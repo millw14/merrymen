@@ -90,9 +90,11 @@
  *
  * Partner gate, for a key with an owner (an operator key has none and is never
  * metered), after key and scope checks:
+ *   billing.nextPlanFor(owner, keyCreatedAt) -> {id, name, requests, rpm, starts_at, ends_at}
+ *                                       the plan the request is served on once a due charge is
+ *                                       made (pure); rpm is per ACCOUNT: bucket it by owner
  *   await billing.prepare(owner)        settles first when one is due (2 s, then fail open)
- *   billing.planFor(owner, keyCreatedAt) -> {id, name, requests, rpm, starts_at, ends_at}
- *                                       rpm is per ACCOUNT: bucket it by owner
+ *   billing.planFor(owner, keyCreatedAt) the plan as it stands, before any due charge
  *   billing.reserve({owner, keyId, keyCreatedAt}) synchronous, counts the request:
  *     {ok:true, metered, ticket, headers}  or  {ok:false, status:402, error:{code:
  *     "quota_exhausted", message, plan, limit, used, resets_at, upgrade_url}, headers}
@@ -833,8 +835,7 @@ export async function createBilling({
    * carries over; keying it by its start could merge it with a Free window that
    * began in the same millisecond.
    */
-  function planOf(owner, now, keyCreatedAt) {
-    const acct = account(owner);
+  function planOf(owner, now, keyCreatedAt, acct = account(owner)) {
     const p = acct && activePeriod(acct, now);
     if (p) return { id: p.tier, name: nameOf(p.tier), requests: p.requests, rpm: p.rpm, start: p.starts_at, end: p.ends_at,
       period: true, window: `${owner}|${p.period_id}` };
@@ -852,6 +853,19 @@ export async function createBilling({
     if (mode === "off" || ledger.fatal) return false;
     const acct = account(owner);
     return !!acct && decide(acct, ledger.now(), plans) !== null;
+  }
+
+  /**
+   * The plan the NEXT metered request is served on: the plan as it stands,
+   * or, when a charge is due, the plan that charge makes. Pure: nothing is
+   * appended. The gate rate-limits with it, because it checks the rate before
+   * the settle that makes the charge, and a renewal must not be refused at
+   * Free's rate by the very request that would renew it.
+   */
+  function nextPlanOf(owner, now, keyCreatedAt) {
+    const acct = account(owner);
+    if (!acct || !needsSettle(owner)) return planOf(owner, now, keyCreatedAt, acct);
+    return planOf(owner, now, keyCreatedAt, simulate(acct, now, plans).sim);
   }
 
   const missingNoted = new Set();
@@ -1183,6 +1197,11 @@ export async function createBilling({
     },
     planFor(owner, keyCreatedAt) {
       const p = planOf(lower(owner), ledger.now(), keyCreatedAt);
+      return { id: p.id, name: p.name, requests: p.requests, rpm: p.rpm, starts_at: p.start, ends_at: p.end };
+    },
+    /** planFor after the charge a metered request would make first, if one is due (pure). The gate's rate. */
+    nextPlanFor(owner, keyCreatedAt) {
+      const p = nextPlanOf(lower(owner), ledger.now(), keyCreatedAt);
       return { id: p.id, name: p.name, requests: p.requests, rpm: p.rpm, starts_at: p.start, ends_at: p.end };
     },
     /**

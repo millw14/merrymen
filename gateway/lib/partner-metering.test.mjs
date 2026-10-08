@@ -196,6 +196,32 @@ test("a Feast account's 300 a minute is reachable from one backend: the per-IP l
   assert.equal(f.used(), 300, "the rate-limited request was not counted");
 });
 
+test("at a renewal the rate is the plan the renewal makes: a busy paid account is not held to Free's 30 a minute", async () => {
+  const f = await fixture({ plans: PLANS });
+  assert.equal((await f.billing.createAccount(OWNER, "Acme")).status, 201);
+  await f.grant(2_000_000);
+  assert.equal((await f.billing.choosePlan(OWNER, { tier: "feast", confirm: true })).json.plan.id, "feast");
+  // The period's last minute, and a busy one: 100 requests, well inside Feast's 300.
+  f.clock.t = START + PERIOD_MS - 30_000;
+  f.store = countingStore();
+  f.rewire();
+  for (let i = 0; i < 100; i++) assert.equal((await f.call("/agents")).status, 200, `request ${i + 1}`);
+  // The period ends inside that same rate-limit minute, with credit for the renewal.
+  f.clock.t = START + PERIOD_MS + 1;
+  assert.equal(f.billing.needsSettle(OWNER), true);
+  const meta = await f.call("/meta");
+  assert.equal(meta.status, 200, JSON.stringify(meta.json));
+  assert.deepEqual([meta.json.rate_per_min, meta.json.billing.plan, meta.json.billing.renews_on_next_request], [300, "free", true],
+    "the rate the next request gets; the plan as it stands until that request renews it");
+  assert.equal(await f.raw().then((t) => t.split("\n").filter((l) => l.includes('"type":"charge"')).length), 1, "/meta renewed nothing");
+  const r = await f.call("/agents");
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.headers["x-merrymen-quota-limit"], "1000000", "counted against the renewed period");
+  const charges = (await f.raw()).split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => c.type === "charge");
+  assert.deepEqual(charges.map((c) => [c.reason, c.tier]), [["activate", "feast"], ["renew", "feast"]]);
+  assert.deepEqual([...new Set(f.store.hits.filter((h) => !h.key.startsWith("pip:")).map((h) => h.limit))], [300], "never checked at Free's rate");
+});
+
 test("an operator key (no owner) is never metered and keeps its own rate and bucket", async () => {
   const op = key("op1", { owner: null, rpm: 500 });
   const f = await fixture({ keys: [op] });
@@ -254,7 +280,9 @@ test("a metered request makes the charge a crash left undone; /meta, a 429 and a
   assert.equal(meta.json.billing.plan, "free");
   assert.equal(meta.json.billing.renews_on_next_request, true);
   assert.equal((await f.call("/agents", { method: "POST", keyId: "k2" })).status, 403);
-  for (let i = 0; i < 30; i++) await f.call("/meta"); // past Free's 30/min: the 429s that follow are refusals too
+  assert.equal(meta.json.rate_per_min, 60, "rate-limited at the plan the due activation makes");
+  // Past that 60 a minute: the 429 that follows is a refusal too, and makes no charge.
+  for (let i = 0; i < 59; i++) assert.equal((await f.call("/meta")).status, 200);
   assert.equal((await f.call("/agents")).status, 429);
   await f.billing.tail();
   assert.equal(await f.raw(), before, "reads and refusals appended nothing");

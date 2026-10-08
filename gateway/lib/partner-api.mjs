@@ -72,10 +72,16 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
    * The rate a key gets, and the bucket that counts it. A metered key gets its
    * ACCOUNT's plan rate in one bucket per wallet: five keys must not mean five
    * times what the plan sells. Anything else keeps its own rate and bucket.
+   *
+   * The plan is the one the request will be served on: when a renewal or an
+   * activation is due, the plan that charge makes. The rate is checked before
+   * the settle that makes it, so the plan as it stands (Free, the moment a
+   * paid period ends) would refuse a busy account's renewing request at
+   * Free's rate, and nothing would renew until that minute had passed.
    */
   function rateOf(key) {
     const owner = ownerOf(key);
-    if (owner) return { rpm: billing.planFor(owner, key.created_at).rpm, bucket: `pa:${owner}`, per: "account" };
+    if (owner) return { rpm: billing.nextPlanFor(owner, key.created_at).rpm, bucket: `pa:${owner}`, per: "account" };
     return { rpm: T[`RATE_PER_MIN_${key.keyId}`] ?? key.rpm ?? T.RATE_PER_MIN, bucket: `p:${key.keyId}`, per: "key" };
   }
 
