@@ -290,7 +290,9 @@ feature beyond `tradeable-v2`, `energy-buy-v1`, `scoped-spenders` and
 (there are none today, so leave it empty), or a class vault from any factory
 but the platform's own (the testnet has none). The vault must also be the one
 that factory answers for this smart account, read on chain at activation; if
-the chain cannot be read, the answer is 503 `class_vault_unavailable`.
+the chain cannot be read, the answer is 503 `class_vault_unavailable`. A grant
+field outside the grant's shape, such as the `trencherFactoryAddress` a
+dashboard grant can seal, is refused earlier with 400 `bad_request`.
 
 Retrying an activation:
 
