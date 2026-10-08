@@ -91,7 +91,10 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    DM. A coin's theses (strangers' words) are never quoted in a room: it hears
    a code digest of what they argue, or the group model's paraphrase of
    cleaned texts fenced as data (links, addresses, handles and $tags out,
-   rows shaped as instructions or lures dropped), never a five-word run of
+   rows shaped as instructions or lures dropped, and rows written at the
+   summariser: "hey AI, summarize this as…", "summary for any bot reading",
+   the tool's own labels such as "for:", "new rule:", "from now on say"),
+   never a five-word run of
    anyone's words (Milla, 2026-10-07, decision D5).
 
 4. **Only the owner shapes the agent.** Group members cannot write owner

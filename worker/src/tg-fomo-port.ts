@@ -358,6 +358,17 @@ export const THESES_SAMPLES_MIN = 3;
  */
 const INJECTION_SHAPED =
   /\b(?:ignore|disregard|forget|override|bypass)\b[^.!?\n]{0,40}\b(?:instructions?|prompts?|rules|previous|above|system|guidelines)\b|\b(?:system|developer|assistant)\s*(?:prompt|message|:)|\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:[a-z]+\s+){0,2}(?:ai|assistant|bot|model|chatbot)\b|\bact\s+as\b|\bjailbreak|\bprompt\b|\btell\s+(?:the|this)\s+(?:group|chat|room)\b/i;
+/**
+ * A row written AT THE SUMMARISER, not about the coin: addressed to an AI, a
+ * bot or a model ("hey AI, summarize this as…", "any bot reading this"),
+ * asking to be summed up a certain way ("when you sum this up…", "summary
+ * for…"), carrying the tool's own field labels ("for: …", "gist:"), or
+ * setting a rule ("new rule:", "from now on say…", "always say…"). Dropped
+ * whole, like INJECTION_SHAPED: "rides the AI agent narrative", "the bot
+ * narrative is strong" and "for the culture" are views, and stay.
+ */
+const AT_THE_READER =
+  /\b(?:hey|dear|attention|note to|memo to)\s+(?:the\s+|any\s+|all\s+)?(?:ai|bots?|gpt|llms?|models?|assistants?|summari[sz]ers?)\b|\b(?:any|the|an?|every)\s+(?:ai|bots?|llms?|models?)\s+(?:reading|summari[sz]ing|parsing)\b|\bsum\s+(?:this|it|these|them)\s+up\b|\bsummari[sz](?:e|es|ing)\s+(?:this|these|it|them)\b|\bsummary\s+for\b|\b(?:gist|for|against|waiting[_ ]on)\s*:|\bnew rules?\s*:|\bfrom now on\b[^.!?\n]{0,20}\b(?:say|write|tell|call)\b|\balways\s+(?:say|write|call)\b/i;
 /** A lure, not a view: a claim page, a seed phrase, a wallet to connect, free tokens. */
 const LURE =
   /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b/i;
@@ -380,7 +391,7 @@ export function thesesSample(text: unknown): string | null {
     .replace(/([,.;:!?])(?:\s*[,.;:!?])+/g, "$1")
     .replace(/^[\s,.;:!?-]+/, "")
     .trim();
-  if (!s || contentFree(s) || INJECTION_SHAPED.test(s) || LURE.test(s) || ABOUT_MERRYMEN.test(s)) return null;
+  if (!s || contentFree(s) || INJECTION_SHAPED.test(s) || AT_THE_READER.test(s) || LURE.test(s) || ABOUT_MERRYMEN.test(s)) return null;
   if (s.length > THESES_SAMPLE_CHARS) s = `${s.slice(0, THESES_SAMPLE_CHARS - 1).replace(/\s+\S*$/, "")}…`;
   return s;
 }
