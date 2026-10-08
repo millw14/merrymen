@@ -10,38 +10,63 @@ import { fileURLToPath } from "node:url";
 import { serializeErc6492Signature } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { createDeveloperApi } from "./developer-api.mjs";
-import { createPartners, loadRegistry } from "./partners.mjs";
+import { createBilling, openLedger } from "./billing.mjs";
+import { ONE_TOKEN } from "./billing-plans.mjs";
+import { createPartners, hashSecret, loadRegistry, makeKey, writeRecord } from "./partners.mjs";
 import { createPartnerApi } from "./partner-api.mjs";
 import { createStore } from "./store.mjs";
 const dir = await mkdtemp(join(tmpdir(), "merrymen-developer-test-"));
 process.env.MERRYMEN_DATA_DIR = dir;
 delete process.env.MERRYMEN_PARTNER_KEYS;
-after(() => rm(dir, { recursive: true, force: true }));
+const dirs = [dir];
+after(() => Promise.all(dirs.map(d => rm(d, { recursive: true, force: true }))));
 const portalSecret = "portal-test-secret-with-at-least-32-bytes";
 const gatewaySecret = "gateway-test-secret-with-at-least-32-bytes";
-function fixture({ store = createStore(), ...options } = {}) {
+/** A billing core on its own ledger, as server.mjs builds it; off by default, as it ships. */
+async function billingFor({ mode = "off", now = Date.now } = {}) {
+  const dataDir = await mkdtemp(join(tmpdir(), "merrymen-developer-billing-"));
+  dirs.push(dataDir);
+  return { dataDir, billing: await createBilling({ dataDir, mode, now, log: () => {}, timers: false }) };
+}
+async function fixture({ store = createStore(), mode, ...options } = {}) {
   let time = Date.now();
+  const { billing, dataDir } = await billingFor({ mode, now: () => time });
   const partners = createPartners({ secret: gatewaySecret });
-  const partnerApi = createPartnerApi({ partners, store });
+  const partnerApi = createPartnerApi({ partners, store, billing });
   // `restart` is a new process on the same secrets and the same store.
-  const start = () => createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, now: () => time, ...options });
+  const start = () => createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, billing, now: () => time, ...options });
   let api = start();
   const wallet = privateKeyToAccount(generatePrivateKey());
+  const f = { ip: null };
   // Bodies travel as the server hands them over: raw text. A string is sent verbatim.
   const call = (path, body, session, authorization = `Bearer ${portalSecret}`) => api.handle({ method: body === undefined ? "GET" : "POST", path,
-    body: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body), session, authorization, ip: wallet.address });
-  async function login() {
-    const challenge = await call("/challenge", { address: wallet.address });
+    body: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body), session, authorization, ip: f.ip ?? wallet.address });
+  async function login(who = wallet) {
+    const challenge = await call("/challenge", { address: who.address });
     assert.equal(challenge.status, 200);
-    const proof = { challenge: challenge.json.challenge, signature: await wallet.signMessage({ message: challenge.json.message }) };
+    const proof = { challenge: challenge.json.challenge, signature: await who.signMessage({ message: challenge.json.message }) };
     const verified = await call("/verify", proof);
     assert.equal(verified.status, 200);
     return { session: verified.json.session, proof };
   }
-  return { call, login, partners, wallet, advance: n => { time += n; }, restart: () => { api = start(); } };
+  /** Sign in and create the account a new key needs. */
+  async function onboard(who = wallet) {
+    const signedIn = await login(who);
+    const created = await call("/account", { name: "Acme" }, signedIn.session);
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    return signedIn;
+  }
+  /** Credit the way an operator grants it: billing-cli's adjustment, picked up by the gateway's tail. */
+  async function grant(tokens, who = wallet) {
+    const ledger = await openLedger({ dataDir, log: () => {} });
+    const acct = ledger.state.byOwner.get(who.address.toLowerCase());
+    await ledger.enqueue(() => ledger.append({ type: "adjustment", account_id: acct.account_id, amount_raw: (BigInt(tokens) * ONE_TOKEN).toString(), note: "test", operator: true }));
+    await billing.tail();
+  }
+  return Object.assign(f, { call, login, onboard, grant, billing, partners, wallet, advance: n => { time += n; }, restart: () => { api = start(); } });
 }
 test("portal credential and real wallet proof are required; proofs cannot replay", async () => {
-  const f = fixture();
+  const f = await fixture();
   assert.equal((await f.call("/challenge", { address: f.wallet.address }, undefined, "Bearer wrong")).status, 401);
   assert.equal((await f.call("/keys", { name: "Unowned" })).status, 401);
   const { session, proof } = await f.login();
@@ -55,7 +80,7 @@ test("the portal's own secret cannot mint a session or a challenge", async () =>
   // a payload copied from a real token, re-addressed, and MAC'd with the portal
   // secret. Copying every other field (nonce, boot, expiry) from genuine tokens
   // proves the key is what refuses it, not a field the forger could not guess.
-  const f = fixture(), victim = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
+  const f = await fixture(), victim = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
   const payload = token => JSON.parse(Buffer.from(token.split(".")[0], "base64url"));
   const forge = data => { const encoded = Buffer.from(JSON.stringify(data)).toString("base64url");
     return `${encoded}.${createHmac("sha256", portalSecret).update(`developer-v1:${encoded}`).digest("base64url")}`; };
@@ -76,14 +101,16 @@ test("rotating the portal secret signs every developer out, and leaves partner k
   const store = createStore();
   Object.defineProperty(store, "durable", { value: true }); // KV: sessions survive restarts, so only the key can end them
   const partners = createPartners({ secret: gatewaySecret });
-  const partnerApi = createPartnerApi({ partners, store });
+  const { billing } = await billingFor();
+  const partnerApi = createPartnerApi({ partners, store, billing });
   const wallet = privateKeyToAccount(generatePrivateKey());
-  const api = secret => createDeveloperApi({ portalSecret: secret, gatewaySecret, partners, partnerApi, store });
+  const api = secret => createDeveloperApi({ portalSecret: secret, gatewaySecret, partners, partnerApi, store, billing });
   const call = (target, secret, path, body, session) => target.handle({ method: body === undefined ? "GET" : "POST", path,
     body: body === undefined ? undefined : JSON.stringify(body), session, authorization: `Bearer ${secret}`, ip: wallet.address });
   const before = api(portalSecret);
   const challenge = await call(before, portalSecret, "/challenge", { address: wallet.address });
   const { session } = (await call(before, portalSecret, "/verify", { challenge: challenge.json.challenge, signature: await wallet.signMessage({ message: challenge.json.message }) })).json;
+  assert.equal((await call(before, portalSecret, "/account", { name: "Rotation" }, session)).status, 201);
   const minted = await call(before, portalSecret, "/keys", { name: "Survives rotation" }, session);
   assert.equal(minted.status, 201);
   assert.equal((await call(api(portalSecret), portalSecret, "/keys", undefined, session)).status, 200, "an unrotated restart keeps the session");
@@ -94,7 +121,7 @@ test("rotating the portal secret signs every developer out, and leaves partner k
   assert.equal((await partners.verify(minted.json.key)).ok, true, "partner keys do not depend on the portal secret");
 });
 test("logout revokes that session on the gateway, not just the site's cookie", async () => {
-  const f = fixture();
+  const f = await fixture();
   const first = await f.login(), second = await f.login();
   assert.equal((await f.call("/logout", {}, first.session, "Bearer wrong")).status, 401);
   assert.equal((await f.call("/keys", undefined, first.session)).status, 200);
@@ -109,10 +136,10 @@ test("logout revokes that session on the gateway, not just the site's cookie", a
 test("a memory store binds sessions to the process; a durable store keeps sessions and logouts", async () => {
   // The memory store forgets revocations on restart. Were sessions to outlive
   // the process anyway, a deploy would revive every one signed out before it.
-  const memory = fixture(), { session } = await memory.login();
+  const memory = await fixture(), { session } = await memory.login();
   memory.restart();
   assert.equal((await memory.call("/keys", undefined, session)).status, 401);
-  const durable = fixture({ store: { ...createStore(), durable: true } });
+  const durable = await fixture({ store: { ...createStore(), durable: true } });
   const kept = await durable.login(), ended = await durable.login();
   assert.equal((await durable.call("/logout", {}, ended.session)).status, 200);
   durable.restart();
@@ -121,9 +148,9 @@ test("a memory store binds sessions to the process; a durable store keeps sessio
 });
 test("a store that cannot record a logout fails closed rather than reporting success", async () => {
   const broken = { ...createStore(), revoke: async () => { throw new Error("redis 500"); } };
-  const f = fixture({ store: broken }), { session } = await f.login();
+  const f = await fixture({ store: broken }), { session } = await f.login();
   assert.equal((await f.call("/logout", {}, session)).status, 503);
-  const unreadable = fixture({ store: { ...createStore(), isRevoked: async () => { throw new Error("redis 500"); } } });
+  const unreadable = await fixture({ store: { ...createStore(), isRevoked: async () => { throw new Error("redis 500"); } } });
   const challenge = await unreadable.call("/challenge", { address: unreadable.wallet.address });
   const verified = await unreadable.call("/verify", { challenge: challenge.json.challenge, signature: await unreadable.wallet.signMessage({ message: challenge.json.message }) });
   assert.equal((await unreadable.call("/keys", undefined, verified.json.session)).status, 503);
@@ -131,7 +158,7 @@ test("a store that cannot record a logout fails closed rather than reporting suc
   // and the same proof works once it answers.
   let down = true;
   const memory = createStore();
-  const flaky = fixture({ store: { ...memory, spendNonce: async (token, ttl, options) => {
+  const flaky = await fixture({ store: { ...memory, spendNonce: async (token, ttl, options) => {
     if (down) { if (options?.throwOnError) throw new Error("redis 500"); return false; }
     return memory.spendNonce(token, ttl, options);
   } } });
@@ -143,7 +170,7 @@ test("a store that cannot record a logout fails closed rather than reporting suc
   assert.equal((await flaky.call("/verify", proof)).status, 200);
 });
 test("wrong wallet signatures and stale challenges are rejected", async () => {
-  const f = fixture(); const challenge = await f.call("/challenge", { address: f.wallet.address });
+  const f = await fixture(); const challenge = await f.call("/challenge", { address: f.wallet.address });
   const other = privateKeyToAccount(generatePrivateKey());
   const bad = await f.call("/verify", { challenge: challenge.json.challenge, signature: await other.signMessage({ message: challenge.json.message }) });
   assert.equal(bad.status, 401); assert.equal(bad.json.error.code, "signature_invalid");
@@ -162,7 +189,7 @@ test("a smart-contract wallet is refused by name, and no chain is ever asked to 
   // trusting one let a lying RPC sign in as any address and mint keys there.
   const calls = [];
   const lying = { getCode: async () => { calls.push("getCode"); return "0x6080"; }, verifyMessage: async () => { calls.push("verifyMessage"); return true; } };
-  const f = fixture({ publicClient: lying });
+  const f = await fixture({ publicClient: lying });
   const victim = `0x${"11".repeat(20)}`;
   const wrapped = serializeErc6492Signature({ address: `0x${"fa".repeat(20)}`, data: "0x1234", signature: `0x${"5a".repeat(300)}` });
   for (const proof of [wrapped, `0x${"5a".repeat(400)}`]) {
@@ -180,7 +207,7 @@ test("a smart-contract wallet is refused by name, and no chain is ever asked to 
   assert.equal((await f.call("/verify", { challenge: challenge.json.challenge, signature: await f.wallet.signMessage({ message: challenge.json.message }) })).status, 200);
 });
 test("each sign-in refusal names its cause", async () => {
-  const f = fixture();
+  const f = await fixture();
   const challenge = (await f.call("/challenge", { address: f.wallet.address })).json.challenge;
   const verify = async signature => (await f.call("/verify", { challenge, signature })).json.error?.code;
   for (const signature of [`0x${"ab".repeat(3001)}`, "0xabc", "0x", `0x${"zz".repeat(65)}`, 42, undefined]) {
@@ -196,7 +223,7 @@ test("each sign-in refusal names its cause", async () => {
   assert.equal((await f.call("/verify", { challenge, signature: "0x00" })).json.error.code, "challenge_expired");
 });
 test("issue, test, list, rotate, and revoke use the actual partner registry", async () => {
-  const f = fixture(); const { session } = await f.login();
+  const f = await fixture(); const { session } = await f.onboard();
   const issued = await f.call("/keys", { name: "Example app" }, session);
   assert.equal(issued.status, 201);
   assert.equal((await f.partners.verify(issued.json.key)).ok, true);
@@ -216,8 +243,9 @@ test("issue, test, list, rotate, and revoke use the actual partner registry", as
   assert.equal((await loadRegistry()).get(issued.json.key_id).owner, f.wallet.address.toLowerCase());
 });
 test("one developer cannot list, test, replace, or revoke another developer's keys", async () => {
-  const owner = fixture(), other = fixture();
-  const a = await owner.login(), b = await other.login();
+  // Both have accounts, so every refusal below is about whose key it is.
+  const owner = await fixture(), other = await fixture();
+  const a = await owner.onboard(), b = await other.onboard();
   const issued = await owner.call("/keys", { name: "Private app" }, a.session);
   assert.equal((await other.call("/keys", undefined, b.session)).json.keys.length, 0);
   assert.equal((await other.call("/keys", { name: "Takeover", app_id: issued.json.app_id }, b.session)).status, 403);
@@ -225,25 +253,136 @@ test("one developer cannot list, test, replace, or revoke another developer's ke
   assert.equal((await other.call("/test", { key: issued.json.key }, b.session)).status, 403);
 });
 test("concurrent creation enforces the active-key cap", async () => {
-  const f = fixture(), { session } = await f.login();
+  const f = await fixture(), { session } = await f.onboard();
   const results = await Promise.all(Array.from({ length: 8 }, (_, i) => f.call("/keys", { name: `App ${i}` }, session)));
   assert.equal(results.filter(r => r.status === 201).length, 5);
   assert.equal(results.filter(r => r.status === 409).length, 3);
 });
 test("an app name that is not well-formed text is refused, not stored", async () => {
-  const f = fixture(), { session } = await f.login();
+  const f = await fixture(), { session } = await f.onboard();
   const refused = await f.call("/keys", '{"name":"App \\ud800"}', session);
   assert.equal(refused.status, 400); assert.equal(refused.json.error.code, "invalid_name");
   assert.equal((await f.call("/keys", { name: "App \u{1F600}" }, session)).status, 201, "a whole emoji is fine");
 });
 test("a body that is JSON but not an object is a 400, after authentication", async () => {
-  const f = fixture(), { session } = await f.login();
+  const f = await fixture(), { session } = await f.login();
   for (const raw of ["null", "5", "[]", '"text"', "{", ""]) {
-    for (const path of ["/challenge", "/verify", "/keys", "/revoke", "/test", "/logout"]) {
+    for (const path of ["/challenge", "/verify", "/keys", "/revoke", "/test", "/logout", "/account", "/plan", "/payments"]) {
       assert.equal((await f.call(path, raw, session)).status, 400, `${path} ${raw}`);
     }
   }
   assert.equal((await f.call("/challenge", "null", undefined, "Bearer wrong")).status, 401);
+});
+
+/** A key minted before accounts existed, straight into the registry. */
+async function legacyKey(owner, extra = {}) {
+  const { key, keyId, secret } = makeKey();
+  await writeRecord({ keyId, appId: `app_${keyId}`, owner: owner.toLowerCase(), name: "Legacy", hash: hashSecret(gatewaySecret, secret),
+    scopes: ["read:agents"], rpm: 30, status: "active", created_at: new Date().toISOString(), ...extra });
+  return { key, keyId };
+}
+test("a new key needs an account; keys from before accounts are still listed, tested and revoked", async () => {
+  const f = await fixture(), { session } = await f.login();
+  // Refused before the issuance limit, so asking costs nothing: ten an hour would refuse the eleventh.
+  for (let i = 0; i < 12; i++) {
+    const refused = await f.call("/keys", { name: "Before an account" }, session);
+    assert.equal(refused.status, 409); assert.equal(refused.json.error.code, "account_required");
+  }
+  const legacy = await legacyKey(f.wallet.address);
+  f.partners.reload();
+  assert.equal((await f.call("/keys", undefined, session)).json.keys.length, 1);
+  assert.equal((await f.call("/test", { key: legacy.key }, session)).status, 200);
+  assert.equal((await f.call("/keys", { name: "Rotated", app_id: `app_${legacy.keyId}` }, session)).json.error.code, "account_required");
+  assert.equal((await f.call("/revoke", { key_id: legacy.keyId }, session)).status, 200);
+  assert.equal((await f.call("/account", { name: "Acme" }, session)).status, 201);
+  assert.equal((await f.call("/keys", { name: "After an account" }, session)).status, 201);
+});
+test("one account per wallet, named like an app; one address makes at most three a day", async () => {
+  const f = await fixture();
+  f.ip = "198.51.100.7";
+  const wallets = [f.wallet, ...Array.from({ length: 3 }, () => privateKeyToAccount(generatePrivateKey()))];
+  const sessions = [];
+  for (const w of wallets) sessions.push((await f.login(w)).session);
+  // Refusals before the limit cost nothing, or three typos would lock an office out for a day.
+  for (const name of ["", "   ", "x".repeat(49), "Tab\there", 42, undefined]) {
+    const r = await f.call("/account", { name }, sessions[0]);
+    assert.equal(r.status, 400, JSON.stringify(name)); assert.equal(r.json.error.code, "invalid_name");
+  }
+  assert.equal((await f.call("/account", '{"name":"Half \\ud800"}', sessions[0])).json.error.code, "invalid_name");
+  const first = await f.call("/account", { name: "  Acme Labs " }, sessions[0]);
+  assert.equal(first.status, 201);
+  assert.deepEqual([first.json.account.name, first.json.account.wallet, first.json.plan.id], ["Acme Labs", f.wallet.address.toLowerCase(), "free"]);
+  for (let i = 0; i < 3; i++) {
+    const again = await f.call("/account", { name: "Again" }, sessions[0]);
+    assert.equal(again.status, 409); assert.equal(again.json.error.code, "account_exists");
+  }
+  assert.equal((await f.call("/account", { name: "Second" }, sessions[1])).status, 201);
+  assert.equal((await f.call("/account", { name: "Third" }, sessions[2])).status, 201);
+  const fourth = await f.call("/account", { name: "Fourth" }, sessions[3]);
+  assert.equal(fourth.status, 429); assert.equal(fourth.json.error.code, "rate_limited");
+  assert.equal((await f.call("/account", undefined, sessions[3])).json.error.code, "account_missing");
+  f.ip = "198.51.100.8";
+  assert.equal((await f.call("/account", { name: "Fourth" }, sessions[3])).status, 201, "the limit is per address");
+  assert.equal((await f.call("/account", undefined, sessions[3])).json.account.name, "Fourth");
+});
+test("the price list needs the portal but no session; account, plan and payment answers are billing's", async () => {
+  const f = await fixture({ mode: "observe" });
+  const plans = await f.call("/plans");
+  assert.equal(plans.status, 200);
+  assert.deepEqual(plans.json.billing, { mode: "observe", enforced: false });
+  assert.equal(plans.json.treasury, null, "no treasury configured, so nothing to pay to");
+  assert.deepEqual(plans.json.plans.map(p => [p.id, p.price_tokens, p.requests, p.rpm]),
+    [["free", "0", 1000, 30], ["crumbs", "100000", 50000, 60], ["loaf", "400000", 250000, 120], ["feast", "1000000", 1000000, 300]]);
+  assert.equal((await f.call("/plans", undefined, undefined, "Bearer wrong")).status, 401);
+  assert.equal((await f.call("/account")).json.error.code, "signed_out");
+  const { session } = await f.login();
+  const hash = `0x${"ab".repeat(32)}`;
+  for (const [path, body] of [["/account", undefined], ["/plan", { tier: "crumbs" }], ["/payments", { tx_hash: hash }]]) {
+    const r = await f.call(path, body, session);
+    assert.equal(r.status, 404, path); assert.equal(r.json.error.code, "account_missing");
+  }
+  assert.equal((await f.call("/account", { name: "Acme" }, session)).status, 201);
+  const preview = await f.call("/plan", { tier: "crumbs" }, session);
+  assert.equal(preview.status, 200);
+  assert.deepEqual([preview.json.preview, preview.json.effect, preview.json.charge_now_tokens, preview.json.due_tokens], [true, "waiting_for_payment", "0", "100000"]);
+  assert.equal((await f.call("/account", undefined, session)).json.plan.selected, "free", "a preview chooses nothing");
+  const chosen = await f.call("/plan", { tier: "crumbs", confirm: true }, session);
+  assert.deepEqual([chosen.status, chosen.json.plan.id, chosen.json.plan.selected, chosen.json.due_tokens], [200, "free", "crumbs", "100000"]);
+  assert.equal((await f.call("/plan", { tier: "gold", confirm: true }, session)).json.error.code, "invalid_tier");
+  assert.equal((await f.call("/payments", { tx_hash: "0x123" }, session)).json.error.code, "invalid_tx_hash");
+  assert.equal((await f.call("/payments", { tx_hash: hash }, session)).json.error.code, "payments_unavailable");
+});
+test("payment checks are limited to 30 a minute per wallet", async () => {
+  const f = await fixture({ mode: "observe" }), { session } = await f.onboard();
+  const hash = `0x${"ab".repeat(32)}`;
+  for (let i = 0; i < 30; i++) assert.equal((await f.call("/payments", { tx_hash: hash }, session)).json.error.code, "payments_unavailable");
+  const limited = await f.call("/payments", { tx_hash: hash }, session);
+  assert.equal(limited.status, 429); assert.equal(limited.json.error.code, "rate_limited");
+  const other = await f.onboard(privateKeyToAccount(generatePrivateKey()));
+  assert.equal((await f.call("/payments", { tx_hash: hash }, other.session)).json.error.code, "payments_unavailable", "each wallet has its own");
+});
+test("a key lists the rate its account's plan gives it, not the one stored when it was minted", async () => {
+  // Billing off: what was stored, as before billing.
+  const off = await fixture(), { session } = await off.onboard();
+  await legacyKey(off.wallet.address, { rpm: 7 });
+  assert.deepEqual((await off.call("/keys", undefined, session)).json.keys.map(k => k.rate_per_min), [7]);
+
+  const f = await fixture({ mode: "observe" }), s = await f.onboard();
+  const minted = await f.call("/keys", { name: "App" }, s.session);
+  assert.equal(minted.json.rate_per_min, 30, "Free's rate");
+  await f.grant(400_000);
+  assert.equal((await f.call("/plan", { tier: "loaf", confirm: true }, s.session)).json.plan.id, "loaf");
+  assert.deepEqual((await f.call("/keys", undefined, s.session)).json.keys.map(k => k.rate_per_min), [120]);
+  assert.equal((await f.call("/test", { key: minted.json.key }, s.session)).json.rate_per_min, 120, "the list and the key test agree");
+});
+test("without a billing service, accounts and plans answer 503 and no key is minted; listing still works", async () => {
+  const f = await fixture({ billing: null }), { session } = await f.login();
+  assert.equal((await f.call("/plans")).json.error.code, "billing_unavailable");
+  for (const [path, body] of [["/account", undefined], ["/account", { name: "Acme" }], ["/plan", { tier: "free" }], ["/payments", { tx_hash: "0x" }], ["/keys", { name: "App" }]]) {
+    const r = await f.call(path, body, session);
+    assert.equal(r.status, 503, path); assert.equal(r.json.error.code, "billing_unavailable");
+  }
+  assert.equal((await f.call("/keys", undefined, session)).status, 200);
 });
 
 /**

@@ -9,8 +9,11 @@ const SCOPES = ["read:agents", "write:agents", "chat:agents"];
 const MAX_SIGNATURE_BYTES = 3000;
 const SIGNATURE = new RegExp(`^0x(?:[0-9a-fA-F]{2}){1,${MAX_SIGNATURE_BYTES}}$`);
 const same = (a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""); return x.length === y.length && timingSafeEqual(x, y); };
-const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status: r.status,
-  scopes: r.scopes, rate_per_min: r.rpm, created_at: r.created_at, prefix: `mmp_${r.keyId}_` });
+/** `rpm` is what the key gets now (its account's plan, when billing meters it), not what was stored when it was minted. */
+const publicKey = (r, rpm = r.rpm) => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status: r.status,
+  scopes: r.scopes, rate_per_min: rpm, created_at: r.created_at, prefix: `mmp_${r.keyId}_` });
+/** App names and account names: 1–48 characters of well-formed text, no control characters. */
+const validName = n => typeof n === "string" && !!n.trim() && n.length <= 48 && !/[\x00-\x1f\x7f]/.test(n) && n.isWellFormed();
 
 /**
  * Only the first-party portal's server may call this wallet-authenticated surface.
@@ -23,8 +26,14 @@ const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status
  * could mint a session for ANY wallet, then keys under that developer's app_id,
  * then read and chat with that app's users' agents, without the wallet ever
  * signing anything.
+ *
+ * ACCOUNTS AND PLANS are lib/billing.mjs's (`billing`, built once by server.mjs
+ * and shared with the partner gate). A signed-in wallet creates one account,
+ * which new keys then require, chooses a plan and submits the hash of a
+ * $MERRYMEN transfer it sent. Payment checks read the chain through billing's
+ * own client; sign-in still never asks a chain anything (see refusal()).
  */
-export function createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store,
+export function createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, billing = null,
   verify = verifyMessage, now = Date.now, read = loadRegistry, write = writeRecord }) {
   const boot = randomBytes(16).toString("hex");
   // A subkey, so the gateway secret itself never MACs attacker-shaped data here.
@@ -72,6 +81,9 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
   const message = c => `Sign in to Merrymen Developers\n\nWebsite: https://merrymen.dev/api\nWallet: ${c.address}\n\nManage API keys for your applications. This does not authorize trading or move funds.\n\nNonce: ${c.nonce}\nExpires: ${new Date(c.expires).toISOString()}`;
   // Codes are for the console and for tests; messages are for the person reading.
   const error = (status, code, message) => ({ status, json: { error: { code, message } } });
+  const noBilling = () => error(503, "billing_unavailable", "Billing is temporarily unavailable. Try again later.");
+  /** The partner gate's own answer, so the portal and /meta never disagree about a key's rate. */
+  const rateOf = r => (partnerApi?.ratePerMin ? partnerApi.ratePerMin(r) : r.rpm);
   /**
    * null when `signature` is `address`'s own key signing `text`; otherwise the refusal.
    *
@@ -100,6 +112,8 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
     if (!await store.rateHit(`dev:ip:${ip}`, 60, 60)) return error(429, "rate_limited", "Too many requests. Try again in a minute.");
     const body = parse(raw);
     if (!body) return error(400, "bad_request", "Invalid request");
+    // The price list needs no session: the site shows it signed out too.
+    if (method === "GET" && path === "/plans") return billing ? billing.plansView() : noBilling();
     if (method === "POST" && path === "/challenge") {
       if (typeof body.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(body.address)) return error(400, "invalid_address", "Choose a wallet address");
       const c = { address: body.address.toLowerCase(), nonce: randomBytes(24).toString("hex"), expires: now() + 300_000, boot };
@@ -133,7 +147,28 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
     if (!user) return error(401, "signed_out", "Sign in to manage your API keys");
     if (method === "GET" && path === "/keys") {
       const keys = [...(await read()).values()].filter(r => r.owner === user.address);
-      return { status: 200, json: { address: user.address, keys: keys.map(publicKey) } };
+      return { status: 200, json: { address: user.address, keys: keys.map(r => publicKey(r, rateOf(r))) } };
+    }
+    // Accounts, plans and payments: billing's rules, each answer its {status, json}.
+    // None of them takes the key-mutation queue below: a payment check waits on
+    // the chain for up to seconds, and key issuance must not wait behind it.
+    if (["/account", "/plan", "/payments"].includes(path) && !billing) return noBilling();
+    if (method === "GET" && path === "/account") return billing.accountView(user.address);
+    if (method === "POST" && path === "/account") {
+      if (!validName(body.name)) return error(400, "invalid_name", "Account name must contain 1–48 characters");
+      // Before the limit, so asking again for an account that exists costs nothing.
+      if (billing.hasAccount(user.address)) return error(409, "account_exists", "This wallet already has a developer account.");
+      // One account per wallet already; this caps how many fresh wallets (each
+      // with a fresh Free quota) one address can turn into accounts in a day.
+      if (!await store.rateHit(`dev:account:${ip}`, 3, 86_400)) return error(429, "rate_limited", "Account creation limit reached. Try again tomorrow.");
+      return billing.createAccount(user.address, body.name);
+    }
+    if (method === "POST" && path === "/plan") return billing.choosePlan(user.address, { tier: body.tier, confirm: body.confirm });
+    if (method === "POST" && path === "/payments") {
+      // The console polls a pending payment every 6 s with back-off; each check
+      // is up to four chain reads, so a client that does not back off stops here.
+      if (!await store.rateHit(`dev:pay:${user.address}`, 30, 60)) return error(429, "rate_limited", "Too many payment checks. Try again in a minute.");
+      return billing.submitPayment(user.address, body.tx_hash);
     }
     if (method === "POST" && path === "/test") {
       const checked = await partners.verify(body.key);
@@ -155,7 +190,12 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
         partners.reload();
         return { status: 200, json: { revoked: true } };
       }
-      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 48 || /[\x00-\x1f\x7f]/.test(body.name) || !body.name.isWellFormed()) return error(400, "invalid_name", "App name must contain 1–48 characters");
+      if (!validName(body.name)) return error(400, "invalid_name", "App name must contain 1–48 characters");
+      // A new key is metered against an account's plan, so it needs one. Keys
+      // from before accounts keep working, and listing, testing and revoking
+      // them never asks; only minting does. Before the limit, so this costs nothing.
+      if (!billing) return noBilling();
+      if (!billing.hasAccount(user.address)) return error(409, "account_required", "Create your developer account first.");
       if (!await store.rateHit(`dev:issue:${user.address}`, 10, 3600)) return error(429, "rate_limited", "Key creation limit reached. Try again in an hour.");
       if (owned.filter(r => r.status === "active").length >= 5) return error(409, "key_limit", "You can have five active keys. Revoke an unused key first.");
       let appId = body.app_id;
@@ -166,7 +206,7 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
         hash: hashSecret(gatewaySecret, minted.secret), scopes: SCOPES, rpm: 30, status: "active", created_at: new Date(now()).toISOString() };
       await write(record);
       partners.reload();
-      return { status: 201, json: { ...publicKey(record), key: minted.key } };
+      return { status: 201, json: { ...publicKey(record, rateOf(record)), key: minted.key } };
     });
     mutations = operation.then(() => {}, () => {});
     return operation;
