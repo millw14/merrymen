@@ -499,6 +499,39 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
   });
 });
 
+describe("a coin post the coin flow keeps quiet on is never re-run by a poke (review 2026-10-08)", () => {
+  const MINT = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+  for (const post of [`shogun ${MINT} wdyt`, "shogun https://dexscreener.com/solana/7xkxtg2cw87d97txjsdpbd5jbkhetqa83tzrujosgasu"]) {
+    for (const after of [20, 45, 100]) {
+      it(`${post.slice(0, 32)}…, then 'shogun ?' ${after} s later: 'hey 👋' to the poke, nothing about the coin`, async () => {
+        make();
+        const coin = msg(post);
+        await said(coin);
+        const before = tg.out().length;
+        clock += after * SEC;
+        const poke = msg("shogun ?");
+        await said(poke);
+        const outs = tg.out().slice(before);
+        assert.ok(!outs.some((o) => o.replyTo === coin.messageId), `nothing replies to the coin post: ${JSON.stringify(outs)}`);
+        assert.ok(!logs.some((l) => l.startsWith("[tg-groups] an unanswered ask re-asked")), "never re-asked");
+        assert.deepEqual(outs, [{ text: "hey 👋", replyTo: poke.messageId }]);
+      });
+    }
+  }
+
+  it("a complaint after it asks which question; the router is never offered a re-ask of it", async () => {
+    make();
+    await said(msg(`shogun ${MINT} wdyt`));
+    clock += 40 * SEC;
+    const complaint = msg("shogun i asked a question");
+    await said(complaint);
+    assert.deepEqual(tg.out().slice(-1), [{ text: "which question? i might've missed it, ask me again", replyTo: complaint.messageId }]);
+    clock += 40 * SEC;
+    await said(msg("shogun what do you think of the new logo lol"));
+    assert.ok(routePrompts.every((p) => !p.includes(MINT)), "the coin post is never put to the router as unanswered");
+  });
+});
+
 describe("other words for 'you missed it' go to the router (route.ts reask)", () => {
   it("a lost ask, then 'bro you skipped mine earlier': the router may re-run it", async () => {
     make();

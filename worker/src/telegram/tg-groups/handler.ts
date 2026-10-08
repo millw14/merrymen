@@ -638,6 +638,13 @@ interface OpenAsk {
   reasked: boolean;
   /** A poke on it already got its 👀: later ones while it runs get nothing more. */
   eyed?: boolean;
+  /**
+   * Never re-run: the coin flow owns the line (it acts on it, or stays quiet
+   * by rule, e.g. another chain's coin), and a re-run skips the flow
+   * (lineOutcome: reasked), so the persona would answer a coin nobody looked
+   * at. Past its 👀 while the look runs, it counts as nothing open.
+   */
+  noReask?: boolean;
 }
 
 /** An open ask run again: the same line, a fresh deadline, none of its own re-ask marks. */
@@ -3425,7 +3432,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    */
   const reaskAgain = (j: LineJob): boolean => {
     const open = j.reaskable;
-    if (!open || open.reasked || askStateOf(open) !== "lost" || forgotten(open.job)) return false;
+    if (!open || open.reasked || open.noReask || askStateOf(open) !== "lost" || forgotten(open.job)) return false;
     const now = clock();
     const again = againOf(open.job, now, ++ingressOrder);
     open.reasked = true;
@@ -3734,6 +3741,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // public desk, or on the legacy coin lane. The next line is read now.
         if (post.owned === "handled") {
           const key = msgKey(chatId, j.line.messageId);
+          // The flow owns it, and a re-run skips the flow: never re-askable, by a poke, a complaint or the router.
+          const ownedAsk = openAsks.get(askKey(chatId, j.line.fromId, j.threadId));
+          if (ownedAsk && ownedAsk.job.line.messageId === j.line.messageId) ownedAsk.noReask = true;
           const how = asked ? "reply to a coin post" : j.addressed !== null ? "to me" : "not to me";
           track(
             post.done.then((end) => {
@@ -4105,6 +4115,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const meta = addressed !== null ? metaLineOf(text, selfNamesOf(me)) : null;
         const open = addressed !== null ? openAskOf(chatId, msg.fromId, threadId) : null;
         const openState = open ? askStateOf(open) : null;
+        // An ask the coin flow owns (noReask) is never run again: past the 👀 while it runs, nothing is open.
+        const live = open && !open.noReask ? open : null;
         const substantive = addressed !== null && meta === null && smallTalkOf(text, selfNamesOf(me), room.title) === null;
         if (addressed !== null) {
           stats.addressed += 1;
@@ -4122,7 +4134,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           }
           return;
         }
-        if (meta !== null && open && openState === "lost" && !open.reasked) {
+        if (meta !== null && live && openState === "lost" && !live.reasked) {
+          const open = live;
           // NOTHING ANSWERED THEIR ASK: run it again, once, as the reply to
           // it. A /forgetme since still cancels it (seenAtMs is kept), and it
           // is never claimed or nominated again (lineOutcome: reasked).
@@ -4163,9 +4176,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           ...(fomoAsk ? { fomo: true } : {}),
           ...(trendingAsk ? { trending: true } : {}),
           ...(meta !== null ? { meta } : {}),
-          ...(meta === "complaint" && !open ? { noOpenAsk: true } : {}),
-          ...(meta === "complaint" && answeredHere ? { reaskOf: open!.job.line.text } : {}),
-          ...(meta === null && addressed !== null && open && openState === "lost" && !open.reasked ? { reaskable: open } : {}),
+          ...(meta === "complaint" && !live ? { noOpenAsk: true } : {}),
+          ...(meta === "complaint" && answeredHere && live ? { reaskOf: live.job.line.text } : {}),
+          ...(meta === null && addressed !== null && live && openState === "lost" && !live.reasked ? { reaskable: live } : {}),
         };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.
