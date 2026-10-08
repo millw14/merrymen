@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -319,6 +319,28 @@ describe("prepareMerryman", () => {
   });
 });
 
+const BUILD = fileURLToPath(new URL("./build.mjs", import.meta.url));
+/** Run a build script (sdk/build.mjs unless given a copy) and return what it printed. */
+const buildTo = (out: string, script = BUILD) =>
+  execFileSync(process.execPath, [script, "--outfile", out], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+/**
+ * Import a built bundle the way a partner's page does, in a process with no
+ * process, Buffer or global. Importing it into this test's own Node process
+ * hid a top-level process.env read that broke the SDK in every browser.
+ */
+function importLikeABrowser(file: string): Record<string, unknown> {
+  const script = `const url = process.argv[1];
+for (const name of ["process", "Buffer", "global"]) delete globalThis[name];
+try {
+  const sdk = await import(url);
+  console.log(JSON.stringify({ exports: Object.fromEntries(Object.entries(sdk).map(([k, v]) => [k, typeof v === "function" ? "function" : v])) }));
+} catch (error) { console.log(JSON.stringify({ error: String(error) })); }`;
+  const { exports, error } = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script, pathToFileURL(file).href], { encoding: "utf8" }));
+  if (error) throw new Error(`The bundle does not load in a browser: ${error}`);
+  return exports;
+}
+
 describe("SDK version", () => {
   it("speaks the partner API contract version the gateway reports", () => {
     // The gateway's /meta api_version default; a contract bump there must move this too.
@@ -327,19 +349,61 @@ describe("SDK version", () => {
     assert.equal(SDK_VERSION, `${PARTNER_API_VERSION}+source`, "unbundled, the build is named as source");
   });
 
-  it("is stamped into the built bundle as a fingerprint of its contents, and printed", async () => {
+  it("is stamped into the built bundle as a fingerprint of its contents, and printed", () => {
     const home = mkdtempSync(join(tmpdir(), "merrymen-sdk-build-"));
     try {
       const out = join(home, "browser.mjs");
-      const build = () => execFileSync(process.execPath, [fileURLToPath(new URL("./build.mjs", import.meta.url)), "--outfile", out], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-      const printed = build();
+      const printed = buildTo(out);
       const version = new RegExp(`${PARTNER_API_VERSION}\\+[0-9a-f]{12}`).exec(printed)?.[0];
       assert.ok(version, `the build prints its version: ${printed}`);
       const code = readFileSync(out, "utf8");
       assert.ok(code.startsWith(`/* merrymen-browser ${version} */\n`), "the file names its version on its first line");
       assert.ok(!code.includes("placeholder"));
-      assert.equal((await import(pathToFileURL(out).href)).SDK_VERSION, version, "and the module exports it");
-      assert.match(build(), new RegExp(`${version.replace("+", "\\+")}\\b`), "the same sources build the same version");
+      assert.equal(importLikeABrowser(out).SDK_VERSION, version, "and the module exports it");
+      assert.match(buildTo(out), new RegExp(`${version.replace("+", "\\+")}\\b`), "the same sources build the same version");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("built bundle", () => {
+  it("loads in a page with no Node globals and exports the documented API", () => {
+    const home = mkdtempSync(join(tmpdir(), "merrymen-sdk-build-"));
+    try {
+      const out = join(home, "browser.mjs");
+      buildTo(out);
+      assert.equal(/process\.env\.NEXT_PUBLIC_\w+/.exec(readFileSync(out, "utf8"))?.[0], undefined, "Next inlines these; esbuild does not");
+      const sdk = importLikeABrowser(out);
+      assert.match(String(sdk.SDK_VERSION), new RegExp(`^${PARTNER_API_VERSION}\\+[0-9a-f]{12}$`));
+      assert.deepEqual(sdk, {
+        PARTNER_API_VERSION, SDK_VERSION: sdk.SDK_VERSION,
+        partnerGrantDigest: "function", prepareMerryman: "function", signMerrymanAuthorization: "function",
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to build when a bundled module reads a NEXT_PUBLIC_ setting it does not settle", () => {
+    // build.mjs bundles the browser.ts beside it, so a copy of it next to an
+    // entry that reads a new setting stands in for a dashboard module that
+    // starts to.
+    const home = mkdtempSync(join(tmpdir(), "merrymen-sdk-build-"));
+    try {
+      mkdirSync(join(home, "sdk"));
+      copyFileSync(BUILD, join(home, "sdk", "build.mjs"));
+      symlinkSync(fileURLToPath(new URL("../node_modules", import.meta.url)), join(home, "node_modules"));
+      writeFileSync(join(home, "tsconfig.json"), "{}");
+      writeFileSync(join(home, "sdk", "browser.ts"), [
+        `export const PARTNER_API_VERSION = "${PARTNER_API_VERSION}";`,
+        "declare const __MERRYMEN_SDK_BUILD__: string;",
+        "export const SDK_VERSION = __MERRYMEN_SDK_BUILD__;",
+        "export const venue = process.env.NEXT_PUBLIC_SOMETHING_NEW;",
+      ].join("\n"));
+      const out = join(home, "browser.mjs");
+      assert.throws(() => buildTo(out, join(home, "sdk", "build.mjs")), /reads process\.env\.NEXT_PUBLIC_SOMETHING_NEW, which no browser defines/);
+      assert.equal(existsSync(out), false, "and writes nothing");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

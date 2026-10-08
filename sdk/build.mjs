@@ -25,6 +25,20 @@ if (!api) throw new Error("sdk/browser.ts must declare PARTNER_API_VERSION as a 
  * anything bundled gets a new one.
  */
 const PLACEHOLDER = "merrymen-sdk-build-placeholder";
+
+/**
+ * NO process IN A BROWSER. Bundled dashboard modules read NEXT_PUBLIC_*
+ * settings, which Next inlines at build time and esbuild leaves as
+ * `process.env.X`: trencher-permission.ts reads two at top level, so the SDK
+ * threw `ReferenceError: process is not defined` on import, before a partner
+ * could call anything. Each is settled here. The Trencher pair is undefined
+ * because partner enrollment grants no Trencher permission: with no trusted
+ * factory compiled in, the SDK cannot resolve one even if asked.
+ */
+const env = {
+  "process.env.NEXT_PUBLIC_TRENCHER_FACTORY": "undefined",
+  "process.env.NEXT_PUBLIC_TRENCHER_FACTORY_CODE_HASH": "undefined",
+};
 const { outputFiles: [bundle] } = await build({
   entryPoints: [entry],
   outfile,
@@ -39,9 +53,13 @@ const { outputFiles: [bundle] } = await build({
   tsconfig: path.join(dir, "..", "tsconfig.json"),
   legalComments: "eof",
   logLevel: "info",
-  define: { __MERRYMEN_SDK_BUILD__: JSON.stringify(PLACEHOLDER) },
+  define: { __MERRYMEN_SDK_BUILD__: JSON.stringify(PLACEHOLDER), ...env },
 });
 if (!bundle.text.includes(PLACEHOLDER)) throw new Error("The build stamp did not reach the bundle; SDK_VERSION would not identify this build");
+// A NEXT_PUBLIC_ read that a bundled module adds later fails this build rather
+// than every partner page that imports it.
+const unsettled = /process\.env\.NEXT_PUBLIC_\w+/.exec(bundle.text)?.[0];
+if (unsettled) throw new Error(`The bundle reads ${unsettled}, which no browser defines; settle it in sdk/build.mjs`);
 const id = createHash("sha256").update(bundle.contents).digest("hex").slice(0, 12);
 const version = `${api}+${id}`;
 await mkdir(path.dirname(outfile), { recursive: true });
