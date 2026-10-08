@@ -1048,6 +1048,19 @@ describe("a room's research budget, in plain words (WP10: D7, D8, D10)", () => {
     assert.equal(s.provider.filter((p) => p === "/v2/tokens/search").length, searches);
   });
 
+  it("a room's cap that fits the page but not the search with it: told the next hour, and answered then from the kept search (review r2)", async () => {
+    const s = await setup({ groupHourlyCredits: 1_400, thesisCost: 1_250 });
+    s.clock.now = Date.UTC(2026, 9, 7, 14, 20);
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const first = await port.ask({ text: "what are the theses on $PONS?", chatId: GROUP });
+    assert.equal(first!.text, "fomo lookups for this room are used up for now, try again after 15:00 UTC.");
+    s.clock.now = Date.UTC(2026, 9, 7, 15, 0, 30);
+    const searches = s.provider.filter((p) => p === "/v2/tokens/search").length;
+    const then = await port.ask({ text: "what are the theses on $PONS?", chatId: GROUP });
+    assert.match(then!.text, /^What traders on Fomo are saying about PONS/, then!.text);
+    assert.equal(s.provider.filter((p) => p === "/v2/tokens/search").length, searches, "the search was kept");
+  });
+
   it("an ask begun at 14:59:59.995 and refused by hour 15's counter at 15:00:00.02 is told 16:00, the reset the service stamped (review r2)", async () => {
     const s = await setup({ groupHourlyCredits: 500 });
     // Hour 15's allowance spent by two boards just after the hour.

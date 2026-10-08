@@ -1252,7 +1252,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       log(`fomo: budget pre-check failed: ${errText(e)}`);
       return null;
     }
-    if (refusal === null) return null;
+    // A cap the whole cost can never fit, though each read can (a room's 1,400 an hour: a 250
+    // search, then a 1,250 page): the reads go one by one as before, so the search is kept and
+    // the page fits the next hour. Only a refusal a later hour or day lifts is said up front.
+    if (refusal === null || refusal === "below-one-read") return null;
     const reason = `budget-${refusal}`;
     noteBudgetRefusal(reason, cc, cc.now);
     usage?.recordRefusal({ now: cc.now, bucket: CAPABILITY_FOR_ROUTE[firstSpec.route] });
