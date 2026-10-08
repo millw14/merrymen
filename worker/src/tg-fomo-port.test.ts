@@ -82,7 +82,7 @@ interface Setup {
   clock: { now: number };
 }
 
-async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; theses?: () => Rec } = {}): Promise<Setup> {
+async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean } = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await fstore.ensureFomoSchema(db, "sqlite");
@@ -107,7 +107,7 @@ async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; 
     if (/\/stats$/.test(p)) return json(fixture("token-stats"));
     if (/\/balances$/.test(p)) return json(fixture("balances"));
     const positions = /^\/v2\/users\/([0-9a-f-]{36})\/positions$/.exec(p);
-    if (positions) return json(positionsAt(positions[1]!, clock.now));
+    if (positions) return caps.positionsFail ? json({ error: "internal" }, 500) : json(positionsAt(positions[1]!, clock.now));
     if (p.startsWith("/v2/leaderboard/tokens/")) return json(caps.trending ? caps.trending() : fixture("token-board-trending"));
     if (p.startsWith("/v2/leaderboard/")) {
       // The board answers for the window asked, captured a minute ago.
@@ -250,6 +250,19 @@ describe("createTgFomoPort", () => {
         assert.equal(a.moves, undefined, "no moves for one trader's answer");
         assert.ok(!("trader" in a), "nothing is handed to a DM");
       }
+    }
+  });
+
+  it("what a trader made, with the positions read failing: 'could not be read just now', never 'nothing realised' (named and a board's row)", async () => {
+    const s = await setup({ positionsFail: true });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    for (const q of ["what did trader CryptoKaleo make money on on fomo today?", "who's the best trader on fomo today and what did he make money on"]) {
+      s.clock.now += 6 * 60_000;
+      const a = await port.ask({ text: q, chatId: GROUP });
+      assert.ok(a && !a.deflect, q);
+      assert.match(a.text, /^CryptoKaleo: what they made or lost on trades opened or closed in the last 24h could not be read just now\.$/m, `${q}: ${a.text}`);
+      assert.doesNotMatch(a.text, /nothing realised/, a.text);
+      for (const l of a.text.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, `${q}: ${l}`);
     }
   });
 

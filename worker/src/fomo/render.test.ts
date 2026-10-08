@@ -187,6 +187,33 @@ describe("renderEnvelope", () => {
     assert.equal(renderAnswer([flat], earnings, G), "frankdegods: nothing realised either way on trades opened or closed in the last 24h (provider-reported).");
   });
 
+  it("what one trader made: positions not read (refused or failed) is said, never 'nothing realised'", () => {
+    const act: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "24h", side: null, sources: ["feed"],
+      positions: [], fills: [], events: [], counts: { buys: 1, sells: 0, transfers: 0, other: 0 },
+    };
+    const unread = (window: TraderActivityData["window"]) =>
+      env("fomo_get_trader_activity", "partial", { ...act, window }, { subject: { kind: "trader", trader: act.trader }, coverage: { requested: {}, achieved: {}, pagesRequested: 2, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: null, capped: false, missing: ["positions"], notes: [] } });
+    const earnings = { intent: "trader-activity", earnings: true } as unknown as FomoQuestionPlan;
+    for (const [window, scope] of [["24h", "opened or closed in the last 24h"], ["all", "on record"]] as const) {
+      const g = renderAnswer([unread(window)], earnings, G);
+      assert.ok(g.split("\n").includes(`frankdegods: what they made or lost on trades ${scope} could not be read just now.`), g);
+      assert.doesNotMatch(g, /nothing realised/);
+      for (const l of g.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+      assert.doesNotMatch(renderAnswer([unread(window)], earnings, O), /nothing realised/);
+    }
+    // The same under a board row's earnings ask ("who's the best trader on fomo today and what did he make money on").
+    const row = (rank: number, handle: string, pnlUsd: number) => ({ rank, trader: { userId: FRANK, handle, displayName: null, verified: null }, pnlUsd, volumeUsd: null, trades: null, inCohort: false });
+    const board = env("fomo_get_rankings", "ok", { board: "traders", window: "24h", basis: "x", tokens: [], traders: [row(1, "frankdegods", 151_383)] } as RankingsData, { subject: { kind: "market" } });
+    const rowAsk = { intent: "rankings-traders", rowAsk: { rank: 1, about: "earnings" } } as unknown as FomoQuestionPlan;
+    const g = renderAnswer([board, unread("24h")], rowAsk, G);
+    assert.match(g, /^1\. frankdegods \+\$151\.4k$/m);
+    assert.match(g, /^frankdegods: what they made or lost on trades opened or closed in the last 24h could not be read just now\.$/m);
+    assert.doesNotMatch(g, /nothing realised/);
+    for (const l of g.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+  });
+
   it("gives a group Fomo's public leaderboard: handles and short P&L, a few rows, never who Merrymen follows", () => {
     const row = (rank: number, handle: string, pnlUsd: number, inCohort: boolean) =>
       ({ rank, trader: { userId: `${rank}dcf7c78-2537-522a-8307-3f9970c081be`, handle, displayName: null, verified: null }, pnlUsd, volumeUsd: null, trades: null, inCohort });

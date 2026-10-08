@@ -554,7 +554,8 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
   if (!d) return [];
   const name = audience === "group" ? publicHandle(d.trader.handle) : trader(d.trader);
   const scope = `${d.window === "all" ? "on record" : `in the last ${d.window}`}${d.token ? ` on ${coin(d.token, null, audience)}` : ""}`;
-  if (view.earnings) return earningsLines(d, audience, name);
+  // Never "nothing realised" from a positions read that was refused or failed: that would be a false negative about a named trader.
+  if (view.earnings) return earningsLines(d, audience, name, !(env.coverage?.missing ?? []).includes("positions"));
   const c = d.counts;
   const out: string[] = [];
   if (d.events.length === 0 && d.positions.length === 0 && d.fills.length === 0) {
@@ -582,11 +583,13 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
  * the provider's realised P&L to date, highest first, unknown left out. A
  * position only received by transfer is never a win. Never the leaderboard's
  * per-coin figures, which have no window (docs/fomo.md). One line, so a room
- * that also hears the board still hears it whole.
+ * that also hears the board still hears it whole. When the positions were
+ * not read (refused on budget, or failed), it says so, never "nothing realised".
  */
-function earningsLines(d: TraderActivityData, audience: Audience, name: string): string[] {
+function earningsLines(d: TraderActivityData, audience: Audience, name: string, positionsRead: boolean): string[] {
   // "trades", not "positions opened or closed": the group gate reads that as a trade alert.
   const scope = d.window === "all" ? "on record" : `opened or closed in the last ${d.window}`;
+  if (!positionsRead) return [`${name}: what they made or lost on trades ${scope} could not be read just now.`];
   const known = d.positions.filter((p) => !receivedOnly(p) && finite(p.realizedPnlUsd));
   const won = known.filter((p) => p.realizedPnlUsd! > 0).sort((a, b) => b.realizedPnlUsd! - a.realizedPnlUsd!).slice(0, 3);
   const lost = known.filter((p) => p.realizedPnlUsd! < 0).sort((a, b) => a.realizedPnlUsd! - b.realizedPnlUsd!).slice(0, 2);
