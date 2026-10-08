@@ -1067,6 +1067,16 @@ describe("a bare 'what's trending' is Fomo's board where Fomo is wired, with the
     assert.deepEqual(desk!.asks, []);
   });
 
+  it("a chain the line leaves out is no cut at all: 'besides solana', 'solana is dead' get every chain", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "board" ? { text: BOARD, deflect: false, status: "ok" } : null);
+    make();
+    await said(msg("pine what's trending besides solana"));
+    clock += 3 * MIN;
+    await said(msg("pine what's trending? solana is dead lol", { fromId: ANN + 1 }));
+    assert.deepEqual(fomo!.asks.map((a) => a.request), [{ kind: "board", board: "trending" }, { kind: "board", board: "trending" }]);
+    assert.deepEqual(desk!.asks, []);
+  });
+
   it("Fomo refusing on budget, unavailable or failed: the desk's market read answers instead, and nothing of Fomo's is said", async () => {
     for (const status of ["budget-limited", "unavailable", "failed"] as const) {
       fomo!.answer = () => ({ text: "Fomo research is rationed right now: this group's hourly research budget is used up.", deflect: false, status });

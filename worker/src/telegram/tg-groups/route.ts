@@ -349,9 +349,38 @@ const CHAIN_WORDS: Readonly<Record<TgFomoChain, RegExp>> = {
   bsc: new RegExp(String.raw`\bbsc\b|\bbnb chain\b|\bbinance smart chain\b|\b${AT_BEFORE}bnb\b`, "u"),
 };
 
-/** The ONE chain a line's own words name; undefined for none, or for two ("solana or robinhood?"). */
+/** Every way a chain is written, for CHAIN_EXCLUDED. */
+const ANY_CHAIN = String.raw`(?:robin ?hood|hood|rh|solana|sol|base|ethereum|eth|bsc|bnb)`;
+/**
+ * A CHAIN THE LINE LEAVES OUT OR DISMISSES: "besides solana", "other than
+ * robinhood coins", "isn't on sol", "solana is dead", "base sucks". A board
+ * can be cut to one chain or left on every chain; it cannot leave one out,
+ * so such a line names no chain at all (every chain, plus the Robinhood line).
+ * "over" counts only as "over solana", never "over on solana".
+ */
+const CHAIN_EXCLUDED = new RegExp(
+  String.raw`\b(?:not|isn't|isnt|aren't|arent|without|besides|except|excluding|other than|outside(?: of)?|apart from|instead of|but not|sick of|tired of|done with|over(?! (?:on|in|at|there|here)\b))[,:]?(?: \S+){0,3}? ${ANY_CHAIN}\b` +
+    String.raw`|\b${ANY_CHAIN}(?: \S+){0,2}?(?:'s| is| are) (?:so |totally |completely |basically |literally |kinda )?(?:dead|cooked|over|done|trash|rugged)\b` +
+    String.raw`|\b${ANY_CHAIN}(?: \S+){0,2}? sucks\b`,
+  "u",
+);
+
+const chainText = (text: unknown): string =>
+  typeof text === "string" ? text.normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'").replace(/[$@＄＠]/gu, "").replace(/\s+/gu, " ") : "";
+
+/** Whether the line leaves a chain out or dismisses one (CHAIN_EXCLUDED). */
+export function chainExcluded(text: unknown): boolean {
+  return CHAIN_EXCLUDED.test(chainText(text));
+}
+
+/**
+ * The ONE chain a line's own words name; undefined for none, for two
+ * ("solana or robinhood?"), and for a line that leaves a chain out
+ * ("what's trending besides solana": every chain, never Solana only).
+ */
 export function chainIn(text: unknown): TgFomoChain | undefined {
-  const t = typeof text === "string" ? text.normalize("NFKC").toLowerCase().replace(/[$@＄＠]/gu, "") : "";
+  const t = chainText(text);
+  if (CHAIN_EXCLUDED.test(t)) return undefined;
   const hit = ROUTE_CHAINS.filter((c) => CHAIN_WORDS[c].test(t));
   return hit.length === 1 ? hit[0] : undefined;
 }
@@ -365,6 +394,8 @@ export function chainIn(text: unknown): TgFomoChain | undefined {
  * it?"), never the persona's offer, never a chain nobody here wrote.
  */
 function groundedChain(model: unknown, ctx: RouteCtx): TgFomoChain | undefined {
+  // A line that leaves a chain out names none, and an earlier line naming it grounds nothing.
+  if (chainExcluded(ctx.line)) return undefined;
   const own = chainIn(ctx.line);
   if (own) return own;
   if (typeof model !== "string" || !(ROUTE_CHAINS as readonly string[]).includes(model)) return undefined;

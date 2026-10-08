@@ -130,8 +130,19 @@ describe("the chain a routed list is cut to (decision D3, live 2026-10-07)", () 
       ["solana ones", "solana"], ["anything on eth", "ethereum"], ["bnb chain memes", "bsc"],
       ["solana or robinhood?", undefined], ["send it?", undefined], ["do it", undefined], ["what's the base case here", undefined],
       ["the robin in my garden", undefined], ["SOL is ripping", undefined], ["eth price?", undefined],
+      // A chain left out or dismissed is no chain: never the one cut the asker did not want.
+      ["what's trending besides solana", undefined], ["what's trending? solana is dead lol", undefined], ["what's trending that isn't on solana", undefined],
+      ["what's trending on fomo other than robinhood coins", undefined], ["anything trending on fomo outside of solana?", undefined],
+      ["base sucks, what's hot", undefined], ["solana's cooked, what's trending", undefined], ["what's trending, sick of sol coins", undefined],
+      ["what's trending over on solana", "solana"], ["trending on solana instead", "solana"],
     ];
     for (const [t, c] of want) assert.equal(chainIn(t), c, t);
+  });
+
+  it("a line that leaves a chain out cuts a routed board to no chain, whatever the model or an earlier line said", () => {
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending" }, ctxOf("what's trending besides solana")), { action: "fomo", request: { kind: "board", board: "trending" } });
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "solana" }, ctxOf("what's trending besides solana", { askerLines: ["anything hot on solana?"] })), { action: "fomo", request: { kind: "board", board: "trending" } });
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "robinhood" }, ctxOf("what's trending on fomo other than robinhood coins", { askerLines: ["what about robinhood coins on fomo"] })), { action: "fomo", request: { kind: "board", board: "trending" } });
   });
 
   /** The 23:01-23:03 room: the board, her ask, its offer, her yes. */

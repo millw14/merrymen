@@ -733,6 +733,18 @@ describe("a chain's coins, a row of the trader board, and what a trader made mon
     for (const [q, args] of want) assert.deepEqual(callsOf(q), [["fomo_get_rankings", args]], q);
   });
 
+  it("a chain the line leaves out is no chain at all: the board on every chain", () => {
+    for (const q of [
+      "what's trending on fomo other than robinhood coins",
+      "what's trending on fomo but not on robinhood",
+      "what's trending on fomo besides solana coins",
+      "trending on fomo that isn't on base",
+    ]) assert.deepEqual(callsOf(q), [["fomo_get_rankings", { board: "trending-tokens" }]], q);
+    // A chain it does ask for keeps its cut; the one it leaves out does not join it.
+    assert.deepEqual(callsOf("what's trending on fomo on base, not solana"), [["fomo_get_rankings", { board: "trending-tokens", chain: "base" }]]);
+    assert.deepEqual(callsOf("what's trending over on solana on fomo"), [["fomo_get_rankings", { board: "trending-tokens", chain: "solana" }]]);
+  });
+
   it("unchanged: a shouted ticker, the switch, the owner's own coins, discovery", () => {
     assert.equal(plan("is fomo on robinhood?"), null);
     assert.deepEqual(callsOf("theses on SOL coins"), [["fomo_get_token_theses", { token: "SOL" }]]);

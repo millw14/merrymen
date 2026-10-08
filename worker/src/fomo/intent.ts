@@ -707,6 +707,14 @@ const CHAIN_LIST_NOUN: ReadonlySet<string> = new Set(["coins", "tokens", "memeco
 /** A list of coins asked for by a chain alone: "what about robinhood coins on fomo". */
 const CHAIN_LIST = /\b(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|ones)\b/;
 
+/**
+ * A cue, in the few words before a chain word, that the line leaves that chain
+ * out ("besides solana", "other than robinhood coins", "but not on robinhood",
+ * "isn't on sol"): a list can be cut to one chain or left on all of them, never
+ * cut to the one it excludes. "over" only as "over solana", never "over on it".
+ */
+const CHAIN_EXCLUSION_CUE = /\b(?:not|without|besides|except|excluding|other than|outside|apart from|instead of|sick of|tired of|done with|over(?! (?:on|in|at|there|here)\b))\b/;
+
 function chainSlug(word: string): string | null {
   const c = chainFromUserText(word);
   return c?.slug ?? null;
@@ -744,6 +752,12 @@ function extract(ws: readonly Word[], self: SelfRef): Extracted {
     // "Theses on SOL" asks about the coin; "on sol", "on solana", "on SOL chain" name the chain.
     const shoutedTicker = /^[A-Z0-9]{2,6}$/.test(w.bare) && !NOT_TICKERS.has(w.bare) && !shouting;
     if (shoutedTicker && next !== "chain" && next !== "network") continue;
+    // A chain the line leaves out is neither a chain hint nor a coin.
+    if (CHAIN_EXCLUSION_CUE.test(ws.slice(Math.max(0, i - 4), i).map((x) => x.canon).join(" "))) {
+      consumed.add(i);
+      if (next === "chain" || next === "network") consumed.add(i + 1);
+      continue;
+    }
     const positioned = prev === "on" || prev === "via" || prev === "from" || prev === "across"
       || (prev === "the" && (prev2 === "on" || prev2 === "via" || prev2 === "from"))
       || next === "chain" || next === "network"
