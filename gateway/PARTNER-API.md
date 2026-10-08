@@ -390,8 +390,9 @@ response; a different text with that ID returns HTTP 409
 if the first request finished, you get its saved reply.
 
 A connection answers one message at a time. A request that arrives while
-another is generating waits, up to about 20 seconds; a retry of the request
-being generated then gets its saved reply. The hosted runtime also generates
+another is generating waits, up to about 20 seconds; a reply's model call is
+held to 18 seconds, so a retry of the request being generated normally gets its
+saved reply. The hosted runtime also generates
 only a few replies and activations at once, across all apps, so a request can
 wait when nothing else is running for its connection. Still waiting after
 that, the answer is 409 `conversation_busy` with a `Retry-After` header and
@@ -503,7 +504,8 @@ proves a valid grant, a running worker, configured chat or a reachable bridge.
   carries `request_id`.
 - Messages that are not well-formed text or carry control characters are refused
   before any reply is generated; replies are cleaned and capped instead of
-  failing, and a model that does not answer within 25 seconds yields the status
+  failing, and a model that does not answer within 18 seconds (or within what
+  is left of the request's 40 seconds, after any wait) yields the status
   reply.
 - The SDK's `prepareMerryman` takes only `owner`, `caps`, `chainId` and
   `onStatus`, refuses a `null` chain, and exports `PARTNER_API_VERSION` and
@@ -543,6 +545,10 @@ underlies stored partner key hashes and the developer portal's session key, so
 rotating it invalidates every partner key and signs every developer out. To sign
 every developer out without touching partner keys (a leaked session cookie),
 rotate `MERRYMEN_DEVELOPER_PORTAL_SECRET` on the gateway and the site together.
+A rotation ends sessions; it does not undo what a stolen session already did.
+After rotating, list each affected developer's keys (`GET /keys` in the portal,
+or `node partners-cli.mjs list` on the gateway), revoke any created while the
+cookie was exposed, and reissue any legitimate key it revoked.
 
 The gateway forwards authenticated requests to hosted web using a dedicated
 `MERRYMEN_PARTNER_BRIDGE_SECRET` (at least 32 bytes), configured identically on

@@ -640,7 +640,7 @@ same partner registry on the gateway's volume.
 | gateway + web | `MERRYMEN_PARTNER_BRIDGE_SECRET` | The same dedicated random secret, at least 32 bytes, on both services. Keep separate from holder/session secrets and never distribute to partners. Rotating it voids outstanding enrollment challenges, and `POST /agents` for a user with an unexpired pending authorization fails until its 30 minutes pass. |
 | gateway | `MERRYMEN_PARTNER_APP_ORIGIN` | `https://app.merrymen.dev` (the default); HTTPS required outside localhost development. |
 | web | `MERRYMEN_PUBLIC_ORIGIN` | `https://app.merrymen.dev`, also used for optional hosted onboarding links. |
-| gateway + site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | The same random secret, at least 32 bytes, on the gateway and the site. It proves a request came through the site and cannot sign anyone in on its own. A hash of it is mixed into the developer session key, so rotating it (both services together) signs every developer out while partner keys keep working: the switch for a leaked session cookie. Unset or shorter, the gateway's `/developer/v1` answers 503 `unavailable` and the site answers 503 "Developer sign-in is temporarily unavailable". Server-only, never `NEXT_PUBLIC_*`. |
+| gateway + site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | The same random secret, at least 32 bytes, on the gateway and the site. It proves a request came through the site and cannot sign anyone in on its own. A hash of it is mixed into the developer session key, so rotating it (both services together) signs every developer out while partner keys keep working: the switch for a leaked session cookie. It ends sessions, not what one did: afterwards list the affected developer's keys (portal `GET /keys` or `node partners-cli.mjs list`), revoke any minted while the cookie was exposed, and reissue any it revoked. Unset or shorter, the gateway's `/developer/v1` answers 503 `unavailable` and the site answers 503 "Developer sign-in is temporarily unavailable". Server-only, never `NEXT_PUBLIC_*`. |
 | site | `MERRYMEN_DEVELOPER_GATEWAY_ORIGIN` | Optional, server-only. Defaults to `https://ai.merrymen.dev`; set it to point a preview or local site at another gateway. Must be a bare `https://` origin (plain `http://` only for `localhost` or `127.0.0.1`); anything else makes the portal answer 503 rather than send the secret elsewhere. |
 | gateway | `MERRYMEN_GATEWAY_SECRET` | Already required for holder tokens. It also peppers every partner key's stored hash and derives the key that signs developer sign-in challenges and sessions, so rotating it invalidates every partner key and signs every developer out. |
 | gateway | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Optional for a single process. Without them (the in-memory store), developer sessions are bound to the process: every gateway restart or deploy signs developers out, because their logouts would not survive it. With KV, sessions and logouts survive deploys, and an unreachable KV makes session checks, logouts and sign-ins answer 503 `unavailable` rather than guess. |
@@ -668,9 +668,11 @@ for the owner's signed grant.
 
 Partner chat answers one message per connection at a time, and activation one
 per owner wallet, through Postgres advisory locks that hold across replicas.
-Each web replica holds at most five of these locks at once: a holder pins a
-connection from that replica's Postgres pool (pg's default of ten) for a whole
-model call, and the other half stays free for everything else. A waiting
+Each web replica holds at most six of these locks at once, four chats and two
+activations, so slow chats never stop activations: a holder pins a connection
+from that replica's Postgres pool (pg's default of ten) for its turn, and four
+connections stay free for everything else. A chat's model call is held to 18
+seconds, and to what is left of the request's 40-second budget. A waiting
 request holds no connection. A chat waits up to 20 seconds and an activation
 up to 10, counting queueing and connection checkout, then gets 409
 `conversation_busy` or `enrollment_busy` with `Retry-After: 2`. Busy answers

@@ -16,7 +16,8 @@ const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status
  * Only the first-party portal's server may call this wallet-authenticated surface.
  *
  * TWO SECRETS, TWO JOBS. The portal secret is the site's Bearer credential: it
- * proves a request came through merrymen.dev and nothing more. Challenges and
+ * proves a request came through merrymen.dev, and (hashed into the session key)
+ * rotating it signs developers out; it cannot sign anyone in. Challenges and
  * sessions are MAC'd with a key only this gateway can derive. They used to be
  * MAC'd with the portal secret itself, so anyone holding the site's environment
  * could mint a session for ANY wallet, then keys under that developer's app_id,
@@ -32,7 +33,8 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
   //
   // THE PORTAL SECRET IS MIXED IN, AS A HASH, so rotating it still signs every
   // developer out, as it did when it was the key itself: the kill switch for a
-  // leaked session cookie that does not also void every partner key, which
+  // leaked session cookie (it ends sessions, not the keys one minted: those are
+  // revoked separately) that does not also void every partner key, which
   // rotating the gateway secret would. Knowing it alone still forges nothing;
   // the derivation needs the gateway secret too.
   const sessionKey = gatewaySecret && Buffer.byteLength(gatewaySecret) >= 32 && portalSecret
