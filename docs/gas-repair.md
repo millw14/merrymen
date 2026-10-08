@@ -14,7 +14,7 @@ Those writers now record and price gas. `worker/src/gas-repair-cli.ts` completes
 It writes only NULL gas columns of rows the board counts as missing. The values come only from two sources:
 
 - **The row's own UserOperationEvent.** The tool finds it in the transaction's receipt by the row's user-op hash, with the row's account as sender. It takes the actual gas cost, the gas used and the paymaster from that event. Its success must match the row's status.
-- **The Chainlink ETH/USD round in force at that receipt's block.** This is the price the live path would have used. If no round was published, or the newest one is over six hours old, the row gets wei only and stays unpriced.
+- **The Chainlink ETH/USD round in force at that receipt's block.** This is the price the live path would have used. If no round was published, or the newest one is over six hours old, an owner-paid row is listed as unresolved and left for a later run. A row is completed whole or not at all.
 
 It leaves some rows alone and lists them as unresolved:
 

@@ -271,6 +271,13 @@ export function repairOf(row: GasRow, ev: OpEvidence | null, price: { usdg: numb
   if (ev.payer === "sponsor" && row.sponsored_gas_wei !== null && row.sponsored_gas_wei !== ev.gasWei.toString()) {
     return { why: "the row's recorded sponsor cost differs from its receipt — left for a person" };
   }
+  // A ROW IS COMPLETED WHOLE OR NOT AT ALL. An owner cost with no honest
+  // price is still a cost the board withholds P&L for, and a wei-only write
+  // would hold a receipt that blocks the run that can price it later (one
+  // applied repair per trade). So it waits, listed, for a run that can.
+  if (ev.payer === "owner" && ev.gasWei > 0n && !price) {
+    return { why: "no Chainlink round prices it yet (none in force at its block within the lag bound, or the feed did not answer) — run again later" };
+  }
   const units = row.gas_units ?? (ev.gasUnits > 0n ? ev.gasUnits.toString() : null);
   const after: GasColumns = ev.payer === "sponsor"
     ? { gas_wei: null, sponsored_gas_wei: ev.gasWei.toString(), gas_units: units, gas_usdg: null }
@@ -410,11 +417,20 @@ export async function applyGasRepair(db: Db, plan: GasRepairPlan, o: {
       if (res.changes !== 1) {
         throw new GasRepairRefused("row-moved", `row ${r.id} no longer holds what the preview read: nothing was written — preview again`);
       }
-      await tx.prepare(`INSERT INTO ${REPAIRS_TABLE} (repair_id, trade_id, account, before_json, after_json, evidence_json, preview_digest, backup_ref, state, applied_at_ms)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'applied', ?)`)
-        .run(o.repairId, r.id, r.account, canonical(r.before), canonical(r.after),
-          canonical({ txHash: r.txHash, userOpHash: r.userOpHash, blockNumber: r.blockNumber, blockTime: r.blockTime, payer: r.payer, priced: r.priced }),
-          plan.previewDigest, o.backupRef, o.nowMs);
+      try {
+        await tx.prepare(`INSERT INTO ${REPAIRS_TABLE} (repair_id, trade_id, account, before_json, after_json, evidence_json, preview_digest, backup_ref, state, applied_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'applied', ?)`)
+          .run(o.repairId, r.id, r.account, canonical(r.before), canonical(r.after),
+            canonical({ txHash: r.txHash, userOpHash: r.userOpHash, blockNumber: r.blockNumber, blockTime: r.blockTime, payer: r.payer, priced: r.priced }),
+            plan.previewDigest, o.backupRef, o.nowMs);
+      } catch (e) {
+        // One applied repair per trade (gas_repairs_once). Said by name, and the
+        // whole apply rolls back with it.
+        if (/unique|constraint/i.test(String((e as { message?: unknown })?.message ?? "")) || (e as { code?: unknown })?.code === "23505") {
+          throw new GasRepairRefused("already-repaired", `row ${r.id} already holds an applied gas repair: nothing was written — revert that repair before repairing the row again`);
+        }
+        throw e;
+      }
       rows.push({ id: r.id, account: r.account, before: r.before, after: r.after });
     }
     const body = { format: APPLY_FORMAT, repairId: o.repairId, tenant: plan.tenant, target: plan.target, previewDigest: plan.previewDigest,

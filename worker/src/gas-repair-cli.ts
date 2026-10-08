@@ -204,6 +204,12 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
   if (options.mode === "check" || options.mode === "revert") {
     let raw: string;
     try { raw = readFileSync(options.report, "utf8"); } catch { throw new CliError("report-unreadable"); }
+    // An apply that died before its report was whole never sent its COMMIT:
+    // the report is written in full and fsynced inside the transaction, first.
+    try { JSON.parse(raw); } catch {
+      throw new GasRepairRefused("report-unfinished", "the apply report is empty or cut short. If it is the --output of an apply that died, " +
+        "that apply never sent its COMMIT, so nothing was written: preview again");
+    }
     const report = parseApplyReport(raw);
     sameDatabase(report, url);
     if (options.mode === "check") {
@@ -242,8 +248,15 @@ export async function main(args: readonly string[] = process.argv.slice(2), env:
       if (conflictRolledBack(e)) throw new GasRepairRefused("conflict", "Postgres rolled the revert back for a conflict with another transaction: nothing was written — run it again");
       throw e;
     }
-    finishReportFile(fd, options.output, r);
-    out(`${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} repair ${r.repairId}: ${r.rows.length} row(s); report ${options.output}`);
+    // Committed: the revert stands whatever happens to its report or its console line now.
+    const said = `${r.outcome === "reverted" ? "REVERTED" : "ALREADY REVERTED"} repair ${r.repairId}: ${r.rows.length} row(s)`;
+    try { finishReportFile(fd, options.output, r); }
+    catch {
+      rmSync(options.output, { force: true });
+      say(`${said}, but its report could not be written to ${options.output}: run the same --revert again with a new --output for one (it says ALREADY REVERTED)`);
+      throw new CliError("reverted-but-report-not-written");
+    }
+    try { out(`${said}; report ${options.output}`); } catch { throw new CliError("reverted-but-not-printed"); }
     return 0;
   }
 

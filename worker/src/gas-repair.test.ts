@@ -14,10 +14,13 @@ import type { RpcCall } from "./chain-capital";
 import { wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import {
-  applyGasRepair, CHAIN_ID, GasRepairRefused, parseApplyReport, planGasRepair, readGasSnapshot, REPAIRS_TABLE, repairOf, revertGasRepair, stampCommitOutcome,
+  applyGasRepair, CHAIN_ID, GasRepairRefused, parseApplyReport, planGasRepair, readGasSnapshot, REPAIRS_SCHEMA, REPAIRS_TABLE, repairOf, revertGasRepair, stampCommitOutcome,
   type GasRepairPlan,
 } from "./gas-repair";
-import { createRepairRpc, parseRepairArgs } from "./gas-repair-cli";
+import { createRepairRpc, main, parseRepairArgs } from "./gas-repair-cli";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { CliError } from "./chain-gap-booking-cli";
 
 const EP_ABI = parseAbi([
@@ -141,12 +144,12 @@ describe("planGasRepair — from the receipt and the round in force", () => {
     assert.equal(p.repairs[0]!.before.gas_wei, "2000000000000000");
   });
 
-  it("leaves wei only, never a guessed price, when no round was in force", async () => {
+  it("leaves an owner cost it cannot price for a later run — never half-completed, never a guessed price", async () => {
     const db = await ledger();
-    await trade(db, { agent: A, status: "landed", op: h(1), tx: h(11) });
+    const id = await trade(db, { agent: A, status: "landed", op: h(1), tx: h(11) });
     const p = await plan(db, chain({ [h(11)]: { block: 100, logs: [opLog(h(1), A)] } }, { 100: 500 }));
-    assert.equal(p.repairs[0]!.after.gas_usdg, null);
-    assert.equal(p.repairs[0]!.after.gas_wei, "2000000000000000");
+    assert.equal(p.repairs.length, 0);
+    assert.match(p.unresolved.find((u) => u.id === id)!.why, /no Chainlink round prices it yet/);
   });
 
   it("leaves every disagreement for a person", async () => {
@@ -193,10 +196,11 @@ describe("planGasRepair — from the receipt and the round in force", () => {
 
   it("never fills a column the row already holds", () => {
     const row = { id: 1, account: A, status: "landed" as const, userOpHash: h(1), txHash: h(11), gas_wei: null, sponsored_gas_wei: null, gas_units: "7", gas_usdg: null };
-    const r = repairOf(row, { blockNumber: 1, blockTime: 1, success: true, gasWei: 10n, gasUnits: 7n, payer: "owner" }, null);
+    const priced = { usdg: 0.01, round: { roundId: "1", priceUsd: 2_000, lagSec: 5 } };
+    const r = repairOf(row, { blockNumber: 1, blockTime: 1, success: true, gasWei: 10n, gasUnits: 7n, payer: "owner" }, priced);
     assert.ok("repair" in r);
     assert.equal(r.repair.after.gas_units, "7");
-    assert.ok("why" in repairOf({ ...row, gas_units: "8" }, { blockNumber: 1, blockTime: 1, success: true, gasWei: 10n, gasUnits: 7n, payer: "owner" }, null));
+    assert.ok("why" in repairOf({ ...row, gas_units: "8" }, { blockNumber: 1, blockTime: 1, success: true, gasWei: 10n, gasUnits: 7n, payer: "owner" }, priced));
   });
 });
 
@@ -260,6 +264,16 @@ describe("applyGasRepair and revertGasRepair", () => {
     await assert.rejects(revertGasRepair(db, report, { nowMs: 2 }), (e: unknown) => e instanceof GasRepairRefused && e.code === "row-changed");
   });
 
+  it("names a row that already holds an applied repair, and writes nothing", async () => {
+    const { db, p, ids } = await planned();
+    for (const statement of REPAIRS_SCHEMA.split(";").map((s) => s.trim()).filter(Boolean)) await db.exec(statement);
+    await db.prepare(`INSERT INTO ${REPAIRS_TABLE} (repair_id, trade_id, account, before_json, after_json, evidence_json, preview_digest, backup_ref, state, applied_at_ms)
+        VALUES ('r0', ?, ?, '{}', '{}', '{}', 'd', 'b', 'applied', 0)`).run(ids[1]!, A);
+    await assert.rejects(applyGasRepair(db, p, { confirm: p.previewDigest, backupRef: "railway-pitr-1", repairId: "r1", nowMs: 1 }),
+      (e: unknown) => e instanceof GasRepairRefused && e.code === "already-repaired");
+    assert.deepEqual(await gasCols(db, ids[0]!), { gas_wei: null, sponsored_gas_wei: null, gas_units: null, gas_usdg: null });
+  });
+
   it("refuses a report that does not verify", () => {
     assert.throws(() => parseApplyReport(JSON.stringify({ format: "merrymen.gas-repair.apply.v1", rows: [] })), (e: unknown) => e instanceof GasRepairRefused);
   });
@@ -274,6 +288,16 @@ describe("the shell", () => {
     for (const bad of [["--output", "rel.json"], ["--confirm", "a".repeat(64), "--output", "/tmp/p.json"], ["--apply", "--output", "/tmp/a.json"],
       ["--revert", "/tmp/a.json", "--tenant", A, "--output", "/tmp/r.json"]]) {
       assert.throws(() => parseRepairArgs(bad), (e: unknown) => e instanceof CliError && e.code === "invalid-arguments");
+    }
+  });
+
+  it("reads an apply that died before its report as one that never committed", async () => {
+    const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "gas-repair-")));
+    const report = path.join(dir, "apply.json");
+    writeFileSync(report, "");
+    for (const mode of ["--check", "--revert"]) {
+      await assert.rejects(main([mode, report, "--output", path.join(dir, `${mode.slice(2)}.json`)], { DATABASE_URL: "postgres://db.internal:5432/ledger" }, { out: () => {} }),
+        (e: unknown) => e instanceof GasRepairRefused && e.code === "report-unfinished");
     }
   });
 
