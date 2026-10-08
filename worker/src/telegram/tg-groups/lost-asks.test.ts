@@ -689,6 +689,43 @@ describe("other words for 'you missed it' go to the router (route.ts reask)", ()
     assert.ok(tg.out().some((o) => o.replyTo === own.messageId), "the dropped line is re-run, not lost for good");
   });
 
+  it("a newer question of hers while the complaint is routed wins: the reask is not run and the newer question is answered (review r2)", async () => {
+    make();
+    tg.failNext = 1;
+    const ask = msg("shogun how's the market?");
+    await said(ask);
+    clock += 20 * SEC;
+    // The routing call is held until her newer question has arrived and been read.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const inner = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: { body: string }) => {
+      if ((JSON.parse(init.body) as { tools?: unknown }).tools) await held;
+      return (inner as unknown as (u: string, i: { body: string }) => Promise<unknown>)(url, init);
+    }) as never;
+    picks.push({ action: "reask" });
+    groups.onMessage(msg("shogun bro you skipped mine earlier"));
+    await settle();
+    clock += 3 * SEC;
+    // Her newer question's read is still running when the router answers.
+    let readDone!: () => void;
+    desk.hold = new Promise<void>((r) => { readDone = r; });
+    const newer = msg("shogun how are the vibes on robinhood chain today?");
+    groups.onMessage(newer);
+    await settle();
+    release();
+    await settle();
+    readDone();
+    desk.hold = null;
+    await groups.drain();
+    assert.equal(routePrompts.length, 1, "the complaint was routed");
+    const toNewer = tg.out().filter((o) => o.replyTo === newer.messageId);
+    assert.equal(toNewer.length, 1, JSON.stringify(tg.out()));
+    assert.match(toNewer[0]!.text, /mostly red/);
+    assert.equal(tg.out().filter((o) => o.replyTo === ask.messageId).length, 1, "only her first, refused, send: the old ask is not re-run over the newer one");
+    assert.ok(!logs.includes("[tg-groups] an unanswered ask re-asked (routed)"), JSON.stringify(logs));
+  });
+
   it("with nothing of hers unanswered, reask is not even on the menu, and a reask pick is refused", async () => {
     make();
     picks.push({ action: "reask" });

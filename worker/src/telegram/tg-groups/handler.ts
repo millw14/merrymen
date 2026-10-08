@@ -3163,6 +3163,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           return done(r === null, r ?? undefined);
         }
         case "reask": {
+          // A newer line of theirs arrived while this was routed (burst), or
+          // they were forgotten: that line wins, and the old ask stays lost.
+          // Re-running it now would make it their last addressed line again
+          // and drop the newer question as a burst.
+          if (o.stillWanted && !o.stillWanted()) return done(false, "not-wanted");
           // Their earlier ask, run again as the reply to it (reaskAgain); this
           // line itself needs no answer of its own.
           if (!reaskAgain(j)) return await asBefore();
