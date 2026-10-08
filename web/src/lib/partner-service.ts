@@ -1,10 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { PartnerError, objectBody, onlyFields, partnerAppOrigin, readPartnerBody, requirePartnerScope, verifyPartnerRequest, type PartnerPrincipal } from "./partner-bridge";
-import { PartnerStoreError, type PartnerConnection, type PartnerStore } from "./partner-store";
+import {
+  fitPartnerReply, partnerCommandFits, partnerText, PartnerStoreError, PARTNER_MESSAGE_MAX,
+  type PartnerConnection, type PartnerStore,
+} from "./partner-store";
 import type { readPartnerRuntime, replyToPartner } from "./partner-runtime";
 import type { createPartnerEnrollmentService } from "./partner-enrollment";
 
 type Runtime = Awaited<ReturnType<typeof readPartnerRuntime>>;
+/** Saved, like any reply, when a model answer had nothing printable left: never an empty message. */
+const UNUSABLE_REPLY = "My conversational service did not return a usable reply. I have not executed any action from this message.";
 export function partnerFailure(error: unknown): Response {
   // PartnerRuntimeError is a PartnerError: its status and code are answers too.
   // Anything else may carry internal detail and becomes a generic 503.
@@ -96,7 +101,11 @@ export function createPartnerService(deps: {
       if (method === "GET") return { status: 200, body: { agent_id: id, messages: await store.readMessages(id) } };
       const body = objectBody(raw);
       onlyFields(body, ["message", "request_id"]);
-      if (typeof body.message !== "string" || !body.message.trim() || body.message.length > 2000) throw new PartnerError(400, "bad_request", "message must contain 1–2000 characters");
+      // The store's own rule, checked before the model is paid for: a message it
+      // would refuse used to cost a generation first, then fail as a 400 anyway.
+      if (typeof body.message !== "string" || body.message.length > PARTNER_MESSAGE_MAX || !partnerText(body.message.trim(), PARTNER_MESSAGE_MAX, true)) {
+        throw new PartnerError(400, "bad_request", "message must contain 1–2000 characters, with no control characters other than tabs and line breaks");
+      }
       if (typeof body.request_id !== "string" || !/^[a-zA-Z0-9_-]{8,128}$/.test(body.request_id)) throw new PartnerError(400, "bad_request", "request_id must contain 8–128 letters, numbers, underscores or hyphens");
       const message = body.message.trim(), requestId = body.request_id;
       return store.withConversationLock(id, async () => {
@@ -108,7 +117,12 @@ export function createPartnerService(deps: {
         if (exchange && exchange.message !== message) throw new PartnerError(409, "idempotency_conflict", "request_id was already used for another message");
         if (!exchange) {
           const result = await deps.reply(tenant, { message, history: await store.readMessages(id) });
-          const saved = await store.appendExchange(id, { requestId, message, reply: result.reply, command: result.command });
+          // The model's output is not the partner's input: fit it to what the
+          // store keeps rather than answer the partner's message with a 400.
+          const reply = fitPartnerReply(result.reply);
+          const saved = await store.appendExchange(id, reply
+            ? { requestId, message, reply, command: partnerCommandFits(result.command) ? result.command : undefined }
+            : { requestId, message, reply: UNUSABLE_REPLY });
           exchange = saved.exchange;
         }
         return { status: 200, body: { agent_id: id, request_id: requestId, reply: exchange.reply,

@@ -151,6 +151,51 @@ test("runtime refusals reach the partner with their own status and code, never a
   assert.doesNotMatch(JSON.stringify(hidden.body), /password/);
 });
 
+test("a message the store would refuse is refused before the model is called", async () => {
+  const { store, call, replies } = fixture();
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const path = `/agents/${created.body.id}/messages`;
+  for (const message of ["hello\u0007", "bell\u0000", "  \u001b[31m red"]) {
+    const refused = await call("POST", path, { message, request_id: "request_bad" });
+    assert.equal(refused.status, 400, JSON.stringify(message));
+    assert.equal(refused.body.error.code, "bad_request");
+  }
+  assert.equal(replies(), 0, "no generation was paid for a message that could never be saved");
+  const ok = await call("POST", path, { message: "line one\n\tline two\r\n", request_id: "request_ok" });
+  assert.equal(ok.status, 200);
+  assert.equal(replies(), 1);
+});
+
+test("a model reply that is too long, has control characters or an oversized proposal is fitted, not blamed on the partner", async () => {
+  const replies: Array<Pick<Awaited<ReturnType<ServiceDeps["reply"]>>, "reply" | "command">> = [
+    // After the controls go, the emoji's two halves sit at 15,998 and 15,999: across the cut.
+    { reply: `Start\u0000\u001b ${"a".repeat(15_992)}😀${"b".repeat(50)}`, command: { id: "open-settings", args: {} } },
+    { reply: "Here is a proposal.", command: { id: "change-settings", args: { changes: "x".repeat(9000) } } },
+    { reply: "\u0000\u0001\u0002" },
+  ];
+  const { store, call } = fixture({ reply: async () => ({ ...replies.shift()!, generation: "model" as const, runtime }) });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const path = `/agents/${created.body.id}/messages`;
+  const long = await call("POST", path, { message: "tell me everything", request_id: "request_long" });
+  assert.equal(long.status, 200);
+  assert.ok(long.body.reply.length <= 16_000);
+  assert.match(long.body.reply, /^Start a+…$/, "controls dropped, cut before the emoji rather than through it");
+  assert.ok(long.body.reply.isWellFormed());
+  assert.deepEqual(long.body.proposal, { id: "open-settings", args: {} });
+  const big = await call("POST", path, { message: "propose something", request_id: "request_big" });
+  assert.equal(big.status, 200);
+  assert.equal(big.body.reply, "Here is a proposal.");
+  assert.equal(big.body.proposal, null);
+  const empty = await call("POST", path, { message: "say nothing", request_id: "request_empty" });
+  assert.equal(empty.status, 200);
+  assert.match(empty.body.reply, /did not return a usable reply.*not executed any action/);
+  // Saved like any other reply: a retry returns it rather than generating again.
+  assert.deepEqual((await call("POST", path, { message: "tell me everything", request_id: "request_long" })).body, long.body);
+  assert.equal((await call("GET", path)).body.messages.length, 6);
+});
+
 test("key chat scope cannot substitute for owner consent", async () => {
   const { store, call } = fixture();
   const created = await call("POST", "/agents", { external_user_id: "user-1" }, { ...key, scopes: ["write:agents", "read:agents"] });

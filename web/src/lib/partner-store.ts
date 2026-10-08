@@ -96,12 +96,40 @@ export function onboardingToken(connection: Pick<PartnerConnection, "id" | "expi
   return `mmon_${payload}.${createHmac("sha256", secret).update(`partner-onboarding:${payload}`).digest("base64url")}`;
 }
 
+export const PARTNER_MESSAGE_MAX = 2000;
+export const PARTNER_REPLY_MAX = 16_000;
+export const PARTNER_COMMAND_MAX = 8000;
+/** Multiline text keeps tabs and line breaks; every other C0 control is refused. */
+const LINE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
+const LINE_CONTROLS = new RegExp(LINE_CONTROL.source, "g");
+const CONTROL = /[\u0000-\u001f]/;
+
+/** The store's text rule, exported so a caller can refuse before paying for work the store would then reject. */
+export function partnerText(value: unknown, max: number, multiline = false): value is string {
+  return typeof value === "string" && !!value.trim() && value.length <= max && !(multiline ? LINE_CONTROL : CONTROL).test(value);
+}
 function textField(value: string, max: number, label: string, multiline = false): string {
-  const controls = multiline ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/ : /[\u0000-\u001f]/;
-  if (typeof value !== "string" || !value.trim() || value.length > max || controls.test(value)) {
-    throw new PartnerStoreError(400, "invalid_input", `invalid ${label}`);
-  }
+  if (!partnerText(value, max, multiline)) throw new PartnerStoreError(400, "invalid_input", `invalid ${label}`);
   return value;
+}
+
+/**
+ * A model reply made storable instead of refused: the model's output is not the
+ * partner's input, so it must never come back as the partner's 400. Disallowed
+ * controls are dropped (tabs and line breaks kept) and an over-long reply is cut
+ * on a character boundary, marked with an ellipsis. "" when nothing is left.
+ */
+export function fitPartnerReply(reply: string): string {
+  const clean = String(reply ?? "").replace(LINE_CONTROLS, "").trim();
+  if (clean.length <= PARTNER_REPLY_MAX) return clean;
+  let end = PARTNER_REPLY_MAX - 1;
+  // Never keep half of a surrogate pair: the stored JSON would carry a lone one.
+  if (/[\ud800-\udbff]/.test(clean[end - 1])) end--;
+  return `${clean.slice(0, end).trimEnd()}…`;
+}
+/** A proposal the store would refuse as too large; the reply is kept without it. */
+export function partnerCommandFits(command: unknown): boolean {
+  return JSON.stringify(command ?? null).length <= PARTNER_COMMAND_MAX;
 }
 function scopeList(scopes: string[]): string[] {
   if (!Array.isArray(scopes) || !scopes.length || scopes.length > 32 || scopes.some(s => typeof s !== "string" || !/^[a-z][a-z0-9:_-]{0,63}$/.test(s))) {
@@ -305,9 +333,9 @@ export class SqlPartnerStore implements PartnerStore {
   }
   async appendExchange(connectionId: string, input: Omit<PartnerExchange, "createdAt">) {
     textField(input.requestId, 128, "request id");
-    textField(input.message, 2000, "message", true);
-    textField(input.reply, 16000, "reply", true);
-    if (JSON.stringify(input.command ?? null).length > 8000) throw new PartnerStoreError(400, "invalid_command", "command is too large");
+    textField(input.message, PARTNER_MESSAGE_MAX, "message", true);
+    textField(input.reply, PARTNER_REPLY_MAX, "reply", true);
+    if (!partnerCommandFits(input.command)) throw new PartnerStoreError(400, "invalid_command", "command is too large");
     return this.transaction(async db => {
       const c = connectionOf(await db.prepare(`SELECT record_json FROM partner_connections WHERE id = ?${this.lockSuffix()}`).get(connectionId));
       if (!c || c.status !== "linked") throw new PartnerStoreError(409, "connection_inactive", "agent connection is not active");
