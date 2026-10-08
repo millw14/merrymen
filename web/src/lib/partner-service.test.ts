@@ -251,6 +251,31 @@ test("an activation that committed is reported as a success even when the status
   assert.equal(full.body.agent.id, "robin");
 });
 
+test("after a disconnect, requesting the connection again starts a fresh authorization under a new id", async () => {
+  const { store, call } = fixture();
+  const original = await call("POST", "/agents", { external_user_id: "user-1", name: "Robin" });
+  await store.bindAuthorized(original.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  assert.equal((await call("POST", `/agents/${original.body.id}/messages`, { message: "private", request_id: "request_old" })).status, 200);
+  assert.equal((await call("DELETE", `/agents/${original.body.id}/connection`)).status, 200);
+  const fresh = await call("POST", "/agents", { external_user_id: "user-1", name: "Robin" });
+  assert.equal(fresh.status, 202);
+  assert.notEqual(fresh.body.id, original.body.id);
+  assert.equal(fresh.body.status, "pending_authorization");
+  assert.match(fresh.body.onboarding_url, /^https:\/\/app\.merrymen\.dev\/connect#token=/);
+  // The new connection needs the owner again and sees none of the old conversation.
+  assert.equal((await call("GET", `/agents/${fresh.body.id}/messages`)).status, 409);
+  await store.bindAuthorized(fresh.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  assert.deepEqual((await call("GET", `/agents/${fresh.body.id}/messages`)).body.messages, []);
+  // The old id still answers, as disconnected, and cannot chat.
+  const old = await call("GET", `/agents/${original.body.id}`);
+  assert.equal(old.status, 200);
+  assert.equal(old.body.status, "disconnected");
+  assert.equal(old.body.agent, undefined);
+  assert.equal((await call("GET", `/agents/${original.body.id}/messages`)).status, 409);
+  const listed = new Map((await call("GET", "/agents")).body.data.map((c: { id: string; status: string }) => [c.id, c.status]));
+  assert.deepEqual(listed, new Map([[original.body.id, "disconnected"], [fresh.body.id, "connected"]]));
+});
+
 test("key chat scope cannot substitute for owner consent", async () => {
   const { store, call } = fixture();
   const created = await call("POST", "/agents", { external_user_id: "user-1" }, { ...key, scopes: ["write:agents", "read:agents"] });

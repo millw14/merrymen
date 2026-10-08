@@ -137,7 +137,9 @@ test("consent cannot escalate scopes and only the actual owner can revoke", asyn
   assert.equal((await store.byId("partner-a", pending.connection.id))?.status, "linked");
   assert.equal(await store.revokeByTenant(pending.connection.id, A), true);
   assert.equal((await store.byId("partner-a", pending.connection.id))?.status, "revoked");
-  assert.equal((await store.create(input())).token, null, "a create retry does not silently undo revocation");
+  const reopened = await store.create(input());
+  assert.notEqual(reopened.connection.id, pending.connection.id, "a create after revocation never reopens the revoked connection");
+  assert.equal((await store.byId("partner-a", pending.connection.id))?.status, "revoked");
   await assert.rejects(store.appendExchange(pending.connection.id, { requestId: "r1", message: "hello", reply: "hello" }), /not active/);
 });
 
@@ -153,6 +155,49 @@ test("embedded proof binding scopes the connection to its partner and is idempot
   await assert.rejects(store.bindAuthorized(pending.connection.id, "partner-a", B, ["chat:agent"]), /different owner/);
   await assert.rejects(store.bindAuthorized(pending.connection.id, "partner-a", A, ["read:agent", "chat:agent"]), /different owner or consent/);
   assert.equal(await store.byToken(pending.token!), null);
+});
+
+test("a disconnected user reconnects through a fresh authorization; the revoked connection stays revoked", async () => {
+  const { store, advance } = fixture();
+  const original = await store.create(input());
+  await store.bind(original.token!, A, ["chat:agent"]);
+  await store.appendExchange(original.connection.id, { requestId: "old-turn", message: "private question", reply: "private answer" });
+  await store.revoke("partner-a", original.connection.id);
+  advance(1);
+  const fresh = await store.create(input());
+  assert.equal(fresh.created, true);
+  assert.notEqual(fresh.connection.id, original.connection.id);
+  assert.equal(fresh.connection.status, "pending");
+  assert.equal(fresh.connection.tenant, null, "no owner binding carries over");
+  assert.ok(fresh.token && fresh.token !== original.token);
+  assert.deepEqual(await store.readMessages(fresh.connection.id), [], "no history carries over");
+  assert.equal(await store.getExchange(fresh.connection.id, "old-turn"), null);
+  // The old id keeps answering as revoked, with its own record, and can never be used again.
+  const old = await store.byId("partner-a", original.connection.id);
+  assert.equal(old?.status, "revoked");
+  assert.equal(old?.externalUserId, "user-1");
+  assert.equal(await store.byToken(original.token!), null);
+  await assert.rejects(store.bindAuthorized(original.connection.id, "partner-a", A, ["chat:agent"]), (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_revoked");
+  await assert.rejects(store.appendExchange(original.connection.id, { requestId: "late", message: "hello", reply: "hello" }), /not active/);
+  assert.equal(await store.revoke("partner-a", original.connection.id), true, "disconnecting the old id again is still a no-op success");
+  assert.equal((await store.byId("partner-a", original.connection.id))?.status, "revoked");
+  // Repeating the create returns the same pending authorization, as for any other pending one.
+  const repeat = await store.create(input());
+  assert.equal(repeat.created, false);
+  assert.equal(repeat.connection.id, fresh.connection.id);
+  assert.equal(repeat.token, fresh.token);
+  // Fresh consent is required, and the same wallet may give it: the revoked link no longer holds it.
+  assert.equal(await store.byTenant("partner-a", A), null);
+  assert.equal((await store.bind(fresh.token!, A, ["chat:agent"])).status, "linked");
+  assert.equal((await store.byTenant("partner-a", A))?.id, fresh.connection.id);
+  assert.deepEqual((await store.list("partner-a")).map(c => [c.id, c.status]), [[original.connection.id, "revoked"], [fresh.connection.id, "linked"]]);
+  // And again: every disconnect can be followed by another fresh authorization.
+  await store.revoke("partner-a", fresh.connection.id);
+  advance(1);
+  const third = await store.create(input());
+  assert.equal(third.created, true);
+  assert.equal(new Set([original.connection.id, fresh.connection.id, third.connection.id]).size, 3);
+  assert.equal((await store.byId("partner-a", fresh.connection.id))?.status, "revoked");
 });
 
 test("an activation proof is recorded only on a connection linked to that owner, and names one exact authorization", async () => {

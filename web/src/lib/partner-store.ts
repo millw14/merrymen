@@ -193,6 +193,8 @@ CREATE TABLE IF NOT EXISTS partner_exchanges (
 CREATE INDEX IF NOT EXISTS partner_exchanges_history ON partner_exchanges (connection_id, ordinal);
 `;
 
+/** The external_user_id column of a revoked connection that has been reconnected; its record keeps the real one. */
+const retiredSlot = (id: string) => `\u001fretired:${id}`;
 type JsonRow = { record_json: string };
 type ExchangeRow = { exchange_json: string };
 const connectionOf = (row: unknown): PartnerConnection | null => row ? JSON.parse((row as JsonRow).record_json) as PartnerConnection : null;
@@ -255,6 +257,18 @@ export class SqlPartnerStore implements PartnerStore {
         await db.prepare("SELECT pg_advisory_xact_lock(?, ?)").get(1_297_692_082, key);
       }
       let c = connectionOf(await db.prepare(`SELECT record_json FROM partner_connections WHERE partner_id = ? AND external_user_id = ?${this.lockSuffix()}`).get(checked.partnerId, checked.externalUserId));
+      if (c?.status === "revoked") {
+        // A disconnected user may connect again, but never through the revoked
+        // connection: returning it made a disconnect permanent. Its id keeps
+        // answering disconnected, and its history, owner binding and consent
+        // stay with it. The fresh authorization gets a NEW id, so nothing keyed
+        // by the old one can be read or reused, and needs full owner consent and
+        // activation again. The old row gives up its (app, user) slot in the
+        // existing UNIQUE constraint (no migration) for a value no real external
+        // id can collide with: textField refuses control characters.
+        await db.prepare("UPDATE partner_connections SET external_user_id = ? WHERE id = ?").run(retiredSlot(c.id), c.id);
+        c = null;
+      }
       const created = !c;
       const now = this.clock();
       if (!c) {

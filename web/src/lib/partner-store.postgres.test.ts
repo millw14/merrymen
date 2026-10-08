@@ -94,6 +94,34 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       assert.equal(await second.byId("different-app", results[0].connection.id), null);
     });
 
+    await t.test("concurrent reconnects after a disconnect mint one fresh authorization; the revoked row stays revoked", async () => {
+      const original = await first.create(create("reconnect"));
+      await first.bind(original.token!, A, SCOPES);
+      await first.appendExchange(original.connection.id, { requestId: "old-turn", message: "private", reply: "history" });
+      assert.equal(await second.revoke("reconnect", original.connection.id), true);
+      const results = await Promise.all(Array.from({ length: 12 }, (_, i) => (i % 2 ? first : second).create(create("reconnect"))));
+      assert.equal(results.filter(r => r.created).length, 1);
+      assert.equal(new Set(results.map(r => r.connection.id)).size, 1);
+      assert.equal(new Set(results.map(r => r.token)).size, 1);
+      const fresh = results[0].connection;
+      assert.notEqual(fresh.id, original.connection.id);
+      assert.equal(fresh.status, "pending");
+      assert.deepEqual(await second.readMessages(fresh.id), []);
+      assert.equal((await second.byId("reconnect", original.connection.id))?.status, "revoked");
+      await assert.rejects(first.bindAuthorized(original.connection.id, "reconnect", A, SCOPES),
+        (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_revoked");
+      // The existing UNIQUE (partner_id, external_user_id) is untouched: the retired
+      // row only gave up its slot, and its record still names the real user.
+      const rows = await databases[0].prepare("SELECT id, external_user_id, status, record_json FROM partner_connections WHERE partner_id = ? ORDER BY id").all("reconnect") as Array<{ id: string; external_user_id: string; status: string; record_json: string }>;
+      const retired = rows.find(r => r.id === original.connection.id)!;
+      assert.equal(retired.external_user_id, `\u001fretired:${original.connection.id}`);
+      assert.equal(JSON.parse(retired.record_json).externalUserId, "user-1");
+      assert.equal(rows.find(r => r.id === fresh.id)!.external_user_id, "user-1");
+      // The same wallet can consent again through the new connection only.
+      assert.equal((await second.bind(results[0].token!, A, SCOPES)).id, fresh.id);
+      assert.equal((await first.byTenant("reconnect", A))?.id, fresh.id);
+    });
+
     await t.test("list orders by creation time, then id, reading createdAt from the stored record", async () => {
       let now = 1_800_000_000;
       const clocked = new SqlPartnerStore(async () => databases[0], "postgres", () => now, secret);
