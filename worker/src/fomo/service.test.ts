@@ -2092,3 +2092,71 @@ describe("live provider shapes, as the service reads them (2026-10-04)", () => {
     assert.ok(!whole.coverage.notes.some((n) => /recent window/.test(n)));
   });
 });
+
+describe("a held empty thesis page (review on #306)", () => {
+  const LABEL = { symbol: "PONS", name: null };
+
+  it("the shared research queue keeps the class's window on an empty page; a read someone hears re-reads it after two minutes", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", () => json({ theses: [], available: true }, 200, { "x-credits-cost": "1250" }));
+    const token = tokenIdentity(robinhoodChain(), PONS)!;
+    await h.service.refreshDossier(token, LABEL, { priority: "discovery", depth: "quick", now: h.clock.now });
+    h.clock.now += 3 * 60_000;
+    await h.service.refreshDossier(token, LABEL, { priority: "discovery", depth: "quick", now: h.clock.now });
+    assert.equal(h.count("/v2/thesis/token/"), 1, "background research never re-buys an empty page every two minutes");
+    // The same shared copy, three minutes old, is read again for a person who will hear it.
+    const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    assert.equal(h.count("/v2/thesis/token/"), 2);
+    assert.equal(env.freshness.servedFrom, "live");
+  });
+
+  it("a trader's empty thesis page is read again after two minutes, like a coin's; pageRows says the provider's page was empty", async () => {
+    const h = await harness();
+    h.routes.set("thesis-user", () => json({ theses: [], available: false }, 200, { "x-credits-cost": "1250" }));
+    const dm = { surface: "telegram-dm" as const };
+    const first = await h.invoke<TokenThesesData>("fomo_get_token_theses", { trader: KALEO }, dm);
+    assert.equal(h.count("/v2/thesis/user/"), 1);
+    assert.equal(first.data?.pageRows, 0);
+    assert.equal(first.data?.available, false);
+    h.clock.now += 11 * 60_000;
+    await h.invoke<TokenThesesData>("fomo_get_token_theses", { trader: KALEO }, dm);
+    assert.equal(h.count("/v2/thesis/user/"), 2, "never kept for the theses class's 30 minutes");
+    // The trader-and-coin route too.
+    await h.invoke("fomo_get_token_theses", { trader: KALEO, token: PONS, chain: "robinhood" }, dm);
+    h.clock.now += 3 * 60_000;
+    await h.invoke("fomo_get_token_theses", { trader: KALEO, token: PONS, chain: "robinhood" }, dm);
+    assert.equal(h.count("/v2/thesis/user/"), 4);
+    // A page with rows reports them before any filter.
+    const full = await harness();
+    const env = await full.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    assert.equal(env.data?.pageRows, 3);
+  });
+
+  it("the owner's 'ask me again in a couple of minutes' is how long the empty copy is held: a minute on it is the same copy, two minutes on a new read", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", () => json({ theses: [], available: false }, 200, { "x-credits-cost": "1250" }));
+    const dm = { surface: "telegram-dm" as const };
+    const first = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, dm);
+    assert.match(renderEnvelope(first, { audience: "owner", maxChars: 3_500, now: h.clock.now }), /just now\. Ask me again in a couple of minutes\./);
+    h.clock.now += 65_000;
+    await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, dm);
+    assert.equal(h.count("/v2/thesis/token/"), 1);
+    h.clock.now += 55_000;
+    await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, dm);
+    assert.equal(h.count("/v2/thesis/token/"), 2, "asked again after two minutes, as told: read again");
+  });
+
+  it("an empty first page under a count is never expanded to a multi-page read", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", () => json({ theses: [], available: false, totalAvailable: 4190 }, 200, { "x-credits-cost": "1250" }));
+    const token = tokenIdentity(robinhoodChain(), PONS)!;
+    await h.service.refreshDossier(token, LABEL, { priority: "discovery", depth: "standard", now: h.clock.now });
+    assert.equal(h.count("/v2/thesis/token/"), 1, "one page, not page one and then pages 1-3");
+    assert.ok(!h.calls.some((c) => c.includes("/v2/thesis/token/") && /[?&]pages=/.test(c)), h.calls.join(" | "));
+    // A person's research ask at standard depth, two minutes on: one page again, never pages 1-3.
+    h.clock.now += 2 * 60_000;
+    await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood" });
+    assert.equal(h.count("/v2/thesis/token/"), 2);
+    assert.ok(!h.calls.some((c) => c.includes("/v2/thesis/token/") && /[?&]pages=/.test(c)), h.calls.join(" | "));
+  });
+});

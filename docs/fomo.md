@@ -169,6 +169,29 @@ most 30 days. "Should we follow this?" is analysis, not permission.
 
   "refresh", "latest", "check now" and "right now" force an upstream attempt. Identical
   concurrent refreshes share one in-flight call and never substitute an older result.
+  **A copy that says "nothing here" is short-lived** (the AUTON incident, 2026-10-08:
+  the provider answered one coin's thesis page empty, `available: false`, while it held
+  4,190 theses, and a room was told "no theses" three times from that copy): an empty
+  thesis page is reused for at most 2 min on any surface a person hears (`service.ts
+  EMPTY_HOLD_MS`, `ReadSpec.empty`; the shared research queue keeps the class's own
+  window on the same copy, and an empty first page is never expanded to a multi-page
+  read), and never when the asker pushed back ("there has to be thesis",
+  "check again"). A pushback is carried as its own flag (`BrokerCallOptions.retryEmpty`
+  to `ChargeContext.retryEmpty`), never as a forced refresh: a copy with something in it
+  keeps its window, a room's two hours included (D8). A page the provider itself answers
+  empty (`pageRows: 0`) while marking it not available, or under a count it still holds
+  for the coin, is said as "Fomo didn't return the
+  theses on X just now (it lists N).", never "no theses". The owner is also told when to
+  ask again ("Ask me again in a couple of minutes.", how long the empty copy is held); a
+  room never is, since its allowance (a page is 1,250 of its 2,500 credits
+  an hour) may refuse the retry and "used up" would follow the promise. Rows
+  Merrymen filtered off (another chain's) are "none" as before, and a trader's read never
+  quotes the coin's count. Research on such a page ("research $AUTON on fomo") builds and
+  stores no revision from it: the previous revision stands, labelled as stored, or the
+  answer is "Fomo didn't return the theses on X just now, so no research was built from
+  it.", never "0 theses ... none on record" (`service.ts refreshCore`, reason
+  `theses-not-ready`). An empty page is logged by its shape only (available, count,
+  source, served from).
   **A Telegram group reads differently** (decisions D7 and D8, 2026-10-07;
   `freshness.ts GROUP_REUSE_MS`, `service.ts read`): a room reuses a copy longer, theses
   for 2 h, the trader board for 1 h and coin boards for 15 min (the other classes keep

@@ -49,7 +49,7 @@ import {
   shownTraderRows,
   type Audience,
 } from "./render";
-import { applyPlan, applyResult, deserialize, MAX_BOARD_ROWS, serialize, type BoardMemory, type SubjectMemory } from "./subject-memory";
+import { applyPlan, applyResult, deserialize, isMemoryUsable, MAX_BOARD_ROWS, serialize, type BoardMemory, type SubjectMemory } from "./subject-memory";
 import { isMutationTool } from "./tools";
 import type { RankingsData, TokenThesesData, TraderActivityData } from "./tools";
 import type { FomoEnvelope, FomoSurface, FomoToolName, ResolvedSubject, ResultStatus } from "./types";
@@ -93,6 +93,14 @@ export interface AnswerFomoInput {
    * DM), so that text from a room can never change her state.
    */
   readOnly?: boolean;
+  /**
+   * The asker pushed back on the last answer ("there has to be theses",
+   * "check again"): a held copy that says "nothing here" is read again
+   * (BrokerCallOptions.retryEmpty). Never a forced refresh: the plan's
+   * freshness is unchanged, so a copy with something in it keeps its window,
+   * a room's longer one included (decision D8, review on #306).
+   */
+  retryEmpty?: boolean;
   /**
    * The surface's own last word on a plan, before anything is remembered,
    * deflected, clarified or looked up: false and the question is not handled
@@ -186,6 +194,28 @@ function roomPnlPlan(plan: FomoQuestionPlan, text: string): FomoQuestionPlan {
     earnings: true,
     window,
     toolCalls: [{ tool: "fomo_get_trader_activity", args: sanitizePlanArgs({ trader: ctx.args.trader, window, limit: EARNINGS_LIMIT, ...fresh }) }],
+  };
+}
+
+/**
+ * A PUSHBACK THE PLANNER CANNOT READ ("check again", "are you sure?",
+ * "that's wrong"): the remembered coin's theses, asked again (review on
+ * #306). Only when the conversation's last answer was a coin's theses, the
+ * class whose "nothing here" is short-lived: planned from the planner's own
+ * pure follow-up of that subject, at its ordinary freshness, so a held empty
+ * page is read again (retryEmpty) and a page with theses keeps its window.
+ */
+function pushbackPlan(memory: SubjectMemory | null, now: number, ctx: Parameters<typeof classifyFomoQuestion>[1]): FomoQuestionPlan | null {
+  if (!isMemoryUsable(memory, now) || memory.lastIntent !== "token-theses") return null;
+  const p = classifyFomoQuestion("refresh it", ctx);
+  if (!p || p.intent !== "token-theses" || p.clarification || p.toolCalls.length === 0) return null;
+  return {
+    ...p,
+    freshness: "prefer-fresh",
+    toolCalls: p.toolCalls.map((c) => {
+      const { freshness: _forced, ...args } = c.args;
+      return { ...c, args };
+    }),
   };
 }
 
@@ -314,7 +344,8 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
 
   // 2. The deterministic plan.
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
-  const planned = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
+  const ctx = { memory, now, ...(selfNames.length ? { selfNames } : {}) };
+  const planned = classifyFomoQuestion(input.text, ctx) ?? (input.retryEmpty === true ? pushbackPlan(memory, now, ctx) : null);
   if (!planned) return { handled: false };
   const plan = audience === "group" ? roomPnlPlan(planned, input.text) : planned;
   try {
@@ -361,6 +392,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
         conversationKey,
         priority: "interactive",
         groupId: input.groupId ?? null,
+        ...(input.retryEmpty === true ? { retryEmpty: true } : {}),
       });
     } catch {
       env = failedEnvelope(c.tool, now, i);

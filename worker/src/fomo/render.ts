@@ -715,6 +715,28 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
   const subject = d.token ? coin(d.token, d.label, audience) : d.trader ? trader(d.trader) : "this subject";
   const total = d.stance.supporting + d.stance.opposing + d.stance.neutral;
   if (total === 0) {
+    // AN EMPTY READ IS NOT "NONE" WHEN THE PROVIDER SAYS OTHERWISE: its own
+    // page came back empty while it marked it not available, or still counts
+    // theses on the coin (the AUTON incident, 2026-10-08: a room was told a
+    // coin with 4,190 theses had none). Only the provider's page itself
+    // (pageRows): rows filtered off here (another chain's) are "none", said as
+    // before, and only a coin's own read quotes its count; a trader's route
+    // total is not per trader and coin (review on #306). A windowed ask on
+    // such a page is the same: the window filtered nothing, the provider
+    // returned nothing; it is just never given the all-time figure.
+    const windowed = !!env.coverage.requested.window;
+    const held = !d.trader && finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 ? env.coverage.providerTotal : null;
+    if (d.pageRows === 0 && (d.available === false || held !== null)) {
+      const count = held !== null && !windowed ? ` (it lists ${held.toLocaleString("en-US")})` : "";
+      // A ROOM IS NEVER PROMISED A RETRY: this renderer cannot see the room's
+      // allowance, and a new page is 1,250 credits of its 2,500 an hour, so
+      // "ask me again" would be followed by "used up" (review on #306). The
+      // owner's matches how long the empty copy is held (service.ts
+      // EMPTY_HOLD_MS, 2 min): asked again in a minute, she would get it back.
+      const retry = audience === "group" ? "" : " Ask me again in a couple of minutes.";
+      const line = `The provider didn't return the theses on ${subject} just now${count}.${retry}`;
+      return [audience === "group" ? roomNote(line) : line];
+    }
     const line = `No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`;
     // A room hears "Fomo's record": the gate reads "the provider" as plumbing, and with it refused a coin with no theses heard "ask me in a direct message".
     return [audience === "group" ? roomNote(line) : line];
@@ -893,7 +915,16 @@ const ABOUT_COHORT = /\bcohort\b|\bwatched[- ]traders?\b/i;
 
 function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, now: number): string[] {
   const d = env.data;
-  if (!d) return [];
+  if (!d) {
+    // The provider answered the coin's thesis page empty while it holds
+    // theses: no research was built from it, and "0 theses" is never said
+    // (service.ts refreshCore, review on #306).
+    if (env.reason === "theses-not-ready" && env.subject?.kind === "token") {
+      const line = `The provider didn't return the theses on ${coin(env.subject.token, env.subject.label, audience)} just now, so no research was built from it.`;
+      return [audience === "group" ? roomNote(line) : line];
+    }
+    return [];
+  }
   const name = coin(d.token, d.label, audience);
   const c = d.coverage;
   const out: string[] = [];

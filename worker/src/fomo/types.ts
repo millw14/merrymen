@@ -619,6 +619,12 @@ export interface FomoCallContext {
    * own timeout. Absent ⇒ the service's default invoke deadline.
    */
   budgetMs?: number;
+  /**
+   * The asker pushed back on the last answer (contract.ts
+   * BrokerCallOptions.retryEmpty): a held "nothing here" is read again; a
+   * copy with something in it keeps its window.
+   */
+  retryEmpty?: boolean;
 }
 
 /**
