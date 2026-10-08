@@ -40,7 +40,7 @@ import {
   type FomoInvokeContext,
   type FomoServiceExt,
 } from "./service";
-import { renderEnvelope } from "./render";
+import { FOMO_GROUP_OFF, renderEnvelope } from "./render";
 import * as store from "./store";
 import type {
   ExtendTailData,
@@ -468,6 +468,71 @@ describe("token tools", () => {
     assert.ok(capped.data!.rows.every((r) => r.marketCapUsd === null || r.marketCapUsd <= 1_000_000));
     assert.ok(capped.data!.rows.some((r) => !r.marketCapKnown), "an unknown market cap is kept");
     assert.ok(capped.data!.filteredByMarketCap >= 1);
+  });
+});
+
+describe("a token board narrowed to one chain says what the filter did (Milla, 2026-10-07)", () => {
+  /** A Solana row at `rank`, placeable. */
+  const solRow = (rank: number) => ({ rank, network: "solana", token: { symbol: `SOL${rank}`, name: `Sol ${rank}`, address: `So1${"abcdefghijkmnopqrstuvwxyz".slice(0, 26)}${String(rank).padStart(3, "1").replace(/0/g, "z")}ABCDEFGHJKLMNp`.slice(0, 43) }, marketCapUsd: 100_000 * rank });
+
+  it("a chain read reports the board's rows, the matches and the unplaced, from the one board read", async () => {
+    const h = await harness();
+    const hood = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", chain: "robinhood" });
+    assert.equal(hood.status, "ok");
+    assert.equal(hood.data?.chain, "robinhood");
+    assert.equal(hood.data?.boardRows, 3);
+    assert.equal(hood.data?.matched, 2);
+    assert.equal(hood.data?.unplaced, 0);
+    assert.equal(hood.data?.robinhood, undefined, "a chain was asked: no Robinhood aside");
+    assert.deepEqual(hood.data?.tokens.map((t) => t.rank), [1, 4], "rows keep their board rank");
+    // The same board for every chain: the second read is the cached copy.
+    const before = h.count("/v2/leaderboard/tokens/trending");
+    const sol = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", chain: "solana" });
+    assert.equal(sol.data?.matched, 1);
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), before, "a chain filter is never a second paid read");
+  });
+
+  it("every chain: the board's Robinhood Chain rows ride along, the top three by rank", async () => {
+    const h = await harness();
+    const all = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" });
+    assert.equal(all.data?.chain, undefined);
+    assert.equal(all.data?.boardRows, 3);
+    assert.equal(all.data?.robinhood?.rows, 2);
+    assert.deepEqual(all.data?.robinhood?.top.map((t) => t.label.symbol), ["PONS", "CACHE"]);
+  });
+
+  it("an all-Solana board asked for Robinhood Chain is empty, with the board's size known; unplaced rows are counted", async () => {
+    const h = await harness();
+    h.routes.set("board-trending", () => json({ board: "trending", count: 31, tokens: [...Array.from({ length: 30 }, (_, i) => solRow(i + 1)), { rank: 31, token: { symbol: "LOST", name: "Lost" } }] }));
+    const hood = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", chain: "robinhood" });
+    assert.equal(hood.status, "empty");
+    assert.equal(hood.data?.boardRows, 30);
+    assert.equal(hood.data?.matched, 0);
+    assert.equal(hood.data?.unplaced, 1);
+    const all = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" });
+    assert.deepEqual(all.data?.robinhood, { rows: 0, top: [] });
+  });
+
+  it("a chain asked of the trader board is kept, so the answer can say it covers every chain", async () => {
+    const h = await harness();
+    const lb = await h.invoke<RankingsData>("fomo_get_rankings", { board: "traders", chain: "robinhood" });
+    assert.equal(lb.status, "ok");
+    assert.equal(lb.data?.chain, "robinhood");
+    assert.equal(lb.data?.traders.length, 2, "nothing narrowed");
+  });
+
+  it("the whole feed's top coins are counts of distinct wallets, never who they were", async () => {
+    const h = await harness();
+    const buys = await h.invoke<TokenActivityData>("fomo_get_token_activity", { side: "buy" });
+    const top = buys.data?.topTokens ?? [];
+    assert.ok(top.length >= 1 && top.length <= 3, JSON.stringify(top));
+    for (const c of top) {
+      assert.deepEqual(Object.keys(c).sort(), ["buyers", "label", "sellers", "token"]);
+      assert.ok(c.buyers >= 1);
+    }
+    for (let i = 1; i < top.length; i++) assert.ok(top[i - 1]!.buyers >= top[i]!.buyers, "most buyers first");
+    const one = await h.invoke<TokenActivityData>("fomo_get_token_activity", { token: "PONS", side: "buy" });
+    assert.equal(one.data?.topTokens, undefined, "one coin's read has no crowd aside");
   });
 });
 
@@ -1669,6 +1734,81 @@ describe("owners see the monitoring health that applies to them (C15)", () => {
   });
 });
 
+describe("a room's research lasts the evening (WP10: D7, D8, D10)", () => {
+  const G = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123" };
+
+  it("a group reuses a coin's theses for two hours; the app chat refreshes them after thirty minutes", async () => {
+    const h = await harness();
+    await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, G);
+    assert.equal(h.count("/v2/thesis/token/"), 1);
+    h.clock.now += 31 * 60_000;
+    const again = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, G);
+    assert.equal(h.count("/v2/thesis/token/"), 1, "a group's copy is still the set");
+    assert.equal(again.freshness.servedFrom, "cache");
+    assert.match(renderEnvelope(again, { audience: "group", maxChars: 3_000, now: h.clock.now }), /From a copy fetched 31m ago\./, "always labelled with its age");
+    await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    assert.equal(h.count("/v2/thesis/token/"), 2, "the owner's app chat keeps the class window");
+    // Two hours and a minute after the app chat's copy, the newest one.
+    h.clock.now += 2 * 3_600_000 + 60_000;
+    await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, G);
+    assert.equal(h.count("/v2/thesis/token/"), 3, "past two hours a group reads again");
+  });
+
+  it("a room's 'now' is never a paid forced refresh: the class window, no group reuse", async () => {
+    const h = await harness();
+    await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" }, G);
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), 1);
+    h.clock.now += 3 * 60_000;
+    const now3 = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", freshness: "force-refresh" }, G);
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), 1, "inside the board's five minutes: the copy");
+    assert.equal(now3.freshness.mode, "prefer-fresh");
+    h.clock.now += 3 * 60_000;
+    await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", freshness: "force-refresh" }, G);
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), 2, "past five minutes: read, not the group's fifteen");
+    // The owner's own "now" in her DM is unchanged: a forced read.
+    await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", freshness: "force-refresh" }, { surface: "telegram-dm" });
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), 3);
+  });
+
+  it("a group's ordinary board read reuses the copy for fifteen minutes", async () => {
+    const h = await harness();
+    await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" }, G);
+    h.clock.now += 14 * 60_000;
+    await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" }, G);
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), 1);
+    h.clock.now += 2 * 60_000;
+    await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" }, G);
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), 2);
+  });
+
+  it("the owner is told which allowance ran out and when it resets; a room only when to try again", async () => {
+    const h = await harness({ budget: { ...GENEROUS, groupHourlyCredits: 1_600 } });
+    h.clock.now = Date.parse("2026-10-07T23:05:00Z");
+    await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, G);
+    const refused = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: CACHE_TOKEN, chain: "robinhood" }, G);
+    assert.equal(refused.status, "budget-limited");
+    assert.equal(refused.reason, "budget-group-hourly");
+    assert.equal(refused.message, "Fomo research is rationed right now: this group's hourly research allowance is used up; it resets at 00:00 UTC.");
+    const room = renderEnvelope(refused, { audience: "group", maxChars: 600, now: h.clock.now });
+    assert.equal(room, "fomo lookups for this room are used up for now, try again after 00:00 UTC.");
+    assert.doesNotMatch(room, /credit|\d{3,}|group's|your/);
+
+    // An hourly share that fits one board read (300 of 400) but not two: spent, it resets at the hour.
+    const t = await harness({ budget: { ...GENEROUS, tenantHourlyCredits: 400 } });
+    t.clock.now = Date.parse("2026-10-07T14:59:59Z");
+    assert.equal((await t.invoke("fomo_get_rankings", { board: "traders" })).status, "ok");
+    const mine = await t.invoke("fomo_get_rankings", { board: "traders", window: "7d" });
+    assert.equal(mine.message, "Fomo research is rationed right now: your hourly Fomo research allowance is used up; it resets at 15:00 UTC.");
+    // A cap below what one read costs never resets on a clock: no time is promised, to her or a room.
+    const low = await harness({ budget: { ...GENEROUS, tenantHourlyCredits: 100 } });
+    low.clock.now = Date.parse("2026-10-07T14:59:59Z");
+    const never = await low.invoke("fomo_get_rankings", { board: "traders" });
+    assert.equal(never.reason, "budget-below-one-read");
+    assert.equal(never.message, "Fomo research is rationed right now: a configured research cap is below what one read costs.");
+    assert.equal(renderEnvelope(never, { audience: "group", maxChars: 600, now: low.clock.now }), FOMO_GROUP_OFF);
+  });
+});
+
 describe("one owner's budget refusal is theirs alone (C23)", () => {
   it("tenant A's own cap does not tell tenant B, or the fleet, that Fomo is rationed", async () => {
     const h = await harness({ budget: { sharedDailyCredits: 1_000_000, tenantHourlyCredits: 300, tenantDailyCredits: 300, groupHourlyCredits: 300 } });
@@ -1676,7 +1816,8 @@ describe("one owner's budget refusal is theirs alone (C23)", () => {
     const B = "0xbbbb000000000000000000000000000000000002";
     const refused = await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, { tenant: A });
     assert.equal(refused.status, "budget-limited");
-    assert.match(refused.reason ?? "", /budget-tenant-/);
+    // A's caps (300) are below one thesis page: A's own refusal either way, never the fleet's.
+    assert.match(refused.reason ?? "", /budget-(?:tenant-|below-one-read)/);
     assert.equal((await h.service.ownerHealth(A, NOW)).state, "budget-limited", "A is told about A's own cap");
     assert.notEqual((await h.service.ownerHealth(B, NOW)).state, "budget-limited", "B is not");
     assert.equal((await h.service.health(NOW)).budgetLimited, false, "the process-wide health is not");

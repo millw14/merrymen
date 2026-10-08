@@ -14,7 +14,11 @@
  *   4. a clarification is replied verbatim, with no tool call
  *   5. the plan's tool calls run through the broker, in order, at most four,
  *      at interactive priority; mutations are dropped for a group, and a group
- *      question about a trader is deflected to a DM before anything is spent
+ *      question about the owner's own research state or who Merrymen watches
+ *      is deflected to a DM before anything is spent. One row of the trader
+ *      board asked about with it ("...and what did he make money on") is
+ *      looked up next, by the user id the provider's own board gave
+ *      (rowCall), never by a name from the text
  *   6. applyResult from the envelopes that actually answered → persist
  *   7. analysis asked for (and not "just the facts") and a composer given →
  *      the composer writes from fenced evidence under FOMO_CHAT_RULES;
@@ -29,7 +33,7 @@
  */
 
 import type { FomoBroker } from "./contract";
-import { classifyFomoQuestion, type FomoQuestionPlan } from "./intent";
+import { classifyFomoQuestion, sanitizePlanArgs, traderPnlAsk, type FomoQuestionPlan, type FomoToolCall } from "./intent";
 import {
   evidenceForModel,
   FOMO_ATTRIBUTION,
@@ -42,10 +46,12 @@ import {
   groupScrub,
   NOT_PERMISSION_LINE,
   renderAnswer,
+  shownTraderRows,
+  type Audience,
 } from "./render";
-import { applyPlan, applyResult, deserialize, serialize, type SubjectMemory } from "./subject-memory";
+import { applyPlan, applyResult, deserialize, MAX_BOARD_ROWS, serialize, type BoardMemory, type SubjectMemory } from "./subject-memory";
 import { isMutationTool } from "./tools";
-import type { TokenThesesData, TraderActivityData } from "./tools";
+import type { RankingsData, TokenThesesData, TraderActivityData } from "./tools";
 import type { FomoEnvelope, FomoSurface, FomoToolName, ResolvedSubject, ResultStatus } from "./types";
 
 export interface FomoComposeInput {
@@ -87,6 +93,22 @@ export interface AnswerFomoInput {
    * DM), so that text from a room can never change her state.
    */
   readOnly?: boolean;
+  /**
+   * The surface's own last word on a plan, before anything is remembered,
+   * deflected, clarified or looked up: false and the question is not handled
+   * here at all. A group uses it to leave a coin question the planner could
+   * not place ("who's selling pons on fomo?") to its router, rather than
+   * answer it about the whole feed (tg-fomo-port.ts looseCoin), and a line
+   * that names another trader than the remembered one ("how is ansem doing"
+   * right after frankdegods) rather than answer it about the remembered one
+   * (looseTrader, which reads the memory the plan was made against).
+   */
+  wanted?: (plan: FomoQuestionPlan, memory: SubjectMemory | null) => boolean;
+  /**
+   * A group only: whether a trader's handle may be said in the room
+   * (render.ts RenderOptions.sayableHandle; the port asks the group gate).
+   */
+  sayableHandle?: (handle: string) => boolean;
 }
 
 export type AnswerFomoResult =
@@ -99,6 +121,12 @@ export type AnswerFomoResult =
       toolsCalled: FomoToolName[];
       analysis: boolean;
       clarification: boolean;
+      /**
+       * A trader board was remembered for this conversation (boardMemoryOf),
+       * answered at `at`: a surface that cuts the text further (a room's line
+       * cap) says which of its rows were heard (tg-fomo-port.ts heard).
+       */
+      board?: { at: number };
     };
 
 /** The most tool calls one question may make. */
@@ -108,22 +136,105 @@ const DEFAULT_MAX_CHARS = 3_500;
 /** Statuses that mean a lookup actually returned something real. */
 const ANSWERED: ReadonlySet<ResultStatus> = new Set(["ok", "empty", "partial", "capped", "stale"]);
 
-/**
- * One trader's holdings, trades or profile. The public leaderboard is not
- * here: a group hears it, handles and P&L included (Milla, 2026-10-07).
- */
+/** One trader's profile, holdings or trades (and what they made or lost money on). */
 const TRADER_INTENTS: ReadonlySet<string> = new Set(["trader-holdings", "trader-activity", "trader-context"]);
 const OWNER_ONLY_INTENTS: ReadonlySet<string> = new Set(["research-status", "why-skipped", "health", "watch", "unwatch"]);
 
-/** A group may hear coin-level aggregates and the public leaderboard; anything about one trader (or the owner's own state) goes to a DM. */
+/**
+ * WHAT A GROUP NEVER HEARS ANSWERED: the owner's own research state, and who
+ * Merrymen watches or follows. Coin-level aggregates, the public leaderboard
+ * and ONE NAMED TRADER'S PUBLIC FOMO DATA are a room's, for anyone who asks,
+ * the owner included (Milla, 2026-10-07: a named trader's public Fomo data
+ * may be answered in a group): who they are, what they hold, what they
+ * traded, what they made or lost money on (provider-reported). The renderer
+ * leaves out of a room whether Merrymen watches them (render.ts). A trader's
+ * own theses, or a coin read narrowed to one trader, still go to a DM.
+ */
 function groupMustDeflect(plan: FomoQuestionPlan): boolean {
-  if (TRADER_INTENTS.has(plan.intent) || OWNER_ONLY_INTENTS.has(plan.intent)) return true;
+  if (OWNER_ONLY_INTENTS.has(plan.intent)) return true;
   // The leaderboard cut to the traders Merrymen watches ("top traders we
   // watch") IS the watch list, and who it follows is never a room's.
   if (plan.intent === "rankings-traders" && plan.cohortScope) return true;
-  if (plan.toolCalls.some((c) => c.tool === "fomo_get_rankings" && c.args.board === "traders" && c.args.cohort_only === true)) return true;
+  // Any read cut to the watched traders ("what are watched traders buying", their opportunities) is the watch list.
+  if (plan.toolCalls.some((c) => c.args.cohort_only === true)) return true;
+  // "Is @X in your cohort", "the top trader we watch": about the watch list, even when one trader is named.
+  if (TRADER_INTENTS.has(plan.intent) && plan.cohortScope) return true;
+  if (TRADER_INTENTS.has(plan.intent)) return false;
   if (plan.subjects.some((s) => s.kind === "trader")) return true;
-  return plan.toolCalls.some((c) => typeof c.args.trader === "string" || c.tool === "fomo_get_trader_context" || c.tool === "fomo_get_trader_activity");
+  return plan.toolCalls.some((c) => typeof c.args.trader === "string" || TRADER_TOOLS.has(c.tool));
+}
+
+const TRADER_TOOLS: ReadonlySet<string> = new Set(["fomo_get_trader_context", "fomo_get_trader_activity"]);
+
+/**
+ * A ROOM'S P&L QUESTION ABOUT ONE TRADER ("what's @X's pnl", "how much did @X
+ * make this week", "how is @X doing"): what they made or lost on their trades
+ * over the window the line names (this week otherwise), the read an earnings
+ * ask makes. A room never hears the profile's P&L (render.ts
+ * groupTraderContext: it may come from the watched-trader record), so their
+ * holdings alone would leave the question unanswered without saying so.
+ */
+function roomPnlPlan(plan: FomoQuestionPlan, text: string): FomoQuestionPlan {
+  if (plan.intent !== "trader-context" || plan.clarification || plan.cohortScope || plan.rowAsk || plan.toolCalls.length !== 1) return plan;
+  const ctx = plan.toolCalls[0]!;
+  if (ctx.tool !== "fomo_get_trader_context" || typeof ctx.args.trader !== "string" || !traderPnlAsk(text)) return plan;
+  const window = plan.window ?? "7d";
+  const fresh = ctx.args.freshness !== undefined ? { freshness: ctx.args.freshness } : {};
+  return {
+    ...plan,
+    intent: "trader-activity",
+    earnings: true,
+    window,
+    toolCalls: [{ tool: "fomo_get_trader_activity", args: sanitizePlanArgs({ trader: ctx.args.trader, window, limit: EARNINGS_LIMIT, ...fresh }) }],
+  };
+}
+
+/** The most positions an earnings read keeps, so its winners and losers are ranked over more than the default page. */
+const EARNINGS_LIMIT = 50;
+const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * THE LOOKUP FOR ONE ROW OF THE TRADER BOARD (plan.rowAsk): that row's
+ * trader, by the user id the provider's own answered board gave (never a
+ * name from the text), asked what the line asked over the board's window.
+ * Null: the board did not answer, has no such row, or its id is not one.
+ */
+function rowCall(plan: FomoQuestionPlan, envelopes: readonly FomoEnvelope[]): FomoToolCall | null {
+  const ask = plan.rowAsk;
+  if (!ask) return null;
+  const board = envelopes.find((e) => e.tool === "fomo_get_rankings" && ANSWERED.has(e.status) && e.data !== null);
+  const d = board?.data as RankingsData | undefined;
+  if (!d || d.board !== "traders") return null;
+  const row = d.traders.find((r) => r.rank === ask.rank) ?? (d.traders.every((r) => r.rank === null) ? d.traders[ask.rank - 1] : undefined);
+  const userId = row?.trader.userId;
+  if (typeof userId !== "string" || !UUID.test(userId)) return null;
+  const fresh = plan.freshness !== "prefer-fresh" ? { freshness: plan.freshness } : {};
+  if (ask.about === "holdings" || ask.about === "profile") return { tool: "fomo_get_trader_context", args: sanitizePlanArgs({ trader: userId, ...fresh }) };
+  const window = d.window ?? plan.window ?? "24h";
+  return {
+    tool: "fomo_get_trader_activity",
+    // The side the line asked ("what did the best trader sell"), as buildCalls passes a named trader's.
+    args: sanitizePlanArgs({ trader: userId, window, ...(ask.side ? { side: ask.side } : {}), ...(ask.about === "earnings" ? { limit: EARNINGS_LIMIT } : {}), ...fresh }),
+  };
+}
+
+/**
+ * THE BOARD TO REMEMBER, so "the second one" and "#3" mean its rows next
+ * (subject-memory.ts board): Fomo's public trader board as it answered, its
+ * ranks, user ids and handles only. Never one cut to Merrymen's watched
+ * traders. Only the rows the audience heard (render.ts shownTraderRows), and
+ * the row it was answered about with the board: in a room "the last one" is
+ * the last row it saw, and "the fifth one" one it never saw asks which.
+ */
+function boardMemoryOf(plan: FomoQuestionPlan, envelopes: readonly FomoEnvelope[], now: number, audience: Audience): BoardMemory | null {
+  const env = envelopes.find((e) => e.tool === "fomo_get_rankings" && ANSWERED.has(e.status) && e.data !== null);
+  const d = env?.data as RankingsData | undefined;
+  if (!env || !d || d.board !== "traders" || plan.cohortScope || env.coverage.requested.cohortOnly === true) return null;
+  const all = d.traders.map((r, i) => ({ rank: typeof r.rank === "number" ? r.rank : i + 1, userId: r.trader.userId, handle: r.trader.handle }));
+  const rows = all.slice(0, Math.min(MAX_BOARD_ROWS, shownTraderRows(d, audience, !!plan.rowAsk)));
+  const asked = plan.rowAsk ? all.find((r) => r.rank === plan.rowAsk!.rank) : undefined;
+  if (asked && !rows.some((r) => r.rank === asked.rank) && rows.length < MAX_BOARD_ROWS) rows.push(asked);
+  return rows.length ? { window: d.window ?? null, singular: plan.singular === true, about: plan.rowAsk?.about ?? null, at: now, rows } : null;
 }
 
 /** Every subject an answering envelope resolved, including the second one a two-subject read carries. */
@@ -203,8 +314,14 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
 
   // 2. The deterministic plan.
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
-  const plan = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
-  if (!plan) return { handled: false };
+  const planned = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
+  if (!planned) return { handled: false };
+  const plan = audience === "group" ? roomPnlPlan(planned, input.text) : planned;
+  try {
+    if (input.wanted && input.wanted(plan, memory) !== true) return { handled: false };
+  } catch {
+    return { handled: false };
+  }
 
   // ANSWERED BY CODE, NOTHING LOOKED UP OR REMEMBERED: what it can do with
   // Fomo, and, in a group, whether research is on here at all. A group never
@@ -235,7 +352,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   const calls = plan.toolCalls.filter((c) => (audience === "owner" && input.readOnly !== true) || !isMutationTool(c.tool)).slice(0, MAX_CALLS_PER_QUESTION);
   const envelopes: FomoEnvelope[] = [];
   const toolsCalled: FomoToolName[] = [];
-  for (const [i, c] of calls.entries()) {
+  const run = async (c: FomoToolCall, i: number): Promise<void> => {
     let env: FomoEnvelope;
     try {
       env = await broker.call(c.tool, { ...c.args }, {
@@ -250,20 +367,28 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
     }
     envelopes.push(env);
     toolsCalled.push(c.tool);
-  }
+  };
+  for (const [i, c] of calls.entries()) await run(c, i);
+  // 5b. One row of the board, from the board just read (rowCall).
+  const row = calls.length < MAX_CALLS_PER_QUESTION ? rowCall(plan, envelopes) : null;
+  if (row) await run(row, calls.length);
 
   // 6. Remember what was actually resolved, only from envelopes that answered.
   const answered = envelopes.filter((e) => ANSWERED.has(e.status));
+  let remembered: { at: number } | null = null;
   if (answered.length) {
     const last = answered[answered.length - 1]!;
     const revision = [...answered].reverse().find((e) => e.dossierRevision)?.dossierRevision ?? null;
-    const m3 = applyResult(step.memory, { subjects: answered.flatMap(subjectsOf), dossierRevision: revision, requestId: last.requestId }, now);
+    const board = boardMemoryOf(plan, answered, now, audience);
+    if (board) remembered = { at: board.at };
+    const m3 = applyResult(step.memory, { subjects: answered.flatMap(subjectsOf), dossierRevision: revision, requestId: last.requestId, ...(board ? { board } : {}) }, now);
     await remember(broker, conversationKey, m3);
   }
 
   // 7. The answer.
   const analysis = plan.analysisRequested && !plan.infoOnly;
-  const deterministic = renderAnswer(envelopes, plan, { audience, maxChars, now });
+  const sayableHandle = audience === "group" && typeof input.sayableHandle === "function" ? input.sayableHandle : undefined;
+  const deterministic = renderAnswer(envelopes, plan, { audience, maxChars, now, ...(sayableHandle ? { sayableHandle } : {}) });
   let text = deterministic;
   // A composer writes only from evidence that exists: with no answering envelope the honest text is the deterministic one.
   if (analysis && input.compose && answered.length > 0) {
@@ -285,7 +410,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
     if (!text.includes(NOT_PERMISSION_LINE)) text = `${text}\n${NOT_PERMISSION_LINE}`;
     if (!text.includes(FOMO_ATTRIBUTION)) text = `${text}\n${FOMO_ATTRIBUTION}`;
   }
-  return { handled: true, text, plan, envelopes, toolsCalled, analysis, clarification: false };
+  return { handled: true, text, plan, envelopes, toolsCalled, analysis, clarification: false, ...(remembered ? { board: remembered } : {}) };
 }
 
 /**

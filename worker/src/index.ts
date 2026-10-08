@@ -175,6 +175,7 @@ import {
   type FomoLiveFacts,
 } from "./fomo-child";
 import { processBrokerPort } from "./fomo/broker";
+import { fomoBudgetFrom, fomoPlanFrom } from "./fomo/budget";
 import { fomoTailsOn, type FomoBroker } from "./fomo/contract";
 import { createTailNotifier } from "./fomo/tail-notifier";
 import { createTgFomoPort } from "./tg-fomo-port";
@@ -14812,6 +14813,13 @@ async function main() {
         // SELF-HOSTED ONLY: this install's deep-research queue runs here, one
         // job a minute (hosted, the orchestrator runs every tenant's).
         jobsEveryMs: FOMO_CHILD.selfHostedJobsEveryMs,
+        // The plan and caps as the install's web process reads them: one fomo.sqlite, one set of limits.
+        planCreditsPerMonth: fomoPlanFrom(process.env),
+        budget: (() => {
+          const caps = fomoBudgetFrom(process.env);
+          for (const p of caps.problems) console.log(p);
+          return caps.budget;
+        })(),
         log: (line) => console.log(line),
       }),
     log: (line) => console.log(line),

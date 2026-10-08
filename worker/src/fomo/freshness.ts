@@ -76,6 +76,22 @@ export const FRESHNESS_POLICY: Readonly<Record<FreshnessClass, Readonly<Freshnes
   boards: Object.freeze({ maxAgeMs: 5 * MIN, staleServeMaxMs: 2 * HOUR }),
 });
 
+/**
+ * HOW LONG A TELEGRAM GROUP MAY REUSE A COPY (decision D7, 2026-10-07). A
+ * room's research is rationed per hour, and one coin's theses cost a page
+ * at full price; a copy a few minutes past its class window is still the
+ * set, and the room hears its age ("From a copy fetched 2h ago."). Only the
+ * slow classes stretch: activity, holdings, token stats and profiles keep
+ * their own windows. Never past the class's longest shown age
+ * (staleServeMaxMs), and never for a room's "now" (service.ts turns that
+ * into an ordinary read with no reuse, decision D8).
+ */
+export const GROUP_REUSE_MS: Readonly<Partial<Record<FreshnessClass, number>>> = Object.freeze({
+  theses: 2 * HOUR,
+  rankings: 1 * HOUR,
+  boards: 15 * MIN,
+});
+
 /** A `retrievedAt` this far in our future is read as age zero (replica clock skew). */
 export const CLOCK_SKEW_TOLERANCE_MS = 5 * SEC;
 /** A provider timestamp further than this in our future is not believed. */
@@ -171,6 +187,13 @@ export interface DecideReadInput {
   budgetAvailable: boolean;
   /** Back-off after a failed attempt for non-forced reads (default 30 s). */
   recentFailureBackoffMs?: number;
+  /**
+   * A longer window in which a held copy still counts as fresh (a Telegram
+   * group's GROUP_REUSE_MS): max(class window, reuseMs), capped at the
+   * class's staleServeMaxMs. Ignored under force-refresh, and when not a
+   * finite, non-negative number.
+   */
+  reuseMs?: number;
 }
 
 function finiteOrNull(n: unknown): number | null {
@@ -199,7 +222,9 @@ export function decideRead(input: DecideReadInput): ReadDecision {
 
   const entry = input.entry;
   const cacheAgeMs = entry ? ageAt(entry.retrievedAt, now) : null;
-  const fresh = cacheAgeMs !== null && cacheAgeMs <= policy.maxAgeMs;
+  const reuse = finiteOrNull(input.reuseMs);
+  const freshFor = mode !== "force-refresh" && reuse !== null && reuse >= 0 ? Math.min(Math.max(policy.maxAgeMs, reuse), policy.staleServeMaxMs) : policy.maxAgeMs;
+  const fresh = cacheAgeMs !== null && cacheAgeMs <= freshFor;
   // Fit to show at all, labelled with its age. Beyond this it is "nothing".
   const showable = cacheAgeMs !== null && cacheAgeMs <= policy.staleServeMaxMs;
   const onFailure = showable ? "serve-stale" : "nothing";

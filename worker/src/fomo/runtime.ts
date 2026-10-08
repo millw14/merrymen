@@ -18,11 +18,13 @@
  *     conservative fractions under it.
  *
  * Nothing here can raise a limit at runtime: overrides are construction-time
- * configuration from the hosting process, never from a tenant or a model.
+ * configuration from the hosting process (budget.ts fomoBudgetFrom, read from
+ * the operator's environment by orchestrator, web and a self-hosted worker
+ * alike), never from a tenant or a model.
  */
 
 import type { Db } from "../db";
-import { deriveDailyCredits, FomoBudget, UsageMeter, type AllowancePort, type FomoBudgetConfig } from "./budget";
+import { budgetConfigFor, FomoBudget, FREE_PLAN_CREDITS_PER_MONTH, UsageMeter, type AllowancePort, type FomoBudgetConfig } from "./budget";
 import { fomoTailsOn, type FomoAccess } from "./contract";
 import { SingleFlight } from "./freshness";
 import { createFomoClient, type FomoClient } from "./provider";
@@ -31,21 +33,20 @@ import * as store from "./store";
 import type { FomoDialect } from "./store";
 
 export { runPendingJobs } from "./service";
-
-/** The Free plan's monthly credits, the default when the plan is not known. */
-export const FREE_PLAN_CREDITS_PER_MONTH = 250_000;
-/** Held back from the monthly allowance: the budget never plans to spend the last fifth. */
-export const PLAN_SAFETY_FRACTION = 0.2;
-
-/**
- * Conservative per-tenant and per-group caps. One standard coin research costs
- * about 1,500–2,000 credits (one thesis page, one feed page, token stats, maybe
- * a search); a tenant can ask a handful of those an hour and a few dozen a day,
- * and a group less. The shared pool still bounds the whole fleet.
- */
-export const DEFAULT_TENANT_HOURLY_CREDITS = 6_000;
-export const DEFAULT_TENANT_DAILY_CREDITS = 20_000;
-export const DEFAULT_GROUP_HOURLY_CREDITS = 2_500;
+// The caps live with the budget (budget.ts), where a process that must not
+// load the service (orchestrator.ts fomoSetup) can read them too.
+export {
+  budgetConfigFor,
+  DEFAULT_GROUP_HOURLY_CREDITS,
+  DEFAULT_TENANT_DAILY_CREDITS,
+  DEFAULT_TENANT_HOURLY_CREDITS,
+  describeBudget,
+  FOMO_CAP_ENV,
+  fomoBudgetFrom,
+  fomoPlanFrom,
+  FREE_PLAN_CREDITS_PER_MONTH,
+  PLAN_SAFETY_FRACTION,
+} from "./budget";
 
 export interface FomoRuntimeOptions {
   db: Db;
@@ -103,21 +104,10 @@ export function storeAllowancePort(db: Db, now: () => number = Date.now): Allowa
     give(key, amount) {
       return store.returnAllowance(db, key, amount, now());
     },
-  };
-}
-
-/** The budget configuration a plan supports, with any construction-time overrides applied and clamped. */
-export function budgetConfigFor(planCreditsPerMonth: number, over: Partial<FomoBudgetConfig> = {}): FomoBudgetConfig {
-  const derived = deriveDailyCredits(planCreditsPerMonth, 31, PLAN_SAFETY_FRACTION);
-  // An unusable plan figure is not a big plan: spend nothing rather than guess.
-  const shared = over.sharedDailyCredits ?? derived ?? 0;
-  const cap = (v: number | undefined, fallback: number): number => Math.min(shared, Math.max(0, v ?? fallback));
-  return {
-    ...over,
-    sharedDailyCredits: shared,
-    tenantHourlyCredits: cap(over.tenantHourlyCredits, DEFAULT_TENANT_HOURLY_CREDITS),
-    tenantDailyCredits: cap(over.tenantDailyCredits, DEFAULT_TENANT_DAILY_CREDITS),
-    groupHourlyCredits: cap(over.groupHourlyCredits, DEFAULT_GROUP_HOURLY_CREDITS),
+    // A plain read: which cap a refusal names, and whether a tool's whole planned cost fits (budget.ts).
+    async peek(key) {
+      return (await store.readAllowance(db, key)) ?? 0;
+    },
   };
 }
 

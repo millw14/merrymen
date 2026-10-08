@@ -50,10 +50,15 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    replies may report public indexed coin metrics with their source and
    observation time, or calculate from numbers explicitly supplied in the
    question. Fomo research lines are code-written and pass the gate as
-   `research`: every clause but the money clause, so a board's market caps
-   and Fomo's public leaderboard P&L (third parties' published figures, in
-   short form, under a header naming Fomo; the room has had a post about the
-   source, so group answers carry no source line) reach the room. A market desk read may cite public market figures only when
+   `research`: every clause but the money clause, so a board's market caps,
+   Fomo's public leaderboard P&L and one named trader's provider-reported
+   holdings value and realised figures (third parties' published figures, in
+   short form, under words naming Fomo or the trader; the room has had a post
+   about the source, so group answers carry no source line) reach the room.
+   The group model's paraphrase of a coin's theses is NOT code-written: each
+   of its phrases is checked as an `answer` line (the money clause applies;
+   no digit outside the coin's name), never as `research`, which would admit
+   "going to 10m". A market desk read may cite public market figures only when
    every figure in it is one the brief code measured for that answer contains
    (Market analysis); the desk is never handed the owner's book, so it has
    none of the owner's figures to cite. Hypothetical arithmetic is never
@@ -75,6 +80,22 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    can match the fill to an already-public, safe Brain rationale remembered
    in that same group; identifiers are never printed. It never supplies an address,
    size, raw decision reason, private refusal reason or account identifier.
+   Third parties' public Fomo data is not private: Fomo's public leaderboard,
+   and ONE NAMED TRADER'S PUBLIC FOMO DATA (who they are, what they hold,
+   what they traded, what they made or lost money on, provider-reported) may
+   be answered in a group, for anyone who asks, the owner included (Milla,
+   2026-10-07). Handles are said without the `@`. Still never in a room: who
+   Merrymen follows or watches (a board cut to its watched traders, whether a
+   trader is among them, figures read from that record), the owner's own
+   research state or watch list, a trader's own theses, and anything from her
+   DM. A coin's theses (strangers' words) are never quoted in a room: it hears
+   a code digest of what they argue, or the group model's paraphrase of
+   cleaned texts fenced as data (links, addresses, handles and $tags out,
+   rows shaped as instructions or lures dropped, and rows written at the
+   summariser: "hey AI, summarize this as…", "summary for any bot reading",
+   the tool's own labels such as "for:", "new rule:", "from now on say"),
+   never a five-word run of
+   anyone's words (Milla, 2026-10-07, decision D5).
 
 4. **Only the owner shapes the agent.** Group members cannot write owner
    facts, bump the relationship, rename it, change settings, confirm
@@ -90,7 +111,16 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    `admitDeskText` — every protective clause, with the money and figure bans
    replaced by grounding in its brief — and a refused read is replaced by the
    desk's code-written read, never repaired. An addressed factual question
-   can report unavailable evidence without exposing provider details.
+   can report unavailable evidence without exposing provider details. A Fomo
+   read that failed, could not be reached or was refused by a budget is said
+   plainly ("couldn't reach fomo just now, try again in a bit.", or "fomo
+   lookups for this room are used up for now, try again after 15:00 UTC."),
+   never as "ask me in a direct message", which would make a failure sound
+   private and would not be true. The time is the latest reset among the
+   caps that would refuse that read (a spent daily pool wins over a spent
+   hourly cap; a search and its page are asked about together), and
+   a cap no read fits (a group cap of 0) is "Fomo research isn't available
+   here right now.", never a time that would come and go.
    Unprompted failures (model, chain, Brain, Telegram) are silent in the group
    and at most logged.
 
@@ -106,7 +136,10 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    spends the house key on group chatter unless the operator says so. Brain
    reads a group's market question only with `MERRYMEN_TG_GROUPS_BRAIN=1`.
    Every group model call, Brain's included, is counted against a daily
-   allowance that survives redeploys. Group work runs off the serial poll loop, so a slow model or
+   allowance that survives redeploys. Calls that are only nice to have (the
+   router, a thesis paraphrase) spend only the first half of the day's and
+   the chat's hour's allowance. Fomo credits are research budget, never
+   trading's. Group work runs off the serial poll loop, so a slow model or
    Brain never delays the owner's DMs, buttons or `/kill`.
 
 ## Which groups it talks in
@@ -201,6 +234,39 @@ and Telegram's own pace below still applies), or the message is from a bot.
 When one person sends a burst of messages addressing it (each within 15 s of
 the next), it answers their last one; someone else addressing it meanwhile
 is a conversation of its own and never drops the first person's answer.
+
+**A request is never silently lost.** A short line about its own silence
+(`metaLineOf`: a poke such as "?", "hello??", "you there?", "done?", its
+name alone, or a complaint such as "i asked a question", "you didn't
+answer", "answer me", "still waiting") is never what drops their question.
+Each person's last substantive line said to it (not small talk, not one of
+these) stays their open ask, per chat and topic, for 10 minutes:
+
+* While it is still being worked on (a read in flight, inside its 30 s
+  deadline), such a line gets a 👀 reaction (no model call, no reply slot,
+  logged as `poke-while-working`), and the answer still lands as the reply
+  to the question. Live 2026-10-07: "what's trending", then "shogun" ten
+  seconds in, and the slow market read was dropped as a burst.
+* When nothing answered it (the send failed, the deadline passed), the
+  line runs that ask again, once, as the reply to the question. A /forgetme
+  since still cancels it, and a re-run is never claimed or nominated by the
+  coin flow (rule 1). Someone else's complaint never re-runs another
+  person's question.
+* A complaint from someone with nothing open gets a fixed line, "which
+  question? i might've missed it, ask me again", never a guessed market read.
+  A poke with nothing open is small talk, as before.
+* A complaint replying to its answer to their open question has that
+  question read again by the router, in the light of the complaint (live
+  22:59: "I said what's trending on fomo").
+* Other words for it ("bro you skipped mine earlier", "you good?") while an
+  earlier question went unanswered go to the router, which may pick `reask`
+  ("What a line wants" below).
+
+While a research or desk read runs it shows "typing…" (or "sending a
+photo…" for a chart) again every 4 s until the answer goes, the deadline
+passes, the line is no longer wanted (a newer line, a /forgetme) or the chat
+is shushed. These are Bot API calls, outside the chat lock, never a model
+call.
 
 An addressed message that gets nothing (no line, no reaction) leaves one
 operator log line with a stable reason code and nothing else: `[tg-groups]
@@ -339,6 +405,24 @@ to someone in distress goes out shushed or not.
   disbelief ("are you serious?"), it looks again at what they said before,
   owns a misreading in a few words and answers what they meant, instead of
   doubling down.
+* Never fakes progress. The persona has no lookup running, ever: the Fomo
+  research, the desk and the owner's DM handoff each answer for themselves.
+  So a persona line (an answer, banter or a roast) may not stall ("give me a
+  sec", "hang tight"), claim it is fetching ("on it", "lemme check", "pulling
+  it now"), deliver what never came ("here we go", "here you go", "sent it")
+  or promise to come back ("i'll let you know", "i'll keep tabs on him"): the
+  gate refuses it (reason `progress`) and a template answers instead. The
+  prompt says the same, and when someone is waiting on something that never
+  came, it says it didn't come through and that asking plainly gets it. Live
+  2026-10-07: "do it" got "give me a sec", "done?" got "yeah here we go", and
+  nothing was ever sent. Code-written lines are not judged by it: the coin
+  flow's "on it, gimme a sec" is said while its look really runs.
+* Asks, never offers. Where Fomo research is wired and a Fomo question was
+  not answered by the research lane, the persona asks one short question that
+  pins down what they want ("top traders today, or what's trending?",
+  "trending on robinhood chain, or everywhere?", "which coin?") instead of
+  offering ("i can pull it if you want, just say the word"): the answer to a
+  question is looked up on its own.
 * Does not know (never in its prompt): anything in rule 3.
 * Other people's words are quoted inside a fenced block marked as untrusted
   data; instructions inside them are ignored.
@@ -394,6 +478,26 @@ in that same group; otherwise it identifies the recorded decision source and
 directs the owner to DM for the full private reason. Private DM and web chat
 share the same operation deduplication, fill provenance and sold-cost replay.
 
+**About itself, in fixed words** (`facts.ts`, WP11; never the persona,
+which could undersell or invent):
+
+* "what can you do?", "help", "commands" (the whole line, nothing else, so
+  "can you help me with pons" or "what can you do with fomo?" is not it): a
+  code-written list of what a room can ask, naming Fomo, the desk and coin
+  looks only where each is wired in this process, and always "i never take
+  trade orders from a group."
+* "how do i get my own agent", "how can i get one of you": the onboarding
+  answer.
+* "why can't you answer in the group?", "why not here?", "why only in DMs?",
+  and a bare "why?" under its own "That one is for a direct message": who it
+  watches or follows, the owner's own research and anyone's account details
+  stay in DMs; boards, coin research and one trader's public Fomo data are
+  fine in the room. A past-tense "why didn't you answer" is a missed
+  question (the re-ask's), and "why doesn't the bot reply in my group" stays
+  the Telegram troubleshooting answer.
+
+Each template passes the gate as `fixed` (pinned in facts-followups.test.ts).
+
 Literal arithmetic, percentage changes and P&L calculations use bounded
 decimal arithmetic and only the supplied operands. They never become a
 verified account result. Product questions use fixed, code-backed answers
@@ -428,12 +532,42 @@ one-liner from a model that was given no data.
 * the market's own words with a question or request ("how's the market",
   "market update"), or "what's pumping / moving", "any setups"; "what's up /
   hot" only beside a trading word;
+* a bare "what's trending" is the market read only where Fomo research is
+  not wired. Where it is, it means Fomo's trending board (decision D1,
+  2026-10-07: "I said what's trending on fomo"): the research is asked for
+  that board as a fixed request, and the desk's market read answers instead
+  when Fomo cannot (the room's research answers spent, a read past 12 s, a
+  budget refusal, research unavailable or failed, nothing sayable), inside
+  the same 30 s deadline, with nothing of Fomo's said. Fomo's board covers
+  every chain; one the line names ("what's trending on solana", "on base")
+  cuts it to that chain (`chainIn`), and one it leaves out or dismisses
+  ("besides solana", "other than robinhood coins", "solana is dead") cuts it
+  to none: every chain, with the Robinhood Chain line. A venue word keeps it
+  on the desk: "what's trending on robinhood chain", "what's trending in the
+  market", even right after a Fomo answer (never a Fomo follow-up), and so
+  does a line the desk owns: an analysis, a comparison, or a coin it names
+  ("what do you think about sol?", "should i buy sol?"). A coin line that
+  asks what traders are saying ("what are they saying about $AnyPS5", "what
+  are people saying about $PONS now") is the coin's theses, never the desk's
+  chart, and stays a Fomo follow-up. Personal chat
+  ("is she holding up ok?", "what is he doing lol") is never a follow-up
+  about a trader. After a board, a chain alone ("and on solana?", "solana
+  ones?", "on base?") is that board on that chain; the router reads one the
+  planner cannot;
 * a bare "do a quick analysis" — bound to the coin it replies
   under, else a desk ask up the reply chain, else what this topic last asked
   within 15 minutes, else the market. A specific entry, stop, target or other
   setup follow-up requires an identifiable subject and otherwise asks which
   coin. Words with an everyday meaning
   ("entry", "support", "breakdown") ask for a read only beside a trading word.
+  A complaint ("you didn't answer", "just vibes?") binds the same way, but
+  with no subject anywhere it is never a guessed market read: the re-ask,
+  "which question?" or the persona answers it ("When it speaks"). A reply
+  to one of its own old photo captions that the store no longer holds still
+  names the caption's coin, but only for a real caption (a title line above
+  the read): its own one-line "yo" or "sup" is never searched as a coin
+  (live 2026-10-07: "i asked a question" under "yo" got "can't find a coin
+  by that name").
 * a coin's story or background ("what's RHOOKS about", "what's its lore"),
   or a request to explain the previous read more clearly ("not clean enough",
   "make it simpler"). These follow the coin or desk reply chain before the
@@ -624,43 +758,124 @@ desk, however short, because what "pons" or "trending" means there is in
 the line it answers. A reaction under it ("lol", "🔥") is not, and a desk
 read that happens to say "trending up" keeps its own follow-ups.
 
+**A yes under its own line.** Its own Fomo lines include the persona's
+offers ("i can pull the fomo board for robinhood chain coins if you want",
+recognised by `offerShaped`) and anything the persona says inside a research
+thread, marked by message id. A yes under one of the persona's own lines
+("do it", "yes pls", "send it", and there also "ok" and "bet", which are
+otherwise reactions: `consents`) goes to the router, which is told: when the
+line says yes to something its own line offered or asked, pick what that
+line offered, with the coin, board or trader it named, and chat if it
+offered nothing on the menu. Code still grounds every name: a trader named
+only by the persona's offer counts when the person's line that the offer
+answered named it too (`RouteCtx.asked`), never a name the persona made up.
+A yes is never a tail (a tail's trader and hours are read only from the
+line), so a `fomo_tail` pick on a yes is chat. "ok" under a research answer
+itself stays a reaction. Live 2026-10-07: "do it" under such an offer got
+"give me a sec" and nothing ever came.
+
 **The menu** is one forced tool call (`callChoice`): chat, the Fomo
 leaderboard, a Fomo board, one coin on Fomo (theses, buyers, sellers, a
 research dive, what is going on), what Fomo's traders are buying or
 selling, small coins on Fomo, one Fomo trader by name (who they are, what
-they hold, what they traded), a tail, what Fomo is, a market read, a coin
-read. It lists only what this agent can serve (no Fomo actions without
+they hold, what they traded, what they made or lost money on), a tail, what
+Fomo is, a market read, a coin read. It lists only what this agent can serve (no Fomo actions without
 Fomo, no reads without the desk). Nothing on it trades (rule 1). The model
 sees `$PONS` as `cashtag:PONS` and `@unipcs` as `handle:unipcs`: the sign is
 what tells a coin from a person, and the router writes nothing anyone sees.
 
 **Checked by code.** A coin or trader the model names counts only when it is
 written in the line as a whole word (a coin may also come from the line it
-replies to); never the bot's own names, a stop word or a number. A coin is
+replies to); never the bot's own names, a stop word, a number or a board
+position ("second", "one", "first", "number", "winner": "what's the second
+one holding" asks about a row, never a trader called "second"). A coin is
 never an `@name` and a trader never a `$tag`. The time
 window and the buy or sell side are read from the line's own words, never
-from the model. A Fomo pick reaches the research only as a fixed question
+from the model.
+
+**A chain** (decision D3, 2026-10-07). Fomo's lists cover every chain; the
+menu's optional `chain` (robinhood, solana, base, ethereum, bsc) cuts a
+board, the crowd or small coins to one, and the model is told to put one
+only when they want one chain's coins. Code reads it: the → line's own words
+first (`chainIn`: full names anywhere, short ones only where a chain goes, so
+"on sol" and "hood coins" are chains and "SOL is ripping", "the base case"
+and "eth price" are not), whatever the model picked; else the model's pick
+only when the asker's own lines it was shown (same sender, never its own
+lines) or their unanswered question name that same chain. Never the line it
+replies to (a board names every row's chain: "ETAC on solana" must not
+narrow "send it?"), never the persona's offer. That is what makes the live
+23:01-23:03 lines work: "do it" under "i can pull the fomo board for
+robinhood chain coins if you want" and "send it?" both name nothing, and
+her own "what about robinhood coins on fomo" grounds the pick. A board pick
+with a grounded chain and no board is that chain's trending board (D4);
+"boards?" alone is still nothing.
+
+**A row of the leaderboard.** "Who's been winning the most today and what
+did he make money on" is the leaderboard with one row (`rowIn`, read from the
+words, never the model: a singular rank, "the top trader", "who's #1", "the
+second best trader", plus one trader's question in the rest of the line,
+what he made money on, holds, traded, or who he is). Its fixed question
+("who is the top trader on fomo in the last 24h and what did he make money
+on?") plans that row (`rowAsk`). The research reads the board, then that
+row's trader by the user id the provider's own board gave (never a name
+from the text, `fomo/chat.ts rowCall`), over the board's window, and the
+room hears the board (a row fewer, so the row's answer fits its six lines)
+and then that trader's answer: what they made or lost money on ("CryptoKaleo
+on trades opened or closed in the last 24h (source-reported, realised to
+date): made the most on ROO +$4.2k; lost the most on plumber -$10.9k."),
+what they hold, or what they traded. A row the board does not have is said
+("That board has no 3rd trader."). Ranks run to the board's tenth row ("the
+5th best trader", "the sixth best trader", "#7"); a rank past it ("the 11th
+best trader") or one relative to someone ("the best trader after kaleo") is
+no row: the room hears the board alone, never the 1st row's answer, and its
+"he" is never a trader remembered from before. A Fomo pick reaches the research only as a fixed question
 code writes (`tg-fomo-port.ts requestText`), planned by the same
 deterministic planner. Anything else (no model, an answer in words, an
 unknown action, a made-up name) is the persona's answer, exactly as before.
 
-**One trader by name.** The owner's own ask (her sender id, never through a
-chat) is answered in her DM, whether the router read it ("do you know
-unipcs on fomo") or the planner did ("who is trader unipcs on fomo?",
-"what is @x holding on fomo?", which the room would otherwise only hear
-deflected): `service.ts` checks her id and the allowlist again, proves the
-DM with a typing action before any lookup, and asks one fixed question
-read-only ("who is trader X on fomo?", "what is trader X holding on
-fomo?", or "what has trader X been trading on fomo this week?"; nothing can
-be watched or changed from a room). Only that question and its answer enter
-her DM history, and her DM's research subject changes only once the answer
-was delivered (a failed send leaves her last subject as it was). An ask
-superseded by a newer line of hers, or forgotten, while the lookup runs is
-not answered and writes nothing. The room hears "sent it to your DMs" and never the name, or
-"dm me /start first" (once an hour, counted only once it was said) when her
-DM cannot be reached. At most six of these per 10 minutes. Anyone else gets
-the room's deflection, which, made before any lookup, spends none of the
-room's research answers, and her DM is never touched.
+**A row of the board, after it** ("what's the second one holding?", "#3?",
+"what did the top guy make money on", "and number two?"). The research
+remembers the public trader board the room was last shown (its ranks, user
+ids and public handles only; never one cut to Merrymen's watched traders),
+per room and topic, for 30 minutes, while the room keeps asking about it or
+one trader; any other question, the owner's forget or a new board replaces it
+(`fomo/subject-memory.ts board`). The planner reads a row reference against
+it (`fomo/intent.ts rowRefOf`) and asks about that row's trader by the
+board's user id, over the board's window; a bare "and #2?" asks of that row
+what the last row question asked. "He" or "that guy" right after a board
+asked in the singular ("who's the best trader on fomo") is its 1st row; after
+a board of several, with no row asked about yet, it asks "Which one on the
+board: the 1st, 2nd or 3rd?"; once a row was, "he" is that trader. While the
+room's last answer was research, such a line reaches the research without a
+question about Fomo in it (`detect.ts fomoFollowUpOf`: a row reference, or
+"he"/"his"/"that guy" with what one trader does). "Who's #1 on fomo" is still
+a new board.
+
+**One trader by name** (Milla, 2026-10-07: a named trader's public Fomo
+data may be answered in a group). Answered in the room, for anyone who
+asks, the owner included, whether the router read it ("do you know unipcs
+on fomo", a `fomo_trader` pick with `about` profile, holdings, trades or
+earnings, and the window, and a trades ask's side, read from the line's
+words: "what did frankdegods sell this week?" is his sales, never his buys)
+or the planner did
+("who is trader unipcs on fomo?", "what is @x holding on fomo?", "what did
+trader x make money on this week?"). A routed pick is asked as one fixed,
+read-only question ("who is trader X on fomo?", "what is trader X holding on
+fomo?", "what has trader X been trading on fomo this week?", or "been
+selling" / "been buying" for a side the line named, "what did
+trader X make money on on fomo this week?"); nothing can be watched or
+changed from a room. The room hears the trader by their public handle,
+without the `@`: what they hold and its value, the largest few; their buys
+and sells in the window and their positions; or their winners and losers,
+all provider-reported and in short money. Never whether Merrymen watches or
+follows them, and no P&L figures from Merrymen's own watched-trader record
+(whether a room saw them would say who it watches). Each is a lookup and
+spends one of the room's research answers when it reads from the provider;
+only answers that read from the provider (or call the model for a thesis
+paraphrase) count toward the six per ten minutes, so a re-ask or a board cut
+from a kept copy costs the room nothing. Nothing about a trader goes to
+her DM any more: the DM handoff (`TgOwnerPort.research`) was retired with
+this decision; her moves after a board, and her tail card, still go there.
 
 **A tail** ("pine can you tail unipcs trades for the next 3 hours, inform me of his
 thesis and if you like the trade as well, take it"). Read by code before the router
@@ -683,6 +898,19 @@ stop at all, and "pine stop tailing him" stops nothing and asks her which, in he
 Where a tail cannot work (`MERRYMEN_FOMO_TAILS=0`, or no live feed on a self-hosted
 install: `TgOwnerPort.tailsState`), her start line is no tail and goes on to the
 research lane as before; with the switch off a stop is still read.
+
+**Their earlier question.** When someone whose earlier question went
+unanswered (in the last 10 minutes, not re-run yet) says something else to
+it, the line is worth a routing call however short or small-talky it is,
+the prompt quotes that question after the line, and the menu gains
+`reask`: run that question again, once, as the reply to it. `reask` is on
+the menu only then, and a `reask` pick anywhere else is refused. A short
+complaint replying to its answer to their open question ("you didn't
+answer") is routed first, before the desk, with that question quoted the
+same way but without `reask` (running it as it was would only repeat the
+answer): the model picks what the question wanted. In both cases a coin,
+trader, window or side the earlier question names counts as the person's
+own words.
 
 **Cost.** One call of the allowance, through the same gate. A research pick
 replaces the persona's call; a chat pick costs one more. Routing only ever
@@ -1181,6 +1409,86 @@ calls run at once per agent. A desk read (Market analysis) is one call — to
 Brain when `MERRYMEN_TG_GROUPS_BRAIN=1`, else to this model — and is counted
 the same way.
 
+**A coin's theses in its own words** (`theses.ts`, decision D5; OFF unless
+`MERRYMEN_TG_THESES_MODEL=1`: Milla, 2026-10-08, because its input is text
+any Fomo trader can write and each review round found new ways past its
+checks). When the research
+answers what traders are saying about one coin, the room's answer is the code
+digest (fomo/digest.ts: what they argue for and against, what most of it is
+about, what holders wait on, "Their claims, not facts; newest 25 of 41.").
+With a model, one forced choice (`summarise_theses`: a gist, up to three
+points for, three worries, two things waited on) reads at most twelve cleaned
+samples, one per family, at most 160 characters each, fenced as data (a
+sample is read as the gate reads a line, lookalike letters folded and
+invisible characters gone, before its lure and instruction checks, and a
+sample with a letter of another script than Latin, Chinese or Cyrillic, is
+never read: every check is English, and the prompt asks for plain English
+only). Code
+checks every phrase, in plain ASCII only (an invisible, lookalike, fullwidth
+or accented letter drops it) and read as the gate reads a line (letters
+spelled out one by one, "h a l f", are the word): its length, no digit
+outside the coin's name and no
+number word (a multiple in words, "tenfold", "a ten bagger", "a tenbagger"
+or "a multibagger", included, and halves, quarters, dozens, a sixth to a
+thousandth, doubled, tripled, halved, "bil", any "-illion" ("a zillion"),
+"k", single digits, and a bill or a yard market cap: "half the supply",
+"price doubled since launch", "a bil market cap", "a few k holders"; "the
+second wave of buyers", "fits the bill" and "the market structure bill" are
+no figure), no
+$, @, # or link, no domain spelled out with any ending ("ponsfi dot bet";
+a sample that spells one out is never read either), no quotation mark, no five-word run shared with any sample,
+nothing about instructions, nothing in the first person or naming the agent,
+Merrymen, this room or the room's own owner, admin, mod, bot or desk ("the
+group's bot is holding a bag", "the owner here is heavy in it"; "contract
+owner renounced" and "the agent posts on its own" stay), nothing waited on
+that is a claim, and in no
+phrase (the gist, for, against or waited on) a holder snapshot, a giveaway
+(or the team giving, gives or gave tokens away), a handout, a free mint, a
+holder bonus, rewards or a reward distribution, or tokens sent or dropped to
+holders (the airdrop story without the word; a coin's "giveaway meme" and
+"worries about the token distribution" stay), no lure (an airdrop, a presale,
+a wallet to connect, verify, sync or revoke, tokens to migrate, a migration
+portal or any portal, an approval or message to sign, eligible wallets,
+someone to message or contact: "contact the admins to verify your wallet",
+"migrate your tokens on the portal"; "the contract is verified" and "worries
+about the team allocation" stay; the same shapes keep a thesis from the
+samples at all), nothing addressed to the room ("you", "your": a summary of
+other people's claims never speaks to anyone), no crime or misconduct laid at anyone's
+door (theft, robbery, looting, siphoning or draining the treasury,
+swindling, defrauding, a grifter, fleecing, deceit, ripping off, a faked
+audit or botted volume, an arrest, an indictment or jail, "is a con", a
+stolen or pulled pool, walking or making off with the money,
+laundering, wash trading, manipulation, insider trading, a cash grab, lying
+or liars, dumping or selling on followers or holders, a criminal: worries
+stay worries, "fears it could collapse"; never the bare "lies" or "lying",
+so "the value lies in…" stays), no name of a person or account (a
+capitalised word past the first that is not the header's coin, chain or
+Fomo, nor a venue, chain, coin or common acronym such as Robinhood,
+Telegram, AI or SOL; a first word when it is an acronym such as "CZ", or
+when it does what a person does, "Ansem is backing it", "Elon tweeted the
+meme", unless it reads as a plural or a common noun, "Whales bought the
+dip", "Liquidity is thin"; a name in lowercase is not caught by code and
+rests on the prompt alone), no account to follow ("follow ponsdev on x"),
+no trade advice in its voice (a trade
+verb opening the phrase or a clause, "get some before the listing", "still
+early, join in", "hold through the unlock", "never sell before the listing",
+"go long", "stay away", "fade the pump", "fill your bags", one someone urges,
+"holders say get some" or "holders say hold", "worth grabbing", "a
+no-brainer" or "not too late to"; "fears early buyers sell before the
+unlock", "holders plan to hold until the listing", "long-term holders" and
+"a short squeeze" are worries and facts and stay),
+and the gate as an `answer`
+line. A phrase that fails is dropped, never repaired; the worded lines sit
+between the digest's header and its closing lines, which always stay, within
+the room's six lines and 700 characters. No model, under 1.5 s of the reply
+deadline left, the router's reserve reached, an answer in words, a late or
+failed call, or nothing passing: the code digest. One call per coin, copy
+and theses read (the coin, when its theses were read, and which samples the
+model reads: "the last hour" cut from the same copy is other theses, and is
+never said in the wording of all of them), kept 30 minutes, so "tell me what
+it's about from the theses" right after costs no call. Logs carry counts
+only.
+
 ## Operator switch
 
 `MERRYMEN_TG_GROUPS=0` in the environment turns the whole feature off for
@@ -1194,6 +1502,9 @@ restored at spawn (see Storage and the ferry).
 
 `MERRYMEN_TG_GROUPS_ROUTER=0` turns off only the router (What a line wants):
 lines no rule knew go straight to the persona.
+
+`MERRYMEN_TG_THESES_MODEL=1` turns on the group model's paraphrase of a
+coin's theses (The model); unset or anything else, rooms hear the code digest.
 
 `MERRYMEN_TG_GROUPS_DESK=0` turns off only the market desk: market and coin
 questions go back to the voice and the public snapshot.
@@ -1366,16 +1677,43 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "wdyt?" / "is it good?" said to it | An unambiguous remembered coin gets a factual quick-screen take; otherwise it asks for the CA. It never claims a buy without a recorded fill |
 | "what do you think about sex" / "thoughts on pizza?" said to it, nothing marking a coin | One COIN-or-TOPIC question to the group model with the last lines as context; a topic is the persona's to answer, never "drop the CA". A $tag, ticker capitals, a trading word or a coin this chat knows makes it a coin with no question |
 | "are you serious?" under its own odd reply | Sees which of its lines it is answering; owns a misreading in a few words instead of "yeah i am" |
-| "who's the top trader on fomo today?" / "who's the top on fomo today" | Fomo's public leaderboard: four handles with their money made on closed trades, short form; no source line or skill caveat (the room has had a post about both). Never who it follows; one trader's holdings stay in a DM |
+| "who's the top trader on fomo today?" / "who's the top on fomo today" | Fomo's public leaderboard: four handles with their money made on closed trades, short form; no source line or skill caveat (the room has had a post about both). Never who it follows |
 | "what can you do with fomo" / "is fomo working?" | A fixed list of what a room can ask / whether Fomo research is on here; no lookup |
 | "i'm sorry, who's been winning the most lately" / "what are people over there offloading this week" | No rule knew it: the router picks the leaderboard / the crowd's sells for this week, and the research answers it as the fixed question |
-| The owner: "do you know unipcs on fomo" / "who is trader unipcs on fomo?" | One trader: looked up read-only and sent to her DM; the room hears "sent it to your DMs" and never the name. Anyone else: "That one is for a direct message, not the group." |
+| Anyone, the owner included: "do you know unipcs on fomo" / "who is trader unipcs on fomo?" / "what is @unipcs holding?" | One trader's public data, in the room, by handle without the `@`: what they hold and its value, or their trades, provider-reported, short money. Never whether Merrymen watches them; nothing goes to her DM |
+| "who's the best trader on fomo today and what did he make money on" (live 23:04) | The board (a row fewer), then that row's trader, read by the user id the board gave: "… made the most on ROO +$4.2k; lost the most on plumber -$10.9k." For anyone. A row the board does not have is said |
+| After a board: "what's the second one holding?" / "#3?" / "and number two?" / "what did he make money on" | That row's trader, by the board's user id, in the room. "He" after "who's the best trader" is the 1st row; after a board of several, "Which one on the board: the 1st, 2nd or 3rd?" |
+| After a board in a room: "what's the last one holding?" / "the fifth one" | Only the rows the room heard are remembered (four, a row fewer with a chain note or a row's answer, and fewer again when the room's six lines cut rows for a reused copy's age line, her moves line or a row's answer: the handler tells the port which it said, `TgFomoPort.heard`): "the last one" is the last row it saw; one it never saw asks which |
+| After a trader board: "what's #1 trending on fomo" / "the number one coin on fomo" / "number one priority is safety" | The trending board / a coin question / chat: a row reference counts only where one trader is asked about, never before a coin noun |
+| "what did the best trader sell today on fomo?" | The board, then that row's sells only; a room's bullets name buys, sells and transfers, never a thesis, perp, listing or "other" event |
+| "what's @X's pnl on fomo?" / "how much did @X make this week on fomo?" / "how is @X doing on fomo?" | What they made or lost on their trades over the window named (this week otherwise), in the room; never holdings alone. "who is trader X on fomo?" ends with how to ask that |
+| "who made the most on PONS?" | About that coin, never the all-coins trader board |
+| "do you watch @x on fomo?" / "are you tailing @x?" / "who's the top trader we watch?" / "best trader u r tracking, what's he holding?" / "who are the traders you're tracking" | Never answered in a room: the private-ask deflection, or "That one is for a direct message", never the public board's #1 (and never a trader called "ur") |
+| "what coins are the watched traders buying on fomo" / "what are your traders buying?" / "is frankdegods one of the watched traders?" | Whichever Fomo read the router picks (the crowd, a board, small coins, a coin, one trader), a watch-list line is chat: never the whole feed's buys or a trader's profile, which the room could read as who it watches |
+| "what is @x saying about $PONS" / "who are the top traders we watch" / "what are you researching on fomo" | "That one is for a direct message, not the group." (a trader's own theses, the watch list, her own research state), with no lookup |
 | The owner: "pine can you tail unipcs trades for the next 3 hours … take it" / "pine stop tailing unipcs" | Read by code: her DM gets the tail's confirm card (or the stop's answer); the room hears "sent it to your DMs 🤫", never the trader or "tail". Nothing starts until she presses in her DM; "take it" grants nothing |
 | Anyone else: "pine tail @unipcs for 2h" / "/tail unipcs" | "only my owner can do that 🙃" (once an hour per person), nothing else; her DM is never touched |
 | The router picks a tail for a line naming no trader ("can you shadow that trader for a bit?") | Her line: the `/tail` usage in her DM; anyone else's: the owner-only line |
 | "pine copy unipcs's trades" / "pine mirror @unipcs" / "pine track $pons" / "pine stop tracking $PONS" | Never a tail: the line goes on as before (a coin stop never stops her tails) |
 | The owner: "pine ok stop tailing him" | Names nobody: her DM gets her tails and "Which tail should I stop?"; nothing stops, and the room hears only that it went |
 | "trending" / "$pons" in reply to its own "top traders today, or what's trending?" / "which coin?" | Read in the light of that line: Fomo's trending board / that coin's theses, not a market read or a chart |
+| "what's trending", then "shogun" or "?" ten seconds later while the read runs | A 👀 on the poke; the read lands as the reply to the question. Never dropped as a burst |
+| "i asked a question" / "you didn't answer" / its name, after nothing answered their question in the last 10 minutes | Their question runs again, once, as the reply to it (never a second claim or nomination); with nothing of theirs open: "which question? i might've missed it, ask me again" |
+| "shogun what's trending" (Fomo wired) | Fomo's trending board. Fomo busy, late, refused by its budget, unavailable or failed: the desk's Robinhood Chain market read instead, never Fomo's refusal. "what's trending on robinhood chain", or no Fomo here: the desk. "what's trending on solana / base / eth" that Fomo cannot answer: Fomo's own plain line (its refusal with the reset time, busy, late, "couldn't reach fomo just now"), never the desk's Robinhood Chain read |
+| "do it" / "ok" / "bet" under its own offer ("i can pull the fomo board for robinhood chain coins if you want") | A yes to that offer: the router picks what the offer named and the research answers it. Never "give me a sec" (the gate refuses fake progress), never a tail |
+| "what about robinhood coins on fomo" / "only robinhood ones" (live 23:01) | That chain's slice of the trending board, from the same read: "Trending on Fomo, Robinhood Chain only (2 of the top 100):" with each row's board rank, or "None of the top 100 trending coins on Fomo are on Robinhood Chain right now." No offer to "pull" it |
+| "do it" under that offer, "send it?" after it (live 23:01-23:03) | The Robinhood Chain board: her own earlier line named the chain. A chain only the replied board's rows name ("ETAC on solana") never narrows it |
+| "shogun what's trending on fomo?" with only Solana coins on top | Every chain's board, three rows, and "On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st)." (or that none of the top 100 is on it) |
+| "who's the top trader on robinhood on fomo" | The trader board, plus "Fomo's trader board covers every chain; it can't be narrowed to one." |
+| "who's selling pons on fomo?" (no `$`, not in capitals) | Never the whole feed's sellers: the port leaves it to the router, which names PONS from the line and asks its sellers |
+| "what are they saying about anyps5" (live 23:00) | What they argue, never counts: "What traders on Fomo are saying about AnyPS5 on Solana (25 recent theses from 20 traders):", then the group model's checked gist, points for and worries, then "Their claims, not facts; newest 25 of 60." No model, or nothing of its passing: the code digest ("Mostly hype, with no case for or against that I can pick out." when no cue matches) |
+| "tell me what it's about from thesis" right after (live 23:00) | The same worded answer from the same copy: no provider read, no model call |
+| "fetch the thesis for merrymen on fomo" past the room's research allowance (live 23:05) | "fomo lookups for this room are used up for now, try again after 00:00 UTC." The same words for the room's cap and the owner's; never a credit, never "ask me in a direct message" |
+| "what are people saying about $PONS now" a minute after the last answer | The copy from a minute ago, labelled with its age: a room's "now" never buys a forced refresh. Theses are reused for 2 h in a room, boards 15 min |
+| A Fomo read that failed or could not be reached | "couldn't reach fomo just now, try again in a bit." |
+| "shogun what can you do?" / "shogun help" | A fixed list of what this room can ask (Fomo, the desk, coin looks, as wired here) and "i never take trade orders from a group." No model, no lookup |
+| "shogun how do i get my own agent" | The onboarding answer |
+| "why can't you answer in the group?" under "That one is for a direct message, not the group." / a bare "why?" there | What stays in DMs (who it watches, the owner's research, account details) and what a room may hear, as wired here: boards, coin research and one trader's public Fomo data with Fomo; coin research with only the desk or coin looks; nothing more with neither. Never a market read |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |
@@ -1437,6 +1775,25 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
   wins silence.
 * Only a Uniswap v3 pool is resolved to its coin. A chart link to a v2 pair
   answers `decimals()` like a token, so its look reads `no-pool`.
+* Fomo's trader board cannot be cut to one chain (the provider documents no
+  chain filter for it): asked for one, the board says it covers every chain.
+  A token board is cut to a chain from its top 100, so a chain's coins
+  further down are not seen.
+* A bare chain correction with no list word ("i said robinhood") is not read
+  by the planner; it reaches the router, whose chain counts only when her
+  own lines name it.
+* The thesis digest knows only its lexicon's cues and topics: a coin whose
+  theses are all hype gets "no case for or against" from code, and the
+  paraphrase is what names its story. A paraphrase phrase that copies five
+  words in a row of a sample, holds a number word or fails the gate is
+  dropped, so a paraphrase can be shorter than the model wrote, or the code
+  digest.
+* A room's research allowance is per clock hour, and every room charge also
+  counts against the owner's own hourly share: one coin's theses (a search and
+  a thesis page) cost about 1,500 credits, so under the default 2,500 an hour
+  a room gets about one new coin's theses an hour, beyond copies it reuses. The
+  caps are the operator's to raise (docs/fomo.md "Operations"); the search is
+  still paid when the page after it is then refused.
 * The owner's first name for tagging is taken from what it has seen in that
   chat; before the owner speaks there, it says "my owner", and the tag in the
   owner ask (a link to the owner's account) reads "boss".

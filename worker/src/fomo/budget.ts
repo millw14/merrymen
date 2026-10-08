@@ -46,7 +46,12 @@
  * high until its window rolls over. Both errors spend LESS than allowed. No
  * interleaving spends more, because every take is itself a conditional add.
  * Likewise a charge whose request outcome is unknown keeps its estimate:
- * credits we may have been billed for are counted.
+ * credits we may have been billed for are counted. The hourly counters are
+ * taken first, so a room or owner past its hour never briefly raises the
+ * fleet's daily pools; which reason a refusal reports (and so which reset
+ * time is promised) is read from the counters afterwards, without taking
+ * anything (`AllowancePort.peek`): a spent hour says the next hour only when
+ * no daily cap or pool would refuse as well.
  *
  * Credits are research-operations accounting only. They never touch equity,
  * P&L, grants or caps, and nothing here can place, size or authorise a trade.
@@ -150,6 +155,13 @@ export function deriveDailyCredits(planCreditsPerMonth: number, daysInMonth: num
 export interface AllowancePort {
   take(key: string, amount: number, limit: number, nowMs: number): Promise<boolean>;
   give(key: string, amount: number): Promise<void>;
+  /**
+   * The counter's value now (0 when absent), changing nothing. Optional: a
+   * port without it still charges correctly; the budget then cannot say
+   * which later cap would also refuse (tryCharge's reason) or whether a
+   * whole planned cost fits (wouldRefuse), and says nothing it cannot know.
+   */
+  peek?(key: string): Promise<number>;
 }
 
 /**
@@ -180,6 +192,10 @@ export class MemoryAllowance implements AllowancePort {
     return this.counts.get(key)?.n ?? 0;
   }
 
+  async peek(key: string): Promise<number> {
+    return this.used(key);
+  }
+
   keys(): string[] {
     return [...this.counts.keys()];
   }
@@ -196,6 +212,8 @@ interface Step<R extends string> {
   key: string;
   limit: number;
   reason: R;
+  /** The reason when the limit is below the amount itself (it can never fit, in any window); `reason` otherwise. */
+  tooBig?: R;
 }
 
 interface Taken {
@@ -236,7 +254,8 @@ async function takeAll<R extends string>(
   for (const s of steps) {
     // Checked here so the port never sees amount > limit (see AllowancePort).
     let ok = false;
-    if (s.limit > 0 && amount <= s.limit) {
+    const fits = s.limit > 0 && amount <= s.limit;
+    if (fits) {
       try {
         ok = await port.take(s.key, amount, s.limit, nowMs);
       } catch (err) {
@@ -246,7 +265,7 @@ async function takeAll<R extends string>(
     }
     if (!ok) {
       await rollback();
-      return { ok: false, reason: s.reason };
+      return { ok: false, reason: !fits && s.tooBig !== undefined ? s.tooBig : s.reason };
     }
     taken.push({ key: s.key, amount });
   }
@@ -335,6 +354,27 @@ export function utcDay(nowMs: number): string {
   return new Date(nowMs).toISOString().slice(0, 10);
 }
 
+/**
+ * WHEN A REFUSED CHARGE CAN BE ASKED AGAIN: the start of the next clock hour
+ * for an hourly counter, 00:00 UTC for a daily one (the counters' keys carry
+ * their window, so that is when a fresh one starts). Takes a ChargeRefusal
+ * or a read's reason ("budget-group-hourly"). Null when nothing resets on a
+ * clock: a job's own allowance, a budget that could not be checked.
+ */
+export function refusalResetAt(reason: string | null | undefined, nowMs: number): number | null {
+  if (typeof reason !== "string" || typeof nowMs !== "number" || !Number.isFinite(nowMs)) return null;
+  const r = reason.startsWith("budget-") ? reason.slice("budget-".length) : reason;
+  if (r === "group-hourly" || r === "tenant-hourly") return (hourIndex(nowMs) + 1) * HOUR_MS;
+  if (r === "tenant-daily" || r === "shared-daily" || r === "class-reserve") return Date.parse(`${utcDay(nowMs)}T00:00:00.000Z`) + 24 * HOUR_MS;
+  // below-one-read and no-group never reset on a clock, like a job's own allowance.
+  return null;
+}
+
+/** "15:00": a reset time as people read it, in UTC. */
+export function utcClockText(ms: number): string {
+  return new Date(ms).toISOString().slice(11, 16);
+}
+
 /** Tenant and group ids go into keys percent-encoded, so no id can forge another's key. */
 function seg(id: string): string {
   return encodeURIComponent(id);
@@ -380,7 +420,14 @@ export interface FomoBudgetConfig {
   tenantProtectionReserve?: number;
 }
 
-export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "shared-daily" | "class-reserve";
+/**
+ * Why a charge was refused. Each clock-bound one resets at the next hour or
+ * at 00:00 UTC (refusalResetAt). Two never reset on a clock: `below-one-read`
+ * (a configured cap is below this one read's cost, the documented 0 for a
+ * group included, so no window will ever fit it) and `no-group` (a group
+ * request that cannot name its group cannot be capped).
+ */
+export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "shared-daily" | "class-reserve" | "below-one-read" | "no-group";
 
 export interface ChargeRequest {
   priority: RetrievalPriority;
@@ -481,6 +528,69 @@ export class FomoBudget {
     };
   }
 
+  /**
+   * The counters a charge takes, in order: the HOURLY ones first (the
+   * room's, then the owner's), then the daily caps and the fleet's pools.
+   * A refusal from a spent hour therefore never touches the fleet-wide
+   * daily counters: nothing another owner's charge could see briefly high
+   * and be refused by, and nothing a failed give-back could leave high
+   * until midnight.
+   *
+   * A tenant or group cap below this one read's cost can never fit, in any
+   * window (the documented 0 for a group included): `below-one-read`, no
+   * clock time promised. The pools keep their own reasons: an empty pool is
+   * the fleet's, said as such.
+   */
+  private stepsFor(req: ChargeRequest, groupId: string | null): { hourly: Step<ChargeRefusal>[]; daily: Step<ChargeRefusal>[] } {
+    const pr = priorityOf(req.priority);
+    const protect = pr === "position-protection";
+    const c = this.config;
+    const L = this.limitsFor(pr);
+    const h = hourIndex(req.now);
+    const day = utcDay(req.now);
+    const t = seg(req.tenant);
+    const k = (...parts: string[]): string => [this.prefix, "credits", ...parts].join(":");
+    const cap = "below-one-read" as const;
+    const hourly: Step<ChargeRefusal>[] = [];
+    if (groupId !== null) hourly.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly", tooBig: cap });
+    if (!protect) hourly.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly", tooBig: cap });
+    hourly.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly", tooBig: cap });
+    const daily: Step<ChargeRefusal>[] = [];
+    if (!protect) daily.push({ key: k("tenant", t, "np", "d", day), limit: L.tenantDaily, reason: "tenant-daily", tooBig: cap });
+    daily.push({ key: k("tenant", t, "all", "d", day), limit: c.tenantDailyCredits, reason: "tenant-daily", tooBig: cap });
+    if (L.poolDiscovery !== null) daily.push({ key: k("pool", "discovery", "d", day), limit: L.poolDiscovery, reason: "class-reserve" });
+    if (L.poolNonProtection !== null) daily.push({ key: k("pool", "np", "d", day), limit: L.poolNonProtection, reason: "class-reserve" });
+    daily.push({ key: k("pool", "all", "d", day), limit: L.poolAll, reason: "shared-daily" });
+    return { hourly, daily };
+  }
+
+  /** The first step that would refuse `amount` now, by reading the counters (port.peek); null when every one fits. Throws when a read fails. */
+  private async firstRefusing(steps: readonly Step<ChargeRefusal>[], amount: number, peek: (key: string) => Promise<number>): Promise<ChargeRefusal | null> {
+    for (const s of steps) {
+      if (!(s.limit > 0 && amount <= s.limit)) return s.tooBig ?? s.reason;
+      if ((await peek(s.key)) + amount > s.limit) return s.reason;
+    }
+    return null;
+  }
+
+  /**
+   * THE REASON A REFUSAL REPORTS, whose reset time is promised to the room
+   * and the owner (refusalResetAt): a spent hour says the next hour only
+   * when no daily cap or pool would refuse too, or "try again after 15:00"
+   * is refused again at 15:00 until midnight. Read without taking anything
+   * (port.peek); a port without it, or a failed read, keeps the hourly reason.
+   */
+  private async reportedReason(reason: ChargeRefusal, daily: readonly Step<ChargeRefusal>[], amount: number): Promise<ChargeRefusal> {
+    if (reason !== "group-hourly" && reason !== "tenant-hourly") return reason;
+    const port = this.port;
+    if (typeof port.peek !== "function") return reason;
+    try {
+      return (await this.firstRefusing(daily, amount, (key) => port.peek!(key))) ?? reason;
+    } catch {
+      return reason;
+    }
+  }
+
   async tryCharge(req: ChargeRequest): Promise<ChargeResult> {
     if (typeof req.tenant !== "string" || !req.tenant.trim()) throw new TypeError("tenant is required");
     if (typeof req.now !== "number" || !Number.isFinite(req.now)) throw new RangeError("now must be a finite time");
@@ -490,32 +600,140 @@ export class FomoBudget {
     const amount = Math.ceil(req.credits);
     const groupId = typeof req.groupId === "string" && req.groupId.trim() ? req.groupId : null;
     // A group question that cannot name its group cannot be capped: refuse it.
-    if (req.surface === "telegram-group" && groupId === null) return { ok: false, reason: "group-hourly" };
+    if (req.surface === "telegram-group" && groupId === null) return { ok: false, reason: "no-group" };
     if (amount === 0) return noopGrant();
 
-    const pr = priorityOf(req.priority);
-    const protect = pr === "position-protection";
-    const c = this.config;
-    const L = this.limitsFor(pr);
-    const h = hourIndex(req.now);
-    const day = utcDay(req.now);
-    const t = seg(req.tenant);
-    const k = (...parts: string[]): string => [this.prefix, "credits", ...parts].join(":");
-
-    const steps: Step<ChargeRefusal>[] = [];
-    if (groupId !== null) steps.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly" });
-    if (!protect) steps.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly" });
-    steps.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly" });
-    if (!protect) steps.push({ key: k("tenant", t, "np", "d", day), limit: L.tenantDaily, reason: "tenant-daily" });
-    steps.push({ key: k("tenant", t, "all", "d", day), limit: c.tenantDailyCredits, reason: "tenant-daily" });
-    if (L.poolDiscovery !== null) steps.push({ key: k("pool", "discovery", "d", day), limit: L.poolDiscovery, reason: "class-reserve" });
-    if (L.poolNonProtection !== null) steps.push({ key: k("pool", "np", "d", day), limit: L.poolNonProtection, reason: "class-reserve" });
-    steps.push({ key: k("pool", "all", "d", day), limit: L.poolAll, reason: "shared-daily" });
-
-    const r = await takeAll(this.port, steps, amount, req.now, this.onError);
-    if (!r.ok) return r;
+    const { hourly, daily } = this.stepsFor(req, groupId);
+    const r = await takeAll(this.port, [...hourly, ...daily], amount, req.now, this.onError);
+    if (!r.ok) return { ok: false, reason: await this.reportedReason(r.reason, daily, amount) };
     return makeGrant(this.port, r.taken, amount, this.clock, this.onError);
   }
+
+  /**
+   * WHETHER A CHARGE OF `credits` WOULD BE REFUSED NOW, and why, taking
+   * nothing: the same steps in the same order as tryCharge, the same reason
+   * it would report. For a tool that pays a cheap read and then a dear one
+   * (a search, then a coin's thesis page): asked with the whole planned cost
+   * before the first, so a room is never charged for the search and then
+   * refused the page, nor told one reset time by the first read and refused
+   * again then by the second. Null: it fits, or this budget's port cannot
+   * read its counters (peek), or a read failed; the reads are then charged
+   * one by one as before.
+   */
+  async wouldRefuse(req: ChargeRequest): Promise<ChargeRefusal | null> {
+    if (typeof req.tenant !== "string" || !req.tenant.trim()) return null;
+    if (typeof req.now !== "number" || !Number.isFinite(req.now)) return null;
+    if (typeof req.credits !== "number" || !Number.isFinite(req.credits) || req.credits < 0) return null;
+    const amount = Math.ceil(req.credits);
+    const groupId = typeof req.groupId === "string" && req.groupId.trim() ? req.groupId : null;
+    if (req.surface === "telegram-group" && groupId === null) return "no-group";
+    const port = this.port;
+    if (amount === 0 || typeof port.peek !== "function") return null;
+    const { hourly, daily } = this.stepsFor(req, groupId);
+    try {
+      const first = await this.firstRefusing([...hourly, ...daily], amount, (key) => port.peek!(key));
+      return first === null ? null : await this.reportedReason(first, daily, amount);
+    } catch {
+      return null;
+    }
+  }
+}
+
+// ── The caps a hosting process configures ────────────────────────────────
+
+/** The Free plan's monthly credits, the default when the plan is not known. */
+export const FREE_PLAN_CREDITS_PER_MONTH = 250_000;
+/** Held back from the monthly allowance: the budget never plans to spend the last fifth. */
+export const PLAN_SAFETY_FRACTION = 0.2;
+
+/**
+ * Conservative per-tenant and per-group caps. One standard coin research costs
+ * about 1,500–2,000 credits (one thesis page, one feed page, token stats, maybe
+ * a search); a tenant can ask a handful of those an hour and a few dozen a day,
+ * and a group less. The shared pool still bounds the whole fleet.
+ */
+export const DEFAULT_TENANT_HOURLY_CREDITS = 6_000;
+export const DEFAULT_TENANT_DAILY_CREDITS = 20_000;
+export const DEFAULT_GROUP_HOURLY_CREDITS = 2_500;
+
+/** The budget configuration a plan supports, with any construction-time overrides applied and clamped. */
+export function budgetConfigFor(planCreditsPerMonth: number, over: Partial<FomoBudgetConfig> = {}): FomoBudgetConfig {
+  const derived = deriveDailyCredits(planCreditsPerMonth, 31, PLAN_SAFETY_FRACTION);
+  // An unusable plan figure is not a big plan: spend nothing rather than guess.
+  const shared = over.sharedDailyCredits ?? derived ?? 0;
+  const cap = (v: number | undefined, fallback: number): number => Math.min(shared, Math.max(0, v ?? fallback));
+  return {
+    ...over,
+    sharedDailyCredits: shared,
+    tenantHourlyCredits: cap(over.tenantHourlyCredits, DEFAULT_TENANT_HOURLY_CREDITS),
+    tenantDailyCredits: cap(over.tenantDailyCredits, DEFAULT_TENANT_DAILY_CREDITS),
+    groupHourlyCredits: cap(over.groupHourlyCredits, DEFAULT_GROUP_HOURLY_CREDITS),
+  };
+}
+
+type Env = Record<string, string | undefined>;
+
+/**
+ * THE CAPS AN OPERATOR MAY SET, by environment variable. The orchestrator
+ * (fomoSetup), the web process (web/src/lib/fomo-runtime.ts) and a
+ * self-hosted worker (index.ts) all read them through fomoBudgetFrom, so the
+ * processes that share the fomo_meta counters agree on every limit (set
+ * them on web AND orchestrator, then redeploy both). Unset, the defaults
+ * above apply, unchanged. These are research-credit caps, never trading
+ * limits, and budgetConfigFor still holds each one under the shared pool.
+ */
+export const FOMO_CAP_ENV = Object.freeze({
+  groupHourlyCredits: "MERRYMEN_FOMO_GROUP_HOURLY_CREDITS",
+  tenantHourlyCredits: "MERRYMEN_FOMO_TENANT_HOURLY_CREDITS",
+  tenantDailyCredits: "MERRYMEN_FOMO_TENANT_DAILY_CREDITS",
+} as const);
+
+/** The provider plan's monthly credits (MERRYMEN_FOMO_PLAN_CREDITS): a positive number, else undefined and the default applies. */
+export function fomoPlanFrom(env: Env): number | undefined {
+  const plan = Number(env?.MERRYMEN_FOMO_PLAN_CREDITS);
+  return Number.isFinite(plan) && plan > 0 ? plan : undefined;
+}
+
+/**
+ * The cap overrides an environment sets: whole numbers of credits only
+ * (digits, nothing else: no sign, comma, decimal or unit). A blank or unset
+ * variable is no override. Each bad value is one problem line, which names
+ * the variable and never echoes the value (a key pasted into the wrong
+ * variable must not reach a log), and leaves that cap at its default.
+ */
+export function fomoBudgetFrom(env: Env): { budget: Partial<FomoBudgetConfig>; problems: string[] } {
+  const budget: Partial<FomoBudgetConfig> = {};
+  const problems: string[] = [];
+  for (const [field, name] of Object.entries(FOMO_CAP_ENV) as Array<[keyof typeof FOMO_CAP_ENV, string]>) {
+    const raw = env?.[name];
+    if (raw === undefined || raw.trim() === "") continue;
+    const v = raw.trim();
+    const n = /^\d{1,12}$/.test(v) ? Number(v) : Number.NaN;
+    if (!Number.isSafeInteger(n)) {
+      problems.push(`fomo: ${name} is not a whole number of credits; its default applies`);
+      continue;
+    }
+    budget[field] = n;
+  }
+  // A nonzero cap below the dearest read a room or owner surface makes can never answer it, in
+  // any hour: said once at boot, as the limit in force (0 is the documented "off", said by docs).
+  // An owner's deep trader read may use the 2,500-credit profile route; a room never does (a
+  // trader is a 250 search, then 250-credit reads), so a room's dearest read is a coin's
+  // thesis page.
+  const dearest = ROUTE_COST["wallet-resolution"];
+  const roomDearest = ROUTE_COST["thesis-page"];
+  const keep = 1 - DEFAULT_PRIORITY_SHARES["position-protection"];
+  const below = (v: number | undefined, share: number, floor: number): boolean => typeof v === "number" && v > 0 && Math.floor(v * share) < floor;
+  const low = (v: number | undefined, share: number): boolean => below(v, share, dearest);
+  if (below(budget.groupHourlyCredits, 1, roomDearest)) problems.push(`fomo: ${FOMO_CAP_ENV.groupHourlyCredits} is below what one coin's thesis page costs (${roomDearest} credits), so a room can never hear a coin's theses`);
+  if (low(budget.tenantHourlyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantHourlyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) an hour`);
+  if (low(budget.tenantDailyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantDailyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) a day`);
+  return { budget, problems };
+}
+
+/** One boot line: the limits in force, as budgetConfigFor clamped them. */
+export function describeBudget(c: FomoBudgetConfig): string {
+  return `fomo: research budget ${c.sharedDailyCredits} credits/day shared; per owner ${c.tenantHourlyCredits}/h and ${c.tenantDailyCredits}/day; per group ${c.groupHourlyCredits}/h`;
 }
 
 // ── Analysis-model budget ────────────────────────────────────────────────

@@ -101,6 +101,23 @@ async function fomoFixture(o: { liveFeed?: boolean; search?: Rec } = {}) {
     if (p.startsWith("/v2/thesis/token/")) return fjson(fixture("theses-token"));
     if (/\/stats$/.test(p)) return fjson(fixture("token-stats"));
     if (/\/balances$/.test(p)) return fjson(fixture("balances"));
+    if (p.startsWith("/v2/leaderboard/") && !p.startsWith("/v2/leaderboard/tokens/")) {
+      return fjson({ ...fixture("leaderboard-24h"), window: p.split("/").pop(), capturedAt: new Date(Date.now() - 60_000).toISOString() });
+    }
+    const pos = /^\/v2\/users\/([0-9a-f-]{36})\/positions$/.exec(p);
+    if (pos) {
+      // The fixture's shape, around now: a winner and a loser closed in the last hour.
+      const b = fixture("positions");
+      const [open, , loser] = b.trades as Rec[];
+      const at = (ms: number) => new Date(Date.now() - ms).toISOString();
+      b.key = pos[1];
+      b.trades = [
+        { ...open, userId: pos[1], createdAt: at(3_600_000), closedAt: null },
+        { ...loser, userId: pos[1], createdAt: at(5 * 3_600_000), closedAt: at(1_800_000) },
+        { ...loser, userId: pos[1], tradeId: "c0000000-0000-4000-8000-000000000001", token: { symbol: "ROO", address: "0x51fb760000000000000000000000000000000b0c" }, realizedPnlUsd: 4_200, createdAt: at(5 * 3_600_000), closedAt: at(600_000) },
+      ];
+      return fjson(b);
+    }
     return fjson({ error: "not_found" }, 404);
   }) as typeof fetch;
   const client = createFomoClient({ apiKey: "test_key_not_a_credential_0000", fetchImpl, now: () => Date.now(), sleep: async () => {}, random: () => 0 });
@@ -627,109 +644,83 @@ describe("social-trading research in a DM", () => {
   });
 });
 
-describe("the owner's group ask about one trader, answered in her DM", () => {
-  it("'do you know unipcs on fomo' in a group: routed, looked up read-only in her DM, and the room hears only that it went", async () => {
-    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" } }, async (h) => {
-      h.sayInGroup("pine do you know unipcs on fomo");
-      await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
+describe("one trader asked about in a group: answered in the room, for her as for anyone, never in her DM (Milla, 2026-10-07)", () => {
+  const KALEO = "1f08e6ab-5c73-5443-9225-bfc496cde51f";
+  const roomOnly = async (h: Harness) => {
+    assert.deepEqual(h.sentTo(OWNER), [], "nothing about a trader goes to her DM");
+    const turns = await recentChatTurns(OWNER, 8);
+    assert.ok(!turns.some((t) => /CryptoKaleo/.test(t.content)), "nor into her DM history");
+    for (const c of h.fx.calls) {
+      assert.equal(c.opts.surface, "telegram-group");
+      assert.equal(c.opts.audience, "group");
+      assert.equal(c.opts.conversationKey, `tg-group:${GROUP}:0`);
+    }
+  };
+
+  it("'do you know CryptoKaleo on fomo' from her: routed, one read with the group's audience, the room hears who they are by handle", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "CryptoKaleo" } }, async (h) => {
+      h.sayInGroup("pine do you know CryptoKaleo on fomo");
+      await h.until(() => h.sentTo(GROUP).length > 0);
       assert.ok(h.llm.includes("group-route"), "the line was routed by the group's model");
-      const lookups = h.fx.calls.map((c) => c.tool);
-      assert.deepEqual(lookups, ["fomo_get_trader_context"], "one read; nothing that changes anything");
-      const o = h.fx.calls[0]!.opts;
-      assert.equal(o.surface, "telegram-dm");
-      assert.equal(o.audience, "owner");
-      assert.equal(o.conversationKey, `tg-dm:${OWNER}`);
-      assert.deepEqual(h.fx.calls[0]!.args, { trader: "unipcs" });
-      const dm = h.sentTo(OWNER);
-      assert.equal(dm.length, 1);
-      assert.match(dm[0]!, /^You asked about Fomo trader unipcs in a group, so here it is privately\./);
+      assert.deepEqual(h.fx.calls.map((c) => [c.tool, c.args]), [["fomo_get_trader_context", { trader: "CryptoKaleo" }]], "one read; nothing that changes anything");
       const room = h.sentTo(GROUP);
       assert.equal(room.length, 1);
-      assert.doesNotMatch(room[0]!, /unipcs/i);
-      // Only the fixed question code wrote enters her DM history, never the group's words.
-      const turns = await recentChatTurns(OWNER, 4);
-      assert.ok(turns.some((t) => t.role === "user" && t.content === "who is trader unipcs on fomo?"));
-      assert.ok(!turns.some((t) => /do you know/.test(t.content)));
+      assert.match(room[0]!, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(source-reported snapshot, valued at current prices\)\.\nLargest held by CryptoKaleo: PONS on robinhood \$3\.1k, FU2O on solana \$13\./);
+      assert.doesNotMatch(room[0]!, /cohort|watched|follow|@|0x[0-9a-fA-F]{6}/i);
+      await roomOnly(h);
     });
   });
 
-  it("her plain wording, 'who is trader unipcs on fomo?': the real port names the trader, and her DM gets it", async () => {
+  it("her plain wording, 'what is trader CryptoKaleo holding on fomo?', and the same line from anyone else: the same room answer", async () => {
     await withDm({ groupPick: { action: "chat" } }, async (h) => {
-      h.sayInGroup("pine what is trader unipcs holding on fomo?");
-      await h.until(() => h.sentTo(GROUP).length > 0 && h.sentTo(OWNER).length > 0);
-      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_trader_context"]);
-      assert.equal(h.fx.calls[0]!.opts.audience, "owner");
-      assert.match(h.sentTo(OWNER)[0]!, /^You asked about Fomo trader unipcs in a group/);
-      assert.doesNotMatch(h.sentTo(GROUP)[0]!, /unipcs/i);
-      const turns = await recentChatTurns(OWNER, 4);
-      assert.ok(turns.some((t) => t.role === "user" && t.content === "what is trader unipcs holding on fomo?"));
-    });
-  });
-
-  it("her DM unreachable: nothing is looked up, nothing enters her history, and the room is told to /start", async () => {
-    // A handle no other test here asks about: the DM history is the file's own.
-    await withDm({ groupPick: { action: "fomo_trader", trader: "bobbyx" }, dmBlocked: true }, async (h) => {
-      h.sayInGroup("pine do you know bobbyx on fomo");
+      h.sayInGroup("pine what is trader CryptoKaleo holding on fomo?");
       await h.until(() => h.sentTo(GROUP).length > 0);
-      assert.deepEqual(h.fx.calls, []);
-      assert.match(h.sentTo(GROUP)[0]!, /\/start/);
-      const turns = await recentChatTurns(OWNER, 8);
-      assert.ok(!turns.some((t) => /bobbyx/.test(t.content)));
+      h.sayInGroup("pine what is trader CryptoKaleo holding on fomo now?", FRIEND);
+      await h.until(() => h.sentTo(GROUP).length > 1);
+      const room = h.sentTo(GROUP);
+      assert.equal(room.length, 2);
+      for (const t of room) assert.match(t, /^CryptoKaleo on Fomo holds 2 coins/);
+      assert.ok(!h.llm.includes("group-route"), "the planner read it: no routing call");
+      await roomOnly(h);
     });
   });
 
-  it("not on the allowlist: her DM would not answer her, so nothing is looked up or sent there", async () => {
-    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" }, allowlist: [FRIEND] }, async (h) => {
-      h.sayInGroup("pine do you know unipcs on fomo");
+  it("live 23:04, 'who's the best trader on fomo today and what did he make money on': the board, then his winners and losers, in the room", async () => {
+    await withDm({ groupPick: { action: "chat" } }, async (h) => {
+      h.sayInGroup("@bot111 who's the best trader on fomo today and what did he make money on");
       await h.until(() => h.sentTo(GROUP).length > 0);
-      assert.deepEqual(h.fx.calls, []);
-      assert.deepEqual(h.sentTo(OWNER), []);
+      assert.deepEqual(h.fx.calls.map((c) => [c.tool, c.args]), [
+        ["fomo_get_rankings", { board: "traders", window: "24h" }],
+        ["fomo_get_trader_activity", { trader: KALEO, window: "24h", limit: 50 }],
+      ], "the row's trader by the id the board gave");
+      assert.deepEqual(h.sentTo(GROUP)[0]!.split("\n").slice(0, 4), [
+        "Top traders on Fomo, last 24h, by money made on closed trades:",
+        "1. CryptoKaleo +$151.4k",
+        "2. frankdegods -$4.2k",
+        "CryptoKaleo on trades opened or closed in the last 24h (source-reported, realised to date): made the most on ROO +$4.2k; lost the most on plumber -$10.9k.",
+      ]);
+      // Her DM gets only her moves on the board (kept as before), never the row's research.
+      const dm = h.sentTo(OWNER);
+      assert.ok(dm.every((t) => t.startsWith("Your moves on these Fomo traders")), dm.join("\n---\n"));
+      assert.match(h.sentTo(GROUP)[0]!, /\nsent the trade moves for these to your DM\.$/);
     });
   });
 
-  it("a DM that fails after the lookup leaves her DM's research subject as it was", async () => {
-    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" } }, async (h) => {
-      await ask(h, "what are the theses on $PONS");
-      h.ownerSendsFail(true);
-      const before = h.fx.calls.length;
-      h.sayInGroup("pine do you know unipcs on fomo");
-      await h.until(() => h.sentTo(GROUP).length > 0);
-      assert.deepEqual(h.fx.calls.slice(before).map((c) => c.tool), ["fomo_get_trader_context"], "the lookup ran");
-      h.ownerSendsFail(false);
-      await ask(h, "What about the sellers?");
-      const last = h.fx.calls[h.fx.calls.length - 1]!;
-      assert.equal(last.tool, "fomo_get_token_activity", "the follow-up is still about the coin she last asked about");
-      assert.equal(last.args.token, PONS);
-    });
-  });
-
-  it("an ask forgotten while its lookup runs is not answered: no DM, nothing in her history", async () => {
-    await withDm({ groupPick: { action: "fomo_trader", trader: "zedtrader" } }, async (h) => {
+  it("an ask forgotten while its lookup runs is not answered: nothing in the room, nothing in her DM", async () => {
+    await withDm({ groupPick: { action: "fomo_trader", trader: "CryptoKaleo" } }, async (h) => {
       let release!: () => void;
       h.fx.hold.until = new Promise<void>((r) => {
         release = r;
       });
-      h.sayInGroup("pine do you know zedtrader on fomo");
+      h.sayInGroup("pine do you know CryptoKaleo on fomo");
       await h.until(() => h.fx.calls.length > 0);
       h.sayInGroup("/forgetme");
       await h.advance(2_000);
       h.fx.hold.until = null;
       release();
       await h.advance(5_000);
-      assert.deepEqual(h.fx.calls.map((c) => c.tool), ["fomo_get_trader_context"]);
-      assert.ok(!h.sentTo(OWNER).some((t) => /zedtrader/.test(t)), "no DM for a forgotten ask");
-      const turns = await recentChatTurns(OWNER, 8);
-      assert.ok(!turns.some((t) => /zedtrader/.test(t.content)));
-    });
-  });
-
-  it("the same line from anyone else: the room's deflection, no lookup, nothing in the owner's DM", async () => {
-    await withDm({ groupPick: { action: "fomo_trader", trader: "unipcs" } }, async (h) => {
-      h.sayInGroup("pine do you know unipcs on fomo", FRIEND);
-      await h.until(() => h.sentTo(GROUP).length > 0);
-      assert.deepEqual(h.fx.calls, []);
-      assert.deepEqual(h.sentTo(OWNER), []);
-      assert.match(h.sentTo(GROUP)[0]!, /direct message/);
+      assert.ok(!h.sentTo(GROUP).some((t) => /CryptoKaleo/.test(t)), "no answer for a forgotten ask");
+      assert.ok(!h.sentTo(OWNER).some((t) => /CryptoKaleo/.test(t)));
     });
   });
 });
