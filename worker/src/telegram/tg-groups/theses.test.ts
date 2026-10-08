@@ -302,6 +302,24 @@ describe("checkWording", () => {
     assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
   });
 
+  it("hold, never sell, go long, stay away and fill your bags are advice too, and are never said back (review r4)", () => {
+    for (const x of [
+      "never sell before the listing", "don't sell before the listing", "don\u2019t sell before the listing", "do not sell before the listing", "hold through the unlock",
+      "holders say hold until the listing", "go long before the listing", "stay away until the unlock", "fade the pump", "add on every dip",
+      "diamond hands until the listing", "hodl till the listing", "strong community, hold for the listing", "fill your bags before the listing", "avoid it until the unlock",
+      "a no-brainer at this size", "not too late to get a bag", "best avoided until the unlock", "long it before the listing",
+    ]) {
+      const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
+      assert.equal(w.gist, null, x);
+      assert.deepEqual([...w.forIt, ...w.against, ...w.waitingOn], [], x);
+    }
+    // A fact or a worry that names a trade stays.
+    const fair = ["long-term holders are patient", "a short squeeze could follow the listing", "holders keep adding on dips", "holders plan to hold until the listing", "diamond-handed holders", "fears holders never sell"];
+    const kept = checkWording({ for: fair.slice(0, 3), against: fair.slice(3) }, MATERIAL, "Shogun").wording;
+    assert.deepEqual([...kept.forIt, ...kept.against], fair);
+    assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
+  });
+
   it("misconduct and named people are never said back: wash trading, lying, walking off with the money, '<name> dumped on his followers' (review r3)", () => {
     for (const x of [
       "worries the dev is wash trading the volume", "worries insiders are manipulating the chart", "the dev lied about the partnership",

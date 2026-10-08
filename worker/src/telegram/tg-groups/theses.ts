@@ -184,16 +184,19 @@ const OUT_ACCUSE =
   /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|(?:ran|walked|made|went|got)\s+(?:off|away)\s+with|(?:disappeared|vanished|fled)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool)|manipulat\w*|wash[\s-]?trad\w*|insider\s+trading|cash[\s-]?grab|lied|liars?|(?:dump(?:ed|ing|s)?|sold|selling)\s+on\s+(?:his|her|their|the)\s+(?:followers|holders|community|buyers|fans))\b/i;
 /**
  * TRADE ADVICE IN THE AGENT'S VOICE: a trade verb opening the phrase or one
- * of its clauses ("get some before the listing", "still early, join in"), or
- * one someone says or urges ("holders say get some while it is cheap"), or
- * "worth grabbing". The gate's `answer` kind skips its coin advice clause,
- * and its own advice clause has no bare imperative. A worry that names a
- * trade ("fears early buyers sell before the unlock", "worries holders exit
- * before the unlock") is not one, and stays.
+ * of its clauses ("get some before the listing", "still early, join in",
+ * "hold through the unlock", "never sell before the listing", "go long",
+ * "stay away", "fill your bags"), or one someone says or urges ("holders say
+ * get some while it is cheap", "holders say hold until the listing"), or
+ * "worth grabbing", "a no-brainer", "not too late to". The gate's `answer`
+ * kind skips its coin advice clause, and its own advice clause has no bare
+ * imperative. A worry or a fact that names a trade ("fears early buyers sell
+ * before the unlock", "holders plan to hold until the listing", "long-term
+ * holders", "a short squeeze") is not one, and stays.
  */
-const TRADE_VERB = String.raw`(?:buy|sell|grab|ape|load(?:\s+up)?|accumulate|stack|scoop|exit|bail|dump|take\s+profits?|get\s+(?:some|in|on|a\s+bag|it)|hop\s+(?:in|on)|jump\s+(?:in|on)|join(?:\s+(?:in|us|me))?)`;
+const TRADE_VERB = String.raw`(?:buy|sell|grab|ape|load(?:\s+up)?|accumulate|stack|scoop|exit|bail|dump|take\s+profits?|get\s+(?:some|in|on|a\s+bag|it)|hop\s+(?:in|on)|jump\s+(?:in|on)|join(?:\s+(?:in|us|me))?|hold|hodl|add|fade|avoid|stay\s+(?:away|out)|go\s+(?:long|short)|(?:long|short)\s+(?:it|this)|fill\s+(?:\w+\s+)?bags?|diamond[\s-]+hands?)`;
 const OUT_ADVICE = new RegExp(
-  String.raw`(?:^|[,;:—–]\s*|\b(?:say|says|saying|said|tell|tells|telling|urge|urges|urging)\s+(?:(?:you|people|holders|everyone)\s+)?(?:to\s+)?)(?:(?:just|go|so|now|still)\s+)*${TRADE_VERB}\b|\bworth\s+(?:buying|grabbing|aping|getting|accumulating|a\s+(?:bag|punt|buy))\b`,
+  String.raw`(?:^|[,;:—–]\s*|\b(?:say|says|saying|said|tell|tells|telling|urge|urges|urging)\s+(?:(?:you|people|holders|everyone)\s+)?(?:to\s+)?)(?:(?:just|go|so|now|still|never|don['’]?t|do\s+not)\s+)*${TRADE_VERB}\b|\bno[\s-]+brainer\b|\bnot\s+too\s+late\s+to\b|\bbest\s+avoided\b|\bworth\s+(?:buying|grabbing|aping|getting|accumulating|a\s+(?:bag|punt|buy))\b`,
   "i",
 );
 /**

@@ -1443,8 +1443,12 @@ Fomo, nor a venue, chain, coin or common acronym such as Robinhood,
 Telegram, AI or SOL; a first word only when it is an acronym such as "CZ"),
 no trade advice in its voice (a trade
 verb opening the phrase or a clause, "get some before the listing", "still
-early, join in", one someone urges, "holders say get some", or "worth
-grabbing"; "fears early buyers sell before the unlock" is a worry and stays),
+early, join in", "hold through the unlock", "never sell before the listing",
+"go long", "stay away", "fade the pump", "fill your bags", one someone urges,
+"holders say get some" or "holders say hold", "worth grabbing", "a
+no-brainer" or "not too late to"; "fears early buyers sell before the
+unlock", "holders plan to hold until the listing", "long-term holders" and
+"a short squeeze" are worries and facts and stay),
 and the gate as an `answer`
 line. A phrase that fails is dropped, never repaired; the worded lines sit
 between the digest's header and its closing lines, which always stay, within
