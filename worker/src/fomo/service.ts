@@ -1230,9 +1230,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       log(`fomo: cache read failed: ${errText(e)}`);
     }
     let heldData = entry && entry.retrievedAtMs !== null ? spec.revive(entry.payload) : null;
-    // A held "nothing here" is a short-lived answer: past EMPTY_HOLD_MS, or
-    // when the asker pushed back, it is read again (ReadSpec.empty).
-    if (heldData !== null && spec.empty?.(heldData) === true && entry && entry.retrievedAtMs !== null && (cc.retryEmpty === true || now - entry.retrievedAtMs >= EMPTY_HOLD_MS)) {
+    // A held "nothing here" is a short-lived answer for a read someone will
+    // hear: past EMPTY_HOLD_MS, or when the asker pushed back, it is read
+    // again (ReadSpec.empty). Each read decides for itself, so the shared
+    // research queue (background) keeps the class's own window on the same
+    // copy and never re-buys an empty page every two minutes (review on #306).
+    if (heldData !== null && cc.surface !== "background" && spec.empty?.(heldData) === true && entry && entry.retrievedAtMs !== null && (cc.retryEmpty === true || now - entry.retrievedAtMs >= EMPTY_HOLD_MS)) {
       heldData = null;
     }
     const heldMeta = entry && isObj(entry.meta) ? entry.meta : null;
@@ -2190,7 +2193,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     let page = first.data;
     let section = first;
     const total = page.totalAvailable;
-    const capped = page.rows.length >= THESIS_PAGE_SIZE || (total !== null && total > page.rows.length);
+    // An EMPTY first page is never "capped": it tells nothing about pages 2-3, and the provider's
+    // `pages` reads 1..N again, so a page that came back empty under a count would buy a 3-page
+    // read that comes back empty too (review on #306).
+    const capped = page.rows.length > 0 && (page.rows.length >= THESIS_PAGE_SIZE || (total !== null && total > page.rows.length));
     const firstStances = page.rows.map((x) => readThesisText(x.text).stance);
     const plan = planThesisFetch(
       await previousDossier(t),

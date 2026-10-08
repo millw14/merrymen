@@ -2092,3 +2092,35 @@ describe("live provider shapes, as the service reads them (2026-10-04)", () => {
     assert.ok(!whole.coverage.notes.some((n) => /recent window/.test(n)));
   });
 });
+
+describe("a held empty thesis page (review on #306)", () => {
+  const LABEL = { symbol: "PONS", name: null };
+
+  it("the shared research queue keeps the class's window on an empty page; a read someone hears re-reads it after two minutes", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", () => json({ theses: [], available: true }, 200, { "x-credits-cost": "1250" }));
+    const token = tokenIdentity(robinhoodChain(), PONS)!;
+    await h.service.refreshDossier(token, LABEL, { priority: "discovery", depth: "quick", now: h.clock.now });
+    h.clock.now += 3 * 60_000;
+    await h.service.refreshDossier(token, LABEL, { priority: "discovery", depth: "quick", now: h.clock.now });
+    assert.equal(h.count("/v2/thesis/token/"), 1, "background research never re-buys an empty page every two minutes");
+    // The same shared copy, three minutes old, is read again for a person who will hear it.
+    const env = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" });
+    assert.equal(h.count("/v2/thesis/token/"), 2);
+    assert.equal(env.freshness.servedFrom, "live");
+  });
+
+  it("an empty first page under a count is never expanded to a multi-page read", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", () => json({ theses: [], available: false, totalAvailable: 4190 }, 200, { "x-credits-cost": "1250" }));
+    const token = tokenIdentity(robinhoodChain(), PONS)!;
+    await h.service.refreshDossier(token, LABEL, { priority: "discovery", depth: "standard", now: h.clock.now });
+    assert.equal(h.count("/v2/thesis/token/"), 1, "one page, not page one and then pages 1-3");
+    assert.ok(!h.calls.some((c) => c.includes("/v2/thesis/token/") && /[?&]pages=/.test(c)), h.calls.join(" | "));
+    // A person's research ask at standard depth, two minutes on: one page again, never pages 1-3.
+    h.clock.now += 2 * 60_000;
+    await h.invoke<ResearchCoinData>("fomo_research_coin", { token: PONS, chain: "robinhood" });
+    assert.equal(h.count("/v2/thesis/token/"), 2);
+    assert.ok(!h.calls.some((c) => c.includes("/v2/thesis/token/") && /[?&]pages=/.test(c)), h.calls.join(" | "));
+  });
+});

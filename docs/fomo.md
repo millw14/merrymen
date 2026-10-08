@@ -172,8 +172,10 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   **A copy that says "nothing here" is short-lived** (the AUTON incident, 2026-10-08:
   the provider answered one coin's thesis page empty, `available: false`, while it held
   4,190 theses, and a room was told "no theses" three times from that copy): an empty
-  thesis page is reused for at most 2 min on any surface (`service.ts EMPTY_HOLD_MS`,
-  `ReadSpec.empty`), and never when the asker pushed back ("there has to be thesis",
+  thesis page is reused for at most 2 min on any surface a person hears (`service.ts
+  EMPTY_HOLD_MS`, `ReadSpec.empty`; the shared research queue keeps the class's own
+  window on the same copy, and an empty first page is never expanded to a multi-page
+  read), and never when the asker pushed back ("there has to be thesis",
   "check again"). A pushback is carried as its own flag (`BrokerCallOptions.retryEmpty`
   to `ChargeContext.retryEmpty`), never as a forced refresh: a copy with something in it
   keeps its window, a room's two hours included (D8). An empty page the provider marks not
