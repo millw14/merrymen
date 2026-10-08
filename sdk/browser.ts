@@ -73,6 +73,12 @@ function activatableCaps(caps: unknown): boolean {
     && Number.isSafeInteger(expiryDays) && expiryDays <= 365 && Number.isSafeInteger(maxOpsPerDay);
 }
 
+/** A refused value as the caller wrote it, without JSON.stringify's own throws (a bigint, a cycle). */
+function shown(value: unknown): string {
+  if (typeof value === "bigint") return `${value}n`;
+  try { return JSON.stringify(value) ?? String(value); } catch { return typeof value; }
+}
+
 /**
  * Derive and sign the same permission wall the Merrymen dashboard uses.
  *
@@ -99,9 +105,11 @@ export async function prepareMerryman(options: PrepareMerrymanOptions): Promise<
   // cannot: it maps every id but the testnet's to MAINNET (chainForId), so a
   // typo like 46631, another network's 1 or the string "46630" sealed a
   // real-funds Robinhood Chain permission without a word.
-  const chainId = options.chainId ?? robinhoodChain.id;
+  // Only an ABSENT chainId means mainnet: `?? mainnet` read null, which config
+  // like `chainId: cfg.testnet ?? null` produces, as a request for real funds.
+  const chainId = options.chainId === undefined ? robinhoodChain.id : options.chainId;
   if (chainId !== robinhoodChain.id && chainId !== robinhoodTestnet.id) {
-    throw new Error(`chainId ${JSON.stringify(options.chainId)} is not a partner enrollment chain: use Robinhood Chain ${robinhoodChain.id} or its testnet ${robinhoodTestnet.id}. Nothing was signed.`);
+    throw new Error(`chainId ${shown(options.chainId)} is not a partner enrollment chain: use Robinhood Chain ${robinhoodChain.id} or its testnet ${robinhoodTestnet.id}. Nothing was signed.`);
   }
   if (!activatableCaps(caps)) {
     throw new Error(
