@@ -729,14 +729,16 @@ describe("a coin with no theses, in a room (review r2)", () => {
     const unavailable = env("fomo_get_token_theses", "empty", { ...none, available: false, pageRows: 0 }, cov(null));
     const counted = env("fomo_get_token_theses", "empty", { ...none, pageRows: 0 }, cov(4190));
     for (const [e, want] of [
-      [unavailable, /^Fomo didn't return the theses on PONS on robinhood just now\. Ask me again in a minute\.$/],
-      [counted, /^Fomo didn't return the theses on PONS on robinhood just now \(it lists 4,190\)\. Ask me again in a minute\.$/],
+      [unavailable, /^Fomo didn't return the theses on PONS on robinhood just now\.$/],
+      [counted, /^Fomo didn't return the theses on PONS on robinhood just now \(it lists 4,190\)\.$/],
     ] as const) {
       const text = groupScrub(renderAnswer([e], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, G));
       assert.match(text.split("\n")[0]!, want, text);
       assert.doesNotMatch(text, /No theses were returned/);
+      // A room is never promised a retry its allowance may refuse (review on #306).
+      assert.doesNotMatch(text, /ask me again|in a minute/i, text);
       for (const l of text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
-      assert.match(renderEnvelope(e, O), /The provider didn't return the theses on/);
+      assert.match(renderEnvelope(e, O), /The provider didn't return the theses on .* just now.*\. Ask me again in a minute\./);
     }
     // A windowed read whose page had theses, none in the window, is still "none in that window", whatever the all-time count.
     const windowed = env("fomo_get_token_theses", "empty", { ...none, pageRows: 25 }, { coverage: { ...cov(4190).coverage, requested: { window: "24h" } } });

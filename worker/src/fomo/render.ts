@@ -728,7 +728,11 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
     const held = !d.trader && finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 ? env.coverage.providerTotal : null;
     if (d.pageRows === 0 && (d.available === false || held !== null)) {
       const count = held !== null && !windowed ? ` (it lists ${held.toLocaleString("en-US")})` : "";
-      const line = `The provider didn't return the theses on ${subject} just now${count}. Ask me again in a minute.`;
+      // A ROOM IS NEVER PROMISED A RETRY: this renderer cannot see the room's
+      // allowance, and a new page is 1,250 credits of its 2,500 an hour, so
+      // "ask me again" would be followed by "used up" (review on #306).
+      const retry = audience === "group" ? "" : " Ask me again in a minute.";
+      const line = `The provider didn't return the theses on ${subject} just now${count}.${retry}`;
       return [audience === "group" ? roomNote(line) : line];
     }
     const line = `No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`;

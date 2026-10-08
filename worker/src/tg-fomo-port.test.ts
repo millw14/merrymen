@@ -29,7 +29,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { wrapSqlite } from "./db";
 import { createDirectBroker } from "./fomo/broker";
-import { FomoBudget, MemoryAllowance } from "./fomo/budget";
+import { DEFAULT_GROUP_HOURLY_CREDITS, FomoBudget, MemoryAllowance } from "./fomo/budget";
 import type { BrokerCallOptions, FomoBroker } from "./fomo/contract";
 import { createFomoClient } from "./fomo/provider";
 import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_GROUP_ON, groupScrub, NOT_PERMISSION_LINE, renderAnswer } from "./fomo/render";
@@ -1596,14 +1596,29 @@ describe("a group research question, end to end", () => {
     };
     await say("pine what are people saying about $PONS on fomo?");
     const first = tg.texts(GROUP).slice(-1)[0] ?? "";
-    assert.match(first, /didn't return the theses on PONS[^.]* just now\. Ask me again in a minute\./, first);
+    assert.match(first, /didn't return the theses on PONS[^.]* just now\./, first);
     assert.doesNotMatch(first, /No theses were returned/);
+    assert.doesNotMatch(first, /ask me again|in a minute/i, "a room is never promised a retry (review on #306)");
     clock += 20_000;
     s.clock.now = clock;
     await say("pine there has to be thesis.");
     assert.equal(thesisReads, 2, "the pushback read again rather than serve the held empty page");
     const second = tg.texts(GROUP).slice(-1)[0] ?? "";
     assert.match(second, /What traders on Fomo are saying about PONS/, second);
+  });
+
+  it("at the room's default cap the empty answer promises nothing: the pushback and a re-ask get the theses or an honest line (review on #306)", async () => {
+    let thesisReads = 0;
+    // The real prices: a search is 250, a thesis page 1,250, of the room's default 2,500 an hour.
+    const r = await room({ groupHourlyCredits: DEFAULT_GROUP_HOURLY_CREDITS, thesisCost: 1_250, theses: () => (thesisReads += 1, thesisReads === 1 ? { theses: [], available: false } : fixture("theses-token")) });
+    const first = (await r.say("pine what are people saying about $PONS on fomo?")).join("\n");
+    assert.match(first, /didn't return the theses on PONS[^.]* just now\./, first);
+    assert.doesNotMatch(first, /ask me again|in a minute|try again/i, "no retry promised that the room's allowance would refuse");
+    for (const [line, advanceMs] of [["pine there has to be thesis.", 20_000], ["pine what are people saying about $PONS on fomo?", 3 * 60_000]] as const) {
+      const out = (await r.say(line, { advanceMs })).join("\n");
+      // The theses, or the room's refusal with its reset: honest either way, and nothing promised was broken.
+      assert.ok(/What traders on Fomo are saying about PONS/.test(out) || /^fomo lookups for this room are used up for now, try again after 17:00 UTC\.$/.test(out), `${line}: ${out}`);
+    }
   });
 
   it("a held empty thesis page is reused for two minutes at most, then read again", async () => {
