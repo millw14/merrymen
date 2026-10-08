@@ -3,7 +3,29 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const COOKIE = "mm_developer";
+const UNAVAILABLE = "Developer sign-in is temporarily unavailable. Please try again shortly.";
 const fail = (message: string, status: number) => NextResponse.json({ error: { message } }, { status, headers: { "Cache-Control": "no-store" } });
+const clientIp = (req: NextRequest) => req.headers.get("x-vercel-forwarded-for")?.split(",")[0] || req.headers.get("x-forwarded-for")?.split(",")[0] || "unknown";
+/**
+ * Where the portal credential goes, or null to fail closed.
+ *
+ * MERRYMEN_DEVELOPER_GATEWAY_ORIGIN points a preview or local site at another
+ * gateway. The secret travels with every request, so the override must be a
+ * bare https origin (plain http only on localhost), and a malformed one is
+ * refused rather than ignored. The secret needs 32+ bytes, as the gateway
+ * already requires: a shorter one could only ever be refused there.
+ */
+function gateway(): { origin: string; secret: string } | null {
+  const secret = process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET;
+  if (!secret || Buffer.byteLength(secret) < 32) { console.error("[developer] MERRYMEN_DEVELOPER_PORTAL_SECRET is unset or under 32 bytes"); return null; }
+  try {
+    const url = new URL(process.env.MERRYMEN_DEVELOPER_GATEWAY_ORIGIN || "https://ai.merrymen.dev");
+    const local = url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname);
+    if ((url.protocol === "https:" || local) && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash) return { origin: url.origin, secret };
+  } catch { /* Reported below. */ }
+  console.error("[developer] MERRYMEN_DEVELOPER_GATEWAY_ORIGIN must be an https origin, or http on localhost");
+  return null;
+}
 async function handle(req: NextRequest, context: { params: Promise<{ action: string }> }) {
   const { action } = await context.params;
   if (action === "sdk" && req.method === "GET") {
@@ -20,8 +42,8 @@ async function handle(req: NextRequest, context: { params: Promise<{ action: str
     return response;
   }
   if (!(req.method === "GET" && action === "keys") && !(req.method === "POST" && ["challenge", "verify", "keys", "revoke", "test"].includes(action))) return fail("Not found", 404);
-  const secret = process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET;
-  if (!secret) return fail("Developer sign-in is temporarily unavailable. Please try again shortly.", 503);
+  const target = gateway();
+  if (!target) return fail(UNAVAILABLE, 503);
   try {
     let raw: string | undefined;
     if (req.method === "POST") {
@@ -30,9 +52,9 @@ async function handle(req: NextRequest, context: { params: Promise<{ action: str
       if (reader) { try { for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 8192) { await reader.cancel(); return fail("Request too large", 413); } chunks.push(next.value); } } finally { reader.releaseLock(); } }
       raw = Buffer.concat(chunks).toString("utf8");
     }
-    const upstream = await fetch(`https://ai.merrymen.dev/developer/v1/${action}`, {
-      method: req.method, headers: { "content-type": "application/json", authorization: `Bearer ${secret}`,
-        "x-developer-session": req.cookies.get(COOKIE)?.value || "", "x-developer-ip": req.headers.get("x-vercel-forwarded-for")?.split(",")[0] || req.headers.get("x-forwarded-for")?.split(",")[0] || "unknown" },
+    const upstream = await fetch(`${target.origin}/developer/v1/${action}`, {
+      method: req.method, headers: { "content-type": "application/json", authorization: `Bearer ${target.secret}`,
+        "x-developer-session": req.cookies.get(COOKIE)?.value || "", "x-developer-ip": clientIp(req) },
       ...(raw !== undefined ? { body: raw } : {}), cache: "no-store", redirect: "error", signal: AbortSignal.timeout(20_000),
     });
     const data = await upstream.json();

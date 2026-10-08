@@ -7,8 +7,9 @@ test('portal proxy enforces origin, uses a server-only credential, and hides ses
   const oldFetch = globalThis.fetch, oldSecret = process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET;
   process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET = 'test-only-portal-credential-32-bytes';
   let calls = 0;
-  globalThis.fetch = async (_url, init) => {
+  globalThis.fetch = async (url, init) => {
     calls++;
+    assert.equal(String(url), 'https://ai.merrymen.dev/developer/v1/verify');
     const headers = new Headers(init?.headers);
     assert.equal(headers.get('authorization'), 'Bearer test-only-portal-credential-32-bytes');
     assert.equal(headers.get('x-developer-session'), 'existing-session');
@@ -33,4 +34,40 @@ test('portal proxy enforces origin, uses a server-only credential, and hides ses
     const sdk = await GET(new NextRequest('https://merrymen.dev/api/developer/sdk'), { params: Promise.resolve({ action: 'sdk' }) });
     assert.equal(sdk.status, 200); assert.match(sdk.headers.get('content-disposition')!, /attachment/);
   } finally { globalThis.fetch = oldFetch; if (oldSecret === undefined) delete process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET; else process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET = oldSecret; }
+});
+
+/** Runs `fn` with these env values (undefined removes one), restoring fetch and env after. */
+async function withEnv(env: Record<string, string | undefined>, fn: (urls: string[]) => Promise<void>) {
+  const oldFetch = globalThis.fetch, old = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
+  const urls: string[] = [];
+  globalThis.fetch = async url => { urls.push(String(url)); return Response.json({ address: '0x123', keys: [] }); };
+  const set = (values: Record<string, string | undefined>) => { for (const [k, v] of Object.entries(values)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+  const quiet = console.error; console.error = () => {};
+  try { set(env); await fn(urls); } finally { globalThis.fetch = oldFetch; console.error = quiet; set(old); }
+}
+const keys = () => GET(new NextRequest('https://merrymen.dev/api/developer/keys'), { params: Promise.resolve({ action: 'keys' }) });
+const secret = 'test-only-portal-credential-32-bytes';
+
+test('the gateway origin can be overridden, only to an https origin or a local one', async () => {
+  for (const [origin, expected] of [['http://localhost:8787', 'http://localhost:8787/developer/v1/keys'], ['https://gateway.example/', 'https://gateway.example/developer/v1/keys'], [undefined, 'https://ai.merrymen.dev/developer/v1/keys']] as const) {
+    await withEnv({ MERRYMEN_DEVELOPER_PORTAL_SECRET: secret, MERRYMEN_DEVELOPER_GATEWAY_ORIGIN: origin }, async urls => {
+      assert.equal((await keys()).status, 200); assert.deepEqual(urls, [expected]);
+    });
+  }
+  // The portal secret travels with every request: a bad override fails closed, never falls back.
+  for (const origin of ['http://gateway.example', 'https://user:pass@gateway.example', 'https://gateway.example/api', 'https://gateway.example/?x=1', 'ftp://gateway.example', 'not a url']) {
+    await withEnv({ MERRYMEN_DEVELOPER_PORTAL_SECRET: secret, MERRYMEN_DEVELOPER_GATEWAY_ORIGIN: origin }, async urls => {
+      const refused = await keys();
+      assert.equal(refused.status, 503, origin); assert.deepEqual(urls, [], origin);
+      assert.match((await refused.json()).error.message, /temporarily unavailable/);
+    });
+  }
+});
+
+test('a portal secret under 32 bytes fails closed before anything is sent', async () => {
+  for (const short of [undefined, '', 'too-short-portal-secret', 'x'.repeat(31)]) {
+    await withEnv({ MERRYMEN_DEVELOPER_PORTAL_SECRET: short, MERRYMEN_DEVELOPER_GATEWAY_ORIGIN: undefined }, async urls => {
+      assert.equal((await keys()).status, 503); assert.deepEqual(urls, []);
+    });
+  }
 });
