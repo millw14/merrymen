@@ -70,14 +70,6 @@ export interface PoolPrice {
    * limit — is not it, and never becomes a spot price.
    */
   historyShort: boolean;
-  /**
-   * Another fee tier of the SAME pair holding more cash, whose own oracle said
-   * its history is too short (historyShort). readPoolPrice prices the deepest
-   * pool that answers a TWAP; this is the deeper market beside it, read too,
-   * so a quiet dust tier with an oracle cannot hide a busy new pool on the
-   * same pair (readRoutedPrice turns it into a spotAlternative).
-   */
-  shortHistoryDeeper?: PoolPrice;
   /** TWAP, cash per whole token, 8dp — use for valuation and safety. */
   price8: bigint;
   /** Spot, same units — use for execution sizing only. */
@@ -405,42 +397,6 @@ async function liveCashPools(
     .sort((a, b) => (b.cashInPool > a.cashInPool ? 1 : b.cashInPool < a.cashInPool ? -1 : 0));
 }
 
-/**
- * WHICH POOL THE PRICE READ USES, and the deeper short-history pool beside it.
- *
- * bestCashPool's order — the deepest pool that answers a TWAP — with two
- * differences, for the price read alone (the depth readers keep bestCashPool):
- *
- *  - A PROBE THAT FAILED ON THE WAY IS A FAILED READ. A timeout or a rate
- *    limit on one pool's observe() used to move the choice to the next pool,
- *    and with sampling that can be a busy single-slot pool whose spot then
- *    replaced a working TWAP for a tick. Now the whole read answers null, and
- *    the caller keeps the route it had (pool-prices.ts).
- *  - THE DEEPER MARKET IS REPORTED. A pool holding more cash whose own oracle
- *    said "OLD" (its history is shorter than the window) is passed over for a
- *    shallower one that answers — and returned as `shortDeeper`, so a dust
- *    tier with a quiet oracle cannot hide a busy new pool on the same pair.
- */
-async function chooseCashPool(
-  client: PublicClient,
-  args: { token: `0x${string}`; cash: `0x${string}`; twapWindowSec: number },
-): Promise<{ best: CashPool | null; shortDeeper: CashPool | null }> {
-  const live = await liveCashPools(client, args);
-  if (live.length <= 1) return { best: live[0] ?? null, shortDeeper: null };
-  let shortDeeper: CashPool | null = null;
-  for (const p of live) {
-    try {
-      await client.readContract({ address: p.pool, abi: POOL_ABI, functionName: "observe", args: [[args.twapWindowSec, 0]] });
-      return { best: p, shortDeeper };
-    } catch (e) {
-      if (!revertedOld(e)) return { best: null, shortDeeper: null };
-      shortDeeper ??= p;
-    }
-  }
-  // Every pool's history is short: the deepest is the market, read as such.
-  return { best: live[0]!, shortDeeper: null };
-}
-
 export async function readPoolPrice(
   client: PublicClient,
   args: {
@@ -453,14 +409,9 @@ export async function readPoolPrice(
 ): Promise<PoolPrice | null> {
   const windowSec = args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC;
 
-  const choice = await chooseCashPool(client, { token: args.token, cash: args.cash, twapWindowSec: windowSec });
-  if (!choice.best) return null;
-  const read = await readPoolAt(client, choice.best, args, windowSec);
-  if (read && choice.shortDeeper) {
-    const deeper = await readPoolAt(client, choice.shortDeeper, args, windowSec);
-    if (deeper?.historyShort) read.shortHistoryDeeper = deeper;
-  }
-  return read;
+  const best = await bestCashPool(client, { token: args.token, cash: args.cash, twapWindowSec: windowSec });
+  if (!best) return null;
+  return readPoolAt(client, best, args, windowSec);
 }
 
 /** One pool's TWAP, spot and in-range depth, read as readPoolPrice reads its choice. */
@@ -594,15 +545,6 @@ export interface RoutedPrice {
   pool?: `0x${string}`;
   /** That pool's oracle ring size, on a TWAP route: one means the "TWAP" was a quiet pool's single observation, extrapolated. */
   poolCardinality?: number;
-  /**
-   * On a TWAP route only, and only for a caller that asked (`allowSpot`): a
-   * DEEPER route through a pool with no oracle history yet. The TWAP route is
-   * still the answer; this rides with it so a caller whose depth floor refuses
-   * the TWAP route can fall back to the deeper market (pool-prices.ts) rather
-   * than leave the coin unpriced because someone opened a dust pool with an
-   * oracle beside it.
-   */
-  spotAlternative?: RoutedPrice;
 }
 
 /** Enough to re-read one oracle-less pool's spot without searching for it again. */
@@ -741,12 +683,15 @@ export async function readRoutedPrice(
   })();
   if (!args.allowSpot) return twapRoute;
 
-  // A TWAP ROUTE STILL COMES BACK FIRST. A spot route is the answer only when
-  // there is no TWAP route at all, and otherwise rides with it as an
-  // alternative when it is the deeper market (see RoutedPrice.spotAlternative).
-  const spot = spotRoute(direct, leg, wethLeg, args.tokenDecimals);
-  if (!twapRoute) return spot;
-  return spot && spot.liquidityUsdg > twapRoute.liquidityUsdg ? { ...twapRoute, spotAlternative: spot } : twapRoute;
+  // A TWAP ROUTE ALWAYS WINS. A spot route is the answer only when there is no
+  // TWAP route at all. Not "the deeper of the two": that was tried, and every
+  // way of carrying a deeper oracle-less market beside a TWAP route, across
+  // refreshes that fail to read one or the other, opened a new way to price a
+  // coin off the wrong pool or none (three review rounds). The cost is
+  // stated instead: a dust pool with a working oracle beside a coin's real,
+  // new pool leaves the coin refused as too thin — exactly what every such
+  // coin was before sampling existed.
+  return twapRoute ?? spotRoute(direct, leg, wethLeg, args.tokenDecimals);
 }
 
 /**
@@ -779,14 +724,12 @@ function spotRoute(
   wethLeg: PoolPrice | null,
   tokenDecimals: number,
 ): RoutedPrice | null {
-  // ONLY A POOL WHOSE OWN ORACLE SAID ITS HISTORY IS TOO SHORT (historyShort):
-  // the pool the read chose, or a deeper tier of the same pair it passed over
-  // for one that answers (shortHistoryDeeper). A price8 of zero is also what a
-  // TWAP reads for a coin cheaper than 8dp can carry, and what an observe()
-  // that failed on the way leaves behind — neither means the pool has no
-  // history, and treating them so would trade a TWAP for a spot price.
-  const shortOf = (p: PoolPrice | null): PoolPrice[] =>
-    p ? [...(p.historyShort ? [p] : []), ...(p.shortHistoryDeeper?.historyShort ? [p.shortHistoryDeeper] : [])] : [];
+  // ONLY A POOL WHOSE OWN ORACLE SAID ITS HISTORY IS TOO SHORT (historyShort).
+  // A price8 of zero is also what a TWAP reads for a coin cheaper than 8dp can
+  // carry, and what an observe() that failed on the way leaves behind —
+  // neither means the pool has no history, and treating them so would trade a
+  // TWAP for a spot price.
+  const shortOf = (p: PoolPrice | null): PoolPrice[] => (p?.historyShort ? [p] : []);
   const candidates: RoutedPrice[] = [];
   for (const d of shortOf(direct)) {
     if (d.spot8 <= 0n) continue;

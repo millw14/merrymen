@@ -88,8 +88,6 @@ interface CacheEntry {
   /** The raw route, unjudged. null = no pool found at all. */
   routed: RoutedPrice | null;
   fetchedAt: number;
-  /** When the route's spotAlternative was last read whole — it can be carried past a refresh that failed to read it, up to MAX_ROUTE_AGE_SEC. */
-  altFetchedAt?: number;
 }
 
 export interface PoolPriceReader {
@@ -147,32 +145,24 @@ export function spotIdentity(r: RoutedPrice): string {
   return leg ? `${r.route}:${leg.pool.toLowerCase()}:${leg.tokenIsToken0 ? 0 : 1}:${leg.cashDecimals}` : "";
 }
 
-/** The route a sampled series is kept for: a spot route, or the spot alternative riding a TWAP one. */
-export function spotOf(r: RoutedPrice): RoutedPrice | null {
-  return r.spotOnly ? r : r.spotAlternative?.spotOnly ? r.spotAlternative : null;
-}
-
 /**
  * WHETHER A CURRENT TWAP ROUTE STANDS when a refresh can only find a spot one.
  *
- * A TWAP ON A REAL ORACLE RING STANDS, against any spot route, until
- * MAX_ROUTE_AGE_SEC retires it: a ring overrun by a burst of swaps, or a read
- * of it that failed, comes back exactly like this, on its own pool or another
- * tier's — and a TWAP must not be traded for a spot price on either. Two
- * exceptions, taken at once:
- *  - the spot route is the deeper market the TWAP route already carried as its
- *    alternative (spotAlternative) — known, read and sampled before;
- *  - the TWAP pool keeps a single observation. It could only have "answered"
- *    by extrapolating one quiet observation; its next swap ends that, and
- *    keeping the old reading would freeze a pre-trade price for minutes.
- * An unknown ring size is treated as a real one.
+ * It stands — the refresh treated as a failed read, ageing toward
+ * MAX_ROUTE_AGE_SEC — against any spot route but one: the TWAP pool's OWN
+ * single observation. Such a pool can only have "answered" by extrapolating
+ * one quiet observation; its next swap ends that, and keeping the old reading
+ * would freeze a pre-trade price for minutes. Everything else — a real ring
+ * overrun by a burst of swaps, a read of the TWAP pool that failed and left
+ * another pool's spot as the only answer — comes back exactly like this, and a
+ * TWAP is not traded for a spot price on it. An unknown ring size is treated
+ * as a real one.
  */
 export function keepTwapOver(previous: { routed: RoutedPrice | null; fetchedAt: number } | undefined, routed: RoutedPrice, nowSec: number): boolean {
   const prev = previous?.routed;
   if (!prev || prev.spotOnly || !routed.spotOnly || nowSec - previous!.fetchedAt > MAX_ROUTE_AGE_SEC) return false;
-  const known = prev.spotAlternative?.spotOnly?.pool;
-  if (known && known.toLowerCase() === routed.spotOnly.pool.toLowerCase()) return false;
-  return (prev.poolCardinality ?? 2) > 1;
+  const samePool = !!prev.pool && prev.pool.toLowerCase() === routed.spotOnly.pool.toLowerCase();
+  return !(samePool && (prev.poolCardinality ?? 2) <= 1);
 }
 
 /** Human-readable provenance for a sampled price, beside `describeRoute`. */
@@ -229,30 +219,12 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
           if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) return;
-          // AN ALTERNATIVE THAT WAS NOT READ IS NOT GONE. A refresh of the same
-          // TWAP pool that came back without the deeper market it carried — a
-          // rate limit on that pool, a failed WETH leg — keeps the one it had,
-          // re-read below like any spot route, until MAX_ROUTE_AGE_SEC. Dropping
-          // it threw away its series and left a held coin refused too-thin.
-          let altFetchedAt = routed?.spotAlternative ? nowSec : undefined;
-          let carried = false;
-          const prevAlt = previous?.routed && !previous.routed.spotOnly ? previous.routed.spotAlternative : undefined;
-          if (routed && !routed.spotOnly && !routed.spotAlternative && prevAlt && !!routed.pool && previous!.routed!.pool?.toLowerCase() === routed.pool.toLowerCase()
-            && nowSec - (previous!.altFetchedAt ?? previous!.fetchedAt) <= MAX_ROUTE_AGE_SEC) {
-            routed = { ...routed, spotAlternative: prevAlt };
-            altFetchedAt = previous!.altFetchedAt ?? previous!.fetchedAt;
-            carried = true;
-          }
           if (routed) {
-            cache.set(key, { routed, fetchedAt: nowSec, ...(altFetchedAt !== undefined ? { altFetchedAt } : {}) });
-            // A carried alternative was not read this time: it is re-read below.
-            if (carried) return;
-            // The full read's spot IS this tick's reading — of the spot route,
-            // or of the deeper oracle-less alternative riding a TWAP route. A
-            // route with neither needs no series: its pool keeps its own.
-            const spot = spotOf(routed);
-            if (spot) {
-              sampler.record(key, { atSec: nowSec, price18: spot.price18 ?? spot.price8 * 10_000_000_000n, liquidityUsdg: spot.liquidityUsdg }, spotIdentity(spot));
+            cache.set(key, { routed, fetchedAt: nowSec });
+            // The full read's spot IS this tick's reading. A route with an
+            // oracle needs no series: its pool keeps its own.
+            if (routed.spotOnly) {
+              sampler.record(key, { atSec: nowSec, price18: routed.price18 ?? routed.price8 * 10_000_000_000n, liquidityUsdg: routed.liquidityUsdg }, spotIdentity(routed));
             } else sampler.drop(key);
             refreshed.add(key);
             return;
@@ -273,7 +245,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
         tokens.map(async (t) => {
           const key = cacheKey(t);
           const hit = cache.get(key);
-          const route = hit?.routed ? spotOf(hit.routed) : null;
+          const route = hit?.routed;
           if (refreshed.has(key) || !hit || !route?.spotOnly || nowSec - hit.fetchedAt > MAX_ROUTE_AGE_SEC) return;
           const spot = await readSpotLeg(client, route.spotOnly);
           if (spot) sampler.record(key, { atSec: nowSec, price18: spot.price18, liquidityUsdg: spot.liquidityUsdg }, spotIdentity(route));
@@ -308,18 +280,6 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
         // The guard is re-applied on every read, against the CURRENT settings —
         // a cached route must never carry a stale verdict.
         const verdict = poolPriceUsable(r, guard);
-        // TOO THIN, WITH A DEEPER MARKET BESIDE IT: the deeper market answers.
-        // A dust pool with a working oracle must not leave a coin whose real
-        // market is a deep new pool unpriced — and a held one force-sold as
-        // unpriceable. Only for depth: a TWAP refused as divergent is being
-        // pushed, and that refusal stands.
-        if (!verdict.ok && verdict.kind === "too-thin" && r.spotAlternative) {
-          const alt = r.spotAlternative;
-          const quote = sampledQuote(alt, sampler.read(cacheKey(t), nowSec, spotIdentity(alt)), guard);
-          if ("refusal" in quote) refused.push({ symbol: t.symbol, ...quote.refusal });
-          else quotes.set(t.symbol, quote.quote);
-          continue;
-        }
         if (!verdict.ok) {
           refused.push({ symbol: t.symbol, kind: verdict.kind, reason: verdict.reason });
           continue;
