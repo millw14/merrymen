@@ -41,6 +41,7 @@ import { __resetMemoryPassThrottleForTest } from "./telegram/tg-groups/memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./telegram/tg-groups/store";
 import type { CoinLook, NominateResult, TgCoinsPort, TrencherReadiness } from "./telegram/tg-groups/types";
 import { classifyFomoQuestion } from "./fomo/intent";
+import { applyPlan } from "./fomo/subject-memory";
 import { parseSlash } from "./telegram/interpreter";
 import { isMutationTool } from "./fomo/tools";
 import {
@@ -273,6 +274,12 @@ describe("createTgFomoPort", () => {
     for (const t of ["who's selling on fomo?", "who's buying solana coins on fomo", "who's selling the most on fomo", "who's selling $PONS on fomo", "what are fomo traders buying", "who's buying rn on fomo"]) {
       assert.equal(looseCoin(t, p(t)), false, t);
     }
+    // With a coin remembered: the same coin is the planner's; another name is not that coin.
+    const pons = applyPlan(null, classifyFomoQuestion("what are the theses on $PONS on fomo", { memory: null, now: NOW })!, NOW).memory;
+    const after = (t: string) => classifyFomoQuestion(t, { memory: pons, now: NOW })!;
+    assert.equal(looseCoin("research pons on fomo", after("research pons on fomo")), false);
+    assert.equal(looseCoin("who's selling it on fomo", after("who's selling it on fomo")), false);
+    assert.equal(looseCoin("research anyps5 on fomo", after("research anyps5 on fomo")), true, "never the remembered PONS for a line about anyps5");
   });
 
   it("a trader question is deflected before anything is looked up", async () => {

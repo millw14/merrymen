@@ -190,14 +190,18 @@ const COIN_SUBJECT_INTENTS: ReadonlySet<string> = new Set([
  * fixed question names it as a $tag. True: leave the line to the router.
  */
 export function looseCoin(text: string, plan: FomoQuestionPlan): boolean {
+  // A coin or trader this message named is the planner's own reading.
   if (!COIN_SUBJECT_INTENTS.has(plan.intent) || plan.subjects.some((s) => s.kind === "token" || s.kind === "trader")) return false;
-  if (plan.usesMemory.includes("token")) return false;
-  if (plan.toolCalls.some((c) => typeof c.args.token === "string" || typeof c.args.chain === "string" || typeof c.args.trader === "string")) return false;
+  if (plan.toolCalls.some((c) => typeof c.args.trader === "string")) return false;
   const m = LOOSE_SUBJECT.exec(typeof text === "string" ? text.normalize("NFKC") : "");
   const word = m?.[1]?.toLowerCase() ?? "";
   if (!word || NOT_A_COIN.has(word) || /^\d+$/.test(word)) return false;
   // A chain word is the planner's ("buying solana coins" is a chain's slice).
-  return chainFromUserText(word) === null;
+  if (chainFromUserText(word) !== null) return false;
+  // The remembered coin, when that is the word ("who's selling pons" right
+  // after PONS): the planner has it right. Any other remembered coin is the
+  // wrong subject for a line that names a different one.
+  return !plan.toolCalls.some((c) => typeof c.args.token === "string" && c.args.token.toLowerCase() === word);
 }
 
 // ─── The owner's moves ──────────────────────────────────────────────────────
