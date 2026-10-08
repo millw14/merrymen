@@ -51,12 +51,16 @@ describe("GET /api/perps/chart owner perimeter", () => {
     assert.equal(rejected.headers.get("Cache-Control"), "private, no-store");
     assert.equal((await GET(new Request(url.replace("BTC-PERP", "UNKNOWN-PERP")))).status, 400);
 
-    const empty = await GET(new Request(url));
+    const oldFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ code: 503 }, { status: 503 });
+    let empty: Response;
+    try { empty = await GET(new Request(url.replace("BTC-PERP", "ETH-PERP"))); }
+    finally { globalThis.fetch = oldFetch; }
     assert.equal(empty.status, 200);
     assert.equal(empty.headers.get("Cache-Control"), "private, no-store");
     const body = await empty.json() as Record<string, unknown>;
     assert.equal(body.state, "not-configured");
-    assert.equal(body.market, "BTC-PERP");
+    assert.equal(body.market, "ETH-PERP");
     assert.equal(body.book, "paper");
     assert.deepEqual(body.entries, []);
     assert.equal(typeof body.generatedAtMs, "number");

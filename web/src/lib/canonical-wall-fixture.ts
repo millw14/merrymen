@@ -70,9 +70,10 @@ type RpcAnswer = { result: unknown } | { error: { code: number; message: string;
 const reverted = (data?: Hex): RpcAnswer => ({ error: { code: 3, message: "execution reverted", ...(data ? { data } : {}) } });
 
 /** One JSON-RPC answer from a chain whose Kernel factory deploys to `account`. */
-function answer(account: Address, method: string, params: unknown[]): RpcAnswer {
+function answer(account: Address, method: string, params: unknown[], deployed = false): RpcAnswer {
   if (method === "eth_chainId") return { result: toHex(robinhoodChain.id) };
   if (method === "eth_getCode") {
+    if (deployed && String(params[0]).toLowerCase() === account.toLowerCase()) return { result: "0x6000" };
     return { result: String(params[0]).toLowerCase() === TRENCHER_FACTORY ? TRENCHER_CODE : "0x" };
   }
   if (method === "eth_call") {
@@ -112,7 +113,7 @@ function answer(account: Address, method: string, params: unknown[]): RpcAnswer 
 }
 
 /** Run `fn` with global fetch answering JSON-RPC as that chain, and only then. */
-async function withStubChain<T>(account: Address, fn: () => Promise<T>): Promise<T> {
+async function withStubChain<T>(account: Address, fn: () => Promise<T>, options?: SignerOptions): Promise<T> {
   const real = globalThis.fetch;
   globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
     const request = JSON.parse(String(init?.body)) as
@@ -121,8 +122,9 @@ async function withStubChain<T>(account: Address, fn: () => Promise<T>): Promise
     const one = (r: { id: number; method: string; params?: unknown[] }) => ({
       jsonrpc: "2.0",
       id: r.id,
-      ...answer(account, r.method, r.params ?? []),
+      ...answer(account, r.method, r.params ?? [], options?.deployed),
     });
+    for (const r of Array.isArray(request) ? request : [request]) options?.onRpc?.(r.method, r.params ?? []);
     const body = Array.isArray(request) ? request.map(one) : one(request);
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
@@ -137,6 +139,9 @@ export const TEST_CAPS = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDr
 
 /** What prepareAgentGrant accepts beyond the owner, all optional. */
 export interface SignerOptions {
+  newAccountPerpsOnly?: boolean;
+  deployed?: boolean;
+  onRpc?: (method: string, params: unknown[]) => void;
   account: Address;
   owner?: LocalAccount;
   caps?: StoredGrant["caps"];
@@ -159,6 +164,7 @@ export async function signerGrant(o: SignerOptions): Promise<{ grant: StoredGran
   const { prepareAgentGrant } = await import("./session");
   const grant = await withStubChain(o.account, () =>
     prepareAgentGrant(owner, {
+      newAccountPerpsOnly: o.newAccountPerpsOnly,
       caps: o.caps ?? TEST_CAPS,
       onStatus: () => {},
       chainId: o.chainId ?? robinhoodChain.id,
@@ -171,6 +177,7 @@ export async function signerGrant(o: SignerOptions): Promise<{ grant: StoredGran
       perpDrop: o.perpDrop,
       venueFlat: o.venueFlat,
     }),
+    o,
   );
   return { grant, owner };
 }

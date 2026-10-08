@@ -1,9 +1,9 @@
 "use client";
-import type { PerpsStyleId } from "@merrymen/core";
+import { isPerpsStyle, type PerpsStyleId } from "@merrymen/core";
 import { perpsReviewLink } from "./perps-review-link";
 import { PerpsShutdownNotice } from "./PerpsShutdownNotice";
 import { PerpsRecoveryNotice } from "./PerpsRecoveryNotice";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
 import {
@@ -112,6 +112,10 @@ export function App() {
   const live = useMemo(() => liveOf(sources), [sources]);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
+  const searchParams = useSearchParams();
+  const perpsSetup = pathname === "/create" && searchParams.get("for") === "perps";
+  const requestedPerpsStyle = searchParams.get("style");
+  const initialPerpsStyle = perpsSetup && isPerpsStyle(requestedPerpsStyle) ? requestedPerpsStyle : undefined;
   const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
   const setScreen = (next: Screen) => router.push(pathForScreen(next));
   const [account, setAccount] = useState<AccountState|null>(null);
@@ -337,7 +341,7 @@ export function App() {
       setSidebarSection("feed");
       // A route-backed Perps view must leave that view when the wordmark's
       // Feed action is chosen; the old desktop detail pages had no such mode.
-      if (screen.kind === "perps") setScreen({ kind: "tab", tab: "feed" });
+      if (screen.kind === "perps" || perpsSetup) setScreen({ kind: "tab", tab: "feed" });
       return;
     }
     setTab(next);
@@ -468,11 +472,12 @@ export function App() {
   const portfolioRead = live.reads.mine;
   /** The tape's rows, from the market read above — desktop only; see ticker.ts. */
   const ticks = desktop ? ticksOf(live.tokens, Date.now() / 1000) : [];
+  const perpsSurface = screen.kind === "perps" || perpsSetup;
 
   return (
     <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
       className={ticks.length > 0 ? "app has-tape" : "app"}
-      data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
+      data-screen={perpsSurface ? "perps" : screen.kind === "tab" ? screen.tab : screen.kind}
     >
       <PerpsShutdownNotice status={account?.status.perpsShutdown} />
       <PerpsRecoveryNotice status={account?.status.perpsRecovery} />
@@ -481,8 +486,8 @@ export function App() {
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} mode={screen.kind === "perps" ? "perps" : "spot"} modePending={entrance.pending} onScreen={openScreen} onTab={goTab} />}
-      {desktop && screen.kind !== "perps" && (
+      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} mode={perpsSurface ? "perps" : "spot"} modePending={entrance.pending} onScreen={openScreen} onTab={goTab} />}
+      {desktop && !perpsSurface && (
         <DesktopSidebar
           reads={live.reads}
           retired={live.retired}
@@ -502,8 +507,8 @@ export function App() {
         ref={bodyRef}
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
-        {!desktop && screen.kind !== "perps" && <div className="spot-mode-header"><span className="spot-mode-brand"><LogoMark size={20} />merrymen</span><TradingModeToggle compact mode="spot" pending={entrance.pending} onChange={(mode) => { if (mode === "perps") openScreen({ kind: "perps" }); else entrance.cancelPending(); }} /></div>}
-        {banner && screen.kind !== "perps" && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={clockShell.retryFailing}/>}
+        {!desktop && screen.kind !== "perps" && <div className="spot-mode-header"><span className="spot-mode-brand"><LogoMark size={20} />merrymen</span><TradingModeToggle compact mode={perpsSetup ? "perps" : "spot"} pending={entrance.pending} onChange={(mode) => { if (mode === "perps") openScreen({ kind: "perps" }); else if (perpsSetup) goTab("feed"); else entrance.cancelPending(); }} /></div>}
+        {banner && !perpsSurface && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={clockShell.retryFailing}/>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -517,7 +522,7 @@ export function App() {
           tenant={account?.session.hosted ? account.session.address : null}
           href={resignHref}
         />
-        {screen.kind !== "perps" && <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
+        {!perpsSurface && <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
           if (desktop && next.kind === "tab" && ["home", "agent", "feed"].includes(next.tab)) {
             // Desktop tabs live in the rail/dock, not the phone's routes.
             // Navigating home would select Feed again and spotlight Markets
@@ -530,7 +535,7 @@ export function App() {
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>}
         {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "perps" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}
-        {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
+        {screen.kind === "create" && <CreateAgent key={`${chatKey ?? "visitor"}:${perpsSetup ? "perps" : "spot"}:${initialPerpsStyle ?? "default"}`} perpsOnly={perpsSetup} initialPerpsStyle={initialPerpsStyle} account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onBack={()=>perpsSetup ? openScreen({kind:"perps"}) : goTab("home")} onDone={()=>{refreshAccount();if(perpsSetup) openScreen({kind:"perps"}); else goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {screen.kind === "settings" && <Settings initialPerpsStyle={pendingPerpsStyle?.owner === chatKey ? pendingPerpsStyle?.style : undefined} onInitialPerpsStyleConsumed={consumePerpsStyle} onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
         {screen.kind === "grant" && <Wallet/>}
         {screen.kind === "tab" && screen.tab === "home" && (
@@ -552,7 +557,17 @@ export function App() {
             hasAgent={account?.status.exists === true}
           />
         )}
-        {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} perps={mine?.perps} hasAgent={account?.status.exists === true} onSpot={() => goTab("feed")} onSettings={(style) => { setPendingPerpsStyle(style ? { owner: chatKey, style } : null); openScreen({ kind: "settings" }); }} />}
+        {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} session={account?.session ?? null} workerAliveAt={account?.status.workerAliveAt} perps={mine?.perps} hasAgent={account?.status.exists === true}
+          onSpot={() => goTab("feed")} onRefreshAccount={refreshAccount}
+          onCreate={(style) => router.push(`/create?for=perps${isPerpsStyle(style) ? `&style=${encodeURIComponent(style)}` : ""}`)}
+          onPermission={() => openScreen({kind:"grant"})}
+          onFund={() => openScreen({kind:"deposit"})}
+          onReviewExit={({market,book}) => {
+            if (!chatKey || !account?.status.exists || chat.sending || chat.confirming) return;
+            chat.setProposal({id: market ? "close-perp" : "flatten-perps", args: {...(market ? {symbol:market} : {}), ...(book ? {book} : {})}});
+            goTab("agent");
+          }}
+          onSettings={(style) => { setPendingPerpsStyle(style ? { owner: chatKey, style } : null); openScreen({ kind: "settings" }); }} />}
         {screen.kind === "tab" && screen.tab === "feed" && (
           <Feed
             read={live.reads.theses}
@@ -742,14 +757,14 @@ export function App() {
         )}
         {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
       </div>
-      {desktop && screen.kind !== "perps" && money ? (
+      {desktop && !perpsSurface && money ? (
         <aside
           className="desktop-money-panel"
           aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
         >
           {account && <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>}
         </aside>
-      ) : desktop && screen.kind !== "perps" && mine ? (
+      ) : desktop && !perpsSurface && mine ? (
         <DesktopPortfolio
           selectedToken={token}
           mine={mine}
@@ -760,8 +775,8 @@ export function App() {
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop && screen.kind !== "perps" ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}</aside> : null}
-      {screen.kind !== "perps" && (
+      ) : desktop && !perpsSurface ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}</aside> : null}
+      {!perpsSurface && (
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (
               <button

@@ -132,6 +132,7 @@ let nextAccount = 1;
 interface Account {
   id: string;
   lane: PerpLane;
+  restart: () => Promise<void>;
   events: { level: string; message: string }[];
   inFlight: { ops: number; spend: bigint };
   energy: { claimed: number; refunded: number };
@@ -223,6 +224,7 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode; b
     },
     log: () => {},
   };
+  acct.restart = async () => { await acct.lane.stopProtect(); acct.lane = createPerpLane(deps); };
   acct.lane = createPerpLane(deps);
   return acct;
 }
@@ -881,6 +883,10 @@ describe("all nine profiles through the measured paper trading loop", () => {
     db.close();
     const status = parsePerpsReport(JSON.parse(saved.perps));
     assert.ok(status);
+    assert.equal(status.automation?.style, profile.id);
+    assert.equal(status.automation?.state, "candidate");
+    assert.equal(status.automation?.evaluatedAt, Math.floor(clock / 1000));
+    assert.match(status.automation!.reason, /not a fill/);
     assert.equal(status.positions[0]?.entryStyle, profile.id);
     assert.equal(status.positions[0]?.holdDeadlineSec, Math.floor(clock / 1000) + profile.maxHoldHours * 3600);
     const facts = await store.perpLaneLedgerFacts(a.id, "paper", Math.floor(clock / 1000) - 86400);
@@ -888,6 +894,8 @@ describe("all nine profiles through the measured paper trading loop", () => {
     assert.equal(facts.lastEntrySignals.get(1)?.candleT, last);
     a.cfg = { ...a.cfg, perpsDriver: "manual" };
     await a.lane.configChanged();
+    assert.equal((await a.lane.ownerReport())?.automation, undefined);
+    await a.restart();
     clock += profile.maxHoldHours * 3600_000;
     writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]] });
     await pass(a, 2);
@@ -922,4 +930,62 @@ it("a deterministic signal that expires during executor review cannot be booked"
   assert.equal(await journalKinds(a, "perp-fill"), 0);
   assert.equal(a.energy.refunded, 1);
   assert.ok(a.events.some(e => /perp-signal-expired/.test(e.message)));
+});
+
+it("automation reports distinguish manual, waiting and unreported after restart", async () => {
+  clock = T_LAST + H4 + 3_600_000;
+  writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]] });
+  const a = await account({ cfg: { perpsDriver: "manual" } });
+  const start = await equityOf(a);
+  await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+  const manual = (await a.lane.ownerReport())?.automation;
+  assert.equal(manual?.state, "manual");
+  assert.equal(manual?.driver, "manual");
+  assert.equal(await held(a), null);
+  a.cfg = { ...a.cfg, perpsDriver: "perp-trend", perpsPerTradeUsdg: 10 };
+  await a.lane.configChanged();
+  assert.equal((await a.lane.ownerReport())?.automation, undefined);
+  await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+  const waiting = (await a.lane.ownerReport())?.automation;
+  assert.equal(waiting?.state, "waiting");
+  assert.equal(waiting?.driver, "perp-trend");
+  assert.ok(waiting?.reason);
+  assert.equal(await held(a), null);
+  await a.restart();
+  await pass(a);
+  assert.equal((await a.lane.ownerReport())?.automation, undefined, "a restarted worker never invents a completed strategy review");
+});
+
+it("publishing an old tick's automation result cannot restore a position already closed by protection", async () => {
+  clock = T_LAST + H4 + 3_600_000;
+  writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]] });
+  const a = await account();
+  const start = await equityOf(a);
+  await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+  const position = await held(a);
+  assert.ok(position?.stopTrigger);
+  a.cfg = { ...a.cfg, perpsDriver: "manual" };
+  await a.lane.configChanged();
+  const olderTick = await equityOf(a); // route retains this position-bearing view
+  assert.equal(a.lane.snapshotView()?.positions.size, 1);
+  clock += 20_000;
+  writeFeed({ mark: position.stopTrigger, bids: [[position.stopTrigger, 1000n]], asks: [[position.stopTrigger + 1n, 1000n]] });
+  await pass(a);
+  assert.equal(await held(a), null);
+  const saved = () => {
+    const db = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+    try {
+      const row = db.prepare("SELECT perps FROM agents WHERE smart_account = ?").get(a.id) as { perps: string };
+      return parsePerpsReport(JSON.parse(row.perps))!;
+    } finally { db.close(); }
+  };
+  const closed = saved();
+  assert.equal(closed.positions.length, 0);
+  await a.lane.runRoute({ ...TICK, equityUsdg: olderTick.equity }, hooks(a, olderTick.equity));
+  const report = saved();
+  assert.equal(report.automation?.state, "manual");
+  assert.equal(report.positions.length, 0, "automation must merge into a current book, not its older decision snapshot");
+  assert.equal(report.openNotionalMicro, closed.openNotionalMicro);
+  assert.equal(report.collateralMicro, closed.collateralMicro);
+  assert.equal(report.protectAt, closed.protectAt);
 });

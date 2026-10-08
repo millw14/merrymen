@@ -13,7 +13,7 @@
  * Driven through the real GET, self-hosted, against the worker's own schema.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -239,4 +239,28 @@ describe("the desk and the chat take them from the feed", () => {
     const mine = mineOf({ agent: { name: "Shogun", strategy: "trencher", slug: null }, positions: [] } as never, [])!;
     assert.equal(mine.perps, undefined);
   });
+});
+
+it("private feeds use the current local grant instead of a newer unrelated agent", async () => {
+  await ledger(JSON.stringify(REPORT));
+  const other = "0xffffffffffffffffffffffffffffffffffffffff";
+  const raw = new DatabaseSync(path.join(dir, "merrymen.db"));
+  raw.prepare(`INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, mode, epoch, perps, created_at)
+    VALUES (?, 'Other', '0x1', '0x2', 4663, '{}', 0, 0, 'paper', 2, ?, ?)`).run(other, JSON.stringify({ ...REPORT, positions: [] }), Math.floor(Date.now() / 1000) + 10);
+  raw.close();
+  await writeFile(path.join(dir, "grant.json"), JSON.stringify({ smartAccount: ACCOUNT }));
+  try {
+    const response = await GET(new Request("http://localhost/api/feed"));
+    assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+    assert.equal(response.headers.get("Vary"), "Cookie");
+    const result = await response.json();
+    assert.equal(result.perps[0].market, "ETH-PERP");
+  } finally { await rm(path.join(dir, "grant.json"), { force: true }); }
+});
+
+it("an unreadable current grant never falls back to a historical local account", async () => {
+  await ledger(JSON.stringify(REPORT));
+  await writeFile(path.join(dir, "grant.json"), "broken JSON");
+  try { assert.equal((await feed()).perps, null); }
+  finally { await rm(path.join(dir, "grant.json"), { force: true }); }
 });

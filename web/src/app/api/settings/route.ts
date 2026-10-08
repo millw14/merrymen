@@ -41,6 +41,7 @@ import { tenantOf } from "@/lib/auth";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { hasStoredGrant } from "@merrymen/grant-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
 import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
 
@@ -104,7 +105,7 @@ export interface SettingsView {
 const STRATEGIES_DIR = homePaths.strategies();
 // Free + Merry Circle (holder-gated) builtins — both selectable; the worker runs
 // the Circle ones only for $MERRYMEN holders. Mirrors worker/src/strategies/registry.ts.
-const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "trencher", "even-keel", "dip-hunter"];
+const BUILTIN_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "trencher", "even-keel", "dip-hunter", "perps-only"];
 
 async function listCustomStrategies(): Promise<string[]> {
   try {
@@ -197,7 +198,7 @@ export async function GET(req: Request) {
     llmProviders: LLM_PROVIDERS,
     owner: isHostedMode() ? (tenant ?? "") : null,
   };
-  return NextResponse.json(view);
+  return NextResponse.json(view, { headers: { "Cache-Control": "private, no-store", Vary: "Cookie" } });
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
@@ -569,6 +570,19 @@ export async function PUT(req: Request) {
     const v = body.strategy;
     if (v === "" || v === null || v === undefined) {
       setOrClear("strategy", undefined);
+    } else if (v === "perps-only" && stored.strategy !== "perps-only") {
+      // This mode has no spot producer. Only a new account may select it:
+      // replacing an armed spot strategy could remove its intrinsic exits.
+      let grantPresent = true;
+      try {
+        if (tenant) grantPresent = await hasStoredGrant(tenant);
+        else {
+          try { await readFile(homePaths.grant(), "utf8"); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") grantPresent = false; else throw error; }
+        }
+      } catch { /* Unknown existing authority refuses a strategy replacement. */ }
+      if (grantPresent) errors.push("perps-only is for new accounts; keep your current spot strategy and configure Perpetuals separately");
+      else setOrClear("strategy", "perps-only");
     } else if (typeof v === "string" && BUILTIN_STRATEGIES.includes(v)) {
       setOrClear("strategy", v as MerrymenSettings["strategy"]);
     } else if (!isHostedMode() && typeof v === "string" && (await listCustomStrategies()).includes(v)) {

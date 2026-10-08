@@ -959,7 +959,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
               label={t("settings.label.strategy")}
             >
               <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
-                {view.strategies.builtin.map((s) => (
+                {view.strategies.builtin.filter(s => s !== "perps-only" || view.values.strategy === "perps-only").map((s) => (
                   <option key={s} value={s}>
                     {/* MARKED IN THE LIST ITSELF. A dropdown has nowhere to put
                         a badge, so the requirement goes in the option label —

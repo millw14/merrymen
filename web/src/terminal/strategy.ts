@@ -1,6 +1,7 @@
 /** What an agent runs, and the few numbers that strategy cares about. */
 
 export const STRATEGY_IDS = [
+  "perps-only",
   "steady-basket",
   "weekend-gap",
   "even-keel",
@@ -70,6 +71,8 @@ export function isStrategyId(v: string | null | undefined): v is StrategyId {
 /** The rulebook name. Not the glance, not the size of this buy. */
 export function strategyName(id: StrategyId): string {
   switch (id) {
+    case "perps-only":
+      return "Perpetuals";
     case "steady-basket":
       return "Steady basket";
     case "weekend-gap":
@@ -93,6 +96,8 @@ export function strategyName(id: StrategyId): string {
 
 export function strategyLabel(id: StrategyId): string {
   switch (id) {
+    case "perps-only":
+      return "perpetuals only";
     case "steady-basket":
       return "five names";
     case "weekend-gap":

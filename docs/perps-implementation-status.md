@@ -184,7 +184,9 @@ or paid model calls were made during these tests.
 
 1. Run and record every [mainnet checklist](perps-mainnet-checklist.md) item on an
    explicitly authorized operator account with a small amount. All checklist
-   Result entries remain **not run**. There is no Robinhood Lighter testnet.
+   Result entries remain **not run**. No equivalent venue route on Robinhood
+   testnet 46630 has been verified (the documented RH API testnet currently
+   reports a different underlying development chain; see the research below).
 2. Verify the hosted paper phase, including the fleet feed, canonical wall and
    fail-closed behavior, before allowlisting live accounts. Keep web and
    orchestrator restrictions aligned.
@@ -200,3 +202,123 @@ or paid model calls were made during these tests.
 
 No push, deployment, live allowlist activation or live trades were performed as
 part of this implementation handoff.
+
+
+## Product backend verification, 2026-10-08
+
+The worker has a real autonomous lane: shared native candle feed, deterministic
+profile evaluation, policy/sizing, paper settlement or durable live submission,
+reconciliation, protection and owner-scoped accounting. It is not a UI demo.
+The new `perps-only` builtin emits no spot purchases or vault deposits; the
+independent perpetuals lane remains responsible for its own entries and exits.
+It is intended for new perps accounts, not a silent replacement for an existing
+spot strategy's own exit rules.
+
+Worker reports now carry optional `automation` observations: the completed
+review's Unix-second timestamp, effective driver, selected style, outcome and
+reason. A candidate is explicitly not a fill. Owner/configuration changes clear
+that observation, and consumers must still check worker heartbeat freshness.
+
+Replay previously dropped `perpsStyle` and silently evaluated the original
+four-hour rule. It now validates and retains the selected profile, consumes its
+native bars, and carries entry style through the simulated ledger so protective
+deadlines work even when later signal candles are absent. Synthetic tests cover
+all nine profile cadences and deadlines; these are not return forecasts.
+
+### Current official-source cross-check
+
+Read-only research on 2026-10-08 confirmed:
+
+- [Robinhood network configuration](https://docs.robinhood.com/chain/connecting/)
+  specifies mainnet 4663 and testnet 46630. Production RPC should use a provider;
+  the public endpoint is rate-limited.
+- [Robinhood Lighter Domains](https://docs.robinhood.com/chain/lighter-domains/)
+  confirms the independent venue, current proxy and API base, USDG asset index 3,
+  route 0 and six-decimal deposit amounts. These match the frozen v1 route.
+- [Lighter RH integration differences](https://apidocs.lighter.xyz/docs/lighter-rh)
+  and [RH getting started](https://apidocs.rh.lighter.xyz/docs/get-started)
+  confirm signing chain 466324, separate account/key/nonce state, reserved key
+  indexes 0–3 and 157 (our index remains 16), and Standard REST 60 requests/minute.
+  The generic Ethereum Lighter deployment must not replace these route literals.
+- Public `api.rh.lighter.xyz/api/v1/layer1BasicInfo` returned underlying chain 4663,
+  the pinned proxy and collateral address. `orderBookDetails?filter=perp` returned
+  BTC 1 / ETH 0 / SOL 3 active with price/size precisions 1/5, 2/4, 3/3 and 10 USDG minimum
+  quote. Minimum base amounts were 0.00020 BTC, 0.0050 ETH and 0.100 SOL; the worker
+  reads these dynamic limits instead of assuming the quote minimum alone.
+- RH docs expose `api.rh-testnet.lighter.xyz` with signing chain 300. Its public
+  layer1BasicInfo currently reports underlying chain 123456, not 46630. This is
+  not evidence that Merrymen's frozen 4663 grant can be tested on 46630, and no
+  route, permission or signer literal was changed.
+
+No private credentials, wallet writes, deposits or venue orders were used for
+this research. Mainnet stop/withdrawal acceptance, deployment health and real
+historical performance remain separate uncompleted evidence requirements.
+
+
+Executed backend checks for this follow-up: 169 passed in the combined core
+report parser, paper lane, profile replay/evaluation and perps-only registry run.
+After adding fresh-lane restarts to each profile lifecycle, the focused
+paper/replay/registry run passed 50 tests. The final paper-lane rerun passed 34,
+including explicit manual/waiting/unreported-after-restart observations. These
+runs overlap and are not additive. Worker TypeScript checking and diff whitespace
+validation passed. No build, server start, deployment or real-money operation was
+performed by this backend audit.
+
+
+Independent review also found that publishing automation diagnostics from a
+retained strategy snapshot could overwrite a newer protective position report.
+Publication now reads the current book and persists it under the lane lock.
+The regression reproduced a closed position reappearing before the correction;
+the corrected paper/live integration run passed 79 tests, including all 34 paper
+lane tests. Root's repository-wide typecheck is the final compilation check.
+
+### Product connection and onboarding
+
+`/perps` now serves the owner-connected Tactical Radar product. Both former lab
+routes redirect there. Public prices come from a bounded Lighter mark-candle
+endpoint; private chart entries, open positions, fills and funding records stay
+behind the current owner's grant and never enter the public cache.
+
+The Control room reads saved settings, shows the actual worker heartbeat and
+completed evaluation, changes profiles through the existing owner-bound settings
+path, and pauses new entries without cancelling protective exits. Close and
+flatten actions open the existing owner-confirmed order flow. Mobile keeps Radar,
+Positions, Playbook and Control in separate panels behind the floating dock.
+
+New-account onboarding is available at `/create?for=perps`. It saves an explicit
+paper-only configuration, the selected native-cadence profile and BTC/ETH/SOL
+universe before minting the account. The initial per-trade cap is 25 USDG, total
+open notional 50 USDG, leverage 2x, collateral 30 USDG, and opens four per day;
+venue minimums can still block a trade. Its displayed fourteen-day permission
+accommodates the seven-day swing horizon. Real funds require separate venue
+permission, consent and funding.
+
+The new-account signing option omits optional coin/adapter extensions and their
+unrelated RPC probes. It retains the canonical base wall and rejects use for a
+restore, renewal, saved account or deployed account. It does not create a new
+perps-only on-chain permission system. Existing spot accounts keep their original
+strategy and can configure the independent perps lane in the Control room.
+
+Browser acceptance covered the real public BTC chart and the new name/profile/
+limits form, stopping before wallet creation or signing. Private control changes,
+authentication changes, journal presentation and restart-safe paper trading were
+verified through integration tests. This is not a recorded real-money execution
+or withdrawal acceptance run.
+
+Final follow-up checks: repository typechecking and the production build passed.
+The complete app suite ran 15,994 tests: 15,989 passed, three skipped and two
+failed. The two findings were corrected: the conversational strategy allowlist
+now explicitly excludes the creation-only `perps-only` strategy, and stale
+profile/signal refusals have private owner explanations while staying withheld
+from public feeds. Their focused reruns passed. The final UI flow regression also
+verifies that an inspected profile reaches new-agent creation without writing
+settings, and that switching owners clears the draft. These targeted runs overlap
+with the full suite and are not additional unique-test totals.
+
+Production HTTP checks returned 307 from each retired lab route to `/perps` and
+200 with 288 real closed mark candles for each BTC/ETH/SOL 24-hour chart, with no
+private entries in the public response. Responsive browser checks covered the
+390px mobile dock, isolated panels and 1440px desktop layout; an observed mobile
+min-content overflow was corrected without disabling chart panning. Wallet
+creation, permission signing, deposits, live orders and withdrawals were not
+performed during browser verification.

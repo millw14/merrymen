@@ -66,6 +66,7 @@ export function glanceOfHow(how: HowItTrades | null | undefined): StrategyGlance
  * was published, so the page prints its own "hasn't shared its approach yet".
  */
 const APPROACH: Record<Exclude<StrategyId, "custom" | "llm-strategist">, string> = {
+  "perps-only": "Runs its separately configured perpetuals profile within the owner's limits; it does not make automatic spot purchases.",
   "steady-basket": "Buys a little of a chosen basket on a schedule, rather than all at once.",
   "weekend-gap": "Buys stock tokens while their market is closed and sells when it reopens.",
   "even-keel": "Keeps its basket evenly weighted, trimming whatever grows to dominate it.",

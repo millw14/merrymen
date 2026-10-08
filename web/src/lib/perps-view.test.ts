@@ -388,3 +388,12 @@ it("preserves immutable position profile metadata while legacy positions remain 
   assert.equal(row.hold_deadline_sec, 1900);
   assert.equal("entry_style" in perpsFeedOf({ state: "ok", report: LIVE }, NOW).perps![0], false);
 });
+
+it("passes through actual route automation observations without deriving a signal from current settings", () => {
+  const automation = { evaluatedAt: Math.floor(NOW / 1000), driver: "perp-trend" as const, style: "scalp-breakout" as const, state: "waiting" as const, reason: "Waiting for a closed candle" };
+  const account = perpsFeedOf({ state: "ok", report: { ...LIVE, automation } }, NOW).perpsAccount;
+  assert.ok(account?.state === "ok");
+  assert.deepEqual(account.automation, automation);
+  const legacy = perpsFeedOf({ state: "ok", report: LIVE }, NOW).perpsAccount;
+  assert.ok(legacy?.state === "ok"); assert.equal("automation" in legacy, false);
+});

@@ -16,7 +16,7 @@ import {
   fullDateTime as fmtFullDateTime,
 } from "@/lib/format";
 import { loadTokenQuotes, applyTokenQuotes, type TokenQuote } from "./quotes";
-import { STOCK_TOKENS, perpsPositionStyleReport, type PerpsStyleId } from "@merrymen/core";
+import { STOCK_TOKENS, perpsPositionStyleReport, type PerpsStyleId, type PerpsReport } from "@merrymen/core";
 import { PERPS_REPORT_STALE_MS, type FeedPerpRow, type FeedPerpsAccount } from "@/lib/perps-view";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
@@ -360,6 +360,7 @@ export interface DeskPerpRow {
  * no mark), and `stale` means its read is older than PERPS_REPORT_STALE_MS.
  */
 export interface DeskPerps {
+  automation?: PerpsReport["automation"];
   read: "ok" | "unreadable";
   mode: "off" | "paper" | "live" | "refuse" | null;
   /**
@@ -446,6 +447,7 @@ export function deskPerpsOf(feed: Pick<Feed, "perps" | "perpsAccount">, nowMs: n
   const blockerWhat = str(acct.blocker_text);
   return {
     read: "ok",
+    ...(acct.automation ? { automation: acct.automation } : {}),
     mode,
     book,
     paper: book === "paper",

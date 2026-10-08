@@ -3,7 +3,7 @@
  * shared SQLite file the worker writes (.data/merrymen.db).
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
 import { isHostedMode, sameBookAsLatest } from "@merrymen/core";
@@ -13,7 +13,7 @@ import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { readDeskPositions } from "@/lib/desk-positions";
 import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
-import { hostedAgentFor } from "@/lib/agent-for";
+import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
 import { readMeasuredMark } from "@/lib/held-marks";
 import type { FeedMeasured } from "@/lib/feed-pnl";
@@ -220,6 +220,8 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
   };
 }
 
+const privateJson = (body: unknown) => NextResponse.json(body, { headers: { "Cache-Control": "private, no-store", Vary: "Cookie" } });
+
 export async function GET(req: Request) {
   // HOSTED: the tenant is the SIWE-authenticated wallet, resolved up front. No
   // session → nothing to show. The feed must scope to THIS tenant's agent, never
@@ -236,7 +238,7 @@ export async function GET(req: Request) {
   if (isHostedMode()) {
     tenant = tenantOf(req);
     // No session: nothing to scope to, so no per-tenant identity either.
-    if (!tenant) return NextResponse.json(await emptyFeed(null));
+    if (!tenant) return privateJson(await emptyFeed(null));
     hostedAgentId = await hostedAgentFor(req);
   }
 
@@ -246,7 +248,7 @@ export async function GET(req: Request) {
   // datetime('unixepoch') (timestamps are raw epoch, formatted by fmtEpoch) and
   // no rowid (the tie-break is smart_account, which both backends have).
   return withReadDb(async (db) => {
-    if (!db) return NextResponse.json(await emptyFeed(tenant));
+    if (!db) return privateJson(await emptyFeed(tenant));
     let events: FeedEvent[] = [];
     let equity: EquityPoint[] = [];
     /** "paper" | "live" | null — the book the newest equity mark belongs to. */
@@ -272,7 +274,8 @@ export async function GET(req: Request) {
     if (tenant) {
       agentId = hostedAgentId;
     } else {
-      try {
+      agentId = await diskAgent();
+      if (!agentId && !existsSync(homePaths.grant())) try {
         const row = (await db
           .prepare(
             // The tie-break: `status` DEFAULTs to 'armed' so it discriminates
@@ -480,7 +483,7 @@ export async function GET(req: Request) {
       perpsRead.state === "ok" && !perpsRead.accountMode ? { ...perpsRead, accountMode: bookMode } : perpsRead,
       Date.now(),
     );
-    return NextResponse.json({
+    return privateJson({
       source: "sqlite",
       events,
       equity,
@@ -497,5 +500,5 @@ export async function GET(req: Request) {
       perps,
       perpsAccount,
     } satisfies FeedResponse);
-  });
+  }).catch(async () => privateJson(await emptyFeed(tenant)));
 }

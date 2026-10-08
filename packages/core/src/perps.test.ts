@@ -1258,6 +1258,14 @@ describe("parsePerpsReport is a strict whitelist", () => {
       assert.equal(parsePerpsReport({ ...full, entryMinimums: bad }), null);
     }
     assert.equal(parsePerpsReport({ ...full, entriesHalted: "false" }), null);
+    const automation = { evaluatedAt: 1_790_000_000, driver: "perp-trend", style: "scalp-breakout", state: "waiting", reason: "Waiting for a closed candle." };
+    assert.deepEqual(parsePerpsReport({ ...full, automation })?.automation, automation);
+    for (const bad of [{ ...automation, style: "unknown" }, { ...automation, evaluatedAt: -1 }, { ...automation, state: "trading" }]) {
+      const report = parsePerpsReport({ ...full, automation: bad });
+      assert.ok(report);
+      assert.equal(report.automation, undefined);
+      assert.deepEqual(report.positions, parsePerpsReport(full)!.positions);
+    }
   });
 
   it("drops unknown keys, top level and per position", () => {

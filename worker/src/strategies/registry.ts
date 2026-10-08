@@ -21,7 +21,7 @@ import type { PerpBoundarySettings } from "../strategist/proposals";
 import type { PerpRouteIntent } from "../perps/route";
 
 /** Free, open strategies — available to everyone. */
-const FREE_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "trencher"] as const;
+const FREE_STRATEGIES = ["perps-only", "steady-basket", "weekend-gap", "llm-strategist", "trencher"] as const;
 /** Merry Circle strategies — buildable and selectable, but only RUN for holders
  * (Merry Man tier and up). The worker gates them at tick time by holder tier. */
 export const CIRCLE_STRATEGIES = ["even-keel", "dip-hunter"] as const;
@@ -293,6 +293,11 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
     } else {
       return makeCustomStrategy(name, { onNote: opts.onNote });
     }
+  }
+  if (name === "perps-only") {
+    // The perps lane is called independently after this producer. Selecting it
+    // must never fall through to basket purchases or park collateral in a vault.
+    return { name, tick: () => ({ intents: [], why: [] }) };
   }
   if (name === "llm-strategist") {
     // LLM proposes; deterministic code disposes. Without a key, the null

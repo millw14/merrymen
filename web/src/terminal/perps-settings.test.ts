@@ -992,6 +992,17 @@ describe("automatic setup is visible, current and bound to the owner", () => {
     assert.equal(writes().length, 0);
   });
 
+  it("uses each saved trend doctrine's hold horizon and accepts the exact deadline", () => {
+    const now = 1_800_000_000_000;
+    const values = { perpsEnabled: true, liveTradingEnabled: true, perpsDriver: "perp-trend" as const, perpsStyle: "scalp-breakout" as const };
+    const horizon = perpsAutonomyReadiness(values, DEFAULTS, {state:"unread"}, now).requiredHours;
+    assert.ok(horizon < 168);
+    const grant = readPerpsGrant(grantsBody({expiresAt: now / 1000 + horizon * 3600}));
+    assert.equal(perpsAutonomyReadiness(values,DEFAULTS,grant,now).authority,null);
+    assert.equal(perpsAutonomyReadiness(values,DEFAULTS,grant,now+1000).authority,"short");
+    assert.equal(perpsAutonomyReadiness({...values,perpsDriver:"brain"},DEFAULTS,grant,now).requiredHours,168);
+  });
+
   it("never marks stale or unread minimums eligible, and keeps them as last-observed facts", () => {
     const now = Date.now();
     const raw = report({ venueReadAt: now, entryMinimums: [{ market: "BTC-PERP", minNotionalMicro: "9000000" }] });

@@ -4,6 +4,7 @@
  */
 import { SETTINGS_DEFAULTS, perpsNumberOk, type PerpsNumKey } from "../../../packages/core/src/settings";
 import { leverageTarget, perpMarketByKey, perpMarketById, type PerpKey } from "../../../packages/core/src/perps";
+import { getPerpsStyle, isPerpsStyle, type PerpsStyleId } from "../../../packages/core/src/perps-styles";
 import { checkPolicy, type AgentLimits } from "../policy";
 import { parseLighterFeed, type LighterFeedRead } from "./feed-reader";
 import { buildPerpsView, buildPerpPolicyState, perpsUsdgToMicro, type PerpsViewInput, type PerpsViewSettings, type PerpsViewLedgerRow } from "./view";
@@ -14,10 +15,11 @@ import type { PerpIntentDraft } from "./drafts";
 import type { PerpsNewsEvidence } from "./news";
 import type { PerpsView } from "../strategies/types";
 import { createReplayTradeTracker, replayTradeMetrics } from "./replay-metrics";
+export interface PerpsReplaySettings extends PerpsViewSettings { perpsStyle?: PerpsStyleId; }
 export interface PerpsReplayConfig {
   initialCashUsdg: number;
   /** Omitted settings use the shipped defaults, including their small position cap. */
-  settings?: Partial<PerpsViewSettings>;
+  settings?: Partial<PerpsReplaySettings>;
   perTradeUsdg?: number;
   dailyUsdg?: number;
   maxOpsPerDay?: number;
@@ -38,7 +40,7 @@ export interface PerpsReplayProducer {
     frame: PerpsReplayFrame;
     feed: LighterFeedRead;
     view: PerpsView | null;
-    settings: PerpsViewSettings;
+    settings: PerpsReplaySettings;
     context: PerpTrendCtx;
     trend: PerpTrendResult;
   }): PerpTrendResult;
@@ -56,9 +58,10 @@ function positive(v: number, name: string, integer = false): number {
     throw new RangeError(`invalid ${name}`);
   return v;
 }
-export function replaySettings(over: Partial<PerpsViewSettings> = {}): PerpsViewSettings {
+export function replaySettings(over: Partial<PerpsReplaySettings> = {}): PerpsReplaySettings {
+  if (over.perpsStyle !== undefined && !isPerpsStyle(over.perpsStyle)) throw new RangeError("invalid perpsStyle");
   const keys = ["perpsMaxLeverage", "perpsPerTradeUsdg", "perpsMaxOpenNotionalUsdg", "perpsMaxCollateralUsdg", "perpsMaxOpensPerDay", "perpsStopLossPct", "perpsStopSlipBps", "perpsLiqBufferPct", "perpsMaxSlippageBps"] as const;
-  const s = { perpsMarkets: [...SETTINGS_DEFAULTS.perpsMarkets] as PerpKey[], perpsEntriesHalted: false } as PerpsViewSettings;
+  const s = { perpsMarkets: [...SETTINGS_DEFAULTS.perpsMarkets] as PerpKey[], perpsEntriesHalted: false, perpsStyle: getPerpsStyle(over.perpsStyle).id } as PerpsReplaySettings;
   for (const key of keys) {
     const value = over[key] ?? SETTINGS_DEFAULTS[key];
     if (!perpsNumberOk(key as PerpsNumKey, value))
@@ -105,6 +108,7 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
   } | null = null;
   let maxSampleGapMs = 0;
   const lastEntryCandleT = new Map<PerpKey, number>();
+  const positionStyles = new Map<number, PerpsStyleId>();
   const lastExit = new Map<PerpKey, {
     atSec: number;
     cause: "strategy" | "risk";
@@ -142,6 +146,7 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
     if (step.funding)
       funding += step.funding.paymentMicro;
     if (step.before && !step.after) {
+      positionStyles.delete(step.marketId);
       const key = perpMarketById(step.marketId)?.key;
       if (key)
         lastExit.set(key, { atSec: Math.floor(now / 1000), cause: kind === "strategy-close" ? "strategy" : "risk" });
@@ -209,7 +214,7 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
         const p = book.positions.get(m.marketId);
         return { marketId: m.marketId, side: p?.side ?? null, base: p?.baseAmount ?? 0n, entryPrice: p?.entryPrice ?? 0n, allocatedMarginMicro: p?.allocatedMarginMicro ?? 0n, imfBp: p?.imfBp ?? leverageTarget(settings.perpsMaxLeverage, m.spec).imfBp, marginMode: "isolated", fundingMicro: p?.fundingMicro ?? 0n, stopTrigger: p?.stop?.trigger ?? null, stopPrice: p?.stop?.price ?? null, takeTrigger: p?.take?.trigger ?? null, takePrice: p?.take?.price ?? null, openedAt: p?.openedAtSec ?? null };
       });
-      return { mode: "paper", nowSec, feed, settings, grant: { perTradeSealedMicro: sealed, expiresAtSec: null }, ledger: { positions, paperCashMicro: book.cashMicro, paperCollateralMicro: 0n, unresolvedMarkets: new Set(), unresolvedOpenMarkets: new Set(), closeInFlightMarkets: new Set(), pendingOpenNotionalMicro: 0n, opensToday: today().length, lastExit, lastEntryCandleT, depositsInTransitMicro: 0n, withdrawalsInTransitMicro: 0n, incident: false, entriesHalted: settings.perpsEntriesHalted } };
+      return { mode: "paper", nowSec, feed, settings, grant: { perTradeSealedMicro: sealed, expiresAtSec: null }, ledger: { positions, positionStyles, paperCashMicro: book.cashMicro, paperCollateralMicro: 0n, unresolvedMarkets: new Set(), unresolvedOpenMarkets: new Set(), closeInFlightMarkets: new Set(), pendingOpenNotionalMicro: 0n, opensToday: today().length, lastExit, lastEntryCandleT, depositsInTransitMicro: 0n, withdrawalsInTransitMicro: 0n, incident: false, entriesHalted: settings.perpsEntriesHalted } };
     };
     const execute = (intent: PerpIntentDraft, kind: string) => {
       const state = input(), view = buildPerpsView(state), term = valuation();
@@ -230,8 +235,11 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
       record(step, kind);
       if (step.fills.length) {
         operations.push(nowSec);
-        if (intent.effect === "open")
+        if (intent.effect === "open") {
           opens.push({ atSec: nowSec, notional: intent.notionalUsdg });
+          // Only the deterministic producer establishes a named style.
+          if (!producer) positionStyles.set(intent.marketId, getPerpsStyle(settings.perpsStyle).id);
+        }
       }
     };
     const protectedPass = evaluateProtection({ view: buildPerpsView(input()), nowSec, settings, prior: memory, feedFresh: true, book: "paper" });
@@ -278,7 +286,7 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
     assumptions: REPLAY_LIMITS, maxSampleGapMs, snapshotsProcessed: curve.length,
     initialCashMicro: initial, finalEquityMicro: failure ? null : curve.at(-1)!.equityMicro,
     realizedMicro: realized, fundingMicro: funding, feesMicro: fees, maxDrawdownMicro,
-    tailPositions: [...book.positions.values()], curve,
+    tailPositions: [...book.positions.values()].map(p => ({ ...p, ...(positionStyles.has(p.marketId) ? { entryStyle: positionStyles.get(p.marketId) } : {}) })), curve,
     completedTrades: trades.completed(), openTrades: trades.open(),
     metrics: replayTradeMetrics({ completed: trades.completed(), open: trades.open(), initialCashMicro: initial, curve, complete: failure === null }),
     producerDiagnostics: producer?.diagnostics?.(),

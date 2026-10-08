@@ -231,6 +231,16 @@ describe("perps are withheld from every public surface", () => {
     }
   });
 
+  it("entry configuration and signal expiry refusals stay private with owner explanations", () => {
+    for (const rule of ["perp-style-changed", "perp-signal-expired"]) {
+      assert.ok(WITHHELD_REJECT_RULES[rule]?.why);
+      assert.equal(rejectRuleLabel(rule), null);
+      assert.ok(ownerRejectRuleLabel(rule));
+      assert.match(rejectRuleRemedy(rule) ?? "", /Existing stops and exits continue/);
+    }
+    assert.match(rejectRuleRemedy("perp-style-changed") ?? "", /Manual mode keeps automatic entries off/);
+  });
+
   it("every perp refusal policy.ts can return is withheld — with the owner's words and a remedy, no public label", () => {
     const src = readFileSync(new URL("./policy.ts", import.meta.url), "utf8");
     const perpRules = new Set<string>();
@@ -250,4 +260,3 @@ describe("perps are withheld from every public surface", () => {
     }
   });
 });
-

@@ -1115,6 +1115,16 @@ export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner
       owner: "the Brain review expired or the market, permission or trading conditions changed before the entry could be sent",
       remedy: "The agent will request a fresh review for an eligible entry. Existing stops and exits continue; no action is needed.",
     },
+    "perp-style-changed": {
+      why: PERP_WHY,
+      owner: "the prepared entry no longer matches the current perpetuals settings or permission, so it was not sent",
+      remedy: "The agent needs a fresh eligible entry under the saved settings. Manual mode keeps automatic entries off. Existing stops and exits continue.",
+    },
+    "perp-signal-expired": {
+      why: PERP_WHY,
+      owner: "the closed-candle signal expired before the perpetuals entry could be sent",
+      remedy: "The agent will wait for a fresh eligible closed-candle signal. Existing stops and exits continue; no action is needed.",
+    },
     "perp-no-cash": {
       why: PERP_WHY,
       owner: "the open needs margin posted at Lighter first, and the account does not hold the USDG to post it",

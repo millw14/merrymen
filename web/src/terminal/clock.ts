@@ -54,7 +54,7 @@ export function countdown(ms: number): { text: string; unit: string } {
  * No schedule ships in the fixtures, so the next slot is the next whole
  * cadence on the wall clock. Every viewer sees the same countdown.
  */
-const CADENCE_MS: Record<StrategyId, number> = {
+const CADENCE_MS: Partial<Record<StrategyId, number>> = {
   "steady-basket": 4 * 3_600_000,
   "even-keel": 6 * 3_600_000,
   "weekend-gap": 24 * 3_600_000,
@@ -66,6 +66,7 @@ const CADENCE_MS: Record<StrategyId, number> = {
 
 export function cadenceWords(id: StrategyId): string {
   const ms = CADENCE_MS[id];
+  if (ms === undefined) return "by perpetuals profile";
   const h = ms / 3_600_000;
   if (h < 1) return `every ${Math.round(ms / 60_000)} minutes`;
   if (h === 24) return "once a day";
@@ -74,12 +75,14 @@ export function cadenceWords(id: StrategyId): string {
 
 export function nextRun(id: StrategyId, now: number): number {
   const step = CADENCE_MS[id];
+  if (step === undefined) return Infinity; // No synthetic schedule for the independently observed perps lane.
   return Math.ceil((now + 1) / step) * step;
 }
 
 /** Share of the cadence still to run, 1 just after a slot and 0 at the next one. */
 export function runLeft(id: StrategyId, now: number): number {
-  return (nextRun(id, now) - now) / CADENCE_MS[id];
+  const cadence = CADENCE_MS[id];
+  return cadence === undefined ? 0 : (nextRun(id, now) - now) / cadence;
 }
 
 /**

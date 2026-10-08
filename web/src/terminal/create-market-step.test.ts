@@ -58,7 +58,7 @@ describe("a coin named in the wizard is covered by the first signature", () => {
     const at = code.indexOf("const mintOptions=");
     assert.ok(at > 0, "the mint options must still be built here");
     const opts = code.slice(at, code.indexOf("};", at));
-    assert.match(opts, /extraTokens:\[\.\.\.\(\(settings\.values\.customTokens\?\?\[\]\)/);
+    assert.match(opts, /extraTokens:perpsOnly \? \[\] : \[\.\.\.\(\(settings\.values\.customTokens\?\?\[\]\)/);
     assert.match(opts, /\.\.\.wizardTokens\]/, "the wizard's own coins travel with them");
   });
 
@@ -66,9 +66,11 @@ describe("a coin named in the wizard is covered by the first signature", () => {
     // Both, not either: the signature decides what CAN be sold, the settings
     // decide what the agent watches and proposes. A coin in one and not the
     // other is the two-gate trap in a new costume.
-    const at = code.indexOf("/api/settings\",{method:\"PUT\"");
-    assert.ok(at > 0);
-    const put = code.slice(at, code.indexOf("});", at));
+    const at = code.indexOf("const creationSettings =");
+    const writeAt = code.indexOf("/api/settings\",{method:\"PUT\"", at);
+    assert.ok(at > 0 && writeAt > at);
+    const put = code.slice(at, code.indexOf("});", writeAt));
+    assert.match(put, /body:JSON\.stringify\(creationSettings\)/);
     assert.match(put, /customTokens:\[/);
     assert.match(put, /wizardTokens/);
     assert.match(put, /basketSymbols:basket/, "and what to trade");

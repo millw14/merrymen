@@ -28,7 +28,7 @@
  * browser bundle, which is why it lives here and not in core's browser barrel.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { merrymenHome } from "./home";
@@ -58,6 +58,8 @@ export interface StoredRecord {
 }
 
 export interface GrantStore {
+  /** Strict existence check: malformed/unreadable authority is never absent. */
+  hasStoredGrant?(tenant: `0x${string}`): Promise<boolean>;
   /** Persist (or replace) a tenant's grant. Throws on an owner key or a tenant mismatch. */
   put(tenant: `0x${string}`, grant: StoredGrant): Promise<void>;
   /** The tenant's grant, session key decrypted back in, or null. */
@@ -321,6 +323,10 @@ export class FileGrantStore implements GrantStore {
       await rename(tmp, this.file(tenant));
     });
   }
+  async hasStoredGrant(tenant: `0x${string}`): Promise<boolean> {
+    try { await stat(this.file(tenant)); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     try {
       const rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord;
@@ -460,6 +466,11 @@ export class PgGrantStore implements GrantStore {
     }
     });
   }
+  async hasStoredGrant(tenant: `0x${string}`): Promise<boolean> {
+    const client = await this.client();
+    const { rows } = await client.query("SELECT 1 FROM grants WHERE tenant = $1 LIMIT 1", [tenant.toLowerCase()]);
+    return rows.length > 0;
+  }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     const c = await this.client();
     const { rows } = await c.query(
@@ -523,4 +534,11 @@ export function getGrantStore(): GrantStore {
 /** Test seam: drop the cached store so a test can change the environment. */
 export function resetGrantStoreForTest(): void {
   cached = null;
+}
+
+/** Refuse unknown backends rather than interpreting a failed read as no grant. */
+export async function hasStoredGrant(tenant: `0x${string}`): Promise<boolean> {
+  const store = getGrantStore();
+  if (!store.hasStoredGrant) throw new Error("Grant presence cannot be verified");
+  return store.hasStoredGrant(tenant);
 }

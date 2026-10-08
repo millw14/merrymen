@@ -1360,6 +1360,14 @@ export interface PerpsReport {
   incident: boolean;
   /** Owner's durable Close-all halt, separate from the operator's entry halt. */
   entriesHalted?: boolean;
+  /** Actual completed route evaluation; its timestamp is not a worker liveness claim. */
+  automation?: {
+    evaluatedAt: number;
+    driver: "perp-trend" | "brain" | "strategist" | "manual";
+    style: PerpsStyleId;
+    state: "waiting" | "candidate" | "manual";
+    reason: string;
+  };
   /** Current worker observations for configured entry markets; absent means unreported. */
   entryMinimums?: { market: PerpKey; minNotionalMicro: string }[];
 }
@@ -1482,6 +1490,14 @@ export function parsePerpsReport(raw: unknown): PerpsReport | null {
     positions.push(parsed);
   }
   if (raw.entriesHalted !== undefined && typeof raw.entriesHalted !== "boolean") return null;
+  let automation: PerpsReport["automation"];
+  const auto = raw.automation;
+  // Optional diagnostics must never hide real exposure when malformed.
+  if (isRecord(auto) && isTimestamp(auto.evaluatedAt) &&
+      ["perp-trend", "brain", "strategist", "manual"].includes(String(auto.driver)) && isPerpsStyle(auto.style) &&
+      ["waiting", "candidate", "manual"].includes(String(auto.state)) && typeof auto.reason === "string" && auto.reason.length <= 500)
+    automation = { evaluatedAt: auto.evaluatedAt as number, driver: auto.driver as NonNullable<PerpsReport["automation"]>["driver"],
+      style: auto.style, state: auto.state as NonNullable<PerpsReport["automation"]>["state"], reason: auto.reason };
   let entryMinimums: PerpsReport["entryMinimums"];
   if (raw.entryMinimums !== undefined) {
     if (!Array.isArray(raw.entryMinimums) || raw.entryMinimums.length > LIGHTER_MARKETS_V1.length) return null;
@@ -1509,6 +1525,7 @@ export function parsePerpsReport(raw: unknown): PerpsReport | null {
     incident: raw.incident,
     ...(raw.entriesHalted === undefined ? {} : { entriesHalted: raw.entriesHalted }),
     ...(entryMinimums === undefined ? {} : { entryMinimums }),
+    ...(automation === undefined ? {} : { automation }),
   };
 }
 

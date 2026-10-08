@@ -203,6 +203,7 @@ export type FeedPerpsAccount =
   | { state: "unreadable" }
   | {
       state: "ok";
+      automation?: PerpsReport["automation"];
       mode: PerpsReport["mode"];
       /** perpsBookOf: which money this is — null when the report does not say, which no surface may draw as real. */
       book: PerpsBook | null;
@@ -302,6 +303,7 @@ export function perpsFeedOf(
     perps: rows,
     perpsAccount: {
       state: "ok",
+      ...(r.automation === undefined ? {} : { automation: r.automation }),
       mode: r.mode,
       book,
       paper,

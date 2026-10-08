@@ -596,6 +596,15 @@ async function prepareGrantCore(
    */
   perpIn: PerpSigningInput = {},
 ): Promise<Grant> {
+  if (perpIn.newAccountPerpsOnly) {
+    if (expectAccount || perpIn.previousGrant != null || perpIn.perpDrop || perpIn.recovery)
+      throw new Error("Minimal perps setup is only for a brand-new account, never restore or renewal.");
+    extraTokens = [];
+    v4AdapterAddress = undefined;
+    ponsAdapterAddress = undefined;
+    ponsClassVaultFactory = undefined;
+    trencherFactory = undefined;
+  }
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -624,7 +633,7 @@ async function prepareGrantCore(
    * whose grant predates a listing must re-sign before their key can touch it.
    * That is the wall working, not a gap in it.
    */
-  const sealedTokens: readonly CustomToken[] = [...officialCoinTokens(chainId), ...extraTokens];
+  const sealedTokens: readonly CustomToken[] = perpIn.newAccountPerpsOnly ? [] : [...officialCoinTokens(chainId), ...extraTokens];
 
   /**
    * The Pons adapter this signature seals: the owner's own if they named one,
@@ -641,7 +650,7 @@ async function prepareGrantCore(
    * redeploy cannot redirect an existing grant's trades, and an owner who names
    * their own address still wins over the platform's.
    */
-  const sealedPonsAdapter = ponsAdapterForSigning(chainId, ponsAdapterAddress);
+  const sealedPonsAdapter = perpIn.newAccountPerpsOnly ? undefined : ponsAdapterForSigning(chainId, ponsAdapterAddress);
 
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
@@ -713,6 +722,10 @@ async function prepareGrantCore(
     );
   }
 
+  if (perpIn.newAccountPerpsOnly && [perpIn.localGrants?.current, ...(perpIn.localGrants?.archived ?? [])]
+    .some(g => sameAccount(g, sudoOnlyAccount.address)))
+    throw new Error("Minimal perps setup cannot replace a previously saved account grant.");
+
   // THE WALL now lives in packages/core/src/wall.ts, so the phone app signs the
   // IDENTICAL permission set rather than a second copy that could drift from this
   // one with nothing failing when it did. worker/src/wall.test.ts pins its shape.
@@ -760,9 +773,9 @@ async function prepareGrantCore(
    * A tenant who has set their own factory keeps it — grant-first precedence,
    * exactly as the adapter path does.
    */
-  const sealedClassFactory =
+  const sealedClassFactory = perpIn.newAccountPerpsOnly ? undefined : (
     ponsClassVaultFactory ??
-    ((PONS_CLASS_VAULT_FACTORY[chainId] ?? undefined) as `0x${string}` | undefined);
+    ((PONS_CLASS_VAULT_FACTORY[chainId] ?? undefined) as `0x${string}` | undefined));
 
   let ponsClassVaultAddress: `0x${string}` | undefined;
   if (sealedClassFactory) {
@@ -867,9 +880,12 @@ async function prepareGrantCore(
   try {
     const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
     alreadyDeployed = code !== undefined && code !== "0x";
-  } catch {
+  } catch (error) {
+    if (perpIn.newAccountPerpsOnly) throw new Error("Cannot verify that minimal perps setup is a new account.", { cause: error });
     alreadyDeployed = false;
   }
+  if (perpIn.newAccountPerpsOnly && alreadyDeployed)
+    throw new Error("Minimal perps setup cannot replace a deployed account grant.");
 
   // ── PERPETUALS: DECIDED ONCE, HERE, BEFORE ANYTHING THAT MAY GIVE WAY ─────
   //
@@ -1560,6 +1576,8 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
  * With names, adding a field can only ever be additive.
  */
 export interface MintOptions {
+  /** Fresh perps account only: omit optional spot routes and their RPC probes. */
+  newAccountPerpsOnly?: boolean;
   caps: GrantCaps;
   onStatus: (status: string) => void;
   chainId?: number;
@@ -1618,6 +1636,7 @@ export interface MintOptions {
 
 /** What the preparation core takes about perpetuals; built from MintOptions by `perpInput`. */
 export interface PerpSigningInput {
+  newAccountPerpsOnly?: boolean;
   recovery?: PerpRecoveryReference;
   perp?: PerpSealRequest | null;
   previousGrant?: unknown;
@@ -1632,7 +1651,7 @@ export interface PerpSigningInput {
  * new entry point cannot thread three of the four and forget the drop guard.
  */
 function perpInput(o: Omit<MintOptions, "hostedAs">): PerpSigningInput {
-  return { perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant, perpDrop: o.perpDrop, venueFlat: o.venueFlat };
+  return { newAccountPerpsOnly: o.newAccountPerpsOnly, perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant, perpDrop: o.perpDrop, venueFlat: o.venueFlat };
 }
 
 /**
@@ -1739,6 +1758,7 @@ export async function restoreAgentWallet(
   ownerPrivateKey: `0x${string}`,
   o: MintOptions,
 ): Promise<MintedGrant> {
+  if (o.newAccountPerpsOnly) throw new Error("Minimal perps setup is not allowed on restore or renewal.");
   o.onStatus("re-deriving your smart account from the owner key…");
   return mintGrant(
     {

@@ -1,13 +1,4 @@
-import type { Metadata } from "next";
-import { PerpsLabClient } from "./PerpsLabClient";
-import "./lab.css";
+import { redirect } from "next/navigation";
 
-export const metadata: Metadata = {
-  title: "Perps mode concepts · Merrymen",
-  description: "Three interactive visual concepts for a future Merrymen perps view. Fictional sample data only.",
-  robots: { index: false, follow: false },
-};
-
-export default function PerpsLabPage() {
-  return <PerpsLabClient />;
-}
+/** Retire the shared concept link in favor of the actual owner-connected desk. */
+export default function PerpsLabPage() { redirect("/perps"); }

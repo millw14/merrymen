@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff } from "lucide-react";
 import {
   DEFAULT_BASKET_SYMBOLS,
+  PERPS_STYLE_CATALOG,
+  DEFAULT_PERPS_STYLE,
+  getPerpsStyle,
+  type PerpsStyleId,
   ENERGY,
   STOCK_TOKENS,
   isEnergyReserveToken,
@@ -22,6 +26,7 @@ import type { TierView } from "@/app/api/tier/route";
 import { loadTier, newAgentQualifies } from "../tier";
 import { count, decimalSeparator } from "@/lib/format";
 import { useT } from "@/lib/i18n";
+import { perpsCreationSettings, PERPS_CREATE_PERMISSION_DAYS, PERPS_CREATE_TRADE_USDG } from "../perps-create";
 
 /**
  * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
@@ -55,11 +60,14 @@ const EXAMPLES:Record<string,string>={
   "llm-strategist":"For example, assess current market information, explain a proposed move, and check it against your limits.",
 };
 const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
-export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
+export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onBack,onDone,onFund,perpsOnly=false,initialPerpsStyle}:{initialPerpsStyle?:PerpsStyleId;perpsOnly?:boolean;account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
   const t = useT();
+  const surfaceClass = perpsOnly ? "create-agent perps-create" : "create-agent";
   const [step,setStep]=useState<"agent"|"market"|"limits"|"backup"|"fund">("agent");
   const [name,setName]=useState("");
   const [strategy,setStrategy]=useState("steady-basket");
+  const [perpsStyle,setPerpsStyle]=useState<PerpsStyleId>(initialPerpsStyle ?? DEFAULT_PERPS_STYLE);
+  const [perpsMarkets,setPerpsMarkets]=useState(["BTC-PERP", "ETH-PERP", "SOL-PERP"]);
   /**
    * WHAT IT TRADES, ASKED DURING SETUP — and the reason this step exists at all.
    *
@@ -95,7 +103,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   // its existing owner key.
   const privyOwner=usePrivyOwner();
   const [paper,setPaper]=useState(true);
-  const [trade,setTrade]=useState("10");
+  const [trade,setTrade]=useState(perpsOnly ? String(PERPS_CREATE_TRADE_USDG) : "10");
   const [day,setDay]=useState("50");
   const [ack,setAck]=useState(false);
   const [backupAck,setBackupAck]=useState(false);
@@ -105,16 +113,19 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   const [busy,setBusy]=useState(false);
   const [status,setStatus]=useState("");
   const [error,setError]=useState("");
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const requireCurrentSetup = () => { if (!mounted.current) throw new Error("This account's setup is no longer open."); };
   useEffect(()=>{
     if(!account?.status.grant)return;
-    void requestJson<{values:{liveTradingEnabled?:boolean;agentName?:string;strategy?:string}}>("/api/settings").then(({values})=>{setPaper(!(values.liveTradingEnabled ?? false));setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
+    void requestJson<{values:{liveTradingEnabled?:boolean;agentName?:string;strategy?:string}}>("/api/settings").then(({values})=>{setPaper(perpsOnly || !(values.liveTradingEnabled ?? false));setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
     const local=loadGrant();
     if(local?.smartAccount.toLowerCase()===account.status.grant.smartAccount.toLowerCase()) {
       setGrant(local);setArmed(account.status.exists);
       const saved=localStorage.getItem(`merrymen.backup.${local.smartAccount.toLowerCase()}`)==="1";
       setStep(saved ? "fund" : "backup");
     }
-  },[account?.status.grant?.smartAccount]);
+  },[account?.status.grant?.smartAccount,perpsOnly]);
   useEffect(()=>{
     if(!grant || step!=="backup")return;
     const guard=(event:BeforeUnloadEvent)=>{event.preventDefault();};
@@ -125,12 +136,12 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   // said "Loading your account…" for either — for ever, after a failure, with
   // nothing to press. See AccountEntry.
   if(!account)return accountFailed
-    ? <section className="create-agent"><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
-    : <section className="create-agent"><SkeletonRows rows={3} label="Loading your account"/></section>;
-  if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onRefresh}/></section>;
-  if(account.status.exists && !grant)return <section className="create-agent"><h1>Your agent is already set up.</h1><p>Open your agent to view its portfolio, or manage its wallet on this device.</p><button className="flow-primary" onClick={onDone}>Open agent</button><a href="/grant">Manage existing wallet</a></section>;
+    ? <section className={surfaceClass}><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
+    : <section className={surfaceClass}><SkeletonRows rows={3} label="Loading your account"/></section>;
+  if(account.session.hosted && !account.session.address)return <section className={surfaceClass}><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onRefresh}/></section>;
+  if(account.status.exists && !grant)return <section className={surfaceClass}><h1>Your agent is already set up.</h1><p>Open your agent to view its portfolio, or manage its wallet on this device.</p><button className="flow-primary" onClick={onDone}>Open agent</button><a href="/grant">Manage existing wallet</a></section>;
   async function create() {
-    if(busy || grant)return;
+    if(busy || grant || !account)return;
     // WAS `validAmount`, which took a dot decimal and nothing else — while the
     // field above is `inputMode="decimal"`, which renders a COMMA key on a
     // Spanish, German, French, Portuguese, Turkish or Indonesian keyboard. The
@@ -163,13 +174,21 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     setBusy(true);setError("");
     try {
       const current=await requestJson<AccountState["status"]>("/api/grants");
+      requireCurrentSetup();
       if(current.exists){throw new Error("An agent is already active. Open your agent instead of creating another wallet.");}
       const settings=await requestJson<{values:{customTokens?:unknown[];v4AdapterAddress?:string;ponsAdapterAddress?:string;ponsClassVaultFactory?:string}}>("/api/settings");
+      requireCurrentSetup();
       const address=(value?:string)=>value&&/^0x[0-9a-fA-F]{40}$/.test(value) ? value as `0x${string}` : undefined;
-      const pons=await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
+      const pons=perpsOnly ? undefined : await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
+      requireCurrentSetup();
       // The market answers ride the settings write that was already happening —
       // one round trip, not four.
-      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]})});
+      const owner = account.session.hosted ? account.session.address : null;
+      const creationSettings = perpsOnly
+        ? perpsCreationSettings({ name, style: perpsStyle, markets: perpsMarkets, perTradeUsdg: perTrade.value, owner })
+        : {owner,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]};
+      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(creationSettings)});
+      requireCurrentSetup();
       /**
        * MERGED LOCALLY, NOT RE-READ — and getting this wrong would silently
        * undo the whole point of the step.
@@ -183,7 +202,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
        */
       // The PARSED values, not `Number(trade)`. The raw string is what the
       // owner typed, and `Number("10,50")` is NaN while `Number("1.000")` is 1.
-      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
+      const mintOptions={caps:{...INITIAL_CAPS,expiryDays:perpsOnly ? PERPS_CREATE_PERMISSION_DAYS : INITIAL_CAPS.expiryDays,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,newAccountPerpsOnly:perpsOnly,extraTokens:perpsOnly ? [] : [...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:perpsOnly ? undefined : address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:perpsOnly ? undefined : address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
       // WHO OWNS THIS MERRYMAN. A Privy session owns it with the embedded
       // wallet it signed in with; everything else keeps the browser-generated
       // key. Same Kernel, same wall, same session key either way.
@@ -203,10 +222,10 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     }catch(e){setError(e instanceof Error ? e.message : "Could not activate your agent.");}finally{setBusy(false);}
   }
   const index=["agent","market","limits","backup","fund"].indexOf(step);
-  return <section className="create-agent">
-    <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
+  return <section className={surfaceClass}>
+    <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>{perpsOnly ? "Create a perps agent" : "Create an agent"}</span></header>
     <ol className="create-steps" aria-label="Setup progress">{["Agent","Market","Limits","Backup","Ready"].map((label,i)=><li key={label} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{label}</li>)}</ol>
-    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError(t("create.errName"));return;}setError("");setStep("market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it opens nothing new until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
+    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>{perpsOnly ? "Choose a perpetuals profile, bound its risk, and start on real market data with simulated funds." : "A name, a strategy, and room to make its own moves."}</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError(t("create.errName"));return;}setError("");setStep("market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/>{!perpsOnly && <fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it opens nothing new until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset>}<div className="create-example" aria-live="polite"><span>{perpsOnly ? "Perpetuals only" : "Strategy example"}</span><p>{perpsOnly ? "Your agent will evaluate your chosen profile automatically. Spot strategies and real-money trading start disabled. No signal means no trade." : EXAMPLES[strategy]}</p></div>
             {/* THE READER'S STANDING, not the rule. The badge above states the
                 requirement; this says whether THEY meet it, which is the only
                 half that decides whether to press the button. "I had to go to
@@ -216,7 +235,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
                 agent is a new, empty account — so a figure that includes the
                 old one would promise this agent tokens it will not have. And
                 an unread count is a dash, never `?? 0`. */}
-            {STRATEGIES.find((x) => x.id === strategy)?.circle &&
+            {!perpsOnly && STRATEGIES.find((x) => x.id === strategy)?.circle &&
               tier &&
               tier.why !== "sign-in" &&
               !newAgentQualifies(tier) && (
@@ -248,7 +267,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
                 agent's account counts toward THAT agent; it stays there, and
                 a new agent starts without it. Said here, before the owner
                 builds a second agent expecting the first one's standing. */}
-            {tier && tier.agentTokens !== null && tier.agentTokens > 0 && (
+            {!perpsOnly && tier && tier.agentTokens !== null && tier.agentTokens > 0 && (
               <p className="create-energy">
                 The {count(tier.agentTokens)} $MERRYMEN in your current agent&apos;s account stays with
                 that agent — a new agent starts without it.
@@ -256,7 +275,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
             )}
             {/* AND, ON A DEPLOYMENT THAT GATES ENERGY, THE CAPACITY IT WILL
                 HAVE — said before anybody funds it, never after. */}
-            {tier &&
+            {!perpsOnly && tier &&
               tier.energyGate &&
               tier.why === "ok" &&
               tier.holderTokens !== null &&
@@ -269,8 +288,14 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
                   orders are never limited; its own AI reviews — including of its open positions — are
                   paced along with the rest.
                 </p>
-              )}<button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
-    {step==="market" && <>
+              )}<button className="flow-primary" type="submit">{perpsOnly ? "Choose your profile" : "Set trading limits"} <ArrowRight size={16}/></button></form></>}
+    {step==="market" && perpsOnly && <>
+      <div className="create-intro"><h1>Choose your play.</h1><p>Each profile uses closed candles, a defined entry rule and a holding deadline. Your size caps and protective exits apply to every profile.</p></div>
+      <fieldset className="create-strategies"><legend>Perpetuals profile</legend>{PERPS_STYLE_CATALOG.map(profile => <label key={profile.id} className={perpsStyle === profile.id ? "selected" : ""}><input type="radio" name="perpsStyle" checked={perpsStyle === profile.id} onChange={() => setPerpsStyle(profile.id)} /><span><strong>{profile.label}</strong><small>{profile.description}</small></span></label>)}</fieldset>
+      <fieldset className="create-mode"><legend>Markets to scan</legend>{["BTC-PERP", "ETH-PERP", "SOL-PERP"].map(market => <label key={market}><input type="checkbox" checked={perpsMarkets.includes(market)} onChange={() => setPerpsMarkets(current => current.includes(market) ? current.filter(item => item !== market) : [...current, market])} />{market}</label>)}</fieldset>
+      <button className="flow-primary" disabled={!perpsMarkets.length} onClick={() => { setError(""); setStep("limits"); }}>Set trading limits <ArrowRight size={16}/></button>
+    </>}
+    {step==="market" && !perpsOnly && <>
       {/* WHAT IT TRADES, ASKED ONCE, AT THE ONLY MOMENT IT IS FREE.
           Every answer here rides the settings write create() already makes, and
           any coin named here is sealed into the FIRST signature — so it needs
@@ -324,7 +349,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
       {basket.length===0 && <p className="create-note" role="status">Pick at least one thing to trade, or your agent will have nothing to do.</p>}
       <button className="flow-primary" disabled={basket.length===0} onClick={()=>{setError("");setStep("limits");}}>Continue</button>
     </>}
-    {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl><fieldset className="create-mode"><legend>{t("mode.legend")}</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> {t("mode.paperOption")}</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> {t("mode.liveOption")}</label></fieldset><p className="create-note">{paper?t("mode.paperNote"):t("mode.liveNote")}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>{t("mode.ack")}</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":"Create agent"}</button></>}
+    {step==="limits" && <><div className="create-intro"><h1>A little freedom.<br/>Clear limits.</h1><p>Start small. You can change these limits with a new signature later.</p></div><div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div><dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>{perpsOnly ? `${PERPS_CREATE_PERMISSION_DAYS} days` : "7 days"}</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>{!perpsOnly && <fieldset className="create-mode"><legend>{t("mode.legend")}</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> {t("mode.paperOption")}</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> {t("mode.liveOption")}</label></fieldset>}{perpsOnly && <dl className="fund-breakdown"><div><dt>Selected profile</dt><dd>{getPerpsStyle(perpsStyle).label}</dd></div><div><dt>Starting book</dt><dd>Paper · simulated funds</dd></div><div><dt>Leverage cap</dt><dd>2×</dd></div><div><dt>Stop distance</dt><dd>5%</dd></div><div><dt>Total open notional cap</dt><dd>50 USDG, or your per-trade cap if higher</dd></div><div><dt>Maximum collateral</dt><dd>30 USDG</dd></div><div><dt>Maximum new positions</dt><dd>4 per day</dd></div></dl>}{perpsOnly && <p className="create-note">A fourteen-day permission leaves room for the seven-day swing horizon. The worker checks current venue minimums before every entry and waits if your cap is too small.</p>}<p className="create-note">{perpsOnly ? "Paper trading uses live market data and simulated funds. Real-money perpetuals require separate consent, signed venue permission and funding in the Control room." : paper?t("mode.paperNote"):t("mode.liveNote")}</p>{!paper&&<label className="create-check"><input type="checkbox" checked={ack} onChange={e=>setAck(e.target.checked)}/>{t("mode.ack")}</label>}<button className="flow-primary" disabled={busy} onClick={()=>void create()}>{busy?"Creating your agent…":perpsOnly?"Create paper perps agent":"Create agent"}</button></>}
     {/* TWO OWNER MODELS, TWO DIFFERENT TRUTHS TO TELL.
         A Privy-owned account has NO key here, by design — showing dots and
         asking somebody to confirm they saved them is asking them to lie, and
@@ -332,7 +357,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
         that was working. So this step says what is actually true of each. */}
     {step==="backup"&&grant&&isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Your X login holds the key that owns this account. There is nothing here to write down — merrymen never sees it, so it cannot show it to you or lose it.</p></div><div className="create-secret"><code>Held by your Privy login</code></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I understand: if I lose access to this X account, merrymen cannot recover these funds for me.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setStep("fund");}}>Continue</button></>}
     {step==="backup"&&grant&&!isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Save the recovery key before you go. It lets you recover this wallet if you lose this device.</p></div><label className="create-label">Recovery key</label><div className="create-secret"><code>{reveal ? grant.demoOwnerPrivateKey : "•••• •••• •••• •••• •••• ••••"}</code><button aria-label={reveal?"Hide recovery key":"Reveal recovery key"} onClick={()=>setReveal(!reveal)}>{reveal?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I saved my recovery key somewhere safe.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setReveal(false);setStep("fund");}}>Continue</button></>}
-    {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?"Ready when you are.":"One last connection."}</h1><p>{armed?(paper ? "Your wallet is connected. Open your agent to check its status and follow paper trades." : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation to connect it to your agent."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>Open your agent</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
+    {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?"Ready when you are.":"One last connection."}</h1><p>{armed?(paper ? (perpsOnly ? "Your paper perps profile is saved. Open Tactical Radar to follow market scans, positions and execution history. Real-money trading needs a separate opt-in." : "Your wallet is connected. Open your agent to check its status and follow paper trades.") : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation to connect it to your agent."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{perpsOnly ? getPerpsStyle(perpsStyle).label : STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>{perpsOnly ? "Open Tactical Radar" : "Open your agent"}</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
     {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}{isWallTooWide(error)&&<> <a href="/settings">Review custom tokens</a></>}</p>}
   </section>;
 }

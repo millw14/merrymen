@@ -58,7 +58,7 @@ function wallRules(): string[] {
   // about in words — so it is held to the same "published or withheld with a
   // reason" rule, read from the same kind of source.
   const perpExecutorRules = new Set<string>();
-  for (const f of ["perps/executor.ts", "perps/executor-live.ts"]) {
+  for (const f of ["perps/executor.ts", "perps/executor-live.ts", "perps/lane.ts"]) {
     for (const m of read(f).matchAll(/new PerpRefused\(\s*"([a-z][a-z-]+)"/g)) perpExecutorRules.add(m[1]!);
   }
   // THE LANE REFUSES BY NAME TOO (its own `refuse(intent, { rule: … })` and
@@ -68,6 +68,7 @@ function wallRules(): string[] {
   for (const m of read("perps/onboard.ts").matchAll(/"(perp-(?:per-trade-cap|collateral-cap|below-min|no-cash))"/g)) perpExecutorRules.add(m[1]!);
   assert.ok(perpExecutorRules.has("perp-withdraw-in-flight"), "sanity: the live executor's refusals were read");
   assert.ok(perpExecutorRules.has("perp-standing-down"), "sanity: the lane's refusals were read");
+  assert.ok(perpExecutorRules.has("perp-signal-expired"), "sanity: the lane's thrown refusals were read");
   for (const r of perpExecutorRules) found.add(r);
   return [...found].sort();
 }

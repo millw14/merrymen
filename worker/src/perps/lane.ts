@@ -752,6 +752,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   const brainPermits = new WeakMap<object, PerpsBrainApproval>();
   const trendPermits = new WeakMap<object, { context: string; notAfterMs: number }>();
   const trendContext = (a: PerpLaneAgent, settings = deps.config()) => brainFingerprint({ agent: a, settings });
+  const automationContext = (a: PerpLaneAgent) => brainFingerprint({ agent: a, settings: deps.config(), execution: deps.execMode() });
   const brainContext = (a: PerpLaneAgent) => brainFingerprint({ agent: a, settings: deps.config(), brain: deps.brain?.configKey() ?? "unconfigured" });
   let brainNotice: string | null = null;
   // A failed halt write must still prevent entries in this process. Kept
@@ -772,6 +773,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   let strategistIntents: PerpRouteIntent[] = [];
   let lastRefusalKey: string | null = null;
   let lastIdleKey: string | null = null;
+  let automation: { context: string; report: NonNullable<PerpsReport["automation"]> } | null = null;
   let railKey: string | null = null;
   let tickFailureKey: string | null = null;
   let reportJson: string | null = null;
@@ -861,6 +863,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     brainNotice = null;
     lastRefusalKey = null;
     lastIdleKey = null;
+    automation = null;
     railKey = null;
     tickFailureKey = null;
     lastActive = false;
@@ -3080,6 +3083,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     if (r === null || !r.active) return;
     const cfg = deps.config();
     const profileContext = trendContext(a, cfg);
+    const evaluatedContext = automationContext(a);
     // ONE WRITER PER BOOK: `strategist` without a real model behind it is
     // nobody, so it is manual — never a fall back to perp-trend.
     const driver = cfg.perpsDriver === "strategist" && !t.strategistLive ? "manual" : cfg.perpsDriver;
@@ -3138,6 +3142,18 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       }
     } else brainReview.reset("");
     const out = runPerpRoute({ ...routeInput, brainApproved: approval !== null });
+    automation = { context: evaluatedContext, report: {
+      evaluatedAt: Math.floor(deps.now() / 1000), driver, style: getPerpsStyle(cfg.perpsStyle).id,
+      state: driver === "manual" ? "manual" : out.entry !== null ? "candidate" : "waiting",
+      reason: (driver === "manual" ? "Automatic entries are off; position protection remains independent."
+        : out.entry !== null ? `A ${out.entry.market} entry signal qualified for execution checks; this is not a fill.`
+        : out.idle ? renderWhy(out.idle, "owner") : "No new entry qualified on this review.").slice(0, 500),
+    } };
+    // The route deliberately evaluates its older tick snapshot. Protection may
+    // already have changed the book; publish diagnostics beside a fresh read,
+    // holding the same lock through persistence so no newer settlement races it.
+    await lock.run(async () => writeReport(await readLocked()), { label: "automation report" })
+      .catch(e => log(`automation report could not be saved: ${errText(e)}`));
     for (const d of out.dropped) log(`strategist ${labelOf(d.intent)} dropped: ${d.why}`);
     const source = out.source ?? "perp-route";
     const all: { intent: PerpRouteIntent; why: Why | null }[] = [
@@ -3460,10 +3476,14 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
 
   // ── the report ──────────────────────────────────────────────────────────
 
+  function reportedAutomation(a: PerpLaneAgent): Pick<PerpsReport, "automation"> {
+    return automation !== null && automation.context === automationContext(a) ? { automation: automation.report } : {};
+  }
+
   async function writeReport(r: PerpLaneRead | null): Promise<void> {
     const a = laneAgent();
     if (a === null || r === null) return;
-    const json = JSON.stringify(r.report);
+    const json = JSON.stringify({ ...r.report, ...reportedAutomation(a) });
     if (json === reportJson) return;
     await deps.store.setAgentPerps(a.agentId, json);
     reportJson = json;
@@ -3618,6 +3638,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       brainNotice = null;
       lastRefusalKey = null;
       lastIdleKey = null;
+      automation = null;
       lane.startProtect();
       const r = await lock.run(readLocked, { label: "settings" });
       await writeReport(r);
@@ -3642,9 +3663,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       const a = laneAgent();
       if (a !== null && deps.live !== undefined && live !== null && (live.exposure || live.snap?.account?.positions.some((p) => p.baseAmount !== 0n))) {
         const r = await readLiveLocked(a, deps.config(), deps.execMode(), deps.now(), true);
-        return { ...r.report, mode: "live" };
+        return { ...r.report, ...reportedAutomation(a), mode: "live" };
       }
-      return lastRead ? { ...lastRead.report, mode: lastRead.bookMode } : null;
+      return lastRead ? { ...lastRead.report, ...(a ? reportedAutomation(a) : {}), mode: lastRead.bookMode } : null;
     }, { label: "owner perpetual report" }),
     feedMarketIds() {
       const cfg = deps.config();

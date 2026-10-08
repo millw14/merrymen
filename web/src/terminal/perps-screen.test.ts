@@ -89,7 +89,8 @@ describe("private perps screen", () => {
       assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0);
       assert.match(dom.container.textContent ?? "", /Sign in again/);
       await dom.render(createElement(PerpsScreen, { ...props, ownerKey: null }));
-      assert.equal(urls.length, 2, "signed-out screen performs no private chart read");
+      assert.equal(urls.filter(url => url.startsWith("/api/perps/chart?")).length, 2, "signed-out screen performs no private chart read");
+      assert.ok(urls.at(-1)?.startsWith("/api/perps/market?"));
       assert.doesNotMatch(dom.container.textContent ?? "", /100\.00/);
     } finally { globalThis.fetch = original; await dom.close(); }
   });
@@ -99,7 +100,7 @@ describe("private perps screen", () => {
     const original = globalThis.fetch;
     let status = 200;
     let calls = 0;
-    globalThis.fetch = async () => { calls++; return json(answer([entry("known", NOW - 1000)]), status); };
+    globalThis.fetch = async (url) => { if(String(url).startsWith("/api/perps/chart?")) calls++; return json(answer([entry("known", NOW - 1000)]), status); };
     try {
       await dom.render(createElement(PerpsScreen, props));
       status = 500;
@@ -160,7 +161,7 @@ describe("mobile command dock", () => {
       addEventListener: (_event: string, listener: () => void) => listeners.add(listener),
       removeEventListener: (_event: string, listener: () => void) => listeners.delete(listener),
     }) });
-    globalThis.fetch = async () => { calls++; return json(answer([entry("retained", NOW - 1000)])); };
+    globalThis.fetch = async (url) => { if(String(url).startsWith("/api/perps/chart?")) calls++; return json(answer([entry("retained", NOW - 1000)])); };
     const panel = (name: string) => dom.container.querySelector<HTMLElement>(`[id$="-panel-${name}"]`)!;
     const tab = (name: string) => dom.container.querySelector<HTMLButtonElement>(`[id$="-tab-${name}"]`)!;
     try {
@@ -201,5 +202,57 @@ describe("mobile command dock", () => {
       assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0);
       assert.match(dom.container.querySelector('[id$="-panel-positions"]')?.textContent ?? "", /Only the owner can access/);
     } finally { globalThis.fetch = original; await dom.close(); }
+  });
+});
+
+
+describe("public market access", () => {
+  it("renders real candles for visitors without requesting private records", async () => {
+    const dom = testDom(); const original = globalThis.fetch; const urls: string[] = [];
+    globalThis.fetch = async url => { urls.push(String(url)); return json({...answer(), state:"not-configured"}); };
+    try {
+      await dom.render(createElement(PerpsScreen, {...props, ownerKey:null, hasAgent:false}));
+      assert.equal(urls.length,1); assert.equal(urls[0], "/api/perps/market?market=BTC-PERP&window=24h");
+      assert.ok(dom.container.querySelector(".perps-chart"));
+      assert.equal(dom.container.querySelector(".perps-entry-history"),null);
+      assert.equal(dom.container.querySelector(".perps-activity"),null);
+      assert.match(dom.container.textContent ?? "",/Public market prices/);
+      assert.match(dom.container.textContent ?? "",/LIVE MARKET DATA/);
+      assert.doesNotMatch(dom.container.textContent ?? "",/PAPER PRACTICE|Simulated entries/);
+      assert.equal(dom.container.querySelector('[aria-label="Entry book"]'),null);
+    } finally {globalThis.fetch=original;await dom.close();}
+  });
+  it("keeps real candles visible when the private tape is unreadable", async () => {
+    const dom = testDom(); const original = globalThis.fetch;
+    globalThis.fetch=async()=>json({...answer(),state:"unreadable"});
+    try {
+      await dom.render(createElement(PerpsScreen,props));
+      assert.ok(dom.container.querySelector(".perps-chart"));
+      assert.match(dom.container.textContent ?? "",/Entry counts are unknown/);
+      assert.doesNotMatch(dom.container.textContent ?? "",/No recorded entries in/);
+    } finally {globalThis.fetch=original;await dom.close();}
+  });
+});
+
+describe("doctrine intent for new agents", () => {
+  it("carries the inspected profile into creation without saving and resets it for a new owner", async () => {
+    const dom = testDom(); const original = globalThis.fetch;
+    const methods: string[] = []; const selections: Array<string | undefined> = [];
+    globalThis.fetch = async (_url, init) => { methods.push(init?.method ?? "GET"); return json({...answer(), state:"not-configured"}); };
+    const setupProps = {...props, hasAgent:false, session:{hosted:false,address:null}, onCreate:(style?: string)=>selections.push(style)};
+    try {
+      await dom.render(createElement(PerpsScreen, setupProps));
+      await act(async()=>dom.container.querySelector<HTMLButtonElement>('[aria-label^="Inspect Razor:"]')!.click());
+      await dom.click("Review controls ↗");
+      // The control room is loaded on first use, not in the market's initial bundle.
+      await act(async()=>{ await new Promise(resolve=>setTimeout(resolve,100)); });
+      await dom.click("Create your agent ↗");
+      assert.deepEqual(selections,["scalp-breakout"]);
+      assert.ok(methods.every(method=>method==="GET"), "inspecting and starting setup never saves settings");
+      await dom.render(createElement(PerpsScreen,{...setupProps,ownerKey:"owner-b"}));
+      await dom.click("Control room ↗");
+      await dom.click("Create your agent ↗");
+      assert.deepEqual(selections,["scalp-breakout",undefined],"a different owner does not inherit the previous doctrine draft");
+    } finally {globalThis.fetch=original;await dom.close();}
   });
 });

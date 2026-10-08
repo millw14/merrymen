@@ -18,6 +18,8 @@
  */
 import {
   LIGHTER_MARKETS_V1,
+  getPerpsStyle,
+  DEFAULT_PERPS_STYLE,
   PERPS_LIVE_CONSENT_VERSION,
   PERPS_MARKETS_MAX,
   PERPS_NUM_BOUNDS,
@@ -378,6 +380,7 @@ export function perpsAutonomyReadiness(values: PerpsStored, defaults: PerpsDefau
   const live = values.liveTradingEnabled ?? defaults.liveTradingEnabled;
   const markets = perpMarketsInForce(values, defaults);
   const expiresAt = grant.state === "read" ? grant.expiresAt : null;
+  const requiredHours = driver === "perp-trend" ? getPerpsStyle(values.perpsStyle ?? defaults.perpsStyle ?? DEFAULT_PERPS_STYLE).maxHoldHours : PERP_TREND_MAX_HOLD_HOURS;
   const remainingHours = expiresAt === null ? null : Math.max(0, (expiresAt - nowMs / 1000) / 3600);
   const cap = perpsEffectiveCap(grant.state === "read" ? grant.signedPerTradeUsdg : null, values.perpsPerTradeUsdg ?? defaults.perpsPerTradeUsdg);
   const report = grant.state === "read" ? grant.report : null;
@@ -387,8 +390,8 @@ export function perpsAutonomyReadiness(values: PerpsStored, defaults: PerpsDefau
     driver, enabled, manual: enabled && driver === "manual",
     strategistMismatch: enabled && driver === "strategist" && (values.strategy ?? defaults.strategy) !== "llm-strategist",
     noTrendMarkets: enabled && (driver === "perp-trend" || driver === "brain") && !markets.some(m => (PERP_TREND_UNIVERSE as readonly string[]).includes(m)),
-    authority: !enabled || (driver !== "perp-trend" && driver !== "brain") || (!live && expiresAt === null) ? null : remainingHours === null ? "unknown" : remainingHours <= PERP_TREND_MAX_HOLD_HOURS ? "short" : null,
-    remainingHours, requiredHours: PERP_TREND_MAX_HOLD_HOURS, cap,
+    authority: !enabled || (driver !== "perp-trend" && driver !== "brain") || (!live && expiresAt === null) ? null : remainingHours === null ? "unknown" : remainingHours < requiredHours ? "short" : null,
+    remainingHours, requiredHours, cap,
     minimums: (report?.entryMinimums ?? []).filter(m => markets.includes(m.market)).map(m => {
       const minimumUsdg = Number(m.minNotionalMicro) / 1_000_000;
       return { market: m.market, minimumUsdg, fits: !minimumsCurrent || cap === null ? null : cap >= minimumUsdg };

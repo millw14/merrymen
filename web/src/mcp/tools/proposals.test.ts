@@ -88,8 +88,12 @@ async function setup(o: { settings?: Record<string, unknown>; directory?: Return
 const data = (r: Awaited<ReturnType<typeof runTool>>) => r.structuredContent as Record<string, unknown>;
 const code = (r: Awaited<ReturnType<typeof runTool>>) => errorOf(r).code;
 
-test("the strategy list matches the worker's registry", () => {
-  assert.deepEqual([...KNOWN_STRATEGIES].sort(), [...BUILTIN_STRATEGIES].sort());
+test("the conversational strategy list matches switchable worker strategies", () => {
+  // This builtin is reserved for the explicit perps creation flow. Offering it
+  // as an ordinary settings proposal could silently stop an existing spot agent.
+  assert.ok(BUILTIN_STRATEGIES.includes("perps-only"));
+  assert.ok(!(KNOWN_STRATEGIES as readonly string[]).includes("perps-only"));
+  assert.deepEqual([...KNOWN_STRATEGIES].sort(), BUILTIN_STRATEGIES.filter(strategy => strategy !== "perps-only").sort());
 });
 
 test("quote_trade: expected, minimum at the agent's slippage, impact, route and caveats — and places nothing", async () => {
@@ -186,6 +190,7 @@ test("settings proposals: only conversation-settable keys, validated values, wit
   assert.equal(code(await run("propose_settings_change", { changes: { liveTradingEnabled: true }, idempotency_key: "set-000001" })), "invalid_input");
   assert.equal(code(await run("propose_settings_change", { changes: { maxImpactBps: 5000 }, idempotency_key: "set-000002" })), "invalid_input");
   assert.equal(code(await run("propose_settings_change", { changes: { slippageBps: 5000 }, idempotency_key: "set-000003" })), "invalid_input");
+  assert.equal(code(await run("propose_settings_change", { changes: { strategy: "perps-only" }, idempotency_key: "set-perps-only" })), "invalid_input");
   const r = data(await run("propose_settings_change", { changes: { strategistStopLossBps: 800, strategy: "trencher" }, idempotency_key: "set-000004" }));
   const diff = r.diff as Array<{ key: string; current: string; proposed: string }>;
   assert.deepEqual(diff.map((x) => [x.key, x.current, x.proposed]), [["strategistStopLossBps", "10%", "8%"], ["strategy", "not set", "trencher"]]);

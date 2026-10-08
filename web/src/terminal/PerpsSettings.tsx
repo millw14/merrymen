@@ -170,6 +170,7 @@ export interface PerpsSettingsProps {
   /** After a write the server accepted: re-read the settings so the switches show the server's answer. */
   onSaved: () => void | Promise<void>;
   initialStyle?: PerpsStyleId;
+  styleRequest?: { style: PerpsStyleId; revision: number };
   onInitialStyleConsumed?: () => void;
 }
 
@@ -183,7 +184,7 @@ export function PerpsSettings(props: PerpsSettingsProps) {
   return <PerpsSettingsForOwner key={`${props.hosted}:${props.owner?.toLowerCase() ?? "none"}`} {...props} />;
 }
 
-function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initialStyle, onInitialStyleConsumed }: PerpsSettingsProps) {
+function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initialStyle, onInitialStyleConsumed, styleRequest }: PerpsSettingsProps) {
   const t = useT();
   const [grants, setGrants] = useState<PerpsGrantRead>({ state: "loading" });
   const [busy, setBusy] = useState<Busy>(null);
@@ -194,6 +195,11 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
   const [statusRevision, setStatusRevision] = useState(0);
   const [readAt, setReadAt] = useState(Date.now);
   const limitsSection = useRef<HTMLDetailsElement | null>(null);
+  useEffect(() => {
+    if (!styleRequest) return;
+    setDraft((current) => ({ ...current, driver: "perp-trend", style: styleRequest.style }));
+    if (limitsSection.current) limitsSection.current.open = true;
+  }, [styleRequest]);
   const initialStyleRef = useRef(initialStyle);
   useEffect(() => {
     if (!initialStyleRef.current || hosted === null) return;

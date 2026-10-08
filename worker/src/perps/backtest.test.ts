@@ -1,3 +1,4 @@
+import { PERPS_STYLE_CATALOG } from "../../../packages/core/src/perps-styles";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runPerpsReplay, replaySettings, type PerpsReplayFrame } from "./backtest";
@@ -88,3 +89,40 @@ test("stale held-market depth makes performance incomplete instead of optimistic
   assert.equal(r.finalEquityMicro, null);
   assert.match(r.failure!.reason, /depth/);
 });
+
+
+test("replay rejects unknown profiles instead of silently evaluating swing defaults", () => {
+  assert.throws(() => replaySettings({ perpsStyle: "unknown" as never }), /invalid perpsStyle/);
+});
+for (const profile of PERPS_STYLE_CATALOG) {
+  test(`replay evaluates ${profile.id} native signals and immutable deadline`, () => {
+    const entryAt = Math.floor(start / profile.candleMs) * profile.candleMs + 90_000;
+    const last = Math.floor(entryAt / profile.candleMs) * profile.candleMs - profile.candleMs;
+    const first = frame(entryAt);
+    const market = (first.feed as LighterFeedFile).markets["1"]!;
+    const rows = market.closed4h!.map((c, i, all) => ({ ...c, t: last - (all.length - 1 - i) * profile.candleMs }));
+    if (profile.timeframe === "4h") market.closed4h = rows;
+    else { delete market.closed4h; delete market.candlesObservedAt; market.closedByTimeframe = { [profile.timeframe]: { observedAt: entryAt, rows } }; }
+    const cfg = { ...config, settings: { ...config.settings, perpsStyle: profile.id } };
+    const opened = runPerpsReplay(cfg, [first]);
+    assert.equal(opened.complete, true);
+    assert.equal(opened.settings.perpsStyle, profile.id);
+    assert.equal(opened.tailPositions.length, 1);
+    assert.equal(opened.tailPositions[0]!.entryStyle, profile.id);
+    // Hourly frames retain complete funding and real depth; no fresh signal
+    // candles are fabricated after entry. The recorded position still expires.
+    const endAt = entryAt + profile.maxHoldHours * 3600_000;
+    const samples = [first];
+    for (let at = entryAt + 3600_000; at < endAt; at += 3600_000) {
+      const f = frame(at); const m = (f.feed as LighterFeedFile).markets["1"]!;
+      delete m.closed4h; delete m.candlesObservedAt; delete m.closedByTimeframe; samples.push(f);
+    }
+    const closing = frame(endAt); const m = (closing.feed as LighterFeedFile).markets["1"]!;
+    delete m.closed4h; delete m.candlesObservedAt; delete m.closedByTimeframe; samples.push(closing);
+    const closed = runPerpsReplay(cfg, samples);
+    assert.equal(closed.complete, true, closed.failure?.reason);
+    assert.equal(closed.tailPositions.length, 0);
+    assert.equal(closed.events.filter(e => e.kind === "open").length, 1);
+    assert.ok(closed.events.some(e => e.kind === "risk-close" && e.atMs === endAt));
+  });
+}
