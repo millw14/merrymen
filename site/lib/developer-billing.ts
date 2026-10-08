@@ -109,6 +109,22 @@ export function normalizePlans(input: unknown): PlansView | null {
  */
 export const paymentsReady = (view: PlansView) => view.source === "live" && view.billing.mode !== "off" && view.treasury !== null && view.currency_ok;
 
+export type Freshness = { ok: true; plans: PlansView } | { ok: false; plans: PlansView | null; message: string };
+/**
+ * GET /plans read again at the moment of paying, against the treasury the
+ * page is about to send to. A tab left open, or a page from the minute-long
+ * cache, can show a treasury since rotated out or payments since closed; the
+ * gateway credits neither and nothing is returned. Anything short of a live
+ * answer naming the same treasury refuses, with the fresh plans to show.
+ */
+export function stillPayable(answer: unknown, treasury: string): Freshness {
+  const fresh = normalizePlans(answer);
+  if (!fresh) return { ok: false, plans: null, message: "The payment details could not be confirmed just now, so nothing was sent. Try again shortly." };
+  if (!paymentsReady(fresh)) return { ok: false, plans: fresh, message: "Payments are paused just now, so nothing was sent. Your selection waits." };
+  if (fresh.treasury !== treasury.toLowerCase()) return { ok: false, plans: fresh, message: "The Merrymen payments wallet changed since this page loaded, so nothing was sent. Check the new details and pay again." };
+  return { ok: true, plans: fresh };
+}
+
 export interface HistoryItem { type: "payment" | "charge" | "reversal" | "adjustment"; at: string; amount_raw: string; tier: string | null; tx_hash: string | null; reason: string | null }
 export interface AccountView {
   account: { id: string; name: string; wallet: string; created_at: string | null };

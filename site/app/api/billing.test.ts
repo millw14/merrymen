@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import {
   FALLBACK_PLANS, POLL_GIVE_UP_MS, POLL_MAX_CHECKS, ROBINHOOD_CHAIN, TOKEN, UNIT, amountToSend, balanceOfCalldata, ceilToWholeToken, chainIdOf, formatTokens, historyLabel, nextPollDelay,
-  normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, switchToRobinhood,
+  normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, stillPayable, switchToRobinhood,
   endMessage, tokensToRaw, transferCalldata, txHash, waitingMessage, walletError, watchPayment, type Eip1193,
 } from '../../lib/developer-billing';
 
@@ -201,6 +201,22 @@ test('payments are offered only with billing on, a real treasury and our own tok
   }
   // An enforced flag without enforce mode is not believed.
   assert.equal(normalizePlans(livePlans({ billing: { mode: 'observe', enforced: true } }))!.billing.enforced, false);
+});
+
+test('a wallet payment goes ahead only if a fresh read still names the same treasury', () => {
+  assert.equal(stillPayable(livePlans(), TREASURY).ok, true);
+  assert.equal(stillPayable(livePlans(), TREASURY.toUpperCase().replace('0X', '0x')).ok, true);
+  const rotated = stillPayable(livePlans({ treasury: OTHER }), TREASURY);
+  assert.equal(rotated.ok, false); assert.equal(rotated.plans?.treasury, OTHER, 'the new details come back to show');
+  assert.match(!rotated.ok ? rotated.message : '', /payments wallet changed since this page loaded, so nothing was sent/);
+  for (const closed of [livePlans({ billing: { mode: 'off', enforced: false } }), livePlans({ treasury: null }), livePlans({ currency: null })]) {
+    const answer = stillPayable(closed, TREASURY);
+    assert.equal(answer.ok, false); assert.match(!answer.ok ? answer.message : '', /paused just now, so nothing was sent/);
+  }
+  for (const unreadable of [null, {}, 'Bad gateway']) {
+    const answer = stillPayable(unreadable, TREASURY);
+    assert.equal(answer.ok, false); assert.equal(answer.plans, null); assert.match(!answer.ok ? answer.message : '', /could not be confirmed/);
+  }
 });
 
 const account = (over: Record<string, unknown> = {}) => ({
