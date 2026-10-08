@@ -420,6 +420,21 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     assert.deepEqual(tg.out().slice(-1)[0], { text: BOARD, replyTo: ask.messageId });
   });
 
+  it("with nothing ever asked, a nudge under 'yo' is never a market read (d1 probe 2c reversed)", async () => {
+    make();
+    const yo = ownLine(7_200, "yo");
+    for (const t of ["i asked a question", "you didn't answer", "hello??", "answer me", "answer the question", "?"]) {
+      clock += 3 * MIN;
+      const before = tg.out().length;
+      await said(under(t, yo));
+      const said1 = tg.out().slice(before).map((o) => o.text);
+      assert.equal(said1.length, 1, t);
+      if (/answer|asked/.test(t)) assert.equal(said1[0], "which question? i might've missed it, ask me again", t);
+      else assert.doesNotMatch(said1[0]!, /market|mostly red/, t);
+    }
+    assert.deepEqual(desk.asks, []);
+  });
+
   it("past ten minutes her question is no longer open: 'which question?'", async () => {
     fomo = new SpyFomo();
     make();
