@@ -1,3 +1,4 @@
+import { readRequestPurpose } from "./account-purpose";
 /** Client-safe wire contract: amounts stay exact decimal strings. */
 import { perpMarketByKey } from "@merrymen/core";
 export interface PerpsActivityQuery { market: string; book: "paper" | "live" }
@@ -12,7 +13,9 @@ export interface PerpsActivityResponse extends PerpsActivityQuery {
   items: PerpsActivityItem[]; unknownRows: number; truncated: boolean;
 }
 export function perpsActivityQuery(url: string): PerpsActivityQuery | null {
+  if (!readRequestPurpose({ url })) return null;
   const p = new URL(url).searchParams, market = p.get("market"), book = p.get("book");
+  p.delete("purpose");
   return p.size === 2 && market && (market === "all" || perpMarketByKey(market)) && (book === "paper" || book === "live") ? { market, book } : null;
 }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);

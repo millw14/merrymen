@@ -161,7 +161,7 @@ function LiveChart({ privateReady, market, book, windowKey, sound, positions, po
         controller = new AbortController();
         const timeout = globalThis.setTimeout(() => controller?.abort(), 12_000);
         try {
-          const params = new URLSearchParams({ market, ...(privateReady ? {book} : {}), window: windowKey });
+          const params = new URLSearchParams({ market, ...(privateReady ? {book, purpose: "perps"} : {}), window: windowKey });
           const response = await fetch(`/api/perps/${privateReady ? "chart" : "market"}?${params}`, { credentials: "same-origin", cache: "no-store", signal: controller.signal });
           if (stopped) return false;
           if (!response.ok) {

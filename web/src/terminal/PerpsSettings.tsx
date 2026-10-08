@@ -159,6 +159,7 @@ const UNIT_KEY = {
 } as const satisfies Record<(typeof PERPS_NUM_UNIT)[PerpsNumKey], MessageKey>;
 
 export interface PerpsSettingsProps {
+  purpose?: "spot" | "perps";
   /** The stored settings, as GET /api/settings read them (SettingsView.values). */
   values: PerpsStored;
   /** SettingsView.defaults. */
@@ -181,10 +182,10 @@ type Note = { at: "switch" | "consent" | "fields"; ok: boolean; lines: string[] 
 export function PerpsSettings(props: PerpsSettingsProps) {
   // Consent, unsaved limits and the venue report belong to the owner who read
   // them. A changed session must begin with a fresh section, before any click.
-  return <PerpsSettingsForOwner key={`${props.hosted}:${props.owner?.toLowerCase() ?? "none"}`} {...props} />;
+  return <PerpsSettingsForOwner key={`${props.purpose ?? "spot"}:${props.hosted}:${props.owner?.toLowerCase() ?? "none"}`} {...props} />;
 }
 
-function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initialStyle, onInitialStyleConsumed, styleRequest }: PerpsSettingsProps) {
+function PerpsSettingsForOwner({ purpose = "spot", values, defaults, owner, hosted, onSaved, initialStyle, onInitialStyleConsumed, styleRequest }: PerpsSettingsProps) {
   const t = useT();
   const [grants, setGrants] = useState<PerpsGrantRead>({ state: "loading" });
   const [busy, setBusy] = useState<Busy>(null);
@@ -238,7 +239,10 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
       active = abort;
       const deadline = setTimeout(() => abort.abort(), 10_000);
       try {
-        const query = hosted && owner ? `?owner=${encodeURIComponent(owner)}` : "";
+        const params = new URLSearchParams();
+        if (hosted && owner) params.set("owner", owner);
+        if (purpose === "perps") params.set("purpose", purpose);
+        const query = params.size ? `?${params}` : "";
         // Bound both response headers and body reading. A fresh controller on
         // every attempt lets a timed-out request recover on the next poll.
         const read = await Promise.race([
@@ -295,7 +299,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
   async function put(body: Record<string, unknown>): Promise<{ ok: boolean; wrote: boolean; lines: string[] }> {
     let res: Response;
     try {
-      res = await fetch("/api/settings", {
+      res = await fetch(purpose === "perps" ? "/api/settings?purpose=perps" : "/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(withOwner(body, owner)),
@@ -399,13 +403,13 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
       t("settings.perps.needs.grantUnread")
     ) : !grants.exists ? (
       <>
-        {t("settings.perps.needs.grantNone")} <Link href="/grant#resign">{t("settings.perps.needs.resign")}</Link>
+        {t("settings.perps.needs.grantNone")} <Link href={purpose === "perps" ? "/grant?purpose=perps#resign" : "/grant#resign"}>{t("settings.perps.needs.resign")}</Link>
       </>
     ) : grants.granted ? (
       t("settings.perps.needs.grantYes")
     ) : (
       <>
-        {t("settings.perps.needs.grantNo")} <Link href="/grant#resign">{t("settings.perps.needs.resign")}</Link>
+        {t("settings.perps.needs.grantNo")} <Link href={purpose === "perps" ? "/grant?purpose=perps#resign" : "/grant#resign"}>{t("settings.perps.needs.resign")}</Link>
       </>
     );
   const offer = grants.state === "read" ? grants.optIn : null;
@@ -413,7 +417,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
     <div className="perps-needs">
       <b>{t("settings.perps.needs.title")}</b>
       <ul>
-        <li>{accountLive ? t("settings.perps.needs.liveTradingOn") : <>{t("settings.perps.needs.liveTradingOff")} <Link href="/settings#trading-mode">{t("settings.perps.setup.reviewMode")}</Link></>}</li>
+        <li>{accountLive ? t("settings.perps.needs.liveTradingOn") : <>{t("settings.perps.needs.liveTradingOff")} <Link href={purpose === "perps" ? "/settings?purpose=perps#trading-mode" : "/settings#trading-mode"}>{t("settings.perps.setup.reviewMode")}</Link></>}</li>
         {grantLine !== null && <li>{grantLine}</li>}
       </ul>
       {offer === false && <p>{t("settings.perps.needs.notOffered")}</p>}
@@ -505,7 +509,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
         {statusLines.map((line, i) => (
           <div key={i}>{line}</div>
         ))}
-        {grants.state === "read" && grants.report?.blocker === "perps-no-collateral" && <p><Link href="/deposit">{t("settings.perps.setup.addFunds")}</Link></p>}
+        {grants.state === "read" && grants.report?.blocker === "perps-no-collateral" && <p><Link href={purpose === "perps" ? "/perps?view=account" : "/deposit"}>{t("settings.perps.setup.addFunds")}</Link></p>}
         <button type="button" className="mm-btn" onClick={() => setStatusRevision(n => n + 1)}>{t("settings.perps.status.refresh")}</button>
       </div>
 
@@ -518,7 +522,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
         {readiness.noTrendMarkets && <p role="status">{t("settings.perps.setup.noTrendMarkets")}</p>}
         {readiness.authority && <p role="status">
           {readiness.authority === "short" ? t("settings.perps.setup.authorityShort", { hours: readiness.requiredHours, remaining: Math.floor(readiness.remainingHours ?? 0) }) : t("settings.perps.setup.authorityUnread", { hours: readiness.requiredHours })}
-          {" "}<Link href="/grant#resign">{t("settings.perps.setup.reviewGrant")}</Link>
+          {" "}<Link href={purpose === "perps" ? "/grant?purpose=perps#resign" : "/grant#resign"}>{t("settings.perps.setup.reviewGrant")}</Link>
         </p>}
         {readiness.enabled && <>
           <p>{readiness.minimums.length ? t("settings.perps.setup.minimums") : t("settings.perps.setup.minimumsUnread")}</p>
@@ -527,14 +531,14 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved, initi
             {m.fits === false ? ` — ${t("settings.perps.setup.capShort", { cap: count(readiness.cap) })}` : ""}
           </li>)}</ul>
           {readiness.minimums.some(m => m.fits === false) && <p role="status">
-            {t("settings.perps.setup.minimumAction")} {" "}<Link href="/grant#resign">{t("settings.perps.setup.reviewGrant")}</Link>
+            {t("settings.perps.setup.minimumAction")} {" "}<Link href={purpose === "perps" ? "/grant?purpose=perps#resign" : "/grant#resign"}>{t("settings.perps.setup.reviewGrant")}</Link>
           </p>}
         </>}
         <button type="button" className="mm-btn" onClick={reviewLimits}>{t("settings.perps.setup.reviewLimits")}</button>
       </section>
 
       {ownerHalted && status.kind === "report" && status.book !== null && (
-        <PerpsResume key={`${owner}:${status.book}`} owner={owner} hosted={hosted} mode={status.book} incident={grants.state === "read" && grants.report?.incident === true} />
+        <PerpsResume purpose={purpose} key={`${owner}:${status.book}`} owner={owner} hosted={hosted} mode={status.book} incident={grants.state === "read" && grants.report?.incident === true} />
       )}
 
       <div className="mm-grid">

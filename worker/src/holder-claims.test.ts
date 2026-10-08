@@ -416,7 +416,7 @@ describe("the orchestrator wiring", () => {
     // Skipping the write would spawn a fresh child on the defaults, and the
     // default is paper: a live agent off its real stop-losses.
     const fn = body("async function writeSettingsForChild(");
-    const decide = fn.indexOf("const holder: `0x${string}` | null = claims");
+    const decide = fn.indexOf('const holder: `0x${string}` | null = workerPurpose(tenant) === "perps" ? null : claims');
     const kept = fn.indexOf(': lastWrittenHolder(path.join(childHome(tenant), "settings.json"));');
     const firstWrite = fn.indexOf("writeChildSettings(");
     assert.ok(decide > 0 && kept > decide && firstWrite > kept, "the holder is decided before any write");

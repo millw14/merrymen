@@ -1,3 +1,4 @@
+import { readRequestPurpose } from "@/lib/account-purpose";
 import { carryPerpRecovery, perpRecoveryIntakeRefusal } from "@/lib/perp-recovery-intake";
 /**
  * Dev-mode grant handoff + agent status.
@@ -14,7 +15,7 @@ import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { homePaths, merrymenHome } from "@merrymen/home";
+import { homePaths, purposeHome } from "@merrymen/home";
 import { createPublicClient } from "viem";
 import {
   accountsMatch,
@@ -24,6 +25,8 @@ import {
   duplicateWallPermissions,
   GRANT_PERP_LIGHTER,
   isHostedMode,
+  grantPurpose,
+  type GrantPurpose,
   publicGrantView,
   type Derivation,
   type EnergyStatus,
@@ -40,7 +43,7 @@ import { readAgentEnergy } from "@/lib/agent-energy";
 import { readAgentPerps, readAgentPerpsRead } from "@/lib/agent-perps";
 import { standDownForKill } from "@/lib/perp-kill";
 import { custodyText, grantMentionsPerps, perpExposureOfReport } from "@/lib/perps-view";
-import { getGrantStore } from "@merrymen/grant-store";
+import { getGrantStore, hasStoredGrant } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { hostedStanddownAvailable } from "../../../../../worker/src/perps/hosted-standdown";
@@ -49,6 +52,7 @@ import { makePgDb } from "../../../../../worker/src/db";
 import { readHostedPerpsRecovery, unknownHostedPerpsRecovery, type HostedPerpsRecoveryNotice } from "../../../../../worker/src/hosted-perps-recovery";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
+import { LocalGrantBusyError, replaceLocalGrant, withLocalGrantLock } from "../../../../../cli/grant-lock.mjs";
 import {
   acceptIncomingPerp,
   NO_STORE_HEADERS,
@@ -59,10 +63,33 @@ import {
   type PerpRefusal,
 } from "@/lib/perp-custody";
 
-const DATA_DIR = merrymenHome();
-const GRANT_FILE = homePaths.grant();
-const HEARTBEAT_FILE = homePaths.heartbeat();
-const ARCHIVE_DIR = homePaths.grantsArchive();
+function grantFiles(purpose: GrantPurpose) {
+  const DATA_DIR = purposeHome(purpose);
+  return { DATA_DIR, GRANT_FILE: homePaths.grant(purpose), HEARTBEAT_FILE: homePaths.heartbeat(purpose), ARCHIVE_DIR: path.join(DATA_DIR, "grants") };
+}
+
+/** Separate authority is mandatory; an existing venue key must be retired explicitly. */
+async function otherPurposeRefusal(grant: StoredGrant, purpose: GrantPurpose, tenant: `0x${string}` | null): Promise<NextResponse | null> {
+  const otherPurpose = purpose === "perps" ? "spot" : "perps";
+  try {
+    let other: StoredGrant | null;
+    if (tenant) {
+      other = await getGrantStore(otherPurpose).get(tenant);
+      if (!other && await hasStoredGrant(tenant, otherPurpose)) throw new Error("unreadable authority");
+    } else {
+      try { other = JSON.parse(await readFile(homePaths.grant(otherPurpose), "utf8")) as StoredGrant; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; other = null; }
+    }
+    if (!other) return null;
+    if (grantPurpose(other) !== otherPurpose) throw new Error("stored account purpose mismatch");
+    if (other.smartAccount?.toLowerCase() === grant.smartAccount.toLowerCase()) return NextResponse.json({ error: "Spot and Perps must have separate wallet addresses.", code: "account-purpose-collision" }, { status: 409 });
+    if (!isAddr(other.owner) || other.owner.toLowerCase() !== grant.owner?.toLowerCase()) return NextResponse.json({ error: "Use the same owner key as your existing account to create the other wallet. Your existing wallet has not changed.", code: "account-owner-mismatch" }, { status: 409 });
+    if (purpose === "perps" ? grantMentionsPerps(other) : grantMentionsPerps(grant)) return NextResponse.json({ error: "Your Spot wallet already carries a perpetual permission. Close and recover that account, then retire its perpetual permission before creating a separate Perps wallet.", code: "legacy-perps-retirement-required", ownerFacing: true }, { status: 409 });
+    return null;
+  } catch {
+    return NextResponse.json({ error: "The other account's permission could not be checked. Neither wallet was changed.", ownerFacing: true }, { status: 503 });
+  }
+}
 
 /** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
  * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
@@ -96,7 +123,8 @@ function perpRefused(r: PerpRefusal): NextResponse {
  * of that wallet's owner key, permanently stranding any funds still in it. This
  * is the safety net. Best-effort: archiving must never block arming a grant.
  */
-async function archiveCurrentGrant(): Promise<void> {
+async function archiveCurrentGrant(purpose: GrantPurpose = "spot"): Promise<void> {
+  const { GRANT_FILE, ARCHIVE_DIR } = grantFiles(purpose);
   try {
     const raw = await readFile(GRANT_FILE, "utf8");
     const prev = JSON.parse(raw) as StoredGrant;
@@ -210,7 +238,16 @@ export interface AgentStatus {
 }
 
 export async function POST(req: Request) {
-  const grant = (await req.json()) as StoredGrant;
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "Invalid account purpose" }, { status: 400 });
+  const { DATA_DIR, GRANT_FILE } = grantFiles(purpose);
+  const readDb: typeof withReadDb = fn => withReadDb(fn, isHostedMode() ? "spot" : purpose);
+  let grant: StoredGrant;
+  try { grant = await req.json() as StoredGrant; }
+  catch { return NextResponse.json({ error: "not a JSON grant" }, { status: 400 }); }
+  try { if (grantPurpose(grant) !== purpose) throw new Error(); }
+  catch { return NextResponse.json({ error: "The signed grant does not match this account purpose.", code: "grant-purpose-mismatch" }, { status: 400 }); }
+  if (purpose === "perps" && grant?.chainId !== 4663) return NextResponse.json({ error: "Dedicated Perps wallets use USDG on Robinhood Chain (4663)." }, { status: 400 });
   if (!grant?.serialized || !isAddr(grant?.smartAccount)) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
   }
@@ -397,6 +434,7 @@ export async function POST(req: Request) {
       owner: grant.owner,
       smartAccount: grant.smartAccount,
       chainId: grant.chainId,
+      purpose,
       walletSignature: binding.walletSignature,
       ownerSignature: binding.ownerSignature,
       // PASSED THROUGH UNVALIDATED, ON PURPOSE. verifyGrantBinding is the one
@@ -420,7 +458,7 @@ export async function POST(req: Request) {
     // not a security boundary so much as a collision guard, and it fails safe:
     // an unreadable store refuses rather than allowing a possible collision.
     try {
-      const holder = await getGrantStore().tenantForAccount(grant.smartAccount);
+      const holder = await getGrantStore(purpose).tenantForAccount(grant.smartAccount);
       if (holder && holder !== tenant) {
         return NextResponse.json(
           { error: "this agent account is already linked to a different login" },
@@ -457,13 +495,15 @@ export async function POST(req: Request) {
     // grant is exactly what (1) and (2) are about.
     let stored: StoredGrant | null;
     try {
-      stored = await getGrantStore().get(tenant);
+      stored = await getGrantStore(purpose).get(tenant);
     } catch {
       return NextResponse.json(
         { error: "couldn't read this agent's current permission to check it — please try again", ownerFacing: true },
         { status: 503 },
       );
     }
+    const otherRefusal = await otherPurposeRefusal(grant, purpose, tenant);
+    if (otherRefusal) return otherRefusal;
     const perpIntake = acceptIncomingPerp({
       hosted: true,
       tenant,
@@ -474,7 +514,7 @@ export async function POST(req: Request) {
       perpsOffered: perpsOptInOffered(grant.smartAccount),
     });
     if (!perpIntake.ok) return perpRefused(perpIntake.refusal);
-    const recoveryRefusal = await perpRecoveryIntakeRefusal(stored, grant);
+    const recoveryRefusal = await perpRecoveryIntakeRefusal(stored, grant, undefined, { home: DATA_DIR, readDb });
     if (recoveryRefusal) return perpRefused(recoveryRefusal);
     const drop = await perpDropRefusal({ stored, incoming: grant });
     if (drop) return perpRefused(drop);
@@ -499,7 +539,7 @@ export async function POST(req: Request) {
     // derivation before any equality is computed. See packages/core/derivation.
     let derived: Derivation;
     try {
-      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId);
+      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId, purpose);
     } catch (e) {
       derived = derivationUnreachable(e instanceof Error ? e.message : String(e));
     }
@@ -518,7 +558,7 @@ export async function POST(req: Request) {
     // store seals the session key at rest and refuses (again, defence in depth)
     // any grant carrying an owner key or whose owner isn't this tenant.
     try {
-      await getGrantStore().put(tenant, toStore);
+      await getGrantStore(purpose).put(tenant, toStore);
     } catch (e) {
       return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
     }
@@ -548,78 +588,94 @@ export async function POST(req: Request) {
     await mintAndNameAgent({
       tenant,
       account: grant.smartAccount,
-      identities: () => getIdentityStore(),
+      identities: () => ({
+        get: tenant => getIdentityStore().get(tenant),
+        ensure: (tenant, account) => getIdentityStore().ensure(tenant, account, { primary: purpose === "spot" }),
+      }),
       settings: {
-        get: () => getSettingsStore().get(tenant),
-        put: (s) => getSettingsStore().put(tenant, s),
+        get: () => getSettingsStore(purpose).get(tenant),
+        put: (s) => getSettingsStore(purpose).put(tenant, s),
       },
-      ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
+      ledgerHasAgent: (account) => ledgerHasAgent(readDb, account),
     });
     return NextResponse.json({ ok: true });
   }
 
-  // ── THE LIGHTER KEY, SELF-HOSTED (docs/perps.md rule 5) ─────────────────
-  //
-  // BEFORE the archive, because the archive is the first thing that moves the
-  // outgoing grant. The same two checks as hosted: the block must name a key
-  // this install's key store holds ($MERRYMEN_HOME/perp-keys/<pub>.json), and
-  // a grant that lets go of a venue key needs that venue provably flat.
-  //
-  // A grant.json that exists but cannot be read is refused rather than
-  // assumed empty: it is exactly the grant (2) is about. A corrupt one is let
-  // through unless it mentions the perps marker — a file that cannot say it
-  // held perps cannot be the reason to keep an owner from re-signing.
-  let stored: StoredGrant | null = null;
-  let storedRaw: string | null = null;
   try {
-    storedRaw = await readFile(GRANT_FILE, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-      return NextResponse.json(
-        { error: "couldn't read this agent's current permission to check it — please try again", ownerFacing: true },
-        { status: 503 },
-      );
-    }
-  }
-  if (storedRaw !== null) {
+    return await withLocalGrantLock(purposeHome(), async () => {
+    // ── THE LIGHTER KEY, SELF-HOSTED (docs/perps.md rule 5) ─────────────────
+    //
+    // BEFORE the archive, because the archive is the first thing that moves the
+    // outgoing grant. The same two checks as hosted: the block must name a key
+    // this install's key store holds ($MERRYMEN_HOME/perp-keys/<pub>.json), and
+    // a grant that lets go of a venue key needs that venue provably flat.
+    //
+    // A grant.json that exists but cannot be read is refused rather than
+    // assumed empty: it is exactly the grant (2) is about. A corrupt one is let
+    // through unless it mentions the perps marker — a file that cannot say it
+    // held perps cannot be the reason to keep an owner from re-signing.
+    let stored: StoredGrant | null = null;
+    let storedRaw: string | null = null;
     try {
-      stored = JSON.parse(storedRaw) as StoredGrant;
-    } catch {
-      if (storedRaw.includes(GRANT_PERP_LIGHTER)) {
-        return perpRefused({
-          status: 409,
-          code: "perp-venue-unread",
-          error: `the current grant.json cannot be read, so merrymen must assume ${PERP_NOT_FLAT_MESSAGE}`,
-          flat: null,
-        });
+      storedRaw = await readFile(GRANT_FILE, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        return NextResponse.json(
+          { error: "couldn't read this agent's current permission to check it — please try again", ownerFacing: true },
+          { status: 503 },
+        );
       }
     }
-  }
-  const perpIntake = acceptIncomingPerp({
-    hosted: false,
-    tenant: null,
-    incoming: grant,
-    stored,
-    dek: null,
-    home: DATA_DIR,
-    perpsOffered: perpsOptInOffered(grant.smartAccount),
-  });
-  if (!perpIntake.ok) return perpRefused(perpIntake.refusal);
-  const recoveryRefusal = await perpRecoveryIntakeRefusal(stored, grant);
-  if (recoveryRefusal) return perpRefused(recoveryRefusal);
-  const drop = await perpDropRefusal({ stored, incoming: grant });
-  if (drop) return perpRefused(drop);
+    if (storedRaw !== null) {
+      try {
+        stored = JSON.parse(storedRaw) as StoredGrant;
+      } catch {
+        if (purpose === "perps" || storedRaw.includes(GRANT_PERP_LIGHTER)) {
+          return perpRefused({
+            status: 409,
+            code: "perp-venue-unread",
+            error: `the current grant.json cannot be read, so merrymen must assume ${PERP_NOT_FLAT_MESSAGE}`,
+            flat: null,
+          });
+        }
+      }
+    }
+    if (stored && grantPurpose(stored) !== purpose) return NextResponse.json({ error: "Stored account purpose could not be verified." }, { status: 503 });
+    const otherRefusal = await otherPurposeRefusal(grant, purpose, null);
+    if (otherRefusal) return otherRefusal;
+    const perpIntake = acceptIncomingPerp({
+      hosted: false,
+      tenant: null,
+      incoming: grant,
+      stored,
+      dek: null,
+      home: DATA_DIR,
+      perpsOffered: perpsOptInOffered(grant.smartAccount),
+    });
+    if (!perpIntake.ok) return perpRefused(perpIntake.refusal);
+    const recoveryRefusal = await perpRecoveryIntakeRefusal(stored, grant, undefined, { home: DATA_DIR, readDb });
+    if (recoveryRefusal) return perpRefused(recoveryRefusal);
+    const drop = await perpDropRefusal({ stored, incoming: grant });
+    if (drop) return perpRefused(drop);
 
-  await mkdir(DATA_DIR, { recursive: true });
-  // Keep the outgoing wallet (and its owner key) before this one replaces it.
-  await archiveCurrentGrant();
-  // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600).
-  await writeFile(GRANT_FILE, JSON.stringify(carryPerpRecovery(stored, perpIntake.grant), null, 2), { encoding: "utf8", mode: 0o600 });
-  await chmod(GRANT_FILE, 0o600).catch(() => {});
-  return NextResponse.json({ ok: true });
+    await mkdir(DATA_DIR, { recursive: true });
+    // Keep the outgoing wallet (and its owner key) before this one replaces it.
+    await archiveCurrentGrant(purpose);
+    // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600).
+    await replaceLocalGrant(GRANT_FILE, JSON.stringify(carryPerpRecovery(stored, perpIntake.grant), null, 2));
+    return NextResponse.json({ ok: true });
+    });
+  } catch (error) {
+    if (error instanceof LocalGrantBusyError) return NextResponse.json({ error: error.message, ownerFacing: true }, { status: 503 });
+    throw error;
+  }
 }
 
 export async function DELETE(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "Invalid account purpose" }, { status: 400 });
+  const { DATA_DIR, GRANT_FILE } = grantFiles(purpose);
+  const readDb: typeof withReadDb = fn => withReadDb(fn, isHostedMode() ? "spot" : purpose);
   if (isHostedMode()) {
     // The kill switch is per-tenant and authenticated. It forgets the server's
     // session key; the wallet and its funds stay reachable via the owner key
@@ -632,7 +688,7 @@ export async function DELETE(req: Request) {
     // queued, never closed: only the authenticated shutdown result can say so.
     let custody: string | null = null;
     try {
-      const g = await getGrantStore().get(tenant);
+      const g = await getGrantStore(purpose).get(tenant);
       // Bounded: the kill must not wait on a custody sentence. No answer in
       // time is no sentence, and clients fall back to their own last read.
       custody = g
@@ -644,53 +700,60 @@ export async function DELETE(req: Request) {
     } catch {
       custody = null;
     }
-    await getGrantStore().remove(tenant);
-    const perpsShutdown = await shutdownStatus(tenant);
+    await getGrantStore(purpose).remove(tenant);
+    const perpsShutdown = await shutdownStatus(tenant, purpose);
     return NextResponse.json({ ok: true, ...(custody === null ? {} : { custody }), standdown: null, ...(perpsShutdown ? { perpsShutdown } : {}) });
   }
-  // ── STAND THE PERPS DOWN FIRST (docs/perps.md rule 13) ──────────────────
-  //
-  // BEFORE the archive, because the archive is what takes the grant — and with
-  // it the worker's knowledge of the account and its Lighter key — away. A
-  // grant that mentions perps gets a stand-down request in the home, and this
-  // waits a short while for the worker's result (lib/perp-kill.ts). A request
-  // that cannot be written stops the kill here, with the grant untouched: the
-  // agent is still running and still protecting what it holds, which is
-  // better than an archived key and positions nobody was asked to close.
-  //
-  // A grant.json that cannot be parsed is asked about by what it mentions: one
-  // naming the perps marker is treated as a perps grant, because the stand-down
-  // is exits only and asking for one that is not needed costs nothing.
-  let stored: unknown = null;
   try {
-    const raw = await readFile(GRANT_FILE, "utf8");
+    return await withLocalGrantLock(purposeHome(), async () => {
+    // ── STAND THE PERPS DOWN FIRST (docs/perps.md rule 13) ──────────────────
+    //
+    // BEFORE the archive, because the archive is what takes the grant — and with
+    // it the worker's knowledge of the account and its Lighter key — away. A
+    // grant that mentions perps gets a stand-down request in the home, and this
+    // waits a short while for the worker's result (lib/perp-kill.ts). A request
+    // that cannot be written stops the kill here, with the grant untouched: the
+    // agent is still running and still protecting what it holds, which is
+    // better than an archived key and positions nobody was asked to close.
+    //
+    // A grant.json that cannot be parsed is asked about by what it mentions: one
+    // naming the perps marker is treated as a perps grant, because the stand-down
+    // is exits only and asking for one that is not needed costs nothing.
+    let stored: unknown = null;
     try {
-      stored = JSON.parse(raw) as unknown;
+      const raw = await readFile(GRANT_FILE, "utf8");
+      try {
+        stored = JSON.parse(raw) as unknown;
+      } catch {
+        stored = raw.includes(GRANT_PERP_LIGHTER) ? { grantFeatures: [GRANT_PERP_LIGHTER] } : null;
+      }
     } catch {
-      stored = raw.includes(GRANT_PERP_LIGHTER) ? { grantFeatures: [GRANT_PERP_LIGHTER] } : null;
+      // no grant.json: nothing armed, nothing at a venue that this kill can ask about
     }
-  } catch {
-    // no grant.json: nothing armed, nothing at a venue that this kill can ask about
+    const account = (stored as { smartAccount?: unknown } | null)?.smartAccount;
+    // The report AND the account's own book (agents.mode): a practice position
+    // held while practice perps are off is reported under rail "off", and only
+    // the book says it is practice (perps-view.ts perpsBookOf).
+    const read = isAddr(account) ? await readAgentPerpsRead(account, readDb) : null;
+    const report = read?.state === "ok" ? read.report : null;
+    const accountMode = read?.state === "ok" ? (read.accountMode ?? null) : null;
+    const perps = await standDownForKill({ home: DATA_DIR, grant: stored, report, accountMode });
+    if (!perps.ok) {
+      return NextResponse.json({ error: perps.error, ownerFacing: true }, { status: 503 });
+    }
+    // The kill switch destroys the session key, NOT the wallet — archive it so the
+    // owner key survives and the funds stay reachable.
+    await archiveCurrentGrant(purpose);
+    await rm(GRANT_FILE, { force: true });
+    // WHERE THE MONEY IS, in the one sentence that is never a constant: built
+    // from the stand-down's result when the worker answered, else from its last
+    // report, and saying so (core custodySentence).
+    return NextResponse.json({ ok: true, custody: perps.custody, standdown: perps.standdown });
+    });
+  } catch (error) {
+    if (error instanceof LocalGrantBusyError) return NextResponse.json({ error: error.message, ownerFacing: true }, { status: 503 });
+    throw error;
   }
-  const account = (stored as { smartAccount?: unknown } | null)?.smartAccount;
-  // The report AND the account's own book (agents.mode): a practice position
-  // held while practice perps are off is reported under rail "off", and only
-  // the book says it is practice (perps-view.ts perpsBookOf).
-  const read = isAddr(account) ? await readAgentPerpsRead(account) : null;
-  const report = read?.state === "ok" ? read.report : null;
-  const accountMode = read?.state === "ok" ? (read.accountMode ?? null) : null;
-  const perps = await standDownForKill({ home: DATA_DIR, grant: stored, report, accountMode });
-  if (!perps.ok) {
-    return NextResponse.json({ error: perps.error, ownerFacing: true }, { status: 503 });
-  }
-  // The kill switch destroys the session key, NOT the wallet — archive it so the
-  // owner key survives and the funds stay reachable.
-  await archiveCurrentGrant();
-  await rm(GRANT_FILE, { force: true });
-  // WHERE THE MONEY IS, in the one sentence that is never a constant: built
-  // from the stand-down's result when the worker answered, else from its last
-  // report, and saying so (core custodySentence).
-  return NextResponse.json({ ok: true, custody: perps.custody, standdown: perps.standdown });
 }
 
 /**
@@ -705,6 +768,10 @@ function statusResponse(status: AgentStatus): NextResponse {
 }
 
 export async function GET(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "Invalid account purpose" }, { status: 400, headers: NO_STORE_HEADERS });
+  const { GRANT_FILE, HEARTBEAT_FILE } = grantFiles(purpose);
+  const readDb: typeof withReadDb = fn => withReadDb(fn, isHostedMode() ? "spot" : purpose);
   let grant: StoredGrant;
   if (isHostedMode()) {
     const tenant = tenantOf(req);
@@ -712,10 +779,10 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "The signed-in owner changed. Refresh this page before continuing." }, { status: 409, headers: NO_STORE_HEADERS });
     }
     if (!tenant) return statusResponse({ exists: false });
-    const g = await getGrantStore().get(tenant);
+    const g = await getGrantStore(purpose).get(tenant);
     if (!g) {
-      const perpsShutdown = await shutdownStatus(tenant);
-      const perpsRecovery = await recoveryStatus(tenant);
+      const perpsShutdown = await shutdownStatus(tenant, purpose);
+      const perpsRecovery = await recoveryStatus(tenant, undefined, purpose);
       return statusResponse({ exists: false, ...(perpsShutdown ? { perpsShutdown } : {}), ...(perpsRecovery ? { perpsRecovery } : {}) });
     }
     grant = g;
@@ -727,6 +794,8 @@ export async function GET(req: Request) {
     }
   }
 
+  try { if (grantPurpose(grant) !== purpose) throw new Error(); }
+  catch { return NextResponse.json({ error: "Stored account purpose could not be verified." }, { status: 503, headers: NO_STORE_HEADERS }); }
   const chain = chainForId(grant.chainId);
   const client = createPublicClient({ chain, transport: webChainRead() });
 
@@ -765,7 +834,7 @@ export async function GET(req: Request) {
   // same disk, so it is fresher than a mirror that runs on its own clock.
   if (workerAliveAt === null) {
     try {
-      const row = await withReadDb(async (db) =>
+      const row = await readDb(async (db) =>
         db
           ? ((await db
               .prepare("SELECT mode, beat_at, sponsor_gas, live_blocker FROM agents WHERE smart_account = ?")
@@ -797,11 +866,11 @@ export async function GET(req: Request) {
   // column read inside it would never reach a self-hosted owner at all. The
   // report is the child's own and lives only on the agents row, on both
   // deployments. Best effort: an unreadable report is null, never an error.
-  const energy = await readAgentEnergy(grant.smartAccount);
+  const energy = await readAgentEnergy(grant.smartAccount, readDb);
   // PERPS THE SAME WAY, for the same reason: the report lives only on the
   // agents row, on both deployments, so its read sits outside the heartbeat
   // branch too. Best effort: unreadable is null, never an error and never [].
-  const perps = await readAgentPerps(grant.smartAccount);
+  const perps = await readAgentPerps(grant.smartAccount, readDb);
 
   // NEVER ECHO KEY MATERIAL, BY CONSTRUCTION: the grant goes out through core's
   // publicGrantView, an ALLOWLIST. This used to be a denylist spread
@@ -825,14 +894,19 @@ export async function GET(req: Request) {
   };
   if (isHostedMode()) {
     const tenant = tenantOf(req);
-    const perpsRecovery = tenant ? await recoveryStatus(tenant, grant.smartAccount) : null;
+    const perpsRecovery = tenant ? await recoveryStatus(tenant, grant.smartAccount, purpose) : null;
     if (perpsRecovery) status.perpsRecovery = perpsRecovery;
   }
   return statusResponse(status);
 }
 
-async function recoveryStatus(tenant: string, account?: string): Promise<HostedPerpsRecoveryNotice | null> {
+async function recoveryStatus(tenant: string, account?: string, purpose: GrantPurpose = "spot"): Promise<HostedPerpsRecoveryNotice | null> {
   try {
+    if (purpose === "perps" && !account) {
+      const shutdown = await shutdownStatus(tenant as `0x${string}`, purpose);
+      if (!shutdown) return null;
+      account = shutdown.smartAccount;
+    }
     return await withReadDb((db) => db ? readHostedPerpsRecovery(db, tenant, account) : Promise.resolve(unknownHostedPerpsRecovery()));
   } catch {
     return unknownHostedPerpsRecovery();
@@ -865,11 +939,11 @@ async function perpsHostedKillCustody(grant: StoredGrant): Promise<string | null
   );
 }
 
-async function shutdownStatus(tenant: `0x${string}`): Promise<AgentStatus["perpsShutdown"] | undefined> {
+async function shutdownStatus(tenant: `0x${string}`, purpose: GrantPurpose = "spot"): Promise<AgentStatus["perpsShutdown"] | undefined> {
   if (!hostedStanddownAvailable()) return undefined;
   const store = new HostedStanddownStore(await makePgDb(process.env.DATABASE_URL!), storeDek()!);
   await store.init();
-  const job = await store.latest(tenant);
+  const job = await store.latest(tenant, purpose);
   if (!job) return undefined;
   // Every field is allowlisted. In particular the encrypted checkpoint and
   // sealed venue key never reach status, even after the grant is gone.

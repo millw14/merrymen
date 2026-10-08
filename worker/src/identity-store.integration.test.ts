@@ -227,3 +227,26 @@ describe("linking a social account", () => {
     assert.equal((await store.get(CAROL))!.slug, before);
   });
 });
+
+describe("two wallets share one public identity", () => {
+  const store = new FileIdentityStore();
+  it("adding or refreshing Perps retains the primary Spot account and the slug", async () => {
+    const owner = "0x0000000000000000000000000000000000000071" as const;
+    const spot = "0x0000000000000000000000000000000000000072" as const;
+    const perps = "0x0000000000000000000000000000000000000073" as const;
+    const first = await store.ensure(owner, spot);
+    const second = await store.ensure(owner, perps, { primary: false });
+    assert.equal(second.slug, first.slug);
+    assert.deepEqual(second.accounts, [spot, perps]);
+    assert.deepEqual((await store.ensure(owner, perps, { primary: false })).accounts, [spot, perps]);
+  });
+
+  it("Perps-first and simultaneous creation keep both memberships when Spot becomes primary", async () => {
+    const owner = "0x0000000000000000000000000000000000000081" as const;
+    const spot = "0x0000000000000000000000000000000000000082" as const;
+    const perps = "0x0000000000000000000000000000000000000083" as const;
+    const [first, second] = await Promise.all([store.ensure(owner, perps, { primary: false }), store.ensure(owner, spot)]);
+    assert.equal(first.slug, second.slug);
+    assert.deepEqual((await store.get(owner))?.accounts, [spot, perps]);
+  });
+});

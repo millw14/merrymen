@@ -1,4 +1,6 @@
 "use client";
+import { accountIndexForPurpose, grantPurpose, isGrantPurpose, type GrantPurpose } from "@merrymen/core";
+import { scopedAccountUrl } from "./account-purpose";
 
 import { resolveTrencherPermission } from "./trencher-permission";
 import { GRANT_TRENCHER } from "@merrymen/core";
@@ -147,10 +149,13 @@ export function isPrivyOwned(grant: Pick<Grant, "binding"> | null | undefined): 
 
 const STORAGE_KEY = "merrymen.grant.v1";
 
-export function loadGrant(): Grant | null {
+const storageKey = (purpose: GrantPurpose) => purpose === "perps" ? "merrymen.grant.perps.v1" : STORAGE_KEY;
+
+export function loadGrant(purpose: GrantPurpose = "spot"): Grant | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Grant) : null;
+    const raw = localStorage.getItem(storageKey(purpose));
+    const grant = raw ? JSON.parse(raw) as Grant : null;
+    return grant && grantPurpose(grant) === purpose ? grant : null;
   } catch {
     return null;
   }
@@ -177,9 +182,9 @@ export function loadGrant(): Grant | null {
  * listSavedWallets already surfaces archived wallets so the key stays
  * reachable from /grant and from the dashboard's recovery panel.
  */
-export function clearGrant(): void {
-  archivePreviousGrant();
-  localStorage.removeItem(STORAGE_KEY);
+export function clearGrant(purpose: GrantPurpose = "spot"): void {
+  archivePreviousGrant(purpose);
+  localStorage.removeItem(storageKey(purpose));
 }
 
 const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
@@ -194,7 +199,7 @@ const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
  * The account address derives from the owner key alone (the sudo ECDSA
  * validator + factory + index) — the session/permission plugin is enabled at
  * UserOp time and does NOT affect the address. That's what makes restore work:
- * the same owner key always reproduces the same smart account, so an existing
+ * the same owner key and purpose reproduce the same smart account, so an existing
  * funded wallet can be re-armed with a brand-new session key.
  */
 /**
@@ -596,6 +601,10 @@ async function prepareGrantCore(
    */
   perpIn: PerpSigningInput = {},
 ): Promise<Grant> {
+  const purpose = perpIn.purpose ?? "spot";
+  if (!isGrantPurpose(purpose)) throw new Error("Unknown wallet purpose");
+  if (purpose === "perps" && chainId !== 4663) throw new Error("Perps wallets require Robinhood Chain mainnet");
+  if (purpose === "perps") { extraTokens = []; v4AdapterAddress = undefined; ponsAdapterAddress = undefined; ponsClassVaultFactory = undefined; trencherFactory = undefined; }
   if (perpIn.newAccountPerpsOnly) {
     if (expectAccount || perpIn.previousGrant != null || perpIn.perpDrop || perpIn.recovery)
       throw new Error("Minimal perps setup is only for a brand-new account, never restore or renewal.");
@@ -633,7 +642,7 @@ async function prepareGrantCore(
    * whose grant predates a listing must re-sign before their key can touch it.
    * That is the wall working, not a gap in it.
    */
-  const sealedTokens: readonly CustomToken[] = perpIn.newAccountPerpsOnly ? [] : [...officialCoinTokens(chainId), ...extraTokens];
+  const sealedTokens: readonly CustomToken[] = (purpose === "perps" || perpIn.newAccountPerpsOnly) ? [] : [...officialCoinTokens(chainId), ...extraTokens];
 
   /**
    * The Pons adapter this signature seals: the owner's own if they named one,
@@ -650,7 +659,7 @@ async function prepareGrantCore(
    * redeploy cannot redirect an existing grant's trades, and an owner who names
    * their own address still wins over the platform's.
    */
-  const sealedPonsAdapter = perpIn.newAccountPerpsOnly ? undefined : ponsAdapterForSigning(chainId, ponsAdapterAddress);
+  const sealedPonsAdapter = (purpose === "perps" || perpIn.newAccountPerpsOnly) ? undefined : ponsAdapterForSigning(chainId, ponsAdapterAddress);
 
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
@@ -676,6 +685,7 @@ async function prepareGrantCore(
   // pin the swap recipient / vault receiver to it, and assert below that the
   // full account came out identical.
   const sudoOnlyAccount = await createKernelAccount(publicClient, {
+    index: accountIndexForPurpose(purpose),
     entryPoint,
     kernelVersion,
     plugins: { sudo: ecdsaValidator },
@@ -773,7 +783,7 @@ async function prepareGrantCore(
    * A tenant who has set their own factory keeps it — grant-first precedence,
    * exactly as the adapter path does.
    */
-  const sealedClassFactory = perpIn.newAccountPerpsOnly ? undefined : (
+  const sealedClassFactory = (purpose === "perps" || perpIn.newAccountPerpsOnly) ? undefined : (
     ponsClassVaultFactory ??
     ((PONS_CLASS_VAULT_FACTORY[chainId] ?? undefined) as `0x${string}` | undefined));
 
@@ -925,6 +935,7 @@ async function prepareGrantCore(
     : undefined;
 
   const wallOpts = {
+    perpsOnly: purpose === "perps",
     ...trenchScope,
     extraTokens: sealedTokens,
     allowUniswapV4,
@@ -1032,6 +1043,7 @@ async function prepareGrantCore(
   });
 
   const account = await createKernelAccount(publicClient, {
+    index: accountIndexForPurpose(purpose),
     entryPoint,
     kernelVersion,
     plugins: {
@@ -1058,6 +1070,7 @@ async function prepareGrantCore(
   const serialized = await serializePermissionAccount(account, sessionPrivateKey);
 
   const grant: Grant = {
+    ...(purpose === "perps" ? { purpose } : {}),
     smartAccount: account.address,
     owner,
     sessionKeyAddress: sessionAccount.address,
@@ -1093,7 +1106,7 @@ async function prepareGrantCore(
     ...trenchScope,
     grantFeatures: [
       ...(trencherFactory ? [GRANT_TRENCHER] : []),
-      TRADEABLE_V2,
+      ...(purpose === "spot" ? [TRADEABLE_V2] : []),
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
       ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
@@ -1189,7 +1202,7 @@ async function mintGrant(
   const grant = await prepareGrantCore(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
     ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
-    { ...perpIn, localGrants: localGrantsSnapshot() },
+    { ...perpIn, localGrants: localGrantsSnapshot(perpIn.purpose ?? "spot") },
   );
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
@@ -1204,6 +1217,7 @@ async function mintGrant(
       chainId,
       ownerSigner,
       tenant: hostedAs,
+      purpose: grantPurpose(grant),
     });
     grant.binding = binding;
   }
@@ -1219,7 +1233,7 @@ async function mintGrant(
   // silently strands any funds in the old account, so the outgoing grant is
   // copied aside under its own address, the same safety net archiveCurrentGrant
   // gives the self-hosted file (web/src/app/api/grants/route.ts).
-  archivePreviousGrant();
+  archivePreviousGrant(grantPurpose(grant));
   // The browser copy, which ALWAYS carries the owner key, hosted or not. Kept in
   // a named local so it can be returned as well as stored -- the UI needs the
   // copy with the key, and reading it back off localStorage to find that out
@@ -1228,7 +1242,7 @@ async function mintGrant(
     ownerSigner.binding === "legacy-wallet-owner-v1"
       ? { ...grant, demoOwnerPrivateKey: ownerSigner.privateKey }
       : { ...grant };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(localGrant));
+  localStorage.setItem(storageKey(grantPurpose(grant)), JSON.stringify(localGrant));
 
   // Hand the grant to the worker. Self-hosted: a localhost file handoff.
   // Hosted: an authenticated POST of the session-key-only grant to the tenant's
@@ -1258,6 +1272,7 @@ async function mintGrant(
  * still signs this fine.
  */
 async function signBinding(args: {
+  purpose?: GrantPurpose;
   owner: Address;
   smartAccount: Address;
   chainId: number;
@@ -1290,6 +1305,7 @@ async function signBinding(args: {
       owner: args.owner,
       smartAccount: args.smartAccount,
       chainId: args.chainId,
+      purpose: args.purpose,
       did,
     });
     return {
@@ -1306,6 +1322,7 @@ async function signBinding(args: {
     owner: args.owner,
     smartAccount: args.smartAccount,
     chainId: args.chainId,
+    purpose: args.purpose,
   });
 
   const provider = findInjectedProvider();
@@ -1342,6 +1359,7 @@ const ARCHIVE_PREFIX = "merrymen.grant.archive.";
 
 /** An agent account this browser holds the owner key for. */
 export interface SavedWallet {
+  purpose?: GrantPurpose;
   smartAccount: Address;
   owner: Address;
   chainId: number;
@@ -1374,6 +1392,7 @@ export function listSavedWallets(): SavedWallet[] {
       // A wallet already listed as current must not appear twice as an archive.
       if (out.some((w) => w.smartAccount.toLowerCase() === g.smartAccount!.toLowerCase())) return;
       out.push({
+        purpose: grantPurpose(g),
         smartAccount: g.smartAccount as Address,
         owner: g.owner as Address,
         // A grant with no readable chainId is a corrupt record, not a testnet
@@ -1392,6 +1411,7 @@ export function listSavedWallets(): SavedWallet[] {
   };
   try {
     take(localStorage.getItem(STORAGE_KEY), true);
+    take(localStorage.getItem(storageKey("perps")), true);
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (k?.startsWith(ARCHIVE_PREFIX)) take(localStorage.getItem(k), false);
@@ -1413,7 +1433,7 @@ export function listSavedWallets(): SavedWallet[] {
  * a venue account that is not flat. The objects returned carry keys; nothing
  * but the public fields is ever read from them.
  */
-export function localGrantsSnapshot(): LocalGrants {
+export function localGrantsSnapshot(purpose: GrantPurpose = "spot"): LocalGrants {
   const parse = (raw: string | null): unknown => {
     if (!raw) return undefined;
     try {
@@ -1423,13 +1443,13 @@ export function localGrantsSnapshot(): LocalGrants {
     }
   };
   try {
-    const current = parse(localStorage.getItem(STORAGE_KEY));
+    const current = parse(localStorage.getItem(storageKey(purpose)));
     const archived: unknown[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k?.startsWith(ARCHIVE_PREFIX)) continue;
       const g = parse(localStorage.getItem(k));
-      if (g !== undefined) archived.push(g);
+      if (g !== undefined && grantPurpose(g as Grant) === purpose) archived.push(g);
     }
     return { current, archived };
   } catch {
@@ -1444,9 +1464,9 @@ export function localGrantsSnapshot(): LocalGrants {
  * creating a wallet. Keyed by smart account, so re-creating over the same
  * account just refreshes its copy while a different account gets its own slot.
  */
-function archivePreviousGrant(): void {
+function archivePreviousGrant(purpose: GrantPurpose = "spot"): void {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey(purpose));
     if (!raw) return;
     const prev = JSON.parse(raw) as Partial<Grant>;
     if (typeof prev?.smartAccount !== "string") return;
@@ -1535,7 +1555,7 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
       const token = await privyTokenSource();
       if (token) headers.Authorization = `Bearer ${token}`;
     }
-    const res = await fetch("/api/grants", {
+    const res = await fetch(scopedAccountUrl("/api/grants", grantPurpose(grant)), {
       method: "POST",
       headers,
       credentials: "same-origin",
@@ -1576,6 +1596,7 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
  * With names, adding a field can only ever be additive.
  */
 export interface MintOptions {
+  purpose?: GrantPurpose;
   /** Fresh perps account only: omit optional spot routes and their RPC probes. */
   newAccountPerpsOnly?: boolean;
   caps: GrantCaps;
@@ -1636,6 +1657,7 @@ export interface MintOptions {
 
 /** What the preparation core takes about perpetuals; built from MintOptions by `perpInput`. */
 export interface PerpSigningInput {
+  purpose?: GrantPurpose;
   newAccountPerpsOnly?: boolean;
   recovery?: PerpRecoveryReference;
   perp?: PerpSealRequest | null;
@@ -1651,7 +1673,7 @@ export interface PerpSigningInput {
  * new entry point cannot thread three of the four and forget the drop guard.
  */
 function perpInput(o: Omit<MintOptions, "hostedAs">): PerpSigningInput {
-  return { newAccountPerpsOnly: o.newAccountPerpsOnly, perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant, perpDrop: o.perpDrop, venueFlat: o.venueFlat };
+  return { purpose: o.purpose, newAccountPerpsOnly: o.newAccountPerpsOnly, perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant, perpDrop: o.perpDrop, venueFlat: o.venueFlat };
 }
 
 /**
@@ -1686,8 +1708,20 @@ export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOpti
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
-  o.onStatus("minting your agent's owner key…");
-  const key = generatePrivateKey();
+  const otherPurpose = (o.purpose ?? "spot") === "perps" ? "spot" : "perps";
+  const ownerQuery = o.hostedAs ? `?owner=${encodeURIComponent(o.hostedAs)}` : "";
+  const response = await fetch(scopedAccountUrl(`/api/grants${ownerQuery}`, otherPurpose), { credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(12_000) });
+  if (!response.ok) throw new Error("Could not check your existing wallet. Nothing was created.");
+  const existing = await response.json() as {exists?: boolean; grant?: {smartAccount?: string; owner?: string}};
+  const local = loadGrant(otherPurpose);
+  let key: `0x${string}`;
+  if (existing.exists) {
+    if (!local?.demoOwnerPrivateKey || local.smartAccount.toLowerCase() !== existing.grant?.smartAccount?.toLowerCase() ||
+        privateKeyToAccount(local.demoOwnerPrivateKey).address.toLowerCase() !== existing.grant?.owner?.toLowerCase())
+      throw new Error("Restore your existing wallet owner key in this browser before creating the second wallet. No new owner key was generated.");
+    key = local.demoOwnerPrivateKey;
+    o.onStatus("using your existing wallet owner…");
+  } else { o.onStatus("minting your agent's owner key…"); key = generatePrivateKey(); }
   return mintGrant(
     { account: privateKeyToAccount(key), binding: "legacy-wallet-owner-v1", privateKey: key },
     o.caps,
@@ -1726,6 +1760,18 @@ export async function createPrivyOwnedWallet(
   did: string,
   o: MintOptions,
 ): Promise<MintedGrant> {
+  if (!o.expectAccount) {
+    const otherPurpose = (o.purpose ?? "spot") === "perps" ? "spot" : "perps";
+    const ownerQuery = o.hostedAs ? `?owner=${encodeURIComponent(o.hostedAs)}` : "";
+    const response = await fetch(scopedAccountUrl(`/api/grants${ownerQuery}`, otherPurpose), {
+      credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(12_000),
+    });
+    if (!response.ok) throw new Error("Could not verify your existing wallet. Nothing was created.");
+    const existing = await response.json() as { exists?: boolean; grant?: { owner?: string } };
+    if (existing.exists && existing.grant?.owner?.toLowerCase() !== owner.address.toLowerCase()) {
+      throw new Error("Your existing wallet uses a different owner key. Restore that owner before creating the second wallet; no funds or permissions were moved.");
+    }
+  }
   o.onStatus("deriving your smart account…");
   return mintGrant(
     { account: owner, binding: "privy-did-owner-v1", did },
@@ -1835,6 +1881,7 @@ export interface OwnerPreview {
 export async function previewOwnerAccount(
   ownerPrivateKey: `0x${string}`,
   chainId: number = robinhoodChain.id,
+  purpose: GrantPurpose = "spot",
 ): Promise<OwnerPreview> {
   const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
@@ -1846,6 +1893,7 @@ export async function previewOwnerAccount(
   });
   // sudo-only derivation — the permission plugin doesn't change the address.
   const account = await createKernelAccount(publicClient, {
+    index: accountIndexForPurpose(purpose),
     entryPoint: getEntryPoint("0.7"),
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },

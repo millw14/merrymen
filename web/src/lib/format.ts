@@ -362,3 +362,9 @@ export function utcDayLabel(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return DASH;
   return dtf("utc-day", { timeZone: "UTC", month: "short", day: "numeric" }).format(new Date(ms));
 }
+
+/** A USDG token balance, preserving its six decimal places when present. */
+export function usdgAmount(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return DASH;
+  return `${nf({ maximumFractionDigits: 6 }).format(n)} USDG`;
+}

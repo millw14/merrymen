@@ -41,10 +41,10 @@ export async function readKillAnswer(r: Pick<Response, "ok" | "status" | "json">
 }
 
 /** Send the kill and read its answer. `fetchImpl` is a test seam. Never throws. */
-export async function sendKill(fetchImpl: typeof fetch = fetch): Promise<KillAnswer> {
+export async function sendKill(fetchImpl: typeof fetch = fetch, purpose: "spot" | "perps" = "spot"): Promise<KillAnswer> {
   let r: Response;
   try {
-    r = await fetchImpl("/api/grants", { method: "DELETE" });
+    r = await fetchImpl(purpose === "perps" ? "/api/grants?purpose=perps" : "/api/grants", { method: "DELETE" });
   } catch {
     return { kind: "unreachable" };
   }

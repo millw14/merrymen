@@ -1,3 +1,4 @@
+import { readRequestPurpose } from "@/lib/account-purpose";
 /**
  * Settings API — the web UI's write path to .data/settings.json, which the
  * worker re-reads every tick.
@@ -10,7 +11,7 @@
 
 import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths, merrymenHome } from "@merrymen/home";
+import { homePaths, purposeHome } from "@merrymen/home";
 import {
   HOSTED_FORBIDDEN_SETTING_FIELDS,
   LLM_PROVIDER_IDS,
@@ -36,6 +37,7 @@ import {
   type LlmProviderInfo,
   type MerrymenSettings,
   type PerpsNumKey,
+  type GrantPurpose,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
@@ -47,8 +49,6 @@ import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve
 
 export const dynamic = "force-dynamic";
 
-const DATA_DIR = merrymenHome();
-const SETTINGS_FILE = homePaths.settings();
 
 export interface SecretView {
   set: boolean;
@@ -120,13 +120,13 @@ async function listCustomStrategies(): Promise<string[]> {
   }
 }
 
-async function readStored(tenant?: `0x${string}` | null): Promise<MerrymenSettings> {
+async function readStored(tenant: `0x${string}` | null | undefined, purpose: GrantPurpose = "spot"): Promise<MerrymenSettings> {
   // Hosted: a tenant's settings live in the per-tenant store, not the global
   // settings.json (which the child workers each have their own copy of).
-  if (tenant) return (await getSettingsStore().get(tenant)) ?? {};
+  if (tenant) return (await getSettingsStore(purpose).get(tenant)) ?? {};
   try {
     // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
-    return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^\ufeff/, "")) as MerrymenSettings;
+    return JSON.parse((await readFile(homePaths.settings(purpose), "utf8")).replace(/^\ufeff/, "")) as MerrymenSettings;
   } catch {
     return {};
   }
@@ -158,15 +158,18 @@ function redactUrl(u: unknown): string | undefined {
 }
 
 export async function GET(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ errors: ["Invalid account purpose"] }, { status: 400 });
   // Hosted: show the signed-in tenant's own settings (a signed-out caller sees
   // defaults — nothing personal, no secrets). Self-hosted: the single file.
   const tenant = isHostedMode() ? tenantOf(req) : null;
-  const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant);
+  const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant, purpose);
   const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, bitqueryApiKey, merrymenToken, ...values } = stored;
   const servedTokens = withoutEnergyReserve(values.customTokens);
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
     ...values,
+    ...(purpose === "perps" ? { strategy: "perps-only" } : {}),
     bundlerUrl: redactUrl(values.bundlerUrl),
     rpcMainnet: redactUrl(values.rpcMainnet),
     rpcTestnet: redactUrl(values.rpcTestnet),
@@ -194,7 +197,7 @@ export async function GET(req: Request) {
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
     officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
-    strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
+    strategies: { builtin: purpose === "perps" ? ["perps-only"] : BUILTIN_STRATEGIES, custom: purpose === "perps" ? [] : await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
     owner: isHostedMode() ? (tenant ?? "") : null,
   };
@@ -370,6 +373,9 @@ const STR_ARRAY_FIELDS: Record<string, number> = {
 };
 
 export async function PUT(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ errors: ["Invalid account purpose"] }, { status: 400 });
+  const DATA_DIR = purposeHome(purpose), SETTINGS_FILE = homePaths.settings(purpose);
   let body: Partial<Record<keyof MerrymenSettings, unknown>>;
   try {
     body = (await req.json()) as typeof body;
@@ -412,8 +418,8 @@ export async function PUT(req: Request) {
   }
 
   const errors: string[] = [];
-  const stored = await readStored(tenant);
-  const next: MerrymenSettings = { ...stored };
+  const stored = await readStored(tenant, purpose);
+  const next: MerrymenSettings = { ...stored, ...(purpose === "perps" ? { strategy: "perps-only" } : {}) };
 
   // Every settings key this request actually processed. Used at the end to
   // name what was DROPPED — see the note above the `ignored` computation.
@@ -568,16 +574,19 @@ export async function PUT(req: Request) {
 
   if ("strategy" in body) {
     const v = body.strategy;
-    if (v === "" || v === null || v === undefined) {
+    if (purpose === "perps") {
+      if (v === "perps-only" || v === "" || v === null || v === undefined) setOrClear("strategy", "perps-only");
+      else errors.push("strategy: a dedicated Perps wallet only runs perps-only");
+    } else if (v === "" || v === null || v === undefined) {
       setOrClear("strategy", undefined);
     } else if (v === "perps-only" && stored.strategy !== "perps-only") {
       // This mode has no spot producer. Only a new account may select it:
       // replacing an armed spot strategy could remove its intrinsic exits.
       let grantPresent = true;
       try {
-        if (tenant) grantPresent = await hasStoredGrant(tenant);
+        if (tenant) grantPresent = await hasStoredGrant(tenant, purpose);
         else {
-          try { await readFile(homePaths.grant(), "utf8"); }
+          try { await readFile(homePaths.grant(purpose), "utf8"); }
           catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") grantPresent = false; else throw error; }
         }
       } catch { /* Unknown existing authority refuses a strategy replacement. */ }
@@ -1055,11 +1064,12 @@ export async function PUT(req: Request) {
   }
 
   const persist = async (settings: MerrymenSettings) => {
+    if (purpose === "perps") settings = { ...settings, strategy: "perps-only" };
     if (tenant) {
       // Hosted: the tenant's own settings go to the per-tenant store (sealed at
       // rest), and the orchestrator hands the child worker a settings.json from it
       // within a reconcile tick.
-      await getSettingsStore().put(tenant, settings);
+      await getSettingsStore(purpose).put(tenant, settings);
     } else {
       await mkdir(DATA_DIR, { recursive: true });
       // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —

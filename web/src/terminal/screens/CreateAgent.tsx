@@ -62,6 +62,8 @@ const EXAMPLES:Record<string,string>={
 const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
 export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onBack,onDone,onFund,perpsOnly=false,initialPerpsStyle}:{initialPerpsStyle?:PerpsStyleId;perpsOnly?:boolean;account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
   const t = useT();
+  const purpose = perpsOnly ? "perps" as const : "spot" as const;
+  const purposeQuery = perpsOnly ? "?purpose=perps" : "";
   const surfaceClass = perpsOnly ? "create-agent perps-create" : "create-agent";
   const [step,setStep]=useState<"agent"|"market"|"limits"|"backup"|"fund">("agent");
   const [name,setName]=useState("");
@@ -118,8 +120,8 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   const requireCurrentSetup = () => { if (!mounted.current) throw new Error("This account's setup is no longer open."); };
   useEffect(()=>{
     if(!account?.status.grant)return;
-    void requestJson<{values:{liveTradingEnabled?:boolean;agentName?:string;strategy?:string}}>("/api/settings").then(({values})=>{setPaper(perpsOnly || !(values.liveTradingEnabled ?? false));setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
-    const local=loadGrant();
+    void requestJson<{values:{liveTradingEnabled?:boolean;agentName?:string;strategy?:string}}>(`/api/settings${purposeQuery}`).then(({values})=>{setPaper(perpsOnly || !(values.liveTradingEnabled ?? false));setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
+    const local=loadGrant(purpose);
     if(local?.smartAccount.toLowerCase()===account.status.grant.smartAccount.toLowerCase()) {
       setGrant(local);setArmed(account.status.exists);
       const saved=localStorage.getItem(`merrymen.backup.${local.smartAccount.toLowerCase()}`)==="1";
@@ -173,10 +175,10 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     if(!paper&&!ack){setError(t("create.errAck"));return;}
     setBusy(true);setError("");
     try {
-      const current=await requestJson<AccountState["status"]>("/api/grants");
+      const current=await requestJson<AccountState["status"]>(`/api/grants${purposeQuery}`);
       requireCurrentSetup();
       if(current.exists){throw new Error("An agent is already active. Open your agent instead of creating another wallet.");}
-      const settings=await requestJson<{values:{customTokens?:unknown[];v4AdapterAddress?:string;ponsAdapterAddress?:string;ponsClassVaultFactory?:string}}>("/api/settings");
+      const settings=await requestJson<{values:{customTokens?:unknown[];v4AdapterAddress?:string;ponsAdapterAddress?:string;ponsClassVaultFactory?:string}}>(`/api/settings${purposeQuery}`);
       requireCurrentSetup();
       const address=(value?:string)=>value&&/^0x[0-9a-fA-F]{40}$/.test(value) ? value as `0x${string}` : undefined;
       const pons=perpsOnly ? undefined : await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
@@ -187,7 +189,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
       const creationSettings = perpsOnly
         ? perpsCreationSettings({ name, style: perpsStyle, markets: perpsMarkets, perTradeUsdg: perTrade.value, owner })
         : {owner,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]};
-      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(creationSettings)});
+      await requestJson(`/api/settings${purposeQuery}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(creationSettings)});
       requireCurrentSetup();
       /**
        * MERGED LOCALLY, NOT RE-READ — and getting this wrong would silently
@@ -202,7 +204,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
        */
       // The PARSED values, not `Number(trade)`. The raw string is what the
       // owner typed, and `Number("10,50")` is NaN while `Number("1.000")` is 1.
-      const mintOptions={caps:{...INITIAL_CAPS,expiryDays:perpsOnly ? PERPS_CREATE_PERMISSION_DAYS : INITIAL_CAPS.expiryDays,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,newAccountPerpsOnly:perpsOnly,extraTokens:perpsOnly ? [] : [...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:perpsOnly ? undefined : address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:perpsOnly ? undefined : address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
+      const mintOptions={purpose,caps:{...INITIAL_CAPS,expiryDays:perpsOnly ? PERPS_CREATE_PERMISSION_DAYS : INITIAL_CAPS.expiryDays,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,newAccountPerpsOnly:perpsOnly,extraTokens:perpsOnly ? [] : [...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:perpsOnly ? undefined : address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:perpsOnly ? undefined : address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
       // WHO OWNS THIS MERRYMAN. A Privy session owns it with the embedded
       // wallet it signed in with; everything else keeps the browser-generated
       // key. Same Kernel, same wall, same session key either way.
@@ -217,7 +219,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     setBusy(true);setError("");
     try{
       const {demoOwnerPrivateKey:owner,...publicGrant}=grant;
-      await requestJson("/api/grants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(account?.session.hosted ? publicGrant : grant)});
+      await requestJson(`/api/grants${purposeQuery}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(account?.session.hosted ? publicGrant : grant)});
       setArmed(true);onRefresh();
     }catch(e){setError(e instanceof Error ? e.message : "Could not activate your agent.");}finally{setBusy(false);}
   }
@@ -358,6 +360,6 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     {step==="backup"&&grant&&isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Your X login holds the key that owns this account. There is nothing here to write down — merrymen never sees it, so it cannot show it to you or lose it.</p></div><div className="create-secret"><code>Held by your Privy login</code></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I understand: if I lose access to this X account, merrymen cannot recover these funds for me.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setStep("fund");}}>Continue</button></>}
     {step==="backup"&&grant&&!isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Save the recovery key before you go. It lets you recover this wallet if you lose this device.</p></div><label className="create-label">Recovery key</label><div className="create-secret"><code>{reveal ? grant.demoOwnerPrivateKey : "•••• •••• •••• •••• •••• ••••"}</code><button aria-label={reveal?"Hide recovery key":"Reveal recovery key"} onClick={()=>setReveal(!reveal)}>{reveal?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I saved my recovery key somewhere safe.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setReveal(false);setStep("fund");}}>Continue</button></>}
     {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?"Ready when you are.":"One last connection."}</h1><p>{armed?(paper ? (perpsOnly ? "Your paper perps profile is saved. Open Tactical Radar to follow market scans, positions and execution history. Real-money trading needs a separate opt-in." : "Your wallet is connected. Open your agent to check its status and follow paper trades.") : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation to connect it to your agent."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{perpsOnly ? getPerpsStyle(perpsStyle).label : STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>{perpsOnly ? "Open Tactical Radar" : "Open your agent"}</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
-    {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}{isWallTooWide(error)&&<> <a href="/settings">Review custom tokens</a></>}</p>}
+    {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}{perpsOnly && /Spot wallet already carries a perpetual permission/i.test(error) && <> <a href="/grant">Review the existing Spot wallet and its perpetual permission</a></>}{isWallTooWide(error)&&<> <a href="/settings">Review custom tokens</a></>}</p>}
   </section>;
 }

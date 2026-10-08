@@ -294,11 +294,12 @@ venue minimums can still block a trade. Its displayed fourteen-day permission
 accommodates the seven-day swing horizon. Real funds require separate venue
 permission, consent and funding.
 
-The new-account signing option omits optional coin/adapter extensions and their
-unrelated RPC probes. It retains the canonical base wall and rejects use for a
-restore, renewal, saved account or deployed account. It does not create a new
-perps-only on-chain permission system. Existing spot accounts keep their original
-strategy and can configure the independent perps lane in the Control room.
+Dedicated Perps accounts now use a purpose-bound permission wall: capped USDG
+approval to Lighter, the pinned venue operations and optional energy purchase.
+Spot swaps, stock approvals, curve adapters and transfers are absent. Legacy
+Spot grants retain their existing derivation and canonical wall. The earlier
+minimal-onboarding option remains creation-only; dedicated-purpose renewals
+rebuild the same Perps wall and preserve their venue authority.
 
 Browser acceptance covered the real public BTC chart and the new name/profile/
 limits form, stopping before wallet creation or signing. Private control changes,
@@ -339,12 +340,21 @@ changes only the maximum USDG collateral ceiling through owner-bound settings,
 with a readback before success. It is not an immediate transfer, and lowering the
 ceiling does not withdraw existing collateral or change signed permissions.
 
-Current account architecture remains one on-chain agent smart account per owner.
-Existing Spot owners reuse that address and have independent Perps venue state;
-the product explicitly says so. A second on-chain address for the same owner
-requires an account/grant model change and has not been silently substituted for
-the existing account. Funding amount is still chosen by the owner in the sending
-wallet, not automatically transferred by this screen.
+The account model now supports two smart accounts under the same login and
+root owner. Spot retains Kernel index 0; Perps uses index 1. Purpose is included
+in Perps ownership signatures, canonical-wall checks, grant/settings stores and
+all private controls. Existing Spot state is preserved. A legacy Spot grant
+already carrying Perps authority blocks dedicated onboarding until its owner
+completes the existing retirement/recovery flow; balances and positions are
+never silently migrated or discarded.
+
+Funding from Spot requires an exact USDG amount, review and explicit owner
+confirmation. It uses the owner signer and the existing transfer-only,
+unsponsored relay, not an agent key. A persistent operation hash is written
+before broadcast, ambiguous results are reconciled without rebroadcast, and
+browser locks serialize funding from the same source. Users without an
+available Spot owner signer can send USDG manually to the dedicated deposit
+address. No automatic funding or refill from Spot exists.
 
 The Feed panel reuses public fleet posts and agent profiles, and adds a private
 all-market execution/funding journal with separate paper/live selectors. Both
@@ -362,3 +372,96 @@ allocation/account-switch cases were exercised in integration tests; the local
 browser has no configured funded agent or public feed ledger. No wallet was
 created, signed, funded, traded or withdrawn during verification. No deployment
 or real-money acceptance run is claimed.
+
+
+### Separate Spot and Perps authority, 2026-10-08
+
+Additive `perps_grants` and `perps_tenant_settings` tables preserve existing
+Spot rows. The file-store equivalent uses a separate Perps directory. Both
+writers serialize ownership checks across purposes and reject a reused account
+address, different root owner or unretired legacy Perps authority. Revocation,
+shutdown and recovery are scoped to the selected purpose. The shared public
+identity retains Spot as its primary account and adds Perps as a membership.
+
+The orchestrator runs each purpose in a separate home/process with its own
+session key, venue key, settings, command files, mirror cursors and execution
+lease. True login identity remains the encryption/authentication owner. A
+Perps worker always uses the `perps-only` strategy, including when settings
+are absent. Spot Telegram/X credentials and holder delegations are not copied
+into the Perps worker. This separation does not constitute an operating-system
+sandbox: hosted workers currently run under the same OS user.
+
+The app reads a dedicated Perps account snapshot under its existing login.
+Private chart markers, positions, activity, controls, recovery and balance reads
+select that account explicitly; missing Perps data never falls back to the
+Spot book. The profile and public community feed remain shared, while private
+venue executions remain owner-only.
+
+No user wallets were created or signed, and no live funding transfers, venue
+trades or withdrawals were performed during this implementation. Live deployment and mainnet/device
+acceptance remain subject to the operational gates above.
+
+
+## Separate wallet execution and self-hosted operation
+
+One login keeps the same public profile and follows across Spot and Perps. Each
+mode has its own grant, settings, wallet, worker process, and accounting rows.
+Perps uses Kernel index 1; existing Spot accounts remain index 0. Private chart
+entries, position exits, activity, recovery, and paper resets resolve the selected
+wallet. No automatic transfer from Spot funds the Perps wallet.
+
+Hosted execution uses distinct owner and owner:perps slots for worker homes,
+leases, command delivery, and restart state. Cryptographic seals and authentication
+remain bound to the real owner and exact smart account. A Perps shutdown stops and
+retires only that execution slot. Shared identity membership preserves Spot as
+the primary account when both exist. Worker directory separation does not provide
+a hostile-process sandbox: children still share a host UID. A deployment requiring
+that boundary must use separate UIDs or containers without shared key volumes.
+
+For self-hosted installs, `merrymen start` and `npm run dev:worker` run the local
+worker supervisor. It starts Spot immediately and notices a newly created Perps
+grant within two seconds. Perps state lives under `~/.merrymen/accounts/perps` (or
+`$MERRYMEN_HOME/accounts/perps`). Independent process restart backoff preserves
+the other worker. Revocation leaves the running worker time to consume its
+protective stand-down request; losing the supervisor's IPC connection exits its
+children so an old process cannot outlive the manager. Each local wallet also
+holds a kernel-released SQLite writer lease for the lifetime of its worker; a
+replacement cannot execute while the old child still holds that lease.
+
+The browser recovery screen selects the correct wallet automatically. To use the
+local CLI escape hatch for Perps, select its home and purpose explicitly:
+
+```sh
+MERRYMEN_HOME="$HOME/.merrymen/accounts/perps" MERRYMEN_WALLET_PURPOSE=perps merrymen recover
+```
+
+The CLI also retains the selected archived grant's account purpose. Recovery
+reconstructs that fixed index and checks the reviewed smart-account address before
+signing. Planning and signing use the same derivation. These paths were checked
+with temporary files, stub RPC/bundler responses, throwaway signers, and simulated
+child processes; no production funds or live orders were used for this validation.
+
+Final verification for the separate-wallet implementation:
+
+- Repository TypeScript checks and the production Next/SDK build passed.
+- The full application run executed 16,093 tests: 16,088 passed, four skipped,
+  and one stale source assertion failed because it expected the old unscoped
+  Settings callback. The assertion now checks the two purpose-specific
+  callbacks; its complete 67-test chat-controller group passed on rerun.
+- The real PostgreSQL 17.11 integration run passed all six cases, including
+  legacy-schema upgrade, concurrent initialization, independent grants/settings,
+  atomic cross-purpose ownership, shared identity and isolated revocation.
+  Command: `MERRYMEN_TEST_PG_URL=<disposable-local-database> node --import tsx --test --test-force-exit worker/src/dual-purpose.postgres.test.ts`.
+  The temporary cluster and temporary driver installation were removed.
+- Real SDK funding tests used a stub RPC and throwaway owner signer to verify
+  the exact transfer and distinct purpose derivations. An owner switch after
+  signing prevented both broadcast and pending-journal creation. Journal tests
+  cover reloads, lost responses, storage failures and no automatic resubmission.
+- Local worker lifetime leases, CLI grant-change races and purpose-specific
+  recovery/kill controls passed their focused integration tests. Those runs
+  overlap the full suite and must not be added to its total.
+- Read-only production browser checks covered 390px and 1440px layouts, public
+  candles, Spot/Perps navigation, dedicated Account/Create/Settings links,
+  private-position gating and shared community navigation. Funded owner states
+  were exercised with fixtures, not real assets. The local feed has no populated
+  public ledger; its unavailable state was shown without invented activity.

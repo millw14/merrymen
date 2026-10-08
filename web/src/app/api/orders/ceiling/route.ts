@@ -10,12 +10,15 @@
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { readRequestPurpose } from "@/lib/account-purpose";
 import { ceilingFor } from "@/lib/order-ceiling";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
   if (isHostedMode() && !tenantOf(req)) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-  return NextResponse.json({ ceilingUsdg: await ceilingFor(req, isHostedMode()) });
+  return NextResponse.json({ ceilingUsdg: await ceilingFor(req, isHostedMode(), purpose) });
 }

@@ -38,13 +38,15 @@ import {
   carriesPerpPrivateKey,
   GRANT_PERP_LIGHTER,
   grantPerp,
+  grantPurpose,
+  isGrantPurpose,
   isHostedMode,
 } from "../../packages/core/src/index";
 import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
 import { openPerpKey } from "./perps/key-seal";
 import { makePgDb } from "./db";
-import { HOSTED_STANDDOWN_SCHEMA, HostedStanddownStore, revokeHostedGrant } from "./perps/hosted-standdown-store";
-import type { StoredGrant } from "../../packages/core/src/index";
+import { createHostedTables, initHostedStanddownSchema, HostedStanddownStore, revokeHostedGrant } from "./perps/hosted-standdown-store";
+import type { GrantPurpose, StoredGrant } from "../../packages/core/src/index";
 
 /** A grant safe to persist server-side: session-key-only, session key sealed. */
 export interface StoredRecord {
@@ -96,8 +98,18 @@ export interface GrantStore {
   expirePerps?(nowMs: number): Promise<void>;
 }
 
+/** Rechecked under the writer lock so simultaneous setup cannot split owner authority. */
+function assertIndependentAccount(incoming: StoredGrant, other: StoredGrant | null): void {
+  if (!other) return;
+  if (typeof other.owner !== "string" || other.owner.toLowerCase() !== incoming.owner?.toLowerCase()) throw new Error("Spot and Perps must use the same owner key");
+  if (other.smartAccount?.toLowerCase() === incoming.smartAccount.toLowerCase()) throw new Error("Spot and Perps must use distinct smart accounts");
+  const spot = grantPurpose(incoming) === "spot" ? incoming : other;
+  if (spot.perp !== undefined || spot.grantFeatures?.includes(GRANT_PERP_LIGHTER)) throw new Error("retire the legacy Spot perpetual permission before creating separate account authority");
+}
+
 /** Split a full grant into a persistable record, refusing anything with an owner key. */
-function toRecord(tenant: `0x${string}`, grant: StoredGrant): StoredRecord {
+function toRecord(tenant: `0x${string}`, grant: StoredGrant, purpose: GrantPurpose): StoredRecord {
+  if (grantPurpose(grant) !== purpose) throw new Error("grant purpose does not match its account store");
   if (carriesOwnerKey(grant)) {
     throw new Error("refusing to store a grant that carries an owner key");
   }
@@ -197,7 +209,8 @@ function assertRecordsClean(grants: readonly unknown[]): void {
 }
 
 /** Reassemble a full grant, decrypting the session key back in. */
-function fromRecord(rec: StoredRecord): StoredGrant {
+function fromRecord(rec: StoredRecord, purpose: GrantPurpose): StoredGrant {
+  if (grantPurpose(rec.grant) !== purpose) throw new Error("stored grant purpose does not match its account store");
   // READ-TIME, PER RECORD, over the grant as it was written (never the
   // rebuilt one, which is where secrets are joined back in): a record holding
   // a plaintext Lighter key is refused on the way out as well as the way in,
@@ -229,7 +242,11 @@ function lockBusy(e: unknown): boolean {
  * not contain the plaintext key.
  */
 export class FileGrantStore implements GrantStore {
-  private dir = path.join(merrymenHome(), "tenants");
+  private dir: string;
+  constructor(readonly purpose: GrantPurpose = "spot") {
+    if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+    this.dir = path.join(merrymenHome(), purpose === "perps" ? "tenants-perps" : "tenants");
+  }
   private file(tenant: string) {
     return path.join(this.dir, `${tenant.toLowerCase()}.json`);
   }
@@ -258,7 +275,10 @@ export class FileGrantStore implements GrantStore {
    */
   private async locked<T>(tenant: string, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.dir, { recursive: true });
-    const db = new DatabaseSync(path.join(this.dir, GRANT_STORE_LOCK_FILE));
+    // Both purposes share the writer lock: cross-purpose account checks and writes are atomic.
+    const lockDir = path.join(merrymenHome(), "tenants");
+    await mkdir(lockDir, { recursive: true });
+    const db = new DatabaseSync(path.join(lockDir, GRANT_STORE_LOCK_FILE));
     try {
       const giveUpAt = Date.now() + LOCK_WAIT_MS;
       for (;;) {
@@ -317,7 +337,14 @@ export class FileGrantStore implements GrantStore {
     await this.scanAtRest();
     await this.locked(tenant, async () => {
       // Stamped inside the lock, so `updatedAt` is when the record landed.
-      const rec = toRecord(tenant, grant);
+      const rec = toRecord(tenant, grant, this.purpose);
+      const other = new FileGrantStore(this.purpose === "perps" ? "spot" : "perps");
+      const otherGrant = await other.get(tenant);
+      if (!otherGrant && await other.hasStoredGrant(tenant)) throw new Error("the other account authority could not be read");
+      assertIndependentAccount(grant, otherGrant);
+      if (await other.tenantForAccountInPurpose(grant.smartAccount)) {
+        throw new Error("Spot and Perps must use distinct smart accounts");
+      }
       const tmp = `${this.file(tenant)}.${randomUUID()}.tmp`;
       await writeFile(tmp, JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
       await rename(tmp, this.file(tenant));
@@ -330,7 +357,8 @@ export class FileGrantStore implements GrantStore {
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     try {
       const rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord;
-      return fromRecord(rec);
+      if (rec.tenant.toLowerCase() !== tenant.toLowerCase()) throw new Error("stored grant tenant mismatch");
+      return fromRecord(rec, this.purpose);
     } catch {
       return null;
     }
@@ -340,8 +368,9 @@ export class FileGrantStore implements GrantStore {
     try {
       const files = await readdir(this.dir);
       return files.filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5) as `0x${string}`);
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
     }
   }
   async remove(tenant: `0x${string}`): Promise<void> {
@@ -372,6 +401,12 @@ export class FileGrantStore implements GrantStore {
     });
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
+    const own = await this.tenantForAccountInPurpose(smartAccount);
+    const other = await new FileGrantStore(this.purpose === "perps" ? "spot" : "perps").tenantForAccountInPurpose(smartAccount);
+    if (own && other && own !== other) throw new Error("smart account has conflicting tenant claims");
+    return own ?? other;
+  }
+  private async tenantForAccountInPurpose(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const want = smartAccount.toLowerCase();
     // A scan, deliberately: the file backend is the single-service/self-hosted
     // path where the tenant count is small, and an index would be another thing
@@ -379,6 +414,7 @@ export class FileGrantStore implements GrantStore {
     // the caller must refuse rather than assume the account is unclaimed.
     for (const tenant of await this.listTenants()) {
       const rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord;
+      if (rec.tenant.toLowerCase() !== tenant.toLowerCase() || grantPurpose(rec.grant) !== this.purpose) throw new Error("stored grant account scope mismatch");
       if (rec.grant?.smartAccount?.toLowerCase() === want) return tenant;
     }
     return null;
@@ -408,12 +444,15 @@ interface PgClientLike {
  */
 export class PgGrantStore implements GrantStore {
   private ready: Promise<PgClientLike> | null = null;
-  constructor(private url: string) {
+  private table: "grants" | "perps_grants";
+  constructor(private url: string, readonly purpose: GrantPurpose = "spot") {
+    if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+    this.table = purpose === "perps" ? "perps_grants" : "grants";
     requireDek(); // fail fast: hosted Postgres without a DEK is a plaintext-at-rest bug
   }
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
-      this.ready = (async () => {
+      const started = this.ready = (async () => {
         // pg is a RUNTIME-only dependency (installed on the hosted deploy, not
         // in this repo). The webpackIgnore comment stops Next's bundler from
         // trying to resolve it at build — the file backend must build with pg
@@ -422,12 +461,13 @@ export class PgGrantStore implements GrantStore {
         // before any deploy (docs/hosted-platform-plan.md).
         // @ts-expect-error pg has no types here (runtime-only); webpackIgnore stops the bundler resolving it
         const pg = (await import(/* webpackIgnore: true */ "pg")) as unknown as {
-          Client: new (c: { connectionString: string }) => PgClientLike & { connect(): Promise<void> };
+          Client: new (c: { connectionString: string }) => PgClientLike & { connect(): Promise<void>; end(): Promise<void> };
         };
         const c = new pg.Client({ connectionString: this.url });
+        try {
         await c.connect();
-        await c.query(
-          `CREATE TABLE IF NOT EXISTS grants (
+        for (const table of ["grants", "perps_grants"]) await createHostedTables(sql => c.query(sql),
+          `CREATE TABLE IF NOT EXISTS ${table} (
              tenant TEXT PRIMARY KEY,
              chain_id INTEGER NOT NULL,
              grant_json JSONB NOT NULL,
@@ -435,24 +475,38 @@ export class PgGrantStore implements GrantStore {
              updated_at BIGINT NOT NULL
            )`,
         );
-        await c.query(HOSTED_STANDDOWN_SCHEMA);
+        await initHostedStanddownSchema(sql => c.query(sql));
         // THE BOOT SCAN: every grant_json as written, before this process
         // serves a single read or write. A hosted store holding a plaintext
         // Lighter key anywhere does not come up (assertNoPerpKeysAtRest).
-        const { rows } = await c.query(`SELECT grant_json FROM grants`);
+        const { rows } = await c.query(`SELECT grant_json FROM grants UNION ALL SELECT grant_json FROM perps_grants`);
         assertRecordsClean(rows.map((r) => (typeof r.grant_json === "string" ? JSON.parse(r.grant_json) : r.grant_json)));
         return c;
+        } catch (error) {
+          await c.end().catch(() => {});
+          throw error;
+        }
       })();
+      started.catch(() => { if (this.ready === started) this.ready = null; });
     }
     return this.ready;
   }
   async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
-    const rec = toRecord(tenant, grant);
+    const rec = toRecord(tenant, grant, this.purpose);
     await this.client();
     const db = await makePgDb(this.url);
     await db.tx(async tx => {
+    // Serialize both account purposes for an owner, then cross-owner account claims.
+    await tx.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))").get(`grant-owner:${tenant.toLowerCase()}`);
+    await tx.prepare("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))").get(grant.smartAccount.toLowerCase());
+    const otherTable = this.purpose === "perps" ? "grants" : "perps_grants";
+    const opposite = await tx.prepare(`SELECT grant_json FROM ${otherTable} WHERE tenant = ?`).get(tenant.toLowerCase()) as { grant_json: unknown } | undefined;
+    if (opposite) assertIndependentAccount(grant, (typeof opposite.grant_json === "string" ? JSON.parse(opposite.grant_json) : opposite.grant_json) as StoredGrant);
+    if (await tx.prepare(`SELECT tenant FROM ${otherTable} WHERE lower(grant_json->>'smartAccount') = ? LIMIT 1`).get(grant.smartAccount.toLowerCase())) {
+      throw new Error("Spot and Perps must use distinct smart accounts");
+    }
     await tx.prepare(
-      `INSERT INTO grants (tenant, chain_id, grant_json, sealed_session_key, updated_at)
+      `INSERT INTO ${this.table} (tenant, chain_id, grant_json, sealed_session_key, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (tenant) DO UPDATE SET
          chain_id = EXCLUDED.chain_id, grant_json = EXCLUDED.grant_json,
@@ -461,20 +515,20 @@ export class PgGrantStore implements GrantStore {
     // The upsert takes the grant's row lock FIRST. A concurrent kill either
     // follows this put or commits its job before this test; it cannot slip a
     // new normal worker beside a draining venue key.
-    if (await new HostedStanddownStore(tx, requireDek()).blocked(tenant, grant.smartAccount)) {
+    if (await new HostedStanddownStore(tx, requireDek()).blocked(tenant, grant.smartAccount, this.purpose)) {
       throw new Error("the previous perps shutdown is still being accounted for; try again after it finishes");
     }
     });
   }
   async hasStoredGrant(tenant: `0x${string}`): Promise<boolean> {
     const client = await this.client();
-    const { rows } = await client.query("SELECT 1 FROM grants WHERE tenant = $1 LIMIT 1", [tenant.toLowerCase()]);
+    const { rows } = await client.query(`SELECT 1 FROM ${this.table} WHERE tenant = $1 LIMIT 1`, [tenant.toLowerCase()]);
     return rows.length > 0;
   }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     const c = await this.client();
     const { rows } = await c.query(
-      `SELECT tenant, chain_id, grant_json, sealed_session_key, updated_at FROM grants WHERE tenant = $1`,
+      `SELECT tenant, chain_id, grant_json, sealed_session_key, updated_at FROM ${this.table} WHERE tenant = $1`,
       [tenant.toLowerCase()],
     );
     const row = rows[0];
@@ -486,27 +540,27 @@ export class PgGrantStore implements GrantStore {
       sealedSessionKey: String(row.sealed_session_key),
       updatedAt: Number(row.updated_at),
     };
-    return fromRecord(rec);
+    return fromRecord(rec, this.purpose);
   }
   async listTenants(): Promise<`0x${string}`[]> {
     const c = await this.client();
-    const { rows } = await c.query(`SELECT tenant FROM grants`);
+    const { rows } = await c.query(`SELECT tenant FROM ${this.table}`);
     return rows.map((r) => String(r.tenant) as `0x${string}`);
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     await this.client();
-    await revokeHostedGrant(await makePgDb(this.url), tenant, requireDek());
+    await revokeHostedGrant(await makePgDb(this.url), tenant, requireDek(), { purpose: this.purpose });
   }
   async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
     await this.client();
-    return revokeHostedGrant(await makePgDb(this.url), tenant, requireDek(), { beforeSec: atSec });
+    return revokeHostedGrant(await makePgDb(this.url), tenant, requireDek(), { beforeSec: atSec, purpose: this.purpose });
   }
   async expirePerps(nowMs: number): Promise<void> {
     const c = await this.client();
-    const { rows } = await c.query(`SELECT tenant FROM grants WHERE grant_json->'perp' IS NOT NULL
+    const { rows } = await c.query(`SELECT tenant FROM ${this.table} WHERE grant_json->'perp' IS NOT NULL
       AND CAST(grant_json->>'expiresAt' AS BIGINT) <= $1`, [Math.floor(nowMs / 1000)]);
     const db = await makePgDb(this.url);
-    for (const row of rows) await revokeHostedGrant(db, String(row.tenant) as `0x${string}`, requireDek(), { nowMs, reason: "expiry", expiredOnly: true });
+    for (const row of rows) await revokeHostedGrant(db, String(row.tenant) as `0x${string}`, requireDek(), { nowMs, reason: "expiry", expiredOnly: true, purpose: this.purpose });
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const c = await this.client();
@@ -514,31 +568,36 @@ export class PgGrantStore implements GrantStore {
     // rather than a column. Fine at this size; if the fleet grows, the index to
     // add is on (grant_json->>'smartAccount').
     const { rows } = await c.query(
-      `SELECT tenant FROM grants WHERE lower(grant_json->>'smartAccount') = $1 LIMIT 1`,
+      `SELECT tenant FROM grants WHERE lower(grant_json->>'smartAccount') = $1
+       UNION SELECT tenant FROM perps_grants WHERE lower(grant_json->>'smartAccount') = $1`,
       [smartAccount.toLowerCase()],
     );
+    if (rows.length > 1) throw new Error("smart account has conflicting tenant claims");
     const row = rows[0];
     return row ? (String(row.tenant) as `0x${string}`) : null;
   }
 }
 
 /** The store this deploy uses: Postgres when DATABASE_URL is set, else the file backend. */
-let cached: GrantStore | null = null;
-export function getGrantStore(): GrantStore {
-  if (cached) return cached;
+const cached = new Map<GrantPurpose, GrantStore>();
+export function getGrantStore(purpose: GrantPurpose = "spot"): GrantStore {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+  const found = cached.get(purpose);
+  if (found) return found;
   const url = process.env.DATABASE_URL;
-  cached = url ? new PgGrantStore(url) : new FileGrantStore();
-  return cached;
+  const store = url ? new PgGrantStore(url, purpose) : new FileGrantStore(purpose);
+  cached.set(purpose, store);
+  return store;
 }
 
 /** Test seam: drop the cached store so a test can change the environment. */
 export function resetGrantStoreForTest(): void {
-  cached = null;
+  cached.clear();
 }
 
 /** Refuse unknown backends rather than interpreting a failed read as no grant. */
-export async function hasStoredGrant(tenant: `0x${string}`): Promise<boolean> {
-  const store = getGrantStore();
+export async function hasStoredGrant(tenant: `0x${string}`, purpose: GrantPurpose = "spot"): Promise<boolean> {
+  const store = getGrantStore(purpose);
   if (!store.hasStoredGrant) throw new Error("Grant presence cannot be verified");
   return store.hasStoredGrant(tenant);
 }

@@ -127,7 +127,7 @@ describe("the orchestrator writes it where rule 5 says, and nowhere else", () =>
   it("the key never enters a child's environment", () => {
     const env = code.slice(code.indexOf("export function childEnv("), code.indexOf("\n}\n", code.indexOf("export function childEnv(")));
     assert.ok(env.length > 0);
-    assert.ok(!/perp|PERP|syncChildPerpKey|openPerpKey/.test(env), "childEnv must not carry anything perp");
+    assert.ok(!/syncChildPerpKey|openPerpKey|apiPrivateKey|apiKeySealed/.test(env), "the wallet-purpose label carries no venue key or key-opening operation");
     assert.match(code, /"MERRYMEN_STORE_DEK"/, "and the DEK stays stripped from children");
   });
 });

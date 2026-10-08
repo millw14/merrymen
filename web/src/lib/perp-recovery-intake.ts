@@ -12,7 +12,7 @@ const reads: RecoveryIntakeReads = {
  context: account => withReadDb(db => { if (!db) throw new Error('The ledger could not be read.'); return readPerpRecoveryContext(db, account); }),
  verify: verifyLiveOwnerRecovery,
 };
-export async function perpRecoveryIntakeRefusal(stored: StoredGrant | null, incoming: StoredGrant, deps: RecoveryIntakeReads = reads): Promise<PerpRefusal | null> {
+export async function perpRecoveryIntakeRefusal(stored: StoredGrant | null, incoming: StoredGrant, deps: RecoveryIntakeReads = reads, options?: { home: string; readDb: typeof withReadDb }): Promise<PerpRefusal | null> {
  if (incoming.perpRecovery === undefined) return null;
  const ref = readPerpRecoveryReference(incoming.perpRecovery), next = grantPerp(incoming), old = grantPerp(stored);
  const no = (error: string): PerpRefusal => ({ status: 409, code: 'perp-recovery-unverified', error });
@@ -22,8 +22,10 @@ export async function perpRecoveryIntakeRefusal(stored: StoredGrant | null, inco
  const retry = old?.apiPublicKey === next.apiPublicKey && samePerpRecoveryAttempt(stored?.perpRecovery, ref);
  if (!old || (!retry && old.apiPublicKey !== ref.oldPublicKey) || stored?.smartAccount.toLowerCase() !== ref.smartAccount) return no('The prior permission changed after recovery was prepared. Review recovery again.');
  try {
-  const context = await deps.context(ref.smartAccount);
-  const proof = await deps.verify(ref, context, { newPublicKey: next.apiPublicKey, home: merrymenHome() });
+  const context = options && deps === reads
+   ? await options.readDb(db => { if (!db) throw new Error("The ledger could not be read."); return readPerpRecoveryContext(db, ref.smartAccount); })
+   : await deps.context(ref.smartAccount);
+  const proof = await deps.verify(ref, context, { newPublicKey: next.apiPublicKey, home: options?.home ?? merrymenHome() });
   return proof.ok ? null : no(`Recovery remains halted: ${proof.why}`);
  } catch { return no('Recovery evidence could not be checked. The existing permission remains in place.'); }
 }

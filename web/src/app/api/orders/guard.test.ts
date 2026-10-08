@@ -111,7 +111,7 @@ describe("who may place an order", () => {
     // through the grant store — so a caller can never name somebody else's
     // agent. Self-hosted there is no auth and the localhost middleware is the
     // perimeter, which is the same split /api/selftest already draws.
-    assert.match(CODE, /const agent = await agentFor\(req\);\s*\n\s*if \(!agent\) return NextResponse\.json\(\{ error: "not signed in" \}, \{ status: 401 \}\);/);
+    assert.match(CODE, /const agent = await agentFor\(req, purpose\);\s*\n\s*if \(!agent\) return NextResponse\.json\(\{ error: "not signed in" \}, \{ status: 401 \}\);/);
     assert.equal((CODE.match(/if \(!agent\) return/g) ?? []).length, 2, "both POST and GET");
   });
 
@@ -200,7 +200,7 @@ describe("one click is at most one trade", () => {
     assert.deepEqual(readCommandState(h, "stamped"), { state: "queued", expiresAt: T + WINDOW_MS }, "self-hosted stamps it");
     // And it is the CALLER's tick, not this container's — the same lesson the
     // ceiling below had to learn.
-    assert.match(CODE, /\(await getSettingsStore\(\)\.get\(tenant\)\)\?\.tickSeconds/);
+    assert.match(CODE, /\(await getSettingsStore\(purpose\)\.get\(tenant\)\)\?\.tickSeconds/);
   });
 });
 

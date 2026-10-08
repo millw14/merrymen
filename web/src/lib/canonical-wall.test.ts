@@ -470,6 +470,8 @@ describe("the accepted markers are exactly what the signers can mint", () => {
       const keys = [...block[1].matchAll(/(?:^|,)\s*(?:\.\.\.)?([A-Za-z0-9_]+)\s*(?=[:,]|$)/g)].map((m) => m[1]);
       assert.ok(keys.includes("allowUniswapV4") && keys.includes("extraTokens"), `${who}: the key scan must see the options it is checking`);
       const modelled = new Set([
+        // Rebuilt from the purpose bound into the owner-signed grant.
+        "perpsOnly",
         "trenchScope",
         "extraTokens",
         "allowUniswapV4",

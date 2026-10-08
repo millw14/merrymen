@@ -4,7 +4,7 @@ import { toAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
-import { chainForId, derivationOf, type Derivation } from "@merrymen/core";
+import { accountIndexForPurpose, type GrantPurpose, chainForId, derivationOf, type Derivation } from "@merrymen/core";
 
 /**
  * Recompute the ERC-4337 smart-account address a given OWNER controls, from the
@@ -26,7 +26,7 @@ import { chainForId, derivationOf, type Derivation } from "@merrymen/core";
  * smart_account, so an unverified address lets one tenant write under another's
  * partition.
  */
-export async function deriveKernelAccountAddress(owner: Address, chainId: number): Promise<Derivation> {
+export async function deriveKernelAccountAddress(owner: Address, chainId: number, purpose: GrantPurpose = "spot"): Promise<Derivation> {
   // A malformed owner cannot derive anything, and letting it through would ask
   // the SDK to build enable-data out of it. Refuse here rather than downstream.
   const o = derivationOf(owner);
@@ -56,6 +56,7 @@ export async function deriveKernelAccountAddress(owner: Address, chainId: number
   });
 
   const account = await createKernelAccount(publicClient, {
+    index: accountIndexForPurpose(purpose),
     entryPoint: getEntryPoint("0.7"),
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },

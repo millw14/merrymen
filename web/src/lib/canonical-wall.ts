@@ -58,6 +58,7 @@ import { toCallPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
 import { getActionSelector } from "@zerodev/sdk";
 import {
   buildWallPolicies,
+  isGrantPurpose,
   grantWallOptions,
   GRANT_PONS_ADAPTER,
   GRANT_PONS_CLASS,
@@ -307,7 +308,16 @@ function verify(grant: Record<string, unknown>): void {
   // the mirror would open with any recipient. Naming the rejects makes a stale
   // or hand-built client say which marker it sent.
   const features = grant.grantFeatures;
-  if (!Array.isArray(features) || !features.includes(TRADEABLE_V2)) {
+  if (grant.purpose !== undefined && !isGrantPurpose(grant.purpose)) {
+    refuse(400, "invalid_grant", "Unknown account purpose");
+  }
+  if (grant.purpose === "perps" && (grant.chainId !== LIGHTER_ROUTE_V1.chainId ||
+      (Array.isArray(tokens) && tokens.length > 0) ||
+      !Array.isArray(features) || features.some((f) => f !== GRANT_ENERGY && f !== GRANT_PERP_LIGHTER) ||
+      SEALED.some(([field]) => grant[field] !== undefined))) {
+    refuse(400, "invalid_grant", "A dedicated Perps wallet cannot carry Spot permissions");
+  }
+  if (!Array.isArray(features) || (grant.purpose !== "perps" && !features.includes(TRADEABLE_V2))) {
     refuse(400, "invalid_grant", `The permission must declare ${TRADEABLE_V2}`);
   }
   const unknown = (features as unknown[]).filter((f) => typeof f !== "string" || !CANONICAL_GRANT_FEATURES.includes(f));
@@ -395,6 +405,7 @@ function verify(grant: Record<string, unknown>): void {
       // the perps permissions around THE KEY THE GRANT NAMES: a wall sealed
       // over any other key differs in changePubKey's w4/w5 and fails below.
       ...grantWallOptions({
+        purpose: grant.purpose as "spot" | "perps" | undefined,
         grantTokens: tokens as string[] | undefined,
         grantFeatures: features as string[],
         chainId: typeof grant.chainId === "number" ? grant.chainId : undefined,

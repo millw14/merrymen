@@ -24,7 +24,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
-import type { MerrymenSettings } from "../../packages/core/src/index";
+import { isGrantPurpose, type GrantPurpose, type MerrymenSettings } from "../../packages/core/src/index";
 
 /** The outcome of claiming a holder wallet for an account. */
 export type HolderClaim =
@@ -321,7 +321,11 @@ interface StoredSettingsRecord {
 // ── file backend ─────────────────────────────────────────────────────────────
 
 export class FileSettingsStore implements SettingsStore {
-  private dir = path.join(merrymenHome(), "tenant-settings");
+  private dir: string;
+  constructor(readonly purpose: GrantPurpose = "spot") {
+    if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+    this.dir = path.join(merrymenHome(), purpose === "perps" ? "tenant-settings-perps" : "tenant-settings");
+  }
   private file(tenant: string) {
     return path.join(this.dir, `${tenant.toLowerCase()}.json`);
   }
@@ -903,7 +907,9 @@ export class PgSettingsStore implements SettingsStore {
   constructor(
     private url: string,
     private connect: PgConnect = connectPg,
+    readonly purpose: GrantPurpose = "spot",
   ) {
+    if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
     requireDek();
   }
   /**
@@ -935,10 +941,13 @@ export class PgSettingsStore implements SettingsStore {
     }
     return this.ready;
   }
+  private get table(): "tenant_settings" | "perps_tenant_settings" {
+    return this.purpose === "perps" ? "perps_tenant_settings" : "tenant_settings";
+  }
   private async makeTables(c: PgClientLike): Promise<void> {
     await createIfAbsent(
       c,
-      `CREATE TABLE IF NOT EXISTS tenant_settings (
+      `CREATE TABLE IF NOT EXISTS ${this.table} (
          tenant TEXT PRIMARY KEY,
          sealed TEXT NOT NULL,
          updated_at BIGINT NOT NULL
@@ -991,24 +1000,24 @@ export class PgSettingsStore implements SettingsStore {
   async put(tenant: `0x${string}`, settings: MerrymenSettings): Promise<void> {
     const c = await this.client();
     await c.query(
-      `INSERT INTO tenant_settings (tenant, sealed, updated_at) VALUES ($1, $2, $3)
+      `INSERT INTO ${this.table} (tenant, sealed, updated_at) VALUES ($1, $2, $3)
        ON CONFLICT (tenant) DO UPDATE SET sealed = EXCLUDED.sealed, updated_at = EXCLUDED.updated_at`,
       [tenant.toLowerCase(), seal(settings), Math.floor(Date.now() / 1000)],
     );
   }
   async get(tenant: `0x${string}`): Promise<MerrymenSettings | null> {
     const c = await this.client();
-    const { rows } = await c.query(`SELECT sealed FROM tenant_settings WHERE tenant = $1`, [tenant.toLowerCase()]);
+    const { rows } = await c.query(`SELECT sealed FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
     return rows[0] ? unseal(String(rows[0].sealed)) : null;
   }
   async listTenants(): Promise<`0x${string}`[]> {
     const c = await this.client();
-    const { rows } = await c.query(`SELECT tenant FROM tenant_settings`);
+    const { rows } = await c.query(`SELECT tenant FROM ${this.table}`);
     return rows.map((r) => String(r.tenant) as `0x${string}`);
   }
   async remove(tenant: `0x${string}`): Promise<void> {
     const c = await this.client();
-    await c.query(`DELETE FROM tenant_settings WHERE tenant = $1`, [tenant.toLowerCase()]);
+    await c.query(`DELETE FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
   }
   /**
    * INSERT … ON CONFLICT DO NOTHING, THEN LOOK. The insert is the atomic
@@ -1194,17 +1203,20 @@ export class PgSettingsStore implements SettingsStore {
   }
 }
 
-let cached: SettingsStore | null = null;
-export function getSettingsStore(): SettingsStore {
-  if (cached) return cached;
+const cached = new Map<GrantPurpose, SettingsStore>();
+export function getSettingsStore(purpose: GrantPurpose = "spot"): SettingsStore {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+  const found = cached.get(purpose);
+  if (found) return found;
   const url = process.env.DATABASE_URL;
-  cached = url ? new PgSettingsStore(url) : new FileSettingsStore();
-  return cached;
+  const store = url ? new PgSettingsStore(url, connectPg, purpose) : new FileSettingsStore(purpose);
+  cached.set(purpose, store);
+  return store;
 }
 
 /** Test seam: drop the cached store so a test can change the environment. */
 export function resetSettingsStoreForTest(): void {
-  cached = null;
+  cached.clear();
 }
 
 /**
@@ -1212,6 +1224,6 @@ export function resetSettingsStoreForTest(): void {
  * DATABASE_URL (the nonce store refuses without one), and `pg` is absent here,
  * so a hosted route test stands a PgSettingsStore over sqlite in through this.
  */
-export function useSettingsStoreForTest(store: SettingsStore): void {
-  cached = store;
+export function useSettingsStoreForTest(store: SettingsStore, purpose: GrantPurpose = "spot"): void {
+  cached.set(purpose, store);
 }

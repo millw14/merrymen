@@ -124,12 +124,11 @@ describe("the construction cannot drift between planning and signing", () => {
     assert.equal((RECOVER_CODE.match(/deriveKernelAccount\(/g) ?? []).length, 4, "one definition, three callers");
   });
 
-  it("no index, salt or address override is passed — the SDK defaults are the contract", () => {
-    // index 0n and useMetaFactory true are what web/src/lib/session.ts mints
-    // with. Passing anything here would derive an account no owner has.
+  it("only the fixed purpose index is passed — no arbitrary address or factory override", () => {
+    // Recovery and creation select the same fixed index for each wallet mode.
     const fn = RECOVER_CODE.slice(RECOVER_CODE.indexOf("async function deriveKernelAccount"));
     const body = fn.slice(0, fn.indexOf("\n}"));
-    assert.doesNotMatch(body, /\bindex\s*:/, "no index override");
+    assert.match(body, /index:\s*accountIndexForPurpose\(purpose\)/, "the canonical purpose index");
     assert.doesNotMatch(body, /\baddress\s*:/, "no address override — that would bypass derivation");
     assert.doesNotMatch(body, /factoryAddress|metaFactoryAddress|useMetaFactory/, "no factory overrides");
     assert.match(body, /KERNEL_V3_3/, "the same Kernel version");

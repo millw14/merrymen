@@ -29,6 +29,7 @@
 import { NextResponse } from "next/server";
 import { createPublicClient, http, recoverMessageAddress } from "viem";
 import { consumeChallengeNonce, issueChallengeNonce, requestOrigin } from "@/lib/auth";
+import { readRequestPurpose } from "@/lib/account-purpose";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { mintTicket, recoveryChallengeMessage, TICKET_TTL_MS } from "@/lib/recovery-ticket";
 import {
@@ -44,12 +45,16 @@ export const runtime = "nodejs";
 const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
 
 export async function GET(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
   const origin = requestOrigin(req);
   const nonce = issueChallengeNonce(origin);
-  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce) });
+  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce, purpose) });
 }
 
 export async function POST(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
   const origin = requestOrigin(req);
 
   let body: { nonce?: unknown; signature?: unknown; chainId?: unknown };
@@ -80,7 +85,7 @@ export async function POST(req: Request) {
   // Reconstruct the exact text that was signed. Nothing the caller sends is
   // trusted as an identity — the address falls out of the signature or the
   // request fails.
-  const message = recoveryChallengeMessage(origin, nonce);
+  const message = recoveryChallengeMessage(origin, nonce, purpose);
   let owner: `0x${string}`;
   try {
     owner = await recoverMessageAddress({ message, signature: signature as `0x${string}` });
@@ -98,7 +103,7 @@ export async function POST(req: Request) {
   // relay's `sender === ticket.smartAccount` check would even pass for it.
   let smartAccount: `0x${string}`;
   try {
-    const derived = await deriveKernelAccountAddress(owner, chainId);
+    const derived = await deriveKernelAccountAddress(owner, chainId, purpose);
     if (!derived.ok) return NextResponse.json({ error: derived.why }, { status: 502 });
     smartAccount = derived.address;
   } catch {

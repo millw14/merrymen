@@ -1,3 +1,4 @@
+import { readRequestPurpose } from "@/lib/account-purpose";
 /**
  * The signed-in owner's own execution markers over Lighter MARK candles.
  * The tenant's grant selects the account. Query parameters select only a
@@ -27,6 +28,8 @@ export async function GET(req: Request) {
   const hosted = isHostedMode();
   const tenant = hosted ? tenantOf(req) : null;
   if (hosted && !tenant) return reply({ error: "not signed in", code: "not-signed-in" }, 401);
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return reply({ error: "Invalid account purpose" }, 400);
 
   const q = chartQuery(req.url);
   if (!q) return reply({ error: "expected one market, book and window", code: "bad-request" }, 400);
@@ -34,7 +37,7 @@ export async function GET(req: Request) {
   // A grant is the only tenant→agent index. Self-hosted has one disk agent
   // behind the existing localhost perimeter. Neither route uses a request
   // account, even if a caller supplies one under another parameter name.
-  const agent = hosted ? await hostedAgentFor(req) : await diskAgent();
+  const agent = hosted ? await hostedAgentFor(req, purpose) : await diskAgent(purpose);
   const allowed = limit(tenant ?? "self-hosted");
   if (!allowed.ok) return reply({ error: "chart requested too often — try again shortly", code: "rate-limited" }, 429,
     { "Retry-After": String(allowed.retryAfterSec) });
@@ -45,7 +48,7 @@ export async function GET(req: Request) {
   answer.candles = await readPerpsMarketCandles(q, nowMs, spec);
   if (agent && spec) {
     try {
-      const rows = await withReadDb(async db => db ? readChartFills(db, agent, q, nowMs) : null);
+      const rows = await withReadDb(async db => db ? readChartFills(db, agent, q, nowMs) : null, hosted ? "spot" : purpose);
       if (rows !== null) Object.assign(answer, { state: "ok", ...entriesFromFills(rows, q, spec) });
     } catch { /* Keep public candles while explicitly marking private history unreadable. */ }
   }

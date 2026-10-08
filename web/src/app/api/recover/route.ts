@@ -23,6 +23,8 @@ import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
 import {
   chainForId,
+  grantPurpose,
+  type GrantPurpose,
   explorerFor,
   isHostedMode,
   pimlicoBundlerUrl,
@@ -30,6 +32,7 @@ import {
   type MerrymenSettings,
   type StoredGrant,
 } from "@merrymen/core";
+import { readRequestPurpose } from "@/lib/account-purpose";
 import { ownerFromPrivateKey, planRecovery, recoverFunds } from "@merrymen/recover";
 
 export const runtime = "nodejs";
@@ -39,17 +42,18 @@ const isKey = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-async function readGrant(): Promise<StoredGrant | null> {
+async function readGrant(purpose: GrantPurpose): Promise<StoredGrant | null> {
   try {
-    return JSON.parse(await readFile(homePaths.grant(), "utf8")) as StoredGrant;
+    const grant = JSON.parse(await readFile(homePaths.grant(purpose), "utf8")) as StoredGrant;
+    return grantPurpose(grant) === purpose ? grant : null;
   } catch {
     return null;
   }
 }
 
-async function readSettings(): Promise<MerrymenSettings> {
+async function readSettings(purpose: GrantPurpose): Promise<MerrymenSettings> {
   try {
-    return JSON.parse((await readFile(homePaths.settings(), "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
+    return JSON.parse((await readFile(homePaths.settings(purpose), "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
   } catch {
     return {};
   }
@@ -84,9 +88,11 @@ const HOSTED_RECOVERY = {
 };
 
 /** Context for the active grant so the panel can render without asking for a key. */
-export async function GET() {
+export async function GET(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
   if (isHostedMode()) return NextResponse.json({ hasStoredKey: false, ...HOSTED_RECOVERY });
-  const [grant, settings] = await Promise.all([readGrant(), readSettings()]);
+  const [grant, settings] = await Promise.all([readGrant(purpose), readSettings(purpose)]);
 
   if (!grant || !isKey(grant.demoOwnerPrivateKey)) {
     // Killed/expired (or externally-owned) — no stored key. The UI asks for the
@@ -98,6 +104,7 @@ export async function GET() {
   const hasBundler = !!bundlerFor(settings, chainId);
   try {
     const plan = await planRecovery({
+      purpose,
       chain: chainForId(chainId),
       owner: ownerFromPrivateKey(grant.demoOwnerPrivateKey),
       rpcUrl: rpcFor(settings, chainId),
@@ -145,20 +152,27 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
   // HOSTED: never accept an owner key over the wire and never sweep server-side.
   // This is the fund-drain endpoint the audit flagged — a public URL where the
   // only guard was localhost. Closed by construction: the server has no key and
   // will not take one.
   if (isHostedMode()) return NextResponse.json(HOSTED_RECOVERY, { status: 403 });
 
-  let body: { mode?: string; to?: unknown; ownerKey?: unknown; chainId?: unknown };
+  let body: { mode?: string; to?: unknown; ownerKey?: unknown; chainId?: unknown; expectedAccount?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "body is not JSON" }, { status: 400 });
   }
 
-  const [grant, settings] = await Promise.all([readGrant(), readSettings()]);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return NextResponse.json({ error: "body must be an object" }, { status: 400 });
+  const [grant, settings] = await Promise.all([readGrant(purpose), readSettings(purpose)]);
+  if (body.expectedAccount !== undefined && !isAddr(body.expectedAccount)) return NextResponse.json({ error: "invalid expected account" }, { status: 400 });
+  if (isAddr(body.expectedAccount) && grant && body.expectedAccount.toLowerCase() !== grant.smartAccount.toLowerCase()) {
+    return NextResponse.json({ error: "the selected wallet changed; review its recovery again" }, { status: 409 });
+  }
   const mode = body.mode === "sweep" ? "sweep" : "plan";
 
   // Prefer a pasted key (killed case); fall back to the active grant's stored key.
@@ -171,12 +185,13 @@ export async function POST(req: Request) {
   const chainId = Number.isInteger(body.chainId) ? Number(body.chainId) : grant?.chainId ?? robinhoodChain.id;
   // Only assert an expected account when signing with the grant's OWN stored key
   // (we know which account that is); a pasted key may be for a different wallet.
-  const expected = pasted ? undefined : grant?.smartAccount;
+  const expected = isAddr(body.expectedAccount) ? body.expectedAccount : (pasted && purpose === "spot") ? undefined : grant?.smartAccount;
   const rpcUrl = rpcFor(settings, chainId);
 
   try {
     if (mode === "plan") {
       const plan = await planRecovery({
+        purpose,
         chain: chainForId(chainId),
         owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
@@ -226,6 +241,7 @@ export async function POST(req: Request) {
       );
     }
     const res = await recoverFunds({
+      purpose,
       chain: chainForId(chainId),
       owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,

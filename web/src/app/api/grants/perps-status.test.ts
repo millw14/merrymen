@@ -260,9 +260,9 @@ describe("the kill controls say what THIS server's kill does, and read its answe
   it("WALLET'S DISCARD sends the kill and reads it BEFORE clearing this browser's grant, and stops on a refusal", () => {
     const wallet = strip(readFileSync(new URL("../../../terminal/screens/Wallet.tsx", import.meta.url), "utf8"));
     const body = wallet.slice(wallet.indexOf("async function discard()"));
-    const send = body.indexOf("await sendKill()");
+    const send = body.indexOf("await sendKill(fetch, purpose)");
     const refused = body.indexOf('answer.kind === "refused"');
-    const clear = body.indexOf("clearGrant()");
+    const clear = body.indexOf("clearGrant(purpose)");
     assert.ok(send > 0 && refused > send && clear > refused, "send → refused? stop → only then clear");
     assert.match(body.slice(refused, clear), /setError\(answer\.error\);\s*return;/);
     assert.doesNotMatch(body, /void fetch\("\/api\/grants", \{ method: "DELETE" \}\)/);

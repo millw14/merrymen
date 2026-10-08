@@ -1,6 +1,7 @@
 "use client";
 import { readPerpRecoveryReference, type PerpRecoveryReference } from "@merrymen/core";
 
+import { scopedAccountUrl } from "@/lib/account-purpose";
 import Link from "next/link";
 import { PerpsShutdownNotice } from "../PerpsShutdownNotice";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
@@ -268,9 +269,9 @@ const PERPS_REACH_HINT_USDG = 20;
  * collapse into "holds none", or an unread answer would let a re-sign drop a
  * Lighter key the server still has.
  */
-async function readServerGrant(): Promise<unknown> {
+async function readServerGrant(purpose: "spot" | "perps"): Promise<unknown> {
   try {
-    const r = await fetch("/api/grants", { cache: "no-store" });
+    const r = await fetch(scopedAccountUrl("/api/grants", purpose), { cache: "no-store" });
     if (!r.ok) return undefined;
     const s = (await r.json()) as { exists?: unknown; grant?: unknown };
     if (s.exists === false) return null;
@@ -288,9 +289,9 @@ async function readServerGrant(): Promise<unknown> {
  * /api/grants (409) whatever this says; this is what lets the page say why
  * before anybody signs.
  */
-async function readVenueFlat(smartAccount: string): Promise<{ flat: boolean | null; detail: string }> {
+async function readVenueFlat(smartAccount: string, purpose: "spot" | "perps"): Promise<{ flat: boolean | null; detail: string }> {
   try {
-    const r = await fetch(`/api/perps/flat?smartAccount=${encodeURIComponent(smartAccount)}`, { cache: "no-store" });
+    const r = await fetch(scopedAccountUrl(`/api/perps/flat?smartAccount=${encodeURIComponent(smartAccount)}`, purpose), { cache: "no-store" });
     if (!r.ok) return { flat: null, detail: `HTTP ${r.status}` };
     const body = (await r.json()) as { flat?: unknown; detail?: unknown };
     return {
@@ -314,8 +315,8 @@ async function readVenueFlat(smartAccount: string): Promise<{ flat: boolean | nu
  * private key is refused outright rather than passed along, because the page
  * would then be holding exactly what rule 5 says it never holds.
  */
-async function mintPerpKey(smartAccount: string): Promise<PerpSealRequest> {
-  const r = await fetch("/api/perps/keygen", {
+async function mintPerpKey(smartAccount: string, purpose: "spot" | "perps"): Promise<PerpSealRequest> {
+  const r = await fetch(scopedAccountUrl("/api/perps/keygen", purpose), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -470,7 +471,10 @@ function WalletRow({ w }: { w: SavedWallet }) {
   );
 }
 
-export default function GrantPage() {
+export default function GrantPage({ purpose = "spot" }: { purpose?: "spot" | "perps" } = {}) {
+  return <PurposeGrantPage key={purpose} purpose={purpose}/>;
+}
+function PurposeGrantPage({ purpose }: { purpose: "spot" | "perps" }) {
   /*
     THE SCOUT, not the outlaw. Caps are sealed into the signature BEFORE the
     account has any money in it, so the default cannot be sized to capital
@@ -538,7 +542,7 @@ export default function GrantPage() {
     const account = grant.smartAccount, owner = session.address;
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 25_000);
     try {
-      const r = await fetch("/api/perps/recovery", { signal: controller.signal, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ owner, confirm: true, txHash: recoveryTx.trim(), userOpHash: recoveryOp.trim() }) });
+      const r = await fetch(scopedAccountUrl("/api/perps/recovery", purpose), { signal: controller.signal, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ owner, confirm: true, txHash: recoveryTx.trim(), userOpHash: recoveryOp.trim() }) });
       const answer = await r.json();
       const recovery = readPerpRecoveryReference(answer.recovery);
       if (!r.ok || !recovery || recovery.smartAccount !== account.toLowerCase() || answer.key?.apiPublicKey !== recovery.newPublicKey) throw new Error(answer.error || "The recovery response could not be verified.");
@@ -613,7 +617,7 @@ export default function GrantPage() {
    */
   const [serverGrant, setServerGrant] = useState<unknown>(undefined);
   async function serverGrantNow(): Promise<unknown> {
-    const fresh = await readServerGrant();
+    const fresh = await readServerGrant(purpose);
     return fresh === undefined ? serverGrant : fresh;
   }
   const t = useT();
@@ -622,9 +626,9 @@ export default function GrantPage() {
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
 
   useEffect(() => {
-    const stored = loadGrant();
+    const stored = loadGrant(purpose);
     setGrant(stored);
-    setSavedWallets(listSavedWallets());
+    setSavedWallets(listSavedWallets().filter(wallet => (wallet.purpose ?? "spot") === purpose));
     // The chain selector FOLLOWS the loaded grant. renewKey now signs on the
     // SELECTED chain (so the page cannot lie), which makes this sync load-
     // bearing: without it the selector defaults to testnet, and a mainnet
@@ -638,7 +642,7 @@ export default function GrantPage() {
       setCapText({});
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
-    fetch("/api/grants")
+    fetch(scopedAccountUrl("/api/grants", purpose))
       .then((r) => (r.ok ? r.json() : { exists: false }))
       .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant; perpsOptIn?: boolean; perpsShutdown?: unknown }) => {
         setServerArmed(!!s.exists);
@@ -741,7 +745,7 @@ export default function GrantPage() {
         setSession(s ? { hosted: !!s.hosted, address: (s.address ?? null) as `0x${string}` | null } : null),
       )
       .catch(() => setSession(null));
-    fetch("/api/settings")
+    fetch(scopedAccountUrl("/api/settings", purpose))
       .then((r) => (r.ok ? r.json() : null))
       .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
         const list = (v?.values?.customTokens ?? []).filter(isValidCustomToken);
@@ -770,7 +774,7 @@ export default function GrantPage() {
 
   /** Re-push the stored grant so the worker obeys it again (undo a desync). */
   async function reArm() {
-    const stored = loadGrant();
+    const stored = loadGrant(purpose);
     if (!stored) {
       // THE BUTTON THAT DID NOTHING, second edition. Re-arming re-POSTs the
       // browser's own grant, and this browser may be holding an ADOPTED one —
@@ -784,7 +788,7 @@ export default function GrantPage() {
       );
       return;
     }
-    // STRIP THE OWNER KEY BEFORE RE-POSTING. loadGrant() reads the localStorage
+    // STRIP THE OWNER KEY BEFORE RE-POSTING. loadGrant(purpose) reads the localStorage
     // copy, and that one ALWAYS carries demoOwnerPrivateKey — it is the root of
     // client-side recovery. Posting it verbatim tripped the hosted owner-key
     // refusal every single time, so the desync panel's only escape button could
@@ -793,7 +797,7 @@ export default function GrantPage() {
     setReArming(true);
     setError(null);
     try {
-      const r = await fetch("/api/grants", {
+      const r = await fetch(scopedAccountUrl("/api/grants", purpose), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // Explicit, matching the mint-time POST. This is fetch's default for a
@@ -921,7 +925,7 @@ export default function GrantPage() {
   async function onCreate() {
     setError(null);
     if (!grant && !switching) {
-      window.location.href = "/create";
+      window.location.href = purpose === "perps" ? "/create?for=perps" : "/create";
       return;
     }
     // Refuse rather than mint something the server will throw away. /grant is
@@ -938,6 +942,7 @@ export default function GrantPage() {
     setStatus("starting…");
     try {
       const { local: g, handoff } = await createAgentWallet({
+        purpose,
         caps,
         onStatus: setStatus,
         chainId,
@@ -979,7 +984,7 @@ export default function GrantPage() {
     }
     setPreviewing(true);
     try {
-      const p = await previewOwnerAccount(key as `0x${string}`, chainId);
+      const p = await previewOwnerAccount(key as `0x${string}`, chainId, purpose);
       setPreview(p);
       setPreviewFunding(await readFunding(p.smartAccount, chainId).catch(() => null));
     } catch (e) {
@@ -994,6 +999,7 @@ export default function GrantPage() {
     setStatus("starting…");
     try {
       const { local: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
+        purpose,
         caps,
         onStatus: setStatus,
         chainId,
@@ -1096,7 +1102,7 @@ export default function GrantPage() {
     // asks a third time before it stores anything.
     if (!grant) return;
     setPerpsChecking(true);
-    const read = await readVenueFlat(grant.smartAccount);
+    const read = await readVenueFlat(grant.smartAccount, purpose);
     setPerpsChecking(false);
     if (read.flat === true) {
       setPerpsDrop(true);
@@ -1144,11 +1150,11 @@ export default function GrantPage() {
       let perpsFlat: boolean | undefined;
       if (preparedRecovery) {
         if (perpsDropping || chainId !== MAINNET || preparedRecovery.recovery.smartAccount !== grant.smartAccount.toLowerCase() || Date.now() >= preparedRecovery.recovery.notAfterMs) throw new Error("Recovery preparation changed or expired. Verify it again before re-signing.");
-        const read = await readVenueFlat(grant.smartAccount);
+        const read = await readVenueFlat(grant.smartAccount, purpose);
         if (read.flat !== true) throw new Error(t("wallet.perps.dropNotFlat"));
         perpSeal = preparedRecovery.key; perpsFlat = true;
       } else if (perpsDropping) {
-        const read = await readVenueFlat(grant.smartAccount);
+        const read = await readVenueFlat(grant.smartAccount, purpose);
         if (read.flat !== true) throw new Error(t("wallet.perps.dropNotFlat"));
         perpsFlat = true;
       } else if (priorAtClick.state === "none" && perpsOptIn) {
@@ -1157,7 +1163,7 @@ export default function GrantPage() {
         // owner's choice is refused aloud, never quietly left out.
         if (chainId !== MAINNET) throw new Error(t("wallet.perps.mainnetOnly"));
         try {
-          perpSeal = await mintPerpKey(grant.smartAccount);
+          perpSeal = await mintPerpKey(grant.smartAccount, purpose);
         } catch (e) {
           throw new Error(t("wallet.perps.keygenFailed", { detail: e instanceof Error ? e.message : String(e) }));
         }
@@ -1175,7 +1181,7 @@ export default function GrantPage() {
       // wall without the thing they added thirty seconds ago.
       let freshClassFactory = classFactory;
       try {
-        const r = await fetch("/api/settings");
+        const r = await fetch(scopedAccountUrl("/api/settings", purpose));
         if (r.ok) {
           const v = (await r.json()) as {
             values?: { customTokens?: unknown[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string };
@@ -1204,6 +1210,7 @@ export default function GrantPage() {
       // owner had just edited in the form was ignored. What the page shows is
       // what gets signed, or the page is lying.
       const options = {
+        purpose,
         caps,
         onStatus: setStatus,
         chainId,
@@ -1353,7 +1360,7 @@ export default function GrantPage() {
     // no answer at all → the local clear is the fallback, and said to be only
     // that; answered → its custody sentence, when there is anything at Lighter.
     setError(null);
-    const answer = await sendKill();
+    const answer = await sendKill(fetch, purpose);
     if (answer.kind === "refused") {
       setError(answer.error);
       return;
@@ -1363,13 +1370,13 @@ export default function GrantPage() {
       // A lost follow-up read cannot turn a possible venue balance into none.
       if (exposure && exposure.kind !== "none")
         setPerpsShutdown({ state: "unknown", result: null });
-      void fetch("/api/grants", { cache: "no-store" })
+      void fetch(scopedAccountUrl("/api/grants", purpose), { cache: "no-store" })
         .then((r) => r.ok ? r.json() : null)
         .then((s: { perpsShutdown?: unknown } | null) => {
           if (s?.perpsShutdown) setPerpsShutdown(s.perpsShutdown);
         }).catch(() => {});
     }
-    clearGrant();
+    clearGrant(purpose);
     if (answer.kind === "unreachable") {
       setError(
         "couldn't reach the server, so only this browser's copy was discarded — the agent may still be armed there. " +
@@ -1388,7 +1395,7 @@ export default function GrantPage() {
     // Ask the child to restart the paper book. Best-effort and
     // unconditional: only the worker knows which rail it is on, and it refuses
     // this outright when the agent is live, so nothing real can be cleared.
-    void fetch("/api/paper-reset", { method: "POST" }).catch(() => {});
+    void fetch(scopedAccountUrl("/api/paper-reset", purpose), { method: "POST" }).catch(() => {});
     localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);
@@ -1533,9 +1540,9 @@ export default function GrantPage() {
      * not belong in the same change as adding a navigation bar.
      */
     <AppShell>
-      <PerpsShutdownNotice status={perpsShutdown} />
+      <PerpsShutdownNotice purpose={purpose} status={perpsShutdown} />
       <PageHeader
-        title="Wallet & permissions"
+        title={purpose === "perps" ? "Perps wallet & permissions" : "Wallet & permissions"}
         /* THE CHAIN INDICATOR MOVES, IT DOES NOT GO. Its markup and its
            classes are exactly as they were; only its parent changed. On a
            page that seals spending caps, which chain they are being sealed
@@ -1670,7 +1677,7 @@ export default function GrantPage() {
                 type="button"
                 className={`mode-tab ${mode === "create" ? "on" : ""}`}
                 onClick={() => {
-                  window.location.href = "/create";
+                  window.location.href = purpose === "perps" ? "/create?for=perps" : "/create";
                 }}
               >
                 new wallet
@@ -2129,7 +2136,7 @@ export default function GrantPage() {
             </div>
 
             <div className="grant-note" style={{ marginTop: 12 }}>
-              Deposit to the account address above. Use <Link href="/profile">Withdraw in Profile</Link> to move funds out.
+              Deposit to the account address above. Use <Link href={purpose === "perps" ? "/perps?view=account" : "/profile"}>Withdraw in {purpose === "perps" ? "Perps Account" : "Profile"}</Link> to move funds out.
             </div>
 
             <div className="fund-balances">

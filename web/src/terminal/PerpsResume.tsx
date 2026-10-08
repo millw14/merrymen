@@ -1,9 +1,11 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { scopedAccountUrl } from "@/lib/account-purpose";
 import { routeAnswer } from "./order-follow";
 
 /** Dashboard-only, separate from the chat registry and the perps opt-in. */
-export function PerpsResume({ owner, hosted, mode, incident }: {
+export function PerpsResume({ owner, hosted, mode, incident, purpose = "spot" }: {
+  purpose?: "spot" | "perps";
   owner: string | null; hosted: boolean | null; mode: "paper" | "live"; incident: boolean;
 }) {
   const [question, setQuestion] = useState(false);
@@ -15,7 +17,7 @@ export function PerpsResume({ owner, hosted, mode, incident }: {
     generation.current++;
     setQuestion(false); setBusy(false); setWaiting(null); setNote(null);
     return () => { generation.current++; };
-  }, [owner, mode]);
+  }, [owner, mode, purpose]);
 
   useEffect(() => {
     if (!waiting) return;
@@ -23,7 +25,7 @@ export function PerpsResume({ owner, hosted, mode, incident }: {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       const params = new URLSearchParams({ id: waiting.id, ...(owner ? { owner } : {}) });
-      const answer = await routeAnswer<{ state?: string; result?: string; error?: string }>(`/api/perps/resume?${params}`, { cache: "no-store" });
+      const answer = await routeAnswer<{ state?: string; result?: string; error?: string }>(scopedAccountUrl(`/api/perps/resume?${params}`, purpose), { cache: "no-store" });
       if (!current) return;
       if (answer?.ok && answer.body?.state === "done") {
         setNote(answer.body.result || "The worker finished without a readable result. Check perpetuals status before asking again.");
@@ -41,13 +43,13 @@ export function PerpsResume({ owner, hosted, mode, incident }: {
     };
     void poll();
     return () => { current = false; if (timer) clearTimeout(timer); };
-  }, [waiting, owner]);
+  }, [waiting, owner, purpose]);
 
   async function resume() {
     if (busy || waiting || incident || hosted === null || (hosted && !owner)) return;
     const started = generation.current;
     setBusy(true); setQuestion(false);
-    const answer = await routeAnswer<{ id?: string; expiresInMs?: number; error?: string }>("/api/perps/resume", {
+    const answer = await routeAnswer<{ id?: string; expiresInMs?: number; error?: string }>(scopedAccountUrl("/api/perps/resume", purpose), {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ owner, mode, confirm: true }),
     });

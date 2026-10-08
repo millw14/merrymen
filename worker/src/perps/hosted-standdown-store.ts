@@ -1,6 +1,6 @@
 /** Durable hosted kill/expiry custody. No session key or signed grant enters this table. */
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
-import { grantPerp, type StoredGrant } from "../../../packages/core/src/index";
+import { grantPerp, grantPurpose, isGrantPurpose, type GrantPurpose, type StoredGrant } from "../../../packages/core/src/index";
 import type { Db } from "../db";
 import { openPerpKey } from "./key-seal";
 import { PAGED_CHECKPOINT_SCHEMA, savePagedCheckpointStream, loadPagedCheckpoint, readPagedCheckpoint, deletePagedCheckpoint, isPagedCheckpoint } from "./hosted-financial-pages";
@@ -10,7 +10,7 @@ import { mergeFinancialStreams } from "./hosted-financial-merge";
 export const HOSTED_STANDDOWN_TTL_MS = 15 * 60_000;
 export const STANDDOWN_CHECKPOINT_MAX = 32 * 1024 * 1024;
 export const HOSTED_STANDDOWN_SCHEMA = `CREATE TABLE IF NOT EXISTS perp_standdown (
- id TEXT PRIMARY KEY, tenant TEXT NOT NULL, smart_account TEXT NOT NULL,
+ id TEXT PRIMARY KEY, tenant TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT 'spot', smart_account TEXT NOT NULL,
  api_public_key TEXT NOT NULL, api_key_index INTEGER NOT NULL, sealed_key TEXT,
  reason TEXT NOT NULL, created_at_ms BIGINT NOT NULL, expires_at_ms BIGINT NOT NULL,
  generation INTEGER NOT NULL DEFAULT 0, claimant TEXT, state TEXT NOT NULL DEFAULT 'pending',
@@ -28,17 +28,42 @@ CREATE TABLE IF NOT EXISTS perp_live_checkpoint (
  generation INTEGER NOT NULL, claimant TEXT NOT NULL, checkpoint TEXT,
  PRIMARY KEY (tenant, smart_account)
 );
+CREATE TABLE IF NOT EXISTS perps_grants (
+ tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json JSONB NOT NULL,
+ sealed_session_key TEXT NOT NULL, updated_at BIGINT NOT NULL
+);
 ${PAGED_CHECKPOINT_SCHEMA}`;
 
 export interface HostedStanddownJob {
- id: string; tenant: `0x${string}`; smartAccount: `0x${string}`;
+ id: string; tenant: `0x${string}`; purpose?: GrantPurpose; smartAccount: `0x${string}`;
  apiPublicKey: `0x${string}`; apiKeyIndex: number; sealedKey: string | null;
  reason: "kill" | "expiry"; createdAtMs: number; expiresAtMs: number;
  generation: number; claimant: string | null; state: "pending" | "running" | "done" | "expired";
  checkpoint: string | null; resultJson: string | null; mirrored: boolean;
 }
+
+/** Postgres IF NOT EXISTS still races on catalog rows when services boot together. */
+export async function createHostedTables(exec: (sql: string) => Promise<unknown>, schema: string): Promise<void> {
+ for (let attempt = 0; ; attempt++) {
+  try { await exec(schema); return; }
+  catch (error) {
+   const code = (error as { code?: string }).code;
+   // Retry the idempotent DDL after the competing catalog transaction commits.
+   // Do not swallow the error: the retry must prove the whole schema exists.
+   if (attempt >= 3 || !["23505", "42P07", "42710"].includes(code ?? "")) throw error;
+  }
+ }
+}
+export async function initHostedStanddownSchema(exec: (sql: string) => Promise<unknown>): Promise<void> {
+ await createHostedTables(exec, HOSTED_STANDDOWN_SCHEMA);
+ try { await exec("ALTER TABLE perp_standdown ADD COLUMN purpose TEXT NOT NULL DEFAULT 'spot'"); }
+ catch (error) {
+  if ((error as { code?: string }).code !== "42701" && !/duplicate column|column .+ already exists/i.test(String((error as Error).message))) throw error;
+ }
+ await createHostedTables(exec, "CREATE INDEX IF NOT EXISTS perp_standdown_tenant_purpose ON perp_standdown(tenant, purpose, created_at_ms)");
+}
 function of(r: Record<string, unknown>): HostedStanddownJob {
- return { id: String(r.id), tenant: String(r.tenant) as `0x${string}`, smartAccount: String(r.smart_account) as `0x${string}`,
+ return { id: String(r.id), purpose: grantPurpose({ purpose: r.purpose }), tenant: String(r.tenant) as `0x${string}`, smartAccount: String(r.smart_account) as `0x${string}`,
  apiPublicKey: String(r.api_public_key) as `0x${string}`, apiKeyIndex: Number(r.api_key_index), sealedKey: r.sealed_key == null ? null : String(r.sealed_key),
  reason: r.reason as HostedStanddownJob["reason"], createdAtMs: Number(r.created_at_ms), expiresAtMs: Number(r.expires_at_ms), generation: Number(r.generation),
  claimant: r.claimant == null ? null : String(r.claimant), state: r.state as HostedStanddownJob["state"], checkpoint: r.checkpoint == null ? null : String(r.checkpoint),
@@ -47,18 +72,21 @@ function of(r: Record<string, unknown>): HostedStanddownJob {
 
 /** DELETE and key retention commit together. A failed seal check rolls the deletion back. */
 export async function revokeHostedGrant(db: Db, tenant: `0x${string}`, dek: Buffer, opts: {
- nowMs?: number; beforeSec?: number; reason?: "kill" | "expiry"; expiredOnly?: boolean;
+ nowMs?: number; beforeSec?: number; reason?: "kill" | "expiry"; expiredOnly?: boolean; purpose?: GrantPurpose;
 } = {}): Promise<"removed" | "absent" | "newer"> {
  const now = opts.nowMs ?? Date.now();
+ const purpose = grantPurpose(opts);
+ const table = purpose === "perps" ? "perps_grants" : "grants";
  return db.tx(async tx => {
   // The conditional DELETE locks the exact version being revoked; a concurrent newer put survives.
-  const row = await tx.prepare(`DELETE FROM grants WHERE tenant = ?${opts.beforeSec === undefined ? "" : " AND updated_at <= ?"}${opts.expiredOnly ? " AND CAST(grant_json->>'expiresAt' AS BIGINT) <= ?" : ""} RETURNING grant_json`)
+  const row = await tx.prepare(`DELETE FROM ${table} WHERE tenant = ?${opts.beforeSec === undefined ? "" : " AND updated_at <= ?"}${opts.expiredOnly ? " AND CAST(grant_json->>'expiresAt' AS BIGINT) <= ?" : ""} RETURNING grant_json`)
    .get(tenant.toLowerCase(), ...(opts.beforeSec === undefined ? [] : [opts.beforeSec]), ...(opts.expiredOnly ? [Math.floor(now / 1000)] : [])) as { grant_json: unknown } | undefined;
   if (!row) {
-   const left = await tx.prepare("SELECT tenant FROM grants WHERE tenant = ?").get(tenant.toLowerCase());
+   const left = await tx.prepare(`SELECT tenant FROM ${table} WHERE tenant = ?`).get(tenant.toLowerCase());
    return left ? "newer" : "absent";
   }
   const grant = (typeof row.grant_json === "string" ? JSON.parse(row.grant_json) : row.grant_json) as StoredGrant;
+  if (grantPurpose(grant) !== purpose) throw new Error("revoked grant purpose mismatch");
   const p = grantPerp(grant);
   if (grant.perp !== undefined && !p) throw new Error("cannot revoke malformed perps custody");
   if (p) {
@@ -66,11 +94,11 @@ export async function revokeHostedGrant(db: Db, tenant: `0x${string}`, dek: Buff
    openPerpKey(p.apiKeySealed, { tenant, smartAccount: grant.smartAccount, apiPublicKey: p.apiPublicKey, apiKeyIndex: p.apiKeyIndex }, dek);
    const id = randomUUID();
    const live = await new HostedLiveCheckpointStore(tx, dek).latest(tenant, grant.smartAccount);
-   const bound = { id, tenant: tenant.toLowerCase(), smartAccount: grant.smartAccount.toLowerCase(), generation: 1 } as HostedStanddownJob;
+   const bound = { id, purpose, tenant: tenant.toLowerCase(), smartAccount: grant.smartAccount.toLowerCase(), generation: 1 } as HostedStanddownJob;
    const checkpoint = live?.checkpoint ? await writeCheckpointStream(tx, bound,
     transformFinancialStream(readCheckpointStream(tx, liveCheckpointBinding(live), live.checkpoint, dek), grant.smartAccount, { scope: "standdown" }), dek) : null;
-   await tx.prepare(`INSERT INTO perp_standdown (id, tenant, smart_account, api_public_key, api_key_index, sealed_key, reason, created_at_ms, expires_at_ms, generation, checkpoint)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`).run(id, tenant.toLowerCase(), grant.smartAccount.toLowerCase(), p.apiPublicKey, p.apiKeyIndex,
+   await tx.prepare(`INSERT INTO perp_standdown (id, tenant, purpose, smart_account, api_public_key, api_key_index, sealed_key, reason, created_at_ms, expires_at_ms, generation, checkpoint)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`).run(id, tenant.toLowerCase(), purpose, grant.smartAccount.toLowerCase(), p.apiPublicKey, p.apiKeyIndex,
      p.apiKeySealed, opts.reason ?? "kill", now, now + HOSTED_STANDDOWN_TTL_MS, checkpoint);
    // Signed venue bytes move into the bounded shutdown capability. The long-
    // lived financial book keeps identity/nonce/hash evidence, never replay authority.
@@ -107,7 +135,7 @@ export class HostedLiveCheckpointStore {
  async restore(row: HostedLiveCheckpoint): Promise<Buffer | null> { return row.checkpoint ? readCheckpoint(this.db, liveCheckpointBinding(row), row.checkpoint, this.dek) : null; }
  loadStream(row: HostedLiveCheckpoint): AsyncIterable<Buffer> { return readCheckpointStream(this.db, liveCheckpointBinding(row), row.checkpoint, this.dek); }
  async fence(row: HostedLiveCheckpoint): Promise<boolean> {
-  return !!await this.db.prepare(`SELECT c.tenant FROM perp_live_checkpoint c JOIN grants g ON g.tenant = c.tenant
+  return !!await this.db.prepare(`SELECT c.tenant FROM perp_live_checkpoint c JOIN (SELECT tenant, grant_json FROM grants UNION ALL SELECT tenant, grant_json FROM perps_grants) g ON g.tenant = c.tenant
    WHERE c.tenant = ? AND c.smart_account = ? AND c.generation = ? AND c.claimant = ?
    AND lower(g.grant_json->>'smartAccount') = c.smart_account AND g.grant_json->'perp'->>'apiPublicKey' = c.api_public_key`)
    .get(row.tenant, row.smartAccount, row.generation, row.claimant);
@@ -121,7 +149,7 @@ export class HostedLiveCheckpointStore {
   const prior = current?.checkpoint ? await inspectFinancialStream(readCheckpointStream(tx, liveCheckpointBinding(current), current.checkpoint, this.dek), row.smartAccount, { scope: "financial" }) : null;
   const sealed = await writeCheckpointStream(tx, liveCheckpointBinding(row), validateFinancialStream(chunks, row.smartAccount, { scope: "financial", priorJournalProof: prior?.journalProof }), this.dek, current?.checkpoint);
   const result = await tx.prepare(`UPDATE perp_live_checkpoint SET checkpoint = ? WHERE tenant = ? AND smart_account = ? AND generation = ? AND claimant = ?
-   AND EXISTS (SELECT 1 FROM grants g WHERE g.tenant = perp_live_checkpoint.tenant AND lower(g.grant_json->>'smartAccount') = perp_live_checkpoint.smart_account
+   AND EXISTS (SELECT 1 FROM (SELECT tenant, grant_json FROM grants UNION ALL SELECT tenant, grant_json FROM perps_grants) g WHERE g.tenant = perp_live_checkpoint.tenant AND lower(g.grant_json->>'smartAccount') = perp_live_checkpoint.smart_account
     AND g.grant_json->'perp'->>'apiPublicKey' = perp_live_checkpoint.api_public_key)`)
    .run(sealed, row.tenant, row.smartAccount, row.generation, row.claimant);
   if (result.changes !== 1) throw new Error("live perps checkpoint was fenced");
@@ -157,17 +185,21 @@ export class HostedLiveCheckpointStore {
 
 export class HostedStanddownStore {
  constructor(readonly db: Db, private dek: Buffer) {}
- async init(): Promise<void> { await this.db.exec(HOSTED_STANDDOWN_SCHEMA); }
+ async init(): Promise<void> {
+  await initHostedStanddownSchema(sql => this.db.exec(sql));
+ }
  async list(): Promise<HostedStanddownJob[]> {
   return (await this.db.prepare("SELECT * FROM perp_standdown WHERE mirrored = 0 OR state IN ('pending', 'running') ORDER BY created_at_ms").all()).map(r => of(r as Record<string, unknown>));
  }
- async latest(tenant: string): Promise<HostedStanddownJob | null> {
-  const r = await this.db.prepare("SELECT * FROM perp_standdown WHERE tenant = ? ORDER BY created_at_ms DESC LIMIT 1").get(tenant.toLowerCase());
+ async latest(tenant: string, purpose: GrantPurpose = "spot"): Promise<HostedStanddownJob | null> {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+  const r = await this.db.prepare("SELECT * FROM perp_standdown WHERE tenant = ? AND purpose = ? ORDER BY created_at_ms DESC LIMIT 1").get(tenant.toLowerCase(), purpose);
   return r ? of(r as Record<string, unknown>) : null;
  }
- async blocked(tenant: string, account: string): Promise<boolean> {
-  return !!await this.db.prepare("SELECT id FROM perp_standdown WHERE (tenant = ? OR smart_account = ?) AND (mirrored = 0 OR state IN ('pending', 'running')) LIMIT 1")
-   .get(tenant.toLowerCase(), account.toLowerCase());
+ async blocked(tenant: string, account: string, purpose: GrantPurpose = "spot"): Promise<boolean> {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+  return !!await this.db.prepare("SELECT id FROM perp_standdown WHERE ((tenant = ? AND purpose = ?) OR smart_account = ?) AND (mirrored = 0 OR state IN ('pending', 'running')) LIMIT 1")
+   .get(tenant.toLowerCase(), purpose, account.toLowerCase());
  }
  /** Caller MUST already hold the same healthy tenant lease used by normal children. */
  async claim(id: string, claimant: string, now = Date.now()): Promise<HostedStanddownJob | null> {

@@ -1,5 +1,5 @@
 /**
- * The hosted supervisor — one worker child per tenant.
+ * The hosted supervisor — one worker child per owner and wallet purpose.
  *
  * merrymen's worker keeps ~35 pieces of per-agent state (the `active` handle, the
  * money counters, the price/HWM caches, the discovery cursors) as locals INSIDE
@@ -68,6 +68,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
+import { workerExecutionKey, workerOwner, workerPurpose, perpsWorkerSettings, grantMatchesWorkerExecution } from "./worker-execution";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
 import { hostedStanddownConfirmation } from "./perps/hosted-standdown-status";
 import { writeHostedPerpsRecovery } from "./hosted-perps-recovery";
@@ -282,6 +283,7 @@ const ROOT = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "..")
  */
 const CHILD_SECRET_STRIP = [
   "MERRYMEN_STORE_DEK",
+  "MERRYMEN_RECOVER_OWNER_KEY",
   "MERRYMEN_SESSION_SECRET",
   "DATABASE_URL",
   // THE NEWS PROVIDER TOKEN. A fourth kind of secret and it belongs here for a
@@ -371,7 +373,7 @@ const CHILD_SECRET_STRIP = [
   "MERRYMEN_XPOST_LLM_KEY",
 ] as const;
 
-/** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
+/** A private state directory per execution slot; Spot's historical path stays stable. */
 export function childHome(tenant: string): string {
   return path.join(merrymenHome(), "children", tenant.toLowerCase());
 }
@@ -411,6 +413,11 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
+  // An inherited file override must never point this child at another wallet.
+  env.MERRYMEN_GRANT_FILE = path.join(childHome(tenant), "grant.json");
+  env.MERRYMEN_SETTINGS_FILE = path.join(childHome(tenant), "settings.json");
+  env.MERRYMEN_WALLET_PURPOSE = workerPurpose(tenant);
+  if (workerPurpose(tenant) === "perps") env.MERRYMEN_TG_GROUPS = "0";
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
@@ -438,6 +445,7 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
 
 interface Child {
   proc: ChildProcess;
+  /** Internal execution key (owner or owner:perps), never a cryptographic tenant. */
   tenant: `0x${string}`;
   /**
    * The SMART ACCOUNT this child trades from.
@@ -524,6 +532,7 @@ async function reconcilePerpShutdowns(): Promise<void> {
   if (!hostedStanddownAvailable()) return;
   if (!perpShutdown) perpShutdown = new HostedStanddownSupervisor({
     db: await makePgDb(process.env.DATABASE_URL!), dek: storeDek()!, home: merrymenHome(), normalHome: childHome,
+    executionKey: job => workerExecutionKey(job.tenant, job.purpose ?? "spot"),
     healthy: tenant => leases.get(tenant)?.healthy() === true,
     acquire: async tenant => {
       const held = leases.get(tenant);
@@ -673,6 +682,7 @@ function readChildTelegram(tenant: string): {
  * restore a lost link, never overwrite a live one.
  */
 async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promise<void> {
+  if (workerPurpose(tenant) === "perps") return;
   const file = path.join(childHome(tenant), "telegram.json");
   if (existsSync(file)) return;
   const url = process.env.DATABASE_URL;
@@ -729,6 +739,7 @@ async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promis
 }
 
 async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<void> {
+  if (workerPurpose(tenant) === "perps") return;
   const tg = readChildTelegram(tenant);
   if (!tg) return;
   try {
@@ -776,6 +787,7 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<
  * the store round-trip around that decision and nothing else.
  */
 async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | null): Promise<void> {
+  if (workerPurpose(tenant) === "perps") return;
   if (!chat) return;
   try {
     const stored = (await getSettingsStore().get(tenant)) ?? {};
@@ -848,6 +860,7 @@ function tgGroupsDek(): Buffer | null {
  * off a child whose own file survived.
  */
 async function restoreTgGroupsForChild(tenant: `0x${string}`): Promise<void> {
+  if (workerPurpose(tenant) === "perps") return;
   const lc = tenant.toLowerCase();
   const url = process.env.DATABASE_URL;
   const dek = url ? tgGroupsDek() : null;
@@ -892,6 +905,7 @@ async function restoreTgGroupsForChild(tenant: `0x${string}`): Promise<void> {
  * before anything is awaited, so no spawn can start in between.
  */
 async function forgetTgGroups(tenant: string): Promise<void> {
+  if (workerPurpose(tenant) === "perps") return;
   const lc = tenant.toLowerCase();
   tgGroupsSeen.delete(lc);
   tgGroupsHeld.delete(lc);
@@ -961,7 +975,7 @@ function childPerpKey(
   grant: Parameters<typeof syncChildPerpKey>[0]["grant"],
   phase: "before-grant" | "after-grant",
 ): ChildPerpKeyOutcome {
-  const outcome = syncChildPerpKey({ home, tenant, grant, dek: storeDek(), phase });
+  const outcome = syncChildPerpKey({ home, tenant: workerOwner(tenant), grant, dek: storeDek(), phase });
   const lc = tenant.toLowerCase();
   if (outcome === "no-dek" || outcome === "unopenable" || outcome === "unsealed" || outcome === "io-error") {
     if (perpKeyFailureLogged.get(lc) !== outcome) {
@@ -980,8 +994,16 @@ function childPerpKey(
 async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
   // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
   if (killRequested(childHome(tenant))) return null;
-  const grant = await getGrantStore().get(tenant);
+  const grant = await getGrantStore(workerPurpose(tenant)).get(workerOwner(tenant));
   if (!grant) return null;
+  if (!grantMatchesWorkerExecution(tenant, grant)) {
+    log(`${tenant}: grant purpose does not match this worker — no key handed over`);
+    return null;
+  }
+  if ([...children].some(([key, child]) => key !== tenant && child.smartAccount.toLowerCase() === grant.smartAccount.toLowerCase())) {
+    log(`${tenant}: account is already assigned to another worker — no key handed over`);
+    return null;
+  }
 
   // BACKFILL THE PUBLIC ID.
   //
@@ -1001,7 +1023,8 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
   //
   // Best effort: an identity hiccup must never stop a tenant being armed.
   try {
-    await getIdentityStore().ensure(tenant, grant.smartAccount as `0x${string}`);
+    // One public identity belongs to the login. Perps membership never replaces Spot as primary.
+    await getIdentityStore().ensure(workerOwner(tenant), grant.smartAccount as `0x${string}`, { primary: workerPurpose(tenant) === "spot" });
   } catch (e) {
     log(`${tenant}: could not mint a public id — ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -1067,13 +1090,18 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
   if (killRequested(childHome(tenant))) return;
   let grant;
   try {
-    grant = await getGrantStore().get(tenant);
+    grant = await getGrantStore(workerPurpose(tenant)).get(workerOwner(tenant));
   } catch {
     // An unreadable store is not a revoked grant. Leave the child with the wall
     // it has; the kill switch below is what stands an agent down.
     return;
   }
   if (!grant) return;
+  if (!grantMatchesWorkerExecution(tenant, grant)) {
+    killChild(tenant);
+    log(`${tenant}: grant purpose mismatch — worker stood down`);
+    return;
+  }
 
   const file = path.join(childHome(tenant), "grant.json");
   const next = JSON.stringify(grant, null, 2);
@@ -1142,7 +1170,8 @@ async function writeSettingsForChild(
   claimsRead?: HolderClaimsRead,
 ): Promise<MerrymenSettings | null> {
   try {
-    const settings = await getSettingsStore().get(tenant);
+    const stored = await getSettingsStore(workerPurpose(tenant)).get(workerOwner(tenant));
+    const settings = workerPurpose(tenant) === "perps" ? perpsWorkerSettings(stored) : stored;
     // THE UNIVERSE IS RECORDED EVEN WHEN NOTHING WAS SAVED, and that is the fix.
     //
     // This used to be set below, AFTER the early return — so a tenant who never
@@ -1188,7 +1217,7 @@ async function writeSettingsForChild(
      * never a guess in the generous direction.
      */
     const claims = claimsRead === undefined ? await readHolderClaims() : claimsRead;
-    const holder: `0x${string}` | null = claims
+    const holder: `0x${string}` | null = workerPurpose(tenant) === "perps" ? null : claims
       ? (effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w))?.address ?? null)
       : lastWrittenHolder(path.join(childHome(tenant), "settings.json"));
     /**
@@ -1749,7 +1778,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0, recovering = fals
   if (perpShutdownTenants.has(tenant)) return;
   perpNormalMirrored.delete(tenant);
   if (hostedStanddownAvailable()) {
-    const pending = await new HostedStanddownStore(await makePgDb(process.env.DATABASE_URL!), storeDek()!).latest(tenant);
+    const pending = await new HostedStanddownStore(await makePgDb(process.env.DATABASE_URL!), storeDek()!).latest(workerOwner(tenant), workerPurpose(tenant));
     if (pending && (!pending.mirrored || pending.state === "pending" || pending.state === "running")) return;
   }
   // The advisory lease is a precondition, taken by reconcile() before the FIRST
@@ -1779,19 +1808,19 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0, recovering = fals
     return;
   }
   let perpBridge: HostedLiveCheckpointBridge | null = null;
-  const storedForPerps = await getGrantStore().get(tenant);
+  const storedForPerps = await getGrantStore(workerPurpose(tenant)).get(workerOwner(tenant));
   const perpGrant = storedForPerps ? grantPerp(storedForPerps) : null;
   if (perpGrant && process.env.DATABASE_URL) {
     try {
       perpBridge = await HostedLiveCheckpointBridge.prepare({ shared: await makePgDb(process.env.DATABASE_URL), dek: storeDek()!,
-        tenant, account: smartAccount, publicKey: perpGrant.apiPublicKey, home: childHome(tenant), healthy: () => leases.get(tenant)?.healthy() === true });
+        tenant: workerOwner(tenant), account: smartAccount, publicKey: perpGrant.apiPublicKey, home: childHome(tenant), healthy: () => leases.get(tenant)?.healthy() === true });
       perpRecoveryRetries.clear(tenant);
     } catch (error) {
       perpRecoveryRetries.fail(tenant, smartAccount, error);
       log(`${tenant}: hosted perps journal could not be restored exactly — venue sends held; spot and paper remain available`);
     }
     try {
-      await writeHostedPerpsRecovery(await makePgDb(process.env.DATABASE_URL), { tenant, account: smartAccount, ok: perpBridge !== null });
+      await writeHostedPerpsRecovery(await makePgDb(process.env.DATABASE_URL), { tenant: workerOwner(tenant), account: smartAccount, ok: perpBridge !== null });
     } catch { log(`${tenant}: hosted perps recovery status could not be published`); }
   }
   if (perpBridge) perpLiveBridges.set(tenant, perpBridge);
@@ -1886,7 +1915,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0, recovering = fals
 /** Retry only failed infrastructure at arm, never a running agent's observed drift. */
 async function retryHostedPerpsRecovery(tenant: `0x${string}`): Promise<void> {
   if (!perpRecoveryRetries.has(tenant) || perpRecoveryBusy.has(tenant) || !hostedStanddownAvailable()) return;
-  const grant = await getGrantStore().get(tenant);
+  const grant = await getGrantStore(workerPurpose(tenant)).get(workerOwner(tenant));
   if (!grant || !grantPerp(grant)) { perpRecoveryRetries.clear(tenant); return; }
   const account = grant.smartAccount;
   if (!perpRecoveryRetries.due(tenant, account)) return;
@@ -1987,10 +2016,10 @@ export function setKillConfirmForTest(fn: (tenant: `0x${string}`) => Promise<voi
  * one call sees `removed` and confirms to the owner.
  */
 async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOutcome> {
-  const k = await honourKillRequest(getGrantStore(), tenant, childHome(tenant), nowSec);
+  const k = await honourKillRequest(getGrantStore(workerPurpose(tenant)), workerOwner(tenant), childHome(tenant), nowSec);
   if (k.outcome === "revoked" && k.removed) {
     log(`${tenant}: Telegram kill honoured — grant removed from the store`);
-    void confirmKillDone(tenant);
+    if (workerPurpose(tenant) === "spot") void confirmKillDone(tenant);
     // AND ITS STORED GROUP MEMORY, now rather than when a reconcile next
     // finds its child here: the kill may be carried out by the order ferry or
     // on shutdown, with no child here to stand down. Only the one call whose
@@ -2015,7 +2044,7 @@ function pendingKillTenants(): `0x${string}`[] {
   } catch {
     return [];
   }
-  return names.filter((n): n is `0x${string}` => /^0x[0-9a-f]{40}$/.test(n) && killRequested(childHome(n)));
+  return names.filter((n): n is `0x${string}` => /^0x[0-9a-f]{40}(?::perps)?$/.test(n) && killRequested(childHome(n)));
 }
 
 /**
@@ -2040,12 +2069,14 @@ export async function reconcile(): Promise<void> {
   const store = getGrantStore();
   // Expiry must survive a child crash too, and uses the same atomic key custody as kill.
   await store.expirePerps?.(Date.now());
+  await getGrantStore("perps").expirePerps?.(Date.now());
   let tenants: `0x${string}`[];
   // Before the listing is asked for: the group-memory sweep below judges only
   // rows written before this, never one a newer grant's child has published.
   const listedAtMs = Date.now();
   try {
-    tenants = await store.listTenants();
+    const [spot, perps] = await Promise.all([store.listTenants(), getGrantStore("perps").listTenants()]);
+    tenants = [...spot, ...perps.map(owner => workerExecutionKey(owner, "perps"))];
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
     return;
@@ -5846,12 +5877,12 @@ async function mirrorLedgers(): Promise<void> {
     // refused or failed), the requests in the home are applied to the stored
     // row itself, under the same lease, so a /forgetme made while the child's
     // groups are held off is not undone by the restore that ends the hold.
-    if (tgGroupsDekThisPass && !tgGroupsHeld.has(tenant.toLowerCase())) {
+    if (workerPurpose(tenant) === "spot" && tgGroupsDekThisPass && !tgGroupsHeld.has(tenant.toLowerCase())) {
       const published = await publishTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
       if (published !== "published" && published !== "unchanged") {
         await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
       }
-    } else if (tgGroupsDekThisPass) {
+    } else if (workerPurpose(tenant) === "spot" && tgGroupsDekThisPass) {
       await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
     }
     // ── THE WIRE ────────────────────────────────────────────────────────────
@@ -5889,7 +5920,7 @@ async function mirrorLedgers(): Promise<void> {
  */
 async function writePeersFor(tenant: `0x${string}`, shared: Db): Promise<void> {
   try {
-    const edges = await getFollowStore().following(tenant);
+    const edges = await getFollowStore().following(workerOwner(tenant));
     const theses = await peerThesesForSlugs(
       shared,
       edges.slice(0, MAX_FOLLOWS).map((e) => e.target),
@@ -5908,7 +5939,7 @@ async function writePeersFor(tenant: `0x${string}`, shared: Db): Promise<void> {
     // must not be able to disagree about what this agent said.
     let own: PublicThesis[] = [];
     try {
-      const id = await getIdentityStore().get(tenant);
+      const id = workerPurpose(tenant) === "spot" ? await getIdentityStore().get(tenant) : null;
       if (id?.accounts.length) own = await readPeerTheses(shared, id.accounts);
     } catch {
       // An agent with no identity yet has no published theses to remember, and
@@ -6083,6 +6114,7 @@ async function runGroupChatPass(): Promise<void> {
     // tenant alone.
     const roster: RosterMember[] = [];
     for (const [tenant, child] of children) {
+      if (workerPurpose(tenant) === "perps") continue; // Private Perps activity is never a public speaker.
       const key = tenant.toLowerCase();
       const held = leases.get(key);
       if (!held || !held.healthy()) continue;
@@ -6139,6 +6171,7 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
     // THE SAME ROSTER AS THE ROOM'S: only who this replica speaks for.
     const roster: RosterMember[] = [];
     for (const [tenant, child] of children) {
+      if (workerPurpose(tenant) === "perps") continue; // Private Perps activity is never a public speaker.
       const key = tenant.toLowerCase();
       const held = leases.get(key);
       if (!held || !held.healthy()) continue;
@@ -6272,6 +6305,7 @@ export async function runOrchestrator(): Promise<void> {
       // A fleet entry halt must not suspend already-revoked venue custody or
       // extend a sealed shutdown key's TTL. These children have no strategy.
       await getGrantStore().expirePerps?.(Date.now());
+      await getGrantStore("perps").expirePerps?.(Date.now());
       await reconcilePerpShutdowns();
       if (children.size > 0 || leases.size > 0) {
         log("FLEET_HALT present — standing every child down and releasing leases");

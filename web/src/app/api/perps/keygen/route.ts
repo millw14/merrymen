@@ -1,3 +1,4 @@
+import { readRequestPurpose } from "@/lib/account-purpose";
 /**
  * POST /api/perps/keygen — a fresh Lighter API key for the owner opting in to
  * perps (docs/perps.md rule 5).
@@ -39,7 +40,7 @@
  */
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
-import { merrymenHome } from "@merrymen/home";
+import { purposeHome } from "@merrymen/home";
 import { tenantOf } from "@/lib/auth";
 import { NO_STORE_HEADERS, PERP_NOT_OFFERED, perpsOptInOffered, perRouteLimiter, storeDek } from "@/lib/perp-custody";
 import { hostedPerpKeygen, PerpKeySealError, selfHostedPerpKeygen } from "../../../../../../worker/src/perps/keygen";
@@ -61,6 +62,8 @@ export async function POST(req: Request) {
   const hosted = isHostedMode();
   const tenant = hosted ? tenantOf(req) : null;
   if (hosted && !tenant) return reply({ error: "not signed in" }, 401);
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return reply({ error: "Invalid account purpose" }, 400);
 
   const allowed = limit(tenant ?? "self-hosted");
   if (!allowed.ok) {
@@ -95,7 +98,7 @@ export async function POST(req: Request) {
       }
       return reply({ ...(await hostedPerpKeygen({ tenant: tenant as `0x${string}`, smartAccount, dek })) });
     }
-    return reply({ ...(await selfHostedPerpKeygen({ home: merrymenHome() })) });
+    return reply({ ...(await selfHostedPerpKeygen({ home: purposeHome(purpose) })) });
   } catch (e) {
     if (e instanceof SignerUnavailable) {
       // Named, never a key from anywhere else: the pinned signer is missing,

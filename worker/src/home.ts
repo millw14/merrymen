@@ -19,16 +19,23 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isGrantPurpose, type GrantPurpose } from "../../packages/core/src/grant";
 
 export function merrymenHome(): string {
   return process.env.MERRYMEN_HOME ?? path.join(os.homedir(), ".merrymen");
 }
 
+/** A dedicated local Perps worker owns a complete home, including custody and journal. */
+export function purposeHome(purpose: GrantPurpose = "spot"): string {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+  return purpose === "perps" ? path.join(merrymenHome(), "accounts", "perps") : merrymenHome();
+}
+
 export const homePaths = {
-  settings: () => path.join(merrymenHome(), "settings.json"),
-  grant: () => path.join(merrymenHome(), "grant.json"),
-  heartbeat: () => path.join(merrymenHome(), "heartbeat.json"),
-  db: () => path.join(merrymenHome(), "merrymen.db"),
+  settings: (purpose: GrantPurpose = "spot") => path.join(purposeHome(purpose), "settings.json"),
+  grant: (purpose: GrantPurpose = "spot") => path.join(purposeHome(purpose), "grant.json"),
+  heartbeat: (purpose: GrantPurpose = "spot") => path.join(purposeHome(purpose), "heartbeat.json"),
+  db: (purpose: GrantPurpose = "spot") => path.join(purposeHome(purpose), "merrymen.db"),
   strategies: () => path.join(merrymenHome(), "strategies"),
   /** Telegram runtime state: update offset, link code, owner id. */
   telegram: () => path.join(merrymenHome(), "telegram.json"),

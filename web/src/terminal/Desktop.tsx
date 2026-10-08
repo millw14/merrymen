@@ -86,7 +86,7 @@ export function DesktopHeader({
       </div>
       <div className="desktop-header-account">
         {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
-        <Link className="desktop-settings-link" href="/settings">Settings</Link>
+        <Link className="desktop-settings-link" href={mode === "perps" ? "/settings?purpose=perps" : "/settings"}>Settings</Link>
         {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
             already read "$964" as their deposit does not go on to read a
             footnote. See packages/core/src/autonomy.ts. */}
@@ -104,9 +104,9 @@ export function DesktopHeader({
           <summary><Face name={mine.name} slug={mine.slug}/><span>Account</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
             {mode === "perps" ? <button type="button" onClick={() => onScreen({ kind: "deposit" })}>Account</button> : <Link href="/you">Portfolio</Link>}
-            <Link href="/settings">Settings</Link>
-            <Link href="/grant">Wallet & permissions</Link>
-            <Link href="/limits">Trading limits</Link>
+            <Link href={mode === "perps" ? "/settings?purpose=perps" : "/settings"}>Settings</Link>
+            <Link href={mode === "perps" ? "/grant?purpose=perps" : "/grant"}>Wallet & permissions</Link>
+            <Link href={mode === "perps" ? "/settings?purpose=perps#trading-mode" : "/limits"}>Trading limits</Link>
             {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
             {!hasAgent && <Link href={mode === "perps" ? "/create?for=perps" : "/create"}>Create an agent</Link>}
           </nav>

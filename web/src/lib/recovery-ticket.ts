@@ -30,6 +30,7 @@
  * tickets for that account forever.
  */
 
+import type { GrantPurpose } from "@merrymen/core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 /** Long enough to plan, read, confirm and submit; short enough to be worthless if leaked. */
@@ -53,7 +54,7 @@ const hmac = (payload: string, secret: string) =>
  * to sign something with the key that controls all their money and deserves to
  * read a sentence rather than a hex blob.
  */
-export function recoveryChallengeMessage(origin: string, nonce: string): string {
+export function recoveryChallengeMessage(origin: string, nonce: string, purpose: GrantPurpose = "spot"): string {
   return [
     `${origin} — withdraw from your merrymen account.`,
     "",
@@ -61,6 +62,7 @@ export function recoveryChallengeMessage(origin: string, nonce: string): string 
     "It moves no funds by itself and grants no permissions: the withdrawal itself",
     "is a separate operation you sign next.",
     "",
+    ...(purpose === "perps" ? ["Account: Perps wallet (Kernel index 1)"] : []),
     `URI: ${origin}`,
     `Nonce: ${nonce}`,
   ].join("\n");

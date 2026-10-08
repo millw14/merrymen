@@ -190,7 +190,7 @@ describe("the route asks BEFORE it archives, and a refusal returns before the ar
   it("standDownForKill, then the refusal's return, then archiveCurrentGrant and rm", () => {
     const ask = selfHosted.indexOf("await standDownForKill(");
     const refuse = selfHosted.indexOf("if (!perps.ok)");
-    const archive = selfHosted.indexOf("await archiveCurrentGrant()");
+    const archive = selfHosted.indexOf("await archiveCurrentGrant(purpose)");
     const rm = selfHosted.indexOf("await rm(GRANT_FILE");
     assert.ok(ask > 0 && refuse > ask && archive > refuse && rm > archive, "ask → refuse → archive → remove");
     assert.match(selfHosted.slice(refuse, archive), /status: 503/);

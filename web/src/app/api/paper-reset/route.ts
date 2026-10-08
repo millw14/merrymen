@@ -23,18 +23,21 @@
  * reaches a live agent's history.
  */
 import { NextResponse } from "next/server";
-import { merrymenHome } from "@merrymen/home";
-import { isHostedMode } from "@merrymen/core";
-import { writeCommand } from "@merrymen/command-files";
+import { purposeHome } from "@merrymen/home";
+import { isHostedMode, type GrantPurpose } from "@merrymen/core";
+import { writeCommand } from "../../../../../worker/src/command-files";
+import { readRequestPurpose } from "@/lib/account-purpose";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 
 export const dynamic = "force-dynamic";
 
-const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
+const agentFor = (req: Request, purpose: GrantPurpose) => (isHostedMode() ? hostedAgentFor(req, purpose) : diskAgent(purpose));
 
 export async function POST(req: Request) {
-  const agent = await agentFor(req);
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
+  const agent = await agentFor(req, purpose);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
 
   // Minted here, never accepted from the caller: an id a client chooses is an
@@ -45,7 +48,7 @@ export async function POST(req: Request) {
   // straight into the directory the worker drains — no table, no ferry.
   if (!isHostedMode()) {
     try {
-      writeCommand(merrymenHome(), { id, kind: "paper-reset", at: Date.now() });
+      writeCommand(purposeHome(purpose), { id, kind: "paper-reset", at: Date.now() });
       return NextResponse.json({ id, queued: true });
     } catch (e) {
       return NextResponse.json(
@@ -65,7 +68,7 @@ export async function POST(req: Request) {
     } catch {
       return false;
     }
-  });
+  }, purpose);
 
   if (!ok) {
     return NextResponse.json(

@@ -1,17 +1,22 @@
 "use client";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { usdgAmount } from "@/lib/format";
 import { LIGHTER_ROUTE_V1, perpsNumberOk } from "@merrymen/core";
 import type { PerpsAccountResponse } from "@/lib/perps-account";
+import { PerpsShutdownNotice } from "./PerpsShutdownNotice";
+import { PerpsRecoveryNotice } from "./PerpsRecoveryNotice";
 import { FundingPanel, SignIn, type AccountState } from "./HostedControls";
+import { PerpsFunding, type PerpsFundingSource, type PerpsTransfer } from "./PerpsFunding";
 import { realCashOf } from "./account-read";
 import { deskPerpsOf, type DeskPerps } from "./live";
 
 type Props = {
   account: AccountState | null; ownerKey: string | null; perps: DeskPerps | null | undefined;
+  fundingSource?: PerpsFundingSource | null; onTransfer?: PerpsTransfer;
   signOut?: ReactNode; onRefreshAccount: () => void; onCreate: () => void; onPermission: () => void; onProfile: (slug: string) => void;
 };
 type Budget = { owner: string | null; value: number };
-const amount = (v: number | null) => v === null ? "Unavailable" : `${v.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDG`;
+const amount = (v: number | null) => v === null ? "Unavailable" : usdgAmount(v);
 
 class AccountIdentityError extends Error {}
 function accountResponse(raw: unknown): PerpsAccountResponse {
@@ -38,7 +43,7 @@ function accountResponse(raw: unknown): PerpsAccountResponse {
 export function PerpsAccount(props: Props) {
   return <AccountBody key={`${props.ownerKey ?? "signed-out"}:${props.account?.session.address ?? "local"}:${props.account?.status.grant?.smartAccount ?? "none"}:${props.account?.status.grant?.chainId ?? "none"}:${props.account?.session.hosted ?? "unknown"}:${props.account?.status.exists ?? "unknown"}`} {...props}/>;
 }
-function AccountBody({ account, ownerKey, signOut, onCreate, onPermission, onProfile, onRefreshAccount }: Props) {
+function AccountBody({ account, ownerKey, fundingSource = null, onTransfer, signOut, onCreate, onPermission, onProfile, onRefreshAccount }: Props) {
   const [data, setData] = useState<PerpsAccountResponse | null>(null);
   const [fresh, setFresh] = useState(false);
   const [budget, setBudget] = useState<Budget | null>(null);
@@ -73,12 +78,12 @@ function AccountBody({ account, ownerKey, signOut, onCreate, onPermission, onPro
     async function read() {
       let accountRead = false;
       try {
-        const value = accountResponse(await request("/api/perps/account"));
+        const value = accountResponse(await request("/api/perps/account?purpose=perps"));
         if (!ownerMatches(value.owner)) throw new AccountIdentityError();
         if (value.account && (value.account.smartAccount.toLowerCase() !== address?.toLowerCase() || value.account.chainId !== account?.status.grant?.chainId)) throw new AccountIdentityError();
         if (!mounted.current || abort.signal.aborted) return;
         setData(value); accountRead = true;
-        const s = await request("/api/settings");
+        const s = await request("/api/settings?purpose=perps");
         if (!ownerMatches(s?.owner)) throw new AccountIdentityError();
         const n = s.values?.perpsMaxCollateralUsdg ?? s.defaults?.perpsMaxCollateralUsdg;
         if (typeof n !== "number" || !perpsNumberOk("perpsMaxCollateralUsdg", n)) throw new Error("Allocation unread");
@@ -101,9 +106,9 @@ function AccountBody({ account, ownerKey, signOut, onCreate, onPermission, onPro
     if (!fresh || !verified || !budget || !perpsNumberOk("perpsMaxCollateralUsdg", n)) { setNote("Enter a valid USDG allocation within the supported limits."); return; }
     setBusy(true); setNote("");
     try {
-      await request("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" },
+      await request("/api/settings?purpose=perps", { method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ owner: budget.owner, perpsMaxCollateralUsdg: n }) });
-      const s = await request("/api/settings");
+      const s = await request("/api/settings?purpose=perps");
       if (!ownerMatches(s?.owner)) throw new AccountIdentityError();
       if (s.values?.perpsMaxCollateralUsdg !== n) throw new Error("readback");
       if (mounted.current) { setBudget({ owner: s.owner, value: n }); setNote("Allocation limit saved. No funds were transferred and trading permissions did not change."); }
@@ -111,14 +116,16 @@ function AccountBody({ account, ownerKey, signOut, onCreate, onPermission, onPro
     finally { if (mounted.current) setBusy(false); }
   }
   return <section className="perps-account" aria-label="Perpetuals account">
-    <header><div><p className="perps-account-eyebrow">YOUR ACCOUNT</p><h1>Agent USDG wallet</h1></div>{signOut}</header>
-    <p>Your main app login owns this account. Existing Spot users share the on-chain agent wallet; the Perps venue account and its allocation limit are separate.</p>
-    {!account ? <p>Reading session…</p> : (hosted && !account.session.address) ? <SignIn onDone={onRefreshAccount}/> : !account.status.exists ? <button onClick={onCreate}>Create an agent wallet</button> : !verified ? <p>Verifying your account…</p> : <>
+    <header><div><p className="perps-account-eyebrow">YOUR ACCOUNT</p><h1>Perps USDG wallet</h1></div>{signOut}</header>
+    <p>Your main app login owns this account. Your dedicated Perps wallet is separate from your Spot wallet. Choose exactly how much USDG to transfer; its collateral ceiling remains a separate limit.</p>
+    <PerpsShutdownNotice purpose="perps" status={account?.status.perpsShutdown}/><PerpsRecoveryNotice status={account?.status.perpsRecovery}/>
+    {!account ? <p>Reading session…</p> : (hosted && !account.session.address) ? <SignIn onDone={onRefreshAccount}/> : !account.status.exists ? <button onClick={onCreate}>Create your Perps wallet</button> : !verified ? <p>Verifying your account…</p> : <>
       <div className="perps-account-balances"><article><span>Wallet USDG</span><strong>{amount(fresh ? realCashOf(account) : null)}</strong><small>On-chain funds. Paper balances are excluded.</small></article>
       <article><span>Real venue equity</span><strong>{amount(venueValue)}</strong><small>Includes collateral, position margin, unrealized P&amp;L and funds in transit. {view?.book === "paper" ? "Current report is simulated." : view?.stale ? "Venue report is stale." : ""}</small></article></div>
       <dl><dt>Network</dt><dd>{data.account!.chainId === 4663 ? "Robinhood Chain · 4663" : `Chain ${data.account!.chainId}`}</dd><dt>Agent wallet address</dt><dd className="perps-account-address">{data.account!.smartAccount}</dd></dl>
       <div className="perps-account-actions"><button disabled={!supported} onClick={() => setFunding("deposit")}>Add USDG</button><button disabled={!fresh} onClick={() => setFunding("withdraw")}>Withdraw / recover</button><button onClick={onPermission}>Trading permissions</button>{data.account?.profile?.slug && <button onClick={() => onProfile(data.account!.profile!.slug!)}>View profile</button>}</div>
-      {funding && fresh && (funding !== "deposit" || supported) && <FundingPanel key={`${address}:${funding}`} mode={funding} account={account} onClose={() => { setFunding(null); onRefreshAccount(); }}/>}
+      {funding === "deposit" && supported && <PerpsFunding account={data.account!.smartAccount} chainId={data.account!.chainId} owner={expectedOwner ?? null} source={fundingSource} onTransfer={onTransfer} onClose={() => { setFunding(null); onRefreshAccount(); }} onConfirmed={onRefreshAccount}/>}
+      {funding === "withdraw" && fresh && <FundingPanel purpose="perps" key={`${address}:withdraw`} mode="withdraw" account={account} onClose={() => { setFunding(null); onRefreshAccount(); }}/>}
       {!fresh && <p>Account information is stale or incomplete. Funding and allocation controls are disabled.</p>}{fresh && !supported && <p>USDG deposits are unavailable on this account’s network.</p>}
       <form onSubmit={e => { e.preventDefault(); void saveBudget(); }}><h2>Maximum Perps allocation</h2><p>This is a collateral ceiling, not a transfer amount. The agent posts USDG as eligible trades need margin, within your signed limits. Lowering it does not withdraw existing collateral.</p><label htmlFor="perps-allocation">USDG allocation limit</label><div className="perps-account-actions"><input id="perps-allocation" inputMode="decimal" value={draft} disabled={!fresh || !budget || busy} onChange={e => setDraft(e.target.value)}/><button disabled={!fresh || !budget || busy}>{busy ? "Saving…" : "Save allocation limit"}</button></div></form>
     </>}

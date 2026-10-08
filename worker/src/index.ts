@@ -1,4 +1,5 @@
 import { EVIDENCE_BUDGET_MS, readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
+import { acquireLocalWorkerLease } from "./local-worker-lease";
 import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 /**
  * merrymen worker — the 24/7 loop.
@@ -15220,6 +15221,15 @@ async function main() {
 }
 
 
+
+// A local supervisor's crash must not leave an orphan trading alongside its
+// replacement. Hosted children use the orchestrator's lease instead.
+if (process.env.MERRYMEN_LOCAL_SUPERVISED === "1" && process.send) {
+  const releaseLocalLease = acquireLocalWorkerLease(merrymenHome());
+  process.once("exit", releaseLocalLease);
+  process.once("disconnect", () => process.exit(1));
+  if (!process.connected) process.exit(1);
+}
 
 main().catch((e) => {
   console.error("[worker] fatal:", e);

@@ -353,7 +353,7 @@ describe("nothing is left behind after a save", () => {
     // guards themselves, so a toggle added tomorrow is held to it too.
     const save = code.slice(code.indexOf("async function save()"));
     const saved = save.indexOf('setStatus("Changes saved")');
-    const refetch = save.indexOf('const fresh = await fetch("/api/settings")');
+    const refetch = save.indexOf('const fresh = await fetch(purpose === "perps" ? "/api/settings?purpose=perps" : "/api/settings")');
     assert.ok(saved > 0 && refetch > saved, "the post-save block was not found");
     const reset = save.slice(saved, refetch);
     const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);

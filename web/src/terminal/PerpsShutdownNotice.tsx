@@ -22,12 +22,12 @@ export function perpsShutdownLines(raw: unknown): string[] | null {
   lines.push("Check the venue custody and any pending withdrawal claim in Withdraw / Recover, even after the agent is removed.");
   return lines;
 }
-export function PerpsShutdownNotice({ status }: { status: unknown }) {
+export function PerpsShutdownNotice({ status, purpose = "spot" }: { status: unknown; purpose?: "spot" | "perps" }) {
   const lines = perpsShutdownLines(status);
   if (!lines) return null;
   return <section className="desk-note perps-shutdown" role="status" aria-label="Perpetual shutdown custody">
     <strong>Perpetuals · Lighter</strong>
     {lines.map((line) => <p key={line}>{line}</p>)}
-    <a href="/withdraw">Check venue custody →</a>
+    <a href={purpose === "perps" ? "/withdraw?purpose=perps" : "/withdraw"}>Check venue custody →</a>
   </section>;
 }

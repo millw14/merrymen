@@ -18,7 +18,7 @@ it("shows actual base-unit wallet cash and keeps unread venue funds unavailable"
   await ui.render(React.createElement(PerpsAccount, props));
   assert.match(ui.container.textContent!, /12.5 USDG/);
   assert.match(ui.container.textContent!, /Real venue equityUnavailable/);
-  assert.match(ui.container.textContent!, /Existing Spot users share/);
+  assert.match(ui.container.textContent!, /dedicated Perps wallet/);
   assert.match(ui.container.textContent!, new RegExp(address));
 });
 it("saves only the owner-bound collateral ceiling and confirms readback", async () => {

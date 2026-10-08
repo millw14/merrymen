@@ -23,17 +23,28 @@ it("file grant presence distinguishes absent from malformed and unavailable stor
     await rm(home, { recursive: true, force: true });
   }
 });
-it("Postgres presence binds the tenant and propagates database failures", async () => {
-  let rows: unknown[] = [], fail = false;
-  const fake = { async client() { return { async query(sql: string, args: unknown[]) {
-    assert.equal(sql, "SELECT 1 FROM grants WHERE tenant = $1 LIMIT 1");
-    assert.deepEqual(args, [tenant.toLowerCase()]);
-    if (fail) throw new Error("database unavailable");
-    return { rows };
-  } }; } } as unknown as PgGrantStore;
-  assert.equal(await PgGrantStore.prototype.hasStoredGrant.call(fake, tenant), false);
-  rows = [{ "?column?": 1 }];
-  assert.equal(await PgGrantStore.prototype.hasStoredGrant.call(fake, tenant), true);
-  fail = true;
-  await assert.rejects(PgGrantStore.prototype.hasStoredGrant.call(fake, tenant), /unavailable/);
+it("Postgres presence binds the tenant and purpose and propagates database failures", async () => {
+  const originalDek = process.env.MERRYMEN_STORE_DEK;
+  process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 4).toString("base64");
+  try {
+    for (const purpose of ["spot", "perps"] as const) {
+      let rows: unknown[] = [], fail = false;
+      const store = new PgGrantStore("postgres://unused", purpose);
+      // Keep the real constructor's purpose/table selection; replace only I/O.
+      Object.assign(store, { async client() { return { async query(sql: string, args: unknown[]) {
+        assert.equal(sql, `SELECT 1 FROM ${purpose === "spot" ? "grants" : "perps_grants"} WHERE tenant = $1 LIMIT 1`);
+        assert.deepEqual(args, [tenant.toLowerCase()]);
+        if (fail) throw new Error("database unavailable");
+        return { rows };
+      } }; } });
+      assert.equal(await store.hasStoredGrant(tenant), false);
+      rows = [{ "?column?": 1 }];
+      assert.equal(await store.hasStoredGrant(tenant), true);
+      fail = true;
+      await assert.rejects(store.hasStoredGrant(tenant), /unavailable/);
+    }
+  } finally {
+    if (originalDek === undefined) delete process.env.MERRYMEN_STORE_DEK;
+    else process.env.MERRYMEN_STORE_DEK = originalDek;
+  }
 });

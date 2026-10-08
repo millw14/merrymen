@@ -11,7 +11,7 @@ describe("perpetual control room",()=>{
     const dom=testDom(), original=globalThis.fetch; const writes:unknown[]=[]; let enabled=true;
     globalThis.fetch=async(url,init)=>{
       if(init?.method==="PUT") {const body=JSON.parse(String(init.body));writes.push(body);enabled=body.perpsEnabled;return json({ok:true});}
-      if(String(url)==="/api/settings")return json({owner,values:{perpsEnabled:enabled},defaults:SETTINGS_DEFAULTS});
+      if(String(url)==="/api/settings?purpose=perps")return json({owner,values:{perpsEnabled:enabled},defaults:SETTINGS_DEFAULTS});
       return json({});
     };
     try {
@@ -29,7 +29,7 @@ describe("perpetual control room",()=>{
   });
   it("drops the prior owner's controls before a delayed next-owner read resolves", async()=>{
     const dom=testDom(),original=globalThis.fetch; const pending=deferred<Response>();
-    globalThis.fetch=async url=>String(url)==="/api/settings"?json({owner,values:{perpsEnabled:true},defaults:SETTINGS_DEFAULTS}):json({});
+    globalThis.fetch=async url=>String(url)==="/api/settings?purpose=perps"?json({owner,values:{perpsEnabled:true},defaults:SETTINGS_DEFAULTS}):json({});
     try {
       await dom.render(createElement(PerpsControlDesk,props));assert.ok(dom.container.querySelector(".perps-control-form"));
       globalThis.fetch=async()=>pending.promise;

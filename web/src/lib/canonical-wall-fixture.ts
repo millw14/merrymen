@@ -139,6 +139,7 @@ export const TEST_CAPS = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDr
 
 /** What prepareAgentGrant accepts beyond the owner, all optional. */
 export interface SignerOptions {
+  purpose?: "spot" | "perps";
   newAccountPerpsOnly?: boolean;
   deployed?: boolean;
   onRpc?: (method: string, params: unknown[]) => void;
@@ -164,6 +165,7 @@ export async function signerGrant(o: SignerOptions): Promise<{ grant: StoredGran
   const { prepareAgentGrant } = await import("./session");
   const grant = await withStubChain(o.account, () =>
     prepareAgentGrant(owner, {
+      purpose: o.purpose,
       newAccountPerpsOnly: o.newAccountPerpsOnly,
       caps: o.caps ?? TEST_CAPS,
       onStatus: () => {},

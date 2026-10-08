@@ -116,7 +116,7 @@ describe("the perpetuals opt-in is wired into the mint, not merely declared", ()
   });
 
   it("renew mints the key at CLICK time, from the box, and passes it BY NAME into the mint options", () => {
-    assert.match(body, /perpSeal = await mintPerpKey\(grant\.smartAccount\)/, "the key must come from keygen for THIS account");
+    assert.match(body, /perpSeal = await mintPerpKey\(grant\.smartAccount, purpose\)/, "the key must come from keygen for THIS account");
     assert.match(body, /priorAtClick\.state === "none" && perpsOptIn/, "a key is minted only for a new opt-in the owner ticked");
     const options = body.slice(body.indexOf("const options = {"));
     for (const field of [/perp: perpSeal,/, /previousGrant,/, /perpDrop: perpsDropping,/, /venueFlat: perpsFlat,/]) {
@@ -125,7 +125,7 @@ describe("the perpetuals opt-in is wired into the mint, not merely declared", ()
   });
 
   it("keygen is asked for the PUBLIC half only, and what comes back is checked before it is sealed", () => {
-    assert.match(WALLET, /fetch\("\/api\/perps\/keygen", \{\s*method: "POST"/);
+    assert.match(WALLET, /fetch\(scopedAccountUrl\("\/api\/perps\/keygen", purpose\), \{\s*method: "POST"/);
     assert.match(WALLET, /body: JSON\.stringify\(\{ smartAccount \}\)/);
     assert.match(WALLET, /validatePerpPubKey\(body\.apiPublicKey\)/);
     assert.match(WALLET, /body\.apiKeyIndex !== LIGHTER_ROUTE_V1\.apiKeyIndex/);
@@ -151,7 +151,7 @@ describe("the perpetuals opt-in is wired into the mint, not merely declared", ()
 
   it("removing carried perps re-reads the venue at click time and proceeds only on flat === true", () => {
     assert.match(WALLET, /\/api\/perps\/flat\?smartAccount=/);
-    assert.match(body, /readVenueFlat\(grant\.smartAccount\)/, "the drop must be re-checked when the owner signs, not only when the box was cleared");
+    assert.match(body, /readVenueFlat\(grant\.smartAccount, purpose\)/, "the drop must be re-checked when the owner signs, not only when the box was cleared");
     assert.match(body, /if \(read\.flat !== true\) throw/, "anything but a flat reading refuses the drop");
     assert.match(WALLET, /flat: body\.flat === true \? true : body\.flat === false \? false : null/, "an unreadable venue is never read as flat");
   });

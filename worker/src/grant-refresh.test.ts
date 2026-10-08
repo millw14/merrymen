@@ -86,7 +86,9 @@ describe("what the refresh costs, and what it refuses to do", () => {
     // further down the same function. A store that would not answer must leave
     // the child with the wall it has, not disarm it.
     assert.match(FN, /\} catch \{[\s\S]*?return;[\s\S]*?\}\s*\n\s*if \(!grant\) return;/);
-    assert.ok(!/killChild|rmSync/.test(FN), "the refresh must never stand a child down");
+    const unreadable = FN.slice(FN.indexOf("} catch {"), FN.indexOf("if (!grant) return;"));
+    assert.ok(!/killChild|rmSync/.test(unreadable), "an unreadable store must never stand a child down");
+    assert.match(FN, /if \(!grantMatchesWorkerExecution\(tenant, grant\)\) \{\s*killChild\(tenant\);/, "a positive account-purpose mismatch must stand down");
   });
 
   it("and the file keeps the same owner-only mode as the spawn-time write", () => {

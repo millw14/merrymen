@@ -83,7 +83,7 @@ describe("private perps screen", () => {
     try {
       await dom.render(createElement(PerpsScreen, props));
       assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 1);
-      assert.equal(urls[0], "/api/perps/chart?market=BTC-PERP&book=paper&window=24h");
+      assert.equal(urls[0], "/api/perps/chart?market=BTC-PERP&book=paper&purpose=perps&window=24h");
       status = 401;
       await dom.click("Refresh");
       assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0);
@@ -248,12 +248,12 @@ describe("doctrine intent for new agents", () => {
       await dom.click("Review controls ↗");
       // The control room is loaded on first use, not in the market's initial bundle.
       await act(async()=>{ await new Promise(resolve=>setTimeout(resolve,100)); });
-      await dom.click("Create your agent ↗");
+      await dom.click("Create your Perps wallet ↗");
       assert.deepEqual(selections,["scalp-breakout"]);
       assert.ok(methods.every(method=>method==="GET"), "inspecting and starting setup never saves settings");
       await dom.render(createElement(PerpsScreen,{...setupProps,ownerKey:"owner-b"}));
       await dom.click("Control room ↗");
-      await dom.click("Create your agent ↗");
+      await dom.click("Create your Perps wallet ↗");
       assert.deepEqual(selections,["scalp-breakout",undefined],"a different owner does not inherit the previous doctrine draft");
     } finally {globalThis.fetch=original;await dom.close();}
   });

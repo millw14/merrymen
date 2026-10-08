@@ -307,3 +307,8 @@
 .terminal-host .desktop-account-menu nav button{display:block;width:100%;padding:12px;border:0;border-radius:8px;background:transparent;text-align:left;font:inherit;font-size:14px;color:var(--tx);cursor:pointer}
 .terminal-host .desktop-account-menu nav button:hover{background:var(--line)}
 .terminal-host .desktop-account-menu nav button:focus-visible{outline:2px solid var(--tx-2);outline-offset:3px}
+
+.perps-exit-review { max-width: min(34rem, calc(100vw - 2rem)); background: #0e1512; color: #e9eee5; border: 1px solid #6b9a75; padding: 1.5rem; }
+.perps-exit-review::backdrop { background: #000b; }
+.perps-exit-review button { margin: .5rem .5rem 0 0; padding: .65rem .9rem; color: inherit; background: #183923; border: 1px solid #83bd90; }
+.perps-exit-review .funding-address { overflow-wrap: anywhere; }

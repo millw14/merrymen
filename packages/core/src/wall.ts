@@ -217,6 +217,8 @@ export function allowedSpenders(
  * trades, and does nothing else.
  */
 export interface WallOptions extends TrencherPermission {
+  /** Dedicated Perps wallet: no Spot trading or withdrawal authority. */
+  perpsOnly?: boolean;
   extraTokens?: readonly CustomToken[];
   /**
    * Addresses USDG may be transferred OUT to.
@@ -617,7 +619,7 @@ export function buildCallPermissions(
   // this account's own `deposit` call below.
   const energy = opts.energyBuy === true;
   const usdgSpenders: Address[] = [
-    ...spenders,
+    ...(opts.perpsOnly ? [] : spenders),
     ...(energy ? [ENERGY_ROUTE_V1.router as Address] : []),
     ...(perp ? [LIGHTER_ROUTE_V1.proxy as Address] : []),
   ];
@@ -677,7 +679,7 @@ export function buildCallPermissions(
     ...new Set((opts.withdrawalAddresses ?? []).map((a) => a.toLowerCase() as Address)),
   ];
 
-  return [
+  const permissions = [
     ...trencherPermissions(opts, smartAccount, usdgUnits(caps.perTradeUsdg)),
     {
       // approve USDG, only to the allowed spenders, only up to one trade's size.
@@ -1325,6 +1327,17 @@ export function buildCallPermissions(
         ]
       : []),
   ];
+  if (!opts.perpsOnly) return permissions;
+  // A purpose-bound grant never installs Spot approvals or swap/vault calls.
+  // Keep the existing venue recipient/key pins and per-call amount limits.
+  return permissions.filter((permission) => {
+    const target = permission.target.toLowerCase();
+    if (target === CASH.USDG.toLowerCase()) {
+      return permission.functionName === "approve" && usdgSpenders.length > 0;
+    }
+    return (perp && target === LIGHTER_ROUTE_V1.proxy.toLowerCase()) ||
+      (energy && target === ENERGY_ROUTE_V1.router.toLowerCase());
+  });
 }
 
 /**
@@ -1393,6 +1406,7 @@ export function buildWallPolicies(args: {
       // A mirror looser than the chain is the one shape this file exists to
       // prevent.
       permissions: buildCallPermissions(args.caps, args.smartAccount, {
+        perpsOnly: args.perpsOnly,
         extraTokens: args.extraTokens,
         withdrawalAddresses: args.withdrawalAddresses,
         allowRialto: args.allowRialto,
@@ -1473,6 +1487,7 @@ export function buildWallPolicies(args: {
  * wall it always did. The sealed private key never enters this object.
  */
 export function grantWallOptions(grant: {
+  purpose?: "spot" | "perps";
   grantTokens?: readonly string[];
   grantFeatures?: readonly string[];
   chainId?: number;
@@ -1487,6 +1502,7 @@ export function grantWallOptions(grant: {
       ? grantPerp({ grantFeatures: grant.grantFeatures, chainId: grant.chainId, perp: grant.perp })
       : null;
   return {
+    ...(grant.purpose === "perps" ? { perpsOnly: true } : {}),
     extraTokens,
     allowRialto: features.has("rialto"),
     allowUniswapV4: features.has("v4"),

@@ -66,6 +66,7 @@ import {
 export type { VenueDisclosure };
 
 export interface BrowserWallet {
+  purpose?: "spot" | "perps";
   smartAccount: `0x${string}`;
   /**
    * A browser-held owner key, for wallets that have one.
@@ -138,7 +139,8 @@ export function redact(e: unknown, ownerKey?: string): string {
  * and no script on the page can read it back out.
  */
 export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
-  const chal = await fetch("/api/recover/ticket", { cache: "no-store" });
+  const url = w.purpose === "perps" ? "/api/recover/ticket?purpose=perps" : "/api/recover/ticket";
+  const chal = await fetch(url, { cache: "no-store" });
   if (!chal.ok) throw new Error("could not start recovery — the site did not issue a challenge");
   const { nonce, message } = (await chal.json()) as { nonce: string; message: string };
 
@@ -149,7 +151,7 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
   if (!signer) throw new Error("no owner signer: nothing here can sign the recovery challenge.");
   const signature = await signer.signMessage({ message });
 
-  const res = await fetch("/api/recover/ticket", {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ nonce, signature, chainId: w.chainId }),
@@ -203,6 +205,7 @@ export const grantExtraTokens = (grantTokens: readonly string[] = []) =>
 /** What is in the account, read straight from the chain. No relay, no session. */
 export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
   const plan = (await planRecovery({
+    purpose: w.purpose,
     chain: chainOf(w.chainId),
     owner: ownerOf(w),
     // ALWAYS passed: the server route cannot check this for a pasted key, but
@@ -273,6 +276,7 @@ export async function sweepFromBrowser(
   await getRecoveryTicket(w);
 
   return recoverFunds({
+    purpose: w.purpose,
     chain: chainOf(w.chainId),
     owner: ownerOf(w),
     bundlerUrl: relayUrl(w.chainId),

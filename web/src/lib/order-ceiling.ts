@@ -18,16 +18,17 @@
  * always false in a browser bundle, so only app/api may call it
  * (client-env.test.ts).
  */
+import type { GrantPurpose } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { resolveConfig } from "../../../worker/src/settings";
 import { tenantOf } from "./auth";
 import { chatOrderCeiling } from "./order-state";
 
-export function ceilingFor(req: Request, hosted: boolean): Promise<number> {
+export function ceilingFor(req: Request, hosted: boolean, purpose: GrantPurpose = "spot"): Promise<number> {
   return chatOrderCeiling({
     hosted,
     tenant: tenantOf(req),
-    fallback: resolveConfig().telegramMaxActionUsdg,
-    stored: (tenant) => getSettingsStore().get(tenant as `0x${string}`),
+    fallback: resolveConfig(purpose).telegramMaxActionUsdg,
+    stored: (tenant) => getSettingsStore(purpose).get(tenant as `0x${string}`),
   });
 }

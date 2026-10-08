@@ -23,7 +23,7 @@
  * account itself, and the ordinary sweep moves it on.
  */
 
-import { chainForId, LIGHTER_ROUTE_V1, pimlicoBundlerUrl, robinhoodChain, validatePerpPubKey } from "../../packages/core/src/index";
+import { chainForId, isGrantPurpose, LIGHTER_ROUTE_V1, pimlicoBundlerUrl, robinhoodChain, validatePerpPubKey } from "../../packages/core/src/index";
 import { merrymenHome } from "./home";
 import { markOwnerRotationSeen, recordOwnerRotation, retiredKeysFor } from "./perps-local";
 import { resolveConfig } from "./settings";
@@ -83,6 +83,8 @@ async function main() {
   const mode = process.argv[2];
   const to = process.argv[3] as `0x${string}` | undefined;
   const chainId = Number(process.argv[4] || robinhoodChain.id);
+  const purpose = process.env.MERRYMEN_RECOVER_PURPOSE ?? process.env.MERRYMEN_WALLET_PURPOSE ?? "spot";
+  if (!isGrantPurpose(purpose)) throw new Error("recover-cli: invalid account purpose");
 
   const ownerKey = process.env.MERRYMEN_RECOVER_OWNER_KEY as `0x${string}` | undefined;
   const expect = (process.env.MERRYMEN_RECOVER_EXPECT || undefined) as `0x${string}` | undefined;
@@ -112,6 +114,7 @@ async function main() {
   try {
     if (mode === "plan") {
       const plan = await planRecovery({
+        purpose,
         chain,
         owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
@@ -224,6 +227,7 @@ async function main() {
       }
       say(mode === "venue-claim" ? "  claiming from the Lighter contract …" : "  sending the Lighter unwind …");
       const res = await recoverVenueStep({
+        purpose,
         chain,
         owner: ownerFromPrivateKey(ownerKey),
         bundlerUrl,
@@ -307,6 +311,7 @@ async function main() {
 
     say(`  sweeping to ${to} …`);
     const res = await recoverFunds({
+      purpose,
       chain,
       owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,

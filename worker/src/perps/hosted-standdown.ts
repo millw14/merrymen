@@ -29,6 +29,8 @@ export function standdownChildEnv(home: string, fleetHome: string, env: NodeJS.P
 type Running = { job: HostedStanddownJob; proc: ChildProcess; home: string; deadline: NodeJS.Timeout; frames: CheckpointFrameReceiver };
 export interface StanddownSupervisorOptions {
  db: Db; dek: Buffer; home: string; normalHome(tenant: string): string;
+ /** Execution slot for homes, leases and stopping; cryptographic bindings keep job.tenant. */
+ executionKey?(job: HostedStanddownJob): `0x${string}`;
  acquire(tenant: `0x${string}`): Promise<boolean>; healthy(tenant: string): boolean;
  /** Resolves only after the previous normal process has actually exited. */
  stopNormal(tenant: string): Promise<boolean>;
@@ -43,28 +45,29 @@ export class HostedStanddownSupervisor {
  private claimant = randomUUID();
  private busy = false;
  constructor(private o: StanddownSupervisorOptions) { this.store = new HostedStanddownStore(o.db, o.dek); }
+ private execution(job: HostedStanddownJob): `0x${string}` { return this.o.executionKey?.(job) ?? job.tenant; }
  async reconcile(): Promise<Set<string>> {
-  if (this.busy) return new Set((await this.store.list()).map(j => j.tenant));
+  if (this.busy) return new Set((await this.store.list()).map(j => this.execution(j)));
   this.busy = true;
   try {
    await this.store.init(); await this.store.expire();
    const jobs = await this.store.list();
    for (const job of jobs) if (job.state === "done" || job.state === "expired") this.wipeJobKeys(job.id);
-   const blocked = new Set(jobs.map(j => j.tenant));
+   const blocked = new Set(jobs.map(j => this.execution(j)));
    for (const run of [...this.running.values()]) {
-    if (!this.o.healthy(run.job.tenant) || Date.now() >= run.job.expiresAtMs || !jobs.some(j => j.id === run.job.id && j.state === "running")) this.stop(run);
+    if (!this.o.healthy(this.execution(run.job)) || Date.now() >= run.job.expiresAtMs || !jobs.some(j => j.id === run.job.id && j.state === "running")) this.stop(run);
    }
    for (const job of jobs) {
-    if (!(await this.o.acquire(job.tenant))) continue;
-    if (!(await this.o.stopNormal(job.tenant))) continue;
+    if (!(await this.o.acquire(this.execution(job)))) continue;
+    if (!(await this.o.stopNormal(this.execution(job)))) continue;
     // Session authority ends with the kill. Only the sealed job can recover
     // the venue key; the normal home keeps ledger evidence until final mirror.
-    for (const file of ["grant.json", "perp-key.json"]) rmSync(path.join(this.o.normalHome(job.tenant), file), { force: true });
-    clearCheckpointUploads(this.o.normalHome(job.tenant));
-    this.retireHomeReplay(this.o.normalHome(job.tenant));
+    for (const file of ["grant.json", "perp-key.json"]) rmSync(path.join(this.o.normalHome(this.execution(job)), file), { force: true });
+    clearCheckpointUploads(this.o.normalHome(this.execution(job)));
+    this.retireHomeReplay(this.o.normalHome(this.execution(job)));
     if (this.running.has(job.id)) continue;
     if (job.state === "done" || job.state === "expired") { await this.finishMirror(job); continue; }
-    if (!this.o.healthy(job.tenant)) continue;
+    if (!this.o.healthy(this.execution(job))) continue;
     const claimed = await this.store.claim(job.id, this.claimant);
     if (!claimed) continue;
     try { await this.start(claimed); }
@@ -108,7 +111,7 @@ export class HostedStanddownSupervisor {
    // final nonce or fills. Corrupt/missing durable evidence remains blocked.
    throw new Error("shutdown completion has no verified checkpoint");
   }
-  const local = openChildLedger(this.o.normalHome(job.tenant));
+  const local = openChildLedger(this.o.normalHome(this.execution(job)));
   if (local) {
    try { return await local.db.tx(tx => consume(captureFinancialStream(tx, job.smartAccount, { scope: "standdown" }))); }
    finally { local.close(); }
@@ -121,7 +124,7 @@ export class HostedStanddownSupervisor {
   return consume([await captureStanddownLedger(this.o.db, job.smartAccount)]);
  }
  private async start(job: HostedStanddownJob): Promise<void> {
-  if (!this.o.healthy(job.tenant) || !(await this.store.fence(job))) throw new Error("shutdown lease lost");
+  if (!this.o.healthy(this.execution(job)) || !(await this.store.fence(job))) throw new Error("shutdown lease lost");
   const home = path.join(this.o.home, "perp-standdowns", `${job.id}-${job.generation}`);
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const raw = new DatabaseSync(path.join(home, "merrymen.db"));
@@ -140,7 +143,7 @@ export class HostedStanddownSupervisor {
   try {
   const privateKey = openPerpKey(job.sealedKey!, { tenant: job.tenant, smartAccount: job.smartAccount, apiPublicKey: job.apiPublicKey, apiKeyIndex: job.apiKeyIndex }, this.o.dek);
   writeFileSync(path.join(home, "perp-key.json"), JSON.stringify({ v: 1, publicKey: job.apiPublicKey, privateKey }), { mode: 0o600 });
-  if (!this.o.healthy(job.tenant) || !(await this.store.fence(job))) { rmSync(path.join(home, "perp-key.json"), { force: true }); throw new Error("shutdown authority expired"); }
+  if (!this.o.healthy(this.execution(job)) || !(await this.store.fence(job))) { rmSync(path.join(home, "perp-key.json"), { force: true }); throw new Error("shutdown authority expired"); }
   const entry = fileURLToPath(new URL("./hosted-standdown-runner.ts", import.meta.url));
   const proc = (this.o.spawnRunner ?? spawn)(process.execPath, ["--max-old-space-size=384", "--import", "tsx", entry], {
    cwd: path.resolve(path.dirname(entry), "../../.."), env: standdownChildEnv(home, this.o.home), stdio: ["ignore", "ignore", "ignore", "ipc"],
@@ -169,7 +172,7 @@ export class HostedStanddownSupervisor {
   if (!Number.isSafeInteger(msg.id)) throw new Error("invalid shutdown message id");
   let ok = false;
   try {
-   if (this.running.get(run.job.id) !== run || !this.o.healthy(run.job.tenant) || !(await this.store.fence(run.job))) throw new Error("shutdown fenced");
+   if (this.running.get(run.job.id) !== run || !this.o.healthy(this.execution(run.job)) || !(await this.store.fence(run.job))) throw new Error("shutdown fenced");
    if (msg.kind?.startsWith("checkpoint-")) {
     await run.frames.acceptStream(msg.kind.slice("checkpoint-".length), msg.payload, async chunks => {
      await this.store.checkpointStream(run.job, validateFinancialStream(chunks, run.job.smartAccount, { scope: "standdown" }));
@@ -181,14 +184,14 @@ export class HostedStanddownSupervisor {
     if (typeof msg.payload !== "string" || msg.payload.length > 128) throw new Error("shutdown close capacity refused");
     const marketId = JSON.parse(msg.payload) as number;
     const remainingCloseAttempts = await this.store.remainingCloseAttempts(run.job, marketId);
-    if (!this.o.healthy(run.job.tenant) || !(await this.store.fence(run.job))) throw new Error("shutdown close capacity fenced");
+    if (!this.o.healthy(this.execution(run.job)) || !(await this.store.fence(run.job))) throw new Error("shutdown close capacity fenced");
     if (run.proc.connected) run.proc.send({ id: msg.id, ok: true, remainingCloseAttempts });
     return;
    } else if (msg.kind === "close-budget") {
     if (typeof msg.payload !== "string" || msg.payload.length > 1024) throw new Error("shutdown close identity refused");
     const close = JSON.parse(msg.payload) as { marketId: number; txHash: string };
     const reserved = await this.store.reserveClose(run.job, close);
-    if (!this.o.healthy(run.job.tenant) || !(await this.store.fence(run.job))) throw new Error("shutdown close budget fenced");
+    if (!this.o.healthy(this.execution(run.job)) || !(await this.store.fence(run.job))) throw new Error("shutdown close budget fenced");
     // An exhausted market budget refuses that close; other markets, cancels
     // and withdrawal can still complete under the same bounded shutdown.
     if (run.proc.connected) run.proc.send({ id: msg.id, ok: reserved });
@@ -201,13 +204,13 @@ export class HostedStanddownSupervisor {
     if (run.proc.connected) run.proc.send({ id: msg.id, ok });
     return;
    } else if (msg.kind !== "fence") throw new Error("shutdown message kind refused");
-   ok = this.o.healthy(run.job.tenant) && await this.store.fence(run.job);
+   ok = this.o.healthy(this.execution(run.job)) && await this.store.fence(run.job);
   } catch { ok = false; }
   if (run.proc.connected) run.proc.send({ id: msg.id, ok });
   if (!ok) this.stop(run);
  }
  private async finishMirror(job: HostedStanddownJob): Promise<void> {
-  if (!this.o.healthy(job.tenant)) return;
+  if (!this.o.healthy(this.execution(job))) return;
   const mirrorHome = path.join(this.o.home, "perp-standdowns", `${job.id}-mirror`);
   mkdirSync(mirrorHome, { recursive: true, mode: 0o700 });
   const raw = new DatabaseSync(path.join(mirrorHome, "merrymen.db"));
@@ -230,10 +233,10 @@ export class HostedStanddownSupervisor {
      }
     } });
    }));
-   if (!this.o.healthy(job.tenant)) return;
+   if (!this.o.healthy(this.execution(job))) return;
    rmSync(path.join(this.o.home, "perp-standdowns", `${job.id}-${job.generation}`), { recursive: true, force: true });
    // No newer grant is admitted while this job was unmirrored.
-   rmSync(this.o.normalHome(job.tenant), { recursive: true, force: true });
+   rmSync(this.o.normalHome(this.execution(job)), { recursive: true, force: true });
    await this.store.mirrored(job);
    completed = true;
   } catch { this.o.log(`${job.tenant}: hosted perps shutdown accounting is waiting for its final mirror`); }

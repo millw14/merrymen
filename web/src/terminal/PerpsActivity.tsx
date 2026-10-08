@@ -29,7 +29,7 @@ export function PerpsActivity({ market, book }: { market: string; book: ChartBoo
       request = new AbortController();
       const timeout = globalThis.setTimeout(() => request?.abort(), 12_000);
       try {
-        const response = await fetch(`/api/perps/activity?${new URLSearchParams({ market, book })}`, { credentials: "same-origin", cache: "no-store", signal: request.signal });
+        const response = await fetch(`/api/perps/activity?${new URLSearchParams({ market, book, purpose: "perps" })}`, { credentials: "same-origin", cache: "no-store", signal: request.signal });
         if (stopped) return false;
         if (response.status === 401 || response.status === 403) { setData(null); throw new Error("Sign in again to read your private activity."); }
         if (response.status === 429) { retryAt = Date.now() + 60_000; throw new Error("Activity refresh is limited. Retrying after a short pause."); }

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
 import { XPosting } from "../XPosting";
+import { loadGrant } from "@/lib/session";
 import { PerpsSettings } from "../PerpsSettings";
 import { AgentImageField } from "../AgentImageField";
 import { basketAfterAdd, basketNow } from "../basket";
@@ -59,7 +60,7 @@ function Field(props: {
 }
 
 /** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
-export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, onInitialPerpsStyleConsumed}:{onFund:()=>void; slug: string | null; onSaved?: () => void; initialPerpsStyle?: PerpsStyleId; onInitialPerpsStyleConsumed?: () => void}) {
+export default function SettingsPage({purpose="spot",onFund, slug, onSaved, initialPerpsStyle, onInitialPerpsStyleConsumed}:{purpose?:"spot"|"perps";onFund:()=>void; slug: string | null; onSaved?: () => void; initialPerpsStyle?: PerpsStyleId; onInitialPerpsStyleConsumed?: () => void}) {
   const t = useT();
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -191,15 +192,14 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem("merrymen.grant.v1");
-      if (raw) setStoredGrant(JSON.parse(raw) as StoredGrant);
+      setStoredGrant(loadGrant(purpose));
     } catch {
       /* no grant, or unreadable — the basket just won't annotate */
     }
     void (async () => {
       setLoadError(false);
       try {
-        const res = await fetch("/api/settings");
+        const res = await fetch(purpose === "perps" ? "/api/settings?purpose=perps" : "/api/settings");
         if (!res.ok) throw new Error("Settings unavailable");
         setView((await res.json()) as SettingsView);
       } catch {
@@ -414,7 +414,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
     if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
-      const res = await fetch("/api/settings", {
+      const res = await fetch(purpose === "perps" ? "/api/settings?purpose=perps" : "/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         // FOR THE WALLET THESE VALUES WERE READ FOR (SettingsView.owner): a
@@ -471,7 +471,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
       setDeskEnabled(null);
       setClassSnipe(null);
       setOfficialCoins(null);
-      const fresh = await fetch("/api/settings");
+      const fresh = await fetch(purpose === "perps" ? "/api/settings?purpose=perps" : "/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
       void loadTelegram();
       if (statusTimer.current) clearTimeout(statusTimer.current);
@@ -489,7 +489,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
    */
   async function reloadView() {
     try {
-      const fresh = await fetch("/api/settings");
+      const fresh = await fetch(purpose === "perps" ? "/api/settings?purpose=perps" : "/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
     } catch {
       /* the screen keeps its last read; the section says what its own save did */
@@ -619,6 +619,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
       <PageHeader title="Settings" />
 
       <div className="mm-wrap">
+        {purpose === "perps" && <p className="mm-note">These trading controls apply to your dedicated Perps wallet.</p>}
         <p className="mm-note">
             Leave an API key blank to keep the saved key.
         </p>
@@ -774,7 +775,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
             {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
               You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
             </p>}
-            <p>Save changes below, then <Link href="/grant">update trading permission</Link> and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
+            <p>Save changes below, then <Link href={purpose === "perps" ? "/grant?purpose=perps" : "/grant"}>update trading permission</Link> and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
               Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
           </div>
           <div className="mm-grid">
@@ -820,7 +821,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
               this form's `draft`, and "Save changes" sends none of it.
               `reloadView` re-reads the values without clearing the draft, so
               switching perps off does not throw away an unsaved edit above. */}
-          <PerpsSettings values={view.values} defaults={view.defaults} owner={view.owner} initialStyle={initialPerpsStyle} onInitialStyleConsumed={onInitialPerpsStyleConsumed} hosted={hosted} onSaved={reloadView} />
+          <PerpsSettings purpose={purpose} values={view.values} defaults={view.defaults} owner={view.owner} initialStyle={initialPerpsStyle} onInitialStyleConsumed={onInitialPerpsStyleConsumed} hosted={hosted} onSaved={reloadView} />
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="mm-section">{t("settings.section.agentSettings")}</div>
@@ -1074,7 +1075,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
               at the moment of choosing — rather than in the event feed later. */}
           {unsellable.length > 0 && (
             <div className="mm-danger">
-              Update your <Link href="/grant">trading permissions</Link> to buy or sell <b>{unsellable.join(", ")}</b>.
+              Update your <Link href={purpose === "perps" ? "/grant?purpose=perps" : "/grant"}>trading permissions</Link> to buy or sell <b>{unsellable.join(", ")}</b>.
             </div>
           )}
 
@@ -1175,7 +1176,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
               the basket entirely — the one gate that was invisible. */}
           <div className="mm-hint">{t("settings.hint.threeThingsHaveTo")}<b>in your trading basket</b> above (the checkbox does that when you
             add it), you&apos;ve <b>saved</b>, and your{" "}
-            <Link href="/grant">trading permission</Link> covers it — re-sign after
+            <Link href={purpose === "perps" ? "/grant?purpose=perps" : "/grant"}>trading permission</Link> covers it — re-sign after
             saving, and it will. Adding a token on its own only means &ldquo;watch this&rdquo;.
           </div>
 
@@ -1249,7 +1250,7 @@ export default function SettingsPage({onFund, slug, onSaved, initialPerpsStyle, 
               />
             </Field>
           </div>
-          <div className="mm-hint">{t("settings.hint.discoverySendsAlertsAutonomous")}<Link href="/grant">trading permission</Link>. The individual-token route still requires adding and authorizing each token.
+          <div className="mm-hint">{t("settings.hint.discoverySendsAlertsAutonomous")}<Link href={purpose === "perps" ? "/grant?purpose=perps" : "/grant"}>trading permission</Link>. The individual-token route still requires adding and authorizing each token.
           </div>
 
           {/* ── SCOUT MODE ─────────────────────────────────────────────────

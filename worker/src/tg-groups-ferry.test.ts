@@ -1545,7 +1545,7 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.equal(ORCH.split("env: childEnv(").length - 1, 1, "the one spawn site");
 
     const mirror = body("async function mirrorLedgers(");
-    assert.match(mirror, /if \(tgGroupsDekThisPass && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
+    assert.match(mirror, /if \(workerPurpose\(tenant\) === "spot" && tgGroupsDekThisPass && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
 
     const forget = body("async function forgetTgGroups(");
     assert.match(forget, /tgGroupsHeld\.delete\(/, "cleared with the grant");
@@ -1557,7 +1557,7 @@ describe("the orchestrator ferries it where the contract says", () => {
     const publish = mirror.indexOf("const published = await publishTgGroups({");
     const unpublished = mirror.indexOf('if (published !== "published" && published !== "unchanged") {', publish);
     const patchAfter = mirror.indexOf("await forgetStoredTgGroups({", unpublished);
-    const heldBranch = mirror.indexOf("} else if (tgGroupsDekThisPass) {", patchAfter);
+    const heldBranch = mirror.indexOf('} else if (workerPurpose(tenant) === "spot" && tgGroupsDekThisPass) {', patchAfter);
     const patchHeld = mirror.indexOf("await forgetStoredTgGroups({", heldBranch);
     assert.ok(gate > 0 && publish > gate, "below the lease gate");
     assert.ok(unpublished > publish && patchAfter > unpublished, "a file that was not published still carries its requests");
@@ -1609,7 +1609,7 @@ describe("the orchestrator ferries it where the contract says", () => {
 
     const rec = body("export async function reconcile(");
     const stamp = rec.indexOf("const listedAtMs = Date.now();");
-    const list = rec.indexOf("tenants = await store.listTenants();");
+    const list = rec.indexOf('const [spot, perps] = await Promise.all([store.listTenants(), getGrantStore("perps").listTenants()]);');
     const unreadable = rec.indexOf("store unreadable, skipping this reconcile");
     const wanted = rec.indexOf("const wanted = new Set(");
     const killBranch = rec.indexOf("grant removed — standing it down");

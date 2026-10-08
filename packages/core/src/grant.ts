@@ -22,6 +22,24 @@ import { GRANT_PERP_LIGHTER, validatePerpPubKey, type PerpGrant, type PerpRecove
  * position be bought and never sold — so the grant declares what it carries,
  * and code that needs to know asks the grant, not the constant.
  */
+/** The two independent account authorities sharing one authenticated owner. */
+export type GrantPurpose = "spot" | "perps";
+export function isGrantPurpose(value: unknown): value is GrantPurpose {
+  return value === "spot" || value === "perps";
+}
+/** Old grants were Spot accounts. An unrecognised purpose never becomes Spot. */
+export function grantPurpose(grant: { purpose?: unknown } | null | undefined): GrantPurpose {
+  const purpose = grant?.purpose;
+  if (purpose === undefined) return "spot";
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+  return purpose;
+}
+/** Kernel's historical default index is zero. Perps uses its own address. */
+export function accountIndexForPurpose(purpose: GrantPurpose = "spot"): bigint {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
+  return purpose === "perps" ? 1n : 0n;
+}
+
 export const TRADEABLE_V2 = "tradeable-v2";
 
 /**
@@ -328,6 +346,7 @@ export type BindingClaim =
       owner: `0x${string}`;
       smartAccount: `0x${string}`;
       chainId: number;
+      purpose?: GrantPurpose;
     }
   | {
       version: "privy-did-owner-v1";
@@ -336,11 +355,13 @@ export type BindingClaim =
       owner: `0x${string}`;
       smartAccount: `0x${string}`;
       chainId: number;
+      purpose?: GrantPurpose;
       /** The Privy DID the access token was verified to carry. */
       did: string;
     };
 
 export function bindingMessage(args: BindingClaim): string {
+  const purpose = grantPurpose(args);
   if (args.version === "privy-did-owner-v1") {
     // THE DID IS IN THE SIGNED TEXT. Without it the owner signature would say
     // "this key authorizes account X" and name no identity at all — it would
@@ -355,6 +376,7 @@ export function bindingMessage(args: BindingClaim): string {
       `Owner key: ${args.owner.toLowerCase()}`,
       `Identity: ${args.did}`,
       `Chain ID: ${args.chainId}`,
+      ...(purpose === "perps" ? ["Account purpose: perps"] : []),
       `URI: ${args.origin}`,
       `Nonce: ${args.nonce}`,
     ].join("\n");
@@ -370,12 +392,15 @@ export function bindingMessage(args: BindingClaim): string {
     `Agent account: ${args.smartAccount.toLowerCase()}`,
     `Owner key: ${args.owner.toLowerCase()}`,
     `Chain ID: ${args.chainId}`,
+    ...(purpose === "perps" ? ["Account purpose: perps"] : []),
     `URI: ${args.origin}`,
     `Nonce: ${args.nonce}`,
   ].join("\n");
 }
 
 export interface StoredGrant {
+  /** Absent on legacy Spot grants. Perps is signed against its distinct account index. */
+  purpose?: GrantPurpose;
   /** Explicit owner recovery reference, independently verified before incident clearing. */
   perpRecovery?: PerpRecoveryReference;
   smartAccount: `0x${string}`;
@@ -537,6 +562,7 @@ export interface StoredGrant {
  * secret of any kind, sealed or not.
  */
 export interface PublicGrantView {
+  purpose?: GrantPurpose;
   smartAccount?: `0x${string}`;
   owner?: `0x${string}`;
   sessionKeyAddress?: `0x${string}`;
@@ -602,6 +628,7 @@ const SEALED_ADDRESS_FIELDS = [
 export function publicGrantView(grant: unknown): PublicGrantView {
   const g = (typeof grant === "object" && grant !== null ? grant : {}) as Record<string, unknown>;
   const out: PublicGrantView = {};
+  if (isGrantPurpose(g.purpose)) out.purpose = g.purpose;
   const address = (v: unknown): `0x${string}` | undefined =>
     typeof v === "string" && ADDRESS_RE.test(v) ? (v as `0x${string}`) : undefined;
   const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);

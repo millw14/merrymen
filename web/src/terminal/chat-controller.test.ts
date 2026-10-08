@@ -552,7 +552,7 @@ describe("chips", () => {
     const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
     const at = app.indexOf("<Settings ");
     assert.ok(at > 0, "App mounts the Settings screen");
-    assert.match(app.slice(at, app.indexOf("/>", at)), /\sonSaved=\{chat\.refreshSettings\}/);
+    assert.match(app.slice(at, app.indexOf("/>", at)), /\sonSaved=\{walletPurpose === "perps" \? refreshAccount : chat\.refreshSettings\}/);
   });
 
   it("A MESSAGE THAT ASKS NOTHING OF HOW MUCH DOES NOT READ THE CEILING", async () => {

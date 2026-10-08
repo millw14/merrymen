@@ -71,6 +71,9 @@ before(async () => {
   const grants = req("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
   grants.resetGrantStoreForTest();
   const store = grants.getGrantStore();
+  const separate = grants.getGrantStore("perps");
+  mock.method(separate, "get", async () => null);
+  mock.method(separate as { hasStoredGrant(tenant: `0x${string}`): Promise<boolean> }, "hasStoredGrant", async () => false);
   mock.method(store, "tenantForAccount", async () => null);
   mock.method(store, "get", async () => stored);
   mock.method(store, "put", async (_t: unknown, g: unknown) => {

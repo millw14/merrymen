@@ -899,10 +899,10 @@ describe("what the section must go on saying", () => {
 
   it("Settings mounts the section, and its save sends none of it", () => {
     const settings = src("./screens/Settings.tsx");
-    assert.match(settings, /<PerpsSettings values=\{view\.values\} defaults=\{view\.defaults\} owner=\{view\.owner\}/);
+    assert.match(settings, /<PerpsSettings purpose=\{purpose\} values=\{view\.values\} defaults=\{view\.defaults\} owner=\{view\.owner\}/);
     const saveFn = settings.slice(settings.indexOf("async function save()"), settings.indexOf("async function reloadView()"));
     assert.ok(saveFn.length > 0, "save() moved");
-    assert.doesNotMatch(saveFn, /perps/, "the page's Save changes must not carry a perps key");
+    assert.doesNotMatch(saveFn, /\bperps[A-Z]\w*/, "the page's Save changes must not carry a perps key");
   });
 });
 
@@ -1132,4 +1132,15 @@ describe("doctrine draft isolation", () => {
     assert.deepEqual(body, { perpsDriver: "perp-trend", perpsStyle: "scalp-confirmed" });
     assert.equal(perpsDraftProblems({ ...EMPTY_PERPS_DRAFT, driver: "perp-trend", style: "scalp-confirmed" }, {}, DEFAULTS).openBelowTrade, null);
   });
+});
+it("dedicated wallet scopes status and settings without dropping owner binding", async () => {
+  await ui.render(createElement(PerpsSettings, { purpose: "perps", values: {}, defaults: DEFAULTS, owner: OWNER, hosted: true, onSaved() {} }));
+  await settle();
+  const read = calls.find(call => call.method === "GET" && call.url.startsWith("/api/grants"));
+  assert.ok(read); const query = new URL(read.url, "http://local").searchParams;
+  assert.equal(query.get("purpose"), "perps"); assert.equal(query.get("owner"), OWNER);
+  await typeInto("perpsMaxCollateralUsdg", "30");
+  await press(button(SAVE), "save limits");
+  const write = writes().find(call => call.method === "PUT");
+  assert.equal(write?.url, "/api/settings?purpose=perps"); assert.equal(write?.body?.owner, OWNER);
 });

@@ -1,3 +1,4 @@
+import type { GrantPurpose } from "@merrymen/core";
 /**
  * Wallet-native authentication for HOSTED mode.
  *
@@ -246,6 +247,7 @@ export type BindingResult =
  * someone else's nonce.
  */
 export async function verifyGrantBinding(args: {
+  purpose?: GrantPurpose;
   origin: string;
   tenant: `0x${string}`;
   nonce: string;
@@ -338,6 +340,7 @@ export async function verifyGrantBinding(args: {
       owner: args.owner,
       smartAccount: args.smartAccount,
       chainId: args.chainId,
+      purpose: args.purpose,
       did: args.verifiedDid,
     });
     let privyOwner: `0x${string}`;
@@ -381,6 +384,7 @@ export async function verifyGrantBinding(args: {
     owner: args.owner,
     smartAccount: args.smartAccount,
     chainId: args.chainId,
+    purpose: args.purpose,
   });
 
   let walletSigner: `0x${string}`;

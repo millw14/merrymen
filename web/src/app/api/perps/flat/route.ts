@@ -1,3 +1,4 @@
+import { readRequestPurpose } from "@/lib/account-purpose";
 /**
  * GET /api/perps/flat?smartAccount=0x… — is this agent's Lighter venue
  * PROVABLY flat? (docs/perps.md rule 5; worker/src/perps/flatness.ts)
@@ -22,7 +23,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { isHostedMode, type StoredGrant } from "@merrymen/core";
+import { grantPurpose, isHostedMode, type StoredGrant } from "@merrymen/core";
 import { homePaths } from "@merrymen/home";
 import { getGrantStore } from "@merrymen/grant-store";
 import { tenantOf } from "@/lib/auth";
@@ -41,6 +42,8 @@ export async function GET(req: Request) {
   const hosted = isHostedMode();
   const tenant = hosted ? tenantOf(req) : null;
   if (hosted && !tenant) return reply({ error: "not signed in" }, 401);
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return reply({ error: "Invalid account purpose" }, 400);
 
   const asked = new URL(req.url).searchParams.get("smartAccount");
   if (typeof asked !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(asked)) {
@@ -51,18 +54,18 @@ export async function GET(req: Request) {
   let stored: StoredGrant | null = null;
   if (hosted) {
     try {
-      stored = await getGrantStore().get(tenant as `0x${string}`);
+      stored = await getGrantStore(purpose).get(tenant as `0x${string}`);
     } catch {
       return reply({ error: "couldn't read your agent right now — please try again", ownerFacing: true }, 503);
     }
   } else {
     try {
-      stored = JSON.parse(await readFile(homePaths.grant(), "utf8")) as StoredGrant;
+      stored = JSON.parse(await readFile(homePaths.grant(purpose), "utf8")) as StoredGrant;
     } catch {
       stored = null;
     }
   }
-  if (!stored || typeof stored.smartAccount !== "string" || stored.smartAccount.toLowerCase() !== smartAccount) {
+  if (!stored || grantPurpose(stored) !== purpose || typeof stored.smartAccount !== "string" || stored.smartAccount.toLowerCase() !== smartAccount) {
     return reply({ error: "no agent of yours has that account", code: "not-found" }, 404);
   }
 

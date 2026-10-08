@@ -347,6 +347,46 @@ function runKill(home: string, onStart?: () => void): Promise<{ code: number | n
 const requestsIn = (home: string) => readdirSync(home).filter((f) => f.startsWith(STANDDOWN_REQUEST_PREFIX));
 
 describe("merrymen kill with perps", { timeout: 150_000 }, () => {
+  it("a grant changed while confirmation is open is neither stood down nor deleted", async () => {
+    const home = setupHome({ perps: true, workerAlive: false });
+    const replacement = { ...perpGrant(), smartAccount: `0x${"44".repeat(20)}` };
+    const answer = await new Promise<{ code: number | null; out: string }>(resolve => {
+      const child = spawn(process.execPath, [BIN, "kill"], {
+        cwd: ROOT, env: { ...process.env, MERRYMEN_HOME: home, NO_COLOR: "1", MERRYMEN_NO_ANIM: "1" },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let out = "", answered = false;
+      child.stdout.on("data", d => {
+        out += String(d);
+        if (!answered && out.includes("destroy the grant?")) {
+          answered = true;
+          writeFileSync(path.join(home, "grant.json"), JSON.stringify(replacement));
+          child.stdin.end("y\n");
+        }
+      });
+      child.stderr.on("data", d => { out += String(d); });
+      child.on("exit", code => resolve({ code, out }));
+    });
+    assert.equal(answer.code, 1, answer.out);
+    assert.match(answer.out, /grant changed/);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(home, "grant.json"), "utf8")), replacement);
+    assert.equal(requestsIn(home).length, 0);
+    assert.equal(existsSync(path.join(home, "grants")), false);
+  });
+
+  it("a dedicated Perps CLI kill uses the main home lock and leaves the Spot grant intact", async () => {
+    const home = setupHome({ perps: false, workerAlive: false });
+    const spot = readFileSync(path.join(home, "grant.json"), "utf8");
+    const dedicated = path.join(home, "accounts", "perps"); mkdirSync(dedicated, { recursive: true });
+    writeFileSync(path.join(dedicated, "grant.json"), JSON.stringify({ ...perpGrant(), purpose: "perps" }));
+    const result = await runKill(dedicated);
+    assert.equal(result.code, 0, result.out);
+    assert.equal(existsSync(path.join(dedicated, "grant.json")), false);
+    assert.equal(readFileSync(path.join(home, "grant.json"), "utf8"), spot);
+    assert.equal(existsSync(path.join(home, ".grant-writers.lock.db")), true);
+    assert.equal(existsSync(path.join(dedicated, ".grant-writers.lock.db")), false);
+  });
+
   it("writes the stand-down request BEFORE the grant goes, waits, and prints the custody text from the result", async () => {
     const home = setupHome({ perps: true, workerAlive: true });
     let stop = false;
@@ -420,15 +460,15 @@ describe("merrymen kill with perps", { timeout: 150_000 }, () => {
     assert.equal(existsSync(path.join(home, "grant.json")), false);
   });
 
-  it("NO REQUEST CAN BE WRITTEN: the kill STOPS with the grant kept, unless the owner types 'kill anyway'", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  it("AN UNWRITABLE HOME CANNOT LOCK AUTHORITY: kill keeps the grant and never offers a bypass", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
     const home = setupHome({ perps: true, workerAlive: false });
     chmodSync(home, 0o555); // nothing can be created in the home: neither the helper nor the CLI can ask
     try {
       const { code, out } = await runKill(home);
       assert.equal(code, 1, out);
-      assert.match(out, /could not ask the worker to stand the perps down/);
-      assert.match(out, /Nothing has been stopped\. The grant is kept/);
-      assert.match(out, /kill anyway/);
+      assert.match(out, /could not safely access the current grant/);
+      assert.match(out, /The grant is kept; nothing was stopped/);
+      assert.doesNotMatch(out, /Type .*kill anyway/);
       assert.doesNotMatch(out, /grant destroyed/);
       assert.equal(existsSync(path.join(home, "grant.json")), true, "the agent keeps running, protecting what it holds");
     } finally {

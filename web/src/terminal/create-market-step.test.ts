@@ -67,7 +67,7 @@ describe("a coin named in the wizard is covered by the first signature", () => {
     // decide what the agent watches and proposes. A coin in one and not the
     // other is the two-gate trap in a new costume.
     const at = code.indexOf("const creationSettings =");
-    const writeAt = code.indexOf("/api/settings\",{method:\"PUT\"", at);
+    const writeAt = code.indexOf("/api/settings${purposeQuery}`,{method:\"PUT\"", at);
     assert.ok(at > 0 && writeAt > at);
     const put = code.slice(at, code.indexOf("});", writeAt));
     assert.match(put, /body:JSON\.stringify\(creationSettings\)/);
@@ -79,7 +79,7 @@ describe("a coin named in the wizard is covered by the first signature", () => {
 
   it("ONE ROUND TRIP — the answers ride the write that was already happening", () => {
     assert.equal(
-      (code.match(/requestJson\("\/api\/settings",\{method:"PUT"/g) ?? []).length,
+      (code.match(/requestJson\(`\/api\/settings\$\{purposeQuery\}`,\{method:"PUT"/g) ?? []).length,
       1,
       "a second PUT would be a second way for the two halves to disagree",
     );

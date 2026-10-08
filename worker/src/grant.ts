@@ -3,6 +3,7 @@ import path from "node:path";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { homePaths, merrymenHome } from "./home";
 import { mayArm } from "./kill-request";
+import { grantPurpose } from "../../packages/core/src/index";
 
 /** Reads the grant handoff written by web's /api/grants (~/.merrymen/grant.json). */
 export function loadGrantFile(): StoredGrant | null {
@@ -29,6 +30,12 @@ export function loadGrantFile(): StoredGrant | null {
 export function loadArmableGrant(): StoredGrant | null {
   const grant = loadGrantFile();
   if (!grant) return null;
+  const purpose = process.env.MERRYMEN_WALLET_PURPOSE;
+  if (purpose !== undefined) {
+    try {
+      if ((purpose !== "spot" && purpose !== "perps") || grantPurpose(grant) !== purpose) return null;
+    } catch { return null; }
+  }
   return mayArm(merrymenHome(), grant) ? grant : null;
 }
 

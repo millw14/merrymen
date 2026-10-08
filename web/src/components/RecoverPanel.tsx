@@ -138,16 +138,17 @@ const TESTNET = 46630;
  * did: that page is reachable while signed out and on a machine that never had
  * the wallet, which is the case the paste field exists for.
  */
-export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: string } = {}) {
+export function RecoverPanel({ initialOwnerKey = "", purpose = "spot", expectedAccount }: { initialOwnerKey?: string; purpose?: "spot" | "perps"; expectedAccount?: string } = {}) {
   // THE HOOK LIVES HERE AND NOWHERE ELSE. `usePrivy` throws outside a
   // PrivyProvider, and `Providers` renders none when Privy is disabled — so a
   // component that calls it cannot be rendered in a test without standing up
   // Privy itself. Keeping the hook in a one-line wrapper leaves the whole flow
   // below reachable, which is what lets `recover-privy-flow.test.ts` drive it.
-  return <RecoverPanelView initialOwnerKey={initialOwnerKey} privyOwner={usePrivyOwner()} />;
+  return <RecoverPanelView key={`${purpose}:${expectedAccount ?? ""}`} purpose={purpose} expectedAccount={expectedAccount} initialOwnerKey={initialOwnerKey} privyOwner={usePrivyOwner()} />;
 }
 
 export function RecoverPanelView({
+  purpose = "spot", expectedAccount,
   initialOwnerKey = "",
   privyOwner,
   /**
@@ -158,6 +159,7 @@ export function RecoverPanelView({
   venueFn = venueFromBrowser,
 }: {
   initialOwnerKey?: string;
+  purpose?: "spot" | "perps"; expectedAccount?: string;
   /**
    * The signed-in embedded wallet, or null for a browser-key wallet.
    *
@@ -190,8 +192,10 @@ export function RecoverPanelView({
     if (ctx || loadingCtx) return;
     setLoadingCtx(true);
     try {
-      const r = await fetch("/api/recover");
-      setCtx((await r.json()) as Ctx);
+      const r = await fetch(purpose === "perps" ? "/api/recover?purpose=perps" : "/api/recover");
+      const value = (await r.json()) as Ctx;
+      if (expectedAccount && value.smartAccount && value.smartAccount.toLowerCase() !== expectedAccount.toLowerCase()) throw new Error("account changed");
+      setCtx(value);
     } catch {
       setCtx({ hasStoredKey: false, hasBundler: false, error: "couldn't reach the recovery service" });
     }
@@ -222,18 +226,19 @@ export function RecoverPanelView({
       // reason this path exists. Reading it from `ctx` therefore yielded
       // undefined before a plan existed, `browserWallet()` returned null, and
       // the panel told a signed-in owner "this browser doesn't hold that
-      // wallet" about their own agent. `loadGrant()` is where the hosted mint
+      // wallet" about their own agent. `loadGrant(purpose)` is where the hosted mint
       // actually put it.
       const saved = (() => {
         try {
-          return loadGrant();
+          return loadGrant(purpose);
         } catch {
           return null;
         }
       })();
-      const account = (smartAccount ?? saved?.smartAccount) as `0x${string}` | undefined;
-      if (!account) return null;
+      const account = (expectedAccount ?? smartAccount ?? saved?.smartAccount) as `0x${string}` | undefined;
+      if (!account || (expectedAccount && saved?.smartAccount.toLowerCase() !== expectedAccount.toLowerCase())) return null;
       return {
+        purpose,
         smartAccount: account,
         ownerAccount: privyOwner.account,
         chainId: saved?.chainId ?? chainId,
@@ -247,8 +252,10 @@ export function RecoverPanelView({
     // comes from what the wall actually covers rather than the builtin floor.
     const saved = (() => {
       try {
+        const selected = loadGrant(purpose);
+        const target = expectedAccount ?? (purpose === "perps" ? selected?.smartAccount : undefined);
         return listSavedWallets().find(
-          (w) => (w.ownerKey ?? "").toLowerCase() === key.toLowerCase(),
+          (w) => (w.purpose ?? "spot") === purpose && (w.ownerKey ?? "").toLowerCase() === key.toLowerCase() && (!target || w.smartAccount.toLowerCase() === target.toLowerCase()),
         );
       } catch {
         return undefined;
@@ -256,6 +263,7 @@ export function RecoverPanelView({
     })();
     if (!saved) return null;
     return {
+      purpose,
       smartAccount: saved.smartAccount,
       ownerKey: key as `0x${string}`,
       chainId: saved.chainId ?? chainId,
@@ -270,7 +278,7 @@ export function RecoverPanelView({
    */
   function perpKeyFor(account: string): string | null {
     try {
-      const g = loadGrant() as { smartAccount?: string; perp?: { apiPublicKey?: unknown } } | null;
+      const g = loadGrant(purpose) as { smartAccount?: string; perp?: { apiPublicKey?: unknown } } | null;
       if (!g || (g.smartAccount ?? "").toLowerCase() !== account.toLowerCase()) return null;
       return typeof g.perp?.apiPublicKey === "string" ? g.perp.apiPublicKey : null;
     } catch {
@@ -428,13 +436,14 @@ export function RecoverPanelView({
     }
     setBusy("checking");
     try {
-      const r = await fetch("/api/recover", {
+      const r = await fetch(purpose === "perps" ? "/api/recover?purpose=perps" : "/api/recover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "plan", ownerKey: ownerKey.trim(), chainId }),
+        body: JSON.stringify({ mode: "plan", ownerKey: ownerKey.trim(), chainId, ...(expectedAccount ? { expectedAccount } : {}) }),
       });
       const j = (await r.json()) as PlanRes;
       if (!r.ok || j.error) setError(j.error ?? "couldn't read that wallet.");
+      else if (expectedAccount && j.smartAccount?.toLowerCase() !== expectedAccount.toLowerCase()) setError("The recovery account changed. Refresh before continuing.");
       else setPlan(j);
     } catch {
       setError("couldn't reach the recovery service.");
@@ -600,12 +609,12 @@ export function RecoverPanelView({
     }
     setBusy("sweeping");
     try {
-      const body: Record<string, unknown> = { mode: "sweep", to: normalizeAddr(to) };
+      const body: Record<string, unknown> = { mode: "sweep", to: normalizeAddr(to), ...(expectedAccount ? { expectedAccount } : {}) };
       if (plan) {
         body.ownerKey = ownerKey.trim();
         body.chainId = chainId;
       }
-      const r = await fetch("/api/recover", {
+      const r = await fetch(purpose === "perps" ? "/api/recover?purpose=perps" : "/api/recover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

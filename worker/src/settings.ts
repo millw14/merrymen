@@ -23,6 +23,7 @@ import {
   isValidCustomToken,
   perpsNumberOk,
   type CustomToken,
+  type GrantPurpose,
   type MerrymenSettings,
   type PerpKey,
   type PerpsDriver,
@@ -628,6 +629,9 @@ export function mergeSettings(
     // everything else resolves to strategies/<name>.* (missing file = honest
     // no-trades with the reason in the event feed, decided at tick time).
     strategy: (() => {
+      // A dedicated Perps worker cannot gain a Spot producer through settings
+      // or a missing/corrupt settings file. The orchestrator sets this purpose.
+      if (env.MERRYMEN_WALLET_PURPOSE === "perps") return "perps-only";
       const v = str(file.strategy, env.MERRYMEN_STRATEGY);
       return v && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : d.strategy;
     })(),
@@ -755,8 +759,8 @@ export function mergeSettings(
 }
 
 /** Read + merge. A missing or corrupt file is just "no overrides". */
-export function resolveConfig(): ResolvedConfig {
-  const SETTINGS_FILE = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
+export function resolveConfig(purpose: GrantPurpose = "spot"): ResolvedConfig {
+  const SETTINGS_FILE = purpose === "perps" ? homePaths.settings("perps") : process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
   let file: MerrymenSettings = {};
   try {
     // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.
@@ -764,12 +768,12 @@ export function resolveConfig(): ResolvedConfig {
   } catch {
     // no settings file yet — env + defaults
   }
-  return mergeSettings(file ?? {}, process.env);
+  return mergeSettings(file ?? {}, purpose === "perps" ? { ...process.env, MERRYMEN_WALLET_PURPOSE: "perps" } : process.env);
 }
 
 /** Read the raw settings file (unresolved), tolerating BOM/missing. */
-export function readSettingsFile(): MerrymenSettings {
-  const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
+export function readSettingsFile(purpose: GrantPurpose = "spot"): MerrymenSettings {
+  const file = purpose === "perps" ? homePaths.settings("perps") : process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
   try {
     return JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, "")) as MerrymenSettings;
   } catch {

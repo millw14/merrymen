@@ -10,6 +10,7 @@
  * doesn't cover — hence `datetime(at,'unixepoch')` is gone from the SQL here and
  * timestamps are formatted from the raw epoch by fmtEpoch() instead.
  */
+import { isGrantPurpose, type GrantPurpose } from "@merrymen/core";
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { homePaths } from "../../../worker/src/home";
@@ -22,7 +23,8 @@ import { wrapSqlite, makePgDb, type Db } from "../../../worker/src/db";
  */
 export function createReadDb(openPostgres: (url: string) => Promise<Db> = makePgDb) {
   let pgDriver: Promise<Db> | null = null;
-  return async function withReadDb<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
+  return async function withReadDb<T>(fn: (db: Db | null) => Promise<T>, purpose: GrantPurpose = "spot"): Promise<T> {
+    if (!isGrantPurpose(purpose)) throw new Error("Unrecognised agent account purpose");
     const url = process.env.DATABASE_URL;
     if (url) {
       // One pooled Postgres driver for the whole web process. The worker child is
@@ -33,10 +35,10 @@ export function createReadDb(openPostgres: (url: string) => Promise<Db> = makePg
       });
       return fn(await pgDriver);
     }
-    if (!existsSync(homePaths.db())) return fn(null);
+    if (!existsSync(homePaths.db(purpose))) return fn(null);
     let raw: DatabaseSync;
     try {
-      raw = new DatabaseSync(homePaths.db(), { readOnly: true });
+      raw = new DatabaseSync(homePaths.db(purpose), { readOnly: true });
     } catch {
       return fn(null);
     }

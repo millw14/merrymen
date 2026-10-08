@@ -29,6 +29,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { banner, c, spinner, type as typeOut, withSpinner } from "./ui.mjs";
 import { writeKillStanddownRequest } from "./standdown-request.mjs";
+import { withLocalGrantLock } from "./grant-lock.mjs";
 
 // Where the PACKAGE lives (npm global dir or a checkout) — code, never data.
 import { installService, serviceLogTail, serviceStatus, uninstallService } from "./service.mjs";
@@ -698,7 +699,7 @@ async function start() {
 
   const specs = [
     { name: "tavern", bin: localBin("next"), args: ["start", "-p", "3100", "-H", host], cwd: web, supervise: false },
-    { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "index.ts")], cwd: ROOT, supervise: true },
+    { name: "band  ", bin: localBin("tsx"), args: [path.join(ROOT, "worker", "src", "local-workers.ts")], cwd: ROOT, supervise: true },
   ];
 
   function launch(spec) {
@@ -1180,6 +1181,14 @@ async function kill() {
   }
   // A grant.json that does not parse is asked about by what it mentions, as
   // the web kill does: naming the perps marker makes it a perps grant.
+  let confirmedGrantRaw;
+  try { confirmedGrantRaw = readFileSync(GRANT, "utf8"); }
+  catch { bad("the grant could not be read; nothing was changed"); return; }
+  const lockHome = path.basename(HOME) === "perps" && path.basename(path.dirname(HOME)) === "accounts"
+    ? path.dirname(path.dirname(HOME)) : HOME;
+  const checkConfirmedGrant = () => {
+    if (readFileSync(GRANT, "utf8") !== confirmedGrantRaw) throw new Error("the grant changed while you were reviewing it; run merrymen kill again");
+  };
   let grant = readJson(GRANT);
   if (grant === null) {
     try {
@@ -1226,7 +1235,12 @@ async function kill() {
     // typed phrase, whether to let go of the agent without one.
     let standdown = null;
     if (perps) {
-      const req = await runPerpsHelper(["standdown-request"]);
+      let req;
+      try {
+        req = await withLocalGrantLock(lockHome, async () => { checkConfirmedGrant(); return runPerpsHelper(["standdown-request"]); });
+      } catch (e) {
+        p.close(); bad(`could not safely access the current grant: ${e instanceof Error ? e.message : "permission check failed"}. The grant is kept; nothing was stopped.`); process.exitCode = 1; return;
+      }
       if (req.result?.ok && req.result.nonce) {
         standdown = req.result;
         ok("stand-down requested — the worker closes Lighter positions with its own key");
@@ -1235,7 +1249,7 @@ async function kill() {
         let direct = null;
         let directWhy = null;
         try {
-          direct = writeKillStanddownRequest(HOME);
+          direct = await withLocalGrantLock(lockHome, () => { checkConfirmedGrant(); return writeKillStanddownRequest(HOME); });
         } catch (e) {
           directWhy = e instanceof Error ? e.message : String(e);
         }
@@ -1267,8 +1281,17 @@ async function kill() {
     p.close();
     // Keep the wallet + its owner key before the grant goes — killing the session
     // key must never mean losing access to funds still sitting in the account.
-    const archived = archiveCurrentGrant();
-    rmSync(GRANT, { force: true });
+    let archived;
+    try {
+      archived = await withLocalGrantLock(lockHome, () => {
+        checkConfirmedGrant();
+        const saved = archiveCurrentGrant();
+        rmSync(GRANT, { force: true });
+        return saved;
+      });
+    } catch (e) {
+      bad(e instanceof Error ? e.message : "the grant could not be verified; nothing was deleted"); process.exitCode = 1; return;
+    }
     ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
     if (archived) {
       console.log(
@@ -1325,11 +1348,12 @@ async function waitForStanddown(nonce, account) {
  * logged — so it can't leak into `ps` or shell history. Human progress streams
  * from the child's stderr; the one machine result line comes back on stdout.
  */
-function runRecoverChild(mode, { ownerKey, to, chainId, expect, perpPubKey, approved }) {
+function runRecoverChild(mode, { ownerKey, to, chainId, expect, perpPubKey, approved, purpose }) {
   return new Promise((resolve) => {
     const env = {
       ...process.env,
       MERRYMEN_RECOVER_OWNER_KEY: ownerKey,
+      MERRYMEN_RECOVER_PURPOSE: purpose ?? process.env.MERRYMEN_WALLET_PURPOSE ?? "spot",
       MERRYMEN_RECOVER_EXPECT: expect || "",
       // PUBLIC (a Lighter API public key): labels the key slot, decides nothing.
       MERRYMEN_RECOVER_PERP_PUBKEY: perpPubKey || "",
@@ -1446,6 +1470,7 @@ async function recover() {
   let ownerKey;
   let chainId;
   let expect;
+  let purpose = process.env.MERRYMEN_WALLET_PURPOSE ?? "spot";
 
   // Every wallet on this machine whose owner key we hold: the active grant PLUS
   // every archived one (replaced/killed wallets are kept with their key). A picker
@@ -1462,6 +1487,7 @@ async function recover() {
       chainId: grant.chainId || 4663,
       active: true,
       perp: grant.perp?.apiPublicKey ?? "",
+      purpose: grant.purpose ?? "spot",
     });
   }
   for (const g of await archivedWallets()) {
@@ -1475,12 +1501,13 @@ async function recover() {
         chainId: g.chainId || 4663,
         active: false,
         perp: g.perp?.apiPublicKey ?? "",
+        purpose: g.purpose ?? "spot",
       });
     }
   }
 
   if (candidates.length === 1) {
-    ({ key: ownerKey, account: expect, chainId, perp: perpPubKey } = candidates[0]);
+    ({ key: ownerKey, account: expect, chainId, perp: perpPubKey, purpose } = candidates[0]);
     ok(`recovering ${expect.slice(0, 10)}… on chain ${chainId} ${dim("(owner key read from disk)")}`);
   } else if (candidates.length > 1) {
     console.log(`  ${green("✓")} ${candidates.length} wallets on this machine ${dim("(owner key on disk)")}:`);
@@ -1490,7 +1517,7 @@ async function recover() {
     const pick = (await p.ask(`  which to recover? 1-${candidates.length}, or Enter to paste a different key: `)).trim();
     const idx = Number(pick) - 1;
     if (pick && Number.isInteger(idx) && candidates[idx]) {
-      ({ key: ownerKey, account: expect, chainId, perp: perpPubKey } = candidates[idx]);
+      ({ key: ownerKey, account: expect, chainId, perp: perpPubKey, purpose } = candidates[idx]);
       ok(`using ${expect.slice(0, 10)}… ${dim("(owner key read from disk — never typed)")}`);
     }
   }
@@ -1534,7 +1561,7 @@ async function recover() {
   }
 
   console.log(dim("\n  reading what the account holds…\n"));
-  const ctx = { ownerKey, to, chainId, expect, perpPubKey };
+  const ctx = { ownerKey, to, chainId, expect, perpPubKey, purpose };
   let plan = await runRecoverChild("plan", ctx);
   if (!plan.result || plan.result.ok !== true) {
     p.close();
@@ -1701,7 +1728,7 @@ async function recover() {
   }
 
   console.log(dim("\n  signing the recovery op with your owner key…\n"));
-  const done = await runRecoverChild("sweep", { ownerKey, to, chainId, expect });
+  const done = await runRecoverChild("sweep", { ownerKey, to, chainId, expect, purpose });
   if (done.result?.ok && done.result.txHash) {
     const base = EXPLORER[chainId] ?? EXPLORER[4663];
     console.log(`\n  ${green("✓")} ${bold("recovered.")} ${list} → ${to}`);

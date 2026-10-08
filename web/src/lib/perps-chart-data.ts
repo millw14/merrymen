@@ -1,3 +1,4 @@
+import { readRequestPurpose } from "./account-purpose";
 /**
  * Owner-only perps chart data. Mark candles and executions have different
  * prices: a marker is placed at the fill's exact venue time and execution
@@ -77,7 +78,9 @@ export function scaled(v: bigint, decimals: number): string {
 }
 
 export function chartQuery(url: string): ChartQuery | null {
+  if (!readRequestPurpose({ url })) return null;
   const p = new URL(url).searchParams;
+  p.delete("purpose");
   const market = p.get("market");
   const book = p.get("book");
   const window = p.get("window");

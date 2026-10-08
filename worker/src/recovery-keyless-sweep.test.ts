@@ -99,6 +99,7 @@ const hex = (n: bigint) => `0x${n.toString(16)}`;
 
 /** Every UserOperation that reached the bundler, exactly as it was sent. */
 const submitted: Record<string, unknown>[] = [];
+const derivations: string[] = [];
 
 /** The one op that went out, or a failure saying none did. */
 function sentOp(): Record<string, unknown> {
@@ -202,6 +203,7 @@ function stubNode() {
           const call = params[0] as { to?: string; data?: string };
           const data = String(call.data ?? "");
           if (data.startsWith(SEL.getSenderAddress)) {
+            derivations.push(data);
             return {
               jsonrpc: "2.0",
               id,
@@ -338,5 +340,39 @@ describe("a keyless owner can SWEEP — the half a derivation test cannot see", 
         `recovery must not carry ${field}`,
       );
     }
+  });
+});
+
+
+describe("dedicated Perps recovery uses the same fixed account index throughout", () => {
+  it("planning changes the factory request, and sweeping never falls back to the Spot derivation", async () => {
+    derivations.length = 0;
+    await planRecovery({ chain: robinhoodChain, owner: ownerFromPrivateKey(HIDDEN), rpcUrl: url });
+    const spotInit = derivations.at(-1);
+    assert.ok(spotInit);
+    derivations.length = 0;
+    const calls = noCalls();
+    const owner = ownerFromSigner(privyShapedAccount(calls));
+    await planRecovery({ purpose: "perps", chain: robinhoodChain, owner, rpcUrl: url, expectedSmartAccount: DEPLOYS_TO });
+    const perpInit = derivations.at(-1);
+    assert.ok(perpInit);
+    assert.notEqual(perpInit, spotInit, "the same owner must use different factory init data for its Perps wallet");
+    assert.deepEqual(calls, noCalls());
+    derivations.length = 0;
+    const before = submitted.length;
+    await recoverFunds({ purpose: "perps", chain: robinhoodChain, owner, bundlerUrl: url, rpcUrl: url,
+      to: DESTINATION, expectedSmartAccount: DEPLOYS_TO, extraTokens });
+    assert.equal(submitted.length, before + 1);
+    assert.ok(derivations.length > 0);
+    assert.ok(derivations.every(data => data === perpInit), "replanning and signing retain the reviewed Perps index");
+    assert.ok(calls.signMessage + calls.signTypedData > 0);
+  });
+
+  it("a mismatching reviewed account fails before any owner signature or submission", async () => {
+    const calls = noCalls(), before = submitted.length;
+    await assert.rejects(recoverFunds({ purpose: "perps", chain: robinhoodChain,
+      owner: ownerFromSigner(privyShapedAccount(calls)), bundlerUrl: url, rpcUrl: url,
+      to: DESTINATION, expectedSmartAccount: DESTINATION, extraTokens }), /does not match|mismatch|different/i);
+    assert.deepEqual(calls, noCalls()); assert.equal(submitted.length, before);
   });
 });

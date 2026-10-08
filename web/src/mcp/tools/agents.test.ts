@@ -127,8 +127,8 @@ test("the screens on each path exist and lead where the text says", () => {
   assert.ok(app.includes(`onStop={() => {window.location.href="/grant";}}`));
   assert.ok(shows(wallet, `<button className="btn-kill" style={{ padding: "10px 16px" }} onClick={discard}>`));
   // …through the one kill reader, which reads the server's answer before anything local changes.
-  assert.ok(wallet.includes("await sendKill()"), "discard deletes the server-side grant");
-  assert.ok(source("web/src/lib/kill-answer.ts").includes(`fetchImpl("/api/grants", { method: "DELETE" })`), "sendKill is the DELETE");
+  assert.ok(wallet.includes("await sendKill(fetch, purpose)"), "discard deletes the server-side grant");
+  assert.ok(source("web/src/lib/kill-answer.ts").includes(`fetchImpl(purpose === "perps" ? "/api/grants?purpose=perps" : "/api/grants", { method: "DELETE" })`), "sendKill is the DELETE");
 
   // You → Trading limits → Edit signed limits goes to /grant; You → Settings is /settings.
   assert.ok(you.includes("<strong>Trading limits</strong>"));

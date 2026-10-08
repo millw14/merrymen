@@ -35,6 +35,7 @@
  * rows still in the ledger; they are not reachable here and are not meant to be
  * — mixing two accounts' books is the bug the epoch filter exists to prevent.
  */
+import { grantPurpose, type GrantPurpose } from "@merrymen/core";
 import { readFile } from "node:fs/promises";
 import { homePaths } from "@merrymen/home";
 import { getGrantStore } from "@merrymen/grant-store";
@@ -45,11 +46,11 @@ import { tenantOf } from "@/lib/auth";
  * grant. HOSTED ONLY — the caller cannot name the agent, so one tenant can never
  * read (or spend the gas of) another's.
  */
-export async function hostedAgentFor(req: Request): Promise<`0x${string}` | null> {
+export async function hostedAgentFor(req: Request, purpose: GrantPurpose = "spot"): Promise<`0x${string}` | null> {
   const tenant = tenantOf(req);
   if (!tenant) return null;
   try {
-    const grant = await getGrantStore().get(tenant);
+    const grant = await getGrantStore(purpose).get(tenant);
     return (grant?.smartAccount as `0x${string}`) ?? null;
   } catch {
     // An unreadable store is "we cannot tell", and the honest render of that is
@@ -63,9 +64,10 @@ export async function hostedAgentFor(req: Request): Promise<`0x${string}` | null
  * there, the localhost middleware is the perimeter, and the machine owns exactly
  * one agent.
  */
-export async function diskAgent(): Promise<`0x${string}` | null> {
+export async function diskAgent(purpose: GrantPurpose = "spot"): Promise<`0x${string}` | null> {
   try {
-    const g = JSON.parse(await readFile(homePaths.grant(), "utf8")) as { smartAccount?: string };
+    const g = JSON.parse(await readFile(homePaths.grant(purpose), "utf8")) as { smartAccount?: string; purpose?: unknown };
+    if (grantPurpose(g) !== purpose) return null;
     return (g.smartAccount as `0x${string}`) ?? null;
   } catch {
     return null;

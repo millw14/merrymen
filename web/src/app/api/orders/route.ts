@@ -55,8 +55,8 @@
  */
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
-import { merrymenHome } from "@merrymen/home";
-import { isHostedMode } from "@merrymen/core";
+import { purposeHome } from "@merrymen/home";
+import { isHostedMode, type GrantPurpose } from "@merrymen/core";
 // RELATIVE, NOT THE ALIASES, so a test can run this route. `tsx --test`
 // resolves against the root tsconfig, which has no @merrymen/command-files or
 // @merrymen/settings; the build resolves either way (lib/order-ceiling.ts
@@ -64,6 +64,7 @@ import { isHostedMode } from "@merrymen/core";
 import { openCommands, readCommandState, writeCommand } from "../../../../../worker/src/command-files";
 import { resolveConfig } from "../../../../../worker/src/settings";
 import { tenantOf } from "@/lib/auth";
+import { readRequestPurpose } from "@/lib/account-purpose";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { ceilingFor } from "@/lib/order-ceiling";
@@ -103,12 +104,12 @@ export const dynamic = "force-dynamic";
  * above it. Hosted, `resolveConfig()` is the house's own settings file and says
  * nothing about this tenant's cadence.
  */
-async function orderTtlFor(req: Request): Promise<number> {
-  let tickSeconds = resolveConfig().tickSeconds;
+async function orderTtlFor(req: Request, purpose: GrantPurpose): Promise<number> {
+  let tickSeconds = resolveConfig(purpose).tickSeconds;
   if (isHostedMode()) {
     const tenant = tenantOf(req);
     try {
-      const own = tenant ? (await getSettingsStore().get(tenant))?.tickSeconds : undefined;
+      const own = tenant ? (await getSettingsStore(purpose).get(tenant))?.tickSeconds : undefined;
       if (typeof own === "number" && Number.isFinite(own) && own > 0) tickSeconds = own;
     } catch {
       /* the container's own tick is the safe fallback */
@@ -117,7 +118,7 @@ async function orderTtlFor(req: Request): Promise<number> {
   return orderTtlMs(tickSeconds);
 }
 
-const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
+const agentFor = (req: Request, purpose: GrantPurpose) => (isHostedMode() ? hostedAgentFor(req, purpose) : diskAgent(purpose));
 
 /**
  * The primary key for this order, in this minute.
@@ -143,10 +144,12 @@ function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: n
 }
 
 export async function POST(req: Request) {
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
   // Hosted, `tenantOf` is a server-verified wallet and the account is resolved
   // through the grant store — a caller can never name someone else's agent.
   // Self-hosted there is no auth and the localhost middleware is the perimeter.
-  const agent = await agentFor(req);
+  const agent = await agentFor(req, purpose);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
 
   let body: OrderBody;
@@ -162,9 +165,21 @@ export async function POST(req: Request) {
   if (isHostedMode() && ownerMismatch((body as { owner?: unknown } | null)?.owner, tenantOf(req))) {
     return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
   }
+  const expectedAccount = (body as { expectedAccount?: unknown } | null)?.expectedAccount;
+  if (expectedAccount !== undefined) {
+    if (typeof expectedAccount !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(expectedAccount)) {
+      return NextResponse.json({ error: "invalid expected account" }, { status: 400 });
+    }
+    if (expectedAccount.toLowerCase() !== agent.toLowerCase()) {
+      return NextResponse.json({ error: "the selected wallet changed; review this order again" }, { status: 409 });
+    }
+  }
   const read = readOrder(body);
   if ("error" in read) return NextResponse.json({ error: read.error }, { status: 400 });
   const order = read.order;
+  if (purpose === "perps" && order.purpose !== "close-perp" && order.purpose !== "flatten-perps") {
+    return NextResponse.json({ error: "this account accepts perpetual position exits only" }, { status: 400 });
+  }
 
   // The owner's own ceiling on a typed order. The setting is named for the
   // Telegram surface because that is the surface that existed when it was
@@ -178,7 +193,7 @@ export async function POST(req: Request) {
   // smaller, SAFE direction) when the tenant stored none or the store cannot be
   // read. Enforced again in the worker, which reads the settings.json the
   // orchestrator wrote for that child: two gates, neither relying on the other.
-  const ceiling = await ceilingFor(req, isHostedMode());
+  const ceiling = await ceilingFor(req, isHostedMode(), purpose);
   if (ceiling > 0 && order.usdgAmount > ceiling) {
     return NextResponse.json(
       { error: `${order.usdgAmount} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.` },
@@ -187,7 +202,7 @@ export async function POST(req: Request) {
   }
 
   const now = Date.now();
-  const ttlMs = await orderTtlFor(req);
+  const ttlMs = await orderTtlFor(req, purpose);
   // ONE DEADLINE, stamped on the order and handed back to the card, so the
   // worker that enforces it, the slot that waits on it and the card that
   // follows it all read the same number.
@@ -200,12 +215,12 @@ export async function POST(req: Request) {
   // against each open order's own `expiresAt`, and only a key collision is a
   // duplicate.
   const result = isHostedMode()
-    ? await withReadDb((db) => placeHostedOrder(db, { agent, id, args, expiresAt, now })).catch(
+    ? await withReadDb((db) => placeHostedOrder(db, { agent, id, args, expiresAt, now }), purpose).catch(
         () => ({ ok: false as const, why: "unreachable" as const }),
       )
     : // The web process and the worker share one MERRYMEN_HOME — no table, no ferry.
       placeSelfHostedOrder(
-        { open: () => openCommands(merrymenHome()), write: (cmd) => writeCommand(merrymenHome(), cmd) },
+        { open: () => openCommands(purposeHome(purpose)), write: (cmd) => writeCommand(purposeHome(purpose), cmd) },
         { id, args, expiresAt, now },
       );
 
@@ -246,7 +261,9 @@ export async function POST(req: Request) {
  * line from it; an older worker's answer carries none and renders `result`.
  */
 export async function GET(req: Request) {
-  const agent = await agentFor(req);
+  const purpose = readRequestPurpose(req);
+  if (!purpose) return NextResponse.json({ error: "invalid account purpose" }, { status: 400 });
+  const agent = await agentFor(req, purpose);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
   const params = new URL(req.url).searchParams;
   const id = params.get("id") ?? "";
@@ -261,9 +278,9 @@ export async function GET(req: Request) {
     // Self-hosted the files ARE the record: there is no orchestrator to ferry a
     // result into a table, so reading the table would answer "none" for an
     // order that had already filled.
-    return NextResponse.json(selfHostedOrderReply(id, id ? readCommandState(merrymenHome(), id) : null, Date.now()));
+    return NextResponse.json(selfHostedOrderReply(id, id ? readCommandState(purposeHome(purpose), id) : null, Date.now()));
   }
 
-  const reply = await withReadDb((db) => readHostedOrder(db, agent, id, Date.now())).catch(() => LEDGER_UNREADABLE);
+  const reply = await withReadDb((db) => readHostedOrder(db, agent, id, Date.now()), purpose).catch(() => LEDGER_UNREADABLE);
   return NextResponse.json(reply.body, { status: reply.status });
 }

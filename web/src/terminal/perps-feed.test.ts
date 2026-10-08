@@ -18,11 +18,11 @@ it("loads all-market private activity only on demand and labels real markets and
   try {
     await dom.render(createElement(PerpsFeed,props));assert.deepEqual(requests,[]);
     await dom.click("My activity");
-    assert.deepEqual(requests,["/api/perps/activity?market=all&book=live"]);
+    assert.deepEqual(requests,["/api/perps/activity?market=all&book=live&purpose=perps"]);
     assert.match(dom.container.textContent??"",/BTC-PERP · OPEN/);assert.match(dom.container.textContent??"",/ETH-PERP · FUNDING/);
     assert.match(dom.container.textContent??"",/real-money executions/);
     await dom.click("Paper");
-    assert.equal(requests.at(-1),"/api/perps/activity?market=all&book=paper");
+    assert.equal(requests.at(-1),"/api/perps/activity?market=all&book=paper&purpose=perps");
     assert.match(dom.container.textContent??"",/simulations; no real money moves/);
     assert.equal(dom.container.querySelectorAll(".perps-activity-list>li").length,2);
   } finally {globalThis.fetch=original;await dom.close();}

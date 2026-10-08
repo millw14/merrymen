@@ -125,12 +125,14 @@ export interface PublicIdentity {
   tenant: `0x${string}`;
   /** Minted once, never re-minted, never derived. Links depend on it. */
   slug: string;
-  /** Every smart account this tenant has held, newest first. */
+  /** Every owned smart account; the primary Spot account stays first. */
   accounts: `0x${string}`[];
   social?: SocialIdentity | null;
   createdAt: number;
   updatedAt: number;
 }
+
+export interface EnsureIdentityOptions { primary?: boolean }
 
 export interface IdentityStore {
   /**
@@ -140,7 +142,7 @@ export interface IdentityStore {
    * and every follow edge depends on that. Calling it on a re-grant appends the
    * new account and leaves the slug alone.
    */
-  ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity>;
+  ensure(tenant: `0x${string}`, account: `0x${string}`, options?: EnsureIdentityOptions): Promise<PublicIdentity>;
   get(tenant: `0x${string}`): Promise<PublicIdentity | null>;
   bySlug(slug: string): Promise<PublicIdentity | null>;
   /** Resolve a social login to the tenant that claimed it. */
@@ -179,9 +181,20 @@ export interface IdentityStore {
 const now = () => Math.floor(Date.now() / 1000);
 
 /** Newest first, no duplicates, case-normalised. */
-function withAccount(accounts: `0x${string}`[], account: `0x${string}`): `0x${string}`[] {
+function withAccount(accounts: `0x${string}`[], account: `0x${string}`, primary = true): `0x${string}`[] {
   const a = account.toLowerCase() as `0x${string}`;
+  if (!primary) return accounts.some(x => x.toLowerCase() === a) ? [...accounts] : [...accounts, a];
   return [a, ...accounts.filter((x) => x.toLowerCase() !== a)];
+}
+
+// Each backend uses one writer/connection. Concurrent mode creations must not
+// interleave two read-modify-write operations (or two BEGINs on one pg client).
+const identityEnsures = new Map<string, Promise<unknown>>();
+function serialIdentityEnsure<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const next = (identityEnsures.get(key) ?? Promise.resolve()).catch(() => {}).then(run);
+  identityEnsures.set(key, next);
+  void next.finally(() => { if (identityEnsures.get(key) === next) identityEnsures.delete(key); }).catch(() => {});
+  return next;
 }
 
 // ── file backend ─────────────────────────────────────────────────────────────
@@ -205,7 +218,10 @@ export class FileIdentityStore implements IdentityStore {
       return null;
     }
   }
-  async ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
+  ensure(tenant: `0x${string}`, account: `0x${string}`, options: EnsureIdentityOptions = {}): Promise<PublicIdentity> {
+    return serialIdentityEnsure(`file:${this.dir}`, () => this.ensureSerial(tenant, account, options));
+  }
+  private async ensureSerial(tenant: `0x${string}`, account: `0x${string}`, options: EnsureIdentityOptions): Promise<PublicIdentity> {
     // ONE IDENTITY PER ACCOUNT, on this backend too. Single-process and
     // single-writer, so a scan is the whole enforcement — but the RULE has to
     // be the same one, or a self-hosted install permits what hosted refuses.
@@ -218,7 +234,7 @@ export class FileIdentityStore implements IdentityStore {
     }
     const existing = await this.get(tenant);
     const rec: PublicIdentity = existing
-      ? { ...existing, accounts: withAccount(existing.accounts, account), updatedAt: now() }
+      ? { ...existing, accounts: withAccount(existing.accounts, account, options.primary !== false), updatedAt: now() }
       : {
           tenant: tenant.toLowerCase() as `0x${string}`,
           slug: mintSlug(),
@@ -402,19 +418,21 @@ async function backfillClaims(c: PgClientLike): Promise<ClaimState> {
     }
   }
 
-  try {
-    const { rows: grantRows } = await c.query(
-      `SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants`,
-    );
-    for (const r of grantRows) {
-      const acc = (r as { smart_account?: unknown }).smart_account;
-      if (acc === null || acc === undefined) continue;
-      observed.push({ account: String(acc), tenant: String(r.tenant ?? ""), source: "installed-grant" });
+  for (const table of ["grants", "perps_grants"] as const) {
+    try {
+      const { rows: grantRows } = await c.query(
+        `SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM ${table}`,
+      );
+      for (const r of grantRows) {
+        const acc = (r as { smart_account?: unknown }).smart_account;
+        if (acc === null || acc === undefined) continue;
+        observed.push({ account: String(acc), tenant: String(r.tenant ?? ""), source: "installed-grant" });
+      }
+    } catch (e) {
+      // Either account store may not yet exist on a fresh installation. An
+      // unreadable existing table is not evidence that its accounts are free.
+      if ((e as { code?: unknown } | null)?.code !== "42P01") throw e;
     }
-  } catch {
-    // The grants table lives in the same database but is owned by another
-    // store, and a deployment that has not created it yet is a fresh install
-    // with nothing to backfill.
   }
 
   const { rows: claimRows } = await c.query(`SELECT smart_account, tenant FROM agent_account`);
@@ -537,7 +555,10 @@ export class PgIdentityStore implements IdentityStore {
    * no interleaving in which both proceed, and no ordering in which the loser
    * silently overwrites.
    */
-  async ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
+  ensure(tenant: `0x${string}`, account: `0x${string}`, options: EnsureIdentityOptions = {}): Promise<PublicIdentity> {
+    return serialIdentityEnsure(`pg:${this.url}`, () => this.ensureSerial(tenant, account, options));
+  }
+  private async ensureSerial(tenant: `0x${string}`, account: `0x${string}`, options: EnsureIdentityOptions): Promise<PublicIdentity> {
     const c = await this.client();
     const t = tenant.toLowerCase();
     const a = account.toLowerCase();
@@ -550,6 +571,7 @@ export class PgIdentityStore implements IdentityStore {
 
     await c.query("BEGIN");
     try {
+      await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`identity-owner:${t}`]);
       await c.query(
         `INSERT INTO agent_account (smart_account, tenant, claimed_at)
          VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
@@ -566,7 +588,7 @@ export class PgIdentityStore implements IdentityStore {
 
       const existing = await this.getWithin(c, tenant);
       if (existing) {
-        const accounts = withAccount(existing.accounts, account);
+        const accounts = withAccount(existing.accounts, account, options.primary !== false);
         await c.query(`UPDATE agent_identity SET accounts = $2, updated_at = $3 WHERE tenant = $1`, [
           t,
           JSON.stringify(accounts),
@@ -580,6 +602,7 @@ export class PgIdentityStore implements IdentityStore {
       // into a no-op and costs nothing on the path that never collides.
       for (let attempt = 0; attempt < 3; attempt++) {
         const slug = mintSlug();
+        await c.query("SAVEPOINT mint_identity_slug");
         try {
           const { rows } = await c.query(
             `INSERT INTO agent_identity (tenant, slug, accounts, created_at, updated_at)
@@ -596,13 +619,8 @@ export class PgIdentityStore implements IdentityStore {
           // A failed statement poisons the transaction, so the retry needs a
           // savepoint rather than another attempt on a dead one.
           if (attempt === 2) throw e;
-          await c.query("ROLLBACK");
-          await c.query("BEGIN");
-          await c.query(
-            `INSERT INTO agent_account (smart_account, tenant, claimed_at)
-             VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
-            [a, t, now()],
-          );
+          // Retain the account claim and owner lock while drawing another slug.
+          await c.query("ROLLBACK TO SAVEPOINT mint_identity_slug");
         }
       }
       await c.query("ROLLBACK");

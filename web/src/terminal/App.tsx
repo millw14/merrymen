@@ -1,5 +1,8 @@
 "use client";
 import { isPerpsStyle, type PerpsStyleId } from "@merrymen/core";
+import { PerpsExitDialog, type PerpsExitRequest } from "./PerpsExitDialog";
+import { usePerpsAccount } from "./usePerpsAccount";
+import { PerpsFundingAccount } from "./PerpsFundingAccount";
 import { perpsReviewLink } from "./perps-review-link";
 import { PerpsShutdownNotice } from "./PerpsShutdownNotice";
 import { PerpsRecoveryNotice } from "./PerpsRecoveryNotice";
@@ -51,7 +54,6 @@ import { GroupChat } from "./screens/GroupChat";
 import { Home } from "./screens/Home";
 import { PerpsScreen } from "./PerpsScreen";
 import { PerpsFeed } from "./PerpsFeed";
-import { PerpsAccount } from "./PerpsAccount";
 import type { PerpsMobileView } from "./PerpsMobileNav";
 import { PerpsEntrance } from "./PerpsEntrance";
 import { perpsEntranceOwner, usePerpsEntrance } from "./use-perps-entrance";
@@ -129,6 +131,9 @@ export function App() {
    * "Loading your account…" for both — for ever, after a failure.
    */
   const [accountFailed, setAccountFailed] = useState(false);
+  const dedicatedPerps = usePerpsAccount(account?.session ?? null);
+  const walletPurpose = searchParams.get("purpose") === "perps" ? "perps" : "spot";
+  const moneyAccount = walletPurpose === "perps" ? dedicatedPerps.account : account;
   /** Bumped by sign-out, which starts every clock again from nothing — see resetLive. */
   const [epoch, setEpoch] = useState(0);
   /**
@@ -189,6 +194,8 @@ export function App() {
    * has to be deleted.
    */
   const chatKey = chatKeyFor(account?.session ?? null);
+  const [perpsExit, setPerpsExit] = useState<(PerpsExitRequest & { ownerKey: string }) | null>(null);
+  useEffect(() => { setPerpsExit(null); }, [chatKey, dedicatedPerps.account?.status.grant?.smartAccount]);
   const [perpsNavigation, setPerpsNavigation] = useState<{owner: string | null; view: PerpsMobileView; revision: number} | null>(null);
   const [perpsProfile, setPerpsProfile] = useState<{owner: string | null; slug: string; revision: number} | null>(null);
   const showPerpsView = (view: PerpsMobileView) => setPerpsNavigation(previous => ({owner: chatKey, view, revision: (previous?.revision ?? 0) + 1}));
@@ -196,6 +203,11 @@ export function App() {
     setPerpsProfile(previous => ({owner: chatKey, slug, revision: (previous?.revision ?? 0) + 1}));
     showPerpsView("feed");
   };
+  const requestedPerpsView = searchParams.get("view");
+  useEffect(() => {
+    if (pathname === "/perps" && (requestedPerpsView === "account" || requestedPerpsView === "feed" || requestedPerpsView === "trade" || requestedPerpsView === "positions"))
+      setPerpsNavigation(previous => ({ owner: chatKey, view: requestedPerpsView, revision: (previous?.revision ?? 0) + 1 }));
+  }, [pathname, requestedPerpsView, chatKey]);
   const entrance = usePerpsEntrance(perpsEntranceOwner(account?.session ?? null));
   useEffect(() => {
     entrance.cancelPending();
@@ -306,7 +318,7 @@ export function App() {
   /** The account or the owner's book is being read right now — a retry asked for, or the timer's. */
   const accountBusy = clockShell.shell.accountBusy;
   /** The account and the owner's book, again, now — see ShellClocksHandle.refreshAccount. */
-  const refreshAccount = clockShell.refreshAccount;
+  const refreshAccount = useCallback(() => { clockShell.refreshAccount(); dedicatedPerps.refresh(); }, [clockShell.refreshAccount, dedicatedPerps.refresh]);
 
   /**
    * A REAL-MONEY TRADE LANDING, SAID — see live-news.ts.
@@ -548,9 +560,9 @@ export function App() {
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>}
         {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "perps" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount}/>}
-        {screen.kind === "create" && <CreateAgent key={`${chatKey ?? "visitor"}:${perpsSetup ? "perps" : "spot"}:${initialPerpsStyle ?? "default"}`} perpsOnly={perpsSetup} initialPerpsStyle={initialPerpsStyle} account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onBack={()=>perpsSetup ? openScreen({kind:"perps"}) : goTab("home")} onDone={()=>{refreshAccount();if(perpsSetup) openScreen({kind:"perps"}); else goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
-        {screen.kind === "settings" && <Settings initialPerpsStyle={pendingPerpsStyle?.owner === chatKey ? pendingPerpsStyle?.style : undefined} onInitialPerpsStyleConsumed={consumePerpsStyle} onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
-        {screen.kind === "grant" && <Wallet/>}
+        {screen.kind === "create" && <CreateAgent key={`${chatKey ?? "visitor"}:${perpsSetup ? "perps" : "spot"}:${initialPerpsStyle ?? "default"}`} perpsOnly={perpsSetup} initialPerpsStyle={initialPerpsStyle} account={perpsSetup ? dedicatedPerps.account : account} accountFailed={perpsSetup ? dedicatedPerps.failed : accountFailed} retrying={perpsSetup ? dedicatedPerps.busy : accountBusy} onRefresh={refreshAccount} onBack={()=>perpsSetup ? openScreen({kind:"perps"}) : goTab("home")} onDone={()=>{refreshAccount();if(perpsSetup) openScreen({kind:"perps"}); else goTab("agent");}} onFund={grant=>{if(perpsSetup){refreshAccount();router.push("/perps?view=account");}else{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}}/>}
+        {screen.kind === "settings" && <Settings key={walletPurpose} purpose={walletPurpose} initialPerpsStyle={pendingPerpsStyle?.owner === chatKey ? pendingPerpsStyle?.style : undefined} onInitialPerpsStyleConsumed={consumePerpsStyle} onFund={()=>walletPurpose === "perps" ? router.push("/perps?view=account") : openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={walletPurpose === "perps" ? refreshAccount : chat.refreshSettings}/>}
+        {screen.kind === "grant" && <Wallet purpose={walletPurpose}/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
             tokens={live.tokens}
@@ -570,25 +582,26 @@ export function App() {
             hasAgent={account?.status.exists === true}
           />
         )}
-        {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} session={account?.session ?? null} workerAliveAt={account?.status.workerAliveAt} perps={mine?.perps} hasAgent={account?.status.exists === true}
+        {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} session={account?.session ?? null} workerAliveAt={dedicatedPerps.account?.status.workerAliveAt} perps={dedicatedPerps.perps} hasAgent={dedicatedPerps.account?.status.exists === true}
           requestedView={perpsNavigation?.owner === chatKey ? perpsNavigation : undefined}
-          feedContent={<PerpsFeed ownerKey={chatKey} mineSlug={mine?.slug ?? null} hasAgent={account?.status.exists === true} currentBook={mine?.perps?.book ?? null}
+          feedContent={<PerpsFeed ownerKey={chatKey} mineSlug={mine?.slug ?? null} hasAgent={dedicatedPerps.account?.status.exists === true} currentBook={dedicatedPerps.perps?.book ?? null}
             theses={live.theses} tokens={live.tokens} agents={live.agents} read={live.reads.theses}
             onToken={id => openScreen({kind:"token",id})} onDesk={() => goTab("agent")} onAccount={() => showPerpsView("account")}
             requestedProfile={perpsProfile?.owner === chatKey ? perpsProfile : undefined} />}
-          accountContent={<PerpsAccount account={account} ownerKey={chatKey} perps={mine?.perps} onCreate={() => router.push("/create?for=perps")}
-            onPermission={() => openScreen({kind:"grant"})} onProfile={showPerpsProfile} onRefreshAccount={refreshAccount}
+          accountContent={<PerpsFundingAccount account={dedicatedPerps.account} spotAccount={account} ownerKey={chatKey} perps={dedicatedPerps.perps} onCreate={() => router.push("/create?for=perps")}
+            onPermission={() => router.push("/grant?purpose=perps")} onProfile={showPerpsProfile} onRefreshAccount={refreshAccount}
             signOut={account?.session.hosted && account.session.address ? <SignOut after={() => { resetLive(); setAccount(null); setTurns([]); setChatDraft(""); setPerpsNavigation(null); setPerpsProfile(null); }} /> : undefined} />}
           onSpot={() => goTab("feed")} onRefreshAccount={refreshAccount}
           onCreate={(style) => router.push(`/create?for=perps${isPerpsStyle(style) ? `&style=${encodeURIComponent(style)}` : ""}`)}
-          onPermission={() => openScreen({kind:"grant"})}
+          onPermission={() => router.push("/grant?purpose=perps")}
           onFund={() => showPerpsView("account")}
           onReviewExit={({market,book}) => {
-            if (!chatKey || !account?.status.exists || chat.sending || chat.confirming) return;
-            chat.setProposal({id: market ? "close-perp" : "flatten-perps", args: {...(market ? {symbol:market} : {}), ...(book ? {book} : {})}});
-            goTab("agent");
+            const grant = dedicatedPerps.account?.status.grant;
+            if (!chatKey || !grant || !book) return;
+            setPerpsExit({ ownerKey: chatKey, owner: dedicatedPerps.account?.session.hosted ? dedicatedPerps.account.session.address : null, account: grant.smartAccount, market, book });
           }}
-          onSettings={(style) => { setPendingPerpsStyle(style ? { owner: chatKey, style } : null); openScreen({ kind: "settings" }); }} />}
+          onSettings={() => showPerpsView("trade")} />}
+        {screen.kind === "perps" && perpsExit?.ownerKey === chatKey && perpsExit.account.toLowerCase() === dedicatedPerps.account?.status.grant?.smartAccount.toLowerCase() && <PerpsExitDialog {...perpsExit} onClose={() => setPerpsExit(null)} onChanged={refreshAccount}/>}
         {screen.kind === "tab" && screen.tab === "feed" && (
           <Feed
             read={live.reads.theses}
@@ -761,8 +774,8 @@ export function App() {
             page that loaded fine. The guard moves to the render, where it
             belongs, and the AccountEntry above says which kind of nothing this
             is: loading, signed out, or no agent yet. */}
-        {!desktop && money && account && (
-          <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>
+        {!desktop && money && moneyAccount && (
+          <FundingPanel purpose={walletPurpose} key={`${walletPurpose}:${money}`} mode={money} account={moneyAccount!} onClose={()=>goTab(tab)}/>
         )}
         {screen.kind === "search" && (
           <Search
@@ -783,7 +796,7 @@ export function App() {
           className="desktop-money-panel"
           aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
         >
-          {account && <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>}
+          {moneyAccount && <FundingPanel purpose={walletPurpose} key={`${walletPurpose}:${money}`} mode={money} account={moneyAccount!} onClose={()=>goTab(tab)}/>}
         </aside>
       ) : desktop && !perpsSurface && mine ? (
         <DesktopPortfolio

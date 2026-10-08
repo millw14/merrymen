@@ -52,7 +52,7 @@ describe("the status carries energy", () => {
     assert.ok(branch > get, "the heartbeat branch must still exist, or this test is guarding nothing");
     const end = blockEnd(CODE, branch);
     assert.ok(end > branch, "the branch must close");
-    const read = CODE.indexOf("readAgentEnergy(grant.smartAccount)", get);
+    const read = CODE.indexOf("readAgentEnergy(grant.smartAccount, readDb)", get);
     assert.ok(read > 0, "GET must read the agent's energy for ITS OWN account");
     assert.ok(read > end, "and not inside the branch that only runs without a heartbeat file");
     assert.equal(
