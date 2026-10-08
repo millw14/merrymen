@@ -7,7 +7,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createBilling, isPlatformFailure, openLedger, parseBillingConfig, quotaHeaders, replayLedger, upgradeRaw } from "./billing.mjs";
@@ -204,6 +204,50 @@ test("a torn final line is cut before the next append, so the record after it su
   await f.restart();
   assert.equal(f.billing.blocked, null, "nothing unreadable remains");
   assert.equal(f.view().plan.selected, "crumbs", "the select written after the torn line is intact");
+});
+
+test("a line another process is still writing is never cut as torn: repair and append wait for its lock", async () => {
+  // The operator CLI appends to this file too. Seen mid-write (a line that
+  // crosses a page is copied in two steps), its line ends without a newline,
+  // like a torn one; cutting it then removed the CLI's record once its write
+  // completed. A writer holds billing.jsonl.lock from repair to append.
+  const f = await fixture();
+  await f.account();
+  const acct = (await f.records()).find((r) => r.type === "account");
+  const lock = `${f.file}.lock`;
+  await writeFile(lock, "", { flag: "wx" }); // the CLI is mid-append
+  const cli = `${JSON.stringify({ id: "f".repeat(32), type: "adjustment", at: START, account_id: acct.account_id, amount_raw: T(5).toString(), note: "cli", operator: true })}\n`;
+  await appendFile(f.file, cli.slice(0, 40));
+  const gateway = f.plan("crumbs"); // the gateway's own append, meanwhile
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.ok((await f.raw()).endsWith(cli.slice(0, 40)), "the gateway waits; it does not cut the line being written");
+  await appendFile(f.file, cli.slice(40));
+  await rm(lock);
+  assert.equal((await gateway).status, 200);
+  await f.billing.tail();
+  assert.equal(f.billing.blocked, null);
+  assert.deepEqual((await f.records()).map((r) => r.type), ["config", "account", "adjustment", "select"]);
+  assert.equal(f.view().credit_tokens, "5", "the CLI's record survived");
+  await assert.rejects(stat(lock), { code: "ENOENT" }, "the gateway released its own lock");
+});
+
+test("a lock left by a writer that died is broken once stale; one held too long refuses the write without failing the ledger", async () => {
+  const f = await fixture({ lockWaitMs: 300 });
+  await f.account();
+  const lock = `${f.file}.lock`;
+  await writeFile(lock, "");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lock, old, old);
+  assert.equal((await f.plan("crumbs")).status, 200, "a minute-old lock is a dead writer's");
+  await writeFile(lock, ""); // fresh, and never released
+  const started = Date.now();
+  const busy = await f.plan("loaf");
+  assert.deepEqual([busy.status, busy.json.error.code], [503, "billing_unavailable"]);
+  assert.ok(Date.now() - started < 3_000, "the wait is bounded");
+  assert.equal(f.billing.blocked, null, "nothing was written, so nothing needs repair");
+  assert.match(f.logs.join("\n"), /locked by another writer/);
+  await rm(lock);
+  assert.equal((await f.plan("loaf")).status, 200);
 });
 
 test("a failed append refuses billing writes until the ledger is repaired, then they resume", async () => {

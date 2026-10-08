@@ -7,7 +7,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,6 +119,29 @@ test("comp refuses to run alongside a period the developer paid for, and names i
   assert.equal((await s.run("comp", other, "crumbs", "7", "--note", "first")).code, 0);
   const again = await s.run("comp", other, "loaf", "7", "--note", "second");
   assert.equal(again.code, 0, again.stderr);
+});
+
+test("the CLI waits for a line the gateway is still writing instead of cutting it as torn", async () => {
+  const s = await setup();
+  assert.equal((await s.billing.createAccount(OWNER, "Acme")).status, 201);
+  const file = path.join(s.dir, "billing.jsonl");
+  const acct = (await s.records()).find((r) => r.type === "account");
+  // Another writer mid-append (the gateway here; any record it appends would
+  // do): it holds the lock, and half its line is on disk.
+  await writeFile(`${file}.lock`, "", { flag: "wx" });
+  const line = `${JSON.stringify({ id: "e".repeat(32), type: "adjustment", at: Date.now(), account_id: acct.account_id, amount_raw: (7n * ONE_TOKEN).toString(), note: "first", operator: true })}\n`;
+  await appendFile(file, line.slice(0, 50));
+  const cli = s.run("adjust", OWNER, "+5", "--note", "while the gateway writes");
+  await new Promise((resolve) => setTimeout(resolve, 1_500)); // the CLI has started and is waiting
+  assert.ok((await readFile(file, "utf8")).endsWith(line.slice(0, 50)), "the gateway's line is not cut");
+  await appendFile(file, line.slice(50));
+  await rm(`${file}.lock`);
+  const r = await cli;
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual((await s.records()).map((x) => [x.type, x.note]), [["config", undefined], ["account", undefined], ["adjustment", "first"], ["adjustment", "while the gateway writes"]]);
+  await s.billing.tail();
+  assert.equal(s.billing.accountView(OWNER).json.credit_tokens, "12", "both survived");
+  assert.equal(s.billing.blocked, null);
 });
 
 test("the CLI will not write to a corrupt ledger", async () => {

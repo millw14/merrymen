@@ -32,7 +32,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, mkdir, open, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 /** Where the Railway volume is mounted. Same variable lib/signups.mjs uses. */
@@ -230,17 +230,71 @@ export async function repairTail(file) {
   }
 }
 
+/** withAppendLock() gave up: another writer held the file for the whole wait. Nothing was written. */
+export class FileBusy extends Error {}
+
+const LOCK_POLL_MS = 25;
+/** A lock this old belongs to a writer that died mid-append: one ≤ 4 KiB append and its flush never take this long. */
+const LOCK_STALE_MS = 10_000;
+
+/**
+ * Run `fn` (a repairTail() and the append after it) holding `<file>.lock`,
+ * so no OTHER PROCESS repairs or appends to `file` meanwhile. The gateway and
+ * the operator CLIs (partners-cli, billing-cli) write the same files. Without
+ * this, one could read the other's line while that write was still being
+ * copied in (a line crossing a page lands in two steps), take it for a torn
+ * tail and truncate it; the truncate waits for the write to finish, then
+ * removes a complete, acknowledged record.
+ *
+ * The lock is a file created exclusively ("wx") and removed after. One left
+ * by a writer that died is broken once LOCK_STALE_MS old. The wait is bounded
+ * by a count of attempts, then FileBusy, with nothing written.
+ */
+export async function withAppendLock(file, fn, { waitMs = 5_000 } = {}) {
+  const lock = `${file}.lock`;
+  await mkdir(path.dirname(file), { recursive: true });
+  const attempts = Math.max(1, Math.ceil(waitMs / LOCK_POLL_MS));
+  for (let i = 0; i < attempts; i++) {
+    let fh;
+    try {
+      fh = await open(lock, "wx");
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      let age = null;
+      try { age = Date.now() - (await stat(lock)).mtimeMs; } catch (e) { if (e.code !== "ENOENT") throw e; }
+      if (age !== null && age > LOCK_STALE_MS) {
+        console.error(`[partners] ${path.basename(lock)} is ${Math.round(age / 1000)} s old: a writer died holding it; removing it`);
+        await rm(lock, { force: true });
+      } else if (age !== null) {
+        await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+      }
+      continue;
+    }
+    await fh.close();
+    try {
+      return await fn();
+    } finally {
+      await rm(lock, { force: true });
+    }
+  }
+  throw new FileBusy(`${path.basename(file)} is locked by another writer`);
+}
+
 /** Append a record. Creating and revoking are the same operation on this file. */
 export async function writeRecord(rec) {
   await mkdir(DIR(), { recursive: true });
-  // Before every append, not only the first: the CLI writes this file too, and
-  // a torn line it leaves would otherwise swallow the gateway's next record.
-  const removed = await repairTail(FILE());
-  if (removed) console.error(`[partners] partners.jsonl ended in a torn line: removed ${removed} bytes before appending`);
-  // flush:true for the same reason signups.mjs does it: a container can stop
-  // between the write and the flush, and a revocation is exactly the write that
-  // must not be the one that is lost.
-  await appendFile(FILE(), `${JSON.stringify(rec)}\n`, { encoding: "utf8", flush: true });
+  // Under the lock the CLI takes too (withAppendLock), so neither cuts a line
+  // the other is still writing.
+  await withAppendLock(FILE(), async () => {
+    // Before every append, not only the first: the CLI writes this file too, and
+    // a torn line it leaves would otherwise swallow the gateway's next record.
+    const removed = await repairTail(FILE());
+    if (removed) console.error(`[partners] partners.jsonl ended in a torn line: removed ${removed} bytes before appending`);
+    // flush:true for the same reason signups.mjs does it: a container can stop
+    // between the write and the flush, and a revocation is exactly the write that
+    // must not be the one that is lost.
+    await appendFile(FILE(), `${JSON.stringify(rec)}\n`, { encoding: "utf8", flush: true });
+  });
 }
 
 /**

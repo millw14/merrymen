@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -189,6 +189,24 @@ test("a torn final line is cut before the next append, so a revocation after it 
   const v = await createPartners({ secret: SECRET }).verify(key);
   assert.equal(v.ok, false, "the revocation written after a torn line must take effect");
   assert.equal(v.code, "key_revoked");
+});
+
+test("a registry line another process is still writing is never cut: writeRecord waits for its lock", async () => {
+  const { key, keyId } = await issue({ name: "locked" });
+  const rec = (await loadRegistry()).get(keyId);
+  const lock = `${FILE}.lock`;
+  await writeFile(lock, "", { flag: "wx" }); // partners-cli is mid-append
+  const other = makeKey();
+  const line = `${JSON.stringify({ keyId: other.keyId, name: "cli", hash: hashSecret(SECRET, other.secret), scopes: ["read:agents"], status: "active" })}\n`;
+  await appendFile(FILE, line.slice(0, 30));
+  const revoking = writeRecord({ ...rec, status: "revoked" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.ok((await readFile(FILE, "utf8")).endsWith(line.slice(0, 30)), "the CLI's line is not cut while it is written");
+  await appendFile(FILE, line.slice(30));
+  await rm(lock);
+  await revoking;
+  assert.equal((await createPartners({ secret: SECRET }).verify(other.key)).ok, true, "the CLI's key survived");
+  assert.equal((await createPartners({ secret: SECRET }).verify(key)).code, "key_revoked", "and the revocation landed after it");
 });
 
 test("repairTail keeps a file that ends cleanly, and empties one with no complete line", async () => {

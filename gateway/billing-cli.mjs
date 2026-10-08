@@ -13,7 +13,9 @@
  *   node billing-cli.mjs reconcile [--all]
  *
  * WRITES GO THROUGH THE GATEWAY'S OWN WRITER (lib/billing.mjs openLedger): the
- * same torn-tail repair, one flushed line per change. The running gateway
+ * same torn-tail repair under the same lock (billing.jsonl.lock, so neither
+ * process cuts a line the other is still writing), one flushed line per
+ * change. The running gateway
  * picks an adjustment or a comp up within 10 seconds; it accepts no other
  * record type from another process, so this CLI writes no other.
  *
@@ -64,6 +66,17 @@ async function writer() {
   return ledger;
 }
 
+/** One record, through the gateway's writer and its lock. A refusal says why and that nothing was written. */
+async function write(ledger, fields) {
+  try {
+    return await ledger.enqueue(() => ledger.append(fields));
+  } catch (err) {
+    die(err?.reason === "busy"
+      ? `${ledger.file} stayed locked by another writer (the gateway appending): nothing written. Run the command again.`
+      : `nothing written: ${err?.message ?? err}`);
+  }
+}
+
 async function list() {
   const billing = await view();
   const ledger = await openLedger({ dataDir: config.dataDir, log: () => {} });
@@ -101,7 +114,7 @@ async function adjust(argv) {
   const ledger = await writer();
   const acct = ledger.state.byOwner.get(owner);
   if (!acct) die(`no account for ${owner}: the developer creates one at merrymen.dev/api first`);
-  await ledger.enqueue(() => ledger.append({ type: "adjustment", account_id: acct.account_id, amount_raw: amount.toString(), note: why, operator: true }));
+  await write(ledger, { type: "adjustment", account_id: acct.account_id, amount_raw: amount.toString(), note: why, operator: true });
   console.log(`[billing] ${owner}: ${amount > 0n ? "+" : ""}${formatTokens(amount)} MERRYMEN of API credit, now ${formatTokens(ledger.state.byOwner.get(owner).credit)}. The gateway applies it within 10 s.`);
 }
 
@@ -127,10 +140,10 @@ async function comp(argv) {
       + "and hide or use up part of what was paid for: comp after that date, or credit tokens with adjust. Nothing written.");
   }
   const hex = () => randomBytes(12).toString("hex");
-  await ledger.enqueue(() => ledger.append({ type: "charge", account_id: acct.account_id, charge_id: `chg_${hex()}`, period_id: `per_${hex()}`,
+  await write(ledger, { type: "charge", account_id: acct.account_id, charge_id: `chg_${hex()}`, period_id: `per_${hex()}`,
     reason: "comp", tier: plan.id, price_raw: "0", tier_price_raw: plan.price_raw.toString(), requests: plan.requests,
     tier_requests: plan.requests, rpm: plan.rpm,
-    starts_at: now, ends_at: now + days * DAY, note: why }));
+    starts_at: now, ends_at: now + days * DAY, note: why });
   const longer = days * DAY > PERIOD_MS ? ` (its quota of ${plan.requests} requests covers all ${days} days)` : "";
   console.log(`[billing] ${owner}: ${plan.name} at no charge until ${new Date(now + days * DAY).toISOString()}${longer}. The gateway applies it within 10 s.`);
 }

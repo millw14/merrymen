@@ -63,6 +63,8 @@
  *   settleWaitMs   how long prepare() waits for a settle (2 s)
  *   readOnly       the operator CLI's view: no write probe, no config line, no timers
  *   writeLine      (file, line) => Promise, the append itself; tests inject failures here
+ *   lockWaitMs     how long an append waits for billing.jsonl.lock, held by another
+ *                  writer (the operator CLI), before it is refused (5 s)
  * The returned object has `mode` (effective, after the durability and ledger
  * checks), `enforced`, `paymentsReady` and `blocked` (null, or why billing
  * writes are refused).
@@ -115,7 +117,7 @@ import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createPublicClient, defineChain, http } from "viem";
-import { loadRegistry, repairTail } from "./partners.mjs";
+import { FileBusy, loadRegistry, repairTail, withAppendLock } from "./partners.mjs";
 import { ONE_TOKEN, PERIOD_DAYS, PERIOD_MS, PLANS, TOKEN, ceilTokens, formatTokens, validatePlans } from "./billing-plans.mjs";
 
 export const LEDGER_FILE = "billing.jsonl";
@@ -422,7 +424,7 @@ const tailAccepts = (r) => r?.type === "adjustment" || r?.type === "config" || (
  * goes through. Shared by createBilling and billing-cli.mjs, so the CLI appends
  * with the same repair and flush. `append` must run inside `enqueue`.
  */
-export async function openLedger({ dataDir, now: clock = Date.now, log = console.error, writeLine = appendLine } = {}) {
+export async function openLedger({ dataDir, now: clock = Date.now, log = console.error, writeLine = appendLine, lockWaitMs = 5_000 } = {}) {
   if (!dataDir) throw new Error("openLedger: dataDir is required");
   const file = path.join(dataDir, LEDGER_FILE);
   let state = emptyState();
@@ -472,12 +474,15 @@ export async function openLedger({ dataDir, now: clock = Date.now, log = console
     return run;
   }
 
-  /** Cut a torn tail and re-read the file, so the index is exactly what is on disk. */
-  async function repair() {
+  /** Cut a torn tail and re-read the file, so the index is exactly what is on disk. The caller holds the append lock. */
+  async function repairLocked() {
     const removed = await repairTail(file);
     if (removed) log(`[billing] ${LEDGER_FILE} ended in a torn line: removed ${removed} bytes`);
     await rebuild();
   }
+  /** The file is shared with the operator CLI: repairs and appends hold its lock (lib/partners.mjs withAppendLock). */
+  const locked = (fn) => withAppendLock(file, fn, { waitMs: lockWaitMs });
+  const repair = () => locked(repairLocked);
 
   /** Inside the queue: retry a pending repair, then say whether writes may go ahead. */
   async function writable() {
@@ -489,22 +494,32 @@ export async function openLedger({ dataDir, now: clock = Date.now, log = console
 
   async function append(fields, { at } = {}) {
     if (!(await writable())) throw new BillingUnavailable(blocked());
-    await mkdir(dataDir, { recursive: true });
-    // Before every append, not only the first: the CLI writes this file too.
-    if (await repairTail(file)) { log(`[billing] ${LEDGER_FILE} ended in a torn line: cut before appending`); await rebuild(); }
-    if (blocked()) throw new BillingUnavailable(blocked());
-    const rec = { id: hex(16), type: fields.type, at: at ?? nowMs(), ...fields };
-    const line = `${JSON.stringify(rec)}\n`;
-    if (Buffer.byteLength(line) > MAX_LINE_BYTES) throw new Error(`ledger record over ${MAX_LINE_BYTES} bytes`);
+    let rec;
     try {
-      await writeLine(file, line);
+      rec = await locked(async () => {
+        // Before every append, not only the first: the CLI writes this file too.
+        if (await repairTail(file)) { log(`[billing] ${LEDGER_FILE} ended in a torn line: cut before appending`); await rebuild(); }
+        if (blocked()) throw new BillingUnavailable(blocked());
+        const r = { id: hex(16), type: fields.type, at: at ?? nowMs(), ...fields };
+        const line = `${JSON.stringify(r)}\n`;
+        if (Buffer.byteLength(line) > MAX_LINE_BYTES) throw new Error(`ledger record over ${MAX_LINE_BYTES} bytes`);
+        try {
+          await writeLine(file, line);
+        } catch (err) {
+          // Some of the line, or all of it, may be on disk. Until the file is cut
+          // back to a complete line and re-read, nothing more is written.
+          failed = true;
+          log(`[billing] ledger append failed (${errName(err)}): billing writes are refused until it is repaired`);
+          try { await repairLocked(); failed = false; log("[billing] ledger repaired: writes resume"); } catch (e) { log(`[billing] ledger repair failed (${errName(e)})`); }
+          throw new BillingUnavailable("failed");
+        }
+        return r;
+      });
     } catch (err) {
-      // Some of the line, or all of it, may be on disk. Until the file is cut
-      // back to a complete line and re-read, nothing more is written.
-      failed = true;
-      log(`[billing] ledger append failed (${errName(err)}): billing writes are refused until it is repaired`);
-      try { await repair(); failed = false; log("[billing] ledger repaired: writes resume"); } catch (e) { log(`[billing] ledger repair failed (${errName(e)})`); }
-      throw new BillingUnavailable("failed");
+      if (!(err instanceof FileBusy)) throw err;
+      // Nothing was written: the ledger needs no repair, only a later retry.
+      log(`[billing] ${LEDGER_FILE} is locked by another writer (the operator CLI?): this write is refused, try again`);
+      throw new BillingUnavailable("busy");
     }
     try {
       const why = applyRecord(state, rec);
@@ -791,7 +806,7 @@ export async function createBilling({
   dataDir, mode = "off", treasury = null, previousTreasuries = [], startBlock = null,
   minConfirmations = 64, minAgeSec = 120, publicClient = null,
   now: clock = Date.now, log = console.error, plans = PLANS, keyRegistry = loadRegistry,
-  timers = true, writeLine, readTimeoutMs = READ_TIMEOUT_MS, settleWaitMs = SETTLE_WAIT_MS, readOnly = false,
+  timers = true, writeLine, readTimeoutMs = READ_TIMEOUT_MS, settleWaitMs = SETTLE_WAIT_MS, readOnly = false, lockWaitMs = 5_000,
 } = {}) {
   validatePlans(plans);
   if (!dataDir) throw new Error("createBilling: dataDir is required");
@@ -803,7 +818,7 @@ export async function createBilling({
     const why = await probeWritable(dataDir);
     if (why) { log(`[billing] ${dataDir} is not writable (${why}): billing is off`); mode = "off"; }
   }
-  const ledger = await openLedger({ dataDir, now: clock, log, ...(writeLine ? { writeLine } : {}) });
+  const ledger = await openLedger({ dataDir, now: clock, log, lockWaitMs, ...(writeLine ? { writeLine } : {}) });
   if (ledger.blocked() === "unreadable" && mode !== "off") { log("[billing] the ledger cannot be read: billing is off"); mode = "off"; }
 
   treasury = treasury ? lower(treasury) : null;
