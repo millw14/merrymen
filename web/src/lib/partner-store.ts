@@ -276,7 +276,11 @@ export class SqlPartnerStore implements PartnerStore {
   async revokeByTenant(id: string, tenant: PartnerAddress) { return this.revokeWhere(id, "tenant", address(tenant)); }
   async revoke(partnerId: string, id: string) { return this.revokeWhere(id, "partner_id", partnerId); }
   async list(partnerId: string) {
-    return (await (await this.reader()).prepare("SELECT record_json FROM partner_connections WHERE partner_id = ? ORDER BY id LIMIT 100").all(partnerId)).map(row => connectionOf(row)!);
+    // Oldest first, then id: the ids are random, so ordering by them alone made
+    // WHICH 100 a large app saw arbitrary. createdAt lives only in record_json;
+    // reading it there needs no schema change and covers every existing row.
+    const createdAt = this.dialect === "postgres" ? "(record_json::jsonb ->> 'createdAt')::bigint" : "json_extract(record_json, '$.createdAt')";
+    return (await (await this.reader()).prepare(`SELECT record_json FROM partner_connections WHERE partner_id = ? ORDER BY ${createdAt}, id LIMIT 100`).all(partnerId)).map(row => connectionOf(row)!);
   }
   async consumeNonce(nonce: string, expiresAt: number): Promise<boolean> {
     const now = this.clock();

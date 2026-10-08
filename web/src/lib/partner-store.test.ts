@@ -65,6 +65,23 @@ test("partner namespace isolates external ids, lookup, list, and revocation", as
   assert.equal((await store.byToken(first.token!))?.status, "pending");
 });
 
+test("list returns the oldest connections first, then by id, before its limit", async () => {
+  const { store, advance } = fixture();
+  const made: string[] = [];
+  for (let n = 0; n < 8; n++) {
+    made.push((await store.create(input(`user-${n}`))).connection.id);
+    advance(1);
+  }
+  // Same-second connections fall back to id order, never to insertion luck.
+  const twins = [(await store.create(input("twin-a"))).connection.id, (await store.create(input("twin-b"))).connection.id].sort();
+  assert.deepEqual((await store.list("partner-a")).map(c => c.id), [...made, ...twins]);
+  advance(1);
+  for (let n = 0; n < 100; n++) await store.create(input(`later-${n}`));
+  const page = await store.list("partner-a");
+  assert.equal(page.length, 100);
+  assert.deepEqual(page.slice(0, 10).map(c => c.id), [...made, ...twins], "a full page keeps the same oldest connections");
+});
+
 test("token binding is single-use even with concurrent different tenants", async () => {
   const { store } = fixture();
   const created = await store.create(input());

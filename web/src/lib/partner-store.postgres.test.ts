@@ -47,6 +47,18 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       assert.equal(await second.byId("different-app", results[0].connection.id), null);
     });
 
+    await t.test("list orders by creation time, then id, reading createdAt from the stored record", async () => {
+      let now = 1_800_000_000;
+      const clocked = new SqlPartnerStore(async () => databases[0], "postgres", () => now, secret);
+      const made: string[] = [];
+      for (let n = 0; n < 6; n++) {
+        made.push((await clocked.create(create("ordered", `user-${n}`))).connection.id);
+        now += 1;
+      }
+      const twins = [(await clocked.create(create("ordered", "twin-a"))).connection.id, (await clocked.create(create("ordered", "twin-b"))).connection.id].sort();
+      assert.deepEqual((await second.list("ordered")).map(c => c.id), [...made, ...twins]);
+    });
+
     await t.test("one-time consent and unique owner binding hold under concurrent transactions", async () => {
       const pending = await first.create(create("bind-race"));
       const results = await Promise.allSettled([
