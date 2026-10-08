@@ -11,7 +11,7 @@ const SIGNATURE = new RegExp(`^0x(?:[0-9a-fA-F]{2}){1,${MAX_SIGNATURE_BYTES}}$`)
 /** The site gives up after 20s; two chain reads must answer well inside that. */
 const within = (ms, promise) => Promise.race([promise,
   new Promise((_, reject) => setTimeout(() => reject(new Error("chain read timed out")), ms).unref())]);
-const same =(a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""); return x.length === y.length && timingSafeEqual(x, y); };
+const same = (a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""); return x.length === y.length && timingSafeEqual(x, y); };
 const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status: r.status,
   scopes: r.scopes, rate_per_min: r.rpm, created_at: r.created_at, prefix: `mmp_${r.keyId}_` });
 

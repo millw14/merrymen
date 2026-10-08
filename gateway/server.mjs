@@ -194,7 +194,7 @@ const server = createServer(async (req, res) => {
       let body;
       if (req.method === "POST") {
         try { body = await readBody(req); } catch { body = null; }
-        if (body === null || Buffer.byteLength(body) > 8192) return respond(res, { status: 413, json: { error: { message: "Request too large" } } });
+        if (body === null || Buffer.byteLength(body) > 8192) return respond(res, { status: 413, json: { error: { code: "request_too_large", message: "Request too large" } } });
       }
       return respond(res, await developerApi.handle({ method: req.method, path: pathname.slice("/developer/v1".length),
         authorization: req.headers.authorization, session: req.headers["x-developer-session"], body,

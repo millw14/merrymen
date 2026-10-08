@@ -261,6 +261,9 @@ test("the server hands the developer API raw text, so a null body is a 400 rathe
       headers: { authorization: `Bearer ${portalSecret}`, "content-type": "application/json" } });
     for (const body of ["null", "[]", "7", "{"]) assert.equal((await post("/challenge", body)).status, 400, body);
     assert.equal((await post("/challenge", JSON.stringify({ address: `0x${"ab".repeat(20)}` }))).status, 200);
-    assert.equal((await post("/challenge", "x".repeat(8193))).status, 413);
+    for (const size of [8193, 300 * 1024]) {
+      const tooLarge = await post("/challenge", "x".repeat(size));
+      assert.equal(tooLarge.status, 413, `${size} bytes`); assert.equal((await tooLarge.json()).error.code, "request_too_large");
+    }
   } finally { gateway.stop(); }
 });
