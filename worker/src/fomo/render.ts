@@ -730,8 +730,10 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
       const count = held !== null && !windowed ? ` (it lists ${held.toLocaleString("en-US")})` : "";
       // A ROOM IS NEVER PROMISED A RETRY: this renderer cannot see the room's
       // allowance, and a new page is 1,250 credits of its 2,500 an hour, so
-      // "ask me again" would be followed by "used up" (review on #306).
-      const retry = audience === "group" ? "" : " Ask me again in a minute.";
+      // "ask me again" would be followed by "used up" (review on #306). The
+      // owner's matches how long the empty copy is held (service.ts
+      // EMPTY_HOLD_MS, 2 min): asked again in a minute, she would get it back.
+      const retry = audience === "group" ? "" : " Ask me again in a couple of minutes.";
       const line = `The provider didn't return the theses on ${subject} just now${count}.${retry}`;
       return [audience === "group" ? roomNote(line) : line];
     }

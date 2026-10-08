@@ -182,7 +182,8 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   empty (`pageRows: 0`) while marking it not available, or under a count it still holds
   for the coin, is said as "Fomo didn't return the
   theses on X just now (it lists N).", never "no theses". The owner is also told when to
-  ask again; a room never is, since its allowance (a page is 1,250 of its 2,500 credits
+  ask again ("Ask me again in a couple of minutes.", how long the empty copy is held); a
+  room never is, since its allowance (a page is 1,250 of its 2,500 credits
   an hour) may refuse the retry and "used up" would follow the promise. Rows
   Merrymen filtered off (another chain's) are "none" as before, and a trader's read never
   quotes the coin's count. An empty page is logged by its shape only (available, count,

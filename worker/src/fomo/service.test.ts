@@ -2132,6 +2132,20 @@ describe("a held empty thesis page (review on #306)", () => {
     assert.equal(env.data?.pageRows, 3);
   });
 
+  it("the owner's 'ask me again in a couple of minutes' is how long the empty copy is held: a minute on it is the same copy, two minutes on a new read", async () => {
+    const h = await harness();
+    h.routes.set("thesis-token", () => json({ theses: [], available: false }, 200, { "x-credits-cost": "1250" }));
+    const dm = { surface: "telegram-dm" as const };
+    const first = await h.invoke<TokenThesesData>("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, dm);
+    assert.match(renderEnvelope(first, { audience: "owner", maxChars: 3_500, now: h.clock.now }), /just now\. Ask me again in a couple of minutes\./);
+    h.clock.now += 65_000;
+    await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, dm);
+    assert.equal(h.count("/v2/thesis/token/"), 1);
+    h.clock.now += 55_000;
+    await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, dm);
+    assert.equal(h.count("/v2/thesis/token/"), 2, "asked again after two minutes, as told: read again");
+  });
+
   it("an empty first page under a count is never expanded to a multi-page read", async () => {
     const h = await harness();
     h.routes.set("thesis-token", () => json({ theses: [], available: false, totalAvailable: 4190 }, 200, { "x-credits-cost": "1250" }));

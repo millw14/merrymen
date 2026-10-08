@@ -738,7 +738,9 @@ describe("a coin with no theses, in a room (review r2)", () => {
       // A room is never promised a retry its allowance may refuse (review on #306).
       assert.doesNotMatch(text, /ask me again|in a minute/i, text);
       for (const l of text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
-      assert.match(renderEnvelope(e, O), /The provider didn't return the theses on .* just now.*\. Ask me again in a minute\./);
+      // The owner is told when, in step with how long the empty copy is held (two minutes, review on #306).
+      assert.match(renderEnvelope(e, O), /The provider didn't return the theses on .* just now.*\. Ask me again in a couple of minutes\./);
+      assert.doesNotMatch(renderEnvelope(e, O), /in a minute/);
     }
     // A windowed read whose page had theses, none in the window, is still "none in that window", whatever the all-time count.
     const windowed = env("fomo_get_token_theses", "empty", { ...none, pageRows: 25 }, { coverage: { ...cov(4190).coverage, requested: { window: "24h" } } });
