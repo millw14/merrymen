@@ -1428,7 +1428,11 @@ halves, quarters, dozens, doubled, tripled, halved and "bil": "half the
 supply", "price doubled since launch", "a bil market cap"; "the second wave
 of buyers" is no figure), no
 $, @, # or link, no quotation mark, no five-word run shared with any sample,
-nothing about instructions, nothing waited on that is a claim, and in no
+nothing about instructions, nothing in the first person or naming the agent,
+Merrymen, this room or the room's own owner, admin, mod, bot or desk ("the
+group's bot is holding a bag", "the owner here is heavy in it"; "contract
+owner renounced" and "the agent posts on its own" stay), nothing waited on
+that is a claim, and in no
 phrase (the gist, for, against or waited on) a holder snapshot, a giveaway
 (or the team giving, gives or gave tokens away), a handout, a free mint, a
 holder bonus, rewards or a reward distribution, or tokens sent or dropped to

@@ -147,11 +147,16 @@ const ABOUT_ITSELF = /\b(?:instructions?|prompts?|system|assistant|ignore|disreg
 /**
  * A phrase in the first person, or about Merrymen or this room, would be said
  * in the agent's own voice: "Shogun picked it as a buy", "we're holding a bag"
- * are a nomination or a position nobody took (rules 1, 2, 5). Never bot, agent,
- * ai, owner or us: "rides the AI agent narrative", "contract owner renounced"
- * and "a US listing" are fair points.
+ * are a nomination or a position nobody took (rules 1, 2, 5). So would one
+ * about the room's own people, its owner, admin, mod, bot or desk ("the
+ * group's bot is holding a bag", "the owner here is heavy in it", "the desk
+ * is long it"): the owner's own state
+ * never reaches a room (SECOND_PERSON drops "your agent"). Never the bare bot,
+ * agent, ai, owner or us: "rides the AI agent narrative", "contract owner
+ * renounced", "the agent posts on its own" and "a US listing" are fair points.
  */
-const SELF_REF = /\b(?:i|i'm|im|i've|i'd|we|we're|we've|we'd|our|ours|my|me|merrymen|merryman)\b|\bthis (?:group|chat|room)\b/i;
+const SELF_REF =
+  /\b(?:i|i'm|im|i've|i'd|we|we're|we've|we'd|our|ours|my|me|merrymen|merryman)\b|\b(?:this|the) desk\b|\bthis (?:group|chat|room)\b|\b(?:group|chat|room|channel)(?:'s)?\s+(?:owners?|admins?|bots?|agents?|mods?)\b|\b(?:owners?|admins?|bots?|agents?|mods?|desk)\s+(?:here|(?:of|in)\s+(?:the|this|your)\s+(?:group|chat|room|channel))\b/i;
 /**
  * A lure, not a view, said back to a room: an airdrop, a presale, free tokens,
  * a wallet to connect, verify, sync or revoke, tokens to migrate, a portal,
