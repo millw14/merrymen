@@ -467,6 +467,49 @@ test("a renewal the selection cannot fund keeps the tier that ended, and falls t
   assert.equal(f.view().plan.id, "free");
 });
 
+/** A comp as billing-cli.mjs writes it, from another process, picked up by the gateway's tail. */
+async function comp(f, tier, days, owner = OWNER) {
+  const ledger = await openLedger({ dataDir: f.dir, now: () => f.clock.t, log: () => {} });
+  const acct = ledger.state.byOwner.get(owner);
+  const hex = (n) => n.toString(16).padStart(24, "0");
+  const n = Math.floor(Math.random() * 2 ** 40);
+  await ledger.enqueue(() => ledger.append({ type: "charge", account_id: acct.account_id, charge_id: `chg_${hex(n)}`, period_id: `per_${hex(n)}`,
+    reason: "comp", tier, price_raw: "0", tier_price_raw: PLANS[tier].price_raw.toString(), requests: PLANS[tier].requests,
+    tier_requests: PLANS[tier].requests, rpm: PLANS[tier].rpm, starts_at: f.clock.t, ends_at: f.clock.t + days * DAY, note: "test" }));
+  await f.billing.tail();
+}
+
+test("a renewal never spends credit on a comped tier the developer did not choose", async () => {
+  const f = await fixture();
+  await f.account();
+  await f.plan("feast"); // selected, and paid toward, but not yet affordable
+  await f.grant(500_000);
+  await comp(f, "loaf", 30);
+  assert.equal(f.billing.planFor(OWNER).id, "loaf");
+  f.advance(30 * DAY);
+  // The selection cannot be funded, and Loaf was a gift: nothing renews.
+  assert.equal(f.billing.needsSettle(OWNER), false);
+  assert.equal(await f.billing.settle(OWNER), 0);
+  assert.deepEqual([f.view().plan.id, f.view().plan.selected, f.view().credit_tokens], ["free", "feast", "500000"]);
+  assert.deepEqual([f.view().due_for, f.view().due_tokens], ["renewal", "500000"]);
+  assert.deepEqual((await f.charges()).map((c) => c.reason), ["comp"]);
+});
+
+test("a comp the developer upgraded is theirs: a renewal falls back to the tier they paid for", async () => {
+  const f = await fixture();
+  await f.account();
+  await f.grant(750_000);
+  await comp(f, "crumbs", 30);
+  await f.plan("loaf"); // (400,000 − 100,000) for the whole comp: 450,000 left
+  assert.deepEqual((await f.charges()).map((c) => [c.reason, c.tier]), [["comp", "crumbs"], ["upgrade", "loaf"]]);
+  await f.plan("feast"); // a dearer selection the credit cannot cover (600,000 now, 1,000,000 to renew)
+  f.advance(30 * DAY);
+  await f.billing.prepare(OWNER);
+  const renew = (await f.charges()).at(-1);
+  assert.deepEqual([renew.reason, renew.tier], ["renew", "loaf"]);
+  assert.equal(f.view().credit_tokens, "50000");
+});
+
 test("selecting Free cancels the renewal: the running period ends and its credit stays", async () => {
   const f = await fixture();
   await f.account();

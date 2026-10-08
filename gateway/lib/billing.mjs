@@ -319,9 +319,12 @@ const APPLY = {
     s.chargeIds.add(r.charge_id);
     const terms = { tier: r.tier, requests: r.requests, rpm: r.rpm, tier_price: BigInt(r.tier_price_raw ?? r.price_raw),
       tier_requests: r.tier_requests ?? r.requests };
-    if (period) Object.assign(period, terms);
+    // `bought`: the period's tier is one the developer paid for (activated,
+    // renewed or upgraded to), not only an operator's comp.
+    if (period) Object.assign(period, terms, { bought: true });
     else {
-      period = { period_id: r.period_id, account_id: a.account_id, reason: r.reason, starts_at: r.starts_at, ends_at: r.ends_at, ...terms };
+      period = { period_id: r.period_id, account_id: a.account_id, reason: r.reason, starts_at: r.starts_at, ends_at: r.ends_at, ...terms,
+        bought: r.reason !== "comp" };
       s.periods.set(period.period_id, period);
       a.periods.push(period);
     }
@@ -574,7 +577,7 @@ export function upgradeRequests(newRequests, oldTierRequests, current, endsAt, n
   return current + Number((more * left) / BigInt(PERIOD_MS));
 }
 
-/** The period that ended last: the tier a lapsed renewal falls back to. */
+/** The period that ended last. */
 function lastPeriod(acct) {
   let last = null;
   for (const p of acct.periods) if (!last || p.ends_at >= last.ends_at) last = p;
@@ -588,6 +591,8 @@ function lastPeriod(acct) {
  *     ever) or renew, starting NOW: an idle gap is never paid for;
  *   a renewal the selection cannot fund renews the tier that just ended if
  *     credit covers that, so an unpaid upgrade never drops service to Free;
+ *     but only a tier the developer paid for: an operator's comp is a gift,
+ *     and when one ends only the developer's own selection is renewed;
  *   a period running and a dearer tier selected: one upgrade charge for the
  *     time left, keeping the period and its usage, when credit covers it;
  *   a cheaper tier, or Free, waits for the period to end.
@@ -601,7 +606,8 @@ export function decide(acct, now, plans) {
     const had = acct.periods.length > 0;
     if (sel && sel.price_raw > 0n && acct.credit >= sel.price_raw) return { reason: had ? "renew" : "activate", plan: sel, price: sel.price_raw };
     if (!had) return null;
-    const last = tierOf(plans, lastPeriod(acct).tier);
+    const ended = lastPeriod(acct);
+    const last = ended.bought ? tierOf(plans, ended.tier) : null;
     if (last && last.price_raw > 0n && acct.credit >= last.price_raw) return { reason: "renew", plan: last, price: last.price_raw };
     return null;
   }
@@ -623,8 +629,8 @@ function simulate(acct, now, plans, selected = acct.selected) {
     sim.credit -= act.price;
     const terms = { tier: act.plan.id, requests: act.requests ?? act.plan.requests, rpm: act.plan.rpm,
       tier_price: act.plan.price_raw, tier_requests: act.plan.requests };
-    if (act.period) Object.assign(act.period, terms);
-    else sim.periods.push({ period_id: `sim_${i}`, starts_at: now, ends_at: now + PERIOD_MS, ...terms });
+    if (act.period) Object.assign(act.period, terms, { bought: true });
+    else sim.periods.push({ period_id: `sim_${i}`, reason: act.reason, starts_at: now, ends_at: now + PERIOD_MS, ...terms, bought: true });
   }
   return { sim, actions };
 }
