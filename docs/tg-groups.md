@@ -720,10 +720,37 @@ what tells a coin from a person, and the router writes nothing anyone sees.
 
 **Checked by code.** A coin or trader the model names counts only when it is
 written in the line as a whole word (a coin may also come from the line it
-replies to); never the bot's own names, a stop word or a number. A coin is
+replies to); never the bot's own names, a stop word, a number or a board
+position ("second", "one", "first", "number", "winner": "what's the second
+one holding" asks about a row, never a trader called "second"). A coin is
 never an `@name` and a trader never a `$tag`. The time
 window and the buy or sell side are read from the line's own words, never
-from the model. A Fomo pick reaches the research only as a fixed question
+from the model.
+
+**A chain** (decision D3, 2026-10-07). Fomo's lists cover every chain; the
+menu's optional `chain` (robinhood, solana, base, ethereum, bsc) cuts a
+board, the crowd or small coins to one, and the model is told to put one
+only when they want one chain's coins. Code reads it: the → line's own words
+first (`chainIn`: full names anywhere, short ones only where a chain goes, so
+"on sol" and "hood coins" are chains and "SOL is ripping", "the base case"
+and "eth price" are not), whatever the model picked; else the model's pick
+only when the asker's own lines it was shown (same sender, never its own
+lines) or their unanswered question name that same chain. Never the line it
+replies to (a board names every row's chain: "ETAC on solana" must not
+narrow "send it?"), never the persona's offer. That is what makes the live
+23:01-23:03 lines work: "do it" under "i can pull the fomo board for
+robinhood chain coins if you want" and "send it?" both name nothing, and
+her own "what about robinhood coins on fomo" grounds the pick. A board pick
+with a grounded chain and no board is that chain's trending board (D4);
+"boards?" alone is still nothing.
+
+**A row of the leaderboard.** "Who's been winning the most today and what
+did he make money on" is the leaderboard with one row (`rowIn`, read from the
+words, never the model: a singular rank, "the top trader", "who's #1", "the
+second best trader", plus one trader's question in the rest of the line,
+what he made money on, holds, traded, or who he is). Its fixed question
+("who is the top trader on fomo in the last 24h and what did he make money
+on?") plans that row (`rowAsk`). A Fomo pick reaches the research only as a fixed question
 code writes (`tg-fomo-port.ts requestText`), planned by the same
 deterministic planner. Anything else (no model, an answer in words, an
 unknown action, a made-up name) is the persona's answer, exactly as before.
@@ -1477,6 +1504,11 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "i asked a question" / "you didn't answer" / its name, after nothing answered their question in the last 10 minutes | Their question runs again, once, as the reply to it (never a second claim or nomination); with nothing of theirs open: "which question? i might've missed it, ask me again" |
 | "shogun what's trending" (Fomo wired) | Fomo's trending board. Fomo busy, late, refused by its budget, unavailable or failed: the desk's Robinhood Chain market read instead, never Fomo's refusal. "what's trending on robinhood chain", or no Fomo here: the desk |
 | "do it" / "ok" / "bet" under its own offer ("i can pull the fomo board for robinhood chain coins if you want") | A yes to that offer: the router picks what the offer named and the research answers it. Never "give me a sec" (the gate refuses fake progress), never a tail |
+| "what about robinhood coins on fomo" / "only robinhood ones" (live 23:01) | That chain's slice of the trending board, from the same read: "Trending on Fomo, Robinhood Chain only (2 of the top 100):" with each row's board rank, or "None of the top 100 trending coins on Fomo are on Robinhood Chain right now." No offer to "pull" it |
+| "do it" under that offer, "send it?" after it (live 23:01-23:03) | The Robinhood Chain board: her own earlier line named the chain. A chain only the replied board's rows name ("ETAC on solana") never narrows it |
+| "shogun what's trending on fomo?" with only Solana coins on top | Every chain's board, three rows, and "On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st)." (or that none of the top 100 is on it) |
+| "who's the top trader on robinhood on fomo" | The trader board, plus "Fomo's trader board covers every chain; it can't be narrowed to one." |
+| "who's selling pons on fomo?" (no `$`, not in capitals) | Never the whole feed's sellers: the port leaves it to the router, which names PONS from the line and asks its sellers |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |
@@ -1538,6 +1570,13 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
   wins silence.
 * Only a Uniswap v3 pool is resolved to its coin. A chart link to a v2 pair
   answers `decimals()` like a token, so its look reads `no-pool`.
+* Fomo's trader board cannot be cut to one chain (the provider documents no
+  chain filter for it): asked for one, the board says it covers every chain.
+  A token board is cut to a chain from its top 100, so a chain's coins
+  further down are not seen.
+* A bare chain correction with no list word ("i said robinhood") is not read
+  by the planner; it reaches the router, whose chain counts only when her
+  own lines name it.
 * The owner's first name for tagging is taken from what it has seen in that
   chat; before the owner speaks there, it says "my owner", and the tag in the
   owner ask (a link to the owner's account) reads "boss".

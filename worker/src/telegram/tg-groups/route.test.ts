@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { TgModelGate, type TgModel } from "./model";
-import { parseRoute, readRoute, ROUTE_ACTIONS, routeActions, ROUTE_SPEC, ROUTE_SYSTEM, RouteBreaker, routePrompt, routeSpec, routeSystem, windowIn, type RouteCtx } from "./route";
+import { askerLinesOf, chainIn, parseRoute, readRoute, ROUTE_ACTIONS, ROUTE_CHAINS, routeActions, ROUTE_SPEC, ROUTE_SYSTEM, RouteBreaker, routePrompt, routeSpec, routeSystem, rowIn, windowIn, type RouteCtx } from "./route";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
 import type { TgLine, TgRoom } from "./types";
 
@@ -110,6 +110,104 @@ describe("parseRoute", () => {
     assert.equal(parseRoute([{ action: "chat" }], ctxOf("x")), null);
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard", window: "all", extra: 1 }, ctxOf("who's top")), { action: "fomo", request: { kind: "leaderboard" } }, "the model's window is never read");
     assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "PONS", aspect: "rug" }, ctxOf("PONS?")), { action: "fomo", request: { kind: "coin", symbol: "PONS", aspect: "activity" } });
+  });
+});
+
+describe("the chain a routed list is cut to (decision D3, live 2026-10-07)", () => {
+  it("the menu carries an optional chain, and says when to put one", () => {
+    const props = (ROUTE_SPEC.schema as { properties: Record<string, { enum?: string[] }>; required: string[] }).properties;
+    assert.deepEqual(props.chain!.enum, [...ROUTE_CHAINS]);
+    assert.deepEqual([...ROUTE_CHAINS], ["robinhood", "solana", "base", "ethereum", "bsc"]);
+    assert.deepEqual((ROUTE_SPEC.schema as { required: string[] }).required, ["action"], "a plain chat pick is never refused");
+    assert.match(ROUTE_SYSTEM, /fomo_board: .*Put a chain in chain only when they want one chain's coins/);
+    assert.match(ROUTE_SYSTEM, /with the coin, board, chain or trader it named/);
+  });
+
+  it("chainIn: full names anywhere, short names only where a chain goes", () => {
+    const want: Array<[string, string | undefined]> = [
+      ["what's trending on robinhood", "robinhood"], ["robinhood chain coins on fomo", "robinhood"], ["what about robinhood coins on fomo", "robinhood"],
+      ["new coins on base", "base"], ["anything hot on sol", "solana"], ["hood coins?", "robinhood"], ["what's pumping on rh", "robinhood"],
+      ["solana ones", "solana"], ["anything on eth", "ethereum"], ["bnb chain memes", "bsc"],
+      ["solana or robinhood?", undefined], ["send it?", undefined], ["do it", undefined], ["what's the base case here", undefined],
+      ["the robin in my garden", undefined], ["SOL is ripping", undefined], ["eth price?", undefined],
+    ];
+    for (const [t, c] of want) assert.equal(chainIn(t), c, t);
+  });
+
+  /** The 23:01-23:03 room: the board, her ask, its offer, her yes. */
+  const MILLA = 7_007;
+  const room = roomWith([
+    line(1, "Milla", "I said what's trending on fomo", { fromId: MILLA }),
+    line(2, "Shogun", "Trending on Fomo (board position is popularity, not quality):", { own: true }),
+    line(3, "Milla", "what about robinhood coins on fomo", { fromId: MILLA }),
+    line(4, "Shogun", "i can pull the fomo board for robinhood chain coins if you want, just say the word", { own: true }),
+    line(5, "Ann", "solana is where it's at", { fromId: 8_008 }),
+    line(6, "Milla", "do it", { fromId: MILLA }),
+  ]);
+  const doIt = room.lines[5]!;
+  const BOARD_ROWS = "Trending on Fomo (board position is popularity, not quality):\n1. ETAC on solana, market cap $874.6k";
+
+  it("the asker's own lines the model was shown, never its own or anyone else's", () => {
+    assert.deepEqual(askerLinesOf(room, doIt), ["I said what's trending on fomo", "what about robinhood coins on fomo"]);
+    assert.deepEqual(askerLinesOf(null, doIt), []);
+  });
+
+  it("'do it' under the offer, and 'send it?' after it: robinhood, because her own line named it", () => {
+    const asked = "what about robinhood coins on fomo";
+    const ctx = ctxOf("do it", { replied: room.lines[3]!.text, asked, askerLines: askerLinesOf(room, doIt) });
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "robinhood" }, ctx), { action: "fomo", request: { kind: "board", board: "trending", chain: "robinhood" } });
+    const send = ctxOf("send it?", { replied: BOARD_ROWS, askerLines: askerLinesOf(room, doIt) });
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "robinhood" }, send), { action: "fomo", request: { kind: "board", board: "trending", chain: "robinhood" } });
+  });
+
+  it("a chain nobody asking wrote is dropped: the replied rows, another member, the persona's offer, the model's guess", () => {
+    const theirs = askerLinesOf(room, doIt);
+    // Solana is only in the board's rows and in Ann's line.
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "solana" }, ctxOf("send it?", { replied: BOARD_ROWS, askerLines: theirs })), { action: "fomo", request: { kind: "board", board: "trending" } });
+    // Without her earlier line, the offer alone grounds nothing.
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "robinhood" }, ctxOf("do it", { replied: room.lines[3]!.text, askerLines: [] })), { action: "fomo", request: { kind: "board", board: "trending" } });
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "base" }, ctxOf("what's hot over there")), { action: "fomo", request: { kind: "board", board: "trending" } });
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "polygon" }, ctxOf("trending on polygon?")), { action: "fomo", request: { kind: "board", board: "trending" } });
+  });
+
+  it("the line's own words win, whatever the model picked", () => {
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: "trending", chain: "robinhood" }, ctxOf("trending on solana instead", { askerLines: ["what about robinhood coins on fomo"] })), { action: "fomo", request: { kind: "board", board: "trending", chain: "solana" } });
+    assert.deepEqual(parseRoute({ action: "fomo_crowd", side: "buy" }, ctxOf("what are whales aping on base")), { action: "fomo", request: { kind: "crowd", side: "buy", chain: "base" } });
+    assert.deepEqual(parseRoute({ action: "fomo_small_coins", chain: "robinhood" }, ctxOf("any tiny hood gems getting love")), { action: "fomo", request: { kind: "small-coins", chain: "robinhood" } });
+    assert.deepEqual(parseRoute({ action: "fomo_crowd", side: "sell", chain: "ethereum" }, ctxOf("what's the crowd dumping", { reaskOf: "what are they selling on eth" })), { action: "fomo", request: { kind: "crowd", side: "sell", chain: "ethereum" } }, "their unanswered question is their own words");
+  });
+
+  it("a grounded chain with no board is that chain's trending board (D4); no board and no chain is nothing", () => {
+    assert.deepEqual(parseRoute({ action: "fomo_board", chain: "robinhood" }, ctxOf("hood coins?")), { action: "fomo", request: { kind: "board", board: "trending", chain: "robinhood" } });
+    assert.deepEqual(parseRoute({ action: "fomo_board", board: null, chain: "robinhood" }, ctxOf("what about robinhood ones")), { action: "fomo", request: { kind: "board", board: "trending", chain: "robinhood" } });
+    assert.equal(parseRoute({ action: "fomo_board" }, ctxOf("boards?")), null);
+    assert.equal(parseRoute({ action: "fomo_board", chain: "solana" }, ctxOf("boards?")), null, "a chain the line does not ground makes no board");
+  });
+});
+
+describe("a row of the leaderboard, and ordinals that are never names", () => {
+  it("rowIn: one rank and one trader's question, read from the words", () => {
+    assert.deepEqual(rowIn("who's been winning the most today and what did he make money on"), { rank: 1, about: "earnings" });
+    assert.deepEqual(rowIn("who's the best trader on fomo today and what did he make money on"), { rank: 1, about: "earnings" });
+    assert.deepEqual(rowIn("who's #1 on fomo and what's he buying"), { rank: 1, about: "trades" });
+    assert.deepEqual(rowIn("what's the second best trader holding"), { rank: 2, about: "holdings" });
+    assert.deepEqual(rowIn("who’s the top guy on fomo today, tell me about him"), { rank: 1, about: "profile" });
+    for (const t of ["top traders today, what are they buying", "who's the best trader on fomo", "who's the top trader and what are people buying", "who's the top trader, is @unipcs on it"]) assert.equal(rowIn(t), undefined, t);
+  });
+
+  it("the leaderboard pick carries the row from the line, never from the model", () => {
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who's been winning the most today and what did he make money on")), {
+      action: "fomo",
+      request: { kind: "leaderboard", window: "24h", row: { rank: 1, about: "earnings" } },
+    });
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard", row: { rank: 3, about: "holdings" } }, ctxOf("who's on top this week")), { action: "fomo", request: { kind: "leaderboard", window: "7d" } });
+    assert.match(ROUTE_SYSTEM, /fomo_leaderboard: .*also when they ask what the top one made money on, holds or traded/);
+  });
+
+  it("'second', 'one', 'first' and 'number' are never a trader", () => {
+    for (const [name, text] of [["second", "what's the second one holding on fomo"], ["one", "what's that one holding"], ["first", "who's first on fomo, what's he holding"], ["number", "number two on fomo, what's he holding"]] as const) {
+      assert.equal(parseRoute({ action: "fomo_trader", trader: name, about: "holdings" }, ctxOf(text)), null, name);
+    }
   });
 });
 
@@ -392,7 +490,7 @@ describe("a yes under its own line (live 2026-10-07)", () => {
   const OFFER = "i can pull the fomo board for robinhood chain coins if you want, just say the word";
   it("the system tells the model a yes picks what its own line offered, and chat when it offered nothing", () => {
     assert.match(ROUTE_SYSTEM, /When the → line says yes to something \[you\] offered or asked in the line it replies to/);
-    assert.match(ROUTE_SYSTEM, /pick the action that line of yours offered, with the coin, board or trader it named\. If it offered nothing on this list, chat\./);
+    assert.match(ROUTE_SYSTEM, /pick the action that line of yours offered, with the coin, board, chain or trader it named\. If it offered nothing on this list, chat\./);
     assert.match(ROUTE_SYSTEM, /a trader only from the → line or, when it says yes to your own line, from that line/);
     const noFomo = routeSystem({ fomo: false, desk: true, coins: true });
     assert.match(noFomo, /with the coin it named/);

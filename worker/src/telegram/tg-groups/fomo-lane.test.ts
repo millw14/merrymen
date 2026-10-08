@@ -1026,15 +1026,15 @@ describe("live 2026-10-07: a yes under its own offer, and no fake progress (d2 r
     const offer = lastOwn();
     assert.equal(offer.text, OFFER, "the persona's offer, as live");
     const before = routePrompts.length;
-    picks.push({ action: "fomo_board", board: "trending" });
+    picks.push({ action: "fomo_board", board: "trending", chain: "robinhood" });
     replies.push("give me a sec");
     clock += 20 * SEC;
     await said(under("do it", offer));
     assert.equal(routePrompts.length - before, 1, "'do it' under its own offer is routed");
     assert.match(routePrompts.slice(-1)[0]!, /the → line replies to: «i can pull the fomo board for robinhood chain coins/);
     const routed = fomo!.asks.slice(-1)[0]!.request;
-    assert.equal(routed?.kind, "board");
-    assert.equal(routed?.kind === "board" ? routed.board : null, "trending");
+    // The chain the offer named, grounded in her own "what about robinhood coins on fomo".
+    assert.deepEqual(routed, { kind: "board", board: "trending", chain: "robinhood" });
     assert.match(lastOwn().text, /Trending on Fomo/);
     for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /give me a sec|here we go/, t);
   });

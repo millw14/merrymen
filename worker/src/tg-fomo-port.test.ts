@@ -871,3 +871,137 @@ describe("a group research question, end to end", () => {
     assert.equal(s.calls.length, looked, "neither cost a lookup");
   });
 });
+
+describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, planner and service", () => {
+  const OWNER_ID = 4242;
+  const SHOGUN = { id: 999, username: "Merrymanme_bot", name: "Shogun" };
+  const OFFER = "i can pull the fomo board for robinhood chain coins if you want, just say the word";
+  const HOOD_BOARD = ["Trending on Fomo, Robinhood Chain only (2 of the top 100):", "12. PONS on robinhood, market cap $2.1M", "31. CACHE on robinhood, market cap $1.2M"];
+  let home: string;
+  let store: TgGroupsStore;
+  let groups: TgGroups | null = null;
+  const realFetch = globalThis.fetch;
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tg-fomo-2301-"));
+    __resetMemoryPassThrottleForTest();
+  });
+  afterEach(async () => {
+    groups?.stop();
+    await groups?.drain();
+    store?.close();
+    rmSync(home, { recursive: true, force: true });
+    globalThis.fetch = realFetch;
+  });
+
+  /** The room, with the group model scripted: routing picks, then persona lines, in order. */
+  async function world() {
+    const s = await setup({ trending: () => incidentBoard() });
+    let clock = Date.UTC(2026, 9, 7, 22, 59);
+    s.clock.now = clock;
+    store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    store.ensureRoom(GROUP, { title: "frens", kind: "supergroup" });
+    store.setStatus(GROUP, "approved", OWNER_ID);
+    store.update(GROUP, (r) => { r.helloSaid = true; r.ownerName = "Milla"; });
+    const tg = new FakeTg();
+    let tstate = { ownerId: OWNER_ID } as unknown as TelegramState;
+    const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const picks: Array<Record<string, unknown>> = [];
+    const replies: string[] = [];
+    const routePrompts: string[] = [];
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { tools?: unknown; messages: Array<{ role: string; content: string }> };
+      if (body.tools) {
+        routePrompts.push(body.messages.find((m) => m.role === "user")?.content ?? "");
+        const pick = picks.shift() ?? { action: "chat" };
+        return { ok: true, json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "route", arguments: JSON.stringify(pick) } }] } }] }) };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: replies.shift() ?? "PASS" } }] }) };
+    }) as never;
+    const logs: string[] = [];
+    groups = createTgGroups({
+      opts: () => ({ token: "123:TOKEN", fetchFn: tg.fetchFn }),
+      store,
+      getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [OWNER_ID] }) as unknown as ResolvedConfig,
+      stateRef,
+      port: () => coins,
+      fomo: () => port,
+      self: () => SHOGUN,
+      privacyOff: () => false,
+      note: () => {},
+      dashboardBase: () => "https://app.test",
+      agentKey: () => "agent-1",
+      now: () => clock,
+      rand: () => 0.99,
+      env: { MERRYMEN_TG_GROUPS_LLM_KEY: "k-test", MERRYMEN_TG_GROUPS_LLM_PROVIDER: "openai", MERRYMEN_TG_GROUPS_LLM_BASE_URL: "https://llm.test/v1", MERRYMEN_TG_GROUPS_MODEL: "fake" },
+      hosted: true,
+      sleep: async (ms) => { clock += Math.max(0, ms); },
+      timer: () => new Promise(() => {}),
+      log: (l) => logs.push(l),
+    });
+    let id = 100;
+    const lastOwn = (): { id: number; text: string } => {
+      const l = (store.room(GROUP)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+      return { id: l.messageId, text: l.text };
+    };
+    const say = async (text: string, under?: { id: number; text: string }, advanceMs = 60_000): Promise<string> => {
+      clock += advanceMs;
+      s.clock.now = clock;
+      const before = tg.texts(GROUP).length;
+      const m: TgMessage = {
+        updateId: id, chatId: GROUP, fromId: OWNER_ID, fromFirstName: "Milla", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++,
+        dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens",
+        ...(under ? { replyTo: { messageId: under.id, fromId: SHOGUN.id, fromIsBot: true, text: under.text } } : {}),
+      } as TgMessage;
+      groups!.onMessage(m);
+      await groups!.drain();
+      const out = tg.texts(GROUP).slice(before);
+      return out.join("\n---\n");
+    };
+    return { s, tg, picks, replies, routePrompts, logs, lastOwn, say };
+  }
+
+  it("'what about robinhood coins on fomo' under the board is the Robinhood Chain board itself: no offer, no routing call", async () => {
+    const w = await world();
+    const board = await w.say("shogun what's trending on fomo?");
+    assert.ok(board.split("\n").includes("On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st)."), board);
+    const read = w.s.provider.length;
+    const hood = await w.say("what about robinhood coins on fomo", w.lastOwn(), 2 * 60_000);
+    assert.deepEqual(hood.split("\n").slice(0, 3), HOOD_BOARD, hood);
+    assert.equal(w.routePrompts.length, 0, "the planner read it: nothing for the router to guess");
+    assert.equal(w.s.provider.length, read, "the same board read, cut to the chain");
+    assert.equal(w.s.calls[w.s.calls.length - 1]!.args.chain, "robinhood");
+  });
+
+  it("'do it' under its own offer, then 'send it?': each is the Robinhood Chain board, grounded in her own line", async () => {
+    const w = await world();
+    await w.say("shogun what's trending on fomo?");
+    // Her ask in words the planner does not take; the router reads it as chat and the persona offers, as live.
+    w.picks.push({ action: "chat" });
+    w.replies.push(OFFER);
+    await w.say("what about robinhood", w.lastOwn(), 2 * 60_000);
+    const offer = w.lastOwn();
+    assert.equal(offer.text, OFFER);
+    // 23:01 "do it": the model picks the board with the chain its offer named.
+    w.picks.push({ action: "fomo_board", board: "trending", chain: "robinhood" });
+    const doIt = await w.say("do it", offer, 20_000);
+    assert.deepEqual(doIt.split("\n").slice(0, 3), HOOD_BOARD, doIt);
+    assert.match(w.routePrompts[w.routePrompts.length - 1]!, /Milla: what about robinhood/);
+    // 23:03 "send it?": the same, answered from the same read.
+    const read = w.s.provider.length;
+    w.picks.push({ action: "fomo_board", board: "trending", chain: "robinhood" });
+    const sendIt = await w.say("send it?", w.lastOwn(), 2 * 60_000);
+    assert.deepEqual(sendIt.split("\n").slice(0, 3), HOOD_BOARD, sendIt);
+    assert.equal(w.s.provider.length, read);
+    for (const t of w.tg.texts(GROUP)) assert.doesNotMatch(t, /give me a sec|here we go/, t);
+  });
+
+  it("a chain only the replied board's rows name never narrows 'send it?'", async () => {
+    const w = await world();
+    await w.say("shogun what's trending on fomo?");
+    w.picks.push({ action: "fomo_board", board: "trending", chain: "solana" });
+    const out = await w.say("send it?", w.lastOwn(), 2 * 60_000);
+    assert.match(out, /^Trending on Fomo \(board position is popularity, not quality\):\n1\. ETAC on solana/);
+    assert.doesNotMatch(out, /only/);
+  });
+});
