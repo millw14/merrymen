@@ -1,16 +1,13 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { isErc6492Signature, verifyMessage } from "viem";
+import { verifyMessage } from "viem";
 import { makeKey, hashSecret, loadRegistry, writeRecord } from "./partners.mjs";
 
 const SCOPES = ["read:agents", "write:agents", "chat:agents"];
-// Room for a smart-contract wallet's proof (a passkey assertion, a multisig's
-// concatenated signatures, an ERC-6492 deploy wrapper) while the whole /verify
-// body, challenge included, still fits the 8 KiB both the site and gateway cap.
+// Long enough that a smart-contract wallet's proof (a passkey assertion, an
+// ERC-6492 wrapper) is refused by name as unsupported rather than as malformed,
+// while the whole /verify body, challenge included, fits the 8 KiB cap.
 const MAX_SIGNATURE_BYTES = 3000;
 const SIGNATURE = new RegExp(`^0x(?:[0-9a-fA-F]{2}){1,${MAX_SIGNATURE_BYTES}}$`);
-/** The site gives up after 20s; two chain reads must answer well inside that. */
-const within = (ms, promise) => Promise.race([promise,
-  new Promise((_, reject) => setTimeout(() => reject(new Error("chain read timed out")), ms).unref())]);
 const same = (a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""); return x.length === y.length && timingSafeEqual(x, y); };
 const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status: r.status,
   scopes: r.scopes, rate_per_min: r.rpm, created_at: r.created_at, prefix: `mmp_${r.keyId}_` });
@@ -26,8 +23,8 @@ const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status
  * then read and chat with that app's users' agents, without the wallet ever
  * signing anything.
  */
-export function createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, publicClient,
-  verify = verifyMessage, now = Date.now, read = loadRegistry, write = writeRecord, chainTimeoutMs = 7_000 }) {
+export function createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store,
+  verify = verifyMessage, now = Date.now, read = loadRegistry, write = writeRecord }) {
   const boot = randomBytes(16).toString("hex");
   // A subkey, so the gateway secret itself never MACs attacker-shaped data here.
   // The colon keeps it apart from every other HMAC over that secret: holder
@@ -65,32 +62,20 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
   const message = c => `Sign in to Merrymen Developers\n\nWebsite: https://merrymen.dev/api\nWallet: ${c.address}\n\nManage API keys for your applications. This does not authorize trading or move funds.\n\nNonce: ${c.nonce}\nExpires: ${new Date(c.expires).toISOString()}`;
   // Codes are for the console and for tests; messages are for the person reading.
   const error = (status, code, message) => ({ status, json: { error: { code, message } } });
-  const unreachable = () => error(503, "wallet_check_unavailable", "Could not reach Robinhood Chain to check this wallet's signature. Try again shortly.");
   /**
-   * null when `signature` proves `address` signed `text`; otherwise the refusal.
+   * null when `signature` is `address`'s own key signing `text`; otherwise the refusal.
    *
-   * The local ECDSA check runs first and settles an ordinary wallet by itself,
-   * so EOA sign-in never waits on, or fails with, the RPC. Only a signature it
-   * rejects goes to the chain: ERC-1271 for a deployed smart-contract wallet,
-   * ERC-6492 for one not deployed yet, both through viem's verifyMessage.
+   * ECDSA ONLY, CHECKED HERE. A smart-contract wallet's signature (ERC-1271, or
+   * ERC-6492 before deployment) can only be judged by asking an RPC, and that
+   * makes the RPC an authority over EVERY developer account: one that answers
+   * "valid" signs anybody in as any address, an ordinary wallet that already owns
+   * keys included. A developer account mints partner keys that read and chat with
+   * other people's agents, so a smart wallet signs in with a standard wallet's key.
    */
   async function refusal(address, text, signature) {
-    const ecdsa = signature.length === 132;
-    if (ecdsa) { try { if (await verify({ address, message: text, signature })) return null; } catch { /* Not this key. */ } }
-    const mismatch = error(401, "signature_invalid", "That is not this wallet's signature of the sign-in message. Sign the exact message shown and paste the result unchanged.");
-    const unsupported = error(401, "wallet_unsupported", "This wallet's signature cannot be checked. A smart-contract wallet must be deployed on Robinhood Chain; otherwise sign in with a standard wallet.");
-    if (!publicClient) return ecdsa ? mismatch : unsupported;
-    // getCode first. viem's verifyMessage turns a failed eth_call into `false`,
-    // which would report an RPC outage as a bad signature; getCode throws.
-    let code;
-    try { code = await within(chainTimeoutMs, publicClient.getCode({ address })); } catch { return unreachable(); }
-    const deployed = !!code && code !== "0x";
-    if (!deployed && !isErc6492Signature(signature)) return ecdsa ? mismatch : unsupported;
-    let valid = false;
-    try { valid = await within(chainTimeoutMs, publicClient.verifyMessage({ address, message: text, signature })); } catch { return unreachable(); }
-    // An undeployed wallet whose ERC-6492 proof fails may simply have no factory
-    // on this chain, so it is not called a wrong signature.
-    return valid ? null : deployed ? mismatch : unsupported;
+    if (signature.length !== 132) return error(401, "wallet_unsupported", "Smart-contract wallets cannot sign in to Merrymen Developers. Sign in with a standard wallet (an EOA).");
+    try { if (await verify({ address, message: text, signature })) return null; } catch { /* Not this key. */ }
+    return error(401, "signature_invalid", "That is not this wallet's signature of the sign-in message. Sign the exact message shown with a standard wallet and paste the result unchanged.");
   }
   // Raw text in, as the partner API takes it, so what a body must look like is
   // this service's rule. `null`, `[]` and `5` are valid JSON that used to reach

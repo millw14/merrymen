@@ -115,72 +115,40 @@ test("wrong wallet signatures and stale challenges are rejected", async () => {
   assert.equal(stale.status, 401); assert.equal(stale.json.error.code, "challenge_expired");
 });
 
-/** Answers like viem's public client, and records every question asked of it. */
-function chain({ code, valid = () => false, down = false } = {}) {
-  const fake = { calls: [], down,
-    async getCode({ address }) { fake.calls.push("getCode"); if (fake.down) throw new Error("HTTP request failed"); return code; },
-    async verifyMessage(args) { fake.calls.push("verifyMessage"); return valid(args); } };
-  return fake;
-}
 /** One sign-in attempt against a challenge for `address`, which may be a contract. */
 async function attempt(f, address, sign) {
   const challenge = await f.call("/challenge", { address });
   return { challenge, verified: await f.call("/verify", { challenge: challenge.json.challenge, signature: await sign(challenge.json.message) }) };
 }
-test("an ordinary wallet signs in without the RPC, even while it is down", async () => {
-  const rpc = chain({ down: true }), f = fixture({ publicClient: rpc });
-  await f.login();
-  assert.deepEqual(rpc.calls, [], "a valid EOA signature never reaches the chain");
-});
-test("a deployed smart-contract wallet signs in through ERC-1271", async () => {
-  const owner = privateKeyToAccount(generatePrivateKey()), wallet = `0x${"c0".repeat(20)}`;
-  const passkey = `0x${"5a".repeat(400)}`; // longer than any ECDSA signature
-  const rpc = chain({ code: "0x6080", valid: ({ address, message, signature }) => address === wallet &&
-    message.includes(`Wallet: ${wallet}`) && (signature === passkey || signature === rpc.ownerSignature) });
-  const f = fixture({ publicClient: rpc });
-  const { verified } = await attempt(f, wallet, async () => passkey);
-  assert.equal(verified.status, 200); assert.equal(verified.json.address, wallet);
-  assert.equal((await f.call("/keys", undefined, verified.json.session)).json.address, wallet);
-  // A 65-byte owner signature (a one-owner Safe) fails the local check, since it
-  // recovers the owner rather than the wallet, and is then asked of the wallet.
-  const safe = await attempt(f, wallet, async message => (rpc.ownerSignature = await owner.signMessage({ message })));
-  assert.equal(safe.verified.status, 200);
-  // The wallet saying no is a wrong signature, and the challenge survives it.
-  const refused = await attempt(f, wallet, async () => `0x${"66".repeat(400)}`);
-  assert.equal(refused.verified.status, 401); assert.equal(refused.verified.json.error.code, "signature_invalid");
-  assert.equal((await f.call("/verify", { challenge: refused.challenge.json.challenge, signature: passkey })).status, 200);
-});
-test("an undeployed wallet: an ERC-6492 proof is checked, anything else is unsupported", async () => {
-  const wallet = `0x${"de".repeat(20)}`;
+test("a smart-contract wallet is refused by name, and no chain is ever asked to vouch for a signature", async () => {
+  // A chain client that would vouch for anything. Handed in, it must be ignored:
+  // trusting one let a lying RPC sign in as any address and mint keys there.
+  const calls = [];
+  const lying = { getCode: async () => { calls.push("getCode"); return "0x6080"; }, verifyMessage: async () => { calls.push("verifyMessage"); return true; } };
+  const f = fixture({ publicClient: lying });
+  const victim = `0x${"11".repeat(20)}`;
   const wrapped = serializeErc6492Signature({ address: `0x${"fa".repeat(20)}`, data: "0x1234", signature: `0x${"5a".repeat(300)}` });
-  const rpc = chain({ code: undefined, valid: ({ signature }) => signature === wrapped }), f = fixture({ publicClient: rpc });
-  const plain = await attempt(f, wallet, async () => `0x${"5a".repeat(300)}`);
-  assert.equal(plain.verified.status, 401); assert.equal(plain.verified.json.error.code, "wallet_unsupported");
-  assert.deepEqual(rpc.calls, ["getCode"], "nothing to ask a wallet that is not there");
-  assert.equal((await attempt(f, wallet, async () => wrapped)).verified.status, 200);
-  const rejected = serializeErc6492Signature({ address: `0x${"fa".repeat(20)}`, data: "0x1234", signature: `0x${"77".repeat(300)}` });
-  assert.equal((await attempt(f, wallet, async () => rejected)).verified.json.error.code, "wallet_unsupported");
+  for (const proof of [wrapped, `0x${"5a".repeat(400)}`]) {
+    const { verified } = await attempt(f, victim, async () => proof);
+    assert.equal(verified.status, 401); assert.equal(verified.json.error.code, "wallet_unsupported");
+  }
+  // A 65-byte signature from some other key (a one-owner Safe's owner) is simply not this wallet's.
+  const owner = privateKeyToAccount(generatePrivateKey());
+  const safe = await attempt(f, victim, message => owner.signMessage({ message }));
+  assert.equal(safe.verified.json.error.code, "signature_invalid");
+  assert.deepEqual(calls, []);
+  // A refused proof leaves the challenge usable for the wallet's real signature.
+  const challenge = await f.call("/challenge", { address: f.wallet.address });
+  assert.equal((await f.call("/verify", { challenge: challenge.json.challenge, signature: wrapped })).json.error.code, "wallet_unsupported");
+  assert.equal((await f.call("/verify", { challenge: challenge.json.challenge, signature: await f.wallet.signMessage({ message: challenge.json.message }) })).status, 200);
 });
-test("an unreachable or hung chain is reported as such, and the sign-in can be retried", async () => {
-  const wallet = `0x${"c0".repeat(20)}`, proof = `0x${"5a".repeat(400)}`;
-  const rpc = chain({ code: "0x6080", valid: ({ signature }) => signature === proof, down: true }), f = fixture({ publicClient: rpc });
-  const down = await attempt(f, wallet, async () => proof);
-  assert.equal(down.verified.status, 503); assert.equal(down.verified.json.error.code, "wallet_check_unavailable");
-  rpc.down = false;
-  assert.equal((await f.call("/verify", { challenge: down.challenge.json.challenge, signature: proof })).status, 200);
-  const hung = fixture({ publicClient: { getCode: () => new Promise(() => {}) }, chainTimeoutMs: 20 });
-  assert.equal((await attempt(hung, wallet, async () => proof)).verified.json.error.code, "wallet_check_unavailable");
-  // Without a chain client a non-ECDSA proof cannot be judged at all.
-  assert.equal((await attempt(fixture(), wallet, async () => proof)).verified.json.error.code, "wallet_unsupported");
-});
-test("each sign-in refusal names its cause, and malformed proofs never reach the chain", async () => {
-  const rpc = chain({ code: "0x6080", valid: () => true }), f = fixture({ publicClient: rpc });
+test("each sign-in refusal names its cause", async () => {
+  const f = fixture();
   const challenge = (await f.call("/challenge", { address: f.wallet.address })).json.challenge;
   const verify = async signature => (await f.call("/verify", { challenge, signature })).json.error?.code;
   for (const signature of [`0x${"ab".repeat(3001)}`, "0xabc", "0x", `0x${"zz".repeat(65)}`, 42, undefined]) {
     assert.equal(await verify(signature), "signature_malformed", String(signature).slice(0, 12));
   }
-  assert.deepEqual(rpc.calls, []);
   // The largest accepted proof still fits the 8 KiB body cap with its challenge.
   assert.ok(JSON.stringify({ challenge, signature: `0x${"ab".repeat(3000)}` }).length < 8192);
   const [encoded, mac] = challenge.split(".");

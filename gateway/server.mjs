@@ -168,10 +168,10 @@ const partnerApi = createPartnerApi({ partners, store,
   forward: createPartnerBridge({ secret: process.env.MERRYMEN_PARTNER_BRIDGE_SECRET,
     origin: process.env.MERRYMEN_PARTNER_APP_ORIGIN || "https://app.merrymen.dev" }),
 });
-// The holder gate's Robinhood Chain client doubles as the fallback verifier for
-// smart-contract wallets (ERC-1271/6492). An ordinary wallet never touches it.
+// No chain client, deliberately: developer sign-in is checked locally, so no RPC
+// can vouch for a signature (see refusal() in lib/developer-api.mjs).
 const developerApi = createDeveloperApi({ portalSecret: process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET,
-  gatewaySecret: SECRET, partners, partnerApi, store, publicClient });
+  gatewaySecret: SECRET, partners, partnerApi, store });
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
