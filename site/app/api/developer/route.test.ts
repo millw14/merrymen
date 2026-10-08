@@ -92,6 +92,18 @@ test('a portal secret under 32 bytes fails closed before anything is sent', asyn
   }
 });
 
+test('the console treats the gateway ending a session as signed out, not as an error', async () => {
+  // Sessions on the gateway's memory store end at every restart, so the code
+  // the console reacts to has to be the one the gateway actually sends.
+  const { sessionEnded } = await import('../DeveloperConsole');
+  const gateway = readFileSync(new URL('../../../../gateway/lib/developer-api.mjs', import.meta.url), 'utf8');
+  assert.match(gateway, /if \(!user\) return error\(401, "signed_out"/);
+  assert.equal(sessionEnded(Object.assign(new Error('Sign in to manage your API keys'), { status: 401, code: 'signed_out' })), true);
+  for (const other of [Object.assign(new Error('x'), { status: 401, code: 'signature_invalid' }), new Error('offline'), null, undefined, 'signed_out']) {
+    assert.equal(sessionEnded(other), false, String(other));
+  }
+});
+
 test('the console links to repository docs on main, not on a feature branch', () => {
   // The reference link pointed at codex/embedded-partner-api, which stops
   // matching the deployed API the moment main moves on (or the branch goes).

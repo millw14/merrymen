@@ -12,9 +12,15 @@ async function request(action: string, body?: unknown) {
   const response = await fetch(`/api/developer/${action}`, { method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
     ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
   const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error?.message || "Something went wrong. Please try again."), { status: response.status });
+  if (!response.ok) throw Object.assign(new Error(data.error?.message || "Something went wrong. Please try again."), { status: response.status, code: data.error?.code });
   return data;
 }
+/**
+ * The gateway no longer accepts this session: signed out elsewhere, expired, or
+ * a gateway restart (sessions on its memory store end with the process). The
+ * page must offer sign-in again, not an error under a "Connected" badge.
+ */
+export const sessionEnded = (e: unknown) => (e as { code?: unknown } | null)?.code === "signed_out";
 function Code({ text, label = "Copy code" }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -52,7 +58,14 @@ export function DeveloperConsole() {
     const data = await request("keys"); setAddress(data.address); setKeys(data.keys);
   }
   useEffect(() => { let active = true; request("keys").then(data => { if (active) { setAddress(data.address); setKeys(data.keys); } }).catch(e => { if (active && e.status !== 401) setError(e.message); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, []);
-  async function run(task: string, fn: () => Promise<void>) { setBusy(task); setError(""); try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : "Please try again."); } finally { setBusy(""); } }
+  function forget() { setAddress(""); setKeys([]); setFresh(null); setRevokeId(""); setRotateApp(""); setTestResult(""); }
+  async function run(task: string, fn: () => Promise<void>) {
+    setBusy(task); setError("");
+    try { await fn(); } catch (e) {
+      if (sessionEnded(e)) { forget(); setError("Your session ended. Connect your wallet again to continue."); }
+      else setError(e instanceof Error ? e.message : "Please try again.");
+    } finally { setBusy(""); }
+  }
   async function connect() {
     await run("connect", async () => {
       const provider = (window as Window & { ethereum?: Wallet }).ethereum;
@@ -86,7 +99,7 @@ export function DeveloperConsole() {
         <section id="api-keys" className="dev-section"><div className="dev-section-heading"><div><p className="dev-eyebrow">01 / YOUR WORKSPACE</p><h2>Keys to your next idea.</h2></div><span className="dev-pill">SERVER-SIDE ONLY</span></div><p className="dev-description">Give each app its own key. User wallets stay in their control.</p>
           {loading ? <div className="dev-account-box" role="status">Loading your developer account…</div> : !address ? <div className="dev-account-box"><div className="dev-lock" aria-hidden>⌘</div><div><h3>Your wallet is your developer account.</h3><p>Sign a message to create and manage API keys. No payment, transaction, or token balance required.</p></div><button className="dev-primary" disabled={!!busy} onClick={connect}>{busy === "connect" ? "Check your wallet…" : "Connect wallet ↗"}</button>
             <details className="dev-manual"><summary>Use a wallet signature instead</summary><p>For wallets without a browser connection: request the message, sign it using your wallet’s personal-message signing tool, and paste the signature. Never paste a private key.</p><form onSubmit={e => { e.preventDefault(); void run("challenge", async () => { setChallenge(await request("challenge", { address: manualAddress })); setSignature(""); }); }}><label>Wallet address<input required value={manualAddress} onChange={e => setManualAddress(e.target.value)} placeholder="0x…" pattern="0x[a-fA-F0-9]{40}" /></label><button className="dev-secondary" disabled={!!busy}>Get sign-in message</button></form>{challenge && <><Code text={challenge.message} label="Copy sign-in message" /><form onSubmit={e => { e.preventDefault(); void run("verify", async () => { await request("verify", { challenge: challenge.challenge, signature }); setSignature(""); setChallenge(null); await refresh(); }); }}><label>Wallet signature<input required type="password" autoComplete="off" value={signature} onChange={e => setSignature(e.target.value)} placeholder="0x…" /></label><button className="dev-primary" disabled={!!busy}>Verify signature</button></form></>}</details>
-          </div> : <div className="dev-key-workspace"><div className="dev-account-bar"><span><i /> Connected <code>{address.slice(0, 6)}…{address.slice(-4)}</code></span><button onClick={() => run("logout", async () => { await request("logout", {}); setAddress(""); setKeys([]); setFresh(null); setRevokeId(""); setRotateApp(""); setTestResult(""); })} disabled={!!busy}>Sign out</button></div>
+          </div> : <div className="dev-key-workspace"><div className="dev-account-bar"><span><i /> Connected <code>{address.slice(0, 6)}…{address.slice(-4)}</code></span><button onClick={() => run("logout", async () => { await request("logout", {}); forget(); })} disabled={!!busy}>Sign out</button></div>
             <form className="dev-create-form" onSubmit={createKey}><label>{rotateApp ? "New key for this app" : "Application name"}<input required maxLength={48} placeholder="e.g. Prism Finance" value={name} onChange={e => setName(e.target.value)} /></label><button className="dev-primary" disabled={!!busy || !name.trim()}>{busy === "create" ? "Creating…" : rotateApp ? "Create replacement ↗" : "Create API key ↗"}</button>{rotateApp && <button type="button" className="dev-textlink" onClick={() => { setRotateApp(""); setName(""); }}>Cancel replacement</button>}</form>
             <p className="dev-small">Up to 5 active keys · 30 requests/minute per key · Create, read and chat scopes</p>
             {fresh && <div className="dev-new-key"><div className="dev-key-title"><strong>Your key is ready.</strong><span>SHOWN ONCE</span></div><p>Copy it into your backend’s secret storage now. We cannot show it again after you leave.</p><div className="dev-secret-row"><input aria-label="New API key" type={showKey ? "text" : "password"} readOnly value={fresh.key} autoComplete="off" spellCheck={false} /><button aria-label={showKey ? "Hide API key" : "Reveal API key"} onClick={() => setShowKey(!showKey)}>{showKey ? "Hide" : "Reveal"}</button><button onClick={() => run("copy", async () => { await navigator.clipboard.writeText(fresh.key); setCopiedKey(true); })}>{copiedKey ? "Copied ✓" : "Copy key"}</button></div><p className="dev-app-id">App ID <code>{fresh.app_id}</code></p><div className="dev-key-test"><button className="dev-secondary" disabled={!!busy} onClick={() => run("test", async () => { setTestResult(""); const result = await request("test", { key: fresh.key }); setTestResult(`200 OK · ${result.name} · ${result.rate_per_min} requests/minute`); })}>{busy === "test" ? "Testing…" : "Test this key ↗"}</button><span role="status">{testResult || "Makes a real authenticated /meta request."}</span></div></div>}
