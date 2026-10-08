@@ -178,6 +178,24 @@ test("an account's keys share ONE plan rate, whatever each key stores; a paid pl
   assert.deepEqual(f.store.hits.at(-2), { key: `pa:${OWNER}`, limit: 60 });
 });
 
+test("a Feast account's 300 a minute is reachable from one backend: the per-IP limit is 600", async () => {
+  // A partner usually calls from one server. At the old 240 per IP, the top
+  // plan sold a rate its buyer could not reach; the plan, not the address,
+  // must be what stops it.
+  const f = await fixture({ plans: PLANS });
+  assert.equal((await f.billing.createAccount(OWNER, "Acme")).status, 201);
+  await f.grant(1_000_000);
+  assert.equal((await f.billing.choosePlan(OWNER, { tier: "feast", confirm: true })).json.plan.id, "feast");
+  f.store = countingStore(); // a fresh minute
+  f.rewire();
+  for (let i = 0; i < 300; i++) assert.equal((await f.call("/agents")).status, 200, `request ${i + 1}`);
+  const limited = await f.call("/agents");
+  assert.equal(limited.status, 429);
+  assert.equal(limited.json.error.message, "300 requests/minute for this account");
+  assert.deepEqual([...new Set(f.store.hits.filter((h) => h.key.startsWith("pip:")).map((h) => h.limit))], [600]);
+  assert.equal(f.used(), 300, "the rate-limited request was not counted");
+});
+
 test("an operator key (no owner) is never metered and keeps its own rate and bucket", async () => {
   const op = key("op1", { owner: null, rpm: 500 });
   const f = await fixture({ keys: [op] });
