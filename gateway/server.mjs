@@ -23,6 +23,7 @@ import { createPartners } from "./lib/partners.mjs";
 import { createPartnerApi, partnerError } from "./lib/partner-api.mjs";
 import { createPartnerBridge } from "./lib/partner-bridge.mjs";
 import { createDeveloperApi } from "./lib/developer-api.mjs";
+import { createBilling, createPaymentsClient, parseBillingConfig } from "./lib/billing.mjs";
 
 // ── config (env) ─────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT || 8787);
@@ -153,7 +154,8 @@ function respond(res, r) {
     res.writeHead(r.status, { "content-type": r.contentType || "application/json", ...cors });
     return res.end(r.text);
   }
-  // `headers` is set by the partner bridge alone, for a relayed Retry-After.
+  // `headers` come from the partner API alone: a relayed Retry-After, and the
+  // quota headers on a metered answer.
   res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...r.headers, ...cors });
   res.end(JSON.stringify(r.json ?? {}));
 }
@@ -164,15 +166,42 @@ function respond(res, r) {
 // store. It reuses MERRYMEN_GATEWAY_SECRET as an HMAC PEPPER over per-key
 // secrets rather than as the key material itself, so revoking one partner does
 // not invalidate every holder token at the same time.
+//
+// BILLING: MERRYMEN-paid plans for that API (lib/billing.mjs). OFF unless every
+// requirement holds, an explicit MERRYMEN_DATA_DIR on a persistent volume among
+// them; each reason it is not on is a [billing] line here at boot. Its ledger
+// is the only record of who paid, so it is built ONCE and shared by the
+// partner gate (metering) and the developer API (accounts, plans, payments): a
+// second instance would keep a second index and credit one transfer twice. Its
+// chain client is its own, read-only, and asked about payments alone; the
+// holder gate's client above is not touched.
+const billingConfig = parseBillingConfig(process.env);
+for (const note of billingConfig.notes) console.error(`[billing] ${note}`);
+const billing = await createBilling({ ...billingConfig,
+  publicClient: billingConfig.rpc ? createPaymentsClient(billingConfig.rpc) : null });
+{
+  // Said at every boot, before "listening", so the deploy log shows a degraded
+  // mode rather than a developer's 503 or a partner's missing quota headers.
+  const asked = JSON.stringify(billingConfig.requested.slice(0, 20));
+  const on = billing.mode !== "off";
+  const degraded = billing.mode !== billingConfig.requested || (on && !billing.paymentsReady) || !!billing.blocked;
+  (degraded ? console.error : console.log)(`[gateway] partner billing: ${billing.mode}`
+    + (billing.mode !== billingConfig.requested ? ` (MERRYMEN_BILLING=${asked}; see the [billing] lines above)` : "")
+    + (!on ? ", nothing is metered"
+      : `, ${billing.enforced ? "quotas enforced" : "metered, never refused"}; payments ${billing.paymentsReady ? `to ${billingConfig.treasury}` : "UNAVAILABLE"}`)
+    + (billing.blocked ? `; ledger writes REFUSED (${billing.blocked})` : ""));
+}
+
 const partners = createPartners({ secret: SECRET });
-const partnerApi = createPartnerApi({ partners, store,
+const partnerApi = createPartnerApi({ partners, store, billing,
   forward: createPartnerBridge({ secret: process.env.MERRYMEN_PARTNER_BRIDGE_SECRET,
     origin: process.env.MERRYMEN_PARTNER_APP_ORIGIN || "https://app.merrymen.dev" }),
 });
-// No chain client, deliberately: developer sign-in is checked locally, so no RPC
-// can vouch for a signature (see refusal() in lib/developer-api.mjs).
+// No chain client for sign-in, deliberately: developer sign-in is checked
+// locally, so no RPC can vouch for a signature (see refusal() in
+// lib/developer-api.mjs). Billing's client checks payment transfers and nothing else.
 const developerApi = createDeveloperApi({ portalSecret: process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET,
-  gatewaySecret: SECRET, partners, partnerApi, store });
+  gatewaySecret: SECRET, partners, partnerApi, store, billing });
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -344,3 +373,25 @@ server.listen(PORT, () => {
     if (Buffer.byteLength(process.env[name] || "") < 32) console.error(`[gateway] ${name} is unset or under 32 bytes: ${routes} will answer 503.`);
   }
 });
+
+/**
+ * A deploy (SIGTERM) or Ctrl-C (SIGINT) saves the partner usage counts before
+ * the process goes. usage.json is otherwise written every 10 s, so every deploy
+ * would drop up to that much metering; queued billing writes finish first (5 s
+ * at most, lib/billing.mjs close()). The ledger itself needs nothing here: each
+ * record is flushed by the append that made it. A second signal, or a close
+ * that hangs, exits at once rather than outliving the host's patience.
+ */
+let stopping = false;
+async function stop(signal) {
+  if (stopping) process.exit(1);
+  stopping = true;
+  console.log(`[gateway] ${signal}: saving usage counts, then exiting`);
+  setTimeout(() => process.exit(1), 10_000).unref();
+  server.close();
+  server.closeIdleConnections();
+  await billing.close();
+  process.exit(0);
+}
+process.on("SIGTERM", () => stop("SIGTERM"));
+process.on("SIGINT", () => stop("SIGINT"));
