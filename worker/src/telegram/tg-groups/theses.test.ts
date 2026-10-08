@@ -191,6 +191,34 @@ describe("checkWording", () => {
     assert.equal(good.dropped, 0, "the good fixture keeps every phrase");
   });
 
+  it("a crime laid at the dev's or the team's door is never said back; a worry stays (review r2)", () => {
+    const accusing = {
+      gist: "Mostly a fight over whether the dev stole the liquidity",
+      against: ["the dev stole the liquidity", "the dev pulled the liquidity", "the team are thieves and crooks"],
+    };
+    const { wording, dropped } = checkWording(accusing, MATERIAL, "Shogun");
+    assert.equal(wording.gist, null);
+    assert.deepEqual(wording.against, []);
+    assert.equal(dropped, 4);
+    for (const x of ["the dev is a criminal", "the dev is a pedo", "the team is laundering money", "the devs ran off with the funds", "they drained the pool", "the dev took all the liquidity", "a con man running it", "the stolen funds were never returned", "the dev embezzled the treasury"]) {
+      assert.deepEqual(checkWording({ against: [x] }, MATERIAL, "Shogun").wording.against, [], x);
+      assert.equal(checkWording({ gist: x }, MATERIAL, "Shogun").wording.gist, null, x);
+      assert.deepEqual(checkWording({ for: [x] }, MATERIAL, "Shogun").wording.forIt, [], x);
+      assert.deepEqual(checkWording({ waiting_on: [x] }, MATERIAL, "Shogun").wording.waitingOn, [], x);
+    }
+    // Worries and plain facts stay.
+    const fair = ["thin liquidity for its size", "liquidity is locked", "worries about the dev's wallet", "fears it could collapse", "worries the dev could pull liquidity", "contract owner renounced", "the community took over after the dev left"];
+    assert.deepEqual(checkWording({ against: fair.slice(0, 3), for: fair.slice(3, 6) }, MATERIAL, "Shogun").wording, { gist: null, forIt: fair.slice(3, 6), against: fair.slice(0, 3), waitingOn: [] });
+    assert.equal(checkWording({ gist: "The community took over after the dev left" }, MATERIAL, "Shogun").wording.gist, "The community took over after the dev left");
+    // What a room hears from such a wording: none of it.
+    const mixed = checkWording({ ...accusing, against: [...accusing.against.slice(0, 2), "thin liquidity for its size"], for: ["the dev is a criminal", "a busy community running raids"] }, MATERIAL, "Shogun").wording;
+    const lines = thesesLines(MATERIAL, mixed, 6, "Shogun", 700)!;
+    for (const l of lines) {
+      assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+      assert.doesNotMatch(l, /stole|pulled the liquidity|thie|crook|criminal|pedo/i, l);
+    }
+  });
+
   it("over the room's caps, waiting-on gives way first and the closing lines stay", () => {
     const { wording } = checkWording(GOOD, MATERIAL, "Shogun");
     const five = thesesLines(MATERIAL, wording, 5, "Shogun", 700)!;

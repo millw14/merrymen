@@ -19,7 +19,9 @@
  * instructions, nothing in the first person or naming the agent, Merrymen or
  * this room (never a pick or a position in its voice), no lure (an airdrop,
  * a presale, free tokens, someone to message; nothing waited on is a claim),
- * and the group gate as an `answer` line, never as `research`
+ * no crime laid at anyone's door (OUT_ACCUSE: theft, a stolen or pulled
+ * pool, laundering, a criminal), and the group gate as an `answer` line,
+ * never as `research`
  * (research admits "going to 10m" and "100x"; an answer does not, and its
  * accusation, alert, advice and link clauses all apply). A phrase that
  * fails is DROPPED, never repaired; nothing left means the code digest.
@@ -144,6 +146,19 @@ const SELF_REF = /\b(?:i|i'm|im|i've|i'd|we|we're|we've|we'd|our|ours|my|me|merr
  */
 const OUT_LURE =
   /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b/i;
+/**
+ * A CRIME LAID AT SOMEONE'S DOOR, said back to a room: theft, a stolen or
+ * pulled pool, laundering, a criminal, a predator. Theses are claims about
+ * identifiable people (a coin's dev, its team), and worries stay worries
+ * (THESES_SYSTEM): the gate's accusation clause knows rug, scam, honeypot,
+ * ponzi, fraud and a dev dumping, not these. Kept here, not in the shared
+ * gate, so research and desk lines that pass today still pass. "Worries the
+ * dev could pull liquidity", "liquidity is locked" and "the community took
+ * over" are worries and facts, and stay; a rare false drop ("a theft-proof
+ * vault") costs one phrase.
+ */
+const OUT_ACCUSE =
+  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|ran\s+(?:off|away)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool))\b/i;
 /** What holders wait on is never a claim ("the token claim opening"); a gist may still say "they claim". */
 const WAIT_CLAIM = /\bclaim(?:s|able|ing)?\b/i;
 const WAITING_LABEL = "Waiting on: ";
@@ -167,7 +182,7 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   const coin = m.coin ? new RegExp(`(?<![\\p{L}\\p{N}])${escRe(m.coin)}(?![\\p{L}\\p{N}])`, "giu") : null;
   const bare = coin ? p.replace(coin, " ") : p;
   if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p)) return null;
-  if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p)) return null;
+  if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p)) return null;
   if (label === WAITING_LABEL && WAIT_CLAIM.test(p)) return null;
   const w = words(p);
   for (let i = 0; i + COPY_RUN <= w.length; i++) if (runs.has(w.slice(i, i + COPY_RUN).join(" "))) return null;

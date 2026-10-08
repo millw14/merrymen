@@ -840,7 +840,8 @@ Surface limits:
   Milla, 2026-10-07 (D5): the group model may also put them in its own words
   (`tg-groups/theses.ts`): it reads at most twelve cleaned samples, fenced as data, and
   every phrase it writes is checked by code (no digit outside the coin's name, no number
-  word, $tag, handle, link or quotation mark, no five-word run of any thesis) and by the
+  word, $tag, handle, link or quotation mark, no five-word run of any thesis, no crime
+  laid at anyone's door such as theft or a stolen or pulled pool) and by the
   gate as an `answer` line, dropped and never repaired; the digest is said whenever that
   cannot be. One call per coin and copy, from the half of the room's model allowance kept
   for what is nice to have, kept 30 minutes; `MERRYMEN_TG_THESES_MODEL=0` turns it off.
