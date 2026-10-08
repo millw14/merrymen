@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { NextRequest } from 'next/server';
-import { GET, POST } from './[action]/route';
+import { GET, POST, maxDuration } from './[action]/route';
 
 test('portal proxy enforces origin, uses a server-only credential, and hides session tokens', async () => {
   const oldFetch = globalThis.fetch, oldSecret = process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET;
@@ -176,7 +176,8 @@ test('another site cannot create an account, choose a plan or submit a payment',
 });
 
 test('a pending payment and a refusal reach the console with their status, code and detail', async () => {
-  const pending = { error: { code: 'payment_pending', message: 'Confirming', stage: 'confirming', ready_in_sec: 90 } };
+  // The gateway's 202 carries its code at the top level, not in an error envelope (gateway/lib/billing.mjs pending()).
+  const pending = { code: 'payment_pending', message: 'Confirming on Robinhood Chain.', tx_hash: '0x' + 'ab'.repeat(32), stage: 'confirming', confirmations: 12, needed: 64, ready_in_sec: 90 };
   const accepted = await proxy('POST', 'payments', { answer: () => Response.json(pending, { status: 202 }) });
   assert.equal(accepted.response.status, 202); assert.deepEqual(await accepted.response.json(), pending);
   assert.equal(accepted.response.headers.get('cache-control'), 'no-store');
@@ -186,4 +187,17 @@ test('a pending payment and a refusal reach the console with their status, code 
   // A gateway that never sets a session on these routes still cannot leak one through them.
   const leaky = await proxy('GET', 'account', { answer: () => Response.json({ account: { id: 'acct_1' }, session: 'should-not-leave' }) });
   assert.deepEqual(await leaky.response.json(), { account: { id: 'acct_1' } }); assert.equal(leaky.response.headers.get('set-cookie'), null);
+});
+
+test('a payment check gets the time its chain reads need: 45 s upstream, inside the function\'s own limit', async () => {
+  const timeout = AbortSignal.timeout, asked: number[] = [];
+  AbortSignal.timeout = (ms: number) => { asked.push(ms); return timeout.call(AbortSignal, ms); };
+  try {
+    await proxy('POST', 'payments', { body: '{"tx_hash":"0x' + 'ab'.repeat(32) + '"}' });
+    await proxy('POST', 'keys', { body: '{"name":"Prism"}' });
+  } finally { AbortSignal.timeout = timeout; }
+  // The gateway reads the chain before it answers (up to 10 s a read); every other action keeps the shorter wait.
+  assert.deepEqual(asked, [45_000, 20_000]);
+  // A function ended by the host before the gateway answers leaves the console a bare 504 and the check unanswered.
+  assert.ok(maxDuration * 1000 >= 45_000 + 10_000, `maxDuration ${maxDuration} s`);
 });
