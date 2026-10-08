@@ -590,6 +590,11 @@ describe("a yes under its own line (live 2026-10-07)", () => {
 });
 
 describe("their earlier question, when they say it was missed (route.ts reask, reaskOf)", () => {
+  it("an earlier watch-list question keeps its intent: never answered with the public board (review on #303)", () => {
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("i asked a question", { reaskOf: "who are the traders you're tracking?" })), { action: "chat" });
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("you didn't answer", { reaskOf: "who's top on fomo this week?" })), { action: "fomo", request: { kind: "leaderboard", window: "7d" } });
+  });
+
   it("reask is on the menu only for someone with an unanswered question, and refused otherwise", () => {
     const enumOf = (spec: ReturnType<typeof routeSpec>) => (spec.schema as { properties: { action: { enum: string[] } } }).properties.action.enum;
     assert.ok(!enumOf(routeSpec({ fomo: true, desk: true, coins: true })).includes("reask"));

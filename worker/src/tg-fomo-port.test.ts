@@ -1411,6 +1411,74 @@ describe("a group research question, end to end", () => {
     }
   });
 
+  it("a board that never reached the room is never 'the second one' (review on #303)", async () => {
+    const s = await setup();
+    let clock = NOW;
+    s.clock.now = clock;
+    store?.close();
+    store = new TgGroupsStore(path.join(home, "tg-groups-undelivered.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    store.ensureRoom(GROUP, { title: "frens", kind: "supergroup" });
+    store.setStatus(GROUP, "approved", 4242);
+    store.update(GROUP, (r) => { r.helloSaid = true; });
+    const tg = new FakeTg();
+    // Telegram refuses the board's message; everything else goes through.
+    const refuse = { on: true };
+    const fetchFn: FetchLike = async (url, init) =>
+      refuse.on && String(url).endsWith("/sendMessage")
+        ? ({ ok: false, status: 400, json: async () => ({ ok: false, error_code: 400, description: "Bad Request: something went wrong" }) } as never)
+        : tg.fetchFn(url, init);
+    let tstate = { ownerId: 4242 } as unknown as TelegramState;
+    const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    groups?.stop();
+    await groups?.drain();
+    groups = createTgGroups({
+      opts: () => ({ token: "123:TOKEN", fetchFn }),
+      store,
+      getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [4242] }) as unknown as ResolvedConfig,
+      stateRef,
+      port: () => coins,
+      fomo: () => port,
+      self: () => ({ id: 999, username: "pinebot", name: "Pine" }),
+      privacyOff: () => false,
+      note: () => {},
+      dashboardBase: () => "https://app.test",
+      agentKey: () => "agent-1",
+      now: () => clock,
+      rand: () => 0.99,
+      env: {},
+      hosted: true,
+      sleep: async (ms) => { clock += Math.max(0, ms); },
+      timer: () => new Promise(() => {}),
+      log: () => {},
+    });
+    let id = 500;
+    const say = async (text: string, fromId: number): Promise<void> => {
+      groups!.onMessage({ updateId: id, chatId: GROUP, fromId, fromFirstName: "Ann", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++, dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens" });
+      await groups!.drain();
+    };
+    await say("pine who are the top traders on fomo this week?", 777);
+    assert.ok(s.calls.some((c) => c.tool === "fomo_get_rankings"), "the board was read");
+    assert.deepEqual(tg.texts(GROUP), [], "and never delivered");
+    refuse.on = false;
+    clock += 60_000;
+    s.clock.now = clock;
+    const before = s.calls.length;
+    await say("pine what's the second one holding?", 888);
+    assert.ok(!s.calls.slice(before).some((c) => String(c.tool).startsWith("fomo_get_trader")), "no trader is looked up from a board the room never saw");
+  });
+
+  it("heard() with nothing delivered forgets the remembered board entirely", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "who are the top traders on fomo this week?", chatId: GROUP });
+    assert.ok(a?.board, "the answer carries its board");
+    const key = tgGroupConversationKey(GROUP);
+    assert.match(String(await s.broker.memory.get(key)), /"board"/);
+    await port.heard!(GROUP, undefined, a!.board!, "");
+    assert.doesNotMatch(String(await s.broker.memory.get(key)), /"board"/);
+  });
+
   it("the room hears Fomo's public leaderboard with its figures, and a trending board with its market caps", async () => {
     const s = await setup();
     let clock = NOW;

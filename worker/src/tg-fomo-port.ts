@@ -654,9 +654,11 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
     async heard(chatId: number, threadId: number | undefined, board: { at: number; ranks: number[] }, sent: string): Promise<void> {
       try {
         if (!isUsableChatId(chatId) || !board || !Array.isArray(board.ranks) || typeof sent !== "string") return;
+        // Nothing delivered (""): the room heard no row, the asked one included.
+        const none = sent === "";
         const heardRanks = new Set(boardRanksIn(sent));
         const cut = new Set(board.ranks.filter((r) => !heardRanks.has(r)));
-        if (!cut.size) return;
+        if (!cut.size && !none) return;
         const b = brokerNow();
         if (!b) return;
         const key = tgGroupConversationKey(chatId, threadId);
@@ -664,11 +666,11 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         // Only the board this answer remembered: a newer ask's board is its own.
         if (!m?.board || m.board.at !== board.at) return;
         // The row a line asked about was never a board row the handler cuts (it is named below the board): it stays.
-        const rows = m.board.rows.filter((r) => !cut.has(r.rank));
+        const rows = none ? [] : m.board.rows.filter((r) => !cut.has(r.rank));
         const next = { ...m, board: { ...m.board, rows } };
         if (!rows.length) delete (next as { board?: unknown }).board;
         await b.memory.set(key, serialize(next));
-        log(`[tg-fomo] board rows the room did not hear forgotten (${cut.size})`);
+        log(none ? "[tg-fomo] board forgotten: the answer never reached the room" : `[tg-fomo] board rows the room did not hear forgotten (${cut.size})`);
       } catch {
         /* memory is a convenience: "the last one" may then ask which row */
       }

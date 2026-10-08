@@ -2932,7 +2932,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       log(`[tg-groups] research ${r.status ?? "unsayable"}, the fallback answers`);
       return "not-research";
     }
-    // A deflection is still an answer about research: a follow-up here goes back to it.
+    // A deflection is still an answer about research: a follow-up here goes back to it
+    // (taken back below if nothing reaches the room).
+    const fomoKey = deskKey(chatId, j.threadId);
+    const fomoBefore = lastFomo.get(fomoKey);
     rememberFomo(chatId, j.threadId);
     // Deflected before anything was looked up: it cost nothing, so it takes nothing.
     if (r.deflect && r.free === true) refund();
@@ -2983,16 +2986,23 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     const failedRead = r.status === "failed" || r.status === "unavailable" || r.status === "budget-limited";
     const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
+    const said = await send(text);
     // A REMEMBERED BOARD IS THE ROWS THE ROOM HEARD: rows the six lines cut
-    // (an age line, her moves line, a row's answer) are never "the last one".
+    // (an age line, her moves line, a row's answer) are never "the last one",
+    // and an answer that never landed (a refused send, the deadline, a shush)
+    // leaves no board at all, and no research answer to follow up.
     if (r.board && typeof port.heard === "function") {
       try {
-        await port.heard(chatId, j.threadId, r.board, text);
+        await port.heard(chatId, j.threadId, r.board, said === "sent" ? text : "");
       } catch (e) {
         fail("research", e);
       }
     }
-    return send(text);
+    if (said !== "sent") {
+      if (fomoBefore === undefined) lastFomo.delete(fomoKey);
+      else lastFomo.set(fomoKey, fomoBefore);
+    }
+    return said;
   };
 
   // ── what a line wants, when no rule knew (route.ts) ──

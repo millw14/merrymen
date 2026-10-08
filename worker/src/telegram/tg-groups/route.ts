@@ -473,7 +473,8 @@ export function parseRoute(raw: unknown, ctx: RouteCtx): TgRoute | null {
       return { action: "chat" };
     case "fomo_leaderboard": {
       // "Who are the traders you're tracking" is the watch list: never answered with the public board.
-      if (ROW_WATCHED.test(String(ctx?.line ?? "").normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'"))) return { action: "chat" };
+      // The earlier question a complaint re-asks counts too: its watch-list intent is never lost.
+      if (ROW_WATCHED.test(line.normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'"))) return { action: "chat" };
       const window = windowIn(line);
       // One row of it ("...and what did he make money on"), read from the line's words only.
       const row = rowIn(line);
