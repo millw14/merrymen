@@ -244,6 +244,13 @@ test('a plan preview says what confirming does, in whole tokens', () => {
   assert.match(previewSentence(p({ effect: 'at_renewal', starts_at: '2026-11-07T12:00:00.000Z' }), FALLBACK_PLANS.plans[1], 'Loaf'), /Crumbs takes over when Loaf ends on 7 Nov 2026\. Nothing is charged now\./);
   assert.match(previewSentence(p({ effect: 'cancel_renewal' }), FALLBACK_PLANS.plans[0], 'Loaf'), /then your account moves to Free\. Nothing is charged\./);
   assert.equal(normalizePreview({ effect: 'charge_everything' }), null);
+  // Back to Free while on Free with Crumbs waiting for payment: the gateway answers activate_now, no charge, no end.
+  const back = p({ effect: 'activate_now', ends_at: null, starts_at: '2026-10-08T00:00:00.000Z' });
+  assert.equal(previewSentence(back, FALLBACK_PLANS.plans[0], 'Free', 'Crumbs'), 'Your account stays on Free and the pending Crumbs selection is dropped. Nothing is charged.');
+  assert.equal(previewSentence(back, FALLBACK_PLANS.plans[0], 'Free'), 'Your account stays on Free. Nothing is charged.');
+  // No end date, no dangling "runs"; no charge, no "0 MERRYMEN comes out".
+  assert.equal(previewSentence(p({ effect: 'activate_now', ends_at: null }), loaf, 'Free'), 'Loaf starts now. Nothing is charged.');
+  for (const sentence of [previewSentence(back, FALLBACK_PLANS.plans[0], 'Free', 'Crumbs'), previewSentence(p({ effect: 'upgrade_now' }), loaf, 'Crumbs')]) assert.doesNotMatch(sentence, /\b0 MERRYMEN|runs\./);
 });
 
 test('a payment check is read as credited, still pending, worth retrying, or refused with its reason', () => {

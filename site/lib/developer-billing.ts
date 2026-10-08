@@ -161,13 +161,20 @@ export function normalizePreview(input: unknown): PlanPreview | null {
   return { effect: effect as PreviewEffect, charge_now_raw: raw(body.charge_now_raw) ?? "0", due_raw: due !== null && BigInt(due) > 0n ? due : null, starts_at: iso(body.starts_at), ends_at: iso(body.ends_at) };
 }
 
-/** What confirming would do, in one sentence the developer agrees to. */
-export function previewSentence(preview: PlanPreview, plan: Plan, current: string): string {
+/**
+ * What confirming would do, in one sentence the developer agrees to.
+ * `selected` names the plan waiting for payment, if any: choosing Free before
+ * it starts drops it.
+ */
+export function previewSentence(preview: PlanPreview, plan: Plan, current: string, selected?: string): string {
   const until = preview.ends_at ? ` until ${formatDate(preview.ends_at)}` : "";
-  const charge = `${formatTokens(preview.charge_now_raw)} MERRYMEN`;
+  const charge = BigInt(preview.charge_now_raw) > 0n ? `${formatTokens(preview.charge_now_raw)} MERRYMEN comes out of your credit` : "";
   switch (preview.effect) {
-    case "activate_now": return `${plan.name} starts now and runs${until}. ${charge} comes out of your credit.`;
-    case "upgrade_now": return `You move to ${plan.name} now for the rest of this period${until}. ${charge} comes out of your credit, and the requests you have used so far carry over.`;
+    case "activate_now":
+      // Free "activates" with nothing running: the account stays where it is, and only the unpaid selection goes.
+      if (plan.price_raw === "0") return `Your account stays on ${plan.name}${selected && selected !== plan.name ? ` and the pending ${selected} selection is dropped` : ""}. Nothing is charged.`;
+      return `${plan.name} starts now${until ? ` and runs${until}` : ""}. ${charge ? `${charge}.` : "Nothing is charged."}`;
+    case "upgrade_now": return `You move to ${plan.name} now for the rest of this period${until}. ${charge || "Nothing is charged"}, and the requests you have used so far carry over.`;
     case "at_renewal": return `${plan.name} takes over when ${current} ends${preview.starts_at ? ` on ${formatDate(preview.starts_at)}` : ""}. Nothing is charged now.`;
     case "cancel_renewal": return `${current} runs to the end of its period${preview.starts_at ? ` (${formatDate(preview.starts_at)})` : ""}, then your account moves to ${plan.name}. Nothing is charged.`;
     case "waiting_for_payment": return `${plan.name} starts as soon as ${preview.due_raw ? `${formatTokens(preview.due_raw, { round: "up", decimals: 0 })} MERRYMEN arrives` : "your payment arrives"}. Confirm, then pay below.`;
