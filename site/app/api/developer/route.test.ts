@@ -112,3 +112,78 @@ test('the console links to repository docs on main, not on a feature branch', ()
   assert.ok(links.length > 0, 'the console should link to the reference');
   assert.deepEqual([...new Set(links)], ['main']);
 });
+
+/** Calls the proxy as the console would, recording what reached the gateway. */
+async function proxy(method: 'GET' | 'POST', action: string, { origin = 'https://merrymen.dev', cookie = 'mm_developer=live-session', body, fetchSite, answer = () => Response.json({ ok: true }) }:
+  { origin?: string | null; cookie?: string | null; body?: string; fetchSite?: string; answer?: () => Response } = {}) {
+  const calls: { url: string; method: string; headers: Headers; body: unknown }[] = [];
+  const oldFetch = globalThis.fetch, oldSecret = process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET, oldOrigin = process.env.MERRYMEN_DEVELOPER_GATEWAY_ORIGIN;
+  process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET = secret; delete process.env.MERRYMEN_DEVELOPER_GATEWAY_ORIGIN;
+  globalThis.fetch = async (url, init) => { calls.push({ url: String(url), method: init?.method || 'GET', headers: new Headers(init?.headers), body: init?.body }); return answer(); };
+  try {
+    const headers: Record<string, string> = {};
+    if (origin) headers.origin = origin;
+    if (cookie) headers.cookie = cookie;
+    if (fetchSite) headers['sec-fetch-site'] = fetchSite;
+    const request = new NextRequest(`https://merrymen.dev/api/developer/${action}`, { method, headers, ...(method === 'POST' ? { body: body ?? '{}' } : {}) });
+    const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ action }) });
+    return { response, calls };
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldSecret === undefined) delete process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET; else process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET = oldSecret;
+    if (oldOrigin !== undefined) process.env.MERRYMEN_DEVELOPER_GATEWAY_ORIGIN = oldOrigin;
+  }
+}
+
+test('the proxy forwards the billing actions, each only with its own method', async () => {
+  for (const [method, action] of [['GET', 'plans'], ['GET', 'account'], ['POST', 'account'], ['POST', 'plan'], ['POST', 'payments']] as const) {
+    const { response, calls } = await proxy(method, action, { body: '{"tier":"crumbs"}' });
+    assert.equal(response.status, 200, `${method} ${action}`);
+    assert.equal(calls.length, 1); assert.equal(calls[0].url, `https://ai.merrymen.dev/developer/v1/${action}`);
+    assert.equal(calls[0].method, method); assert.equal(calls[0].headers.get('authorization'), `Bearer ${secret}`);
+    if (method === 'POST') assert.equal(calls[0].body, '{"tier":"crumbs"}');
+  }
+  // Reading a plan or a payment, or writing the plans table, is not something the console does.
+  for (const [method, action] of [['GET', 'plan'], ['GET', 'payments'], ['POST', 'plans'], ['GET', 'challenge'], ['POST', 'constructor'], ['GET', '__proto__'], ['POST', 'logout-all']] as const) {
+    const { response, calls } = await proxy(method, action);
+    assert.equal(response.status, 404, `${method} ${action}`); assert.deepEqual(calls, [], `${method} ${action}`);
+  }
+});
+
+test('plans are public: read without a cookie, and a cookie that is there is not forwarded', async () => {
+  const signedOut = await proxy('GET', 'plans', { cookie: null, answer: () => Response.json({ billing: { mode: 'off', enforced: false }, plans: [] }) });
+  assert.equal(signedOut.response.status, 200);
+  assert.equal(signedOut.calls[0].headers.get('x-developer-session'), '');
+  const signedIn = await proxy('GET', 'plans');
+  assert.equal(signedIn.calls[0].headers.get('x-developer-session'), '');
+  // Everything else still carries the session, or the gateway could not tell whose account it is.
+  for (const [method, action] of [['GET', 'account'], ['POST', 'account'], ['POST', 'plan'], ['POST', 'payments']] as const) {
+    assert.equal((await proxy(method, action)).calls[0].headers.get('x-developer-session'), 'live-session', `${method} ${action}`);
+  }
+});
+
+test('another site cannot create an account, choose a plan or submit a payment', async () => {
+  for (const action of ['account', 'plan', 'payments']) {
+    for (const hostile of [{ origin: 'https://evil.example' }, { origin: null }, { origin: 'https://merrymen.dev', fetchSite: 'cross-site' }, { origin: 'https://merrymen.dev', fetchSite: 'same-site' }]) {
+      const { response, calls } = await proxy('POST', action, { ...hostile, body: '{"tx_hash":"0x' + 'ab'.repeat(32) + '"}' });
+      assert.equal(response.status, 403, `${action} ${JSON.stringify(hostile)}`); assert.deepEqual(calls, []);
+    }
+    const sameOrigin = await proxy('POST', action, { fetchSite: 'same-origin' });
+    assert.equal(sameOrigin.response.status, 200, action);
+  }
+  const big = await proxy('POST', 'payments', { body: 'x'.repeat(8193) });
+  assert.equal(big.response.status, 413); assert.deepEqual(big.calls, []);
+});
+
+test('a pending payment and a refusal reach the console with their status, code and detail', async () => {
+  const pending = { error: { code: 'payment_pending', message: 'Confirming', stage: 'confirming', ready_in_sec: 90 } };
+  const accepted = await proxy('POST', 'payments', { answer: () => Response.json(pending, { status: 202 }) });
+  assert.equal(accepted.response.status, 202); assert.deepEqual(await accepted.response.json(), pending);
+  assert.equal(accepted.response.headers.get('cache-control'), 'no-store');
+  const refused = { error: { code: 'payment_not_found', reason: 'wrong_sender', message: 'Sent from 0xb…' } };
+  const wrong = await proxy('POST', 'payments', { answer: () => Response.json(refused, { status: 422 }) });
+  assert.equal(wrong.response.status, 422); assert.deepEqual(await wrong.response.json(), refused);
+  // A gateway that never sets a session on these routes still cannot leak one through them.
+  const leaky = await proxy('GET', 'account', { answer: () => Response.json({ account: { id: 'acct_1' }, session: 'should-not-leave' }) });
+  assert.deepEqual(await leaky.response.json(), { account: { id: 'acct_1' } }); assert.equal(leaky.response.headers.get('set-cookie'), null);
+});
