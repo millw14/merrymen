@@ -3,7 +3,12 @@
  * attribution — and in a group, coin-level aggregates with no identities.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+
+import { admitTgLine } from "../telegram/tg-groups/gate";
+import { readThesisForDigest } from "./digest";
+import { resolveFamilies } from "./dossier";
 
 import { robinhoodChain, tokenIdentity } from "./identity";
 import type { FomoQuestionPlan } from "./intent";
@@ -20,7 +25,7 @@ import {
   renderEnvelope,
 } from "./render";
 import type { RankingsData, ResearchCoinData, ResearchStatusData, TokenActivityData, TokenThesesData, TraderActivityData, TraderContextData } from "./tools";
-import type { FomoEnvelope, FomoToolName, ResolvedSubject, ResultStatus, TokenIdentity } from "./types";
+import type { FomoEnvelope, FomoToolName, ResolvedSubject, ResultStatus, Thesis, TokenIdentity } from "./types";
 
 const NOW = Date.UTC(2026, 9, 4, 16, 5);
 const PONS = "0x39dbed3a00000000000000000000000000000c0d";
@@ -97,7 +102,9 @@ describe("renderEnvelope", () => {
 
   it("in a group: coin-level aggregates only — no handles, addresses, links, cashtags or quotes", () => {
     const text = renderEnvelope(env("fomo_get_token_theses", "ok", theses(INJECTION)), G);
-    assert.ok(text.startsWith("PONS on robinhood: 3 theses"));
+    // What they argue in fixed words, never their words or counts (plan WP9, D6).
+    assert.ok(text.startsWith("What traders on Fomo are saying about PONS on Robinhood Chain (1 recent thesis from 1 trader):"), text);
+    assert.doesNotMatch(text, /ignore|instructions|evidence famil|Merrymen's reading|supporting|opposing|neutral/);
     assert.ok(!/frankdegods|0x[0-9a-f]{6}|https?:|\$PONS|their words/.test(text), text);
     // The attribution is the owner's; a group has had its post about the source (Milla, 2026-10-07).
     assert.ok(!text.includes(FOMO_ATTRIBUTION));
@@ -547,5 +554,69 @@ describe("a board says what its chain filter did, and where Robinhood Chain stan
     assert.match(g, /\nMost bought on Fomo in the last 24h: PONS on robinhood \(5 buyers\), ROO on solana \(1 buyer\)\./);
     const sold = renderEnvelope(env("fomo_get_token_activity", "ok", { ...act, side: "sell", topTokens: [{ ...act.topTokens![0]!, sellers: 2 }] }, { subject: { kind: "market" } }), G);
     assert.match(sold, /\nMost sold on Fomo in the last 24h: PONS on robinhood \(2 sellers\)\./);
+  });
+});
+
+describe("a coin's theses in a room: what they argue, not counts (plan WP9 P1, D6)", () => {
+  interface Row { id: string; text: string; likes: number; isDev: boolean; userId: string; handle: string; ts: string }
+  const rich = (JSON.parse(readFileSync(new URL("./testdata/theses-token-rich.json", import.meta.url), "utf8")) as { theses: Row[]; totalAvailable: number });
+  /** The data service.ts builds from those rows (thesisViews). */
+  function richData(rows: Row[]): TokenThesesData {
+    const fam = resolveFamilies(rows.map((r) => ({ id: r.id, text: r.text, familyKey: `id:${r.id}` }) as unknown as Thesis));
+    const theses = rows.map((r) => ({
+      evidenceId: `fomo:thesis/${r.id}`,
+      author: { userId: r.userId, handle: r.handle },
+      token: T,
+      postedAt: Date.parse(r.ts),
+      stance: "neutral" as const,
+      excerpt: r.text,
+      likes: r.likes,
+      isDev: r.isDev,
+      family: fam.get(r.id) ?? r.id,
+      ...readThesisForDigest(r.text),
+    }));
+    return { token: T, label: { symbol: "PONS", name: null }, trader: null, theses, stance: { supporting: 5, opposing: 4, neutral: rows.length - 9 }, families: 23, uniqueAuthors: 20, chainFilterHonoured: true };
+  }
+  const RICH = env("fomo_get_token_theses", "capped", richData(rich.theses), { coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 25, duplicatesRemoved: 0, providerTotal: rich.totalAvailable, capped: true, missing: [], notes: [] } });
+  const FORBIDDEN = /evidence famil|Merrymen's reading|supporting|opposing|neutral|their words|IGNORE|pons-claim|ponsarmy|t\.me|\$PONS|@|0x[0-9a-fA-F]{6}|https?:|10m|200k|50m|40%/i;
+
+  it("the rich fixture: for, against, what it is about, how much was read; every line through the gate as research", () => {
+    const text = renderEnvelope(RICH, G);
+    const lines = text.split("\n");
+    assert.equal(lines[0], "What traders on Fomo are saying about PONS on Robinhood Chain (25 recent theses from 20 traders):");
+    assert.match(lines[1]!, /^For it: it's still early, a strong community/);
+    assert.match(lines[2]!, /^Against it: .*fears it could collapse/);
+    assert.match(lines[3]!, /^Most of it is about /);
+    assert.equal(lines[lines.length - 1], "Their claims, not facts; newest 25 of 41; the dev's own posts left out.");
+    assert.ok(lines.length <= 5, "room for the copy's age under the room's six-line cap");
+    assert.doesNotMatch(text, FORBIDDEN);
+    assert.doesNotMatch(text, /More records exist/, "said once, as 'newest 25 of 41'");
+    for (const l of lines) {
+      const v = admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] });
+      assert.ok(v.ok, `${l}: ${v.ok ? "" : v.reason}`);
+    }
+  });
+
+  it("no six-word run of any thesis reaches the room", () => {
+    const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+    const said = words(renderEnvelope(RICH, G)).join(" ");
+    for (const r of rich.theses) {
+      const w = words(r.text);
+      for (let i = 0; i + 6 <= w.length; i++) assert.ok(!said.includes(w.slice(i, i + 6).join(" ")), w.slice(i, i + 6).join(" "));
+    }
+  });
+
+  it("all hype and no cue says so, instead of '0 supporting, 0 opposing, 25 neutral'", () => {
+    const hype = rich.theses.slice(0, 2);
+    const text = renderEnvelope(env("fomo_get_token_theses", "ok", richData(hype)), G);
+    assert.match(text, /\nMostly hype, with no case for or against that I can pick out\.\n/);
+    assert.doesNotMatch(text, FORBIDDEN);
+  });
+
+  it("the owner keeps the counts and her excerpts, with 'no clear lean' for what matched no cue", () => {
+    const text = renderEnvelope(env("fomo_get_token_theses", "ok", theses()), O);
+    assert.match(text, /Merrymen's reading: 1 supporting, 1 opposing, 1 no clear lean\./);
+    assert.doesNotMatch(text, /neutral/);
+    assert.match(text, /\(supporting, /);
   });
 });

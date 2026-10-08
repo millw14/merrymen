@@ -189,7 +189,9 @@ describe("createTgFomoPort", () => {
     assert.ok(!JSON.stringify(s.calls[0]!.args).includes("evil"), "nothing from the text becomes an argument beyond the planner's vocabulary");
     assert.deepEqual([...new Set(s.tenants)], [TENANT], "the tenant is the broker's, never the text's");
     for (const re of NO_IDENTITY) assert.doesNotMatch(a.text, re);
-    assert.match(a.text, /3 theses/);
+    // What they argue, never counts read as a verdict (plan WP9, D6).
+    assert.match(a.text, /^What traders on Fomo are saying about PONS on Robinhood Chain \(3 recent theses from 3 traders\):/);
+    assert.doesNotMatch(a.text, /evidence famil|Merrymen's reading|supporting|opposing|neutral/);
     assert.doesNotMatch(a.text, /Source:|fomoapi|not a (?:skill measure|measure of skill)/, "a group answer carries no source line (Milla, 2026-10-07)");
     assert.ok(!a.text.includes(FOMO_ATTRIBUTION));
   });
@@ -883,7 +885,7 @@ describe("a group research question, end to end", () => {
     await groups.drain();
     const first = tg.texts(GROUP);
     assert.equal(first.length, 1);
-    assert.match(first[0]!, /3 theses/);
+    assert.match(first[0]!, /3 recent theses/);
     assert.doesNotMatch(first[0]!, /Source:|fomoapi|not a (?:skill measure|measure of skill)/);
     for (const re of NO_IDENTITY) assert.doesNotMatch(first[0]!, re);
     assert.equal(s.calls[0]!.opts.audience, "group");
@@ -910,7 +912,7 @@ describe("a group research question, end to end", () => {
       const out = tg.texts(GROUP);
       assert.equal(out.length, before + 1, line);
       assert.notEqual(out[out.length - 1], TG_FOMO_DEFLECTION, `${line}: the bot's handle was read as a trader`);
-      assert.match(out[out.length - 1]!, /3 theses/, line);
+      assert.match(out[out.length - 1]!, /3 recent theses/, line);
       assert.equal(s.calls.length, looked + 1, line);
       assert.equal(s.calls[s.calls.length - 1]!.tool, "fomo_get_token_theses", line);
     }

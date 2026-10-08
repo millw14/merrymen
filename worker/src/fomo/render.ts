@@ -21,13 +21,16 @@
  * P&L, and one named trader's public data (who they are, what they hold,
  * what they traded and what they made or lost money on, provider-reported;
  * Milla, 2026-10-07), never as @mentions and never who Merrymen follows or
- * watches. The owner's own research state is deflected to a direct message.
- * A final scrub runs over the whole group text as a second line of defence.
+ * watches. A coin's theses are a digest of what they argue (digest.ts),
+ * never quoted and never counted. The owner's own research state is
+ * deflected to a direct message. A final scrub runs over the whole group
+ * text as a second line of defence.
  *
  * NO PERMALINKS. Nothing here writes a URL. The provider supplies no verified
  * links in the envelope, and Merrymen never invents one.
  */
 
+import { digestTheses, listWords } from "./digest";
 import { agoText, durationText } from "./dossier";
 import { chainFromUserText, isRobinhoodToken, shortAddress } from "./identity";
 import type { FomoQuestionPlan } from "./intent";
@@ -325,7 +328,8 @@ function coverageLine(env: FomoEnvelope, audience: Audience = "owner"): string |
   const parts: string[] = [];
   if (env.status === "partial" && c.missing.length) parts.push(`Not read: ${c.missing.slice(0, 3).join(", ")}.`);
   else if (env.status === "partial" && env.reason !== "deep-research-queued") parts.push("Part of this could not be read.");
-  if (c.capped) parts.push("More records exist than were read, so counts are a floor.");
+  // A room's thesis digest says "newest 25 of 41" itself, and has no counts to call a floor.
+  if (c.capped && !(audience === "group" && env.tool === "fomo_get_token_theses")) parts.push("More records exist than were read, so counts are a floor.");
   // Notes that change what the answer means: limits, removed rows, transfers that are not trades, stored copies, unread parts.
   // About one trader, a room never hears a note that says where Merrymen's
   // watched-trader record stands on them (who it watches is never a room's),
@@ -563,17 +567,61 @@ function earningsLines(d: TraderActivityData, audience: Audience, name: string):
   return [`${name} on trades ${scope} (provider-reported, realised to date): ${parts.join("; ")}.`];
 }
 
+/** "neutral" read as a verdict ("25 neutral"); it only ever meant no cue matched. */
+function leanWords(s: string): string {
+  return s === "neutral" ? "no clear lean" : s;
+}
+
+/** The first line of a group's thesis digest (tg-fomo-port.ts finds the digest by it). */
+export const GROUP_THESES_HEAD = "What traders on Fomo are saying about ";
+/** The digest's closing line (tg-fomo-port.ts: the model's paraphrase keeps it and what follows). */
+export const GROUP_THESES_TAIL = "Their claims, not facts";
+
+/**
+ * A COIN'S THESES AS A ROOM HEARS THEM (digest.ts, plan WP9 P1): what they
+ * argue for and against, what most of it is about and what holders wait on,
+ * in fixed phrases, never their words; no stance counts and no "evidence
+ * families" (Milla, 2026-10-07). How much was read, and that it is claims,
+ * closes it. At most five lines, so a room's line cap still leaves the
+ * copy's age (from the limits) in the answer.
+ */
+function groupTheses(env: FomoEnvelope<TokenThesesData>, d: TokenThesesData, total: number): string[] {
+  const dg = digestTheses(d.theses);
+  const name = sym(d.label, "group") ?? "this coin";
+  const where = d.token ? ` on ${chainLabel(d.token.chain.slug)}` : "";
+  const out = [`${GROUP_THESES_HEAD}${name}${where} (${plural(dg.theses, "recent thesis", "recent theses")} from ${plural(dg.authors, "trader", "traders")}):`];
+  if (dg.forIt.length) out.push(`For it: ${listWords(dg.forIt)}.`);
+  if (dg.against.length) out.push(`Against it: ${listWords(dg.against)}.`);
+  const waiting = dg.waitingOn.length ? `some are waiting on ${listWords(dg.waitingOn)}` : "";
+  const cases = dg.forIt.length > 0 || dg.against.length > 0;
+  if (dg.about.length) {
+    const lead = cases ? "Most of it is about " : "No clear case for or against; most of it is about ";
+    out.push(`${lead}${listWords(dg.about)}${waiting ? `, and ${waiting}` : ""}.`);
+  } else if (!cases) {
+    out.push(waiting ? `No clear case for or against; ${waiting}.` : "Mostly hype, with no case for or against that I can pick out.");
+  } else if (waiting) {
+    out.push(`${waiting.charAt(0).toUpperCase()}${waiting.slice(1)}.`);
+  }
+  const of = Math.max(total, finite(env.coverage.providerTotal) ? env.coverage.providerTotal : 0);
+  const parts = [GROUP_THESES_TAIL];
+  if (of > dg.theses) parts.push(`newest ${dg.theses} of ${of}`);
+  if (dg.devPosts > 0) parts.push("the dev's own posts left out");
+  out.push(`${parts.join("; ")}.`);
+  return out;
+}
+
 function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now: number): string[] {
   const d = env.data;
   if (!d) return [];
   const subject = d.token ? coin(d.token, d.label, audience) : d.trader ? trader(d.trader) : "this subject";
   const total = d.stance.supporting + d.stance.opposing + d.stance.neutral;
   if (total === 0) return [`No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`];
+  if (audience === "group" && d.token && !d.trader && d.theses.length > 0) return groupTheses(env, d, total);
   const out = [
-    `${subject}: ${plural(total, "thesis", "theses")} from ${plural(d.uniqueAuthors, "author", "authors")} in ${plural(d.families, "evidence family", "evidence families")} — Merrymen's reading: ${d.stance.supporting} supporting, ${d.stance.opposing} opposing, ${d.stance.neutral} neutral.`,
+    `${subject}: ${plural(total, "thesis", "theses")} from ${plural(d.uniqueAuthors, "author", "authors")} in ${plural(d.families, "evidence family", "evidence families")} — Merrymen's reading: ${d.stance.supporting} supporting, ${d.stance.opposing} opposing, ${d.stance.neutral} ${leanWords("neutral")}.`,
   ];
   if (audience === "owner") {
-    for (const t of d.theses.slice(0, 4)) out.push(`• ${who(t.author.handle, t.author.userId)} (${t.stance}, ${ago(now, t.postedAt)}): ${quoted(t.excerpt)}`);
+    for (const t of d.theses.slice(0, 4)) out.push(`• ${who(t.author.handle, t.author.userId)} (${leanWords(t.stance)}, ${ago(now, t.postedAt)}): ${quoted(t.excerpt)}`);
   }
   out.push("Theses are claims to evaluate, not facts.");
   return out;

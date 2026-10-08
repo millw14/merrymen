@@ -29,6 +29,8 @@
  */
 
 import type { ToolSpec } from "../llm";
+import type { ThesisCue } from "./digest";
+import type { DossierTopic } from "./dossier";
 import { chainFromUserText, IDENTITY_GUARDS } from "./identity";
 import type {
   ChainIdentity,
@@ -387,6 +389,14 @@ export interface ThesisView {
   likes: number | null;
   isDev: boolean | null;
   family: string;
+  /**
+   * Merrymen's reading of the full text for a group's digest (digest.ts):
+   * the cues that are not negated, the topics, what it says holders wait on.
+   * Labels from fixed tables only, never the author's words.
+   */
+  cues?: ThesisCue[];
+  topics?: DossierTopic[];
+  waitingOn?: string[];
 }
 
 export interface TokenThesesData {

@@ -66,6 +66,7 @@ import {
   THESIS_PAGE_SIZE,
   type DossierClaimDetail,
 } from "./dossier";
+import { readThesisForDigest } from "./digest";
 import { chronologicalOrder, dedupeEvents } from "./events";
 import { changeSummary, earlyDiscovery, participationBreadth } from "./features";
 import { SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
@@ -2030,6 +2031,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         likes: t.likes,
         isDev: t.isDev,
         family: fam.get(t.id) ?? t.familyKey,
+        // A group's digest (digest.ts) reads the whole text, not the cut excerpt.
+        ...readThesisForDigest(t.text),
       };
     });
     return { views, stance, families: new Set(views.map((v) => v.family)).size, authors: new Set(rows.map((t) => t.author.userId)).size };
