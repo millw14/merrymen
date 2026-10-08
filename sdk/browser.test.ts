@@ -19,6 +19,7 @@ import { partnerEnrollmentMessage } from "../packages/core/src/partner-enrollmen
 import { carriesOwnerKey } from "../packages/core/src/hosted";
 import { prepareAgentGrant } from "../web/src/lib/session";
 import { checkCanonicalWall } from "../web/src/lib/canonical-wall";
+import { MAX_USDG_UI } from "../packages/core/src/wall";
 import { createPartnerEnrollmentService } from "../web/src/lib/partner-enrollment";
 import { FilePartnerStore } from "../web/src/lib/partner-store";
 import { PartnerError } from "../web/src/lib/partner-bridge";
@@ -316,11 +317,25 @@ describe("prepareMerryman", () => {
     }
   });
 
-  it("accepts limits at activation's own bounds", async () => {
-    const edge = { perTradeUsdg: 1.5, dailyUsdg: 1.5, expiryDays: 365, maxDrawdownPct: 100, maxOpsPerDay: 1 };
-    const a = attempt({ caps: edge });
-    const { result } = await activate(await a.grant, a.owner);
-    assert.equal(result.connection.status, "linked");
+  // Each accepted by both, at a bound or an odd value of one field, so a check
+  // here made STRICTER than activation's (a whole drawdown, an ops or USDG
+  // ceiling, a minimum expiry) fails too, not only a looser one.
+  const ACTIVATABLE_CAPS = [
+    { perTradeUsdg: 1.5, dailyUsdg: 1.5, expiryDays: 365, maxDrawdownPct: 100, maxOpsPerDay: 1 },
+    { perTradeUsdg: 1, dailyUsdg: 1, expiryDays: 1, maxDrawdownPct: 1, maxOpsPerDay: 1 },
+    { ...CAPS, perTradeUsdg: 2.25, dailyUsdg: 7.75 },
+    { ...CAPS, maxDrawdownPct: 12.5 },
+    { ...CAPS, maxOpsPerDay: 1_000_000 },
+    // The largest whole USDG amount the signer can seal exactly.
+    { ...CAPS, perTradeUsdg: Math.floor(MAX_USDG_UI), dailyUsdg: Math.floor(MAX_USDG_UI) },
+  ];
+
+  it("accepts limits at activation's own bounds, and odd values inside them", async () => {
+    for (const caps of ACTIVATABLE_CAPS) {
+      const a = attempt({ caps });
+      const { result } = await activate(await a.grant, a.owner);
+      assert.equal(result.connection.status, "linked", JSON.stringify(caps));
+    }
   });
 
   it("signs for mainnet by default and for the testnet when asked, and activation keeps that chain", async () => {
