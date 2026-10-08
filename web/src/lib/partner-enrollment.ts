@@ -14,7 +14,7 @@ import {
 import type { GrantStore } from "../../../worker/src/grant-store";
 import type { SettingsStore } from "../../../worker/src/settings-store";
 import type { IdentityStore } from "../../../worker/src/identity-store";
-import { activatedBy, getPartnerStore, type PartnerConnection, type PartnerStore } from "./partner-store";
+import { activatedBy, getPartnerStore, PartnerStoreError, type PartnerConnection, type PartnerStore } from "./partner-store";
 import { onlyFields, PartnerError, requirePartnerScope, type PartnerPrincipal } from "./partner-bridge";
 import { AGENT_NAME_RE, AGENT_NAME_RULE, normalizeAgentName } from "./agent-name-rule";
 
@@ -239,21 +239,33 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
           ...previous, agentName: claim.settings.name, strategy: claim.settings.strategy,
           basketSymbols: claim.settings.basket_symbols, paperTradingEnabled: true, liveTradingEnabled: false,
         };
+        let bound: PartnerConnection;
         try {
           // Keep the old permission in paper mode until the replacement has
           // been durably installed and the partner's consent has been bound.
           await settingsStore.put(grant.owner, safe);
           await (await identities()).ensure(grant.owner, grant.smartAccount);
           await grantStore.put(grant.owner, grant);
-          const bound = await store().bindAuthorized(current.id, principal.app_id, grant.owner, claim.scopes);
+          bound = await store().bindAuthorized(current.id, principal.app_id, grant.owner, claim.scopes);
           if (claim.settings.live_trading_enabled) await settingsStore.put(grant.owner, { ...safe, liveTradingEnabled: true });
-          // Last: only an activation that finished every step may later be
-          // answered as a lost response instead of challenge_used.
-          const recorded = await store().recordActivation(bound.id, principal.app_id, grant.owner, proof);
-          return { connection: recorded, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: false };
         } catch (error) {
           if (error instanceof PartnerError || (error && typeof error === "object" && "status" in error && "code" in error)) throw error;
           return fail(503, "enrollment_storage_failed", "Enrollment could not be fully saved. Request a fresh challenge and retry; inspect agent status before continuing");
+        }
+        // Last: only an activation that finished every step may later be
+        // answered as a lost response instead of challenge_used. Every effect
+        // is durable by now, so failing to record that proof is no failure of
+        // the activation: answering it enrollment_storage_failed told the
+        // partner a completed one (live trading perhaps on) had failed. The
+        // only loss is the old answer, challenge_used, to a lost-response retry.
+        try {
+          const recorded = await store().recordActivation(bound.id, principal.app_id, grant.owner, proof);
+          return { connection: recorded, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: false };
+        } catch (error) {
+          // Revoked or re-owned meanwhile: that is an answer, not a storage failure.
+          if (error instanceof PartnerStoreError) throw error;
+          console.error("[partner-enrollment] activation completed; its retry proof was not recorded", error instanceof Error ? error.name : "unknown");
+          return { connection: bound, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: false };
         }
       });
     },

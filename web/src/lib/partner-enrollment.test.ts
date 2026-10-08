@@ -146,6 +146,34 @@ test("only the latest completed activation is answered again; an earlier or unfi
   await assert.rejects(g.service.activate(principal, g.connection, live), errorCode("challenge_used"));
 });
 
+test("an activation whose every effect committed is a success even when its retry proof cannot be recorded", async t => {
+  const logged = t.mock.method(console, "error", () => {});
+  const f = await fixture();
+  const tenant = f.owner.address.toLowerCase();
+  const recordActivation = f.store.recordActivation.bind(f.store);
+  f.store.recordActivation = async () => { throw new Error("connection reset"); };
+  const activation = await f.activationFor(f.grant, { ...settings, live_trading_enabled: true });
+  const done = await f.service.activate(principal, f.connection, activation);
+  assert.equal(done.replayed, false);
+  assert.equal(done.connection.status, "linked");
+  assert.equal(done.connection.tenant, tenant);
+  assert.equal(done.connection.activation, undefined);
+  assert.deepEqual(f.events, ["settings-paper", "identity", "grant", "settings-live"]);
+  assert.equal(f.savedSettings.get(tenant)?.liveTradingEnabled, true, "live trading is on, and the answer says the activation succeeded");
+  assert.equal(logged.mock.callCount(), 1);
+  assert.doesNotMatch(JSON.stringify(logged.mock.calls[0].arguments), /connection reset/, "only the error's name is logged");
+  // With no recorded proof a lost-response retry gets the old answer, and nothing is applied twice.
+  f.store.recordActivation = recordActivation;
+  await assert.rejects(f.service.activate(principal, f.connection, activation), errorCode("challenge_used"));
+  assert.deepEqual(f.events, ["settings-paper", "identity", "grant", "settings-live"]);
+  // A connection revoked meanwhile is still an answer, not a success.
+  const g = await fixture();
+  const record = g.store.recordActivation.bind(g.store);
+  g.store.recordActivation = async (id, partnerId, owner, proof) => { await g.store.revoke(partnerId, id); return record(id, partnerId, owner, proof); };
+  await assert.rejects(g.service.activate(principal, g.connection, await g.activationFor()), (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_changed");
+  assert.equal((await g.store.byId(principal.app_id, g.connection.id))?.status, "revoked");
+});
+
 test("contention for the owner's enrollment lock leaves the signature usable for a retry", async () => {
   const f = await fixture();
   const activation = await f.activationFor();
