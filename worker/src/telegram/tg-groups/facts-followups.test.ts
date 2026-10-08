@@ -163,6 +163,22 @@ describe("fixed answers about itself (WP11): what it can do, its own agent, why 
       assert.deepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "onboarding" }, q);
     }
     assert.equal(publicFactRequest("i get my own coffee"), null);
+    // A coin under a board is never the onboarding steps (review r2).
+    for (const q of ["should i get one of these coins?", "should i get one of them?", "shogun should i get one of these?", "how do i get one of those"]) {
+      assert.notDeepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "onboarding" }, q);
+    }
+  });
+
+  it("banter about DMs is never the DM policy (review r2)", () => {
+    for (const q of ["shogun why do scammers always slide into the dms?", "why is everyone in the dms lol", "shogun why do people get rugged in dms", "why is the dev not here", "why buy on base and not here?", "why does he only reply in private chats lol"]) {
+      const r = publicFactRequest(q, ["Shogun"]);
+      assert.notDeepEqual(r, { kind: "site", topic: "dm-policy" }, q);
+      assert.notDeepEqual(r, { kind: "site", topic: "onboarding" }, q);
+    }
+    // The ones that ask why the bot keeps it to DMs still are.
+    for (const q of ["shogun why not here?", "why only in dms", "why privately?", "how come in private?", "why won't you tell me in the chat?", "why are you unable to say it in the group?"]) {
+      assert.deepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "dm-policy" }, q);
+    }
   });
 
   it("'why can't you answer in the group?' is the DM policy; a missed answer or a silent bot is not (g1 x11)", () => {

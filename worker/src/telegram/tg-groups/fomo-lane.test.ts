@@ -1537,6 +1537,22 @@ describe("fixed answers about itself, through the real handler (WP11; g1 b06, b1
     assert.doesNotMatch(tg.texts(CHAT)[0]!, /Fomo/);
   });
 
+  it("'should i get one of these?' under a trending board is never the onboarding steps, nor banter about DMs the DM policy (review r2)", async () => {
+    fomo!.answer = () => ({ text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood, market cap $2.1M", deflect: false, status: "ok" });
+    make();
+    await said(msg("pine what's trending on fomo?"));
+    const board = lastSent();
+    const replyTo = { messageId: board.id, fromId: BOT.id, fromIsBot: true, text: board.text };
+    clock += 30 * SEC;
+    await said(msg("pine should i get one of these?", { fromId: ANN + 1, replyTo }));
+    clock += 2 * MIN;
+    await said(msg("pine why do scammers always slide into the dms?", { fromId: ANN + 2 }));
+    for (const t of tg.texts(CHAT).slice(1)) {
+      assert.doesNotMatch(t, /open Merrymen on the web, sign in, then choose Create agent/, t);
+      assert.doesNotMatch(t, /stay in DMs/, t);
+    }
+  });
+
   it("'how do i get my own agent' is the onboarding answer", async () => {
     make();
     await said(msg("pine how do i get my own agent"));

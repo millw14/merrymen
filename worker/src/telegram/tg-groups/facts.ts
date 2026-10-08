@@ -31,9 +31,13 @@ function withoutSelf(text: string, names: readonly string[]): string {
 const CAPABILITIES =
   /^(?:help|help\s+me|halp|commands|menu|what\s+(?:can|do)\s+(?:you|u)\s+do(?:\s+(?:here|in\s+here|in\s+(?:this|the)\s+(?:group|chat)|for\s+(?:me|us)))?|what\s+(?:are|r)\s+(?:you|u)\s+(?:able\s+to\s+do|good\s+for|for)|what\s+can\s+i\s+ask(?:\s+(?:you|u))?(?:\s+(?:here|for))?|how\s+do\s+i\s+use\s+(?:you|u|this\s+bot|this|the\s+bot)|what\s+(?:are\s+)?(?:your|ur)\s+(?:commands|features|capabilities|skills))[\s?!.]*$/iu;
 
-/** "how do i get my own agent / one of you / a bot like you": onboarding, not a chat. */
+/**
+ * "how do i get my own agent / one of you / a bot like you": onboarding, not
+ * a chat. Never "one of these" or "one of them": under a board that is a coin
+ * ("should i get one of these coins?").
+ */
 const OWN_AGENT =
-  /\b(?:get|make|build|set\s*up|have|run)\s+(?:my\s+own\s+(?:agent|bot|merryman|one)|one\s+of\s+(?:you|u|these|those|them)|an?\s+(?:agent|bot|merryman)\s+like\s+(?:you|u|this|yours|this\s+one)|(?:an?\s+)?(?:agent|bot)\s+of\s+my\s+own)\b/iu;
+  /\b(?:get|make|build|set\s*up|have|run)\s+(?:my\s+own\s+(?:agent|bot|merryman|one)|one\s+of\s+(?:you|u)\b|an?\s+(?:agent|bot|merryman)\s+like\s+(?:you|u|this|yours|this\s+one)|(?:an?\s+)?(?:agent|bot)\s+of\s+my\s+own)\b/iu;
 
 /**
  * "WHY CAN'T YOU ANSWER THAT HERE?", "why not in the group?", "why only in
@@ -44,9 +48,13 @@ const OWN_AGENT =
  */
 const DM_WHY = /\b(?:why|how\s+come)\b/iu;
 const DM_POLICY: readonly RegExp[] = [
-  /\b(?:can'?t|cannot|won'?t|wont|unable\s+to)\b.{0,30}\b(?:answer|say|tell|share|post|show|talk\s+about)\w*\b.{0,30}\b(?:here|in\s+(?:the\s+|this\s+|a\s+)?(?:group|chat|gc|room))\b/iu,
-  /\bnot\s+(?:here|in\s+(?:the\s+|this\s+)?(?:group|chat|gc|room))\b/iu,
-  /\b(?:only\s+(?:in\s+)?(?:dms?|pms?|private)|(?:a|the|your|in)\s+dms?|dm\s+(?:you|u|only)|direct\s+messages?|in\s+private|privately)\b/iu,
+  // "why can't you answer that here": the bot is the one who can't.
+  /\b(?:(?:can'?t|cannot|won'?t|wont)\s+(?:you|u)|(?:you|u)\s+(?:can'?t|cannot|won'?t|wont|(?:are\s+)?unable\s+to))\b.{0,30}\b(?:answer|say|tell|share|post|show|talk\s+about)\w*\b.{0,30}\b(?:here|in\s+(?:the\s+|this\s+|a\s+)?(?:group|chat|gc|room))\b/iu,
+  // "why not here?", "how come only in dms?", "why a dm?", "why privately?": the whole line,
+  // so "why do scammers always slide into the dms?" or "why is the dev not here" stay chat.
+  /^(?:why|how\s+come)\s+(?:not\s+(?:here|in\s+(?:the\s+|this\s+)?(?:group|chat|gc|room))|(?:only\s+)?(?:(?:in\s+)?(?:a\s+|the\s+)?(?:dms?|pms?)|(?:in\s+)?(?:private|direct\s+messages?)|privately))[\s?!.]*$/iu,
+  // "why do i have to dm you".
+  /\b(?:have\s+to|must|need\s+to|gotta|should)\s+dm\s+(?:you|u)\b/iu,
 ];
 const DM_POLICY_NOT = /\b(?:bot|telegram|botfather|privacy\s*mode|wallet|balance|portfolio|withdraw\w*|deposit\w*|didn'?t|did\s+not)\b/iu;
 
@@ -87,7 +95,7 @@ export function publicFactRequest(text: string, names: readonly string[] = []): 
   if (/\b(?:withdraw\w*|cash\s*out|recover(?:y)?\s+(?:key|wallet|funds)|(?:lost|restore)\s+(?:(?:my|the)\s+)?(?:wallet|recovery\s*key))\b/iu.test(s)) return { kind: "site", topic: "withdrawals" };
   if (/\b(?:add\s+(?:funds|money|usdg)|deposit(?:ed)?\s*(?:funds|money|usdg|address)?|top[ -]?up|fund\s+(?:(?:my|the|an?|your)\s+)?(?:agent|merryman|account|wallet))\b/iu.test(s)) return { kind: "site", topic: "funding" };
   if (/\b(?:paper\s*(?:trading|trades?|mode|money)|practice\s*(?:trading|mode|money)|simulated\s*(?:money|funds|trades?)|real\s*(?:money|funds)|paper\s*(?:and|or|vs\.?|versus)\s*live|live\s*(?:and|or|vs\.?|versus)\s*paper|(?:switch|turn|enable)\b.{0,25}\blive\s*trading)\b/iu.test(s)) return { kind: "site", topic: "modes" };
-  if (DM_WHY.test(s) && DM_POLICY.some((re) => re.test(s)) && !DM_POLICY_NOT.test(s)) return { kind: "site", topic: "dm-policy" };
+  if (DM_WHY.test(s) && DM_POLICY.some((re) => re.test(s.trim())) && !DM_POLICY_NOT.test(s)) return { kind: "site", topic: "dm-policy" };
   if (/\b(?:public\s*(?:group|chat)|in\s+(?:the\s+)?group|private\s*(?:chat|details|portfolio|account|wallet)|dm|direct\s*message)\b/iu.test(s)
     && /\b(?:private|privacy|portfolio|balance|holdings|sizes?|wallet|difference|details|share|see|show|ask|tell)\b/iu.test(s)) return { kind: "site", topic: "privacy" };
   if (/\b(?:botfather|privacy\s*mode)\b/iu.test(s)
