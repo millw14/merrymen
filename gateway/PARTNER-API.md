@@ -39,8 +39,9 @@ Sign-in is a free message signature from a standard wallet (an EOA). The
 signature is checked on the gateway itself, with no chain lookup, so
 smart-contract wallets (a Safe, a passkey or ERC-4337 account) cannot sign in;
 use an ordinary wallet's key. A portal session lasts up to eight hours. Signing
-out revokes it on the gateway, not only in your browser, and a gateway restart
-can end it early: sign in again. Your keys are unaffected either way.
+out clears it in your browser and asks the gateway to revoke it; if that
+request fails, the session stays valid until it expires. A gateway restart can
+end a session early: sign in again. Your keys are unaffected either way.
 
 Operators can also issue keys with the gateway CLI (see
 [Operator configuration](#operator-configuration-and-key-rotation)). Such a key
