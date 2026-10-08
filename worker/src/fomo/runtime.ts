@@ -104,6 +104,10 @@ export function storeAllowancePort(db: Db, now: () => number = Date.now): Allowa
     give(key, amount) {
       return store.returnAllowance(db, key, amount, now());
     },
+    // A plain read: which cap a refusal names, and whether a tool's whole planned cost fits (budget.ts).
+    async peek(key) {
+      return (await store.readAllowance(db, key)) ?? 0;
+    },
   };
 }
 

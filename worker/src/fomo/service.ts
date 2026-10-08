@@ -307,7 +307,7 @@ export interface BackgroundResearchCap {
 export const BACKGROUND_RESEARCH_CAP: Readonly<BackgroundResearchCap> = Object.freeze({ poolShare: 0.8 });
 
 /** What a read is charged through: a budget, or a budget behind the research cap. */
-type BudgetLike = Pick<FomoBudget, "tryCharge">;
+type BudgetLike = Pick<FomoBudget, "tryCharge"> & Partial<Pick<FomoBudget, "wouldRefuse">>;
 
 function capFraction(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : fallback;
@@ -1191,7 +1191,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
    *   decideRead → (serve cache | budget.tryCharge → SingleFlight → settle/refund
    *   → cachePut/cacheMarkAttempt) → a Section saying honestly what was served.
    */
-  async function read<T>(cc: ChargeContext, spec: ReadSpec<T>, asked: FreshnessMode): Promise<Section<T>> {
+  /**
+   * What a read would do before anything is charged: its cache key, the
+   * mode and reuse window a room reads with, the held copy, and freshness's
+   * first decision (serve the copy, serve it stale, or fetch).
+   */
+  async function firstLook<T>(cc: ChargeContext, spec: ReadSpec<T>, asked: FreshnessMode) {
     const key = cacheKeyOf(spec.route, spec.params);
     const now = cc.now;
     // A ROOM NEVER FORCES A PAID REFRESH (D8), and otherwise reuses the slow
@@ -1200,7 +1205,6 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const room = cc.surface === "telegram-group";
     const mode: FreshnessMode = room && asked === "force-refresh" ? "prefer-fresh" : asked;
     const reuseMs = room && asked !== "force-refresh" && cc.noReuse !== true ? GROUP_REUSE_MS[spec.cls] : undefined;
-    const pages = Math.max(1, spec.pages ?? 1);
     let entry: store.CacheEntry | null = null;
     try {
       entry = await store.cacheGet(db, key);
@@ -1218,6 +1222,47 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           lastAttemptOutcome: entry.lastAttemptOutcome,
         }
       : null;
+    const first = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: true, ...(reuseMs !== undefined ? { reuseMs } : {}) });
+    return { key, mode, reuseMs, heldData, heldSnap, state, first };
+  }
+
+  /**
+   * THE WHOLE PLANNED COST BEFORE THE FIRST PAID READ (review r2, plan F1):
+   * a tool that pays a cheap identity read (a search) and then the read it
+   * exists for (a thesis page, a trader's holdings) asks the budget, taking
+   * nothing, whether both fit (FomoBudget.wouldRefuse). If not, nothing is
+   * charged and the answer is the refusal the whole read would have met, so
+   * a room is never charged for a search and then refused the page, nor told
+   * "try again after 15:00" by the search and refused at 15:00 by the page.
+   * Only when the first read would really go to the provider: a kept copy
+   * costs nothing, and each later read is then charged on its own as before.
+   * `later`: the credits of the reads the answer cannot do without.
+   */
+  async function plannedFits(cc: ChargeContext, firstSpec: ReadSpec<unknown>, asked: FreshnessMode, later: number): Promise<Fail | null> {
+    const b = cc.budget ?? budget;
+    if (!client || typeof b.wouldRefuse !== "function" || !(later > 0)) return null;
+    if (cc.cap) return null;
+    const look = await firstLook(cc, firstSpec, asked);
+    if (look.first.action !== "fetch") return null;
+    const total = expectedCredits(firstSpec.route, Math.max(1, firstSpec.pages ?? 1)) + later;
+    let refusal: string | null = null;
+    try {
+      refusal = await b.wouldRefuse({ priority: cc.priority, tenant: cc.tenant, surface: cc.surface, groupId: cc.groupId, credits: total, now: cc.now });
+    } catch (e) {
+      log(`fomo: budget pre-check failed: ${errText(e)}`);
+      return null;
+    }
+    if (refusal === null) return null;
+    const reason = `budget-${refusal}`;
+    noteBudgetRefusal(reason, cc, cc.now);
+    usage?.recordRefusal({ now: cc.now, bucket: CAPABILITY_FOR_ROUTE[firstSpec.route] });
+    return { ok: false, status: "budget-limited", reason, message: null, candidates: [] };
+  }
+
+  async function read<T>(cc: ChargeContext, spec: ReadSpec<T>, asked: FreshnessMode): Promise<Section<T>> {
+    const now = cc.now;
+    const pages = Math.max(1, spec.pages ?? 1);
+    const { key, mode, reuseMs, heldData, heldSnap, state, first } = await firstLook(cc, spec, asked);
     const base = (over: Partial<Section<T>>): Section<T> => ({
       name: spec.name,
       route: spec.route,
@@ -1249,7 +1294,6 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         providerSnapshot: heldSnap,
       });
 
-    const first = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: true, ...(reuseMs !== undefined ? { reuseMs } : {}) });
     if (first.action === "serve-cache" && heldData !== null) {
       usage?.recordCacheHit({ now, bucket: CAPABILITY_FOR_ROUTE[spec.route] });
       return base({
@@ -1509,7 +1553,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     return { symbol: null, name: null };
   }
 
-  async function resolveToken(cc: ChargeContext, a: Answer, ref: TokenRef, chainSlug: string | null, mode: FreshnessMode): Promise<TokenResolution> {
+  /** `later`: the credits of the reads the answer needs after this one (plannedFits); 0 or absent, no pre-check. */
+  async function resolveToken(cc: ChargeContext, a: Answer, ref: TokenRef, chainSlug: string | null, mode: FreshnessMode, later = 0): Promise<TokenResolution> {
     const chain = chainSlug ? chainFromUserText(chainSlug) : null;
     if (ref.kind === "address" && chain) {
       const t = tokenIdentity(chain, ref.value);
@@ -1521,7 +1566,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // An address with no chain, or a ticker: ask the provider where it lives.
     // Search answers are identity data and cached for an hour, shared by every caller.
     // Resolution is identity, not the answer's retrieval: it is metered but not counted as a page of the answer.
-    const s = a.add({ ...(await read(cc, specs.tokensSearch(ref.value), mode === "force-refresh" ? "prefer-fresh" : mode)), pages: 0, identity: true });
+    const searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
+    const refused = await plannedFits(cc, specs.tokensSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
+    if (refused) return refused;
+    const s = a.add({ ...(await read(cc, specs.tokensSearch(ref.value), searchMode)), pages: 0, identity: true });
     if (!s.data) return sectionFail(s);
     const rows = s.data.rows;
     const matches =
@@ -1558,7 +1606,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     return { ok: false, status: "not-found", reason: "symbol-not-found", message: `No coin with the ticker ${ref.value} was found on Fomo.`, candidates: [] };
   }
 
-  async function resolveTrader(cc: ChargeContext, a: Answer, ref: TraderRef, mode: FreshnessMode): Promise<TraderResolution> {
+  /** `later`: the credits of the reads the answer needs after this one (plannedFits); 0 or absent, no pre-check. */
+  async function resolveTrader(cc: ChargeContext, a: Answer, ref: TraderRef, mode: FreshnessMode, later = 0): Promise<TraderResolution> {
     if (ref.kind === "user-id") {
       // The id is the identity. Our own record is free; a 2,500-credit profile read is not spent to learn a handle.
       const local = await store.traderById(db, ref.value).catch(() => null);
@@ -1576,7 +1625,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       };
     }
     // Search (250 credits) rather than the profile route (2,500): only the user id is needed.
-    const s = a.add({ ...(await read(cc, specs.traderSearch(ref.value), mode === "force-refresh" ? "prefer-fresh" : mode)), pages: 0, identity: true });
+    const searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
+    const refused = await plannedFits(cc, specs.traderSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
+    if (refused) return refused;
+    const s = a.add({ ...(await read(cc, specs.traderSearch(ref.value), searchMode)), pages: 0, identity: true });
     if (!s.data) return sectionFail(s);
     const want = ref.value.toLowerCase();
     const hits = s.data.rows.filter((r): r is Extract<typeof r, { kind: "trader" }> => r.kind === "trader" && (r.trader.handle ?? "").toLowerCase() === want);
@@ -1850,7 +1902,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const a = new Answer();
     const focus = args.focus === "holdings" ? "holdings" : "context";
     a.requested = { trader: args.trader.kind, focus, window: args.window, depth: args.depth };
-    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness);
+    // The holdings read is what the answer is: planned with the search (plannedFits).
+    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness, expectedCredits("balances"));
     if (!r.ok) return fromFail(ic, a, "holdings", args.freshness, r);
     const userId = r.trader.userId;
     const bal = a.add(await read(ic.cc, specs.balances(userId), args.freshness));
@@ -1945,11 +1998,13 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   async function toolTraderActivity(ic: Inv, args: ToolArgs["fomo_get_trader_activity"]): Promise<FomoEnvelope<TraderActivityData>> {
     const a = new Answer();
     a.requested = { window: args.window, side: args.side, token: args.token ? args.token.kind : null, chain: args.chain, limit: args.limit };
-    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness);
+    // An answer needs positions or the feed (either one is an answer), and the named coin when there is one.
+    const needed = Math.min(expectedCredits("positions"), expectedCredits("alerts")) + (args.token && args.token.kind === "symbol" ? expectedCredits("tokensSearch") : 0);
+    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness, needed);
     if (!r.ok) return fromFail(ic, a, "activity", args.freshness, r);
     let token: TokenIdentity | null = null;
     if (args.token) {
-      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness);
+      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness, Math.min(expectedCredits("positions"), expectedCredits("alerts")));
       if (!t.ok) return fromFail(ic, a, "activity", args.freshness, t);
       token = t.token;
     }
@@ -2128,7 +2183,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     let label: TokenLabel | null = null;
     let trader: TraderIdentity | null = null;
     if (args.token) {
-      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness);
+      // The coin's first thesis page is what a coin's answer is: planned with the search (plannedFits).
+      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness, args.trader ? 0 : expectedCredits("thesesByToken", 1));
       if (!t.ok) return fromFail(ic, a, "theses", args.freshness, t);
       token = t.token;
       label = t.label;

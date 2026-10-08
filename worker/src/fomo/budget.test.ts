@@ -283,6 +283,85 @@ describe("FomoBudget: the reason reported is the one with the latest reset (revi
   });
 });
 
+describe("FomoBudget: the hourly counters first; the reason read without taking anything (review r2)", () => {
+  const free = budgetConfigFor(FREE_PLAN_CREDITS_PER_MONTH);
+  const at = Date.UTC(2026, 9, 7, 14, 20, 0);
+  const room = (credits: number, over: Partial<ChargeRequest> = {}) => req("interactive", { surface: "telegram-group", groupId: "g1", credits, now: at, ...over });
+  /** A MemoryAllowance that records every take, and may run something when one key is taken. */
+  const spy = (mem = new MemoryAllowance(), during?: (key: string) => Promise<void>, withPeek = true) => {
+    const takes: string[] = [];
+    const port: AllowancePort = {
+      take: async (k, a, l, n) => {
+        takes.push(k);
+        if (during) await during(k);
+        return mem.take(k, a, l, n);
+      },
+      give: (k, a) => mem.give(k, a),
+      ...(withPeek ? { peek: (k: string) => mem.peek(k) } : {}),
+    };
+    return { port, takes, mem };
+  };
+
+  it("a room past its hour is refused at its own counter, never touching the fleet's daily pools", async () => {
+    const { port, takes } = spy();
+    const budget = new FomoBudget({ port, config: free, now: () => at });
+    for (const c of [250, 1_250, 250]) assert.equal((await budget.tryCharge(room(c))).ok, true, String(c));
+    takes.length = 0;
+    for (let i = 0; i < 6; i++) assert.deepEqual(await budget.tryCharge(room(1_250)), { ok: false, reason: "group-hourly" });
+    assert.ok(takes.length > 0 && takes.every((k) => k.startsWith("fomo:credits:group:g1:h:")), takes.join("\n"));
+  });
+
+  it("another owner's read while a spent room is refused is granted with the pool one read from full", async () => {
+    const mem = new MemoryAllowance();
+    let other: Promise<unknown> | null = null;
+    let armed = false;
+    let budget!: FomoBudget;
+    const { port } = spy(mem, async (k) => {
+      // The room's refused charge is under way: another owner asks for the last read the pool holds.
+      if (armed && k.startsWith("fomo:credits:group:g1:h:") && other === null) other = budget.tryCharge(req("interactive", { tenant: "t9", surface: "telegram-dm", credits: 250, now: at }));
+    });
+    const pool = 2_000;
+    budget = new FomoBudget({ port, config: { ...free, sharedDailyCredits: pool, groupHourlyCredits: 1_250, tenantHourlyCredits: pool, tenantDailyCredits: pool }, now: () => at });
+    assert.equal((await budget.tryCharge(room(1_250))).ok, true);
+    // Fill the interactive pool to one read from its limit.
+    const np = budget.limitsFor("interactive").poolNonProtection!;
+    for (let used = 1_250; used + 250 <= np - 250; used += 250) assert.equal((await budget.tryCharge(req("interactive", { tenant: "t8", surface: "telegram-dm", credits: 250, now: at }))).ok, true);
+    armed = true;
+    const refused = await budget.tryCharge(room(250));
+    assert.equal(refused.ok, false);
+    assert.ok(other !== null, "the other owner's read ran inside the room's refused charge");
+    assert.equal(((await other) as { ok: boolean }).ok, true, "granted: the room's refusal never held the pool");
+  });
+
+  it("without a way to read the counters (no peek), a refusal keeps the hourly reason it met", async () => {
+    const { port } = spy(new MemoryAllowance(), undefined, false);
+    const budget = new FomoBudget({ port, config: free, now: () => at });
+    for (let i = 0; i < 11; i++) assert.equal((await budget.tryCharge(req("interactive", { tenant: "t9", surface: "telegram-dm", credits: 250, now: at }))).ok, true);
+    for (const c of [250, 1_250, 250]) assert.equal((await budget.tryCharge(room(c))).ok, true, String(c));
+    assert.deepEqual(await budget.tryCharge(room(1_250)), { ok: false, reason: "group-hourly" });
+    assert.equal(await budget.wouldRefuse(room(1_250)), null, "nothing it cannot read is said");
+  });
+
+  it("wouldRefuse: the reason tryCharge would report, taking nothing; null when the whole cost fits", async () => {
+    const mem = new MemoryAllowance();
+    const budget = new FomoBudget({ port: mem, config: { ...free, groupHourlyCredits: 1_600, tenantDailyCredits: 3_000 }, now: () => at });
+    assert.equal(await budget.wouldRefuse(room(1_500)), null);
+    assert.ok(mem.keys().every((k) => mem.used(k) === 0), "nothing taken");
+    for (const c of [250, 1_250]) assert.equal((await budget.tryCharge(room(c))).ok, true);
+    const before = mem.keys().map((k) => [k, mem.used(k)]);
+    // The group hour (1,500 of 1,600) and the owner's daily share (1,500 of 2,250) both refuse 1,500 more: midnight.
+    assert.equal(await budget.wouldRefuse(room(1_500)), "tenant-daily");
+    // 250 alone is refused only by the hour: the next hour, and it fits then.
+    assert.equal(await budget.wouldRefuse(room(250)), "group-hourly");
+    assert.equal(await budget.wouldRefuse(room(100)), null);
+    assert.deepEqual(mem.keys().map((k) => [k, mem.used(k)]), before, "still nothing taken");
+    assert.equal(await budget.wouldRefuse(room(1_500)), (await budget.tryCharge(room(1_500)).then((r) => (r.ok ? null : r.reason))));
+    assert.equal(await budget.wouldRefuse(room(250, { groupId: null })), "no-group");
+    const off = new FomoBudget({ port: new MemoryAllowance(), config: { ...free, groupHourlyCredits: 0 }, now: () => at });
+    assert.equal(await off.wouldRefuse(room(250)), "below-one-read");
+  });
+});
+
 describe("FomoBudget: settle and refund", () => {
   it("refund restores the allowance, once", async () => {
     const { budget, port } = make({ sharedDailyCredits: 1_000 });

@@ -761,8 +761,15 @@ resets: the owner hears which allowance ran out ("your hourly Fomo research allo
 used up; it resets at 15:00 UTC"), a room hears one wording for every cap, "fomo lookups
 for this room are used up for now, try again after 15:00 UTC." (hourly caps reset at the
 next clock hour, daily ones at 00:00 UTC; `budget.ts refusalResetAt`), never a credit or
-an amount. The daily caps and pools are checked before the hourly ones, so when both are
-spent the reset promised is midnight, never an hour that would refuse again. A cap below
+an amount. The hourly counters are taken first, so a room past its hour never raises the
+fleet's daily pools, even briefly; which cap a refusal names is then read from the counters
+without taking anything (`AllowancePort.peek`), so a spent hour promises the next hour only
+when no daily cap or pool would refuse as well. A tool that pays a search and then the read
+it exists for (a coin's thesis page, a trader's holdings, positions or feed) first asks the
+budget, taking nothing, whether both fit (`FomoBudget.wouldRefuse`, `service.ts
+plannedFits`): if not, nothing is charged, no search is paid for a page that cannot fit, and
+the reset promised is the one the whole read would meet, never an hour at which the second
+read would refuse again. A cap below
 what one read costs (a group cap of 0 included) never resets on a clock: the owner hears
 that a configured cap is below one read, a room hears "Fomo research isn't available here
 right now.", never a time. Nothing upgrades a plan, tops up credits or

@@ -83,7 +83,7 @@ interface Setup {
   clock: { now: number };
 }
 
-interface SetupCaps { groupHourlyCredits?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean; leaderboard?: () => Rec; search?: () => Rec }
+interface SetupCaps { groupHourlyCredits?: number; tenantDailyCredits?: number; thesisCost?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean; leaderboard?: () => Rec; search?: () => Rec }
 
 async function setup(caps: SetupCaps = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
@@ -108,7 +108,12 @@ async function setup(caps: SetupCaps = {}): Promise<Setup> {
       if (caps.feedCutShort) Object.assign(b, { hasMore: true, newestTs: clock.now - 60_000, oldestTs: clock.now - 120_000 });
       return json(b);
     }
-    if (p.startsWith("/v2/thesis/token/")) return json(caps.theses ? caps.theses() : fixture("theses-token"));
+    if (p.startsWith("/v2/thesis/token/")) {
+      const r = json(caps.theses ? caps.theses() : fixture("theses-token"));
+      // The provider's own bill for a thesis page, when a test needs it (every other route bills 250).
+      if (caps.thesisCost !== undefined) r.headers.set("x-credits-cost", String(caps.thesisCost));
+      return r;
+    }
     if (/\/stats$/.test(p)) return json(fixture("token-stats"));
     if (/\/balances$/.test(p)) return json(fixture("balances"));
     const positions = /^\/v2\/users\/([0-9a-f-]{36})\/positions$/.exec(p);
@@ -123,7 +128,7 @@ async function setup(caps: SetupCaps = {}): Promise<Setup> {
   const client = createFomoClient({ apiKey: "test_key_not_a_credential_0000", fetchImpl, now: () => clock.now, sleep: async () => {}, random: () => 0 });
   const budget = new FomoBudget({
     port: new MemoryAllowance(),
-    config: { sharedDailyCredits: 10_000_000, tenantHourlyCredits: 1_000_000, tenantDailyCredits: 1_000_000, groupHourlyCredits: caps.groupHourlyCredits ?? 1_000_000 },
+    config: { sharedDailyCredits: 10_000_000, tenantHourlyCredits: 1_000_000, tenantDailyCredits: caps.tenantDailyCredits ?? 1_000_000, groupHourlyCredits: caps.groupHourlyCredits ?? 1_000_000 },
     now: () => clock.now,
   });
   const tenants: string[] = [];
@@ -1020,6 +1025,28 @@ describe("a room's research budget, in plain words (WP10: D7, D8, D10)", () => {
       assert.doesNotMatch(second.text, /credit|rationed|direct message|group's|your/i);
     });
   }
+
+  it("a coin by ticker whose search fits the day but whose page does not: refused before the search, with the reset that holds (review r2)", async () => {
+    // A room's cap of 1,600 an hour, its owner's 3,000 a day (2,250 for anything but protecting positions).
+    const s = await setup({ groupHourlyCredits: 1_600, tenantDailyCredits: 3_000, thesisCost: 1_250 });
+    s.clock.now = Date.UTC(2026, 9, 7, 14, 10);
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const first = await port.ask({ text: "what are the theses on $PONS?", chatId: GROUP });
+    assert.match(first!.text, /^What traders on Fomo are saying about PONS/, first!.text);
+    s.clock.now = Date.UTC(2026, 9, 7, 14, 20);
+    const searches = s.provider.filter((p) => p === "/v2/tokens/search").length;
+    const second = await port.ask({ text: "what are the theses on $ANSEM?", chatId: GROUP });
+    assert.equal(second!.status, "budget-limited");
+    // The room's hour and the owner's day both refuse the search and the page together: midnight, never 15:00.
+    assert.equal(second!.text, "fomo lookups for this room are used up for now, try again after 00:00 UTC.");
+    assert.equal(s.provider.filter((p) => p === "/v2/tokens/search").length, searches, "no search paid for a page that cannot fit");
+    assert.ok(admitTgLine(second!.text, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+    // At 15:00:30 nothing promised is broken: the same answer, the same reset.
+    s.clock.now = Date.UTC(2026, 9, 7, 15, 0, 30);
+    const again = await port.ask({ text: "what are the theses on $ANSEM?", chatId: GROUP });
+    assert.equal(again!.text, "fomo lookups for this room are used up for now, try again after 00:00 UTC.");
+    assert.equal(s.provider.filter((p) => p === "/v2/tokens/search").length, searches);
+  });
 
   it("a failed read is said plainly, never as 'ask me in a direct message'", async () => {
     const s = await setup({ trending: () => { throw new Error("upstream down"); } });

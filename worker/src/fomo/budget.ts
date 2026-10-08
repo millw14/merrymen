@@ -46,7 +46,12 @@
  * high until its window rolls over. Both errors spend LESS than allowed. No
  * interleaving spends more, because every take is itself a conditional add.
  * Likewise a charge whose request outcome is unknown keeps its estimate:
- * credits we may have been billed for are counted.
+ * credits we may have been billed for are counted. The hourly counters are
+ * taken first, so a room or owner past its hour never briefly raises the
+ * fleet's daily pools; which reason a refusal reports (and so which reset
+ * time is promised) is read from the counters afterwards, without taking
+ * anything (`AllowancePort.peek`): a spent hour says the next hour only when
+ * no daily cap or pool would refuse as well.
  *
  * Credits are research-operations accounting only. They never touch equity,
  * P&L, grants or caps, and nothing here can place, size or authorise a trade.
@@ -150,6 +155,13 @@ export function deriveDailyCredits(planCreditsPerMonth: number, daysInMonth: num
 export interface AllowancePort {
   take(key: string, amount: number, limit: number, nowMs: number): Promise<boolean>;
   give(key: string, amount: number): Promise<void>;
+  /**
+   * The counter's value now (0 when absent), changing nothing. Optional: a
+   * port without it still charges correctly; the budget then cannot say
+   * which later cap would also refuse (tryCharge's reason) or whether a
+   * whole planned cost fits (wouldRefuse), and says nothing it cannot know.
+   */
+  peek?(key: string): Promise<number>;
 }
 
 /**
@@ -178,6 +190,10 @@ export class MemoryAllowance implements AllowancePort {
   /** Current counter value (0 when absent). */
   used(key: string): number {
     return this.counts.get(key)?.n ?? 0;
+  }
+
+  async peek(key: string): Promise<number> {
+    return this.used(key);
   }
 
   keys(): string[] {
@@ -512,6 +528,69 @@ export class FomoBudget {
     };
   }
 
+  /**
+   * The counters a charge takes, in order: the HOURLY ones first (the
+   * room's, then the owner's), then the daily caps and the fleet's pools.
+   * A refusal from a spent hour therefore never touches the fleet-wide
+   * daily counters: nothing another owner's charge could see briefly high
+   * and be refused by, and nothing a failed give-back could leave high
+   * until midnight.
+   *
+   * A tenant or group cap below this one read's cost can never fit, in any
+   * window (the documented 0 for a group included): `below-one-read`, no
+   * clock time promised. The pools keep their own reasons: an empty pool is
+   * the fleet's, said as such.
+   */
+  private stepsFor(req: ChargeRequest, groupId: string | null): { hourly: Step<ChargeRefusal>[]; daily: Step<ChargeRefusal>[] } {
+    const pr = priorityOf(req.priority);
+    const protect = pr === "position-protection";
+    const c = this.config;
+    const L = this.limitsFor(pr);
+    const h = hourIndex(req.now);
+    const day = utcDay(req.now);
+    const t = seg(req.tenant);
+    const k = (...parts: string[]): string => [this.prefix, "credits", ...parts].join(":");
+    const cap = "below-one-read" as const;
+    const hourly: Step<ChargeRefusal>[] = [];
+    if (groupId !== null) hourly.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly", tooBig: cap });
+    if (!protect) hourly.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly", tooBig: cap });
+    hourly.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly", tooBig: cap });
+    const daily: Step<ChargeRefusal>[] = [];
+    if (!protect) daily.push({ key: k("tenant", t, "np", "d", day), limit: L.tenantDaily, reason: "tenant-daily", tooBig: cap });
+    daily.push({ key: k("tenant", t, "all", "d", day), limit: c.tenantDailyCredits, reason: "tenant-daily", tooBig: cap });
+    if (L.poolDiscovery !== null) daily.push({ key: k("pool", "discovery", "d", day), limit: L.poolDiscovery, reason: "class-reserve" });
+    if (L.poolNonProtection !== null) daily.push({ key: k("pool", "np", "d", day), limit: L.poolNonProtection, reason: "class-reserve" });
+    daily.push({ key: k("pool", "all", "d", day), limit: L.poolAll, reason: "shared-daily" });
+    return { hourly, daily };
+  }
+
+  /** The first step that would refuse `amount` now, by reading the counters (port.peek); null when every one fits. Throws when a read fails. */
+  private async firstRefusing(steps: readonly Step<ChargeRefusal>[], amount: number, peek: (key: string) => Promise<number>): Promise<ChargeRefusal | null> {
+    for (const s of steps) {
+      if (!(s.limit > 0 && amount <= s.limit)) return s.tooBig ?? s.reason;
+      if ((await peek(s.key)) + amount > s.limit) return s.reason;
+    }
+    return null;
+  }
+
+  /**
+   * THE REASON A REFUSAL REPORTS, whose reset time is promised to the room
+   * and the owner (refusalResetAt): a spent hour says the next hour only
+   * when no daily cap or pool would refuse too, or "try again after 15:00"
+   * is refused again at 15:00 until midnight. Read without taking anything
+   * (port.peek); a port without it, or a failed read, keeps the hourly reason.
+   */
+  private async reportedReason(reason: ChargeRefusal, daily: readonly Step<ChargeRefusal>[], amount: number): Promise<ChargeRefusal> {
+    if (reason !== "group-hourly" && reason !== "tenant-hourly") return reason;
+    const port = this.port;
+    if (typeof port.peek !== "function") return reason;
+    try {
+      return (await this.firstRefusing(daily, amount, (key) => port.peek!(key))) ?? reason;
+    } catch {
+      return reason;
+    }
+  }
+
   async tryCharge(req: ChargeRequest): Promise<ChargeResult> {
     if (typeof req.tenant !== "string" || !req.tenant.trim()) throw new TypeError("tenant is required");
     if (typeof req.now !== "number" || !Number.isFinite(req.now)) throw new RangeError("now must be a finite time");
@@ -524,39 +603,39 @@ export class FomoBudget {
     if (req.surface === "telegram-group" && groupId === null) return { ok: false, reason: "no-group" };
     if (amount === 0) return noopGrant();
 
-    const pr = priorityOf(req.priority);
-    const protect = pr === "position-protection";
-    const c = this.config;
-    const L = this.limitsFor(pr);
-    const h = hourIndex(req.now);
-    const day = utcDay(req.now);
-    const t = seg(req.tenant);
-    const k = (...parts: string[]): string => [this.prefix, "credits", ...parts].join(":");
-
-    // THE DAILY STEPS FIRST, then the hourly ones. Every step must still pass, so what is
-    // granted does not change; only the reason reported does. A refusal reports the FIRST
-    // step that failed, and its reset time is promised to the room and the owner: midnight
-    // UTC is never earlier than the next hour (and every hourly counter starts fresh then
-    // too), so a spent daily cap or pool must win over a spent hourly one, or "try again
-    // after 15:00" is refused again at 15:00 until midnight.
-    //
-    // A tenant or group cap below this one read's cost can never fit, in any window (the
-    // documented 0 for a group included): `below-one-read`, no clock time promised. The
-    // pools keep their own reasons: an empty pool is the fleet's, said as such.
-    const cap = "below-one-read" as const;
-    const steps: Step<ChargeRefusal>[] = [];
-    if (!protect) steps.push({ key: k("tenant", t, "np", "d", day), limit: L.tenantDaily, reason: "tenant-daily", tooBig: cap });
-    steps.push({ key: k("tenant", t, "all", "d", day), limit: c.tenantDailyCredits, reason: "tenant-daily", tooBig: cap });
-    if (L.poolDiscovery !== null) steps.push({ key: k("pool", "discovery", "d", day), limit: L.poolDiscovery, reason: "class-reserve" });
-    if (L.poolNonProtection !== null) steps.push({ key: k("pool", "np", "d", day), limit: L.poolNonProtection, reason: "class-reserve" });
-    steps.push({ key: k("pool", "all", "d", day), limit: L.poolAll, reason: "shared-daily" });
-    if (groupId !== null) steps.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly", tooBig: cap });
-    if (!protect) steps.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly", tooBig: cap });
-    steps.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly", tooBig: cap });
-
-    const r = await takeAll(this.port, steps, amount, req.now, this.onError);
-    if (!r.ok) return r;
+    const { hourly, daily } = this.stepsFor(req, groupId);
+    const r = await takeAll(this.port, [...hourly, ...daily], amount, req.now, this.onError);
+    if (!r.ok) return { ok: false, reason: await this.reportedReason(r.reason, daily, amount) };
     return makeGrant(this.port, r.taken, amount, this.clock, this.onError);
+  }
+
+  /**
+   * WHETHER A CHARGE OF `credits` WOULD BE REFUSED NOW, and why, taking
+   * nothing: the same steps in the same order as tryCharge, the same reason
+   * it would report. For a tool that pays a cheap read and then a dear one
+   * (a search, then a coin's thesis page): asked with the whole planned cost
+   * before the first, so a room is never charged for the search and then
+   * refused the page, nor told one reset time by the first read and refused
+   * again then by the second. Null: it fits, or this budget's port cannot
+   * read its counters (peek), or a read failed; the reads are then charged
+   * one by one as before.
+   */
+  async wouldRefuse(req: ChargeRequest): Promise<ChargeRefusal | null> {
+    if (typeof req.tenant !== "string" || !req.tenant.trim()) return null;
+    if (typeof req.now !== "number" || !Number.isFinite(req.now)) return null;
+    if (typeof req.credits !== "number" || !Number.isFinite(req.credits) || req.credits < 0) return null;
+    const amount = Math.ceil(req.credits);
+    const groupId = typeof req.groupId === "string" && req.groupId.trim() ? req.groupId : null;
+    if (req.surface === "telegram-group" && groupId === null) return "no-group";
+    const port = this.port;
+    if (amount === 0 || typeof port.peek !== "function") return null;
+    const { hourly, daily } = this.stepsFor(req, groupId);
+    try {
+      const first = await this.firstRefusing([...hourly, ...daily], amount, (key) => port.peek!(key));
+      return first === null ? null : await this.reportedReason(first, daily, amount);
+    } catch {
+      return null;
+    }
   }
 }
 
