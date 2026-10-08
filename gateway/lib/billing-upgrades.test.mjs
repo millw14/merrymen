@@ -64,6 +64,9 @@ test("a second upgrade in one period is priced against the tier the first one bo
     ["upgrade", "loaf", raw(200_000), raw(400_000)],
     ["upgrade", "feast", raw(200_000), raw(1_000_000)],
   ]);
+  // The quota moves the same way, against the tier the first upgrade bought:
+  // 50,000 + (250,000 − 50,000) × 2/3, then + (1,000,000 − 250,000) × 1/3.
+  assert.deepEqual(charges.map((c) => [c.requests, c.tier_requests]), [[50_000, 50_000], [183_333, 250_000], [433_333, 1_000_000]]);
   assert.equal(new Set(charges.map((c) => c.period_id)).size, 1, "one period throughout");
   // 1,000,000 granted, 500,000 charged; renewing on Feast needs the other 500,000.
   const summary = (v) => [v.plan.id, v.credit_tokens, v.due_for, v.due_tokens];
@@ -72,5 +75,6 @@ test("a second upgrade in one period is priced against the tier the first one bo
   // A restart replays the same three lines into the same account.
   billing = await boot();
   assert.deepEqual(summary(billing.accountView(OWNER).json), summary(feast));
+  assert.equal(billing.planFor(OWNER).requests, 433_333);
   assert.equal(await billing.settle(OWNER), 0, "nothing is charged again after a replay");
 });

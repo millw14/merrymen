@@ -118,7 +118,8 @@ async function comp(argv) {
   const now = ledger.now();
   const hex = () => randomBytes(12).toString("hex");
   await ledger.enqueue(() => ledger.append({ type: "charge", account_id: acct.account_id, charge_id: `chg_${hex()}`, period_id: `per_${hex()}`,
-    reason: "comp", tier: plan.id, price_raw: "0", tier_price_raw: plan.price_raw.toString(), requests: plan.requests, rpm: plan.rpm,
+    reason: "comp", tier: plan.id, price_raw: "0", tier_price_raw: plan.price_raw.toString(), requests: plan.requests,
+    tier_requests: plan.requests, rpm: plan.rpm,
     starts_at: now, ends_at: now + days * DAY, note: why }));
   const longer = days * DAY > PERIOD_MS ? ` (its quota of ${plan.requests} requests covers all ${days} days)` : "";
   console.log(`[billing] ${owner}: ${plan.name} at no charge until ${new Date(now + days * DAY).toISOString()}${longer}. The gateway applies it within 10 s.`);

@@ -55,8 +55,8 @@ test("adjust and comp append through the gateway's writer, and the running gatew
   const comped = await s.run("comp", OWNER, "loaf", "45", "--note", "launch partner");
   assert.equal(comped.code, 0, comped.stderr);
   const c = (await s.records()).at(-1);
-  assert.deepEqual([c.type, c.reason, c.tier, c.price_raw, c.tier_price_raw, c.requests, c.rpm, c.ends_at - c.starts_at],
-    ["charge", "comp", "loaf", "0", PLANS.loaf.price_raw.toString(), 250_000, 120, 45 * 86_400_000]);
+  assert.deepEqual([c.type, c.reason, c.tier, c.price_raw, c.tier_price_raw, c.requests, c.tier_requests, c.rpm, c.ends_at - c.starts_at],
+    ["charge", "comp", "loaf", "0", PLANS.loaf.price_raw.toString(), 250_000, 250_000, 120, 45 * 86_400_000]);
   await s.billing.tail();
   assert.equal(s.billing.planFor(OWNER).id, "loaf");
   assert.equal(s.billing.accountView(OWNER).json.credit_tokens, "250000.5", "a comp costs nothing");

@@ -418,7 +418,8 @@ test("credit before any selection waits; selecting a plan previews, then activat
   const [c] = await f.charges();
   assert.deepEqual({ ...c, id: undefined, at: undefined, charge_id: undefined, period_id: undefined, account_id: undefined }, {
     id: undefined, at: undefined, charge_id: undefined, period_id: undefined, account_id: undefined, type: "charge", reason: "activate",
-    tier: "crumbs", price_raw: T(100_000).toString(), tier_price_raw: T(100_000).toString(), requests: 50_000, rpm: 60, starts_at: START, ends_at: START + P });
+    tier: "crumbs", price_raw: T(100_000).toString(), tier_price_raw: T(100_000).toString(), requests: 50_000, tier_requests: 50_000, rpm: 60,
+    starts_at: START, ends_at: START + P });
   assert.match(c.charge_id, /^chg_[0-9a-f]{24}$/);
   assert.match(c.period_id, /^per_[0-9a-f]{24}$/);
   assert.equal((await f.plan("crumbs")).status, 200);
@@ -524,7 +525,8 @@ test("an upgrade is ONE ledger line on the same period: usage carries over and a
   assert.equal(up.ends_at, START + P);
   assert.equal(up.price_raw, T(150_000).toString());
   assert.equal(up.tier_price_raw, T(400_000).toString());
-  assert.deepEqual([up.tier, up.requests, up.rpm], ["loaf", 250_000, 120]);
+  // Half a period of Loaf on top of Crumbs: 50,000 + (250,000 − 50,000) / 2.
+  assert.deepEqual([up.tier, up.requests, up.tier_requests, up.rpm], ["loaf", 150_000, 250_000, 120]);
   assert.equal(f.view().credit_raw, T(250_000).toString());
   // Settle again, now and later in the period: nothing more to write.
   assert.equal(f.billing.needsSettle(OWNER), false);
@@ -535,10 +537,39 @@ test("an upgrade is ONE ledger line on the same period: usage carries over and a
   await f.restart();
   assert.equal(await f.billing.settle(OWNER), 0, "replay sees the upgrade as applied");
   assert.equal((await f.charges()).length, 2);
-  // The window is the period's, so the count carries over; the limits are Loaf's.
+  // The window is the period's, so the count carries over; the rate is Loaf's,
+  // the quota what the upgrade bought for the half period left.
   const plan = f.billing.planFor(OWNER);
-  assert.deepEqual([plan.id, plan.requests, plan.rpm, plan.starts_at, plan.ends_at], ["loaf", 250_000, 120, START, START + P]);
-  assert.equal(f.billing.reserve({ owner: OWNER, keyId: "key1" }).headers["x-merrymen-quota-remaining"], String(250_000 - 4));
+  assert.deepEqual([plan.id, plan.requests, plan.rpm, plan.starts_at, plan.ends_at], ["loaf", 150_000, 120, START, START + P]);
+  assert.equal(f.billing.reserve({ owner: OWNER, keyId: "key1" }).headers["x-merrymen-quota-remaining"], String(150_000 - 4));
+});
+
+test("a late upgrade raises the request quota only for the time it paid for, as it does the price", async () => {
+  // Crumbs, then Feast with two days left: (1,000,000 − 100,000) × 2/30 =
+  // 60,000. Feast's FULL million requests for that would be most of a Feast
+  // period for 6% of its price, every month (select Crumbs again and repeat).
+  const f = await fixture();
+  await f.account();
+  await f.grant(2_000_000);
+  await f.plan("crumbs");
+  f.advance(P - 2 * DAY);
+  const preview = (await f.plan("feast", false)).json;
+  assert.deepEqual([preview.effect, preview.charge_now_raw], ["upgrade_now", T(60_000).toString()]);
+  await f.plan("feast");
+  const up = (await f.charges()).at(-1);
+  const more = Math.floor((1_000_000 - 50_000) * (2 * DAY) / P); // Feast's extra requests, for two days of thirty
+  assert.equal(more, 63_333);
+  assert.deepEqual([up.reason, up.price_raw, up.requests, up.tier_requests, up.rpm], ["upgrade", T(60_000).toString(), 50_000 + more, 1_000_000, 300]);
+  const plan = f.billing.planFor(OWNER);
+  assert.deepEqual([plan.id, plan.requests, plan.rpm], ["feast", 50_000 + more, 300]);
+  assert.equal(f.view().usage.limit, 50_000 + more);
+  await f.restart();
+  assert.equal(f.billing.planFor(OWNER).requests, 50_000 + more, "replayed as recorded");
+  // The renewal is a whole new period at the selected tier's whole quota.
+  f.advance(2 * DAY);
+  await f.billing.prepare(OWNER);
+  const renew = (await f.charges()).at(-1);
+  assert.deepEqual([renew.reason, renew.tier, renew.requests, renew.tier_requests], ["renew", "feast", 1_000_000, 1_000_000]);
 });
 
 test("an upgrade credit cannot cover waits for payment, and what is due only falls as the period runs", async () => {

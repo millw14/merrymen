@@ -29,14 +29,16 @@
  *   payment     {account_id, owner, chain_id, token, recipient, tx_hash,
  *                block_number, block_hash, amount_raw, log_indexes}
  *   charge      {account_id, charge_id, period_id, reason: activate|renew|
- *                upgrade|comp, tier, price_raw, tier_price_raw, requests, rpm,
- *                starts_at, ends_at}
+ *                upgrade|comp, tier, price_raw, tier_price_raw, requests,
+ *                tier_requests, rpm, starts_at, ends_at}
  *   reversal    {account_id, payment_id, amount_raw, why}   (reorg reconciliation)
  *   adjustment  {account_id, amount_raw (signed), note, operator: true}  (CLI only)
  *   config      {treasury, previous, start_block}           (audit trail, at boot)
- * `tier_price_raw` is the tier's full 30-day price when the charge was made: an
- * upgrade charges a pro-rated difference and a comp charges nothing, so later
- * upgrades price against it, never against today's table.
+ * `tier_price_raw` and `tier_requests` are the tier's full 30-day price and
+ * quota when the charge was made. An upgrade charges the price difference for
+ * the time left and adds the quota difference for the same time left (its
+ * `requests` is the period's new total), and a comp charges nothing, so later
+ * upgrades price against them, never against today's table.
  * credit = Σpayment − Σreversal − Σcharge.price_raw + Σadjustment.
  *
  * ── API ─────────────────────────────────────────────────────────────────────
@@ -296,6 +298,7 @@ const APPLY = {
     if (!/^chg_[0-9a-f]{24}$/.test(r.charge_id ?? "") || !/^per_[0-9a-f]{24}$/.test(r.period_id ?? "") || !REASONS.includes(r.reason)
       || !TIER.test(r.tier ?? "") || !RAW.test(r.price_raw ?? "") || (r.tier_price_raw !== undefined && !RAW.test(r.tier_price_raw))
       || !Number.isSafeInteger(r.requests) || r.requests < 0 || !Number.isSafeInteger(r.rpm) || r.rpm < 1
+      || (r.tier_requests !== undefined && (!Number.isSafeInteger(r.tier_requests) || r.tier_requests < 0))
       || !safeTime(r.starts_at) || !safeTime(r.ends_at) || r.ends_at <= r.starts_at) return "malformed charge";
     if (s.chargeIds.has(r.charge_id)) return `repeated charge ${r.charge_id}`;
     const price = BigInt(r.price_raw);
@@ -314,7 +317,8 @@ const APPLY = {
     a.credit -= price;
     a.gross -= price;
     s.chargeIds.add(r.charge_id);
-    const terms = { tier: r.tier, requests: r.requests, rpm: r.rpm, tier_price: BigInt(r.tier_price_raw ?? r.price_raw) };
+    const terms = { tier: r.tier, requests: r.requests, rpm: r.rpm, tier_price: BigInt(r.tier_price_raw ?? r.price_raw),
+      tier_requests: r.tier_requests ?? r.requests };
     if (period) Object.assign(period, terms);
     else {
       period = { period_id: r.period_id, account_id: a.account_id, reason: r.reason, starts_at: r.starts_at, ends_at: r.ends_at, ...terms };
@@ -554,6 +558,22 @@ export function upgradeRaw(newPrice, oldPrice, endsAt, now) {
   return ((newPrice - oldPrice) * left) / BigInt(PERIOD_MS);
 }
 
+/**
+ * The request quota a period has after moving the rest of it to a dearer
+ * tier: what it had, plus the tiers' quota difference for the time left,
+ * rounded down. The same share of the period as upgradeRaw() charges for, so
+ * a late upgrade buys a late upgrade's worth of requests: Feast's full
+ * million for two days' price difference would sell most of a Feast period at
+ * a fraction of its price. A tier with fewer requests than the period's never
+ * takes any away. The rate becomes the new tier's: it only caps how fast
+ * that quota is used, for the time that is left.
+ */
+export function upgradeRequests(newRequests, oldTierRequests, current, endsAt, now) {
+  const left = BigInt(Math.min(Math.max(endsAt - now, 0), PERIOD_MS));
+  const more = BigInt(Math.max(0, newRequests - oldTierRequests));
+  return current + Number((more * left) / BigInt(PERIOD_MS));
+}
+
 /** The period that ended last: the tier a lapsed renewal falls back to. */
 function lastPeriod(acct) {
   let last = null;
@@ -587,7 +607,9 @@ export function decide(acct, now, plans) {
   }
   if (!sel || sel.id === active.tier || sel.price_raw <= active.tier_price) return null;
   const price = upgradeRaw(sel.price_raw, active.tier_price, active.ends_at, now);
-  return acct.credit >= price ? { reason: "upgrade", plan: sel, price, period: active } : null;
+  if (acct.credit < price) return null;
+  return { reason: "upgrade", plan: sel, price, period: active,
+    requests: upgradeRequests(sel.requests, active.tier_requests, active.requests, active.ends_at, now) };
 }
 
 /** settle() run on a copy: what it would charge, and the account after. */
@@ -599,7 +621,8 @@ function simulate(acct, now, plans, selected = acct.selected) {
     if (!act) break;
     actions.push(act);
     sim.credit -= act.price;
-    const terms = { tier: act.plan.id, requests: act.plan.requests, rpm: act.plan.rpm, tier_price: act.plan.price_raw };
+    const terms = { tier: act.plan.id, requests: act.requests ?? act.plan.requests, rpm: act.plan.rpm,
+      tier_price: act.plan.price_raw, tier_requests: act.plan.requests };
     if (act.period) Object.assign(act.period, terms);
     else sim.periods.push({ period_id: `sim_${i}`, starts_at: now, ends_at: now + PERIOD_MS, ...terms });
   }
@@ -625,7 +648,7 @@ function chargeFor(acct, act, now) {
   return { type: "charge", account_id: acct.account_id, charge_id: `chg_${hex(12)}`,
     period_id: act.period ? act.period.period_id : `per_${hex(12)}`, reason: act.reason, tier: act.plan.id,
     price_raw: act.price.toString(), tier_price_raw: act.plan.price_raw.toString(),
-    requests: act.plan.requests, rpm: act.plan.rpm,
+    requests: act.requests ?? act.plan.requests, tier_requests: act.plan.requests, rpm: act.plan.rpm,
     starts_at: now, ends_at: act.period ? act.period.ends_at : now + PERIOD_MS };
 }
 
