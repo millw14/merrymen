@@ -118,6 +118,7 @@ export interface AccountView {
   /** Base units still to send for what is selected, or null when nothing is due. */
   due_raw: string | null;
   usage: { used: number; limit: number; resets_at: string | null; by_key: { key_id: string; used: number }[] } | null;
+  /** Newest first, at most 50. */
   history: HistoryItem[];
 }
 
@@ -134,7 +135,7 @@ export function normalizeAccount(input: unknown): AccountView | null {
   const dueRaw = body.due_raw === null || body.due_raw === undefined ? (body.due_tokens == null ? null : fromTokens(body.due_tokens)) : raw(body.due_raw);
   const usage = record(body.usage), used = count(usage?.used), limit = count(usage?.limit);
   const history: HistoryItem[] = [];
-  for (const entry of Array.isArray(body.history) ? body.history.slice(-50) : []) {
+  for (const entry of Array.isArray(body.history) ? body.history : []) {
     const h = record(entry), at = iso(h?.at), amount = typeof h?.amount_tokens === "string" ? tokensToRaw(h.amount_tokens) : null;
     if (!h || !at || amount === null || !["payment", "charge", "reversal", "adjustment"].includes(h.type as string)) continue;
     const tx = typeof h.tx_hash === "string" && /^0x[0-9a-fA-F]{64}$/.test(h.tx_hash) ? h.tx_hash.toLowerCase() : null;
@@ -146,7 +147,8 @@ export function normalizeAccount(input: unknown): AccountView | null {
       selected: typeof plan.selected === "string" ? plan.selected : plan.id, renews_on_next_request: plan.renews_on_next_request === true },
     credit_raw: credit, due_raw: dueRaw !== null && BigInt(dueRaw) > 0n ? dueRaw : null,
     usage: used !== null && limit !== null ? { used, limit, resets_at: iso(usage?.resets_at), by_key: byKey(usage?.by_key) } : null,
-    history,
+    // Newest first, whatever order the gateway sends: the reader wants the latest at the top, and a long list keeps its latest 50.
+    history: history.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 50),
   };
 }
 

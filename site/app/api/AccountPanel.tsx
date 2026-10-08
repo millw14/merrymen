@@ -140,7 +140,7 @@ export function AccountSummary({ view, plans, keys }: { view: AccountView; plans
       {!plans.billing.enforced && <small>Counted, not yet enforced: requests past the limit still go through.</small>}
       {usage.by_key.length > 0 && <ul className="dev-usage-keys" aria-label="Requests by key">{usage.by_key.map(k => <li key={k.key_id}><span>{keyName(k.key_id)}</span><code>{group(k.used)}</code></li>)}</ul>}
     </div>}
-    {view.history.length > 0 && <details className="dev-history"><summary>History ({view.history.length})</summary><ul>{[...view.history].reverse().map((h, i) => {
+    {view.history.length > 0 && <details className="dev-history"><summary>History ({view.history.length})</summary><ul>{view.history.map((h, i) => {
       const amount = BigInt(h.amount_raw), magnitude = amount < 0n ? -amount : amount;
       const sign = h.type === "payment" ? "+" : h.type === "adjustment" ? (amount < 0n ? "−" : "+") : magnitude === 0n ? "" : "−";
       return <li key={`${h.at}-${i}`}><time dateTime={h.at}>{formatDateTime(h.at)}</time><span>{historyLabel(h, plans.plans)}</span><code>{sign}{formatTokens(magnitude, { decimals: 2 })}</code>

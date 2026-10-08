@@ -70,6 +70,10 @@ test('the payment panel asks for the amount due rounded up, from the signed-in w
   // The usage meter, per-key use and history.
   assert.match(page, /120 of 1,000 requests/); assert.match(page, /Prism backend/); assert.match(page, /aria-valuenow="120"/);
   assert.match(page, /Choose a plan/); assert.match(page, /Payment received/); assert.match(page, /\+60,000/);
+  // History reads newest first, as the gateway sends it.
+  const history = [{ type: 'charge', at: '2026-10-05T00:00:00.000Z', amount_tokens: '100000', tier: 'crumbs', reason: 'activate' }, { type: 'payment', at: '2026-10-01T00:00:00.000Z', amount_tokens: '100000', tx_hash: '0x' + 'cd'.repeat(32) }];
+  const listed = panel({ kind: 'ready', view: view({ history }) });
+  assert.ok(listed.indexOf('Crumbs started') < listed.indexOf('Payment received'), 'newest first');
   assert.doesNotMatch(page, BANNED);
 });
 

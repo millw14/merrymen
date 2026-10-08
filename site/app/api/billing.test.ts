@@ -220,6 +220,21 @@ test('the account view keeps exact amounts and drops what it cannot read', () =>
   }
 });
 
+test('history is newest first whatever order it arrives in, and a long one keeps its latest 50', () => {
+  const day = (d: number) => new Date(Date.UTC(2026, 9, d)).toISOString();
+  const payment = { type: 'payment', at: day(1), amount_tokens: '100000', tx_hash: HASH };
+  const activate = { type: 'charge', at: day(5), amount_tokens: '100000', tier: 'crumbs', reason: 'activate' };
+  // The gateway sends newest first; an older one sent oldest first. Both read the same.
+  for (const history of [[activate, payment], [payment, activate]]) {
+    assert.deepEqual(normalizeAccount(account({ history }))!.history.map(h => h.at), [day(5), day(1)]);
+  }
+  const many = Array.from({ length: 60 }, (_, i) => ({ type: 'adjustment', at: new Date(Date.UTC(2026, 0, 1) + i * 3600_000).toISOString(), amount_tokens: String(i) }));
+  for (const history of [many, [...many].reverse()]) {
+    const kept = normalizeAccount(account({ history }))!.history;
+    assert.equal(kept.length, 50); assert.equal(kept[0].amount_raw, (59n * UNIT).toString()); assert.equal(kept[49].amount_raw, (10n * UNIT).toString());
+  }
+});
+
 test('a plan preview says what confirming does, in whole tokens', () => {
   const loaf = FALLBACK_PLANS.plans[2];
   const p = (body: Record<string, unknown>) => normalizePreview({ charge_now_raw: '0', due_raw: null, starts_at: null, ends_at: '2026-11-07T12:00:00.000Z', ...body })!;
