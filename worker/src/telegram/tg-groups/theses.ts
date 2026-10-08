@@ -16,7 +16,10 @@
  * its length cap, no digit (the coin's own name aside) and no number word,
  * no $, @, # or link, no quotation mark, no five-word run shared with any
  * sample (never a quote, not even a paraphrase that is one), nothing about
- * instructions, and the group gate as an `answer` line, never as `research`
+ * instructions, nothing in the first person or naming the agent, Merrymen or
+ * this room (never a pick or a position in its voice), no lure (an airdrop,
+ * a presale, free tokens, someone to message; nothing waited on is a claim),
+ * and the group gate as an `answer` line, never as `research`
  * (research admits "going to 10m" and "100x"; an answer does not, and its
  * accusation, alert, advice and link clauses all apply). A phrase that
  * fails is DROPPED, never repaired; nothing left means the code digest.
@@ -25,7 +28,9 @@
  * and when its theses were read), through TgModelGate with the router's
  * reserve, so it only spends the half of the room's allowance kept for what
  * is nice to have; the worded digest is kept for thirty minutes, so "tell me
- * what it's about from thesis" right after costs no call. Under 1.5 s left
+ * what it's about from thesis" right after costs no call; a call that gave
+ * no usable choice keeps the code digest for five minutes, so a model that
+ * answers in prose or times out is not asked on every ask. Under 1.5 s left
  * of the reply deadline, or no model, or the switch off: the code digest,
  * with no call. Logs carry counts only.
  */
@@ -38,6 +43,12 @@ export const THESES_BOX_MS = 6_000;
 export const THESES_MIN_MS = 1_500;
 /** How long a worded digest is reused for the same coin and copy. */
 export const THESES_KEEP_MS = 30 * 60_000;
+/**
+ * How long a call that gave no usable choice (an answer in words, a throw, a
+ * late answer) keeps the same coin and copy on the code digest, so a model
+ * that answers in prose or times out is not asked again on every ask.
+ */
+export const THESES_RETRY_MS = 5 * 60_000;
 const THESES_KEEP_MAX = 64;
 const THESES_TOKENS = 700;
 
@@ -118,6 +129,32 @@ const NUMBER_WORDS =
   /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|hundreds|thousand|thousands|million|millions|billion|billions|trillion|percent|percentage|double|triple|tenx|hundredx|[0-9]+x)\b/i;
 const MARKUP = /[@$#"“”«»„]|https?:|www\.|t\.me|\.(?:com|net|org|io|xyz|gg|fun|app|me|co|ai)\b/i;
 const ABOUT_ITSELF = /\b(?:instructions?|prompts?|system|assistant|ignore|disregard)\b/i;
+/**
+ * A phrase in the first person, or about Merrymen or this room, would be said
+ * in the agent's own voice: "Shogun picked it as a buy", "we're holding a bag"
+ * are a nomination or a position nobody took (rules 1, 2, 5). Never bot, agent,
+ * ai, owner or us: "rides the AI agent narrative", "contract owner renounced"
+ * and "a US listing" are fair points.
+ */
+const SELF_REF = /\b(?:i|i'm|im|i've|i'd|we|we're|we've|we'd|our|ours|my|me|merrymen|merryman)\b|\bthis (?:group|chat|room)\b/i;
+/**
+ * A lure, not a view, said back to a room: an airdrop, a presale, free tokens,
+ * a wallet to connect, someone to message. The prompt asks for none; code
+ * makes sure (docs/tg-groups.md rule 3, fomo/digest.ts never says an airdrop).
+ */
+const OUT_LURE =
+  /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b/i;
+/** What holders wait on is never a claim ("the token claim opening"); a gist may still say "they claim". */
+const WAIT_CLAIM = /\bclaim(?:s|able|ing)?\b/i;
+const WAITING_LABEL = "Waiting on: ";
+
+const escRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** The agent's full name as a word of its own; never its aliases ("Will" would drop "holders will wait"). */
+function namesAgent(p: string, agentName: string): boolean {
+  const me = agentName.trim();
+  if (!me) return false;
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escRe(me)}(?![\\p{L}\\p{N}])`, "iu").test(p);
+}
 
 /**
  * One phrase, checked, or null: dropped, never repaired. `label` is the line
@@ -127,9 +164,11 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   if (typeof raw !== "string") return null;
   const p = raw.replace(/\s+/g, " ").trim().replace(/^[-•*·]\s*/, "").replace(/[\s.;,:!]+$/, "");
   if (!p || p.length > cap) return null;
-  const coin = m.coin ? new RegExp(`(?<![\\p{L}\\p{N}])${m.coin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "giu") : null;
+  const coin = m.coin ? new RegExp(`(?<![\\p{L}\\p{N}])${escRe(m.coin)}(?![\\p{L}\\p{N}])`, "giu") : null;
   const bare = coin ? p.replace(coin, " ") : p;
   if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p)) return null;
+  if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p)) return null;
+  if (label === WAITING_LABEL && WAIT_CLAIM.test(p)) return null;
   const w = words(p);
   for (let i = 0; i + COPY_RUN <= w.length; i++) if (runs.has(w.slice(i, i + COPY_RUN).join(" "))) return null;
   const v = admitTgLine(`${label}${p}.`, { agentName, kind: "answer", recentOwn: [] });
@@ -163,7 +202,7 @@ export function checkWording(raw: unknown, m: TgThesesMaterial, agentName: strin
     gist: gist ? `${gist.charAt(0).toUpperCase()}${gist.slice(1)}` : null,
     forIt: list(o.for, POINTS, POINT_MAX, "For it: "),
     against: list(o.against, POINTS, POINT_MAX, "Against it: "),
-    waitingOn: list(o.waiting_on, WAITINGS, WAITING_MAX, "Waiting on: "),
+    waitingOn: list(o.waiting_on, WAITINGS, WAITING_MAX, WAITING_LABEL),
   };
   const kept = (wording.gist ? 1 : 0) + wording.forIt.length + wording.against.length + wording.waitingOn.length;
   return { wording, kept, dropped };
@@ -200,24 +239,28 @@ export function thesesLines(m: TgThesesMaterial, w: ThesesWording, maxLines: num
   return [...m.head, ...kept, ...m.tail];
 }
 
-/** Worded digests by material key, for THESES_KEEP_MS; null: the model's phrases did not pass, say the code digest. */
+/**
+ * Worded digests by material key, each for its own lifetime (THESES_KEEP_MS by
+ * default); null: say the code digest (the phrases did not pass, or, for
+ * THESES_RETRY_MS, the call gave no usable choice).
+ */
 export class ThesesWordings {
-  private readonly kept = new Map<string, { at: number; wording: ThesesWording | null }>();
+  private readonly kept = new Map<string, { at: number; ttl: number; wording: ThesesWording | null }>();
 
   get(key: string, now: number): { wording: ThesesWording | null } | undefined {
     const hit = this.kept.get(key);
     if (!hit) return undefined;
-    if (!(now - hit.at >= 0 && now - hit.at < THESES_KEEP_MS)) {
+    if (!(now - hit.at >= 0 && now - hit.at < hit.ttl)) {
       this.kept.delete(key);
       return undefined;
     }
     return { wording: hit.wording };
   }
 
-  set(key: string, wording: ThesesWording | null, now: number): void {
+  set(key: string, wording: ThesesWording | null, now: number, ttl = THESES_KEEP_MS): void {
     this.kept.delete(key);
     if (this.kept.size >= THESES_KEEP_MAX) this.kept.delete(this.kept.keys().next().value!);
-    this.kept.set(key, { at: now, wording });
+    this.kept.set(key, { at: now, ttl: Number.isFinite(ttl) && ttl > 0 ? ttl : THESES_KEEP_MS, wording });
   }
 }
 
@@ -266,9 +309,16 @@ export async function wordTheses(o: {
       box,
       { reserve, minCallMs: THESES_MIN_MS },
     );
-    if (raw === null) return { lines: null, why: ran ? "no-answer" : "skipped" };
-    // An answer in words is no choice at all: nothing is kept, the next ask may try again.
-    if (!["gist", "for", "against", "waiting_on"].some((k) => Object.hasOwn(raw, k))) return { lines: null, why: "no-answer" };
+    // A call that ran and gave no usable choice (a throw, a late answer, an answer in words) keeps
+    // the code digest for THESES_RETRY_MS: no second call, no second wait; after it, one more try.
+    if (raw === null) {
+      if (ran) o.kept.set(m.key, null, o.now, THESES_RETRY_MS);
+      return { lines: null, why: ran ? "no-answer" : "skipped" };
+    }
+    if (!["gist", "for", "against", "waiting_on"].some((k) => Object.hasOwn(raw, k))) {
+      o.kept.set(m.key, null, o.now, THESES_RETRY_MS);
+      return { lines: null, why: "no-answer" };
+    }
     const { wording, kept, dropped } = checkWording(raw, m, o.agentName);
     // A wording with nothing usable is remembered too: the same theses get the code digest, not another call.
     o.kept.set(m.key, kept > 0 ? wording : null, o.now);

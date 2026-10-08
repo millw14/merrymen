@@ -354,8 +354,11 @@ export const THESES_SAMPLES_MIN = 3;
  */
 const INJECTION_SHAPED =
   /\b(?:ignore|disregard|forget|override|bypass)\b[^.!?\n]{0,40}\b(?:instructions?|prompts?|rules|previous|above|system|guidelines)\b|\b(?:system|developer|assistant)\s*(?:prompt|message|:)|\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:[a-z]+\s+){0,2}(?:ai|assistant|bot|model|chatbot)\b|\bact\s+as\b|\bjailbreak|\bprompt\b|\btell\s+(?:the|this)\s+(?:group|chat|room)\b/i;
-/** A lure, not a view: a claim page, a seed phrase, a wallet to connect. */
-const LURE = /\b(?:airdrops?|claim(?:ing|s)?|presale|whitelist|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|dm\s+me)\b/i;
+/** A lure, not a view: a claim page, a seed phrase, a wallet to connect, free tokens. */
+const LURE =
+  /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b/i;
+/** A row about Merrymen itself ("the merrymen bot picked it") is about the agent, not the coin. */
+const ABOUT_MERRYMEN = /\bmerrym[ae]n\b/i;
 
 /**
  * One thesis as a sample the group model may read: their words with every
@@ -373,7 +376,7 @@ export function thesesSample(text: unknown): string | null {
     .replace(/([,.;:!?])(?:\s*[,.;:!?])+/g, "$1")
     .replace(/^[\s,.;:!?-]+/, "")
     .trim();
-  if (!s || contentFree(s) || INJECTION_SHAPED.test(s) || LURE.test(s)) return null;
+  if (!s || contentFree(s) || INJECTION_SHAPED.test(s) || LURE.test(s) || ABOUT_MERRYMEN.test(s)) return null;
   if (s.length > THESES_SAMPLE_CHARS) s = `${s.slice(0, THESES_SAMPLE_CHARS - 1).replace(/\s+\S*$/, "")}…`;
   return s;
 }
