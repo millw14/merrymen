@@ -245,6 +245,14 @@ describe("prepareMerryman", () => {
     assert.equal(result.chainId, 46630);
   });
 
+  it("refuses any other chain id instead of quietly signing for mainnet", async () => {
+    // The signer maps every id but the testnet's to mainnet, so each of these
+    // used to come back as a real-funds chain 4663 grant.
+    for (const chainId of [1, 46631, 0, "46630", "4663"]) {
+      await refusedUpFront({ chainId }, /is not a partner enrollment chain: use Robinhood Chain 4663 or its testnet 46630/);
+    }
+  });
+
   it("reports progress through onStatus, and the last status precedes the owner's one signature", async () => {
     const a = attempt();
     await a.grant;

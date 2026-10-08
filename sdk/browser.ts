@@ -1,5 +1,6 @@
 /** Browser-only wallet preparation. Partner API keys belong on your server. */
 import { type LocalAccount } from "viem";
+import { robinhoodChain, robinhoodTestnet } from "../packages/core/src/chain";
 import { type StoredGrant } from "../packages/core/src/grant";
 import { carriesOwnerKey } from "../packages/core/src/hosted";
 import {
@@ -42,7 +43,15 @@ export async function prepareMerryman({ owner, onStatus = () => {}, ...options }
   if ((options as { trencherFactory?: unknown }).trencherFactory !== undefined) {
     throw new Error("Partner enrollment does not grant Trencher permissions: remove trencherFactory. Nothing was signed.");
   }
-  const grant = await prepareAgentGrant(owner, { ...options, onStatus });
+  // ONLY THE CHAINS ACTIVATION ACCEPTS, and checked here because the signer
+  // cannot: it maps every id but the testnet's to MAINNET (chainForId), so a
+  // typo like 46631, another network's 1 or the string "46630" sealed a
+  // real-funds Robinhood Chain permission without a word.
+  const chainId = options.chainId ?? robinhoodChain.id;
+  if (chainId !== robinhoodChain.id && chainId !== robinhoodTestnet.id) {
+    throw new Error(`chainId ${JSON.stringify(options.chainId)} is not a partner enrollment chain: use Robinhood Chain ${robinhoodChain.id} or its testnet ${robinhoodTestnet.id}. Nothing was signed.`);
+  }
+  const grant = await prepareAgentGrant(owner, { ...options, chainId, onStatus });
   if (carriesOwnerKey(grant)) throw new Error("An owner private key must never be included in a partner grant.");
   return grant;
 }
