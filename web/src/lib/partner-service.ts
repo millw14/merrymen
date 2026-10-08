@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { PartnerError, objectBody, onlyFields, partnerAppOrigin, readPartnerBody, requirePartnerScope, verifyPartnerRequest, type PartnerPrincipal } from "./partner-bridge";
 import {
-  fitPartnerReply, partnerCommandFits, partnerText, PartnerStoreError, PARTNER_MESSAGE_MAX, wellFormed,
+  fitPartnerReply, partnerCommandFits, partnerText, PartnerStoreError, PARTNER_MESSAGE_MAX, toWellFormed, wellFormed,
   type PartnerConnection, type PartnerStore,
 } from "./partner-store";
 import type { readPartnerRuntime, replyToPartner } from "./partner-runtime";
@@ -67,7 +67,9 @@ export function createPartnerService(deps: {
         throw new PartnerError(400, "bad_request", "name must contain 1–64 characters");
       }
       const scopes = ["read:agents", ...(partner.scopes.includes("chat:agents") ? ["chat:agents"] : [])];
-      const created = await store.create({ partnerId: partner.app_id, partnerName: partner.name,
+      // The key's name is the gateway's signed metadata, not the partner's input
+      // to refuse: made well-formed rather than failing every create for that key.
+      const created = await store.create({ partnerId: partner.app_id, partnerName: toWellFormed(partner.name),
         externalUserId: body.external_user_id, name: typeof body.name === "string" ? body.name.trim() : "Your Merryman", scopes });
       return { status: created.connection.status === "linked" ? 200 : 202,
         body: view(created.connection, undefined, created.token) };

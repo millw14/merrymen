@@ -54,6 +54,14 @@ function fixture(overrides: Partial<ServiceDeps> = {}, waits?: ConstructorParame
   return { store, call, service, replies: () => replies };
 }
 
+test("a key whose name is not well-formed text can still create connections", async () => {
+  const f = fixture();
+  const oddKey = { ...key, name: "Test App \ud800" };
+  const created = await f.call("POST", "/agents", { external_user_id: "odd-name-user" }, oddKey);
+  assert.equal(created.status, 202);
+  assert.equal((await f.store.byId(key.appId, created.body.id))?.partnerName, "Test App \ufffd");
+});
+
 test("gateway signatures bind exact method, body, path and principal, and reject replay", async () => {
   const path = "/agents", raw = '{"external_user_id":"user-1"}';
   const headers = signPartnerRequest({ secret, key, method: "POST", path, body: raw });

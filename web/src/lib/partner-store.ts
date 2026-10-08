@@ -149,7 +149,7 @@ const CONTROL = /[\u0000-\u001f]/;
 // compiles this file too, targets an older lib. Same rule, spelled out.
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 export const wellFormed = (value: string): boolean => !LONE_SURROGATE.test(value);
-const toWellFormed = (value: string): string => value.replace(new RegExp(LONE_SURROGATE.source, "g"), "\ufffd");
+export const toWellFormed = (value: string): string => value.replace(new RegExp(LONE_SURROGATE.source, "g"), "\ufffd");
 
 /**
  * The store's text rule, exported so a caller can refuse before paying for work

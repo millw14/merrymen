@@ -230,6 +230,12 @@ test("concurrent creation enforces the active-key cap", async () => {
   assert.equal(results.filter(r => r.status === 201).length, 5);
   assert.equal(results.filter(r => r.status === 409).length, 3);
 });
+test("an app name that is not well-formed text is refused, not stored", async () => {
+  const f = fixture(), { session } = await f.login();
+  const refused = await f.call("/keys", '{"name":"App \\ud800"}', session);
+  assert.equal(refused.status, 400); assert.equal(refused.json.error.code, "invalid_name");
+  assert.equal((await f.call("/keys", { name: "App \u{1F600}" }, session)).status, 201, "a whole emoji is fine");
+});
 test("a body that is JSON but not an object is a 400, after authentication", async () => {
   const f = fixture(), { session } = await f.login();
   for (const raw of ["null", "5", "[]", '"text"', "{", ""]) {

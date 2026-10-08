@@ -153,7 +153,7 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
         partners.reload();
         return { status: 200, json: { revoked: true } };
       }
-      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 48 || /[\x00-\x1f\x7f]/.test(body.name)) return error(400, "invalid_name", "App name must contain 1–48 characters");
+      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 48 || /[\x00-\x1f\x7f]/.test(body.name) || !body.name.isWellFormed()) return error(400, "invalid_name", "App name must contain 1–48 characters");
       if (!await store.rateHit(`dev:issue:${user.address}`, 10, 3600)) return error(429, "rate_limited", "Key creation limit reached. Try again in an hour.");
       if (owned.filter(r => r.status === "active").length >= 5) return error(409, "key_limit", "You can have five active keys. Revoke an unused key first.");
       let appId = body.app_id;
