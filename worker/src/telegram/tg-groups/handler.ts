@@ -3310,6 +3310,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     // An unresolved explicit reply must not silently borrow a newer coin.
     if (j.line.replyTo !== undefined && discussion) return null;
+    // A complaint from someone with nothing open never borrows the topic's
+    // last read, someone else's (D12): "which question?" (act()).
+    if (j.meta === "complaint" && j.noOpenAsk === true) return null;
     const general = lastDesk.get(deskKey(j.msg.chatId));
     const remembered = lastDesk.get(deskKey(j.msg.chatId, j.threadId)) ?? (general?.migrated ? general : undefined);
     // A subject asked by someone forgotten since is not this topic's any more.

@@ -478,6 +478,50 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     assert.equal(tg.out().filter((o) => o.replyTo === ask.messageId).length, 1, "only her first, refused, send");
   });
 
+  it("someone else's complaint never borrows her desk read: 'which question?', answered or lost (review r3)", async () => {
+    // Her market read answered, then Bob's complaint two minutes later.
+    make();
+    await said(msg("shogun how's the market?"));
+    assert.equal(desk.asks.length, 1);
+    assert.match(tg.out().slice(-1)[0]!.text, /mostly red/);
+    clock += 2 * MIN;
+    const bob = msg("shogun i asked a question", { fromId: BOB, fromFirstName: "Bob" });
+    await said(bob);
+    assert.equal(desk.asks.length, 1, "no second market read for Bob");
+    assert.deepEqual(tg.out().slice(-1), [{ text: "which question? i might've missed it, ask me again", replyTo: bob.messageId }]);
+    // Her coin read, then Bob's "i asked you a question".
+    clock += 2 * MIN;
+    await said(msg("shogun thoughts on $PONS?"));
+    const looks = desk.asks.length;
+    assert.ok(looks >= 2, "the desk read her coin");
+    clock += MIN;
+    const bob2 = msg("shogun i asked you a question", { fromId: BOB, fromFirstName: "Bob" });
+    await said(bob2);
+    assert.equal(desk.asks.length, looks, "her coin is never read again for Bob");
+    assert.deepEqual(tg.out().slice(-1), [{ text: "which question? i might've missed it, ask me again", replyTo: bob2.messageId }]);
+  });
+
+  it("her desk read lost, then Bob's complaint: 'which question?' for him, and her own complaint re-runs it exactly once (review r3)", async () => {
+    make();
+    tg.failNext = 1;
+    const ask = msg("shogun how's the market?");
+    await said(ask);
+    assert.equal(desk.asks.length, 1);
+    clock += 20 * SEC;
+    const sent = tg.out().length;
+    const bob = msg("shogun i asked a question", { fromId: BOB, fromFirstName: "Bob" });
+    await said(bob);
+    assert.equal(desk.asks.length, 1, "her lost read is never answered to Bob");
+    assert.deepEqual(tg.out().slice(-1), [{ text: "which question? i might've missed it, ask me again", replyTo: bob.messageId }]);
+    clock += 20 * SEC;
+    await said(msg("shogun i asked a question"));
+    assert.equal(desk.asks.length, 2, "her own complaint re-runs her ask");
+    const reads = tg.out().slice(sent).filter((o) => /mostly red/.test(o.text));
+    assert.equal(reads.length, 1, "the room hears one market read after her refused send");
+    assert.equal(reads[0]!.replyTo, ask.messageId);
+    assert.equal(logs.filter((l) => l.startsWith("[tg-groups] an unanswered ask re-asked")).length, 1);
+  });
+
   it("/forgetme in between: nothing is re-run and nothing is sent for her line; her complaint asks which question", async () => {
     make();
     tg.failNext = 1;
