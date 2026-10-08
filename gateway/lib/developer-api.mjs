@@ -29,7 +29,7 @@ const validName = n => typeof n === "string" && !!n.trim() && n.length <= 48 && 
  *
  * ACCOUNTS AND PLANS are lib/billing.mjs's (`billing`, built once by server.mjs
  * and shared with the partner gate). A signed-in wallet creates one account,
- * which new keys then require, chooses a plan and submits the hash of a
+ * which new keys then require while billing is on, chooses a plan and submits the hash of a
  * $MERRYMEN transfer it sent. Payment checks read the chain through billing's
  * own client; sign-in still never asks a chain anything (see refusal()).
  */
@@ -191,11 +191,15 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
         return { status: 200, json: { revoked: true } };
       }
       if (!validName(body.name)) return error(400, "invalid_name", "App name must contain 1–48 characters");
-      // A new key is metered against an account's plan, so it needs one. Keys
-      // from before accounts keep working, and listing, testing and revoking
-      // them never asks; only minting does. Before the limit, so this costs nothing.
-      if (!billing) return noBilling();
-      if (!billing.hasAccount(user.address)) return error(409, "account_required", "Create your developer account first.");
+      // While billing meters keys (observe or enforce), a new key is metered
+      // against an account's plan, so it needs one. Keys from before accounts
+      // keep working, and listing, testing and revoking them never asks; only
+      // minting does. Before the limit, so this costs nothing. With billing off
+      // (or no billing service) nothing is metered and minting is what it was
+      // before billing: the gateway deploys apart from the site, which may not
+      // offer account creation yet. Such a key is one from before accounts
+      // once billing is on (Free until its owner creates an account).
+      if (billing && billing.mode !== "off" && !billing.hasAccount(user.address)) return error(409, "account_required", "Create your developer account first.");
       if (!await store.rateHit(`dev:issue:${user.address}`, 10, 3600)) return error(429, "rate_limited", "Key creation limit reached. Try again in an hour.");
       if (owned.filter(r => r.status === "active").length >= 5) return error(409, "key_limit", "You can have five active keys. Revoke an unused key first.");
       let appId = body.app_id;

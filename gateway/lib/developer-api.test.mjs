@@ -281,8 +281,8 @@ async function legacyKey(owner, extra = {}) {
     scopes: ["read:agents"], rpm: 30, status: "active", created_at: new Date().toISOString(), ...extra });
   return { key, keyId };
 }
-test("a new key needs an account; keys from before accounts are still listed, tested and revoked", async () => {
-  const f = await fixture(), { session } = await f.login();
+test("a new key needs an account while billing meters keys; keys from before accounts are still listed, tested and revoked", async () => {
+  const f = await fixture({ mode: "observe" }), { session } = await f.login();
   // Refused before the issuance limit, so asking costs nothing: ten an hour would refuse the eleventh.
   for (let i = 0; i < 12; i++) {
     const refused = await f.call("/keys", { name: "Before an account" }, session);
@@ -400,13 +400,30 @@ test("a key lists the rate its account's plan gives it, not the one stored when 
   assert.deepEqual((await f.call("/keys", undefined, s.session)).json.keys.map(k => k.rate_per_min), [120]);
   assert.equal((await f.call("/test", { key: minted.json.key }, s.session)).json.rate_per_min, 120, "the list and the key test agree");
 });
-test("without a billing service, accounts and plans answer 503 and no key is minted; listing still works", async () => {
+test("with billing off, a key is minted without an account, exactly as before billing", async () => {
+  // Gateway and site deploy separately. A gateway on billing off, behind a
+  // site that cannot create accounts yet, must still mint keys; such a key is
+  // one from before accounts once billing meters it.
+  for (const mode of ["off", "observe", "enforce"]) {
+    const f = await fixture({ mode }), { session } = await f.login();
+    const r = await f.call("/keys", { name: "Before an account" }, session);
+    if (mode === "off") {
+      assert.equal(r.status, 201, JSON.stringify(r.json));
+      assert.equal((await f.partners.verify(r.json.key)).ok, true);
+      assert.equal(r.json.rate_per_min, 30, "the rate a key got before billing");
+    } else {
+      assert.deepEqual([r.status, r.json.error.code], [409, "account_required"], mode);
+    }
+  }
+});
+test("without a billing service, accounts and plans answer 503; keys are listed and minted as before billing", async () => {
   const f = await fixture({ billing: null }), { session } = await f.login();
   assert.equal((await f.call("/plans")).json.error.code, "billing_unavailable");
-  for (const [path, body] of [["/account", undefined], ["/account", { name: "Acme" }], ["/plan", { tier: "free" }], ["/payments", { tx_hash: "0x" }], ["/keys", { name: "App" }]]) {
+  for (const [path, body] of [["/account", undefined], ["/account", { name: "Acme" }], ["/plan", { tier: "free" }], ["/payments", { tx_hash: "0x" }]]) {
     const r = await f.call(path, body, session);
     assert.equal(r.status, 503, path); assert.equal(r.json.error.code, "billing_unavailable");
   }
+  assert.equal((await f.call("/keys", { name: "App" }, session)).status, 201, "nothing is metered, so nothing needs an account");
   assert.equal((await f.call("/keys", undefined, session)).status, 200);
 });
 
