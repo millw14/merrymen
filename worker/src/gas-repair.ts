@@ -260,6 +260,17 @@ export function repairOf(row: GasRow, ev: OpEvidence | null, price: { usdg: numb
   if (ev.payer === "sponsor" && row.gas_wei !== null) {
     return { why: "the row books the cost to the owner, and the receipt says a sponsor paid — correcting who paid is left for a person" };
   }
+  // THE SPONSOR COLUMN IS CHECKED AGAINST THE RECEIPT TOO, BOTH WAYS. An
+  // owner-paid receipt beside a recorded sponsor cost would leave the row
+  // claiming both payers; a sponsor-paid receipt beside a sponsor figure that
+  // is not this receipt's — the "0" placeholder included — would overwrite a
+  // value, not fill a NULL. Either is a disagreement, and left for a person.
+  if (ev.payer === "owner" && row.sponsored_gas_wei !== null && row.sponsored_gas_wei !== "0") {
+    return { why: "the row books a sponsor cost, and the receipt says the owner paid — correcting who paid is left for a person" };
+  }
+  if (ev.payer === "sponsor" && row.sponsored_gas_wei !== null && row.sponsored_gas_wei !== ev.gasWei.toString()) {
+    return { why: "the row's recorded sponsor cost differs from its receipt — left for a person" };
+  }
   const units = row.gas_units ?? (ev.gasUnits > 0n ? ev.gasUnits.toString() : null);
   const after: GasColumns = ev.payer === "sponsor"
     ? { gas_wei: null, sponsored_gas_wei: ev.gasWei.toString(), gas_units: units, gas_usdg: null }

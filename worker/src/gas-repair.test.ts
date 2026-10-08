@@ -156,11 +156,16 @@ describe("planGasRepair — from the receipt and the round in force", () => {
     const wrongStatus = await trade(db, { agent: A, status: "landed", op: h(3), tx: h(13) });
     const wrongSender = await trade(db, { agent: A, status: "landed", op: h(4), tx: h(14) });
     const noTx = await trade(db, { agent: A, status: "landed", op: h(5), tx: null });
+    // The sponsor column must agree with the receipt too, both ways.
+    const bothPayers = await trade(db, { agent: A, status: "landed", op: h(6), tx: h(16), gasWei: "2000000000000000", sponsored: "2000000000000000" });
+    const placeholder = await trade(db, { agent: A, status: "landed", op: h(7), tx: h(17), sponsored: "0" });
     const rpc = chain({
       [h(11)]: { block: 100, logs: [opLog(h(1), A)] },
       [h(12)]: { block: 100, logs: [opLog(h(2), A, { paymaster: SPONSOR })] },
       [h(13)]: { block: 100, logs: [opLog(h(3), A, { success: false })] },
       [h(14)]: { block: 100, logs: [opLog(h(4), B)] },
+      [h(16)]: { block: 100, logs: [opLog(h(6), A)] },
+      [h(17)]: { block: 100, logs: [opLog(h(7), A, { paymaster: SPONSOR })] },
     }, { 100: 10_000 });
     const p = await plan(db, rpc);
     assert.equal(p.repairs.length, 0);
@@ -170,6 +175,8 @@ describe("planGasRepair — from the receipt and the round in force", () => {
     assert.match(why.get(wrongStatus)!, /reverted, the row says landed/);
     assert.match(why.get(wrongSender)!, /no single UserOperationEvent/);
     assert.match(why.get(noTx)!, /no transaction hash/);
+    assert.match(why.get(bothPayers)!, /books a sponsor cost, and the receipt says the owner paid/);
+    assert.match(why.get(placeholder)!, /recorded sponsor cost differs from its receipt/);
   });
 
   it("refuses a chain that is not Robinhood Chain", async () => {
