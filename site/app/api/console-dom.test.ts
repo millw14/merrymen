@@ -63,7 +63,7 @@ const accountJson = (over: Record<string, unknown> = {}) => ({
 const pending = { status: 202, body: { code: 'payment_pending', stage: 'not_found_yet', message: 'Not on Robinhood Chain yet. Check again shortly.' } };
 
 type Answer = { status: number; body: unknown };
-type Handler = (body: Record<string, unknown> | undefined, call: number) => Answer;
+type Handler = (body: Record<string, unknown> | undefined, call: number) => Answer | Promise<Answer>;
 type Root = { render(node: React.ReactNode): void; unmount(): void };
 let dom: { window: Window & typeof globalThis & { close(): void } };
 let act: typeof React.act;
@@ -122,7 +122,7 @@ before(async () => {
     calls.push({ method, action, body });
     const handler = routes[`${method} ${action}`];
     if (!handler) return Response.json({ error: { code: 'not_found', message: 'Not found' } }, { status: 404 });
-    const answer = handler(body, calls.filter(c => c.method === method && c.action === action).length);
+    const answer = await handler(body, calls.filter(c => c.method === method && c.action === action).length);
     return Response.json(answer.body, { status: answer.status });
   };
 });
@@ -275,6 +275,8 @@ test('a hash is forgotten only on a final answer; a stall, a refused check, a si
   assert.deepEqual(new Set(submitted()), new Set([HASH_A, HASH_B, HASH_C, HASH_D]));
   assert.deepEqual(saved(), [HASH_C, HASH_D], 'credited and refused are answered; the others are not');
   assert.match(statusOf(page.container, HASH_A), /^Credited/);
+  // The account view that came with the credit is what the page now shows.
+  assert.match(text(page.container), /Nothing due/); assert.doesNotMatch(text(page.container), /Due: 100,000/);
   assert.match(statusOf(page.container, HASH_B), /^Not credited This transfer did not go to the Merrymen payments wallet\./);
   assert.match(statusOf(page.container, HASH_C), /could not be checked just now \(Not found\)\. It is saved here/, 'a refused check is not a refused payment');
   assert.match(statusOf(page.container, HASH_D), /^Checking payment/);
@@ -318,6 +320,34 @@ test('a stalled payment holds back Pay until it is checked again or forgotten, a
   assert.deepEqual(saved(), []); assert.ok(!text(again.container).includes(short(HASH_C)));
   assert.equal(canPay(again.container), true);
   await again.unmount();
+});
+
+test('a page that goes away stops checking, and the payment is checked again when it comes back', async () => {
+  save(HASH_A);
+  const page = await mount();
+  assert.equal(checksOf(HASH_A), 1); assert.deepEqual(held.map(t => t.ms), [6000], 'waiting to check again');
+  await page.unmount();
+  assert.equal(held.length, 0, 'the wait is cleared with the page');
+  await fastForward(() => false, 5);
+  assert.equal(checksOf(HASH_A), 1, 'nothing is sent for a page that is gone');
+  assert.deepEqual(saved(), [HASH_A]);
+  calls = [];
+  const back = await mount();
+  assert.equal(checksOf(HASH_A), 1, 'checked again at once');
+  await drain(back.container, [HASH_A]);
+  await back.unmount();
+
+  // The page goes while a check is on its way: the answer that arrives later starts nothing.
+  let answer: (a: Answer) => void = () => {};
+  routes['POST payments'] = () => new Promise<Answer>(resolve => { answer = resolve; });
+  calls = [];
+  const gone = await mount();
+  assert.equal(checksOf(HASH_A), 1); assert.equal(held.length, 0, 'the check is still out');
+  await gone.unmount();
+  answer(pending);
+  await settle(4); await fastForward(() => false, 5);
+  assert.equal(checksOf(HASH_A), 1); assert.equal(held.length, 0, 'no wait was started for a page that is gone');
+  assert.deepEqual(saved(), [HASH_A]);
 });
 
 test(`pasting stops at ${MAX_PENDING} unanswered payments rather than dropping one`, async () => {
