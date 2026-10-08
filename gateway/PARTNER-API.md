@@ -31,8 +31,20 @@ Visit [Merrymen Developers](https://merrymen.dev/api), sign in with a wallet,
 and create a key for your application. Copy the key immediately: it is shown
 only once. The portal includes an SDK download, integration tutorial, and a
 real authenticated key test. Each developer can have five active keys at
-30 requests per minute each. Replacement keys retain the app identity; update
-your backend before revoking the previous key.
+30 requests per minute each, and may request at most ten new keys an hour.
+Replacement keys retain the app identity; update your backend before revoking
+the previous key.
+
+Sign-in is a free message signature from a standard wallet (an EOA). The
+signature is checked on the gateway itself, with no chain lookup, so
+smart-contract wallets (a Safe, a passkey or ERC-4337 account) cannot sign in;
+use an ordinary wallet's key. A portal session lasts up to eight hours. Signing
+out revokes it on the gateway, not only in your browser, and a gateway restart
+can end it early: sign in again. Your keys are unaffected either way.
+
+Operators can also issue keys with the gateway CLI (see
+[Operator configuration](#operator-configuration-and-key-rotation)). Such a key
+may carry different scopes or a different quota; `/meta` reports what it has.
 
 Self-service keys include these scopes:
 
@@ -85,8 +97,10 @@ POST /agents
 ```
 
 `external_user_id` is 1–128 characters with no whitespace or control characters.
-The optional display `name` is 1–64 characters. A pending connection returns
-HTTP 202, including:
+The optional display `name` is 1–64 characters with no control characters. Both
+must be well-formed Unicode: a lone UTF-16 surrogate (a `\ud800` escape with no
+pair) is refused with 400 `bad_request`; emoji and other surrogate pairs are
+fine. A pending connection returns HTTP 202, including:
 
 ```json
 {
@@ -100,10 +114,23 @@ HTTP 202, including:
 }
 ```
 
-Creation is scoped to `(app_id, external_user_id)`: repeating it returns that
-connection, rather than another worker. An already linked connection returns
-HTTP 200. Store `id` on your server. It is the partner connection ID, not the
-worker's slug. The optional `onboarding_url` is unnecessary for the embedded flow.
+Creation is scoped to `(app_id, external_user_id)`, so it is safe to retry:
+repeating it returns the same connection rather than another worker. A pending
+one comes back as HTTP 202 with the same `id`, and with a fresh
+`onboarding_url` once the previous link's 30 minutes have passed. A linked one
+returns HTTP 200. Store `id` on your server. It is the partner connection ID,
+not the worker's slug. The optional `onboarding_url` is unnecessary for the
+embedded flow.
+
+**After a disconnect** (your `DELETE /agents/{id}/connection`, or the owner
+disconnecting your app on Merrymen), `POST /agents` for the same
+`external_user_id` starts a fresh authorization under a **new** `id`: HTTP 202,
+`pending_authorization`, a new `onboarding_url`. Replace the stored ID. The
+owner must authorize again (a new challenge, signature and activation, or the
+hosted page). The old ID keeps answering `GET /agents/{id}` with `disconnected`
+and can never be used again: challenge, activate and both message routes
+return 409, and `DELETE` stays a 200 no-op. Its conversation is not carried
+over to the new ID.
 
 ### 2. Prepare permissions and sign the challenge
 
@@ -118,9 +145,13 @@ import {
 ```
 
 For a pinned build, check out a reviewed repository revision, install its
-dependencies and run `npm run build:sdk`. Serve `sdk/dist/browser.js` from your
-own assets. This SDK is not yet a published npm package; do not assume an npm
-package/version is available. See [the SDK guide](../sdk/README.md).
+dependencies (the build uses the repository's pinned `esbuild` devDependency)
+and run `npm run build:sdk`. Serve `sdk/dist/browser.js` from your own assets.
+A copy built from a revision between 2026-09-19 and 2026-10-08 fails on import
+with `ReferenceError: process is not defined`; rebuild it. This SDK is not yet a
+published npm package; do not assume an npm package/version is available. The
+module exports `SDK_VERSION`, which names the build; quote it in support
+requests. See [the SDK guide](../sdk/README.md).
 
 The following illustrates browser orchestration. `backend` is your authenticated
 same-origin backend adapter; it adds the partner key on the server. `owner` is a
@@ -179,7 +210,17 @@ connection: a key with `chat:agents` requests both scopes. For a read-only setup
 use a key without `chat:agents` and expect only `read:agents`. If an owner declines
 the requested access, do not sign or activate that challenge.
 
-`settings.name` must be 1–24 characters; `strategy` is `steady-basket` or
+`prepareMerryman` takes only `owner`, `caps`, `chainId` and `onStatus`, and
+refuses anything else (`trencherFactory`, adapter addresses, `extraTokens` and
+the like) before any chain read or signature. `chainId` is `4663` or `46630`;
+leaving it out means `4663`, real funds, and `null` is refused. It refuses
+`caps` that activation would refuse. A grant it makes, passed on unmodified, is
+never refused as `unsupported_permission` (see below). The owner signs twice in
+all: one typed-data signature for the permission inside `prepareMerryman`, and
+one message signature in `signMerrymanAuthorization`.
+
+`settings.name` must be 1–24 characters, start with a letter or number and
+contain at least one letter; `strategy` is `steady-basket` or
 `llm-strategist`; `basket_symbols` contains 1–10 supported stock symbols;
 `live_trading_enabled` must be an explicit boolean. Use clean, unique symbols and
 an already trimmed name so the server's normalized settings match what you show
@@ -226,16 +267,56 @@ POST /agents/{id}/activate
 HTTP 200 returns the same connection detail shape as `GET /agents/{id}`, plus
 `wallet: {smart_account, chain_id}`. Authorization is checked against the owner
 signature, grant and derived smart account before the grant/settings are stored.
-Activation is not a claim that the worker is already running. After an ambiguous
-timeout, inspect the connection before retrying; an enrollment retry may need a
-fresh challenge and owner signature because the original nonce is single-use.
+Activation is not a claim that the worker is already running. If activation
+committed but the worker's state could not then be read, the answer is still
+HTTP 200, with `status: "connected"`, no `agent` object and
+`runtime_available: false`; poll `GET /agents/{id}`.
+
+A partner grant may seal only what `prepareMerryman` seals from owner, caps and
+chain. Activation refuses with HTTP 422 `unsupported_permission`, before the
+challenge is spent, a grant that seals a v4 or Pons adapter address, a grant
+feature beyond `tradeable-v2`, `energy-buy-v1`, `scoped-spenders` and
+`pons-class`, any `grantTokens` that are not the chain's official coin listings
+(there are none today, so leave it empty), or a class vault from any factory
+but the platform's own (the testnet has none). The vault must also be the one
+that factory answers for this smart account, read on chain at activation; if
+the chain cannot be read, the answer is 503 `class_vault_unavailable`.
+
+Retrying an activation:
+
+- **Lost response** (a timeout, a dropped connection): resend the exact same
+  body within the challenge's five minutes. If the first attempt completed,
+  you get HTTP 200 with the connection as it is now, and nothing is applied
+  again: no grant reinstall, no settings change, live trading not re-enabled.
+- **409 `enrollment_busy`** (another activation for the same owner wallet is
+  still running), **503 `class_vault_unavailable`** or **503
+  `derivation_unavailable`**: the challenge was not spent. Resend the same body
+  unchanged after `retry_after` seconds or a short back-off, within the five
+  minutes; the owner does not sign again.
+- **503 `enrollment_storage_failed`**: the challenge was spent and activation
+  stopped part-way. The connection may still be pending, or linked in paper
+  mode with the grant installed and live trading off. Inspect
+  `GET /agents/{id}`, then request a fresh challenge and owner signature.
+- **409 `challenge_used`**: this authorization was already spent, by an
+  attempt that was refused or stopped after spending it, by an activation a
+  later one has since replaced, or (rarely) by one that completed but could not
+  record itself for retries. Inspect `GET /agents/{id}`; changing anything
+  needs a fresh challenge.
+- **401 `challenge_expired`**: the five minutes are over, for a retry too.
+  Inspect the connection, and request and sign a fresh challenge if needed.
 
 ## Runtime status, funding and chat
 
-`GET /agents` returns `{data: [...]}` for up to 100 of your app's connections.
-There is no pagination contract yet. This list is a connection summary: a status
-of `connected` does not prove worker health. Use `GET /agents/{id}` for current
-worker state; only your app's authorized connection can resolve its tenant.
+`GET /agents` returns `{data: [...]}` for up to 100 of your app's connections,
+newest first (by `created_at`, then `id`). There is no pagination contract yet.
+Each external user appears once: a connection that was disconnected and then
+replaced by a new `POST /agents` drops out of the list, though its ID still
+answers `GET /agents/{id}`; one that was disconnected and not replaced is still
+listed. This list is a connection summary with no `agent` object, and its only
+statuses are `pending_authorization`, `connected` and `disconnected`:
+`connected` means the owner authorized your app, not that a worker is healthy.
+Use `GET /agents/{id}` for current worker state; only your app's authorized
+connection can resolve its tenant.
 
 | Detail status | Meaning |
 | --- | --- |
@@ -275,15 +356,31 @@ POST /agents/{id}/messages
 }
 ```
 
-Messages are 1–2000 characters. `request_id` is 8–128 letters, digits, underscores
-or hyphens. Generate one per logical message and reuse it for transport retries.
-The same ID and text returns the saved response; a different text with that ID
-returns HTTP 409 `idempotency_conflict`.
+Messages are 1–2000 characters of well-formed text (no lone UTF-16 surrogate)
+and may contain tabs and line breaks but no other control characters; leading
+and trailing whitespace is trimmed. Anything else is refused with 400
+`bad_request` before a reply is generated. `request_id` is 8–128 letters,
+digits, underscores or hyphens. Generate one per logical message and reuse it
+for transport retries. The same ID and text returns the saved response; a
+different text with that ID returns HTTP 409 `idempotency_conflict`. After a
+503 or a timeout, resend the same ID and text: if the first request finished,
+you get its saved reply.
+
+A connection answers one message at a time. A request that arrives while
+another is generating waits, up to about 20 seconds; a retry of the request
+being generated then gets its saved reply. Still busy after that, the answer
+is 409 `conversation_busy` with a `Retry-After` header and
+`error.retry_after` (seconds, currently 2): resend the same request unchanged.
 
 Chat uses the actual tenant's portfolio, positions, recent trades, settings and
 worker state, with persisted conversation context. If an LLM is unavailable,
-the response falls back to a factual status response. A non-null `proposal`
-describes a suggested command; it **does not execute** a trade or change settings.
+the response falls back to a factual status response. Replies are cleaned
+rather than refused: control characters other than tabs and line breaks are
+removed, a lone surrogate becomes U+FFFD, a reply over 16,000 characters is cut
+and ends with `…`, and an empty one is replaced by a statement that no action
+was executed. A non-null `proposal` describes a suggested command; it **does
+not execute** a trade or change settings. A proposal too large to store (over
+8,000 characters as JSON) is dropped and comes back as `null`.
 
 `GET /agents/{id}/messages` returns `{agent_id, messages}` in chronological order.
 Each message has `role`, `content`, `requestId` and `createdAt`; assistant messages
@@ -291,10 +388,12 @@ may also have `command`. These history fields are camelCase. The store retains
 the latest **40 exchanges** (80 messages); idempotency protection lasts only
 while the corresponding exchange is retained. Do not reuse old request IDs.
 
-`DELETE /agents/{id}/connection` revokes this app's access. It does not stop the
-worker, revoke the owner's trading grant or withdraw funds. Expose those actions
-as separate owner controls if your product needs them; they are not partner API
-routes in this version.
+`DELETE /agents/{id}/connection` revokes this app's access and returns
+`{id, status: "disconnected"}`; repeating it is a 200 no-op. It does not stop
+the worker, revoke the owner's trading grant or withdraw funds. Expose those
+actions as separate owner controls if your product needs them; they are not
+partner API routes in this version. To connect the same user again, see
+[after a disconnect](#1-request-a-connection).
 
 ## Optional hosted setup
 
@@ -313,18 +412,39 @@ Errors use one envelope:
 {"error":{"code":"forbidden_scope","message":"...","request_id":"req_..."}}
 ```
 
-Preserve `request_id` when reporting failures. Missing, unrecognized-format and
-holder credentials return 404; a correctly formatted partner key with an unknown
-ID or incorrect secret returns 401. Revoked keys return 401 `key_revoked`, and
-missing scopes return 403 `forbidden_scope`.
-Other expected cases include invalid input (400/422), unavailable authorization
-or conflicting identities (403/409), rate limits (429), and an unavailable
-hosted runtime or storage (503). Check the code rather than matching prose.
+Preserve `request_id` when reporting failures: it is the ID the operator's
+logs record for the request. Missing, unrecognized-format and holder
+credentials return 404; a correctly formatted partner key with an unknown ID or
+incorrect secret returns 401. Revoked keys return 401 `key_revoked`, and
+missing scopes return 403 `forbidden_scope`. Other expected cases include
+invalid input (400/422), unavailable authorization or conflicting identities
+(403/409), rate limits (429), and an unavailable hosted runtime or storage
+(503). Check the code rather than matching prose.
 
-Default quotas are 120 requests per key per minute and 240 per IP per minute; a
-key can have a custom quota reported by `/meta`. Poll with a modest interval and
-back off with jitter on 429/503. Do not blindly retry wallet authorization,
-change the body under a message request ID, or treat `/health` as worker health.
+A body over 32 KiB (256 KiB for `/activate`) is refused with HTTP 413
+`bad_request`, which carries a `request_id` like any other error. Past 4 MiB
+the gateway drops the connection, so expect a reset rather than an answer. The
+gateway waits up to 45 seconds for the hosted runtime; give your own HTTP
+client a longer timeout than that.
+
+The codes that call for a retry, and how:
+
+| Code | Status | What to do |
+| --- | --- | --- |
+| `rate_limited` | 429 | Back off with jitter. |
+| `upstream_unavailable` | 503 | No complete answer from the hosted runtime (unreachable, timed out, or misconfigured). Back off and retry; writes are safe to resend as described above. |
+| `upstream_invalid_response` | 503 | The runtime answered, but not with its JSON envelope (a proxy or error page). Back off as for `upstream_unavailable`, and report the `request_id` if it persists. |
+| `runtime_unavailable` | 503 | The worker's state could not be read. Retry later. |
+| `conversation_busy`, `enrollment_busy` | 409 | Resend the same request unchanged after `Retry-After` / `error.retry_after` seconds. |
+| `class_vault_unavailable`, `derivation_unavailable` | 503 | A chain read failed before the authorization was spent. Resend the same activation within the challenge's five minutes. |
+| `enrollment_storage_failed` | 503 | Inspect the connection, then start a fresh challenge. |
+
+Each key's quota is `rate_per_min` from `/meta`: 30 for self-service keys, and
+120 unless set otherwise for operator-issued ones. Each caller IP also has 240
+per minute. Poll with a modest interval. Do not retry a wallet authorization
+except as described under [activation](#3-challenge-and-activation-endpoints),
+change the body under a message request ID, or treat `/health` as worker
+health.
 
 `GET /partner/v1` discovers the surface and `GET /partner/v1/health` checks gateway
 liveness without authentication. `GET /healthz` is also process liveness. Neither
@@ -332,9 +452,19 @@ proves a valid grant, a running worker, configured chat or a reachable bridge.
 
 ## Operator configuration and key rotation
 
-Run the key CLI on the gateway's configured registry/volume with
-`MERRYMEN_GATEWAY_SECRET` available. Keys are printed once; no HTTP endpoint issues
-them. Use a stable 12–64 character application ID:
+Developers issue their own keys at [merrymen.dev/api](https://merrymen.dev/api).
+The site reaches the gateway's `/developer/v1` routes with
+`MERRYMEN_DEVELOPER_PORTAL_SECRET`, and the wallet's signed-in session decides
+which keys it may see, create or revoke. Portal and CLI keys live in the same
+registry on the gateway's volume.
+
+The key CLI remains for operator-issued keys: other scopes, a custom quota
+(`--rpm`), or a key no developer wallet owns. Such a key does not appear in the
+portal and is rotated and revoked with the CLI. Run it on the gateway's
+configured registry/volume with `MERRYMEN_GATEWAY_SECRET` available. Keys are
+printed once. Pass `--scopes` explicitly: without it the CLI issues
+`read:agents,read:theses,read:market`, which cannot create agents or chat. Use
+a stable 12–64 character application ID:
 
 ```bash
 cd gateway
@@ -348,8 +478,10 @@ When rotating, issue the replacement with the **same `--app-id`**, deploy it to 
 partner backend, verify `/meta` and an existing connection, then revoke the old
 key. A different app ID is a different application and cannot access existing
 connections. Older keys without `appId` use their `keyId` as their app ID; preserve
-that exact value for their first rotation. Keep the gateway HMAC secret stable,
-since it also underlies stored partner key hashes.
+that exact value for their first rotation. A CLI revocation reaches the running
+gateway within 30 seconds. Keep `MERRYMEN_GATEWAY_SECRET` stable: it also
+underlies stored partner key hashes and the developer portal's session key, so
+rotating it invalidates every partner key and signs every developer out.
 
 The gateway forwards authenticated requests to hosted web using a dedicated
 `MERRYMEN_PARTNER_BRIDGE_SECRET` (at least 32 bytes), configured identically on
@@ -358,7 +490,9 @@ both services. `MERRYMEN_PARTNER_APP_ORIGIN` on the gateway defaults to
 Hosted web also needs its normal Postgres and grant-encryption configuration;
 the orchestrator needs the same grant store and its worker configuration. Web
 needs an LLM credential for conversational replies beyond the factual fallback.
-See [hosted deployment](../docs/hosted-deploy.md#5c-partner-agent-api).
+See [hosted deployment](../docs/hosted-deploy.md#5c-partner-agent-api), which
+also covers the developer portal's settings and what the gateway logs when the
+bridge fails.
 
 This version does not provide public market/thesis resources, arbitrary trade
 execution, agent deletion, funding transfers or a partner-wide view of other
