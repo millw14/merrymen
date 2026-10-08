@@ -578,6 +578,12 @@ describe("their earlier question, when they say it was missed (route.ts reask, r
     const trigger = line(4, "Milla", "you didn't answer");
     const p = routePrompt(roomWith([trigger]), trigger, "the chain is mostly red today", "who's top on fomo today, and what about $pons?");
     assert.match(p, /\(their earlier question, which they say you did not answer: «who's top on fomo today, and what about cashtag:pons\?»\)\n<\/untrusted>/);
+    // A new line from someone with an unanswered ask (the reaskable path): no complaint they did not make.
+    const q = routePrompt(roomWith([trigger]), trigger, null, "how's the market?", true);
+    assert.match(q, /\(an earlier question of theirs that got no answer yet: «how's the market\?»\)/);
+    assert.doesNotMatch(q, /they say/);
+    assert.match(routeSystem({ fomo: true, desk: true, coins: true, reask: true }), /Pick reask only when the → line itself is about that earlier question going unanswered/);
+    assert.doesNotMatch(routeSystem({ fomo: true, desk: true, coins: true }), /Pick reask only/);
     const ctx = ctxOf("you didn't answer", { replied: "the chain is mostly red today", reaskOf: "who's top on fomo today, and what about $pons?" });
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctx), { action: "fomo", request: { kind: "leaderboard", window: "24h" } });
     assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "pons", aspect: "theses" }, ctx), { action: "fomo", request: { kind: "coin", symbol: "PONS", aspect: "theses" } });

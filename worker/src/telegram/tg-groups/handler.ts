@@ -3445,8 +3445,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     open.job = again;
     lostAsks.delete(msgKey(again.msg.chatId, again.line.messageId));
     lastAddressed.set(`${again.msg.chatId}:${again.line.fromId}`, { messageId: again.line.messageId, atMs: now });
-    // It is their open ask again, so a poke while it runs gets the 👀.
-    openAsks.set(askKey(again.msg.chatId, again.line.fromId, again.threadId), open);
+    // It is their open ask again, so a poke while it runs gets the 👀; unless the line that
+    // asked for it became their open ask itself (it was substantive): a misread reask then
+    // leaves that line open, to be re-run in turn, never dropped for good.
+    const k = askKey(again.msg.chatId, again.line.fromId, again.threadId);
+    if (openAsks.get(k)?.job.line.messageId !== j.line.messageId) openAsks.set(k, open);
     log("[tg-groups] an unanswered ask re-asked (routed)");
     if (open.research) track(processLine(again));
     else enqueue(again.msg.chatId, () => processLine(again), { force: true });

@@ -576,9 +576,34 @@ describe("other words for 'you missed it' go to the router (route.ts reask)", ()
     picks.push({ action: "reask" });
     await said(msg("shogun bro you skipped mine earlier"));
     assert.equal(routePrompts.length, 1);
-    assert.match(routePrompts[0]!, /their earlier question, which they say you did not answer: «shogun how's the market\?»/);
+    assert.match(routePrompts[0]!, /\(an earlier question of theirs that got no answer yet: «shogun how's the market\?»\)/);
     assert.equal(desk.asks.length, 2);
     assert.equal(tg.out().slice(-1)[0]!.replyTo, ask.messageId);
+  });
+
+  it("a lost ask, then a line with a question of its own: the prompt never says they complained", async () => {
+    make();
+    tg.failNext = 1;
+    await said(msg("shogun how's the market?"));
+    clock += 20 * SEC;
+    await said(msg("shogun what do you think of the new logo lol"));
+    assert.equal(routePrompts.length, 1);
+    assert.match(routePrompts[0]!, /\(an earlier question of theirs that got no answer yet: «shogun how's the market\?»\)/);
+    assert.doesNotMatch(routePrompts[0]!, /they say/);
+  });
+
+  it("a misread reask on a line with its own question leaves that line open, so it can be re-run in turn", async () => {
+    make();
+    tg.failNext = 1;
+    await said(msg("shogun how's the market?"));
+    clock += 20 * SEC;
+    picks.push({ action: "reask" });
+    const own = msg("shogun what do you think of the new logo lol");
+    await said(own);
+    assert.equal(desk.asks.length, 2, "the earlier ask ran again");
+    clock += 2 * MIN;
+    await said(msg("shogun i asked a question"));
+    assert.ok(tg.out().some((o) => o.replyTo === own.messageId), "the dropped line is re-run, not lost for good");
   });
 
   it("with nothing of hers unanswered, reask is not even on the menu, and a reask pick is refused", async () => {
