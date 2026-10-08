@@ -24,9 +24,10 @@ import { isPlatformFailure } from "./billing.mjs";
 
 export const PARTNER_TUNABLES = {
   /**
-   * Per-key, per-minute, for a key billing does not meter: an operator's key,
-   * or any key while billing is off. Generous — these reads are cached and
-   * cheap. A metered key gets its account's plan rate instead (lib/billing-plans.mjs).
+   * Per-key, per-minute, for a key with no stored rate of its own (portal keys
+   * store 30). Generous — these reads are cached and cheap. Under billing
+   * enforce, a metered key gets its account's plan rate instead
+   * (lib/billing-plans.mjs); under observe, the higher of the two.
    */
   RATE_PER_MIN: 120,
   /**
@@ -69,9 +70,16 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
   const ownerOf = (key) => (billing && billing.mode !== "off" && key?.owner) || null;
 
   /**
-   * The rate a key gets, and the bucket that counts it. A metered key gets its
-   * ACCOUNT's plan rate in one bucket per wallet: five keys must not mean five
-   * times what the plan sells. Anything else keeps its own rate and bucket.
+   * The rate a key gets, and the bucket that counts it. Under enforce, a
+   * metered key gets its ACCOUNT's plan rate in one bucket per wallet: five
+   * keys must not mean five times what the plan sells. Anything else keeps
+   * its own rate and bucket.
+   *
+   * Observe is the dry run before enforce, and refuses nothing billing off
+   * would answer: each key keeps its own bucket, at its own rate or its
+   * plan's when that is higher (a paying account is not held below what it
+   * bought). One shared bucket at Free's 30 would turn a developer's second
+   * key into 429s the moment observe is switched on.
    *
    * The plan is the one the request will be served on: when a renewal or an
    * activation is due, the plan that charge makes. The rate is checked before
@@ -81,8 +89,11 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
    */
   function rateOf(key) {
     const owner = ownerOf(key);
-    if (owner) return { rpm: billing.nextPlanFor(owner, key.created_at).rpm, bucket: `pa:${owner}`, per: "account" };
-    return { rpm: T[`RATE_PER_MIN_${key.keyId}`] ?? key.rpm ?? T.RATE_PER_MIN, bucket: `p:${key.keyId}`, per: "key" };
+    const own = T[`RATE_PER_MIN_${key.keyId}`] ?? key.rpm ?? T.RATE_PER_MIN;
+    if (!owner) return { rpm: own, bucket: `p:${key.keyId}`, per: "key" };
+    const plan = billing.nextPlanFor(owner, key.created_at).rpm;
+    if (billing.enforced) return { rpm: plan, bucket: `pa:${owner}`, per: "account" };
+    return { rpm: Math.max(own, plan), bucket: `p:${key.keyId}`, per: "key" };
   }
 
   /**

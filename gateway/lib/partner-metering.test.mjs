@@ -178,6 +178,32 @@ test("an account's keys share ONE plan rate, whatever each key stores; a paid pl
   assert.deepEqual(f.store.hits.at(-2), { key: `pa:${OWNER}`, limit: 60 });
 });
 
+test("observe refuses nothing billing off would answer: each key keeps its own bucket, at its plan's rate when that is higher", async () => {
+  // The dry run before enforce. Two keys at 30 a minute each answered 60 a
+  // minute with billing off; one shared Free bucket would turn half into 429s
+  // the moment observe is switched on.
+  const keys = [key("k1"), key("k2")];
+  const off = await fixture({ mode: "off", plans: PLANS, keys });
+  const observe = await fixture({ mode: "observe", plans: PLANS, keys });
+  for (let i = 0; i < 60; i++) {
+    const keyId = i % 2 ? "k1" : "k2";
+    assert.equal((await off.call("/agents", { keyId })).status, 200, `off, request ${i + 1}`);
+    assert.equal((await observe.call("/agents", { keyId })).status, 200, `observe, request ${i + 1}`);
+  }
+  assert.deepEqual(observe.store.hits, off.store.hits, "the same buckets at the same limits");
+  const limited = await observe.call("/agents", { keyId: "k1" });
+  assert.deepEqual([limited.status, limited.json.error.message], [429, "30 requests/minute for this key"]);
+  assert.equal(observe.used(), 60, "every answered request is metered");
+  // A paid plan's rate, when higher, applies to each key; quotas are never refused.
+  assert.equal((await observe.billing.createAccount(OWNER, "Acme")).status, 201);
+  await observe.grant(400_000);
+  assert.equal((await observe.billing.choosePlan(OWNER, { tier: "loaf", confirm: true })).json.plan.id, "loaf");
+  assert.equal((await observe.call("/meta", { keyId: "k1" })).json.rate_per_min, 120);
+  assert.equal(observe.api.ratePerMin(key("k2")), 120);
+  assert.deepEqual(observe.store.hits.at(-1), { key: "pip:203.0.113.9", limit: 600 });
+  assert.deepEqual(observe.store.hits.at(-2), { key: "p:k1", limit: 120 });
+});
+
 test("a Feast account's 300 a minute is reachable from one backend: the per-IP limit is 600", async () => {
   // A partner usually calls from one server. At the old 240 per IP, the top
   // plan sold a rate its buyer could not reach; the plan, not the address,

@@ -188,7 +188,7 @@ const billing = await createBilling({ ...billingConfig,
   (degraded ? console.error : console.log)(`[gateway] partner billing: ${billing.mode}`
     + (billing.mode !== billingConfig.requested ? ` (MERRYMEN_BILLING=${asked}; see the [billing] lines above)` : "")
     + (!on ? ", nothing is metered"
-      : `, ${billing.enforced ? "quotas enforced" : "metered, never refused"}; payments ${billing.paymentsReady ? `to ${billingConfig.treasury}` : "UNAVAILABLE"}`)
+      : `, ${billing.enforced ? "quotas enforced" : "metered, no quota refused, each key at its own rate or its plan's if higher"}; payments ${billing.paymentsReady ? `to ${billingConfig.treasury}` : "UNAVAILABLE"}`)
     + (billing.blocked ? `; ledger writes REFUSED (${billing.blocked})` : ""));
 }
 
