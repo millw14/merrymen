@@ -774,7 +774,10 @@ it exists for (a coin's thesis page, a trader's holdings, positions or feed) fir
 budget, taking nothing, whether both fit (`FomoBudget.wouldRefuse`, `service.ts
 plannedFits`): if not, nothing is charged, no search is paid for a page that cannot fit, and
 the reset promised is the one the whole read would meet, never an hour at which the second
-read would refuse again. A cap below
+read would refuse again. When the search still holds a copy fit to show, that copy is used
+instead, for nothing, and the read it exists for decides on its own: a room's thesis page it
+still holds (two hours) is served for nothing rather than refused for a search it need not
+pay, and one it does not hold meets its own charge and reset. A cap below
 what one read costs (a group cap of 0 included) never resets on a clock: the owner hears
 that a configured cap is below one read, a room hears "Fomo research isn't available here
 right now.", never a time. Nothing upgrades a plan, tops up credits or

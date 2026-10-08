@@ -1126,6 +1126,42 @@ describe("a room's research budget, in plain words (WP10: D7, D8, D10)", () => {
     assert.equal(s.provider.filter((p) => p === "/v2/tokens/search").length, searches, "the search was kept");
   });
 
+  it("a coin whose thesis page the room still holds is answered, not refused for a search it need not pay (review r3)", async () => {
+    // The default room cap: 2,500 an hour. A ticker costs a 250 search and a 1,250 page.
+    const s = await setup({ groupHourlyCredits: 2_500, thesisCost: 1_250 });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const pages = () => s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length;
+    const searches = () => s.provider.filter((p) => p === "/v2/tokens/search").length;
+    s.clock.now = Date.UTC(2026, 9, 7, 20, 10);
+    assert.match((await port.ask({ text: "what are the theses on $PONS?", chatId: GROUP }))!.text, /^What traders on Fomo are saying about PONS/);
+    // Another coin's page by address at 21:05: 1,250 of hour 21's 2,500.
+    s.clock.now = Date.UTC(2026, 9, 7, 21, 5);
+    const other = await port.ask({ text: "what are the theses on 0x7fe9950000000000000000000000000000000ca5 on robinhood on fomo?", chatId: GROUP });
+    assert.notEqual(other!.status, "budget-limited");
+    // 21:20: the search copy is past its hour, the page is still the room's (two hours).
+    s.clock.now = Date.UTC(2026, 9, 7, 21, 20);
+    const [p0, q0] = [pages(), searches()];
+    const again = await port.ask({ text: "what are the theses on $PONS?", chatId: GROUP });
+    assert.notEqual(again!.status, "budget-limited", again!.text);
+    assert.match(again!.text, /^What traders on Fomo are saying about PONS/, again!.text);
+    assert.equal(pages(), p0, "the kept page, no new page call");
+    assert.ok(searches() <= q0 + 1, "at most one search");
+    // The hour fully spent: the kept copies still answer, with no provider call at all.
+    const s2 = await setup({ groupHourlyCredits: 2_500, thesisCost: 1_250 });
+    const port2 = createTgFomoPort(() => s2.broker, { now: () => s2.clock.now });
+    s2.clock.now = Date.UTC(2026, 9, 7, 20, 10);
+    await port2.ask({ text: "what are the theses on $PONS?", chatId: GROUP });
+    s2.clock.now = Date.UTC(2026, 9, 7, 21, 5);
+    await port2.ask({ text: "what are the theses on 0x7fe9950000000000000000000000000000000ca5 on robinhood on fomo?", chatId: GROUP });
+    await port2.ask({ text: "what are the theses on 0x7fe9950000000000000000000000000000000ca6 on robinhood on fomo?", chatId: GROUP });
+    s2.clock.now = Date.UTC(2026, 9, 7, 21, 20);
+    const calls = s2.provider.length;
+    const spent = await port2.ask({ text: "what are the theses on $PONS?", chatId: GROUP });
+    assert.match(spent!.text, /^What traders on Fomo are saying about PONS/, spent!.text);
+    assert.doesNotMatch(spent!.text, /used up/);
+    assert.equal(s2.provider.length, calls, "no provider call");
+  });
+
   it("an ask begun at 14:59:59.995 and refused by hour 15's counter at 15:00:00.02 is told 16:00, the reset the service stamped (review r2)", async () => {
     const s = await setup({ groupHourlyCredits: 500 });
     // Hour 15's allowance spent by two boards just after the hour.

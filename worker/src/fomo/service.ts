@@ -1237,8 +1237,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
    * Only when the first read would really go to the provider: a kept copy
    * costs nothing, and each later read is then charged on its own as before.
    * `later`: the credits of the reads the answer cannot do without.
+   *
+   * "use-held" (review r3): the whole cost would be refused, but the search
+   * holds a copy fit to show. The caller reads it as that copy (cached-ok),
+   * charging nothing, and the read it exists for decides for itself: a copy
+   * still kept (a room's thesis page, two hours) is served for nothing, and
+   * one that is not meets its own charge, refused with its own reset and
+   * nothing taken. Never charged a search and then refused the page, and
+   * never refused a page the room already holds. A refused search falls back
+   * to the same copy (read()), so no older identity is trusted than before.
    */
-  async function plannedFits(cc: ChargeContext, firstSpec: ReadSpec<unknown>, asked: FreshnessMode, later: number): Promise<Fail | null> {
+  async function plannedFits(cc: ChargeContext, firstSpec: ReadSpec<unknown>, asked: FreshnessMode, later: number): Promise<Fail | "use-held" | null> {
     const b = cc.budget ?? budget;
     if (!client || typeof b.wouldRefuse !== "function" || !(later > 0)) return null;
     if (cc.cap) return null;
@@ -1256,6 +1265,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // search, then a 1,250 page): the reads go one by one as before, so the search is kept and
     // the page fits the next hour. Only a refusal a later hour or day lifts is said up front.
     if (refusal === null || refusal === "below-one-read") return null;
+    if (look.heldData !== null && look.first.onFailure === "serve-stale") return "use-held";
     const reason = `budget-${refusal}`;
     noteBudgetRefusal(reason, cc, cc.now);
     usage?.recordRefusal({ now: cc.now, bucket: CAPABILITY_FOR_ROUTE[firstSpec.route] });
@@ -1569,9 +1579,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // An address with no chain, or a ticker: ask the provider where it lives.
     // Search answers are identity data and cached for an hour, shared by every caller.
     // Resolution is identity, not the answer's retrieval: it is metered but not counted as a page of the answer.
-    const searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
-    const refused = await plannedFits(cc, specs.tokensSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
-    if (refused) return refused;
+    let searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
+    const planned = await plannedFits(cc, specs.tokensSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
+    if (planned === "use-held") searchMode = "cached-ok";
+    else if (planned) return planned;
     const s = a.add({ ...(await read(cc, specs.tokensSearch(ref.value), searchMode)), pages: 0, identity: true });
     if (!s.data) return sectionFail(s);
     const rows = s.data.rows;
@@ -1628,9 +1639,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       };
     }
     // Search (250 credits) rather than the profile route (2,500): only the user id is needed.
-    const searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
-    const refused = await plannedFits(cc, specs.traderSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
-    if (refused) return refused;
+    let searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
+    const planned = await plannedFits(cc, specs.traderSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
+    if (planned === "use-held") searchMode = "cached-ok";
+    else if (planned) return planned;
     const s = a.add({ ...(await read(cc, specs.traderSearch(ref.value), searchMode)), pages: 0, identity: true });
     if (!s.data) return sectionFail(s);
     const want = ref.value.toLowerCase();
