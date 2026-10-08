@@ -846,7 +846,8 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience, view:
     hoodLine = d.robinhood.rows > 0 && named.length
       ? `On Robinhood Chain, the chain I trade: ${named.join(", ")}.`
       : d.robinhood.rows === 0
-        ? `None of ${top} ${lower} coins are on Robinhood Chain, the chain I trade.`
+        // Rows that could not be placed on a chain may be Robinhood Chain's (a new chain's id is the likeliest to be unplaceable): said, as on a filtered board.
+        ? `None of ${top} ${lower} coins are on Robinhood Chain, the chain I trade${unplaced}.`
         : null;
   }
   const out = [`${name} on Fomo (board position is popularity, not quality):`];

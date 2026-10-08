@@ -541,6 +541,20 @@ describe("a board says what its chain filter did, and where Robinhood Chain stan
     assert.match(renderEnvelope(none, G), /\nNone of the top 30 trending coins are on Robinhood Chain, the chain I trade\.$/);
   });
 
+  it("an unfiltered board's 'none on Robinhood Chain' says how many rows could not be placed on a chain (review r2)", () => {
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    const two = board({ tokens: [row(1, "ETAC", solToken(1))], boardRows: 97, matched: 97, unplaced: 2, robinhood: { rows: 0, top: [] } });
+    const line = renderEnvelope(two, G).split("\n").pop()!;
+    assert.equal(line, "None of the top 97 trending coins are on Robinhood Chain, the chain I trade (2 rows could not be placed on a chain).");
+    assert.ok(admitTgLine(line, research).ok, line);
+    const one = board({ tokens: [row(1, "ETAC", solToken(1))], boardRows: 99, matched: 99, unplaced: 1, robinhood: { rows: 0, top: [] } });
+    const single = renderEnvelope(one, G).split("\n").pop()!;
+    assert.match(single, /the chain I trade \(1 row could not be placed on a chain\)\.$/);
+    assert.ok(admitTgLine(single, research).ok, single);
+    // The owner's answer says the same.
+    assert.match(renderEnvelope(two, O), /\nNone of the top 97 trending coins are on Robinhood Chain, the chain I trade \(2 rows could not be placed on a chain\)\./);
+  });
+
   it("one chain asked: its rows under an honest header, or none of the top N on it, or an empty board", () => {
     const hood = board({ chain: "robinhood", tokens: [row(12, "PONS", T, 2_080_000), row(31, "CACHE", CACHE)], boardRows: 100, matched: 2, unplaced: 0 });
     assert.deepEqual(renderEnvelope(hood, G).split("\n"), [
