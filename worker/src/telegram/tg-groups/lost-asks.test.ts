@@ -435,6 +435,20 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     assert.deepEqual(desk.asks, []);
   });
 
+  it("'vibes?' and 'how are the vibes' with nothing open are still the market read; 'just vibes?' and a complaint are not", async () => {
+    for (const [t, want] of [["shogun vibes?", [{ kind: "market" }]], ["shogun how are the vibes on robinhood chain", [{ kind: "market" }]], ["shogun just vibes?", []], ["shogun i asked a question", []]] as const) {
+      make();
+      desk.asks.length = 0;
+      clock += 11 * MIN;
+      const m = msg(t, { fromId: BOB + Math.floor(clock / MIN) });
+      await said(m);
+      assert.deepEqual(desk.asks, want, t);
+      if (t === "shogun i asked a question") assert.deepEqual(tg.out().slice(-1), [{ text: "which question? i might've missed it, ask me again", replyTo: m.messageId }]);
+      groups.stop();
+      await groups.drain();
+    }
+  });
+
   it("past ten minutes her question is no longer open: 'which question?'", async () => {
     fomo = new SpyFomo();
     make();

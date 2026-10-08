@@ -3243,7 +3243,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // A complaint with no subject anywhere ("i asked a question", "why can't
     // you answer in the group?") is never a guessed market read: the re-ask,
     // "which question?" or the persona answers it (onMessage, act()).
-    if (discussion || (complaint && intent?.kind !== "analysis")) return null;
+    // Only real complaint wording blocks it: a bare "vibes?" or "how are the vibes" is still the market read.
+    const grievance = complaint && /\b(?:asked you|asked a question|answer|just|nothing|not|deal|single|entire)\b/iu.test(j.line.text);
+    if (discussion || (grievance && intent?.kind !== "analysis")) return null;
     return { kind: "market" };
   };
 
