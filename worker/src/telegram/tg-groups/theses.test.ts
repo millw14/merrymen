@@ -429,6 +429,13 @@ describe("wordTheses", () => {
     assert.equal(bodies.length, 0);
   });
 
+  it("an answer in another language is never said: a Chinese gist, point or wait gets the code digest (review r4)", async () => {
+    assert.match(THESES_SYSTEM, /plain English only/);
+    const cjk = { ...MATERIAL, samples: [...SAMPLES, "\u8fd9\u662f\u94fe\u4e0a\u6700\u5f3a\u7684\u8868\u60c5\u5305\uff0c\u8d76\u7d27\u4e70\u5165\uff0c\u7a7a\u6295\u9a6c\u4e0a\u5f00\u59cb"] };
+    answering({ gist: "\u8fd9\u662f\u94fe\u4e0a\u6700\u5f3a\u7684\u8868\u60c5\u5305", for: ["\u8d76\u7d27\u4e70\u5165"], against: ["\u0441\u043a\u0430\u043c \u0441\u043a\u043e\u0440\u043e"], waiting_on: ["\u7a7a\u6295"] });
+    assert.deepEqual(await run({ material: cjk }), { lines: null, why: "dropped", dropped: 4 });
+  });
+
   it("the same coin and copy within half an hour costs no second call, even when its phrases did not pass", async () => {
     const kept = new ThesesWordings();
     const bodies = answering(GOOD);

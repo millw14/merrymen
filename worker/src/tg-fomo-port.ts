@@ -385,6 +385,14 @@ const LURE =
   /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to|message|dm)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
 /** A row about Merrymen itself ("the merrymen bot picked it") is about the agent, not the coin. */
 const ABOUT_MERRYMEN = /\bmerrym[ae]n\b/i;
+/**
+ * A letter of another script than Latin (Chinese, Cyrillic, Greek, a
+ * lookalike): every check here and in tg-groups/theses.ts is English, and a
+ * sentence with no spaces never forms the five-word run the paraphrase may
+ * not copy, so such a row never reaches the model (review r4). Accented Latin
+ * ("café") and emoji stay.
+ */
+const NON_LATIN = /(?=\p{L})\P{Script=Latin}/u;
 
 /**
  * One thesis as a sample the group model may read: their words with every
@@ -402,7 +410,7 @@ export function thesesSample(text: unknown): string | null {
     .replace(/([,.;:!?])(?:\s*[,.;:!?])+/g, "$1")
     .replace(/^[\s,.;:!?-]+/, "")
     .trim();
-  if (!s || contentFree(s)) return null;
+  if (!s || contentFree(s) || NON_LATIN.test(s)) return null;
   // Read as the group gate reads a line (lookalikes folded, invisible
   // characters gone, spelled-out letters joined), so "frее tоkens" with
   // Cyrillic letters or "instruc\u200btions" is the row it is (review r4).

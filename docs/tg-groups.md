@@ -1415,7 +1415,10 @@ With a model, one forced choice (`summarise_theses`: a gist, up to three
 points for, three worries, two things waited on) reads at most twelve cleaned
 samples, one per family, at most 160 characters each, fenced as data (a
 sample is read as the gate reads a line, lookalike letters folded and
-invisible characters gone, before its lure and instruction checks). Code
+invisible characters gone, before its lure and instruction checks, and a
+sample with a letter of another script than Latin, Chinese or Cyrillic, is
+never read: every check is English, and the prompt asks for plain English
+only). Code
 checks every phrase, in plain ASCII only (an invisible, lookalike, fullwidth
 or accented letter drops it) and read as the gate reads a line (letters
 spelled out one by one, "h a l f", are the word): its length, no digit
