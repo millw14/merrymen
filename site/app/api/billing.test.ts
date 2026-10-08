@@ -212,6 +212,8 @@ test('the account view keeps exact amounts and drops what it cannot read', () =>
   assert.equal(normalizeAccount(account({ credit_raw: '-5000000000000000000' }))!.credit_raw, '-5000000000000000000');
   assert.equal(normalizeAccount(account({ usage: undefined }))!.usage, null);
   assert.equal(normalizeAccount({ ...account(), account: { id: 'acct_1', wallet: 'nope' } }), null);
+  // Names come from whoever made the account: right-to-left overrides and zero-width characters are dropped, so one cannot pass for another.
+  assert.equal(normalizeAccount(account({ account: { id: 'acct_1', name: 'Pri\u202esm\u200b\u0007', wallet: WALLET } }))!.account.name, 'Prism');
 });
 
 test('a plan preview says what confirming does, in whole tokens', () => {

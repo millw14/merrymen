@@ -139,3 +139,10 @@ test('nothing the console imports reads a server secret', () => {
     assert.ok(!/from ["'][^"']*developer-gateway["']|process\.env\.(?!MERRYMEN_API_KEY\b)/.test(source), file);
   }
 });
+
+test('the billing sources carry no invisible or bidirectional characters', () => {
+  // Written as \u escapes where they are matched; a literal one reads differently than it runs.
+  for (const file of ['./DeveloperConsole.tsx', './AccountPanel.tsx', './PlansSection.tsx', './developer-client.ts', '../../lib/developer-billing.ts', '../../lib/developer-gateway.ts', './developer/[action]/route.ts']) {
+    assert.ok(!/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/.test(readFileSync(new URL(file, import.meta.url), 'utf8')), file);
+  }
+});

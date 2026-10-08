@@ -69,7 +69,7 @@ const count = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) &
 const RAW = /^-?\d{1,78}$/;
 const raw = (v: unknown) => typeof v === "string" && RAW.test(v) ? BigInt(v).toString() : null;
 /** A display name from the gateway, stripped to printable text. React escapes it; this keeps it short and visible. */
-const label = (v: unknown, max = 48) => typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]/g, "").trim().slice(0, max) : "";
+const label = (v: unknown, max = 48) => typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim().slice(0, max) : "";
 const iso = (v: unknown) => typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : null;
 export const isAddress = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
 
