@@ -468,7 +468,7 @@ test("a renewal the selection cannot fund keeps the tier that ended, and falls t
 });
 
 /** A comp as billing-cli.mjs writes it, from another process, picked up by the gateway's tail. */
-async function comp(f, tier, days, owner = OWNER) {
+async function comp(f, tier, days, owner = OWNER, { tail = true } = {}) {
   const ledger = await openLedger({ dataDir: f.dir, now: () => f.clock.t, log: () => {} });
   const acct = ledger.state.byOwner.get(owner);
   const hex = (n) => n.toString(16).padStart(24, "0");
@@ -476,7 +476,7 @@ async function comp(f, tier, days, owner = OWNER) {
   await ledger.enqueue(() => ledger.append({ type: "charge", account_id: acct.account_id, charge_id: `chg_${hex(n)}`, period_id: `per_${hex(n)}`,
     reason: "comp", tier, price_raw: "0", tier_price_raw: PLANS[tier].price_raw.toString(), requests: PLANS[tier].requests,
     tier_requests: PLANS[tier].requests, rpm: PLANS[tier].rpm, starts_at: f.clock.t, ends_at: f.clock.t + days * DAY, note: "test" }));
-  await f.billing.tail();
+  if (tail) await f.billing.tail();
 }
 
 test("a renewal never spends credit on a comped tier the developer did not choose", async () => {
@@ -508,6 +508,47 @@ test("a comp the developer upgraded is theirs: a renewal falls back to the tier 
   const renew = (await f.charges()).at(-1);
   assert.deepEqual([renew.reason, renew.tier], ["renew", "loaf"]);
   assert.equal(f.view().credit_tokens, "50000");
+});
+
+test("a comp over a running paid period never hides it, and never charges an upgrade to what was paid for", async () => {
+  const f = await fixture();
+  await f.account();
+  await f.grant(1_200_000);
+  await f.plan("feast"); // 200,000 left
+  await comp(f, "loaf", 3);
+  const plan = f.billing.planFor(OWNER);
+  assert.deepEqual([plan.id, plan.requests, plan.rpm, plan.ends_at], ["feast", 1_000_000, 300, START + P], "the paid Feast, not the cheaper comp");
+  assert.equal(f.billing.needsSettle(OWNER), false);
+  assert.equal(await f.billing.settle(OWNER), 0, "no 'upgrade' of the comp back to the Feast already paid for");
+  assert.deepEqual([f.view().plan.id, f.view().credit_tokens], ["feast", "200000"]);
+
+  // A dearer comp over a cheaper paid period gives the better tier while it
+  // runs; the paid period resumes, with its own usage, when the comp ends.
+  await f.account(OTHER, "Other");
+  await f.grant(100_000, OTHER);
+  await f.plan("crumbs", true, OTHER);
+  f.billing.reserve({ owner: OTHER, keyId: "k" });
+  await comp(f, "feast", 3, OTHER);
+  assert.equal(f.billing.planFor(OTHER).id, "feast");
+  assert.equal(f.billing.meta(OTHER).billing.requests_used, 0, "the comp is its own window");
+  assert.equal(await f.billing.settle(OTHER), 0);
+  f.advance(3 * DAY);
+  assert.deepEqual([f.billing.planFor(OTHER).id, f.billing.meta(OTHER).billing.requests_used], ["crumbs", 1]);
+  assert.equal(await f.billing.settle(OTHER), 0);
+  assert.deepEqual((await f.charges()).map((c) => [c.reason, c.tier]), [["activate", "feast"], ["comp", "loaf"], ["activate", "crumbs"], ["comp", "feast"]]);
+});
+
+test("settle reads an operator's comp before it charges, without waiting for the 10 s tail", async () => {
+  const f = await fixture();
+  await f.account();
+  await f.grant(200_000);
+  await f.plan("crumbs"); // 100,000 left: enough to renew
+  f.advance(P);
+  assert.equal(f.billing.needsSettle(OWNER), true);
+  await comp(f, "feast", 30, OWNER, { tail: false }); // the CLI's line, not yet tailed
+  await f.billing.prepare(OWNER);
+  assert.deepEqual((await f.charges()).map((c) => c.reason), ["activate", "comp"], "the comp covers it: no renewal paid for alongside it");
+  assert.deepEqual([f.view().plan.id, f.view().credit_tokens], ["feast", "100000"]);
 });
 
 test("selecting Free cancels the renewal: the running period ends and its credit stays", async () => {

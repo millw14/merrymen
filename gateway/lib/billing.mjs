@@ -499,31 +499,50 @@ export async function openLedger({ dataDir, now: clock = Date.now, log = console
    * adjustments, comps and config; anything else means a second gateway is
    * writing this ledger, which double-credits (each keeps its own index), so it
    * is kept out of the index and writes stop until restart.
+   *
+   * Inside the queue. Reads only what lies past the lines already replayed,
+   * and nothing at all when the file has not grown, so settle() runs it before
+   * every charge: an operator's comp written seconds ago must be seen before a
+   * renewal is paid for alongside it, not up to 10 s later.
    */
+  async function catchUp() {
+    const none = { foreign: 0, rejected: 0 };
+    if (fatal === "unreadable") return none;
+    let fh;
+    try { fh = await open(file, "r"); } catch (err) { if (err.code === "ENOENT") return none; throw err; }
+    let buf;
+    try {
+      const { size } = await fh.stat();
+      if (size < offset) { await rebuild(); return none; } // cut back by another process's repair
+      if (size === offset) return none;
+      buf = Buffer.alloc(size - offset);
+      buf = buf.subarray(0, (await fh.read(buf, 0, buf.length, offset)).bytesRead);
+    } finally {
+      await fh.close();
+    }
+    const fresh = buf.subarray(0, buf.lastIndexOf(0x0a) + 1);
+    let foreign = 0, refused = 0;
+    for (const line of fresh.toString("utf8").split("\n")) {
+      if (!line) continue;
+      let rec = null;
+      try { rec = JSON.parse(line); } catch { foreign += 1; continue; } // rebuild reports it as corruption
+      if (typeof rec?.id === "string" && state.ids.has(rec.id)) continue;
+      foreign += 1;
+      if (tailAccepts(rec)) continue;
+      refused += 1;
+      if (typeof rec?.id === "string") rejected.add(rec.id);
+      fatal = "foreign_writer";
+      log(`[billing] ANOTHER PROCESS APPENDED A ${String(rec?.type).slice(0, 20)} RECORD to ${LEDGER_FILE}. Billing must run on one instance only. Billing writes are refused until restart.`);
+    }
+    if (foreign) await rebuild();
+    else offset += fresh.length;
+    return { foreign, rejected: refused };
+  }
+
   function tail() {
     return enqueue(async () => {
-      if (fatal === "unreadable") return { foreign: 0, rejected: 0 };
       if (failed) await writable(); // every 10 s, so a repair does not wait for the next payment
-      let buf;
-      try { buf = await readFile(file); } catch (err) { if (err.code === "ENOENT") return { foreign: 0, rejected: 0 }; throw err; }
-      if (buf.length < offset) { await rebuild(); return { foreign: 0, rejected: 0 }; }
-      const fresh = buf.subarray(offset, buf.lastIndexOf(0x0a) + 1);
-      let foreign = 0, refused = 0;
-      for (const line of fresh.toString("utf8").split("\n")) {
-        if (!line) continue;
-        let rec = null;
-        try { rec = JSON.parse(line); } catch { foreign += 1; continue; } // rebuild reports it as corruption
-        if (typeof rec?.id === "string" && state.ids.has(rec.id)) continue;
-        foreign += 1;
-        if (tailAccepts(rec)) continue;
-        refused += 1;
-        if (typeof rec?.id === "string") rejected.add(rec.id);
-        fatal = "foreign_writer";
-        log(`[billing] ANOTHER PROCESS APPENDED A ${String(rec?.type).slice(0, 20)} RECORD to ${LEDGER_FILE}. Billing must run on one instance only. Billing writes are refused until restart.`);
-      }
-      if (foreign) await rebuild();
-      else offset += fresh.length;
-      return { foreign, rejected: refused };
+      return catchUp();
     });
   }
 
@@ -538,16 +557,28 @@ export async function openLedger({ dataDir, now: clock = Date.now, log = console
     enqueue,
     append,
     tail,
+    /** tail() from inside the queue. */
+    catchUp,
     rebuild: () => enqueue(rebuild),
   };
 }
 
 // ── plan rules (pure) ────────────────────────────────────────────────────────
 
-/** The latest period (file order) still running. starts_at is not consulted: a clock step back must not end a plan. */
+/**
+ * The period running now. settle() opens a period only when none runs, so
+ * there is normally one; only an operator's comp can overlap another. Then the
+ * dearest tier (as sold) wins, a tie going to the later line: a comp never
+ * hides a better period the developer paid for, nor makes settle charge an
+ * "upgrade" back to a tier a hidden period already gives. A dearer comp gives
+ * its tier while it runs, and the paid period resumes, with its own usage
+ * window, if it is still running when the comp ends. starts_at is not
+ * consulted: a clock step back must not end a plan.
+ */
 export function activePeriod(acct, now) {
-  for (let i = acct.periods.length - 1; i >= 0; i--) if (acct.periods[i].ends_at > now) return acct.periods[i];
-  return null;
+  let best = null;
+  for (const p of acct.periods) if (p.ends_at > now && (!best || p.tier_price >= best.tier_price)) best = p;
+  return best;
 }
 
 /**
@@ -900,6 +931,9 @@ export async function createBilling({
   const missingNoted = new Set();
   async function settleLocked(owner) {
     let n = 0;
+    if (mode !== "off" && account(owner)) {
+      try { await ledger.catchUp(); } catch (err) { log(`[billing] could not read the ledger's new lines before settling (${errName(err)})`); }
+    }
     for (let i = 0; i < 4; i++) {
       const acct = account(owner);
       if (mode === "off" || !acct || !(await ledger.writable())) break;

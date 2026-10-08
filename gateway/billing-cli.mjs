@@ -19,7 +19,8 @@
  *
  * Nothing here is reachable over HTTP, and nothing here moves tokens: an
  * adjustment changes API credit only. A comp is a period of a tier at no
- * charge. Both need the developer to have created an account in the portal.
+ * charge, refused while a period the developer paid for is running. Both need
+ * the developer to have created an account in the portal.
  * `reconcile` reads the chain and writes nothing; the gateway itself reverses
  * a payment that a reorg undid, every five minutes.
  */
@@ -116,6 +117,15 @@ async function comp(argv) {
   const acct = ledger.state.byOwner.get(owner);
   if (!acct) die(`no account for ${owner}: the developer creates one at merrymen.dev/api first`);
   const now = ledger.now();
+  // A comp starts now and runs alongside anything already running. Over a
+  // period the developer paid for, it would either be hidden by it (a cheaper
+  // comp) or use up the paid days in parallel (a dearer one). Refused; the
+  // operator comps after it ends, or credits tokens with `adjust` instead.
+  const paid = acct.periods.filter((p) => p.bought && p.ends_at > now).sort((a, b) => b.ends_at - a.ends_at)[0];
+  if (paid) {
+    die(`${owner}'s paid ${paid.tier} period runs until ${new Date(paid.ends_at).toISOString()}. A comp now would run alongside it `
+      + "and hide or use up part of what was paid for: comp after that date, or credit tokens with adjust. Nothing written.");
+  }
   const hex = () => randomBytes(12).toString("hex");
   await ledger.enqueue(() => ledger.append({ type: "charge", account_id: acct.account_id, charge_id: `chg_${hex()}`, period_id: `per_${hex()}`,
     reason: "comp", tier: plan.id, price_raw: "0", tier_price_raw: plan.price_raw.toString(), requests: plan.requests,

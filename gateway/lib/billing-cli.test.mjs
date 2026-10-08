@@ -101,6 +101,26 @@ test("the CLI refuses what it cannot write correctly, and writes nothing then", 
   assert.match(usage.stdout, /usage: billing-cli\.mjs/);
 });
 
+test("comp refuses to run alongside a period the developer paid for, and names it", async () => {
+  const s = await setup();
+  assert.equal((await s.billing.createAccount(OWNER, "Acme")).status, 201);
+  assert.equal((await s.run("adjust", OWNER, "+1200000", "--note", "credit")).code, 0);
+  await s.billing.tail();
+  assert.equal((await s.billing.choosePlan(OWNER, { tier: "feast", confirm: true })).json.plan.id, "feast");
+  const before = (await s.records()).length;
+  const refused = await s.run("comp", OWNER, "loaf", "3", "--note", "cutover");
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /paid feast period runs until \d{4}-\d\d-\d\dT/);
+  assert.match(refused.stderr, /nothing written/i);
+  assert.equal((await s.records()).length, before);
+  // A comp alongside another comp is the operator's own choice.
+  const other = `0x${"b2".repeat(20)}`;
+  await s.billing.createAccount(other, "Other");
+  assert.equal((await s.run("comp", other, "crumbs", "7", "--note", "first")).code, 0);
+  const again = await s.run("comp", other, "loaf", "7", "--note", "second");
+  assert.equal(again.code, 0, again.stderr);
+});
+
 test("the CLI will not write to a corrupt ledger", async () => {
   const s = await setup();
   await s.billing.createAccount(OWNER, "Acme");
