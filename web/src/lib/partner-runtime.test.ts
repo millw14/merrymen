@@ -57,22 +57,36 @@ describe("consented partner runtime", () => {
     assert.equal(result.reply, "I bought PRISM in paper mode; its recorded reason was momentum.");
     assert.equal(result.command, undefined);
   });
-  it("bounds the model call it makes under the conversation lock, and answers with the status instead", async () => {
-    let seen: AbortSignal | undefined;
-    const started = Date.now();
-    const adapter = createPartnerRuntime({ ...dependencies(), replyTimeoutMs: 50,
-      // A provider that never answers until it is aborted.
+  it("bounds the model call it makes under the conversation lock, and answers with the status instead", { timeout: 10_000 }, async () => {
+    const calls: AbortSignal[] = [];
+    const adapter = (replyTimeoutMs: number) => createPartnerRuntime({ ...dependencies(), replyTimeoutMs, now: Date.now,
+      // A provider that answers only when aborted, or "too late" after 3s, so a
+      // dropped signal fails this test instead of hanging it.
       complete: async (_creds, request) => {
-        seen = request.signal;
-        return new Promise<string>((_resolve, reject) => request.signal?.addEventListener("abort", () => reject(request.signal!.reason)));
+        if (request.signal) calls.push(request.signal);
+        return new Promise<string>((resolve, reject) => {
+          const late = setTimeout(() => resolve("too late"), 3_000);
+          request.signal?.addEventListener("abort", () => { clearTimeout(late); reject(request.signal!.reason); });
+        });
       },
       reply: async (_body, options) => ({ reply: await options!.complete!({} as never, { system: "s", prompt: "p" }) }),
     });
-    const result = await adapter.replyToPartner(TENANT, { message: "How are you?" });
-    assert.ok(seen, "the model call carries a signal");
-    assert.ok(seen!.aborted, "and it was aborted at the deadline");
-    assert.equal(result.generation, "status");
-    assert.ok(Date.now() - started < 5_000, "the partner is answered at the deadline, not when the provider gives up");
+    let started = Date.now();
+    const capped = await adapter(50).replyToPartner(TENANT, { message: "How are you?" });
+    assert.equal(calls.length, 1, "the model call carries a signal");
+    assert.ok(calls[0].aborted, "aborted at the runtime's own cap");
+    assert.equal(capped.generation, "status");
+    assert.ok(Date.now() - started < 2_000, "answered at the deadline, not when the provider gives up");
+    // The request's own deadline wins when its lock wait left less than the cap.
+    started = Date.now();
+    const budgeted = await adapter(60_000).replyToPartner(TENANT, { message: "How are you?", deadline: Date.now() + 1_100 });
+    assert.equal(budgeted.generation, "status");
+    assert.ok(Date.now() - started < 2_000, "the remaining budget bounded the call");
+    // Nothing left: the status reply, without asking the model at all.
+    const before = calls.length;
+    const spent = await adapter(60_000).replyToPartner(TENANT, { message: "How are you?", deadline: Date.now() + 500 });
+    assert.equal(spent.generation, "status");
+    assert.equal(calls.length, before, "no model call once the budget is spent");
   });
   it("grounds the model in the verified account and ignores financial state supplied by the caller", async () => {
     let captured: AgentChatBody | undefined;

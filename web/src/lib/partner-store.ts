@@ -110,16 +110,17 @@ const LOCK_CLASS: Readonly<Record<LockKind, number>> = { conversation: 1_297_692
  * inside (the grants and feed routes and chat facts, through withReadDb) draw
  * more from the same memoized DATABASE_URL pool: pg's default ten, which
  * openPgDb leaves as is. Ten holders each waiting for an eleventh connection
- * hung every database user on the replica, so five in all, and half the pool
- * stays free for those reads and everything else.
+ * hung every database user on the replica, so six at most, and four
+ * connections stay free for those reads and everything else.
  *
  * SEPARATE BY KIND. One shared five let slow chats, from any app, take every
  * slot for as long as their model calls ran, and every activation behind them
- * answered enrollment_busy. An activation's turn is a few short writes, so one
- * slot of its own serves it; chats share the other four, each bounded by the
- * runtime's model deadline (partner-runtime.ts).
+ * answered enrollment_busy. Chats share four, each bounded by the runtime's
+ * model deadline (partner-runtime.ts). An activation's turn is a few short
+ * writes on stores with their own connections; it gets two, so one whose write
+ * hangs does not stop every other owner's.
  */
-export const PARTNER_LOCK_HOLDERS: Readonly<Record<LockKind, number>> = { conversation: 4, enrollment: 1 };
+export const PARTNER_LOCK_HOLDERS: Readonly<Record<LockKind, number>> = { conversation: 4, enrollment: 2 };
 const BUSY_RETRY_AFTER_SECONDS = 2;
 const NONCE_RETENTION_SECONDS = 10 * 60;
 const nowSeconds = () => Math.floor(Date.now() / 1000);

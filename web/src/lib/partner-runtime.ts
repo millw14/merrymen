@@ -63,6 +63,9 @@ interface RuntimeDependencies {
   now: () => number;
 }
 
+/** Less than this left of a request's budget and the status reply is given without asking the model. */
+const MIN_MODEL_MS = 1_000;
+
 const defaults: RuntimeDependencies = {
   // Lazy imports keep the adapter's pure tests independent of route startup and
   // preserve the existing single definitions of tenant/account/book scoping.
@@ -71,7 +74,7 @@ const defaults: RuntimeDependencies = {
   settings: async (req) => (await import("../app/api/settings/route")).GET(req),
   reply: generateAgentReply,
   complete: llmText,
-  replyTimeoutMs: 25_000,
+  replyTimeoutMs: 18_000,
   facts: ledgerChatReply,
   session: mintSession,
   hosted: isHostedMode,
@@ -247,7 +250,7 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
     async readPartnerRuntime(tenant: Tenant): Promise<PartnerRuntime> {
       return (await snapshot(tenant)).runtime;
     },
-    async replyToPartner(tenant: Tenant, input: { message: string; history?: unknown }): Promise<{
+    async replyToPartner(tenant: Tenant, input: { message: string; history?: unknown; deadline?: number }): Promise<{
       reply: string;
       command?: AgentReply["command"];
       generation: "model" | "status";
@@ -264,10 +267,15 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
         // A DEADLINE ON THE MODEL. This runs under the connection's conversation
         // lock, which holds one of a few pooled connections per replica for the
         // call's whole length, and the providers' own defaults run to minutes.
-        // A stalled provider then blocked every other app's chats. Past 25s the
-        // call is aborted and the partner gets the factual status below, well
-        // inside the gateway's 45s upstream timeout.
-        const signal = AbortSignal.timeout(deps.replyTimeoutMs);
+        // A stalled provider then blocked every other app's chats. The call gets
+        // at most replyTimeoutMs, and never more than is left of the request's
+        // `deadline` (its lock wait already spent part of it); past that it is
+        // aborted and the partner gets the factual status below. Shorter than the
+        // 20s a resend of the same request_id waits for the lock, so a transport
+        // retry normally finds the saved reply rather than conversation_busy.
+        const budget = (input.deadline ?? Infinity) - deps.now();
+        if (budget < MIN_MODEL_MS) throw new Error("no time left for the model");
+        const signal = AbortSignal.timeout(Math.min(deps.replyTimeoutMs, budget));
         answer = await deps.reply(body, { surface: "partner", factualReply,
           complete: (creds, request) => deps.complete(creds, { ...request, signal }) });
       } catch {

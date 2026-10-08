@@ -5,6 +5,9 @@ import {
   type PartnerConnection, type PartnerStore,
 } from "./partner-store";
 import type { readPartnerRuntime, replyToPartner } from "./partner-runtime";
+
+/** From the request's arrival to its reply being saved: 5s inside the gateway bridge's 45s timeout. */
+export const PARTNER_REPLY_BUDGET_MS = 40_000;
 import type { createPartnerEnrollmentService } from "./partner-enrollment";
 
 type Runtime = Awaited<ReturnType<typeof readPartnerRuntime>>;
@@ -119,6 +122,9 @@ export function createPartnerService(deps: {
       }
       if (typeof body.request_id !== "string" || !/^[a-zA-Z0-9_-]{8,128}$/.test(body.request_id)) throw new PartnerError(400, "bad_request", "request_id must contain 8–128 letters, numbers, underscores or hyphens");
       const message = body.message.trim(), requestId = body.request_id;
+      // The whole answer, lock wait included, must reach the gateway inside its
+      // 45s upstream timeout; the model gets what is left of this budget.
+      const deadline = Date.now() + PARTNER_REPLY_BUDGET_MS;
       return store.withConversationLock(id, async () => {
         // Recheck consent after acquiring the lock; revocation may have raced the request.
         const current = await store.byId(partner.app_id, id);
@@ -127,7 +133,7 @@ export function createPartnerService(deps: {
         let exchange = await store.getExchange(id, requestId);
         if (exchange && exchange.message !== message) throw new PartnerError(409, "idempotency_conflict", "request_id was already used for another message");
         if (!exchange) {
-          const result = await deps.reply(tenant, { message, history: await store.readMessages(id) });
+          const result = await deps.reply(tenant, { message, history: await store.readMessages(id), deadline });
           // The model's output is not the partner's input: fit it to what the
           // store keeps rather than answer the partner's message with a 400.
           const reply = fitPartnerReply(result.reply);

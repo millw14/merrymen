@@ -302,16 +302,23 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
     });
 
     await t.test("chats holding every conversation slot do not hold up an activation", async () => {
-      const ids = await Promise.all(Array.from({ length: PARTNER_LOCK_HOLDERS.conversation }, async (_, i) => {
+      // One chat more than its kind's slots, which is five: every slot of the old
+      // single shared pool, so this fails if the kinds ever share slots again.
+      const ids = await Promise.all(Array.from({ length: PARTNER_LOCK_HOLDERS.conversation + 1 }, async (_, i) => {
         const pending = await first.create(create("busy-chats", `user-${i}`));
         await first.bind(pending.token!, `0x${(i + 0x100).toString(16).padStart(40, "0")}`, SCOPES);
         return pending.connection.id;
       }));
-      const inside = barrier(), release = barrier();
+      const full = barrier(), release = barrier();
       let entered = 0;
-      const chats = ids.map(id => first.withConversationLock(id, async () => { if (++entered === ids.length) inside.release(); await release.promise; }));
-      await inside.promise;
+      const chats = ids.map(id => first.withConversationLock(id, async () => {
+        if (++entered === PARTNER_LOCK_HOLDERS.conversation) full.release();
+        await release.promise;
+      }));
+      await full.promise;
+      await delay(100); // the last chat has asked for a slot too
       try {
+        assert.equal(entered, PARTNER_LOCK_HOLDERS.conversation, "chats beyond their kind's slots wait");
         // Every conversation slot is taken by a turn that will not end on its own.
         assert.equal(await Promise.race([first.withEnrollmentLock(A, async () => "enrolled"), delay(2000).then(() => "starved")]), "enrolled");
       } finally { release.release(); }
