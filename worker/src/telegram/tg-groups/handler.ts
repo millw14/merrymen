@@ -645,6 +645,12 @@ interface OpenAsk {
    * at. Past its 👀 while the look runs, it counts as nothing open.
    */
   noReask?: boolean;
+  /**
+   * The earlier ask this line had re-run through the router's reask
+   * (reaskAgain), when this line stayed their open ask: it is running only
+   * while that re-run is, never for its whole deadline with nothing in flight.
+   */
+  rerun?: OpenAsk;
 }
 
 /** An open ask run again: the same line, a fresh deadline, none of its own re-ask marks. */
@@ -807,6 +813,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const k = msgKey(a.job.msg.chatId, a.job.line.messageId);
     if (landedOn.has(k)) return "answered";
     if (lostAsks.has(k)) return "lost";
+    // A nudge that had their earlier ask re-run is waiting on nothing of its own.
+    if (a.rerun) return askStateOf(a.rerun) === "running" ? "running" : "lost";
     return clock() - a.job.bornAtMs <= (a.research ? RESEARCH_REPLY_MS : STALE_MS) ? "running" : "lost";
   };
   /**
@@ -3108,6 +3116,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!j.isOwner) {
       const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, "owner-only", j.threadId, extra);
       log(`[tg-groups] tail ask from someone else${said ? "" : ", owner-only already said this hour"}`);
+      // Silent by rule (said this hour already): nothing is open, and a re-run could only be silent again.
+      const k = askKey(chatId, j.line.fromId, j.threadId);
+      if (!said && openAsks.get(k)?.job.line.messageId === j.line.messageId) openAsks.delete(k);
       return null;
     }
     const port = ownerNow();
@@ -3516,7 +3527,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // asked for it became their open ask itself (it was substantive): a misread reask then
     // leaves that line open, to be re-run in turn, never dropped for good.
     const k = askKey(again.msg.chatId, again.line.fromId, again.threadId);
-    if (openAsks.get(k)?.job.line.messageId !== j.line.messageId) openAsks.set(k, open);
+    const left = openAsks.get(k);
+    if (left?.job.line.messageId !== j.line.messageId) openAsks.set(k, open);
+    else left.rerun = open;
     log("[tg-groups] an unanswered ask re-asked (routed)");
     if (open.research) track(processLine(again));
     else enqueue(again.msg.chatId, () => processLine(again), { force: true });
@@ -4216,7 +4229,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           }
           return;
         }
-        if (meta !== null && live && openState === "lost" && !live.reasked) {
+        // A hail or a "?" after a nudge whose re-run already ran gets its own
+        // answer; only an explicit complaint re-runs that nudge (a misread reask).
+        if (meta !== null && live && openState === "lost" && !live.reasked && (!live.rerun || meta === "complaint")) {
           const open = live;
           // NOTHING ANSWERED THEIR ASK: run it again, once, as the reply to
           // it. A /forgetme since still cancels it (seenAtMs is kept), and it

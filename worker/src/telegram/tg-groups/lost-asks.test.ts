@@ -726,6 +726,76 @@ describe("other words for 'you missed it' go to the router (route.ts reask)", ()
     assert.ok(!logs.includes("[tg-groups] an unanswered ask re-asked (routed)"), JSON.stringify(logs));
   });
 
+  const HAILS = ["hey 👋", "yo", "sup", "hey hey", "heyy", "yo 👋", "hey there", "hi 👋", "ayy", "oh hey", "sup 👀", "hey, what's up"];
+
+  it("a reask whose re-run landed: 'shogun' 20 s and 120 s later gets its hail, never a 👀 for nothing in flight (review r2)", async () => {
+    make();
+    tg.failNext = 1;
+    const ask = msg("shogun how's the market?");
+    await said(ask);
+    clock += 20 * SEC;
+    picks.push({ action: "reask" });
+    await said(msg("shogun bro you skipped mine earlier"));
+    assert.equal(tg.out().slice(-1)[0]!.replyTo, ask.messageId, "the re-run landed on her ask");
+    const looks = desk.asks.length;
+    for (const after of [20, 100]) {
+      clock += after * SEC;
+      const eyes = tg.reactions().length;
+      const hail = msg("shogun");
+      await said(hail);
+      const answered = tg.out().filter((o) => o.replyTo === hail.messageId);
+      assert.equal(answered.length, 1, `+${after}s: ${JSON.stringify(tg.out().slice(-2))}`);
+      assert.ok(HAILS.includes(answered[0]!.text), answered[0]!.text);
+      assert.equal(tg.reactions().length, eyes, `+${after}s: no 👀`);
+    }
+    assert.equal(desk.asks.length, looks, "nothing is read again");
+  });
+
+  it("a poke while the routed re-run is still being read gets its 👀 (review r2)", async () => {
+    make();
+    tg.failNext = 1;
+    const ask = msg("shogun how's the market?");
+    await said(ask);
+    clock += 20 * SEC;
+    let open!: () => void;
+    desk.hold = new Promise<void>((r) => { open = r; });
+    picks.push({ action: "reask" });
+    groups.onMessage(msg("shogun bro you skipped mine earlier"));
+    await settle();
+    clock += 5 * SEC;
+    const poke = msg("shogun?");
+    groups.onMessage(poke);
+    await settle();
+    const eyed = tg.reactions().filter((r) => r.emoji === "👀").map((r) => r.messageId);
+    open();
+    await groups.drain();
+    assert.deepEqual(eyed, [poke.messageId]);
+    assert.equal(tg.out().slice(-1)[0]!.replyTo, ask.messageId, "the re-run lands on her ask");
+  });
+
+  it("a second tail ask from someone else, silent by rule: 'shogun' 20 s and 100 s later gets its hail (review r2)", async () => {
+    fomo = new SpyFomo();
+    make();
+    const TAIL = "shogun tail unipcs for 3 hours";
+    await said(msg(TAIL, { fromId: BOB, fromFirstName: "Bob" }));
+    const notices = tg.out().length;
+    assert.ok(notices >= 1, "the owner-only line, once");
+    clock += 2 * MIN;
+    await said(msg(TAIL, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.out().length, notices, "the owner-only line is said once an hour");
+    for (const after of [20, 80]) {
+      clock += after * SEC;
+      const eyes = tg.reactions().length;
+      const hail = msg("shogun", { fromId: BOB, fromFirstName: "Bob" });
+      await said(hail);
+      const answered = tg.out().filter((o) => o.replyTo === hail.messageId);
+      assert.equal(answered.length, 1, `+${after}s: ${JSON.stringify(tg.out().slice(-2))}`);
+      assert.ok(HAILS.includes(answered[0]!.text), answered[0]!.text);
+      assert.equal(tg.reactions().length, eyes, `+${after}s: no 👀`);
+    }
+    assert.ok(!logs.some((l) => l.startsWith("[tg-groups] an unanswered ask re-asked")), "the silent tail line is never re-run");
+  });
+
   it("with nothing of hers unanswered, reask is not even on the menu, and a reask pick is refused", async () => {
     make();
     picks.push({ action: "reask" });
