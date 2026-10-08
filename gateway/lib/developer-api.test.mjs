@@ -15,11 +15,13 @@ delete process.env.MERRYMEN_PARTNER_KEYS;
 after(() => rm(dir, { recursive: true, force: true }));
 const portalSecret = "portal-test-secret-with-at-least-32-bytes";
 const gatewaySecret = "gateway-test-secret-with-at-least-32-bytes";
-function fixture() {
+function fixture({ store = createStore(), ...options } = {}) {
   let time = Date.now();
-  const store = createStore(), partners = createPartners({ secret: gatewaySecret });
+  const partners = createPartners({ secret: gatewaySecret });
   const partnerApi = createPartnerApi({ partners, store });
-  const api = createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, now: () => time });
+  // `restart` is a new process on the same secrets and the same store.
+  const start = () => createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, now: () => time, ...options });
+  let api = start();
   const wallet = privateKeyToAccount(generatePrivateKey());
   const call = (path, body, session, authorization = `Bearer ${portalSecret}`) => api.handle({ method: body === undefined ? "GET" : "POST", path, body, session, authorization, ip: wallet.address });
   async function login() {
@@ -30,7 +32,7 @@ function fixture() {
     assert.equal(verified.status, 200);
     return { session: verified.json.session, proof };
   }
-  return { call, login, partners, wallet, advance: n => { time += n; } };
+  return { call, login, partners, wallet, advance: n => { time += n; }, restart: () => { api = start(); } };
 }
 test("portal credential and real wallet proof are required; proofs cannot replay", async () => {
   const f = fixture();
@@ -61,6 +63,41 @@ test("the portal's own secret cannot mint a session or a challenge", async () =>
   assert.equal((await f.call("/keys", undefined, session)).status, 200);
   const keyless = createDeveloperApi({ portalSecret, gatewaySecret: "", partners: f.partners, store: createStore() });
   assert.equal((await keyless.handle({ method: "POST", path: "/challenge", body: { address: f.wallet.address }, authorization: `Bearer ${portalSecret}` })).status, 503);
+});
+test("logout revokes that session on the gateway, not just the site's cookie", async () => {
+  const f = fixture();
+  const first = await f.login(), second = await f.login();
+  assert.equal((await f.call("/logout", {}, first.session, "Bearer wrong")).status, 401);
+  assert.equal((await f.call("/keys", undefined, first.session)).status, 200);
+  assert.equal((await f.call("/logout", {}, first.session)).status, 200);
+  assert.equal((await f.call("/keys", undefined, first.session)).status, 401);
+  assert.equal((await f.call("/keys", { name: "After logout" }, first.session)).status, 401);
+  assert.equal((await f.call("/keys", undefined, second.session)).status, 200, "only that session ends");
+  // Idempotent, so the site can call it without knowing the token's state.
+  assert.equal((await f.call("/logout", {}, first.session)).status, 200);
+  assert.equal((await f.call("/logout", {}, "not-a-session")).status, 200);
+});
+test("a memory store binds sessions to the process; a durable store keeps sessions and logouts", async () => {
+  // The memory store forgets revocations on restart. Were sessions to outlive
+  // the process anyway, a deploy would revive every one signed out before it.
+  const memory = fixture(), { session } = await memory.login();
+  memory.restart();
+  assert.equal((await memory.call("/keys", undefined, session)).status, 401);
+  const durable = fixture({ store: { ...createStore(), durable: true } });
+  const kept = await durable.login(), ended = await durable.login();
+  assert.equal((await durable.call("/logout", {}, ended.session)).status, 200);
+  durable.restart();
+  assert.equal((await durable.call("/keys", undefined, kept.session)).status, 200);
+  assert.equal((await durable.call("/keys", undefined, ended.session)).status, 401);
+});
+test("a store that cannot record a logout fails closed rather than reporting success", async () => {
+  const broken = { ...createStore(), revoke: async () => { throw new Error("redis 500"); } };
+  const f = fixture({ store: broken }), { session } = await f.login();
+  assert.equal((await f.call("/logout", {}, session)).status, 503);
+  const unreadable = fixture({ store: { ...createStore(), isRevoked: async () => { throw new Error("redis 500"); } } });
+  const challenge = await unreadable.call("/challenge", { address: unreadable.wallet.address });
+  const verified = await unreadable.call("/verify", { challenge: challenge.json.challenge, signature: await unreadable.wallet.signMessage({ message: challenge.json.message }) });
+  assert.equal((await unreadable.call("/keys", undefined, verified.json.session)).status, 503);
 });
 test("wrong wallet signatures and stale challenges are rejected", async () => {
   const f = fixture(); const challenge = await f.call("/challenge", { address: f.wallet.address });

@@ -27,6 +27,12 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
   const sessionKey = gatewaySecret && Buffer.byteLength(gatewaySecret) >= 32
     ? createHmac("sha256", gatewaySecret).update("merrymen:developer-session:v1").digest() : null;
   const macOf = encoded => createHmac("sha256", sessionKey).update(`developer-v1:${encoded}`).digest("base64url");
+  // WHERE A REVOCATION LIVES DECIDES HOW LONG A SESSION MAY. A durable store
+  // remembers a logout across restarts, so its sessions survive a deploy. The
+  // memory store forgets, so its sessions are bound to this process the way
+  // challenges are: a restart signs every developer out, costing one wallet
+  // signature, instead of quietly reviving every session signed out before it.
+  const epoch = store.durable ? null : boot;
   let mutations = Promise.resolve();
   const sign = (type, data) => {
     const encoded = Buffer.from(JSON.stringify({ ...data, type })).toString("base64url");
@@ -41,6 +47,11 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
       return v.type === type && v.expires > now() && /^0x[0-9a-f]{40}$/.test(v.address) ? v : null;
     } catch { return null; }
   };
+  /** A session is its MAC, its process (see `epoch`), and the absence of a logout. */
+  async function signedIn(raw) {
+    const s = decode(raw, "session");
+    return s && s.epoch === epoch && typeof s.sid === "string" && !await store.isRevoked(`developer-session:${s.sid}`) ? s : null;
+  }
   const message = c => `Sign in to Merrymen Developers\n\nWebsite: https://merrymen.dev/api\nWallet: ${c.address}\n\nManage API keys for your applications. This does not authorize trading or move funds.\n\nNonce: ${c.nonce}\nExpires: ${new Date(c.expires).toISOString()}`;
   const error = (status, message) => ({ status, json: { error: { message } } });
   async function dispatch({ method, path, authorization, session, body = {}, ip = "unknown" }) {
@@ -58,9 +69,18 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
       let valid = false;
       try { valid = await verify({ address: c.address, message: message(c), signature: body.signature }); } catch { /* Invalid proof. */ }
       if (!valid || !await store.spendNonce(`developer:${c.nonce}`, 301)) return error(401, "Invalid or already used wallet signature");
-      return { status: 200, json: { address: c.address, session: sign("session", { address: c.address, expires: now() + 8 * 3600_000 }) } };
+      return { status: 200, json: { address: c.address, session: sign("session",
+        { address: c.address, sid: randomBytes(16).toString("hex"), epoch, expires: now() + 8 * 3600_000 }) } };
     }
-    const user = decode(session, "session");
+    if (method === "POST" && path === "/logout") {
+      // Clearing the site's cookie alone left the token valid for its full eight
+      // hours to anyone who had copied it. Idempotent: whatever state the token
+      // was in, it does not work once this answers 200.
+      const s = await signedIn(session);
+      if (s) await store.revoke(`developer-session:${s.sid}`, Math.ceil((s.expires - now()) / 1000));
+      return { status: 200, json: { signed_out: true } };
+    }
+    const user = await signedIn(session);
     if (!user) return error(401, "Sign in to manage your API keys");
     if (method === "GET" && path === "/keys") {
       const keys = [...(await read()).values()].filter(r => r.owner === user.address);
