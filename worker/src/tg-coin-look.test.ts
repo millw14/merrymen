@@ -1156,7 +1156,7 @@ describe("a nominated coin's buy", () => {
     assert.ok(entry.kind === "swap");
     assert.equal(entry.buyToken, COIN);
     assert.equal(entry.decisionId, "decision-nom", "provenance is the Brain's decision, nothing minted");
-    assert.equal(entry.sellAmountRaw, 5_000_000n, "sized by the entry path, never by the chat");
+    assert.equal(entry.sellAmountRaw, TRENCHER_FAST.perEntryUsdg, "sized by the entry path, never by the chat");
 
     // 3. The group-entry claim, on top of everything else.
     const claimed = claimGroupEntry(book, entry, (id) => reviewed.get(id));

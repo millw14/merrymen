@@ -30,10 +30,12 @@ import { CASH, type PriceQuote, type StockToken } from "../../../packages/core/s
 import {
   poolPriceUsable,
   readRoutedPrice,
+  readSpotLeg,
   type PriceGuard,
   type RefusalKind,
   type RoutedPrice,
 } from "./pool-price";
+import { SpotSampler, type SampledPrice } from "./spot-sampler";
 
 /**
  * How long a routed read stays fresh. Well under the 15-minute TWAP window, so
@@ -71,7 +73,7 @@ export interface PoolQuoteRefusal {
    * pool but does have a bonding curve. Same contract: stable identifier, never
    * the prose.
    */
-  kind: RefusalKind | "no-pool" | "stale-read" | `curve-${string}`;
+  kind: RefusalKind | "no-pool" | "stale-read" | "sampling" | `curve-${string}`;
   reason: string;
 }
 
@@ -119,12 +121,67 @@ export function describeRoute(r: RoutedPrice): string {
  */
 const cacheKey = (t: StockToken) => `${t.address.toLowerCase()}:${t.decimals ?? 18}`;
 
-export function createPoolPriceReader(opts?: { ttlSec?: number }): PoolPriceReader {
+/**
+ * The spot-vs-average band for a SAMPLED price: twice the pool band.
+ *
+ * The pool band compares spot with a fifteen-minute oracle; a sampled average
+ * covers five, of a coin new enough that it is still finding its price. Held to
+ * the pool band, every coin moving the way a fast Trencher exists to trade would
+ * be refused as manipulated. Doubled rather than fixed so an owner who tightens
+ * their band tightens this one with it. What the band is for is unchanged: a
+ * reading that jumped away from the coin's own recent series.
+ */
+export function sampledDivergenceBps(guard: PriceGuard): number {
+  return guard.maxDivergenceBps * 2;
+}
+
+/**
+ * What a sampled series is a history OF: the pool read, and the route through
+ * it. Lowercased. A series recorded under one identity is never read under
+ * another (spot-sampler.ts), so a route that moves to a new pool starts over.
+ */
+export function spotIdentity(r: RoutedPrice): string {
+  const leg = r.spotOnly;
+  return leg ? `${r.route}:${leg.pool.toLowerCase()}:${leg.tokenIsToken0 ? 0 : 1}:${leg.cashDecimals}` : "";
+}
+
+/**
+ * WHETHER A CURRENT TWAP ROUTE STANDS when a refresh can only find a spot one:
+ * it does, until MAX_ROUTE_AGE_SEC — the same tolerance every TWAP route
+ * already had for a read that fails (null keeps the cached route, ageing). A
+ * spot route coming back where a TWAP was is that failure, or a ring that
+ * cannot serve the window right now, and a TWAP is not traded for a spot
+ * price on either.
+ *
+ * DELIBERATELY NO FINER THAN THAT. Five review rounds tried to tell a quiet
+ * single-slot pool's first trade from a failed read, and a spot pool's real
+ * move from a transient one, and every rule for it opened a new way to price a
+ * held coin off the wrong pool or force-sell it. Routes otherwise move exactly
+ * as they always have.
+ */
+export function keepTwapOver(previous: { routed: RoutedPrice | null; fetchedAt: number } | undefined, routed: RoutedPrice, nowSec: number): boolean {
+  const prev = previous?.routed;
+  return !!prev && !prev.spotOnly && !!routed.spotOnly && nowSec - previous!.fetchedAt <= MAX_ROUTE_AGE_SEC;
+}
+
+/** Human-readable provenance for a sampled price, beside `describeRoute`. */
+export function describeSampled(r: RoutedPrice, s: SampledPrice): string {
+  const depth = Number(s.liquidityUsdg) / 1e6;
+  const hop = r.route === "direct" ? "USDG pool" : "via WETH";
+  const span = s.spanSec >= 60 ? `${Math.round(s.spanSec / 60)}m` : `${s.spanSec}s`;
+  return `new pool, ${span} sampled spot (${s.readings} readings), ${hop}, $${depth.toLocaleString(undefined, { maximumFractionDigits: 0 })} deep`;
+}
+
+export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSampler }): PoolPriceReader {
   const ttlSec = opts?.ttlSec ?? DEFAULT_CACHE_TTL_SEC;
   const cache = new Map<string, CacheEntry>();
+  // Fed on EVERY read, not every route refresh: the series is only as dense as
+  // the reads that feed it (spot-sampler.ts).
+  const sampler = opts?.sampler ?? new SpotSampler();
 
   return {
     reset() {
+      for (const key of cache.keys()) sampler.drop(key);
       cache.clear();
     },
 
@@ -138,6 +195,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number }): PoolPriceRead
         const hit = cache.get(cacheKey(t));
         return !hit || nowSec - hit.fetchedAt >= ttlSec;
       });
+      const refreshed = new Set<string>();
 
       await Promise.all(
         stale.map(async (t) => {
@@ -151,12 +209,23 @@ export function createPoolPriceReader(opts?: { ttlSec?: number }): PoolPriceRead
               cash: CASH.USDG as `0x${string}`,
               cashDecimals: 6,
               weth: CASH.WETH as `0x${string}`,
+              // A pool too new for an oracle comes back priced at its spot,
+              // and is judged off the sampled series below — never off that
+              // one spot reading.
+              allowSpot: true,
             });
           } catch {
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
+          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) return;
           if (routed) {
             cache.set(key, { routed, fetchedAt: nowSec });
+            // The full read's spot IS this tick's reading. A route with an
+            // oracle needs no series: its pool keeps its own.
+            if (routed.spotOnly) {
+              sampler.record(key, { atSec: nowSec, price18: routed.price18 ?? routed.price8 * 10_000_000_000n, liquidityUsdg: routed.liquidityUsdg }, spotIdentity(routed));
+            } else sampler.drop(key);
+            refreshed.add(key);
             return;
           }
           // Nothing came back. That's either "no pool" or "the RPC didn't
@@ -164,6 +233,21 @@ export function createPoolPriceReader(opts?: { ttlSec?: number }): PoolPriceRead
           // do NOT touch fetchedAt: it keeps ageing, and MAX_ROUTE_AGE_SEC below
           // eventually retires it whichever of the two it actually was.
           if (!previous?.routed) cache.set(key, { routed: null, fetchedAt: nowSec });
+        }),
+      );
+
+      // EVERY OTHER ORACLE-LESS ROUTE GETS ITS READING TOO — two calls on the
+      // pool already found, instead of the full search a refresh costs. A
+      // failed read records nothing: the series ages, and a long enough hole
+      // restarts it (SAMPLE_MAX_GAP_SEC).
+      await Promise.all(
+        tokens.map(async (t) => {
+          const key = cacheKey(t);
+          const hit = cache.get(key);
+          const route = hit?.routed;
+          if (refreshed.has(key) || !hit || !route?.spotOnly || nowSec - hit.fetchedAt > MAX_ROUTE_AGE_SEC) return;
+          const spot = await readSpotLeg(client, route.spotOnly);
+          if (spot) sampler.record(key, { atSec: nowSec, price18: spot.price18, liquidityUsdg: spot.liquidityUsdg }, spotIdentity(route));
         }),
       );
 
@@ -186,6 +270,24 @@ export function createPoolPriceReader(opts?: { ttlSec?: number }): PoolPriceRead
           continue;
         }
         const r = hit.routed;
+        if (r.spotOnly) {
+          // A GAP IN READINGS IS NOT A PRICE GONE. While the route is current
+          // (MAX_ROUTE_AGE_SEC, as for any cached route), a held coin is valued
+          // at its newest reading — never ready, so it authorises no buy —
+          // rather than refused after one gap and force-sold.
+          let s = sampler.read(cacheKey(t), nowSec, spotIdentity(r));
+          if (!s) {
+            const last = sampler.latest(cacheKey(t), spotIdentity(r));
+            if (last) {
+              const price8 = last.price18 / 10_000_000_000n;
+              s = { price8, spot8: price8, liquidityUsdg: last.liquidityUsdg, divergenceBps: 0, readings: 0, spanSec: 0, ready: false };
+            }
+          }
+          const quote = sampledQuote(r, s, guard);
+          if ("refusal" in quote) refused.push({ symbol: t.symbol, ...quote.refusal });
+          else quotes.set(t.symbol, quote.quote);
+          continue;
+        }
         // The guard is re-applied on every read, against the CURRENT settings —
         // a cached route must never carry a stale verdict.
         const verdict = poolPriceUsable(r, guard);
@@ -208,6 +310,59 @@ export function createPoolPriceReader(opts?: { ttlSec?: number }): PoolPriceRead
       }
 
       return { quotes, refused };
+    },
+  };
+}
+
+/**
+ * A price for an oracle-less route, from its sampled series — or why not.
+ *
+ * The same depth floor as every pool quote, at the newest reading's depth; the
+ * spot-vs-average band at `sampledDivergenceBps`, also counting the WETH leg's
+ * own divergence on a two-hop route. A series that is not ready still prices
+ * (`sampled.ready` false), so a held coin is valued while it refills; only a
+ * ready one may authorise a buy, and that is decided by the buyer
+ * (strategies/trencher.ts), not here.
+ */
+export function sampledQuote(
+  r: RoutedPrice,
+  s: SampledPrice | null,
+  guard: PriceGuard,
+): { quote: PriceQuote } | { refusal: { kind: PoolQuoteRefusal["kind"]; reason: string } } {
+  if (!s) {
+    return {
+      refusal: {
+        kind: "sampling",
+        reason: "its pool is too new to keep its own price history, and we have no recent reading of it to average",
+      },
+    };
+  }
+  if (s.price8 <= 0n) {
+    return { refusal: { kind: "sampling", reason: "its price is below what an 8-decimal quote can carry" } };
+  }
+  const depth = poolPriceUsable(
+    { price8: s.price8, liquidityUsdg: s.liquidityUsdg, twapWindowSec: s.spanSec, divergenceBps: 0 },
+    guard,
+  );
+  if (!depth.ok) return { refusal: { kind: depth.kind, reason: depth.reason } };
+  const band = sampledDivergenceBps(guard);
+  const divergence = Math.max(s.divergenceBps, r.divergenceBps);
+  if (divergence > band) {
+    return {
+      refusal: {
+        kind: "divergent",
+        reason: `spot is ${(divergence / 100).toFixed(1)}% off its ${Math.round(s.spanSec / 60)}m sampled average (limit ${(band / 100).toFixed(1)}%) — pool may be under manipulation`,
+      },
+    };
+  }
+  return {
+    quote: {
+      price8: s.price8,
+      stale: false,
+      source: "sampled",
+      detail: describeSampled(r, s),
+      liquidityUsdg: s.liquidityUsdg,
+      sampled: { readings: s.readings, spanSec: s.spanSec, ready: s.ready },
     },
   };
 }

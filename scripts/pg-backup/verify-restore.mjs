@@ -200,7 +200,8 @@ export const DRILL_TABLES = validateDrillTables([
   // Resolved in place: the mirror's resolution pass (`UPDATE trades SET
   // tx_hash = COALESCE(…), status = ?, … WHERE … status = 'submitted'`),
   // store.ts addTrade's resolution of an in-flight row, orchestrator.ts's
-  // realised-P&L booking against the shared trades, history-fill-repair.ts.
+  // realised-P&L booking against the shared trades, history-fill-repair.ts,
+  // gas-repair.ts's completion of NULL gas columns.
   // None of them touches created_at.
   { table: "trades", stamp: "created_at", kind: "presence-only",
     why: "A submitted trade is resolved in place (status, tx hash, fill, gas) without moving created_at." },
@@ -310,6 +311,9 @@ export const DRILL_TABLES = validateDrillTables([
     why: "A revert marks each receipt reverted in place without moving applied_at_ms." },
   // closed-epoch-capital.ts applyClosedEpoch and revertClosedEpoch.
   { table: "closed_epoch_repairs", stamp: "applied_at_ms", kind: "presence-only",
+    why: "A revert marks each receipt reverted in place without moving applied_at_ms." },
+  // gas-repair.ts applyGasRepair and revertGasRepair.
+  { table: "gas_repairs", stamp: "applied_at_ms", kind: "presence-only",
     why: "A revert marks each receipt reverted in place without moving applied_at_ms." },
 
   // ── Wallet authority and the owner's configuration ────────────────────────

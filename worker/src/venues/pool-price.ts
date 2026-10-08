@@ -51,6 +51,25 @@ export const DEFAULT_TWAP_WINDOW_SEC = 900; // 15 minutes
 export interface PoolPrice {
   pool: `0x${string}`;
   fee: number;
+  /** Which side of the pair the priced token is — what a later spot re-read needs. */
+  tokenIsToken0: boolean;
+  /**
+   * slot0's observationCardinality: how many observations the pool's oracle
+   * keeps. ONE means it has no history to average at all — the only case a
+   * spot route may stand in for it (spotRoute). A pool with more whose
+   * observe() failed has an oracle that did not answer this time, which is
+   * not the same fact and never becomes a spot price.
+   */
+  oracleCardinality: number;
+  /**
+   * observe() over the window was REFUSED BY THE POOL — Uniswap's "OLD": its
+   * history is shorter than the window. A cardinality-1 pool that traded
+   * recently answers this way, and so does a grown ring that has not yet
+   * filled the window. That is the only fact a spot route may stand on
+   * (spotRoute). An observe() that failed any other way — a timeout, a rate
+   * limit — is not it, and never becomes a spot price.
+   */
+  historyShort: boolean;
   /** TWAP, cash per whole token, 8dp — use for valuation and safety. */
   price8: bigint;
   /** Spot, same units — use for execution sizing only. */
@@ -316,32 +335,7 @@ export async function bestCashPool(
     twapWindowSec?: number;
   },
 ): Promise<CashPool | null> {
-  const pools = await Promise.all(
-    FEE_TIERS.map(async (fee) => {
-      try {
-        const pool = (await client.readContract({
-          address: UNISWAP.v3Factory as `0x${string}`,
-          abi: FACTORY_ABI,
-          functionName: "getPool",
-          args: [args.token, args.cash, fee],
-        })) as `0x${string}`;
-        if (!pool || /^0x0{40}$/i.test(pool)) return null;
-        const cashInPool = (await client.readContract({
-          address: args.cash,
-          abi: ERC20_ABI,
-          functionName: "balanceOf",
-          args: [pool],
-        })) as bigint;
-        return { fee, pool, cashInPool };
-      } catch {
-        return null;
-      }
-    }),
-  );
-
-  const live = pools
-    .flatMap((p): CashPool[] => (p && p.cashInPool > 0n ? [p] : []))
-    .sort((a, b) => (b.cashInPool > a.cashInPool ? 1 : b.cashInPool < a.cashInPool ? -1 : 0));
+  const live = await liveCashPools(client, args);
   if (live.length <= 1) return live[0] ?? null;
 
   // ── THE DEEPEST THAT CAN ANSWER, WHEN THERE IS A CHOICE ─────────────────
@@ -370,6 +364,39 @@ export async function bestCashPool(
   return live[0]!;
 }
 
+/** Every fee tier's pool for the pair that holds any cash, deepest cash first. */
+async function liveCashPools(
+  client: PublicClient,
+  args: { token: `0x${string}`; cash: `0x${string}` },
+): Promise<CashPool[]> {
+  const pools = await Promise.all(
+    FEE_TIERS.map(async (fee) => {
+      try {
+        const pool = (await client.readContract({
+          address: UNISWAP.v3Factory as `0x${string}`,
+          abi: FACTORY_ABI,
+          functionName: "getPool",
+          args: [args.token, args.cash, fee],
+        })) as `0x${string}`;
+        if (!pool || /^0x0{40}$/i.test(pool)) return null;
+        const cashInPool = (await client.readContract({
+          address: args.cash,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [pool],
+        })) as bigint;
+        return { fee, pool, cashInPool };
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  return pools
+    .flatMap((p): CashPool[] => (p && p.cashInPool > 0n ? [p] : []))
+    .sort((a, b) => (b.cashInPool > a.cashInPool ? 1 : b.cashInPool < a.cashInPool ? -1 : 0));
+}
+
 export async function readPoolPrice(
   client: PublicClient,
   args: {
@@ -384,16 +411,28 @@ export async function readPoolPrice(
 
   const best = await bestCashPool(client, { token: args.token, cash: args.cash, twapWindowSec: windowSec });
   if (!best) return null;
+  return readPoolAt(client, best, args, windowSec);
+}
 
+/** One pool's TWAP, spot and in-range depth, read as readPoolPrice reads its choice. */
+async function readPoolAt(
+  client: PublicClient,
+  best: CashPool,
+  args: { token: `0x${string}`; tokenDecimals: number; cashDecimals: number },
+  windowSec: number,
+): Promise<PoolPrice | null> {
   try {
     const [token0, slot0, liquidity] = await Promise.all([
       client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "token0" }) as Promise<`0x${string}`>,
       client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "slot0" }) as Promise<
         readonly [bigint, number, number, number, number, number, boolean]
       >,
-      client
-        .readContract({ address: best.pool, abi: POOL_ABI, functionName: "liquidity" })
-        .catch(() => 0n) as Promise<bigint>,
+      // NOT caught to zero. A failed read of in-range liquidity is not an
+      // empty pool: read as 0 it refused the coin as too thin — a held one
+      // force-sold on a rate limit — and on a spot route wrote a zero depth
+      // into the sampled series. The whole read fails instead, and the caller
+      // keeps the route it had, as readSpotLeg already does.
+      client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "liquidity" }) as Promise<bigint>,
     ]);
     const tokenIsToken0 = token0.toLowerCase() === args.token.toLowerCase();
     const shape = {
@@ -410,6 +449,7 @@ export async function readPoolPrice(
     // must NOT silently degrade to spot, which is the whole thing we're avoiding.
     let twap8 = 0n;
     let twap18 = 0n;
+    let historyShort = false;
     try {
       const [tickCumulatives] = (await client.readContract({
         address: best.pool,
@@ -422,13 +462,17 @@ export async function readPoolPrice(
         twap8 = tickToPrice({ tick, ...shape, decimals: 8 });
         twap18 = tickToPrice({ tick, ...shape, decimals: 18 });
       }
-    } catch {
+    } catch (e) {
       twap8 = 0n; // oracle can't serve this window — poolPriceUsable will refuse
+      historyShort = revertedOld(e);
     }
 
     return {
       pool: best.pool,
       fee: best.fee,
+      tokenIsToken0,
+      oracleCardinality: Number(slot0[3]),
+      historyShort,
       price8: twap8,
       spot8,
       price18: twap18,
@@ -475,6 +519,50 @@ export interface RoutedPrice {
   /** Worst divergence across the legs. */
   divergenceBps: number;
   twapWindowSec: number;
+  /**
+   * PRESENT ONLY ON A ROUTE WITH NO ORACLE BEHIND IT — and only for a caller
+   * that asked for one (`allowSpot`).
+   *
+   * A brand-new v3 pool keeps a single observation until somebody pays to grow
+   * it, so `observe()` over any real window reverts and there is no TWAP to
+   * read. Measured 2026-10-08: CHONK, ZEVIO, SS, SynthID, DUCAT and CHOP — the
+   * busiest new coins on the chain — all sit on cardinality-1 pools, while the
+   * older CHUMP (3,200) and WOJAK (300) can answer. Without this the route read
+   * returned null, the token was reported as having no pool at all, and the
+   * curve pass then told the owner "I know this token but not where it trades".
+   *
+   * On such a route `price8` IS THE SPOT, `divergenceBps` is 0 because there is
+   * nothing to diverge from, and this field says how to re-read that spot
+   * cheaply so a caller can build its own time series (spot-sampler.ts). A
+   * TWAP route never carries it, and a caller that did not ask never sees one.
+   */
+  spotOnly?: SpotLeg;
+  /**
+   * On a spot route only: the same price at 18dp, USD per whole token. A
+   * sampled series averages and compares at 18dp — at 8dp a coin under about
+   * $1e-7 moves in steps of 10% or more, and its own rounding reads as a
+   * divergence (the reason pool-price.ts measures TWAP divergence at 18dp).
+   */
+  price18?: bigint;
+  /** The token's own pool on this route (the leg that is not WETH/USDG). */
+  pool?: `0x${string}`;
+}
+
+/** Enough to re-read one oracle-less pool's spot without searching for it again. */
+export interface SpotLeg {
+  pool: `0x${string}`;
+  tokenIsToken0: boolean;
+  tokenDecimals: number;
+  cashDecimals: number;
+  /** USD per whole cash unit, 8dp: 1e8 for USDG, the WETH/USDG TWAP for WETH. */
+  cashUsd8: bigint;
+  /** The pool's oracle ring size: over 1 means it has an oracle whose history is merely short. */
+  oracleCardinality: number;
+  /**
+   * Depth of the OTHER leg (WETH/USDG) at the full read, USDG 6dp — a two-hop
+   * route is only as deep as its thinner leg. Null on a direct route.
+   */
+  otherLegDepthUsdg: bigint | null;
 }
 
 /**
@@ -506,6 +594,11 @@ export async function readRoutedPrice(
     weth: `0x${string}`;
     wethDecimals?: number;
     windowSec?: number;
+    /**
+     * Return a spot route (`spotOnly`) when no route has an oracle behind it.
+     * Off by default, so every caller written before it keeps "TWAP or null".
+     */
+    allowSpot?: boolean;
   },
 ): Promise<RoutedPrice | null> {
   const windowSec = args.windowSec ?? DEFAULT_TWAP_WINDOW_SEC;
@@ -552,33 +645,188 @@ export async function readRoutedPrice(
           liquidityUsdg: cashRawToUsdg(direct.liquidityCashRaw, direct.cashDecimals, 100_000_000n),
           divergenceBps: direct.divergenceBps,
           twapWindowSec: windowSec,
+          pool: direct.pool,
         }
       : null;
 
-  if (!leg || !wethLeg || leg.price8 <= 0n || wethLeg.price8 <= 0n) return directRoute;
+  // THE TWAP CHOICE, EXACTLY AS IT WAS BEFORE SPOT ROUTES EXISTED. A caller
+  // that did not ask for spot gets this and nothing else.
+  const twapRoute = ((): RoutedPrice | null => {
+    // The TOKEN leg at 18dp: a coin under ~5e-9 WETH reads 0 at 8dp with a
+    // perfectly good TWAP, and combineLegs consumes price18 anyway.
+    if (!leg || !wethLeg || leg.price18 <= 0n || wethLeg.price8 <= 0n) return directRoute;
 
-  // The TOKEN/WETH pool's depth is denominated in WETH — 18 raw decimals, and
-  // each whole WETH is worth wethLeg.price8. Converting it explicitly through
-  // cashRawToUsdg is the whole point: doing this scaling by hand is how the
-  // number ends up 1e12 too large, which silently makes the depth floor
-  // unreachable on the WETH route — i.e. on most of this chain.
-  const legDepthUsdg = cashRawToUsdg(leg.liquidityCashRaw, leg.cashDecimals, wethLeg.price8);
-  const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
+    // The TOKEN/WETH pool's depth is denominated in WETH — 18 raw decimals, and
+    // each whole WETH is worth wethLeg.price8. Converting it explicitly through
+    // cashRawToUsdg is the whole point: doing this scaling by hand is how the
+    // number ends up 1e12 too large, which silently makes the depth floor
+    // unreachable on the WETH route — i.e. on most of this chain.
+    const legDepthUsdg = cashRawToUsdg(leg.liquidityCashRaw, leg.cashDecimals, wethLeg.price8);
+    const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
 
-  const wethRoute: RoutedPrice = {
-    // The token leg combines at 18dp; anything less quantizes a sub-cent
-    // memecoin's WETH price into single-digit integers.
-    price8: combineLegs(leg.price18, wethLeg.price8),
-    spot8: combineLegs(leg.spot18, wethLeg.spot8),
-    route: "weth",
-    // A deep WETH/USDG pool does NOT make a shallow memecoin pool safe: the
-    // route is only as manipulable as its thinnest leg.
-    liquidityUsdg: legDepthUsdg < wethDepthUsdg ? legDepthUsdg : wethDepthUsdg,
-    divergenceBps: Math.max(leg.divergenceBps, wethLeg.divergenceBps),
-    twapWindowSec: windowSec,
-  };
-  if (wethRoute.price8 <= 0n) return directRoute;
-  if (!directRoute) return wethRoute;
-  // Deeper wins. Ties go to direct — one hop, one pool to reason about.
-  return wethRoute.liquidityUsdg > directRoute.liquidityUsdg ? wethRoute : directRoute;
+    const wethRoute: RoutedPrice = {
+      // The token leg combines at 18dp; anything less quantizes a sub-cent
+      // memecoin's WETH price into single-digit integers.
+      price8: combineLegs(leg.price18, wethLeg.price8),
+      spot8: combineLegs(leg.spot18, wethLeg.spot8),
+      route: "weth",
+      // A deep WETH/USDG pool does NOT make a shallow memecoin pool safe: the
+      // route is only as manipulable as its thinnest leg.
+      liquidityUsdg: legDepthUsdg < wethDepthUsdg ? legDepthUsdg : wethDepthUsdg,
+      divergenceBps: Math.max(leg.divergenceBps, wethLeg.divergenceBps),
+      twapWindowSec: windowSec,
+      pool: leg.pool,
+    };
+    if (wethRoute.price8 <= 0n) return directRoute;
+    if (!directRoute) return wethRoute;
+    // Deeper wins. Ties go to direct — one hop, one pool to reason about.
+    return wethRoute.liquidityUsdg > directRoute.liquidityUsdg ? wethRoute : directRoute;
+  })();
+  if (!args.allowSpot) return twapRoute;
+
+  // A TWAP ROUTE ALWAYS WINS. A spot route is the answer only when there is no
+  // TWAP route at all. Not "the deeper of the two": that was tried, and every
+  // way of carrying a deeper oracle-less market beside a TWAP route, across
+  // refreshes that fail to read one or the other, opened a new way to price a
+  // coin off the wrong pool or none (three review rounds). The cost is
+  // stated instead: a dust pool with a working oracle beside a coin's real,
+  // new pool leaves the coin refused as too thin — exactly what every such
+  // coin was before sampling existed.
+  return twapRoute ?? spotRoute(direct, leg, wethLeg, args.tokenDecimals);
+}
+
+/**
+ * Did the pool itself refuse observe() for want of history — Uniswap v3's
+ * "OLD" — as opposed to the call failing on the way? viem carries a revert's
+ * reason on the error or a cause; a transport failure carries none.
+ */
+export function revertedOld(e: unknown): boolean {
+  for (let x: unknown = e, depth = 0; x && typeof x === "object" && depth < 6; x = (x as { cause?: unknown }).cause, depth++) {
+    const r = x as { reason?: unknown; message?: unknown; shortMessage?: unknown };
+    if (r.reason === "OLD") return true;
+    for (const text of [r.shortMessage, r.message]) {
+      if (typeof text !== "string") continue;
+      if (/^\s*OLD\s*$/.test(text) || /execution reverted:\s*OLD\b/.test(text) || /reverted with the following reason:\s*OLD\b/.test(text)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The deeper of the two routes whose TOKEN pool has no oracle history for the
+ * window, priced at its spot. Same depth rule as the TWAP routes — the
+ * shallower leg bounds a two-hop route — and the WETH/USDG leg must still have
+ * its own TWAP: only the memecoin's pool is allowed to be new. Null when
+ * neither has a spot.
+ */
+function spotRoute(
+  direct: PoolPrice | null,
+  leg: PoolPrice | null,
+  wethLeg: PoolPrice | null,
+  tokenDecimals: number,
+): RoutedPrice | null {
+  // ONLY A POOL WHOSE OWN ORACLE SAID ITS HISTORY IS TOO SHORT (historyShort).
+  // A price8 of zero is also what a TWAP reads for a coin cheaper than 8dp can
+  // carry, and what an observe() that failed on the way leaves behind —
+  // neither means the pool has no history, and treating them so would trade a
+  // TWAP for a spot price.
+  const shortOf = (p: PoolPrice | null): PoolPrice[] => (p?.historyShort ? [p] : []);
+  const candidates: RoutedPrice[] = [];
+  for (const d of shortOf(direct)) {
+    if (d.spot8 <= 0n) continue;
+    candidates.push({
+      price8: d.spot8,
+      // Cash is USDG, so cash per token at 18dp is already USD at 18dp.
+      price18: d.spot18,
+      spot8: d.spot8,
+      route: "direct",
+      liquidityUsdg: cashRawToUsdg(d.liquidityCashRaw, d.cashDecimals, 100_000_000n),
+      divergenceBps: 0,
+      twapWindowSec: 0,
+      pool: d.pool,
+      spotOnly: {
+        pool: d.pool,
+        tokenIsToken0: d.tokenIsToken0,
+        tokenDecimals,
+        cashDecimals: d.cashDecimals,
+        cashUsd8: 100_000_000n,
+        oracleCardinality: d.oracleCardinality,
+        otherLegDepthUsdg: null,
+      },
+    });
+  }
+  if (wethLeg && wethLeg.price8 > 0n) {
+    const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
+    for (const l of shortOf(leg)) {
+      if (l.spot18 <= 0n) continue;
+      const price8 = combineLegs(l.spot18, wethLeg.price8);
+      if (price8 <= 0n) continue;
+      const legDepthUsdg = cashRawToUsdg(l.liquidityCashRaw, l.cashDecimals, wethLeg.price8);
+      candidates.push({
+        price8,
+        price18: (l.spot18 * wethLeg.price8) / 100_000_000n,
+        spot8: combineLegs(l.spot18, wethLeg.spot8),
+        route: "weth",
+        liquidityUsdg: legDepthUsdg < wethDepthUsdg ? legDepthUsdg : wethDepthUsdg,
+        // The WETH/USDG leg still has an oracle, and its divergence still counts.
+        divergenceBps: wethLeg.divergenceBps,
+        twapWindowSec: 0,
+        pool: l.pool,
+        spotOnly: {
+          pool: l.pool,
+          tokenIsToken0: l.tokenIsToken0,
+          tokenDecimals,
+          cashDecimals: l.cashDecimals,
+          cashUsd8: wethLeg.price8,
+          oracleCardinality: l.oracleCardinality,
+          otherLegDepthUsdg: wethDepthUsdg,
+        },
+      });
+    }
+  }
+  // Deeper wins; ties go to the first built — direct, one hop.
+  return candidates.reduce<RoutedPrice | null>((best, c) => (!best || c.liquidityUsdg > best.liquidityUsdg ? c : best), null);
+}
+
+/**
+ * Re-read an oracle-less pool's spot: two calls, no search.
+ *
+ * What a sampler (spot-sampler.ts) takes on every tick between full route
+ * reads, which cost a factory search per fee tier per leg. Price at 8dp in USD
+ * per whole token, depth in USDG 6dp — the same units and the same in-range
+ * depth rule as the full read, so a sample and a full read are one series.
+ * Null when the pool did not answer: an RPC failure is not a price.
+ */
+export async function readSpotLeg(
+  client: PublicClient,
+  leg: SpotLeg,
+): Promise<{ price8: bigint; price18: bigint; liquidityUsdg: bigint } | null> {
+  try {
+    const [slot0, liquidity] = await Promise.all([
+      client.readContract({ address: leg.pool, abi: POOL_ABI, functionName: "slot0" }) as Promise<
+        readonly [bigint, number, number, number, number, number, boolean]
+      >,
+      client.readContract({ address: leg.pool, abi: POOL_ABI, functionName: "liquidity" }) as Promise<bigint>,
+    ]);
+    const spot18 = sqrtPriceX96ToPrice({
+      sqrtPriceX96: slot0[0],
+      tokenIsToken0: leg.tokenIsToken0,
+      tokenDecimals: leg.tokenDecimals,
+      cashDecimals: leg.cashDecimals,
+      decimals: 18,
+    });
+    // A USDG pool's spot is already USD; a WETH pool's goes through the WETH price.
+    const price18 = (spot18 * leg.cashUsd8) / 100_000_000n;
+    if (price18 <= 0n) return null;
+    const price8 = combineLegs(spot18, leg.cashUsd8);
+    const depth = cashRawToUsdg(
+      cashDepthFromLiquidity({ liquidity, sqrtPriceX96: slot0[0], cashIsToken0: !leg.tokenIsToken0 }),
+      leg.cashDecimals,
+      leg.cashUsd8,
+    );
+    const liquidityUsdg = leg.otherLegDepthUsdg !== null && leg.otherLegDepthUsdg < depth ? leg.otherLegDepthUsdg : depth;
+    return { price8, price18, liquidityUsdg };
+  } catch {
+    return null;
+  }
 }
