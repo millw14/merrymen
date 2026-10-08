@@ -62,6 +62,15 @@ export interface RenderOptions {
   audience: Audience;
   maxChars: number;
   now: number;
+  /**
+   * A room only: whether a trader's handle may be said there. The group
+   * port asks the group line gate (tg-fomo-port.ts), so a handle the gate
+   * would refuse ("user84729374", "john.eth") is "an unnamed trader" before
+   * any line is written, and the lines about that trader never reach a room
+   * without a name, read as the trader above's. Absent: every handle of the
+   * public shape is said. Throwing or not true: unnamed.
+   */
+  sayableHandle?: (handle: string) => boolean;
 }
 
 export const FOMO_ATTRIBUTION = "Source: Fomo via FOMO API (independent; not affiliated with fomo.family)";
@@ -210,9 +219,16 @@ function who(h: string | null | undefined, userId: string): string {
  * Never who()'s owner-side fallback, which is a piece of the provider's
  * internal user id.
  */
-function publicHandle(h: string | null | undefined): string {
+const UNNAMED_TRADER = "an unnamed trader";
+function publicHandle(h: string | null | undefined, sayable?: (h: string) => boolean): string {
   const s = h ? sanitizeText(h, 40).replace(/^@/, "") : "";
-  return /^[A-Za-z0-9_.-]{1,40}$/.test(s) ? s : "an unnamed trader";
+  if (!/^[A-Za-z0-9_.-]{1,40}$/.test(s)) return UNNAMED_TRADER;
+  if (!sayable) return s;
+  try {
+    return sayable(s) === true ? s : UNNAMED_TRADER;
+  } catch {
+    return UNNAMED_TRADER;
+  }
 }
 
 function trader(t: { handle: string | null; userId: string }): string {
@@ -437,14 +453,16 @@ export function needsDirectMessage(env: FomoEnvelope): boolean {
   return false;
 }
 
-function eventLine(e: ActivityEventView, audience: Audience, now: number, withWho: boolean): string {
+function eventLine(e: ActivityEventView, audience: Audience, now: number, withWho: boolean, roomName?: string): string {
   const verb =
     e.kind === "buy" ? "bought" : e.kind === "sell" ? "sold" : e.kind === "transfer-in" ? "received by transfer (not a purchase)" : e.kind === "transfer-out" ? "sent out by transfer (not a sale)" : e.kind === "airdrop" ? "received as an airdrop (not a purchase)" : e.kind;
   if (audience === "group") {
     // A room's line: the fill in short form, and nothing of the position's
-    // mark or P&L (those figures are the owner's DM detail). Never who.
+    // mark or P&L (those figures are the owner's DM detail). The trader the
+    // answer is about is named on the line itself (roomName), so a bullet
+    // whose header the gate dropped is never read as another trader's.
     const fill = finite(e.fillUsd) ? `, fill ${money(e.fillUsd, audience)}` : e.kind === "buy" || e.kind === "sell" ? ", fill size unknown" : "";
-    return `• ${verb} ${coin(e.token, e.label, audience, false)} ${ago(now, e.at)}${fill} (${groupBasisOf(e.verification)})`;
+    return `• ${roomName ? `${roomName} ` : ""}${verb} ${coin(e.token, e.label, audience, false)} ${ago(now, e.at)}${fill} (${groupBasisOf(e.verification)})`;
   }
   const whoPart = withWho ? `${who(e.trader.handle, e.trader.userId)} ` : "";
   const figures: string[] = [];
@@ -501,7 +519,7 @@ function availabilityLine(a: string): string {
 function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audience, now: number, view: View = NO_VIEW): string[] {
   const d = env.data;
   if (!d) return [];
-  if (audience === "group") return groupTraderContext(d, view.profile === true);
+  if (audience === "group") return groupTraderContext(d, view.profile === true, view.sayable);
   const out: string[] = [];
   const name = trader(d.trader);
   const h = d.holdings;
@@ -547,8 +565,11 @@ function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audie
  * ask ends with how to ask the second, for every trader alike, so it says
  * nothing about who is watched (a P&L ask is read as earnings, chat.ts).
  */
-function groupTraderContext(d: TraderContextData, profile = false): string[] {
-  const name = `${publicHandle(d.trader.handle)} on Fomo`;
+function groupTraderContext(d: TraderContextData, profile = false, sayable?: (h: string) => boolean): string[] {
+  // EVERY LINE NAMES THE TRADER: the gate judges each line on its own, so a
+  // detail line never outlives the header that says whose it is.
+  const handle = publicHandle(d.trader.handle, sayable);
+  const name = `${handle} on Fomo`;
   const out: string[] = [];
   const h = d.holdings;
   if (h) {
@@ -559,13 +580,13 @@ function groupTraderContext(d: TraderContextData, profile = false): string[] {
         : `${name} holds ${plural(h.rowsTotal, "coin", "coins")}${total} (provider-reported snapshot, valued at current prices).`,
     );
     const rows = h.rows.slice(0, 3).map((r) => `${(r.symbol ? sym({ symbol: r.symbol, name: null }, "group") : null) ?? "a coin"} on ${r.chain ?? "an unknown chain"} ${finite(r.valueUsd) ? money(r.valueUsd, "group") : "(value unknown)"}`);
-    if (rows.length) out.push(`Largest: ${rows.join(", ")}.`);
+    if (rows.length) out.push(`Largest held by ${handle}: ${rows.join(", ")}.`);
   } else {
     out.push(`${name}: the holdings snapshot could not be read.`);
   }
-  if (d.formerHandle) out.push("That handle is one they used before; the account has since renamed.");
-  const handle = publicHandle(d.trader.handle);
-  if (profile && handle !== "an unnamed trader") out.push(`For what they made or lost on their trades, ask: what did trader ${handle} make money on this week on fomo?`);
+  // Said only with the handle it is about: unnamed, there is no handle for it to explain.
+  if (d.formerHandle && handle !== UNNAMED_TRADER) out.push(`${handle} is a handle they used before; the account has since renamed.`);
+  if (profile && handle !== UNNAMED_TRADER) out.push(`For what they made or lost on their trades, ask: what did trader ${handle} make money on this week on fomo?`);
   return out;
 }
 
@@ -578,7 +599,7 @@ const receivedOnly = (p: { transferredInAmount: number | null; boughtAmount: num
 function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Audience, now: number, view: View): string[] {
   const d = env.data;
   if (!d) return [];
-  const name = audience === "group" ? publicHandle(d.trader.handle) : trader(d.trader);
+  const name = audience === "group" ? publicHandle(d.trader.handle, view.sayable) : trader(d.trader);
   const scope = `${d.window === "all" ? "on record" : `in the last ${d.window}`}${d.token ? ` on ${coin(d.token, null, audience)}` : ""}`;
   // Never "nothing realised" from a positions read that was refused or failed: that would be a false negative about a named trader.
   if (view.earnings) return earningsLines(d, audience, name, !(env.coverage?.missing ?? []).includes("positions"));
@@ -593,8 +614,11 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
   // A room hears trades and transfers only: a thesis, a perp, a listing or "other" has no verb of its own,
   // and would be printed as one ("• thesis PONS…", "• other PONS…") under a buy or sell question.
   const shown = group ? d.events.filter((e) => ROOM_EVENT_KINDS.has(e.kind)) : d.events;
-  for (const e of shown.slice(0, group ? 3 : 5)) out.push(eventLine(e, audience, now, false));
-  for (const f of d.fills.slice(0, group ? 2 : 3)) out.push(`• fill: ${f.side} ${money(f.usd, audience)} ${ago(now, f.at)} (provider-reported)`);
+  // A room's bullets and positions name the trader on each line (eventLine roomName).
+  for (const e of shown.slice(0, group ? 3 : 5)) out.push(eventLine(e, audience, now, false, group ? name : undefined));
+  // A room's fill says "bought"/"sold": "buy $250k just now" reads to the gate as advice to buy now.
+  const roomSide = (side: string): string => (side === "buy" ? "bought" : side === "sell" ? "sold" : "swapped");
+  for (const f of d.fills.slice(0, group ? 2 : 3)) out.push(group ? `• fill for ${name}: ${roomSide(f.side)} ${money(f.usd, audience)} ${ago(now, f.at)} (provider-reported)` : `• fill: ${f.side} ${money(f.usd, audience)} ${ago(now, f.at)} (provider-reported)`);
   const pos = d.positions.slice(0, 3).map((p) => {
     const label = `${sym(p.label, audience) ?? "a coin"} ${p.status ?? "status unknown"}`;
     if (receivedOnly(p)) return `${label}, received by transfer (not bought)`;
@@ -602,7 +626,7 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
     if (group) return `${label} (cost ${money(p.costBasisUsd, audience)}, ${signedMoney(p.realizedPnlUsd, audience)} realised${p.status === "open" ? `, ${signedMoney(p.unrealizedPnlUsd, audience)} not yet realised` : ""})`;
     return `${label}, cost ${usd(p.costBasisUsd)}, realised P&L to date ${signedUsd(p.realizedPnlUsd)}${p.status === "open" ? `, unrealised ${signedUsd(p.unrealizedPnlUsd)}` : ""}`;
   });
-  if (pos.length) out.push(`Positions (provider-reported): ${pos.join("; ")}.`);
+  if (pos.length) out.push(`Positions${group ? ` of ${name}` : ""} (provider-reported): ${pos.join("; ")}.`);
   return out;
 }
 
@@ -783,7 +807,7 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience, view:
       // With one row asked about too, a row fewer: the row's answer still fits the room's lines.
       const scope = windowWords(d.window);
       const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades:`];
-      for (const r of d.traders.slice(0, shownTraderRows(d, audience, view.row))) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
+      for (const r of d.traders.slice(0, shownTraderRows(d, audience, view.row))) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle, view.sayable)} ${signedMoney(r.pnlUsd, audience)}`);
       return [...out, ...chainNote];
     }
     const out = [`Top traders by provider-reported ${d.window ?? ""} realised P&L (not a skill measure):`];
@@ -1040,6 +1064,8 @@ interface View {
   row: boolean;
   /** Who a trader is (trader-context, or a row's profile): a room is told how to ask what they made. */
   profile?: boolean;
+  /** A room only: RenderOptions.sayableHandle. */
+  sayable?: (h: string) => boolean;
 }
 const NO_VIEW: View = { earnings: false, row: false };
 
@@ -1147,8 +1173,13 @@ function finalize(text: string, audience: Audience): string {
   return audience === "group" ? groupScrub(text) : text;
 }
 
+/** The view's room-only handle check, from the render options. */
+function withSayable(view: View, opts: RenderOptions): View {
+  return opts.audience === "group" && typeof opts.sayableHandle === "function" ? { ...view, sayable: opts.sayableHandle } : view;
+}
+
 export function renderEnvelope(env: FomoEnvelope, opts: RenderOptions): string {
-  const lines = envelopeLines(env, opts.audience, opts.now);
+  const lines = envelopeLines(env, opts.audience, opts.now, withSayable(NO_VIEW, opts));
   const deflected = lines.length === 1 && lines[0] === GROUP_DM_DEFLECTION;
   // The attribution is the owner's; a group has had its post about the source (Milla, 2026-10-07).
   const tail = deflected || env.status === "needs-clarification" || opts.audience === "group" ? [] : [FOMO_ATTRIBUTION];
@@ -1164,7 +1195,7 @@ export function renderAnswer(envs: readonly FomoEnvelope[], plan: FomoQuestionPl
   if (plan?.clarification) return plan.clarification;
   if (!envs.length) return finalize("Nothing was looked up.", opts.audience);
   if (opts.audience === "group" && envs.some(needsDirectMessage)) return GROUP_DM_DEFLECTION;
-  const view = viewOf(plan);
+  const view = withSayable(viewOf(plan), opts);
   const lines: string[] = [];
   if (plan?.rowAsk) lines.push(...rowAnswerLines(envs, plan, opts.audience, opts.now, view));
   else {

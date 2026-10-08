@@ -808,7 +808,13 @@ Surface limits:
   Merrymen watches or follows them: the room's render leaves out the watched-cohort line,
   any note about that record, and the profile P&L figures (they are read from that record
   when it has one, so whether a room saw them would say who it watches). A trader's own
-  theses, the owner's own research state and the watch list stay in a DM. Lines pass the group gate as
+  theses, the owner's own research state and the watch list stay in a DM. Every line about
+  one trader names them on the line itself ("Largest held by X: …", "• X bought …",
+  "Positions of X …"), and a handle the group gate would refuse (an id run such as
+  "user84729374", a link such as "john.eth") is said as "an unnamed trader" everywhere, the
+  board row included: the port asks the gate before anything is rendered
+  (`tg-fomo-port.ts sayableTraderHandle`), so a dropped name never leaves a trader's lines
+  reading as the trader above's (rule 5). Lines pass the group gate as
   `research` (every clause but money), with money in short form ($151.4k) and four rows a
   board. Boards cover every chain by default (Milla, 2026-10-07); asked for one ("robinhood
   coins", "on base", "solana ones") the board is cut to that chain from the same read, at

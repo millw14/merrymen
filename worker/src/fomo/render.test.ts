@@ -129,7 +129,7 @@ describe("renderEnvelope", () => {
     assert.notEqual(group, GROUP_DM_DEFLECTION);
     assert.deepEqual(group.split("\n"), [
       "frankdegods on Fomo holds 1 coin worth $3.1k (provider-reported snapshot, valued at current prices).",
-      "Largest: PONS on robinhood $3.1k.",
+      "Largest held by frankdegods: PONS on robinhood $3.1k.",
       "Holdings are a snapshot valued at current prices: a change in value can be price, not buying.",
     ]);
     assert.doesNotMatch(group, /cohort|watched|follow|P&L|12,000|\$12k|6dcf7c78/i);
@@ -159,8 +159,8 @@ describe("renderEnvelope", () => {
     const e = env("fomo_get_trader_activity", "ok", act, { subject: { kind: "trader", trader: act.trader } });
     assert.deepEqual(renderEnvelope(e, G).split("\n"), [
       "frankdegods in the last 7d: 1 buy and 0 sells in the feed.",
-      "• bought PONS on robinhood 2m ago, fill $1.2M (matched on chain)",
-      "Positions (provider-reported): PONS open (cost $3k, $0 realised, +$121 not yet realised).",
+      "• frankdegods bought PONS on robinhood 2m ago, fill $1.2M (matched on chain)",
+      "Positions of frankdegods (provider-reported): PONS open (cost $3k, $0 realised, +$121 not yet realised).",
     ]);
     assert.match(renderEnvelope(e, O), /frankdegods on Fomo in the last 7d: 1 buy/);
   });

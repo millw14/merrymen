@@ -101,6 +101,11 @@ export interface AnswerFomoInput {
    * answer it about the whole feed (tg-fomo-port.ts looseCoin).
    */
   wanted?: (plan: FomoQuestionPlan) => boolean;
+  /**
+   * A group only: whether a trader's handle may be said in the room
+   * (render.ts RenderOptions.sayableHandle; the port asks the group gate).
+   */
+  sayableHandle?: (handle: string) => boolean;
 }
 
 export type AnswerFomoResult =
@@ -370,7 +375,8 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
 
   // 7. The answer.
   const analysis = plan.analysisRequested && !plan.infoOnly;
-  const deterministic = renderAnswer(envelopes, plan, { audience, maxChars, now });
+  const sayableHandle = audience === "group" && typeof input.sayableHandle === "function" ? input.sayableHandle : undefined;
+  const deterministic = renderAnswer(envelopes, plan, { audience, maxChars, now, ...(sayableHandle ? { sayableHandle } : {}) });
   let text = deterministic;
   // A composer writes only from evidence that exists: with no answering envelope the honest text is the deterministic one.
   if (analysis && input.compose && answered.length > 0) {

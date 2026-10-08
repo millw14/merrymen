@@ -55,6 +55,7 @@ import {
   looseCoin,
   ownerMoves,
   requestText,
+  sayableTraderHandle,
   tgGroupConversationKey,
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
@@ -82,7 +83,9 @@ interface Setup {
   clock: { now: number };
 }
 
-async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean } = {}): Promise<Setup> {
+interface SetupCaps { groupHourlyCredits?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean; leaderboard?: () => Rec; search?: () => Rec }
+
+async function setup(caps: SetupCaps = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await fstore.ensureFomoSchema(db, "sqlite");
@@ -93,7 +96,7 @@ async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; 
     provider.push(u.pathname);
     const p = u.pathname;
     if (p === "/v2/tokens/search") return json(fixture("tokens-search"));
-    if (p === "/v2/search") return json(fixture("search"));
+    if (p === "/v2/search") return json(caps.search ? caps.search() : fixture("search"));
     if (p === "/v2/alerts") {
       const b = fixture("alerts");
       const shift = clock.now - 60_000 - ALERTS_NEWEST;
@@ -113,7 +116,7 @@ async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec; 
     if (p.startsWith("/v2/leaderboard/tokens/")) return json(caps.trending ? caps.trending() : fixture("token-board-trending"));
     if (p.startsWith("/v2/leaderboard/")) {
       // The board answers for the window asked, captured a minute ago.
-      return json({ ...fixture("leaderboard-24h"), window: p.split("/").pop(), capturedAt: new Date(clock.now - 60_000).toISOString() });
+      return json({ ...(caps.leaderboard ? caps.leaderboard() : fixture("leaderboard-24h")), window: p.split("/").pop(), capturedAt: new Date(clock.now - 60_000).toISOString() });
     }
     return json({ error: "not_found" }, 404);
   }) as typeof fetch;
@@ -234,7 +237,7 @@ describe("createTgFomoPort", () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
     const asks: Array<[string, string, Record<string, unknown>, RegExp]> = [
-      ["who is trader CryptoKaleo on fomo?", "fomo_get_trader_context", { trader: "CryptoKaleo" }, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(source-reported snapshot, valued at current prices\)\.\nLargest: PONS on robinhood \$3\.1k, FU2O on solana \$13\./],
+      ["who is trader CryptoKaleo on fomo?", "fomo_get_trader_context", { trader: "CryptoKaleo" }, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(source-reported snapshot, valued at current prices\)\.\nLargest held by CryptoKaleo: PONS on robinhood \$3\.1k, FU2O on solana \$13\./],
       ["what is @CryptoKaleo holding on fomo?", "fomo_get_trader_context", { trader: "CryptoKaleo" }, /^CryptoKaleo on Fomo holds 2 coins/],
       ["what has @CryptoKaleo bought on fomo this week?", "fomo_get_trader_activity", { trader: "CryptoKaleo", side: "buy", window: "7d" }, /^CryptoKaleo in the last 7d: \d+ buys? and 0 sells in the feed\./],
       ["what did trader CryptoKaleo make money on on fomo today?", "fomo_get_trader_activity", { trader: "CryptoKaleo", window: "24h", limit: 50 }, /^CryptoKaleo on trades opened or closed in the last 24h \(source-reported, realised to date\): made the most on ROO \+\$4\.2k; lost the most on plumber -\$10\.9k\./],
@@ -842,21 +845,61 @@ describe("every room line about one trader passes the group gate as it is sent (
     for (const want of [
       /^CryptoKaleo on Fomo holds 42 coins worth at least \$1\.2M \(source-reported snapshot, valued at current prices\)\.$/m,
       /Fomo caps holdings at about 100 rows, so the total is a floor, not everything they hold\./,
-      /^Largest: PONS on robinhood \$1\.2M, a coin on an unknown chain \(value unknown\)\.$/m,
+      /^Largest held by CryptoKaleo: PONS on robinhood \$1\.2M, a coin on an unknown chain \(value unknown\)\.$/m,
       /^CryptoKaleo on Fomo shows no holdings in Fomo's snapshot/m,
       /^CryptoKaleo on Fomo: the holdings snapshot could not be read\.$/m,
-      /^That handle is one they used before; the account has since renamed\.$/m,
+      /^CryptoKaleo is a handle they used before; the account has since renamed\.$/m,
       /^No matching records were returned for CryptoKaleo in the last 24h\. That is not proof they did not trade: the feed only shows large positions\.$/m,
       /^CryptoKaleo in the last 24h: 2 buys and 1 sell in the feed, plus 3 transfers \(not purchases\)\.$/m,
-      /^• bought PONS on robinhood 2 min ago, fill \$1\.2M \(verified by Merrymen\)$/m,
-      /^• sold PONS on robinhood 2 min ago, fill size unknown \(matched on chain\)$/m,
-      /^• fill: buy \$2\.3M just now \(source-reported\)$/m,
-      /^Positions \(source-reported\): PONS open \(cost \$2\.5M, \$0 realised, \+\$1\.2M not yet realised\); GIFT closed, received by transfer \(not bought\); ROO closed \(cost \$2\.5M, -\$10\.9k realised\)\.$/m,
+      /^• CryptoKaleo bought PONS on robinhood 2 min ago, fill \$1\.2M \(verified by Merrymen\)$/m,
+      /^• CryptoKaleo sold PONS on robinhood 2 min ago, fill size unknown \(matched on chain\)$/m,
+      /^• fill for CryptoKaleo: bought \$2\.3M just now \(source-reported\)$/m,
+      /^Positions of CryptoKaleo \(source-reported\): PONS open \(cost \$2\.5M, \$0 realised, \+\$1\.2M not yet realised\); GIFT closed, received by transfer \(not bought\); ROO closed \(cost \$2\.5M, -\$10\.9k realised\)\.$/m,
       /^CryptoKaleo on trades opened or closed in the last 24h \(source-reported, realised to date\): made the most on PONS \+\$4\.2k, ROO \+\$900, CASH \+\$12; lost the most on WORSE -\$1\.2M, DOWN -\$10\.9k\.$/m,
       /^CryptoKaleo: nothing realised either way on trades on record \(source-reported\)\.$/m,
       /^That board has no 3rd trader\.$/m,
       /^I couldn't look up the 1st trader on that board\.$/m,
     ]) assert.match(all, want);
+  });
+
+  it("a handle the gate refuses ('user84729374', 'john.eth') is 'an unnamed trader' on every line, and no line about them is left without whose it is (review r2)", () => {
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    for (const handle of ["user84729374", "john.eth"]) {
+      // The gate refuses the name itself (an id run; a link), so a line that carried it alone would be dropped.
+      assert.equal(sayableTraderHandle(handle), false, handle);
+      assert.equal(admitTgLine(`${handle} on Fomo holds 2 coins worth $3.1k.`, research).ok, false, handle);
+      const who = { ...KALEO, handle };
+      const quiet = { pagesRequested: 1, pagesReturned: 1, itemsReturned: 1, duplicatesRemoved: 0, providerTotal: 1, capped: false, missing: [], notes: [], requested: {}, achieved: {} };
+      const sayAs = (envs: FomoEnvelope[], plan: Partial<FomoQuestionPlan>) =>
+        groupScrub(groupWords(groupScrub(renderAnswer(envs, { intent: "trader-holdings", clarification: null, ...plan } as FomoQuestionPlan, { audience: "group", maxChars: 2_000, now: NOW, sayableHandle: sayableTraderHandle }))));
+      const ctx = envOf("fomo_get_trader_context", { ...holdings(2, [{ token: T, symbol: "PONS", chain: "robinhood", amount: 1, priceUsd: 1, valueUsd: 1_234_567, change24hPct: null, robinhood: true }]), trader: who }, { subject: { kind: "trader", trader: who }, coverage: quiet });
+      const act = envOf("fomo_get_trader_activity", activity({
+        trader: who,
+        positions: [pos("PONS", 0, { status: "open" })],
+        fills: [{ swapId: "s", side: "buy", token: T, tokenAmount: 1, usd: 250_000, at: NOW - 60_000 }],
+        events: [{ evidenceId: "e0", kind: "buy", trader: who, token: T, label: { symbol: "PONS", name: null }, fillUsd: 250_000, positionValueUsd: 1, positionRealizedPnlUsdCumulative: 1, at: NOW - 120_000, verification: "provider-reported", source: "rest-lookup", inCohort: false }],
+      }), { subject: { kind: "trader", trader: who }, coverage: quiet });
+      const rows = envOf("fomo_get_rankings", { board: "traders", window: "24h", basis: "x", tokens: [], traders: [{ rank: 1, trader: KALEO, pnlUsd: 151_383, volumeUsd: null, trades: null, inCohort: false }, { rank: 2, trader: who, pnlUsd: 90_000, volumeUsd: null, trades: null, inCohort: false }] }, { subject: { kind: "market" }, coverage: quiet });
+      for (const [envs, plan] of [
+        [[ctx], { intent: "trader-holdings" }],
+        [[act], { intent: "trader-activity" }],
+        [[rows, ctx], { intent: "rankings-traders", rowAsk: { rank: 2, about: "holdings" } }],
+        [[rows, act], { intent: "rankings-traders", rowAsk: { rank: 2, about: "trades" } }],
+      ] as Array<[FomoEnvelope[], Partial<FomoQuestionPlan>]>) {
+        const text = sayAs(envs, plan);
+        const kept = text.split("\n").filter(Boolean).filter((l) => admitTgLine(l, research).ok);
+        assert.doesNotMatch(text, new RegExp(handle.replace(".", "\\.")), text);
+        // What the room hears: every detail line names whose it is on the line itself.
+        for (const l of kept.filter((x) => /^(?:Largest|•|Positions)/.test(x))) assert.match(l, /an unnamed trader/, `${handle}: ${l}`);
+        assert.ok(kept.some((l) => /^an unnamed trader\b/.test(l)), text);
+        assert.equal(kept.length, text.split("\n").filter(Boolean).length, `every line admitted: ${text}`);
+        if (plan.rowAsk) assert.ok(kept.includes("2. an unnamed trader +$90k"), text);
+        // No "ask: what did trader X make money on" for a trader with no name.
+        assert.doesNotMatch(text, /what did trader/, text);
+      }
+    }
+    // A handle the gate admits is said as it is, on every line.
+    assert.equal(sayableTraderHandle("CryptoKaleo"), true);
   });
 
   it("a thesis, a perp, a listing or 'other' is never a room's trade bullet", () => {
@@ -866,8 +909,9 @@ describe("every room line about one trader passes the group gate as it is sent (
       events: kinds.map((kind, i) => ({ evidenceId: `e${i}`, kind, trader: KALEO, token: T, label: { symbol: "PONS", name: null }, fillUsd: null, positionValueUsd: null, positionRealizedPnlUsdCumulative: null, at: NOW - 60_000 * (i + 1), verification: "provider-reported", source: "rest-lookup", inCohort: false })),
     }))], { intent: "trader-activity" });
     const bullets = text.split("\n").filter((l) => l.startsWith("• "));
-    assert.deepEqual(bullets.map((l) => l.split(" ")[1]), ["bought", "sold"], text);
-    assert.doesNotMatch(text, /^• (?:thesis|perp|listing|other)\b/m, text);
+    assert.deepEqual(bullets.map((l) => l.split(" ")[2]), ["bought", "sold"], text);
+    assert.ok(bullets.every((l) => l.startsWith("• CryptoKaleo ")), text);
+    assert.doesNotMatch(text, /^• (?:CryptoKaleo )?(?:thesis|perp|listing|other)\b/m, text);
     for (const l of text.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
   });
 
@@ -1223,8 +1267,8 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
   });
 
   /** The room, with the group model scripted: routing picks, then persona lines, in order. */
-  async function world() {
-    const s = await setup({ trending: () => incidentBoard() });
+  async function world(caps: SetupCaps = {}) {
+    const s = await setup({ trending: () => incidentBoard(), ...caps });
     let clock = Date.UTC(2026, 9, 7, 22, 59);
     s.clock.now = clock;
     store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
@@ -1362,6 +1406,40 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     const which = await w.say("shogun what's he holding?", undefined, 2 * 60_000);
     assert.equal(which, "Which one on the board: the 1st or 2nd?");
     assert.ok(admitTgLine(which, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+  });
+
+  it("row 2 with a handle the gate refuses, asked for holdings or trades, or named: no holdings or trade line reaches the room without whose it is (review r2)", async () => {
+    const FRANK_ID = "6dcf7c78-2537-522a-8307-3f9970c081be";
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    for (const handle of ["user84729374", "john.eth"]) {
+      const board = () => {
+        const b = fixture("leaderboard-24h");
+        b.traders = (b.traders as Rec[]).map((t) => (t.userId === FRANK_ID ? { ...t, handle } : t));
+        return b;
+      };
+      const search = () => ({ results: [{ type: "trader", handle, userId: FRANK_ID, displayName: "frank", pnlUsd: -4210.5, volumeUsd: 88000, followers: 1, wallets: {}, verified: false }] });
+      const asks = [
+        "@Merrymanme_bot who's the 2nd best trader on fomo today and what's he holding",
+        "@Merrymanme_bot who's the 2nd best trader on fomo today and what has he been trading",
+        // "john.eth" is no handle the planner or a routed request names (requestText's handle shape): only a board row reaches it.
+        ...(handle === "user84729374" ? [`@Merrymanme_bot what is trader ${handle} holding on fomo?`] : []),
+      ];
+      if (handle === "john.eth") assert.equal(requestText({ kind: "trader", handle, about: "holdings" } as never), null);
+      for (const ask of asks) {
+        const w = await world({ leaderboard: board, search });
+        const out = await w.say(ask, undefined, 60_000, OWNER_ID + 1);
+        const lines = out.split("\n").filter(Boolean);
+        assert.ok(lines.length > 0, ask);
+        for (const l of lines) assert.ok(admitTgLine(l, research).ok, `${ask}: ${l}`);
+        assert.ok(lines.some((l) => /^an unnamed trader\b/.test(l)), `${ask}:\n${out}`);
+        for (const l of lines.filter((x) => /^(?:Largest|•|Positions)/.test(x))) assert.match(l, /an unnamed trader/, `${ask}: ${l}`);
+        assert.doesNotMatch(out, /frankdegods|^Largest: |^• (?:bought|sold|fill:)/m, out);
+        if (!ask.includes("what is trader")) assert.ok(lines.includes("2. an unnamed trader -$4.2k"), out);
+        groups?.stop();
+        await groups?.drain();
+        store?.close();
+      }
+    }
   });
 
   it("a chain only the replied board's rows name never narrows 'send it?'", async () => {

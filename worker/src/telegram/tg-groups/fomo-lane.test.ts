@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { TG_FOMO_DEFLECTION } from "../../tg-fomo-port";
+import { createTgFomoPort, TG_FOMO_DEFLECTION } from "../../tg-fomo-port";
 import type { ResolvedConfig } from "../../settings";
 import type { FetchLike, TgMessage } from "../api";
 import type { StateRef, TelegramState } from "../state";
@@ -1457,4 +1457,77 @@ describe("fixed answers about itself, through the real handler (WP11; g1 b06, b1
     assert.deepEqual(desk!.asks, [], "never a market read");
     assert.equal(fomo!.asks.length, 1);
   });
+});
+
+describe("a trader whose handle the gate refuses is never named apart from their lines (review r2)", () => {
+  /**
+   * The real port, planner and renderer over a scripted broker: the board's
+   * 2nd row is a handle the room may not hear ("user84729374" is an id run to
+   * the gate, "john.eth" a link). Every line about that trader names them on
+   * the line itself, as "an unnamed trader", so nothing the gate drops leaves
+   * their holdings or trades under the trader above.
+   */
+  const KALEO = { userId: "1f08e6ab-5c73-5443-9225-bfc496cde51f", handle: "CryptoKaleo", displayName: null, verified: null };
+  const PONS = { key: "eip155:4663:0x39dbed3a00000000000000000000000000000c0d", chain: { namespace: "eip155", networkId: 4663, slug: "robinhood" }, address: "0x39dbed3a00000000000000000000000000000c0d" };
+  const envelope = (tool: string, data: unknown, subject: unknown) => ({
+    requestId: `r-${tool}`, tool, status: "ok", subject, candidates: [], data, evidence: [],
+    freshness: { policy: "activity", mode: "prefer-fresh", retrievedAt: clock, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: clock, lastRefreshOutcome: "ok", cacheAgeMs: 0, servedFrom: "live" },
+    coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 1, duplicatesRemoved: 0, providerTotal: 1, capped: false, missing: [], notes: [] },
+    usage: { providerCalls: 1, cacheHits: 0, creditsCharged: 250, creditsRemaining: null }, dossierRevision: null, reason: null, message: null,
+  });
+  const brokerFor = (handle: string) => {
+    const who = { userId: "6dcf7c78-2537-522a-8307-3f9970c081be", handle, displayName: null, verified: null };
+    const mem = new Map<string, string>();
+    const calls: string[] = [];
+    const broker = {
+      call: async (tool: string, args: Record<string, unknown>) => {
+        calls.push(tool);
+        if (tool === "fomo_get_rankings") {
+          return envelope(tool, { board: "traders", window: "24h", basis: "x", tokens: [], traders: [{ rank: 1, trader: KALEO, pnlUsd: 151_383, volumeUsd: null, trades: null, inCohort: false }, { rank: 2, trader: who, pnlUsd: 90_000, volumeUsd: null, trades: null, inCohort: false }] }, { kind: "market" });
+        }
+        const subject = { kind: "trader", trader: args.trader === KALEO.userId ? KALEO : who };
+        if (tool === "fomo_get_trader_context") {
+          return envelope(tool, { trader: subject.trader, formerHandle: true, focus: "context", cohort: null, profile: null, holdings: { rows: [{ token: PONS, symbol: "PONS", chain: "robinhood", amount: 1, priceUsd: 1, valueUsd: 1_200_000, change24hPct: null, robinhood: true }], rowsTotal: 2, truncated: false, totalValueUsdFloor: 1_250_000, complete: true, dropped: 0, byChain: [] } }, subject);
+        }
+        return envelope(tool, {
+          trader: subject.trader, token: null, window: "24h", side: null, sources: ["positions", "feed"],
+          positions: [{ tradeId: "t1", token: PONS, label: { symbol: "PONS", name: null }, status: "open", costBasisUsd: 250_000, realizedPnlUsd: 0, unrealizedPnlUsd: 1_000, boughtAmount: 1, soldAmount: 0, transferredInAmount: 0, transferredOutAmount: 0, openedAt: clock - 120_000, closedAt: null, source: "feed" }],
+          fills: [{ swapId: "s1", side: "buy", token: PONS, tokenAmount: 1, usd: 250_000, at: clock - 120_000 }],
+          events: [{ evidenceId: "e1", kind: "buy", trader: subject.trader, token: PONS, label: { symbol: "PONS", name: null }, fillUsd: 250_000, positionValueUsd: null, positionRealizedPnlUsdCumulative: null, at: clock - 120_000, verification: "provider-reported", source: "rest-lookup", inCohort: false }],
+          counts: { buys: 1, sells: 0, transfers: 0, other: 0 },
+        }, subject);
+      },
+      memory: { get: async (k: string) => mem.get(k) ?? null, set: async (k: string, j: string) => void mem.set(k, j), clear: async (k: string) => void mem.delete(k) },
+      report: async () => {},
+      configured: () => true,
+    };
+    return { broker: broker as never, calls };
+  };
+
+  for (const handle of ["user84729374", "john.eth"]) {
+    for (const [ask, about] of [
+      ["pine who's the 2nd best trader on fomo today and what's he holding", "holdings"],
+      ["pine who's the 2nd best trader on fomo today and what has he been trading", "trades"],
+      ...(handle === "user84729374" ? [[`pine what is trader ${handle} holding on fomo?`, "named"]] : []),
+    ] as Array<[string, string]>) {
+      it(`${handle}, ${about}: the room hears "an unnamed trader" on the header and on every holdings or trade line`, async () => {
+        const b = brokerFor(handle);
+        const port = createTgFomoPort(() => b.broker, { now: () => clock });
+        make({ fomo: () => port });
+        await said(msg(ask));
+        const out = tg.texts(CHAT);
+        assert.equal(out.length, 1, out.join("\n---\n"));
+        const lines = out[0]!.split("\n");
+        for (const l of lines) assert.ok(admitTgLine(l, { agentName: BOT.name, kind: "research", recentOwn: [] }).ok, l);
+        assert.ok(lines.some((l) => /^an unnamed trader\b/.test(l)), out[0]);
+        // No "Largest:" or bullet reaches the room without the subject on the same line.
+        const detail = lines.filter((l) => /^(?:Largest|•|Positions)/.test(l));
+        assert.ok(detail.length > 0, out[0]);
+        for (const l of detail) assert.match(l, /an unnamed trader/, l);
+        assert.doesNotMatch(out[0]!, /^Largest: |^• (?:bought|sold|fill:)/m, out[0]);
+        assert.ok(!out[0]!.includes(handle), out[0]);
+        if (about !== "named") assert.ok(lines.includes("2. an unnamed trader +$90k"), out[0]);
+      });
+    }
+  }
 });

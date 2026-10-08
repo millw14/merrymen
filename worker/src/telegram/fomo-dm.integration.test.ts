@@ -665,7 +665,7 @@ describe("one trader asked about in a group: answered in the room, for her as fo
       assert.deepEqual(h.fx.calls.map((c) => [c.tool, c.args]), [["fomo_get_trader_context", { trader: "CryptoKaleo" }]], "one read; nothing that changes anything");
       const room = h.sentTo(GROUP);
       assert.equal(room.length, 1);
-      assert.match(room[0]!, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(source-reported snapshot, valued at current prices\)\.\nLargest: PONS on robinhood \$3\.1k, FU2O on solana \$13\./);
+      assert.match(room[0]!, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(source-reported snapshot, valued at current prices\)\.\nLargest held by CryptoKaleo: PONS on robinhood \$3\.1k, FU2O on solana \$13\./);
       assert.doesNotMatch(room[0]!, /cohort|watched|follow|@|0x[0-9a-fA-F]{6}/i);
       await roomOnly(h);
     });

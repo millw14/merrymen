@@ -363,7 +363,7 @@ describe("answerFomoQuestion", () => {
     assert.ok(r.handled);
     assert.notEqual(r.text, GROUP_DM_DEFLECTION);
     assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args, c.opts.audience]), [["fomo_get_trader_context", { trader: "CryptoKaleo" }, "group"]]);
-    assert.match(r.text, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(provider-reported snapshot, valued at current prices\)\.\nLargest: PONS on robinhood \$3\.1k, FU2O on solana \$13\./);
+    assert.match(r.text, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(provider-reported snapshot, valued at current prices\)\.\nLargest held by CryptoKaleo: PONS on robinhood \$3\.1k, FU2O on solana \$13\./);
     assert.doesNotMatch(r.text, /cohort|watched|follow|P&L|@|0x[0-9a-f]{6}|\$PONS/i, "never who Merrymen watches, never an owner-side figure or an address");
     // The owner's own answer about the same trader keeps its detail.
     const owner = await s.ask("what is @CryptoKaleo holding?");

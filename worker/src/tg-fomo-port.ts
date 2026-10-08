@@ -49,6 +49,7 @@ import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
+import { admitTgLine } from "./telegram/tg-groups/gate";
 import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgThesesMaterial } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
@@ -450,6 +451,18 @@ export function groupWords(text: string): string {
     .join("\n");
 }
 
+/**
+ * WHETHER A TRADER'S HANDLE MAY BE SAID IN A ROOM, judged by the group line
+ * gate itself, as the handler will judge each line (a `research` line). A
+ * handle it refuses ("user84729374" is an id run, "john.eth" a link) is
+ * rendered "an unnamed trader" (render.ts sayableHandle), so the gate never
+ * drops a trader's name while keeping the lines about them, which would read
+ * as the trader named above.
+ */
+export function sayableTraderHandle(handle: string): boolean {
+  return admitTgLine(`${handle} on Fomo`, { agentName: "", kind: "research", recentOwn: [] }).ok;
+}
+
 const isUsableChatId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v !== 0;
 
 /** The handler's selfNamesOf list, bounded: strings only, at most 16 of 64 characters. */
@@ -577,6 +590,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           maxChars,
           selfNames,
           ...(wanted ? { wanted } : {}),
+          sayableHandle: sayableTraderHandle,
         }).finally(() => bounded.done());
         if (!r.handled) {
           if (loose) log("[tg-fomo] group ask left to the router (a coin the planner could not place)");
