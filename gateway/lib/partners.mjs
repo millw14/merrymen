@@ -32,7 +32,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 
 /** Where the Railway volume is mounted. Same variable lib/signups.mjs uses. */
@@ -194,9 +194,49 @@ export async function loadRegistry() {
   return byId;
 }
 
+/**
+ * Cut a JSONL file back to its last complete line. Returns the bytes removed.
+ *
+ * A write that dies part-way (a full volume, a container killed mid-append)
+ * leaves a line with no newline. Skipping it on read is not enough: the NEXT
+ * append is glued onto the fragment, and that whole merged line, a record that
+ * was acknowledged, then fails to parse. In this registry the record lost that
+ * way is typically a revocation, and the key it revoked comes back. Shared with
+ * the billing ledger (lib/billing.mjs), which has the same failure with money.
+ */
+export async function repairTail(file) {
+  let fh;
+  try { fh = await open(file, "r+"); } catch (err) { if (err.code === "ENOENT") return 0; throw err; }
+  try {
+    const { size } = await fh.stat();
+    if (size === 0) return 0;
+    const last = Buffer.alloc(1);
+    await fh.read(last, 0, 1, size - 1);
+    if (last[0] === 0x0a) return 0;
+    let keep = 0;
+    const chunk = Buffer.alloc(64 * 1024);
+    for (let end = size; end > 0;) {
+      const start = Math.max(0, end - chunk.length);
+      const { bytesRead } = await fh.read(chunk, 0, end - start, start);
+      const nl = chunk.subarray(0, bytesRead).lastIndexOf(0x0a);
+      if (nl >= 0) { keep = start + nl + 1; break; }
+      end = start;
+    }
+    await fh.truncate(keep);
+    await fh.sync();
+    return size - keep;
+  } finally {
+    await fh.close();
+  }
+}
+
 /** Append a record. Creating and revoking are the same operation on this file. */
 export async function writeRecord(rec) {
   await mkdir(DIR(), { recursive: true });
+  // Before every append, not only the first: the CLI writes this file too, and
+  // a torn line it leaves would otherwise swallow the gateway's next record.
+  const removed = await repairTail(FILE());
+  if (removed) console.error(`[partners] partners.jsonl ended in a torn line: removed ${removed} bytes before appending`);
   // flush:true for the same reason signups.mjs does it: a container can stop
   // between the write and the flush, and a revocation is exactly the write that
   // must not be the one that is lost.
@@ -257,7 +297,11 @@ export function createPartners({ secret, ttlMs = REGISTRY_TTL_MS, now = () => Da
       if (!rec.hash || !sameHash(rec.hash, hashSecret(secret, parsed.secret))) {
         return { ok: false, status: 401, code: "unauthorized" };
       }
-      return { ok: true, key: { keyId: rec.keyId, appId: rec.appId, name: rec.name, scopes: rec.scopes, rpm: rec.rpm } };
+      // owner and created_at are for metering (lib/billing.mjs): who a request
+      // counts against, and where a Free owner's usage window is anchored. An
+      // operator key has no owner and is never metered.
+      return { ok: true, key: { keyId: rec.keyId, appId: rec.appId, name: rec.name, scopes: rec.scopes, rpm: rec.rpm,
+        owner: rec.owner, created_at: rec.created_at } };
     },
 
     /** Does this verified key carry `scope`? */

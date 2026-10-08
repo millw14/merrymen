@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -13,7 +13,7 @@ const dir = await mkdtemp(path.join(tmpdir(), "merrymen-partners-"));
 process.env.MERRYMEN_DATA_DIR = dir;
 delete process.env.MERRYMEN_PARTNER_KEYS;
 
-const { createPartners, hashSecret, loadRegistry, makeKey, parseKey, writeRecord, SCOPES, DEFAULT_SCOPES } =
+const { createPartners, hashSecret, loadRegistry, makeKey, parseKey, repairTail, writeRecord, SCOPES, DEFAULT_SCOPES } =
   await import("./partners.mjs");
 
 const SECRET = "x".repeat(40);
@@ -163,4 +163,44 @@ test("parseKey splits only well-formed keys", () => {
   const { key, keyId, secret } = makeKey();
   assert.deepEqual(parseKey(` ${key} `), { keyId, secret });
   assert.equal(parseKey("mmp_UPPERCASEID_xxxxxxxxxxxxxxxx"), null);
+});
+
+test("verify names the key's owner and creation time, so a request can be metered to its wallet", async () => {
+  const { key, keyId, secret } = makeKey();
+  const owner = `0x${"Ab".repeat(20)}`;
+  await writeRecord({ keyId, name: "owned", owner, hash: hashSecret(SECRET, secret), scopes: ["read:agents"],
+    status: "active", created_at: "2026-10-01T12:00:00.000Z" });
+  const v = await createPartners({ secret: SECRET }).verify(key);
+  assert.equal(v.key.owner, owner.toLowerCase());
+  assert.equal(v.key.created_at, "2026-10-01T12:00:00.000Z");
+  // An operator key belongs to no wallet: null, which billing never meters.
+  const operator = await issue({ name: "operator" });
+  assert.equal((await createPartners({ secret: SECRET }).verify(operator.key)).key.owner, null);
+});
+
+test("a torn final line is cut before the next append, so a revocation after it is not lost", async () => {
+  const { key, keyId } = await issue({ name: "torn" });
+  const rec = (await loadRegistry()).get(keyId);
+  // A write that died part-way: the first half of a record and no newline.
+  await appendFile(FILE, '{"keyId":"half-writ');
+  await writeRecord({ ...rec, status: "revoked" });
+  const raw = await readFile(FILE, "utf8");
+  assert.ok(raw.endsWith("\n") && !raw.includes("half-writ"), "the fragment must be removed, not glued to");
+  const v = await createPartners({ secret: SECRET }).verify(key);
+  assert.equal(v.ok, false, "the revocation written after a torn line must take effect");
+  assert.equal(v.code, "key_revoked");
+});
+
+test("repairTail keeps a file that ends cleanly, and empties one with no complete line", async () => {
+  const clean = path.join(dir, "clean.jsonl"), torn = path.join(dir, "torn.jsonl"), none = path.join(dir, "none.jsonl");
+  await writeFile(clean, '{"a":1}\n{"b":2}\n');
+  await writeFile(torn, '{"a":1}\n{"b":');
+  await writeFile(none, "x".repeat(70_000)); // longer than one read chunk, and no newline anywhere
+  assert.equal(await repairTail(clean), 0);
+  assert.equal(await readFile(clean, "utf8"), '{"a":1}\n{"b":2}\n');
+  assert.equal(await repairTail(torn), 5);
+  assert.equal(await readFile(torn, "utf8"), '{"a":1}\n');
+  assert.equal(await repairTail(none), 70_000);
+  assert.equal(await readFile(none, "utf8"), "");
+  assert.equal(await repairTail(path.join(dir, "missing.jsonl")), 0);
 });
