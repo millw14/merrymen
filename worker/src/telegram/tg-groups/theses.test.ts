@@ -340,6 +340,9 @@ describe("checkWording", () => {
       "fears the team walked away with the money", "the team is a bunch of liars", "a cash grab by the team", "Ansem dumped on his followers",
       "a caller sold on his followers", "the devs made off with the funds", "the team vanished with the treasury", "fears insider trading by the team",
       "Elon Musk backs it", "CZ shilled it", "hyped by Ansem and friends", "a call from McAfee",
+      // A name opening the phrase, and an account to follow (review r4).
+      "Ansem is backing it", "Elon tweeted the meme", "Vitalik dislikes it", "Ansem backs it", "Musk likes the meme", "Ansem's been shilling it",
+      "Murad has been backing it", "follow ponsdev on x for the alpha", "follow the dev on twitter for updates",
     ]) {
       const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
       assert.equal(w.gist, null, x);
@@ -349,6 +352,10 @@ describe("checkWording", () => {
     const fair = ["hopes the Robinhood app picks it up", "rides the AI narrative", "Strong community on Telegram", "a cheaper bet than SOL memes", "the value lies in the meme", "the dev is lying low for now"];
     const kept = checkWording({ for: fair.slice(0, 3), against: fair.slice(3) }, MATERIAL, "Shogun").wording;
     assert.deepEqual([...kept.forIt, ...kept.against], fair);
+    // A plural, a common noun or a non-person verb opening the phrase is no name (review r4).
+    const opening = ["Liquidity is thin for its size", "Whales bought the dip early", "Hopes the Robinhood app picks it up", "Team bought back tokens", "Holders keep posting memes", "Community is strong"];
+    const kept2 = checkWording({ for: opening.slice(0, 3), against: opening.slice(3) }, MATERIAL, "Shogun").wording;
+    assert.deepEqual([...kept2.forIt, ...kept2.against], opening);
     assert.equal(checkWording({ gist: "Mostly the idea that it's the meme of Robinhood Chain on Fomo" }, MATERIAL, "Shogun").wording.gist, "Mostly the idea that it's the meme of Robinhood Chain on Fomo");
     assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
   });

@@ -1455,7 +1455,11 @@ stay worries, "fears it could collapse"; never the bare "lies" or "lying",
 so "the value lies in…" stays), no name of a person or account (a
 capitalised word past the first that is not the header's coin, chain or
 Fomo, nor a venue, chain, coin or common acronym such as Robinhood,
-Telegram, AI or SOL; a first word only when it is an acronym such as "CZ"),
+Telegram, AI or SOL; a first word when it is an acronym such as "CZ", or
+when it does what a person does, "Ansem is backing it", "Elon tweeted the
+meme", unless it reads as a plural or a common noun, "Whales bought the
+dip", "Liquidity is thin"; a name in lowercase is not caught by code and
+rests on the prompt alone), no account to follow ("follow ponsdev on x"),
 no trade advice in its voice (a trade
 verb opening the phrase or a clause, "get some before the listing", "still
 early, join in", "hold through the unlock", "never sell before the listing",

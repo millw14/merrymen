@@ -23,8 +23,9 @@
  * a presale, free tokens, someone to message; nothing waited on is a claim),
  * no crime laid at anyone's door (OUT_ACCUSE: theft, robbery, looting,
  * siphoning, swindling, fraud, deceit, faking, an arrest, a stolen or pulled
- * pool, laundering, wash trading, lying, a criminal), no name of a person or
- * account (namesSomeone), no trade advice in its voice (OUT_ADVICE),
+ * pool, laundering, wash trading, lying, a criminal), no capitalised name of
+ * a person or account (namesSomeone; a name in lowercase rests on the prompt
+ * alone), no account to follow, no trade advice in its voice (OUT_ADVICE),
  * and the group gate as an `answer` line,
  * never as `research`
  * (research admits "going to 10m" and "100x"; an answer does not, and its
@@ -168,7 +169,7 @@ const SELF_REF =
  * the team allocation").
  */
 const OUT_LURE =
-  /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
+  /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b|\bfollow\s+(?:the\s+|their\s+|its\s+|his\s+|her\s+)?\S+\s+on\s+(?:x|twitter|telegram|tg)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
 /**
  * A phrase that speaks to the room ("verify your wallet or lose your
  * allocation", "you're still early"): a summary of other people's claims
@@ -244,15 +245,32 @@ const PLAIN_TEXT_NOT = /[^\x20-\x7e‘’–—]/u;
  * the digest's header says it (the coin, its chain, Fomo) or it is a venue,
  * a chain, a coin or a common acronym. The first word may be sentence case
  * ("Mostly hype", "Strong community"); an acronym there may still be a name
- * ("CZ shilled it"). A false drop costs one phrase.
+ * ("CZ shilled it"), and so is a word there that does what a person does
+ * ("Ansem is backing it", "Elon tweeted the meme", "Vitalik dislikes it"),
+ * unless it reads as a plural or a common noun ("Whales bought the dip",
+ * "Liquidity is thin", "Team bought back tokens"). A name in lowercase
+ * ("murad keeps posting about it") is not caught by code: that rests on the
+ * prompt alone, and on the samples having no @handles. A false drop costs
+ * one phrase.
  */
 const NAME_OK: ReadonlySet<string> = new Set(
   ("robinhood solana base ethereum binance coinbase twitter x telegram discord ai us usa uk eu nft nfts defi lp cex dex eth btc sol bnb bsc evm " +
     "ath og kol kols ct tg ui ux api ca dev devs fomo chain " +
     "monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december").split(" "),
 );
+/** A first word, then what a person does: "Ansem is backing it", "Elon tweeted", "Vitalik dislikes it". */
+const FIRST_WORD_ACTS =
+  /^\s*(\p{Lu}\p{Ll}+)(?:['’]s)?\s+(?:(?:backs|backed|likes|liked|loves|loved|hates|hated|dislikes|disliked|tweeted|tweets|posted|posts|says|said|called|calls|shilled|shills|bought|buys|sold|sells|thinks|thought|holds|held|follows|followed|mentioned|mentions|endorsed|endorses|promoted|promotes|hyped|hypes|aped|apes)|(?:is|was|been|has\s+been|keeps|kept)\s+(?:backing|shilling|holding|buying|selling|posting|tweeting|calling|pushing|promoting|hyping|behind|in\s+on|all\s+in))\b/u;
+/** First words that are no one's name even when they do what a person does. */
+const NOT_A_NAME: ReadonlySet<string> = new Set(
+  ("team community everyone someone somebody nobody everybody anyone price chart volume supply liquidity market crowd project coin token meme " +
+    "founder founders insider insiders whale buyer seller holder trader caller money smart dev devs mostly").split(" "),
+);
 function namesSomeone(bare: string, m: TgThesesMaterial): boolean {
   const head = new Set(m.head.flatMap((l) => l.match(/[\p{L}\p{N}]+/gu) ?? []).map((w) => w.toLowerCase()));
+  const first = FIRST_WORD_ACTS.exec(bare)?.[1]?.toLowerCase();
+  // A plural ("Whales", "Holders") is no one's name; "Hayes said" is left to the prompt.
+  if (first && !NAME_OK.has(first) && !head.has(first) && !NOT_A_NAME.has(first) && !/[^s]s$/.test(first)) return true;
   const ws = bare.match(/[\p{L}\p{N}]+(?:['’][\p{L}]+)?/gu) ?? [];
   return ws.some((raw, i) => {
     const w = raw.replace(/['’]s$/iu, "");

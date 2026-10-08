@@ -378,11 +378,11 @@ const AT_THE_READER =
 /**
  * A lure, not a view: a claim page, a seed phrase, a wallet to connect,
  * verify, sync or revoke, tokens to migrate, a portal, something to sign,
- * eligible wallets, free tokens, someone to message or contact (the same
+ * eligible wallets, free tokens, someone to message, contact or follow (the same
  * shapes tg-groups/theses.ts OUT_LURE drops from what the model writes).
  */
 const LURE =
-  /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to|message|dm)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
+  /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b|\bfollow\s+(?:the\s+|their\s+|its\s+|his\s+|her\s+)?\S+\s+on\s+(?:x|twitter|telegram|tg)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to|message|dm)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
 /** A row about Merrymen itself ("the merrymen bot picked it") is about the agent, not the coin. */
 const ABOUT_MERRYMEN = /\bmerrym[ae]n\b/i;
 /**
