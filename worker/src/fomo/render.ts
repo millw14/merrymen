@@ -721,10 +721,13 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
     // coin with 4,190 theses had none). Only the provider's page itself
     // (pageRows): rows filtered off here (another chain's) are "none", said as
     // before, and only a coin's own read quotes its count; a trader's route
-    // total is not per trader and coin (review on #306).
-    const held = !d.trader && finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 && !env.coverage.requested.window ? env.coverage.providerTotal : null;
+    // total is not per trader and coin (review on #306). A windowed ask on
+    // such a page is the same: the window filtered nothing, the provider
+    // returned nothing; it is just never given the all-time figure.
+    const windowed = !!env.coverage.requested.window;
+    const held = !d.trader && finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 ? env.coverage.providerTotal : null;
     if (d.pageRows === 0 && (d.available === false || held !== null)) {
-      const count = held !== null ? ` (it lists ${held.toLocaleString("en-US")})` : "";
+      const count = held !== null && !windowed ? ` (it lists ${held.toLocaleString("en-US")})` : "";
       const line = `The provider didn't return the theses on ${subject} just now${count}. Ask me again in a minute.`;
       return [audience === "group" ? roomNote(line) : line];
     }

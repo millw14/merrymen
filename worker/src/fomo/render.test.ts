@@ -738,9 +738,19 @@ describe("a coin with no theses, in a room (review r2)", () => {
       for (const l of text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
       assert.match(renderEnvelope(e, O), /The provider didn't return the theses on/);
     }
-    // A windowed read that came back empty is still "none in that window", whatever the all-time count.
-    const windowed = env("fomo_get_token_theses", "empty", none, { coverage: { ...cov(4190).coverage, requested: { window: "24h" } } });
+    // A windowed read whose page had theses, none in the window, is still "none in that window", whatever the all-time count.
+    const windowed = env("fomo_get_token_theses", "empty", { ...none, pageRows: 25 }, { coverage: { ...cov(4190).coverage, requested: { window: "24h" } } });
     assert.match(renderEnvelope(windowed, G), /No theses were returned for PONS on robinhood in that window/);
+  });
+
+  it("a windowed ask on a page the provider answered empty under a count is 'didn't return', never 'none in that window' (review on #306)", () => {
+    const e = env("fomo_get_token_theses", "empty", { ...none, pageRows: 0 }, { coverage: { requested: { window: "24h" }, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 4190, capped: true, missing: [], notes: [] } });
+    const text = groupScrub(renderAnswer([e], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, G));
+    assert.match(text.split("\n")[0]!, /^Fomo didn't return the theses on PONS on robinhood just now\./, text);
+    assert.doesNotMatch(text, /No theses were returned|in that window/, text);
+    assert.doesNotMatch(text, /it lists/, "an all-time count is not the window's");
+    for (const l of text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
+    assert.match(renderEnvelope(e, O), /^The provider didn't return the theses on /);
   });
 
   it("only the provider's own empty page is 'didn't return': rows filtered off here, or a trader's read under a count, are 'none' as before (review on #306)", () => {
