@@ -48,8 +48,9 @@ describe("the tick's wiring", () => {
     assert.match(INDEX, /\.\.\.priceability\(quote, true, \{[\s\S]{0,400}?sampled: autonomous,\s*\}\)/);
   });
 
-  it("counts a held sampled coin's cost in the scout running total, except vault custody", () => {
-    assert.match(INDEX, /const sampledBudgeted = p\.priceSource === "sampled" && qMode === "live" && !autoTrenchBalances\.has\(p\.token\.toLowerCase\(\)\);/);
+  it("counts a held sampled coin's cost in the scout running total, paper or live, except vault custody", () => {
+    assert.match(INDEX, /const inVault = qMode === "live"\s*\? autoTrenchBalances\.has\(token\)\s*: !!autoTrench && !!active && !!grantTrencher\(active\.grant\) && !baseTokenAddress\(token\) &&\s*!!active\.limits\.knownTrencherAssets\?\.some/);
+    assert.match(INDEX, /const sampledBudgeted = p\.priceSource === "sampled" && !inVault;/);
     assert.match(INDEX, /if \(p\.priceSource !== "curve" && !sampledBudgeted\) continue;/);
   });
 
@@ -58,5 +59,7 @@ describe("the tick's wiring", () => {
     assert.match(INDEX, /ratchet\.paperPeak\(bookRow, usdgNum\(peakEquityUsdg\)/);
     assert.match(INDEX, /ratchet\.riskPeak\(usdgNum\(peakEquityUsdg\)/);
     assert.match(INDEX, /accrueAboveHwm\(peakEquityUsdg, highWaterMarkUsdg/);
+    // A held look still observes the breaker: on the same figure.
+    assert.match(INDEX, /breakerObservationUsdg: heldBreakerObservationUsdg\(\{[\s\S]{0,300}?equityUsdg: peakEquityUsdg,/);
   });
 });

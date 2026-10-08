@@ -11972,13 +11972,20 @@ async function main() {
     // its cost as zero. Before sampling such a coin had no price and stayed in
     // the quarantine at cost. Only the buys the gate budgeted count: a
     // Trencher vault holding (capped on chain) is exempt at the gate
-    // (scoutUnpriceableFor), so it is left out here too — on a paper book
-    // that is every sampled holding, since only the vault path buys them. A token
+    // (scoutUnpriceableFor), so it is left out here too — read from the vault
+    // on a live book, and on a paper one by the same test trenchOpen uses for
+    // a paper vault position. Every other sampled holding, paper included, was
+    // scout-gated and counts. A token
     // held both in the vault and the wallet is left out whole — the vault's
     // own cap bounds it, and the per-token cap still reads its basis.
     let curveCostUsdg = 0n;
     for (const p of positions) {
-      const sampledBudgeted = p.priceSource === "sampled" && qMode === "live" && !autoTrenchBalances.has(p.token.toLowerCase());
+      const token = p.token.toLowerCase();
+      const inVault = qMode === "live"
+        ? autoTrenchBalances.has(token)
+        : !!autoTrench && !!active && !!grantTrencher(active.grant) && !baseTokenAddress(token) &&
+          !!active.limits.knownTrencherAssets?.some((a) => a.toLowerCase() === token);
+      const sampledBudgeted = p.priceSource === "sampled" && !inVault;
       if (p.priceSource !== "curve" && !sampledBudgeted) continue;
       curveCostUsdg += (await getBasis(agentId, qMode, p.symbol)).costUsdg;
     }
@@ -12341,7 +12348,10 @@ async function main() {
           curveMarked: curveMarked.length,
           held: true,
           breakerObservationUsdg: heldBreakerObservationUsdg({
-            equityUsdg,
+            // The same figure every other peak is judged on: sampled holdings
+            // at min(mark, cost). A held look still observes the breaker, and
+            // raw equity here would let a sampled mark raise its peak.
+            equityUsdg: peakEquityUsdg,
             cashUsdg: balances.cashUsdg,
             expectedCashUsdg: await heldCashBaseline(agentId),
           }),
