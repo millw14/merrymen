@@ -355,6 +355,49 @@ describe("renderEnvelope", () => {
     assert.match(group, /1 author was seen acting against their written view/);
   });
 
+  it("a room hears no watched-trader figure in a coin read, a lead or a research answer; the owner keeps them (review r3)", () => {
+    const act: TokenActivityData = {
+      token: T, label: { symbol: "PONS", name: null }, window: "24h", side: null, cohortOnly: false, events: [
+        { evidenceId: "fomo:event/e1", kind: "buy", trader: { userId: FRANK, handle: "frankdegods" }, token: T, label: { symbol: "PONS", name: null }, fillUsd: 5_000, positionValueUsd: 5_000, positionRealizedPnlUsdCumulative: null, at: NOW - 60_000, verification: "provider-reported", source: "rest-lookup", inCohort: true },
+      ],
+      distinctBuyers: 1, distinctSellers: 0,
+      cohort: { buyers: [{ userId: FRANK, handle: "frankdegods", latestAction: "buy", at: NOW - 60_000 }], sellers: [], version: 1, size: 1 },
+      breadth: null, stats: null, localEvents: 0, restEvents: 1,
+    };
+    const a = env("fomo_get_token_activity", "ok", act);
+    assert.doesNotMatch(renderEnvelope(a, G), /watched|cohort|follow/i);
+    assert.match(renderEnvelope(a, O), /Watched traders: latest action buy/);
+    assert.doesNotMatch(renderEnvelope(env("fomo_get_token_activity", "ok", { ...act, token: null, label: null, cohortOnly: true } as TokenActivityData), G), /Watched traders/);
+    const lead = {
+      token: T, label: { symbol: "PONS", name: null }, marketCapUsd: 2_000_000, marketCapKnown: true,
+      signals: { cohortBuyers: 1, distinctBuyers: 1, latestBuyAt: NOW - 3_600_000, firstSeenInWindow: true, newThesis: false, boards: ["trending"] },
+      score: 6, executionAvailability: "unsupported-venue" as const, routeNote: null, evidence: [],
+    };
+    const opp = env("fomo_find_opportunities", "ok", { window: "24h", ranking: "early-signal", rows: [lead], filteredByMarketCap: 0 });
+    assert.doesNotMatch(renderEnvelope(opp, G), /watched|cohort/i);
+    assert.match(renderEnvelope(opp, O), /1 watched trader bought/);
+    const d: ResearchCoinData = {
+      token: T, label: { symbol: "PONS", name: null }, dossierId: "dsr_x", revision: 4, builtAt: NOW, focus: null,
+      strongestSupport: { claimKey: "action:momentum:supporting", stance: "supporting", summary: "Observed buying over 24h: 3 distinct traders bought and 0 sold, 1 of the buyers from the watched-trader cohort. Only positions above about $3,000 are visible.", support: "observed-action", familyCount: 3, authorCount: 3, quoted: null },
+      strongestOpposition: null,
+      claims: [], flow: { window: "24h", distinctBuyers: 3, distinctSellers: 0, cohortBuyers: 1, cohortSellers: 0, repeatAddsBySameTrader: 0, notes: [] },
+      wordsVsActions: [],
+      unknowns: ["Few theses."], changeConditions: ["Cohort sellers outnumber cohort buyers over 24h.", "A credible objection appears from more than one independent source."],
+      coverage: { uniqueTheses: 4, uniqueAuthors: 3, windowRequested: "24h", oldestSourceAt: null, newestSourceAt: null, providerTotal: 4, pagesRequested: 1, pagesReturned: 1, duplicatesRemoved: 0, sourceCaps: [], missingSections: [], limitations: [] },
+      changes: { comparable: true, noChange: false, changes: ["Cohort buyers: 0 → 1."], reason: null, sinceRevision: 3 } as never,
+      job: null, executionAvailability: "unsupported-venue",
+    };
+    const group = renderEnvelope(env("fomo_research_coin", "ok", d), G);
+    assert.doesNotMatch(group, /watched|cohort/i, group);
+    assert.match(group, /strongest case for: Observed buying over 24h: 3 distinct traders bought and 0 sold\. Only positions/);
+    assert.match(group, /What would change this view: A credible objection appears/);
+    assert.doesNotMatch(group, /Since revision 3/, "only a watched-trader change: nothing a room may hear changed");
+    const owner = renderEnvelope(env("fomo_research_coin", "ok", d), O);
+    assert.match(owner, /1 of the buyers from the watched-trader cohort/);
+    assert.match(owner, /watched traders 1 buying \/ 0 selling/);
+    assert.match(owner, /Since revision 3: Cohort buyers: 0 → 1\./);
+  });
+
   it("fits maxChars at a line boundary and keeps the attribution", () => {
     const many = theses();
     many.theses = Array.from({ length: 4 }, (_, i) => ({ ...many.theses[0]!, evidenceId: `fomo:thesis/${i}`, excerpt: "x".repeat(250) }));

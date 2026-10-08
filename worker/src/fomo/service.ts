@@ -2568,7 +2568,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const winMs = windowMsOf(args.window) ?? 30 * DAY;
     const since = ic.now - winMs;
     const chain = args.chain ? chainFromUserText(args.chain) : null;
-    const cohort = await cohortSnapshot(ic.now);
+    // A ROOM'S LEADS NEVER COME FROM THE WATCH LIST (decision 1, 2026-10-07): its local record is
+    // the watched traders' own trades, so a lead's buyers, latest buy and order would say what they
+    // bought, and a room's one-trader answers would then say who they are. A room ranks the boards alone.
+    const cohort: CohortSnap = ic.audience === "owner"
+      ? await cohortSnapshot(ic.now)
+      : { ids: new Set(), byId: new Map(), version: null, createdAt: null, size: null, target: 0, shortfallReason: null };
     const graduated = a.add(await read(ic.cc, specs.tokenBoard("graduated"), args.freshness));
     const trending = a.add(await read(ic.cc, specs.tokenBoard("trending"), args.freshness));
     // Local cohort record (free): first purchases and breadth over the window. "First seen" needs a BASELINE
@@ -2641,9 +2646,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       const firstSeenInWindow: boolean | null = !early.has(c.token.key) ? false : baselineKnown ? true : null;
       // EARLY-SIGNAL EVIDENCE, NOT SIZE: market cap, volume, holders and board rank are never scored.
       const recent = c.latestBuyAt !== null && ic.now - c.latestBuyAt <= 6 * HOUR ? 1 : 0;
+      // A room's order never weighs who Merrymen watches: a watched buyer counts as any other buyer there.
+      const watched = ic.audience === "owner" ? c.cohortBuyers.size : 0;
       const score =
-        3 * c.cohortBuyers.size +
-        1 * Math.max(0, c.buyers.size - c.cohortBuyers.size) * 0.5 +
+        3 * watched +
+        1 * Math.max(0, c.buyers.size - watched) * 0.5 +
         2 * (firstSeenInWindow === true ? 1 : 0) +
         1 * (c.newThesis ? 1 : 0) +
         1 * (c.boards.has("graduated") ? 1 : 0) +
@@ -2656,7 +2663,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         marketCapUsd: c.cap,
         marketCapKnown: c.cap !== null,
         signals: {
-          cohortBuyers: c.cohortBuyers.size,
+          cohortBuyers: watched,
           distinctBuyers: breadth.get(c.token.key)?.distinctBuyers ?? c.buyers.size,
           latestBuyAt: c.latestBuyAt,
           firstSeenInWindow,

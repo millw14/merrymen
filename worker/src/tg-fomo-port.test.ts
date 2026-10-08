@@ -34,6 +34,7 @@ import type { BrokerCallOptions, FomoBroker } from "./fomo/contract";
 import { createFomoClient } from "./fomo/provider";
 import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_GROUP_ON, groupScrub, NOT_PERMISSION_LINE, renderAnswer } from "./fomo/render";
 import { createFomoService } from "./fomo/service";
+import { robinhoodChain, tokenIdentity } from "./fomo/identity";
 import * as fstore from "./fomo/store";
 import type { FomoEnvelope, FomoToolName, TokenIdentity } from "./fomo/types";
 import type { ResolvedConfig } from "./settings";
@@ -423,6 +424,51 @@ describe("createTgFomoPort", () => {
     assert.ok(a && !a.deflect);
     assert.match(a.text, /1\. PONS on robinhood, market cap \$2\.1M/);
     for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, l);
+  });
+
+  it("a room's coin answers carry no watched-trader figure: the same words whoever Merrymen watches (review r3)", async () => {
+    // frankdegods is the fixture feed's only PONS buyer; one cohort holds him, the other leaves him out.
+    const FRANK_ID = "6dcf7c78-2537-522a-8307-3f9970c081be";
+    const OTHER_ID = "254245a7-0000-4000-8000-000000000000";
+    const cohortOf = (userId: string) => ({
+      version: 1,
+      createdAt: NOW - 3_600_000,
+      target: 150,
+      members: [{ trader: { userId, handle: null, displayName: null, verified: null }, score: 0.6, reasons: ["strength:consistency"], followable: true, evidence: { providerReported: {}, reconstructed: {}, prospective: {} }, sampleSize: 20, includedAt: NOW - 86_400_000 }],
+      shortfallReason: "test cohort",
+      changes: [{ userId, change: "added" as const, reason: "test" }],
+    });
+    const QS = ["who is buying $PONS on fomo?", "research $PONS on fomo", "what are the best opportunities on fomo?", "what are watched traders buying on fomo?"];
+    // His buys of PONS in the local record: what the watched traders' own record holds.
+    const PONS_TOKEN = "0x39dbed3a00000000000000000000000000000c0d";
+    const buy = (key: string, at: number) => ({
+      eventKey: key, identityBasis: "provider-event-id", identityAmbiguous: false, source: "stream", kind: "buy",
+      trader: { userId: FRANK_ID, handle: "frankdegods", displayName: null, verified: null },
+      token: tokenIdentity(robinhoodChain(), PONS_TOKEN)!,
+      tokenLabel: { symbol: "PONS", name: null }, tradeId: null, swapId: null, transferId: null, txHash: null, fillUsd: null, fillUsdBasis: null,
+      positionValueUsd: 5000, positionRealizedPnlUsdCumulative: null, sourceEventAt: at, execAt: null, observedAt: at + 1000, verification: "provider-reported", text: null, replay: false,
+    });
+    const answersWith = async (member: string): Promise<string[]> => {
+      const s = await setup();
+      const db = wrapSqlite(s.raw);
+      await fstore.insertCohortVersion(db, cohortOf(member) as never);
+      await fstore.insertEvents(db, [buy("ev:r3-1", NOW - 2 * 3_600_000), buy("ev:r3-2", NOW - 3_600_000)] as never);
+      const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+      const out: string[] = [];
+      for (const q of QS) {
+        s.clock.now += 30_000;
+        const a = await port.ask({ text: q, chatId: GROUP });
+        out.push(a?.text ?? "(none)");
+      }
+      return out;
+    };
+    const watched = await answersWith(FRANK_ID);
+    const unwatched = await answersWith(OTHER_ID);
+    for (const [i, q] of QS.entries()) {
+      assert.doesNotMatch(watched[i]!, /watched|cohort|follow/i, `${q}: ${watched[i]}`);
+      assert.equal(watched[i], unwatched[i], `${q}: reads the same whoever is watched`);
+    }
+    assert.equal(watched[3], TG_FOMO_DEFLECTION, "a read cut to the watched traders is the watch list: a DM's");
   });
 
   it("an owner-state or watch question is deflected, and no watch is ever made from a group", async () => {

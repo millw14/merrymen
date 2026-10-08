@@ -827,7 +827,14 @@ Surface limits:
   (below). By public handle without the `@`, money in short form, and never whether
   Merrymen watches or follows them: the room's render leaves out the watched-cohort line,
   any note about that record, and the profile P&L figures (they are read from that record
-  when it has one, so whether a room saw them would say who it watches). A trader's own
+  when it has one, so whether a room saw them would say who it watches). Nor does a
+  room's coin answer carry a figure read from the watch list, since with these one-trader
+  answers it would tie a trader to it: no "Watched traders: N with a latest buy" under
+  who is buying a coin, no "N watched traders bought" on a lead, no "watched traders N
+  buying" or watched-cohort clause, condition or change in a coin's research, and a
+  room's leads (`fomo_find_opportunities`) are ranked from the boards alone, never the
+  watched traders' own record. A read cut to the watched traders (`cohort_only`, any
+  tool: "what are watched traders buying") is the watch list, and is deflected. A trader's own
   theses, the owner's own research state and the watch list stay in a DM. Every line about
   one trader names them on the line itself ("Largest held by X: …", "• X bought …",
   "Positions of X …"), and a handle the group gate would refuse (an id run such as

@@ -146,7 +146,8 @@ function groupMustDeflect(plan: FomoQuestionPlan): boolean {
   // The leaderboard cut to the traders Merrymen watches ("top traders we
   // watch") IS the watch list, and who it follows is never a room's.
   if (plan.intent === "rankings-traders" && plan.cohortScope) return true;
-  if (plan.toolCalls.some((c) => c.args.cohort_only === true && (c.tool === "fomo_get_rankings" || TRADER_TOOLS.has(c.tool)))) return true;
+  // Any read cut to the watched traders ("what are watched traders buying", their opportunities) is the watch list.
+  if (plan.toolCalls.some((c) => c.args.cohort_only === true)) return true;
   // "Is @X in your cohort", "the top trader we watch": about the watch list, even when one trader is named.
   if (TRADER_INTENTS.has(plan.intent) && plan.cohortScope) return true;
   if (TRADER_INTENTS.has(plan.intent)) return false;

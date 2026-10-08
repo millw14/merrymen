@@ -733,7 +733,9 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
 function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audience, now: number): string[] {
   const d = env.data;
   if (!d) return [];
-  const subject = d.token ? coin(d.token, d.label, audience) : d.cohortOnly ? "Watched traders" : "The Fomo feed";
+  // A room never hears who Merrymen watches, nor a figure read from that record (decision 1, 2026-10-07):
+  // with a room's one-trader answers, a watched count would tie a trader to the watch list.
+  const subject = d.token ? coin(d.token, d.label, audience) : d.cohortOnly && audience === "owner" ? "Watched traders" : "The Fomo feed";
   const scope = d.window === "all" ? "on record" : `in the last ${d.window}`;
   const out: string[] = [];
   if (d.events.length === 0) {
@@ -745,22 +747,18 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
       `${subject} ${scope}: ${b === null ? "an unknown number of" : b} distinct ${b === 1 ? "buyer" : "buyers"} and ${s === null ? "an unknown number of" : s} ${s === 1 ? "seller" : "sellers"} observed (positions above about $3,000; a floor, not a census).`,
     );
   }
-  if (d.cohort && (d.cohort.buyers.length || d.cohort.sellers.length || d.cohortOnly)) {
-    if (audience === "owner") {
-      const fmt = (xs: typeof d.cohort.buyers) => xs.slice(0, 6).map((x) => who(x.handle, x.userId)).join(", ");
-      const parts: string[] = [];
-      if (d.cohort.buyers.length) parts.push(`latest action buy — ${fmt(d.cohort.buyers)}`);
-      if (d.cohort.sellers.length) parts.push(`latest action sell — ${fmt(d.cohort.sellers)}`);
-      out.push(
-        parts.length
-          ? `Watched traders: ${parts.join("; ")}.`
-          : d.cohort.size === null || d.cohort.size === 0
-            ? "Merrymen's watched-trader cohort has not been built yet, so this cannot say which watched traders took part."
-            : "No watched trader appears in this scope.",
-      );
-    } else {
-      out.push(`Watched traders: ${d.cohort.buyers.length} with a latest buy, ${d.cohort.sellers.length} with a latest sell.`);
-    }
+  if (audience === "owner" && d.cohort && (d.cohort.buyers.length || d.cohort.sellers.length || d.cohortOnly)) {
+    const fmt = (xs: typeof d.cohort.buyers) => xs.slice(0, 6).map((x) => who(x.handle, x.userId)).join(", ");
+    const parts: string[] = [];
+    if (d.cohort.buyers.length) parts.push(`latest action buy — ${fmt(d.cohort.buyers)}`);
+    if (d.cohort.sellers.length) parts.push(`latest action sell — ${fmt(d.cohort.sellers)}`);
+    out.push(
+      parts.length
+        ? `Watched traders: ${parts.join("; ")}.`
+        : d.cohort.size === null || d.cohort.size === 0
+          ? "Merrymen's watched-trader cohort has not been built yet, so this cannot say which watched traders took part."
+          : "No watched trader appears in this scope.",
+    );
   }
   // The whole feed's top coins, as counts (no one who traded them).
   if (!d.token && d.topTokens?.length) {
@@ -877,7 +875,7 @@ function bodyOpportunities(env: FomoEnvelope<OpportunitiesData>, audience: Audie
   const out = ["Coins getting fresh attention, ranked by early-signal evidence (not size or popularity):"];
   d.rows.slice(0, 8).forEach((r, i) => {
     const sig: string[] = [];
-    if (r.signals.cohortBuyers) sig.push(`${plural(r.signals.cohortBuyers, "watched trader", "watched traders")} bought`);
+    if (r.signals.cohortBuyers && audience === "owner") sig.push(`${plural(r.signals.cohortBuyers, "watched trader", "watched traders")} bought`);
     if (r.signals.firstSeenInWindow === true) sig.push("first seen in this window");
     if (r.signals.newThesis) sig.push("new thesis");
     if (r.signals.boards.length) sig.push(`on ${r.signals.boards.join(" and ")} board`);
@@ -888,14 +886,24 @@ function bodyOpportunities(env: FomoEnvelope<OpportunitiesData>, audience: Audie
   return out;
 }
 
+/** The dossier's watched-trader clause on a flow claim (dossier.ts cohortClause). */
+const COHORT_CLAUSE = /, \d+ of the (?:buyers|sellers) from the watched-trader cohort/g;
+/** A dossier sentence about the watched traders ("Cohort sellers outnumber cohort buyers…", "Cohort buyers: 0 → 1."). */
+const ABOUT_COHORT = /\bcohort\b|\bwatched[- ]traders?\b/i;
+
 function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, now: number): string[] {
   const d = env.data;
   if (!d) return [];
   const name = coin(d.token, d.label, audience);
   const c = d.coverage;
   const out: string[] = [];
-  const sup = d.strongestSupport;
-  const opp = d.strongestOpposition;
+  // A ROOM NEVER HEARS A FIGURE READ FROM THE WATCH LIST (decision 1, 2026-10-07): with a room's
+  // one-trader answers it would tie a trader to it. The clause goes; a sentence about it is not said.
+  const group = audience === "group";
+  const words = (t: string): string => (group ? t.replace(COHORT_CLAUSE, "") : t);
+  const sayable = (t: string): boolean => !group || !ABOUT_COHORT.test(t);
+  const sup = d.strongestSupport && group ? { ...d.strongestSupport, summary: words(d.strongestSupport.summary) } : d.strongestSupport;
+  const opp = d.strongestOpposition && group ? { ...d.strongestOpposition, summary: words(d.strongestOpposition.summary) } : d.strongestOpposition;
   out.push(
     `${name} — Merrymen's research (revision ${d.revision}): ${plural(c.uniqueTheses, "thesis", "theses")} from ${plural(c.uniqueAuthors, "author", "authors")}; ` +
       `strongest case for: ${sup ? sanitizeText(sup.summary, 140) : "none on record"}; strongest case against: ${opp ? sanitizeText(opp.summary, 140) : "none on record"}.`,
@@ -904,8 +912,11 @@ function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, n
     const ch = d.changes;
     const age = finite(env.freshness.cacheAgeMs) && env.freshness.cacheAgeMs > 60_000 ? `evidence as of ${agoText(env.freshness.cacheAgeMs)}` : "evidence read just now";
     if (ch.comparable && ch.noChange) out.push(`No material change since revision ${ch.sinceRevision} (${age}).`);
-    else if (ch.comparable) out.push(`Since revision ${ch.sinceRevision}: ${ch.changes.slice(0, 4).join(" ")}`);
-    else out.push(`Not compared with revision ${ch.sinceRevision} (${ch.reason.replace(/-/g, " ")}); "no change" is not claimed.`);
+    else if (ch.comparable) {
+      // Only watched-trader changes: nothing a room may hear changed, and "no change" is not claimed either.
+      const changes = ch.changes.map(words).filter(sayable);
+      if (changes.length) out.push(`Since revision ${ch.sinceRevision}: ${changes.slice(0, 4).join(" ")}`);
+    } else out.push(`Not compared with revision ${ch.sinceRevision} (${ch.reason.replace(/-/g, " ")}); "no change" is not claimed.`);
   }
   if (d.focus === "words-vs-actions" || d.wordsVsActions.length) {
     if (!d.wordsVsActions.length) out.push("Words vs actions: no author was seen acting against their written view in the record read.");
@@ -921,11 +932,13 @@ function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, n
   if (d.flow) {
     const f = d.flow;
     out.push(
-      `Flow, ${f.window} (observed, provider-reported feed): ${count(f.distinctBuyers, "buyer", "buyers")} / ${count(f.distinctSellers, "seller", "sellers")}${f.cohortBuyers !== null ? `; watched traders ${f.cohortBuyers} buying / ${f.cohortSellers ?? "unknown"} selling` : ""}.`,
+      `Flow, ${f.window} (observed, provider-reported feed): ${count(f.distinctBuyers, "buyer", "buyers")} / ${count(f.distinctSellers, "seller", "sellers")}${f.cohortBuyers !== null && audience === "owner" ? `; watched traders ${f.cohortBuyers} buying / ${f.cohortSellers ?? "unknown"} selling` : ""}.`,
     );
   }
-  if (d.unknowns.length) out.push(`Unknowns: ${d.unknowns.slice(0, 2).join(" ")}`);
-  if (d.changeConditions.length) out.push(`What would change this view: ${d.changeConditions.slice(0, 2).join(" ")}`);
+  const unknowns = d.unknowns.filter(sayable);
+  const conditions = d.changeConditions.filter(sayable);
+  if (unknowns.length) out.push(`Unknowns: ${unknowns.slice(0, 2).join(" ")}`);
+  if (conditions.length) out.push(`What would change this view: ${conditions.slice(0, 2).join(" ")}`);
   if (d.job) out.push(jobLine(d.job, now));
   out.push(availabilityLine(d.executionAvailability));
   return out;
