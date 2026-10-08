@@ -54,6 +54,7 @@ import {
   createTgFomoPort,
   groupWords,
   looseCoin,
+  looseTrader,
   ownerMoves,
   requestText,
   sayableTraderHandle,
@@ -373,6 +374,45 @@ describe("createTgFomoPort", () => {
     // No broker: the same line is not claimed as research either.
     const none = createTgFomoPort(() => null, { now: () => s.clock.now });
     assert.equal(await none.ask({ text: "who's selling pons on fomo?", chatId: GROUP }), null);
+  });
+
+  it("a line naming another trader than the remembered one is left to the router, never answered about the remembered one (review r4)", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const first = await port.ask({ text: "what is trader CryptoKaleo holding on fomo?", chatId: GROUP, selfNames: ["shogun"] });
+    assert.match(first!.text, /^CryptoKaleo on Fomo holds/, first!.text);
+    const before = s.calls.length;
+    for (const q of [
+      "shogun what's frankdegods holding on fomo", "shogun how is ansem doing on fomo today", "how's frankdegods doing this week on fomo", "what is ansem holding on fomo",
+      "shogun whos the worst trader on fomo today", "is ansem any good on fomo", "tell me about ansem on fomo",
+    ]) {
+      s.clock.now += 60_000;
+      assert.equal(await port.ask({ text: q, chatId: GROUP, selfNames: ["shogun"] }), null, q);
+    }
+    assert.equal(s.calls.length, before, "nothing looked up about the remembered trader");
+    // A pointer at the remembered trader, the remembered name itself, a line that names nobody else and a follow-up keep it.
+    for (const q of ["and his pnl on fomo?", "what's CryptoKaleo holding on fomo", "what's the pnl on fomo", "shogun what is he holding on fomo", "and this week?"]) {
+      s.clock.now += 6 * 60_000;
+      const a = await port.ask({ text: q, chatId: GROUP, selfNames: ["shogun"] });
+      assert.ok(a && !a.deflect, q);
+      assert.match(a.text, /^CryptoKaleo/, `${q}: ${a.text}`);
+    }
+  });
+
+  it("looseTrader: only a word where another trader's name goes, or a rank, with the trader taken from memory and nothing pointing at them", () => {
+    const first = classifyFomoQuestion("what is trader frankdegods holding on fomo?", { memory: null, now: NOW })!;
+    const mem = applyPlan(null, first, NOW).memory;
+    const p = (t: string) => classifyFomoQuestion(t, { memory: mem, now: NOW + 60_000, selfNames: ["shogun"] })!;
+    for (const t of ["how is ansem doing on fomo today", "how's CryptoKaleo doing this week on fomo", "what is ansem holding on fomo", "whos the worst trader on fomo today", "who is ansem on fomo"]) {
+      assert.equal(looseTrader(t, p(t), mem, ["shogun"], NOW + 60_000), true, t);
+    }
+    for (const t of ["and his pnl on fomo?", "what's the pnl on fomo", "what's frankdegods holding on fomo", "and this week?", "what are they holding on fomo", "how is shogun doing on fomo", "how is it doing on fomo"]) {
+      const plan = p(t);
+      assert.equal(plan ? looseTrader(t, plan, mem, ["shogun"], NOW + 60_000) : false, false, t);
+    }
+    // Nothing remembered, or the trader named here: never loose.
+    const fresh = classifyFomoQuestion("what is trader ansem holding on fomo", { memory: mem, now: NOW })!;
+    assert.equal(looseTrader("what is trader ansem holding on fomo", fresh, mem, [], NOW), false);
   });
 
   it("looseCoin: only a word where one coin's name goes, never a chain, a time or filler", () => {
@@ -1704,6 +1744,23 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     assert.deepEqual(sendIt.split("\n").slice(0, 3), HOOD_BOARD, sendIt);
     assert.equal(w.s.provider.length, read);
     for (const t of w.tg.texts(GROUP)) assert.doesNotMatch(t, /give me a sec|here we go/, t);
+  });
+
+  it("Ann asks about one trader, Bob names another: Bob's line goes to the router and he hears his trader, never Ann's (review r4)", async () => {
+    // The provider's search finds whichever trader was searched for (CryptoKaleo first, then frankdegods).
+    let searched = fixture("search");
+    const w = await world({ search: () => searched });
+    const ann = await w.say("shogun what is trader CryptoKaleo holding on fomo?", undefined, 60_000, OWNER_ID + 1);
+    assert.match(ann, /^CryptoKaleo on Fomo holds/, ann);
+    assert.equal(w.routePrompts.length, 0);
+    const kaleo = (searched.results as Rec[])[0]!;
+    searched = { ...searched, results: [{ ...kaleo, handle: "frankdegods", userId: "6dcf7c78-2537-522a-8307-3f9970c081be", displayName: "frank" }] };
+    w.picks.push({ action: "fomo_trader", trader: "frankdegods" });
+    const bob = await w.say("shogun how is frankdegods doing on fomo today", undefined, 60_000, OWNER_ID + 2);
+    assert.equal(w.routePrompts.length, 1, "the router read the name from Bob's own line");
+    assert.match(bob, /^frankdegods/, bob);
+    assert.doesNotMatch(bob, /CryptoKaleo/, bob);
+    assert.ok(w.logs.includes("[tg-groups] route fomo:trader"));
   });
 
   it("23:04 'who's the best trader on fomo today and what did he make money on': the board and his winners and losers, in the room, for her and for anyone", async () => {

@@ -98,9 +98,12 @@ export interface AnswerFomoInput {
    * deflected, clarified or looked up: false and the question is not handled
    * here at all. A group uses it to leave a coin question the planner could
    * not place ("who's selling pons on fomo?") to its router, rather than
-   * answer it about the whole feed (tg-fomo-port.ts looseCoin).
+   * answer it about the whole feed (tg-fomo-port.ts looseCoin), and a line
+   * that names another trader than the remembered one ("how is ansem doing"
+   * right after frankdegods) rather than answer it about the remembered one
+   * (looseTrader, which reads the memory the plan was made against).
    */
-  wanted?: (plan: FomoQuestionPlan) => boolean;
+  wanted?: (plan: FomoQuestionPlan, memory: SubjectMemory | null) => boolean;
   /**
    * A group only: whether a trader's handle may be said in the room
    * (render.ts RenderOptions.sayableHandle; the port asks the group gate).
@@ -315,7 +318,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   if (!planned) return { handled: false };
   const plan = audience === "group" ? roomPnlPlan(planned, input.text) : planned;
   try {
-    if (input.wanted && input.wanted(plan) !== true) return { handled: false };
+    if (input.wanted && input.wanted(plan, memory) !== true) return { handled: false };
   } catch {
     return { handled: false };
   }

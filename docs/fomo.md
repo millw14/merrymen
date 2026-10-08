@@ -821,7 +821,13 @@ Surface limits:
   one coin the planner could not place ("who's selling pons on fomo?", "research pons on
   fomo": no `$tag`, no UPPERCASE ticker) is not answered about the whole feed or with
   "which coin?": the port leaves it to the router (`tg-fomo-port.ts looseCoin`), whose one
-  call names the coin from the line's own words. Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
+  call names the coin from the line's own words. So is a line that names another trader
+  than the one the room's memory holds ("how is ansem doing on fomo today" right after
+  frankdegods, or "who's the worst trader" after one trader's answer), when nothing in it
+  points at the remembered one ("his", "this trader") and it is no bare follow-up ("and this
+  week?"): the planner would answer it about the remembered trader, so one member's
+  earlier question would decide whose book another member hears (`looseTrader`).
+  Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
   leaderboard (Milla's call, 2026-10-07): its handles and their provider-reported money
   made on closed trades, never who Merrymen follows. Milla, 2026-10-07: a named trader's
   public Fomo data may be answered in a group, for anyone who asks, the owner included:

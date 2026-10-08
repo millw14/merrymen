@@ -46,7 +46,7 @@ import { contentFree } from "./fomo/digest";
 import { redactExecutables } from "./fomo/dossier";
 import { chainFromUserText, isRobinhoodToken } from "./fomo/identity";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
-import { deserialize, serialize } from "./fomo/subject-memory";
+import { deserialize, rememberedSubjects, serialize, type SubjectMemory } from "./fomo/subject-memory";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
@@ -225,6 +225,64 @@ export function looseCoin(text: string, plan: FomoQuestionPlan): boolean {
   // after PONS): the planner has it right. Any other remembered coin is the
   // wrong subject for a line that names a different one.
   return !plan.toolCalls.some((c) => typeof c.args.token === "string" && c.args.token.toLowerCase() === word);
+}
+
+// ─── A trader the planner could not place ───────────────────────────────────
+
+/**
+ * A pointer at the remembered trader: a pronoun ("his pnl", "what are they
+ * holding"), or "this/that/the same/said trader, guy, person, account".
+ */
+const TRADER_POINTER =
+  /\b(?:he|she|him|his|her|hers|they|them|their|theirs|he's|she's|they're|hes|shes|theyre)\b|\b(?:this|that|the same|same|said|the) (?:trader|guy|person|account|user|dude|degen)(?:'s)?\b/iu;
+/** Where a trader's name goes in a one-trader question; group 1 is the word there. */
+const TRADER_SLOTS: readonly RegExp[] = [
+  /\bhow(?:'s|s|\s+is|\s+has|\s+was)\s+@?([a-z0-9_]{2,30})\s+(?:been\s+)?(?:doing|done|performing|trading)\b/iu,
+  /\bwhat(?:'s|s|\s+is|\s+has|\s+was)\s+@?([a-z0-9_]{2,30})\s+(?:been\s+)?(?:holding|buying|selling|trading|aping|bought|sold|traded|up\s+to|making|made|losing|lost)\b/iu,
+  /\bwhat\s+(?:does|did|do)\s+@?([a-z0-9_]{2,30})\s+(?:hold|own|buy|sell|trade|make|lose|ape)\b/iu,
+  /\bis\s+@?([a-z0-9_]{2,30})\s+(?:any\s+good|good|legit|profitable|up|down|still\s+holding|holding)\b/iu,
+  /\b(?:tell\s+me\s+about|who\s+is|who's|whos|look\s+up|what\s+about|how\s+about)\s+@?([a-z0-9_]{2,30})\b/iu,
+  /(?<![\p{L}\p{N}_])@?([a-z0-9_]{2,30})(?:'s|s')\s+(?:pnl|p&l|bags?|holdings|trades|stats|positions|portfolio|book|moves|profile|performance|earnings)\b/iu,
+  /(?<![\p{L}\p{N}_])@?([a-z0-9_]{2,30})\s+(?:pnl|p&l|stats)\b/iu,
+];
+/** A board's rank asked for ("whos the worst trader on fomo today"): never the remembered trader. */
+const RANK_ASKED = /\b(?:best|worst|top|biggest|richest|smartest|number\s+one|#\s*1)\s+(?:\w+\s+)?traders?\b|\btraders?\s+(?:leaderboard|board|rankings?)\b/iu;
+/** Words that sit where a name goes without being one. */
+const NOT_A_TRADER = new Set(
+  ("he she him his her hers they them their it its this that the a an my me you your yours our we us i fomo trader traders guy person " +
+    "account user dude degen one someone anyone everyone everybody people today now rn lately recently there here what who which " +
+    "doing going up down the pnl stats board market coin coins token tokens anything something everything things stuff").split(" "),
+);
+
+/**
+ * A GROUP LINE THAT NAMES ANOTHER TRADER THAN THE REMEMBERED ONE. The planner
+ * reads a trader from "trader X" or an @handle; "how is ansem doing on fomo
+ * today" names neither, so right after frankdegods its plan is frankdegods'
+ * (the remembered trader, taken because the question needs one), and the
+ * room hears one member's earlier subject answer another member's question
+ * about someone else (rule 5). Such a plan is not taken: the line goes to
+ * the router, whose one call reads the name from the line itself (route.ts
+ * groundedTrader). Only when the trader came from memory with nothing
+ * pointing at them (no "he", "his", "this trader"), on a line that is not a
+ * pure follow-up ("and this week?"), and either a word sits where a trader's
+ * name goes that is not the remembered one, a bot's name, a chain or filler,
+ * or the line asks for a board's rank. True: leave the line to the router.
+ */
+export function looseTrader(text: string, plan: FomoQuestionPlan, memory: SubjectMemory | null, selfNames: readonly string[] = [], now = Date.now()): boolean {
+  if (!plan.usesMemory.includes("trader") || plan.usesMemory.includes("intent")) return false;
+  const t = typeof text === "string" ? text.normalize("NFKC").replace(/[‘’ʼ]/gu, "'") : "";
+  if (TRADER_POINTER.test(t)) return false;
+  if (RANK_ASKED.test(t)) return true;
+  const remembered = new Set(
+    rememberedSubjects(memory, "trader", now).flatMap((s) => (s.kind === "trader" && typeof s.handle === "string" ? [s.handle.replace(/^@+/, "").toLowerCase()] : [])),
+  );
+  const selves = new Set(selfNames.flatMap((n) => (typeof n === "string" ? n.toLowerCase().replace(/^@+/, "").split(/\s+/) : [])));
+  for (const re of TRADER_SLOTS) {
+    const word = re.exec(t)?.[1]?.toLowerCase() ?? "";
+    if (!word || NOT_A_TRADER.has(word) || /^\d+$/.test(word) || selves.has(word) || chainFromUserText(word) !== null) continue;
+    if (!remembered.has(word)) return true;
+  }
+  return false;
 }
 
 // ─── The owner's moves ──────────────────────────────────────────────────────
@@ -604,11 +662,14 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         // soul, via the handler), so "@thisbot theses on $PONS?" is a coin
         // question and not a question about a trader called thisbot.
         const selfNames = selfNamesOf(q.selfNames);
-        // A line (never a routed request, whose coin the router grounded) is
-        // left to the router when it asks about a coin the planner could not
-        // place (looseCoin).
+        // A line (never a routed request, whose coin or trader the router
+        // grounded) is left to the router when it asks about a coin the
+        // planner could not place (looseCoin), or names another trader than
+        // the one the room's memory would answer about (looseTrader).
         let loose = false;
-        const wanted = q.request ? undefined : (plan: FomoQuestionPlan): boolean => !(loose = looseCoin(text, plan));
+        const wanted = q.request
+          ? undefined
+          : (plan: FomoQuestionPlan, memory?: SubjectMemory | null): boolean => !(loose = looseCoin(text, plan) || looseTrader(text, plan, memory ?? null, selfNames, t));
         if (!b) {
           // Honest about it, but only for a question the research would have taken.
           const plan = classifyFomoQuestion(text, { memory: null, now: t, selfNames });
@@ -633,7 +694,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           sayableHandle: sayableTraderHandle,
         }).finally(() => bounded.done());
         if (!r.handled) {
-          if (loose) log("[tg-fomo] group ask left to the router (a coin the planner could not place)");
+          if (loose) log("[tg-fomo] group ask left to the router (a coin or trader the planner could not place)");
           return null;
         }
         remember(q.chatId, conversationKey);
