@@ -119,6 +119,17 @@ export class SpotSampler {
     while (s.length > SERIES_MAX || (s.length > 1 && s[1]!.atSec <= sample.atSec - SAMPLE_WINDOW_SEC)) s.shift();
   }
 
+  /**
+   * The newest reading of a series under `source`, however old — what a held
+   * coin is valued at while reads fail, so long as its ROUTE is still current
+   * (pool-prices.ts). Never ready: a gap restarts readiness.
+   */
+  latest(key: string, source = ""): SpotSample | null {
+    const entry = this.series.get(key);
+    if (!entry || entry.source !== source) return null;
+    return entry.samples[entry.samples.length - 1] ?? null;
+  }
+
   /** Forget a series — a route that now has an oracle, or a token no longer watched. */
   drop(key: string): void {
     this.series.delete(key);

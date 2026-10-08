@@ -427,9 +427,12 @@ async function readPoolAt(
       client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "slot0" }) as Promise<
         readonly [bigint, number, number, number, number, number, boolean]
       >,
-      client
-        .readContract({ address: best.pool, abi: POOL_ABI, functionName: "liquidity" })
-        .catch(() => 0n) as Promise<bigint>,
+      // NOT caught to zero. A failed read of in-range liquidity is not an
+      // empty pool: read as 0 it refused the coin as too thin — a held one
+      // force-sold on a rate limit — and on a spot route wrote a zero depth
+      // into the sampled series. The whole read fails instead, and the caller
+      // keeps the route it had, as readSpotLeg already does.
+      client.readContract({ address: best.pool, abi: POOL_ABI, functionName: "liquidity" }) as Promise<bigint>,
     ]);
     const tokenIsToken0 = token0.toLowerCase() === args.token.toLowerCase();
     const shape = {
@@ -652,7 +655,9 @@ export async function readRoutedPrice(
   // THE TWAP CHOICE, EXACTLY AS IT WAS BEFORE SPOT ROUTES EXISTED. A caller
   // that did not ask for spot gets this and nothing else.
   const twapRoute = ((): RoutedPrice | null => {
-    if (!leg || !wethLeg || leg.price8 <= 0n || wethLeg.price8 <= 0n) return directRoute;
+    // The TOKEN leg at 18dp: a coin under ~5e-9 WETH reads 0 at 8dp with a
+    // perfectly good TWAP, and combineLegs consumes price18 anyway.
+    if (!leg || !wethLeg || leg.price18 <= 0n || wethLeg.price8 <= 0n) return directRoute;
 
     // The TOKEN/WETH pool's depth is denominated in WETH — 18 raw decimals, and
     // each whole WETH is worth wethLeg.price8. Converting it explicitly through
@@ -692,6 +697,19 @@ export async function readRoutedPrice(
   // new pool leaves the coin refused as too thin — exactly what every such
   // coin was before sampling existed.
   return twapRoute ?? spotRoute(direct, leg, wethLeg, args.tokenDecimals);
+}
+
+/**
+ * Does this pool's own oracle say, right now, that its history is shorter than
+ * the window? A read that fails on the way answers false: not a fact.
+ */
+export async function observeSaysOld(client: PublicClient, pool: `0x${string}`, windowSec = DEFAULT_TWAP_WINDOW_SEC): Promise<boolean> {
+  try {
+    await client.readContract({ address: pool, abi: POOL_ABI, functionName: "observe", args: [[windowSec, 0]] });
+    return false;
+  } catch (e) {
+    return revertedOld(e);
+  }
 }
 
 /**

@@ -28,6 +28,7 @@
 import type { PublicClient } from "viem";
 import { CASH, type PriceQuote, type StockToken } from "../../../packages/core/src/index";
 import {
+  observeSaysOld,
   poolPriceUsable,
   readRoutedPrice,
   readSpotLeg,
@@ -165,6 +166,20 @@ export function keepTwapOver(previous: { routed: RoutedPrice | null; fetchedAt: 
   return !(samePool && (prev.poolCardinality ?? 2) <= 1);
 }
 
+/**
+ * WHETHER A CURRENT SPOT ROUTE STANDS when a refresh finds one through a
+ * DIFFERENT pool. It does, until MAX_ROUTE_AGE_SEC: that is what one failed
+ * read of the coin's pool looks like (bestCashPool falling to another tier),
+ * and switching would throw its series away and measure a drain against
+ * another pool's depth. The cached pool keeps being re-read; if it is really
+ * gone, its re-reads fail, the route ages out, and the new pool is taken.
+ */
+export function keepSpotOver(previous: { routed: RoutedPrice | null; fetchedAt: number } | undefined, routed: RoutedPrice, nowSec: number): boolean {
+  const prev = previous?.routed?.spotOnly;
+  if (!prev || !routed.spotOnly || nowSec - previous!.fetchedAt > MAX_ROUTE_AGE_SEC) return false;
+  return prev.pool.toLowerCase() !== routed.spotOnly.pool.toLowerCase();
+}
+
 /** Human-readable provenance for a sampled price, beside `describeRoute`. */
 export function describeSampled(r: RoutedPrice, s: SampledPrice): string {
   const depth = Number(s.liquidityUsdg) / 1e6;
@@ -218,7 +233,15 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
           } catch {
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
-          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) return;
+          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) {
+            // UNLESS THE TWAP WAS ONE QUIET OBSERVATION AND THAT POOL HAS NOW
+            // TRADED. Its own oracle says so directly; one more call, only for
+            // a single-slot TWAP route. A failed call keeps the TWAP.
+            const prev = previous!.routed!;
+            const quietEnded = (prev.poolCardinality ?? 2) <= 1 && !!prev.pool && await observeSaysOld(client, prev.pool);
+            if (!quietEnded) return;
+          }
+          if (routed?.spotOnly && keepSpotOver(previous, routed, nowSec)) return;
           if (routed) {
             cache.set(key, { routed, fetchedAt: nowSec });
             // The full read's spot IS this tick's reading. A route with an
@@ -272,7 +295,19 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
         }
         const r = hit.routed;
         if (r.spotOnly) {
-          const quote = sampledQuote(r, sampler.read(cacheKey(t), nowSec, spotIdentity(r)), guard);
+          // A GAP IN READINGS IS NOT A PRICE GONE. While the route is current
+          // (MAX_ROUTE_AGE_SEC, as for any cached route), a held coin is valued
+          // at its newest reading — never ready, so it authorises no buy —
+          // rather than refused after one gap and force-sold.
+          let s = sampler.read(cacheKey(t), nowSec, spotIdentity(r));
+          if (!s) {
+            const last = sampler.latest(cacheKey(t), spotIdentity(r));
+            if (last) {
+              const price8 = last.price18 / 10_000_000_000n;
+              s = { price8, spot8: price8, liquidityUsdg: last.liquidityUsdg, divergenceBps: 0, readings: 0, spanSec: 0, ready: false };
+            }
+          }
+          const quote = sampledQuote(r, s, guard);
           if ("refusal" in quote) refused.push({ symbol: t.symbol, ...quote.refusal });
           else quotes.set(t.symbol, quote.quote);
           continue;
