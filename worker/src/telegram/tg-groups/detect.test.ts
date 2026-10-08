@@ -1027,8 +1027,8 @@ describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
   for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
   for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
   // A row of the board it just said, or the trader it just named (fomo/intent.ts resolves them, or asks which).
-  const rows = ["what's the second one holding?", "#3?", "and number two?", "what did the top guy buy", "what's he holding?", "pine what did he make money on", "what is that guy holding", "tell me what his bags are"];
-  const notRows = ["he's cooked lol", "lol that guy", "the second one is better", "is he single?", "number one fan here"];
+  const rows = ["what's the second one holding?", "#3?", "and number two?", "what did the top guy buy", "what's he holding?", "pine what did he make money on", "what is that guy holding", "tell me what his bags are", "how's the second one doing?"];
+  const notRows = ["he's cooked lol", "lol that guy", "the second one is better", "is he single?", "number one fan here", "is she holding up ok?", "what is he doing lol", "what's he up to?"];
   for (const t of rows) it(`a row or that trader: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
   for (const t of notRows) it(`not a row ask: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
 });

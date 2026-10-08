@@ -4233,7 +4233,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // A market ask naming a venue ("what's trending in the market", "on robinhood chain") stays
         // with the desk, even right after a Fomo answer (D1): never a Fomo follow-up.
         const venueMarket = desked?.kind === "market" && desked.trending !== true;
-        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
+        // So does a line the desk owns: an analysis, a comparison, or a coin
+        // it names ("what do you think about sol?", "should i buy sol?"),
+        // unless the coin word is a chain in a chain's position ("on base?").
+        const deskOwned = desked?.kind === "analysis" || desked?.kind === "comparison" || (desked?.kind === "coin" && chainIn(text) === undefined);
+        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
         // A complaint with nothing of theirs open asks which question; one
         // replying to its answer to their open ask has that ask read again by
         // the router (act()). A new line while an earlier one went

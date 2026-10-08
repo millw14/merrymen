@@ -540,9 +540,13 @@ one-liner from a model that was given no data.
   ("besides solana", "other than robinhood coins", "solana is dead") cuts it
   to none: every chain, with the Robinhood Chain line. A venue word keeps it
   on the desk: "what's trending on robinhood chain", "what's trending in the
-  market", even right after a Fomo answer (never a Fomo follow-up). After a
-  board, a chain alone ("and on solana?", "solana ones?", "on base?") is that
-  board on that chain; the router reads one the planner cannot;
+  market", even right after a Fomo answer (never a Fomo follow-up), and so
+  does a line the desk owns: an analysis, a comparison, or a coin it names
+  ("what do you think about sol?", "should i buy sol?"). Personal chat
+  ("is she holding up ok?", "what is he doing lol") is never a follow-up
+  about a trader. After a board, a chain alone ("and on solana?", "solana
+  ones?", "on base?") is that board on that chain; the router reads one the
+  planner cannot;
 * a bare "do a quick analysis" — bound to the coin it replies
   under, else a desk ask up the reply chain, else what this topic last asked
   within 15 minutes, else the market. A specific entry, stop, target or other

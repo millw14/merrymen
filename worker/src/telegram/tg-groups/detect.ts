@@ -2144,7 +2144,12 @@ const FOLLOW_UP_MAX_WORDS = 10;
  */
 const FOMO_ROW_REF = /\bthe (?:top|first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th) (?:one|guy|dude)\b|(?:^|\s)#(?:10|[1-9])(?![\p{L}\p{N}])|\bnumber (?:one|two|three|four|five|[1-9])\b/u;
 const FOMO_PERSON = /\b(?:he|he's|hes|him|his|she|she's|her|that guy|this guy|the guy)\b/u;
-const FOMO_TRADER_VERB = /\b(?:hold|holds|holding|holdings|bags?|bought|buy|buying|sold|sell|selling|trades?|trading|traded|made|make|making|money|won|lost|up to|doing)\b/u;
+/**
+ * What one trader does with money. Never "doing" or "up to" ("what is he
+ * doing lol" is chat), and never "holding up" ("is she holding up ok?"):
+ * "how's the second one doing?" still reads as a row through FOMO_ROW_REF.
+ */
+const FOMO_TRADER_VERB = /\b(?:hold|holds|holding(?! up\b)|holdings|bags?|bought|buy|buying|sold|sell|selling|trades?|trading|traded|made|make|making|money|won|lost)\b/u;
 
 export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []): boolean {
   if (typeof text !== "string" || !text.trim()) return false;

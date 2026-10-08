@@ -1261,6 +1261,31 @@ describe("a bare 'what's trending' is Fomo's board where Fomo is wired, with the
     assert.equal(fomo!.asks[1]!.text, "pine what about robinhood chain?");
   });
 
+  it("right after a Fomo answer, a coin the desk reads, an analysis and personal chat are never taken as Fomo follow-ups (review r2)", async () => {
+    fomo!.answer = () => ({ text: BOARD, deflect: false, status: "ok" });
+    make();
+    await said(msg("pine what's trending on fomo?"));
+    assert.equal(fomo!.asks.length, 1);
+    for (const [i, t] of ["pine what do you think about sol?", "pine should i buy sol?", "pine analysis on eth?"].entries()) {
+      clock += MIN;
+      const before = desk!.asks.length;
+      await said(msg(t, { fromId: ANN + 1 + i }));
+      assert.equal(fomo!.asks.length, 1, `${t}: Fomo is asked nothing`);
+      assert.ok(desk!.asks.length > before, `${t}: the desk reads it`);
+    }
+    assert.deepEqual(desk!.asks.slice(0, 2), [{ kind: "coin", query: "sol" }, { kind: "coin", query: "sol" }]);
+    for (const [i, t] of ["pine is she holding up ok?", "pine what is he doing lol"].entries()) {
+      clock += MIN;
+      await said(msg(t, { fromId: ANN + 10 + i }));
+      assert.equal(fomo!.asks.length, 1, `${t}: Fomo is asked nothing`);
+    }
+    for (const t of tg.texts(CHAT)) assert.doesNotMatch(t, /Which (?:coin|trader) do you mean/, t);
+    // A chain in a chain's position is still a board follow-up.
+    clock += MIN;
+    await said(msg("pine on base?", { fromId: ANN + 20 }));
+    assert.equal(fomo!.asks.length, 2);
+  });
+
   it("with the room's research slots spent, a venue market ask after a Fomo answer still gets the desk, never 'enough lookups'", async () => {
     fomo!.answer = () => ({ text: "PONS: 1 buyer", deflect: false, status: "ok" });
     make();
