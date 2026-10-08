@@ -379,8 +379,10 @@ server.listen(PORT, () => {
  * the process goes. usage.json is otherwise written every 10 s, so every deploy
  * would drop up to that much metering; queued billing writes finish first (5 s
  * at most, lib/billing.mjs close()). The ledger itself needs nothing here: each
- * record is flushed by the append that made it. A second signal, or a close
- * that hangs, exits at once rather than outliving the host's patience.
+ * record is flushed by the append that made it. A second signal exits at once,
+ * and so does a close still hanging after 10 s, rather than waiting for the
+ * host's SIGKILL. The host must allow that long between SIGTERM and SIGKILL
+ * for the save to land; otherwise a deploy loses what a crash would.
  */
 let stopping = false;
 async function stop(signal) {
