@@ -824,7 +824,14 @@ Surface limits:
   that row's trader by the user id the provider's board gave (`fomo/chat.ts rowCall`,
   never a name from the text) over the board's window, for every audience; a group's
   board shows a row fewer so the row's answer fits, and a row the board does not have is
-  said.
+  said. **Rows after a board** ("the second one", "#3", "number two", "the top guy"; DM,
+  app and groups alike): the conversation's subject memory keeps the public trader board
+  it was last shown (`SubjectMemory.board`: ranks, user ids and public handles, at most
+  ten rows, never a board cut to the watched cohort, validated on read and dropped if
+  tampered), for the memory's 30 minutes while the questions stay on the board or one
+  trader. The planner resolves a row reference to that row's user id; a bare one asks
+  what the last row question asked; "he" after a board asked in the singular is its 1st
+  row, and after a board of several it asks which row.
 - **App chat:** at most 4 lookups per question. Analysis answers count against a
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.

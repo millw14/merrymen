@@ -59,8 +59,10 @@ import {
   isMemoryUsable,
   mergeResolved,
   PLAN_WINDOWS,
+  rememberedBoard,
   rememberedSubjects,
   sameSubject,
+  type BoardMemory,
   type FomoIntent,
   type PlanSide,
   type PlanWindow,
@@ -109,6 +111,11 @@ export interface FomoQuestionPlan {
    * or lost money on (provider-reported). Set only with "trader-activity".
    */
   earnings?: true;
+  /**
+   * The trader board asked for in the singular ("who's the best trader on
+   * fomo"): a bare "he" after it is its 1st row. Only with "rankings-traders".
+   */
+  singular?: true;
 }
 
 /** Which row of the trader leaderboard, and what about that trader. */
@@ -490,6 +497,56 @@ function rowAskOf(c: string, ex: Extracted): FomoRowAsk | null {
           : null;
   return about ? { rank: rowRank(m[1] ?? m[2] ?? ""), about } : null;
 }
+/**
+ * A ROW OF THE BOARD THE CONVERSATION WAS JUST SHOWN: "the second one", "the
+ * 3rd guy", "the top one", "the last one", "#2", "number two". Read only
+ * while a trader board is remembered (subject-memory.ts rememberedBoard) and
+ * never in a question that asks for a board ("who's #1 on fomo").
+ */
+const ROW_REF = /\bthe (top|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last|1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th) (?:one|guy|dude|person|on the (?:board|list))\b|(?:^|\s)#(10|[1-9])(?![\p{L}\p{N}])|\bnumber (one|two|three|four|five|six|seven|eight|nine|ten|10|[1-9])\b/u;
+const ROW_NUMBERS: Readonly<Record<string, number>> = {
+  top: 1, first: 1, one: 1, "1st": 1, second: 2, two: 2, "2nd": 2, third: 3, three: 3, "3rd": 3, fourth: 4, four: 4, "4th": 4,
+  fifth: 5, five: 5, "5th": 5, sixth: 6, six: 6, "6th": 6, seventh: 7, seven: 7, "7th": 7, eighth: 8, eight: 8, "8th": 8,
+  ninth: 9, nine: 9, "9th": 9, tenth: 10, ten: 10, "10th": 10,
+};
+/** Words around a bare row reference ("and what about the second one?"): nothing asked of its own. */
+const ROW_REF_FILLER = new Set("and what is about how the then now ok okay so also too again pls please yo hey him her he she his guy one".split(" "));
+
+/**
+ * The rank a row reference names on `board` (the last row for "the last one"),
+ * and whether it asks nothing else; the agent's own names ("shogun and #1?")
+ * ask nothing.
+ */
+function rowRefOf(c: string, board: BoardMemory, self: SelfRef): { rank: number; bare: boolean } | null {
+  const m = ROW_REF.exec(c);
+  if (!m) return null;
+  const word = m[1] ?? m[2] ?? m[3] ?? "";
+  const rank = word === "last" ? Math.max(...board.rows.map((r) => r.rank)) : ROW_NUMBERS[word] ?? Number(word);
+  if (!Number.isSafeInteger(rank) || rank < 1) return null;
+  const rest = `${c.slice(0, m.index)} ${c.slice(m.index + m[0].length)}`.split(" ").filter((w) => w && !ROW_REF_FILLER.has(w) && !self.words.has(w));
+  return { rank, bare: rest.length === 0 };
+}
+
+/** "Which one on the board: the 1st, 2nd or 3rd?", for the rows it has. */
+function askRow(board: BoardMemory): string {
+  const ranks = board.rows.map((r) => r.rank).sort((a, b) => a - b).slice(0, 3).map((r) => ordinalOf(r));
+  const list = ranks.length <= 1 ? `the ${ranks[0] ?? "1st"}` : `the ${ranks.slice(0, -1).join(", ")} or ${ranks[ranks.length - 1]}`;
+  return `Which one on the board: ${list}?`;
+}
+
+function ordinalOf(n: number): string {
+  const tens = n % 100;
+  return `${n}${tens >= 11 && tens <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th")}`;
+}
+
+/** A bare row reference asks of that row what the last one asked (BoardMemory.about). */
+function detectedFromAbout(about: BoardMemory["about"]): Detected {
+  if (about === "earnings") return { intent: "trader-activity", inherent: true, earnings: true };
+  if (about === "trades") return { intent: "trader-activity", inherent: true };
+  if (about === "holdings") return { intent: "trader-holdings", inherent: true };
+  return { intent: "trader-context", inherent: true };
+}
+
 const RANK_TOKENS = /\btrending\b|\b(?:top|hot|hottest|popular|most popular|most held|graduated|newly graduated|most bought|most traded|biggest) (?:\d{1,3} )?(?:fomo )?(?:coins|tokens|memecoins|memes|tickers)\b|\bmost[- ]held\b|\bgraduat(?:ed|ing|ions?)\b/;
 
 const SMALL_COINS = /\b(?:smaller|small|low ?cap|lower ?cap|micro ?cap|microcap|lowcap|tiny|early|earlier|new|newer|under the radar|overlooked|hidden|emerging|undiscovered|lesser known|up and coming) (?:\S+ ){0,2}?(?:coins|tokens|caps|gems|plays|names|projects|memecoins|memes|tickers)\b/;
@@ -1120,7 +1177,30 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   // row of the board. Its "he" is that row, never a remembered trader and
   // never a trader to ask "which one?" about.
   const rowAsk = rowAskOf(c, ex);
-  const traderDeixis = !rowAsk && (TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis || theyTrader);
+  let traderDeixis = !rowAsk && (TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis || theyTrader);
+  // A ROW OF THE BOARD THIS CONVERSATION WAS JUST SHOWN ("what's the second
+  // one holding", "#3?", or "he" after "who's the best trader"): that row's
+  // trader, by the user id the provider's board gave, as if named here. A
+  // "he" after a board of several, with no trader to point at, asks which.
+  const shown = !rowAsk && ex.traders.length === 0 && ex.tokens.length === 0 && !RANK_TRADERS.test(c) ? rememberedBoard(memory, ctx.now) : null;
+  let rowRef: { rank: number; bare: boolean } | null = null;
+  let askWhichRow: string | null = null;
+  if (shown) {
+    rowRef = rowRefOf(c, shown, self);
+    // "He" right after a board (no row of it asked about yet) is someone on
+    // it, whoever was remembered before; after a row was, it is that trader.
+    const boardJustShown = memory?.lastIntent === "rankings-traders" && shown.about === null;
+    const pointing = !rowRef && traderDeixis && (memTraders.length === 0 || boardJustShown);
+    const rank = rowRef?.rank ?? (pointing && shown.singular ? 1 : null);
+    const row = rank === null ? undefined : shown.rows.find((r) => r.rank === rank);
+    if (row) {
+      ex.traders.push({ kind: "trader", userId: row.userId, ...(row.handle ? { handle: row.handle } : {}) });
+      traderDeixis = false;
+    } else if (rowRef || pointing) {
+      askWhichRow = askRow(shown);
+      rowRef = null;
+    }
+  }
   // Position management on the owner's own holding stays with the ledger and
   // the answer loop unless the message itself is about Fomo or a third party
   // ("did he take profit?"). A watch ("should we keep an eye on it?") is not
@@ -1139,7 +1219,11 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
 
   const detected: Detected | null = rowAsk
     ? { intent: "rankings-traders", inherent: TRADERS_WORD.test(c) }
-    : detectIntent({
+    : askWhichRow
+      ? { intent: "trader-context", inherent: true }
+      : rowRef?.bare && shown
+        ? detectedFromAbout(shown.about)
+        : detectIntent({
       c,
       fomo,
       cohort,
@@ -1225,8 +1309,15 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     toolCalls: clarification ? [] : toolCalls,
     ...(rowAsk && intent === "rankings-traders" ? { rowAsk: { ...rowAsk } } : {}),
     ...(detected?.earnings && intent === "trader-activity" ? { earnings: true as const } : {}),
+    ...(intent === "rankings-traders" && (rowAsk || ROW_RANK.test(c) || ROW_WHO.test(c)) ? { singular: true as const } : {}),
   });
   const ask = (question: string) => plan(question, []);
+  if (askWhichRow) return ask(askWhichRow);
+  // A row's trades are asked over the board's own window, unless this line names one.
+  if (rowRef && shown?.window && window === null && intent === "trader-activity") {
+    window = shown.window;
+    usesMemory.push("window");
+  }
 
   // A WATCH IS A WRITE, so it never infers its subject. It takes an explicit
   // coin, or an explicit reference to the remembered one ("watch this coin",

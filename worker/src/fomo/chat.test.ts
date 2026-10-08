@@ -443,6 +443,31 @@ describe("answerFomoQuestion", () => {
       assert.ok(r.handled && r.text.includes("That board has no 3rd trader."), r.handled ? r.text : "");
     });
 
+    it("the board is remembered, so 'the second one' next is its 2nd row; never a board cut to Merrymen's watched traders", async () => {
+      const s = await board();
+      const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-rows" };
+      await s.ask("who are the top traders on fomo today?", g);
+      const mem = deserialize(await s.service.memoryGet(OWNER, "group-rows"));
+      assert.deepEqual(mem?.board?.rows.map((r) => [r.rank, r.handle]), [[1, "CryptoKaleo"], [2, "frankdegods"]]);
+      assert.equal(mem?.board?.singular, false);
+      s.brokerCalls.length = 0;
+      const r = await s.ask("what's the second one holding?", g);
+      assert.ok(r.handled && !r.clarification);
+      assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_trader_context", { trader: "6dcf7c78-2537-522a-8307-3f9970c081be" }]]);
+      // The owner's watched-trader board is never "the board" a row refers to,
+      // even when it has rows (the public board's, served as if they were watched).
+      const call = s.broker.call;
+      s.broker.call = async (tool, args, opts) => {
+        const env = await call(tool, args, opts);
+        if (tool !== "fomo_get_rankings") return env;
+        const publicBoard = await call(tool, { board: "traders", window: "24h" }, opts);
+        return { ...publicBoard, coverage: { ...publicBoard.coverage, requested: { ...publicBoard.coverage.requested, cohortOnly: true } } };
+      };
+      const watched = await s.ask("who are the top traders we watch today?", { conversationKey: "owner-cohort" });
+      assert.ok(watched.handled && /CryptoKaleo/.test(watched.text), "it answered with rows");
+      assert.equal(deserialize(await s.service.memoryGet(OWNER, "owner-cohort"))?.board, undefined);
+    });
+
     it("holdings and trades of a row: the trader's context or activity, by id", async () => {
       const s = await board();
       await s.ask("who's the best trader on fomo today and what is he holding");

@@ -998,6 +998,11 @@ describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
   const no = ["lol", "gm", "pine thoughts on pepe", "what do you think about the weather today in the city where i live right now", "don't look at the sellers"];
   for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
   for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
+  // A row of the board it just said, or the trader it just named (fomo/intent.ts resolves them, or asks which).
+  const rows = ["what's the second one holding?", "#3?", "and number two?", "what did the top guy buy", "what's he holding?", "pine what did he make money on", "what is that guy holding", "tell me what his bags are"];
+  const notRows = ["he's cooked lol", "lol that guy", "the second one is better", "is he single?", "number one fan here"];
+  for (const t of rows) it(`a row or that trader: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
+  for (const t of notRows) it(`not a row ask: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
 });
 
 describe("deskNameOk / routeWorthy (route.ts checks a model's pick with these)", () => {

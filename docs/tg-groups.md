@@ -774,6 +774,24 @@ code writes (`tg-fomo-port.ts requestText`), planned by the same
 deterministic planner. Anything else (no model, an answer in words, an
 unknown action, a made-up name) is the persona's answer, exactly as before.
 
+**A row of the board, after it** ("what's the second one holding?", "#3?",
+"what did the top guy make money on", "and number two?"). The research
+remembers the public trader board the room was last shown (its ranks, user
+ids and public handles only; never one cut to Merrymen's watched traders),
+per room and topic, for 30 minutes, while the room keeps asking about it or
+one trader; any other question, the owner's forget or a new board replaces it
+(`fomo/subject-memory.ts board`). The planner reads a row reference against
+it (`fomo/intent.ts rowRefOf`) and asks about that row's trader by the
+board's user id, over the board's window; a bare "and #2?" asks of that row
+what the last row question asked. "He" or "that guy" right after a board
+asked in the singular ("who's the best trader on fomo") is its 1st row; after
+a board of several, with no row asked about yet, it asks "Which one on the
+board: the 1st, 2nd or 3rd?"; once a row was, "he" is that trader. While the
+room's last answer was research, such a line reaches the research without a
+question about Fomo in it (`detect.ts fomoFollowUpOf`: a row reference, or
+"he"/"his"/"that guy" with what one trader does). "Who's #1 on fomo" is still
+a new board.
+
 **One trader by name** (Milla, 2026-10-07: a named trader's public Fomo
 data may be answered in a group). Answered in the room, for anyone who
 asks, the owner included, whether the router read it ("do you know unipcs
@@ -1516,6 +1534,7 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "i'm sorry, who's been winning the most lately" / "what are people over there offloading this week" | No rule knew it: the router picks the leaderboard / the crowd's sells for this week, and the research answers it as the fixed question |
 | Anyone, the owner included: "do you know unipcs on fomo" / "who is trader unipcs on fomo?" / "what is @unipcs holding?" | One trader's public data, in the room, by handle without the `@`: what they hold and its value, or their trades, provider-reported, short money. Never whether Merrymen watches them; nothing goes to her DM |
 | "who's the best trader on fomo today and what did he make money on" (live 23:04) | The board (a row fewer), then that row's trader, read by the user id the board gave: "… made the most on ROO +$4.2k; lost the most on plumber -$10.9k." For anyone. A row the board does not have is said |
+| After a board: "what's the second one holding?" / "#3?" / "and number two?" / "what did he make money on" | That row's trader, by the board's user id, in the room. "He" after "who's the best trader" is the 1st row; after a board of several, "Which one on the board: the 1st, 2nd or 3rd?" |
 | "what is @x saying about $PONS" / "who are the top traders we watch" / "what are you researching on fomo" | "That one is for a direct message, not the group." (a trader's own theses, the watch list, her own research state), with no lookup |
 | The owner: "pine can you tail unipcs trades for the next 3 hours … take it" / "pine stop tailing unipcs" | Read by code: her DM gets the tail's confirm card (or the stop's answer); the room hears "sent it to your DMs 🤫", never the trader or "tail". Nothing starts until she presses in her DM; "take it" grants nothing |
 | Anyone else: "pine tail @unipcs for 2h" / "/tail unipcs" | "only my owner can do that 🙃" (once an hour per person), nothing else; her DM is never touched |

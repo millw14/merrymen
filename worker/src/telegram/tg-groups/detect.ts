@@ -2112,19 +2112,30 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
 /**
  * A SHORT FOLLOW-UP TO A RESEARCH ANSWER that names no subject of its own:
  * "what about the sellers?", "and the buyers?", "any theses?", "refresh it",
- * "this week?", "what about robinhood chain?", "and the top?". Read only
- * while this chat's last answer was research (handler.ts), so on its own it
- * routes nothing.
+ * "this week?", "what about robinhood chain?", "and the top?", "what's the
+ * second one holding?", "what did he make money on?". Read only while this
+ * chat's last answer was research (handler.ts), so on its own it routes
+ * nothing.
  */
 const FOMO_FOLLOW_UP =
   /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain)\b/u;
 const FOLLOW_UP_MAX_WORDS = 10;
+/**
+ * A ROW OF THE BOARD IT JUST SAID, or the trader it just named: "the second
+ * one", "#3", "number two" on their own; "he", "his" or "that guy" with what
+ * one trader does ("what's he holding", "what did that guy make money on").
+ * The planner resolves them against the board it remembers (fomo/intent.ts
+ * rowRefOf), or asks which row.
+ */
+const FOMO_ROW_REF = /\bthe (?:top|first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th) (?:one|guy|dude)\b|(?:^|\s)#(?:10|[1-9])(?![\p{L}\p{N}])|\bnumber (?:one|two|three|four|five|[1-9])\b/u;
+const FOMO_PERSON = /\b(?:he|he's|hes|him|his|she|she's|her|that guy|this guy|the guy)\b/u;
+const FOMO_TRADER_VERB = /\b(?:hold|holds|holding|holdings|bags?|bought|buy|buying|sold|sell|selling|trades?|trading|traded|made|make|making|money|won|lost|up to|doing)\b/u;
 
 export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []): boolean {
   if (typeof text !== "string" || !text.trim()) return false;
-  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}#]+/u, "");
   if (!t || COIN_STOP.test(t)) return false;
   if (wordsOf(t).length > FOLLOW_UP_MAX_WORDS) return false;
   const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames);
-  return asked && FOMO_FOLLOW_UP.test(t);
+  return asked && (FOMO_FOLLOW_UP.test(t) || FOMO_ROW_REF.test(t) || (FOMO_PERSON.test(t) && FOMO_TRADER_VERB.test(t)));
 }

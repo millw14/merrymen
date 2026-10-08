@@ -1057,6 +1057,26 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     }
   });
 
+  it("after a board, 'the second one', '#1' and 'he' are its rows, answered in the room; a 'he' after several asks which (WP8b)", async () => {
+    const w = await world();
+    await w.say("shogun who are the top traders on fomo today?");
+    const second = await w.say("shogun what's the second one holding?", undefined, 2 * 60_000);
+    assert.match(second, /^frankdegods on Fomo holds 2 coins worth \$3\.1k/, second);
+    assert.deepEqual(w.s.calls.slice(-1).map((c) => [c.tool, c.args]), [["fomo_get_trader_context", { trader: "6dcf7c78-2537-522a-8307-3f9970c081be" }]], "by the board's user id");
+    // "he" is now that trader; a bare "#1?" asks the 1st row what was last asked.
+    const he = await w.say("shogun what did he buy today?", undefined, 2 * 60_000, OWNER_ID + 1);
+    assert.match(he, /^frankdegods in the last 24h: /, he);
+    const first = await w.say("shogun and #1?", undefined, 2 * 60_000, OWNER_ID + 2);
+    assert.match(first, /^CryptoKaleo in the last 24h: /, first);
+    assert.equal(w.routePrompts.length, 0, "the planner read every one");
+    for (const t of w.tg.texts(GROUP)) for (const l of t.split("\n")) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+    // A new board of several: "he" points at nobody yet, so it asks which.
+    await w.say("shogun who are the top traders on fomo this week?", undefined, 2 * 60_000);
+    const which = await w.say("shogun what's he holding?", undefined, 2 * 60_000);
+    assert.equal(which, "Which one on the board: the 1st or 2nd?");
+    assert.ok(admitTgLine(which, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+  });
+
   it("a chain only the replied board's rows name never narrows 'send it?'", async () => {
     const w = await world();
     await w.say("shogun what's trending on fomo?");
