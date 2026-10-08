@@ -16,10 +16,12 @@
  * (rule 1). Its choice reaches the research only as a fixed question code
  * writes (tg-fomo-port.ts requestText), and a coin or trader it names counts
  * only when that name is literally in the line (a coin may also come from the
- * line it replies to); the time window and the buy or sell side are read from
- * the line's own words. Anything else (no model, the allowance spent, a
- * timeout, an answer in words, an unknown action, a name it made up) is
- * null, and the caller says exactly what it would have said without asking.
+ * line it replies to); the time window, the buy or sell side and a
+ * leaderboard row are read from the line's own words, and a chain from the
+ * line or the asker's own earlier lines (groundedChain). Anything else (no
+ * model, the allowance spent, a timeout, an answer in words, an unknown
+ * action, a name it made up) is null, and the caller says exactly what it
+ * would have said without asking.
  *
  * Every call goes through TgModelGate, and only from the first half of the
  * allowance (a reserve the gate checks where it takes the allowance), so
