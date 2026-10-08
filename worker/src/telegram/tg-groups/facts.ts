@@ -23,6 +23,33 @@ function withoutSelf(text: string, names: readonly string[]): string {
   return s.trim();
 }
 
+/**
+ * "WHAT CAN YOU DO?", "HELP", "COMMANDS": the whole line, nothing else in it
+ * (anchored), so "can you help me with pons" or "what can you do with fomo?"
+ * (the research's own list) is never taken for it.
+ */
+const CAPABILITIES =
+  /^(?:help|help\s+me|halp|commands|menu|what\s+(?:can|do)\s+(?:you|u)\s+do(?:\s+(?:here|in\s+here|in\s+(?:this|the)\s+(?:group|chat)|for\s+(?:me|us)))?|what\s+(?:are|r)\s+(?:you|u)\s+(?:able\s+to\s+do|good\s+for|for)|what\s+can\s+i\s+ask(?:\s+(?:you|u))?(?:\s+(?:here|for))?|how\s+do\s+i\s+use\s+(?:you|u|this\s+bot|this|the\s+bot)|what\s+(?:are\s+)?(?:your|ur)\s+(?:commands|features|capabilities|skills))[\s?!.]*$/iu;
+
+/** "how do i get my own agent / one of you / a bot like you": onboarding, not a chat. */
+const OWN_AGENT =
+  /\b(?:get|make|build|set\s*up|have|run)\s+(?:my\s+own\s+(?:agent|bot|merryman|one)|one\s+of\s+(?:you|u|these|those|them)|an?\s+(?:agent|bot|merryman)\s+like\s+(?:you|u|this|yours|this\s+one)|(?:an?\s+)?(?:agent|bot)\s+of\s+my\s+own)\b/iu;
+
+/**
+ * "WHY CAN'T YOU ANSWER THAT HERE?", "why not in the group?", "why only in
+ * DMs?": what stays in a direct message and what a room may hear. Never a
+ * past-tense complaint ("why didn't you answer", a missed question the
+ * re-ask handles), and never the bot or Telegram troubleshooting ("why
+ * doesn't the bot reply in my group" is the groups answer).
+ */
+const DM_WHY = /\b(?:why|how\s+come)\b/iu;
+const DM_POLICY: readonly RegExp[] = [
+  /\b(?:can'?t|cannot|won'?t|wont|unable\s+to)\b.{0,30}\b(?:answer|say|tell|share|post|show|talk\s+about)\w*\b.{0,30}\b(?:here|in\s+(?:the\s+|this\s+|a\s+)?(?:group|chat|gc|room))\b/iu,
+  /\bnot\s+(?:here|in\s+(?:the\s+|this\s+)?(?:group|chat|gc|room))\b/iu,
+  /\b(?:only\s+(?:in\s+)?(?:dms?|pms?|private)|(?:a|the|your|in)\s+dms?|dm\s+(?:you|u|only)|direct\s+messages?|in\s+private|privately)\b/iu,
+];
+const DM_POLICY_NOT = /\b(?:bot|telegram|botfather|privacy\s*mode|wallet|balance|portfolio|withdraw\w*|deposit\w*|didn'?t|did\s+not)\b/iu;
+
 export function publicFactRequest(text: string, names: readonly string[] = []): PublicFactRequest | null {
   const raw = withoutSelf(text, names);
   const math = parseChatMath(raw);
@@ -30,6 +57,7 @@ export function publicFactRequest(text: string, names: readonly string[] = []): 
     return { kind: "calculation", fact: { kind: "calculation", input: math } };
   }
   const s = raw.normalize("NFKC").toLowerCase().replace(/[’]/g, "'");
+  if (CAPABILITIES.test(s.trim())) return { kind: "site", topic: "capabilities" };
   if (/^(?:why|how come)\s+(?:(?:can'?t|cannot|won'?t)\s+(?:you|u)\s+trade|(?:are\s+)?(?:you|u)\s+not\s+trading)[\s?!.]*$/iu.test(s)) return { kind: "site", topic: "readiness" };
   const ownTrade = /\b(?:what|which|show|tell|list|anything|have|did)\b.*\b(?:you|your|u|ur)\b.*\b(?:trade[ds]?|buy|bought|sell|sold|trading)\b|\b(?:what|which)\b.*\b(?:trade[ds]?|coins?|tokens?)\b.*\b(?:you|u)\b.*\b(?:today|buy|bought|sell|sold)\b/iu;
   const ownWhy = /\bwhy\b/iu.test(s) && /\b(?:you|u)\b.*\b(?:buy|bought|sell|sold|trade[ds]?)\b/iu.test(s);
@@ -53,11 +81,13 @@ export function publicFactRequest(text: string, names: readonly string[] = []): 
   if (/\b(?:v4\s*(?:adapter|permission)|v4selfswap)\b/iu.test(s)
     || /\buniswap\s*v4\b/iu.test(s) && /\b(?:grant\w*|permission|adapter|wallet|settings?|renew\w*|re[ -]?sign|trad\w*|use|enable|connect\w*)\b/iu.test(s)) return { kind: "site", topic: "v4" };
   if (/\b(?:drawdown\s*(?:breaker|limit)|breaker\s*(?:tripped|trips|triggered|limit)|high[ -]water\s*mark)\b/iu.test(s)) return { kind: "site", topic: "drawdown" };
-  if (/\b(?:sign[ -]?up|register|create\s+(?:(?:my|an?|the|new)\s+)?(?:agent|merryman)|get\s+started|start\s+using\s+merrymen|join\s+merrymen)\b/iu.test(s)) return { kind: "site", topic: "onboarding" };
+  if (/\b(?:sign[ -]?up|register|create\s+(?:(?:my|an?|the|new)\s+)?(?:agent|merryman)|get\s+started|start\s+using\s+merrymen|join\s+merrymen)\b/iu.test(s)
+    || OWN_AGENT.test(s)) return { kind: "site", topic: "onboarding" };
   if (/\b(?:paper|practice|simulated)\b/iu.test(s) && /\b(?:withdraw\w*|cash\s*out)\b/iu.test(s)) return { kind: "site", topic: "modes" };
   if (/\b(?:withdraw\w*|cash\s*out|recover(?:y)?\s+(?:key|wallet|funds)|(?:lost|restore)\s+(?:(?:my|the)\s+)?(?:wallet|recovery\s*key))\b/iu.test(s)) return { kind: "site", topic: "withdrawals" };
   if (/\b(?:add\s+(?:funds|money|usdg)|deposit(?:ed)?\s*(?:funds|money|usdg|address)?|top[ -]?up|fund\s+(?:(?:my|the|an?|your)\s+)?(?:agent|merryman|account|wallet))\b/iu.test(s)) return { kind: "site", topic: "funding" };
   if (/\b(?:paper\s*(?:trading|trades?|mode|money)|practice\s*(?:trading|mode|money)|simulated\s*(?:money|funds|trades?)|real\s*(?:money|funds)|paper\s*(?:and|or|vs\.?|versus)\s*live|live\s*(?:and|or|vs\.?|versus)\s*paper|(?:switch|turn|enable)\b.{0,25}\blive\s*trading)\b/iu.test(s)) return { kind: "site", topic: "modes" };
+  if (DM_WHY.test(s) && DM_POLICY.some((re) => re.test(s)) && !DM_POLICY_NOT.test(s)) return { kind: "site", topic: "dm-policy" };
   if (/\b(?:public\s*(?:group|chat)|in\s+(?:the\s+)?group|private\s*(?:chat|details|portfolio|account|wallet)|dm|direct\s*message)\b/iu.test(s)
     && /\b(?:private|privacy|portfolio|balance|holdings|sizes?|wallet|difference|details|share|see|show|ask|tell)\b/iu.test(s)) return { kind: "site", topic: "privacy" };
   if (/\b(?:botfather|privacy\s*mode)\b/iu.test(s)
@@ -148,6 +178,23 @@ export function publicCoinStatus(memo: TgCoinMemo | undefined, nowMs: number): s
   return take ? `quick screen: ${take}` : undefined;
 }
 
+/**
+ * WHAT A ROOM CAN ASK IT, said by code (WP11): only what is wired here, so
+ * it never undersells or invents a feature, and always that a group never
+ * orders a trade (docs/tg-groups.md rule 1).
+ */
+function capabilitiesLine(wired: { fomo: boolean; desk: boolean; coins: boolean } | undefined): string {
+  const w = wired ?? { fomo: false, desk: false, coins: false };
+  const asks: string[] = [];
+  if (w.desk) asks.push("a read on a coin or the Robinhood Chain market");
+  if (w.fomo) asks.push("what's trending on Fomo", "who's top on Fomo today", "what traders say about a coin", "one Fomo trader's public moves by handle");
+  if (w.coins) asks.push("a look at a Robinhood Chain CA you drop");
+  const list = asks.length <= 1 ? asks.join("") : `${asks.slice(0, -1).join(", ")} or ${asks[asks.length - 1]}`;
+  return asks.length
+    ? `in here you can ask me for ${list}. i never take trade orders from a group.`
+    : "in here i mostly just chat. i never take trade orders from a group.";
+}
+
 /** A numeric exception is assembled by code, never granted to model-written text. */
 export function publicFactLine(fact: TgPublicFact): string | null {
   if (!fact || typeof fact !== "object") return null;
@@ -226,6 +273,10 @@ export function publicFactLine(fact: TgPublicFact): string | null {
       break;
     }
     case "site": {
+      if (fact.topic === "capabilities") {
+        line = capabilitiesLine(fact.wired);
+        break;
+      }
       const answers = {
         overview: "Merrymen runs your trading agent. the web shows its trades, decisions and controls; Telegram is another view of the same agent.",
         onboarding: "open Merrymen on the web, sign in, then choose Create agent. pick a strategy and trading mode, review the limits and sign the permission. finish the wallet's backup or login steps, then check your agent's status. you can start with paper trading.",
@@ -242,8 +293,9 @@ export function publicFactLine(fact: TgPublicFact): string | null {
         wallet: "open Wallet & permissions on the web and follow the current review/renew step. revocation needs network fees; an interrupted renewal must be resumed before trading. after signing, check agent status. never share a recovery key or bot token.",
         groups: "check Settings → Telegram and test the bot; /status in your linked DM checks the connection. groups also need owner approval. privacy mode can hide posts: disable it in BotFather and re-add the bot, or make it admin. mentions and direct replies can help.",
         limits: "buys still need a Brain decision and must fit the owner's signed permissions and trading limits. group messages can't raise those limits or authorize a wallet change.",
+        "dm-policy": "who i watch or follow, my owner's own research and anyone's account details stay in DMs. boards, coin research and one trader's public Fomo data are fine in here.",
       } as const;
-      line = answers[fact.topic] ?? null;
+      line = answers[fact.topic as Exclude<typeof fact.topic, "capabilities">] ?? null;
       break;
     }
     case "unavailable":

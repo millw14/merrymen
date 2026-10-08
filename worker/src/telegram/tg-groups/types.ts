@@ -252,7 +252,16 @@ export type TgPublicFact =
   | { kind: "coin"; look: CoinLook; nowMs: number; reviewed?: { verdict: "bought" | "passed" | "skipped"; paper?: boolean; notes?: string[] } }
   | { kind: "trades"; data: TgPublicTradesToday; why: boolean; symbol?: string; side?: "buy" | "sell" }
   | { kind: "calculation"; input: ChatMathInput }
-  | { kind: "site"; topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" | "onboarding" | "funding" | "withdrawals" | "modes" | "v4" | "readiness" | "drawdown" | "privacy" }
+  | {
+      kind: "site";
+      topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" | "onboarding" | "funding" | "withdrawals" | "modes" | "v4" | "readiness" | "drawdown" | "privacy" | "capabilities" | "dm-policy";
+      /**
+       * "capabilities" only: what is wired in this process, set by the
+       * handler (never from the line), so the list names only what a room
+       * can really ask for.
+       */
+      wired?: { fomo: boolean; desk: boolean; coins: boolean };
+    }
   | { kind: "unavailable"; topic: "coin" | "trades" | "calculation" };
 
 /** See CoinLook.source. */

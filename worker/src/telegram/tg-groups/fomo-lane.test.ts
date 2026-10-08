@@ -1312,3 +1312,58 @@ describe("a refusal or a failure is said plainly in the room (WP10, D10)", () =>
     assert.match(tg.texts(CHAT)[0]!, /can't put that research into words/);
   });
 });
+
+describe("fixed answers about itself, through the real handler (WP11; g1 b06, b13, b15, x11)", () => {
+  const lastSent = (): { id: number; text: string } => {
+    const sends = tg.calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === CHAT);
+    // FakeTg numbers its sends from 5000 in order.
+    return { id: 5_000 + tg.calls.filter((c) => c.method === "sendMessage").length - 1, text: String(sends[sends.length - 1]!.body.text) };
+  };
+
+  it("'what can you do?' and 'help' get the list of what is wired here, never the persona or a lookup", async () => {
+    make();
+    await said(msg("pine what can you do?"));
+    clock += 2 * MIN;
+    await said(msg("pine help", { fromId: ANN + 1 }));
+    const out = tg.texts(CHAT);
+    assert.equal(out.length, 2);
+    for (const l of out) {
+      assert.match(l, /^in here you can ask me for .*what's trending on Fomo.*\. i never take trade orders from a group\.$/);
+      assert.match(l, /Robinhood Chain market/, "the desk is wired here");
+    }
+    assert.deepEqual(fomo!.asks, []);
+    assert.deepEqual(desk!.asks, []);
+  });
+
+  it("with no research wired, the list never names Fomo", async () => {
+    fomo = null;
+    make();
+    await said(msg("pine what can you do?"));
+    assert.doesNotMatch(tg.texts(CHAT)[0]!, /Fomo/);
+  });
+
+  it("'how do i get my own agent' is the onboarding answer", async () => {
+    make();
+    await said(msg("pine how do i get my own agent"));
+    assert.match(tg.texts(CHAT)[0]!, /open Merrymen on the web, sign in, then choose Create agent/);
+  });
+
+  it("'why can't you answer in the group?' and a bare 'why?' under its deflection get the DM policy, never a market read", async () => {
+    fomo!.answer = () => ({ text: TG_FOMO_DEFLECTION, deflect: true, free: true });
+    make();
+    // The spy deflects whatever it is asked (live, a cohort-scoped board is one such ask).
+    await said(msg("pine what are the top coins among the traders you follow on fomo?"));
+    const deflection = lastSent();
+    assert.equal(deflection.text, TG_FOMO_DEFLECTION);
+    const replyTo = { messageId: deflection.id, fromId: BOT.id, fromIsBot: true, text: deflection.text };
+    clock += 30 * SEC;
+    await said(msg("why can't you answer in the group?", { replyTo }));
+    clock += 2 * MIN;
+    await said(msg("why?", { fromId: ANN + 1, replyTo }));
+    const out = tg.texts(CHAT);
+    assert.equal(out.length, 3);
+    for (const l of out.slice(1)) assert.match(l, /^who i watch or follow, my owner's own research and anyone's account details stay in DMs\./);
+    assert.deepEqual(desk!.asks, [], "never a market read");
+    assert.equal(fomo!.asks.length, 1);
+  });
+});

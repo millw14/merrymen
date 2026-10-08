@@ -2316,7 +2316,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // intent shadows the name in the block).
     const persona: TgIntent = intent;
     if (dec.act === "answer" && dec.mood !== "injection" && dec.mood !== "bot-question") {
-      const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j);
+      const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j) ?? repliedDmPolicy(j);
       const context = coinContext(j);
       const coinQuestion = asksAboutCoin(j.line.text, selfNamesOf(selfNow())) || /\b(?:why|how come)\b/iu.test(j.line.text);
       // SOCIAL-TRADING RESEARCH FIRST for an addressed research question
@@ -2569,6 +2569,18 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       id = line.replyTo;
     }
     return null;
+  };
+
+  /**
+   * "WHY?" UNDER ITS OWN "THAT ONE IS FOR A DIRECT MESSAGE": what stays in
+   * DMs and what a room may hear (facts.ts dm-policy), never a guessed
+   * market read or the persona's guess at its own rules.
+   */
+  const repliedDmPolicy = (j: LineJob): PublicFactRequest | null => {
+    if (j.addressed === null || !/\b(?:why|how come)\b/iu.test(j.line.text) || !isMsgId(j.line.replyTo)) return null;
+    const stored = store.room(j.msg.chatId);
+    const replied = stored ? freshView(stored, clock()).lines.find((l) => l.messageId === j.line.replyTo) : undefined;
+    return replied?.own && /\b(?:for|in) a direct message\b/iu.test(replied.text) ? { kind: "site", topic: "dm-policy" } : null;
   };
 
   /** Time-box a read without holding the per-chat queue. Late evidence is ignored. */
@@ -3540,7 +3552,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
   const requestedFact = async (request: PublicFactRequest, chatId: number): Promise<TgPublicFact> => {
     if (request.kind === "calculation") return request.fact;
-    if (request.kind === "site") return request;
+    // What a room can ask: only what is wired here, read now (never from the line).
+    if (request.kind === "site" && request.topic === "capabilities") return { kind: "site", topic: "capabilities", wired: { fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() } };
+    if (request.kind === "site") return { kind: "site", topic: request.topic };
     const data = await readFact(async () => d.facts?.()?.tradesToday() ?? null);
     if (!data) return { kind: "unavailable", topic: "trades" };
     const stored = store.room(chatId);
