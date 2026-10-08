@@ -65,7 +65,7 @@ test("partner namespace isolates external ids, lookup, list, and revocation", as
   assert.equal((await store.byToken(first.token!))?.status, "pending");
 });
 
-test("list returns the oldest connections first, then by id, before its limit", async () => {
+test("list returns the newest connections first, then by id, one row per user, before its limit", async () => {
   const { store, advance } = fixture();
   const made: string[] = [];
   for (let n = 0; n < 8; n++) {
@@ -73,13 +73,22 @@ test("list returns the oldest connections first, then by id, before its limit", 
     advance(1);
   }
   // Same-second connections fall back to id order, never to insertion luck.
-  const twins = [(await store.create(input("twin-a"))).connection.id, (await store.create(input("twin-b"))).connection.id].sort();
-  assert.deepEqual((await store.list("partner-a")).map(c => c.id), [...made, ...twins]);
+  const twins = [(await store.create(input("twin-a"))).connection.id, (await store.create(input("twin-b"))).connection.id].sort().reverse();
+  assert.deepEqual((await store.list("partner-a")).map(c => c.id), [...twins, ...made.reverse()]);
   advance(1);
-  for (let n = 0; n < 100; n++) await store.create(input(`later-${n}`));
+  for (let n = 0; n < 100; n++) {
+    const { connection } = await store.create(input(`later-${n}`));
+    await store.revoke("partner-a", connection.id);
+  }
+  // A full page of older rows, every one disconnected: a new or reconnected user still shows, once.
+  advance(1);
+  const reconnected = (await store.create(input("later-0"))).connection;
   const page = await store.list("partner-a");
   assert.equal(page.length, 100);
-  assert.deepEqual(page.slice(0, 10).map(c => c.id), [...made, ...twins], "a full page keeps the same oldest connections");
+  assert.equal(page[0].id, reconnected.id);
+  assert.equal(page.filter(c => c.externalUserId === "later-0").length, 1, "the retired connection is not listed beside its replacement");
+  assert.equal(page.filter(c => c.status === "revoked").length, 99);
+  assert.ok(!page.some(c => made.includes(c.id) || twins.includes(c.id)), "the oldest rows are the ones past the limit");
 });
 
 test("text that is not well-formed is refused, and a model reply carrying a lone surrogate is repaired", async () => {
@@ -207,7 +216,8 @@ test("a disconnected user reconnects through a fresh authorization; the revoked 
   assert.equal(await store.byTenant("partner-a", A), null);
   assert.equal((await store.bind(fresh.token!, A, ["chat:agent"])).status, "linked");
   assert.equal((await store.byTenant("partner-a", A))?.id, fresh.connection.id);
-  assert.deepEqual((await store.list("partner-a")).map(c => [c.id, c.status]), [[original.connection.id, "revoked"], [fresh.connection.id, "linked"]]);
+  // Listed once, as its current connection: the retired one answers only by its own id.
+  assert.deepEqual((await store.list("partner-a")).map(c => [c.id, c.status]), [[fresh.connection.id, "linked"]]);
   // And again: every disconnect can be followed by another fresh authorization.
   await store.revoke("partner-a", fresh.connection.id);
   advance(1);

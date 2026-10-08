@@ -122,7 +122,7 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       assert.equal((await first.byTenant("reconnect", A))?.id, fresh.id);
     });
 
-    await t.test("list orders by creation time, then id, reading createdAt from the stored record", async () => {
+    await t.test("list orders newest first, then id, reading createdAt from the stored record, one row per user", async () => {
       let now = 1_800_000_000;
       const clocked = new SqlPartnerStore(async () => databases[0], "postgres", () => now, secret);
       const made: string[] = [];
@@ -130,8 +130,18 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
         made.push((await clocked.create(create("ordered", `user-${n}`))).connection.id);
         now += 1;
       }
-      const twins = [(await clocked.create(create("ordered", "twin-a"))).connection.id, (await clocked.create(create("ordered", "twin-b"))).connection.id].sort();
-      assert.deepEqual((await second.list("ordered")).map(c => c.id), [...made, ...twins]);
+      const twins = [(await clocked.create(create("ordered", "twin-a"))).connection.id, (await clocked.create(create("ordered", "twin-b"))).connection.id].sort().reverse();
+      assert.deepEqual((await second.list("ordered")).map(c => c.id), [...twins, ...[...made].reverse()]);
+      // 100 older rows, all disconnected, then a reconnect: it still shows, and only once.
+      now += 1;
+      for (let n = 0; n < 100; n++) await clocked.revoke("ordered", (await clocked.create(create("ordered", `gone-${n}`))).connection.id);
+      now += 1;
+      const reconnected = (await clocked.create(create("ordered", "gone-0"))).connection;
+      const page = await second.list("ordered");
+      assert.equal(page.length, 100);
+      assert.equal(page[0].id, reconnected.id);
+      assert.equal(page.filter(c => c.externalUserId === "gone-0").length, 1);
+      assert.equal((await second.byId("ordered", page.find(c => c.externalUserId === "gone-1")!.id))?.status, "revoked");
     });
 
     await t.test("a stored row holding a lone surrogate escape cannot break its app's list", async () => {

@@ -206,7 +206,8 @@ CREATE INDEX IF NOT EXISTS partner_exchanges_history ON partner_exchanges (conne
 `;
 
 /** The external_user_id column of a revoked connection that has been reconnected; its record keeps the real one. */
-const retiredSlot = (id: string) => `\u001fretired:${id}`;
+const RETIRED = "\u001fretired:";
+const retiredSlot = (id: string) => `${RETIRED}${id}`;
 type JsonRow = { record_json: string };
 type ExchangeRow = { exchange_json: string };
 const connectionOf = (row: unknown): PartnerConnection | null => row ? JSON.parse((row as JsonRow).record_json) as PartnerConnection : null;
@@ -367,15 +368,21 @@ export class SqlPartnerStore implements PartnerStore {
   async revokeByTenant(id: string, tenant: PartnerAddress) { return this.revokeWhere(id, "tenant", address(tenant)); }
   async revoke(partnerId: string, id: string) { return this.revokeWhere(id, "partner_id", partnerId); }
   async list(partnerId: string) {
-    // Oldest first, then id: the ids are random, so ordering by them alone made
-    // WHICH 100 a large app saw arbitrary. createdAt lives only in record_json,
-    // read there with no schema change. On Postgres it is matched as text, not
-    // cast to json: rows stored before text had to be well-formed may hold a
-    // lone surrogate escape, which json refuses, and one such row failed the
-    // whole list. Only the top-level key can match: inside a JSON string every
-    // quote is escaped, so `"createdAt":` cannot occur there.
+    // Newest first, then id, one row per external user. Ordering by the random
+    // ids alone made WHICH 100 a large app saw arbitrary, and oldest first hid
+    // every new connection once an app had 100 older rows, which each
+    // reconnect adds to. A retired row (revoked, and since replaced for its
+    // user) is history: its id still answers disconnected on its own, but
+    // listed it showed the same user twice.
+    //
+    // createdAt lives only in record_json, read there with no schema change. On
+    // Postgres it is matched as text, not cast to json: rows stored before text
+    // had to be well-formed may hold a lone surrogate escape, which json
+    // refuses, and one such row failed the whole list. Only the top-level key
+    // can match: inside a JSON string every quote is escaped.
     const createdAt = this.dialect === "postgres" ? `substring(record_json from '"createdAt":([0-9]+)')::bigint` : "json_extract(record_json, '$.createdAt')";
-    return (await (await this.reader()).prepare(`SELECT record_json FROM partner_connections WHERE partner_id = ? ORDER BY ${createdAt}, id LIMIT 100`).all(partnerId)).map(row => connectionOf(row)!);
+    return (await (await this.reader()).prepare(`SELECT record_json FROM partner_connections WHERE partner_id = ? AND external_user_id <> (? || id)
+      ORDER BY ${createdAt} DESC NULLS LAST, id DESC LIMIT 100`).all(partnerId, RETIRED)).map(row => connectionOf(row)!);
   }
   async consumeNonce(nonce: string, expiresAt: number): Promise<boolean> {
     const now = this.clock();

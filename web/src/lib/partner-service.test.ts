@@ -291,7 +291,7 @@ test("after a disconnect, requesting the connection again starts a fresh authori
   assert.equal(old.body.agent, undefined);
   assert.equal((await call("GET", `/agents/${original.body.id}/messages`)).status, 409);
   const listed = new Map((await call("GET", "/agents")).body.data.map((c: { id: string; status: string }) => [c.id, c.status]));
-  assert.deepEqual(listed, new Map([[original.body.id, "disconnected"], [fresh.body.id, "connected"]]));
+  assert.deepEqual(listed, new Map([[fresh.body.id, "connected"]]), "the user is listed once, by the connection that replaced the old one");
 });
 
 test("key chat scope cannot substitute for owner consent", async () => {
