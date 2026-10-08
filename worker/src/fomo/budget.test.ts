@@ -612,8 +612,11 @@ describe("refusalResetAt and the configured caps", () => {
     }
     assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "x", MERRYMEN_FOMO_TENANT_DAILY_CREDITS: "y" }).problems.length, 2);
     assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "  " }).problems.length, 0, "blank is unset");
-    // A nonzero cap below the dearest read (a named trader's, 2,500) can never answer one: said at boot.
-    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "1000" }).problems, ["fomo: MERRYMEN_FOMO_GROUP_HOURLY_CREDITS is below what one named-trader read costs (2500 credits), so a room can never get one"]);
+    // A nonzero group cap below a room's dearest read (a coin's thesis page, 1,250; a room never reads
+    // the 2,500-credit profile route) can never answer it: said at boot (review r2).
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "1000" }).problems, ["fomo: MERRYMEN_FOMO_GROUP_HOURLY_CREDITS is below what one coin's thesis page costs (1250 credits), so a room can never hear a coin's theses"]);
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "2000" }).problems, [], "2,000 fits a page, and every trader read");
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "1250" }).problems, [], "exactly one page");
     assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "1500" }).problems.length, 1, "1500 leaves an owner 1125 an hour");
     assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "0" }).problems.length, 0, "0 is the documented off");
     assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "2500" }).problems.length, 0, "the default fits one");

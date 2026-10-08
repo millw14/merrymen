@@ -717,10 +717,15 @@ export function fomoBudgetFrom(env: Env): { budget: Partial<FomoBudgetConfig>; p
   }
   // A nonzero cap below the dearest read a room or owner surface makes can never answer it, in
   // any hour: said once at boot, as the limit in force (0 is the documented "off", said by docs).
+  // An owner's deep trader read may use the 2,500-credit profile route; a room never does (a
+  // trader is a 250 search, then 250-credit reads), so a room's dearest read is a coin's
+  // thesis page.
   const dearest = ROUTE_COST["wallet-resolution"];
+  const roomDearest = ROUTE_COST["thesis-page"];
   const keep = 1 - DEFAULT_PRIORITY_SHARES["position-protection"];
-  const low = (v: number | undefined, share: number): boolean => typeof v === "number" && v > 0 && Math.floor(v * share) < dearest;
-  if (low(budget.groupHourlyCredits, 1)) problems.push(`fomo: ${FOMO_CAP_ENV.groupHourlyCredits} is below what one named-trader read costs (${dearest} credits), so a room can never get one`);
+  const below = (v: number | undefined, share: number, floor: number): boolean => typeof v === "number" && v > 0 && Math.floor(v * share) < floor;
+  const low = (v: number | undefined, share: number): boolean => below(v, share, dearest);
+  if (below(budget.groupHourlyCredits, 1, roomDearest)) problems.push(`fomo: ${FOMO_CAP_ENV.groupHourlyCredits} is below what one coin's thesis page costs (${roomDearest} credits), so a room can never hear a coin's theses`);
   if (low(budget.tenantHourlyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantHourlyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) an hour`);
   if (low(budget.tenantDailyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantDailyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) a day`);
   return { budget, problems };
