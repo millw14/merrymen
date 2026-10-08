@@ -40,7 +40,7 @@ import { checkCanonicalWall } from "./canonical-wall";
 import { createPartnerEnrollmentService } from "./partner-enrollment";
 import type { PartnerRuntime } from "./partner-runtime";
 import { createPartnerService, partnerFailure } from "./partner-service";
-import { FilePartnerStore } from "./partner-store";
+import { FilePartnerStore, PARTNER_LOCK_WAIT_MS } from "./partner-store";
 
 const GATEWAY_SECRET = "e2e-gateway-holder-signing-secret-32-bytes-or-more";
 const BRIDGE_SECRET = "e2e-partner-bridge-secret-shared-by-gateway-and-web";
@@ -150,7 +150,8 @@ before(async () => {
   cleanup.push(home);
   // Defaults everywhere route.ts relies on them: the clock, and the bridge
   // secret read from the environment by the store, service and enrollment.
-  store = new FilePartnerStore(home);
+  // Only the chat lock's wait is shortened, so a busy answer takes 300ms, not 20s.
+  store = new FilePartnerStore(home, undefined, undefined, { ...PARTNER_LOCK_WAIT_MS, conversation: 300 });
   const enrollment = createPartnerEnrollmentService({
     store,
     derive: async owner => derivationOf(accounts.get(owner.toLowerCase())),
@@ -369,6 +370,22 @@ test("the embedded flow, end to end: create, authorize with the SDK, activate, c
   const history = expectStatus(await partner("GET", `/agents/${id}/messages`), 200);
   assert.deepEqual(history.messages.map((m: { role: string; content: string }) => [m.role, m.content]),
     [["user", message.message], ["assistant", reply.reply]]);
+  // Still busy past the wait: the partner is told when to come back, in the
+  // body and in the Retry-After header the gateway relays, and resends unchanged.
+  let entered!: () => void, release!: () => void;
+  const inside = new Promise<void>(resolve => { entered = resolve; });
+  const holder = store.withConversationLock(id, async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); });
+  await inside;
+  const next = { message: "And now?", request_id: "e2e-request-0002" };
+  let busy: Answer;
+  try { busy = await partner("POST", `/agents/${id}/messages`, next); } finally { release(); }
+  await holder;
+  expectStatus(busy, 409);
+  assert.equal(busy.body.error.code, "conversation_busy");
+  assert.equal(busy.body.error.retry_after, 2);
+  assert.equal(busy.headers.get("retry-after"), "2", "the gateway relays the runtime's Retry-After");
+  assert.equal(replies.length, 1, "nothing was generated while busy");
+  assert.equal(expectStatus(await partner("POST", `/agents/${id}/messages`, next), 200).reply, `Robin here. You said: ${next.message}`);
 
   // 5. Disconnect: a DELETE, the other kind of request the outage refused.
   assert.deepEqual(expectStatus(await partner("DELETE", `/agents/${id}/connection`), 200), { id, status: "disconnected" });
