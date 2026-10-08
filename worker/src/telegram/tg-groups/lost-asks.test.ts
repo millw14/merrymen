@@ -876,6 +876,32 @@ describe("other words for 'you missed it' go to the router (route.ts reask)", ()
     assert.ok(!logs.some((l) => l.startsWith("[tg-groups] an unanswered ask re-asked")), "the silent tail line is never re-run");
   });
 
+  it("her own second tail ask, silent by rule while her DM is not open: 'shogun' 20 s and 100 s later gets its hail (review r3)", async () => {
+    fomo = new SpyFomo();
+    let proposed = 0;
+    make({ owner: () => ({ proposeTail: async () => { proposed++; return "dm-first" as const; } }) });
+    const TAIL = "shogun tail unipcs for 3 hours";
+    await said(msg(TAIL));
+    const notices = tg.out().length;
+    assert.ok(notices >= 1, "the 'open my DM first' line, once");
+    clock += 2 * MIN;
+    await said(msg(TAIL));
+    assert.equal(tg.out().length, notices, "said once an hour");
+    const asked = proposed;
+    for (const after of [20, 100]) {
+      clock += after * SEC;
+      const eyes = tg.reactions().length;
+      const hail = msg("shogun");
+      await said(hail);
+      const answered = tg.out().filter((o) => o.replyTo === hail.messageId);
+      assert.equal(answered.length, 1, `+${after}s: ${JSON.stringify(tg.out().slice(-2))}`);
+      assert.ok(HAILS.includes(answered[0]!.text), answered[0]!.text);
+      assert.equal(tg.reactions().length, eyes, `+${after}s: no 👀`);
+    }
+    assert.ok(!logs.some((l) => l.startsWith("[tg-groups] an unanswered ask re-asked")), "the silent tail line is never re-run");
+    assert.equal(proposed, asked, "no second card proposed by a re-run");
+  });
+
   it("with nothing of hers unanswered, reask is not even on the menu, and a reask pick is refused", async () => {
     make();
     picks.push({ action: "reask" });

@@ -3154,7 +3154,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // Counts and kinds only: never the trader, the hours or the line.
     log(`[tg-groups] owner tail ${tail ? tail.kind : "usage"}: ${outcome}`);
     if (outcome !== "sent" && outcome !== "dm-first") return "skipped";
-    await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, extra);
+    const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, extra);
+    // Silent by rule ("dm-first" said this hour) or the notice was dropped: nothing is open, as for
+    // anyone else's, and a re-run could only be silent again (or propose a second card).
+    const k = askKey(chatId, j.line.fromId, j.threadId);
+    if (!said && openAsks.get(k)?.job.line.messageId === j.line.messageId) openAsks.delete(k);
     return null;
   };
 
