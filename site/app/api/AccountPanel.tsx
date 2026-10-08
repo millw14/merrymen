@@ -287,7 +287,7 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, c
     <h3 id="dev-pay-title">{waiting.checking ? "Checking your payment" : "Payment not credited yet"}</h3>
     <p className="dev-warn" role="status">{waiting.checking
       ? `${waiting.count === 1 ? "Your payment is" : `${waiting.count} payments are`} being checked below. Paying again sends a second payment, and payments are not returned: wait for ${waiting.count === 1 ? "it" : "them"} to be credited.`
-      : `Your payment is not credited yet. Check it again below, or forget it, before paying again: paying now sends a second payment.`}</p>
+      : `${waiting.count === 1 ? "Your payment is" : `${waiting.count} payments are`} not credited yet. Check ${waiting.count === 1 ? "it" : "them"} again below, or forget ${waiting.count === 1 ? "it" : "them"}, before paying again: paying now sends a second payment.`}</p>
     {paste}
   </section>;
   return <section className="dev-pay" aria-labelledby="dev-pay-title">

@@ -250,7 +250,7 @@ test('while a payment is being checked no second one is offered, and a pasted ha
   // The gateway never confirms either: the checks stop, both stay saved, and Pay stays held back.
   await drain(page.container, [HASH_A, HASH_B]);
   assert.deepEqual(saved(), [HASH_A, HASH_B]);
-  assert.equal(canPay(page.container), false); assert.match(text(page.container), /Your payment is not credited yet/);
+  assert.equal(canPay(page.container), false); assert.match(text(page.container), /2 payments are not credited yet\. Check them again below, or forget them/);
   await page.unmount();
   // Both are checked again after a reload, in the order they were sent.
   calls = [];
