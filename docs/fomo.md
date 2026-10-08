@@ -169,6 +169,13 @@ most 30 days. "Should we follow this?" is analysis, not permission.
 
   "refresh", "latest", "check now" and "right now" force an upstream attempt. Identical
   concurrent refreshes share one in-flight call and never substitute an older result.
+  **A Telegram group reads differently** (decisions D7 and D8, 2026-10-07;
+  `freshness.ts GROUP_REUSE_MS`, `service.ts read`): a room reuses a copy longer, theses
+  for 2 h, the trader board for 1 h and coin boards for 15 min (the other classes keep
+  their own windows, and no class past its "oldest copy served"), always labelled with its
+  age ("From a copy fetched 41 min ago."); and a room's "now" or "latest" is never a paid
+  forced refresh: it is an ordinary read in the class's own window, without the group's
+  longer one. The owner's DM, the app and MCP read as above.
 - **Envelopes:** every result carries a request id, resolved subject, requested versus
   achieved scope, status, evidence refs, five separate clocks (`retrievedAt`,
   `providerAsOf`, `sourceEventAt`, `lastRefreshAttemptAt`, `cacheAgeMs`), coverage, usage
@@ -743,7 +750,15 @@ Free 250k, Starter 2.5M, Builder 12.5M, Growth 37.5M, Scale 112.5M.
 
 The shared daily pool is `plan × (1 − 20%) / 31`, split 25% position protection, 45%
 interactive and 30% discovery. Discovery is shed first. Per-owner hourly and daily caps,
-per-group caps and model-call caps apply. Nothing upgrades a plan, tops up credits or
+per-group caps and model-call caps apply: by default 6,000 credits an hour and 20,000 a day
+per owner, and 2,500 an hour per group, each held under the shared pool; an operator may
+set them (Operations below). Every group charge also counts against the owner's hourly
+share, so a group's cap alone does not move the wall. A refused read is said with when it
+resets: the owner hears which allowance ran out ("your hourly Fomo research allowance is
+used up; it resets at 15:00 UTC"), a room hears one wording for every cap, "fomo lookups
+for this room are used up for now, try again after 15:00 UTC." (hourly caps reset at the
+next clock hour, daily ones at 00:00 UTC; `budget.ts refusalResetAt`), never a credit or
+an amount. Nothing upgrades a plan, tops up credits or
 switches provider. On the Free plan (about 6,450 credits/day) the fleet gets roughly one
 cohort refresh, a few holdings lookups and about one thesis page a day: enough to verify,
 not to operate. **Builder** (about 322k/day) is the realistic minimum for a fleet;
@@ -755,7 +770,11 @@ answers use one call on the existing house model.
 | Variable | Process | Meaning |
 |---|---|---|
 | `MERRYMEN_FOMO_API_KEY` (alias `FOMO_API_KEY`) | web, orchestrator; self-hosted worker or settings `fomoApiKey` | provider key, stripped from hosted children |
-| `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget |
+| `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget. A self-hosted worker reads it too, so its budget matches the install's web |
+| `MERRYMEN_FOMO_GROUP_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per Telegram group per clock hour. Default 2,500 |
+| `MERRYMEN_FOMO_TENANT_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per clock hour, the owner's groups included. Default 6,000 |
+| `MERRYMEN_FOMO_TENANT_DAILY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per UTC day. Default 20,000. The three caps are whole numbers only (`budget.ts fomoBudgetFrom`, the one reader for orchestrator, web and a self-hosted worker); a bad value is logged by name, never echoed, and its default applies; each cap is held under the shared pool, and the boot line states the limits in force. Research-credit caps only, never a trading limit. Keep a group's cap at most three quarters of the owner's hourly one |
+| `MERRYMEN_TG_THESES_MODEL=0` | worker children | turns off the group model's paraphrase of a coin's theses: rooms hear the code-written digest only |
 | `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; a hosted child is Fomo-on only with both the channel and this value, and off it runs no Fomo code (no Telegram research lane or classifier entries, nothing charged to the scout budget). The web builds no runtime, its chat answers as before, Settings shows no Fomo section and MCP lists no Fomo tool. Self-hosted: on unless `0` (worker and web alike); a self-hosted install never owes the scout budget anything for Fomo |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
@@ -800,7 +819,26 @@ Surface limits:
   board says "Fomo's trader board covers every chain; it can't be narrowed to one." The
   crowd ("what are fomo traders buying?") also names the feed page's top three coins by
   distinct buyers (sellers, for selling), as counts, never who. "What can you do with fomo" and "is fomo working?" are answered by code with no
-  lookup: a fixed list, and whether research is on here. Group answers carry no
+  lookup: a fixed list, and whether research is on here. **What people are saying about
+  a coin** (its theses) is never quoted and never counted in a room: no stance counts and
+  no "evidence families" (decision D6; "25 neutral" only ever meant no cue matched). The
+  code digest (`fomo/digest.ts`) says what they argue: one thesis per family, the coin's
+  dev's own posts left out, content-free rows ("lfg") dropped, the lexicon's cues that are
+  not negated in fixed phrases ("For it: it's still early, a strong community.", "Against
+  it: fears it could collapse, worries about the dev's wallet."), what most of it is about,
+  what holders wait on (never an airdrop), and "Their claims, not facts; newest 25 of 41."
+  Milla, 2026-10-07 (D5): the group model may also put them in its own words
+  (`tg-groups/theses.ts`): it reads at most twelve cleaned samples, fenced as data, and
+  every phrase it writes is checked by code (no digit outside the coin's name, no number
+  word, $tag, handle, link or quotation mark, no five-word run of any thesis) and by the
+  gate as an `answer` line, dropped and never repaired; the digest is said whenever that
+  cannot be. One call per coin and copy, from the half of the room's model allowance kept
+  for what is nice to have, kept 30 minutes; `MERRYMEN_TG_THESES_MODEL=0` turns it off.
+  The owner's own thesis answers keep the counts, with "no clear lean" for "neutral", and
+  her quoted excerpts. A read that failed, could not be reached or was refused is said
+  plainly in the room ("couldn't reach fomo just now, try again in a bit.", or the room's
+  budget line above), never as "ask me in a direct message", which would make a failure
+  sound private. Group answers carry no
   attribution line and no skill caveat (Milla, 2026-10-07: the room has had a post about
   the source); owner answers keep both. When the owner asks in a group, her moves for the
   rows (the DM questions to ask next, and `/buy SYM` only for a Robinhood Chain coin her
@@ -877,6 +915,24 @@ every open Trencher position's cost instead, which errs toward refusing. So:
    the probe's cached answer is dropped on the first decide that fails while carrying the
    lens. A Brain rollback stops the lens after at most one failed review.
 
+## Decided (Milla, 2026-10-07: groups after the live test)
+
+- **One trader in a room.** A named trader's public Fomo data may be answered in a group,
+  for anyone who asks, the owner included: profile, holdings, recent trades, and what they
+  made or lost money on (provider-reported). Still never in a room: who Merrymen follows or
+  watches, the owner's own research state or watch list, a trader's own theses, anything
+  from her DM.
+- **Chains.** Boards cover every chain by default and are cut to one on request ("robinhood
+  coins", "on base", "solana ones"); an unfiltered board in a room ends with where Robinhood
+  Chain stands, honestly when none of the top rows are on it.
+- **Budget.** The default caps stay as they are. The three cap variables (Operations) are
+  read identically by the orchestrator and the web process; rooms reuse copies longer, a
+  room's "now" never forces a paid refresh, and a refusal says when to try again.
+- **Theses.** A room hears a code digest of what they argue, and the group model's
+  paraphrase of cleaned, fenced thesis texts, never a verbatim quote; on by default,
+  `MERRYMEN_TG_THESES_MODEL=0` turns the paraphrase off. Group answers carry no stance
+  counts and no "evidence families".
+
 ## Decisions needed from Milla
 
 1. **Terms.** The provider licenses use "within your own applications and internal
@@ -889,7 +945,10 @@ every open Trencher position's cost instead, which errs toward refusing. So:
    three-caveat Brain gate rule: left unchanged here. The diagnosis above says which ones
    look like accidental permanent holds.
 4. **Plan.** Credits for the fleet (Builder or higher recommended) and the
-   `MERRYMEN_FOMO_PLAN_CREDITS` value.
+   `MERRYMEN_FOMO_PLAN_CREDITS` value. Whether to raise the group and owner caps
+   (`MERRYMEN_FOMO_GROUP_HOURLY_CREDITS`, `MERRYMEN_FOMO_TENANT_HOURLY_CREDITS`,
+   `MERRYMEN_FOMO_TENANT_DAILY_CREDITS`, on web and orchestrator alike) is a later call; the
+   defaults stand until then (2026-10-07).
 5. **Stage E canary.** Name the agent, its scout budget and the live allowlist entry.
 6. **Verification asks.** Coins with cohort buying may be verified on chain beyond the
    top-20 slice, so that a follow nomination has a verified route. They are kept out of the

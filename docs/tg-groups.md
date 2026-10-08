@@ -54,7 +54,11 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    Fomo's public leaderboard P&L and one named trader's provider-reported
    holdings value and realised figures (third parties' published figures, in
    short form, under words naming Fomo or the trader; the room has had a post
-   about the source, so group answers carry no source line) reach the room. A market desk read may cite public market figures only when
+   about the source, so group answers carry no source line) reach the room.
+   The group model's paraphrase of a coin's theses is NOT code-written: each
+   of its phrases is checked as an `answer` line (the money clause applies;
+   no digit outside the coin's name), never as `research`, which would admit
+   "going to 10m". A market desk read may cite public market figures only when
    every figure in it is one the brief code measured for that answer contains
    (Market analysis); the desk is never handed the owner's book, so it has
    none of the owner's figures to cite. Hypothetical arithmetic is never
@@ -84,7 +88,11 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    Merrymen follows or watches (a board cut to its watched traders, whether a
    trader is among them, figures read from that record), the owner's own
    research state or watch list, a trader's own theses, and anything from her
-   DM.
+   DM. A coin's theses (strangers' words) are never quoted in a room: it hears
+   a code digest of what they argue, or the group model's paraphrase of
+   cleaned texts fenced as data (links, addresses, handles and $tags out,
+   rows shaped as instructions or lures dropped), never a five-word run of
+   anyone's words (Milla, 2026-10-07, decision D5).
 
 4. **Only the owner shapes the agent.** Group members cannot write owner
    facts, bump the relationship, rename it, change settings, confirm
@@ -100,7 +108,12 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    `admitDeskText` — every protective clause, with the money and figure bans
    replaced by grounding in its brief — and a refused read is replaced by the
    desk's code-written read, never repaired. An addressed factual question
-   can report unavailable evidence without exposing provider details.
+   can report unavailable evidence without exposing provider details. A Fomo
+   read that failed, could not be reached or was refused by a budget is said
+   plainly ("couldn't reach fomo just now, try again in a bit.", or "fomo
+   lookups for this room are used up for now, try again after 15:00 UTC."),
+   never as "ask me in a direct message", which would make a failure sound
+   private and would not be true.
    Unprompted failures (model, chain, Brain, Telegram) are silent in the group
    and at most logged.
 
@@ -116,7 +129,10 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    spends the house key on group chatter unless the operator says so. Brain
    reads a group's market question only with `MERRYMEN_TG_GROUPS_BRAIN=1`.
    Every group model call, Brain's included, is counted against a daily
-   allowance that survives redeploys. Group work runs off the serial poll loop, so a slow model or
+   allowance that survives redeploys. Calls that are only nice to have (the
+   router, a thesis paraphrase) spend only the first half of the day's and
+   the chat's hour's allowance. Fomo credits are research budget, never
+   trading's. Group work runs off the serial poll loop, so a slow model or
    Brain never delays the owner's DMs, buttons or `/kill`.
 
 ## Which groups it talks in
@@ -454,6 +470,26 @@ trades, and partial or unreadable history is never reported as no trades.
 in that same group; otherwise it identifies the recorded decision source and
 directs the owner to DM for the full private reason. Private DM and web chat
 share the same operation deduplication, fill provenance and sold-cost replay.
+
+**About itself, in fixed words** (`facts.ts`, WP11; never the persona,
+which could undersell or invent):
+
+* "what can you do?", "help", "commands" (the whole line, nothing else, so
+  "can you help me with pons" or "what can you do with fomo?" is not it): a
+  code-written list of what a room can ask, naming Fomo, the desk and coin
+  looks only where each is wired in this process, and always "i never take
+  trade orders from a group."
+* "how do i get my own agent", "how can i get one of you": the onboarding
+  answer.
+* "why can't you answer in the group?", "why not here?", "why only in DMs?",
+  and a bare "why?" under its own "That one is for a direct message": who it
+  watches or follows, the owner's own research and anyone's account details
+  stay in DMs; boards, coin research and one trader's public Fomo data are
+  fine in the room. A past-tense "why didn't you answer" is a missed
+  question (the re-ask's), and "why doesn't the bot reply in my group" stays
+  the Telegram troubleshooting answer.
+
+Each template passes the gate as `fixed` (pinned in facts-followups.test.ts).
 
 Literal arithmetic, percentage changes and P&L calculations use bounded
 decimal arithmetic and only the supplied operands. They never become a
@@ -1344,6 +1380,26 @@ calls run at once per agent. A desk read (Market analysis) is one call — to
 Brain when `MERRYMEN_TG_GROUPS_BRAIN=1`, else to this model — and is counted
 the same way.
 
+**A coin's theses in its own words** (`theses.ts`, decision D5, on by
+default; `MERRYMEN_TG_THESES_MODEL=0` turns it off). When the research
+answers what traders are saying about one coin, the room's answer is the code
+digest (fomo/digest.ts: what they argue for and against, what most of it is
+about, what holders wait on, "Their claims, not facts; newest 25 of 41.").
+With a model, one forced choice (`summarise_theses`: a gist, up to three
+points for, three worries, two things waited on) reads at most twelve cleaned
+samples, one per family, at most 160 characters each, fenced as data. Code
+checks every phrase: its length, no digit outside the coin's name and no
+number word, no $, @, # or link, no quotation mark, no five-word run shared
+with any sample, nothing about instructions, and the gate as an `answer`
+line. A phrase that fails is dropped, never repaired; the worded lines sit
+between the digest's header and its closing lines, which always stay, within
+the room's six lines and 700 characters. No model, under 1.5 s of the reply
+deadline left, the router's reserve reached, an answer in words, a late or
+failed call, or nothing passing: the code digest. One call per coin and copy
+(the coin and when its theses were read), kept 30 minutes, so "tell me what
+it's about from the theses" right after costs no call. Logs carry counts
+only.
+
 ## Operator switch
 
 `MERRYMEN_TG_GROUPS=0` in the environment turns the whole feature off for
@@ -1357,6 +1413,9 @@ restored at spawn (see Storage and the ferry).
 
 `MERRYMEN_TG_GROUPS_ROUTER=0` turns off only the router (What a line wants):
 lines no rule knew go straight to the persona.
+
+`MERRYMEN_TG_THESES_MODEL=0` turns off only the group model's paraphrase of
+a coin's theses (The model): rooms hear the code digest.
 
 `MERRYMEN_TG_GROUPS_DESK=0` turns off only the market desk: market and coin
 questions go back to the voice and the public snapshot.
@@ -1551,6 +1610,14 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "shogun what's trending on fomo?" with only Solana coins on top | Every chain's board, three rows, and "On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st)." (or that none of the top 100 is on it) |
 | "who's the top trader on robinhood on fomo" | The trader board, plus "Fomo's trader board covers every chain; it can't be narrowed to one." |
 | "who's selling pons on fomo?" (no `$`, not in capitals) | Never the whole feed's sellers: the port leaves it to the router, which names PONS from the line and asks its sellers |
+| "what are they saying about anyps5" (live 23:00) | What they argue, never counts: "What traders on Fomo are saying about AnyPS5 on Solana (25 recent theses from 20 traders):", then the group model's checked gist, points for and worries, then "Their claims, not facts; newest 25 of 60." No model, or nothing of its passing: the code digest ("Mostly hype, with no case for or against that I can pick out." when no cue matches) |
+| "tell me what it's about from thesis" right after (live 23:00) | The same worded answer from the same copy: no provider read, no model call |
+| "fetch the thesis for merrymen on fomo" past the room's research allowance (live 23:05) | "fomo lookups for this room are used up for now, try again after 00:00 UTC." The same words for the room's cap and the owner's; never a credit, never "ask me in a direct message" |
+| "what are people saying about $PONS now" a minute after the last answer | The copy from a minute ago, labelled with its age: a room's "now" never buys a forced refresh. Theses are reused for 2 h in a room, boards 15 min |
+| A Fomo read that failed or could not be reached | "couldn't reach fomo just now, try again in a bit." |
+| "shogun what can you do?" / "shogun help" | A fixed list of what this room can ask (Fomo, the desk, coin looks, as wired here) and "i never take trade orders from a group." No model, no lookup |
+| "shogun how do i get my own agent" | The onboarding answer |
+| "why can't you answer in the group?" under "That one is for a direct message, not the group." / a bare "why?" there | What stays in DMs (who it watches, the owner's research, account details) and what a room may hear (boards, coin research, one trader's public Fomo data). Never a market read |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |
@@ -1619,6 +1686,18 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 * A bare chain correction with no list word ("i said robinhood") is not read
   by the planner; it reaches the router, whose chain counts only when her
   own lines name it.
+* The thesis digest knows only its lexicon's cues and topics: a coin whose
+  theses are all hype gets "no case for or against" from code, and the
+  paraphrase is what names its story. A paraphrase phrase that copies five
+  words in a row of a sample, holds a number word or fails the gate is
+  dropped, so a paraphrase can be shorter than the model wrote, or the code
+  digest.
+* A room's research allowance is per clock hour, and every room charge also
+  counts against the owner's own hourly share: one coin's theses (a search and
+  a thesis page) cost about 1,500 credits, so under the default 2,500 an hour
+  a room gets about one new coin's theses an hour, beyond copies it reuses. The
+  caps are the operator's to raise (docs/fomo.md "Operations"); the search is
+  still paid when the page after it is then refused.
 * The owner's first name for tagging is taken from what it has seen in that
   chat; before the owner speaks there, it says "my owner", and the tag in the
   owner ask (a link to the owner's account) reads "boss".
