@@ -4623,6 +4623,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // dropped whole (store.ts forgetPerson, the code the forget record
         // is applied with too).
         store.forgetPerson(chatId, userId);
+        // Their open ask holds their words (the line, their name, a quote): it goes too, in every topic.
+        // The trailing colon keeps user 12 from matching user 123.
+        openAsks.deleteWhere((k) => k.startsWith(`${chatId}:${userId}:`));
         if (userId === ownerId()) {
           store.update(
             chatId,

@@ -538,6 +538,32 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     assert.deepEqual(tg.out().slice(before).filter((o) => o.replyTo === complaint.messageId), [{ text: "which question? i might've missed it, ask me again", replyTo: complaint.messageId }]);
   });
 
+  it("/forgetme takes their open ask with it: once its forget mark has aged out of memory, a poke still re-runs nothing of theirs (review r3)", async () => {
+    make();
+    tg.failNext = 1;
+    await said(msg("shogun how's the market?"));
+    const looks = desk.asks.length;
+    clock += 10 * SEC;
+    await groups.forgetMe(CHAT, MILLA);
+    // Two thousand other people's /forgetme push her mark out of the in-memory book (an LRU).
+    // (Their disk writes are not what this pins: skipped, so the loop is quick.)
+    const record = store.recordForget.bind(store);
+    const person = store.forgetPerson.bind(store);
+    store.recordForget = () => true;
+    store.forgetPerson = () => {};
+    for (let i = 1; i <= 2_000; i++) await groups.forgetMe(CHAT, 900_000 + i, undefined, { late: true });
+    store.recordForget = record;
+    store.forgetPerson = person;
+    clock += 10 * SEC;
+    const eyes = tg.reactions().length;
+    const poke = msg("shogun?");
+    await said(poke);
+    assert.ok(!logs.some((l) => l.startsWith("[tg-groups] an unanswered ask re-asked")), "her forgotten line is never run again");
+    assert.equal(desk.asks.length, looks, "never read again");
+    assert.equal(tg.reactions().length, eyes, "no 👀 promising it");
+    for (const o of tg.out().filter((x) => x.replyTo === poke.messageId)) assert.doesNotMatch(o.text, /mostly red/);
+  });
+
   it("/forgetme while her ask is read, then 'shogun', 'shogun?' or 'hello?? shogun': its hail, never a 👀 promising the forgotten ask (review r2)", async () => {
     const HAILS = ["hey 👋", "yo", "sup", "hey hey", "heyy", "yo 👋", "hey there", "hi 👋", "ayy", "oh hey", "sup 👀", "hey, what's up"];
     for (const poke of ["shogun", "shogun?", "hello?? shogun"]) {
