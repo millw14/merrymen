@@ -45,14 +45,16 @@ const BOOT_MS = 20_000;
 
 const freePort = () => new Promise((resolve) => { const probe = createServer().listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
 
-/** The hosted web runtime the bridge forwards to. `reply` decides each answer; `seen` counts what arrived. */
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The hosted web runtime the bridge forwards to. `reply` decides each answer (or a promise of it); `seen` counts what arrived. */
 async function startWeb() {
   const web = { seen: [], reply: () => ({ status: 200, body: { agents: [] } }) };
   const server = createServer((req, res) => {
     req.resume();
-    req.on("end", () => {
+    req.on("end", async () => {
       web.seen.push(`${req.method} ${req.url}`);
-      const { status, body, headers = {} } = web.reply(req);
+      const { status, body, headers = {} } = await web.reply(req);
       res.writeHead(status, { "content-type": typeof body === "string" ? "text/html" : "application/json", ...headers });
       res.end(typeof body === "string" ? body : JSON.stringify(body));
     });
@@ -260,6 +262,42 @@ test("an account pays, its plan lifts a spent quota, failures do not count, and 
   assert.deepEqual(await gw.stop("SIGINT"), { code: 0, signal: null });
   assert.match(gw.stdout(), /SIGINT: saving usage counts/);
   assert.equal(JSON.parse(await readFile(path.join(dir, "usage.json"), "utf8")).windows[periodKey].total, 4);
+});
+
+test("requests in flight at SIGTERM are answered, and what they counted is what is saved", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "merrymen-billing-drain-"));
+  cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const web = await startWeb();
+  const owner = `0x${"d4".repeat(20)}`;
+  const { key, keyId, secret } = makeKey();
+  // The runtime holds both answers until the gateway has been told to stop:
+  // one it answers, one it fails (a platform failure gives its unit back).
+  const held = [];
+  web.reply = (req) => new Promise((resolve) => held.push(() => resolve(req.url.includes("pa_failing")
+    ? { status: 503, body: { error: { code: "runtime_unavailable", message: "Worker state unreadable" } } }
+    : { status: 200, body: { agent: { id: "pa_answering" } } })));
+  const gw = await startGateway({
+    MERRYMEN_DATA_DIR: dir, MERRYMEN_BILLING: "observe",
+    MERRYMEN_PARTNER_BRIDGE_SECRET: BRIDGE, MERRYMEN_PARTNER_APP_ORIGIN: web.origin,
+    MERRYMEN_PARTNER_KEYS: JSON.stringify([{ keyId, appId: "drain-production", owner, name: "Drain", hash: hashSecret(SECRET, secret),
+      scopes: ["read:agents"], rpm: 30, status: "active", created_at: new Date().toISOString() }]),
+  });
+  const answering = partner(gw, key, "/agents/pa_answering");
+  const failing = partner(gw, key, "/agents/pa_failing");
+  for (let i = 0; i < 300 && web.seen.length < 2; i++) await delay(10);
+  assert.equal(web.seen.length, 2, "both requests reached the runtime");
+
+  const exited = gw.stop("SIGTERM");
+  for (let i = 0; i < 300 && !gw.stdout().includes("SIGTERM: saving usage counts"); i++) await delay(10);
+  for (const answer of held) answer();
+  const answered = Date.now();
+  const [ok, failed] = await Promise.all([answering, failing]);
+  assert.deepEqual([ok.status, failed.status, failed.json.error.code], [200, 503, "runtime_unavailable"], "a deploy does not cut a request off mid-answer");
+  assert.deepEqual(await exited, { code: 0, signal: null });
+  // Once the last answer is out, kept-alive connections do not hold the exit for the 3 s drain limit.
+  assert.ok(Date.now() - answered < 2_000, `exited ${Date.now() - answered} ms after the last answer`);
+  const windows = Object.values(JSON.parse(await readFile(path.join(dir, "usage.json"), "utf8")).windows);
+  assert.deepEqual(windows.map((w) => [w.total, w.keys]), [[1, { [keyId]: 1 }]], "the answered request counted; the failed one gave its unit back");
 });
 
 test("every degraded billing mode is said at boot", async () => {

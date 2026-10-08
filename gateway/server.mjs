@@ -377,21 +377,31 @@ server.listen(PORT, () => {
 /**
  * A deploy (SIGTERM) or Ctrl-C (SIGINT) saves the partner usage counts before
  * the process goes. usage.json is otherwise written every 10 s, so every deploy
- * would drop up to that much metering; queued billing writes finish first (5 s
- * at most, lib/billing.mjs close()). The ledger itself needs nothing here: each
- * record is flushed by the append that made it. A second signal exits at once,
- * and so does a close still hanging after 10 s, rather than waiting for the
- * host's SIGKILL. The host must allow that long between SIGTERM and SIGKILL
- * for the save to land; otherwise a deploy loses what a crash would.
+ * would drop up to that much metering. New connections stop at once; requests
+ * already inside get up to 3 s to finish, so their answers reach the partner
+ * and what they counted, or gave back on a platform failure, is in what is
+ * saved (one still running after that is cut off, as it always was). Then
+ * queued billing writes finish (5 s at most, lib/billing.mjs close()). The
+ * ledger itself needs nothing here: each record is flushed by the append that
+ * made it. A second signal exits at once, and so does a close still hanging
+ * after 10 s, rather than waiting for the host's SIGKILL. The host must allow
+ * that long between SIGTERM and SIGKILL for the save to land; otherwise a
+ * deploy loses what a crash would.
  */
+const DRAIN_MS = 3_000;
 let stopping = false;
 async function stop(signal) {
   if (stopping) process.exit(1);
   stopping = true;
   console.log(`[gateway] ${signal}: saving usage counts, then exiting`);
   setTimeout(() => process.exit(1), 10_000).unref();
-  server.close();
+  const drained = new Promise((resolve) => server.close(() => resolve()));
+  // A kept-alive connection goes idle once its answer is out, and would hold
+  // the close open for the whole 3 s: close each as it does.
   server.closeIdleConnections();
+  const sweep = setInterval(() => server.closeIdleConnections(), 50);
+  await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, DRAIN_MS))]);
+  clearInterval(sweep);
   await billing.close();
   process.exit(0);
 }
