@@ -1066,6 +1066,52 @@ describe("tails", () => {
   });
 });
 
+describe("tail marks", () => {
+  const rec = (db: Db, over: Record<string, unknown> = {}) =>
+    S.recordTailMark(db, {
+      tenant: A, eventKey: "ev-1", traderUserId: "u-1", handle: "@Uni", tokenKey: "k:t",
+      entryPrice8: "0.05000000", entryAtMs: T0, entryPool: "PONS / SOL", nowMs: T0, ...over,
+    } as Parameters<typeof S.recordTailMark>[1]);
+
+  it("records one mark per told buy and never remakes it", async () => {
+    const { db } = await fresh();
+    assert.equal(await rec(db), true);
+    assert.equal(await rec(db), false, "a retried tell never double-books");
+    assert.equal(await rec(db, { eventKey: "ev-2" }), true);
+    await assert.rejects(rec(db, { entryPrice8: "0.050000000" }), /decimal/, "prices keep 8dp shape");
+    await assert.rejects(rec(db, { eventKey: "ev-3", horizon: undefined, entryPrice8: null as never }), /decimal/);
+  });
+
+  it("due marks surface each untaken horizon once, oldest first", async () => {
+    const { db } = await fresh();
+    await rec(db, { eventKey: "ev-old", entryAtMs: T0 - 25 * HOUR });
+    await rec(db, { eventKey: "ev-new", entryAtMs: T0 - 30 * MIN });
+    const due = await S.dueTailMarks(db, A, T0, 10);
+    assert.deepEqual(due.map((m) => m.eventKey), ["ev-old"], "h1 and h24 both due on the old one, the new one due on neither");
+    assert.equal(await S.settleTailMark(db, { tenant: A, eventKey: "ev-old", horizon: "h1", price8: "0.10000000", atMs: T0 }), true);
+    assert.equal(await S.settleTailMark(db, { tenant: A, eventKey: "ev-old", horizon: "h1", price8: "0.20000000", atMs: T0 }), false, "first write wins");
+    const due2 = await S.dueTailMarks(db, A, T0, 10);
+    assert.deepEqual(due2.map((m) => m.eventKey), ["ev-old"], "h24 still due");
+    assert.equal(await S.settleTailMark(db, { tenant: A, eventKey: "ev-old", horizon: "h24", price8: "0.02500000", atMs: T0 }), true);
+    assert.deepEqual(await S.dueTailMarks(db, A, T0, 10), [], "nothing due once both horizons land");
+    assert.equal(await S.settleTailMark(db, { tenant: B, eventKey: "ev-old", horizon: "h24", price8: "1", atMs: T0 }), false, "another tenant settles nothing");
+  });
+
+  it("reads one trader's marks newest first and keeps marks 90 days", async () => {
+    const { db } = await fresh();
+    await rec(db, { eventKey: "ev-1", entryAtMs: T0 - 2 * HOUR });
+    await rec(db, { eventKey: "ev-2", entryAtMs: T0 - HOUR });
+    await rec(db, { eventKey: "ev-x", traderUserId: "u-9", entryAtMs: T0 });
+    const rows = await S.tailMarksForTrader(db, A, "u-1", T0 - DAY);
+    assert.deepEqual(rows.map((m) => m.eventKey), ["ev-2", "ev-1"]);
+    assert.equal(rows[0]!.handle, "Uni", "the display handle loses the @");
+    assert.deepEqual(await S.tailMarksForTrader(db, A, "u-1", T0), [], "the window is honoured");
+    assert.equal(S.FOMO_RETENTION.tailMarksMs, 90 * DAY);
+    await S.pruneFomo(db, T0 + 91 * DAY);
+    assert.deepEqual(await S.tailMarksForTrader(db, A, "u-1", 0), [], "old marks prune");
+  });
+});
+
 describe("tenant routes", () => {
   it("data access is the master switch, and a stale snapshot never undoes a newer one", async () => {
     const { db } = await fresh();

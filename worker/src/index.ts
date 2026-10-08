@@ -177,6 +177,7 @@ import {
 import { processBrokerPort } from "./fomo/broker";
 import { fomoTailsOn, type FomoBroker } from "./fomo/contract";
 import { createTailNotifier } from "./fomo/tail-notifier";
+import { toPrice8 as toMarkPrice8 } from "./fomo/tail-marks";
 import { createTgFomoPort } from "./tg-fomo-port";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
@@ -325,7 +326,7 @@ import {
   quoteUsdOf,
   resolveBitquery,
 } from "./discovery";
-import { fetchGeckoPools, readTokenPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
+import { fetchGeckoPools, readTokenPools, solanaMarkPrice, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
 import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
@@ -910,6 +911,30 @@ async function main() {
     holds: (tokenKey) => fomoChild.holds(tokenKey),
     enabled: () => !fomoOff && fomoTailsOn(),
     log: (line) => console.log(line),
+    // A told buy's entry price at tell time: Solana mints from GeckoTerminal's
+    // solana pools, Robinhood Chain from its pools read, deepest priced pool.
+    // Null when no pool quotes it: the notice is told without a mark, never mis-marked.
+    quoteMark: async (chainSlug, address) => {
+      try {
+        if (chainSlug === "solana") {
+          const q = await solanaMarkPrice(address);
+          if (!q) return null;
+          const price8 = toMarkPrice8(q.priceUsd);
+          return price8 ? { price8, atMs: q.at, pool: q.poolName } : null;
+        }
+        if (chainSlug === "robinhood") {
+          const pools = await readTokenPools(address.toLowerCase()).catch(() => null);
+          const priced = (pools ?? []).filter((p) => typeof p.priceUsd === "number" && p.priceUsd > 0);
+          if (priced.length === 0) return null;
+          priced.sort((a, b) => (b.reserveUsd ?? -1) - (a.reserveUsd ?? -1));
+          const price8 = toMarkPrice8(priced[0]!.priceUsd);
+          return price8 ? { price8, atMs: Date.now(), pool: priced[0]!.name } : null;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    },
   });
   /** What the follow path reads at the moment of asking: settings, pause, rail, grant limits, this tick's prices. */
   function fomoLiveFacts(): FomoLiveFacts {

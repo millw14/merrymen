@@ -44,6 +44,45 @@ export function geckoSource(env: NodeJS.ProcessEnv = process.env) {
 
 /** The network slug for Robinhood Chain (4663) in GeckoTerminal's namespace. */
 export const GECKO_NETWORK = "robinhood";
+/** Solana in GeckoTerminal's namespace — the same pools endpoint shape. */
+export const GECKO_SOLANA_NETWORK = "solana";
+
+/** Base58 mints are case-sensitive: never lowercase one (fomo/identity.ts). */
+const SOLANA_MINT = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** One Solana pool's quotable facts — the mark ledger's entry/horizon source. */
+export interface SolanaPoolQuote {
+  /** The mint as given (case preserved). */
+  mint: string;
+  name: string;
+  dex: string;
+  priceUsd: number | null;
+  reserveUsd: number | null;
+  volume24hUsd: number | null;
+}
+
+export interface SolanaPoolsFetch {
+  pools: SolanaPoolQuote[];
+  failed: boolean;
+  failure?: string;
+  observedAt?: number;
+}
+
+function parseSolanaPool(mint: string, raw: unknown): SolanaPoolQuote | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { attributes?: Record<string, unknown>; relationships?: { dex?: { data?: { id?: unknown } } } };
+  const a = r.attributes;
+  if (!a || typeof a.name !== "string") return null;
+  const num = (v: unknown): number | null => (typeof v === "string" && v !== "" && Number.isFinite(Number(v)) ? Number(v) : null);
+  return {
+    mint,
+    name: a.name,
+    dex: typeof r.relationships?.dex?.data?.id === "string" ? r.relationships.dex.data.id : "",
+    priceUsd: num(a.base_token_price_usd),
+    reserveUsd: num(a.reserve_in_usd),
+    volume24hUsd: num((a.volume_usd as Record<string, unknown> | undefined)?.h24),
+  };
+}
 
 /** Which list to ask for. Each answers a different question about a market. */
 export type PoolFeed = "trending_pools" | "new_pools" | "pools";
@@ -536,4 +575,58 @@ export function screenPools(
     kept.push(p);
   }
   return { kept, dropped };
+}
+
+/**
+ * Solana pools for one mint, newest-page only. Same endpoint shape as the
+ * Robinhood token-pools read, different network slug — and NO lowercasing:
+ * base58 mints are case-sensitive. Anything REPORTING to a human uses the
+ * `failed` field; a 404 is a clean empty (no pools), not a failure.
+ */
+export async function readSolanaPoolsResult(mint: string, opts: { timeoutMs?: number } = {}): Promise<SolanaPoolsFetch> {
+  if (typeof mint !== "string" || !SOLANA_MINT.test(mint)) return { pools: [], failed: true, failure: "invalid-mint" };
+  const source = geckoSource();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
+  try {
+    const res = await fetch(`${source.base}/networks/${GECKO_SOLANA_NETWORK}/tokens/${mint}/pools?page=1`, {
+      headers: source.headers,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => {});
+      return { pools: [], failed: false, observedAt: Date.now() };
+    }
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { pools: [], failed: true, failure: `http-${res.status}`, observedAt: Date.now() };
+    }
+    const read = await readBoundedJson<{ data?: unknown[] }>(res);
+    if (!read.ok) return { pools: [], failed: true, failure: "invalid-body" };
+    if (!Array.isArray(read.value?.data)) return { pools: [], failed: true, failure: "invalid-shape" };
+    return {
+      pools: read.value.data.map((p) => parseSolanaPool(mint, p)).filter((p): p is SolanaPoolQuote => p !== null),
+      failed: false,
+      observedAt: Date.now(),
+    };
+  } catch {
+    return { pools: [], failed: true, failure: controller.signal.aborted ? "timeout" : "network" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The top pool's USD price for a Solana mint, or null when no pool quotes
+ * one. Top = deepest reserve with a price, so a dust pool cannot set a mark.
+ */
+export async function solanaMarkPrice(mint: string): Promise<{ priceUsd: number; at: number; poolName: string } | null> {
+  const r = await readSolanaPoolsResult(mint);
+  if (r.failed) return null;
+  const priced = r.pools.filter((p) => typeof p.priceUsd === "number" && p.priceUsd > 0);
+  if (priced.length === 0) return null;
+  priced.sort((a, b) => (b.reserveUsd ?? -1) - (a.reserveUsd ?? -1));
+  const top = priced[0]!;
+  return { priceUsd: top.priceUsd!, at: r.observedAt ?? Date.now(), poolName: top.name };
 }
