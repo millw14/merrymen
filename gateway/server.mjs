@@ -20,7 +20,7 @@ import { createStore, hasRedis } from "./lib/store.mjs";
 import { CLAIM_HTML } from "./lib/claimPage.mjs";
 import { addSignup, signupCount } from "./lib/signups.mjs";
 import { createPartners } from "./lib/partners.mjs";
-import { createPartnerApi } from "./lib/partner-api.mjs";
+import { createPartnerApi, partnerError } from "./lib/partner-api.mjs";
 import { createPartnerBridge } from "./lib/partner-bridge.mjs";
 import { createDeveloperApi } from "./lib/developer-api.mjs";
 
@@ -83,17 +83,22 @@ const gw = createGateway({
 });
 
 // ── http plumbing ────────────────────────────────────────────────────────────
+/**
+ * An oversized upload is refused, not cut off. This used to destroy the socket
+ * on the first byte over the cap, before any handler could answer, so every
+ * documented 413 arrived as a connection reset that a caller cannot tell from
+ * an outage. Past the cap nothing is buffered: the rest is read and discarded
+ * while the refusal goes out, up to a ceiling past which nobody is owed one.
+ */
+const DRAIN_LIMIT_BYTES = 16 * MAX_BODY_BYTES;
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on("data", (c) => {
       size += c.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("payload too large"));
-        req.destroy();
-        return;
-      }
+      if (size > DRAIN_LIMIT_BYTES) return req.destroy();
+      if (size > MAX_BODY_BYTES) return reject(new Error("payload too large"));
       chunks.push(c);
     });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
@@ -308,8 +313,9 @@ const server = createServer(async (req, res) => {
     if (partnerApi.owns(pathname)) {
       let body = "";
       if (req.method === "POST") {
+        // partnerError, like every other partner refusal: a report needs its request_id.
         try { body = await readBody(req); }
-        catch { return respond(res, { status: 413, json: { error: { code: "bad_request", message: "Request body is too large" } } }); }
+        catch { return respond(res, partnerError(413, "bad_request", "Request body is too large")); }
       }
       const r = await partnerApi.handle({
         method: req.method,
