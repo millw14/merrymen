@@ -38,7 +38,7 @@ import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
-import type { TgFomoAnswer, TgFomoMoves, TgFomoPort, TgFomoRequest, TgTraderAbout } from "./telegram/tg-groups/types";
+import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgTraderAbout } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
 export const TG_FOMO_MAX_CHARS = 600;
@@ -80,6 +80,14 @@ export interface TgFomoPortOptions {
 const TICKER = /^[A-Z0-9][A-Z0-9_-]{0,19}$/;
 
 /**
+ * A request's chain in the planner's own chain words (fomo/identity.ts
+ * chainFromUserText, after "on"): ethereum is "eth" there. Anything else
+ * names no chain, and the list is asked for across every chain.
+ */
+const CHAIN_WORDS: Readonly<Record<TgFomoChain, string>> = { robinhood: "robinhood", solana: "solana", base: "base", ethereum: "eth", bsc: "bsc" };
+const onChain = (c: unknown): string => (typeof c === "string" && Object.hasOwn(CHAIN_WORDS, c) ? ` on ${CHAIN_WORDS[c as TgFomoChain]}` : "");
+
+/**
  * THE FIXED QUESTION FOR A REQUEST. Each one plans exactly the intended read
  * through the deterministic planner (tg-fomo-port.test.ts pins every one), so
  * the model's choice reaches the provider only as that planner's arguments.
@@ -91,8 +99,10 @@ export function requestText(r: TgFomoRequest): string | null {
       const when = r.window === "7d" ? "this week" : r.window === "30d" ? "this month" : r.window === "all" ? "of all time" : "in the last 24h";
       return `who are the top traders on fomo ${when}?`;
     }
-    case "board":
-      return r.board === "graduated" ? "what are the newly graduated coins on fomo?" : r.board === "most-held" ? "what are the most held coins on fomo?" : "what's trending on fomo?";
+    case "board": {
+      const on = onChain(r.chain);
+      return r.board === "graduated" ? `what are the newly graduated coins on fomo${on}?` : r.board === "most-held" ? `what are the most held coins on fomo${on}?` : `what's trending on fomo${on}?`;
+    }
     case "coin": {
       const s = String(r.symbol ?? "").replace(/^\$+/, "").toUpperCase();
       if (!TICKER.test(s)) return null;
@@ -111,10 +121,10 @@ export function requestText(r: TgFomoRequest): string | null {
     }
     case "crowd": {
       const when = r.window === "7d" ? " this week" : r.window === "30d" ? " this month" : "";
-      return `what are traders ${r.side === "sell" ? "selling" : "buying"} on fomo${when}?`;
+      return `what are traders ${r.side === "sell" ? "selling" : "buying"} on fomo${when}${onChain(r.chain)}?`;
     }
     case "small-coins":
-      return "what small coins are getting attention on fomo?";
+      return `what small coins are getting attention on fomo${onChain(r.chain)}?`;
     case "about":
       return "what can you do with fomo?";
     case "status":

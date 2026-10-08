@@ -419,11 +419,11 @@ export interface TgDeskThinkRequest {
  * ticker code found in the line itself.
  */
 export type TgFomoRequest =
-  | { kind: "leaderboard"; window?: "24h" | "7d" | "30d" | "all" }
-  | { kind: "board"; board: "trending" | "graduated" | "most-held" }
+  | { kind: "leaderboard"; window?: "24h" | "7d" | "30d" | "all"; row?: TgBoardRow }
+  | { kind: "board"; board: "trending" | "graduated" | "most-held"; chain?: TgFomoChain }
   | { kind: "coin"; symbol: string; aspect: "theses" | "buyers" | "sellers" | "activity" | "research" }
-  | { kind: "crowd"; side: "buy" | "sell"; window?: "24h" | "7d" | "30d" }
-  | { kind: "small-coins" }
+  | { kind: "crowd"; side: "buy" | "sell"; window?: "24h" | "7d" | "30d"; chain?: TgFomoChain }
+  | { kind: "small-coins"; chain?: TgFomoChain }
   | { kind: "about" }
   | { kind: "status" }
   /** One trader: never answered in a room (the owner's goes to her DM, handler.ts). */
@@ -443,8 +443,29 @@ export interface TgFomoMoves {
   dm: string;
 }
 
-/** What the owner asked about one trader: who they are, what they hold, what they traded. */
-export type TgTraderAbout = "profile" | "holdings" | "trades";
+/**
+ * What was asked about one trader: who they are, what they hold, what they
+ * traded, or what they made or lost money on (provider-reported).
+ */
+export type TgTraderAbout = "profile" | "holdings" | "trades" | "earnings";
+
+/**
+ * A CHAIN A FOMO LIST MAY BE NARROWED TO, as tg-groups names it: one closed
+ * list, because this directory cannot import fomo/. The port writes it into
+ * the planner's own words (tg-fomo-port.ts requestText), and the router takes
+ * one only when the asker's own words name it (route.ts groundedChain).
+ */
+export type TgFomoChain = "robinhood" | "solana" | "base" | "ethereum" | "bsc";
+
+/**
+ * One row of the trader leaderboard asked about ("who's the top trader on
+ * fomo today and what did he make money on"): its rank on the board, and
+ * what about that trader. Read by code from the line, never from a model.
+ */
+export interface TgBoardRow {
+  rank: 1 | 2 | 3 | 4;
+  about: TgTraderAbout;
+}
 
 export interface TgFomoAnswer {
   text: string;

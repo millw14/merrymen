@@ -421,6 +421,27 @@ describe("a model's checked choice, asked as the planner's own question", () => 
       assert.ok(!plan.toolCalls.some((c) => isMutationTool(c.tool)));
     });
   }
+  it("a chain on a list request is asked in the planner's own chain words, and plans that chain on every list", () => {
+    const want: Record<string, string> = { robinhood: "robinhood", solana: "solana", base: "base", ethereum: "eth", bsc: "bsc" };
+    for (const [chain, slug] of Object.entries(want)) {
+      const c = chain as "robinhood" | "solana" | "base" | "ethereum" | "bsc";
+      const lists: Array<[Parameters<typeof requestText>[0], string, Record<string, unknown>]> = [
+        [{ kind: "board", board: "trending", chain: c }, "fomo_get_rankings", { board: "trending-tokens", chain: slug }],
+        [{ kind: "board", board: "graduated", chain: c }, "fomo_get_rankings", { board: "graduated-tokens", chain: slug }],
+        [{ kind: "board", board: "most-held", chain: c }, "fomo_get_rankings", { board: "most-held-tokens", chain: slug }],
+        [{ kind: "crowd", side: "buy", chain: c }, "fomo_get_token_activity", { chain: slug, side: "buy" }],
+        [{ kind: "crowd", side: "sell", window: "7d", chain: c }, "fomo_get_token_activity", { chain: slug, side: "sell", window: "7d" }],
+        [{ kind: "small-coins", chain: c }, "fomo_find_opportunities", { chain: slug }],
+      ];
+      for (const [r, tool, args] of lists) {
+        const plan = classifyFomoQuestion(requestText(r)!, { memory: null, now: NOW });
+        assert.deepEqual(plan?.toolCalls.map((x) => [x.tool, x.args]), [[tool, args]], requestText(r)!);
+      }
+    }
+    // A chain that is not on the list is never written into the question.
+    assert.equal(requestText({ kind: "board", board: "trending", chain: "polygon" as never }), "what's trending on fomo?");
+  });
+
   it("'about' is the fixed capabilities answer, and a trader or a ticker that is not one has no question", () => {
     assert.equal(classifyFomoQuestion(requestText({ kind: "about" })!, { memory: null, now: NOW })?.intent, "capabilities");
     assert.equal(requestText({ kind: "trader" }), null);
