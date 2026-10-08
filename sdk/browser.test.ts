@@ -10,7 +10,7 @@ import { verifyMessage, type Hex } from "viem";
 import { derivationOf, type MerrymenSettings } from "@merrymen/core";
 // FIRST, before ./browser: the fixture trusts its stub Trencher bytecode by
 // setting the env var trencher-permission.ts reads once, when session.ts loads.
-import { CLASS_FACTORY, TRENCHER_FACTORY, withStubChain, type KernelState } from "../web/src/lib/canonical-wall-fixture";
+import { CLASS_FACTORY, CLASS_VAULT, TRENCHER_FACTORY, withStubChain, type KernelState } from "../web/src/lib/canonical-wall-fixture";
 import {
   prepareMerryman, signMerrymanAuthorization, partnerGrantDigest, PARTNER_API_VERSION, SDK_VERSION,
   type LocalAccount, type PrepareMerrymanOptions, type StoredGrant, type PartnerEnrollmentClaim,
@@ -171,6 +171,12 @@ async function activate(grant: StoredGrant, owner: LocalAccount) {
   const service = createPartnerEnrollmentService({
     store, secret: () => SECRET,
     derive: async () => derivationOf(ACCOUNT),
+    // The stub chain's factory answer, which activation re-reads to pin the vault.
+    classVault: async (factory, account) => {
+      assert.equal(factory.toLowerCase(), CLASS_FACTORY);
+      assert.equal(account.toLowerCase(), ACCOUNT.toLowerCase());
+      return CLASS_VAULT;
+    },
     grants: { get: async (t) => saved.get(t) ?? null, put: async (t, g) => { saved.set(t, g); }, tenantForAccount: async () => null },
     settings: { get: async () => null, put: async () => {} },
     identities: { ensure: async (tenant, account) => ({ tenant, slug: "0000000000000001", accounts: [account], createdAt: 1, updatedAt: 1 }) },
