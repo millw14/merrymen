@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EXPLORER } from "../../lib/chain";
 import {
-  POLL_GIVE_UP_MS, TOKEN, amountToSend, balanceOfCalldata, checkWallet, formatDate, formatDateTime, formatTokens, group, historyLabel, nextPollDelay, normalizeAccount,
-  normalizePreview, payWithWallet, paymentOutcome, paymentsReady, previewSentence, priceLabel, short, switchToRobinhood, txHash, walletError,
+  TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount,
+  normalizePreview, payWithWallet, paymentsReady, previewSentence, priceLabel, short, switchToRobinhood, txHash, waitingMessage, walletError, watchPayment,
   type AccountView, type Eip1193, type PayCheck, type PlanPreview, type PlansView,
 } from "../../lib/developer-billing";
 import { request, requestRaw } from "./developer-client";
@@ -52,13 +52,7 @@ function pendingPayment(wallet: string): string | null {
   } catch { return null; }
 }
 
-type Watch = { hash: string; round: number; phase: "checking" | "pending" | "credited" | "failed" | "stalled"; message: string };
-const REASON_HINT: Record<string, (wallet: string) => string> = {
-  wrong_sender: wallet => `Only transfers from ${short(wallet)} count for this account. If you sent it from another wallet, sign in with that wallet, create its account and submit this hash there.`,
-  wrong_recipient: () => "This transfer did not go to the Merrymen payments wallet shown here.",
-  wrong_token: () => "This transaction did not move MERRYMEN.",
-  before_start_block: () => "This transfer was made before payments opened.",
-};
+type Watch = { hash: string; round: number; phase: "checking" | "credited" | "failed" | "stalled"; message: string };
 
 /**
  * Account, plan and payment, for a signed-in wallet. Every write goes through
@@ -79,38 +73,19 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
   callbacks.current = { onAccount, reload, onSignedOut };
   useEffect(() => {
     if (!watch || watch.phase !== "checking") return;
-    let cancelled = false, timer: ReturnType<typeof setTimeout> | undefined, attempt = 0;
-    const started = Date.now(), hash = watch.hash;
-    const tick = async () => {
-      const { status, data } = await requestRaw("payments", { tx_hash: hash }).catch(() => ({ status: 0, data: {} }));
-      if (cancelled) return;
-      const outcome = paymentOutcome(status, data);
-      if (outcome.kind === "signed_out") { callbacks.current.onSignedOut(); return; }
-      if (outcome.kind === "credited") {
-        forgetPayment();
-        setWatch(w => w && { ...w, phase: "credited", message: outcome.already ? "This payment was already credited." : "Payment credited." });
-        if (outcome.account) callbacks.current.onAccount(outcome.account); else await callbacks.current.reload().catch(() => {});
-        return;
-      }
-      if (outcome.kind === "failed") {
-        forgetPayment();
-        setWatch(w => w && { ...w, phase: "failed", message: [outcome.message, outcome.reason ? REASON_HINT[outcome.reason]?.(address) : ""].filter(Boolean).join(" ") });
-        return;
-      }
-      const stage = outcome.kind === "pending" ? outcome.stage : "";
-      if (Date.now() - started > POLL_GIVE_UP_MS) {
-        setWatch(w => w && { ...w, phase: "stalled", message: stage === "not_found_yet"
-          ? "We can't find this transaction on Robinhood Chain. If you sped it up or cancelled it in your wallet, paste the new hash below."
-          : "Still not credited. Check again in a minute; nothing is lost while you wait." });
-        return;
-      }
-      const message = outcome.kind === "retry" ? "The payment check is busy. Trying again shortly…"
-        : stage === "not_found_yet" ? "Waiting for Robinhood Chain to include your transaction…"
-        : `Confirming on Robinhood Chain (about ${Math.max(1, Math.ceil((outcome.kind === "pending" && outcome.readyInSec !== null ? outcome.readyInSec : plans.confirmations?.min_age_sec ?? 120) / 60))} min)…`;
-      setWatch(w => w && w.hash === hash ? { ...w, phase: "checking", message } : w);
-      timer = setTimeout(tick, nextPollDelay(attempt++, outcome.kind === "pending" ? outcome.retryAfterSec : null));
-    };
-    void tick();
+    let cancelled = false, timer: ReturnType<typeof setTimeout> | undefined;
+    const hash = watch.hash;
+    void watchPayment(hash, {
+      check: h => requestRaw("payments", { tx_hash: h }), wait: ms => new Promise(resolve => { timer = setTimeout(resolve, ms); }), cancelled: () => cancelled,
+      onWaiting: outcome => setWatch(w => w && w.hash === hash ? { ...w, message: waitingMessage(outcome, plans.confirmations?.min_age_sec) } : w),
+    }).then(async end => {
+      if (end.kind === "cancelled") return;
+      if (end.kind === "signed_out") { callbacks.current.onSignedOut(); return; }
+      // Credited or refused, the hash has its answer; a stalled one stays saved to check again later.
+      if (end.kind !== "stalled") forgetPayment();
+      setWatch(w => w && w.hash === hash ? { ...w, phase: end.kind, message: endMessage(end, address) } : w);
+      if (end.kind === "credited") { if (end.account) callbacks.current.onAccount(end.account); else await callbacks.current.reload().catch(() => {}); }
+    });
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
     // A new hash or a "Check again" starts a fresh round; message updates do not.
     // eslint-disable-next-line react-hooks/exhaustive-deps

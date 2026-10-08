@@ -356,6 +356,54 @@ export function paymentOutcome(status: number, input: unknown): PaymentOutcome {
   return { kind: "failed", code: code || "payment_refused", reason: typeof detail.reason === "string" ? detail.reason : null, message: message || "This transaction cannot be credited." };
 }
 
+export type WatchEnd = Extract<PaymentOutcome, { kind: "credited" | "failed" | "signed_out" }> | { kind: "stalled"; stage: string } | { kind: "cancelled" };
+/**
+ * Submit `hash` until the gateway credits or refuses it. Re-submitting is how
+ * the gateway is asked again (it credits a transaction once, then answers
+ * `already`), so a lost answer or a reload costs nothing. Gives up after ten
+ * minutes with the last stage seen, so the page can say what to do next.
+ */
+export async function watchPayment(hash: string, { check, wait, now = Date.now, cancelled, onWaiting }: {
+  check: (hash: string) => Promise<{ status: number; data: unknown }>; wait: (ms: number) => Promise<void>; now?: () => number;
+  cancelled: () => boolean; onWaiting: (outcome: Extract<PaymentOutcome, { kind: "pending" | "retry" }>) => void;
+}): Promise<WatchEnd> {
+  const started = now();
+  let stage = "";
+  for (let attempt = 0; ; attempt++) {
+    const { status, data } = await check(hash).catch(() => ({ status: 0, data: null }));
+    if (cancelled()) return { kind: "cancelled" };
+    const outcome = paymentOutcome(status, data);
+    if (outcome.kind !== "pending" && outcome.kind !== "retry") return outcome;
+    if (outcome.kind === "pending") stage = outcome.stage;
+    if (now() - started >= POLL_GIVE_UP_MS) return { kind: "stalled", stage };
+    onWaiting(outcome);
+    await wait(nextPollDelay(attempt, outcome.kind === "pending" ? outcome.retryAfterSec : null));
+    if (cancelled()) return { kind: "cancelled" };
+  }
+}
+
+/** What the page says while it waits. No confirmation counts: on a chain this fast they only flicker. */
+export function waitingMessage(outcome: Extract<PaymentOutcome, { kind: "pending" | "retry" }>, minAgeSec = 120): string {
+  if (outcome.kind === "retry") return "The payment check is busy. Trying again shortly…";
+  if (outcome.stage === "not_found_yet") return "Waiting for Robinhood Chain to include your transaction…";
+  return `Confirming on Robinhood Chain (about ${Math.max(1, Math.ceil((outcome.readyInSec ?? minAgeSec) / 60))} min)…`;
+}
+
+const REASON_HINT: Record<string, (wallet: string) => string> = {
+  wrong_sender: wallet => `Only transfers from ${short(wallet)} count for this account. If you sent it from another wallet, sign in with that wallet, create its account and submit this hash there.`,
+  wrong_recipient: () => "This transfer did not go to the Merrymen payments wallet shown here.",
+  wrong_token: () => "This transaction did not move MERRYMEN.",
+  before_start_block: () => "This transfer was made before payments opened.",
+};
+/** How a finished wait reads, with the remedy when the gateway names a reason. */
+export function endMessage(end: Exclude<WatchEnd, { kind: "signed_out" | "cancelled" }>, wallet: string): string {
+  if (end.kind === "credited") return end.already ? "This payment was already credited." : "Payment credited.";
+  if (end.kind === "stalled") return end.stage === "not_found_yet"
+    ? "We can't find this transaction on Robinhood Chain. If you sped it up or cancelled it in your wallet, paste the new hash below."
+    : "Still not credited. Check again in a minute; nothing is lost while you wait.";
+  return [end.message, end.reason ? REASON_HINT[end.reason]?.(wallet) : ""].filter(Boolean).join(" ");
+}
+
 /** One line of account history, in words. Never "refund": nothing goes back on chain. */
 export function historyLabel(item: HistoryItem, plans: Plan[]): string {
   const tier = plans.find(p => p.id === item.tier)?.name ?? item.tier ?? "Plan";

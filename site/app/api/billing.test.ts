@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import {
   FALLBACK_PLANS, ROBINHOOD_CHAIN, TOKEN, UNIT, amountToSend, balanceOfCalldata, ceilToWholeToken, chainIdOf, formatTokens, historyLabel, nextPollDelay,
   normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, switchToRobinhood,
-  tokensToRaw, transferCalldata, txHash, walletError, type Eip1193,
+  endMessage, tokensToRaw, transferCalldata, txHash, waitingMessage, walletError, watchPayment, type Eip1193,
 } from '../../lib/developer-billing';
 
 const WALLET = '0x1111111111111111111111111111111111111111';
@@ -182,8 +182,9 @@ test('payments are offered only with billing on, a real treasury and our own tok
   for (const currency of [{ address: OTHER, chain_id: 4663, decimals: 18 }, { address: TOKEN.address, chain_id: 1, decimals: 18 }, { address: TOKEN.address, chain_id: 4663, decimals: 6 }, null]) {
     assert.equal(paymentsReady(normalizePlans(livePlans({ currency }))!), false, JSON.stringify(currency));
   }
-  // The table this site wrote itself never pays anyone.
+  // The table this site wrote itself never pays anyone, whatever else it says.
   assert.equal(paymentsReady(FALLBACK_PLANS), false); assert.equal(FALLBACK_PLANS.treasury, null);
+  assert.equal(paymentsReady({ ...view, source: 'fallback' }), false);
   for (const broken of [null, [], { plans: [] }, livePlans({ billing: { mode: 'on' } }), livePlans({ plans: [{ id: 'x', price_raw: '-1', requests: 1, rpm: 1 }] }), livePlans({ plans: [{ id: 'Bad Id', price_raw: '1', requests: 1, rpm: 1 }] })]) {
     assert.equal(normalizePlans(broken), null, JSON.stringify(broken));
   }
@@ -245,6 +246,56 @@ test('payment checks start at six seconds and back off to thirty, honouring a lo
   assert.equal(nextPollDelay(0, 600), 60_000);
   // Thirty checks a minute is the gateway's limit per wallet; the page never comes close.
   assert.ok(60_000 / nextPollDelay(0) <= 10);
+});
+
+/** A gateway that answers POST /payments from a script, and a clock that only moves when the page waits. */
+function scripted(answers: { status: number; data: unknown }[], { leaveAfterChecks = Infinity, leaveDuringWait = Infinity } = {}) {
+  let clock = 0, checks = 0, left = false;
+  const hashes: string[] = [], waits: number[] = [], waiting: string[] = [];
+  const run = watchPayment(HASH, {
+    check: async hash => { hashes.push(hash); const answer = answers[Math.min(checks, answers.length - 1)]; checks++; if (answer.status < 0) throw new TypeError('fetch failed'); return answer; },
+    // A loop that never ends would hang the suite rather than fail it.
+    wait: async ms => { waits.push(ms); clock += ms; if (waits.length > 500) throw new Error('still polling after 500 waits'); if (waits.length >= leaveDuringWait) left = true; },
+    now: () => clock, cancelled: () => left || checks >= leaveAfterChecks, onWaiting: outcome => waiting.push(waitingMessage(outcome)),
+  });
+  return { run, hashes, waits, waiting, checks: () => checks };
+}
+const pendingAnswer = (stage = 'confirming', extra: Record<string, unknown> = {}) => ({ status: 202, data: { error: { code: 'payment_pending', stage, ...extra } } });
+
+test('a submitted hash is checked until the gateway credits it, backing off and saying what it waits for', async () => {
+  const credited = { status: 200, data: { already: false, ...account({ due_raw: null }) } };
+  const s = scripted([pendingAnswer('not_found_yet'), pendingAnswer('confirming', { ready_in_sec: 90 }), { status: 503, data: { error: { code: 'chain_unavailable' } } }, { status: -1, data: null }, pendingAnswer('confirming', { retry_after: 20 }), credited]);
+  const end = await s.run;
+  assert.equal(end.kind, 'credited'); assert.equal(end.kind === 'credited' && end.account?.account.id, 'acct_1');
+  assert.deepEqual(s.hashes, Array(6).fill(HASH));
+  assert.deepEqual(s.waits, [6000, 6000, 6000, 9000, 20_000]);
+  assert.deepEqual(s.waiting, ['Waiting for Robinhood Chain to include your transaction…', 'Confirming on Robinhood Chain (about 2 min)…',
+    'The payment check is busy. Trying again shortly…', 'The payment check is busy. Trying again shortly…', 'Confirming on Robinhood Chain (about 2 min)…']);
+  assert.equal(endMessage(end as Parameters<typeof endMessage>[0], WALLET), 'Payment credited.');
+  assert.equal(endMessage({ kind: 'credited', already: true, account: null }, WALLET), 'This payment was already credited.');
+});
+
+test('a refusal stops the checks at once, with the gateway\'s words and the remedy', async () => {
+  const s = scripted([pendingAnswer(), { status: 422, data: { error: { code: 'payment_not_found', reason: 'wrong_sender', message: 'This was sent from 0x2222…2222, not 0x1111…1111.' } } }, pendingAnswer()]);
+  const end = await s.run;
+  assert.equal(end.kind, 'failed'); assert.equal(s.checks(), 2); assert.deepEqual(s.waits, [6000]);
+  assert.equal(endMessage(end as Parameters<typeof endMessage>[0], WALLET), 'This was sent from 0x2222…2222, not 0x1111…1111. Only transfers from 0x1111…1111 count for this account. If you sent it from another wallet, sign in with that wallet, create its account and submit this hash there.');
+  const out = await scripted([{ status: 401, data: { error: { code: 'signed_out' } } }]).run;
+  assert.deepEqual(out, { kind: 'signed_out' });
+});
+
+test('checks give up after ten minutes with the next step, and stop when the page moves on', async () => {
+  const lost = scripted([pendingAnswer('not_found_yet')]);
+  const end = await lost.run;
+  assert.deepEqual(end, { kind: 'stalled', stage: 'not_found_yet' });
+  assert.ok(lost.waits.reduce((a, b) => a + b, 0) >= 10 * 60_000); assert.ok(lost.checks() < 30, `${lost.checks()} checks in ten minutes`);
+  assert.match(endMessage(end as Parameters<typeof endMessage>[0], WALLET), /can't find this transaction on Robinhood Chain\. If you sped it up or cancelled it/);
+  assert.match(endMessage({ kind: 'stalled', stage: 'confirming' }, WALLET), /Still not credited/);
+  // Leaving while an answer is on its way ignores it; leaving during a wait sends nothing more.
+  const answered = scripted([pendingAnswer()], { leaveAfterChecks: 2 });
+  assert.deepEqual(await answered.run, { kind: 'cancelled' }); assert.equal(answered.checks(), 2);
+  const waiting = scripted([pendingAnswer()], { leaveDuringWait: 2 });
+  assert.deepEqual(await waiting.run, { kind: 'cancelled' }); assert.equal(waiting.checks(), 2);
 });
 
 test('history never promises tokens back', () => {
