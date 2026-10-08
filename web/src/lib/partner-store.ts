@@ -139,6 +139,11 @@ export const PARTNER_COMMAND_MAX = 8000;
 const LINE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
 const LINE_CONTROLS = new RegExp(LINE_CONTROL.source, "g");
 const CONTROL = /[\u0000-\u001f]/;
+// String#isWellFormed/#toWellFormed are ES2024, and the worker project, which
+// compiles this file too, targets an older lib. Same rule, spelled out.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+export const wellFormed = (value: string): boolean => !LONE_SURROGATE.test(value);
+const toWellFormed = (value: string): string => value.replace(new RegExp(LONE_SURROGATE.source, "g"), "\ufffd");
 
 /**
  * The store's text rule, exported so a caller can refuse before paying for work
@@ -147,7 +152,7 @@ const CONTROL = /[\u0000-\u001f]/;
  * and a stored one broke every list of its app.
  */
 export function partnerText(value: unknown, max: number, multiline = false): value is string {
-  return typeof value === "string" && !!value.trim() && value.length <= max && value.isWellFormed() && !(multiline ? LINE_CONTROL : CONTROL).test(value);
+  return typeof value === "string" && !!value.trim() && value.length <= max && wellFormed(value) && !(multiline ? LINE_CONTROL : CONTROL).test(value);
 }
 function textField(value: string, max: number, label: string, multiline = false): string {
   if (!partnerText(value, max, multiline)) throw new PartnerStoreError(400, "invalid_input", `invalid ${label}`);
@@ -162,7 +167,7 @@ function textField(value: string, max: number, label: string, multiline = false)
  * U+FFFD. "" when nothing is left.
  */
 export function fitPartnerReply(reply: string): string {
-  const clean = String(reply ?? "").toWellFormed().replace(LINE_CONTROLS, "").trim();
+  const clean = toWellFormed(String(reply ?? "")).replace(LINE_CONTROLS, "").trim();
   if (clean.length <= PARTNER_REPLY_MAX) return clean;
   let end = PARTNER_REPLY_MAX - 1;
   // Never keep half of a surrogate pair: the stored JSON would carry a lone one.
