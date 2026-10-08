@@ -289,11 +289,14 @@ Retrying an activation:
   arrived, this one activates. If it completed, you get HTTP 200 with the
   connection as it is now, and nothing is applied again: no grant reinstall,
   no settings change, live trading not re-enabled.
-- **409 `enrollment_busy`** (another activation for the same owner wallet is
-  still running), **503 `class_vault_unavailable`** or **503
-  `derivation_unavailable`**: the challenge was not spent. Resend the same body
-  unchanged after `retry_after` seconds or a short back-off, within the five
-  minutes; the owner does not sign again.
+- **409 `enrollment_busy`** (an activation for the same owner wallet is still
+  running, or the hosted runtime is at its limit of activations and chats in
+  progress, across all apps), **503 `class_vault_unavailable`** or **503
+  `derivation_unavailable`**: this request did not spend the challenge. Resend
+  the same body unchanged after `retry_after` seconds or a short back-off,
+  within the five minutes; the owner does not sign again. If the activation
+  still running was your own earlier attempt, that one may have spent it: the
+  resend then gets its result as a lost response, or `challenge_used`.
 - **503 `enrollment_storage_failed`**: the challenge was spent and activation
   stopped part-way. The connection may still be pending, or linked in paper
   mode with the grant installed and live trading off. Inspect
@@ -369,8 +372,10 @@ you get its saved reply.
 
 A connection answers one message at a time. A request that arrives while
 another is generating waits, up to about 20 seconds; a retry of the request
-being generated then gets its saved reply. Still busy after that, the answer
-is 409 `conversation_busy` with a `Retry-After` header and
+being generated then gets its saved reply. The hosted runtime also generates
+only a few replies and activations at once, across all apps, so a request can
+wait when nothing else is running for its connection. Still waiting after
+that, the answer is 409 `conversation_busy` with a `Retry-After` header and
 `error.retry_after` (seconds, currently 2): resend the same request unchanged.
 
 Chat uses the actual tenant's portfolio, positions, recent trades, settings and
@@ -436,7 +441,7 @@ The codes that call for a retry, and how:
 | `upstream_unavailable` | 503 | No complete answer from the hosted runtime (unreachable, timed out, or misconfigured). Back off and retry; writes are safe to resend as described above. |
 | `upstream_invalid_response` | 503 | The runtime answered, but not with its JSON envelope (a proxy or error page). Back off as for `upstream_unavailable`, and report the `request_id` if it persists. |
 | `runtime_unavailable` | 503 | The worker's state could not be read. Retry later. |
-| `conversation_busy`, `enrollment_busy` | 409 | Resend the same request unchanged after `Retry-After` / `error.retry_after` seconds. |
+| `conversation_busy`, `enrollment_busy` | 409 | The same connection or owner is busy, or the runtime is at its concurrency limit. Resend the same request unchanged after `Retry-After` / `error.retry_after` seconds. |
 | `class_vault_unavailable`, `derivation_unavailable` | 503 | A chain read failed before the authorization was spent. Resend the same activation within the challenge's five minutes. |
 | `enrollment_storage_failed` | 503 | Inspect the connection, then start a fresh challenge. |
 
