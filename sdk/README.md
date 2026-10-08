@@ -35,9 +35,9 @@ The bundle needs no Node globals. A copy built from a revision between
 `ReferenceError: process is not defined`; rebuild it.
 
 The module exports two version strings. `PARTNER_API_VERSION` is the partner
-API contract it speaks (`2026-09-18`), the `api_version` that
+API contract it speaks (`2026-10-08`), the `api_version` that
 `GET /partner/v1/meta` reports. `SDK_VERSION` adds the build:
-`2026-09-18+<12 hex characters>`, a fingerprint of the bundle's own bytes, so
+`2026-10-08+<12 hex characters>`, a fingerprint of the bundle's own bytes, so
 the same sources always give the same version and any bundled change gives a
 new one (`+source` when running unbundled). The build prints it and writes it on
 the bundle's first line, `/* merrymen-browser <SDK_VERSION> */`. Log it, and
@@ -122,9 +122,12 @@ an unsupported chain and limits that activation would refuse are all refused
 before any chain read, `onStatus` call or signature request, with "Nothing was
 signed."; so are a missing owner and one without an address or `signMessage`.
 An owner without `signTypedData` fails only at the signature request, after
-the chain reads. A grant it returns, passed on unmodified, is never refused as
-`unsupported_permission`, while activation refuses one that seals anything
-more. Activation can still refuse it for other reasons, such as a wallet
+the chain reads. A grant the hosted module returns, passed on unmodified, is
+never refused as `unsupported_permission`, while activation refuses one that
+seals anything more. A copy you build and serve yourself seals the platform
+constants of its own revision (the class-vault factory, the listed coins), so
+rebuild it whenever hosted web deploys and compare `SDK_VERSION` with the
+hosted module's. Activation can still refuse it for other reasons, such as a wallet
 already linked to another of your users or an expired challenge.
 
 `partnerGrantDigest` hashes the canonical grant. `signMerrymanAuthorization`

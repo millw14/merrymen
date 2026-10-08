@@ -47,7 +47,7 @@ export const PARTNER_PREFIX = "/partner/v1";
  * @param partners  from createPartners() in partners.mjs
  * @param store     the shared rate-limit store (same one the holder routes use)
  */
-export function createPartnerApi({ partners, store, forward, tunables = {}, version = "2026-09-18" }) {
+export function createPartnerApi({ partners, store, forward, tunables = {}, version = "2026-10-08" }) {
   const T = { ...PARTNER_TUNABLES, ...tunables };
 
   /**

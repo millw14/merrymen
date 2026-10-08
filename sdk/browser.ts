@@ -24,7 +24,7 @@ export type { LocalAccount } from "viem";
  * fingerprint of the bundle's own bytes stamped by sdk/build.mjs, so builds of
  * different code never share a version. "+source" means it is running unbundled.
  */
-export const PARTNER_API_VERSION = "2026-09-18";
+export const PARTNER_API_VERSION = "2026-10-08";
 declare const __MERRYMEN_SDK_BUILD__: string | undefined;
 export const SDK_VERSION = `${PARTNER_API_VERSION}+${typeof __MERRYMEN_SDK_BUILD__ === "string" ? __MERRYMEN_SDK_BUILD__ : "source"}`;
 

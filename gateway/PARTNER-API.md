@@ -68,7 +68,8 @@ curl https://ai.merrymen.dev/partner/v1/meta \
 ```
 
 The response contains `key_id`, `app_id`, `name`, `scopes`, `rate_per_min` and
-`api_version`. The current contract version is `2026-09-18`. Use your trusted
+`api_version`. The current contract version is `2026-10-08`; what changed from
+`2026-09-18` is listed under [Contract changes](#contract-changes). Use your trusted
 application configuration for `app_id`; do not accept it from a browser request.
 
 ## Setup entirely inside your app
@@ -216,8 +217,11 @@ the requested access, do not sign or activate that challenge.
 refuses anything else (`trencherFactory`, adapter addresses, `extraTokens` and
 the like) before any chain read or signature. `chainId` is `4663` or `46630`;
 leaving it out means `4663`, real funds, and `null` is refused. It refuses
-`caps` that activation would refuse. A grant it makes, passed on unmodified, is
-never refused as `unsupported_permission` (see below). The owner signs twice in
+`caps` that activation would refuse. A grant made by the hosted module, passed on
+unmodified, is never refused as `unsupported_permission` (see below). A copy you
+serve yourself carries the platform constants of the revision it was built from
+(the class-vault factory, the listed coins), so rebuild it whenever hosted web
+deploys; its `SDK_VERSION` should match the hosted module's. The owner signs twice in
 all: one typed-data signature for the permission inside `prepareMerryman`, and
 one message signature in `signMerrymanAuthorization`.
 
@@ -473,6 +477,37 @@ health.
 `GET /partner/v1` discovers the surface and `GET /partner/v1/health` checks gateway
 liveness without authentication. `GET /healthz` is also process liveness. Neither
 proves a valid grant, a running worker, configured chat or a reachable bridge.
+
+## Contract changes
+
+`2026-10-08`, from `2026-09-18`:
+
+- Every write route (create, challenge, activate, message, disconnect) answers
+  again. Before this version they returned 503 in production, because the hosted
+  runtime refused the gateway's forwarded requests.
+- `POST /agents` for an external user whose connection was disconnected starts a
+  fresh authorization with a **new** `id` (HTTP 202). The old `id` keeps
+  answering `disconnected`, and nothing from it carries over.
+- `GET /agents` lists newest first, and leaves out connections that a reconnect
+  replaced.
+- Activation refuses grants that seal more than `prepareMerryman` does with 422
+  `unsupported_permission`, may answer 503 `class_vault_unavailable` (resend the
+  same authorization), answers a retry after a lost response with the current
+  detail instead of `challenge_used`, and succeeds with `runtime_available: false`
+  when only the status read failed.
+- A busy connection or owner waits before answering 409 `conversation_busy` or
+  `enrollment_busy`, now with `Retry-After`; resending a message's `request_id`
+  while it is still being answered returns the saved reply.
+- Runtime errors keep their own codes (such as `runtime_unavailable`) instead of
+  arriving as `upstream_unavailable`; `upstream_invalid_response` is new; a 413
+  carries `request_id`.
+- Messages that are not well-formed text or carry control characters are refused
+  before any reply is generated; replies are cleaned and capped instead of
+  failing, and a model that does not answer within 25 seconds yields the status
+  reply.
+- The SDK's `prepareMerryman` takes only `owner`, `caps`, `chainId` and
+  `onStatus`, refuses a `null` chain, and exports `PARTNER_API_VERSION` and
+  `SDK_VERSION`. The hosted module loads in browsers again.
 
 ## Operator configuration and key rotation
 
