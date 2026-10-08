@@ -745,6 +745,15 @@ describe("a chain's coins, a row of the trader board, and what a trader made mon
     assert.deepEqual(callsOf("what's trending over on solana on fomo"), [["fomo_get_rankings", { board: "trending-tokens", chain: "solana" }]]);
   });
 
+  it("'the top trader we watch' is the watched set, never the public board's #1; 'the most followed trader' stays public", () => {
+    const watched = plan("who is the top trader we watch on fomo and what is he holding")!;
+    assert.equal(watched.cohortScope, true);
+    assert.ok(watched.toolCalls.some((c) => c.tool === "fomo_get_rankings" && c.args.cohort_only === true), JSON.stringify(watched.toolCalls));
+    assert.equal(plan("who's the best tracked trader on fomo")!.cohortScope, true);
+    assert.equal(plan("who's the most followed trader on fomo")?.cohortScope ?? false, false);
+    assert.equal(plan("who's the top followed trader on fomo")?.cohortScope ?? false, false);
+  });
+
   it("unchanged: a shouted ticker, the switch, the owner's own coins, discovery", () => {
     assert.equal(plan("is fomo on robinhood?"), null);
     assert.deepEqual(callsOf("theses on SOL coins"), [["fomo_get_token_theses", { token: "SOL" }]]);

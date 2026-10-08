@@ -1500,6 +1500,10 @@ const RESEARCH_PRIVATE_RES: readonly RegExp[] = [
   /\bwhat (?:coins? |tokens? |traders? )?(?:are|r) (?:you|u|ya) (?:watching|tracking|monitoring|following|researching|copying|copy[- ]?trading)\b/u,
   /\bwhat(?:'s| is|s) on (?:your|ur) (?:watch ?list|radar|list)\b/u,
   /\b(?:your|ur) (?:watch ?list|follow(?:ing)? list|copy(?:[- ]?trad(?:e|ing))? list|copy[- ]?trades|cohort|tracked traders|followed traders|traders list)\b/u,
+  // The yes/no form about one account: "do you watch @frankdegods on fomo?", "are you
+  // tailing @x?", "do you follow trader x". Not "would you follow…" (an opinion), and
+  // only a handle, "trader X" or "X on fomo": "do you watch the market?" stays chat.
+  /\b(?:do|did|are|r|have|has) (?:you|u|ya)(?: (?:still|already|ever|even|currently|actually))? (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring) (?:@[a-z0-9_]{2,}|trader [a-z0-9_]{2,}|[a-z0-9_]{2,} on fomo\b)/u,
 ];
 
 /** Its balance, P&L, portfolio, positions: private when ASKED for ("what's your pnl", "your p&l?"), not when judged ("your trades are trash"). */

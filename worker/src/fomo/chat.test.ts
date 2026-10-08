@@ -492,7 +492,13 @@ describe("answerFomoQuestion", () => {
     const s = await setup();
     s.serve.set("/v2/leaderboard/24h", () => json(fixture("leaderboard-24h")));
     const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-1" };
-    for (const t of ["who are the top traders we watch?", "top traders in our cohort on fomo", "who's the top of our watched traders on fomo today"]) {
+    for (const t of [
+      "who are the top traders we watch?", "top traders in our cohort on fomo", "who's the top of our watched traders on fomo today",
+      // The singular too: "the top trader we watch" is the watch list's #1, never the public board's.
+      "who is the top trader we watch on fomo and what is he holding", "who's the best tracked trader on fomo", "who's the top trader you follow on fomo and what did he buy",
+      // One trader named, but asked about the watch list.
+      "is @CryptoKaleo in your cohort on fomo?",
+    ]) {
       const r = await s.ask(t, g);
       assert.ok(r.handled, t);
       assert.equal(r.text, GROUP_DM_DEFLECTION, t);

@@ -419,8 +419,12 @@ const ROW_TRADES = /\b(?:buy|buys|buying|bought|sell|sells|selling|sold|trades|t
 const ROW_PROFILE = /\b(?:tell me (?:more )?about (?:him|her|them)|who (?:is|'s) (?:he|she)|(?:his|her) (?:profile|stats|track record|record))\b/u;
 const ROW_CROWD = /\b(?:people|traders|everyone|everybody|whales|wallets|others)\b/u;
 
+/** The trader(s) Merrymen watches ("the best trader we follow", "a watched trader"): a watch-list question, never a row of the public board. */
+const ROW_WATCHED = /\btraders? (?:that |who )?(?:we|you|u)(?:'re| are)? (?:watch|watching|monitor|monitoring|track|tracking|follow|following)\b|\b(?:watched|tracked|monitored) traders?\b/u;
+
 export function rowIn(text: unknown): TgBoardRow | undefined {
   const t = typeof text === "string" ? text.normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'") : "";
+  if (ROW_WATCHED.test(t)) return undefined;
   const m = ROW_RANK.exec(t) ?? ROW_WHO.exec(t);
   if (!m) return undefined;
   const rest = `${t.slice(0, m.index)} ${t.slice(m.index + m[0].length)}`;

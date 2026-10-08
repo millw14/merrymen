@@ -347,7 +347,10 @@ const FOMO_PLATFORM: readonly RegExp[] = [
   /\b(?:is|are|does) (?:the )?fomo (?:crowd |community |people )?(?:saying|say|think|thinking)\b|\bfomo (?:says|thinks)\b/,
 ];
 
-const COHORT = /\bour (?:\d{1,4} )?(?:traders|cohort|trader list|watched traders|tracked traders)\b|\btraders (?:that |who )?(?:we|you) (?:watch|monitor|track|follow|are watching|are tracking|are monitoring)\b|\b(?:watched|tracked|monitored) traders\b|\bcohort\b/;
+// The singular too ("the top trader we watch", "the best tracked trader"): who
+// Merrymen watches, never the public board's #1. Not "followed": "the most
+// followed trader" is a public question.
+const COHORT = /\bour (?:\d{1,4} )?(?:traders|cohort|trader list|watched traders|tracked traders)\b|\btraders (?:that |who )?(?:we|you) (?:watch|monitor|track|follow|are watching|are tracking|are monitoring)\b|\b(?:watched|tracked|monitored) traders\b|\bcohort\b|\btrader (?:that |who )?(?:we|you|u) (?:watch|monitor|track|follow|are watching|are tracking|are monitoring|are following)\b|\b(?:watched|tracked|monitored) trader\b/;
 const TRADERS_WORD = /\btraders?\b/;
 
 const HEALTH: readonly RegExp[] = [
