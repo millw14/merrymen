@@ -7,19 +7,35 @@ const same = (a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""
 const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status: r.status,
   scopes: r.scopes, rate_per_min: r.rpm, created_at: r.created_at, prefix: `mmp_${r.keyId}_` });
 
-/** Only the first-party portal's server may call this wallet-authenticated surface. */
+/**
+ * Only the first-party portal's server may call this wallet-authenticated surface.
+ *
+ * TWO SECRETS, TWO JOBS. The portal secret is the site's Bearer credential: it
+ * proves a request came through merrymen.dev and nothing more. Challenges and
+ * sessions are MAC'd with a key only this gateway can derive. They used to be
+ * MAC'd with the portal secret itself, so anyone holding the site's environment
+ * could mint a session for ANY wallet, then keys under that developer's app_id,
+ * then read and chat with that app's users' agents, without the wallet ever
+ * signing anything.
+ */
 export function createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store,
   verify = verifyMessage, now = Date.now, read = loadRegistry, write = writeRecord }) {
   const boot = randomBytes(16).toString("hex");
+  // A subkey, so the gateway secret itself never MACs attacker-shaped data here.
+  // The colon keeps it apart from every other HMAC over that secret: holder
+  // tokens and nonces MAC base64url (no colon) and partner hashes MAC `mmp:…`.
+  const sessionKey = gatewaySecret && Buffer.byteLength(gatewaySecret) >= 32
+    ? createHmac("sha256", gatewaySecret).update("merrymen:developer-session:v1").digest() : null;
+  const macOf = encoded => createHmac("sha256", sessionKey).update(`developer-v1:${encoded}`).digest("base64url");
   let mutations = Promise.resolve();
   const sign = (type, data) => {
     const encoded = Buffer.from(JSON.stringify({ ...data, type })).toString("base64url");
-    return `${encoded}.${createHmac("sha256", portalSecret).update(`developer-v1:${encoded}`).digest("base64url")}`;
+    return `${encoded}.${macOf(encoded)}`;
   };
   const decode = (raw, type) => {
     if (typeof raw !== "string" || raw.length > 4096) return null;
     const [encoded, mac, extra] = raw.split(".");
-    if (!encoded || !mac || extra || !same(mac, createHmac("sha256", portalSecret).update(`developer-v1:${encoded}`).digest("base64url"))) return null;
+    if (!encoded || !mac || extra || !same(mac, macOf(encoded))) return null;
     try {
       const v = JSON.parse(Buffer.from(encoded, "base64url"));
       return v.type === type && v.expires > now() && /^0x[0-9a-f]{40}$/.test(v.address) ? v : null;
@@ -28,7 +44,7 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
   const message = c => `Sign in to Merrymen Developers\n\nWebsite: https://merrymen.dev/api\nWallet: ${c.address}\n\nManage API keys for your applications. This does not authorize trading or move funds.\n\nNonce: ${c.nonce}\nExpires: ${new Date(c.expires).toISOString()}`;
   const error = (status, message) => ({ status, json: { error: { message } } });
   async function dispatch({ method, path, authorization, session, body = {}, ip = "unknown" }) {
-    if (!portalSecret || Buffer.byteLength(portalSecret) < 32) return error(503, "Developer sign-in is temporarily unavailable");
+    if (!portalSecret || Buffer.byteLength(portalSecret) < 32 || !sessionKey) return error(503, "Developer sign-in is temporarily unavailable");
     if (!same(authorization, `Bearer ${portalSecret}`)) return error(401, "Unauthorized portal");
     if (!await store.rateHit(`dev:ip:${ip}`, 60, 60)) return error(429, "Too many requests. Try again in a minute.");
     if (method === "POST" && path === "/challenge") {

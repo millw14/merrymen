@@ -1,5 +1,6 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +41,26 @@ test("portal credential and real wallet proof are required; proofs cannot replay
   assert.equal((await f.call("/keys", undefined, session + "x")).status, 401);
   f.advance(8 * 3600_000);
   assert.equal((await f.call("/keys", undefined, session)).status, 401);
+});
+test("the portal's own secret cannot mint a session or a challenge", async () => {
+  // Everything the site's environment holds, used the way the old scheme did:
+  // a payload copied from a real token, re-addressed, and MAC'd with the portal
+  // secret. Copying every other field (nonce, boot, expiry) from genuine tokens
+  // proves the key is what refuses it, not a field the forger could not guess.
+  const f = fixture(), victim = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
+  const payload = token => JSON.parse(Buffer.from(token.split(".")[0], "base64url"));
+  const forge = data => { const encoded = Buffer.from(JSON.stringify(data)).toString("base64url");
+    return `${encoded}.${createHmac("sha256", portalSecret).update(`developer-v1:${encoded}`).digest("base64url")}`; };
+  const { session } = await f.login();
+  assert.equal((await f.call("/keys", undefined, forge(payload(session)))).status, 401);
+  assert.equal((await f.call("/keys", undefined, forge({ ...payload(session), address: victim }))).status, 401);
+  const real = await f.call("/challenge", { address: f.wallet.address });
+  const challenge = forge(payload(real.json.challenge));
+  assert.equal((await f.call("/verify", { challenge, signature: await f.wallet.signMessage({ message: real.json.message }) })).status, 401);
+  // The genuine flow is unaffected, and a gateway without its secret fails closed.
+  assert.equal((await f.call("/keys", undefined, session)).status, 200);
+  const keyless = createDeveloperApi({ portalSecret, gatewaySecret: "", partners: f.partners, store: createStore() });
+  assert.equal((await keyless.handle({ method: "POST", path: "/challenge", body: { address: f.wallet.address }, authorization: `Bearer ${portalSecret}` })).status, 503);
 });
 test("wrong wallet signatures and stale challenges are rejected", async () => {
   const f = fixture(); const challenge = await f.call("/challenge", { address: f.wallet.address });
