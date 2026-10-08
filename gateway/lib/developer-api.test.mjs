@@ -1,9 +1,12 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { createDeveloperApi } from "./developer-api.mjs";
 import { createPartners, loadRegistry } from "./partners.mjs";
@@ -23,7 +26,9 @@ function fixture({ store = createStore(), ...options } = {}) {
   const start = () => createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, now: () => time, ...options });
   let api = start();
   const wallet = privateKeyToAccount(generatePrivateKey());
-  const call = (path, body, session, authorization = `Bearer ${portalSecret}`) => api.handle({ method: body === undefined ? "GET" : "POST", path, body, session, authorization, ip: wallet.address });
+  // Bodies travel as the server hands them over: raw text. A string is sent verbatim.
+  const call = (path, body, session, authorization = `Bearer ${portalSecret}`) => api.handle({ method: body === undefined ? "GET" : "POST", path,
+    body: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body), session, authorization, ip: wallet.address });
   async function login() {
     const challenge = await call("/challenge", { address: wallet.address });
     assert.equal(challenge.status, 200);
@@ -62,7 +67,7 @@ test("the portal's own secret cannot mint a session or a challenge", async () =>
   // The genuine flow is unaffected, and a gateway without its secret fails closed.
   assert.equal((await f.call("/keys", undefined, session)).status, 200);
   const keyless = createDeveloperApi({ portalSecret, gatewaySecret: "", partners: f.partners, store: createStore() });
-  assert.equal((await keyless.handle({ method: "POST", path: "/challenge", body: { address: f.wallet.address }, authorization: `Bearer ${portalSecret}` })).status, 503);
+  assert.equal((await keyless.handle({ method: "POST", path: "/challenge", body: JSON.stringify({ address: f.wallet.address }), authorization: `Bearer ${portalSecret}` })).status, 503);
 });
 test("logout revokes that session on the gateway, not just the site's cookie", async () => {
   const f = fixture();
@@ -141,4 +146,43 @@ test("concurrent creation enforces the active-key cap", async () => {
   const results = await Promise.all(Array.from({ length: 8 }, (_, i) => f.call("/keys", { name: `App ${i}` }, session)));
   assert.equal(results.filter(r => r.status === 201).length, 5);
   assert.equal(results.filter(r => r.status === 409).length, 3);
+});
+test("a body that is JSON but not an object is a 400, after authentication", async () => {
+  const f = fixture(), { session } = await f.login();
+  for (const raw of ["null", "5", "[]", '"text"', "{", ""]) {
+    for (const path of ["/challenge", "/verify", "/keys", "/revoke", "/test", "/logout"]) {
+      assert.equal((await f.call(path, raw, session)).status, 400, `${path} ${raw}`);
+    }
+  }
+  assert.equal((await f.call("/challenge", "null", undefined, "Bearer wrong")).status, 401);
+});
+
+/**
+ * The real entrypoint on a free localhost port, for what only the HTTP plumbing
+ * decides. It gets its three required settings and reaches nothing else: the
+ * RPC is a closed local port, and no route here touches the chain unless a
+ * signature fails its local check.
+ */
+async function startGateway() {
+  const port = await new Promise(resolve => { const probe = createServer().listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../server.mjs", import.meta.url))], { stdio: ["ignore", "pipe", "pipe"],
+    env: { PATH: process.env.PATH, PORT: String(port), MERRYMEN_DATA_DIR: dir, MERRYMEN_GATEWAY_UPSTREAM_KEY: "unused",
+      MERRYMEN_GATEWAY_SECRET: gatewaySecret, MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9", MERRYMEN_DEVELOPER_PORTAL_SECRET: portalSecret } });
+  let output = "";
+  await new Promise((resolve, reject) => {
+    child.stdout.on("data", chunk => { output += chunk; if (output.includes("listening")) resolve(); });
+    child.stderr.on("data", chunk => { output += chunk; });
+    child.on("exit", code => reject(new Error(`gateway exited ${code}: ${output}`)));
+  });
+  return { origin: `http://127.0.0.1:${port}`, stop: () => child.kill() };
+}
+test("the server hands the developer API raw text, so a null body is a 400 rather than a 503", async () => {
+  const gateway = await startGateway();
+  try {
+    const post = (path, body) => fetch(`${gateway.origin}/developer/v1${path}`, { method: "POST", body,
+      headers: { authorization: `Bearer ${portalSecret}`, "content-type": "application/json" } });
+    for (const body of ["null", "[]", "7", "{"]) assert.equal((await post("/challenge", body)).status, 400, body);
+    assert.equal((await post("/challenge", JSON.stringify({ address: `0x${"ab".repeat(20)}` }))).status, 200);
+    assert.equal((await post("/challenge", "x".repeat(8193))).status, 413);
+  } finally { gateway.stop(); }
 });

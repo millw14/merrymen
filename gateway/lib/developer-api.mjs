@@ -54,10 +54,19 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
   }
   const message = c => `Sign in to Merrymen Developers\n\nWebsite: https://merrymen.dev/api\nWallet: ${c.address}\n\nManage API keys for your applications. This does not authorize trading or move funds.\n\nNonce: ${c.nonce}\nExpires: ${new Date(c.expires).toISOString()}`;
   const error = (status, message) => ({ status, json: { error: { message } } });
-  async function dispatch({ method, path, authorization, session, body = {}, ip = "unknown" }) {
+  // Raw text in, as the partner API takes it, so what a body must look like is
+  // this service's rule. `null`, `[]` and `5` are valid JSON that used to reach
+  // a property read here and come back as a 503 "temporarily unavailable".
+  const parse = raw => {
+    if (raw === undefined) return {};
+    try { const v = JSON.parse(raw); return v && typeof v === "object" && !Array.isArray(v) ? v : null; } catch { return null; }
+  };
+  async function dispatch({ method, path, authorization, session, body: raw, ip = "unknown" }) {
     if (!portalSecret || Buffer.byteLength(portalSecret) < 32 || !sessionKey) return error(503, "Developer sign-in is temporarily unavailable");
     if (!same(authorization, `Bearer ${portalSecret}`)) return error(401, "Unauthorized portal");
     if (!await store.rateHit(`dev:ip:${ip}`, 60, 60)) return error(429, "Too many requests. Try again in a minute.");
+    const body = parse(raw);
+    if (!body) return error(400, "Invalid request");
     if (method === "POST" && path === "/challenge") {
       if (typeof body.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(body.address)) return error(400, "Choose a wallet address");
       const c = { address: body.address.toLowerCase(), nonce: randomBytes(24).toString("hex"), expires: now() + 300_000, boot };

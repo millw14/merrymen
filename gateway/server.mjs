@@ -183,9 +183,12 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && pathname === "/healthz") return respond(res, gw.health());
     if (pathname.startsWith("/developer/v1/")) {
-      let body = {};
-      try { if (req.method === "POST") { const raw = await readBody(req); if (Buffer.byteLength(raw) > 8192) return respond(res, { status: 413, json: { error: { message: "Request too large" } } }); body = JSON.parse(raw); } }
-      catch { return respond(res, { status: 400, json: { error: { message: "Invalid request" } } }); }
+      // Size is plumbing; shape is the developer API's rule, so it gets raw text.
+      let body;
+      if (req.method === "POST") {
+        try { body = await readBody(req); } catch { body = null; }
+        if (body === null || Buffer.byteLength(body) > 8192) return respond(res, { status: 413, json: { error: { message: "Request too large" } } });
+      }
       return respond(res, await developerApi.handle({ method: req.method, path: pathname.slice("/developer/v1".length),
         authorization: req.headers.authorization, session: req.headers["x-developer-session"], body,
         ip: req.headers["x-developer-ip"] || ip }));
