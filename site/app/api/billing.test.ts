@@ -154,11 +154,11 @@ test('the chain parameters and token the page uses match packages/core', () => {
 test('the static plans table matches the gateway\'s, when that file is here', async (t) => {
   const path = new URL('../../../gateway/lib/billing-plans.mjs', import.meta.url);
   if (!existsSync(path)) return t.skip('gateway/lib/billing-plans.mjs is not on this branch');
-  const source = readFileSync(path, 'utf8').replace(/_/g, '');
-  for (const plan of FALLBACK_PLANS.plans) {
-    assert.ok(source.includes(`"${plan.id}"`) || source.includes(`'${plan.id}'`), plan.id);
-    for (const n of [String(BigInt(plan.price_raw) / UNIT), String(plan.requests), String(plan.rpm)]) assert.ok(source.includes(n), `${plan.id}: ${n}`);
-  }
+  // Imported and compared whole, not searched as text, where "50000" is found inside "250000".
+  // The specifier is a variable, so the site's own type check never resolves a gateway file.
+  const { PLANS } = await import(path.href) as { PLANS: Record<string, { id: string; name: string; price_raw: bigint; requests: number; rpm: number }> };
+  const gateway = Object.values(PLANS).map(p => ({ id: p.id, name: p.name, price_raw: p.price_raw.toString(), requests: p.requests, rpm: p.rpm }));
+  assert.deepEqual(gateway, FALLBACK_PLANS.plans);
 });
 
 const livePlans = (over: Record<string, unknown> = {}) => ({
