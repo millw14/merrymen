@@ -12,6 +12,8 @@ process.env.MERRYMEN_GATEWAY_RPC ||= "https://example.invalid";
 import assert from "node:assert/strict";
 import { bitqueryAuthHeaders, createGateway, DEFAULTS, parseInitializeEvent, sanitizeSymbol } from "./lib/core.mjs";
 import { createStore } from "./lib/store.mjs";
+import { PLANS } from "./lib/billing-plans.mjs";
+import { PARTNER_TUNABLES } from "./lib/partner-api.mjs";
 
 const SECRET = process.env.MERRYMEN_GATEWAY_SECRET;
 const baseCfg = {
@@ -287,3 +289,14 @@ console.log("[gateway] selftest OK — /memescope: public, one shared query per 
 }
 
 console.log("[gateway] selftest OK — /v1/models lists the brand; the upstream model name leaks on no status");
+
+// ── partner plans against the process limit ─────────────────────────────────
+// A plan's rate is per account, but a partner usually calls from one backend,
+// so it also has to fit the per-IP limit or the plan sells a rate nobody can
+// reach. Two tables in two files; this is where an edit to either meets the
+// other, at image build.
+for (const plan of Object.values(PLANS)) {
+  assert.ok(plan.rpm <= PARTNER_TUNABLES.IP_RATE_PER_MIN,
+    `${plan.id} sells ${plan.rpm}/min, over the partner per-IP limit of ${PARTNER_TUNABLES.IP_RATE_PER_MIN}/min`);
+}
+console.log("[gateway] selftest OK — every partner plan's rate fits under the per-IP limit");

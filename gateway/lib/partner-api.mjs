@@ -20,12 +20,21 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { isPlatformFailure } from "./billing.mjs";
 
 export const PARTNER_TUNABLES = {
-  /** Per-key, per-minute. Generous — these reads are cached and cheap. */
+  /**
+   * Per-key, per-minute, for a key billing does not meter: an operator's key,
+   * or any key while billing is off. Generous — these reads are cached and
+   * cheap. A metered key gets its account's plan rate instead (lib/billing-plans.mjs).
+   */
   RATE_PER_MIN: 120,
-  /** Per-IP, per-minute. Protects the PROCESS, not the bill. */
-  IP_RATE_PER_MIN: 240,
+  /**
+   * Per-IP, per-minute. Protects the PROCESS, not the bill: plans bound
+   * accounts. Above every plan's rate (Feast is 300), so a partner's one
+   * backend can use what its account paid for; selftest.mjs pins that.
+   */
+  IP_RATE_PER_MIN: 600,
 };
 
 /** Short, non-secret, and logged next to the keyId so a report locates a request. */
@@ -46,16 +55,39 @@ export const PARTNER_PREFIX = "/partner/v1";
 /**
  * @param partners  from createPartners() in partners.mjs
  * @param store     the shared rate-limit store (same one the holder routes use)
+ * @param billing   from createBilling() in billing.mjs, or null: nothing is metered
  */
-export function createPartnerApi({ partners, store, forward, tunables = {}, version = "2026-10-08" }) {
+export function createPartnerApi({ partners, store, forward, billing = null, tunables = {}, version = "2026-10-08" }) {
   const T = { ...PARTNER_TUNABLES, ...tunables };
+
+  /**
+   * The wallet a key's requests count against, or null when nothing is
+   * metered: billing is off, or the key is an operator's, which has no owner.
+   * Off must stay exactly the gateway from before billing, so every metered
+   * path below starts from this.
+   */
+  const ownerOf = (key) => (billing && billing.mode !== "off" && key?.owner) || null;
+
+  /**
+   * The rate a key gets, and the bucket that counts it. A metered key gets its
+   * ACCOUNT's plan rate in one bucket per wallet: five keys must not mean five
+   * times what the plan sells. Anything else keeps its own rate and bucket.
+   */
+  function rateOf(key) {
+    const owner = ownerOf(key);
+    if (owner) return { rpm: billing.planFor(owner, key.created_at).rpm, bucket: `pa:${owner}`, per: "account" };
+    return { rpm: T[`RATE_PER_MIN_${key.keyId}`] ?? key.rpm ?? T.RATE_PER_MIN, bucket: `p:${key.keyId}`, per: "key" };
+  }
 
   /**
    * Authenticate, then meter. In that order on purpose: metering an
    * unauthenticated caller would let anyone burn a known partner's quota by
    * presenting their key id with a wrong secret.
+   *
+   * `metered: false` is for /meta, which is free: rate-limited like anything
+   * else, never counted, and never the request that makes a charge.
    */
-  async function gate(authorization, ip, scope) {
+  async function gate(authorization, ip, scope, { metered = true } = {}) {
     const rid = requestId();
     const raw = typeof authorization === "string" ? authorization.replace(/^Bearer\s+/i, "").trim() : "";
 
@@ -78,20 +110,54 @@ export function createPartnerApi({ partners, store, forward, tunables = {}, vers
       return { fail: partnerError(403, "forbidden_scope", `this key does not carry ${scope}`, rid) };
     }
 
-    // Buckets keyed on the keyId, NEVER the secret — a rate-limit key can end up
-    // in a log or a Redis dump.
-    const perKey = T[`RATE_PER_MIN_${v.key.keyId}`] ?? v.key.rpm ?? T.RATE_PER_MIN;
-    if (!(await store.rateHit(`p:${v.key.keyId}`, perKey, 60))) {
-      return { fail: partnerError(429, "rate_limited", `${perKey} requests/minute for this key`, rid) };
+    // Buckets keyed on the keyId or the owning wallet, NEVER the secret — a
+    // rate-limit key can end up in a log or a Redis dump.
+    const { rpm, bucket, per } = rateOf(v.key);
+    if (!(await store.rateHit(bucket, rpm, 60))) {
+      return { fail: partnerError(429, "rate_limited", `${rpm} requests/minute for this ${per}`, rid) };
     }
     if (ip && !(await store.rateHit(`pip:${ip}`, T.IP_RATE_PER_MIN, 60))) {
       return { fail: partnerError(429, "rate_limited", "too many requests from this address", rid) };
     }
 
-    return { key: v.key, rid };
+    const owner = metered ? ownerOf(v.key) : null;
+    if (!owner) return { key: v.key, rid, rpm };
+    // Counted only past every refusal above: a request this gate turns away
+    // costs no quota. A charge that is due (a payment waiting to activate, a
+    // lapsed period with credit to renew) is made first, so the request counts
+    // against the plan that was paid for. That wait is bounded (2 s), then the
+    // request is served on what was there before.
+    await billing.prepare(owner);
+    const r = billing.reserve({ owner, keyId: v.key.keyId, keyCreatedAt: v.key.created_at });
+    if (!r.ok) {
+      // Structured, so a partner's client never parses the message for when to come back.
+      const { code, message, ...quota } = r.error;
+      return { fail: { status: r.status, json: { error: { code, message, request_id: rid, ...quota } }, headers: r.headers } };
+    }
+    return { key: v.key, rid, rpm, ticket: r.ticket, quota: r.headers };
+  }
+
+  /**
+   * A metered answer carries the quota headers, merged so a relayed
+   * Retry-After survives. One the platform failed (a 5xx, an upstream_* code,
+   * a busy runtime the contract says to resend to) gives its unit back first,
+   * and its headers count without it. A partner's own 4xx stays counted.
+   */
+  function metered(g, result) {
+    if (!g.ticket) return result;
+    let quota = g.quota;
+    const code = result.json?.error?.code;
+    if (isPlatformFailure(result.status, typeof code === "string" ? code : undefined)) {
+      billing.release(g.ticket);
+      quota = billing.meta(g.key.owner, g.key.created_at).headers;
+    }
+    return { ...result, headers: { ...result.headers, ...quota } };
   }
 
   return {
+    /** The per-minute rate a key gets, as /meta reports it; the developer portal lists keys with it. */
+    ratePerMin: (key) => rateOf(key).rpm,
+
     /** Is this ours to answer at all? */
     owns(pathname) {
       return pathname === PARTNER_PREFIX || pathname.startsWith(`${PARTNER_PREFIX}/`);
@@ -125,9 +191,13 @@ export function createPartnerApi({ partners, store, forward, tunables = {}, vers
       }
 
       // The first call a partner makes: does my key work, and what does it carry?
+      // Free, and never the request that makes a charge: it reads the plan as
+      // it stands, and says whether the next metered request would renew it.
       if (method === "GET" && route === "/meta") {
-        const g = await gate(authorization, ip, null);
+        const g = await gate(authorization, ip, null, { metered: false });
         if (g.fail) return g.fail;
+        const owner = ownerOf(g.key);
+        const m = owner ? billing.meta(owner, g.key.created_at) : null;
         return {
           status: 200,
           json: {
@@ -135,9 +205,12 @@ export function createPartnerApi({ partners, store, forward, tunables = {}, vers
             app_id: g.key.appId ?? g.key.keyId,
             name: g.key.name,
             scopes: g.key.scopes,
-            rate_per_min: g.key.rpm ?? T.RATE_PER_MIN,
+            // The rate this key actually gets: its account's plan when metered.
+            rate_per_min: g.rpm,
             api_version: version,
+            billing: m?.billing ?? null,
           },
+          ...(m ? { headers: m.headers } : {}),
         };
       }
 
@@ -149,23 +222,24 @@ export function createPartnerApi({ partners, store, forward, tunables = {}, vers
       if (scope) {
         const g = await gate(authorization, ip, scope);
         if (g.fail) return g.fail;
-        if (!forward) return partnerError(503, "upstream_unavailable", "Agent runtime is not configured", g.rid);
+        if (!forward) return metered(g, partnerError(503, "upstream_unavailable", "Agent runtime is not configured", g.rid));
         try {
           // The request_id goes along so the bridge's log line matches the partner's report.
           const result = await forward({ key: g.key, method, path: route, body, requestId: g.rid });
           if (result.json?.error && typeof result.json.error === "object") result.json.error.request_id = g.rid;
-          return result;
+          return metered(g, result);
         } catch {
-          return partnerError(503, "upstream_unavailable", "Agent runtime is temporarily unavailable", g.rid);
+          return metered(g, partnerError(503, "upstream_unavailable", "Agent runtime is temporarily unavailable", g.rid));
         }
       }
 
       // An unknown partner route still authenticates first, so the 404 set is not
-      // enumerable by an unauthenticated caller.
+      // enumerable by an unauthenticated caller. Asked with a working key, it is
+      // a request like any other, so it counts.
       const g = await gate(authorization, ip, null);
       if (g.fail) return g.fail;
-      if (method !== "GET") return partnerError(405, "bad_request", "method not supported for this endpoint", g.rid);
-      return partnerError(404, "not_found", `no such endpoint: ${route}`, g.rid);
+      if (method !== "GET") return metered(g, partnerError(405, "bad_request", "method not supported for this endpoint", g.rid));
+      return metered(g, partnerError(404, "not_found", `no such endpoint: ${route}`, g.rid));
     },
   };
 }

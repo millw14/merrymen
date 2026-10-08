@@ -1,0 +1,253 @@
+/**
+ * Metering in the partner gate: lib/partner-api.mjs wired to the real billing
+ * core (lib/billing.mjs) on a temp directory. The core's own rules are tested
+ * in billing.test.mjs; this file proves the GATE uses them: what is counted,
+ * what gives its unit back, which rate and bucket a key gets, what /meta says,
+ * and that billing off leaves the gate exactly as it was.
+ *
+ * `node --test lib/partner-metering.test.mjs`
+ */
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createBilling, openLedger } from "./billing.mjs";
+import { ONE_TOKEN, PERIOD_MS, PLANS, TOKEN } from "./billing-plans.mjs";
+import { createPartnerApi } from "./partner-api.mjs";
+
+const OWNER = `0x${"a1".repeat(20)}`;
+const START = 1_800_000_000_000;
+const T = (n) => (BigInt(n) * ONE_TOKEN).toString();
+/** Free with a quota a test can spend. */
+const SMALL = { ...PLANS, free: { ...PLANS.free, requests: 3 } };
+const key = (keyId, extra = {}) => ({ keyId, appId: `app_${keyId}`, name: keyId, scopes: ["read:agents", "write:agents", "chat:agents"],
+  rpm: 30, owner: OWNER, created_at: new Date(START - 3_600_000).toISOString(), ...extra });
+
+const dirs = [];
+after(() => Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true }))));
+
+/** A rate-limit store that enforces, and remembers which bucket and limit each hit used. */
+function countingStore() {
+  const counts = new Map();
+  const hits = [];
+  return { hits, durable: false, async rateHit(k, limit) {
+    hits.push({ key: k, limit });
+    const n = (counts.get(k) ?? 0) + 1;
+    counts.set(k, n);
+    return n <= limit;
+  } };
+}
+
+async function fixture({ mode = "enforce", plans = SMALL, keys = [key("k1")], forward = async () => ({ status: 200, json: { agents: [] } }), billing: wired = true } = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), "merrymen-metering-"));
+  dirs.push(dir);
+  const clock = { t: START };
+  const logs = [];
+  const registry = new Map(keys.map((k) => [k.keyId, k]));
+  const boot = () => createBilling({ dataDir: dir, mode, plans, now: () => clock.t, log: (l) => logs.push(l), timers: false, keyRegistry: async () => registry });
+  const f = { dir, clock, logs, store: countingStore(), forwards: [], file: path.join(dir, "billing.jsonl") };
+  f.forward = forward;
+  const partners = { verify: async (raw) => { const k = registry.get(raw.replace(/^tok_/, "")); return k ? { ok: true, key: { ...k } } : { ok: false, status: 401, code: "unauthorized" }; },
+    allows: (k, scope) => k.scopes.includes(scope) };
+  /** A new partner API on the same billing: picks up f.store and whether f.forward is set. */
+  f.rewire = () => {
+    f.api = createPartnerApi({ partners, store: f.store, billing: f.billing,
+      forward: f.forward && (async (req) => { f.forwards.push(req); return f.forward(req); }) });
+  };
+  /** A new process: billing replays the ledger. */
+  f.reboot = async () => { f.billing = wired ? await boot() : null; f.rewire(); };
+  await f.reboot();
+  f.call = (route, { method = "GET", keyId = "k1" } = {}) => f.api.handle({ method, pathname: `/partner/v1${route}`, authorization: `Bearer tok_${keyId}`, ip: "203.0.113.9" });
+  f.used = () => f.billing.meta(OWNER).billing.requests_used;
+  f.raw = () => readFile(f.file, "utf8").catch(() => "");
+  /** Credit as an operator grants it: an adjustment from another process, picked up by the tail. */
+  f.grant = async (tokens) => {
+    const ledger = await openLedger({ dataDir: dir, now: () => clock.t, log: () => {} });
+    const acct = ledger.state.byOwner.get(OWNER);
+    await ledger.enqueue(() => ledger.append({ type: "adjustment", account_id: acct.account_id, amount_raw: T(tokens), note: "test", operator: true }));
+    await f.billing.tail();
+  };
+  return f;
+}
+
+const quota = (r) => Object.fromEntries(Object.entries(r.headers ?? {}).filter(([k]) => k.startsWith("x-merrymen-quota")));
+
+test("a metered request counts before it is forwarded, carries its quota, and a spent quota is a structured 402 the runtime never sees", async () => {
+  const f = await fixture();
+  const ok = await f.call("/agents");
+  assert.equal(ok.status, 200);
+  assert.deepEqual(quota(ok), { "x-merrymen-quota-limit": "3", "x-merrymen-quota-remaining": "2",
+    "x-merrymen-quota-reset": String(Math.ceil((START - 3_600_000 + PERIOD_MS) / 1000)), "x-merrymen-quota-enforced": "true" });
+  // A partner's own mistake, refused by the runtime or by the gateway, counts.
+  f.forward = async () => ({ status: 404, json: { error: { code: "not_found", message: "No such agent" } } });
+  assert.equal(quota(await f.call("/agents/pa_1"))["x-merrymen-quota-remaining"], "1");
+  assert.equal(quota(await f.call("/nope"))["x-merrymen-quota-remaining"], "0");
+  assert.equal(f.forwards.length, 2);
+
+  const refused = await f.call("/agents");
+  assert.equal(refused.status, 402);
+  assert.equal(f.forwards.length, 2, "an exhausted quota never reaches the runtime");
+  const { error } = refused.json;
+  assert.match(error.request_id, /^req_[0-9a-f]{12}$/);
+  assert.deepEqual(error, { code: "quota_exhausted", message: error.message, request_id: error.request_id, plan: "free", limit: 3, used: 3,
+    resets_at: new Date(START - 3_600_000 + PERIOD_MS).toISOString(), upgrade_url: "https://merrymen.dev/api#plans" });
+  assert.equal(refused.headers["x-merrymen-quota-remaining"], "0");
+  assert.equal(refused.headers["retry-after"], String(Math.ceil((PERIOD_MS - 3_600_000) / 1000)));
+  assert.equal(f.used(), 3, "the 402 itself is not counted");
+
+  // /meta is free: it answers, reports the plan, and counts nothing.
+  for (let i = 0; i < 3; i++) {
+    const meta = await f.call("/meta");
+    assert.equal(meta.status, 200);
+    assert.equal(meta.json.billing.requests_used, 3);
+    assert.equal(meta.headers["x-merrymen-quota-remaining"], "0");
+  }
+  assert.equal(f.used(), 3);
+});
+
+test("a request the platform failed gives its unit back; a relayed Retry-After survives the quota headers", async () => {
+  const f = await fixture();
+  const failures = [
+    { status: 503, json: { error: { code: "upstream_unavailable", message: "x" } } },
+    { status: 503, json: { error: { code: "upstream_invalid_response", message: "x" } } },
+    { status: 503, json: { error: { code: "runtime_unavailable", message: "x" } } },
+    { status: 500, json: { error: { code: "internal", message: "x" } } },
+    { status: 409, json: { error: { code: "enrollment_busy", message: "x" } } },
+  ];
+  for (const failure of failures) {
+    f.forward = async () => structuredClone(failure);
+    const r = await f.call("/agents", { method: "POST" });
+    assert.equal(r.status, failure.status);
+    assert.equal(r.headers["x-merrymen-quota-remaining"], "3", failure.json.error.code);
+  }
+  f.forward = async () => { throw new Error("socket hang up"); };
+  assert.equal((await f.call("/agents")).json.error.code, "upstream_unavailable");
+  const busy = { status: 409, json: { error: { code: "conversation_busy", message: "x", retry_after: 2 } }, headers: { "retry-after": "2" } };
+  f.forward = async () => structuredClone(busy);
+  const r = await f.call("/agents/pa_1/messages", { method: "POST" });
+  assert.deepEqual(r.headers, { "retry-after": "2", ...quota(r) });
+  assert.equal(r.headers["x-merrymen-quota-remaining"], "3");
+  assert.equal(f.used(), 0, "nothing the platform failed was counted");
+
+  // No runtime configured at all is the platform's failure too.
+  f.forward = null;
+  f.rewire();
+  assert.equal((await f.call("/agents")).status, 503);
+  assert.equal(f.used(), 0);
+
+  // A partner's malformed input, refused by the runtime, is theirs and counts.
+  f.forward = async () => ({ status: 400, json: { error: { code: "bad_request", message: "x" } } });
+  f.rewire();
+  assert.equal((await f.call("/agents", { method: "POST" })).headers["x-merrymen-quota-remaining"], "2");
+  assert.equal(f.used(), 1);
+});
+
+test("refusals before the meter cost nothing: a wrong key, a missing scope", async () => {
+  const f = await fixture({ keys: [key("k1", { scopes: ["read:agents"] })] });
+  assert.equal((await f.api.handle({ method: "GET", pathname: "/partner/v1/agents", authorization: "Bearer tok_nobody", ip: "x" })).status, 401);
+  const scoped = await f.call("/agents", { method: "POST" });
+  assert.equal(scoped.status, 403);
+  assert.equal(scoped.headers, undefined);
+  assert.equal(f.used(), 0);
+  assert.equal(f.forwards.length, 0);
+});
+
+test("an account's keys share ONE plan rate, whatever each key stores; a paid plan raises it", async () => {
+  const f = await fixture({ plans: PLANS, keys: [key("k1", { rpm: 5 }), key("k2", { rpm: 500 })] });
+  for (let i = 0; i < 30; i++) assert.equal((await f.call("/agents", { keyId: i % 2 ? "k1" : "k2" })).status, 200, `request ${i + 1}`);
+  const limited = await f.call("/agents", { keyId: "k2" });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.json.error.message, "30 requests/minute for this account");
+  assert.equal(limited.headers, undefined);
+  assert.deepEqual([...new Set(f.store.hits.filter((h) => !h.key.startsWith("pip:")).map((h) => `${h.key} ${h.limit}`))], [`pa:${OWNER} 30`],
+    "one bucket per wallet, at the plan's rate; the keys' own rates are not used");
+  assert.equal(f.used(), 30, "the rate-limited request was not counted");
+  f.store = countingStore(); // the next minute
+  f.rewire();
+  assert.equal((await f.call("/meta", { keyId: "k1" })).json.rate_per_min, 30);
+  assert.equal(f.api.ratePerMin(key("k2", { rpm: 500 })), 30);
+
+  assert.equal((await f.billing.createAccount(OWNER, "Acme")).status, 201);
+  await f.grant(100_000);
+  assert.equal((await f.billing.choosePlan(OWNER, { tier: "crumbs", confirm: true })).json.plan.id, "crumbs");
+  const meta = await f.call("/meta", { keyId: "k2" });
+  assert.equal(meta.json.rate_per_min, 60);
+  assert.equal(meta.json.billing.plan, "crumbs");
+  assert.equal(f.api.ratePerMin(key("k2", { rpm: 500 })), 60);
+  assert.deepEqual(f.store.hits.at(-2), { key: `pa:${OWNER}`, limit: 60 });
+});
+
+test("an operator key (no owner) is never metered and keeps its own rate and bucket", async () => {
+  const op = key("op1", { owner: null, rpm: 500 });
+  const f = await fixture({ keys: [op] });
+  for (let i = 0; i < 5; i++) {
+    const r = await f.call("/agents", { keyId: "op1" });
+    assert.equal(r.status, 200);
+    assert.equal(r.headers, undefined);
+  }
+  const meta = await f.call("/meta", { keyId: "op1" });
+  assert.equal(meta.json.rate_per_min, 500);
+  assert.equal(meta.json.billing, null);
+  assert.equal(meta.headers, undefined);
+  assert.deepEqual(f.store.hits.find((h) => !h.key.startsWith("pip:")), { key: "p:op1", limit: 500 });
+  await f.billing.flush();
+  await assert.rejects(stat(path.join(f.dir, "usage.json")), { code: "ENOENT" });
+});
+
+test("with billing off, an owned key gets exactly the gate it had before billing", async () => {
+  const today = await fixture({ billing: false, plans: SMALL });
+  const off = await fixture({ mode: "off", plans: SMALL });
+  const strip = (r) => (r.json?.error ? { ...r, json: { error: { ...r.json.error, request_id: "-" } } } : r);
+  for (let i = 0; i < 6; i++) {
+    for (const [route, method] of [["/agents", "GET"], ["/meta", "GET"], ["/nope", "GET"], ["/agents", "PUT"]]) {
+      assert.deepEqual(strip(await off.call(route, { method })), strip(await today.call(route, { method })), `${method} ${route}`);
+    }
+  }
+  assert.deepEqual(off.store.hits, today.store.hits, "same buckets, same limits: the key's own 30/min");
+  assert.ok(off.store.hits.every((h) => h.key === "p:k1" || h.key.startsWith("pip:")));
+  const meta = await off.call("/meta");
+  assert.deepEqual(meta, { status: 200, json: { key_id: "k1", app_id: "app_k1", name: "k1", scopes: key("k1").scopes, rate_per_min: 30,
+    api_version: "2026-10-08", billing: null } });
+  assert.equal(off.forwards.length, 6, "past a quota of three: nothing refused");
+  await off.billing.flush();
+  await assert.rejects(stat(path.join(off.dir, "usage.json")), { code: "ENOENT" });
+  assert.equal(await off.raw(), "", "and the ledger is untouched");
+});
+
+test("a metered request makes the charge a crash left undone; /meta, a 429 and a 403 never do", async () => {
+  // The crash: a payment line was appended, and the process died before the
+  // activation that should have followed it. Nothing replays the payment; the
+  // next metered request settles the account instead.
+  const f = await fixture({ mode: "observe", plans: PLANS, keys: [key("k1"), key("k2", { scopes: ["read:agents"] })] });
+  assert.equal((await f.billing.createAccount(OWNER, "Acme")).status, 201);
+  await f.billing.choosePlan(OWNER, { tier: "crumbs", confirm: true });
+  await f.billing.close();
+  const ledger = await openLedger({ dataDir: f.dir, now: () => f.clock.t, log: () => {} });
+  const acct = ledger.state.byOwner.get(OWNER);
+  await ledger.enqueue(() => ledger.append({ type: "payment", account_id: acct.account_id, owner: OWNER, chain_id: TOKEN.chainId, token: TOKEN.address,
+    recipient: `0x${"7e".repeat(20)}`, tx_hash: `0x${"ab".repeat(32)}`, block_number: 1_000, block_hash: `0x${"cd".repeat(32)}`,
+    amount_raw: T(100_000), log_indexes: [0] }));
+  f.clock.t += 1_000;
+  await f.reboot();
+
+  const before = await f.raw();
+  const meta = await f.call("/meta");
+  assert.equal(meta.json.billing.plan, "free");
+  assert.equal(meta.json.billing.renews_on_next_request, true);
+  assert.equal((await f.call("/agents", { method: "POST", keyId: "k2" })).status, 403);
+  for (let i = 0; i < 30; i++) await f.call("/meta"); // past Free's 30/min: the 429s that follow are refusals too
+  assert.equal((await f.call("/agents")).status, 429);
+  await f.billing.tail();
+  assert.equal(await f.raw(), before, "reads and refusals appended nothing");
+
+  f.store = countingStore(); // the next minute
+  f.rewire();
+  const served = await f.call("/agents");
+  assert.equal(served.status, 200);
+  assert.equal(served.headers["x-merrymen-quota-limit"], "50000", "counted against the plan the payment bought");
+  const charges = (await f.raw()).split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.type === "charge");
+  assert.deepEqual(charges.map((c) => [c.reason, c.tier, c.price_raw]), [["activate", "crumbs", T(100_000)]]);
+  await f.call("/agents");
+  assert.equal((await f.raw()).split("\n").filter((l) => l.includes('"type":"charge"')).length, 1, "settled once");
+});
