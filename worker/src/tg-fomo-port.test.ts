@@ -1785,6 +1785,20 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     assert.ok(w.logs.includes("[tg-groups] route fomo:trader"));
   });
 
+  it("a clarification or the capabilities line looks nothing up, so six of them never use up the room's research answers (review r4)", async () => {
+    for (const ask of ["shogun theses on it on fomo?", "shogun what can you do with fomo?"]) {
+      const w = await world();
+      for (let i = 0; i < 6; i++) {
+        const out = await w.say(ask, undefined, 60_000, OWNER_ID + 1 + i);
+        assert.ok(out.length > 0, `${ask} #${i + 1} is answered`);
+      }
+      assert.equal(w.s.provider.length, 0, "nothing was read");
+      const board = await w.say("shogun what's trending on fomo?", undefined, 60_000, OWNER_ID + 9);
+      assert.match(board, /^Trending on Fomo/, `${ask}: ${board}`);
+      assert.doesNotMatch(board, /research lookups/, board);
+    }
+  });
+
   it("a routed 'what did X sell this week?' names X's sales, never only the buys (review r4)", async () => {
     const kaleo = (fixture("search").results as Rec[])[0]!;
     // frankdegods' three buys in the feed, and one sale.

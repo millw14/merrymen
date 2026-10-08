@@ -717,12 +717,14 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         // A coin's theses: material for the group model to say in its own words (tg-groups/theses.ts).
         const theses = thesesMaterial(r, said.text);
         if (theses) said.theses = theses;
-        // NOTHING BOUGHT FROM THE PROVIDER: every read a kept copy (or refused
-        // before any call), so the room's research slot goes back (handler.ts
-        // fomoAnswer). Counted by the service's own provider calls, which
-        // include the search behind a not-found answer; never a failed read,
-        // whose envelope cannot say what the provider was already asked.
-        if (r.envelopes.length > 0 && r.envelopes.every((e) => e.status !== "failed" && e.usage?.providerCalls === 0)) said.free = true;
+        // NOTHING BOUGHT FROM THE PROVIDER: nothing looked up at all (a
+        // clarification, the capabilities line, "is fomo working?"), or every
+        // read a kept copy (or refused before any call), so the room's
+        // research slot goes back (handler.ts fomoAnswer), as for a deflection
+        // above. Counted by the service's own provider calls, which include
+        // the search behind a not-found answer; never a failed read, whose
+        // envelope cannot say what the provider was already asked.
+        if (r.toolsCalled.length === 0 || (r.envelopes.length > 0 && r.envelopes.every((e) => e.status !== "failed" && e.usage?.providerCalls === 0))) said.free = true;
         // Her moves, only when she asked: the trusted sender id (handler.ts), never a chat.
         if (q.owner === true) {
           let moves: TgFomoMoves | null = null;
