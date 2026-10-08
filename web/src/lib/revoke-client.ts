@@ -36,12 +36,15 @@ function pendingStore(w: Pick<BrowserWallet, "chainId" | "smartAccount">) {
  *
  * Only a definite zero refuses. A saved operation may already be mined and need
  * no further fee, and an unreadable balance is not an empty one: both are left
- * to revokeFromBrowser, which reports its own outcome.
+ * to revokeFromBrowser, which reports its own outcome. A saved record that
+ * cannot be verified is NOT left to it: revokeFromBrowser refuses that record
+ * before any network call, so letting it pass here only moves the same refusal
+ * to after the stop.
  */
 export async function assertRevocationFunded(w: Pick<BrowserWallet, "chainId" | "smartAccount">): Promise<void> {
   const chain = revocationChain(w.chainId);
   if (!chain) return;
-  try { if (pendingStore(w).pending()) return; } catch { return; }
+  if (pendingStore(w).pending()) return;
   const publicClient = createPublicClient({ chain, transport: http() });
   let funds: bigint;
   try {
