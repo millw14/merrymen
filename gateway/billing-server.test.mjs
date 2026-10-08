@@ -254,7 +254,12 @@ test("an account pays, its plan lifts a spent quota, failures do not count, and 
   assert.deepEqual(view.json.history.map((h) => h.type), ["charge", "payment"]);
   assert.equal((await back.call("/payments", { tx_hash: hash })).json.already, true, "a replayed ledger still knows the transfer");
   assert.equal((await ledger(dir)).filter((x) => x.type === "payment").length, 1);
-  await gw.stop("SIGINT");
+
+  // Ctrl-C on a local run saves the counts the same way.
+  assert.equal((await partner(gw, key, "/agents")).status, 200);
+  assert.deepEqual(await gw.stop("SIGINT"), { code: 0, signal: null });
+  assert.match(gw.stdout(), /SIGINT: saving usage counts/);
+  assert.equal(JSON.parse(await readFile(path.join(dir, "usage.json"), "utf8")).windows[periodKey].total, 4);
 });
 
 test("every degraded billing mode is said at boot", async () => {
