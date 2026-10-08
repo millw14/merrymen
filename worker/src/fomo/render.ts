@@ -915,7 +915,16 @@ const ABOUT_COHORT = /\bcohort\b|\bwatched[- ]traders?\b/i;
 
 function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, now: number): string[] {
   const d = env.data;
-  if (!d) return [];
+  if (!d) {
+    // The provider answered the coin's thesis page empty while it holds
+    // theses: no research was built from it, and "0 theses" is never said
+    // (service.ts refreshCore, review on #306).
+    if (env.reason === "theses-not-ready" && env.subject?.kind === "token") {
+      const line = `The provider didn't return the theses on ${coin(env.subject.token, env.subject.label, audience)} just now, so no research was built from it.`;
+      return [audience === "group" ? roomNote(line) : line];
+    }
+    return [];
+  }
   const name = coin(d.token, d.label, audience);
   const c = d.coverage;
   const out: string[] = [];

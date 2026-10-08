@@ -186,7 +186,11 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   room never is, since its allowance (a page is 1,250 of its 2,500 credits
   an hour) may refuse the retry and "used up" would follow the promise. Rows
   Merrymen filtered off (another chain's) are "none" as before, and a trader's read never
-  quotes the coin's count. An empty page is logged by its shape only (available, count,
+  quotes the coin's count. Research on such a page ("research $AUTON on fomo") builds and
+  stores no revision from it: the previous revision stands, labelled as stored, or the
+  answer is "Fomo didn't return the theses on X just now, so no research was built from
+  it.", never "0 theses ... none on record" (`service.ts refreshCore`, reason
+  `theses-not-ready`). An empty page is logged by its shape only (available, count,
   source, served from).
   **A Telegram group reads differently** (decisions D7 and D8, 2026-10-07;
   `freshness.ts GROUP_REUSE_MS`, `service.ts read`): a room reuses a copy longer, theses

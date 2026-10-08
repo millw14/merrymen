@@ -1621,6 +1621,34 @@ describe("a group research question, end to end", () => {
     }
   });
 
+  it("'research $PONS on fomo' on a thesis page the provider answered empty under a count: never '0 theses', and no revision stored (review on #306)", async () => {
+    let ready = false;
+    const s = await setup({ theses: () => (ready ? fixture("theses-token") : { theses: [], available: false, totalAvailable: 4190 }) });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const research = { agentName: "Pine", kind: "research" as const, recentOwn: [] };
+    for (const q of ["research $PONS on fomo", "pine research $PONS on fomo"]) {
+      const a = await port.ask({ text: q, chatId: GROUP });
+      assert.ok(a && !a.deflect, q);
+      assert.equal(s.calls[s.calls.length - 1]!.tool, "fomo_research_coin", q);
+      assert.doesNotMatch(a.text, /0 theses|none on record|revision/i, `${q}: ${a.text}`);
+      assert.match(a.text.split("\n")[0]!, /^Fomo didn't return the theses on PONS[^.]* just now, so no research was built from it\.$/, a.text);
+      assert.match(a.text, /^Not read: theses\.$/m, a.text);
+      for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
+      assert.equal(count(s.raw, "fomo_dossiers"), 0, "no zero-thesis revision is stored as a baseline");
+      s.clock.now += 3 * 60_000;
+    }
+    // With a real revision on record, a not-ready page leaves it standing, labelled as stored.
+    ready = true;
+    s.clock.now += 3 * 60_000;
+    assert.match((await port.ask({ text: "research $PONS on fomo", chatId: GROUP }))!.text, /revision 1\): 3 theses/);
+    ready = false;
+    s.clock.now += 3 * 60 * 60_000;
+    const stood = await port.ask({ text: "research $PONS on fomo", chatId: GROUP });
+    assert.match(stood!.text, /revision 1\): 3 theses/, stood!.text);
+    assert.doesNotMatch(stood!.text, /\b0 theses/, stood!.text);
+    assert.equal(count(s.raw, "fomo_dossiers"), 1, "the earlier revision stands; nothing rebuilt from less");
+  });
+
   it("a held empty thesis page is reused for two minutes at most, then read again", async () => {
     let thesisReads = 0;
     const s = await setup({ theses: () => { thesisReads += 1; return { theses: [], available: true }; } });

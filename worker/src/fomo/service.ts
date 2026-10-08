@@ -2793,6 +2793,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     }
     const page = th.section.data;
     /*
+     * A PAGE THE PROVIDER ANSWERED EMPTY WHILE IT HOLDS THESES (marked not
+     * available, or under a count above zero) is no thesis evidence, never
+     * "0 theses": the previous revision stands, and nothing is built from it
+     * or stored as a baseline for later "changes since" (the AUTON incident,
+     * 2026-10-08; review on #306). The feed and stats are not read for it.
+     */
+    if (th.rows.length === 0 && (page.available === false || (page.totalAvailable ?? 0) > 0)) {
+      say("The provider didn't return the theses just now.");
+      return { dossier: previous, changed: false, status: previous ? "stale" : "partial", reason: "theses-not-ready", checked: false, usage: usageNow(), notes };
+    }
+    /*
      * A NARROWER READ IS NOT EVIDENCE THAT A CLAIM DISAPPEARED. The revision is
      * shared by every owner, the lens and the follow review, and the research
      * queue refreshes at quick depth. Built from one page after a five-page
@@ -2984,6 +2995,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     }
     const r = await refreshCore(ic.cc, a, token, t.label, { depth, mode: args.freshness });
     if (!r.dossier) {
+      // A thesis page the provider answered empty while holding theses: the theses were not read (render.ts bodyResearch).
+      if (r.reason === "theses-not-ready" && !a.missing.includes("theses")) a.missing.push("theses");
       return finish<ResearchCoinData>(ic, a, {
         cls: "theses",
         mode: args.freshness,
