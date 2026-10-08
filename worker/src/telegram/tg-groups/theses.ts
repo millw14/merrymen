@@ -151,11 +151,21 @@ const ABOUT_ITSELF = /\b(?:instructions?|prompts?|system|assistant|ignore|disreg
 const SELF_REF = /\b(?:i|i'm|im|i've|i'd|we|we're|we've|we'd|our|ours|my|me|merrymen|merryman)\b|\bthis (?:group|chat|room)\b/i;
 /**
  * A lure, not a view, said back to a room: an airdrop, a presale, free tokens,
- * a wallet to connect, someone to message. The prompt asks for none; code
- * makes sure (docs/tg-groups.md rule 3, fomo/digest.ts never says an airdrop).
+ * a wallet to connect, verify, sync or revoke, tokens to migrate, a portal,
+ * something to sign, eligible wallets, someone to message or contact. The
+ * prompt asks for none; code makes sure (docs/tg-groups.md rule 3,
+ * fomo/digest.ts never says an airdrop). The bare "verified", "allocation",
+ * "migration" and "contact" stay ("the contract is verified", "worries about
+ * the team allocation").
  */
 const OUT_LURE =
-  /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b/i;
+  /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
+/**
+ * A phrase that speaks to the room ("verify your wallet or lose your
+ * allocation", "you're still early"): a summary of other people's claims
+ * never needs to address anyone, and a lure always does.
+ */
+const SECOND_PERSON = /\b(?:you|your|yours|you're|youre|you've|you'll|y'all|ya'll|ur)\b|\bu\b(?!\.s\b)/i;
 /**
  * A CRIME LAID AT SOMEONE'S DOOR, said back to a room: theft, a stolen or
  * pulled pool, walking off with the money, laundering, wash trading or
@@ -197,12 +207,13 @@ const WAIT_CLAIM =
 /**
  * The airdrop story without the word, in ANY slot (OUT_LURE has the word):
  * "holders get a giveaway soon", "rewards for holders", "the holder
- * snapshot". A coin's "giveaway meme" stays, and so does the bare
+ * snapshot", "the team gives away tokens", a handout, a free mint, a holder
+ * bonus. A coin's "giveaway meme" stays, and so does the bare
  * "distribution" ("worries about the token distribution" is supply
  * concentration); a claim stays a waiting-on-only drop (WAIT_CLAIM).
  */
 const OUT_HANDOUT =
-  /\bsnapshots?\b|\bgive\s*-?\s*aways?\b(?!\s+memes?\b)|\brewards?\b|\breward\s+distribution\b|\bdistribut\w*\s+(?:to|among|for)\s+holders\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
+  /\bsnapshots?\b|\bgive\s*-?\s*aways?\b(?!\s+memes?\b)|\b(?:giv(?:e|es|ing|en)|gave)\s+(?:\w+\s+){0,3}?away\b(?!\s+memes?\b)|\bhand(?:s|ed|ing)?\s*-?\s*outs?\b|\bfree\s+mints?\b|\bholder\s+bonus(?:es)?\b|\bstimmy\b|\brewards?\b|\breward\s+distribution\b|\bdistribut\w*\s+(?:to|among|for)\s+holders\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
 const WAITING_LABEL = "Waiting on: ";
 
 /**
@@ -249,7 +260,7 @@ function phrase(raw: unknown, cap: number, label: string, m: TgThesesMaterial, r
   const coin = m.coin ? new RegExp(`(?<![\\p{L}\\p{N}])${escRe(m.coin)}(?![\\p{L}\\p{N}])`, "giu") : null;
   const bare = coin ? p.replace(coin, " ") : p;
   if (/\p{N}/u.test(bare) || NUMBER_WORDS.test(bare) || FIGURE_WORDS.test(bare) || MARKUP.test(p) || ABOUT_ITSELF.test(p) || namesSomeone(bare, m)) return null;
-  if (SELF_REF.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p) || OUT_ADVICE.test(p)) return null;
+  if (SELF_REF.test(p) || SECOND_PERSON.test(p) || namesAgent(p, agentName) || OUT_LURE.test(p) || OUT_ACCUSE.test(p) || OUT_ADVICE.test(p)) return null;
   if (OUT_HANDOUT.test(p) || (label === WAITING_LABEL && WAIT_CLAIM.test(p))) return null;
   const w = words(p);
   for (let i = 0; i + COPY_RUN <= w.length; i++) if (runs.has(w.slice(i, i + COPY_RUN).join(" "))) return null;

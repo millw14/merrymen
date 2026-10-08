@@ -1421,10 +1421,18 @@ supply", "price doubled since launch", "a bil market cap"; "the second wave
 of buyers" is no figure), no
 $, @, # or link, no quotation mark, no five-word run shared with any sample,
 nothing about instructions, nothing waited on that is a claim, and in no
-phrase (the gist, for, against or waited on) a holder snapshot, a giveaway,
-rewards or a reward distribution, or tokens sent or dropped to holders (the
-airdrop story without the word; a coin's "giveaway meme" and "worries about
-the token distribution" stay), no crime or misconduct laid at anyone's
+phrase (the gist, for, against or waited on) a holder snapshot, a giveaway
+(or the team giving, gives or gave tokens away), a handout, a free mint, a
+holder bonus, rewards or a reward distribution, or tokens sent or dropped to
+holders (the airdrop story without the word; a coin's "giveaway meme" and
+"worries about the token distribution" stay), no lure (an airdrop, a presale,
+a wallet to connect, verify, sync or revoke, tokens to migrate, a migration
+portal or any portal, an approval or message to sign, eligible wallets,
+someone to message or contact: "contact the admins to verify your wallet",
+"migrate your tokens on the portal"; "the contract is verified" and "worries
+about the team allocation" stay; the same shapes keep a thesis from the
+samples at all), nothing addressed to the room ("you", "your": a summary of
+other people's claims never speaks to anyone), no crime or misconduct laid at anyone's
 door (theft, a stolen or pulled pool, walking or making off with the money,
 laundering, wash trading, manipulation, insider trading, a cash grab, lying
 or liars, dumping or selling on followers or holders, a criminal: worries

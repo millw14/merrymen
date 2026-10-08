@@ -237,6 +237,25 @@ describe("checkWording", () => {
     assert.match(THESES_SYSTEM, /In every list and the gist: never an airdrop, a giveaway, a holder snapshot or rewards to holders/);
   });
 
+  it("a drainer lure or a handout in other words is never said back: verify your wallet, migrate tokens, a portal, eligible wallets, gives away (review r4)", () => {
+    for (const x of [
+      "contact the admins to verify your wallet or lose your allocation", "migrate your tokens to the new contract on the portal before friday",
+      "the team gives away tokens to holders", "contact the team to verify your wallet", "allocations for eligible wallets", "the team is giving tokens away",
+      "the dev gave away a bag to every holder", "holders expect a handout", "a free mint for holders", "a holder bonus is coming", "verify the wallet on the site",
+      "sync wallets before the deadline", "reach out to support for a spot", "sign the approval to qualify", "the migration portal opens soon", "you're still early",
+    ]) {
+      const w = checkWording({ gist: x, for: [x], against: [x], waiting_on: [x] }, MATERIAL, "Shogun").wording;
+      assert.equal(w.gist, null, x);
+      assert.deepEqual([...w.forIt, ...w.against, ...w.waitingOn], [], x);
+    }
+    // The bare words stay: a verified contract, a team allocation, a migration, a giveaway meme.
+    const fair = ["the contract is verified", "worries about the team allocation", "the move to the new chain after the migration", "a team that stays in contact with holders"];
+    const kept = checkWording({ for: fair.slice(0, 3), against: fair.slice(3) }, MATERIAL, "Shogun").wording;
+    assert.deepEqual([...kept.forIt, ...kept.against], fair);
+    assert.equal(checkWording({ gist: "Mostly the PS5 giveaway meme and gamers piling in" }, { ...MATERIAL, coin: "PS5" }, "Shogun").wording.gist, "Mostly the PS5 giveaway meme and gamers piling in");
+    assert.equal(checkWording(GOOD, MATERIAL, "Shogun").dropped, 0, "the good fixture keeps every phrase");
+  });
+
   it("a crime laid at the dev's or the team's door is never said back; a worry stays (review r2)", () => {
     const accusing = {
       gist: "Mostly a fight over whether the dev stole the liquidity",

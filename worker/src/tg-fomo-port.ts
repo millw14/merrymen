@@ -375,9 +375,14 @@ const INJECTION_SHAPED =
  */
 const AT_THE_READER =
   /\b(?:hey|dear|attention|note to|memo to)\s+(?:the\s+|any\s+|all\s+)?(?:ai|bots?|gpt|llms?|models?|assistants?|summari[sz]ers?)\b|\b(?:any|the|an?|every)\s+(?:ai|bots?|llms?|models?)\s+(?:reading|summari[sz]ing|parsing)\b|\bsum\s+(?:this|it|these|them)\s+up\b|\bsummari[sz](?:e|es|ing)\s+(?:this|these|it|them)\b|\bsummary\s+for\b|\b(?:gist|for|against|waiting[_ ]on)\s*:|\bnew rules?\s*:|\bfrom now on\b[^.!?\n]{0,20}\b(?:say|write|tell|call)\b|\balways\s+(?:say|write|call)\b/i;
-/** A lure, not a view: a claim page, a seed phrase, a wallet to connect, free tokens. */
+/**
+ * A lure, not a view: a claim page, a seed phrase, a wallet to connect,
+ * verify, sync or revoke, tokens to migrate, a portal, something to sign,
+ * eligible wallets, free tokens, someone to message or contact (the same
+ * shapes tg-groups/theses.ts OUT_LURE drops from what the model writes).
+ */
 const LURE =
-  /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b/i;
+  /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to|message|dm)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
 /** A row about Merrymen itself ("the merrymen bot picked it") is about the agent, not the coin. */
 const ABOUT_MERRYMEN = /\bmerrym[ae]n\b/i;
 
