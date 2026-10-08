@@ -163,7 +163,8 @@ takes one wallet signature). With KV, sessions and their logouts survive.
 
 A `Dockerfile` (universal) and `render.yaml` (Render Blueprint) are included for a
 connect-the-repo deploy. In-memory state is fine here (one process); set
-`KV_REST_API_URL`/`KV_REST_API_TOKEN` only if you run multiple instances.
+`KV_REST_API_URL`/`KV_REST_API_TOKEN` if you run multiple instances, or to keep
+developer portal sessions across deploys.
 
 ### B) Vercel serverless (optional holder gateway runtime)
 
