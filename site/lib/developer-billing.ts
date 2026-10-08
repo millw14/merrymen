@@ -351,12 +351,19 @@ export type PaymentOutcome =
   | { kind: "credited"; already: boolean; account: AccountView | null }
   | { kind: "pending"; stage: string; readyInSec: number | null; retryAfterSec: number | null }
   | { kind: "failed"; code: string; reason: string | null; message: string }
-  | { kind: "retry"; message: string }
+  | { kind: "retry"; code: string; message: string }
+  | { kind: "unchecked"; code: string; message: string }
   | { kind: "signed_out" };
 /**
- * POST /payments, read. Pending and transient answers keep the page waiting;
- * a refusal (422, or a 4xx the developer must fix) stops it with the
- * gateway's own words, which name the cause (wrong sender, too small, …).
+ * POST /payments, read. Pending and transient answers keep the page waiting.
+ *
+ * Only a verdict on the transaction itself is final: the gateway's 422
+ * refusals (failed, not found, too small, unsupported), which name the cause in
+ * the gateway's own words, and a 400 for a "hash" that is not one. Any other
+ * refusal (a rotated portal secret, a gateway rolled back to one without this
+ * route, a missing account, this site's own 403) says nothing about the
+ * transfer. It is `unchecked`: the page stops asking but keeps the hash, since
+ * a transfer the page stops submitting is never credited.
  */
 export function paymentOutcome(status: number, input: unknown): PaymentOutcome {
   const body = record(input) ?? {}, error = record(body.error);
@@ -368,16 +375,19 @@ export function paymentOutcome(status: number, input: unknown): PaymentOutcome {
     return { kind: "pending", stage: typeof detail.stage === "string" ? detail.stage : "confirming", readyInSec: count(detail.ready_in_sec), retryAfterSec: count(detail.retry_after) };
   }
   if (status >= 200 && status < 300) return { kind: "credited", already: body.already === true, account: normalizeAccount(body) };
-  if (status === 429 || status >= 500 || status === 0) return { kind: "retry", message: message || "The payment check is busy. Trying again shortly." };
-  return { kind: "failed", code: code || "payment_refused", reason: typeof detail.reason === "string" ? detail.reason : null, message: message || "This transaction cannot be credited." };
+  if (status === 429 || status >= 500 || status === 0) return { kind: "retry", code, message: message || "The payment check is busy. Trying again shortly." };
+  if (status === 422 || (status === 400 && code === "invalid_tx_hash")) return { kind: "failed", code: code || "payment_refused", reason: typeof detail.reason === "string" ? detail.reason : null, message };
+  return { kind: "unchecked", code, message: message || "The payment check was refused." };
 }
 
-export type WatchEnd = Extract<PaymentOutcome, { kind: "credited" | "failed" | "signed_out" }> | { kind: "stalled"; stage: string } | { kind: "cancelled" };
+/** `message` on a stalled end: the check itself was refused (see `unchecked`), not slow. */
+export type WatchEnd = Extract<PaymentOutcome, { kind: "credited" | "failed" | "signed_out" }> | { kind: "stalled"; stage: string; message?: string } | { kind: "cancelled" };
 /**
  * Submit `hash` until the gateway credits or refuses it. Re-submitting is how
  * the gateway is asked again (it credits a transaction once, then answers
  * `already`), so a lost answer or a reload costs nothing. Gives up after ten
- * minutes with the last stage seen, so the page can say what to do next.
+ * minutes with the last stage seen, or at once when the check itself is
+ * refused, so the page can say what to do next and keep the hash.
  */
 export async function watchPayment(hash: string, { check, wait, now = Date.now, cancelled, onWaiting }: {
   check: (hash: string) => Promise<{ status: number; data: unknown }>; wait: (ms: number) => Promise<void>; now?: () => number;
@@ -389,6 +399,7 @@ export async function watchPayment(hash: string, { check, wait, now = Date.now, 
     const { status, data } = await check(hash).catch(() => ({ status: 0, data: null }));
     if (cancelled()) return { kind: "cancelled" };
     const outcome = paymentOutcome(status, data);
+    if (outcome.kind === "unchecked") return { kind: "stalled", stage, message: outcome.message };
     if (outcome.kind !== "pending" && outcome.kind !== "retry") return outcome;
     if (outcome.kind === "pending") stage = outcome.stage;
     if (now() - started >= POLL_GIVE_UP_MS) return { kind: "stalled", stage };
@@ -400,7 +411,9 @@ export async function watchPayment(hash: string, { check, wait, now = Date.now, 
 
 /** What the page says while it waits. No confirmation counts: on a chain this fast they only flicker. */
 export function waitingMessage(outcome: Extract<PaymentOutcome, { kind: "pending" | "retry" }>, minAgeSec = 120): string {
-  if (outcome.kind === "retry") return "The payment check is busy. Trying again shortly…";
+  if (outcome.kind === "retry") return outcome.code === "billing_off" || outcome.code === "payments_unavailable"
+    ? "Payments are paused on our side just now. This payment is saved; checking again shortly…"
+    : "The payment check is busy. Trying again shortly…";
   if (outcome.stage === "not_found_yet") return "Waiting for Robinhood Chain to include your transaction…";
   return `Confirming on Robinhood Chain (about ${Math.max(1, Math.ceil((outcome.readyInSec ?? minAgeSec) / 60))} min)…`;
 }
@@ -411,13 +424,20 @@ const REASON_HINT: Record<string, (wallet: string) => string> = {
   wrong_token: () => "This transaction did not move MERRYMEN.",
   before_start_block: () => "This transfer was made before payments opened.",
 };
-/** How a finished wait reads, with the remedy when the gateway names a reason. */
+/**
+ * How a finished wait reads. A refusal is told in the gateway's own words,
+ * which already name the cause and the remedy; the page's hint stands in only
+ * when the gateway sent none, so the alert never says the same thing twice.
+ */
 export function endMessage(end: Exclude<WatchEnd, { kind: "signed_out" | "cancelled" }>, wallet: string): string {
   if (end.kind === "credited") return end.already ? "This payment was already credited." : "Payment credited.";
-  if (end.kind === "stalled") return end.stage === "not_found_yet"
-    ? "We can't find this transaction on Robinhood Chain. If you sped it up or cancelled it in your wallet, paste the new hash below."
-    : "Still not credited. Check again in a minute; nothing is lost while you wait.";
-  return [end.message, end.reason ? REASON_HINT[end.reason]?.(wallet) : ""].filter(Boolean).join(" ");
+  if (end.kind === "stalled") {
+    if (end.message) return `This payment could not be checked just now (${end.message.replace(/[.\s]+$/, "")}). It is saved here: check again later. Nothing is lost while you wait.`;
+    return end.stage === "not_found_yet"
+      ? "We can't find this transaction on Robinhood Chain. If you sped it up or cancelled it in your wallet, paste the new hash below."
+      : "Still not credited. Check again in a minute; nothing is lost while you wait.";
+  }
+  return end.message || (end.reason ? REASON_HINT[end.reason]?.(wallet) : "") || "This transaction cannot be credited.";
 }
 
 /** One line of account history, in words. Never "refund": nothing goes back on chain. */

@@ -264,7 +264,15 @@ test('a payment check is read as credited, still pending, worth retrying, or ref
   assert.equal(paymentOutcome(422, { error: { code: 'payment_too_small', message: 'Too small' } }).kind, 'failed');
   for (const status of [429, 500, 503, 0]) assert.equal(paymentOutcome(status, { error: { code: 'chain_unavailable' } }).kind, 'retry', String(status));
   assert.deepEqual(paymentOutcome(401, { error: { code: 'signed_out' } }), { kind: 'signed_out' });
-  assert.equal(paymentOutcome(401, { error: { code: 'unauthorized_portal' } }).kind, 'failed');
+  assert.equal(paymentOutcome(400, { error: { code: 'invalid_tx_hash', message: 'Paste the transaction hash' } }).kind, 'failed');
+  assert.equal(paymentOutcome(422, { error: { code: 'payment_unsupported' } }).kind, 'failed');
+  // Refusals of the CHECK, not of the transfer: a rotated portal secret, a gateway rolled back to one without
+  // the route, a missing account, this site's own 403. None of them may end the wait as "not credited".
+  for (const [status, body] of [[401, { error: { code: 'unauthorized_portal', message: 'Unauthorized portal' } }], [404, { error: { code: 'not_found', message: 'Not found' } }],
+    [404, { error: { code: 'account_missing', message: 'Create your developer account first.' } }], [403, { error: { message: 'Open the developer page to perform this action.' } }],
+    [400, { error: { code: 'bad_request', message: 'Invalid request' } }], [409, {}], [413, { error: { message: 'Request too large' } }]] as const) {
+    assert.equal(paymentOutcome(status, body).kind, 'unchecked', `${status} ${JSON.stringify(body)}`);
+  }
 });
 
 test('payment checks start at six seconds and back off to thirty, honouring a longer retry_after', () => {
@@ -303,13 +311,33 @@ test('a submitted hash is checked until the gateway credits it, backing off and 
   assert.equal(endMessage({ kind: 'credited', already: true, account: null }, WALLET), 'This payment was already credited.');
 });
 
-test('a refusal stops the checks at once, with the gateway\'s words and the remedy', async () => {
-  const s = scripted([pendingAnswer(), { status: 422, data: { error: { code: 'payment_not_found', reason: 'wrong_sender', message: 'This was sent from 0x2222…2222, not 0x1111…1111.' } } }, pendingAnswer()]);
+test('a refusal stops the checks at once, with the gateway\'s words, or the remedy when it sent none', async () => {
+  // The gateway's own wrong_sender message already says what to do; the page does not say it again.
+  const said = 'This transfer was not sent from your signed-in wallet 0x1111…1111. Only $MERRYMEN sent from 0x1111…1111 is credited to this account; a transfer from another wallet is credited by signing in with that wallet and submitting the hash there.';
+  const s = scripted([pendingAnswer(), { status: 422, data: { error: { code: 'payment_not_found', reason: 'wrong_sender', message: said } } }, pendingAnswer()]);
   const end = await s.run;
   assert.equal(end.kind, 'failed'); assert.equal(s.checks(), 2); assert.deepEqual(s.waits, [6000]);
-  assert.equal(endMessage(end as Parameters<typeof endMessage>[0], WALLET), 'This was sent from 0x2222…2222, not 0x1111…1111. Only transfers from 0x1111…1111 count for this account. If you sent it from another wallet, sign in with that wallet, create its account and submit this hash there.');
+  assert.equal(endMessage(end as Parameters<typeof endMessage>[0], WALLET), said);
+  const bare = (reason: string | null) => endMessage({ kind: 'failed', code: 'payment_not_found', reason, message: '' }, WALLET);
+  assert.equal(bare('wrong_sender'), 'Only transfers from 0x1111…1111 count for this account. If you sent it from another wallet, sign in with that wallet, create its account and submit this hash there.');
+  assert.equal(bare('wrong_recipient'), 'This transfer did not go to the Merrymen payments wallet shown here.');
+  assert.equal(bare(null), 'This transaction cannot be credited.');
+  assert.equal(endMessage({ kind: 'failed', code: 'payment_not_found', reason: 'wrong_recipient', message: 'This transfer did not go to the Merrymen payments wallet 0x3333.' }, WALLET), 'This transfer did not go to the Merrymen payments wallet 0x3333.');
   const out = await scripted([{ status: 401, data: { error: { code: 'signed_out' } } }]).run;
   assert.deepEqual(out, { kind: 'signed_out' });
+});
+
+test('a refused check ends at once as stalled, keeping the transfer\'s chance, and a pause reads as one', async () => {
+  for (const answer of [{ status: 404, data: { error: { code: 'not_found', message: 'Not found' } } }, { status: 401, data: { error: { code: 'unauthorized_portal', message: 'Unauthorized portal' } } }]) {
+    const s = scripted([pendingAnswer('not_found_yet'), answer, pendingAnswer()]);
+    const end = await s.run;
+    assert.deepEqual(end, { kind: 'stalled', stage: 'not_found_yet', message: answer.data.error.message }); assert.equal(s.checks(), 2);
+    const said = endMessage(end as Parameters<typeof endMessage>[0], WALLET);
+    assert.match(said, /could not be checked just now \((Not found|Unauthorized portal)\)\. It is saved here: check again later/); assert.doesNotMatch(said, /not credited|cannot be credited/i);
+  }
+  const paused = scripted([{ status: 503, data: { error: { code: 'payments_unavailable', message: 'Payments are temporarily unavailable.' } } }, { status: 503, data: { error: { code: 'billing_off' } } }, { status: 200, data: account({ due_raw: null }) }]);
+  assert.equal((await paused.run).kind, 'credited');
+  assert.deepEqual(paused.waiting, Array(2).fill('Payments are paused on our side just now. This payment is saved; checking again shortly…'));
 });
 
 test('checks give up after ten minutes with the next step, and stop when the page moves on', async () => {
