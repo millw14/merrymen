@@ -337,4 +337,9 @@ server.listen(PORT, () => {
   console.log(`[gateway] Merrymen AI listening on :${PORT} — model forced to "${MODEL}", min hold ${MIN_TOKENS} $MERRYMEN`);
   console.log(`[gateway] discovery: ${BITQUERY_KEY ? "Bitquery ON (named queries only)" : "Bitquery OFF (no key set)"}`);
   if (!hasRedis) console.log("[gateway] state store: in-memory (fine for a single process; set KV_REST_API_URL/TOKEN for multi-instance).");
+  // Optional services, so not fatal, but say so at boot: otherwise the first
+  // sign of a missing secret is a partner's or developer's 503.
+  for (const [name, routes] of [["MERRYMEN_PARTNER_BRIDGE_SECRET", "partner agent routes"], ["MERRYMEN_DEVELOPER_PORTAL_SECRET", "developer portal routes"]]) {
+    if (Buffer.byteLength(process.env[name] || "") < 32) console.error(`[gateway] ${name} is unset or under 32 bytes: ${routes} will answer 503.`);
+  }
 });

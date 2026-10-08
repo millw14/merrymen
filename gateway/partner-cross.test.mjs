@@ -175,11 +175,13 @@ test("a refusal the server answers before the partner API still carries a reques
   const port = await new Promise((resolve) => { const probe = createServer().listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
   const child = spawn(process.execPath, [fileURLToPath(new URL("./server.mjs", import.meta.url))], { stdio: ["ignore", "pipe", "pipe"],
     env: { PATH: process.env.PATH, PORT: String(port), MERRYMEN_DATA_DIR: dir, MERRYMEN_GATEWAY_UPSTREAM_KEY: "unused", MERRYMEN_GATEWAY_SECRET: SECRET, MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9" } });
+  let errors = "";
+  child.stderr.on("data", (chunk) => { errors += chunk; });
   try {
     await new Promise((resolve, reject) => {
       let out = "";
       child.stdout.on("data", (chunk) => { out += chunk; if (out.includes("listening")) resolve(); });
-      child.on("exit", (code) => reject(new Error(`gateway exited ${code}: ${out}`)));
+      child.on("exit", (code) => reject(new Error(`gateway exited ${code}: ${out}${errors}`)));
     });
     for (const size of [256 * 1024 + 1, 1024 * 1024]) {
       const r = await fetch(`http://127.0.0.1:${port}/partner/v1/agents`, { method: "POST", body: "x".repeat(size), headers: { authorization: "Bearer mmp_x" } });
@@ -188,6 +190,8 @@ test("a refusal the server answers before the partner API still carries a reques
       assert.equal(error.code, "bad_request");
       assert.match(error.request_id, /^req_[0-9a-f]{12}$/);
     }
+    // Started without a bridge secret, it says so at boot rather than at a partner's first 503.
+    assert.match(errors, /MERRYMEN_PARTNER_BRIDGE_SECRET is unset/);
   } finally { child.kill(); }
 });
 

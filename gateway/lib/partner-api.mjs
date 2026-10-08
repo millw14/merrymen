@@ -151,7 +151,8 @@ export function createPartnerApi({ partners, store, forward, tunables = {}, vers
         if (g.fail) return g.fail;
         if (!forward) return partnerError(503, "upstream_unavailable", "Agent runtime is not configured", g.rid);
         try {
-          const result = await forward({ key: g.key, method, path: route, body });
+          // The request_id goes along so the bridge's log line matches the partner's report.
+          const result = await forward({ key: g.key, method, path: route, body, requestId: g.rid });
           if (result.json?.error) result.json.error.request_id = g.rid;
           return result;
         } catch {
