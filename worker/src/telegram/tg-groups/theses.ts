@@ -128,7 +128,7 @@ function runsOf(samples: readonly string[]): Set<string> {
 }
 
 const NUMBER_WORDS =
-  /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|hundreds|thousand|thousands|million|millions|billion|billions|trillion|percent|percentage|double|triple|tenx|hundredx|[0-9]+x)\b/i;
+  /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|hundreds|thousand|thousands|million|millions|billion|billions|trillion|percent|percentage|double|triple|tenx|hundredx|[0-9]+x|(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|many|n)fold|quadruple[ds]?|quintuple[ds]?|baggers?)\b/i;
 const MARKUP = /[@$#"“”«»„]|https?:|www\.|t\.me|\.(?:com|net|org|io|xyz|gg|fun|app|me|co|ai)\b/i;
 const ABOUT_ITSELF = /\b(?:instructions?|prompts?|system|assistant|ignore|disregard)\b/i;
 /**
@@ -159,8 +159,14 @@ const OUT_LURE =
  */
 const OUT_ACCUSE =
   /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|ran\s+(?:off|away)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool))\b/i;
-/** What holders wait on is never a claim ("the token claim opening"); a gist may still say "they claim". */
-const WAIT_CLAIM = /\bclaim(?:s|able|ing)?\b/i;
+/**
+ * What holders wait on is never a claim ("the token claim opening"), nor the
+ * airdrop story told without the word: a holder snapshot, a giveaway, a
+ * reward distribution, tokens sent to holders (fomo/digest.ts never says one).
+ * A gist may still say "they claim", or name a coin's giveaway meme.
+ */
+const WAIT_CLAIM =
+  /\bclaim(?:s|able|ing)?\b|\bsnapshots?\b|\bgive\s*-?\s*aways?\b|\bdistribut\w*|\brewards?\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
 const WAITING_LABEL = "Waiting on: ";
 
 const escRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

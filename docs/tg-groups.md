@@ -1397,8 +1397,11 @@ With a model, one forced choice (`summarise_theses`: a gist, up to three
 points for, three worries, two things waited on) reads at most twelve cleaned
 samples, one per family, at most 160 characters each, fenced as data. Code
 checks every phrase: its length, no digit outside the coin's name and no
-number word, no $, @, # or link, no quotation mark, no five-word run shared
-with any sample, nothing about instructions, no crime laid at anyone's door
+number word (a multiple in words, "tenfold" or "a ten bagger", included), no
+$, @, # or link, no quotation mark, no five-word run shared with any sample,
+nothing about instructions, nothing waited on that is a claim, a holder
+snapshot, a giveaway, a reward distribution or tokens sent to holders (the
+airdrop story without the word), no crime laid at anyone's door
 (theft, a stolen or pulled pool, laundering, a criminal: worries stay
 worries, "fears it could collapse"), and the gate as an `answer`
 line. A phrase that fails is dropped, never repaired; the worded lines sit
