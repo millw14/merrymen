@@ -311,7 +311,10 @@ export function parseRoute(raw: unknown, ctx: RouteCtx): TgRoute | null {
       return handle ? { action: "fomo-trader", handle, about } : null;
     }
     case "fomo_tail":
-      // The trader and the hours are read by code from the line itself, never from here.
+      // The trader and the hours are read by code from the line itself
+      // (handler.ts tailLine: parseTailRequest), never from the pick; the
+      // owner's goes to her DM as the confirm card, anyone else's gets the
+      // owner-only line.
       return ctx.fomo ? { action: "fomo-tail" } : null;
     case "market_read":
       return ctx.desk ? { action: "market" } : null;

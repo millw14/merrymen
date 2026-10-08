@@ -71,3 +71,8 @@ export * from "./grant-installable";
 export * from "./wall-release";
 
 export * from "./chat-math";
+
+// "TAIL UNIPCS FOR THE NEXT 3 HOURS" — the trader and the hours of a tail,
+// read by code from the owner's words (her DM and her addressed group line).
+// Parsing starts nothing: only her press on the confirm card in her DM does.
+export * from "./tail-request";

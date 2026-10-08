@@ -40,6 +40,16 @@ import type {
 /** The tenant id a self-hosted install uses everywhere a tenant is required. */
 export const SELF_HOSTED_TENANT = "self";
 
+/**
+ * THE OPERATOR'S TAIL SWITCH (docs/fomo.md "Tailing a trader"), read the same
+ * way by every process: `MERRYMEN_FOMO_TAILS=0` turns tails off. The
+ * orchestrator's pass (routing, the tails block), its service (fomo_tail_trader
+ * refuses to store one) and each child's notices all ask this one function.
+ */
+export function fomoTailsOn(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env.MERRYMEN_FOMO_TAILS !== "0";
+}
+
 /** Per-tenant Fomo permissions, resolved from TRUSTED settings by the hosting process. */
 export interface FomoAccess {
   dataAccess: boolean;
@@ -175,15 +185,72 @@ export interface ChildFomoFile {
   };
   /** Bounded (≤ 40), highest priority first. */
   signals: ChildSignal[];
+  /**
+   * The owner's tails (store.ts fomo_tails): at most 3 active and 3 that
+   * ended in the last 15 minutes, each with the tailed trader's recent buys,
+   * sells and theses from the shared store, for the owner's DM notices
+   * (tail-notices.ts). Written only while data access is on and tails are not
+   * switched off (MERRYMEN_FOMO_TAILS=0). Absent in files from older writers
+   * and for owners with no tail: read as none.
+   */
+  tails?: ChildTail[];
+}
+
+/** One tailed trader, as the child's notices read it. Display and notice data only: never an order, never a size. */
+export interface ChildTail {
+  userId: string;
+  /** A plain Fomo handle, or null when unknown. */
+  handle: string | null;
+  createdAt: number;
+  expiresAt: number;
+  /** True for a tail that expired in the last 15 minutes (its end summary is due). */
+  ended: boolean;
+  /** The owner asked for the trader's buys to be one signal into the normal follow review. */
+  consider: boolean;
+  /** Buys, sells and theses since max(createdAt, now − 2 h), newest first, at most 20. */
+  events: ChildTailEvent[];
+  /**
+   * The whole tail's tally from the shared store, for the end summary; null
+   * while the tail runs. `capped` when the read hit its bound (a floor).
+   */
+  totals: { buys: number; sells: number; theses: number; coins: number; capped: boolean } | null;
+}
+
+export interface ChildTailEvent {
+  eventKey: string;
+  kind: "buy" | "sell" | "thesis";
+  token: TokenIdentity | null;
+  label: TokenLabel;
+  /** The provider's event time when it gave one, else when Merrymen observed it. */
+  at: number;
+  observedAt: number;
+  /** The trader's position mark after the event (never the buy's size); null when unknown. */
+  positionValueUsd: number | null;
+  /** Their words (a thesis or alert text): untrusted, sanitised, at most 500 characters. */
+  text: string | null;
 }
 
 export interface ChildSignal {
   token: TokenIdentity;
   label: TokenLabel;
   priority: RetrievalPriority;
-  reasons: ("held" | "watched" | "cohort" | "dependency" | "early-discovery" | "robinhood-thesis")[];
-  /** Cohort (and dependency) trader events for this token inside the breadth window, newest first, ≤ 25. */
+  reasons: ("held" | "watched" | "cohort" | "dependency" | "early-discovery" | "robinhood-thesis" | "tailed")[];
+  /**
+   * Cohort (and dependency) trader events for this token inside the breadth
+   * window, newest first, ≤ 25; plus a tailed trader's BUYS, only for a tail
+   * the owner asked to have considered, only from when it began (and never a
+   * cohort member marked not followable).
+   */
   triggers: TraderEvent[];
+  /**
+   * Event keys, each one of `triggers`, of the buys ONLY a considered tail
+   * admitted (the tailed trader is neither in the cohort nor one of this
+   * owner's position dependencies). They count in the review like any
+   * trigger, but an entry never reports their trader as a position
+   * dependency (fomo-child.ts reportDependencies): a tail's influence ends
+   * with the tail. Absent: none (and in files from older writers).
+   */
+  tailTriggerKeys?: string[];
   /** When Merrymen first saw cohort activity on this token. */
   firstSeenAt: number;
   /** The latest shared dossier for the token, when one has been built. */

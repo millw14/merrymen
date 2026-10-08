@@ -23,7 +23,7 @@
 
 import type { Db } from "../db";
 import { deriveDailyCredits, FomoBudget, UsageMeter, type AllowancePort, type FomoBudgetConfig } from "./budget";
-import type { FomoAccess } from "./contract";
+import { fomoTailsOn, type FomoAccess } from "./contract";
 import { SingleFlight } from "./freshness";
 import { createFomoClient, type FomoClient } from "./provider";
 import { createFomoService, runPendingJobs, type FomoServiceExt } from "./service";
@@ -62,6 +62,14 @@ export interface FomoRuntimeOptions {
   budget?: Partial<FomoBudgetConfig>;
   /** Our agents' names, so a thesis that cites us is not independent support. */
   selfNames?: readonly string[];
+  /**
+   * Whether this install has the hosted fleet's live feed, which tails are
+   * told from (service.ts FomoServiceDeps.liveFeed). Defaults to the hosted
+   * dialect: Postgres is the fleet's store, sqlite a self-hosted install's.
+   */
+  liveFeed?: boolean;
+  /** The operator's tail switch (contract.ts fomoTailsOn); defaults to reading MERRYMEN_FOMO_TAILS. */
+  tailsEnabled?: boolean;
 }
 
 export interface FomoRuntime {
@@ -144,6 +152,8 @@ export async function createFomoRuntime(opts: FomoRuntimeOptions): Promise<FomoR
     now,
     log,
     selfNames: opts.selfNames,
+    liveFeed: opts.liveFeed ?? opts.dialect === "postgres",
+    tailsEnabled: opts.tailsEnabled ?? fomoTailsOn(),
   });
   return {
     service,

@@ -105,8 +105,8 @@ disposes. Execution is the existing intent → policy → executor path.
 | Provider | templates `research/hey.ts`, `venues/bitquery.ts` | `worker/src/fomo/provider.ts`. The only code that names the host. GET allowlist, one Bearer header, bounded reads, the provider's documented retry policy, credit headers, key scrubbing, runtime normalisers. `capabilities.ts` holds the capability report. |
 | Identity | lowercased 0x address on chain 4663 | `worker/src/fomo/identity.ts`: (namespace, network id as returned, address). EVM lowercased per network; Solana mints keep case. Never routed through `chainForId`. |
 | Event identity | none | `worker/src/fomo/events.ts`: provider event id, then fill id, then tx hash + log index, then an explicitly ambiguous fingerprint |
-| Persistence | `Db` seam (`worker/src/db.ts`) | `worker/src/fomo/store.ts`: 27 `fomo_*` tables under advisory lock `1_297_692_140`. Hosted: shared Postgres. Self-hosted: `fomo.sqlite` (`fomo/local-db.ts`), shared by worker and dashboard. |
-| Research service | none | `worker/src/fomo/service.ts` and `tools.ts`: one dispatcher, 9 registered read tools plus 2 owner-only mutations |
+| Persistence | `Db` seam (`worker/src/db.ts`) | `worker/src/fomo/store.ts`: 29 `fomo_*` tables under advisory lock `1_297_692_140`. Hosted: shared Postgres. Self-hosted: `fomo.sqlite` (`fomo/local-db.ts`), shared by worker and dashboard. |
+| Research service | none | `worker/src/fomo/service.ts` and `tools.ts`: one dispatcher, 9 registered read tools plus 4 owner-only mutations (watch, unwatch, tail, untail) |
 | Natural language | `telegram/question-context.ts`, `chat-ledger-facts.ts` | `worker/src/fomo/intent.ts` (deterministic planner) and `subject-memory.ts` (per-conversation subject) |
 | Rendering and chat | none shared | `worker/src/fomo/render.ts` (answer-first text, model evidence block, runtime rules) and `chat.ts` (the one pipeline every chat surface calls) |
 | Key custody and processes | vendor keys orchestrator-only (`CHILD_SECRET_STRIP`) | Key held by the orchestrator, the web process and the self-hosted worker. Stripped from hosted children under both names. Hosted children ask the orchestrator over a new IPC channel (`fomo/broker.ts`), and the orchestrator stamps the tenant from which child asked. |
@@ -148,7 +148,8 @@ most 30 days. "Should we follow this?" is analysis, not permission.
 - **Registered tools:** `fomo_resolve_subject`, `fomo_get_trader_context`, `fomo_get_trader_activity`,
   `fomo_get_token_theses`, `fomo_get_token_activity`, `fomo_get_rankings`, `fomo_find_opportunities`,
   `fomo_research_coin`, `fomo_get_research_status` (owner only), plus the mutations
-  `fomo_watch_coin` and `fomo_unwatch_coin` (owner only, never offered to a model loop).
+  `fomo_watch_coin`, `fomo_unwatch_coin`, `fomo_tail_trader` and `fomo_untail_trader`
+  (owner only, never offered to a model loop; see "Tailing a trader").
 - **Strict arguments:** each tool has an `additionalProperties:false` schema. Tenant,
   credentials, host, path and URL can never be arguments.
 - **Trusted context only:** the session cookie (web, MCP); the orchestrator's record of which
@@ -425,6 +426,249 @@ stop concurrent signals from overspending.
   current size.
 - The entry rationale is append-only and never rewritten after the outcome is known.
 
+## Tailing a trader
+
+An owner can ask Merrymen to **tail** one Fomo trader for a few hours: to be told, in
+their own Telegram DM, about that trader's buys, sells and theses that Fomo's live feed
+records, with Merrymen's own read of each coin where research runs for that owner
+(monitoring or follow on; with both off, the default, there is no read, and the card,
+the answer and each notice say so). It is not copy trading. The backend is
+`worker/src/fomo/store.ts`, `tools.ts`, `service.ts`, `ingest.ts`,
+`orchestrator-fomo.ts`, `tail-notices.ts` and `tail-notifier.ts`; what the owner types
+and presses is `packages/core/src/tail-request.ts` (her words, read by code),
+`worker/src/telegram/{interpreter,executor,buttons,fomo-tail,service}.ts` and, for a
+group line, `tg-groups/handler.ts` (below, "Asking for a tail").
+
+- **Tools.** `fomo_tail_trader {trader, hours 1–12 (default 3), consider (default
+  false)}`, `fomo_untail_trader {trader}` or `{all: true}` (exactly one), and
+  `fomo_extend_tail {trader, hours 1–12 (default 1)}`, which only ever moves a
+  running tail's end later, never past 12 hours from now, and never revives an ended
+  one (`store.ts extendTail`; `fomo_tail_trader` with a shorter span would cut a
+  longer tail). Owner-only mutations: never offered to a model loop (the DM
+  classifier's enum, `toolSpecs`, the chat loop's Fomo tools) or over MCP, and refused
+  by the service for any audience but the owner. Resolving the trader is free when Merrymen already knows
+  the handle, otherwise one 250-credit search, never the 2,500-credit profile route.
+  Stopping makes no provider call. An install without the hosted live feed
+  (self-hosted, `liveFeed` false) refuses with `tail-needs-live-feed`, and with the
+  switch off (`MERRYMEN_FOMO_TAILS=0`) the service refuses with `tails-disabled`; both
+  are status `unavailable`, store nothing, read nothing, and are said to the owner as
+  they are (never "Tailing X until…", never as a failed read).
+- **Permissions.** Data access is all a tail needs to be stored and to notify: the
+  alerts come from events the shared feed has already stored, at no cost. Routing
+  research for the trader's coins, and putting their buys in front of the follow review,
+  happen only for an owner with monitoring or follow on, and a considered buy can only
+  lead to an entry with follow on. The tool's answer says which (`routable`,
+  `following`).
+- **Caps.** 3 active tails per owner (renewing one does not count, and may change its
+  hours and `consider`), 1–12 hours each, counted under the owner's lock row like
+  watches.
+- **Tailing again soon after the end continues the tail.** There is one row per owner
+  and trader, and an ended tail's row is what its end summary is read from for 15
+  minutes. Tailing the same trader again inside those 15 minutes continues that tail
+  rather than replacing the row: it keeps its start (its notices, caps and sent log carry
+  on, and the minutes between are covered), counts against the 3 again, and gets one
+  more end summary at its new end that says the whole span ("from" its first start).
+  An end summary already sent stays sent; each end has its own. Later than 15 minutes,
+  tailing again starts a new tail. The fleet's routing reads at most 200 tailed traders, with their owners, in
+  one query (`store.ts tailOwners`). Per tail: 10 coins in
+  the child file, 20 events in its tails block, 30 notices, 2 thesis reads (1 per coin),
+  and 6 routed research events per owner and trader an hour (buys and theses only).
+  The notice cap is said, never a silence she could read as "no trades": the 30th
+  notice ends "That's 30 notices on this tail, the most I send for one tail; from here
+  I'll only send its end summary.", the end summary of a capped tail says its counts
+  include trades not told, and renewing it or pressing +1h (its count carries on) says
+  only its end summary is left (`tail-notifier.ts capSpent`, a read of the sent log).
+- **Storage.** `fomo_tails` (tenant, provider user id, display handle, `consider`,
+  created, expires, created via). An ended row is kept a day for the end summary, then
+  pruned. Which notices were told is the owner's durable state
+  `state:fomo-tail-notified` (hashed keys only; retention never prunes `state:` keys).
+- **Coverage.** The feed carries larger positions only (about $3,000 and up), a minute
+  or two late, and the fleet asks it for Robinhood Chain (the stream's and recovery's
+  chain filter), so a trade elsewhere reaches a tail only when the feed carries it
+  anyway. Each notice names its event's own chain, and every notice and tail answer
+  says the same line (`render.ts TAIL_COVERAGE_LINE`): larger positions only, watched
+  for Robinhood Chain, trades elsewhere may be missed, and no alert is not proof they
+  did not trade. It never says the feed is Robinhood Chain only.
+- **Routing.** A tailed trader's buys and theses route research to the owners tailing
+  them only, at interactive priority with reason `tailed`; the cohort's fan-out to every
+  monitoring owner is not copied. In that owner's `fomo.json` the trader's coins since
+  the tail began enter at discovery priority (like position dependencies, so cohort
+  signals keep their place), and a `tails` block (at most 3 active and 3 that ended in
+  the last 15 minutes) carries the trader's recent buys, sells and theses for the
+  notices. Nothing of one owner's tails reaches another owner's file.
+- **Not copy trading: the follow path is unchanged.** A tail with `consider` off adds
+  no breadth to any review. With `consider` on, the trader's buys since the tail began
+  (buys only: never their sells or theses) count as triggers in that owner's file, as a
+  cohort member's do, unless the cohort marks them not followable. The file marks
+  the buys only the tail admitted (`ChildSignal.tailTriggerKeys`: the trader is
+  neither in the cohort nor one of her position dependencies), and an entry they led
+  to never reports that trader as a position dependency (`fomo-child.ts
+  reportDependencies`) or keeps them on the position: a tail's influence ends with the
+  tail (Stop, its end, `MERRYMEN_FOMO_TAILS=0`), and its trader never becomes a 14-day
+  dependency fanned out to every monitoring owner. A nomination only a tail stood behind
+  is withdrawn as soon as that tail stops, ends, turns tell-only or tails are switched
+  off: the child checks the file's tails block each tick and again at the entry gate
+  (an expiry by the clock), and a stop or tell-only renewal from her DM or the Stop
+  button withdraws it at once (`FomoChild.tailRevoked`), so a BUY already on its way
+  is dropped rather than entered on authority she took back. `following.ts`, sizing, the early book, the Trencher
+  review, `take()` and policy are untouched: one buyer is at most a probe (≤ 2.5 USDG),
+  and a considered tail's buy counts as a buyer like a cohort trader's, so beside
+  another buyer (a cohort trader, or a second considered tail) it is breadth for a
+  normal follow entry within the same ceiling. All of it only if Merrymen's own checks
+  and the Brain agree, inside the scout budget, on paper unless
+  `MERRYMEN_FOMO_FOLLOW_LIVE` allows live, and nothing at all with following off. The
+  card's live line says exactly this (a probe on its own, a normal entry beside
+  another buyer), never that every entry would be a small probe.
+  A sell is a reason for an independent re-check, never an exit to copy.
+- **Notices.** Code-written, sent by the Telegram notifier only past its own gates
+  (Telegram on, notifications on, a linked owner), link previews off, with Stop and +1h
+  buttons (`ftl:stop:<userId>`, `ftl:ext:<userId>`). One per trader, coin and kind per 5
+  minutes, and at most 4 per notifier pass (oldest first; the rest stay unclaimed and
+  go on the next pass, 15 seconds later); a buy waits up to 3 minutes for Merrymen's
+  assessment of the coin, except where her coins are not researched at all (monitoring
+  and follow off: `FomoChild.tailsResearched`), when it goes at once and "my read"
+  says "none; with monitoring and following off I don't research their coins". A buy
+  notice carries their position after it (never called their buy), their thesis as
+  "their words, unverified" (stream text when there is some, otherwise one
+  `fomo_get_token_theses` read of that trader on that coin, 1,250 credits; without one,
+  the reason in plain words: no reader, no chain on the alert, the tail's two reads
+  spent, or no time left), Merrymen's
+  read from its assessment, what following would do (tell only; one signal into the
+  normal review, which a thesis notice words as "a thesis alone is never a signal; only
+  their buys go into my normal review", since only buys are ever triggers; or, when it
+  cannot act, the reason in plain words: following off, not
+  the fast Trencher strategy, scout budget off, entries paused, no Trencher vault (every
+  follow entry is a vault-custody entry), live follow not enabled, trading held), the
+  coverage floor and when the tail ends. Their words are sanitised, clipped to 280
+  characters, links removed and addresses only in short form. An end summary says when
+  the tail started and ended and counts what the feed showed. Each notice is recorded
+  durably before it is sent, so a crash can lose a notice but never repeat one; a log
+  that cannot be read sends nothing. The log records when each notice was told (it forgets an entry 8 hours
+  after that, and never one an event still in the file needs) apart from the event time
+  it covers from (the 5-minute coalescing), so an alert the fleet observed hours after
+  the provider's own time is told once, not on every pass. The child reads the tails
+  block itself (`FomoChild.tails()`, at most every 10 seconds, with the owner's data
+  access read at that moment), apart from the trading tick, which an owner who only
+  researches (no signed grant) never runs and a killed agent stops: she is still told,
+  and still gets the end summary, and the follow path never sees its file change
+  between ticks.
+- **Only trades made during the tail.** An event whose own time (the provider's, else
+  when it was observed) is before the tail began, such as a late recovery of an older
+  alert, is not in the tails block, not told, not in the end summary's tally and never a
+  trigger.
+- **Privacy.** A tail is the owner's private state: research status lists it for the
+  owner, and a group is never told about one.
+- **Kill switch.** `MERRYMEN_FOMO_TAILS=0` (orchestrator and children, read by one
+  function, `contract.ts fomoTailsOn`) stops tail routing, the tails block and the
+  notices, and the service refuses new tails and extensions (`tails-disabled`). Stored
+  tails stay stored and expire; the owner can still stop them, and research status says
+  they are on hold.
+
+### Asking for a tail
+
+Only the linked owner, in her own DM (chat id = sender id = owner id, the trusted ids
+Telegram sends, never anything said), can start, stop or list tails. Anyone else, in a
+DM or a group, is told "Only my owner can set up a tail." and nothing is called.
+
+- **Commands.** `/tail NAME [hours]` (1–12, 3 when unsaid; a part hour rounds up, so
+  "1.5 hours" is 2 and "0.5h" is 1; more than 12, a day or a week is cut to 12 and the
+  card says so), `/untail [NAME|all]` (bare is all) and `/tails` (what runs,
+  until when, tell-only or considered). `/tail` and `/untail` are mutations to the
+  interpreter, `/tails` a private read. The classifier's enum has none of them, and a
+  kind it does not know becomes chat, so a model can never start or stop a tail.
+- **Her words.** In her own DM, before the research planner and the classifier, her
+  line is read by code (`parseTailRequest`): "can you tail unipcs trades for the next 3
+  hours …", "keep tabs on trader cupsey for a couple hours", "stop tailing unipcs",
+  "untail all". It becomes the `/tail` or `/untail` it means. "copy", "copytrade",
+  "mirror" and "follow" a trader are never a tail (they keep their old meaning), nor
+  is a coin ("watch PONS on fomo", "track $PONS", "track PONS", "keep an eye on PONS"),
+  a thing of hers ("track my order", "stop monitoring the price"), a pronoun ("tail
+  him"), a question word or quantifier where the trader would be ("tail what unipcs
+  buys", "monitor how unipcs trades", "track every move unipcs makes") or the bot's own
+  name. Anyone else's words, and every line where Fomo is off in
+  the process, go on exactly as before.
+- **A stop is as narrow as a start.** A coin is never a trader for a stop either: "stop
+  tracking $PONS on fomo", "stop monitoring PONS" or an address goes on to the
+  planner's unwatch, as before tails existed. Every tail stops at once only for "untail
+  all", "stop tailing everyone", "stop tracking everyone", or a stop with a tail word and
+  nothing else ("stop tailing", "untail", "ok stop tailing for now"). A stop with a tail
+  word that points at someone it does not name ("stop tailing him", "stop tailing the
+  second one") or "stop tracking him" / "that guy" stops nothing: she gets her `/tails`
+  list headed "Which tail should I stop? I haven't stopped any yet.". "stop tracking" or
+  "stop monitoring" with no tail word and nobody named ("stop tracking it", "stop
+  monitoring the cpu", "cancel tracking") is not about tails and goes on as before. A
+  negated stop ("don't stop tailing unipcs") or a question about one ("when will you
+  stop tailing unipcs?") stops nothing; "can you stop tailing unipcs?" does. In her DM,
+  a stop with no tail word that names someone she is not tailing ("stop tracking pons",
+  a lower-case coin) also goes on to the planner; one local read
+  (`fomo_get_research_status`) decides, never a provider call.
+- **Where a tail cannot work.** Telegram asks first (`fomoTailsState` in
+  `worker/src/index.ts`: the switch and the hosted live feed). With
+  `MERRYMEN_FOMO_TAILS=0`, or self-hosted (no live feed), `/tail` answers the service's
+  own refusal straight away ("Tailing is switched off on this service right now…" /
+  "Tailing needs Fomo's live feed…"): no search is spent, no card is shown, nothing is
+  parked. Her words asking for a tail, in her DM or her group line, go on to research
+  exactly as before; with the switch off a stop is still read, so a stored tail can be
+  stopped. The trader board's moves offer no `/tail`. With 3 tails running, a `/tail`
+  for a fourth trader is refused before the lookup too (one local read of her tails);
+  renewing one of the three is not.
+- **The confirm card.** `/tail` first resolves the trader read-only
+  (`fomo_resolve_subject`: our own record, else one 250-credit search). Not found: "I
+  couldn't find a Fomo trader called X." Two accounts answering to the handle: up to
+  three, and a request for the exact one. Otherwise a `fomo-tail` action is parked
+  for her (ten minutes, the one pending slot, bound to her chat and id) and the card
+  says: "Tail X on Fomo for N hours (until HH:MM UTC)?"; what she gets (each buy, sell
+  or thesis the live feed shows from them, with their thesis when there is one and my
+  read of the coin, with Stop and +1h buttons; with monitoring and following off, no
+  read, and it says why); the coverage line; what following would
+  do now (`fomo-child.ts followReadiness`: off, paper, live, or what is in the way, in
+  the notices' own words); when her words asked me to take the trade too ("if you like
+  it, take it"), that a tail never skips my normal review; and the clamp. Nothing is
+  stored until she presses. With her "all Telegram messages" off
+  (`telegramNotifyEnabled`), the notifier sends nothing at all, tail notices and end
+  summaries included, so the card says that in place of what she'd get ("Your “all
+  Telegram messages” setting is off …, so I won't send you any of these notices, the
+  end summary included, until you turn it back on."), and so do the press's answer, a
+  +1h and `/tails`. The setting is hers and silences even the warnings about her money:
+  a tail never sends past it.
+- **Its buttons.** "👀 Tell me only" always; "👀 + consider their buys" only when
+  following could act (paper or live, no blockers); "✖ No". A press is checked like
+  every confirm (her nonce, this exact action, not expired, still the linked owner in
+  her own DM), and consider is checked again against followReadiness at the press: a
+  stale or forged consider press (`mm:c:` on a card that never offered it) stores a
+  tell-only tail and says why. A `mm:c:` press on any other question is refused. A
+  typed `/confirm` is tell-only. The card becomes the tool's answer ("Tailing X on Fomo
+  until …"). An expired card, No, or anyone else's press starts nothing.
+- **Stop and +1h** under each running-tail notice (`ftl:stop:<userId>`,
+  `ftl:ext:<userId>`) act on the stored tail as it is now, so a notice from before a
+  restart still works (they are taken before the backlog rule, like the groups' own
+  buttons). Only her press in her own DM counts. Stop is `fomo_untail_trader`; +1h is
+  `fomo_extend_tail {hours: 1}`. A short toast answers the press ("Stopped", "+1h",
+  "Extended to the 12-hour limit", "That tail has ended.", "That tail had already
+  ended.", "That tail had already stopped.") and a plain line follows as a reply to the
+  notice, so the notice keeps what it told her. Stopping a tail that ended on its own
+  (Stop, `/untail NAME` or her words) says "Your tail on X already ended at HH:MM UTC."
+  and leaves its row, which its end summary is read from; one she already stopped says
+  "That tail has already stopped."; never "you weren't tailing" a trader she was, and
+  never an internal id. Only a handle with no tail at all is "You weren't tailing that
+  trader."
+- **Backlog.** A `/tail` that waited out an outage is held, like an order; a late
+  `/untail` runs, since it only stops something.
+- **Asked in a group.** Groups never order trades and never hear a trader or a tail
+  (docs/tg-groups.md rules 1 and 3). Her addressed line is read by code the same way,
+  where the research lane is wired, and only what code read (trader, hours, clamp,
+  take, or a stop) goes to her DM through `TgOwnerPort.proposeTail`, which checks her
+  id and the allowlist again, proves her DM with a typing action, and runs the `/tail`
+  or `/untail` it means there: the same card and buttons. The room hears only "sent it
+  to your DMs 🤫" (or "dm me /start first"). Anyone else's tail line gets the owner-only
+  line, at most once an hour per person, and nothing else. The group router's
+  `fomo_tail` pick goes the same way, reading the line in code; her line that names no
+  trader gets the `/tail` usage in her DM. `/tail` typed in a group by her goes to her
+  DM like any command; by anyone else, the owner-only line and no DM.
+- **Discovery.** After the trader board, her DM moves (never the room) carry
+  `/tail <handle> 3h` beside the two book questions (`tg-fomo-port.ts ownerMoves`),
+  only where a tail can work (`tailsAvailable`).
+
 ## Publication
 
 `worker/src/fomo/publish.ts`.
@@ -483,6 +727,7 @@ Free 250k, Starter 2.5M, Builder 12.5M, Growth 37.5M, Scale 112.5M.
 | Quick dossier refresh | ≈ 1,625 | 1 thesis page + alerts + stats |
 | Holdings question | 250 | |
 | Theses question | 1,250 per page | |
+| A tail | 0–250 to resolve the trader, at most 2 × 1,250 thesis reads | alerts come from the stored feed: 0 |
 
 The shared daily pool is `plan × (1 − 20%) / 31`, split 25% position protection, 45%
 interactive and 30% discovery. Discovery is shed first. Per-owner hourly and daily caps,
@@ -503,6 +748,7 @@ answers use one call on the existing house model.
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
 | `MERRYMEN_TG_GROUPS_ROUTER=0` | worker children | turns off the group router (docs/tg-groups.md "What a line wants"): lines no rule knew go to the persona |
+| `MERRYMEN_FOMO_TAILS=0` | orchestrator and worker children | turns tails off: `fomo_tail_trader` refuses (`tails-disabled`), no tail routing, no tails block in child files, no tail notices. Stored tails stay stored, can be stopped, and expire on their own |
 | `MERRYMEN_TENANT` | set by the orchestrator in each child | not a secret; the child checks `fomo.json` belongs to it. IPC never trusts it: the orchestrator stamps the tenant itself. |
 
 Surface limits:
@@ -530,7 +776,7 @@ Surface limits:
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.
 - **MCP:** the read tools only, under `market.read`, with research status under
-  `agents.read`. Watch, unwatch and deep research are not offered over MCP.
+  `agents.read`. Watch, unwatch, tails and deep research are not offered over MCP.
 
 Health is visible to owners without logs. "Is Fomo working?" and the status route report:
 `not-configured`, `disabled`, `permission-required`, `provider-unavailable`,

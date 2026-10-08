@@ -48,7 +48,7 @@ import {
 } from "./fomo-child";
 import { brokerFailureEnvelope, createIpcBroker, serveBrokerRequests, validateBrokerReport, type BrokerPort } from "./fomo/broker";
 import { writeChildFomoFile } from "./fomo/child-file";
-import type { BrokerReport, BrokerRequest, BrokerResponse, ChildFomoFile, ChildSignal, FomoBroker, MemoryRead } from "./fomo/contract";
+import type { BrokerReport, BrokerRequest, BrokerResponse, ChildFomoFile, ChildSignal, ChildTail, FomoBroker, MemoryRead } from "./fomo/contract";
 import type { FollowCounters } from "./fomo/following";
 import { chainFromProvider, robinhoodChain, tokenIdentity } from "./fomo/identity";
 import { AUTONOMOUS_ENTRY_CAP_6 } from "./fomo/sizing";
@@ -175,6 +175,11 @@ function signal(token: TokenIdentity, over: Partial<ChildSignal> = {}): ChildSig
     lensRefs: ["[ref:dabc123r3c1]"],
     ...over,
   };
+}
+
+/** Her considered tail of this trader, running for another two hours (the block the orchestrator writes beside tailTriggerKeys). */
+function consideredTail(userId: string, over: Partial<ChildTail> = {}): ChildTail {
+  return { userId, handle: "tailed", createdAt: T0 - 600_000, expiresAt: T0 + 2 * 3_600_000, ended: false, consider: true, events: [], totals: null, ...over };
 }
 
 function fileOf(signals: ChildSignal[], over: Partial<ChildFomoFile> = {}): ChildFomoFile {
@@ -707,6 +712,110 @@ describe("the entry gate", () => {
     for (const d of deps) {
       assert.equal(d.kind === "position-dependency" && d.expiresAtMs, T0 + 14 * 86_400_000);
     }
+  });
+
+  it("a trigger only her considered tail admitted is never a position dependency: not reported, not on the position (review 2026-10-07)", () => {
+    // One cohort buyer and one tailed buyer: both count in the review (the
+    // follow path is unchanged), but only the cohort trader keeps routing
+    // after the fill. A tailed trader must not become a 14-day, fleet-wide
+    // dependency that outlives Stop, the tail's end and MERRYMEN_FOMO_TAILS=0.
+    const t1 = tok(coin(1));
+    const tailed = ev(t1, 7, { sourceEventAt: T0 - 30_000 });
+    const cohort = ev(t1, 1, { sourceEventAt: T0 - 60_000 });
+    const h = harness({ signals: [signal(t1, { reasons: ["cohort", "tailed"], triggers: [tailed, cohort], tailTriggerKeys: [tailed.eventKey] })], file: { tails: [consideredTail(tailed.trader.userId)] } });
+    h.tick();
+    const g = h.child.gateEntry(h.entry(coin(1), 5));
+    assert.equal(g.kind, "follow");
+    h.child.settleEntry(g, "paper", "d-1");
+    const deps = h.reports().filter((r): r is Extract<BrokerReport, { kind: "position-dependency" }> => r.kind === "position-dependency");
+    assert.deepEqual(deps.map((d) => d.userId), [cohort.trader.userId], "the cohort trader keeps routing; the tailed one does not");
+    assert.deepEqual(h.child.ledger.positions("paper")[0]!.traders, [cohort.trader.userId.toLowerCase()]);
+  });
+
+  it("a considered tail's single-buyer probe fills on paper and reports no position dependency at all (review 2026-10-07)", () => {
+    const t1 = tok(coin(1));
+    const tailed = ev(t1, 7, { sourceEventAt: T0 - 30_000 });
+    const h = harness({ signals: [signal(t1, { reasons: ["tailed"], triggers: [tailed], tailTriggerKeys: [tailed.eventKey] })], file: { tails: [consideredTail(tailed.trader.userId)] } });
+    h.tick();
+    const a = stateOf(h.assessmentsReported(), coin(1));
+    assert.equal(a!.state, "PROBE_CANDIDATE", "one buyer is at most a probe: the review is unchanged");
+    const g = h.child.gateEntry(h.entry(coin(1), 2));
+    assert.equal(g.kind, "follow");
+    h.child.settleEntry(g, "paper", "d-1");
+    assert.equal(h.child.ledger.positions("paper")[0]!.everHeld, true, "it filled");
+    assert.deepEqual(h.reports().filter((r) => r.kind === "position-dependency"), []);
+    assert.deepEqual(h.child.ledger.positions("paper")[0]!.traders, []);
+  });
+
+  describe("a nomination only a tail stood behind goes when the tail does (review on #301)", () => {
+    /** A coin a considered tail's buy (and nothing else) nominated, ticked once. */
+    const tailedProbe = (tail: Partial<ChildTail> = {}) => {
+      const t1 = tok(coin(1));
+      const tailed = ev(t1, 7, { sourceEventAt: T0 - 30_000 });
+      const sig = signal(t1, { reasons: ["tailed"], triggers: [tailed], tailTriggerKeys: [tailed.eventKey] });
+      const h = harness({ signals: [sig], file: { tails: [consideredTail(tailed.trader.userId, tail)] } });
+      h.tick();
+      return { h, sig, tailed };
+    };
+    /** The orchestrator's next file, read on the next tick. */
+    const rewrite = (h: ReturnType<typeof harness>, signals: ChildSignal[], over: Partial<ChildFomoFile>) => {
+      h.t.now += 15_000;
+      writeChildFomoFile(h.home, fileOf(signals, { writtenAt: h.t.now - 1_000, ...over }));
+    };
+
+    it("stopped (the next file has no tail): withdrawn on the next tick, and a BUY on its way is dropped", () => {
+      const { h, sig } = tailedProbe();
+      assert.ok(h.child.followBook.nominated(coin(1)), "nominated while the tail runs");
+      rewrite(h, [{ ...sig, tailTriggerKeys: [] }], { tails: [] });
+      h.tick();
+      assert.equal(h.child.followBook.nominated(coin(1)), null);
+      const g = h.child.gateEntry(h.entry(coin(1), 2));
+      assert.equal(g.kind, "dropped");
+      assert.equal(h.counters.taken, 0, "no follow entry claimed");
+      assert.ok(h.notes.some((n) => n.detail === "follow-withdrawn:tail-ended"));
+    });
+
+    it("the coin's signal gone entirely with the tail: still withdrawn (nothing re-assesses it)", () => {
+      const { h } = tailedProbe();
+      rewrite(h, [], {});
+      h.tick();
+      assert.equal(h.child.followBook.nominated(coin(1)), null);
+      assert.equal(h.child.gateEntry(h.entry(coin(1), 2)).kind, "dropped");
+    });
+
+    it("renewed tell-only, switched off (no tails block), or past its end by the clock: the gate drops the BUY", () => {
+      for (const make of [
+        (h: ReturnType<typeof harness>, sig: ChildSignal, id: string) => rewrite(h, [sig], { tails: [consideredTail(id, { consider: false })] }),
+        (h: ReturnType<typeof harness>, sig: ChildSignal) => rewrite(h, [sig], { tails: undefined }),
+      ]) {
+        const { h, sig, tailed } = tailedProbe();
+        make(h, sig, tailed.trader.userId);
+        h.tick();
+        const g = h.child.gateEntry(h.entry(coin(1), 2));
+        assert.equal(g.kind, "dropped");
+      }
+      const { h } = tailedProbe({ expiresAt: T0 + 5_000 });
+      h.t.now += 6_000;
+      const g = h.child.gateEntry(h.entry(coin(1), 2));
+      assert.equal(g.kind === "dropped" && g.reason, "tail-ended", "expiry is read from the clock, not from the next file");
+    });
+
+    it("stopped from her DM (tailRevoked): withdrawn at once, and the not-yet-rewritten file lends nothing", () => {
+      const { h, tailed } = tailedProbe();
+      h.child.tailRevoked(tailed.trader.userId);
+      assert.equal(h.child.followBook.nominated(coin(1)), null, "withdrawn now, not at its TTL");
+      assert.equal(h.child.gateEntry(h.entry(coin(1), 2)).kind, "dropped");
+      h.t.now += 15_000;
+      h.tick();
+      assert.equal(h.child.followBook.nominated(coin(1)), null, "the stale file's tail trigger does not nominate it again");
+    });
+
+    it("a cohort nomination with no tail behind it is untouched by any of this", () => {
+      const h = harness();
+      h.tick();
+      h.child.tailRevoked(null);
+      assert.equal(h.child.gateEntry(h.entry(coin(1), 5)).kind, "follow");
+    });
   });
 
   it("an entry no follow nomination reached passes untouched", () => {

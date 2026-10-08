@@ -557,7 +557,7 @@ export type FomoReadToolName =
   | "fomo_get_research_status";
 
 /** Authorized mutations — a separate registry, never offered where read-only tools are. */
-export type FomoMutationToolName = "fomo_watch_coin" | "fomo_unwatch_coin";
+export type FomoMutationToolName = "fomo_watch_coin" | "fomo_unwatch_coin" | "fomo_tail_trader" | "fomo_untail_trader" | "fomo_extend_tail";
 
 export type FomoToolName = FomoReadToolName | FomoMutationToolName;
 
@@ -811,6 +811,27 @@ export interface CapabilityRecord {
   /** What the status rests on: doc section, observed status code, filter check. */
   evidence: string;
   verifiedAt: number;
+}
+
+/**
+ * ONE OWNER TAILING ONE FOMO TRADER FOR A FEW HOURS (store.ts fomo_tails).
+ *
+ * Owner state, never a permission: a tail widens what the owner is TOLD about
+ * (the trader's buys, sells and theses the shared feed records) and, only when
+ * `consider` is true and following is already on, adds the trader's buys as
+ * one more signal into the unchanged follow review. It never sizes, never
+ * orders and never skips a gate. It always expires (FOMO_LIMITS.tailMaxMs).
+ */
+export interface FomoTail {
+  tenant: string;
+  /** The provider user id: the identity. The handle is a renameable label. */
+  userId: string;
+  handle: string | null;
+  /** The owner asked for the trader's buys to be considered by the normal follow review (not copied). */
+  consider: boolean;
+  createdAtMs: number;
+  expiresAtMs: number;
+  createdVia: FomoSurface;
 }
 
 /** The status a public post must match exactly (publish.ts). */

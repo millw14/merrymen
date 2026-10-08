@@ -38,8 +38,9 @@
  * calldata, reads no key (the client arrives built), widens no permission and
  * relaxes no limit. Provider money is display data and never accounting. The
  * only tenant state a lookup writes is the request audit log; the only tools
- * that write anything else are fomo_watch_coin and fomo_unwatch_coin, and a
- * deep research request registers one bounded job. Thesis, comment, handle and
+ * that write anything else are fomo_watch_coin, fomo_unwatch_coin,
+ * fomo_tail_trader and fomo_untail_trader (owner state, never a permission),
+ * and a deep research request registers one bounded job. Thesis, comment, handle and
  * token-name text is untrusted data: it is sanitised on the way in, bounded,
  * redacted of links and addresses in excerpts, and never interpreted.
  */
@@ -107,6 +108,8 @@ import {
   type ResearchCoinData,
   type ResearchStatusData,
   type ResolveData,
+  type TailData,
+  type ExtendTailData,
   type ThesisView,
   type TokenActivityData,
   type TokenRef,
@@ -116,6 +119,7 @@ import {
   type TraderActivityData,
   type TraderContextData,
   type TraderRef,
+  type UntailData,
   type WatchData,
 } from "./tools";
 import type {
@@ -183,6 +187,20 @@ export interface FomoServiceDeps {
    * configuration; see READ_DEADLINE_MS for the defaults and why.
    */
   readDeadlineMs?: { invoke?: number; background?: number };
+  /**
+   * Whether this install has the hosted fleet's live feed (the shared alerts
+   * stream the orchestrator ingests). A tail is told about what that feed
+   * records, so without it (self-hosted, a local web) fomo_tail_trader is
+   * refused rather than stored to do nothing. runtime.ts: true on Postgres.
+   */
+  liveFeed?: boolean;
+  /**
+   * The operator's tail switch (contract.ts fomoTailsOn, MERRYMEN_FOMO_TAILS).
+   * False: fomo_tail_trader refuses (`tails-disabled`) and stores nothing,
+   * because nothing would route, be carried or be told; stopping a tail still
+   * works, and research status says the stored ones are on hold. Absent: on.
+   */
+  tailsEnabled?: boolean;
 }
 
 /**
@@ -383,6 +401,14 @@ export const DEEP_JOB_CREDIT_ALLOWANCE = 15_000;
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
+/** An ended tail's row is kept a day for its end summary (store retention): a stop of it is told it ended, not "you weren't tailing". */
+const TAIL_ENDED_ROW_MS = 24 * HOUR;
+
+/** "14:05 UTC": when a tail ended, as the owner reads it. */
+function utcHhMm(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
 const DAY = 24 * HOUR;
 const EXCERPT_MAX = 280;
 const MAX_EVENTS_SHOWN = 50;
@@ -808,6 +834,16 @@ interface FinishOpts<T> {
 
 const OUTCOME_RANK: Record<NonNullable<Freshness["lastRefreshOutcome"]>, number> = { "skipped-fresh": 0, ok: 1, "skipped-budget": 2, failed: 3 };
 
+/**
+ * A tailed trader's handle as it may be stored and shown: a plain Fomo handle
+ * (letters, digits, underscore), or nothing. It ends up in the owner's direct
+ * messages, so anything else from a provider row is dropped, not cleaned.
+ */
+function tailHandle(raw: string | null | undefined): string | null {
+  const h = typeof raw === "string" ? raw.trim().replace(/^@/, "") : "";
+  return /^[A-Za-z0-9_]{1,30}$/.test(h) ? h : null;
+}
+
 function defaultMessage(status: ResultStatus, reason: string | null): string | null {
   switch (status) {
     case "not-authorized":
@@ -872,6 +908,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   const usage = deps.usage ?? null;
   const log = deps.log ?? (() => {});
   const selfNames = deps.selfNames ?? [];
+  const liveFeed = deps.liveFeed === true;
+  const tailsEnabled = deps.tailsEnabled !== false;
   const msOr = (v: unknown, d: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
   const readDeadline = { invoke: msOr(deps.readDeadlineMs?.invoke, READ_DEADLINE_MS.invoke), background: msOr(deps.readDeadlineMs?.background, READ_DEADLINE_MS.background) };
   const invokeDeadlineMs = (budgetMs: number | undefined): number => invokeDeadlineOf(readDeadline.invoke, budgetMs);
@@ -2855,6 +2893,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const assessment = token ? await store.latestAssessment(db, tenant, token.key).catch(() => null) : null;
     const funnel = token ? await store.funnelForToken(db, tenant, token.key, 10).catch(() => []) : [];
     const watches = await store.activeWatches(db, tenant, ic.now).catch(() => []);
+    const tails = await store.activeTails(db, tenant, ic.now).catch(() => []);
     const jobs = await store.recentJobs(db, tenant, 5).catch(() => []);
     const request = args.requestId ? await store.getRequest(db, tenant, args.requestId).catch(() => null) : null;
     const cohort = await cohortSnapshot(ic.now);
@@ -2890,6 +2929,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         : null,
       funnel: funnel.map((f) => ({ stage: f.stage, detail: f.detail ? sanitizeText(f.detail, 200) : null, atMs: f.atMs })),
       watches: watches.map((w) => ({ tokenKey: w.tokenKey, symbol: w.label.symbol ? sanitizeText(w.label.symbol, 24) : null, expiresAtMs: w.expiresAtMs })),
+      tails: tails.map((t) => ({ userId: t.userId, handle: tailHandle(t.handle), expiresAtMs: t.expiresAtMs, consider: t.consider })),
+      ...(tails.length > 0 && !tailsEnabled ? { tailsOff: true } : {}),
       jobs: jobs.map((j) => ({ id: j.id, kind: j.kind, status: jobStatusAt(j.status, j.deadlineMs, ic.now), deadlineMs: j.deadlineMs, createdAtMs: j.createdAtMs, delivered: j.deliveredAtMs !== null })),
       request: request ? { requestId: request.requestId, tool: request.tool, status: request.status, createdAtMs: request.createdAtMs } : null,
       cohort: cohort.size !== null && cohort.version !== null ? { size: cohort.size, version: cohort.version, target: cohort.target, shortfallReason: cohort.shortfallReason } : null,
@@ -2955,6 +2996,192 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       essential: [],
       status: removed ? "ok" : "empty",
       message: removed ? null : "You were not watching that coin.",
+    });
+  }
+
+  /**
+   * TAIL A TRADER: owner state, never a permission. Alerts come from the shared
+   * feed's stored events at no cost, so data access is all a tail needs to be
+   * stored and to notify; routing research for the trader's coins (and, with
+   * consider, putting their buys in front of the unchanged follow review)
+   * happens only for an owner whose monitoring or follow is on, which the
+   * envelope says (`routable`). Without the hosted live feed there is nothing
+   * to be told, so it is refused rather than stored to do nothing. Resolving
+   * the handle is the local record (free) or one search (250 credits), never
+   * the 2,500-credit profile route.
+   */
+  async function toolTail(ic: Inv, args: ToolArgs["fomo_tail_trader"]): Promise<FomoEnvelope<TailData>> {
+    const a = new Answer();
+    a.requested = { trader: args.trader.kind, hours: args.hours, consider: args.consider };
+    // Refused before anything is read or stored: a tail nothing would tell is not a tail.
+    const refuse = (reason: string, message: string): FomoEnvelope<TailData> =>
+      finish<TailData>(ic, a, { cls: "profile", mode: "cached-ok", subject: null, data: null, rows: 0, essential: [], status: "unavailable", reason, message });
+    if (!tailsEnabled) {
+      return refuse("tails-disabled", "Tailing is switched off on this service right now, so I haven't started one; I can still answer Fomo questions.");
+    }
+    if (!liveFeed) {
+      return refuse("tail-needs-live-feed", "Tailing needs Fomo's live feed, which only the hosted service has; this install can answer Fomo questions but can't tail.");
+    }
+    const r = await resolveTrader(ic.cc, a, args.trader, "cached-ok");
+    if (!r.ok) return fromFail(ic, a, "profile", "cached-ok", r);
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const tenant = ic.cc.tenant;
+    const handle = tailHandle(r.trader.handle);
+    const trader = { userId: r.trader.userId, handle };
+    const subject: ResolvedSubject = { kind: "trader", trader: { ...r.trader, handle } };
+    const routable = ic.access?.monitoring === true || ic.access?.follow === true;
+    const following = ic.access?.follow === true;
+    const res = await store.addTail(db, {
+      tenant,
+      userId: r.trader.userId,
+      handle,
+      consider: args.consider,
+      nowMs: ic.now,
+      expiresAtMs: ic.now + args.hours * HOUR,
+      createdVia: ic.surface,
+    });
+    const active = (await store.activeTails(db, tenant, ic.now).catch(() => [])).length;
+    if (!res.ok) {
+      return finish(ic, a, {
+        cls: "profile",
+        mode: "cached-ok",
+        subject,
+        data: { action: "tail", trader, created: false, expiresAtMs: ic.now, consider: args.consider, activeTails: active, routable, following },
+        rows: 0,
+        essential: [],
+        status: "failed",
+        reason: res.reason === "cap-reached" ? "tail-cap-reached" : res.reason,
+        message:
+          res.reason === "cap-reached"
+            ? `You already have ${store.FOMO_LIMITS.activeTailsPerTenant} tails running; stop one first.`
+            : `Tails run 1 to ${Math.round(store.FOMO_LIMITS.tailMaxMs / HOUR)} hours.`,
+      });
+    }
+    if (r.formerHandle) a.note("That handle is one this trader used before; the account has since renamed.");
+    return finish(ic, a, {
+      cls: "profile",
+      mode: "cached-ok",
+      subject,
+      data: { action: "tail", trader, created: res.created, expiresAtMs: res.tail.expiresAtMs, consider: res.tail.consider, activeTails: active, routable, following },
+      rows: 1,
+      essential: [],
+      status: "ok",
+    });
+  }
+
+  /** Stop one tail (by user id, or by handle, case-insensitively) or all of them. Local only: no provider call, ever. */
+  async function toolUntail(ic: Inv, args: ToolArgs["fomo_untail_trader"]): Promise<FomoEnvelope<UntailData>> {
+    const a = new Answer();
+    a.requested = { trader: args.trader?.kind ?? null, all: args.all };
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const tenant = ic.cc.tenant;
+    if (args.all || !args.trader) {
+      const removed = await store.removeAllTails(db, tenant, ic.now);
+      return finish(ic, a, {
+        cls: "profile",
+        mode: "cached-ok",
+        subject: null,
+        data: { action: "untail", trader: null, all: true, removed, activeTails: 0 },
+        rows: removed,
+        essential: [],
+        status: removed > 0 ? "ok" : "empty",
+        message: removed > 0 ? null : "You weren't tailing anyone.",
+      });
+    }
+    const ref = args.trader;
+    const active = await store.activeTails(db, tenant, ic.now);
+    let match = ref.kind === "user-id" ? active.find((t) => t.userId === ref.value) : active.find((t) => (t.handle ?? "").toLowerCase() === ref.value.toLowerCase());
+    if (!match && ref.kind === "handle") {
+      // A rename since the tail began: our own record maps the handle to the id (free; never a provider read).
+      const known = await store.traderByHandle(db, ref.value).catch(() => null);
+      if (known) match = active.find((t) => t.userId === known.userId);
+    }
+    if (!match) {
+      // NOT RUNNING. A tail that ended on its own is said as that, by its
+      // name, never "you weren't tailing" (she was) nor an internal id. Its
+      // row is LEFT: its end summary is read from it. One she stopped is gone,
+      // and a Stop press (by id) says so plainly. Only a handle with no row at
+      // all is "you weren't tailing that trader".
+      const sameHandle = (h: string | null): boolean => (h ?? "").toLowerCase() === ref.value.toLowerCase();
+      const ended = await store.recentlyEndedTails(db, tenant, ic.now - TAIL_ENDED_ROW_MS, ic.now).catch(() => []);
+      let gone = ref.kind === "user-id" ? ended.find((t) => t.userId === ref.value) : ended.find((t) => sameHandle(t.handle));
+      if (!gone && ref.kind === "handle") {
+        const known = await store.traderByHandle(db, ref.value).catch(() => null);
+        if (known) gone = ended.find((t) => t.userId === known.userId);
+      }
+      const message = gone
+        ? `Your tail on ${tailHandle(gone.handle) ?? "that trader"} already ended at ${utcHhMm(gone.expiresAtMs)}.`
+        : ref.kind === "user-id"
+          ? "That tail has already stopped."
+          : "You weren't tailing that trader.";
+      const left = (await store.activeTails(db, tenant, ic.now).catch(() => [])).length;
+      return finish(ic, a, {
+        cls: "profile",
+        mode: "cached-ok",
+        subject: null,
+        // A handle with no row keeps the untail data (removed 0); the other two say their message.
+        data: !gone && ref.kind === "handle" ? { action: "untail", trader: null, all: false, removed: 0, activeTails: left } : null,
+        rows: 0,
+        essential: [],
+        status: "empty",
+        reason: gone ? "tail-ended" : "tail-not-active",
+        message,
+      });
+    }
+    const asked = { userId: match.userId, handle: tailHandle(match.handle) };
+    const removed = (await store.removeTail(db, tenant, match.userId)) ? 1 : 0;
+    const left = (await store.activeTails(db, tenant, ic.now).catch(() => [])).length;
+    return finish(ic, a, {
+      cls: "profile",
+      mode: "cached-ok",
+      subject: { kind: "trader", trader: { userId: asked.userId, handle: asked.handle, displayName: null, verified: null } },
+      data: { action: "untail", trader: asked, all: false, removed, activeTails: left },
+      rows: removed,
+      essential: [],
+      status: removed > 0 ? "ok" : "empty",
+      message: removed > 0 ? null : "You weren't tailing that trader.",
+    });
+  }
+
+  /**
+   * MAKE A RUNNING TAIL LONGER (the +1h button on a notice): by whole hours,
+   * never past 12 hours from now, never shorter than it already runs, and
+   * never a revived one (store.ts extendTail). Refused like a new tail when
+   * tails are switched off or there is no live feed, because it keeps
+   * telling what nothing would tell. Local only: no provider call, ever.
+   */
+  async function toolExtendTail(ic: Inv, args: ToolArgs["fomo_extend_tail"]): Promise<FomoEnvelope<ExtendTailData>> {
+    const a = new Answer();
+    a.requested = { trader: args.trader.kind, hours: args.hours };
+    const refuse = (reason: string, message: string): FomoEnvelope<ExtendTailData> =>
+      finish<ExtendTailData>(ic, a, { cls: "profile", mode: "cached-ok", subject: null, data: null, rows: 0, essential: [], status: "unavailable", reason, message });
+    if (!tailsEnabled) return refuse("tails-disabled", "Tailing is switched off on this service right now, so I haven't made that tail longer.");
+    if (!liveFeed) return refuse("tail-needs-live-feed", "Tailing needs Fomo's live feed, which only the hosted service has; this install can't tail.");
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const tenant = ic.cc.tenant;
+    const ref = args.trader;
+    const active = await store.activeTails(db, tenant, ic.now);
+    let match = ref.kind === "user-id" ? active.find((t) => t.userId === ref.value) : active.find((t) => (t.handle ?? "").toLowerCase() === ref.value.toLowerCase());
+    if (!match && ref.kind === "handle") {
+      // A rename since the tail began: our own record maps the handle to the id (free; never a provider read).
+      const known = await store.traderByHandle(db, ref.value).catch(() => null);
+      if (known) match = active.find((t) => t.userId === known.userId);
+    }
+    const ended = (): FomoEnvelope<ExtendTailData> =>
+      finish<ExtendTailData>(ic, a, { cls: "profile", mode: "cached-ok", subject: null, data: null, rows: 0, essential: [], status: "empty", reason: "tail-not-active", message: "That tail has already ended." });
+    if (!match) return ended();
+    const res = await store.extendTail(db, { tenant, userId: match.userId, addMs: args.hours * HOUR, nowMs: ic.now });
+    if (!res.ok) return ended();
+    const trader = { userId: match.userId, handle: tailHandle(match.handle) };
+    const left = (await store.activeTails(db, tenant, ic.now).catch(() => [])).length;
+    return finish(ic, a, {
+      cls: "profile",
+      mode: "cached-ok",
+      subject: { kind: "trader", trader: { userId: trader.userId, handle: trader.handle, displayName: null, verified: null } },
+      data: { action: "extend", trader, previousExpiresAtMs: res.previousExpiresAtMs, expiresAtMs: res.tail.expiresAtMs, capped: res.capped, activeTails: left },
+      rows: 1,
+      essential: [],
+      status: "ok",
     });
   }
 
@@ -3151,6 +3378,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         return toolWatch(ic, args as ToolArgs[typeof tool], true);
       case "fomo_unwatch_coin":
         return toolWatch(ic, args as ToolArgs[typeof tool], false);
+      case "fomo_tail_trader":
+        return toolTail(ic, args as ToolArgs[typeof tool]);
+      case "fomo_untail_trader":
+        return toolUntail(ic, args as ToolArgs[typeof tool]);
+      case "fomo_extend_tail":
+        return toolExtendTail(ic, args as ToolArgs[typeof tool]);
     }
   }
 

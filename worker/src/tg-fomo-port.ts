@@ -68,6 +68,11 @@ export interface TgFomoPortOptions {
    * watch-set resolution /buy uses). Only then do the owner's moves offer it.
    */
   buyable?: (symbol: string) => boolean;
+  /**
+   * Whether a tail can work here (index.ts: tails switched on and the hosted
+   * live feed). False: the owner's moves offer no `/tail`. Absent: true.
+   */
+  tailsAvailable?: () => boolean;
 }
 
 // ─── A model's checked choice, as the planner's own question ───────────────
@@ -179,7 +184,7 @@ const firstAnswered = (r: Extract<AnswerFomoResult, { handled: true }>): FomoEnv
  * resolves for this agent), the CA to post for a review, watch and theses.
  * Null for anything else, or when no row has a usable name.
  */
-export function ownerMoves(r: AnswerFomoResult, buyable: (s: string) => boolean = () => false): TgFomoMoves | null {
+export function ownerMoves(r: AnswerFomoResult, buyable: (s: string) => boolean = () => false, tails = true): TgFomoMoves | null {
   if (!r.handled || r.clarification) return null;
   const env = firstAnswered(r);
   if (!env) return null;
@@ -191,8 +196,14 @@ export function ownerMoves(r: AnswerFomoResult, buyable: (s: string) => boolean 
       const lines = ["<b>Your moves on these Fomo traders</b> (ask me here):"];
       for (const h of handles) {
         const e = escHtml(h);
-        lines.push(`• <code>what is trader ${e} holding</code> · <code>what has trader ${e} bought this week</code>`);
+        // /tail asks first (a confirm card in this DM), then tells her what
+        // they buy, sell or post for those hours (docs/fomo.md "Tailing a
+        // trader"). DM only: the room hears none of this. Never offered
+        // where a tail cannot work (switched off, or no live feed here).
+        const tail = tails && h.length >= 2 ? ` · <code>/tail ${e} 3h</code>` : "";
+        lines.push(`• <code>what is trader ${e} holding</code> · <code>what has trader ${e} bought this week</code>${tail}`);
       }
+      if (tails) lines.push("/tail asks you first, then tells you here what they buy, sell or post for those hours.");
       return { kind: "traders", room: "sent the trade moves for these to your DM.", dm: lines.join("\n") };
     }
     const coins = d.tokens.map((t) => coinOf(t.token, t.label)).filter((c): c is MoveCoin => c !== null).slice(0, MOVES_ROWS);
@@ -312,6 +323,13 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
       return false;
     }
   };
+  const tailsAvailable = (): boolean => {
+    try {
+      return opts.tailsAvailable ? opts.tailsAvailable() === true : true;
+    } catch {
+      return false;
+    }
+  };
   /** The conversation keys used per chat, so the owner's chat-wide forget reaches every topic. Bounded. */
   const keysByChat = new Map<number, Set<string>>();
   const remember = (chatId: number, key: string): void => {
@@ -383,7 +401,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         if (q.owner === true) {
           let moves: TgFomoMoves | null = null;
           try {
-            moves = ownerMoves(r, buyable);
+            moves = ownerMoves(r, buyable, tailsAvailable());
           } catch {
             moves = null;
           }
