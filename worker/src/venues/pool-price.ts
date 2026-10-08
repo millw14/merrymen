@@ -53,6 +53,14 @@ export interface PoolPrice {
   fee: number;
   /** Which side of the pair the priced token is — what a later spot re-read needs. */
   tokenIsToken0: boolean;
+  /**
+   * slot0's observationCardinality: how many observations the pool's oracle
+   * keeps. ONE means it has no history to average at all — the only case a
+   * spot route may stand in for it (spotRoute). A pool with more whose
+   * observe() failed has an oracle that did not answer this time, which is
+   * not the same fact and never becomes a spot price.
+   */
+  oracleCardinality: number;
   /** TWAP, cash per whole token, 8dp — use for valuation and safety. */
   price8: bigint;
   /** Spot, same units — use for execution sizing only. */
@@ -432,6 +440,7 @@ export async function readPoolPrice(
       pool: best.pool,
       fee: best.fee,
       tokenIsToken0,
+      oracleCardinality: Number(slot0[3]),
       price8: twap8,
       spot8,
       price18: twap18,
@@ -496,6 +505,13 @@ export interface RoutedPrice {
    * TWAP route never carries it, and a caller that did not ask never sees one.
    */
   spotOnly?: SpotLeg;
+  /**
+   * On a spot route only: the same price at 18dp, USD per whole token. A
+   * sampled series averages and compares at 18dp — at 8dp a coin under about
+   * $1e-7 moves in steps of 10% or more, and its own rounding reads as a
+   * divergence (the reason pool-price.ts measures TWAP divergence at 18dp).
+   */
+  price18?: bigint;
 }
 
 /** Enough to re-read one oracle-less pool's spot without searching for it again. */
@@ -641,10 +657,16 @@ function spotRoute(
   wethLeg: PoolPrice | null,
   tokenDecimals: number,
 ): RoutedPrice | null {
+  // ONLY A POOL WITH NO HISTORY AT ALL. A price8 of zero is also what a TWAP
+  // reads for a coin cheaper than 8dp can carry, and what an observe() that
+  // failed for any reason leaves behind — neither means the pool has no
+  // oracle, and treating them so would trade its TWAP for a spot price.
   const directSpot: RoutedPrice | null =
-    direct && direct.price8 <= 0n && direct.spot8 > 0n
+    direct && direct.oracleCardinality <= 1 && direct.price8 <= 0n && direct.spot8 > 0n
       ? {
           price8: direct.spot8,
+          // Cash is USDG, so cash per token at 18dp is already USD at 18dp.
+          price18: direct.spot18,
           spot8: direct.spot8,
           route: "direct",
           liquidityUsdg: cashRawToUsdg(direct.liquidityCashRaw, direct.cashDecimals, 100_000_000n),
@@ -661,13 +683,14 @@ function spotRoute(
         }
       : null;
   let wethSpot: RoutedPrice | null = null;
-  if (leg && wethLeg && leg.price8 <= 0n && leg.spot18 > 0n && wethLeg.price8 > 0n) {
+  if (leg && wethLeg && leg.oracleCardinality <= 1 && leg.price8 <= 0n && leg.spot18 > 0n && wethLeg.price8 > 0n) {
     const legDepthUsdg = cashRawToUsdg(leg.liquidityCashRaw, leg.cashDecimals, wethLeg.price8);
     const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
     const price8 = combineLegs(leg.spot18, wethLeg.price8);
     if (price8 > 0n) {
       wethSpot = {
         price8,
+        price18: (leg.spot18 * wethLeg.price8) / 100_000_000n,
         spot8: combineLegs(leg.spot18, wethLeg.spot8),
         route: "weth",
         liquidityUsdg: legDepthUsdg < wethDepthUsdg ? legDepthUsdg : wethDepthUsdg,
@@ -702,7 +725,7 @@ function spotRoute(
 export async function readSpotLeg(
   client: PublicClient,
   leg: SpotLeg,
-): Promise<{ price8: bigint; liquidityUsdg: bigint } | null> {
+): Promise<{ price8: bigint; price18: bigint; liquidityUsdg: bigint } | null> {
   try {
     const [slot0, liquidity] = await Promise.all([
       client.readContract({ address: leg.pool, abi: POOL_ABI, functionName: "slot0" }) as Promise<
@@ -718,15 +741,16 @@ export async function readSpotLeg(
       decimals: 18,
     });
     // A USDG pool's spot is already USD; a WETH pool's goes through the WETH price.
+    const price18 = (spot18 * leg.cashUsd8) / 100_000_000n;
+    if (price18 <= 0n) return null;
     const price8 = combineLegs(spot18, leg.cashUsd8);
-    if (price8 <= 0n) return null;
     const depth = cashRawToUsdg(
       cashDepthFromLiquidity({ liquidity, sqrtPriceX96: slot0[0], cashIsToken0: !leg.tokenIsToken0 }),
       leg.cashDecimals,
       leg.cashUsd8,
     );
     const liquidityUsdg = leg.otherLegDepthUsdg !== null && leg.otherLegDepthUsdg < depth ? leg.otherLegDepthUsdg : depth;
-    return { price8, liquidityUsdg };
+    return { price8, price18, liquidityUsdg };
   } catch {
     return null;
   }

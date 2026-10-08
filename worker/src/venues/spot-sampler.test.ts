@@ -20,7 +20,7 @@ import {
 
 const p8 = (v: number) => BigInt(Math.round(v * 1e8));
 const usdgD = (v: number) => BigInt(Math.round(v * 1e6));
-const sample = (atSec: number, price: number, depth = 50_000) => ({ atSec, price8: p8(price), liquidityUsdg: usdgD(depth) });
+const sample = (atSec: number, price: number, depth = 50_000) => ({ atSec, price18: p8(price) * 10_000_000_000n, liquidityUsdg: usdgD(depth) });
 
 describe("SpotSampler — when a series counts", () => {
   it("is not ready on a single reading, and still prices at it", () => {
@@ -108,6 +108,18 @@ describe("SpotSampler — when a series counts", () => {
     assert.equal(r.ready, false);
   });
 
+  it("judges a very cheap coin at 18dp, so its own rounding is not a divergence", () => {
+    // ~$1e-7: at 8dp these readings are the integers 10, 9, 9, 9, 10 — a 6% real
+    // move that 8dp arithmetic reads as an 11% divergence.
+    const s = new SpotSampler();
+    const at18 = (usd: number) => BigInt(Math.round(usd * 1e18));
+    const readings = [1.0e-7, 0.97e-7, 0.96e-7, 0.97e-7, 1.02e-7];
+    readings.forEach((usd, i) => s.record("a", { atSec: 1000 + i * 45, price18: at18(usd), liquidityUsdg: usdgD(50_000) }));
+    const r = s.read("a", 1000 + 4 * 45)!;
+    assert.ok(r.divergenceBps < 1_000, `a 6% move must not read as ${r.divergenceBps} bps`);
+    assert.equal(r.spot8, 10n);
+  });
+
   it("only averages what is inside the window", () => {
     const s = new SpotSampler();
     // A long-ago price, then the window's worth of a different one.
@@ -136,7 +148,7 @@ const GUARD = { minLiquidityUsdg: usdgD(25_000), maxDivergenceBps: 500 };
  * exactly as a cardinality-1 pool's does. sqrtPriceX96 = 2^96 × m, so price
  * scales with m²; depth L = 5e10 is $50,000 at m = 1.
  */
-function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean; pool?: `0x${string}` }) {
+function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean; pool?: `0x${string}`; cardinality?: number; observeFails?: boolean }) {
   const calls: string[] = [];
   const client = {
     async readContract(args: { address: string; functionName: string; args?: readonly unknown[] }): Promise<unknown> {
@@ -153,12 +165,14 @@ function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean; poo
           return usdgD(50_000);
         case "token0":
           return CATE.address;
-        case "slot0":
-          return [BigInt(Math.round(2 ** 96 * state.m)), 0, 0, 1, 1, 0, true];
+        case "slot0": {
+          const c = state.cardinality ?? (state.oracle ? 300 : 1);
+          return [BigInt(Math.round(2 ** 96 * state.m)), 0, 0, c, c, 0, true];
+        }
         case "liquidity":
           return state.liquidity ?? usdgD(50_000);
         case "observe":
-          if (!state.oracle) throw new Error("OLD");
+          if (!state.oracle || state.observeFails) throw new Error("OLD");
           return [[0n, 0n], [0n, 0n]];
         default:
           throw new Error(`unexpected call ${args.functionName}`);
@@ -187,6 +201,17 @@ describe("readRoutedPrice — a pool with no oracle", () => {
     assert.equal(r.spotOnly.pool, POOL);
     assert.equal(r.price8, r.spot8);
     assert.equal(r.liquidityUsdg, usdgD(50_000));
+  });
+
+  it("never turns a pool WITH an oracle into a spot price when its observe() fails", async () => {
+    // A timeout, a rate limit, or an outsider filling the ring: the oracle did
+    // not answer this time. That is not a pool with no oracle.
+    const { client } = freshPool({ m: 1, oracle: true, observeFails: true });
+    const r = await readRoutedPrice(client, {
+      token: CATE.address, tokenDecimals: 18, cash: CASH.USDG as `0x${string}`, cashDecimals: 6, weth: CASH.WETH as `0x${string}`,
+      allowSpot: true,
+    });
+    assert.equal(r, null);
   });
 
   it("never replaces a route that has an oracle", async () => {
@@ -272,6 +297,17 @@ describe("createPoolPriceReader — a sampled price", () => {
     assert.equal(moved?.source, "sampled");
     assert.equal(moved?.sampled?.readings, 1);
     assert.equal(moved?.sampled?.ready, false, "a new pool's first reading authorises nothing");
+  });
+
+  it("keeps a current TWAP route when a refresh can only find a spot one", async () => {
+    const state = { m: 1, oracle: true, observeFails: false };
+    const { client } = freshPool(state);
+    const reader = createPoolPriceReader({ ttlSec: 60 });
+    assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1000 })).quotes.get("CATE")?.source, "pool");
+    // The oracle stops answering, and the pool now reads as a fresh one would.
+    Object.assign(state, { oracle: false, cardinality: 1 });
+    const q = (await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE");
+    assert.equal(q?.source, "pool", "a TWAP route inside MAX_ROUTE_AGE_SEC is not traded for a spot one");
   });
 
   it("drops the series once the pool keeps an oracle of its own", async () => {

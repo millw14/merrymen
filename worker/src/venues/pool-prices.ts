@@ -198,12 +198,20 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
           } catch {
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
+          // A CURRENT TWAP ROUTE IS NEVER TRADED FOR A SPOT ONE. A token with
+          // a pool whose oracle answered last time, and a second pool too new
+          // to have one, comes back as the second whenever the first's read
+          // fails — a rate limit, a timeout. Treated as that failure instead:
+          // the TWAP route is kept, ageing, and retired by MAX_ROUTE_AGE_SEC if
+          // it really is gone.
+          if (routed?.spotOnly && previous?.routed && !previous.routed.spotOnly && nowSec - previous.fetchedAt <= MAX_ROUTE_AGE_SEC) return;
           if (routed) {
             cache.set(key, { routed, fetchedAt: nowSec });
             // The full read's spot IS this tick's reading. A route that has
             // grown an oracle needs no series: the pool keeps its own now.
-            if (routed.spotOnly) sampler.record(key, { atSec: nowSec, price8: routed.price8, liquidityUsdg: routed.liquidityUsdg }, spotIdentity(routed));
-            else sampler.drop(key);
+            if (routed.spotOnly) {
+              sampler.record(key, { atSec: nowSec, price18: routed.price18 ?? routed.price8 * 10_000_000_000n, liquidityUsdg: routed.liquidityUsdg }, spotIdentity(routed));
+            } else sampler.drop(key);
             refreshed.add(key);
             return;
           }
@@ -225,7 +233,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
           const hit = cache.get(key);
           if (refreshed.has(key) || !hit?.routed?.spotOnly || nowSec - hit.fetchedAt > MAX_ROUTE_AGE_SEC) return;
           const spot = await readSpotLeg(client, hit.routed.spotOnly);
-          if (spot) sampler.record(key, { atSec: nowSec, ...spot }, spotIdentity(hit.routed));
+          if (spot) sampler.record(key, { atSec: nowSec, price18: spot.price18, liquidityUsdg: spot.liquidityUsdg }, spotIdentity(hit.routed));
         }),
       );
 
@@ -302,6 +310,9 @@ export function sampledQuote(
         reason: "its pool is too new to keep its own price history, and we have no recent reading of it to average",
       },
     };
+  }
+  if (s.price8 <= 0n) {
+    return { refusal: { kind: "sampling", reason: "its price is below what an 8-decimal quote can carry" } };
   }
   const depth = poolPriceUsable(
     { price8: s.price8, liquidityUsdg: s.liquidityUsdg, twapWindowSec: s.spanSec, divergenceBps: 0 },

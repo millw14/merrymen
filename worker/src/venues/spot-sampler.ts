@@ -22,7 +22,7 @@
  * checks: the depth floor, and spot against the average. Pushing it means
  * holding a price across several readings minutes apart, not for one block.
  * Even so it is a thinner claim than the pool's oracle, so the price it makes
- * carries its own source ("sampled"): it may authorise a FAST TRENCHER entry,
+ * carries its own source ("sampled"): it may authorise a FAST TRENCHER VAULT entry,
  * which the vault contract caps at $5 a buy and $25 a day, and nothing else —
  * every other buy of it stays inside the owner's scout budget
  * (strategies/trencher.ts unpriceableCause, index.ts scoutContextFor).
@@ -57,8 +57,12 @@ const SERIES_CAP = 512;
 
 export interface SpotSample {
   atSec: number;
-  /** USD per whole token, 8dp. */
-  price8: bigint;
+  /**
+   * USD per whole token, 18dp. Not 8dp: a coin under about $1e-7 moves in
+   * 10% steps at 8dp, so its own rounding would read as a divergence and its
+   * average would lose a unit to the floor. Scaled to 8dp once, on the way out.
+   */
+  price18: bigint;
   /** In-range depth of the route's thinner leg, USDG 6dp. */
   liquidityUsdg: bigint;
 }
@@ -91,7 +95,7 @@ export class SpotSampler {
    * starts the series over.
    */
   record(key: string, sample: SpotSample, source = ""): void {
-    if (sample.price8 <= 0n || !Number.isFinite(sample.atSec)) return;
+    if (sample.price18 <= 0n || !Number.isFinite(sample.atSec)) return;
     let entry = this.series.get(key);
     if (entry && entry.source !== source) {
       this.series.delete(key);
@@ -138,23 +142,24 @@ export class SpotSampler {
       const to = i + 1 < s.length ? s[i + 1]!.atSec : nowSec;
       if (to <= from) continue;
       const w = BigInt(Math.round(to - from));
-      weighted += s[i]!.price8 * w;
+      weighted += s[i]!.price18 * w;
       total += w;
     }
     // Counted apart from the weights: a reading taken this very second has no
     // duration yet and still happened.
     const readings = s.filter((x) => x.atSec >= start).length;
     // A single reading taken this second has no duration yet: it is its own mean.
-    const price8 = total > 0n ? weighted / total : last.price8;
-    if (price8 <= 0n) return null;
+    const mean18 = total > 0n ? weighted / total : last.price18;
+    if (mean18 <= 0n) return null;
     const first = s.find((x) => x.atSec >= start) ?? last;
     const spanSec = Math.max(0, last.atSec - first.atSec);
-    const diff = last.price8 > price8 ? last.price8 - price8 : price8 - last.price8;
+    const diff = last.price18 > mean18 ? last.price18 - mean18 : mean18 - last.price18;
     return {
-      price8,
-      spot8: last.price8,
+      // May be 0 for a coin cheaper than 8dp carries: the caller refuses it.
+      price8: mean18 / 10_000_000_000n,
+      spot8: last.price18 / 10_000_000_000n,
       liquidityUsdg: last.liquidityUsdg,
-      divergenceBps: Number((diff * 10_000n) / price8),
+      divergenceBps: Number((diff * 10_000n) / mean18),
       readings,
       spanSec,
       ready: readings >= SAMPLE_MIN_COUNT && spanSec >= SAMPLE_MIN_SPAN_SEC,
