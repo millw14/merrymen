@@ -77,7 +77,8 @@ const run = (over: Partial<Parameters<typeof wordTheses>[0]> = {}) =>
     chatId: CHAT,
     material: MATERIAL,
     agentName: "Shogun",
-    env: {},
+    // Opted in: the paraphrase is off unless MERRYMEN_TG_THESES_MODEL=1.
+    env: { MERRYMEN_TG_THESES_MODEL: "1" },
     boxMs: 6_000,
     maxLines: 6,
     maxChars: 700,
@@ -109,9 +110,11 @@ describe("the paraphrase's instructions", () => {
     assert.equal(p.split("<<<").length, 2, "nor open another");
   });
 
-  it("is on unless MERRYMEN_TG_THESES_MODEL=0", () => {
-    assert.equal(thesesModelOn({}), true);
-    assert.equal(thesesModelOn({ MERRYMEN_TG_THESES_MODEL: "1" }), true);
+  it("is off unless MERRYMEN_TG_THESES_MODEL=1 (Milla, 2026-10-08)", () => {
+    assert.equal(thesesModelOn({}), false);
+    assert.equal(thesesModelOn({ MERRYMEN_TG_THESES_MODEL: "" }), false);
+    assert.equal(thesesModelOn({ MERRYMEN_TG_THESES_MODEL: "true" }), false);
+    assert.equal(thesesModelOn({ MERRYMEN_TG_THESES_MODEL: " 1 " }), true);
     assert.equal(thesesModelOn({ MERRYMEN_TG_THESES_MODEL: " 0 " }), false);
   });
 });
@@ -458,6 +461,7 @@ describe("wordTheses", () => {
     const bodies = answering(GOOD);
     assert.deepEqual(await run({ model: null }), { lines: null, why: "no-model" });
     assert.deepEqual(await run({ env: { MERRYMEN_TG_THESES_MODEL: "0" } }), { lines: null, why: "off" });
+    assert.deepEqual(await run({ env: {} }), { lines: null, why: "off" }, "unset is off");
     assert.deepEqual(await run({ gate: new TgModelGate(store, { perDay: 0, now: () => T0, log: () => {} }) }), { lines: null, why: "skipped" });
     assert.deepEqual(await run({ boxMs: 1_400 }), { lines: null, why: "late" });
     // The router's reserve: a paraphrase never spends the half kept for lines that must be written.

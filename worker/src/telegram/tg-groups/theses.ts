@@ -1,7 +1,8 @@
 /**
  * WHAT TRADERS ARE SAYING ABOUT A COIN, IN THE GROUP MODEL'S OWN WORDS
  * (docs/tg-groups.md "Fomo research in a room"; plan WP9 P2, decision D5,
- * shipped on with the kill switch MERRYMEN_TG_THESES_MODEL=0).
+ * OFF unless MERRYMEN_TG_THESES_MODEL=1: Milla, 2026-10-08, after four review
+ * rounds kept finding ways past its checks; rooms hear the code digest).
  *
  * The code-written digest (fomo/digest.ts) can only say what its lexicon
  * knows, and a hype coin's theses match none of it ("Mostly hype…" for the
@@ -70,9 +71,14 @@ const WAITINGS = 2;
 /** Words in a row a phrase may not share with any sample. */
 const COPY_RUN = 5;
 
-/** MERRYMEN_TG_THESES_MODEL=0 turns the paraphrase off; anything else, or unset, leaves it on. */
+/**
+ * OFF BY DEFAULT: only MERRYMEN_TG_THESES_MODEL=1 turns the paraphrase on.
+ * Its input is text any Fomo trader can write, and its checks are a list
+ * that each review round found new ways past, so rooms hear the code-written
+ * digest unless the operator opts in (Milla, 2026-10-08).
+ */
 export function thesesModelOn(env: Record<string, string | undefined>): boolean {
-  return (env?.MERRYMEN_TG_THESES_MODEL ?? "").trim() !== "0";
+  return (env?.MERRYMEN_TG_THESES_MODEL ?? "").trim() === "1";
 }
 
 /** No digits on purpose: a figure in the prompt is one the model may echo. */

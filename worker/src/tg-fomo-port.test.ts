@@ -1083,7 +1083,7 @@ describe("a coin's theses: the code digest, and material for the group model's p
       const kept = new ThesesWordings();
       const model: TgModel = { creds: { provider: "openai", transport: "openai", baseUrl: "https://llm.test/v1", apiKey: "k-test", model: "fake", vision: false }, label: "openai/fake", source: "dedicated" };
       const word = (material: typeof all, chatId: number) =>
-        wordTheses({ model, gate: new TgModelGate(st, { perDay: 100, now: () => NOW, log: () => {} }), chatId, material, agentName: "Shogun", env: {}, boxMs: 6_000, maxLines: 6, maxChars: 700, now: NOW, kept });
+        wordTheses({ model, gate: new TgModelGate(st, { perDay: 100, now: () => NOW, log: () => {} }), chatId, material, agentName: "Shogun", env: { MERRYMEN_TG_THESES_MODEL: "1" }, boxMs: 6_000, maxLines: 6, maxChars: 700, now: NOW, kept });
       for (const id of [GROUP, GROUP - 1, GROUP - 2]) st.ensureRoom(id, { title: "frens", kind: "supergroup" });
       assert.equal((await word(all, GROUP)).why, "worded");
       assert.notEqual((await word(hour, GROUP - 1)).why, "kept", "the hour's theses are worded on their own, never the first wording");

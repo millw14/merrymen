@@ -796,7 +796,7 @@ answers use one call on the existing house model.
 | `MERRYMEN_FOMO_GROUP_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per Telegram group per clock hour. Default 2,500. `0` turns group research off (a room hears "Fomo research isn't available here right now."); a nonzero cap below 1,250 (one coin's thesis page, the dearest read a room needs: a room never reads the 2,500-credit profile route) can never answer a thesis ask, while trader and board asks still answer (250 per read), and the boot log says so. A cap below 2,500 or 3,750 only drops the optional wider thesis read; the room keeps page one. An owner cap whose own share (three quarters) falls below 2,500 (her deep trader read) is said at boot too |
 | `MERRYMEN_FOMO_TENANT_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per clock hour, the owner's groups included. Default 6,000 |
 | `MERRYMEN_FOMO_TENANT_DAILY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per UTC day. Default 20,000. The three caps are whole numbers only (`budget.ts fomoBudgetFrom`, the one reader for orchestrator, web and a self-hosted worker); a bad value is logged by name, never echoed, and its default applies; each cap is held under the shared pool, and the boot line states the limits in force. Research-credit caps only, never a trading limit. Keep a group's cap at most three quarters of the owner's hourly one |
-| `MERRYMEN_TG_THESES_MODEL=0` | worker children | turns off the group model's paraphrase of a coin's theses: rooms hear the code-written digest only |
+| `MERRYMEN_TG_THESES_MODEL=1` | worker children | turns ON the group model's paraphrase of a coin's theses (off by default, Milla 2026-10-08); unset, rooms hear the code-written digest only |
 | `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; a hosted child is Fomo-on only with both the channel and this value, and off it runs no Fomo code (no Telegram research lane or classifier entries, nothing charged to the scout budget). The web builds no runtime, its chat answers as before, Settings shows no Fomo section and MCP lists no Fomo tool. Self-hosted: on unless `0` (worker and web alike); a self-hosted install never owes the scout budget anything for Fomo |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
@@ -890,7 +890,7 @@ Surface limits:
   gate as an `answer` line, dropped and never repaired; the digest is said whenever that
   cannot be. One call per coin, copy and theses read (a window cut from the same copy is
   other theses and gets its own wording), from the half of the room's model allowance kept
-  for what is nice to have, kept 30 minutes; `MERRYMEN_TG_THESES_MODEL=0` turns it off.
+  for what is nice to have, kept 30 minutes; off unless `MERRYMEN_TG_THESES_MODEL=1`.
   The owner's own thesis answers keep the counts, with "no clear lean" for "neutral", and
   her quoted excerpts. A read that failed, could not be reached or was refused is said
   plainly in the room ("couldn't reach fomo just now, try again in a bit.", or the room's
@@ -988,8 +988,8 @@ every open Trencher position's cost instead, which errs toward refusing. So:
   read identically by the orchestrator and the web process; rooms reuse copies longer, a
   room's "now" never forces a paid refresh, and a refusal says when to try again.
 - **Theses.** A room hears a code digest of what they argue, and the group model's
-  paraphrase of cleaned, fenced thesis texts, never a verbatim quote; on by default,
-  `MERRYMEN_TG_THESES_MODEL=0` turns the paraphrase off. Group answers carry no stance
+  paraphrase of cleaned, fenced thesis texts, never a verbatim quote; the paraphrase is
+  off unless `MERRYMEN_TG_THESES_MODEL=1` (Milla, 2026-10-08). Group answers carry no stance
   counts and no "evidence families".
 
 ## Decisions needed from Milla

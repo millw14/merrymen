@@ -1409,8 +1409,10 @@ calls run at once per agent. A desk read (Market analysis) is one call — to
 Brain when `MERRYMEN_TG_GROUPS_BRAIN=1`, else to this model — and is counted
 the same way.
 
-**A coin's theses in its own words** (`theses.ts`, decision D5, on by
-default; `MERRYMEN_TG_THESES_MODEL=0` turns it off). When the research
+**A coin's theses in its own words** (`theses.ts`, decision D5; OFF unless
+`MERRYMEN_TG_THESES_MODEL=1`: Milla, 2026-10-08, because its input is text
+any Fomo trader can write and each review round found new ways past its
+checks). When the research
 answers what traders are saying about one coin, the room's answer is the code
 digest (fomo/digest.ts: what they argue for and against, what most of it is
 about, what holders wait on, "Their claims, not facts; newest 25 of 41.").
@@ -1501,8 +1503,8 @@ restored at spawn (see Storage and the ferry).
 `MERRYMEN_TG_GROUPS_ROUTER=0` turns off only the router (What a line wants):
 lines no rule knew go straight to the persona.
 
-`MERRYMEN_TG_THESES_MODEL=0` turns off only the group model's paraphrase of
-a coin's theses (The model): rooms hear the code digest.
+`MERRYMEN_TG_THESES_MODEL=1` turns on the group model's paraphrase of a
+coin's theses (The model); unset or anything else, rooms hear the code digest.
 
 `MERRYMEN_TG_GROUPS_DESK=0` turns off only the market desk: market and coin
 questions go back to the voice and the public snapshot.

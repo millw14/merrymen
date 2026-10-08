@@ -337,6 +337,7 @@ describe("the group research lane", () => {
   });
 
   it("a free theses answer whose paraphrase called the model keeps its slot (review r2)", async () => {
+    envVars.MERRYMEN_TG_THESES_MODEL = "1";
     envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
     envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
     envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
@@ -1478,6 +1479,8 @@ describe("a coin's theses in the group model's own words (plan WP9 P2, D5)", () 
     envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
     envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
     envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    // Opted in: the paraphrase is off unless MERRYMEN_TG_THESES_MODEL=1 (Milla, 2026-10-08).
+    envVars.MERRYMEN_TG_THESES_MODEL = "1";
     globalThis.fetch = (async (_url: string, init: { body: string }) => {
       const body = JSON.parse(init.body) as { tools?: unknown };
       if (JSON.stringify(body.tools ?? "").includes("summarise_theses")) {
@@ -1513,6 +1516,15 @@ describe("a coin's theses in the group model's own words (plan WP9 P2, D5)", () 
   it("MERRYMEN_TG_THESES_MODEL=0: the code digest, and no call", async () => {
     useModel();
     envVars.MERRYMEN_TG_THESES_MODEL = "0";
+    make();
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    assert.equal(thesesCalls, 0);
+    assert.deepEqual(tg.texts(CHAT), [DIGEST]);
+  });
+
+  it("off by default: with MERRYMEN_TG_THESES_MODEL unset, the code digest and no call (Milla, 2026-10-08)", async () => {
+    useModel();
+    delete envVars.MERRYMEN_TG_THESES_MODEL;
     make();
     await said(msg("pine what are people saying about $PONS on fomo?"));
     assert.equal(thesesCalls, 0);
