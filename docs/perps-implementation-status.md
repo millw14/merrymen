@@ -282,8 +282,9 @@ behind the current owner's grant and never enter the public cache.
 The Control room reads saved settings, shows the actual worker heartbeat and
 completed evaluation, changes profiles through the existing owner-bound settings
 path, and pauses new entries without cancelling protective exits. Close and
-flatten actions open the existing owner-confirmed order flow. Mobile keeps Radar,
-Positions, Playbook and Control in separate panels behind the floating dock.
+flatten actions open the existing owner-confirmed order flow. Mobile keeps Trade,
+Positions, Feed and Account behind the floating dock. Radar, Playbook and Control
+are secondary views within Trade.
 
 New-account onboarding is available at `/create?for=perps`. It saves an explicit
 paper-only configuration, the selected native-cadence profile and BTC/ETH/SOL
@@ -322,3 +323,42 @@ private entries in the public response. Responsive browser checks covered the
 min-content overflow was corrected without disabling chart panning. Wallet
 creation, permission signing, deposits, live orders and withdrawals were not
 performed during browser verification.
+
+### Shared login, account and community integration
+
+Perps uses the main app's existing session and sign-out flow. Account reads are
+bound to that session's current grant, with no client-supplied owner or account
+selector. The private account endpoint returns a whitelist of wallet/network/
+USDG metadata, the existing worker report and separately labelled fill-record
+counts. It does not expose signing keys or publish perpetual positions.
+
+The Account panel shows real on-chain USDG separately from reported real venue
+equity; unknown or paper venue balances are not displayed as real funds. Funding
+and recovery use the existing wallet controls inside Perps. The allocation field
+changes only the maximum USDG collateral ceiling through owner-bound settings,
+with a readback before success. It is not an immediate transfer, and lowering the
+ceiling does not withdraw existing collateral or change signed permissions.
+
+Current account architecture remains one on-chain agent smart account per owner.
+Existing Spot owners reuse that address and have independent Perps venue state;
+the product explicitly says so. A second on-chain address for the same owner
+requires an account/grant model change and has not been silently substituted for
+the existing account. Funding amount is still chosen by the owner in the sending
+wallet, not automatically transferred by this screen.
+
+The Feed panel reuses public fleet posts and agent profiles, and adds a private
+all-market execution/funding journal with separate paper/live selectors. Both
+queries and rendering preserve each record's actual market and decimal strings.
+Profile holdings and trade lists/counts cover spot/on-chain operations; account
+growth can include perpetual equity. Private perpetual positions and entry
+markers are never supplied to another agent's public profile.
+
+This integration passed 62 focused API/UI/navigation tests, repository-wide
+TypeScript checking and the production build. Browser checks covered the 390px
+dock, Feed → Account → Perps onboarding, private-position gating, 1440px desktop
+navigation, header funding/feed links, and the Spot/Perps round trip. Both tested
+widths had no document overflow. Public-profile reads and authenticated wallet/
+allocation/account-switch cases were exercised in integration tests; the local
+browser has no configured funded agent or public feed ledger. No wallet was
+created, signed, funded, traded or withdrawn during verification. No deployment
+or real-money acceptance run is claimed.

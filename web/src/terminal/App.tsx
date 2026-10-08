@@ -50,6 +50,9 @@ import { Feed } from "./screens/Feed";
 import { GroupChat } from "./screens/GroupChat";
 import { Home } from "./screens/Home";
 import { PerpsScreen } from "./PerpsScreen";
+import { PerpsFeed } from "./PerpsFeed";
+import { PerpsAccount } from "./PerpsAccount";
+import type { PerpsMobileView } from "./PerpsMobileNav";
 import { PerpsEntrance } from "./PerpsEntrance";
 import { perpsEntranceOwner, usePerpsEntrance } from "./use-perps-entrance";
 import { TradingModeToggle } from "./TradingModeToggle";
@@ -89,6 +92,7 @@ import "./perps-mode.css";
 import "./perps-chart.css";
 import "./perps-doctrines.css";
 import "./perps-entrance.css";
+import "./perps-account.css";
 
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -185,6 +189,13 @@ export function App() {
    * has to be deleted.
    */
   const chatKey = chatKeyFor(account?.session ?? null);
+  const [perpsNavigation, setPerpsNavigation] = useState<{owner: string | null; view: PerpsMobileView; revision: number} | null>(null);
+  const [perpsProfile, setPerpsProfile] = useState<{owner: string | null; slug: string; revision: number} | null>(null);
+  const showPerpsView = (view: PerpsMobileView) => setPerpsNavigation(previous => ({owner: chatKey, view, revision: (previous?.revision ?? 0) + 1}));
+  const showPerpsProfile = (slug: string) => {
+    setPerpsProfile(previous => ({owner: chatKey, slug, revision: (previous?.revision ?? 0) + 1}));
+    showPerpsView("feed");
+  };
   const entrance = usePerpsEntrance(perpsEntranceOwner(account?.session ?? null));
   useEffect(() => {
     entrance.cancelPending();
@@ -486,7 +497,9 @@ export function App() {
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} mode={perpsSurface ? "perps" : "spot"} modePending={entrance.pending} onScreen={openScreen} onTab={goTab} />}
+      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} mode={perpsSurface ? "perps" : "spot"} modePending={entrance.pending}
+        onScreen={next => { if (screen.kind === "perps" && (next.kind === "deposit" || next.kind === "withdraw")) showPerpsView("account"); else openScreen(next); }}
+        onTab={next => { if (screen.kind === "perps" && next === "feed") showPerpsView("feed"); else goTab(next); }} />}
       {desktop && !perpsSurface && (
         <DesktopSidebar
           reads={live.reads}
@@ -558,10 +571,18 @@ export function App() {
           />
         )}
         {screen.kind === "perps" && <PerpsScreen key={chatKey ?? "visitor"} ownerKey={chatKey} session={account?.session ?? null} workerAliveAt={account?.status.workerAliveAt} perps={mine?.perps} hasAgent={account?.status.exists === true}
+          requestedView={perpsNavigation?.owner === chatKey ? perpsNavigation : undefined}
+          feedContent={<PerpsFeed ownerKey={chatKey} mineSlug={mine?.slug ?? null} hasAgent={account?.status.exists === true} currentBook={mine?.perps?.book ?? null}
+            theses={live.theses} tokens={live.tokens} agents={live.agents} read={live.reads.theses}
+            onToken={id => openScreen({kind:"token",id})} onDesk={() => goTab("agent")} onAccount={() => showPerpsView("account")}
+            requestedProfile={perpsProfile?.owner === chatKey ? perpsProfile : undefined} />}
+          accountContent={<PerpsAccount account={account} ownerKey={chatKey} perps={mine?.perps} onCreate={() => router.push("/create?for=perps")}
+            onPermission={() => openScreen({kind:"grant"})} onProfile={showPerpsProfile} onRefreshAccount={refreshAccount}
+            signOut={account?.session.hosted && account.session.address ? <SignOut after={() => { resetLive(); setAccount(null); setTurns([]); setChatDraft(""); setPerpsNavigation(null); setPerpsProfile(null); }} /> : undefined} />}
           onSpot={() => goTab("feed")} onRefreshAccount={refreshAccount}
           onCreate={(style) => router.push(`/create?for=perps${isPerpsStyle(style) ? `&style=${encodeURIComponent(style)}` : ""}`)}
           onPermission={() => openScreen({kind:"grant"})}
-          onFund={() => openScreen({kind:"deposit"})}
+          onFund={() => showPerpsView("account")}
           onReviewExit={({market,book}) => {
             if (!chatKey || !account?.status.exists || chat.sending || chat.confirming) return;
             chat.setProposal({id: market ? "close-perp" : "flatten-perps", args: {...(market ? {symbol:market} : {}), ...(book ? {book} : {})}});

@@ -166,26 +166,27 @@ describe("mobile command dock", () => {
     const tab = (name: string) => dom.container.querySelector<HTMLButtonElement>(`[id$="-tab-${name}"]`)!;
     try {
       await dom.render(createElement(PerpsScreen, props));
-      assert.equal(panel("radar").hidden, false);
+      assert.equal(panel("trade").hidden, false);
       assert.equal(panel("positions").hidden, true);
       assert.equal(panel("playbook").hidden, true);
       assert.equal(tab("positions").getAttribute("aria-label"), "Positions · positions unknown");
       const originalRow = dom.container.querySelector<HTMLButtonElement>(".perps-entry-row")!;
       await act(async () => { originalRow.click(); tab("positions").click(); });
-      assert.equal(panel("radar").hidden, true);
+      assert.equal(panel("trade").hidden, true);
       assert.equal(panel("positions").hidden, false);
       assert.match(panel("positions").textContent ?? "", /Current positions are unknown/);
       await act(async () => { tab("positions").dispatchEvent(new dom.dom.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); });
-      assert.equal(panel("playbook").hidden, false);
-      assert.equal(tab("playbook").getAttribute("aria-selected"), "true");
-      assert.equal(dom.dom.window.document.activeElement, tab("playbook"));
-      await act(async () => { tab("radar").click(); });
+      assert.equal(panel("feed").hidden, false);
+      assert.equal(tab("feed").getAttribute("aria-selected"), "true");
+      assert.equal(dom.dom.window.document.activeElement, tab("feed"));
+      await act(async () => { tab("trade").click(); });
       assert.equal(dom.container.querySelector(".perps-entry-row"), originalRow, "view navigation must not remount the owner chart");
       assert.equal(originalRow.getAttribute("aria-pressed"), "true");
       assert.equal(calls, 1, "view navigation must not reset the fill baseline or refetch");
       await act(async () => { mobile = false; for (const listener of listeners) listener(); });
       assert.equal(dom.container.querySelector(".perps-mobile-dock"), null);
-      for (const name of ["radar", "positions", "playbook"]) assert.equal(panel(name).hidden, false, "desktop keeps all three sections visible");
+      for (const name of ["trade", "positions"]) assert.equal(panel(name).hidden, false, "desktop keeps chart and positions beside one another");
+      assert.equal(panel("playbook").hidden,true,"secondary Trade views are selected explicitly");
     } finally { globalThis.fetch = original; await dom.close(); }
   });
 
@@ -196,9 +197,9 @@ describe("mobile command dock", () => {
     globalThis.fetch = async () => json(answer([entry("private", NOW - 1000)]));
     try {
       await dom.render(createElement(PerpsScreen, props));
-      await act(async () => { dom.container.querySelector<HTMLButtonElement>('[id$="-tab-playbook"]')!.click(); });
+      await act(async () => { dom.container.querySelector<HTMLButtonElement>('[id$="-tab-feed"]')!.click(); });
       await dom.render(createElement(PerpsScreen, { ...props, ownerKey: null }));
-      assert.equal(dom.container.querySelector(".perps-screen")?.getAttribute("data-mobile-view"), "radar");
+      assert.equal(dom.container.querySelector(".perps-screen")?.getAttribute("data-mobile-view"), "trade");
       assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0);
       assert.match(dom.container.querySelector('[id$="-panel-positions"]')?.textContent ?? "", /Only the owner can access/);
     } finally { globalThis.fetch = original; await dom.close(); }
@@ -242,6 +243,7 @@ describe("doctrine intent for new agents", () => {
     const setupProps = {...props, hasAgent:false, session:{hosted:false,address:null}, onCreate:(style?: string)=>selections.push(style)};
     try {
       await dom.render(createElement(PerpsScreen, setupProps));
+      await dom.click("Playbook");
       await act(async()=>dom.container.querySelector<HTMLButtonElement>('[aria-label^="Inspect Razor:"]')!.click());
       await dom.click("Review controls ↗");
       // The control room is loaded on first use, not in the market's initial bundle.
@@ -255,4 +257,27 @@ describe("doctrine intent for new agents", () => {
       assert.deepEqual(selections,["scalp-breakout",undefined],"a different owner does not inherit the previous doctrine draft");
     } finally {globalThis.fetch=original;await dom.close();}
   });
+});
+
+
+it("opens Feed and Account slots without remounting the owner chart", async () => {
+  const dom=testDom(), original=globalThis.fetch;
+  globalThis.fetch=async()=>json(answer([entry("kept",NOW-1000)]));
+  try {
+    const slotProps={...props,feedContent:createElement("p",null,"Public fleet posts"),accountContent:createElement("p",null,"Owner account controls")};
+    await dom.render(createElement(PerpsScreen,slotProps));
+    assert.doesNotMatch(dom.container.textContent ?? "",/Owner account controls/,"hidden Account content must not mount");
+    const row=dom.container.querySelector(".perps-entry-row");
+    await dom.click("Fleet feed");
+    assert.equal(dom.container.querySelector<HTMLElement>('[id$="-panel-feed"]')!.hidden,false);
+    assert.equal(dom.container.querySelector<HTMLElement>(".perps-command-grid")!.hidden,true);
+    await dom.click("Account");
+    assert.equal(dom.container.querySelector<HTMLElement>('[id$="-panel-account"]')!.hidden,false);
+    assert.match(dom.container.textContent ?? "",/Owner account controls/);
+    await dom.render(createElement(PerpsScreen,{...slotProps,requestedView:{view:"feed",revision:1}}));
+    assert.doesNotMatch(dom.container.textContent ?? "",/Owner account controls/,"leaving Account unmounts its snapshot");
+    assert.equal(dom.container.querySelector<HTMLElement>('[id$="-panel-feed"]')!.hidden,false);
+    await dom.click("Trade");
+    assert.equal(dom.container.querySelector(".perps-entry-row"),row);
+  } finally {globalThis.fetch=original;await dom.close();}
 });

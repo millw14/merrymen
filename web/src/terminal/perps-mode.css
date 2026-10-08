@@ -207,12 +207,6 @@
 @media(max-width:1099px){
   .terminal-host .app[data-screen="perps"]>.body{padding:0;min-width:0;overflow-x:hidden}
   .perps-screen{padding-bottom:calc(116px + env(safe-area-inset-bottom,0px));min-height:calc(100dvh - 80px)}
-  .perps-screen[data-mobile-view="radar"] .perps-position-section,
-  .perps-screen[data-mobile-view="radar"] .perps-playbook-panel,
-  .perps-screen[data-mobile-view="positions"] .perps-arena,
-  .perps-screen[data-mobile-view="positions"] .perps-playbook-panel,
-  .perps-screen[data-mobile-view="playbook"] .perps-command-grid,
-  .perps-screen:not([data-mobile-view="positions"]) .perps-status-strip{display:none}
   .perps-command-grid{display:block}
   .perps-playbook-panel .perps-doctrines{margin-top:0}
   .perps-status-strip{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -225,7 +219,7 @@
   .perps-dock-tabs{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));isolation:isolate}
   .perps-dock-glass{position:absolute;z-index:-1;inset:0 auto 0 0;width:25%;border:1px solid #d9f1a32b;border-radius:23px;background:linear-gradient(165deg,#d5edac23,#abc8750a);box-shadow:inset 0 1px 0 #efffd229,0 2px 8px #0003;transition:transform 330ms cubic-bezier(.2,.8,.2,1)}
   .perps-dock-tabs[data-active="positions"] .perps-dock-glass{transform:translateX(100%)}
-  .perps-dock-tabs[data-active="playbook"] .perps-dock-glass{transform:translateX(200%)}
+  .perps-dock-tabs[data-active="feed"] .perps-dock-glass{transform:translateX(200%)}
   .perps-mobile-dock button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;min-width:0;min-height:61px;border:0;border-radius:23px;background:transparent;color:#b8c0af;font:10px/1.2 var(--mono,monospace);font-weight:500;letter-spacing:.3px;touch-action:manipulation;-webkit-tap-highlight-color:transparent;transition:color 180ms ease}
   .perps-mobile-dock button[aria-selected="true"]{color:#d2f653}
   .perps-mobile-dock button:focus-visible{outline:2px solid #d2f653;outline-offset:-3px}
@@ -257,7 +251,7 @@
 .desk-perp-provenance>strong{color:var(--tx,#e7eddb);font:500 10px/1.5 var(--mono,monospace);font-style:normal}
 .perps-position-section .desk-perp-provenance{border-top:1px dashed #3b432b;padding:10px 0 0;font-size:9px;color:#b4bda4}
 
-.perps-dock-tabs[data-active="control"] .perps-dock-glass{transform:translateX(300%)}
+.perps-dock-tabs[data-active="account"] .perps-dock-glass{transform:translateX(300%)}
 .terminal-host .perps-create{width:min(760px,100%);margin:0 auto;padding:clamp(20px,4vw,44px);font-family:var(--mono,monospace);color:#dbe5c6}
 .terminal-host .perps-create h1{font-family:var(--pixel,monospace);font-style:normal;letter-spacing:-.04em;color:#eff4dd}
 .terminal-host .perps-create .create-intro p,.terminal-host .perps-create .create-note{color:#abb79a}
@@ -295,3 +289,21 @@
 .perps-activity-detail{display:block;margin-top:6px;color:#8d9b7e;font-size:11px;overflow-wrap:anywhere}
 .perps-activity-list dl{display:flex;gap:30px;margin:0;font-size:12px}.perps-activity-list dt{color:#94a281}.perps-activity-list dd{margin:4px 0;color:#e1eacb}
 @media(max-width:1099px){.perps-desktop-navigation{display:none}.perps-control-heading{display:block}.perps-control-saved{grid-template-columns:1fr}.perps-control-pause{margin-left:0}.perps-control-actions>*{flex:1 1 auto}.perps-control-desk{padding:18px 14px}.perps-activity-kind{flex-wrap:wrap}.perps-dock-tabs button{font-size:10px}}
+
+.perps-trade-panel{min-width:0}.perps-trade-panel[hidden],.perps-community-panel[hidden],.perps-account-panel[hidden],.perps-command-grid[hidden]{display:none!important}
+.perps-command-grid.is-single{grid-template-columns:minmax(0,1fr)}
+.perps-trade-navigation{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid #3c4634;padding-bottom:12px}
+.perps-trade-navigation button{background:#151b11;border:1px solid #3d4b2d;color:#a9b798;padding:12px 18px;cursor:pointer;font:inherit}
+.perps-trade-navigation button[aria-pressed="true"]{background:#263718;color:#d4fa9b;border-color:#92bf50}
+.perps-trade-navigation button:focus-visible,.perps-community button:focus-visible{outline:2px solid #c5f56b;outline-offset:3px}
+.perps-community-heading{display:flex;align-items:start;justify-content:space-between;gap:20px;margin:18px 0 24px}.perps-community-heading h2{font-size:clamp(30px,4vw,50px);margin:10px 0;color:#ebf1de}.perps-community-heading p{max-width:70ch;color:#a3b28f;line-height:1.6}
+.perps-community-actions{display:flex;gap:10px;justify-content:space-between}.perps-profile-scope{font-size:12px;padding:14px;border-left:2px solid #a1c969;background:#1c2517;color:#bdcba9;line-height:1.6}
+.perps-community .page{max-width:none;padding:0}.perps-community .feed-head{display:none}.perps-community-panel,.perps-account-panel{min-width:0}
+@media(max-width:1099px){.perps-community-heading{display:block}.perps-community-heading .perps-settings{margin-top:8px}.perps-trade-navigation button{flex:1;padding:12px 6px;font-size:12px}.perps-command-grid{display:block}.perps-community-actions{flex-wrap:wrap}}
+
+.perps-trade-panel:focus-visible,.perps-community-panel:focus-visible,.perps-account-panel:focus-visible{outline:2px solid #c5f56b;outline-offset:4px}
+
+.perps-community,.perps-community-profile,.perps-community .page{min-width:0;max-width:100%}.perps-community-heading>div{min-width:0;overflow-wrap:anywhere}.perps-community-heading h2:focus-visible{outline:2px solid #c5f56b;outline-offset:4px}
+.terminal-host .desktop-account-menu nav button{display:block;width:100%;padding:12px;border:0;border-radius:8px;background:transparent;text-align:left;font:inherit;font-size:14px;color:var(--tx);cursor:pointer}
+.terminal-host .desktop-account-menu nav button:hover{background:var(--line)}
+.terminal-host .desktop-account-menu nav button:focus-visible{outline:2px solid var(--tx-2);outline-offset:3px}

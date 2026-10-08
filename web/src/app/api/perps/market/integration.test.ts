@@ -76,3 +76,12 @@ it("actual fill and funding activity isolates tenant, market and book and keeps 
   assert.deepEqual(live.items.map((row: { id: string }) => row.id), ["fill:2:a-live:ask"]);
   assert.equal((await activity(req(`activity?market=BTC-PERP&book=paper&agent=${agentB}`, A))).status, 400);
 });
+it("all-market activity retains each actual market but never another owner or book", async () => {
+  const q = { market: "all", book: "paper" as const };
+  const data = readPerpsActivity(await (await activity(req("activity?market=all&book=paper", A))).json(), q)!;
+  assert.ok(data); assert.equal(data.state, "ok"); assert.equal(data.items.length, 3);
+  assert.deepEqual(new Set(data.items.map(item => item.market)), new Set(["BTC-PERP", "ETH-PERP"]));
+  assert.equal(data.items.some(item => item.id.includes("b-close") || item.id.includes("a-live")), false);
+  const other = readPerpsActivity(await (await activity(req("activity?market=all&book=paper", B))).json(), q)!;
+  assert.equal(other.items.length, 1); assert.ok(other.items[0].id.includes("b-close"));
+});

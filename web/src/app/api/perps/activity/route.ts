@@ -21,7 +21,7 @@ export async function GET(req: Request) {
   const answer: PerpsActivityResponse = { ...q, state: agent || hosted ? "unreadable" : "not-configured", generatedAtMs: nowMs, items: [], unknownRows: 0, truncated: false };
   if (!agent) return reply(answer);
   try {
-    const spec = await readPerpsMarketSpec(q.market, nowMs);
+    const spec = q.market === "all" ? (market: string) => readPerpsMarketSpec(market, nowMs) : await readPerpsMarketSpec(q.market, nowMs);
     if (!spec) return reply(answer);
     const data = await withReadDb(db => db ? readPerpsActivityData(db, agent, q, spec, nowMs) : Promise.resolve(null));
     if (data !== null) Object.assign(answer, data, { state: "ok" });

@@ -11,3 +11,14 @@ it("shows recorded closes and funding exactly, then removes private records on a
   globalThis.fetch=async()=>json(payload,status);
   try{await dom.render(createElement(PerpsActivity,{market:"BTC-PERP",book:"paper"}));assert.equal(dom.container.querySelectorAll(".perps-activity-list>li").length,2);assert.ok(dom.container.textContent?.includes(usdExact("123.123456789012345678")));assert.ok(dom.container.textContent?.includes(`−${usdExact("1.000001")}`));status=401;await dom.click("Refresh activity");assert.equal(dom.container.querySelectorAll(".perps-activity-list>li").length,0);assert.match(dom.container.textContent??"",/Sign in again/);}finally{globalThis.fetch=original;await dom.close();}
 });
+
+it("labels a reversal by its prior exposure and the full executed size", async () => {
+  const dom=testDom(), original=globalThis.fetch;
+  globalThis.fetch=async()=>json({state:"ok",market:"BTC-PERP",book:"live",generatedAtMs:2000,unknownRows:0,truncated:false,items:[{id:"reverse",kind:"fill",market:"BTC-PERP",book:"live",timeMs:1500,side:"long",effect:"reverse",priceExact:"100.000001",sizeExact:"3.5",realizedMicro:"1000000",feeMicro:"1",attribution:"agent",tradeType:"trade"}]});
+  try {
+    await dom.render(createElement(PerpsActivity,{market:"BTC-PERP",book:"live"}));
+    const row=dom.container.querySelector(".perps-activity-list>li")!;
+    assert.ok(row);assert.match(row.textContent??"",/Reversed from long · 3\.5 total executed/);
+    assert.doesNotMatch(row.textContent??"",/Opened long|New long/);
+  } finally {globalThis.fetch=original;await dom.close();}
+});

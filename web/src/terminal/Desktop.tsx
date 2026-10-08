@@ -103,12 +103,12 @@ export function DesktopHeader({
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
           <summary><Face name={mine.name} slug={mine.slug}/><span>Account</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
-            <Link href="/you">Portfolio</Link>
+            {mode === "perps" ? <button type="button" onClick={() => onScreen({ kind: "deposit" })}>Account</button> : <Link href="/you">Portfolio</Link>}
             <Link href="/settings">Settings</Link>
             <Link href="/grant">Wallet & permissions</Link>
             <Link href="/limits">Trading limits</Link>
             {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
-            {!hasAgent && <Link href="/create">Create an agent</Link>}
+            {!hasAgent && <Link href={mode === "perps" ? "/create?for=perps" : "/create"}>Create an agent</Link>}
           </nav>
         </details>
       </div>

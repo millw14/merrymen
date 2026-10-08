@@ -15,6 +15,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { autonomyOf } from "@merrymen/core";
 import { capsOf, portfolioReadOf, profileShown, usdgOrNull } from "./account-read";
 import type { AccountState } from "./HostedControls";
+import { testDom, json } from "./test-dom";
 import type { LiveMine } from "./live";
 
 // See wire-ring.test.ts: tsx compiles `.tsx` against a global React.
@@ -220,4 +221,26 @@ describe("the real cash the verdict is decided from", () => {
     assert.equal(realCashOf({ session: { hosted: true }, status: { exists: true } } as never), null, "a status with no balances");
     assert.equal(realCashOf(null), null);
   });
+});
+
+
+it("the desktop Perps account menu uses the account callback and preserves perps creation intent", async () => {
+  const dom=testDom(), original=globalThis.fetch;
+  const globals=globalThis as {self?:unknown};const previousSelf=globals.self;globals.self=dom.dom.window;
+  globalThis.fetch=async()=>json({});
+  const { DesktopHeader }=await import("./Desktop");
+  const screens: unknown[]=[];
+  try {
+    await dom.render(createElement(DesktopHeader,{mine,hasAgent:false,mode:"perps",onScreen:screen=>screens.push(screen),onTab:noop}));
+    const menu=dom.container.querySelector<HTMLDetailsElement>(".desktop-account-menu")!;
+    menu.open=true;
+    assert.equal(menu.querySelector('a[href="/you"]'),null);
+    assert.ok(menu.querySelector('a[href="/create?for=perps"]'));
+    await React.act(async()=>menu.querySelector<HTMLButtonElement>("nav button")!.click());
+    assert.deepEqual(screens,[{kind:"deposit"}]);
+    assert.equal(menu.open,false);
+    await dom.render(createElement(DesktopHeader,{mine,hasAgent:false,mode:"spot",onScreen:noop,onTab:noop}));
+    assert.ok(dom.container.querySelector('.desktop-account-menu a[href="/you"]'));
+    assert.ok(dom.container.querySelector('.desktop-account-menu a[href="/create"]'));
+  } finally {globalThis.fetch=original;await dom.close();globals.self=previousSelf;}
 });

@@ -41,3 +41,30 @@ it("browser rejects another book, malformed amount, reordered or duplicate rows 
   assert.equal(perpsActivityQuery("http://local?market=BTC-PERP&book=paper&agent=x"), null);
   assert.equal(perpsActivityQuery("http://local?market=BTC-PERP&book=paper&book=live"), null);
 });
+it("all-markets keeps per-market precision, IDs, bounded queries and explicit partial reads", async () => {
+  const q = { market: "all", book: "paper" as const }, calls: string[] = [];
+  const multi = { prepare(sql: string) { return { async all(...args: unknown[]) {
+    assert.deepEqual(args.slice(0, 2), ["owner", "paper"]); assert.equal(args.length, 4); assert.match(sql, /LIMIT 101/);
+    return sql.includes("FROM perp_fills") ? [{ ...fill, market_id: 1 }, { ...fill, market_id: 0 }, { ...fill, market_id: 999999 }] : [];
+  } }; } } as unknown as Db;
+  const result = await readPerpsActivityData(multi, "OWNER", q, async market => { calls.push(market); return market === "BTC-PERP" ? spec : { ...spec, marketId: 0, priceDecimals: 2 }; }, now);
+  assert.equal(result.items.length, 2); assert.equal(result.unknownRows, 1); assert.equal(new Set(result.items.map(i => i.id)).size, 2);
+  assert.deepEqual(new Set(calls), new Set(["BTC-PERP", "ETH-PERP"]));
+  assert.ok(readPerpsActivity({ ...q, ...result, state: "ok", generatedAtMs: now }, q));
+  assert.equal(readPerpsActivity({ ...q, ...result, items: [{ ...result.items[0], market: "all" }], state: "ok", generatedAtMs: now }, q), null);
+  const partial = await readPerpsActivityData(multi, "owner", q, async market => market === "BTC-PERP" ? spec : null, now);
+  assert.equal(partial.items.length, 1); assert.equal(partial.unknownRows, 2);
+  assert.deepEqual(perpsActivityQuery("http://local?market=all&book=paper"), q);
+});
+
+it("signed pre-fill exposure identifies the closed side even when recorded side is order direction", async () => {
+  for (const [before, role, recorded, expected] of [["100", "ask", "short", "long"], ["-100", "bid", "long", "short"]] as const) {
+    for (const [base, effect] of [["50", "reduce"], ["100", "close"], ["150", "reverse"]] as const) {
+      const original = { ...fill, position_before: before, side_role: role, side: recorded, base };
+      const result = await readPerpsActivityData(db([original]), "owner", q, spec, now);
+      const row = result.items[0]; assert.equal(row.kind, "fill");
+      if (row.kind === "fill") { assert.equal(row.side, expected); assert.equal(row.effect, effect); assert.equal(row.sizeExact, `0.${base.padStart(5, "0")}`); }
+      assert.equal(original.side, recorded, "persisted facts are untouched");
+    }
+  }
+});
