@@ -72,7 +72,7 @@ type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source" | "sampled">
  * `sampled`: a price from the worker's own series of a pool too new to keep an
  * oracle (venues/spot-sampler.ts). Accepted only where the caller can say the
  * buy is bounded without the scout budget — a fast Trencher entry into its
- * vault, which the contract caps at $5 a buy and $25 a day, or a paper book —
+ * vault, which the contract caps at $5 a buy and $25 a day (paper or live) —
  * and even then only once the series is READY. Absent means pool only, which
  * is what every caller written before it asks.
  */

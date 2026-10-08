@@ -312,7 +312,7 @@ import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
 import { getName, nameSeat } from "./soul";
 import { createNameReconciler, mirrorNameOnArm } from "./name-reconcile";
-import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
+import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, sampledGainUsdg, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
   describeDiscovery,
@@ -5338,8 +5338,7 @@ async function main() {
    * The subset of `lastUnpriceable` priced off our own sampled series of a pool
    * too new to keep an oracle (venues/spot-sampler.ts). Unpriceable for every
    * buy the scout budget bounds, EXCEPT a fast Trencher vault entry — which the
-   * contract caps at $5 a buy and $25 a day — and a paper buy, which spends
-   * nothing. See scoutContextFor.
+   * contract caps at $5 a buy and $25 a day. See scoutUnpriceableFor.
    */
   let lastSampled: Set<string> = new Set();
   let lastQuarantinedUsdg = 0n;
@@ -6012,9 +6011,10 @@ async function main() {
           // The verdict and its explanation come from one call so they cannot
           // disagree — they did, and the owner read the disagreement.
           ...priceability(quote, true, {
-            // A ready sampled series may open a VAULT entry (capped on chain)
-            // or a paper one; nothing else here (strategies/trencher.ts).
-            sampled: autonomous || paperActive(),
+            // A ready sampled series may open a VAULT entry (capped on chain,
+            // paper or live) and nothing else (strategies/trencher.ts) — the
+            // same line scoutUnpriceableFor draws, by custody and not by rail.
+            sampled: autonomous,
           }),
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
           // An early pool may not report 24h volume: absent, never 0.
@@ -8220,11 +8220,17 @@ async function main() {
    * other buy of it stays inside the scout budget (default $0). A fast Trencher
    * entry into its vault does not: the vault contract caps it at $5 a buy and
    * $25 a day, and strategies/trencher.ts only offers it once the series is
-   * ready. A paper buy spends nothing. Only the sampled coins leave the set — a
-   * curve, v4 or unpriced coin is budgeted exactly as before.
+   * ready. Only the sampled coins leave the set — a curve, v4 or unpriced coin
+   * is budgeted exactly as before.
+   *
+   * DECIDED BY THE INTENT ALONE, never by the rail. A paper exemption here read
+   * paperActive() awaits before the fork reads the rail (execMode), and a
+   * deposit or gas reading landing in between flipped a paper-judged buy onto
+   * the live rail with no scout gate. A paper book that holds a Trencher grant
+   * enters through the same vault path, so it keeps the exemption by custody.
    */
   function scoutUnpriceableFor(intent: TradeIntent): ReadonlySet<string> {
-    const bounded = intent.kind === "swap" && (intent.custody === "trencher" || paperActive());
+    const bounded = intent.kind === "swap" && intent.custody === "trencher";
     return bounded && lastSampled.size > 0
       ? new Set([...lastUnpriceable].filter((a) => !lastSampled.has(a)))
       : lastUnpriceable;
@@ -11958,9 +11964,22 @@ async function main() {
     // Gate closed, ceiling open. Cost, not mark, because the budget bounds what
     // was SPENT on this class of thing — and because a curve mark is exactly
     // the number that should not be deciding how much more may be spent.
+    //
+    // AND SAMPLED HOLDINGS, FOR THE SAME REASON. A coin priced off our own
+    // series of an oracle-less pool (venues/spot-sampler.ts) is budgeted at the
+    // gate (lastUnpriceable) and then, once held, HAS a price — so it left the
+    // quarantine exactly as a curve holding does, and the next scout buy saw
+    // its cost as zero. Before sampling such a coin had no price and stayed in
+    // the quarantine at cost. Only the buys the gate budgeted count: a
+    // Trencher vault holding (capped on chain) is exempt at the gate
+    // (scoutUnpriceableFor), so it is left out here too — on a paper book
+    // that is every sampled holding, since only the vault path buys them. A token
+    // held both in the vault and the wallet is left out whole — the vault's
+    // own cap bounds it, and the per-token cap still reads its basis.
     let curveCostUsdg = 0n;
     for (const p of positions) {
-      if (p.priceSource !== "curve") continue;
+      const sampledBudgeted = p.priceSource === "sampled" && qMode === "live" && !autoTrenchBalances.has(p.token.toLowerCase());
+      if (p.priceSource !== "curve" && !sampledBudgeted) continue;
       curveCostUsdg += (await getBasis(agentId, qMode, p.symbol)).costUsdg;
     }
     // PLUS WHAT THE CLASS VAULT HOLDS, which the quarantine counts at zero.
@@ -12233,6 +12252,16 @@ async function main() {
     // charged, and a drawdown measured from the last honest peak. The breaker
     // still works -- a curve token falling is still measured against that peak.
     const curveMarked = curveMarkedSymbols(positions);
+    // AND A SAMPLED MARK RATCHETS NOTHING ABOVE COST. Peaks and the fee are
+    // judged on equity with every sampled holding at min(mark, cost)
+    // (positions.ts sampledGainUsdg); the drawdown itself is still measured
+    // on the real equity. Not a curve-style skip, which would freeze the
+    // whole book's peaks while the Trencher holds one $2.50 coin.
+    const sampledCost = new Map<string, bigint>();
+    for (const p of positions) {
+      if (p.priceSource === "sampled") sampledCost.set(p.symbol, (await getBasis(agentId, qMode, p.symbol)).costUsdg);
+    }
+    const peakEquityUsdg = equityUsdg - sampledGainUsdg(positions, (symbol) => sampledCost.get(symbol) ?? null);
     // WHAT THIS TICK MAY WRITE DOWN — the paper peak, the risk-period
     // observation, the fee and the mark, and the equity row — decided in
     // command-wake.ts tickRatchets, where a test runs every guard. A command
@@ -12262,7 +12291,7 @@ async function main() {
       // Raised past the recorded peak and written only on a regular tick with no
       // curve mark: an owner's order is not a sample of the cadence the peak is
       // measured on. See command-wake.ts tickRatchets.
-      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
+      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(peakEquityUsdg), (b) => setPaperBook(agentId, b)));
       markBook = "paper";
       // The mark is the paper book's now, until a live tick re-reads the live
       // one (livePeaksStale); a live lift observed above the live mark means
@@ -12360,7 +12389,7 @@ async function main() {
       // — null asks without observing (risk-period.ts markRiskPeriod), and
       // tickRatchets passes null on a command tick or under a curve mark. On a
       // held tick it passes the held observation, never the raw equity.
-      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
+      const riskPeak = await ratchet.riskPeak(usdgNum(peakEquityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -12384,7 +12413,7 @@ async function main() {
       }
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
-      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, feeBpsThisTick);
+      const accrual = accrueAboveHwm(peakEquityUsdg, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
       // `setAgentHwm` is a one-way ratchet in SQL, with a real

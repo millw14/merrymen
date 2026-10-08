@@ -311,14 +311,37 @@ export async function readPositions(
  * Skipping is conservative in both directions: a fee not charged, and a
  * drawdown measured from the last peak that a feed or a pool stood behind.
  *
- * A SAMPLED MARK IS HELD TO THE SAME RULE. It is a coin new enough that its
- * pool keeps no oracle, averaged over minutes by us rather than by the pool —
- * the same volatility, and after a restart the same discontinuity, since an
- * empty series values the holding off one spot reading until it refills
- * (venues/spot-sampler.ts). No peak or fee is set off it.
+ * A SAMPLED MARK IS NOT IN THIS SET, and that is deliberate: skipping freezes
+ * every peak of the WHOLE book, and the fast Trencher holds a sampled coin for
+ * most of the day — so a $2.50 position would stop the breaker learning the
+ * rest of the book's peak. A sampled holding is held to cost instead
+ * (sampledGainUsdg): no peak or fee is set off its mark, and everything else
+ * still ratchets.
  */
 export function curveMarkedSymbols(positions: readonly Position[]): string[] {
-  return positions.filter((p) => p.priceSource === "curve" || p.priceSource === "sampled").map((p) => p.symbol);
+  return positions.filter((p) => p.priceSource === "curve").map((p) => p.symbol);
+}
+
+/**
+ * WHAT SAMPLED MARKS ADD ABOVE WHAT THEY COST, USDG 6dp. PURE.
+ *
+ * A sampled price is our own minutes-long series of a pool too new to keep an
+ * oracle (venues/spot-sampler.ts): enough to value a holding, not enough to set
+ * a high-water mark or charge a fee on, and after a restart it is one spot
+ * reading until the series refills. Equity less this is the book with every
+ * sampled holding at min(mark, cost) — what peaks and the fee are judged on,
+ * so a sampled mark can lower a peak's reference but never raise it, while the
+ * rest of the book ratchets as before. A missing cost counts the whole mark as
+ * gain: an unknown basis must not let a mark through.
+ */
+export function sampledGainUsdg(positions: readonly Position[], costOf: (symbol: string) => bigint | null): bigint {
+  let gain = 0n;
+  for (const p of positions) {
+    if (p.priceSource !== "sampled") continue;
+    const cost = costOf(p.symbol) ?? 0n;
+    if (p.valueUsdg > cost) gain += p.valueUsdg - cost;
+  }
+  return gain;
 }
 
 /** May this book's equity set a new high-water mark? */
