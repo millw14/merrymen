@@ -197,7 +197,8 @@ test("an account pays, its plan lifts a spent quota, failures do not count, and 
   assert.equal((await dev.call("/plan", { tier: "crumbs", confirm: true })).json.plan.selected, "crumbs");
 
   assert.equal((await dev.call("/payments", { tx_hash: `0x${"9".repeat(64)}` })).json.stage, "not_found_yet");
-  const hash = rpc.chain.mine({ logs: [transferLog({ from: owner, to: TREASURY, value: 100_000n * ONE_TOKEN })] });
+  // Letters in it, so its capitalised spelling below is a different string.
+  const hash = rpc.chain.mine({ hash: `0x${"ab12cd34".repeat(8)}`, logs: [transferLog({ from: owner, to: TREASURY, value: 100_000n * ONE_TOKEN })] });
   const pending = await dev.call("/payments", { tx_hash: hash });
   assert.equal(pending.status, 202);
   assert.deepEqual([pending.json.code, pending.json.stage, pending.json.confirmations, pending.json.needed], ["payment_pending", "confirming", 1, 3]);
@@ -205,7 +206,9 @@ test("an account pays, its plan lifts a spent quota, failures do not count, and 
   const credited = await dev.call("/payments", { tx_hash: hash });
   assert.equal(credited.status, 200, JSON.stringify(credited.json));
   assert.deepEqual([credited.json.already, credited.json.payment.amount_tokens, credited.json.plan.id, credited.json.credit_tokens], [false, "100000", "crumbs", "0"]);
-  const again = await dev.call("/payments", { tx_hash: hash.toUpperCase().replace("0X", "0x") });
+  const capitals = `0x${hash.slice(2).toUpperCase()}`;
+  assert.notEqual(capitals, hash);
+  const again = await dev.call("/payments", { tx_hash: capitals });
   assert.deepEqual([again.status, again.json.already, again.json.credit_tokens], [200, true, "0"], "the same transfer in capitals is the same transfer");
 
   // ── the plan, as the partner sees it ──
