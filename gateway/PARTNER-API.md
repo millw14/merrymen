@@ -309,7 +309,10 @@ Retrying an activation:
   resend then gets its result as a lost response, or `challenge_used`.
 - **503 `enrollment_storage_failed`**: the challenge was spent and activation
   stopped part-way. The connection may still be pending, or linked in paper
-  mode with the grant installed and live trading off. Inspect
+  mode with the grant installed and live trading off. Even while it is still
+  pending, the owner's agent may already have been switched to paper mode
+  (live trading off) with these settings, and its grant replaced: an owner who
+  already ran a Merrymen agent should be told before you go on. Inspect
   `GET /agents/{id}`, then request a fresh challenge and owner signature.
 - **409 `challenge_used`**: this authorization was already spent, by an
   attempt that was refused or stopped after spending it, by an activation a
