@@ -436,7 +436,12 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
   });
 
   it("'vibes?' and 'how are the vibes' with nothing open are still the market read; 'just vibes?' and a complaint are not", async () => {
-    for (const [t, want] of [["shogun vibes?", [{ kind: "market" }]], ["shogun how are the vibes on robinhood chain", [{ kind: "market" }]], ["shogun just vibes?", []], ["shogun i asked a question", []]] as const) {
+    for (const [t, want] of [
+      ["shogun vibes?", [{ kind: "market" }]], ["shogun how are the vibes on robinhood chain", [{ kind: "market" }]], ["shogun just vibes?", []], ["shogun i asked a question", []],
+      // Ordinary words in a vibes question are no grievance (review r2).
+      ["shogun how are the vibes, not great?", [{ kind: "market" }]], ["shogun vibes not great huh?", [{ kind: "market" }]],
+      ["shogun vibes just feel off today?", [{ kind: "market" }]], ["shogun nothing pumping today, vibes?", [{ kind: "market" }]], ["shogun just the vibes pls?", [{ kind: "market" }]],
+    ] as const) {
       make();
       desk.asks.length = 0;
       clock += 11 * MIN;

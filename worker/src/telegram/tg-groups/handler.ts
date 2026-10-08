@@ -3320,7 +3320,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // you answer in the group?") is never a guessed market read: the re-ask,
     // "which question?" or the persona answers it (onMessage, act()).
     // Only real complaint wording blocks it: a bare "vibes?" or "how are the vibes" is still the market read.
-    const grievance = complaint && /\b(?:asked you|asked a question|answer|just|nothing|not|deal|single|entire)\b/iu.test(j.line.text);
+    // Never the ordinary words alone ("vibes not great huh?", "vibes just feel off today?" are vibes questions); "just vibes?" is its own phrase.
+    const grievance = complaint && /\b(?:asked you|asked a question|answer|single|entire|just vibes)\b/iu.test(j.line.text);
     if (discussion || (grievance && intent?.kind !== "analysis")) return null;
     return { kind: "market" };
   };
