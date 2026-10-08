@@ -46,6 +46,7 @@ import { contentFree } from "./fomo/digest";
 import { redactExecutables } from "./fomo/dossier";
 import { chainFromUserText, isRobinhoodToken } from "./fomo/identity";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
+import { deserialize, serialize } from "./fomo/subject-memory";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
@@ -345,6 +346,11 @@ export function ownerMoves(r: AnswerFomoResult, buyable: (s: string) => boolean 
   return { kind: "coin", room: "sent the trade moves for it to your DM.", dm: [`<b>Your moves on ${escHtml(one.symbol)}</b>:`, ...coinMoves(one, buyable).slice(1)].join("\n") };
 }
 
+/** The ranks a trader board's rows carry as they are said ("2. frankdegods +$1.2k"). */
+function boardRanksIn(text: string): number[] {
+  return [...text.matchAll(/^(\d{1,3})\. /gmu)].map((m) => Number(m[1])).filter((n) => Number.isSafeInteger(n) && n >= 1);
+}
+
 // ─── A coin's theses, for the group model's paraphrase ──────────────────────
 
 /** At most this many samples, one per family, each at most this long; fewer than the minimum is no material. */
@@ -618,6 +624,8 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         }
         log(`[tg-fomo] group ask answered (${r.toolsCalled.length} lookup(s))${q.request ? " (routed)" : ""}`);
         const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false, status: answerStatus(r.envelopes) };
+        // A remembered trader board: the rows the text shows, so the handler can say which the room heard (heard()).
+        if (r.board) said.board = { at: r.board.at, ranks: boardRanksIn(said.text) };
         // A coin's theses: material for the group model to say in its own words (tg-groups/theses.ts).
         const theses = thesesMaterial(r, said.text);
         if (theses) said.theses = theses;
@@ -641,6 +649,28 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
       } catch {
         log("[tg-fomo] group ask failed");
         return null;
+      }
+    },
+    async heard(chatId: number, threadId: number | undefined, board: { at: number; ranks: number[] }, sent: string): Promise<void> {
+      try {
+        if (!isUsableChatId(chatId) || !board || !Array.isArray(board.ranks) || typeof sent !== "string") return;
+        const heardRanks = new Set(boardRanksIn(sent));
+        const cut = new Set(board.ranks.filter((r) => !heardRanks.has(r)));
+        if (!cut.size) return;
+        const b = brokerNow();
+        if (!b) return;
+        const key = tgGroupConversationKey(chatId, threadId);
+        const m = deserialize(await b.memory.get(key));
+        // Only the board this answer remembered: a newer ask's board is its own.
+        if (!m?.board || m.board.at !== board.at) return;
+        // The row a line asked about was never a board row the handler cuts (it is named below the board): it stays.
+        const rows = m.board.rows.filter((r) => !cut.has(r.rank));
+        const next = { ...m, board: { ...m.board, rows } };
+        if (!rows.length) delete (next as { board?: unknown }).board;
+        await b.memory.set(key, serialize(next));
+        log(`[tg-fomo] board rows the room did not hear forgotten (${cut.size})`);
+      } catch {
+        /* memory is a convenience: "the last one" may then ask which row */
       }
     },
     async forget(chatId: number): Promise<void> {

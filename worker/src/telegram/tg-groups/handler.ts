@@ -2983,6 +2983,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     const failedRead = r.status === "failed" || r.status === "unavailable" || r.status === "budget-limited";
     const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
+    // A REMEMBERED BOARD IS THE ROWS THE ROOM HEARD: rows the six lines cut
+    // (an age line, her moves line, a row's answer) are never "the last one".
+    if (r.board && typeof port.heard === "function") {
+      try {
+        await port.heard(chatId, j.threadId, r.board, text);
+      } catch (e) {
+        fail("research", e);
+      }
+    }
     return send(text);
   };
 

@@ -1334,6 +1334,83 @@ describe("a group research question, end to end", () => {
     }
   });
 
+  it("a board's rows the room's six lines cut are never 'the last one' (review r3)", async () => {
+    const base = fixture("leaderboard-24h");
+    const t0 = (base.traders as Rec[])[0]!;
+    const ids = ["1f08e6ab-5c73-5443-9225-bfc496cde51f", "6dcf7c78-2537-522a-8307-3f9970c081be", "0b1c2d3e-0000-4000-8000-000000000003", "0b1c2d3e-0000-4000-8000-000000000004"];
+    const handles = ["CryptoKaleo", "frankdegods", "degenthree", "whalefour"];
+    const FOUR = { ...base, count: 4, traders: ids.map((userId, i) => ({ ...t0, rank: i + 1, userId, handle: handles[i], pnlUsd: 150_000 - i * 20_000 })) };
+    const run = async (asker: number, second: string): Promise<{ heard: string; lastOne: unknown[]; texts: string[] }> => {
+      const s = await setup({ leaderboard: () => FOUR });
+      let clock = NOW;
+      s.clock.now = clock;
+      store?.close();
+      store = new TgGroupsStore(path.join(home, `tg-groups-${asker}.json`), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+      store.ensureRoom(GROUP, { title: "frens", kind: "supergroup" });
+      store.setStatus(GROUP, "approved", 4242);
+      store.update(GROUP, (r) => { r.helloSaid = true; });
+      const tg = new FakeTg();
+      let tstate = { ownerId: 4242 } as unknown as TelegramState;
+      const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
+      const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+      groups?.stop();
+      await groups?.drain();
+      groups = createTgGroups({
+        opts: () => ({ token: "123:TOKEN", fetchFn: tg.fetchFn }),
+        store,
+        getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [4242] }) as unknown as ResolvedConfig,
+        stateRef,
+        port: () => coins,
+        fomo: () => port,
+        self: () => ({ id: 999, username: "pinebot", name: "Pine" }),
+        privacyOff: () => false,
+        note: () => {},
+        dashboardBase: () => "https://app.test",
+        agentKey: () => "agent-1",
+        now: () => clock,
+        rand: () => 0.99,
+        env: {},
+        hosted: true,
+        sleep: async (ms) => { clock += Math.max(0, ms); },
+        timer: () => new Promise(() => {}),
+        log: () => {},
+      });
+      let id = 300;
+      const say = async (text: string, fromId: number): Promise<void> => {
+        groups!.onMessage({ updateId: id, chatId: GROUP, fromId, fromFirstName: fromId === 4242 ? "Milla" : "Ann", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++, dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens" });
+        await groups!.drain();
+      };
+      // A member asks for the board; twenty minutes on, the second ask is answered from that copy (an age line).
+      await say("pine who are the top traders on fomo this week?", 777);
+      clock += 20 * 60_000;
+      s.clock.now = clock;
+      await say(second, asker);
+      const texts = tg.texts(GROUP);
+      const heard = texts[texts.length - 1]!;
+      clock += 60_000;
+      s.clock.now = clock;
+      const before = s.calls.length;
+      await say("pine what's the last one holding?", 888);
+      return { heard, lastOne: s.calls.slice(before).map((c) => c.args.trader), texts: tg.texts(GROUP) };
+    };
+    for (const [asker, second] of [
+      // The owner's reused board, with her moves line: one row gives way to the age line.
+      [4242, "pine who are the top traders on fomo this week?"],
+      // A member's row ask on the reused board: rows give way to the row's answer and the age line.
+      [778, "pine who's #1 on fomo this week and what's he holding?"],
+    ] as const) {
+      const r = await run(asker, second);
+      assert.match(r.heard, /From a copy fetched 20 min ago\./, r.heard);
+      const ranks = [...r.heard.matchAll(/^(\d)\. /gm)].map((m) => Number(m[1]));
+      assert.ok(ranks.length >= 1 && ranks.length < (asker === 4242 ? 4 : 3), `${second}: a row was cut (${r.heard})`);
+      const last = Math.max(...ranks);
+      // "The last one" is the last row the room heard, or a question about which; never a row it did not hear.
+      if (r.lastOne.length) assert.deepEqual(r.lastOne, [ids[last - 1]], `${second}: ${r.texts.slice(-1)[0]}`);
+      else assert.match(r.texts.slice(-1)[0]!, /Which one on the board/);
+      for (const t of r.texts.slice(-1)) for (let k = last + 1; k <= 4; k++) assert.ok(!t.includes(handles[k - 1]!), `${second}: ${t}`);
+    }
+  });
+
   it("the room hears Fomo's public leaderboard with its figures, and a trending board with its market caps", async () => {
     const s = await setup();
     let clock = NOW;

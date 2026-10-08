@@ -534,6 +534,13 @@ export interface TgFomoAnswer {
    * to the desk) could not tell it apart.
    */
   status?: "ok" | "empty" | "budget-limited" | "unavailable" | "failed";
+  /**
+   * A trader board the port remembered for this room's "the second one" and
+   * "the last one": when it was answered, and the ranks `text` shows as board
+   * rows ("2. frankdegods …"). The handler may cut rows to fit the room's
+   * lines; it then says which were heard (TgFomoPort.heard).
+   */
+  board?: { at: number; ranks: number[] };
 }
 
 export interface TgFomoPort {
@@ -556,6 +563,13 @@ export interface TgFomoPort {
   }): Promise<TgFomoAnswer | null>;
   /** The owner's chat-wide forget: drop this chat's research subject memory. Never throws. */
   forget?(chatId: number): Promise<void>;
+  /**
+   * WHAT THE ROOM HEARD of a remembered board (`board` from ask): rows the
+   * answer showed but `sent` no longer carries (the handler cut them for the
+   * room's six lines) leave the room's memory, so "the last one" is the last
+   * row it saw, never one it did not. Never throws.
+   */
+  heard?(chatId: number, threadId: number | undefined, board: { at: number; ranks: number[] }, sent: string): Promise<void>;
 }
 
 /** How a handoff to the owner's DM went. "gone": her line stopped being wanted first, and nothing was sent. */

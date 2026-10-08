@@ -118,6 +118,12 @@ export type AnswerFomoResult =
       toolsCalled: FomoToolName[];
       analysis: boolean;
       clarification: boolean;
+      /**
+       * A trader board was remembered for this conversation (boardMemoryOf),
+       * answered at `at`: a surface that cuts the text further (a room's line
+       * cap) says which of its rows were heard (tg-fomo-port.ts heard).
+       */
+      board?: { at: number };
     };
 
 /** The most tool calls one question may make. */
@@ -366,10 +372,12 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
 
   // 6. Remember what was actually resolved, only from envelopes that answered.
   const answered = envelopes.filter((e) => ANSWERED.has(e.status));
+  let remembered: { at: number } | null = null;
   if (answered.length) {
     const last = answered[answered.length - 1]!;
     const revision = [...answered].reverse().find((e) => e.dossierRevision)?.dossierRevision ?? null;
     const board = boardMemoryOf(plan, answered, now, audience);
+    if (board) remembered = { at: board.at };
     const m3 = applyResult(step.memory, { subjects: answered.flatMap(subjectsOf), dossierRevision: revision, requestId: last.requestId, ...(board ? { board } : {}) }, now);
     await remember(broker, conversationKey, m3);
   }
@@ -399,7 +407,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
     if (!text.includes(NOT_PERMISSION_LINE)) text = `${text}\n${NOT_PERMISSION_LINE}`;
     if (!text.includes(FOMO_ATTRIBUTION)) text = `${text}\n${FOMO_ATTRIBUTION}`;
   }
-  return { handled: true, text, plan, envelopes, toolsCalled, analysis, clarification: false };
+  return { handled: true, text, plan, envelopes, toolsCalled, analysis, clarification: false, ...(remembered ? { board: remembered } : {}) };
 }
 
 /**
