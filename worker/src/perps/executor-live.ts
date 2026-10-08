@@ -166,6 +166,8 @@ export interface LivePerpExecutorOptions {
   clockSkewMs: () => number | null;
   /** A bounded stand-down's send cutoff, scoped to this asynchronous call. */
   sendNotAfterMs?: () => number | undefined;
+  /** Required for opening sends; omitted or null permits exits only. */
+  entryContext?: () => string | null;
   /**
    * Size and price decimals for EVERY perp market (orderBookDetails'
    * `decimals`), so a position in a market the feed does not carry is still
@@ -413,6 +415,7 @@ export async function resendPersisted(
     api: Pick<LighterApi, "sendTx">;
     now: () => number;
     clockSkewMs: () => number | null;
+    entryContext?: () => string | null;
   },
   row: PerpOrderRow,
 ): Promise<ResendResult> {
@@ -436,9 +439,14 @@ export async function resendPersisted(
   if (!Number.isFinite(latest) || latest >= row.expiredAt) {
     return { sent: false, why: `past ExpiredAt ${row.expiredAt} by the later of our clock and the venue's; the row waits for its write-off` };
   }
+  const beforeSendGuard = row.effect === "open" && !row.reduceOnly ? () => {
+    if (!row.entryContext || !/^[a-f0-9]{64}$/.test(row.entryContext) || deps.entryContext?.() !== row.entryContext)
+      throw new Error("opening bytes lack a matching current owner configuration; a fresh decision is required");
+  } : undefined;
   try {
+    beforeSendGuard?.();
     const result = await deps.api.sendTx({ txType: row.txType, txInfo: row.txInfo, txHash: row.txHash }, {
-      exit: isExitRow(row.effect, row.reduceOnly), notAfterMs: Math.min(row.expiredAt, row.sendNotAfterMs ?? Infinity),
+      beforeSendGuard, exit: isExitRow(row.effect, row.reduceOnly), notAfterMs: Math.min(row.expiredAt, row.sendNotAfterMs ?? Infinity),
     });
     return { sent: true, result };
   } catch (e) {
@@ -450,6 +458,7 @@ export async function resendPersisted(
 // ── the executor ────────────────────────────────────────────────────────────
 
 interface Submission {
+  entryContext?: string | null;
   effect: PerpOrderEffect;
   reduceOnly: boolean;
   marketId: number | null;
@@ -798,6 +807,7 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
           signed,
           withdraw: s.withdraw,
           sendNotAfterMs: notAfterMs,
+          entryContext: s.entryContext,
         });
       } catch (e) {
         // A failed write sends NOTHING (rule 9). Whatever the store threw, the
@@ -805,14 +815,18 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
         if (e instanceof PerpNotRecorded) throw e;
         throw new PerpNotRecorded("the ledger refused the write", signed.txHash, { cause: e });
       }
+      const entryGuard = s.effect === "open" && !s.reduceOnly && s.entryContext != null ? () => {
+        if (opts.entryContext?.() !== s.entryContext) throw new PerpRefused("perp-style-changed", "the owner configuration changed before send");
+      } : undefined;
       try {
         // The durable write may outlast the owner's request. Persist its
         // deadline too, so a crash or failed resolution cannot revive it.
         checkDeadline();
         await s.beforeSendGuard?.();
+        entryGuard?.();
         checkDeadline();
         const result = await api.sendTx({ txType: signed.txType, txInfo: signed.txInfo, txHash: signed.txHash }, {
-          exit: s.exit, notAfterMs: Math.min(signed.expiredAt, notAfterMs ?? Infinity),
+          beforeSendGuard: entryGuard, exit: s.exit, notAfterMs: Math.min(signed.expiredAt, notAfterMs ?? Infinity),
         });
         return { id, signed, result, thrown: null };
       } catch (e) {
@@ -923,6 +937,9 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
     },
 
     async place(intent, review, ctx) {
+      const entryContext = intent.effect === "open" ? opts.entryContext?.() : undefined;
+      if (intent.effect === "open" && (!entryContext || !/^[a-f0-9]{64}$/.test(entryContext)))
+        throw new PerpRefused("perp-style-changed", "the current owner configuration does not authorize live entries");
       if (typeof ctx?.agentId !== "string" || ctx.agentId.toLowerCase() !== agentId.toLowerCase()) {
         throw malformed("this order was placed for another agent's venue account");
       }
@@ -955,6 +972,7 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
         if (typeof reviewed === "bigint" && reviewed > worst) worst = reviewed;
         const tx = await submit({
           effect: "open",
+          entryContext,
           reduceOnly: false,
           marketId,
           worstNotionalMicro: worst,
@@ -1196,7 +1214,7 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
     resendPersisted(row) {
       // Under the send lock, like every send: one tx of ours in flight at a
       // time, so a re-send never races a fresh signature to the sequencer.
-      return serial(() => resendPersisted({ agentId, accountIndex, api, now: opts.now, clockSkewMs: opts.clockSkewMs }, row));
+      return serial(() => resendPersisted({ agentId, accountIndex, api, now: opts.now, clockSkewMs: opts.clockSkewMs, entryContext: opts.entryContext }, row));
     },
   };
 }

@@ -16,7 +16,7 @@ import {
   fullDateTime as fmtFullDateTime,
 } from "@/lib/format";
 import { loadTokenQuotes, applyTokenQuotes, type TokenQuote } from "./quotes";
-import { STOCK_TOKENS } from "@merrymen/core";
+import { STOCK_TOKENS, perpsPositionStyleReport, type PerpsStyleId } from "@merrymen/core";
 import { PERPS_REPORT_STALE_MS, type FeedPerpRow, type FeedPerpsAccount } from "@/lib/perps-view";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
@@ -343,6 +343,10 @@ export interface DeskPerpRow {
   unrealisedUsd: number | null;
   stopTrigger: string | null;
   fundingUsd: number | null;
+  /** Immutable entry profile from the position ledger, never current settings. */
+  entryStyle?: PerpsStyleId;
+  styleOpenedAtSec?: number;
+  holdDeadlineSec?: number;
 }
 
 /**
@@ -418,7 +422,10 @@ export function deskPerpsOf(feed: Pick<Feed, "perps" | "perpsAccount">, nowMs: n
     if (!r || !market || (r.side !== "long" && r.side !== "short") || !size || !entry || margin === null) {
       return unreadablePerps();
     }
+    const entryPlan = perpsPositionStyleReport(r.entry_style, r.style_opened_at_sec);
+    const verifiedPlan = entryPlan.holdDeadlineSec !== undefined && entryPlan.holdDeadlineSec <= 8_640_000_000_000 && entryPlan.holdDeadlineSec === r.hold_deadline_sec ? entryPlan : {};
     rows.push({
+      ...verifiedPlan,
       market,
       side: r.side,
       // Every row is the account's book: one report is one book.

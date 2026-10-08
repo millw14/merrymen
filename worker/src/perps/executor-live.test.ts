@@ -293,10 +293,11 @@ const realStore: LivePerpStore = {
   listSubmittedPerpOrders: (a, m) => store.listSubmittedPerpOrders(a, m),
 };
 
-function setup(opts: { venue?: PerpAccountRead | null; store?: Partial<LivePerpStore> } = {}): { agentId: string; f: Fake; ex: LivePerpExecutor } {
+function setup(opts: { venue?: PerpAccountRead | null; store?: Partial<LivePerpStore>; entryContext?: () => string | null } = {}): { agentId: string; f: Fake; ex: LivePerpExecutor } {
   const agentId = newAgent();
   const f = fakeVenue(opts.venue === undefined ? flatIsolated() : opts.venue);
   const ex = createLivePerpExecutor({
+    entryContext: opts.entryContext ?? (() => "a".repeat(64)),
     agentId,
     accountIndex: ACCOUNT,
     signerClient: client,
@@ -555,6 +556,33 @@ describe("review(): the feed's fresh book, else one authenticated venue read", (
 // ── what an answer means to the row ─────────────────────────────────────────
 
 describe("sendTx answers (rule 9)", () => {
+  it("fresh opening sends require a current configuration binding", async () => {
+    const s = setup({ entryContext: () => null });
+    await refusedWith(openOnce(s), "perp-style-changed");
+    assert.equal(s.f.sent.length, 0);
+    assert.equal(orderRows(s.agentId).length, 0);
+  });
+
+  it("replay requires durable current configuration and rechecks it after the lease wait", async () => {
+    const s = setup();
+    s.f.sendAnswer = () => fail({ kind: "unavailable", status: null, retryable: true, detail: "unknown" } as const);
+    await openOnce(s);
+    const [row] = await store.listSubmittedPerpOrders(s.agentId, "live");
+    assert.equal(row!.entryContext, "a".repeat(64));
+    let current: string | null = row!.entryContext!;
+    const deps = { agentId: s.agentId, accountIndex: ACCOUNT, api: s.f.api, now: () => clock,
+      clockSkewMs: () => skew, entryContext: () => current };
+    for (const entryContext of [undefined, null, "b".repeat(64)])
+      assert.equal((await resendPersisted(deps, { ...row!, entryContext })).sent, false);
+    current = null;
+    assert.equal((await resendPersisted(deps, row!)).sent, false);
+    current = row!.entryContext!;
+    const guarded = guardedStanddownApi({ api: s.f.api as LighterApi, now: () => clock,
+      beforeSend: async () => { current = "b".repeat(64); } }, new AsyncLocalStorage<StanddownCallContext>());
+    assert.equal((await resendPersisted({ ...deps, api: guarded }, row!)).sent, false);
+    assert.equal(s.f.sent.length, 1, "none of the refused recoveries broadcast bytes");
+  });
+
   it("carries a persisted owner deadline through an awaited replay fence and preserves legacy semantics", async () => {
     const s = setup({ venue: holding("long", 30n) });
     s.f.sendAnswer = () => fail({ kind: "unavailable", status: null, retryable: true, detail: "unknown" } as const);
@@ -595,7 +623,7 @@ describe("sendTx answers (rule 9)", () => {
     assert.deepEqual([second!.txType, second!.txHash, second!.txInfo], [first!.txType, first!.txHash, first!.txInfo], "the same bytes, never a re-signature");
     assert.equal(orderRows(s.agentId)[0]?.status, "submitted", "a re-send resolves nothing");
 
-    const deps = { agentId: s.agentId, accountIndex: ACCOUNT, api: s.f.api, now: () => clock, clockSkewMs: () => skew };
+    const deps = { entryContext: () => "a".repeat(64), agentId: s.agentId, accountIndex: ACCOUNT, api: s.f.api, now: () => clock, clockSkewMs: () => skew };
     // Never past ExpiredAt — by the LATER of the two clocks.
     clock = row.expiredAt! - 1_000;
     skew = 2_000;

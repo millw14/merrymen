@@ -6,9 +6,9 @@ import { PerpsScreen, PerpsScreenPreview, type PerpsScreenProps } from "./PerpsS
 import { testDom, json } from "./test-dom";
 import { forgetAudioForTest } from "./chime";
 
-const NOW = 1_790_697_060_000;
+const NOW = Math.floor(1_790_697_060_000 / 300_000) * 300_000;
 const entry = (id: string, timeMs: number): ChartEntry => ({ id, timeMs, price: 100, priceExact: "100.00", size: "1", side: "long", book: "paper", epoch: 1, attribution: "agent", kind: "open" });
-const answer = (entries: ChartEntry[] = [], generatedAtMs = NOW): ChartResponse => ({ state: "ok", market: "BTC-PERP", book: "paper", window: "24h", generatedAtMs, entries, unknownFills: 0, truncated: false, candles: { state: "ok", bars: [{ timeMs: NOW - 300_000, open: 99, high: 101, low: 98, close: 100 }], gaps: [], stale: false, asOfMs: NOW } });
+const answer = (entries: ChartEntry[] = [], generatedAtMs = NOW): ChartResponse => ({ state: "ok", market: "BTC-PERP", book: "paper", window: "24h", generatedAtMs, entries: [...entries].sort((a, b) => a.timeMs - b.timeMs), unknownFills: 0, truncated: false, candles: { state: "ok", bars: [{ timeMs: NOW - 300_000, open: 99, high: 101, low: 98, close: 100 }], gaps: [], stale: false, asOfMs: NOW } });
 const props: PerpsScreenProps = { perps: undefined, ownerKey: "owner-a", hasAgent: true, onSpot() {}, onSettings() {} };
 
 function audioMock() {
@@ -28,6 +28,24 @@ function audioMock() {
 }
 
 describe("private perps screen", () => {
+  it("keeps the last truthful frame when a refresh mixes books or contains malformed chart fields", async () => {
+    const dom = testDom();
+    const original = globalThis.fetch;
+    let payload: unknown = answer([entry("verified", NOW - 1000)]);
+    globalThis.fetch = async () => json(payload);
+    try {
+      await dom.render(createElement(PerpsScreen, props));
+      payload = { ...answer(), entries: [{ ...entry("wrong-book", NOW - 500), book: "live", price: 150, priceExact: "150.00" }] };
+      await dom.click("Refresh");
+      assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 1);
+      assert.match(dom.container.textContent ?? "", /Showing the last successful read/);
+      assert.doesNotMatch(dom.container.textContent ?? "", /150\.00/);
+      payload = { ...answer(), candles: { ...answer().candles, gaps: null } };
+      await dom.click("Refresh");
+      assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 1);
+      assert.match(dom.container.textContent ?? "", /chart response could not be read/);
+    } finally { globalThis.fetch = original; await dom.close(); }
+  });
   it("keeps historical and duplicate entries silent; animates and chimes only new executions after opt-in", async () => {
     const dom = testDom();
     const sound = audioMock();
@@ -126,6 +144,62 @@ describe("isolated tactical preview", () => {
       await dom.click("Live");
       assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0, "paper fixture must not appear as live history");
       assert.equal(calls, 0);
+    } finally { globalThis.fetch = original; await dom.close(); }
+  });
+});
+
+describe("mobile command dock", () => {
+  it("shows one accessible panel, preserves chart selection and baseline, and restores the desktop layout", async () => {
+    const dom = testDom();
+    const original = globalThis.fetch;
+    let calls = 0;
+    let mobile = true;
+    const listeners = new Set<() => void>();
+    Object.defineProperty(dom.dom.window, "matchMedia", { configurable: true, value: (query: string) => ({
+      matches: query === "(max-width: 1099px)" && mobile,
+      addEventListener: (_event: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_event: string, listener: () => void) => listeners.delete(listener),
+    }) });
+    globalThis.fetch = async () => { calls++; return json(answer([entry("retained", NOW - 1000)])); };
+    const panel = (name: string) => dom.container.querySelector<HTMLElement>(`[id$="-panel-${name}"]`)!;
+    const tab = (name: string) => dom.container.querySelector<HTMLButtonElement>(`[id$="-tab-${name}"]`)!;
+    try {
+      await dom.render(createElement(PerpsScreen, props));
+      assert.equal(panel("radar").hidden, false);
+      assert.equal(panel("positions").hidden, true);
+      assert.equal(panel("playbook").hidden, true);
+      assert.equal(tab("positions").getAttribute("aria-label"), "Positions · positions unknown");
+      const originalRow = dom.container.querySelector<HTMLButtonElement>(".perps-entry-row")!;
+      await act(async () => { originalRow.click(); tab("positions").click(); });
+      assert.equal(panel("radar").hidden, true);
+      assert.equal(panel("positions").hidden, false);
+      assert.match(panel("positions").textContent ?? "", /Current positions are unknown/);
+      await act(async () => { tab("positions").dispatchEvent(new dom.dom.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); });
+      assert.equal(panel("playbook").hidden, false);
+      assert.equal(tab("playbook").getAttribute("aria-selected"), "true");
+      assert.equal(dom.dom.window.document.activeElement, tab("playbook"));
+      await act(async () => { tab("radar").click(); });
+      assert.equal(dom.container.querySelector(".perps-entry-row"), originalRow, "view navigation must not remount the owner chart");
+      assert.equal(originalRow.getAttribute("aria-pressed"), "true");
+      assert.equal(calls, 1, "view navigation must not reset the fill baseline or refetch");
+      await act(async () => { mobile = false; for (const listener of listeners) listener(); });
+      assert.equal(dom.container.querySelector(".perps-mobile-dock"), null);
+      for (const name of ["radar", "positions", "playbook"]) assert.equal(panel(name).hidden, false, "desktop keeps all three sections visible");
+    } finally { globalThis.fetch = original; await dom.close(); }
+  });
+
+  it("resets mobile navigation and removes hidden private entries when the owner signs out", async () => {
+    const dom = testDom();
+    const original = globalThis.fetch;
+    Object.defineProperty(dom.dom.window, "matchMedia", { configurable: true, value: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }) });
+    globalThis.fetch = async () => json(answer([entry("private", NOW - 1000)]));
+    try {
+      await dom.render(createElement(PerpsScreen, props));
+      await act(async () => { dom.container.querySelector<HTMLButtonElement>('[id$="-tab-playbook"]')!.click(); });
+      await dom.render(createElement(PerpsScreen, { ...props, ownerKey: null }));
+      assert.equal(dom.container.querySelector(".perps-screen")?.getAttribute("data-mobile-view"), "radar");
+      assert.equal(dom.container.querySelectorAll(".perps-entry-row").length, 0);
+      assert.match(dom.container.querySelector('[id$="-panel-positions"]')?.textContent ?? "", /Only the owner can access/);
     } finally { globalThis.fetch = original; await dom.close(); }
   });
 });

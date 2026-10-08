@@ -189,6 +189,8 @@ export class LighterApiArgumentError extends Error {
 }
 
 export interface RequestFlags {
+  /** Internal synchronous authority fence, rechecked immediately before HTTP. */
+  beforeSendGuard?: () => void;
   /** Absolute local send deadline; checked immediately before starting HTTP. */
   notAfterMs?: number;
   /**
@@ -530,6 +532,7 @@ export function createLighterApi(opts: LighterApiOptions) {
     if (flags.notAfterMs !== undefined && (!Number.isSafeInteger(flags.notAfterMs) || flags.notAfterMs <= 0 || now() >= flags.notAfterMs)) {
       throw new LighterApiArgumentError("notAfterMs", "the request expired before send");
     }
+    flags.beforeSendGuard?.();
     let res: Awaited<ReturnType<LighterFetch>>;
     try {
       res = await fetchFn(url, { method: spec.method, headers, body, signal, redirect: "error" });

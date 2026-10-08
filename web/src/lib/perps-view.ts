@@ -188,6 +188,10 @@ export interface FeedPerpRow {
   unrealized_usdg: number | null;
   stop_trigger: string | null;
   funding_usdg: number | null;
+  /** Immutable entry profile restored from the position ledger. */
+  entry_style?: PerpsReportPosition["entryStyle"];
+  style_opened_at_sec?: number;
+  hold_deadline_sec?: number;
 }
 
 /**
@@ -260,6 +264,9 @@ function feedRow(p: PerpsReportPosition, paper: boolean): FeedPerpRow {
     unrealized_usdg: usd(micro(p.unrealizedMicro)),
     stop_trigger: p.stopTrigger,
     funding_usdg: usd(micro(p.fundingMicro)),
+    ...(p.entryStyle !== undefined && p.styleOpenedAtSec !== undefined && p.holdDeadlineSec !== undefined
+      ? { entry_style: p.entryStyle, style_opened_at_sec: p.styleOpenedAtSec, hold_deadline_sec: p.holdDeadlineSec }
+      : {}),
   };
 }
 

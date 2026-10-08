@@ -501,3 +501,13 @@ test("clockSkewMs: the venue's Date minus ours, mid-second, from the last dated 
   assert.equal(a.clockSkewMs(), null);
   assert.equal(a.clockSkewMs(60 * 60_000), 3_200);
 });
+
+test("entry authority veto runs at the HTTP boundary without exposing a signed packet", async () => {
+  const f = fake(() => json(200, {}));
+  let checked = 0;
+  await assert.rejects(async () => api(f.fn).sendTx(TX, { beforeSendGuard: () => {
+    checked++; throw new Error("owner configuration changed");
+  } }), /owner configuration changed/);
+  assert.equal(checked, 1);
+  assert.equal(f.calls.length, 0);
+});

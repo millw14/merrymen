@@ -1433,7 +1433,7 @@ const PERP_FUNDING_COLS = [
 const PERP_CARRY_COLS = ["agent_id", "mode", "epoch", "market_id", "side", "base", "mark_price", "entry_quote_micro", "created_at"] as const;
 /** Every perp_orders column EXCEPT tx_info. */
 const PERP_ORDER_COLS = [
-  "id", "agent_id", "mode", "epoch", "account_index", "api_key_index", "nonce", "tx_hash", "tx_type", "expired_at", "send_not_after_ms",
+  "id", "agent_id", "mode", "epoch", "account_index", "api_key_index", "nonce", "tx_hash", "tx_type", "expired_at", "send_not_after_ms", "entry_context",
   "status", "effect", "reduce_only", "market_id", "worst_notional_micro", "filled_base", "filled_quote_micro",
   "decision_id", "reason", "created_at", "resolved_at", "updated_at",
 ] as const;

@@ -6,7 +6,8 @@
  * Its own module so it can be rendered and read in a test without the whole
  * desk: every sentence here is a claim about somebody's leveraged money.
  */
-import { perpsBlockerText } from "@merrymen/core";
+import { getPerpsStyle, perpsBlockerText } from "@merrymen/core";
+import { fullDateTime } from "../lib/format";
 import { whenOf } from "./clock";
 import { coinPrice, money, type DeskPerpRow, type DeskPerps } from "./live";
 
@@ -132,7 +133,7 @@ export function PerpsPanel({ perps, nowMs = Date.now(), onClose, onFlatten, busy
         </p>
       )}
       {perps.rows.map((r) => (
-        <PerpRow key={`${r.market}:${r.side}`} r={r} onClose={onClose} busy={busy} />
+        <PerpRow key={`${r.market}:${r.side}`} r={r} onClose={onClose} busy={busy} stale={perps.stale || !perps.venueRead} />
       ))}
       {perps.stopsMissing > 0 && (
         <p className="desk-perps-note is-warn">
@@ -151,7 +152,9 @@ export function PerpsPanel({ perps, nowMs = Date.now(), onClose, onFlatten, busy
   );
 }
 
-function PerpRow({ r, onClose, busy }: { r: DeskPerpRow; onClose?: (market: string) => void; busy: boolean }) {
+function PerpRow({ r, onClose, busy, stale }: { r: DeskPerpRow; onClose?: (market: string) => void; busy: boolean; stale: boolean }) {
+  const entryStyle = r.entryStyle ? getPerpsStyle(r.entryStyle) : null;
+  const hasEntryPlan = entryStyle && r.styleOpenedAtSec !== undefined && r.holdDeadlineSec !== undefined;
   const liq =
     r.liqPrice === null
       ? "no liquidation price read"
@@ -174,6 +177,11 @@ function PerpRow({ r, onClose, busy }: { r: DeskPerpRow; onClose?: (market: stri
         <small>margin {money(r.marginUsd)}</small>
       </span>
       {onClose && <button type="button" disabled={busy} onClick={() => onClose(r.market)}>Close {r.market}</button>}
+      {hasEntryPlan ? <small className="desk-perp-provenance">
+        <strong>{entryStyle.label} · {entryStyle.timeframe} candles</strong>
+        <span>{stale ? "Last recorded entry plan" : "Recorded entry plan"} · started {fullDateTime(r.styleOpenedAtSec! * 1000)}</span>
+        <span>Time-exit target {fullDateTime(r.holdDeadlineSec! * 1000)}. Requires a fresh market read; this is not a confirmed close.</span>
+      </small> : null}
       <small className="desk-perp-risk">
         {liq} · {r.stopTrigger === null ? "no stop seen" : `stop ${venuePrice(r.stopTrigger)}`} ·{" "}
         {r.fundingUsd === null ? "funding not read" : `funding ${signedMoney(r.fundingUsd)}`}

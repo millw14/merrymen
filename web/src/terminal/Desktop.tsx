@@ -53,7 +53,8 @@ export function DesktopHeader({
   onScreen,
   onTab,
   mode,
-}: Actions & { hasAgent?: boolean; mine: LiveMine; mode: "spot" | "perps" }) {
+  modePending = false,
+}: Actions & { hasAgent?: boolean; mine: LiveMine; mode: "spot" | "perps"; modePending?: boolean }) {
   const accountMenu = useRef<HTMLDetailsElement>(null);
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
   // The desktop's way into the group chat; hidden where the install has no room.
@@ -81,7 +82,7 @@ export function DesktopHeader({
           <Search size={17} />
           <span>Search tokens or agents</span>
         </button>
-        <TradingModeToggle compact mode={mode} onChange={(next) => onScreen(next === "perps" ? { kind: "perps" } : { kind: "tab", tab: "home" })} />
+        <TradingModeToggle compact mode={mode} pending={modePending} onChange={(next) => onScreen(next === "perps" ? { kind: "perps" } : { kind: "tab", tab: "feed" })} />
       </div>
       <div className="desktop-header-account">
         {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}

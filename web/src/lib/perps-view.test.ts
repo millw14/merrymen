@@ -379,3 +379,12 @@ describe("small pieces", () => {
     assert.equal(exposureFromStatus({ exists: true, grant: {}, perps: null }, NOW)?.kind, "none");
   });
 });
+
+it("preserves immutable position profile metadata while legacy positions remain absent", () => {
+  const report: PerpsReport = { ...LIVE, positions: [{ ...LIVE.positions[0], entryStyle: "scalp-breakout", styleOpenedAtSec: 100, holdDeadlineSec: 1900 }] };
+  const row = perpsFeedOf({ state: "ok", report }, NOW).perps![0];
+  assert.equal(row.entry_style, "scalp-breakout");
+  assert.equal(row.style_opened_at_sec, 100);
+  assert.equal(row.hold_deadline_sec, 1900);
+  assert.equal("entry_style" in perpsFeedOf({ state: "ok", report: LIVE }, NOW).perps![0], false);
+});

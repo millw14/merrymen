@@ -571,6 +571,38 @@ still required, so this is not a guaranteed fill time. Existing stops remain
 in force. Legacy positions without style provenance keep the original
 strategy behavior; the worker never invents their entry profile.
 
+The deterministic route binds each new entry to the owner/agent configuration
+used to produce it. A driver, profile, authority or cap change during an
+awaited decision or executor review refuses that pending entry before paper
+settlement or live submission. Signal freshness also becomes a persisted
+`send_not_after_ms` bound on live orders, so recovery cannot re-send a signal
+after its own candle evidence has expired. This adds restrictions; it never
+widens signed permissions or the existing risk limits.
+
+Prepared live opening orders persist an immutable `entry_context` fingerprint of
+the active owner/grant, execution rail, trading settings and Brain configuration.
+Recovery compares that fingerprint before every replay, after an awaited hosted
+lease check and immediately before HTTP. Switching profiles, selecting manual or
+withdrawing live authority prevents old prepared entries from being broadcast.
+Legacy opening rows without a binding are reconciled but never replayed; existing
+reduce-only exits retain their signed-expiry and owner-deadline behavior.
+
+Worker position reports include optional `entryStyle`, `styleOpenedAtSec`
+and `holdDeadlineSec` from the durable entry lifecycle, not from the owner's
+currently selected profile. Older reports retain their existing shape;
+unknown optional profile metadata cannot hide an actual position.
+
+Operational verification uses real worker/feed parsing, route, sizing,
+policy, paper settlement, durable ledger and report code with synthetic
+market fixtures for all nine profiles. Each fixture opens an eligible measured
+breakout, reads back its entry profile and deadline, switches to manual,
+closes on the protective deadline and checks that another pass cannot replay
+the settlement. Separate fake-venue live tests verify persisted signal expiry,
+profile restoration and report propagation. These are integration simulations,
+not historical profitability tests or evidence that a production account is
+funded, authorized or receiving a healthy live feed.
+
+
 
 ### Autonomous operation after setup
 
@@ -608,6 +640,19 @@ required before claiming the live venue lifecycle has been verified.
 
 ### Surfaces
 
+- **Spot / Perps switch** — Spot returns to the original feed at `/`; its
+  Perps toggle opens `/perps`. The entrance animation is claimed once per
+  authenticated owner by `POST /api/perps/intro`, using an atomic database
+  insert (hosted) or exclusive file creation (local). The owner comes from the
+  verified session; another account cannot consume its claim. Claims survive
+  restarts and are shared across devices. Reduced-motion users skip the
+  animation, and unavailable preference storage never blocks navigation.
+  `/perps-lab/radar?intro=1` explicitly previews it with fictional data without
+  changing the account's claim.
+- **Small-screen desk** — a floating Radar / Positions / Playbook dock shows
+  one panel at a time. Switching panels preserves the chart selection and
+  entry history; the Positions badge distinguishes unknown, stale and alert
+  states. The original site's navigation returns with Spot.
 - **Settings** — a "Perpetuals" section with the consent and attestation of
   rule 1, the fields below, each market's reachability under the signed cap,
   and the grant status; dashboard-only (`DASHBOARD_ONLY.perps`).

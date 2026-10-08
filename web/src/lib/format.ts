@@ -336,12 +336,13 @@ export function pctBps(bps: number | null): string {
 
 /** Exact nonnegative venue decimal: preserve every fractional digit without conversion through Number. */
 export function usdExact(value: string | null): string {
-  if (value === null || !/^\d+(?:\.\d+)?$/.test(value)) return DASH;
-  const [whole, fraction] = value.split(".");
+  if (value === null || !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) return DASH;
+  const [whole, rawFraction] = value.split(".");
+  const fraction = rawFraction || undefined;
   // Intl supplies grouping, decimal separator and currency placement. A single
   // placeholder fraction is replaced with the original venue digits verbatim.
   return nf({ ...USD, minimumFractionDigits: fraction === undefined ? 0 : 1, maximumFractionDigits: fraction === undefined ? 0 : 1 })
-    .formatToParts(BigInt(whole!))
+    .formatToParts(BigInt(whole || "0"))
     .map((part) => part.type === "fraction" ? fraction! : part.value).join("");
 }
 

@@ -259,8 +259,11 @@ describe("exact venue prices and UTC chart labels", () => {
     assert.equal(usdExact("9007199254740993.12345678901234567800"), "$9,007,199,254,740,993.12345678901234567800");
     assert.equal(usdExact("0.00000000000000000001"), "$0.00000000000000000001");
     assert.equal(usdExact("100.00"), "$100.00");
+    assert.equal(usdExact(".5000"), "$0.5000");
+    assert.equal(usdExact("1."), "$1");
+    assert.equal(usdExact(".00000000000000000001"), "$0.00000000000000000001");
     assert.equal(usdExact("0"), "$0");
-    for (const bad of [null, "", "NaN", "1e-8", "-1", "1.2.3"]) assert.equal(usdExact(bad), DASH);
+    for (const bad of [null, "", ".", "NaN", "1e-8", "-1", "-.5", "1.2.3"]) assert.equal(usdExact(bad), DASH);
   });
   it("uses the reader's decimal separator and currency placement", () => {
     const original = Object.getOwnPropertyDescriptor(globalThis, "document");

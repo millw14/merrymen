@@ -174,3 +174,9 @@ export function chartResponse(q: ChartQuery, state: ChartState = "unreadable", g
     candles: { state: "unreadable", bars: [], gaps: [], stale: true, asOfMs: null },
     entries: [], unknownFills: 0, truncated: false };
 }
+
+/** Do not cache a just-closed candle's publication delay for a whole 4h window. */
+export function chartCandleCacheMs(rows: readonly MarkCandle[], stepMs: number, nowMs: number): number {
+  const expected = Math.floor(nowMs / stepMs) * stepMs - stepMs;
+  return rows.some(bar => bar.tMs === expected) ? stepMs : 30_000;
+}

@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
 
-const saved = { hosted: process.env.MERRYMEN_HOSTED, home: process.env.MERRYMEN_HOME };
+import { mintSession } from "@/lib/auth";
+import { resetGrantStoreForTest } from "@merrymen/grant-store";
+const envKeys = ["MERRYMEN_HOSTED", "MERRYMEN_HOME", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_STORE_DEK"] as const;
+const saved = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
 let home: string;
 let GET: (req: Request) => Promise<Response>;
 const url = "http://localhost/api/perps/chart?market=BTC-PERP&book=paper&window=24h";
@@ -15,14 +18,20 @@ const AGENT = "0xa6e17a1b2c3d4e5f60718293a4b5c6d7e8f90124";
 before(async () => {
   home = await mkdtemp(path.join(tmpdir(), "mm-perp-chart-"));
   process.env.MERRYMEN_HOME = home;
+  process.env.MERRYMEN_SESSION_SECRET = "a".repeat(64);
+  delete process.env.DATABASE_URL;
+  delete process.env.MERRYMEN_STORE_DEK;
+  resetGrantStoreForTest();
   ({ GET } = await import("./route"));
 });
 
 after(async () => {
-  for (const [key, value] of [["MERRYMEN_HOSTED", saved.hosted], ["MERRYMEN_HOME", saved.home]] as const) {
+  for (const key of envKeys) {
+    const value = saved[key];
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+  resetGrantStoreForTest();
   await rm(home, { recursive: true, force: true });
 });
 
@@ -101,6 +110,21 @@ describe("GET /api/perps/chart owner perimeter", () => {
       assert.deepEqual(body.entries.map((e: Record<string, unknown>) => [e.id, e.priceExact, e.timeMs]),
         [["2:own-fill:bid", "83218.6", fillAt]]);
       assert.deepEqual(calls, ["/api/v1/orderBookDetails", "/api/v1/markPriceCandles"]);
+      // Hosted identity comes from the signed session → grant-store mapping,
+      // even though both accounts share the same public candle-cache entry.
+      process.env.MERRYMEN_HOSTED = "1";
+      const owners = ["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "0xcccccccccccccccccccccccccccccccccccccccc"] as const;
+      await mkdir(path.join(home, "tenants"));
+      for (let i = 0; i < owners.length; i++) await writeFile(path.join(home, "tenants", `${owners[i]}.json`), JSON.stringify({
+        tenant: owners[i], grant: { smartAccount: i === 0 ? AGENT : "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, sealedSessionKey: "0x01", updatedAt: 1,
+      }));
+      for (let i = 0; i < owners.length; i++) {
+        const hosted = await (await GET(new Request(url, { headers: { cookie: `mm_session=${mintSession(owners[i])}` } }))).json() as Record<string, any>;
+        assert.equal(hosted.state, "ok");
+        assert.deepEqual(hosted.entries.map((entry: { id: string }) => entry.id), [i === 0 ? "2:own-fill:bid" : "2:other-agent:bid"]);
+      }
+      assert.deepEqual(calls, ["/api/v1/orderBookDetails", "/api/v1/markPriceCandles"], "only public candles and specs are shared between tenants");
+      delete process.env.MERRYMEN_HOSTED;
       candlesUnavailable = true;
       // A same-window read is correctly served from the shared public candle
       // cache. Change window to force a distinct venue read while keeping the

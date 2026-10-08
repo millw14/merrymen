@@ -124,7 +124,7 @@ import {
   type PerpTickUnread,
 } from "./executor";
 import type { LivePerpExecutor } from "./executor-live";
-import type { LighterFeedRead } from "./feed-reader";
+import { FEED_CANDLE_GRACE_MS, type LighterFeedRead } from "./feed-reader";
 import { persistIncident, type Incident } from "./incident";
 import { openLiveHandle, type LiveHandle, type LiveHandleStore, type LiveSignerLike } from "./live-handle";
 import type { LivePerpTerm } from "./live-term";
@@ -750,6 +750,8 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   let agentKey: string | null = null;
   const brainReview = new PerpsBrainReview(deps.now);
   const brainPermits = new WeakMap<object, PerpsBrainApproval>();
+  const trendPermits = new WeakMap<object, { context: string; notAfterMs: number }>();
+  const trendContext = (a: PerpLaneAgent, settings = deps.config()) => brainFingerprint({ agent: a, settings });
   const brainContext = (a: PerpLaneAgent) => brainFingerprint({ agent: a, settings: deps.config(), brain: deps.brain?.configKey() ?? "unconfigured" });
   let brainNotice: string | null = null;
   // A failed halt write must still prevent entries in this process. Kept
@@ -1304,6 +1306,11 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       smartAccount: a.smartAccount,
       accountIndex: idx,
       sealedPubKey: sealed,
+      entryContext: () => {
+        const current = deps.armed();
+        return current?.agentId.toLowerCase() === a.agentId.toLowerCase() && isLiveRailOn(current)
+          ? brainFingerprint({ agent: current, settings: deps.config(), execution: deps.execMode(), brain: deps.brain?.configKey() ?? "unconfigured" }) : null;
+      },
       home: L.home(),
       api: L.api(a.smartAccount),
       publicApi: L.publicApi(),
@@ -2400,7 +2407,21 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     // Approval remains bound after queue/DB waits. Its deadline is persisted by
     // the executor, so a submitted row cannot replay after research expires.
     const brainPermit = brainPermits.get(intent);
-    let beforeBrainSend: (() => void) | undefined;
+    let beforeEntryCommit: (() => void) | undefined;
+    const trendPermit = trendPermits.get(intent);
+    if (trendPermit && intent.kind === "perp-order" && intent.effect === "open") {
+      beforeEntryCommit = () => {
+        const currentAgent = agentNow();
+        if (!currentAgent || currentAgent.agentId !== a.agentId || trendContext(currentAgent) !== trendPermit.context)
+          throw new PerpRefused("perp-style-changed", "the owner changed the trading configuration before execution; this entry needs a fresh signal decision");
+        if (deps.now() >= trendPermit.notAfterMs)
+          throw new PerpRefused("perp-signal-expired", "the profile's candle evidence expired before execution; this entry needs a fresh signal decision");
+      };
+      try { beforeEntryCommit(); } catch (e) { return refuse(intent, refusalOf(e), "profile"); }
+      // Persist the signal deadline on the order before signing; a crash cannot
+      // turn an expired signal into authority to send an old prepared order.
+      opts = { ...opts, notAfterMs: Math.min(opts.notAfterMs ?? Infinity, trendPermit.notAfterMs) };
+    }
     if (brainPermit !== undefined && intent.kind === "perp-order" && intent.effect === "open") {
       const mark = r.view?.markets.get(intent.market)?.markPrice;
       const reference = BigInt(brainPermit.request.mark_price);
@@ -2412,7 +2433,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       if (!currentEvidence || !brainMarketStillQualified(brainPermit.request, currentEvidence, brainPermit.response) || brainContext(a) !== brainPermit.context || !validatePerpsBrainResponse(brainPermit.response, brainPermit.request, deps.now()) ||
           mark === undefined || drift * 10_000n > reference * BigInt(PERPS_BRAIN_MAX_DRIFT_BPS))
         return refuse(intent, { rule: "perp-brain-expired", detail: "the Brain review is no longer current; the next entry needs a fresh review" }, "brain");
-      beforeBrainSend = () => {
+      beforeEntryCommit = () => {
         const now = deps.now(), currentAgent = agentNow();
         const news = deps.brain?.news?.(intent.market, now);
         if (!currentAgent || currentAgent.agentId !== a.agentId || brainContext(currentAgent) !== brainPermit.context ||
@@ -2462,9 +2483,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       const lr = liveRead;
       const liveHolds = lr?.view?.positions.get(intent.market) !== undefined;
       const paperHolds = r.view?.positions.get(intent.market) !== undefined;
-      if (liveHolds && !paperHolds && lr !== null) return executeLive(a, intent, stateFor, lr, opts.notAfterMs, beforeBrainSend);
+      if (liveHolds && !paperHolds && lr !== null) return executeLive(a, intent, stateFor, lr, opts.notAfterMs, beforeEntryCommit);
     }
-    if (r.bookMode === "live") return executeLive(a, intent, stateFor, r, opts.notAfterMs, beforeBrainSend);
+    if (r.bookMode === "live") return executeLive(a, intent, stateFor, r, opts.notAfterMs, beforeEntryCommit);
 
     const epoch = await deps.store.getAgentEpoch(a.agentId);
     const ex = executorFor(a, epoch);
@@ -2490,9 +2511,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
 
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
     const done = await reservePlaceCount(intent, spend, () => {
-      beforeBrainSend?.();
+      beforeEntryCommit?.();
       return ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs: opts.notAfterMs,
-        ...(beforeBrainSend ? { beforeCommit: beforeBrainSend } : {}) });
+        ...(beforeEntryCommit ? { beforeCommit: beforeEntryCommit } : {}) });
     });
     if (!done.ok) return done.out;
     const placed = done.placed;
@@ -2518,7 +2539,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     stateFor: (read: PerpLaneRead, legs?: boolean) => Promise<AgentState>,
     r: PerpLaneRead,
     notAfterMs?: number,
-    beforeBrainSend?: () => void,
+    beforeEntryCommit?: () => void,
   ): Promise<PerpOutcome> {
     const side = live;
     const exit = intent.effect !== "open";
@@ -2612,9 +2633,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
     const fresh = side.snap !== null && deps.now() - side.snap.atMs <= LIVE_LANE_TIMING.lightMaxAgeMs ? side.snap.account : null;
     const done = await reservePlaceCount(intent, spend, () => {
-      beforeBrainSend?.();
+      beforeEntryCommit?.();
       return ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs,
-        ...(fresh !== null ? { venue: fresh } : {}), ...(beforeBrainSend ? { beforeCommit: beforeBrainSend } : {}) });
+        ...(fresh !== null ? { venue: fresh } : {}), ...(beforeEntryCommit ? { beforeCommit: beforeEntryCommit } : {}) });
     });
     if (!done.ok) return done.out;
     const placed = done.placed as PerpPlaceResult & { tx?: { txHash: string } };
@@ -3058,6 +3079,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     const r = tickRead;
     if (r === null || !r.active) return;
     const cfg = deps.config();
+    const profileContext = trendContext(a, cfg);
     // ONE WRITER PER BOOK: `strategist` without a real model behind it is
     // nobody, so it is manual — never a fall back to perp-trend.
     const driver = cfg.perpsDriver === "strategist" && !t.strategistLive ? "manual" : cfg.perpsDriver;
@@ -3131,6 +3153,11 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       if (claim !== null && !claim.ok) {
         await hooks.withholdEntry();
         continue;
+      }
+      if (entry && driver === "perp-trend" && out.entryCandleT !== null) {
+        const profile = getPerpsStyle(cfg.perpsStyle);
+        trendPermits.set(intent, { context: profileContext,
+          notAfterMs: out.entryCandleT + 2 * profile.candleMs + Math.min(FEED_CANDLE_GRACE_MS, profile.candleMs / 2) });
       }
       const brainEntry = entry && driver === "brain" ? approval : null;
       if (brainEntry !== null) {

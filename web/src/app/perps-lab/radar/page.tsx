@@ -4,6 +4,10 @@ import "../../../terminal/perps-mode.css";
 import "../../../terminal/perps-chart.css";
 import "../../../terminal/perps-doctrines.css";
 import "../../../terminal/trading-mode-toggle.css";
+import "../../../terminal/perps-entrance.css";
 import "./radar-preview.css";
 export const metadata: Metadata = { title: "Tactical Radar · Merrymen", description: "Interactive Tactical Radar design preview. Fictional positions and prices.", robots: { index: false, follow: false } };
-export default function RadarPreviewPage() { return <RadarPreview />; }
+export default async function RadarPreviewPage({ searchParams }: { searchParams: Promise<{ intro?: string }> }) {
+  const query = await searchParams;
+  return <RadarPreview previewEntrance={query.intro === "1"} />;
+}

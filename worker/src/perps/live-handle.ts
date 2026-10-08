@@ -101,6 +101,8 @@ export interface LiveHandleDeps {
   executorTuning?: { sleep?: (ms: number) => Promise<void>; txPollDelaysMs?: readonly number[] };
   /** A retained-key runner may only close, cancel and withdraw. */
   standdownOnly?: boolean;
+  /** Current active owner/grant/settings fingerprint; null denies entry replay. */
+  entryContext?: () => string | null;
   /** Absolute job expiry; checked again after the lease validation awaits. */
   deadlineMs?: number;
   /** Hosted runner lease/generation check, immediately before any send. */
@@ -181,6 +183,7 @@ export function guardedStanddownApi(
         marketId: Number.isSafeInteger(packet?.MarketIndex) && Number(packet.MarketIndex) >= 0 && Number(packet.MarketIndex) <= 65_535 ? Number(packet.MarketIndex) : null,
         reduceOnly: packet?.ReduceOnly === 1 };
       const check = () => {
+        flags?.beforeSendGuard?.();
         if (ctx?.signal.aborted) throw new Error("the stand-down call ended before send");
         for (const deadline of [ctx?.deadlineMs, flags?.notAfterMs]) {
           if (deadline !== undefined && (!Number.isSafeInteger(deadline) || deadline <= 0 || d.now() >= deadline)) {
@@ -279,6 +282,7 @@ export async function openLiveHandle(d: LiveHandleDeps): Promise<LiveHandleOpen>
     now: d.now,
     clockSkewMs: () => d.api.clockSkewMs(),
     sendNotAfterMs: () => sendContext.getStore()?.deadlineMs,
+    entryContext: d.entryContext,
     decimals: () => lastDecimals,
     ...(d.executorTuning?.sleep !== undefined ? { sleep: d.executorTuning.sleep } : {}),
     ...(d.executorTuning?.txPollDelaysMs !== undefined ? { txPollDelaysMs: d.executorTuning.txPollDelaysMs } : {}),

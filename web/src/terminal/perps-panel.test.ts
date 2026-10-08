@@ -180,3 +180,20 @@ describe("perpetual exit controls", () => {
     }
   });
 });
+
+
+describe("recorded entry doctrine", () => {
+  it("shows the ledger's plan and identifies stale targets as unconfirmed", () => {
+    const row = { ...ROW, entryStyle: "scalp-breakout" as const, styleOpenedAtSec: 1_790_600_000, holdDeadlineSec: 1_790_601_800 };
+    const current = html(desk({ rows: [row] }));
+    assert.match(current, /Scalp breakout · 5m candles/);
+    assert.match(current, /Recorded entry plan/);
+    assert.match(current, /Time-exit target/);
+    assert.match(current, /Requires a fresh market read; this is not a confirmed close/);
+    for (const state of [{ stale: true }, { venueRead: false }]) assert.match(html(desk({ ...state, rows: [row] })), /Last recorded entry plan/);
+  });
+  it("omits legacy entry plans rather than assuming today's selected doctrine", () => {
+    const legacy = html(desk());
+    assert.doesNotMatch(legacy, /entry plan|Time-exit target|Swing trend|Scalp breakout/);
+  });
+});

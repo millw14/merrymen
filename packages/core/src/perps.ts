@@ -1313,7 +1313,14 @@ export function custodySentence(exposure: PerpExposure, opts?: { recover?: strin
 
 // ── the report the worker writes and the web reads ──────────────────────────
 
+import { getPerpsStyle, isPerpsStyle, type PerpsStyleId } from "./perps-styles";
+
 export interface PerpsReportPosition {
+  /** Immutable entry profile recovered from the position's durable fills. */
+  entryStyle?: PerpsStyleId;
+  styleOpenedAtSec?: number;
+  /** Requests a reduce-only close; not a promised fill time. */
+  holdDeadlineSec?: number;
   market: PerpKey;
   side: PerpSide;
   /** Venue values rendered in the market's own decimals, e.g. "0.00020". */
@@ -1384,6 +1391,14 @@ const isAccountIndex = (x: unknown): x is number => typeof x === "number" && Num
 const isFiniteNumber = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isLeverage = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x > 0;
 
+/** Optional profile metadata cannot make known exposure disappear when a newer producer adds an unknown profile. */
+export function perpsPositionStyleReport(entryStyle: unknown, openedAtSec: unknown): Pick<PerpsReportPosition, "entryStyle" | "styleOpenedAtSec" | "holdDeadlineSec"> {
+  if (!isPerpsStyle(entryStyle) || typeof openedAtSec !== "number" || !Number.isSafeInteger(openedAtSec) || openedAtSec <= 0) return {};
+  const deadline = openedAtSec + getPerpsStyle(entryStyle).maxHoldHours * 3600;
+  if (!Number.isSafeInteger(deadline)) return {};
+  return { entryStyle, styleOpenedAtSec: openedAtSec, holdDeadlineSec: deadline };
+}
+
 function parsePosition(raw: unknown): PerpsReportPosition | Bad {
   if (!isRecord(raw)) return BAD;
   // Shape, not membership: a report naming a market this build does not list
@@ -1408,7 +1423,9 @@ function parsePosition(raw: unknown): PerpsReportPosition | Bad {
   ) {
     return BAD;
   }
+  const style = perpsPositionStyleReport(raw.entryStyle, raw.styleOpenedAtSec);
   return {
+    ...(style.holdDeadlineSec === raw.holdDeadlineSec ? style : {}),
     market: raw.market as PerpKey,
     side: raw.side,
     baseAmount: raw.baseAmount,

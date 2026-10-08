@@ -1320,6 +1320,20 @@ describe("parsePerpsReport is a strict whitelist", () => {
     for (const j of junk) assert.equal(parsePerpsReport(j), null, JSON.stringify(j, (_k, v) => (v === undefined ? "<undef>" : v)));
   });
 
+  it("reports immutable profile deadlines and keeps exposure when optional metadata is unknown", () => {
+    const annotated = { ...full.positions[0], entryStyle: "scalp-breakout", styleOpenedAtSec: 1000, holdDeadlineSec: 2800 };
+    const parsed = parsePerpsReport({ ...full, positions: [annotated] });
+    assert.equal(parsed?.positions[0]?.entryStyle, "scalp-breakout");
+    assert.equal(parsed?.positions[0]?.holdDeadlineSec, 2800);
+    for (const bad of [{ entryStyle: "future-profile" }, { holdDeadlineSec: 999999 }, { styleOpenedAtSec: -1 }, { styleOpenedAtSec: 0 }, { styleOpenedAtSec: "1000" }]) {
+      const p = parsePerpsReport({ ...full, positions: [{ ...annotated, ...bad }] });
+      assert.ok(p);
+      assert.equal(p.positions.length, 1);
+      assert.equal(p.positions[0]?.entryStyle, undefined);
+      assert.equal(p.positions[0]?.baseAmount, annotated.baseAmount);
+    }
+  });
+
   it("every mode and blocker is accepted", () => {
     for (const mode of ["off", "paper", "live", "refuse"] as const) assert.equal(parsePerpsReport({ ...full, mode })?.mode, mode);
     for (const blocker of PERP_BLOCKERS) assert.equal(parsePerpsReport({ ...full, blocker })?.blocker, blocker);

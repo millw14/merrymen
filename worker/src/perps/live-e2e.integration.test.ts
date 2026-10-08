@@ -428,11 +428,11 @@ async function agentState(w: World, equityUsdg: bigint, equityKnown: boolean): P
 }
 
 /** index.ts ensureDecision's contract: mint an id, write the row with the provenance its Why gives. */
-async function decide(agentId: string, intent: TradeIntent, source: string, reason?: string, known?: { whyCode?: string }) {
+async function decide(agentId: string, intent: TradeIntent, source: string, reason?: string, known?: { whyCode?: string; evidence?: string }) {
   if (intent.decisionId) return { ok: true as const };
   const id = store.newDecisionId();
   intent.decisionId = id;
-  await store.addDecision({ id, agent_id: agentId, source, ...(reason !== undefined ? { reason } : {}), provenance: provenanceOf(source, known?.whyCode) });
+  await store.addDecision({ id, agent_id: agentId, source, ...(reason !== undefined ? { reason } : {}), provenance: provenanceOf(source, known?.whyCode), evidence_json: known?.evidence });
   return { ok: true as const };
 }
 
@@ -509,7 +509,7 @@ function hooks(w: World) {
       if (c?.ok) w.energy.refunded += 1;
     },
     withholdEntry: async () => {},
-    ensureDecision: (i: TradeIntent, s: string, r?: string, k?: { whyCode?: string }) => decide(w.id, i, s, r, k),
+    ensureDecision: (i: TradeIntent, s: string, r?: string, k?: { whyCode?: string; evidence?: string }) => decide(w.id, i, s, r, k),
     // processIntentReporting → processIntentLocked: the lane for an L2 perp
     // intent, the UserOp arm for an on-chain leg (index.ts's own fork).
     processIntentReporting: (i: TradeIntent) =>
@@ -651,6 +651,7 @@ describe("live perps, end to end, on one account", () => {
     const o = liveOrders(w).filter((x) => x.effect === "open");
     assert.equal(o.length, 1);
     assert.equal(o[0]!.tx_type, 28, "entry and stop in one tx (rule 7)");
+    assert.equal(o[0]!.send_not_after_ms, LAST_T + 2 * H4 + 15 * 60_000, "signal expiry is persisted before venue submission");
     const legs = rows("SELECT role FROM perp_order_legs WHERE order_id = ? ORDER BY client_order_index", o[0]!.id as string).map((x) => x.role);
     assert.deepEqual(legs, ["entry", "sl"]);
     assert.deepEqual(venue.violations, [], "every byte the venue saw was already on a row (rule 9)");
@@ -670,6 +671,12 @@ describe("live perps, end to end, on one account", () => {
     assert.equal(liveOrders(w).find((x) => x.effect === "open")!.status, "filled");
     const pos = (await store.getPerpPositions(w.id, "live")).find((p) => p.marketId === 1)!;
     assert.ok(pos.stopTrigger !== null && pos.stopTrigger < mark, "the stop the open carried is recorded on its position");
+    const facts = await store.perpLaneLedgerFacts(w.id, "live", 0);
+    assert.equal(facts.positionStyles.get(1), "swing-trend", "live filled orders retain exact deterministic profile provenance");
+    assert.equal(facts.lastEntrySignals.get(1)?.candleT, LAST_T);
+    const read = await tick(w, { route: false });
+    assert.equal(read.report.positions[0]?.entryStyle, "swing-trend");
+    assert.equal(read.report.positions[0]?.holdDeadlineSec, facts.positionStyleOpenedAt.get(1)! + 168 * 3600);
   });
 
   it("equity is C + ΣM + ΣU, with no drop at zero move", async () => {
@@ -1218,6 +1225,30 @@ describe("a local commit followed by a failed hosted checkpoint", () => {
     assert.deepEqual(w.cachedBudget, { ops: before.ops + 1, spend: before.spend });
     assert.deepEqual(w.inFlight, { ops: 0, spend: 0n });
   });
+
+  for (const change of ["manual", "profile", "paper", "unchanged"] as const) {
+    it(`recovery after a prepared-entry crash respects ${change} owner configuration`, async () => {
+      const { w, draft } = await beforeLeverage();
+      await w.lane.execute(draft, { equityUsdg: u(100), equityKnown: true });
+      await tick(w, { route: false });
+      const sends = venue.sends.length;
+      w.checkpointRejectsAfterInsert = true;
+      const out = await w.lane.execute(draft, { equityUsdg: u(100), equityKnown: true });
+      assert.equal(out.status, "rejected");
+      const [row] = (await store.listSubmittedPerpOrders(w.id, "live")).filter(r => r.effect === "open");
+      assert.match(row!.entryContext!, /^[a-f0-9]{64}$/);
+      assert.equal(venue.sends.length, sends, "crash occurred after durable preparation before send");
+      w.checkpointRejectsAfterInsert = false;
+      if (change === "manual") w.cfg.perpsDriver = "manual";
+      if (change === "profile") w.cfg.perpsStyle = "scalp-breakout";
+      if (change === "paper") w.cfg.perpsLiveEnabled = false;
+      w.lane = laneFor(w, LIVE);
+      await tick(w, { route: false, advanceMs: 16_000 });
+      assert.equal(venue.sends.length, sends + (change === "unchanged" ? 1 : 0),
+        "recovery replays only unchanged authority after the resend grace period");
+      assert.equal((await store.getPerpOrder(w.id, "live", row!.id))!.status, "submitted", "reconcile still owns final transaction outcome");
+    });
+  }
 
   it("counts a locally committed opening order and its notional when checkpoint publication throws", async () => {
     const { w, draft } = await beforeLeverage();

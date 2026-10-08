@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { LIGHTER_MARKETS_V1, type PerpsStyleId } from "@merrymen/core";
+import { readChartResponse } from "../lib/perps-chart-response";
 import type { ChartBook, ChartResponse, ChartWindow } from "../lib/perps-chart-data";
+import { PerpsMobileNav, usePerpsMobile, type PerpsMobileView } from "./PerpsMobileNav";
 import { LogoMark } from "./LogoMark";
 import type { DeskPerpRow, DeskPerps } from "./live";
 import { usdExact, utcTimeOnly } from "../lib/format";
@@ -35,6 +37,22 @@ function RadarSymbol() {
 }
 
 function OwnerPerpsScreen({ perps, hasAgent, ownerKey, onSpot, onSettings, previewData }: PerpsScreenProps & { previewData?: ChartResponse }) {
+  const mobile = usePerpsMobile();
+  const panelId = useId();
+  const [mobileView, setMobileView] = useState<PerpsMobileView>("radar");
+  const panelTop = useRef<HTMLDivElement>(null);
+  const changeMobileView = (view: PerpsMobileView) => {
+    setMobileView(view);
+    // A dock tap from deep in the playbook returns to the start of the new panel.
+    requestAnimationFrame(() => panelTop.current?.scrollIntoView?.({ block: "start", behavior: "instant" }));
+  };
+  const panelProps = (view: PerpsMobileView) => ({
+    id: `${panelId}-panel-${view}`,
+    hidden: mobile && mobileView !== view,
+    role: mobile ? "tabpanel" : undefined,
+    "aria-labelledby": mobile ? `${panelId}-tab-${view}` : undefined,
+    tabIndex: mobile ? 0 : undefined,
+  });
   const [market, setMarket] = useState("BTC-PERP");
   const [chosenBook, setBook] = useState<ChartBook | null>(null);
   const book = chosenBook ?? perps?.book ?? "paper";
@@ -43,18 +61,20 @@ function OwnerPerpsScreen({ perps, hasAgent, ownerKey, onSpot, onSettings, previ
   const [audioUnavailable, setAudioUnavailable] = useState(false);
   const ready = ownerKey !== null && hasAgent;
   const readable = perps?.read === "ok" && perps.venueRead;
-  return <main className="perps-screen">
+  return <main className="perps-screen" data-mobile-view={mobileView}>
     {previewData ? <div className="perps-preview-notice">DESIGN PREVIEW · FICTIONAL DATA · NO TRADING</div> : null}
     <div className="perps-mobile-mode"><TradingModeToggle mode="perps" onChange={(mode) => { if (mode === "spot") onSpot(); }} /></div>
-    <header className="perps-screen-head"><div className="perps-identity"><span className="perps-brand-mark"><LogoMark size={46} /></span><div><span className="perps-eyebrow">MERRYMEN / PERPETUALS DIVISION</span><h1>TACTICAL RADAR<span aria-hidden="true">_</span></h1><p>Your agent. Your positions. Every entry in sight.</p></div></div><div className="perps-head-actions"><span className="perps-radar-symbol"><RadarSymbol /></span><button className="perps-settings" type="button" onClick={() => onSettings()}>Configure desk <span aria-hidden="true">↗</span></button></div></header>
-    <div className="perps-status-strip">
+    <header className="perps-screen-head"><div className="perps-identity"><span className="perps-brand-mark"><LogoMark size={46} /></span><div><span className="perps-eyebrow">MERRYMEN / PERPETUALS DIVISION</span><h1 tabIndex={-1}>TACTICAL RADAR<span aria-hidden="true">_</span></h1><p>Your agent. Your positions. Every entry in sight.</p></div></div><div className="perps-head-actions"><span className="perps-radar-symbol"><RadarSymbol /></span><button className="perps-settings" type="button" onClick={() => onSettings()}>Configure desk <span aria-hidden="true">↗</span></button></div></header>
+    <div className="perps-status-strip" hidden={mobile && mobileView !== "positions"}>
       <div><span>AGENT MODE</span><strong>{!ownerKey ? "Signed out" : !hasAgent ? "No agent" : perps?.mode === "paper" ? "Paper practice" : perps?.mode === "live" ? "Live money" : perps?.mode === "off" ? "Perps off" : perps?.mode === "refuse" ? "Blocked" : "Not read"}</strong></div>
       <div><span>{perps?.book === "paper" ? "PAPER PERPS" : perps?.book === "live" ? "AT LIGHTER" : "PERPS BALANCE"}</span><strong>{ready && readable && perps.atLighterUsd !== null && perps.book !== null ? money(perps.atLighterUsd) : "Not read"}{ready && readable && perps.stale ? <small> · last read</small> : null}</strong></div>
       <div><span>OPEN POSITIONS</span><strong>{ready && readable ? `${perps.rows.length}${perps.stale ? " · last read" : ""}` : "Unknown"}</strong></div>
       <div className="perps-owner-note"><span className="perps-status-dot" aria-hidden="true" /><span>Only your agent<br /><small>Owner-only entry history</small></span></div>
     </div>
+    {mobile ? <PerpsMobileNav view={mobileView} onChange={changeMobileView} idPrefix={panelId} positionCount={ready && readable ? perps.rows.length : null} positionStatus={!ready || !readable ? "positions unknown" : `${perps.rows.length} positions${perps.stale ? ", last read" : ""}${perps.incident || perps.stopsMissing > 0 ? ", review required" : ""}`} attention={ready && (!readable || !!perps?.stale || !!perps?.incident || (perps?.stopsMissing ?? 0) > 0)} /> : null}
+    <div className="perps-panel-top" ref={panelTop} />
     <div className="perps-command-grid">
-    <section className="perps-arena" aria-label="Perpetuals market and entries">
+    <section {...panelProps("radar")} className="perps-arena" aria-label="Perpetuals market and entries">
       <div className="perps-chart-toolbar"><label className="perps-market-picker"><span className="perps-control-label">MARKET</span><select value={market} onChange={(event) => setMarket(event.target.value)}>{LIGHTER_MARKETS_V1.map((m) => <option key={m.key} value={m.key}>{m.key}</option>)}</select></label>
         <div className="perps-segment" role="group" aria-label="Entry book">{(["paper", "live"] as const).map((b) => <button key={b} type="button" aria-pressed={book === b} onClick={() => setBook(b)}>{b === "paper" ? "Paper" : "Live"}</button>)}</div>
         <div className="perps-segment perps-windows" role="group" aria-label="Chart time window">{(["24h", "7d", "30d"] as const).map((w) => <button key={w} type="button" aria-pressed={windowKey === w} onClick={() => setWindowKey(w)}>{w}</button>)}</div>
@@ -64,9 +84,10 @@ function OwnerPerpsScreen({ perps, hasAgent, ownerKey, onSpot, onSettings, previ
       {audioUnavailable ? <p className="perps-data-note" role="status">Sound could not be enabled in this browser.</p> : null}
       {ready ? <LiveChart key={`${market}:${book}:${windowKey}`} market={market} book={book} windowKey={windowKey} sound={sound} positions={ready && readable && perps.book !== null ? perps.rows : undefined} positionsStale={perps?.stale} previewData={previewData} /> : <div className="perps-chart-empty"><span className="perps-empty-grid" aria-hidden="true">⌁</span><strong>{ownerKey ? "Your agent’s next chapter" : "Your entries belong to you"}</strong><p>{ownerKey ? "Set up your agent to follow its perpetual entries here." : "Sign in to see your agent’s private perpetual entry history."}</p><button type="button" className="perps-settings" onClick={() => onSettings()}>{ownerKey ? "Set up perpetuals" : "Account settings"} ↗</button></div>}
     </section>
-    {ready ? <section className="perps-position-section"><div className="perps-section-heading"><h2>Open positions</h2><span>OWNER ONLY</span></div><p className="perps-position-explainer">Your worker’s full account. Positions stay visible across chart filters.</p>{perps ? <PerpsPanel perps={perps} /> : <p className="perps-data-note">{perps === undefined ? "The account feed has not supplied a perpetuals report. Current positions are unknown." : "Your worker has not reported its perpetuals yet. Current positions are unknown."}</p>}</section> : <aside className="perps-position-section"><div className="perps-section-heading"><h2>Open positions</h2><span>PRIVATE</span></div><p className="perps-data-note">Sign in and set up your agent to read your positions. Only the owner can access this account.</p></aside>}
+    {ready ? <section {...panelProps("positions")} className="perps-position-section"><div className="perps-section-heading"><h2>Open positions</h2><span>OWNER ONLY</span></div><p className="perps-position-explainer">Your worker’s full account. Positions stay visible across chart filters.</p>{perps ? <PerpsPanel perps={perps} /> : <p className="perps-data-note">{perps === undefined ? "The account feed has not supplied a perpetuals report. Current positions are unknown." : "Your worker has not reported its perpetuals yet. Current positions are unknown."}</p>}</section> : <aside {...panelProps("positions")} className="perps-position-section"><div className="perps-section-heading"><h2>Open positions</h2><span>PRIVATE</span></div><p className="perps-data-note">Sign in and set up your agent to read your positions. Only the owner can access this account.</p></aside>}
     </div>
-    <PerpsDoctrines onConfigure={onSettings} />
+    <div {...panelProps("playbook")} className="perps-playbook-panel"><PerpsDoctrines onConfigure={onSettings} /></div>
+
   </main>;
 }
 
@@ -113,10 +134,10 @@ function LiveChart({ market, book, windowKey, sound, positions, positionsStale, 
             }
             throw new Error(failureMessage);
           }
-          const next = await response.json() as ChartResponse;
+          const next = readChartResponse(await response.json(), { market, book, window: windowKey });
           if (stopped) return false;
           failureMessage = "The chart response could not be read. Retrying automatically.";
-          if (!next || next.market !== market || next.book !== book || next.window !== windowKey || !Number.isFinite(next.generatedAtMs) || !Array.isArray(next.entries) || !Array.isArray(next.candles?.bars)) throw new Error("The chart response could not be read. Retrying automatically.");
+          if (!next) throw new Error("The chart response could not be read. Retrying automatically.");
           if (next.state !== "ok" && next.state !== "not-configured") {
             failureMessage = "Entry history could not be read. Entry counts are unknown.";
             throw new Error(failureMessage);

@@ -57,6 +57,21 @@ const sharedRow = (raw: DatabaseSync, id: string) => raw.prepare("SELECT * FROM 
 const count = (raw: DatabaseSync, table: string) => Number((raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
 
 describe("perp_orders: a known send deadline only narrows", () => {
+  it("preserves an opening order's immutable configuration binding while mirroring outcomes", async () => {
+    const child = perpDb(), shared = perpDb();
+    try {
+      child.raw.prepare(`INSERT INTO perp_orders
+        (id,agent_id,mode,epoch,status,effect,reduce_only,worst_notional_micro,entry_context,created_at,updated_at)
+        VALUES ('open',?,'live',1,'submitted','open',0,'100',?,1000,1000)`).run(A, "a".repeat(64));
+      assert.deepEqual((await pass(child.db, shared.db, 1010)).failed, {});
+      const binding = () => shared.raw.prepare("SELECT entry_context FROM perp_orders WHERE id = 'open'").get()?.entry_context;
+      assert.equal(binding(), "a".repeat(64));
+      child.raw.prepare("UPDATE perp_orders SET status='executed',entry_context=NULL,updated_at=1100").run();
+      assert.deepEqual((await pass(child.db, shared.db, 1110)).failed, {});
+      assert.equal(binding(), "a".repeat(64));
+    } finally { child.raw.close(); shared.raw.close(); }
+  });
+
   it("copies deadlines and keeps the minimum across later, null and older nonce-matched rows", async () => {
     const child = perpDb(), shared = perpDb();
     try {

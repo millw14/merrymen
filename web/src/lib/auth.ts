@@ -482,5 +482,7 @@ export function sessionCookieOptions(): {
 export function tenantOf(req: Request): `0x${string}` | null {
   const cookie = req.headers.get("cookie") ?? "";
   const m = cookie.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
-  return readSession(m ? decodeURIComponent(m[1]) : null);
+  let token: string | null = null;
+  try { token = m ? decodeURIComponent(m[1]) : null; } catch { return null; }
+  return readSession(token);
 }

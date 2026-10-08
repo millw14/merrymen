@@ -11,7 +11,7 @@ import { tenantOf } from "@/lib/auth";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { withReadDb } from "@/lib/ledger";
 import { NO_STORE_HEADERS, perRouteLimiter } from "@/lib/perp-custody";
-import { CHART_WINDOWS, candlesFromVenue, chartQuery, chartResponse, entriesFromFills, readChartFills } from "@/lib/perps-chart-data";
+import { CHART_WINDOWS, chartCandleCacheMs, candlesFromVenue, chartQuery, chartResponse, entriesFromFills, readChartFills } from "@/lib/perps-chart-data";
 import { createPublicReadCache } from "@/lib/public-perps-chart-cache";
 import { createLighterApi } from "../../../../../../worker/src/perps/api";
 import { lighterFeedPath, readLighterFeed } from "../../../../../../worker/src/perps/feed-reader";
@@ -101,12 +101,7 @@ export async function GET(req: Request) {
           priceDecimals: spec.priceDecimals,
         });
         return read.ok && read.value.resolution === resolution ? read.value.candles : null;
-    }, (bars) => {
-      // A valid but empty/delayed venue answer is not a four-hour verdict.
-      // Recheck it soon without causing one request per open owner chart.
-      const newest = bars.reduce((max, bar) => Math.max(max, bar.tMs), 0);
-      return bars.length === 0 || nowMs - (newest + stepMs) > 2 * stepMs ? 30_000 : stepMs;
-    });
+    }, (bars) => chartCandleCacheMs(bars, stepMs, nowMs));
     if (candles) {
       answer.candles = candlesFromVenue(candles, q, spec.priceDecimals, nowMs);
     }

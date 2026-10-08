@@ -70,6 +70,7 @@ import {
   type PerpSide,
   type PerpsStyleId,
   type PerpsReport,
+  perpsPositionStyleReport,
   type PerpsReportPosition,
 } from "../../../packages/core/src/index";
 import type { PerpBookPart, PerpBookTerm } from "../equity";
@@ -1020,6 +1021,7 @@ function reportPosition(
     leverage = null;
   }
   return {
+    ...perpsPositionStyleReport(pos.entryStyle, pos.openedAtSec),
     market: pos.key,
     side: pos.side,
     baseAmount: renderScaled(pos.baseAmount, d.sizeDecimals),
@@ -1084,6 +1086,7 @@ export function buildPerpsReport(
         leverage = null;
       }
       positions.push({
+        ...perpsPositionStyleReport(input.ledger.positionStyles?.get(r.marketId), input.ledger.positionStyleOpenedAt?.get(r.marketId)),
         market: listed.key,
         side: r.side,
         baseAmount: renderScaled(r.base, spec.sizeDecimals),

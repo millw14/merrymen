@@ -100,3 +100,13 @@ describe("venue mark candles", () => {
     assert.equal(chartResponse(Q, "unreadable", NOW).generatedAtMs, NOW);
   });
 });
+
+it("rechecks delayed native candle publication after 30 s, even if a forming candle was returned", async () => {
+  const { chartCandleCacheMs } = await import("./perps-chart-data");
+  const step = 14_400_000, at = Math.floor(NOW / step) * step + 1000;
+  const candle = (tMs: number) => ({ tMs, open: 100n, high: 110n, low: 90n, close: 105n });
+  const current = Math.floor(at / step) * step;
+  assert.equal(chartCandleCacheMs([candle(current - 2 * step)], step, at), 30_000);
+  assert.equal(chartCandleCacheMs([candle(current - 2 * step), candle(current)], step, at), 30_000);
+  assert.equal(chartCandleCacheMs([candle(current - step)], step, at), step);
+});

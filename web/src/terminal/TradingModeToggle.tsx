@@ -3,10 +3,11 @@ function ModeSymbol({ perps = false }: { perps?: boolean }) {
 }
 
 /** Changes the screen being viewed. Trading permission remains in Settings. */
-export function TradingModeToggle({ mode, onChange, compact = false }: {
+export function TradingModeToggle({ mode, onChange, compact = false, pending = false }: {
   mode: "spot" | "perps";
   onChange: (mode: "spot" | "perps") => void;
   compact?: boolean;
+  pending?: boolean;
 }) {
   return (
     <div className={`trading-mode-toggle${compact ? " is-compact" : ""}`} role="group" aria-label="Trading view">
@@ -14,7 +15,7 @@ export function TradingModeToggle({ mode, onChange, compact = false }: {
       <button type="button" className={mode === "spot" ? "is-active" : ""} aria-pressed={mode === "spot"} onClick={() => onChange("spot")}>
         <ModeSymbol />Spot
       </button>
-      <button type="button" className={mode === "perps" ? "is-active" : ""} aria-pressed={mode === "perps"} onClick={() => onChange("perps")}>
+      <button type="button" className={mode === "perps" ? "is-active" : ""} aria-pressed={mode === "perps"} aria-busy={pending} disabled={pending} onClick={() => onChange("perps")}>
         <ModeSymbol perps />Perps
       </button>
     </div>

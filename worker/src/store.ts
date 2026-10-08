@@ -484,6 +484,7 @@ export const PERP_LEDGER_DDL: readonly string[] = [
      tx_info TEXT,
      expired_at INTEGER,
      send_not_after_ms INTEGER,
+     entry_context TEXT,
      status TEXT NOT NULL,
      effect TEXT NOT NULL,
      reduce_only INTEGER NOT NULL,
@@ -735,6 +736,7 @@ export const PERP_LEDGER_DDL: readonly string[] = [
   "ALTER TABLE perp_accounts ADD COLUMN incident_sealed_pubkey TEXT",
   "ALTER TABLE perp_accounts ADD COLUMN recoveries_json TEXT",
   "ALTER TABLE perp_orders ADD COLUMN send_not_after_ms INTEGER",
+  "ALTER TABLE perp_orders ADD COLUMN entry_context TEXT",
 ];
 
 /**
@@ -6635,6 +6637,8 @@ export interface PerpOrderSubmission {
   reason?: string | null;
   /** Local send authority expiry; persisted independently of the signer's ExpiredAt. */
   sendNotAfterMs?: number | null;
+  /** Immutable configuration fingerprint for replayable opening bytes. */
+  entryContext?: string | null;
   /** REQUIRED on live: the signed tx. Absent on paper, which signs nothing. */
   signed?: PerpSignedTx | null;
   /** Paper only — live legs come from `signed.clientOrderIndexes`, never a second list. */
@@ -6689,6 +6693,8 @@ export async function insertPerpOrderSubmitted(s: PerpOrderSubmission): Promise<
     const withdrawId = s.withdraw?.transferId === undefined ? null : idText(s.withdraw.transferId, "transfer id");
     const decisionId = s.decisionId ?? null;
     const reason = s.reason ?? null;
+    const entryContext = s.entryContext ?? null;
+    if (entryContext !== null && !/^[a-f0-9]{64}$/.test(entryContext)) throw new Error("invalid entry context");
     const sendNotAfterMs = s.sendNotAfterMs == null ? null : safeInt(s.sendNotAfterMs, "send not after (ms)", 1);
 
     let signed: {
@@ -6743,11 +6749,11 @@ export async function insertPerpOrderSubmitted(s: PerpOrderSubmission): Promise<
       await db
         .prepare(
           `INSERT INTO perp_orders (id, agent_id, mode, epoch, account_index, api_key_index, nonce, tx_hash, tx_type, tx_info,
-                                    expired_at, send_not_after_ms, status, effect, reduce_only, market_id, worst_notional_micro, decision_id, reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?)`,
+                                    expired_at, send_not_after_ms, entry_context, status, effect, reduce_only, market_id, worst_notional_micro, decision_id, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?)`,
         )
         .run(id, agent, mode, epoch, signed?.accountIndex ?? null, signed?.apiKeyIndex ?? null, signed?.nonce ?? null,
-          signed?.txHash ?? null, signed?.txType ?? null, signed?.txInfo ?? null, signed?.expiredAt ?? null, sendNotAfterMs,
+          signed?.txHash ?? null, signed?.txType ?? null, signed?.txInfo ?? null, signed?.expiredAt ?? null, sendNotAfterMs, entryContext,
           effect, s.reduceOnly ? 1 : 0, marketId, notional, decisionId, reason);
       if (mode === "live" && effect === "open") {
         // Retire the old flat interval before these signed bytes can be sent.
@@ -7006,6 +7012,8 @@ export interface PerpOrderRow {
   expiredAt: number | null;
   /** Absent on legacy rows: only the venue signature's expiry then applies. */
   sendNotAfterMs?: number | null;
+  /** Immutable configuration fingerprint for replayable opening bytes. */
+  entryContext?: string | null;
   status: PerpOrderStatus;
   effect: PerpOrderEffect;
   reduceOnly: boolean;
@@ -7054,6 +7062,7 @@ async function ordersWithLegs(db: Db, rows: Record<string, unknown>[]): Promise<
       txType: nullableNum(r.tx_type),
       txInfo: (r.tx_info as string | null) ?? null,
       expiredAt: nullableNum(r.expired_at),
+      entryContext: typeof r.entry_context === "string" ? r.entry_context : null,
       sendNotAfterMs: r.send_not_after_ms == null ? null : Number(r.send_not_after_ms),
       status: r.status as PerpOrderStatus,
       effect: r.effect as PerpOrderEffect,

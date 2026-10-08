@@ -26,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
+import { PERPS_STYLE_CATALOG } from "../../../packages/core/src/perps-styles";
 import { parsePerpsReport } from "../../../packages/core/src/perps";
 import { tickPlan, tickRatchets } from "../command-wake";
 import { composeEquityUsdg, peakBasisUsdg, type PerpBookTerm } from "../equity";
@@ -70,7 +71,7 @@ const u = (n: number) => BigInt(Math.round(n * 1e6));
 let clock = T_LAST + H4 + 3_600_000;
 const CANDLES = breakout("BTC-PERP", 2_000n); // 119 flat bars at 80,000.0, then a close at 80,200.0: a long breakout
 
-function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, bigint][]; candles?: typeof CANDLES; shortCandles?: typeof CANDLES }): void {
+function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, bigint][]; candles?: typeof CANDLES; shortCandles?: typeof CANDLES; timeframe?: "5m" | "15m" | "1h" | "4h" }): void {
   const lastHour = Math.floor((clock / 1000 - 1800) / 3600) * 3600;
   const m: LighterFeedFileMarket = {
     observedAt: clock - 1_000,
@@ -89,7 +90,7 @@ function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, b
     bookSource: "ws",
     closed4h: (v.candles ?? CANDLES).map((c) => ({ t: c.t, o: c.o.toString(), h: c.h.toString(), l: c.l.toString(), c: c.c.toString() })),
     candlesObservedAt: T_LAST + H4 + 60_000,
-    ...(v.shortCandles ? { closedByTimeframe: { "5m": { observedAt: clock - 500, rows: v.shortCandles.map(c => ({ t: c.t, o: String(c.o), h: String(c.h), l: String(c.l), c: String(c.c) })) } } } : {}),
+    ...(v.shortCandles ? { closedByTimeframe: { [v.timeframe ?? "5m"]: { observedAt: clock - 500, rows: v.shortCandles.map(c => ({ t: c.t, o: String(c.o), h: String(c.h), l: String(c.l), c: String(c.c) })) } } } : {}),
     // 0.0010 %/h paid by longs: 10 ppm, inside perp-trend's 50 ppm limit.
     fundings1h: Array.from({ length: 8 }, (_, i) => ({ t: lastHour - (7 - i) * 3600, rate: "0.0010", direction: "long" as const })),
     fundingsObservedAt: clock - 60_000,
@@ -857,4 +858,68 @@ it("scalp entry profile survives process-memory reset and manual switch; protect
   const fills = await journalKinds(a, "perp-fill");
   await pass(a, 2);
   assert.equal(await journalKinds(a, "perp-fill"), fills, "timed close cannot replay");
+});
+
+
+describe("all nine profiles through the measured paper trading loop", () => {
+  for (const profile of PERPS_STYLE_CATALOG) it(`${profile.id}: candle → sized order → durable profile/report → timed close`, async () => {
+    clock = T_LAST + H4 + 3_600_000;
+    const last = Math.floor((clock - 1000) / profile.candleMs) * profile.candleMs - profile.candleMs;
+    const bars = CANDLES.map((c, i) => ({ ...c, t: last - (CANDLES.length - 1 - i) * profile.candleMs }));
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]],
+      ...(profile.timeframe === "4h" ? { candles: bars } : { shortCandles: bars, timeframe: profile.timeframe }) });
+    const a = await account({ cfg: { perpsStyle: profile.id } });
+    const start = await equityOf(a);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+    const position = await held(a);
+    assert.ok(position, `${profile.id} must execute a measured breakout`);
+    assert.ok(position.allocatedMarginMicro <= u(30));
+    // Reports are updated by the protective pass, on its own clock.
+    await pass(a);
+    const db = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+    const saved = db.prepare("SELECT perps FROM agents WHERE smart_account = ?").get(a.id) as { perps: string };
+    db.close();
+    const status = parsePerpsReport(JSON.parse(saved.perps));
+    assert.ok(status);
+    assert.equal(status.positions[0]?.entryStyle, profile.id);
+    assert.equal(status.positions[0]?.holdDeadlineSec, Math.floor(clock / 1000) + profile.maxHoldHours * 3600);
+    const facts = await store.perpLaneLedgerFacts(a.id, "paper", Math.floor(clock / 1000) - 86400);
+    assert.equal(facts.positionStyles.get(1), profile.id);
+    assert.equal(facts.lastEntrySignals.get(1)?.candleT, last);
+    a.cfg = { ...a.cfg, perpsDriver: "manual" };
+    await a.lane.configChanged();
+    clock += profile.maxHoldHours * 3600_000;
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]] });
+    await pass(a, 2);
+    assert.equal(await held(a), null);
+    const count = await journalKinds(a, "perp-fill");
+    await pass(a, 3);
+    assert.equal(await journalKinds(a, "perp-fill"), count, "settlement must not replay");
+  });
+});
+
+it("a profile/driver change while a deterministic entry waits prevents paper settlement", async () => {
+  clock = T_LAST + H4 + 3_600_000;
+  writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]] });
+  let a: Account;
+  a = await account({ onPaperReview: () => { a.cfg = { ...a.cfg, perpsDriver: "manual" }; } });
+  const start = await equityOf(a);
+  await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+  assert.equal(await held(a), null);
+  assert.equal(await journalKinds(a, "perp-fill"), 0);
+  assert.equal(a.energy.refunded, 1);
+  assert.ok(a.events.some(e => /perp-style-changed/.test(e.message)));
+});
+
+
+it("a deterministic signal that expires during executor review cannot be booked", async () => {
+  clock = T_LAST + H4 + 3_600_000;
+  writeFeed({ mark: 802_000n, bids: [[801_900n, 1000n]], asks: [[802_000n, 1000n]] });
+  const a = await account({ onPaperReview: () => { clock += 5 * 3600_000; } });
+  const start = await equityOf(a);
+  await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+  assert.equal(await held(a), null);
+  assert.equal(await journalKinds(a, "perp-fill"), 0);
+  assert.equal(a.energy.refunded, 1);
+  assert.ok(a.events.some(e => /perp-signal-expired/.test(e.message)));
 });
