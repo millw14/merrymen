@@ -937,12 +937,18 @@ describe("isPrivateAsk: who it follows, copies or watches is the owner's configu
     "do you watch @frankdegods on fomo?", "are you following @frankdegods on fomo?", "do you copy trade @frankdegods on fomo?",
     "do you follow @frankdegods?", "are you tailing @frankdegods on fomo?", "r u still tracking @frankdegods", "do you follow trader frankdegods",
     "do you watch frankdegods on fomo?",
+    // The watch list in slang (review r3).
+    "best trader u r tracking on fomo, what's he holding?", "best trader ur tracking on fomo what's he holding",
+    "the best trader you're tracking on fomo", "is kaleo one of the traders you're following", "who are the traders you're tracking on fomo",
+    "the traders youre watching", "a trader you follow on fomo",
   ];
   const no = [
     "what are you holding?", "who's watching the game", "anyone watching pepe", "i'm following the chart", "what are fomo traders buying?",
     "who is buying pons on fomo?", "what's trending on fomo", "copy that", "follow the money",
     "what is @frankdegods holding on fomo?", "who is trader frankdegods on fomo?", "would you follow @frankdegods?",
     "do you watch the market?", "are you following the news", "do you track the chart on fomo",
+    "which traders should you follow on fomo", "who's the most followed trader on fomo", "what are traders buying on fomo",
+    "the best trader on fomo, what's he holding?",
   ];
   for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t, { research: true }), true));
   for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t, { research: true }), false));

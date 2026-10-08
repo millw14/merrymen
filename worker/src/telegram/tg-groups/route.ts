@@ -437,7 +437,7 @@ const ROW_PROFILE = /\b(?:tell me (?:more )?about (?:him|her|them)|who (?:is|'s)
 const ROW_CROWD = /\b(?:people|traders|everyone|everybody|whales|wallets|others)\b/u;
 
 /** The trader(s) Merrymen watches ("the best trader we follow", "a watched trader"): a watch-list question, never a row of the public board. */
-const ROW_WATCHED = /\btraders? (?:that |who )?(?:we|you|u)(?:'re| are)? (?:watch|watching|monitor|monitoring|track|tracking|follow|following)\b|\b(?:watched|tracked|monitored) traders?\b/u;
+const ROW_WATCHED = /\btraders? (?:that |who )?(?:we|you|u|ya)(?:'re| are| r|re)? (?:watch|watching|monitor|monitoring|track|tracking|follow|following)\b|\btraders? (?:that |who )?ur (?:watching|monitoring|tracking|following)\b|\b(?:watched|tracked|monitored) traders?\b/u;
 
 export function rowIn(text: unknown): TgBoardRow | undefined {
   const t = typeof text === "string" ? text.normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'") : "";
@@ -472,6 +472,8 @@ export function parseRoute(raw: unknown, ctx: RouteCtx): TgRoute | null {
     case "chat":
       return { action: "chat" };
     case "fomo_leaderboard": {
+      // "Who are the traders you're tracking" is the watch list: never answered with the public board.
+      if (ROW_WATCHED.test(String(ctx?.line ?? "").normalize("NFKC").toLowerCase().replace(/[‘’ʼ]/gu, "'"))) return { action: "chat" };
       const window = windowIn(line);
       // One row of it ("...and what did he make money on"), read from the line's words only.
       const row = rowIn(line);

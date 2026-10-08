@@ -206,6 +206,11 @@ describe("a row of the leaderboard, and ordinals that are never names", () => {
     assert.equal(rowIn("who's the best trader we follow and what is he holding"), undefined);
     assert.equal(rowIn("who's the top trader you watch on fomo and what did he buy"), undefined);
     assert.equal(rowIn("who's the best watched trader and what did he make money on"), undefined);
+    // In slang too (review r3): never a trader called "ur", never the public board's row.
+    assert.equal(rowIn("best trader u r tracking on fomo, what's he holding?"), undefined);
+    assert.equal(rowIn("best trader ur tracking on fomo what's he holding"), undefined);
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who are the traders you're tracking on fomo")), { action: "chat" });
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("who are the traders u r following")), { action: "chat" });
     assert.deepEqual(rowIn("who’s the top guy on fomo today, tell me about him"), { rank: 1, about: "profile" });
     for (const t of ["top traders today, what are they buying", "who's the best trader on fomo", "who's the top trader and what are people buying", "who's the top trader, is @unipcs on it"]) assert.equal(rowIn(t), undefined, t);
   });

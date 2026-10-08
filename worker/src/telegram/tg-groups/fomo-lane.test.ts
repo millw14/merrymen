@@ -415,6 +415,9 @@ describe("the group research lane", () => {
       // The yes/no form about one account (live review, 2026-10-08).
       "pine do you watch @frankdegods on fomo?", "pine are you following @frankdegods on fomo?", "pine do you copy trade @frankdegods on fomo?",
       "pine do you follow @frankdegods?", "pine are you tailing @frankdegods on fomo?", "pine is @frankdegods in your cohort on fomo?",
+      // In slang (review r3): never the public board and its #1 as the answer.
+      "pine best trader u r tracking on fomo, what's he holding?", "pine best trader ur tracking on fomo what's he holding",
+      "pine who are the traders you're tracking on fomo", "pine is kaleo one of the traders you're following",
     ]) {
       clock += 3 * MIN;
       await said(msg(t, { fromId: ANN + Math.floor(Math.random() * 1000) }));

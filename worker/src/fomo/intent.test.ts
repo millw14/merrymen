@@ -824,6 +824,17 @@ describe("a chain's coins, a row of the trader board, and what a trader made mon
     assert.equal(plan("who's the best trader on fomo today")!.singular, true);
   });
 
+  it("the watch list in slang is the watch list, never the public board's row nor a trader called 'ur' (review r3)", () => {
+    // The owner's DM gets her watched set (cohort_only); a room deflects it (chat.ts groupMustDeflect).
+    for (const q of ["best trader u r tracking on fomo, what's he holding?", "best trader ur tracking on fomo what's he holding", "the best trader you're tracking on fomo, what's he holding?"]) {
+      const p = plan(q)!;
+      assert.equal(p.cohortScope, true, q);
+      assert.equal(p.intent, "rankings-traders", q);
+      assert.deepEqual(p.toolCalls.map((c) => [c.tool, c.args.cohort_only]), [["fomo_get_rankings", true]], q);
+      assert.ok(!p.toolCalls.some((c) => c.args.trader === "ur"), q);
+    }
+  });
+
   it("a row ask needs one rank, one trader's question, and nobody named", () => {
     const noRow = (q: string) => assert.equal(plan(q)?.rowAsk, undefined, q);
     // The plural board and its crowd.

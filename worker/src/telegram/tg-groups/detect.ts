@@ -1500,6 +1500,10 @@ const RESEARCH_PRIVATE_RES: readonly RegExp[] = [
   /\bwhat (?:coins? |tokens? |traders? )?(?:are|r) (?:you|u|ya) (?:watching|tracking|monitoring|following|researching|copying|copy[- ]?trading)\b/u,
   /\bwhat(?:'s| is|s) on (?:your|ur) (?:watch ?list|radar|list)\b/u,
   /\b(?:your|ur) (?:watch ?list|follow(?:ing)? list|copy(?:[- ]?trad(?:e|ing))? list|copy[- ]?trades|cohort|tracked traders|followed traders|traders list)\b/u,
+  // "The best trader u r tracking", "who are the traders you're tracking", "is kaleo one of the
+  // traders you're following": the watch list in slang too. Never "which traders should you
+  // follow" (an opinion) nor "the most followed trader" (a public figure).
+  /\btraders? (?:that |who )?(?:you|u|ya)(?:'re| are| r|re)? (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b|\btraders? (?:that |who )?ur (?:copying|following|tracking|tailing|watching|monitoring)\b/u,
   // The yes/no form about one account: "do you watch @frankdegods on fomo?", "are you
   // tailing @x?", "do you follow trader x". Not "would you follow…" (an opinion), and
   // only a handle, "trader X" or "X on fomo": "do you watch the market?" stays chat.
