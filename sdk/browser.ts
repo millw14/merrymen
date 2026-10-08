@@ -10,7 +10,7 @@ import {
   type PartnerEnrollmentClaim,
   type PartnerEnrollmentSettings,
 } from "../packages/core/src/partner-enrollment";
-import { prepareAgentGrant, type PrepareAgentOptions } from "../web/src/lib/session";
+import { prepareAgentGrant } from "../web/src/lib/session";
 
 export type { PartnerEnrollmentSettings, PartnerEnrollmentClaim };
 export type { StoredGrant, GrantCaps } from "../packages/core/src/grant";
@@ -29,18 +29,30 @@ declare const __MERRYMEN_SDK_BUILD__: string | undefined;
 export const SDK_VERSION = `${PARTNER_API_VERSION}+${typeof __MERRYMEN_SDK_BUILD__ === "string" ? __MERRYMEN_SDK_BUILD__ : "source"}`;
 
 /**
- * The dashboard signer's options, minus what partner activation refuses.
+ * WHAT A PARTNER CHOOSES: the owner, the limits and the chain. Nothing else.
  *
- * NO TRENCHER. `trencherFactory` seals `trencherFactoryAddress` and
- * `trencherVaultAddress` into the grant, and partner activation accepts neither
- * field (validGrant in web/src/lib/partner-enrollment.ts): enrollment
- * deliberately grants no Trencher permission. Offered here, the option let an
- * owner approve a permission whose activation then failed with a 400.
+ * The dashboard signer also takes a v4 or Pons adapter, a class vault factory
+ * and extra tokens, and seals whatever address it is given into the
+ * owner-signed wall as a call target or approved spender. Partner activation
+ * rebuilds that wall from the grant's own declared addresses, so it cannot tell
+ * a partner's contract from the deployed one: a partner that named its own
+ * "adapter" got the owner's one opaque signature approving it as a USDG
+ * spender, and activation linked the grant. Left out, the signer seals only the
+ * platform's own class vault factory and listed tokens.
+ *
+ * NO TRENCHER either. `trencherFactory` seals `trencherFactoryAddress` and
+ * `trencherVaultAddress`, which activation refuses (validGrant in
+ * web/src/lib/partner-enrollment.ts): enrollment grants no Trencher permission,
+ * so the option let an owner approve a permission that then failed with a 400.
  */
-export interface PrepareMerrymanOptions extends Omit<PrepareAgentOptions, "onStatus" | "trencherFactory"> {
+export interface PrepareMerrymanOptions {
   owner: LocalAccount;
+  caps: GrantCaps;
+  /** Robinhood Chain 4663, the default and real funds, or its testnet 46630. */
+  chainId?: number;
   onStatus?: (status: string) => void;
 }
+const OPTIONS: readonly string[] = ["owner", "caps", "chainId", "onStatus"];
 
 /**
  * PARTNER ACTIVATION'S LIMITS, BEFORE THE OWNER SIGNS. The signer seals whatever
@@ -66,13 +78,22 @@ function activatableCaps(caps: unknown): boolean {
  *
  * Anything partner activation would refuse is refused HERE, before a chain read
  * or a signature: the owner must never approve a permission that activation
- * then throws away.
+ * then throws away, nor one naming a contract nobody verified.
  */
-export async function prepareMerryman({ owner, onStatus = () => {}, ...options }: PrepareMerrymanOptions): Promise<StoredGrant> {
-  // The type above omits it; plain-JavaScript callers still pass it, and
-  // prepareAgentGrant would honour it.
-  if ((options as { trencherFactory?: unknown }).trencherFactory !== undefined) {
+export async function prepareMerryman(options: PrepareMerrymanOptions): Promise<StoredGrant> {
+  const { owner, caps, onStatus = () => {} } = options;
+  // The type offers nothing else; plain-JavaScript callers can still pass it.
+  // Refused rather than dropped, so an integrator who asked for a route learns
+  // it was not sealed. Only the four fields below ever reach the signer.
+  const unoffered = Object.keys(options).filter((key) => !OPTIONS.includes(key) && (options as unknown as Record<string, unknown>)[key] !== undefined);
+  if (unoffered.includes("trencherFactory")) {
     throw new Error("Partner enrollment does not grant Trencher permissions: remove trencherFactory. Nothing was signed.");
+  }
+  if (unoffered.length) {
+    throw new Error(
+      `prepareMerryman takes only owner, caps, chainId and onStatus; remove ${unoffered.join(", ")}. ` +
+        "Partner enrollment seals the platform's own routes and listed tokens. Nothing was signed.",
+    );
   }
   // ONLY THE CHAINS ACTIVATION ACCEPTS, and checked here because the signer
   // cannot: it maps every id but the testnet's to MAINNET (chainForId), so a
@@ -82,14 +103,14 @@ export async function prepareMerryman({ owner, onStatus = () => {}, ...options }
   if (chainId !== robinhoodChain.id && chainId !== robinhoodTestnet.id) {
     throw new Error(`chainId ${JSON.stringify(options.chainId)} is not a partner enrollment chain: use Robinhood Chain ${robinhoodChain.id} or its testnet ${robinhoodTestnet.id}. Nothing was signed.`);
   }
-  if (!activatableCaps(options.caps)) {
+  if (!activatableCaps(caps)) {
     throw new Error(
       "These limits cannot be activated: caps takes exactly perTradeUsdg, dailyUsdg, expiryDays, maxDrawdownPct and " +
         "maxOpsPerDay, each a number of at least 1, with perTradeUsdg at most dailyUsdg, maxDrawdownPct at most 100, " +
         "a whole expiryDays of at most 365 and a whole maxOpsPerDay. Nothing was signed.",
     );
   }
-  const grant = await prepareAgentGrant(owner, { ...options, chainId, onStatus });
+  const grant = await prepareAgentGrant(owner, { caps, chainId, onStatus });
   if (carriesOwnerKey(grant)) throw new Error("An owner private key must never be included in a partner grant.");
   return grant;
 }

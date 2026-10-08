@@ -10,7 +10,7 @@ import { verifyMessage, type Hex } from "viem";
 import { derivationOf, type MerrymenSettings } from "@merrymen/core";
 // FIRST, before ./browser: the fixture trusts its stub Trencher bytecode by
 // setting the env var trencher-permission.ts reads once, when session.ts loads.
-import { TRENCHER_FACTORY, withStubChain, type KernelState } from "../web/src/lib/canonical-wall-fixture";
+import { CLASS_FACTORY, TRENCHER_FACTORY, withStubChain, type KernelState } from "../web/src/lib/canonical-wall-fixture";
 import {
   prepareMerryman, signMerrymanAuthorization, partnerGrantDigest, PARTNER_API_VERSION, SDK_VERSION,
   type LocalAccount, type PrepareMerrymanOptions, type StoredGrant, type PartnerEnrollmentClaim,
@@ -113,6 +113,8 @@ describe("browser partner authorization", () => {
  * allowed-field list that could drift from it.
  */
 const ACCOUNT = "0x00000000000000000000000000000000000a11ce" as const;
+/** A contract a partner controls, as far as any check here can tell. */
+const FOREIGN = "0x000000000000000000000000000000000badbad1" as const;
 const CAPS = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 };
 const APP = { app_id: "prism-production", key_id: "000000000001", name: "Prism", scopes: ["read:agents", "write:agents", "chat:agents"] };
 const SCOPES = ["read:agents", "chat:agents"];
@@ -190,13 +192,56 @@ describe("prepareMerryman", () => {
     await refusedUpFront({ trencherFactory: TRENCHER_FACTORY }, /does not grant Trencher permissions: remove trencherFactory/);
   });
 
-  it("does not offer trencherFactory in its option type", () => {
-    const options: PrepareMerrymanOptions = {
-      owner: wallet().owner, caps: CAPS,
+  it("offers only owner, caps, chainId and onStatus in its option type", () => {
+    const { owner } = wallet();
+    const options: PrepareMerrymanOptions[] = [
+      { owner, caps: CAPS, chainId: 46630, onStatus: () => {} },
       // @ts-expect-error Partner enrollment grants no Trencher permission.
-      trencherFactory: TRENCHER_FACTORY,
-    };
+      { owner, caps: CAPS, trencherFactory: TRENCHER_FACTORY },
+      // @ts-expect-error Nor a route through a contract the partner names.
+      { owner, caps: CAPS, ponsAdapterAddress: FOREIGN },
+      // @ts-expect-error
+      { owner, caps: CAPS, v4AdapterAddress: FOREIGN },
+      // @ts-expect-error
+      { owner, caps: CAPS, ponsClassVaultFactory: FOREIGN },
+      // @ts-expect-error
+      { owner, caps: CAPS, extraTokens: [{ symbol: "PRTNR", address: FOREIGN, decimals: 18 }] },
+    ];
     assert.ok(options);
+  });
+
+  // Each one the dashboard signer honours, and each address it seals.
+  const UNOFFERED: [string, unknown][] = [
+    ["ponsAdapterAddress", FOREIGN],
+    ["v4AdapterAddress", FOREIGN],
+    ["ponsClassVaultFactory", FOREIGN],
+    ["extraTokens", [{ symbol: "PRTNR", address: FOREIGN, decimals: 18 }]],
+    ["expectAccount", ACCOUNT],
+    ["minimumValidationNonce", 2],
+    ["hostedAs", ACCOUNT],
+  ];
+
+  it("refuses every signer option it does not offer, before any chain read or signature", async () => {
+    for (const [option, value] of UNOFFERED) {
+      await refusedUpFront({ [option]: value }, new RegExp(`takes only owner, caps, chainId and onStatus; remove ${option}\\. Partner enrollment seals`));
+    }
+    await refusedUpFront({ ponsAdapterAddress: FOREIGN, extraTokens: [] }, /remove ponsAdapterAddress, extraTokens\./);
+    // Absent and undefined are the same thing, as for chainId.
+    const a = attempt({ ponsAdapterAddress: undefined, trencherFactory: undefined });
+    assert.equal((await a.grant).ponsAdapterAddress, undefined);
+  });
+
+  it("refuses them because the signer seals any adapter or token it is given, unverified", async () => {
+    // What a partner's own contract would have become: a sealed route and an
+    // approved spender in the owner's one signature.
+    const { owner } = wallet();
+    const grant = await withStubChain(ACCOUNT, () => prepareAgentGrant(owner, {
+      caps: CAPS, onStatus: () => {}, ponsAdapterAddress: FOREIGN, extraTokens: [{ symbol: "PRTNR", address: FOREIGN, decimals: 18 }],
+    }));
+    assert.equal(grant.ponsAdapterAddress, FOREIGN);
+    assert.ok(grant.grantFeatures?.includes("pons-adapter"));
+    assert.deepEqual(grant.grantTokens, [FOREIGN]);
+    assert.deepEqual(checkCanonicalWall({ ...grant }), { ok: true }, "the wall rebuilds from the grant's own addresses");
   });
 
   it("refuses it because activation refuses the fields a Trencher factory seals", async () => {
@@ -213,7 +258,11 @@ describe("prepareMerryman", () => {
     // platform class vault, so its vault fields are what activation must accept.
     const a = attempt();
     const grant = await a.grant;
-    assert.ok(grant.ponsClassVaultAddress && grant.ponsClassVaultFactoryAddress, "the class vault was sealed");
+    assert.ok(grant.ponsClassVaultAddress, "the class vault was sealed");
+    assert.equal(grant.ponsClassVaultFactoryAddress, CLASS_FACTORY, "from the platform's own factory");
+    assert.equal(grant.ponsAdapterAddress, undefined, "and no adapter route anyone named");
+    assert.equal(grant.v4AdapterAddress, undefined);
+    assert.deepEqual(grant.grantTokens ?? [], [], "nor a token beyond the listings");
     const { result, stored } = await activate(grant, a.owner);
     assert.equal(result.connection.status, "linked");
     assert.equal(result.smartAccount, ACCOUNT);
