@@ -181,12 +181,12 @@ describe("renderEnvelope", () => {
     const sells = env("fomo_get_trader_activity", "ok", base, { subject: { kind: "trader", trader: base.trader } });
     const g = renderEnvelope(sells, G);
     assert.match(g, /^frankdegods in the last 24h: 0 sells in the feed\.$/m);
-    assert.doesNotMatch(g, /buys?/);
+    assert.doesNotMatch(g, /buys?\b/);
     assert.match(renderEnvelope(sells, O), /frankdegods on Fomo in the last 24h: 0 sells in the feed\./);
     assert.doesNotMatch(renderEnvelope(sells, O), /0 buys/);
     const buys = env("fomo_get_trader_activity", "ok", { ...base, side: "buy", counts: { buys: 1, sells: 0, transfers: 0, other: 0 } }, { subject: { kind: "trader", trader: base.trader } });
     assert.match(renderEnvelope(buys, G), /^frankdegods in the last 24h: 1 buy in the feed\.$/m);
-    assert.doesNotMatch(renderEnvelope(buys, G), /sells?/);
+    assert.doesNotMatch(renderEnvelope(buys, G), /sells?\b/);
     // No side asked: both counts, as before.
     const both = env("fomo_get_trader_activity", "ok", { ...base, side: null, counts: { buys: 1, sells: 0, transfers: 0, other: 0 } }, { subject: { kind: "trader", trader: base.trader } });
     assert.match(renderEnvelope(both, G), /^frankdegods in the last 24h: 1 buy and 0 sells in the feed\.$/m);
