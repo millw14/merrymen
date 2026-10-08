@@ -29,6 +29,11 @@
  *   plan       MERRYMEN_FOMO_PLAN_CREDITS, a positive number, read the way the
  *              orchestrator reads it: the two processes share the fomo_meta
  *              allowance counters, so they must agree on the pool.
+ *   caps       MERRYMEN_FOMO_GROUP_HOURLY_CREDITS, MERRYMEN_FOMO_TENANT_HOURLY_CREDITS
+ *              and MERRYMEN_FOMO_TENANT_DAILY_CREDITS, whole numbers, read by
+ *              the same function the orchestrator uses (fomo/budget.ts
+ *              fomoBudgetFrom), for the same reason: set them on both, then
+ *              redeploy both. Unset, the defaults apply.
  *
  * WHO THE TENANT IS never comes from here or from a request body: hosted it is
  * the verified session cookie (or an MCP principal), self-hosted it is the
@@ -45,7 +50,7 @@
  */
 import { getGrantStore } from "@merrymen/grant-store";
 import type { Db } from "../../../worker/src/db";
-import { ModelBudget, type ModelBudgetConfig } from "../../../worker/src/fomo/budget";
+import { fomoBudgetFrom, fomoPlanFrom, ModelBudget, type FomoBudgetConfig, type ModelBudgetConfig } from "../../../worker/src/fomo/budget";
 import { SELF_HOSTED_TENANT, type FomoAccess } from "../../../worker/src/fomo/contract";
 import { openLocalFomoDb } from "../../../worker/src/fomo/local-db";
 import { createFomoRuntime, storeAllowancePort, type FomoRuntime as BaseFomoRuntime } from "../../../worker/src/fomo/runtime";
@@ -154,8 +159,18 @@ function selfHostedFomoApiKey(env: Env = process.env): string | null {
 
 /** The provider plan's monthly credits, exactly as orchestrator.ts fomoSetup reads them; undefined lets the runtime default apply. */
 export function fomoPlanCredits(env: Env = process.env): number | undefined {
-  const plan = Number(env.MERRYMEN_FOMO_PLAN_CREDITS);
-  return Number.isFinite(plan) && plan > 0 ? plan : undefined;
+  return fomoPlanFrom(env);
+}
+
+/**
+ * The operator's cap overrides, exactly as orchestrator.ts fomoSetup reads
+ * them (the same function); a bad value is logged by name and its default
+ * applies.
+ */
+export function fomoBudgetOverrides(env: Env = process.env, log: (line: string) => void = (l) => console.warn(l)): Partial<FomoBudgetConfig> {
+  const caps = fomoBudgetFrom(env);
+  for (const p of caps.problems) log(p);
+  return caps.budget;
 }
 
 /**
@@ -205,6 +220,8 @@ export interface WebFomoRuntimeOptions {
   dialect: FomoDialect;
   apiKey: string | null;
   planCreditsPerMonth?: number;
+  /** The operator's cap overrides (fomoBudgetOverrides). */
+  budget?: Partial<FomoBudgetConfig>;
   now?: () => number;
   log?: (line: string) => void;
   /** Tests only: the provider client's fetch (fixture-backed). Production passes nothing. */
@@ -224,6 +241,7 @@ export async function createWebFomoRuntime(o: WebFomoRuntimeOptions): Promise<Fo
     apiKey: o.apiKey,
     access: o.hosted ? hostedFomoAccess : selfHostedFomoAccess,
     planCreditsPerMonth: o.planCreditsPerMonth,
+    ...(o.budget ? { budget: o.budget } : {}),
     now: o.now,
     log,
     fetchImpl: o.fetchImpl,
@@ -245,10 +263,10 @@ async function build(hosted: boolean): Promise<FomoRuntime> {
     // Before the database is opened: a deployment that has not opted in gets no schema and no Fomo rows.
     if (!hostedFomoEnabled()) throw new FomoNotEnabledError();
     const { db, dialect } = await mcpDb();
-    return createWebFomoRuntime({ hosted: true, db, dialect, apiKey: hostedFomoApiKey(), planCreditsPerMonth: fomoPlanCredits() });
+    return createWebFomoRuntime({ hosted: true, db, dialect, apiKey: hostedFomoApiKey(), planCreditsPerMonth: fomoPlanCredits(), budget: fomoBudgetOverrides() });
   }
   // createFomoRuntime ensures the schema (ensureFomoSchema(db, "sqlite")) before anything else touches it.
-  return createWebFomoRuntime({ hosted: false, db: openLocalFomoDb(), dialect: "sqlite", apiKey: selfHostedFomoApiKey(), planCreditsPerMonth: fomoPlanCredits() });
+  return createWebFomoRuntime({ hosted: false, db: openLocalFomoDb(), dialect: "sqlite", apiKey: selfHostedFomoApiKey(), planCreditsPerMonth: fomoPlanCredits(), budget: fomoBudgetOverrides() });
 }
 
 const memo: { hosted: Promise<FomoRuntime> | null; self: Promise<FomoRuntime> | null } = { hosted: null, self: null };

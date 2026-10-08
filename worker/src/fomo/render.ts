@@ -30,6 +30,7 @@
  * links in the envelope, and Merrymen never invents one.
  */
 
+import { refusalResetAt, utcClockText } from "./budget";
 import { digestTheses, listWords } from "./digest";
 import { agoText, durationText } from "./dossier";
 import { chainFromUserText, isRobinhoodToken, shortAddress } from "./identity";
@@ -245,7 +246,39 @@ export function groupScrub(text: string): string {
 
 // ── Status, freshness and coverage lines ─────────────────────────────────
 
-function statusLead(env: FomoEnvelope, audience: Audience): string | null {
+/**
+ * A ROOM'S REFUSAL, IN PLAIN WORDS (decision D10, 2026-10-07): one wording
+ * for every budget cap, the room's or the owner's (which one ran out is the
+ * owner's to know, in her own messages), with when to try again; no credit,
+ * no amount. A lookup that failed or could not be reached says so, never
+ * "ask me in a direct message", which would make a failure sound private.
+ */
+export const GROUP_FOMO_UNREACHED = "couldn't reach fomo just now, try again in a bit.";
+export function groupRefusalLine(reason: string | null | undefined, now: number): string {
+  const at = refusalResetAt(reason, now);
+  return at !== null ? `fomo lookups for this room are used up for now, try again after ${utcClockText(at)} UTC.` : GROUP_FOMO_UNREACHED;
+}
+
+function groupStatusLead(env: FomoEnvelope, now: number): string | null {
+  switch (env.status) {
+    case "budget-limited":
+      return groupRefusalLine(env.reason, now);
+    case "failed":
+      return GROUP_FOMO_UNREACHED;
+    case "unavailable":
+      return env.reason === "not-configured" ? FOMO_GROUP_OFF : GROUP_FOMO_UNREACHED;
+    case "not-authorized":
+      return FOMO_GROUP_OFF;
+    default:
+      return null;
+  }
+}
+
+function statusLead(env: FomoEnvelope, audience: Audience, now: number): string | null {
+  if (audience === "group") {
+    const room = groupStatusLead(env, now);
+    if (room !== null) return room;
+  }
   const msg = env.message ? sanitizeText(env.message, 240) : null;
   switch (env.status) {
     case "not-authorized":
@@ -1003,7 +1036,7 @@ function body(env: FomoEnvelope, audience: Audience, now: number, view: View = N
 /** The lines for one envelope, without attribution: status lead or body (`main`), then its limits. */
 function envelopeParts(env: FomoEnvelope, audience: Audience, now: number, view: View = NO_VIEW): { main: string[]; limits: string[] } {
   if (audience === "group" && needsDirectMessage(env)) return { main: [GROUP_DM_DEFLECTION], limits: [] };
-  const lead = statusLead(env, audience);
+  const lead = statusLead(env, audience, now);
   if (lead && (env.data === null || env.status === "needs-clarification")) return { main: [lead], limits: [] };
   const lines = body(env, audience, now, view);
   // An older answer shown because a refresh could not run: say why first, then the labelled answer.

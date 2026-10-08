@@ -335,6 +335,26 @@ export function utcDay(nowMs: number): string {
   return new Date(nowMs).toISOString().slice(0, 10);
 }
 
+/**
+ * WHEN A REFUSED CHARGE CAN BE ASKED AGAIN: the start of the next clock hour
+ * for an hourly counter, 00:00 UTC for a daily one (the counters' keys carry
+ * their window, so that is when a fresh one starts). Takes a ChargeRefusal
+ * or a read's reason ("budget-group-hourly"). Null when nothing resets on a
+ * clock: a job's own allowance, a budget that could not be checked.
+ */
+export function refusalResetAt(reason: string | null | undefined, nowMs: number): number | null {
+  if (typeof reason !== "string" || typeof nowMs !== "number" || !Number.isFinite(nowMs)) return null;
+  const r = reason.startsWith("budget-") ? reason.slice("budget-".length) : reason;
+  if (r === "group-hourly" || r === "tenant-hourly") return (hourIndex(nowMs) + 1) * HOUR_MS;
+  if (r === "tenant-daily" || r === "shared-daily" || r === "class-reserve") return Date.parse(`${utcDay(nowMs)}T00:00:00.000Z`) + 24 * HOUR_MS;
+  return null;
+}
+
+/** "15:00": a reset time as people read it, in UTC. */
+export function utcClockText(ms: number): string {
+  return new Date(ms).toISOString().slice(11, 16);
+}
+
 /** Tenant and group ids go into keys percent-encoded, so no id can forge another's key. */
 function seg(id: string): string {
   return encodeURIComponent(id);
@@ -516,6 +536,90 @@ export class FomoBudget {
     if (!r.ok) return r;
     return makeGrant(this.port, r.taken, amount, this.clock, this.onError);
   }
+}
+
+// ── The caps a hosting process configures ────────────────────────────────
+
+/** The Free plan's monthly credits, the default when the plan is not known. */
+export const FREE_PLAN_CREDITS_PER_MONTH = 250_000;
+/** Held back from the monthly allowance: the budget never plans to spend the last fifth. */
+export const PLAN_SAFETY_FRACTION = 0.2;
+
+/**
+ * Conservative per-tenant and per-group caps. One standard coin research costs
+ * about 1,500–2,000 credits (one thesis page, one feed page, token stats, maybe
+ * a search); a tenant can ask a handful of those an hour and a few dozen a day,
+ * and a group less. The shared pool still bounds the whole fleet.
+ */
+export const DEFAULT_TENANT_HOURLY_CREDITS = 6_000;
+export const DEFAULT_TENANT_DAILY_CREDITS = 20_000;
+export const DEFAULT_GROUP_HOURLY_CREDITS = 2_500;
+
+/** The budget configuration a plan supports, with any construction-time overrides applied and clamped. */
+export function budgetConfigFor(planCreditsPerMonth: number, over: Partial<FomoBudgetConfig> = {}): FomoBudgetConfig {
+  const derived = deriveDailyCredits(planCreditsPerMonth, 31, PLAN_SAFETY_FRACTION);
+  // An unusable plan figure is not a big plan: spend nothing rather than guess.
+  const shared = over.sharedDailyCredits ?? derived ?? 0;
+  const cap = (v: number | undefined, fallback: number): number => Math.min(shared, Math.max(0, v ?? fallback));
+  return {
+    ...over,
+    sharedDailyCredits: shared,
+    tenantHourlyCredits: cap(over.tenantHourlyCredits, DEFAULT_TENANT_HOURLY_CREDITS),
+    tenantDailyCredits: cap(over.tenantDailyCredits, DEFAULT_TENANT_DAILY_CREDITS),
+    groupHourlyCredits: cap(over.groupHourlyCredits, DEFAULT_GROUP_HOURLY_CREDITS),
+  };
+}
+
+type Env = Record<string, string | undefined>;
+
+/**
+ * THE CAPS AN OPERATOR MAY SET, by environment variable. The orchestrator
+ * (fomoSetup), the web process (web/src/lib/fomo-runtime.ts) and a
+ * self-hosted worker (index.ts) all read them through fomoBudgetFrom, so the
+ * processes that share the fomo_meta counters agree on every limit (set
+ * them on web AND orchestrator, then redeploy both). Unset, the defaults
+ * above apply, unchanged. These are research-credit caps, never trading
+ * limits, and budgetConfigFor still holds each one under the shared pool.
+ */
+export const FOMO_CAP_ENV = Object.freeze({
+  groupHourlyCredits: "MERRYMEN_FOMO_GROUP_HOURLY_CREDITS",
+  tenantHourlyCredits: "MERRYMEN_FOMO_TENANT_HOURLY_CREDITS",
+  tenantDailyCredits: "MERRYMEN_FOMO_TENANT_DAILY_CREDITS",
+} as const);
+
+/** The provider plan's monthly credits (MERRYMEN_FOMO_PLAN_CREDITS): a positive number, else undefined and the default applies. */
+export function fomoPlanFrom(env: Env): number | undefined {
+  const plan = Number(env?.MERRYMEN_FOMO_PLAN_CREDITS);
+  return Number.isFinite(plan) && plan > 0 ? plan : undefined;
+}
+
+/**
+ * The cap overrides an environment sets: whole numbers of credits only
+ * (digits, nothing else: no sign, comma, decimal or unit). A blank or unset
+ * variable is no override. Each bad value is one problem line, which names
+ * the variable and never echoes the value (a key pasted into the wrong
+ * variable must not reach a log), and leaves that cap at its default.
+ */
+export function fomoBudgetFrom(env: Env): { budget: Partial<FomoBudgetConfig>; problems: string[] } {
+  const budget: Partial<FomoBudgetConfig> = {};
+  const problems: string[] = [];
+  for (const [field, name] of Object.entries(FOMO_CAP_ENV) as Array<[keyof typeof FOMO_CAP_ENV, string]>) {
+    const raw = env?.[name];
+    if (raw === undefined || raw.trim() === "") continue;
+    const v = raw.trim();
+    const n = /^\d{1,12}$/.test(v) ? Number(v) : Number.NaN;
+    if (!Number.isSafeInteger(n)) {
+      problems.push(`fomo: ${name} is not a whole number of credits; its default applies`);
+      continue;
+    }
+    budget[field] = n;
+  }
+  return { budget, problems };
+}
+
+/** One boot line: the limits in force, as budgetConfigFor clamped them. */
+export function describeBudget(c: FomoBudgetConfig): string {
+  return `fomo: research budget ${c.sharedDailyCredits} credits/day shared; per owner ${c.tenantHourlyCredits}/h and ${c.tenantDailyCredits}/day; per group ${c.groupHourlyCredits}/h`;
 }
 
 // ── Analysis-model budget ────────────────────────────────────────────────

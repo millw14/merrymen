@@ -1278,3 +1278,37 @@ describe("a coin's theses in the group model's own words (plan WP9 P2, D5)", () 
     assert.ok(logs.includes("[tg-groups] theses late"));
   });
 });
+
+describe("a refusal or a failure is said plainly in the room (WP10, D10)", () => {
+  const ROOM_LINE = "fomo lookups for this room are used up for now, try again after 00:00 UTC.";
+
+  it("the room's refusal line reaches the room as the research's reply, through the gate", async () => {
+    fomo!.answer = () => ({ text: ROOM_LINE, deflect: false, status: "budget-limited" });
+    make();
+    const m = msg("pine what are the theses on $PONS on fomo?");
+    await said(m);
+    assert.deepEqual(tg.texts(CHAT), [ROOM_LINE]);
+    const sent = tg.calls.find((c) => c.method === "sendMessage")!;
+    assert.equal((sent.body.reply_parameters as { message_id?: number } | undefined)?.message_id ?? sent.body.reply_to_message_id, m.messageId);
+  });
+
+  it("a failed read with nothing sayable is 'couldn't reach fomo', never 'ask me in a direct message'", async () => {
+    make();
+    for (const status of ["failed", "unavailable", "budget-limited"] as const) {
+      fomo!.answer = () => ({ text: "Fomo lookup failed @provider https://x.test", deflect: false, status });
+      const before = tg.texts(CHAT).length;
+      await said(msg(`pine what are the theses on $PONS on fomo? (${status})`, { fromId: ANN + before + 1 }));
+      clock += 3 * MIN;
+      const out = tg.texts(CHAT);
+      assert.equal(out[out.length - 1], "couldn't reach fomo just now, try again in a bit.", status);
+      assert.doesNotMatch(out.join("\n"), /direct message/);
+    }
+  });
+
+  it("an answer that read fine but has nothing sayable keeps its own line", async () => {
+    fomo!.answer = () => ({ text: "@someone https://x.test", deflect: false, status: "ok" });
+    make();
+    await said(msg("pine what are the theses on $PONS on fomo?"));
+    assert.match(tg.texts(CHAT)[0]!, /can't put that research into words/);
+  });
+});

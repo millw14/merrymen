@@ -2,7 +2,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
+  budgetConfigFor,
+  DEFAULT_GROUP_HOURLY_CREDITS,
   DEFAULT_PRIORITY_SHARES,
+  DEFAULT_TENANT_DAILY_CREDITS,
+  DEFAULT_TENANT_HOURLY_CREDITS,
+  describeBudget,
+  fomoBudgetFrom,
+  fomoPlanFrom,
+  FREE_PLAN_CREDITS_PER_MONTH,
+  refusalResetAt,
+  utcClockText,
   FomoBudget,
   MemoryAllowance,
   ModelBudget,
@@ -439,6 +449,56 @@ describe("UsageMeter", () => {
     assert.ok(b);
     b.calls = 99;
     assert.equal(m.snapshot().days[0]?.buckets.a?.calls, 1);
+  });
+});
+
+describe("refusalResetAt and the configured caps", () => {
+  it("an hourly cap resets at the next clock hour, a daily one at 00:00 UTC, a job's allowance never on a clock", () => {
+    const at = (iso: string) => Date.parse(iso);
+    const t = (r: string, iso: string) => {
+      const ms = refusalResetAt(r, at(iso));
+      return ms === null ? null : new Date(ms).toISOString();
+    };
+    assert.equal(t("budget-group-hourly", "2026-10-07T23:05:00Z"), "2026-10-08T00:00:00.000Z");
+    assert.equal(t("group-hourly", "2026-10-07T14:59:59Z"), "2026-10-07T15:00:00.000Z");
+    assert.equal(t("budget-tenant-hourly", "2026-10-07T15:00:00Z"), "2026-10-07T16:00:00.000Z");
+    assert.equal(t("budget-tenant-daily", "2026-10-07T00:00:00Z"), "2026-10-08T00:00:00.000Z");
+    assert.equal(t("budget-shared-daily", "2026-10-07T23:59:59Z"), "2026-10-08T00:00:00.000Z");
+    assert.equal(t("budget-class-reserve", "2026-10-07T08:00:00Z"), "2026-10-08T00:00:00.000Z");
+    assert.equal(t("job-allowance", "2026-10-07T08:00:00Z"), null);
+    assert.equal(t("budget-error", "2026-10-07T08:00:00Z"), null);
+    assert.equal(refusalResetAt(null, 0), null);
+    assert.equal(refusalResetAt("budget-group-hourly", Number.NaN), null);
+    assert.equal(utcClockText(at("2026-10-08T00:00:00Z")), "00:00");
+  });
+
+  it("reads the three cap overrides as whole numbers only, one problem line per bad value, never echoing it", () => {
+    assert.deepEqual(fomoBudgetFrom({}), { budget: {}, problems: [] });
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: " 6500 ", MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "13000", MERRYMEN_FOMO_TENANT_DAILY_CREDITS: "26000" }), {
+      budget: { groupHourlyCredits: 6_500, tenantHourlyCredits: 13_000, tenantDailyCredits: 26_000 },
+      problems: [],
+    });
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "0" }).budget, { groupHourlyCredits: 0 }, "0 is a cap: no group research");
+    for (const bad of ["6,500", "6500.5", "-1", "1e4", "lots", "0x10", "sk_live_pasted_key_123"]) {
+      const r = fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: bad });
+      assert.deepEqual(r.budget, {}, bad);
+      assert.deepEqual(r.problems, ["fomo: MERRYMEN_FOMO_GROUP_HOURLY_CREDITS is not a whole number of credits; its default applies"], bad);
+    }
+    assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "x", MERRYMEN_FOMO_TENANT_DAILY_CREDITS: "y" }).problems.length, 2);
+    assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "  " }).problems.length, 0, "blank is unset");
+  });
+
+  it("the defaults are unchanged, and an override is still held under the shared pool", () => {
+    const free = budgetConfigFor(FREE_PLAN_CREDITS_PER_MONTH);
+    const growth = budgetConfigFor(37_500_000);
+    assert.deepEqual([growth.tenantHourlyCredits, growth.tenantDailyCredits, growth.groupHourlyCredits], [DEFAULT_TENANT_HOURLY_CREDITS, DEFAULT_TENANT_DAILY_CREDITS, DEFAULT_GROUP_HOURLY_CREDITS]);
+    assert.deepEqual(budgetConfigFor(37_500_000, fomoBudgetFrom({}).budget), growth, "no variable set: exactly the defaults");
+    assert.deepEqual([DEFAULT_TENANT_HOURLY_CREDITS, DEFAULT_TENANT_DAILY_CREDITS, DEFAULT_GROUP_HOURLY_CREDITS], [6_000, 20_000, 2_500]);
+    const big = budgetConfigFor(FREE_PLAN_CREDITS_PER_MONTH, fomoBudgetFrom({ MERRYMEN_FOMO_TENANT_DAILY_CREDITS: "99999999" }).budget);
+    assert.equal(big.tenantDailyCredits, big.sharedDailyCredits);
+    assert.equal(fomoPlanFrom({ MERRYMEN_FOMO_PLAN_CREDITS: "1000000" }), 1_000_000);
+    assert.equal(fomoPlanFrom({ MERRYMEN_FOMO_PLAN_CREDITS: "lots" }), undefined);
+    assert.equal(describeBudget(growth), `fomo: research budget ${growth.sharedDailyCredits} credits/day shared; per owner 6000/h and 20000/day; per group 2500/h`);
   });
 });
 

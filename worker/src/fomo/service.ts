@@ -48,7 +48,7 @@
 import { createHash } from "node:crypto";
 import type { Db } from "../db";
 import { sanitizeText } from "../research/news";
-import { utcDay, type ChargeRequest, type ChargeResult, type FomoBudget } from "./budget";
+import { refusalResetAt, utcClockText, utcDay, type ChargeRequest, type ChargeResult, type FomoBudget } from "./budget";
 import { CAPABILITY_FOR_ROUTE, capabilityFromCall, DOCUMENTED_CAPABILITIES, mergeCapabilities, mergeCapability } from "./capabilities";
 import type { BrokerReport, FomoAccess, FomoService, FomoServiceHealth } from "./contract";
 import {
@@ -69,7 +69,7 @@ import {
 import { readThesisForDigest } from "./digest";
 import { chronologicalOrder, dedupeEvents } from "./events";
 import { changeSummary, earlyDiscovery, participationBreadth } from "./features";
-import { SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
+import { GROUP_REUSE_MS, SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
 import { chainFromUserText, executionAvailabilityOf, isRobinhoodToken, ROBINHOOD_NETWORK_ID, tokenFromKey, tokenIdentity } from "./identity";
 import {
   MIN_ATTEMPT_MS,
@@ -736,6 +736,12 @@ interface ChargeContext {
   cap: { limit: number; spent: number } | null;
   /** Which budget pays; the tenant budget unless this is background shared research. */
   budget?: BudgetLike;
+  /**
+   * A Telegram group's "now" or "latest" (decision D8): read as an ordinary
+   * prefer-fresh question, in the class's own window, never with the group's
+   * longer reuse window and never as a paid forced refresh.
+   */
+  noReuse?: boolean;
 }
 
 function localSection<T>(name: string, data: T, retrievedAt: number | null, servedFrom: Freshness["servedFrom"] = "cache"): Section<T> {
@@ -847,7 +853,33 @@ function tailHandle(raw: string | null | undefined): string | null {
   return /^[A-Za-z0-9_]{1,30}$/.test(h) ? h : null;
 }
 
-function defaultMessage(status: ResultStatus, reason: string | null): string | null {
+/**
+ * A budget refusal for the owner: which allowance ran out and when it
+ * resets (refusalResetAt). A room never hears this one: its render says
+ * only that the room's lookups are used up and when to try again, whichever
+ * cap it was (render.ts, decision D10).
+ */
+function budgetMessage(reason: string | null, now: number): string {
+  const at = refusalResetAt(reason, now);
+  const when = at !== null ? `; it resets at ${utcClockText(at)} UTC` : "";
+  switch (reason) {
+    case "budget-group-hourly":
+      return `Fomo research is rationed right now: this group's hourly research allowance is used up${when}.`;
+    case "budget-tenant-hourly":
+      return `Fomo research is rationed right now: your hourly Fomo research allowance is used up${when}.`;
+    case "budget-tenant-daily":
+      return `Fomo research is rationed right now: your daily Fomo research allowance is used up${when}.`;
+    case "budget-shared-daily":
+    case "budget-class-reserve":
+      return `Fomo research is rationed right now: the shared daily research pool is used up${when}.`;
+    case "job-allowance":
+      return "Fomo research is rationed right now: this research job's credit allowance is spent.";
+    default:
+      return "Fomo research is rationed right now: the retrieval budget refused this read.";
+  }
+}
+
+function defaultMessage(status: ResultStatus, reason: string | null, now: number): string | null {
   switch (status) {
     case "not-authorized":
       return reason === "owner-only"
@@ -858,7 +890,7 @@ function defaultMessage(status: ResultStatus, reason: string | null): string | n
     case "failed":
       return reason === "invalid-args" ? "That request could not be read as a Fomo lookup." : "The Fomo lookup failed; nothing is shown rather than a guess.";
     case "budget-limited":
-      return "Fomo research is rationed right now: the retrieval budget refused this read.";
+      return budgetMessage(reason, now);
     case "stale":
       return "Only an older copy is available; it is shown with its age.";
     case "partial":
@@ -1157,9 +1189,15 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
    *   decideRead → (serve cache | budget.tryCharge → SingleFlight → settle/refund
    *   → cachePut/cacheMarkAttempt) → a Section saying honestly what was served.
    */
-  async function read<T>(cc: ChargeContext, spec: ReadSpec<T>, mode: FreshnessMode): Promise<Section<T>> {
+  async function read<T>(cc: ChargeContext, spec: ReadSpec<T>, asked: FreshnessMode): Promise<Section<T>> {
     const key = cacheKeyOf(spec.route, spec.params);
     const now = cc.now;
+    // A ROOM NEVER FORCES A PAID REFRESH (D8), and otherwise reuses the slow
+    // classes' copies longer (D7, GROUP_REUSE_MS); the answer carries the
+    // copy's age either way. Every other surface reads as it asked.
+    const room = cc.surface === "telegram-group";
+    const mode: FreshnessMode = room && asked === "force-refresh" ? "prefer-fresh" : asked;
+    const reuseMs = room && asked !== "force-refresh" && cc.noReuse !== true ? GROUP_REUSE_MS[spec.cls] : undefined;
     const pages = Math.max(1, spec.pages ?? 1);
     let entry: store.CacheEntry | null = null;
     try {
@@ -1209,7 +1247,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         providerSnapshot: heldSnap,
       });
 
-    const first = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: true });
+    const first = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: true, ...(reuseMs !== undefined ? { reuseMs } : {}) });
     if (first.action === "serve-cache" && heldData !== null) {
       usage?.recordCacheHit({ now, bucket: CAPABILITY_FOR_ROUTE[spec.route] });
       return base({
@@ -1246,7 +1284,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const refused = async (reason: string): Promise<Section<T>> => {
       noteBudgetRefusal(reason, cc, now);
       usage?.recordRefusal({ now, bucket: CAPABILITY_FOR_ROUTE[spec.route] });
-      const second = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: false });
+      const second = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: false, ...(reuseMs !== undefined ? { reuseMs } : {}) });
       return second.action === "serve-stale" && heldData !== null
         ? heldCopy("stale", reason, "skipped-budget")
         : base({ status: "budget-limited", reason, lastOutcome: "skipped-budget" });
@@ -1666,7 +1704,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       },
       dossierRevision: o.dossierRevision ?? null,
       reason: status === "ok" ? null : reason,
-      message: o.message !== undefined ? o.message : defaultMessage(status, reason),
+      message: o.message !== undefined ? o.message : defaultMessage(status, reason, ic.now),
     };
   }
 
@@ -3382,6 +3420,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       return env;
     }
     ic.access = access;
+    // A room's "now" is an ordinary read (D8): the answer says what it served, and how old it is.
+    const asked = v.args as { freshness?: unknown };
+    if (surface === "telegram-group" && asked && asked.freshness === "force-refresh") {
+      asked.freshness = "prefer-fresh";
+      ic.cc.noReuse = true;
+    }
     let env: FomoEnvelope;
     try {
       env = await dispatch(ic, tool, v.args);

@@ -839,6 +839,52 @@ describe("a coin's theses: the code digest, and material for the group model's p
   });
 });
 
+describe("a room's research budget, in plain words (WP10: D7, D8, D10)", () => {
+  it("'what are people saying about $PONS now' a minute later reads no thesis page again (D8)", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    await port.ask({ text: "what are people saying about $PONS on fomo?", chatId: GROUP });
+    const pages = () => s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length;
+    assert.equal(pages(), 1);
+    s.clock.now += 60_000;
+    const again = await port.ask({ text: "what are people saying about $PONS on fomo now", chatId: GROUP });
+    assert.equal(pages(), 1, "a room's 'now' is the copy inside its window, not a paid refresh");
+    assert.equal(s.calls[s.calls.length - 1]!.tool, "fomo_get_token_theses");
+    assert.ok(again && !again.deflect);
+    // Forty minutes on, the group's two-hour reuse still holds the set (D7).
+    s.clock.now += 40 * 60_000;
+    const later = await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP });
+    assert.equal(pages(), 1);
+    assert.match(later!.text, /From a copy fetched 41 min ago\./);
+  });
+
+  for (const [at, reset] of [["2026-10-07T23:05:00Z", "00:00"], ["2026-10-07T14:59:59Z", "15:00"]] as const) {
+    it(`a second coin past the room's cap at ${at.slice(11, 19)}: when to try again (${reset} UTC), never which cap or a credit`, async () => {
+      const s = await setup({ groupHourlyCredits: 1_600 });
+      s.clock.now = Date.parse(at);
+      const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+      const first = await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP });
+      assert.equal(first!.status, "ok");
+      const second = await port.ask({ text: "what are the theses on 0x7fe9950000000000000000000000000000000ca5 on robinhood on fomo?", chatId: GROUP });
+      assert.ok(second);
+      assert.equal(second.status, "budget-limited");
+      assert.equal(second.text, `fomo lookups for this room are used up for now, try again after ${reset} UTC.`);
+      assert.ok(admitTgLine(second.text, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
+      assert.doesNotMatch(second.text, /credit|rationed|direct message|group's|your/i);
+    });
+  }
+
+  it("a failed read is said plainly, never as 'ask me in a direct message'", async () => {
+    const s = await setup({ trending: () => { throw new Error("upstream down"); } });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "what's trending on fomo?", chatId: GROUP });
+    assert.ok(a);
+    assert.ok(a.status === "failed" || a.status === "unavailable", a.status);
+    assert.equal(a.text, "couldn't reach fomo just now, try again in a bit.");
+    assert.ok(admitTgLine(a.text, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
+  });
+});
+
 describe("groupWords", () => {
   it("puts the renderer's fixed wording into words the group gate admits", () => {
     const out = groupWords(

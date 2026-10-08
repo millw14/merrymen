@@ -2669,6 +2669,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const FOMO_BUSY = "i've done enough research lookups in here for now; ask again in a few minutes.";
   const FOMO_UNSAYABLE = "i can't put that research into words for a group; ask me in a direct message.";
   /**
+   * A lookup that failed, could not be reached or was refused by a budget,
+   * when nothing of its answer is sayable: said plainly, never as
+   * FOMO_UNSAYABLE, whose "ask me in a direct message" would make a failure
+   * sound private (fomo/render.ts GROUP_FOMO_UNREACHED, the same words).
+   */
+  const FOMO_UNREACHED = "couldn't reach fomo just now, try again in a bit.";
+  /**
    * The longest a research read with a fallback may take: what is left of the
    * reply deadline after it still holds the desk's look and a send.
    */
@@ -2876,7 +2883,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         log("[tg-groups] owner moves sent to the DM");
       }
     }
-    const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? FOMO_UNSAYABLE;
+    const failedRead = r.status === "failed" || r.status === "unavailable" || r.status === "budget-limited";
+    const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : FOMO_UNSAYABLE);
     return send(text);
   };
 
