@@ -4262,8 +4262,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const venueMarket = desked?.kind === "market" && desked.trending !== true;
         // So does a line the desk owns: an analysis, a comparison, or a coin
         // it names ("what do you think about sol?", "should i buy sol?"),
-        // unless the coin word is a chain in a chain's position ("on base?").
-        const deskOwned = desked?.kind === "analysis" || desked?.kind === "comparison" || (desked?.kind === "coin" && chainIn(text) === undefined);
+        // unless the coin word is a chain in a chain's position ("on base?"),
+        // or the line asks what traders are saying about the coin ("what are
+        // people saying about $PONS now"): that is the coin's theses, never a chart.
+        const deskOwned = desked?.kind === "analysis" || desked?.kind === "comparison"
+          || (desked?.kind === "coin" && chainIn(text) === undefined && !/\b(?:saying|thes[ie]s)\b/iu.test(text));
         const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
         // A complaint with nothing of theirs open asks which question; one
         // replying to its answer to their open ask has that ask read again by

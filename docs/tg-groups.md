@@ -543,7 +543,10 @@ one-liner from a model that was given no data.
   on the desk: "what's trending on robinhood chain", "what's trending in the
   market", even right after a Fomo answer (never a Fomo follow-up), and so
   does a line the desk owns: an analysis, a comparison, or a coin it names
-  ("what do you think about sol?", "should i buy sol?"). Personal chat
+  ("what do you think about sol?", "should i buy sol?"). A coin line that
+  asks what traders are saying ("what are they saying about $AnyPS5", "what
+  are people saying about $PONS now") is the coin's theses, never the desk's
+  chart, and stays a Fomo follow-up. Personal chat
   ("is she holding up ok?", "what is he doing lol") is never a follow-up
   about a trader. After a board, a chain alone ("and on solana?", "solana
   ones?", "on base?") is that board on that chain; the router reads one the

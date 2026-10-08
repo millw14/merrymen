@@ -1286,6 +1286,40 @@ describe("a bare 'what's trending' is Fomo's board where Fomo is wired, with the
     assert.equal(fomo!.asks.length, 2);
   });
 
+  it("right after a Fomo answer, 'what are they saying about $AnyPS5' and 'what are people saying about $PONS now' are Fomo's theses, never the desk's chart (review r3)", async () => {
+    fomo!.answer = () => ({ text: BOARD, deflect: false, status: "ok" });
+    make();
+    await said(msg("pine what's trending on fomo?"));
+    assert.equal(fomo!.asks.length, 1);
+    // A new message, not a reply: the live 23:00 question written with a $tag.
+    clock += MIN;
+    await said(msg("pine what are they saying about $AnyPS5", { fromId: ANN + 1 }));
+    assert.equal(fomo!.asks.length, 2, "Fomo is asked for the theses");
+    assert.equal(fomo!.asks[1]!.text, "pine what are they saying about $AnyPS5");
+    assert.deepEqual(desk!.asks, [], "the desk is asked nothing");
+    // After a theses answer, "now" with no "on fomo" (docs: the kept copy).
+    fomo!.answer = () => ({ text: "What traders on Fomo are saying about PONS on Robinhood Chain (3 recent theses from 3 traders):", deflect: false, status: "ok" });
+    clock += MIN;
+    await said(msg("pine theses on $PONS on fomo", { fromId: ANN + 2 }));
+    assert.equal(fomo!.asks.length, 3);
+    clock += MIN;
+    await said(msg("pine what are people saying about $PONS now", { fromId: ANN + 3 }));
+    assert.equal(fomo!.asks.length, 4, "Fomo is asked for the theses again");
+    assert.deepEqual(desk!.asks, [], "the desk is asked nothing");
+    // One trader's theses (docs: the DM-only deflection, which the port says): never the chart.
+    clock += MIN;
+    await said(msg("pine what is @CryptoKaleo saying about $PONS", { fromId: ANN + 4 }));
+    assert.equal(fomo!.asks.length, 5, "Fomo is asked, so the port can deflect it");
+    assert.deepEqual(desk!.asks, [], "the desk is asked nothing");
+    // A coin the desk reads is still the desk's.
+    for (const [i, t] of ["pine what do you think about sol?", "pine should i buy sol?"].entries()) {
+      clock += MIN;
+      await said(msg(t, { fromId: ANN + 10 + i }));
+    }
+    assert.equal(fomo!.asks.length, 5, "Fomo is asked nothing for the desk's coin asks");
+    assert.deepEqual(desk!.asks, [{ kind: "coin", query: "sol" }, { kind: "coin", query: "sol" }]);
+  });
+
   it("with the room's research slots spent, a venue market ask after a Fomo answer still gets the desk, never 'enough lookups'", async () => {
     fomo!.answer = () => ({ text: "PONS: 1 buyer", deflect: false, status: "ok" });
     make();
