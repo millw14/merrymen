@@ -352,6 +352,14 @@ export const txHash = (value: unknown) => typeof value === "string" && /^0x[0-9a
 
 export const POLL_GIVE_UP_MS = 10 * 60_000;
 /**
+ * The most checks one wait sends, whatever the clock says. Ten minutes of the
+ * backoff below is about 25 checks, so this never cuts a real wait short; it
+ * is there for a clock that does not move as the waits do (a sleeping laptop
+ * waking, a page whose timers fire early, a test that fast-forwards them),
+ * which would otherwise keep asking without end.
+ */
+export const POLL_MAX_CHECKS = 40;
+/**
  * Six seconds, stretching by half again after the second check, to 30 s. The
  * gateway allows 30 checks a minute per wallet; this stays far below it, and
  * honours a retry_after it asks for.
@@ -400,8 +408,9 @@ export type WatchEnd = Extract<PaymentOutcome, { kind: "credited" | "failed" | "
  * Submit `hash` until the gateway credits or refuses it. Re-submitting is how
  * the gateway is asked again (it credits a transaction once, then answers
  * `already`), so a lost answer or a reload costs nothing. Gives up after ten
- * minutes with the last stage seen, or at once when the check itself is
- * refused, so the page can say what to do next and keep the hash.
+ * minutes or POLL_MAX_CHECKS checks, whichever comes first, with the last
+ * stage seen, or at once when the check itself is refused, so the page can
+ * say what to do next ("check again") and keep the hash.
  */
 export async function watchPayment(hash: string, { check, wait, now = Date.now, cancelled, onWaiting }: {
   check: (hash: string) => Promise<{ status: number; data: unknown }>; wait: (ms: number) => Promise<void>; now?: () => number;
@@ -416,7 +425,8 @@ export async function watchPayment(hash: string, { check, wait, now = Date.now, 
     if (outcome.kind === "unchecked") return { kind: "stalled", stage, message: outcome.message };
     if (outcome.kind !== "pending" && outcome.kind !== "retry") return outcome;
     if (outcome.kind === "pending") stage = outcome.stage;
-    if (now() - started >= POLL_GIVE_UP_MS) return { kind: "stalled", stage };
+    // Counted as well as timed: the count alone ends a loop whose clock never moves.
+    if (attempt + 1 >= POLL_MAX_CHECKS || now() - started >= POLL_GIVE_UP_MS) return { kind: "stalled", stage };
     onWaiting(outcome);
     await wait(nextPollDelay(attempt, outcome.kind === "pending" ? outcome.retryAfterSec : null));
     if (cancelled()) return { kind: "cancelled" };

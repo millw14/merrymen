@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import {
-  FALLBACK_PLANS, ROBINHOOD_CHAIN, TOKEN, UNIT, amountToSend, balanceOfCalldata, ceilToWholeToken, chainIdOf, formatTokens, historyLabel, nextPollDelay,
+  FALLBACK_PLANS, POLL_GIVE_UP_MS, POLL_MAX_CHECKS, ROBINHOOD_CHAIN, TOKEN, UNIT, amountToSend, balanceOfCalldata, ceilToWholeToken, chainIdOf, formatTokens, historyLabel, nextPollDelay,
   normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, switchToRobinhood,
   endMessage, tokensToRaw, transferCalldata, txHash, waitingMessage, walletError, watchPayment, type Eip1193,
 } from '../../lib/developer-billing';
@@ -363,6 +363,29 @@ test('checks give up after ten minutes with the next step, and stop when the pag
   assert.deepEqual(await answered.run, { kind: 'cancelled' }); assert.equal(answered.checks(), 2);
   const waiting = scripted([pendingAnswer()], { leaveDuringWait: 2 });
   assert.deepEqual(await waiting.run, { kind: 'cancelled' }); assert.equal(waiting.checks(), 2);
+});
+
+test('checks also stop after a fixed count, so a clock that never moves cannot keep them going', async () => {
+  // Waits that return at once and a clock that stands still, as a page's timers fired early or a
+  // test's fast-forward makes them: only the count can end these.
+  for (const answer of [pendingAnswer('confirming'), { status: 503, data: { error: { code: 'chain_unavailable' } } }, { status: -1, data: null }]) {
+    let checks = 0, waits = 0;
+    const end = await watchPayment(HASH, {
+      // Credited on the 1000th check, so a loop without the count fails this test instead of hanging the suite.
+      check: async () => { checks++; if (checks >= 1000) return { status: 200, data: account({ due_raw: null }) }; if (answer.status < 0) throw new TypeError('fetch failed'); return answer; },
+      wait: async () => { waits++; }, now: () => 0, cancelled: () => false, onWaiting: () => {},
+    });
+    assert.deepEqual(end, { kind: 'stalled', stage: answer.status === 202 ? 'confirming' : '' }, String(answer.status));
+    assert.equal(checks, POLL_MAX_CHECKS); assert.equal(waits, POLL_MAX_CHECKS - 1, 'no wait after the last check');
+  }
+  // It ends where a person can act: still saved, and a button to check again.
+  assert.match(endMessage({ kind: 'stalled', stage: 'confirming' }, WALLET), /^Still not credited\. Check again in a minute/);
+  // The count never cuts a real wait short: ten minutes of backoff is fewer checks.
+  let elapsed = 0, attempt = 0;
+  while (elapsed < POLL_GIVE_UP_MS && attempt < 1000) elapsed += nextPollDelay(attempt++);
+  assert.ok(attempt + 1 < POLL_MAX_CHECKS, `${attempt + 1} checks in ten minutes`);
+  // And it is small: a runaway clock costs at most this many requests per payment.
+  assert.ok(POLL_MAX_CHECKS <= 40, `${POLL_MAX_CHECKS} checks`);
 });
 
 test('history never promises tokens back', () => {
