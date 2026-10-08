@@ -96,11 +96,12 @@ POST /agents
 {"external_user_id":"usr_123","name":"Robin"}
 ```
 
-`external_user_id` is 1–128 characters with no whitespace or control characters.
-The optional display `name` is 1–64 characters with no control characters. Both
-must be well-formed Unicode: a lone UTF-16 surrogate (a `\ud800` escape with no
-pair) is refused with 400 `bad_request`; emoji and other surrogate pairs are
-fine. A pending connection returns HTTP 202, including:
+`external_user_id` is 1–128 characters with no whitespace, C0 control character
+(U+0000–U+001F) or DEL. The optional display `name` is 1–64 characters with no
+C0 control character or DEL. Both must be well-formed Unicode: a lone UTF-16
+surrogate (a `\ud800` escape with no pair) is refused with 400 `bad_request`;
+emoji and other surrogate pairs are fine. A pending connection returns HTTP
+202, including:
 
 ```json
 {
@@ -369,14 +370,14 @@ POST /agents/{id}/messages
 ```
 
 Messages are 1–2000 characters of well-formed text (no lone UTF-16 surrogate)
-and may contain tabs and line breaks but no other control characters; leading
-and trailing whitespace is trimmed. Anything else is refused with 400
-`bad_request` before a reply is generated. `request_id` is 8–128 letters,
-digits, underscores or hyphens. Generate one per logical message and reuse it
-for transport retries. The same ID and text returns the saved response; a
-different text with that ID returns HTTP 409 `idempotency_conflict`. After a
-503 or a timeout, resend the same ID and text: if the first request finished,
-you get its saved reply.
+and may contain tab, LF and CR but no other C0 control character
+(U+0000–U+001F); leading and trailing whitespace is trimmed. Anything else is
+refused with 400 `bad_request` before a reply is generated. `request_id` is
+8–128 letters, digits, underscores or hyphens. Generate one per logical message
+and reuse it for transport retries. The same ID and text returns the saved
+response; a different text with that ID returns HTTP 409
+`idempotency_conflict`. After a 503 or a timeout, resend the same ID and text:
+if the first request finished, you get its saved reply.
 
 A connection answers one message at a time. A request that arrives while
 another is generating waits, up to about 20 seconds; a retry of the request
@@ -389,8 +390,9 @@ that, the answer is 409 `conversation_busy` with a `Retry-After` header and
 Chat uses the actual tenant's portfolio, positions, recent trades, settings and
 worker state, with persisted conversation context. If an LLM is unavailable,
 the response falls back to a factual status response. Replies are cleaned
-rather than refused: control characters other than tabs and line breaks are
-removed, a lone surrogate becomes U+FFFD, a reply over 16,000 characters is cut
+rather than refused: C0 control characters other than tab, LF and CR are
+removed (DEL and U+0080–U+009F are not, so escape them if your display needs
+to), a lone surrogate becomes U+FFFD, a reply over 16,000 characters is cut
 and ends with `…`, and an empty one is replaced by a statement that no action
 was executed. A non-null `proposal` describes a suggested command; it **does
 not execute** a trade or change settings. A proposal too large to store (over
