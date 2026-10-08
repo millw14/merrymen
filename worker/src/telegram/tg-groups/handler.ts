@@ -2219,7 +2219,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * Act on pacing's decision. Books are kept only after a line or reaction
    * actually landed. Null when something landed; else why nothing did (Quiet).
    */
-  const act = async (dec: PaceDecision, j: LineJob): Promise<Quiet | null> => {
+  const act = async (dec: PaceDecision, j: LineJob, fallback?: TgIntent): Promise<Quiet | null> => {
     const chatId = j.msg.chatId;
     const messageId = j.line.messageId;
     // Why the line, or the reaction, did not go out: the send path says.
@@ -2325,8 +2325,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
     if (!reserveReply(chatId, messageId)) return "already-answered";
     // What the persona says when nothing below takes the line (the desk's
-    // intent shadows the name in the block).
-    const persona: TgIntent = intent;
+    // intent shadows the name in the block): a hail's template when the
+    // line was only lifted to an answer for the router (lineOutcome).
+    const persona: TgIntent = fallback ?? intent;
     if (dec.act === "answer" && dec.mood !== "injection" && dec.mood !== "bot-question") {
       const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j) ?? repliedDmPolicy(j);
       const context = coinContext(j);
@@ -3821,12 +3822,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // A NEW LINE WHILE AN EARLIER ASK WENT UNANSWERED ("bro??", "you good?",
     // "you ignored me"): an answer the router may read as "ask it again"
     // (act(): reask), however small the talk.
+    // A hail keeps its template ("hey 👋", "all good, just lurking 👀") as what the persona says
+    // when the router picks nothing: routed for a reask, never a model-written answer to "yo".
+    let fallback: TgIntent | undefined;
     if (j.reaskable && j.addressed !== null && ((dec.act === "smalltalk" && dec.what === "hail") || (dec.act === "answer" && dec.mood === "normal")) && !signals.distress && !signals.injection) {
+      if (dec.act === "smalltalk") fallback = { kind: "smalltalk", what: dec.what };
       dec = { act: "answer", mood: "normal" };
     }
     if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return null;
     stageOf(chatId, `act: ${dec.act}`);
-    return act(dec, j);
+    return act(dec, j, fallback);
   };
 
   // ─── The owner's /groups and its buttons ─────────────────────────────────

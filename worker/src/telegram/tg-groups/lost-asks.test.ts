@@ -595,6 +595,31 @@ describe("other words for 'you missed it' go to the router (route.ts reask)", ()
     assert.equal(tg.out().slice(-1)[0]!.replyTo, ask.messageId);
   });
 
+  it("a lost ask, then a hail: routed once, and a chat pick gets the hail's template, never a model-written answer", async () => {
+    make();
+    tg.failNext = 1;
+    await said(msg("shogun how's the market?"));
+    clock += 20 * SEC;
+    chatReply = "MODEL WROTE THIS";
+    const hail = msg("shogun you good?");
+    await said(hail);
+    assert.equal(routePrompts.length, 1, "routed for a possible reask");
+    assert.deepEqual(tg.out().slice(-1), [{ text: "all good, just lurking 👀", replyTo: hail.messageId }]);
+    assert.ok(!tg.out().some((o) => o.text.includes("MODEL WROTE THIS")));
+  });
+
+  it("a lost ask, then a hail the router reads as a reask: the ask runs again", async () => {
+    make();
+    tg.failNext = 1;
+    const ask = msg("shogun how's the market?");
+    await said(ask);
+    clock += 20 * SEC;
+    picks.push({ action: "reask" });
+    await said(msg("yo shogun"));
+    assert.equal(desk.asks.length, 2);
+    assert.equal(tg.out().slice(-1)[0]!.replyTo, ask.messageId);
+  });
+
   it("a lost ask, then a line with a question of its own: the prompt never says they complained", async () => {
     make();
     tg.failNext = 1;
