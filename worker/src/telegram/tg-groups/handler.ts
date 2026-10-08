@@ -72,6 +72,7 @@ import {
   asksAboutCoin,
   consents,
   deskAskOf,
+  deskNameOk,
   extractCaHits,
   extractCas,
   extractCashtags,
@@ -89,6 +90,7 @@ import {
   isQuestionToRoom,
   isShush,
   isTradeTalk,
+  metaLineOf,
   offerShaped,
   reactionOnly,
   routeWorthy,
@@ -165,6 +167,12 @@ const FOMO_THREAD_MS = 2 * 60 * MIN;
 const FOMO_ASK_BACK = /\b(?:fomo|theses|thesis|trending|top traders?|leaderboard|graduated|most held|robinhood)\b/iu;
 /** A routing call with less time than this is not worth making. */
 const ROUTE_MIN_BOX_MS = 1_500;
+/** How long someone's ask stays open for "i asked a question" to re-run it (decision D12). */
+const REASK_OPEN_MS = 10 * MIN;
+/** "Typing…" lasts about five seconds in Telegram: while a read runs it is sent again this often. */
+const TYPING_EVERY_MS = 4 * SEC;
+/** Said to "i asked a question" from someone with no question open (decision D12). Code-written, gated as fixed. */
+const WHICH_QUESTION = "which question? i might've missed it, ask me again";
 /** The allowance routing never touches: the day's (at least 20, or a tenth) and this chat's hour. */
 const ROUTE_RESERVE_DAY = 20;
 const ROUTE_RESERVE_HOUR = 4;
@@ -358,6 +366,12 @@ export interface TgGroupsDeps {
    * answers.
    */
   timer?: (ms: number) => Promise<void>;
+  /**
+   * The pause between two "typing…" actions while a read runs
+   * (TYPING_EVERY_MS): resolves once `ms` have passed. Real time when absent,
+   * never `sleep`. Injectable so a test can count the actions.
+   */
+  tick?: (ms: number) => Promise<void>;
   /** Operator log (console by default). The same rule as `note`: no content. */
   log?: (s: string) => void;
 }
@@ -597,6 +611,31 @@ interface LineJob {
    * market read as the fallback when Fomo cannot answer (act()).
    */
   trending?: boolean;
+  /**
+   * A line about its own silence (detect.ts metaLineOf): "i asked a
+   * question", "?", its name alone. Never what decides the burst.
+   */
+  meta?: "complaint" | "poke" | "name-only";
+  /** A complaint from someone with no question open in the last 10 minutes: they get WHICH_QUESTION. */
+  noOpenAsk?: boolean;
+  /**
+   * A complaint replying to its answer to their open question: the router
+   * reads that question again, in the light of the complaint (route.ts reaskOf).
+   */
+  reaskOf?: string;
+  /** Their earlier question that nothing answered: the router may re-run it (route.ts reask). */
+  reaskable?: OpenAsk;
+  /** A re-run of an earlier ask that nothing answered: never claimed or nominated again (rule 1). */
+  reasked?: boolean;
+}
+
+/** Someone's last ask in a chat and topic, while it may still be re-asked. */
+interface OpenAsk {
+  job: LineJob;
+  /** It ran off the chat queue (research, a desk ask, a coin), so its re-run does too. */
+  research: boolean;
+  /** Re-run once already: never twice. */
+  reasked: boolean;
 }
 
 /** One outgoing group line, composed and waiting to be sent. */
@@ -683,8 +722,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
   const fail = (stage: string, e: unknown): void => log(`[tg-groups] ${stage} failed (${errName(e)})`);
+  /**
+   * Addressed lines that ended with nothing said or set on them
+   * (`${chatId}:${messageId}`): an open ask among them may be re-asked.
+   */
+  const lostAsks = new Lru<string, true>(LRU_MAX);
   /** An addressed line ended with nothing said or set on it: the code, never the content (see Quiet). */
-  const quietLine = (why: Quiet): void => log(`[tg-groups] addressed line got nothing (${why})`);
+  const quietLine = (why: Quiet, j?: LineJob): void => {
+    if (j && isMsgId(j.line.messageId)) lostAsks.set(msgKey(j.msg.chatId, j.line.messageId), true);
+    log(`[tg-groups] addressed line got nothing (${why})`);
+  };
   const note = (level: "ok" | "warn", msg: string): void => {
     try {
       d.note(level, msg);
@@ -721,6 +768,32 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * and must not drop an answer already being written for the first.
    */
   const lastAddressed = new Lru<string, { messageId: number; atMs: number }>(LRU_MAX);
+  /**
+   * NEVER LOSE HER REQUEST. Each person's last substantive line said to it,
+   * per chat and topic (`${chatId}:${fromId}:${threadId|0}`), for REASK_OPEN_MS.
+   * A poke while it is still being worked on gets a 👀 and leaves it the line
+   * to answer; "i asked a question" after nothing answered it runs it again,
+   * once (onMessage). Live 2026-10-07: "what's trending", then "shogun" ten
+   * seconds in, and the slow market read was dropped as a burst.
+   */
+  const openAsks = new Lru<string, OpenAsk>(LRU_MAX);
+  const askKey = (chatId: number, fromId: number, threadId?: number): string => `${chatId}:${fromId}:${threadId ?? 0}`;
+  /** Their open ask in this chat and topic, while it may still be re-asked. */
+  const openAskOf = (chatId: number, fromId: number, threadId?: number): OpenAsk | null => {
+    const a = openAsks.get(askKey(chatId, fromId, threadId));
+    return a && clock() - a.job.seenAtMs <= REASK_OPEN_MS ? a : null;
+  };
+  /**
+   * Where an open ask stands: something landed on it (a reply or a
+   * reaction), it ended with nothing (lostAsks, or past its deadline with
+   * nothing landed), or it is still being worked on.
+   */
+  const askStateOf = (a: OpenAsk): "running" | "answered" | "lost" => {
+    const k = msgKey(a.job.msg.chatId, a.job.line.messageId);
+    if (landedOn.has(k)) return "answered";
+    if (lostAsks.has(k)) return "lost";
+    return clock() - a.job.bornAtMs <= (a.research ? RESEARCH_REPLY_MS : STALE_MS) ? "running" : "lost";
+  };
   /**
    * The bot's own status per chat as the last my_chat_member said: true when
    * it is an admin there. An admin hears every line whatever privacy mode
@@ -2285,7 +2358,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const r = await tailLine(chatId, j, replyOpts, tailAsk);
           if (r === null) return;
           releaseReply(chatId, messageId);
-          if (j.addressed !== null) quietLine(r);
+          if (j.addressed !== null) quietLine(r, j);
         })());
         return null;
       }
@@ -2313,6 +2386,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const fomoThread = routable && !trendingFellBack && repliesToOwnFomo(j);
       // Whatever the persona says to a line in a research thread stays in it.
       if (j.fomo === true || fomoThread) replyOpts = { ...replyOpts, researchThread: true };
+      // "YOU DIDN'T ANSWER" UNDER ITS ANSWER TO THEIR QUESTION: the question
+      // is read again, in the light of that complaint, before the desk takes
+      // the complaint for a market read (live 22:59: "I said what's trending
+      // on fomo"). A chat pick leaves it to the lanes below, as before.
+      if (routable && typeof j.reaskOf === "string" && (await routeLine(chatId, j, replyOpts, persona, { reaskOf: j.reaskOf })) === "taken") return null;
       if (fomoThread && (await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
@@ -2326,7 +2404,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const deskOpts = deskAsk.kind !== "market" ? { ...timedOpts, stillWanted: () => wanted() && coinFactsOn() } : timedOpts;
         track((async () => {
           const sent = await deskAnswer(chatId, j, deskAsk, deskOpts, note, allowed);
-          if (!sent) { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
+          if (!sent) { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost(), j); }
         })());
         return null;
       }
@@ -2346,16 +2424,27 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const fact = request ? await requestedFact(request, chatId) : await coinFact(context!);
           const sent = await speak(chatId, { kind: "public-fact", fact }, factualOpts);
           if (sent) noteAnswered(sent.chatId, j, false);
-          else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
+          else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost(), j); }
         })());
+        return null;
+      }
+      // "I ASKED A QUESTION" FROM SOMEONE WITH NOTHING OPEN: which one? A
+      // fixed line, never a guessed market read (decision D12).
+      if (j.meta === "complaint" && j.noOpenAsk === true) {
+        const sent = await whichQuestion(chatId, j, replyOpts);
+        if (!sent) { releaseReply(chatId, messageId); return whyLost(); }
+        noteAnswered(sent.chatId, j, false);
         return null;
       }
       // NO RULE KNEW THIS LINE. Before the persona answers it, the group's
       // model picks once from what it can do (route.ts), and code checks the
       // pick. Not for a line read as an ordinary topic or one with nothing
       // the router serves, and only from the first half of the allowance.
-      if (routable && !fomoThread && routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId))) {
-        const routed = await routeLine(chatId, j, replyOpts, persona);
+      // A line from someone whose earlier ask went unanswered is always worth
+      // it: the router may re-run that ask (reask).
+      const unanswered = j.reaskable && askStateOf(j.reaskable) === "lost" && !j.reaskable.reasked ? j.reaskable : null;
+      if (routable && !fomoThread && (unanswered || routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId)))) {
+        const routed = await routeLine(chatId, j, replyOpts, persona, unanswered ? { reask: true, reaskOf: unanswered.job.line.text } : {});
         if (routed === "taken") return null;
       }
     }
@@ -2696,6 +2785,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // The owner is the trusted sender id, never a line sent through a chat (j.isOwner excludes `via`).
     const owner = j.isOwner === true;
     const left = replyByMs - RESEARCH_SEND_MS - clock();
+    // "typing…" while the research is read: the room sees it is on its way.
+    const stopTyping = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
     const r = await readFomo(port, {
       text: j.line.text,
       ...(request ? { request } : {}),
@@ -2703,7 +2794,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       chatId,
       ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
       ...(selfNames.length ? { selfNames } : {}),
-    }, how.fallback ? Math.min(FOMO_FALLBACK_MS, left) : left);
+    }, how.fallback ? Math.min(FOMO_FALLBACK_MS, left) : left).finally(stopTyping);
     if (r === null) {
       refund();
       return "not-research";
@@ -2823,7 +2914,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * Ask what the line wants and run it. "taken": a lane has it (detached, and
    * it answers or says why not); "persona": the persona answers it, as before.
    */
-  const routeLine = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent): Promise<"taken" | "persona"> => {
+  const routeLine = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent, earlier: { reask?: boolean; reaskOf?: string } = {}): Promise<"taken" | "persona"> => {
     try {
       if (!routerOn() || routeBreaker.open()) return "persona";
       // Routing only ever spends the first half of the day and of this
@@ -2844,7 +2935,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         trigger: j.line,
         timeoutMs: box,
         reserve,
-        ctx: { line: j.line.text, replied: repliedText(j), asked: askedBefore(j), selfNames, fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() },
+        ctx: {
+          line: j.line.text,
+          replied: repliedText(j),
+          asked: askedBefore(j),
+          ...(typeof earlier.reaskOf === "string" ? { reaskOf: earlier.reaskOf } : {}),
+          selfNames,
+          fomo: fomoNow() !== null,
+          desk: deskNow() !== null,
+          coins: coinFactsOn(),
+          ...(earlier.reask === true ? { reask: true } : {}),
+        },
       });
       routeBreaker.note(why);
       // Counts and kinds only: never the line, a name or a coin.
@@ -2937,7 +3038,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const done = (ok: boolean, why?: Quiet): void => {
       if (ok) return;
       releaseReply(chatId, messageId);
-      if (j.addressed !== null) quietLine(whyGone(j, why ?? lost));
+      if (j.addressed !== null) quietLine(whyGone(j, why ?? lost), j);
     };
     /** The persona's answer, exactly as without the router. */
     const asBefore = async (): Promise<void> => {
@@ -2965,6 +3066,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const r = await fomoAnswer(chatId, j, opts, { kind: "trader" });
           if (r === "not-research") return await asBefore();
           return done(r === "sent", r === "sent" ? undefined : r);
+        }
+        case "reask": {
+          // Their earlier ask, run again as the reply to it (reaskAgain); this
+          // line itself needs no answer of its own.
+          if (!reaskAgain(j)) return await asBefore();
+          releaseReply(chatId, messageId);
+          return;
         }
         case "market":
         case "coin": {
@@ -3010,12 +3118,23 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (depth === 0 && quote && typeof quote.fromId === "number" && quote.fromId === selfNow()?.id && (!line || line.own)) {
         // Older stored answers contain prose but no subject metadata; the
         // authenticated Telegram photo caption still carries its safe header.
-        const head = (quote.text ?? text).split(/\r?\n/u)[0]?.trim() ?? "";
+        const parts = (quote.text ?? text).split(/\r?\n/u).map((p) => p.trim()).filter((p) => p !== "");
+        const head = parts[0] ?? "";
         if (head === "Robinhood Chain market") return { kind: "market" };
         // Own photo captions start with a code-owned safe subject, unlike
         // project claims further down the caption. Ambiguous ticker lookup
-        // remains an honest miss in the desk.
-        if (/^[\p{L}][\p{L}\p{N}._-]{1,23}$/u.test(head) && coinFactsOn()) return { kind: "coin", query: head };
+        // remains an honest miss in the desk. Only a caption, though: a
+        // title above a read. An older stored answer kept only the read, so
+        // the caption is what Telegram quotes beyond it; a line it remembers
+        // word for word, and a one-line "yo", are never a read (live
+        // 2026-10-07: "i asked a question" under "yo" was searched as the
+        // coin "yo").
+        const names = selfNamesOf(selfNow());
+        const caption = parts.length >= 2 && (!line || parts.join("\n") !== line.text.split(/\r?\n/u).map((p) => p.trim()).filter((p) => p !== "").join("\n"));
+        if (caption && /^[\p{L}][\p{L}\p{N}._-]{1,23}$/u.test(head) && deskNameOk(head, names) && addressedSmallTalk(head, names) === null
+          && greetingOf(head) === null && !reactionOnly(head, names) && coinFactsOn()) {
+          return { kind: "coin", query: head };
+        }
       }
       if (!line?.own) {
         // A loose opinion ask up the chain was never settled as a coin: it lends no subject.
@@ -3084,7 +3203,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const prev = lastDesk.get(deskKey(j.msg.chatId, j.threadId)) ?? (general?.migrated ? general : undefined);
     if (prev?.ask.kind === "comparison" && intent?.kind === "discussion" && intent.topic === "setup" && deskQuestionIntent(j.line.text) !== "comparison") return null;
     if (prev && clock() - prev.atMs <= DESK_FOLLOW_MS && (prev.ask.kind === "market" || coinFactsOn())) return !lore || prev.ask.kind === "coin" ? prev.ask : null;
-    if (discussion) return null;
+    // A complaint with no subject anywhere ("i asked a question", "why can't
+    // you answer in the group?") is never a guessed market read: the re-ask,
+    // "which question?" or the persona answers it (onMessage, act()).
+    if (discussion || (complaint && intent?.kind !== "analysis")) return null;
     return { kind: "market" };
   };
 
@@ -3204,13 +3326,51 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return sent;
   };
 
-  /** A cosmetic action is detached, capped at one second and never gates useful work. */
-  const deskTyping = (chatId: number, replyByMs: number, threadId?: number): void => {
-    const early = optsNow();
-    const left = replyByMs - clock();
-    if (!early || left <= 0) return;
-    void sendChatAction({ ...early, deadlineAtMs: Date.now() + Math.min(SEC, left) }, chatId, "upload_photo", threadId)
-      .catch((e) => fail("typing", e));
+  /** The pause between two chat actions (TgGroupsDeps.tick): real time when absent, never `sleep`. */
+  const tick = (ms: number): Promise<void> =>
+    d.tick
+      ? d.tick(ms)
+      : new Promise((resolve) => {
+          const t = setTimeout(resolve, ms);
+          t.unref?.();
+        });
+  /**
+   * PROGRESS YOU CAN SEE while a read runs: "typing…" (or "sending a
+   * photo…" for a chart) again every TYPING_EVERY_MS until the returned stop
+   * is called, the deadline passes, the line stops being wanted (a newer
+   * line, a /forgetme), the chat is shushed (unless the owner called it) or
+   * the handler stops. Detached and outside the chat lock: each action is
+   * capped at one second and never gates useful work. Bot API calls, never
+   * a model call.
+   */
+  const keepTyping = (
+    chatId: number,
+    replyByMs: number,
+    threadId: number | undefined,
+    action: "typing" | "upload_photo",
+    o: { stillWanted?: () => boolean; ownerAddressed?: boolean } = {},
+  ): (() => void) => {
+    let done = false;
+    const wanted = (): boolean => {
+      try {
+        return !o.stillWanted || o.stillWanted();
+      } catch {
+        return false;
+      }
+    };
+    void (async () => {
+      while (!done && !stopped) {
+        const left = replyByMs - clock();
+        const opts = optsNow();
+        if (!opts || left <= 0 || !wanted() || !canTalk(chatId) || (!o.ownerAddressed && shushedNow(store.room(chatId), clock()))) return;
+        await sendChatAction({ ...opts, deadlineAtMs: Date.now() + Math.min(SEC, left) }, chatId, action, threadId).catch((e) => fail("typing", e));
+        if (done || stopped) return;
+        await tick(TYPING_EVERY_MS);
+      }
+    })().catch((e) => fail("typing", e));
+    return () => {
+      done = true;
+    };
   };
 
   /** A service miss is stated by code, never answered with invented market banter. */
@@ -3229,6 +3389,46 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.accountAnswer ? { accountAnswer: o.accountAnswer } : {}),
     });
     if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    return sent;
+  };
+
+  /**
+   * RUN AN UNANSWERED ASK AGAIN, once, for the line that says it was missed
+   * (the router's reask): as onMessage's re-ask, the reply to the ask itself.
+   * False when there is nothing to re-run (answered meanwhile, re-run
+   * already, or the person was forgotten).
+   */
+  const reaskAgain = (j: LineJob): boolean => {
+    const open = j.reaskable;
+    if (!open || open.reasked || askStateOf(open) !== "lost" || forgotten(open.job)) return false;
+    const now = clock();
+    const again: LineJob = { ...open.job, bornAtMs: now, ingressOrder: ++ingressOrder, reasked: true };
+    open.reasked = true;
+    open.job = again;
+    lostAsks.delete(msgKey(again.msg.chatId, again.line.messageId));
+    lastAddressed.set(`${again.msg.chatId}:${again.line.fromId}`, { messageId: again.line.messageId, atMs: now });
+    // It is their open ask again, so a poke while it runs gets the 👀.
+    openAsks.set(askKey(again.msg.chatId, again.line.fromId, again.threadId), open);
+    log("[tg-groups] an unanswered ask re-asked (routed)");
+    if (open.research) track(processLine(again));
+    else enqueue(again.msg.chatId, () => processLine(again), { force: true });
+    return true;
+  };
+
+  /** "i asked a question" with nothing of theirs open: which one? Code-written, gated as a fixed line. */
+  const whichQuestion = async (chatId: number, j: LineJob, o: SpeakOpts): Promise<{ chatId: number; messageId?: number } | null> => {
+    const v = admitTgLine(WHICH_QUESTION, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn: [] });
+    if (!v.ok) return null;
+    const sent = await deliver({
+      chatId, intent: { kind: "answer", mood: "normal" }, text: v.text,
+      ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+      ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+      bornAtMs: j.bornAtMs,
+      followUp: false, ownerAddressed: o.ownerAddressed === true,
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+      ...(o.miss ? { miss: o.miss } : {}),
+    });
+    if (sent) recordOwn(sent.chatId, sent.messageId, v.text, sent.chatId === chatId ? o.replyTo : undefined);
     return sent;
   };
 
@@ -3256,13 +3456,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // analysis should retry that subject, not turn into unrelated banter.
     rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder, j.threadId);
     if (!allowed) return deskMiss(chatId, ask, "rate-limit", opts, note);
-    deskTyping(chatId, replyByMs, o.threadId);
-    const composed = await deskCompose(chatId, ask, j.line.text, note, replyByMs);
-    if (!composed.ok) {
-      log(`[tg-groups] desk ${ask.kind} miss (${composed.why})`);
-      return deskMiss(chatId, ask, composed.why, opts, note);
+    const stopTyping = keepTyping(chatId, replyByMs, o.threadId, "upload_photo", o);
+    try {
+      const composed = await deskCompose(chatId, ask, j.line.text, note, replyByMs);
+      if (!composed.ok) {
+        log(`[tg-groups] desk ${ask.kind} miss (${composed.why})`);
+        return await deskMiss(chatId, ask, composed.why, opts, note);
+      }
+      return await deskDeliver(chatId, composed, opts);
+    } finally {
+      stopTyping();
     }
-    return deskDeliver(chatId, composed, opts);
   };
 
   /**
@@ -3305,9 +3509,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     else if (!deskNow()) sent = await deskMiss(chatId, ask, "unavailable", opts, note);
     else if (!deskRoom(chatId)) sent = await deskMiss(chatId, ask, "rate-limit", opts, note);
     else {
-      deskTyping(chatId, replyByMs, threadId);
-      const composed = await deskCompose(chatId, ask, o.trigger.text, note, replyByMs);
-      sent = composed.ok ? await deskDeliver(chatId, composed, opts) : await deskMiss(chatId, ask, composed.why, opts, note);
+      const stopTyping = keepTyping(chatId, replyByMs, threadId, "upload_photo", opts);
+      try {
+        const composed = await deskCompose(chatId, ask, o.trigger.text, note, replyByMs);
+        sent = composed.ok ? await deskDeliver(chatId, composed, opts) : await deskMiss(chatId, ask, composed.why, opts, note);
+      } finally {
+        stopTyping();
+      }
     }
     // A transport timeout may already have landed. Keep the message's reply
     // reservation; the coin flow's fallback cannot blindly send another answer.
@@ -3354,7 +3562,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const processLine = async (j: LineJob): Promise<void> => {
     const why = await lineOutcome(j);
     // Only a line said TO it is owed an explanation in the log.
-    if (why !== null && j.addressed !== null) quietLine(why);
+    if (why !== null && j.addressed !== null) quietLine(why, j);
   };
 
   /**
@@ -3438,8 +3646,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
     // DISTRESS BEFORE COINS. "lost everything on 0x… i want to die" is a
     // person in trouble, not a coin to look at: it is never nominated, and it
-    // gets the kind line (pacing), not "hmm is this good?".
-    if (!j.deferred && !isDistress(text)) {
+    // gets the kind line (pacing), not "hmm is this good?". A re-asked line
+    // (onMessage) never comes here: its coin was the flow's the first time,
+    // and a second claim or nomination is never made (rule 1).
+    if (!j.deferred && !j.reasked && !isDistress(text)) {
       // Every CA with the chain its link names: the flow sets aside those in
       // another chain's link before it counts the first two.
       const hits = extractCaHits(text);
@@ -3502,7 +3712,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
               const acted = end.acted || landedOn.has(key);
               coinPostLine(how, { ...end, acted }, coinMissed.get(key));
               if (j.addressed === null || acted) return;
-              quietLine(coinMissed.get(key) ?? end.quiet ?? "coin-silent");
+              quietLine(coinMissed.get(key) ?? end.quiet ?? "coin-silent", j);
             }),
           );
           return null;
@@ -3558,6 +3768,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // while distress, protected-trait abuse, privacy and injection retain priority.
     if (j.addressed !== null && dec.act === "roast" && !signals.distress && !signals.privateAsk && !signals.injection && signals.insult !== "hateful"
       && deskAskFor(j, coinContext(j), asksAboutCoin(text, selfNamesOf(selfNow())), firmDeskIntentOf(text, chatId)) !== null) {
+      dec = { act: "answer", mood: "normal" };
+    }
+    // A NEW LINE WHILE AN EARLIER ASK WENT UNANSWERED ("bro??", "you good?",
+    // "you ignored me"): an answer the router may read as "ask it again"
+    // (act(): reask), however small the talk.
+    if (j.reaskable && j.addressed !== null && (dec.act === "smalltalk" || (dec.act === "answer" && dec.mood === "normal")) && !signals.distress && !signals.injection) {
       dec = { act: "answer", mood: "normal" };
     }
     if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return null;
@@ -3854,12 +4070,41 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // Without getMe's answer nothing can be addressed to it: counted, so
         // "every mention is ignored" shows up as what it is.
         if (!me) stats.noSelf += 1;
+        // A LINE ABOUT ITS OWN SILENCE ("?", "hello??", "i asked a question",
+        // its name alone) while their ask is still being worked on never
+        // decides the burst: that ask stays the line to answer (openAsks).
+        // Small talk and such lines are never an ask of their own.
+        const meta = addressed !== null ? metaLineOf(text, selfNamesOf(me)) : null;
+        const open = addressed !== null ? openAskOf(chatId, msg.fromId, threadId) : null;
+        const openState = open ? askStateOf(open) : null;
+        const substantive = addressed !== null && meta === null && smallTalkOf(text, selfNamesOf(me), room.title) === null;
         if (addressed !== null) {
           stats.addressed += 1;
-          lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
+          if (!(meta !== null && openState === "running")) lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
           askedIn.set(key, true);
         }
         maybeMemoryPass(chatId);
+        if (meta !== null && open && openState === "running") {
+          // A POKE WHILE ITS ASK IS BEING WORKED ON: a 👀 on it (no model
+          // call, no reply slot), and the answer still lands on the ask.
+          log("[tg-groups] addressed line got 👀 (poke-while-working)");
+          track(reactTo(chatId, messageId, "👀", { ownerAddressed: isOwner, stillWanted: () => !forgottenSince(chatId, msg.fromId, now) }));
+          return;
+        }
+        if (meta !== null && open && openState === "lost" && !open.reasked) {
+          // NOTHING ANSWERED THEIR ASK: run it again, once, as the reply to
+          // it. A /forgetme since still cancels it (seenAtMs is kept), and it
+          // is never claimed or nominated again (lineOutcome: reasked).
+          const again: LineJob = { ...open.job, bornAtMs: now, ingressOrder: ++ingressOrder, reasked: true };
+          open.reasked = true;
+          open.job = again;
+          lostAsks.delete(msgKey(chatId, again.line.messageId));
+          lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId: again.line.messageId, atMs: now });
+          log(`[tg-groups] an unanswered ask re-asked (${meta})`);
+          if (open.research) track(processLine(again));
+          else enqueue(chatId, () => processLine(again), { force: true });
+          return;
+        }
 
         // An addressed research question, or a short follow-up to this
         // topic's last research answer (fomoRecent), while a port is wired.
@@ -3870,11 +4115,22 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const desked = fomoHere && !named ? deskIntentOf(text, chatId) : null;
         const trendingAsk = desked?.kind === "market" && desked.trending === true;
         const fomoAsk = fomoHere && (named || trendingAsk || (fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
+        // A complaint with nothing of theirs open asks which question; one
+        // replying to its answer to their open ask has that ask read again by
+        // the router (act()). A new line while an earlier one went
+        // unanswered may be a nudge in other words: the router may re-run it.
+        const repliesToOwn = !!me && msg.replyTo?.fromId === me.id && isMsgId(msg.replyTo.messageId);
+        const answeredHere = !!open && openState === "answered" && repliesToOwn
+          && store.room(chatId)?.lines.some((l) => l.own && l.messageId === msg.replyTo?.messageId && l.replyTo === open.job.line.messageId) === true;
         const job: LineJob = {
           msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order,
           ...(threadId !== undefined ? { threadId } : {}),
           ...(fomoAsk ? { fomo: true } : {}),
           ...(trendingAsk ? { trending: true } : {}),
+          ...(meta !== null ? { meta } : {}),
+          ...(meta === "complaint" && !open ? { noOpenAsk: true } : {}),
+          ...(meta === "complaint" && answeredHere ? { reaskOf: open!.job.line.text } : {}),
+          ...(meta === null && addressed !== null && open && openState === "lost" && !open.reasked ? { reaskable: open } : {}),
         };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.
@@ -3884,6 +4140,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // belongs to the port; financial execution stays on the trading side.
         const research = fomoAsk || (!!d.desk && (coin || (addressed !== null && (deskIntentOf(text, chatId) !== null
           || /\b(?:why|how come|vibes|asked you|asked a question|chart|analysis)\b/iu.test(text)))));
+        // Their newest substantive line is their open ask from now on.
+        if (substantive) openAsks.set(askKey(chatId, msg.fromId, threadId), { job, research, reasked: false });
         if (research) track(processLine(job));
         else enqueue(chatId, () => processLine(job), { force: addressed !== null });
       } catch (e) {

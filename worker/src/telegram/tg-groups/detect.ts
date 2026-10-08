@@ -1773,6 +1773,49 @@ export function reactionOnly(text: unknown, selfNames: readonly string[] = []): 
   return words.every((w) => REACTION_ONLY.test(w));
 }
 
+/** Filler that may open a nudge or a complaint: "bro i asked you something", "um hello??". */
+const META_LEAD = String.raw`(?:(?:bro|bruh|yo|hey|hello|um+|uh+|so|ok|okay|well|dude|man|ser|sir|lol|wait|hmm+)[\s,!.?…]+)*`;
+/** Says, in words, that a question of theirs went unanswered. The whole line, nothing else. */
+const META_COMPLAINT = new RegExp(
+  "^" +
+    META_LEAD +
+    String.raw`(?:` +
+    String.raw`i (?:just |already )?(?:asked|said)(?: (?:you|u))?(?: (?:a|the|my) (?:question|q)| (?:something|smth)| a q)?` +
+    String.raw`|(?:you|u) (?:didn'?t|did not|never|don'?t|haven'?t|have not|still haven'?t) (?:answer|answered|reply|replied|respond|responded|say anything)(?: (?:me|my question|the question|it|that))?` +
+    String.raw`|(?:you|u) (?:ignored|skipped|missed) (?:me|my question|the question|it|that)` +
+    String.raw`|(?:answer|reply to|respond to) (?:me|the question|my question|it|that)(?: (?:pls|please|already|bro|man))?` +
+    String.raw`|(?:i'?m )?still waiting(?: (?:on|for) (?:it|that|an answer|you))?` +
+    String.raw`|no answer|any answer|where'?s (?:my|the) answer|where is (?:my|the) answer` +
+    String.raw`)[\s!?.…]*$`,
+  "u",
+);
+/** A nudge with no content: it means something only while an ask of theirs is open. */
+const META_POKE = new RegExp(
+  "^" + META_LEAD + String.raw`(?:\?+|hello+\?*|hel+o+\?+|(?:bro|bruh|yo|hey|dude|man|ser|sir)\?+|(?:are )?(?:you|u) there\?*|done\?+|well\?+|and\?+|so\?+|any ?(?:thing|update)\?*)[\s!?.…]*$`,
+  "u",
+);
+
+/**
+ * A LINE ABOUT ITS OWN SILENCE, read on the line without its names (the fast
+ * path for short, obvious lines only; handler.ts): "complaint" ("i asked a
+ * question", "you didn't answer", "answer me", "still waiting"), "poke"
+ * ("?", "hello??", "you there?", "done?") or "name-only" (its name or
+ * @username and nothing else). Null for anything with content of its own:
+ * "i asked my wife and she said no", "is pons done?", "still waiting for my
+ * pizza". Wider phrasing ("bro??", "you ignored my question earlier") is the
+ * router's to read (route.ts reask), never a longer list here.
+ */
+export function metaLineOf(text: unknown, selfNames: readonly string[] = []): "complaint" | "poke" | "name-only" | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  // Names out, and whatever punctuation they leave in front (",", "@").
+  const t = norm(unnamed(text, selfNames)).replace(/？/gu, "?").replace(/^[^\p{L}\p{N}?]+/u, "").trim();
+  // Nothing left: its name alone is a hail; an emoji with no name is a reaction.
+  if (!/[\p{L}\p{N}?]/u.test(t)) return /[\p{L}\p{N}]/u.test(norm(text)) ? "name-only" : null;
+  if (META_COMPLAINT.test(t)) return "complaint";
+  if (META_POKE.test(t)) return "poke";
+  return null;
+}
+
 /** One word or phrase of yes. */
 const CONSENT_WORD =
   /^(?:ok|okay|k+|kk|bet|word|sure|yes+|yeah+|yea+|ya+|yah|yep|yup|ye|y|go|go ahead|go for it|do it|do that|send it|send|run it|pull it|pull it up|show me|hit me|pls|plz|please|please do|ofc|of course|absolutely|definitely|for sure|lets go|let's go|lfg|aight|alright|why not|sounds good)$/u;

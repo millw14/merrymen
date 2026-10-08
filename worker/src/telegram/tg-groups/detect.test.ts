@@ -44,6 +44,7 @@ import {
   isShush,
   isTradeTalk,
   lineMood,
+  metaLineOf,
   offerShaped,
   reactionOnly,
   routeWorthy,
@@ -1075,4 +1076,26 @@ describe("a bare 'what's trending' (decision D1, 2026-10-07)", () => {
       assert.deepEqual(deskAskOf(t, self), { kind: "market" }, t);
     }
   });
+});
+
+describe("metaLineOf: a line about its own silence (live 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  const rows: Array<[string, "complaint" | "poke" | "name-only"]> = [
+    ["i asked a question", "complaint"], ["I asked a question", "complaint"], ["shogun i asked you a question", "complaint"],
+    ["you didn't answer", "complaint"], ["you didnt answer me", "complaint"], ["u never answered", "complaint"], ["answer me", "complaint"],
+    ["answer the question", "complaint"], ["answer me pls", "complaint"], ["bro i asked you something", "complaint"], ["you ignored me", "complaint"],
+    ["still waiting", "complaint"], ["i'm still waiting on it", "complaint"], ["where's my answer", "complaint"],
+    ["hello??", "poke"], ["hello?", "poke"], ["?", "poke"], ["??", "poke"], ["？", "poke"], ["you there?", "poke"], ["shogun you there?", "poke"],
+    ["done?", "poke"], ["well?", "poke"], ["and?", "poke"], ["shogun?", "poke"], ["bro??", "poke"],
+    ["shogun", "name-only"], ["@Merrymanme_bot", "name-only"],
+  ];
+  for (const [t, want] of rows) it(`${want}: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), want));
+  const no = [
+    "what's trending", "i asked my wife and she said no", "did you answer bob", "answer is 42", "i said gm", "hello everyone", "gm",
+    "what did you trade today?", "i asked chatgpt about pons", "you didn't buy pons?", "is pons done?", "well that was fast", "and pons?",
+    "so what about pons", "thanks shogun", "lol", "still waiting for my pizza", "you ignored my trade idea lmao it pumped", "🔥", "😂😂",
+    "i said what's trending", "why can't you answer in the group?", "", "   ",
+  ];
+  for (const t of no) it(`content of its own: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), null));
+  it("never throws on junk", () => assert.equal(metaLineOf(undefined), null));
 });

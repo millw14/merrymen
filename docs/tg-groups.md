@@ -202,6 +202,39 @@ When one person sends a burst of messages addressing it (each within 15 s of
 the next), it answers their last one; someone else addressing it meanwhile
 is a conversation of its own and never drops the first person's answer.
 
+**A request is never silently lost.** A short line about its own silence
+(`metaLineOf`: a poke such as "?", "hello??", "you there?", "done?", its
+name alone, or a complaint such as "i asked a question", "you didn't
+answer", "answer me", "still waiting") is never what drops their question.
+Each person's last substantive line said to it (not small talk, not one of
+these) stays their open ask, per chat and topic, for 10 minutes:
+
+* While it is still being worked on (a read in flight, inside its 30 s
+  deadline), such a line gets a 👀 reaction (no model call, no reply slot,
+  logged as `poke-while-working`), and the answer still lands as the reply
+  to the question. Live 2026-10-07: "what's trending", then "shogun" ten
+  seconds in, and the slow market read was dropped as a burst.
+* When nothing answered it (the send failed, the deadline passed), the
+  line runs that ask again, once, as the reply to the question. A /forgetme
+  since still cancels it, and a re-run is never claimed or nominated by the
+  coin flow (rule 1). Someone else's complaint never re-runs another
+  person's question.
+* A complaint from someone with nothing open gets a fixed line, "which
+  question? i might've missed it, ask me again", never a guessed market read.
+  A poke with nothing open is small talk, as before.
+* A complaint replying to its answer to their open question has that
+  question read again by the router, in the light of the complaint (live
+  22:59: "I said what's trending on fomo").
+* Other words for it ("bro you skipped mine earlier", "you good?") while an
+  earlier question went unanswered go to the router, which may pick `reask`
+  ("What a line wants" below).
+
+While a research or desk read runs it shows "typing…" (or "sending a
+photo…" for a chart) again every 4 s until the answer goes, the deadline
+passes, the line is no longer wanted (a newer line, a /forgetme) or the chat
+is shushed. These are Bot API calls, outside the chat lock, never a model
+call.
+
 An addressed message that gets nothing (no line, no reaction) leaves one
 operator log line with a stable reason code and nothing else: `[tg-groups]
 addressed line got nothing (flood)`. The codes: `off`, `room-not-approved`,
@@ -461,6 +494,14 @@ one-liner from a model that was given no data.
   setup follow-up requires an identifiable subject and otherwise asks which
   coin. Words with an everyday meaning
   ("entry", "support", "breakdown") ask for a read only beside a trading word.
+  A complaint ("you didn't answer", "just vibes?") binds the same way, but
+  with no subject anywhere it is never a guessed market read: the re-ask,
+  "which question?" or the persona answers it ("When it speaks"). A reply
+  to one of its own old photo captions that the store no longer holds still
+  names the caption's coin, but only for a real caption (a title line above
+  the read): its own one-line "yo" or "sup" is never searched as a coin
+  (live 2026-10-07: "i asked a question" under "yo" got "can't find a coin
+  by that name").
 * a coin's story or background ("what's RHOOKS about", "what's its lore"),
   or a request to explain the previous read more clearly ("not clean enough",
   "make it simpler"). These follow the coin or desk reply chain before the
@@ -726,6 +767,19 @@ stop at all, and "pine stop tailing him" stops nothing and asks her which, in he
 Where a tail cannot work (`MERRYMEN_FOMO_TAILS=0`, or no live feed on a self-hosted
 install: `TgOwnerPort.tailsState`), her start line is no tail and goes on to the
 research lane as before; with the switch off a stop is still read.
+
+**Their earlier question.** When someone whose earlier question went
+unanswered (in the last 10 minutes, not re-run yet) says something else to
+it, the line is worth a routing call however short or small-talky it is,
+the prompt quotes that question after the line, and the menu gains
+`reask`: run that question again, once, as the reply to it. `reask` is on
+the menu only then, and a `reask` pick anywhere else is refused. A short
+complaint replying to its answer to their open question ("you didn't
+answer") is routed first, before the desk, with that question quoted the
+same way but without `reask` (running it as it was would only repeat the
+answer): the model picks what the question wanted. In both cases a coin,
+trader, window or side the earlier question names counts as the person's
+own words.
 
 **Cost.** One call of the allowance, through the same gate. A research pick
 replaces the persona's call; a chat pick costs one more. Routing only ever
@@ -1419,6 +1473,8 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "pine copy unipcs's trades" / "pine mirror @unipcs" / "pine track $pons" / "pine stop tracking $PONS" | Never a tail: the line goes on as before (a coin stop never stops her tails) |
 | The owner: "pine ok stop tailing him" | Names nobody: her DM gets her tails and "Which tail should I stop?"; nothing stops, and the room hears only that it went |
 | "trending" / "$pons" in reply to its own "top traders today, or what's trending?" / "which coin?" | Read in the light of that line: Fomo's trending board / that coin's theses, not a market read or a chart |
+| "what's trending", then "shogun" or "?" ten seconds later while the read runs | A 👀 on the poke; the read lands as the reply to the question. Never dropped as a burst |
+| "i asked a question" / "you didn't answer" / its name, after nothing answered their question in the last 10 minutes | Their question runs again, once, as the reply to it (never a second claim or nomination); with nothing of theirs open: "which question? i might've missed it, ask me again" |
 | "shogun what's trending" (Fomo wired) | Fomo's trending board. Fomo busy, late, refused by its budget, unavailable or failed: the desk's Robinhood Chain market read instead, never Fomo's refusal. "what's trending on robinhood chain", or no Fomo here: the desk |
 | "do it" / "ok" / "bet" under its own offer ("i can pull the fomo board for robinhood chain coins if you want") | A yes to that offer: the router picks what the offer named and the research answers it. Never "give me a sec" (the gate refuses fake progress), never a tail |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |

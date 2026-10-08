@@ -1216,6 +1216,30 @@ describe("public research follow-up contexts", () => {
     assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "OFY" });
   });
 
+  it("its own one-line small talk is never a coin: 'i asked a question' under 'yo' (live 2026-10-07)", async () => {
+    let id = 7_000;
+    for (const own of ["yo", "sup", "np", "gm"]) {
+      for (const line of ["i asked a question", "do a quick analysis", "why?"]) {
+        id++;
+        store.addLine(CHAT, { messageId: id, fromId: BOT.id, name: "Pine", text: own, atMs: clock, own: true });
+        make();
+        clock += 20 * 60_000;
+        await said(msg(line, { replyTo: { messageId: id, fromId: BOT.id, text: own } }));
+        groups.stop();
+        await groups.drain();
+      }
+    }
+    for (const a of desk!.asks) assert.ok(!("query" in a) || !["yo", "sup", "np", "gm"].includes(a.query.toLowerCase()), JSON.stringify(a));
+    assert.equal(desk!.asks.length, 4, "only the four bare analysis asks read anything");
+    assert.ok(desk!.asks.every((a) => a.kind === "market"), "a bare analysis ask is the market read; a complaint is nothing");
+  });
+
+  it("an older caption whose line was pruned still names its coin: 'CASHCAT\\n\\n…'", async () => {
+    make();
+    await said(msg("where is the stop?", { replyTo: { messageId: 97, fromId: BOT.id, text: "CASHCAT\n\ncashcat is in a downtrend on the 1h" } }));
+    assert.deepEqual(desk!.asks.at(-1), { kind: "coin", query: "CASHCAT" });
+  });
+
   it("uses a genuine quoted caption for a legacy own answer without subject metadata", async () => {
     store.addLine(CHAT, { messageId: 98, fromId: BOT.id, name: "Pine", text: "An older public chart interpretation.", atMs: clock, own: true });
     make();

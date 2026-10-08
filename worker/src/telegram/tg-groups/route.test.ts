@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { TgModelGate, type TgModel } from "./model";
-import { parseRoute, readRoute, ROUTE_ACTIONS, routeActions, ROUTE_SPEC, ROUTE_SYSTEM, RouteBreaker, routePrompt, routeSystem, windowIn, type RouteCtx } from "./route";
+import { parseRoute, readRoute, ROUTE_ACTIONS, routeActions, ROUTE_SPEC, ROUTE_SYSTEM, RouteBreaker, routePrompt, routeSpec, routeSystem, windowIn, type RouteCtx } from "./route";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
 import type { TgLine, TgRoom } from "./types";
 
@@ -441,5 +441,31 @@ describe("a yes under its own line (live 2026-10-07)", () => {
       store.close();
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("their earlier question, when they say it was missed (route.ts reask, reaskOf)", () => {
+  it("reask is on the menu only for someone with an unanswered question, and refused otherwise", () => {
+    const enumOf = (spec: ReturnType<typeof routeSpec>) => (spec.schema as { properties: { action: { enum: string[] } } }).properties.action.enum;
+    assert.ok(!enumOf(routeSpec({ fomo: true, desk: true, coins: true })).includes("reask"));
+    assert.ok(enumOf(routeSpec({ fomo: true, desk: true, coins: true, reask: true })).includes("reask"));
+    assert.equal(parseRoute({ action: "reask" }, ctxOf("bro you skipped mine")), null);
+    assert.deepEqual(parseRoute({ action: "reask" }, ctxOf("bro you skipped mine", { reask: true, reaskOf: "how's the market?" })), { action: "reask" });
+    assert.match(routeSystem({ fomo: true, desk: true, coins: true, reask: true }), /reask: they say you missed, ignored or never answered their earlier question/);
+    assert.doesNotMatch(routeSystem({ fomo: true, desk: true, coins: true }), /^reask:/m);
+  });
+
+  it("the earlier question is shown, fenced, and grounds a coin, a trader and a window as the person's own words", () => {
+    const trigger = line(4, "Milla", "you didn't answer");
+    const p = routePrompt(roomWith([trigger]), trigger, "the chain is mostly red today", "who's top on fomo today, and what about $pons?");
+    assert.match(p, /\(their earlier question, which they say you did not answer: «who's top on fomo today, and what about cashtag:pons\?»\)\n<\/untrusted>/);
+    const ctx = ctxOf("you didn't answer", { replied: "the chain is mostly red today", reaskOf: "who's top on fomo today, and what about $pons?" });
+    assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctx), { action: "fomo", request: { kind: "leaderboard", window: "24h" } });
+    assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "pons", aspect: "theses" }, ctx), { action: "fomo", request: { kind: "coin", symbol: "PONS", aspect: "theses" } });
+    assert.deepEqual(
+      parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("you didn't answer", { reaskOf: "is unipcs any good on fomo" })),
+      { action: "fomo-trader", handle: "unipcs", about: "profile" },
+    );
+    assert.equal(parseRoute({ action: "fomo_coin", coin: "frog" }, ctx), null, "never a name nobody wrote");
   });
 });
