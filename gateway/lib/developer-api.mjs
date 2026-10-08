@@ -1,9 +1,17 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { verifyMessage } from "viem";
+import { isErc6492Signature, verifyMessage } from "viem";
 import { makeKey, hashSecret, loadRegistry, writeRecord } from "./partners.mjs";
 
 const SCOPES = ["read:agents", "write:agents", "chat:agents"];
-const same = (a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""); return x.length === y.length && timingSafeEqual(x, y); };
+// Room for a smart-contract wallet's proof (a passkey assertion, a multisig's
+// concatenated signatures, an ERC-6492 deploy wrapper) while the whole /verify
+// body, challenge included, still fits the 8 KiB both the site and gateway cap.
+const MAX_SIGNATURE_BYTES = 3000;
+const SIGNATURE = new RegExp(`^0x(?:[0-9a-fA-F]{2}){1,${MAX_SIGNATURE_BYTES}}$`);
+/** The site gives up after 20s; two chain reads must answer well inside that. */
+const within = (ms, promise) => Promise.race([promise,
+  new Promise((_, reject) => setTimeout(() => reject(new Error("chain read timed out")), ms).unref())]);
+const same =(a, b) => { const x = Buffer.from(a || ""), y = Buffer.from(b || ""); return x.length === y.length && timingSafeEqual(x, y); };
 const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status: r.status,
   scopes: r.scopes, rate_per_min: r.rpm, created_at: r.created_at, prefix: `mmp_${r.keyId}_` });
 
@@ -18,8 +26,8 @@ const publicKey = r => ({ key_id: r.keyId, app_id: r.appId, name: r.name, status
  * then read and chat with that app's users' agents, without the wallet ever
  * signing anything.
  */
-export function createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store,
-  verify = verifyMessage, now = Date.now, read = loadRegistry, write = writeRecord }) {
+export function createDeveloperApi({ portalSecret, gatewaySecret, partners, partnerApi, store, publicClient,
+  verify = verifyMessage, now = Date.now, read = loadRegistry, write = writeRecord, chainTimeoutMs = 7_000 }) {
   const boot = randomBytes(16).toString("hex");
   // A subkey, so the gateway secret itself never MACs attacker-shaped data here.
   // The colon keeps it apart from every other HMAC over that secret: holder
@@ -38,22 +46,52 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
     const encoded = Buffer.from(JSON.stringify({ ...data, type })).toString("base64url");
     return `${encoded}.${macOf(encoded)}`;
   };
-  const decode = (raw, type) => {
+  /** The payload when the MAC and shape are this gateway's. Freshness is the caller's question. */
+  const open = (raw, type) => {
     if (typeof raw !== "string" || raw.length > 4096) return null;
     const [encoded, mac, extra] = raw.split(".");
-    if (!encoded || !mac || extra || !same(mac, macOf(encoded))) return null;
+    if (!encoded || !mac || extra !== undefined || !same(mac, macOf(encoded))) return null;
     try {
       const v = JSON.parse(Buffer.from(encoded, "base64url"));
-      return v.type === type && v.expires > now() && /^0x[0-9a-f]{40}$/.test(v.address) ? v : null;
+      return v?.type === type && /^0x[0-9a-f]{40}$/.test(v.address) ? v : null;
     } catch { return null; }
   };
-  /** A session is its MAC, its process (see `epoch`), and the absence of a logout. */
+  /** A session is its MAC, its expiry, its process (see `epoch`), and the absence of a logout. */
   async function signedIn(raw) {
-    const s = decode(raw, "session");
-    return s && s.epoch === epoch && typeof s.sid === "string" && !await store.isRevoked(`developer-session:${s.sid}`) ? s : null;
+    const s = open(raw, "session");
+    return s && s.expires > now() && s.epoch === epoch && typeof s.sid === "string"
+      && !await store.isRevoked(`developer-session:${s.sid}`) ? s : null;
   }
   const message = c => `Sign in to Merrymen Developers\n\nWebsite: https://merrymen.dev/api\nWallet: ${c.address}\n\nManage API keys for your applications. This does not authorize trading or move funds.\n\nNonce: ${c.nonce}\nExpires: ${new Date(c.expires).toISOString()}`;
-  const error = (status, message) => ({ status, json: { error: { message } } });
+  // Codes are for the console and for tests; messages are for the person reading.
+  const error = (status, code, message) => ({ status, json: { error: { code, message } } });
+  const unreachable = () => error(503, "wallet_check_unavailable", "Could not reach Robinhood Chain to check this wallet's signature. Try again shortly.");
+  /**
+   * null when `signature` proves `address` signed `text`; otherwise the refusal.
+   *
+   * The local ECDSA check runs first and settles an ordinary wallet by itself,
+   * so EOA sign-in never waits on, or fails with, the RPC. Only a signature it
+   * rejects goes to the chain: ERC-1271 for a deployed smart-contract wallet,
+   * ERC-6492 for one not deployed yet, both through viem's verifyMessage.
+   */
+  async function refusal(address, text, signature) {
+    const ecdsa = signature.length === 132;
+    if (ecdsa) { try { if (await verify({ address, message: text, signature })) return null; } catch { /* Not this key. */ } }
+    const mismatch = error(401, "signature_invalid", "That is not this wallet's signature of the sign-in message. Sign the exact message shown and paste the result unchanged.");
+    const unsupported = error(401, "wallet_unsupported", "This wallet's signature cannot be checked. A smart-contract wallet must be deployed on Robinhood Chain; otherwise sign in with a standard wallet.");
+    if (!publicClient) return ecdsa ? mismatch : unsupported;
+    // getCode first. viem's verifyMessage turns a failed eth_call into `false`,
+    // which would report an RPC outage as a bad signature; getCode throws.
+    let code;
+    try { code = await within(chainTimeoutMs, publicClient.getCode({ address })); } catch { return unreachable(); }
+    const deployed = !!code && code !== "0x";
+    if (!deployed && !isErc6492Signature(signature)) return ecdsa ? mismatch : unsupported;
+    let valid = false;
+    try { valid = await within(chainTimeoutMs, publicClient.verifyMessage({ address, message: text, signature })); } catch { return unreachable(); }
+    // An undeployed wallet whose ERC-6492 proof fails may simply have no factory
+    // on this chain, so it is not called a wrong signature.
+    return valid ? null : deployed ? mismatch : unsupported;
+  }
   // Raw text in, as the partner API takes it, so what a body must look like is
   // this service's rule. `null`, `[]` and `5` are valid JSON that used to reach
   // a property read here and come back as a 503 "temporarily unavailable".
@@ -62,22 +100,28 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
     try { const v = JSON.parse(raw); return v && typeof v === "object" && !Array.isArray(v) ? v : null; } catch { return null; }
   };
   async function dispatch({ method, path, authorization, session, body: raw, ip = "unknown" }) {
-    if (!portalSecret || Buffer.byteLength(portalSecret) < 32 || !sessionKey) return error(503, "Developer sign-in is temporarily unavailable");
-    if (!same(authorization, `Bearer ${portalSecret}`)) return error(401, "Unauthorized portal");
-    if (!await store.rateHit(`dev:ip:${ip}`, 60, 60)) return error(429, "Too many requests. Try again in a minute.");
+    if (!portalSecret || Buffer.byteLength(portalSecret) < 32 || !sessionKey) return error(503, "unavailable", "Developer sign-in is temporarily unavailable");
+    if (!same(authorization, `Bearer ${portalSecret}`)) return error(401, "unauthorized_portal", "Unauthorized portal");
+    if (!await store.rateHit(`dev:ip:${ip}`, 60, 60)) return error(429, "rate_limited", "Too many requests. Try again in a minute.");
     const body = parse(raw);
-    if (!body) return error(400, "Invalid request");
+    if (!body) return error(400, "bad_request", "Invalid request");
     if (method === "POST" && path === "/challenge") {
-      if (typeof body.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(body.address)) return error(400, "Choose a wallet address");
+      if (typeof body.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(body.address)) return error(400, "invalid_address", "Choose a wallet address");
       const c = { address: body.address.toLowerCase(), nonce: randomBytes(24).toString("hex"), expires: now() + 300_000, boot };
       return { status: 200, json: { challenge: sign("challenge", c), message: message(c) } };
     }
     if (method === "POST" && path === "/verify") {
-      const c = decode(body.challenge, "challenge");
-      if (!c || c.boot !== boot || typeof body.signature !== "string" || !/^0x[0-9a-fA-F]{130}$/.test(body.signature)) return error(401, "Sign-in expired. Connect your wallet again.");
-      let valid = false;
-      try { valid = await verify({ address: c.address, message: message(c), signature: body.signature }); } catch { /* Invalid proof. */ }
-      if (!valid || !await store.spendNonce(`developer:${c.nonce}`, 301)) return error(401, "Invalid or already used wallet signature");
+      // Every refusal here used to read "Sign-in expired", including a perfectly
+      // fresh sign-in from a smart-contract wallet. Each now names its cause.
+      const c = open(body.challenge, "challenge");
+      if (!c) return error(401, "challenge_invalid", "This sign-in request is not valid. Connect your wallet again.");
+      // A challenge from before a restart is as stale as an expired one.
+      if (!(c.expires > now()) || c.boot !== boot) return error(401, "challenge_expired", "Sign-in expired. Connect your wallet again.");
+      if (typeof body.signature !== "string" || !SIGNATURE.test(body.signature)) return error(400, "signature_malformed", "Paste the complete wallet signature, starting with 0x.");
+      const refused = await refusal(c.address, message(c), body.signature);
+      if (refused) return refused;
+      // Spent only after the proof checks out, so a mistyped paste can be retried.
+      if (!await store.spendNonce(`developer:${c.nonce}`, 301)) return error(401, "signature_used", "This sign-in was already used. Connect your wallet again.");
       return { status: 200, json: { address: c.address, session: sign("session",
         { address: c.address, sid: randomBytes(16).toString("hex"), epoch, expires: now() + 8 * 3600_000 }) } };
     }
@@ -90,19 +134,19 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
       return { status: 200, json: { signed_out: true } };
     }
     const user = await signedIn(session);
-    if (!user) return error(401, "Sign in to manage your API keys");
+    if (!user) return error(401, "signed_out", "Sign in to manage your API keys");
     if (method === "GET" && path === "/keys") {
       const keys = [...(await read()).values()].filter(r => r.owner === user.address);
       return { status: 200, json: { address: user.address, keys: keys.map(publicKey) } };
     }
     if (method === "POST" && path === "/test") {
       const checked = await partners.verify(body.key);
-      if (!checked.ok) return error(401, "That API key is invalid or revoked");
+      if (!checked.ok) return error(401, "invalid_key", "That API key is invalid or revoked");
       const record = (await read()).get(checked.key.keyId);
-      if (record?.owner !== user.address) return error(403, "Use a key from your developer account");
+      if (record?.owner !== user.address) return error(403, "not_your_key", "Use a key from your developer account");
       return partnerApi.handle({ method: "GET", pathname: "/partner/v1/meta", authorization: `Bearer ${body.key}`, ip });
     }
-    if (method !== "POST" || !["/keys", "/revoke"].includes(path)) return error(404, "Not found");
+    if (method !== "POST" || !["/keys", "/revoke"].includes(path)) return error(404, "not_found", "Not found");
     // The registry is on a single gateway's persistent volume. Serialize the
     // limit-check/write pair so concurrent requests cannot exceed the quota.
     const operation = mutations.then(async () => {
@@ -110,16 +154,16 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
       const owned = [...registry.values()].filter(r => r.owner === user.address);
       if (path === "/revoke") {
         const r = registry.get(body.key_id);
-        if (!r || r.owner !== user.address) return error(404, "Key not found");
+        if (!r || r.owner !== user.address) return error(404, "key_not_found", "Key not found");
         await write({ ...r, status: "revoked" });
         partners.reload();
         return { status: 200, json: { revoked: true } };
       }
-      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 48 || /[\x00-\x1f\x7f]/.test(body.name)) return error(400, "App name must contain 1–48 characters");
-      if (!await store.rateHit(`dev:issue:${user.address}`, 10, 3600)) return error(429, "Key creation limit reached. Try again in an hour.");
-      if (owned.filter(r => r.status === "active").length >= 5) return error(409, "You can have five active keys. Revoke an unused key first.");
+      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 48 || /[\x00-\x1f\x7f]/.test(body.name)) return error(400, "invalid_name", "App name must contain 1–48 characters");
+      if (!await store.rateHit(`dev:issue:${user.address}`, 10, 3600)) return error(429, "rate_limited", "Key creation limit reached. Try again in an hour.");
+      if (owned.filter(r => r.status === "active").length >= 5) return error(409, "key_limit", "You can have five active keys. Revoke an unused key first.");
       let appId = body.app_id;
-      if (appId !== undefined && !owned.some(r => r.appId === appId)) return error(403, "App does not belong to this account");
+      if (appId !== undefined && !owned.some(r => r.appId === appId)) return error(403, "app_not_owned", "App does not belong to this account");
       if (!appId) appId = `app_${randomBytes(12).toString("hex")}`;
       const minted = makeKey();
       const record = { keyId: minted.keyId, appId, owner: user.address, name: body.name.trim(),
@@ -132,6 +176,6 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
     return operation;
   }
   return { async handle(input) {
-    try { return await dispatch(input); } catch { return error(503, "Developer service is temporarily unavailable. Try again."); }
+    try { return await dispatch(input); } catch { return error(503, "unavailable", "Developer service is temporarily unavailable. Try again."); }
   } };
 }
