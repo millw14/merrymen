@@ -32,10 +32,10 @@ import { createDirectBroker } from "./fomo/broker";
 import { FomoBudget, MemoryAllowance } from "./fomo/budget";
 import type { BrokerCallOptions, FomoBroker } from "./fomo/contract";
 import { createFomoClient } from "./fomo/provider";
-import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_GROUP_ON, NOT_PERMISSION_LINE } from "./fomo/render";
+import { FOMO_ATTRIBUTION, FOMO_CAPABILITIES_GROUP, FOMO_GROUP_ON, groupScrub, NOT_PERMISSION_LINE, renderAnswer } from "./fomo/render";
 import { createFomoService } from "./fomo/service";
 import * as fstore from "./fomo/store";
-import type { FomoToolName } from "./fomo/types";
+import type { FomoEnvelope, FomoToolName, TokenIdentity } from "./fomo/types";
 import type { ResolvedConfig } from "./settings";
 import type { FetchLike, TgMessage } from "./telegram/api";
 import type { StateRef, TelegramState } from "./telegram/state";
@@ -44,7 +44,7 @@ import { createTgGroups, type TgGroups } from "./telegram/tg-groups/handler";
 import { __resetMemoryPassThrottleForTest } from "./telegram/tg-groups/memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./telegram/tg-groups/store";
 import type { CoinLook, NominateResult, TgCoinsPort, TrencherReadiness } from "./telegram/tg-groups/types";
-import { classifyFomoQuestion } from "./fomo/intent";
+import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { applyPlan } from "./fomo/subject-memory";
 import { parseSlash } from "./telegram/interpreter";
 import { isMutationTool } from "./fomo/tools";
@@ -698,6 +698,79 @@ describe("the owner's moves", () => {
     assert.equal((await port.ask({ text: "what's trending on fomo?", chatId: GROUP }))?.moves, undefined);
     assert.equal((await port.ask({ text: "what is @CryptoKaleo holding on fomo?", owner: true, chatId: GROUP }))?.moves, undefined);
     assert.equal(ownerMoves({ handled: false }), null);
+  });
+});
+
+describe("every room line about one trader passes the group gate as it is sent (research)", () => {
+  const KALEO = { userId: "1f08e6ab-5c73-5443-9225-bfc496cde51f", handle: "CryptoKaleo", displayName: null, verified: null };
+  const T = { key: "eip155:4663:0x39dbed3a00000000000000000000000000000c0d", chain: { namespace: "eip155", networkId: 4663, slug: "robinhood" }, address: "0x39dbed3a00000000000000000000000000000c0d" } as unknown as TokenIdentity;
+  const envOf = <T,>(tool: FomoToolName, data: T, over: Partial<FomoEnvelope<T>> = {}): FomoEnvelope<T> => ({
+    requestId: "r", tool, status: "ok", subject: { kind: "trader", trader: KALEO }, candidates: [], data, evidence: [],
+    freshness: { policy: "activity", mode: "prefer-fresh", retrievedAt: NOW, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW, lastRefreshOutcome: "ok", cacheAgeMs: 0, servedFrom: "live" },
+    coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 1, duplicatesRemoved: 0, providerTotal: 1, capped: true, missing: [], notes: ["The provider caps holdings at about 100 rows, so the total is a floor, not the whole portfolio.", "Some positions were received by transfer, not bought.", "P&L for 7d was left out: the followed-cohort record it came from is older than that window."] },
+    usage: { providerCalls: 1, cacheHits: 0, creditsCharged: 250, creditsRemaining: null }, dossierRevision: null, reason: null, message: null, ...over,
+  });
+  const pos = (symbol: string, realized: number, o: Record<string, unknown> = {}) => ({
+    tradeId: symbol, token: T, label: { symbol, name: null }, status: "closed", costBasisUsd: 2_500_000, realizedPnlUsd: realized, unrealizedPnlUsd: 1_234_567,
+    boughtAmount: 1, soldAmount: 1, transferredInAmount: 0, transferredOutAmount: 0, openedAt: NOW - 60_000, closedAt: NOW - 30_000, source: "feed", ...o,
+  });
+  const holdings = (rowsTotal: number, rows: unknown[]) => ({ trader: KALEO, formerHandle: true, focus: "context", cohort: { member: true, followable: false, version: 2, size: 150 }, profile: { source: "cohort-evidence", asOf: NOW, mayBeOlder: true, pnlUsd: { "24h": 1 }, volumeUsd: null, trades: null, accountAgeDays: null, averageHoldTimeSeconds: null }, holdings: { rows, rowsTotal, truncated: true, totalValueUsdFloor: 1_234_567.89, complete: false, dropped: 0, byChain: [] } });
+  const activity = (o: Record<string, unknown>) => ({ trader: KALEO, token: null, window: "24h", side: null, sources: ["positions", "feed"], positions: [], fills: [], events: [], counts: { buys: 2, sells: 1, transfers: 3, other: 0 }, ...o });
+  const board = envOf("fomo_get_rankings", { board: "traders", window: "24h", basis: "x", tokens: [], traders: [{ rank: 1, trader: KALEO, pnlUsd: 151_383, volumeUsd: null, trades: null, inCohort: true }] }, {
+    subject: { kind: "market" },
+    coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 1, duplicatesRemoved: 0, providerTotal: 1, capped: false, missing: [], notes: [] },
+  });
+  const say = (envs: FomoEnvelope[], plan: Partial<FomoQuestionPlan> = {}) =>
+    groupScrub(groupWords(groupScrub(renderAnswer(envs, { intent: "trader-holdings", clarification: null, ...plan } as FomoQuestionPlan, { audience: "group", maxChars: 2_000, now: NOW }))));
+
+  it("holdings, trades, fills, positions, earnings, a missing row, a renamed handle: each line admitted, none about watching", () => {
+    const answers = [
+      say([envOf("fomo_get_trader_context", holdings(42, [{ token: T, symbol: "PONS", chain: "robinhood", amount: 1, priceUsd: 1, valueUsd: 1_234_567, change24hPct: null, robinhood: true }, { token: null, symbol: null, chain: null, amount: 1, priceUsd: null, valueUsd: null, change24hPct: null, robinhood: false }]))]),
+      say([envOf("fomo_get_trader_context", holdings(0, []))]),
+      say([envOf("fomo_get_trader_context", { ...holdings(0, []), holdings: null })]),
+      say([envOf("fomo_get_trader_activity", activity({}))], { intent: "trader-activity" }),
+      say([envOf("fomo_get_trader_activity", activity({
+        positions: [pos("PONS", 0, { status: "open" }), pos("GIFT", 9, { boughtAmount: 0, transferredInAmount: 5 }), pos("ROO", -10_856.33)],
+        fills: [{ swapId: "s", side: "buy", token: T, tokenAmount: 1, usd: 2_345_678, at: NOW - 60_000 }],
+        events: ["buy", "sell", "transfer-in", "transfer-out", "airdrop"].map((kind, i) => ({ evidenceId: `e${i}`, kind, trader: KALEO, token: T, label: { symbol: "PONS", name: null }, fillUsd: i ? null : 1_234_567, positionValueUsd: 1, positionRealizedPnlUsdCumulative: 1, at: NOW - 120_000, verification: ["independently-verified", "provider-verified", "provider-reported"][i % 3]!, source: "rest-lookup", inCohort: true })),
+      }))], { intent: "trader-activity" }),
+      say([envOf("fomo_get_trader_activity", activity({ positions: [pos("PONS", 4_200), pos("ROO", 900), pos("CASH", 12), pos("DOWN", -10_856.33), pos("WORSE", -1_234_567)] }))], { intent: "trader-activity", earnings: true }),
+      say([envOf("fomo_get_trader_activity", activity({ positions: [pos("EVEN", 0)], window: "all" }))], { intent: "trader-activity", earnings: true }),
+      say([board], { intent: "rankings-traders", rowAsk: { rank: 3, about: "earnings" } }),
+      say([board], { intent: "rankings-traders", rowAsk: { rank: 1, about: "holdings" } }),
+    ];
+    const lines = answers.flatMap((a) => a.split("\n")).filter(Boolean);
+    for (const l of lines) {
+      const v = admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] });
+      assert.ok(v.ok, `refused (${v.ok ? "" : v.reason}): ${l}`);
+      assert.doesNotMatch(l, /cohort|watched|followed|following|@|0x[0-9a-fA-F]{6}|\$[A-Za-z]|1f08e6ab|P&L/i, l);
+    }
+    // Each new wording is in there.
+    const all = lines.join("\n");
+    for (const want of [
+      /^CryptoKaleo on Fomo holds 42 coins worth at least \$1\.2M \(source-reported snapshot, valued at current prices\)\.$/m,
+      /Fomo caps holdings at about 100 rows, so the total is a floor, not everything they hold\./,
+      /^Largest: PONS on robinhood \$1\.2M, a coin on an unknown chain \(value unknown\)\.$/m,
+      /^CryptoKaleo on Fomo shows no holdings in Fomo's snapshot/m,
+      /^CryptoKaleo on Fomo: the holdings snapshot could not be read\.$/m,
+      /^That handle is one they used before; the account has since renamed\.$/m,
+      /^No matching records were returned for CryptoKaleo in the last 24h\. That is not proof they did not trade: the feed only shows large positions\.$/m,
+      /^CryptoKaleo in the last 24h: 2 buys and 1 sell in the feed, plus 3 transfers \(not purchases\)\.$/m,
+      /^• bought PONS on robinhood 2 min ago, fill \$1\.2M \(verified by Merrymen\)$/m,
+      /^• sold PONS on robinhood 2 min ago, fill size unknown \(matched on chain\)$/m,
+      /^• fill: buy \$2\.3M just now \(source-reported\)$/m,
+      /^Positions \(source-reported\): PONS open \(cost \$2\.5M, \$0 realised, \+\$1\.2M not yet realised\); GIFT closed, received by transfer \(not bought\); ROO closed \(cost \$2\.5M, -\$10\.9k realised\)\.$/m,
+      /^CryptoKaleo on trades opened or closed in the last 24h \(source-reported, realised to date\): made the most on PONS \+\$4\.2k, ROO \+\$900, CASH \+\$12; lost the most on WORSE -\$1\.2M, DOWN -\$10\.9k\.$/m,
+      /^CryptoKaleo: nothing realised either way on trades on record \(source-reported\)\.$/m,
+      /^That board has no 3rd trader\.$/m,
+      /^I couldn't look up the 1st trader on that board\.$/m,
+    ]) assert.match(all, want);
+  });
+
+  it("the group capabilities line and the row question are admitted", () => {
+    for (const l of [...FOMO_CAPABILITIES_GROUP.split("\n"), "Which one on the board: the 1st, 2nd or 3rd?", "Which one on the board: the 1st or 2nd?", "Which one on the board: the 1st?"]) {
+      assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+    }
   });
 });
 

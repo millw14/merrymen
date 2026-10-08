@@ -337,8 +337,22 @@ function coverageLine(env: FomoEnvelope, audience: Audience = "owner"): string |
       && !(audience === "group" && SKILL_CAVEAT.test(n))
       && !(traderNote && (WATCH_WORDS.test(n) || /\bP&L\b/.test(n))),
   );
-  for (const n of keep.slice(0, 3)) parts.push(n);
+  for (const n of keep.slice(0, 3)) parts.push(traderNote ? roomNote(n) : n);
   return parts.length ? parts.join(" ") : null;
+}
+
+/**
+ * A trader read's limit in words the group gate admits: "provider" alone it
+ * reads as plumbing and "portfolio" as the owner's book, so a room would
+ * lose the whole line, the floor it states included.
+ */
+function roomNote(n: string): string {
+  return n
+    .replace(/\bnot the whole portfolio\b/g, "not everything they hold")
+    .replace(/\bno provider valuation\b/g, "no valuation")
+    .replace(/\b[Tt]he provider's\b/g, "Fomo's")
+    .replace(/\bThe provider\b/g, "Fomo")
+    .replace(/\bthe provider\b/g, "Fomo");
 }
 
 // ── Per-tool bodies ──────────────────────────────────────────────────────
@@ -486,7 +500,7 @@ function groupTraderContext(d: TraderContextData): string[] {
         ? `${name} shows no holdings in Fomo's snapshot (that is the snapshot, not proof of an empty wallet).`
         : `${name} holds ${plural(h.rowsTotal, "coin", "coins")}${total} (provider-reported snapshot, valued at current prices).`,
     );
-    const rows = h.rows.slice(0, 3).map((r) => `${(r.symbol ? sym({ symbol: r.symbol, name: null }, "group") : null) ?? "a coin"} on ${r.chain ?? "an unknown chain"} ${money(r.valueUsd, "group")}`);
+    const rows = h.rows.slice(0, 3).map((r) => `${(r.symbol ? sym({ symbol: r.symbol, name: null }, "group") : null) ?? "a coin"} on ${r.chain ?? "an unknown chain"} ${finite(r.valueUsd) ? money(r.valueUsd, "group") : "(value unknown)"}`);
     if (rows.length) out.push(`Largest: ${rows.join(", ")}.`);
   } else {
     out.push(`${name}: the holdings snapshot could not be read.`);
