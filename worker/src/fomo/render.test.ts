@@ -18,6 +18,7 @@ import {
   FOMO_ATTRIBUTION,
   FOMO_CHAT_RULES,
   GROUP_DM_DEFLECTION,
+  groupRefusalLine,
   groupScrub,
   NOT_PERMISSION_LINE,
   refForModel,
@@ -595,6 +596,22 @@ describe("a board says what its chain filter did, and where Robinhood Chain stan
     assert.match(g, /\nMost bought in the newest Fomo trades read: PONS on robinhood \(5 buyers\), ROO on solana \(1 buyer\)\./);
     const sold = renderEnvelope(env("fomo_get_token_activity", "ok", { ...act, side: "sell", topTokens: [{ ...act.topTokens![0]!, sellers: 2 }] }, { subject: { kind: "market" } }), G);
     assert.match(sold, /\nMost sold in the newest Fomo trades read: PONS on robinhood \(2 sellers\)\./);
+  });
+});
+
+describe("a room's refusal promises the reset the service stamped (review r2)", () => {
+  it("the later of the stamped reset and the render's own; a cap no read fits never a time", () => {
+    const at = Date.UTC(2026, 9, 7, 14, 59, 59, 995);
+    const sixteen = Date.UTC(2026, 9, 7, 16, 0, 0);
+    assert.equal(groupRefusalLine("budget-group-hourly", at, sixteen), "fomo lookups for this room are used up for now, try again after 16:00 UTC.");
+    assert.equal(groupRefusalLine("budget-group-hourly", at), "fomo lookups for this room are used up for now, try again after 15:00 UTC.", "no stamp: as before");
+    assert.equal(groupRefusalLine("budget-group-hourly", at, Date.UTC(2026, 9, 7, 14, 0, 0)), "fomo lookups for this room are used up for now, try again after 15:00 UTC.", "a stamp behind the render's clock never promises a time already past");
+    assert.equal(groupRefusalLine("budget-group-hourly", at, Number.NaN), "fomo lookups for this room are used up for now, try again after 15:00 UTC.");
+    assert.doesNotMatch(groupRefusalLine("budget-below-one-read", at, sixteen), /try again/);
+    const env0 = env("fomo_get_rankings", "budget-limited", null, { reason: "budget-group-hourly", retryAt: sixteen });
+    const line = groupScrub(renderEnvelope(env0, { ...G, now: at }));
+    assert.equal(line, "fomo lookups for this room are used up for now, try again after 16:00 UTC.");
+    assert.ok(admitTgLine(line, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
   });
 });
 

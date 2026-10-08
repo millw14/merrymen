@@ -326,7 +326,7 @@ export function envelopeOf(v: unknown, tool?: FomoToolName): FomoEnvelope | null
   if (!(d === null || d === undefined || (isRecord(d) && typeof d.dossierId === "string" && Number.isSafeInteger(d.revision)))) return null;
   if (!(v.reason === null || v.reason === undefined || typeof v.reason === "string")) return null;
   if (!(v.message === null || v.message === undefined || typeof v.message === "string")) return null;
-  return {
+  const out: FomoEnvelope = {
     ...(v as unknown as FomoEnvelope),
     subject: (v.subject ?? null) as FomoEnvelope["subject"],
     data: v.data === undefined ? null : v.data,
@@ -334,6 +334,9 @@ export function envelopeOf(v: unknown, tool?: FomoToolName): FomoEnvelope | null
     reason: (v.reason ?? null) as string | null,
     message: (v.message ?? null) as string | null,
   };
+  // A reset time is a finite instant or nothing: anything else is dropped, and the renderer works it out.
+  if (!(typeof v.retryAt === "number" && Number.isFinite(v.retryAt)) && v.retryAt !== null) delete out.retryAt;
+  return out;
 }
 
 const TRIM_NOTE = "The full result was too large to pass along here; ask a narrower question to see the rest.";

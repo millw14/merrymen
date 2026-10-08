@@ -270,19 +270,24 @@ export function groupScrub(text: string): string {
  * "ask me in a direct message", which would make a failure sound private.
  */
 export const GROUP_FOMO_UNREACHED = "couldn't reach fomo just now, try again in a bit.";
-export function groupRefusalLine(reason: string | null | undefined, now: number): string {
+export function groupRefusalLine(reason: string | null | undefined, now: number, stamped?: number | null): string {
   // A cap below one read (the documented 0 included), or a group it cannot name: no hour will
   // fit it, so never "try again after …" and never "in a bit": research is not on here.
   const r = typeof reason === "string" ? reason.replace(/^budget-/, "") : "";
   if (r === "below-one-read" || r === "no-group") return FOMO_GROUP_OFF;
-  const at = refusalResetAt(reason, now);
+  // The service's own reset (FomoEnvelope.retryAt), on the clock the refusing charge used: an
+  // ask begun at 14:59:59 and refused by hour 15's counter is told 16:00. The later of the two,
+  // so neither a render clock behind the charge nor one ahead of it promises a time too early.
+  const mine = refusalResetAt(reason, now);
+  const theirs = typeof stamped === "number" && Number.isFinite(stamped) ? stamped : null;
+  const at = theirs === null ? mine : mine === null ? theirs : Math.max(mine, theirs);
   return at !== null ? `fomo lookups for this room are used up for now, try again after ${utcClockText(at)} UTC.` : GROUP_FOMO_UNREACHED;
 }
 
 function groupStatusLead(env: FomoEnvelope, now: number): string | null {
   switch (env.status) {
     case "budget-limited":
-      return groupRefusalLine(env.reason, now);
+      return groupRefusalLine(env.reason, now, env.retryAt);
     case "failed":
       return GROUP_FOMO_UNREACHED;
     case "unavailable":

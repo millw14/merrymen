@@ -1759,6 +1759,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       dossierRevision: o.dossierRevision ?? null,
       reason: status === "ok" ? null : reason,
       message: o.message !== undefined ? o.message : defaultMessage(status, reason, ic.now),
+      // When a refusal can be asked again, on the clock its charge used (ic.now is cc.now).
+      ...(status === "budget-limited" ? { retryAt: refusalResetAt(reason, ic.now) } : {}),
     };
   }
 

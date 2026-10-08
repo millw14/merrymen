@@ -1048,6 +1048,25 @@ describe("a room's research budget, in plain words (WP10: D7, D8, D10)", () => {
     assert.equal(s.provider.filter((p) => p === "/v2/tokens/search").length, searches);
   });
 
+  it("an ask begun at 14:59:59.995 and refused by hour 15's counter at 15:00:00.02 is told 16:00, the reset the service stamped (review r2)", async () => {
+    const s = await setup({ groupHourlyCredits: 500 });
+    // Hour 15's allowance spent by two boards just after the hour.
+    s.clock.now = Date.UTC(2026, 9, 7, 15, 0, 0, 10);
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    for (const q of ["who are the top traders on fomo today?", "who are the top traders on fomo this week?"]) assert.match((await port.ask({ text: q, chatId: GROUP }))!.text, /^Top traders on Fomo/);
+    // The room's own clock read the ask before the hour turned; the charge landed after it.
+    s.clock.now = Date.UTC(2026, 9, 7, 15, 0, 0, 20);
+    const early = createTgFomoPort(() => s.broker, { now: () => Date.UTC(2026, 9, 7, 14, 59, 59, 995) });
+    const r = await early.ask({ text: "who are the top traders on fomo this month?", chatId: GROUP });
+    assert.equal(r!.status, "budget-limited");
+    assert.equal(r!.text, "fomo lookups for this room are used up for now, try again after 16:00 UTC.");
+    assert.ok(admitTgLine(r!.text, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+    // The envelope carries it, as an instant.
+    const env = await s.broker.call("fomo_get_rankings", { board: "traders", window: "all" }, { surface: "telegram-group", audience: "group", conversationKey: "k", priority: "interactive", groupId: String(GROUP) });
+    assert.equal(env.status, "budget-limited");
+    assert.equal(env.retryAt, Date.UTC(2026, 9, 7, 16, 0, 0));
+  });
+
   it("a failed read is said plainly, never as 'ask me in a direct message'", async () => {
     const s = await setup({ trending: () => { throw new Error("upstream down"); } });
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });

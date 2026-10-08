@@ -760,7 +760,9 @@ share, so a group's cap alone does not move the wall. A refused read is said wit
 resets: the owner hears which allowance ran out ("your hourly Fomo research allowance is
 used up; it resets at 15:00 UTC"), a room hears one wording for every cap, "fomo lookups
 for this room are used up for now, try again after 15:00 UTC." (hourly caps reset at the
-next clock hour, daily ones at 00:00 UTC; `budget.ts refusalResetAt`), never a credit or
+next clock hour, daily ones at 00:00 UTC; `budget.ts refusalResetAt`, stamped on the
+envelope as `retryAt` by the service on the clock the refusing charge used, so an ask begun
+at 14:59:59 and refused by hour 15's counter hears 16:00), never a credit or
 an amount. The hourly counters are taken first, so a room past its hour never raises the
 fleet's daily pools, even briefly; which cap a refusal names is then read from the counters
 without taking anything (`AllowancePort.peek`), so a spent hour promises the next hour only
