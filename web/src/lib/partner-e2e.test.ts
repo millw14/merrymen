@@ -126,7 +126,25 @@ function freePort(): Promise<number> {
   });
 }
 
+// after() does not run when this file's process is killed (a watch-mode
+// restart, a SIGTERM from another tool), and the gateway, a separate process,
+// would keep listening with its temp dir on disk. Synchronous, so it can also
+// run from the exit handler; a no-op once after() has cleaned up.
+function reap() {
+  if (gateway && gateway.exitCode === null && gateway.signalCode === null) gateway.kill("SIGKILL");
+  for (const dir of cleanup) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort on the way out */ } }
+}
+const REAPED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+function reapOnSignal(signal: NodeJS.Signals) {
+  reap();
+  // Then die of the signal as this process would have, unless something else
+  // (a test runner running files in-process) is there to handle it.
+  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+}
+
 before(async () => {
+  process.once("exit", reap);
+  for (const signal of REAPED_SIGNALS) process.once(signal, reapOnSignal);
   web = createServer((req, res) => {
     serveWeb(req, res).catch(error => {
       harnessFailures.push(error);
@@ -221,6 +239,8 @@ after(async () => {
   await attempt(() => store?.close());
   // See partner-store.test.ts: SQLite can still be clearing its -shm file after close().
   for (const dir of cleanup) await attempt(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  // The exit reaper stays: if anything above failed, it tries once more.
+  for (const signal of REAPED_SIGNALS) process.off(signal, reapOnSignal);
   if (failures.length) throw failures[0];
 });
 
