@@ -106,7 +106,8 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
       const refused = await refusal(c.address, message(c), body.signature);
       if (refused) return refused;
       // Spent only after the proof checks out, so a mistyped paste can be retried.
-      if (!await store.spendNonce(`developer:${c.nonce}`, 301)) return error(401, "signature_used", "This sign-in was already used. Connect your wallet again.");
+      // A KV outage throws to handle()'s 503 rather than reading as "already used".
+      if (!await store.spendNonce(`developer:${c.nonce}`, 301, { throwOnError: true })) return error(401, "signature_used", "This sign-in was already used. Connect your wallet again.");
       return { status: 200, json: { address: c.address, session: sign("session",
         { address: c.address, sid: randomBytes(16).toString("hex"), epoch, expires: now() + 8 * 3600_000 }) } };
     }

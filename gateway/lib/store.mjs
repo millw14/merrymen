@@ -28,11 +28,16 @@ async function redis(cmd) {
 function redisStore() {
   return {
     durable: true,
-    /** Atomic single-use: true only the FIRST time this nonce is spent. */
-    async spendNonce(token, ttlSec) {
+    /**
+     * Atomic single-use: true only the FIRST time this nonce is spent.
+     * `throwOnError` lets a caller tell "already spent" from "could not ask":
+     * both refuse, but only one should tell a person their proof was used.
+     */
+    async spendNonce(token, ttlSec, { throwOnError = false } = {}) {
       try {
         return (await redis(["SET", `n:${token}`, "1", "NX", "EX", String(ttlSec)])) === "OK";
-      } catch {
+      } catch (err) {
+        if (throwOnError) throw err;
         return false; // fail closed — if we can't guarantee single-use, reject
       }
     },

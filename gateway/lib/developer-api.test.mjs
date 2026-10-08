@@ -104,6 +104,20 @@ test("a store that cannot record a logout fails closed rather than reporting suc
   const challenge = await unreadable.call("/challenge", { address: unreadable.wallet.address });
   const verified = await unreadable.call("/verify", { challenge: challenge.json.challenge, signature: await unreadable.wallet.signMessage({ message: challenge.json.message }) });
   assert.equal((await unreadable.call("/keys", undefined, verified.json.session)).status, 503);
+  // A store that cannot spend the sign-in nonce is unavailable, not "already used",
+  // and the same proof works once it answers.
+  let down = true;
+  const memory = createStore();
+  const flaky = fixture({ store: { ...memory, spendNonce: async (token, ttl, options) => {
+    if (down) { if (options?.throwOnError) throw new Error("redis 500"); return false; }
+    return memory.spendNonce(token, ttl, options);
+  } } });
+  const c = await flaky.call("/challenge", { address: flaky.wallet.address });
+  const proof = { challenge: c.json.challenge, signature: await flaky.wallet.signMessage({ message: c.json.message }) };
+  const outage = await flaky.call("/verify", proof);
+  assert.equal(outage.status, 503); assert.equal(outage.json.error.code, "unavailable");
+  down = false;
+  assert.equal((await flaky.call("/verify", proof)).status, 200);
 });
 test("wrong wallet signatures and stale challenges are rejected", async () => {
   const f = fixture(); const challenge = await f.call("/challenge", { address: f.wallet.address });
