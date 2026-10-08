@@ -32,8 +32,16 @@ const PORTAL = "billing-server-test-portal-secret-32-bytes++";
 const BRIDGE = "billing-server-test-bridge-secret-32-bytes++";
 const TREASURY = `0x${"7e".repeat(20)}`;
 
+const children = new Set();
 const cleanup = [];
-after(async () => { for (const fn of cleanup.reverse()) await fn(); });
+// Every spawned gateway is killed first, whatever failed: a test that throws
+// part-way must never leave a server.mjs running on the machine. Then the
+// rest, each on its own, so one close that fails cannot skip the others.
+after(async () => {
+  for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  for (const fn of cleanup.reverse()) { try { await fn(); } catch { /* the next one still runs */ } }
+});
+const BOOT_MS = 20_000;
 
 const freePort = () => new Promise((resolve) => { const probe = createServer().listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
 
@@ -54,19 +62,20 @@ async function startWeb() {
   return Object.assign(web, { origin: `http://127.0.0.1:${server.address().port}` });
 }
 
-/** server.mjs as a child process. Resolves once it is listening. */
+/** server.mjs as a child process, its heap capped. Resolves once it is listening; killed if it is not within BOOT_MS. */
 async function startGateway(env) {
   const port = await freePort();
-  const child = spawn(process.execPath, [fileURLToPath(new URL("./server.mjs", import.meta.url))], { stdio: ["ignore", "pipe", "pipe"],
+  const child = spawn(process.execPath, ["--max-old-space-size=256", fileURLToPath(new URL("./server.mjs", import.meta.url))], { stdio: ["ignore", "pipe", "pipe"],
     env: { PATH: process.env.PATH, PORT: String(port), MERRYMEN_GATEWAY_UPSTREAM_KEY: "unused", MERRYMEN_GATEWAY_SECRET: SECRET,
       MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9", ...env } });
+  children.add(child);
   let out = "", err = "";
   const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
-  cleanup.push(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
   await new Promise((resolve, reject) => {
-    child.stdout.on("data", (c) => { out += c; if (out.includes("listening")) resolve(); });
+    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`gateway did not listen within ${BOOT_MS} ms: ${out}${err}`)); }, BOOT_MS);
+    child.stdout.on("data", (c) => { out += c; if (out.includes("listening")) { clearTimeout(timer); resolve(); } });
     child.stderr.on("data", (c) => { err += c; });
-    exited.then(({ code }) => reject(new Error(`gateway exited ${code}: ${out}${err}`)));
+    exited.then(({ code }) => { clearTimeout(timer); reject(new Error(`gateway exited ${code}: ${out}${err}`)); });
   });
   const origin = `http://127.0.0.1:${port}`;
   return {
