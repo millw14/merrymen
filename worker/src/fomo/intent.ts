@@ -1505,7 +1505,8 @@ function buildCalls(intent: FomoIntent, resolved: readonly SubjectQuery[], o: Ca
     case "words-vs-actions":
       return token ? [call("fomo_research_coin", { ...token, focus: "words-vs-actions", ...win, ...fresh })] : null;
     case "rankings-traders":
-      return [call("fomo_get_rankings", { board: "traders", ...win, ...lim, ...cohortArg, ...fresh })];
+      // A chain narrows nothing on the trader board; it is passed so the answer says so (render.ts).
+      return [call("fomo_get_rankings", { board: "traders", ...win, ...chainOnly, ...lim, ...cohortArg, ...fresh })];
     case "rankings-tokens":
       return [call("fomo_get_rankings", { board: o.board ?? "trending-tokens", ...chainOnly, ...lim, ...fresh })];
     case "opportunities":

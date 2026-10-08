@@ -34,7 +34,7 @@
 
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion, type AnswerFomoResult } from "./fomo/chat";
-import { chainFromUserText } from "./fomo/identity";
+import { chainFromUserText, isRobinhoodToken } from "./fomo/identity";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, TokenActivityData, TokenThesesData } from "./fomo/tools";
@@ -286,7 +286,15 @@ export function ownerMoves(r: AnswerFomoResult, buyable: (s: string) => boolean 
       if (tails) lines.push("/tail asks you first, then tells you here what they buy, sell or post for those hours.");
       return { kind: "traders", room: "sent the trade moves for these to your DM.", dm: lines.join("\n") };
     }
-    const coins = d.tokens.map((t) => coinOf(t.token, t.label)).filter((c): c is MoveCoin => c !== null).slice(0, MOVES_ROWS);
+    // Robinhood Chain coins first, the shown ones and then the board's best
+    // placed ones (RankingsData.robinhood): the chain she can act on is never
+    // crowded out of her moves by three "not tradeable from here" rows.
+    const rows = [...d.tokens.filter((t) => isRobinhoodToken(t.token)), ...(d.robinhood?.top ?? []), ...d.tokens];
+    const coins: MoveCoin[] = [];
+    for (const t of rows) {
+      const c = coinOf(t.token, t.label);
+      if (c && coins.length < MOVES_ROWS && !coins.some((x) => (x.token?.key ?? x.symbol) === (c.token?.key ?? c.symbol))) coins.push(c);
+    }
     if (!coins.length) return null;
     return { kind: "coins", room: "sent the trade moves for these to your DM.", dm: ["<b>Your moves on these coins</b>:", ...coins.flatMap((c) => ["", ...coinMoves(c, buyable)])].join("\n") };
   }

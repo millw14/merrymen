@@ -27,10 +27,11 @@
  */
 
 import { agoText, durationText } from "./dossier";
-import { shortAddress } from "./identity";
+import { chainFromUserText, isRobinhoodToken, shortAddress } from "./identity";
 import type { FomoQuestionPlan } from "./intent";
 import type {
   OpportunitiesData,
+  RankingTokenRow,
   RankingsData,
   ResearchCoinData,
   ResearchStatusData,
@@ -510,6 +511,12 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
       out.push(`Watched traders: ${d.cohort.buyers.length} with a latest buy, ${d.cohort.sellers.length} with a latest sell.`);
     }
   }
+  // The whole feed's top coins, as counts (no one who traded them).
+  if (!d.token && d.topTokens?.length) {
+    const most = d.side === "sell" ? "Most sold" : "Most bought";
+    const n = (c: (typeof d.topTokens)[number]) => (d.side === "sell" ? plural(c.sellers, "seller", "sellers") : plural(c.buyers, "buyer", "buyers"));
+    out.push(`${most} on Fomo ${scope}: ${d.topTokens.map((c) => `${coin(c.token, c.label, audience, false)} (${n(c)})`).join(", ")}.`);
+  }
   if (d.breadth) out.push(`Breadth (Merrymen's reading): ${d.breadth.reading}, ${plural(d.breadth.distinctBuyers, "buyer", "buyers")} across ${plural(d.breadth.buyEvents, "buy", "buys")}${d.breadth.repeatAdds ? `, ${d.breadth.repeatAdds} repeat adds` : ""}.`);
   if (d.stats?.window24h) {
     const w = d.stats.window24h;
@@ -523,11 +530,29 @@ function windowWords(w: string | null | undefined): string {
   return w === "all" ? "all time" : w ? `last ${w}` : "";
 }
 
+/** A chain as people say it: "Robinhood Chain", "Solana", "Ethereum". */
+function chainLabel(slug: string | null | undefined): string {
+  const s = typeof slug === "string" ? chainFromUserText(slug)?.slug ?? slug : "";
+  const named: Record<string, string> = { robinhood: "Robinhood Chain", solana: "Solana", base: "Base", eth: "Ethereum", bsc: "BSC", arc: "Arc", hyperliquid: "Hyperliquid" };
+  return named[s] ?? (/^[a-z][a-z0-9-]{0,23}$/.test(s) ? s : "that chain");
+}
+
+/** "12th": a board position in words the group gate never reads as a handle ("#12" it does). */
+export function ordinal(n: number): string {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
+  return `${n}${suffix}`;
+}
+
+/** Fomo's trader board has no chain: said once, instead of silently answering for every chain. */
+export const TRADER_BOARD_ALL_CHAINS = "Fomo's trader board covers every chain; it can't be narrowed to one.";
+
 function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): string[] {
   const d = env.data;
   if (!d) return [];
   if (d.board === "traders") {
-    if (!d.traders.length) return ["The leaderboard returned no rows for that scope."];
+    const chainNote = d.chain ? [TRADER_BOARD_ALL_CHAINS] : [];
+    if (!d.traders.length) return ["The leaderboard returned no rows for that scope.", ...chainNote];
     if (audience === "group") {
       // THE ONE PLACE A GROUP HEARS TRADERS NAMED (Milla's call, 2026-10-07):
       // Fomo's own public leaderboard, its handles and its provider-reported
@@ -536,19 +561,51 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): stri
       // "P&L" and "profit" are words the group gate keeps for its own book: plain words instead.
       const scope = windowWords(d.window);
       const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades:`];
-      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS)) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
-      return out;
+      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS - chainNote.length)) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
+      return [...out, ...chainNote];
     }
     const out = [`Top traders by provider-reported ${d.window ?? ""} realised P&L (not a skill measure):`];
     for (const r of d.traders.slice(0, 10)) out.push(`${r.rank ?? "–"}. ${who(r.trader.handle, r.trader.userId)} ${signedUsd(r.pnlUsd)}${r.inCohort ? " (followed)" : ""}`);
-    return out;
+    return [...out, ...chainNote];
   }
   const name = d.board === "trending-tokens" ? "Trending" : d.board === "graduated-tokens" ? "Newly graduated" : "Most held";
-  if (!d.tokens.length) return [`The ${name.toLowerCase()} board returned no rows for that scope.`];
-  const out = [`${name} on Fomo (board position is popularity, not quality):`];
-  for (const r of d.tokens.slice(0, audience === "group" ? GROUP_BOARD_ROWS : 10)) {
-    out.push(`${r.rank ?? "–"}. ${coin(r.token, r.label, audience, false)}, market cap ${finite(r.marketCapUsd) ? money(r.marketCapUsd, audience) : "unknown"}`);
+  const lower = name.toLowerCase();
+  const row = (r: RankingTokenRow): string => `${r.rank ?? "–"}. ${coin(r.token, r.label, audience, false)}, market cap ${finite(r.marketCapUsd) ? money(r.marketCapUsd, audience) : "unknown"}`;
+  const shownMax = audience === "group" ? GROUP_BOARD_ROWS : 10;
+  // WHAT THE CHAIN FILTER DID (Milla, 2026-10-07: every chain by default,
+  // one chain when asked): an empty board, a chain with no rows on it, and a
+  // chain's rows, each said as what it is, never "no rows for that scope".
+  if (d.boardRows === 0) return [`The ${lower} board came back empty.`];
+  const top = finite(d.boardRows) ? `the top ${d.boardRows}` : "the board";
+  const unplaced = finite(d.unplaced) && d.unplaced > 0 ? ` (${plural(d.unplaced, "row", "rows")} could not be placed on a chain)` : "";
+  if (d.chain) {
+    const where = chainLabel(d.chain);
+    if (!d.tokens.length) return [`None of ${top} ${lower} coins on Fomo are on ${where} right now${unplaced}.`];
+    const out = [`${name} on Fomo, ${where} only (${finite(d.matched) ? `${d.matched} of ${top}` : `from ${top}`}):`];
+    for (const r of d.tokens.slice(0, shownMax)) out.push(row(r));
+    return out;
   }
+  if (!d.tokens.length) return [`The ${lower} board returned no rows for that scope.`];
+  // EVERY CHAIN, PLUS WHERE ROBINHOOD CHAIN STANDS (decision D2): a board
+  // whose shown rows hold no Robinhood Chain coin ends with that chain's best
+  // placed rows, or says none of the board is on it. The chain Merrymen
+  // trades is never silently missing from a cross-chain board.
+  const hoodShown = d.tokens.slice(0, shownMax).some((r) => isRobinhoodToken(r.token));
+  let hoodLine: string | null = null;
+  if (d.robinhood && !hoodShown) {
+    const named = d.robinhood.top.flatMap((r) => {
+      const s = sym(r.label, audience);
+      return s ? [finite(r.rank) ? `${s} (${ordinal(r.rank)})` : s] : [];
+    });
+    hoodLine = d.robinhood.rows > 0 && named.length
+      ? `On Robinhood Chain, the chain I trade: ${named.join(", ")}.`
+      : d.robinhood.rows === 0
+        ? `None of ${top} are on Robinhood Chain, the chain I trade.`
+        : null;
+  }
+  const out = [`${name} on Fomo (board position is popularity, not quality):`];
+  for (const r of d.tokens.slice(0, shownMax - (hoodLine && audience === "group" ? 1 : 0))) out.push(row(r));
+  if (hoodLine) out.push(hoodLine);
   return out;
 }
 

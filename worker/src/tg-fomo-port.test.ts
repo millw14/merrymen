@@ -77,7 +77,7 @@ interface Setup {
   clock: { now: number };
 }
 
-async function setup(caps: { groupHourlyCredits?: number } = {}): Promise<Setup> {
+async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec } = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);
   await fstore.ensureFomoSchema(db, "sqlite");
@@ -101,7 +101,7 @@ async function setup(caps: { groupHourlyCredits?: number } = {}): Promise<Setup>
     if (p.startsWith("/v2/thesis/token/")) return json(fixture("theses-token"));
     if (/\/stats$/.test(p)) return json(fixture("token-stats"));
     if (/\/balances$/.test(p)) return json(fixture("balances"));
-    if (p.startsWith("/v2/leaderboard/tokens/")) return json(fixture("token-board-trending"));
+    if (p.startsWith("/v2/leaderboard/tokens/")) return json(caps.trending ? caps.trending() : fixture("token-board-trending"));
     if (p.startsWith("/v2/leaderboard/")) {
       // The board answers for the window asked, captured a minute ago.
       return json({ ...fixture("leaderboard-24h"), window: p.split("/").pop(), capturedAt: new Date(clock.now - 60_000).toISOString() });
@@ -515,6 +515,94 @@ describe("a model's checked choice, asked as the planner's own question", () => 
     assert.match(a.text, /^Top traders on Fomo, last 24h/);
     assert.equal(s.calls[0]!.tool, "fomo_get_rankings");
     assert.equal(a.moves, undefined, "no moves unless the owner asked");
+  });
+});
+
+/** A trending board shaped like the 2026-10-07 one: Solana on top, PONS 12th and CACHE 31st of `n`. */
+function incidentBoard(n = 100, hood = true): Rec {
+  const b58 = (i: number) => String(i).padStart(3, "1").replace(/0/g, "z");
+  const tokens: Rec[] = [];
+  for (let rank = 1; rank <= n; rank++) {
+    if (hood && rank === 12) tokens.push({ rank, network: "robinhood", token: { symbol: "PONS", name: "Pons", address: "0x39DBED3A00000000000000000000000000000C0D" }, marketCapUsd: 2_080_000 });
+    else if (hood && rank === 31) tokens.push({ rank, network: "robinhood", token: { symbol: "CACHE", name: "Cache", address: "0x7Fe9950000000000000000000000000000000ca5" }, marketCapUsd: 1_234_567 });
+    else tokens.push({ rank, network: "solana", token: { symbol: ["ETAC", "CATE", "STONK", "ANYPS"][rank - 1] ?? `SOLX${b58(rank)}`, name: "x", address: `So1abcdefghijkmnopqrstuvwxyz${b58(rank)}ABCDEFGHJKLMNp`.slice(0, 43) }, marketCapUsd: 874_600 });
+  }
+  return { board: "trending", count: n, tokens };
+}
+
+describe("a board on one chain or every chain, as a room hears it", () => {
+  /** Every line admitted as `research`; and, except on the public leaderboard (its handles are its content), no identity. */
+  const sayable = (text: string, leaderboard = false) => {
+    for (const l of text.split("\n")) {
+      assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, `refused: ${l}`);
+      if (!leaderboard) for (const re of NO_IDENTITY) assert.doesNotMatch(l, re, l);
+    }
+  };
+
+  it("every chain: three rows and where Robinhood Chain stands; then that chain's coins from the same read", async () => {
+    const s = await setup({ trending: () => incidentBoard() });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const all = await port.ask({ text: "what's trending on fomo?", chatId: GROUP });
+    assert.ok(all && !all.deflect);
+    assert.deepEqual(all.text.split("\n"), [
+      "Trending on Fomo (board position is popularity, not quality):",
+      "1. ETAC on solana, market cap $874.6k",
+      "2. CATE on solana, market cap $874.6k",
+      "3. STONK on solana, market cap $874.6k",
+      "On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st).",
+    ]);
+    sayable(all.text);
+    const read = s.provider.length;
+    s.clock.now += 60_000;
+    const hood = await port.ask({ text: "what about robinhood coins on fomo", chatId: GROUP });
+    assert.ok(hood && !hood.deflect);
+    assert.deepEqual(hood.text.split("\n"), [
+      "Trending on Fomo, Robinhood Chain only (2 of the top 100):",
+      "12. PONS on robinhood, market cap $2.1M",
+      "31. CACHE on robinhood, market cap $1.2M",
+    ]);
+    sayable(hood.text);
+    assert.equal(s.provider.length, read, "the chain's slice is the board already read: no second paid read");
+    assert.equal(s.calls[s.calls.length - 1]!.args.chain, "robinhood");
+  });
+
+  it("a board with no Robinhood Chain coin says so, filtered or not", async () => {
+    const s = await setup({ trending: () => incidentBoard(30, false) });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const all = await port.ask({ text: "what's trending on fomo?", chatId: GROUP });
+    assert.match(all!.text, /\nNone of the top 30 are on Robinhood Chain, the chain I trade\.$/);
+    sayable(all!.text);
+    const hood = await port.ask({ text: "robinhood chain coins on fomo", chatId: GROUP });
+    assert.equal(hood!.text, "None of the top 30 trending coins on Fomo are on Robinhood Chain right now.");
+    assert.equal(hood!.status, "empty");
+    sayable(hood!.text);
+  });
+
+  it("the trader board asked for one chain says it covers every chain", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "who's the top trader on robinhood on fomo today?", chatId: GROUP });
+    assert.match(a!.text, /\nFomo's trader board covers every chain; it can't be narrowed to one\.$/);
+    sayable(a!.text, true);
+  });
+
+  it("the crowd names its top coins by how many bought them, and no one who did", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "what are fomo traders buying?", chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.match(a.text, /\nMost bought on Fomo in the last 24h: [A-Z0-9]+ on [a-z]+ \(\d+ buyers?\)/);
+    sayable(a.text);
+  });
+
+  it("her moves after a board with Solana on top start with the Robinhood Chain coins she can act on", async () => {
+    const s = await setup({ trending: () => incidentBoard() });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, buyable: (sym) => sym === "PONS" });
+    const a = await port.ask({ text: "what's trending on fomo?", owner: true, chatId: GROUP });
+    assert.ok(a?.moves);
+    assert.match(a.moves.dm, /^<b>Your moves on these coins<\/b>:\n\n<b>PONS<\/b> \(Robinhood Chain\)\n• <code>\/buy PONS 5<\/code>/);
+    assert.match(a.moves.dm, /<b>CACHE<\/b> \(Robinhood Chain\)/);
+    assert.equal((a.moves.dm.match(/not tradeable from here/g) ?? []).length, 1, "one Solana row, not three");
   });
 });
 

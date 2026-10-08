@@ -780,12 +780,25 @@ Surface limits:
   made on closed trades, never who Merrymen follows. One trader's holdings, trades or
   profile, and the owner's own research state, stay in a DM. Lines pass the group gate as
   `research` (every clause but money), with money in short form ($151.4k) and four rows a
-  board. "What can you do with fomo" and "is fomo working?" are answered by code with no
+  board. Boards cover every chain by default (Milla, 2026-10-07); asked for one ("robinhood
+  coins", "on base", "solana ones") the board is cut to that chain from the same read, at
+  no extra cost, under an honest header: "Trending on Fomo, Robinhood Chain only (2 of the
+  top 100):" with each row's board rank, "None of the top 30 trending coins on Fomo are on
+  Robinhood Chain right now." (with how many rows could not be placed on a chain), or "The
+  trending board came back empty." An unfiltered board whose shown rows hold no Robinhood
+  Chain coin shows three rows and ends "On Robinhood Chain, the chain I trade: PONS (12th),
+  CACHE (31st)." (positions in words: the gate reads "#12" as a handle), or "None of the
+  top 100 are on Robinhood Chain, the chain I trade." The owner's DM answer gets the same
+  line under its ten rows. Fomo's trader board has no chain filter: asked for one, the
+  board says "Fomo's trader board covers every chain; it can't be narrowed to one." The
+  crowd ("what are fomo traders buying?") also names the feed page's top three coins by
+  distinct buyers (sellers, for selling), as counts, never who. "What can you do with fomo" and "is fomo working?" are answered by code with no
   lookup: a fixed list, and whether research is on here. Group answers carry no
   attribution line and no skill caveat (Milla, 2026-10-07: the room has had a post about
   the source); owner answers keep both. When the owner asks in a group, her moves for the
   rows (the DM questions to ask next, and `/buy SYM` only for a Robinhood Chain coin her
-  `/buy` resolves) go to her DM, and the room hears only that they went. A line no rule
+  `/buy` resolves; Robinhood Chain coins first, the board's best placed ones when none is
+  shown) go to her DM, and the room hears only that they went. A line no rule
   reads is routed by the group model to a closed menu (docs/tg-groups.md); a Fomo pick
   runs as a fixed question through the same planner. A bare "what's trending" said to it
   (no platform or venue named) is asked as the trending board, with the desk's market

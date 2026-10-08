@@ -422,6 +422,12 @@ export interface TokenActivityData {
   stats: { holders: number | null; top10HoldersPercent: number | null; window24h: StatsWindow | null; window1h: StatsWindow | null } | null;
   localEvents: number;
   restEvents: number;
+  /**
+   * The whole feed (no coin, not the cohort): its top coins by distinct
+   * buyers (by sellers for a sell question), at most three, from the page
+   * already read. Counts only: no trader leaves the service through it.
+   */
+  topTokens?: CrowdCoin[];
 }
 
 export interface RankingTraderRow {
@@ -453,6 +459,32 @@ export interface RankingsData {
   basis: string;
   traders: RankingTraderRow[];
   tokens: RankingTokenRow[];
+  /**
+   * The chain asked for, as a slug ("robinhood", "eth"), or absent for every
+   * chain. On the trader board it narrows nothing (Fomo's trader board has no
+   * chain): it is kept so the answer can say so instead of ignoring it.
+   */
+  chain?: string | null;
+  /** Token boards: the rows the board returned, before any chain filter. */
+  boardRows?: number;
+  /** Token boards: of those, the rows on the chain asked for (every row when none was). */
+  matched?: number;
+  /** Token boards: rows the provider sent that could not be placed on a chain (never a match). */
+  unplaced?: number;
+  /**
+   * Token boards with no chain asked: the board's Robinhood Chain rows (the
+   * chain Merrymen trades), how many and the top three by board rank, from
+   * the same read (no extra credits).
+   */
+  robinhood?: { rows: number; top: RankingTokenRow[] };
+}
+
+/** One coin of the feed-wide crowd: how many distinct wallets bought and sold it. No identities. */
+export interface CrowdCoin {
+  token: TokenIdentity;
+  label: TokenLabel;
+  buyers: number;
+  sellers: number;
 }
 
 export interface OpportunityRow {

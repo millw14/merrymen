@@ -99,11 +99,13 @@ import {
   type ActivityEventView,
   type ClaimView,
   type CohortActor,
+  type CrowdCoin,
   type FillView,
   type HoldingView,
   type OpportunitiesData,
   type OpportunityRow,
   type PositionView,
+  type RankingTokenRow,
   type RankingsData,
   type ResearchCoinData,
   type ResearchStatusData,
@@ -2320,6 +2322,29 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       const b = participationBreadth(inScope, winMs ?? 365 * DAY, ic.now).find((x) => x.tokenKey === t.key);
       if (b) breadth = { distinctBuyers: b.distinctBuyers, buyEvents: b.buyEvents, repeatAdds: b.repeatAdds, reading: b.reading, notes: b.notes };
     }
+    // THE WHOLE FEED'S TOP COINS, from the page already read: distinct
+    // wallets per coin (by sellers for a sell question), at most three.
+    // Counts only; who they were never leaves here through it.
+    let topTokens: CrowdCoin[] | undefined;
+    if (!token && !args.cohortOnly) {
+      const per = new Map<string, { token: TokenIdentity; label: TokenLabel; buyers: Set<string>; sellers: Set<string> }>();
+      for (const e of inScope) {
+        if (!e.token || (e.kind !== "buy" && e.kind !== "sell")) continue;
+        let c = per.get(e.token.key);
+        if (!c) {
+          c = { token: e.token, label: cleanLabel(e.tokenLabel), buyers: new Set(), sellers: new Set() };
+          per.set(e.token.key, c);
+        }
+        if (!c.label.symbol && e.tokenLabel?.symbol) c.label = cleanLabel(e.tokenLabel);
+        (e.kind === "buy" ? c.buyers : c.sellers).add(e.trader.userId);
+      }
+      const by = args.side === "sell" ? "sellers" : "buyers";
+      topTokens = [...per.values()]
+        .map((c) => ({ token: c.token, label: c.label, buyers: c.buyers.size, sellers: c.sellers.size }))
+        .filter((c) => c[by] > 0 && !!c.label.symbol)
+        .sort((x, y) => y[by] - x[by] || (by === "buyers" ? y.sellers - x.sellers : y.buyers - x.buyers) || (x.label.symbol ?? "").localeCompare(y.label.symbol ?? ""))
+        .slice(0, 3);
+    }
     if (matching.length > args.limit) a.capped = true;
     const shown = matching.slice(0, args.limit).map((e) => eventView(e, restKeys.has(e.eventKey) && !local.some((l) => l.eventKey === e.eventKey) ? "rest-lookup" : "stream-record", cohort.ids));
     for (const e of shown) {
@@ -2349,6 +2374,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         stats: s ? { holders: s.holders, top10HoldersPercent: s.top10HoldersPercent, window24h: s.windows["24h"] ?? null, window1h: s.windows["1h"] ?? null } : null,
         localEvents: local.length,
         restEvents: rest.length,
+        ...(topTokens ? { topTokens } : {}),
       },
       rows: matching.length,
       essential,
@@ -2386,7 +2412,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         cls: "rankings",
         mode: args.freshness,
         subject: { kind: "market" },
-        data: { board: args.board, window: args.window, basis: "provider-reported P&L, not skill", traders, tokens: [] },
+        // A chain asked of the trader board narrows nothing (it covers every chain): kept so the answer says so.
+        data: { board: args.board, window: args.window, basis: "provider-reported P&L, not skill", traders, tokens: [], ...(args.chain ? { chain: args.chain } : {}) },
         rows: traders.length,
         essential: [lb],
       });
@@ -2394,9 +2421,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const board = args.board === "trending-tokens" ? "trending" : args.board === "graduated-tokens" ? "graduated" : "most-held";
     const tb = a.add(await read(ic.cc, specs.tokenBoard(board), args.freshness));
     const chain = args.chain ? chainFromUserText(args.chain) : null;
-    const rows = (tb.data?.rows ?? []).filter((r) => chainMatches(chain, r.token));
+    const all = tb.data?.rows ?? [];
+    const rows = all.filter((r) => chainMatches(chain, r.token));
     if (tb.data) a.ref("board", board, tb.retrievedAt);
-    const tokens = rows.slice(0, args.limit).map((r) => ({
+    const view = (r: (typeof all)[number]): RankingTokenRow => ({
       rank: r.rank,
       token: r.token,
       label: cleanLabel(r.label),
@@ -2406,15 +2434,24 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       marketCapUsd: r.marketCapUsd,
       volume24hUsd: r.volume24hUsd,
       executionAvailability: availabilityOf(r.token),
-    }));
+    });
+    const tokens = rows.slice(0, args.limit).map(view);
     if (tokens.some((t) => t.marketCapUsd === null)) a.note("A blank market cap is unknown, not zero.");
     a.note("Board position reflects popularity on Fomo, not quality.");
     a.achieved = { rows: tokens.length, chain: args.chain };
+    // WHAT THE CHAIN FILTER DID, from the read already made (one board read
+    // serves every chain; nothing is sent upstream): how many rows the board
+    // had, how many matched, how many could not be placed. With no chain
+    // asked, the board's Robinhood Chain rows too, so a cross-chain board can
+    // still say where the chain Merrymen trades stands on it.
+    const counts = tb.data ? { boardRows: all.length, matched: rows.length, unplaced: tb.data.dropped } : {};
+    const hood = all.filter((r) => isRobinhoodToken(r.token));
+    const robinhood = tb.data && !chain ? { robinhood: { rows: hood.length, top: hood.slice(0, 3).map(view) } } : {};
     return finish(ic, a, {
       cls: "boards",
       mode: args.freshness,
       subject: { kind: "market" },
-      data: { board: args.board, window: null, basis: "provider token board", traders: [], tokens },
+      data: { board: args.board, window: null, basis: "provider token board", traders: [], tokens, ...(args.chain ? { chain: args.chain } : {}), ...counts, ...robinhood },
       rows: tokens.length,
       essential: [tb],
     });

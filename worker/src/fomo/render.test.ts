@@ -404,3 +404,82 @@ describe("the watched-trader cohort, in words", () => {
     assert.ok(!/followed/i.test(text + built), "the cohort is watched, not followed: following is a separate setting");
   });
 });
+
+describe("a board says what its chain filter did, and where Robinhood Chain stands (Milla, 2026-10-07)", () => {
+  const SOL = { namespace: "solana" as const, networkId: 1_399_811_149, slug: "solana" };
+  const solToken = (i: number): TokenIdentity => ({ chain: SOL, address: `So1${i}`, key: `solana:1399811149:So1${i}` });
+  const row = (rank: number, symbol: string, token: TokenIdentity | null, cap = 874_600) => ({
+    rank, token, label: { symbol, name: symbol }, holders: null, priceUsd: null, change24hPct: null, marketCapUsd: cap, volume24hUsd: null, executionAvailability: "unknown" as never,
+  });
+  const CACHE = tokenIdentity(robinhoodChain(), "0x7fe9950000000000000000000000000000000ca5")!;
+  const board = (over: Partial<RankingsData>): FomoEnvelope<RankingsData> =>
+    env("fomo_get_rankings", "ok", { board: "trending-tokens", window: null, basis: "x", traders: [], tokens: [], ...over } as RankingsData, { subject: { kind: "market" } });
+  /** The incident: Solana on top, PONS 12th and CACHE 31st of 100. */
+  const incident = board({
+    tokens: ["ETAC", "CATE", "STONK", "AnyPS5", "MOO", "BAA", "CAW", "WOOF", "HOOT", "PURR"].map((s, i) => row(i + 1, s, solToken(i + 1))),
+    boardRows: 100, matched: 100, unplaced: 0,
+    robinhood: { rows: 2, top: [row(12, "PONS", T, 2_080_000), row(31, "CACHE", CACHE)] },
+  });
+
+  it("every chain, no Robinhood Chain row shown: three rows and that chain's best placed rows, by rank in words", () => {
+    const g = renderEnvelope(incident, G).split("\n");
+    assert.deepEqual(g, [
+      "Trending on Fomo (board position is popularity, not quality):",
+      "1. ETAC on solana, market cap $874.6k",
+      "2. CATE on solana, market cap $874.6k",
+      "3. STONK on solana, market cap $874.6k",
+      "On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st).",
+    ]);
+    // The owner sees ten rows and the same line, with her cashtags.
+    const o = renderEnvelope(incident, O);
+    assert.match(o, /\n10\. \$PURR on solana/);
+    assert.match(o, /\nOn Robinhood Chain, the chain I trade: \$PONS \(12th\), \$CACHE \(31st\)\./);
+  });
+
+  it("no line when a Robinhood Chain row is already shown; 'none of the top N' when the board has none", () => {
+    const shown = board({ tokens: [row(1, "PONS", T), row(2, "ETAC", solToken(2))], boardRows: 3, matched: 3, unplaced: 0, robinhood: { rows: 2, top: [row(1, "PONS", T)] } });
+    const g = renderEnvelope(shown, G);
+    assert.doesNotMatch(g, /chain I trade/);
+    assert.equal(g.split("\n").length, 3);
+    const none = board({ tokens: [row(1, "ETAC", solToken(1))], boardRows: 30, matched: 30, unplaced: 0, robinhood: { rows: 0, top: [] } });
+    assert.match(renderEnvelope(none, G), /\nNone of the top 30 are on Robinhood Chain, the chain I trade\.$/);
+  });
+
+  it("one chain asked: its rows under an honest header, or none of the top N on it, or an empty board", () => {
+    const hood = board({ chain: "robinhood", tokens: [row(12, "PONS", T, 2_080_000), row(31, "CACHE", CACHE)], boardRows: 100, matched: 2, unplaced: 0 });
+    assert.deepEqual(renderEnvelope(hood, G).split("\n"), [
+      "Trending on Fomo, Robinhood Chain only (2 of the top 100):",
+      "12. PONS on robinhood, market cap $2.1M",
+      "31. CACHE on robinhood, market cap $874.6k",
+    ]);
+    const none = board({ chain: "robinhood", tokens: [], boardRows: 30, matched: 0, unplaced: 2 });
+    assert.equal(renderEnvelope({ ...none, status: "empty" }, G), "None of the top 30 trending coins on Fomo are on Robinhood Chain right now (2 rows could not be placed on a chain).");
+    const eth = board({ board: "graduated-tokens", chain: "eth", tokens: [], boardRows: 12, matched: 0, unplaced: 0 });
+    assert.equal(renderEnvelope({ ...eth, status: "empty" }, G), "None of the top 12 newly graduated coins on Fomo are on Ethereum right now.");
+    const empty = board({ chain: "robinhood", tokens: [], boardRows: 0, matched: 0, unplaced: 0 });
+    assert.equal(renderEnvelope({ ...empty, status: "empty" }, G), "The trending board came back empty.");
+  });
+
+  it("the trader board with a chain asked says it covers every chain, and still fits a room", () => {
+    const lb = env("fomo_get_rankings", "ok", {
+      board: "traders", window: "24h", basis: "x", tokens: [], chain: "robinhood",
+      traders: [1, 2, 3, 4].map((rank) => ({ rank, trader: { userId: FRANK, handle: `t${rank}`, displayName: null, verified: null }, pnlUsd: 1_000 * rank, volumeUsd: null, trades: null, inCohort: null })),
+    } as RankingsData, { subject: { kind: "market" } });
+    const g = renderEnvelope(lb, G).split("\n");
+    assert.equal(g[g.length - 1], "Fomo's trader board covers every chain; it can't be narrowed to one.");
+    assert.equal(g.length, 5, "a header, three rows and the note");
+    assert.match(renderEnvelope(lb, O), /\nFomo's trader board covers every chain; it can't be narrowed to one\./);
+  });
+
+  it("the whole feed's crowd names its top coins as counts", () => {
+    const act: TokenActivityData = {
+      token: null, label: null, window: "24h", side: "buy", cohortOnly: false, events: [], distinctBuyers: 6, distinctSellers: 1,
+      cohort: null, breadth: null, stats: null, localEvents: 0, restEvents: 0,
+      topTokens: [{ token: T, label: { symbol: "PONS", name: null }, buyers: 5, sellers: 1 }, { token: solToken(1), label: { symbol: "ROO", name: null }, buyers: 1, sellers: 0 }],
+    };
+    const g = renderEnvelope(env("fomo_get_token_activity", "ok", act, { subject: { kind: "market" } }), G);
+    assert.match(g, /\nMost bought on Fomo in the last 24h: PONS on robinhood \(5 buyers\), ROO on solana \(1 buyer\)\./);
+    const sold = renderEnvelope(env("fomo_get_token_activity", "ok", { ...act, side: "sell", topTokens: [{ ...act.topTokens![0]!, sellers: 2 }] }, { subject: { kind: "market" } }), G);
+    assert.match(sold, /\nMost sold on Fomo in the last 24h: PONS on robinhood \(2 sellers\)\./);
+  });
+});

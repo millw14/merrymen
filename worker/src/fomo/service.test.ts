@@ -471,6 +471,71 @@ describe("token tools", () => {
   });
 });
 
+describe("a token board narrowed to one chain says what the filter did (Milla, 2026-10-07)", () => {
+  /** A Solana row at `rank`, placeable. */
+  const solRow = (rank: number) => ({ rank, network: "solana", token: { symbol: `SOL${rank}`, name: `Sol ${rank}`, address: `So1${"abcdefghijkmnopqrstuvwxyz".slice(0, 26)}${String(rank).padStart(3, "1").replace(/0/g, "z")}ABCDEFGHJKLMNp`.slice(0, 43) }, marketCapUsd: 100_000 * rank });
+
+  it("a chain read reports the board's rows, the matches and the unplaced, from the one board read", async () => {
+    const h = await harness();
+    const hood = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", chain: "robinhood" });
+    assert.equal(hood.status, "ok");
+    assert.equal(hood.data?.chain, "robinhood");
+    assert.equal(hood.data?.boardRows, 3);
+    assert.equal(hood.data?.matched, 2);
+    assert.equal(hood.data?.unplaced, 0);
+    assert.equal(hood.data?.robinhood, undefined, "a chain was asked: no Robinhood aside");
+    assert.deepEqual(hood.data?.tokens.map((t) => t.rank), [1, 4], "rows keep their board rank");
+    // The same board for every chain: the second read is the cached copy.
+    const before = h.count("/v2/leaderboard/tokens/trending");
+    const sol = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", chain: "solana" });
+    assert.equal(sol.data?.matched, 1);
+    assert.equal(h.count("/v2/leaderboard/tokens/trending"), before, "a chain filter is never a second paid read");
+  });
+
+  it("every chain: the board's Robinhood Chain rows ride along, the top three by rank", async () => {
+    const h = await harness();
+    const all = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" });
+    assert.equal(all.data?.chain, undefined);
+    assert.equal(all.data?.boardRows, 3);
+    assert.equal(all.data?.robinhood?.rows, 2);
+    assert.deepEqual(all.data?.robinhood?.top.map((t) => t.label.symbol), ["PONS", "CACHE"]);
+  });
+
+  it("an all-Solana board asked for Robinhood Chain is empty, with the board's size known; unplaced rows are counted", async () => {
+    const h = await harness();
+    h.routes.set("board-trending", () => json({ board: "trending", count: 31, tokens: [...Array.from({ length: 30 }, (_, i) => solRow(i + 1)), { rank: 31, token: { symbol: "LOST", name: "Lost" } }] }));
+    const hood = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens", chain: "robinhood" });
+    assert.equal(hood.status, "empty");
+    assert.equal(hood.data?.boardRows, 30);
+    assert.equal(hood.data?.matched, 0);
+    assert.equal(hood.data?.unplaced, 1);
+    const all = await h.invoke<RankingsData>("fomo_get_rankings", { board: "trending-tokens" });
+    assert.deepEqual(all.data?.robinhood, { rows: 0, top: [] });
+  });
+
+  it("a chain asked of the trader board is kept, so the answer can say it covers every chain", async () => {
+    const h = await harness();
+    const lb = await h.invoke<RankingsData>("fomo_get_rankings", { board: "traders", chain: "robinhood" });
+    assert.equal(lb.status, "ok");
+    assert.equal(lb.data?.chain, "robinhood");
+    assert.equal(lb.data?.traders.length, 2, "nothing narrowed");
+  });
+
+  it("the whole feed's top coins are counts of distinct wallets, never who they were", async () => {
+    const h = await harness();
+    const buys = await h.invoke<TokenActivityData>("fomo_get_token_activity", { side: "buy" });
+    const top = buys.data?.topTokens ?? [];
+    assert.ok(top.length >= 1 && top.length <= 3, JSON.stringify(top));
+    for (const c of top) {
+      assert.deepEqual(Object.keys(c).sort(), ["buyers", "label", "sellers", "token"]);
+      assert.ok(c.buyers >= 1);
+    }
+    for (let i = 1; i < top.length; i++) assert.ok(top[i - 1]!.buyers >= top[i]!.buyers, "most buyers first");
+    const one = await h.invoke<TokenActivityData>("fomo_get_token_activity", { token: "PONS", side: "buy" });
+    assert.equal(one.data?.topTokens, undefined, "one coin's read has no crowd aside");
+  });
+});
+
 describe("a call is charged for every attempt it sent", () => {
   it("a 5xx retried past is charged to every budget, not only the answer that ended the call", async () => {
     const h = await harness();
