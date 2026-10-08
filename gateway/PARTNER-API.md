@@ -285,9 +285,10 @@ the chain cannot be read, the answer is 503 `class_vault_unavailable`.
 Retrying an activation:
 
 - **Lost response** (a timeout, a dropped connection): resend the exact same
-  body within the challenge's five minutes. If the first attempt completed,
-  you get HTTP 200 with the connection as it is now, and nothing is applied
-  again: no grant reinstall, no settings change, live trading not re-enabled.
+  body within the challenge's five minutes. If the first attempt never
+  arrived, this one activates. If it completed, you get HTTP 200 with the
+  connection as it is now, and nothing is applied again: no grant reinstall,
+  no settings change, live trading not re-enabled.
 - **409 `enrollment_busy`** (another activation for the same owner wallet is
   still running), **503 `class_vault_unavailable`** or **503
   `derivation_unavailable`**: the challenge was not spent. Resend the same body
