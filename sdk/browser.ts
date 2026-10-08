@@ -1,7 +1,7 @@
 /** Browser-only wallet preparation. Partner API keys belong on your server. */
 import { type LocalAccount } from "viem";
 import { robinhoodChain, robinhoodTestnet } from "../packages/core/src/chain";
-import { type StoredGrant } from "../packages/core/src/grant";
+import { type GrantCaps, type StoredGrant } from "../packages/core/src/grant";
 import { carriesOwnerKey } from "../packages/core/src/hosted";
 import {
   canonicalJson,
@@ -31,6 +31,25 @@ export interface PrepareMerrymanOptions extends Omit<PrepareAgentOptions, "onSta
 }
 
 /**
+ * PARTNER ACTIVATION'S LIMITS, BEFORE THE OWNER SIGNS. The signer seals whatever
+ * numbers it is given (a missing maxOpsPerDay, a 366-day expiry, a per-trade cap
+ * above the daily one) and activation, validGrant in
+ * web/src/lib/partner-enrollment.ts, then refuses the signed grant. These are
+ * its rules; sdk/browser.test.ts puts every case through both, so the two
+ * cannot drift apart unnoticed.
+ */
+const CAP_FIELDS: readonly string[] = ["perTradeUsdg", "dailyUsdg", "expiryDays", "maxDrawdownPct", "maxOpsPerDay"];
+function activatableCaps(caps: unknown): boolean {
+  if (!caps || typeof caps !== "object" || Array.isArray(caps)) return false;
+  const c = caps as Record<string, unknown>;
+  if (Object.keys(c).some((field) => !CAP_FIELDS.includes(field))) return false;
+  if (CAP_FIELDS.some((field) => typeof c[field] !== "number" || !Number.isFinite(c[field]) || (c[field] as number) < 1)) return false;
+  const { perTradeUsdg, dailyUsdg, expiryDays, maxDrawdownPct, maxOpsPerDay } = c as unknown as GrantCaps;
+  return perTradeUsdg <= dailyUsdg && maxDrawdownPct <= 100
+    && Number.isSafeInteger(expiryDays) && expiryDays <= 365 && Number.isSafeInteger(maxOpsPerDay);
+}
+
+/**
  * Derive and sign the same permission wall the Merrymen dashboard uses.
  *
  * Anything partner activation would refuse is refused HERE, before a chain read
@@ -50,6 +69,13 @@ export async function prepareMerryman({ owner, onStatus = () => {}, ...options }
   const chainId = options.chainId ?? robinhoodChain.id;
   if (chainId !== robinhoodChain.id && chainId !== robinhoodTestnet.id) {
     throw new Error(`chainId ${JSON.stringify(options.chainId)} is not a partner enrollment chain: use Robinhood Chain ${robinhoodChain.id} or its testnet ${robinhoodTestnet.id}. Nothing was signed.`);
+  }
+  if (!activatableCaps(options.caps)) {
+    throw new Error(
+      "These limits cannot be activated: caps takes exactly perTradeUsdg, dailyUsdg, expiryDays, maxDrawdownPct and " +
+        "maxOpsPerDay, each a number of at least 1, with perTradeUsdg at most dailyUsdg, maxDrawdownPct at most 100, " +
+        "a whole expiryDays of at most 365 and a whole maxOpsPerDay. Nothing was signed.",
+    );
   }
   const grant = await prepareAgentGrant(owner, { ...options, chainId, onStatus });
   if (carriesOwnerKey(grant)) throw new Error("An owner private key must never be included in a partner grant.");

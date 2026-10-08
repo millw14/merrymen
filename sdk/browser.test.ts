@@ -236,6 +236,42 @@ describe("prepareMerryman", () => {
     assert.equal(checkCanonicalWall({ ...broad, caps: CAPS }).ok, false);
   });
 
+  // Each breaks exactly one of activation's rules, and the signer seals every one.
+  const UNACTIVATABLE_CAPS: Record<string, unknown>[] = [
+    { ...CAPS, note: 1 },
+    { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5 },
+    { ...CAPS, perTradeUsdg: 0.5 },
+    { ...CAPS, maxOpsPerDay: 0 },
+    { ...CAPS, perTradeUsdg: 60 },
+    { ...CAPS, maxDrawdownPct: 101 },
+    { ...CAPS, expiryDays: 7.5 },
+    { ...CAPS, expiryDays: 366 },
+    { ...CAPS, maxOpsPerDay: 2.5 },
+  ];
+
+  it("refuses limits activation would refuse, before the owner is asked to sign them", async () => {
+    for (const caps of [...UNACTIVATABLE_CAPS, { ...CAPS, dailyUsdg: Infinity }, { ...CAPS, perTradeUsdg: "10" }, null, []]) {
+      await refusedUpFront({ caps }, /These limits cannot be activated/);
+    }
+  });
+
+  it("refuses them because activation refuses each one after the signer has sealed it", async () => {
+    // The parity pin: if activation's rules change, this or the next test fails.
+    const refused = (error: unknown) => partnerCode("invalid_grant")(error) || partnerCode("bad_request")(error);
+    for (const caps of UNACTIVATABLE_CAPS) {
+      const { owner } = wallet();
+      const grant = await withStubChain(ACCOUNT, () => prepareAgentGrant(owner, { caps: caps as unknown as typeof CAPS, onStatus: () => {} }));
+      await assert.rejects(activate(grant, owner), refused, JSON.stringify(caps));
+    }
+  });
+
+  it("accepts limits at activation's own bounds", async () => {
+    const edge = { perTradeUsdg: 1.5, dailyUsdg: 1.5, expiryDays: 365, maxDrawdownPct: 100, maxOpsPerDay: 1 };
+    const a = attempt({ caps: edge });
+    const { result } = await activate(await a.grant, a.owner);
+    assert.equal(result.connection.status, "linked");
+  });
+
   it("signs for mainnet by default and for the testnet when asked, and activation keeps that chain", async () => {
     assert.equal((await attempt().grant).chainId, 4663);
     const testnet = attempt({ chainId: 46630 });
