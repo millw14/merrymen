@@ -3660,7 +3660,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const requestedFact = async (request: PublicFactRequest, chatId: number): Promise<TgPublicFact> => {
     if (request.kind === "calculation") return request.fact;
     // What a room can ask: only what is wired here, read now (never from the line).
-    if (request.kind === "site" && request.topic === "capabilities") return { kind: "site", topic: "capabilities", wired: { fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() } };
+    if (request.kind === "site" && (request.topic === "capabilities" || request.topic === "dm-policy")) {
+      return { kind: "site", topic: request.topic, wired: { fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() } };
+    }
     if (request.kind === "site") return { kind: "site", topic: request.topic };
     const data = await readFact(async () => d.facts?.()?.tradesToday() ?? null);
     if (!data) return { kind: "unavailable", topic: "trades" };

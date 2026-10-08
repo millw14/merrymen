@@ -203,6 +203,19 @@ function capabilitiesLine(wired: { fomo: boolean; desk: boolean; coins: boolean 
     : "in here i mostly just chat. i never take trade orders from a group.";
 }
 
+/**
+ * WHY SOME THINGS STAY IN DMs, and what a room may hear instead: only what is
+ * wired here (a room with no Fomo is never promised boards or one trader's
+ * public Fomo data, which it then could not get).
+ */
+function dmPolicyLine(wired: { fomo: boolean; desk: boolean; coins: boolean } | undefined): string {
+  const w = wired ?? { fomo: false, desk: false, coins: false };
+  const head = "who i watch or follow, my owner's own research and anyone's account details stay in DMs.";
+  return w.fomo ? `${head} boards, coin research and one trader's public Fomo data are fine in here.`
+    : w.desk || w.coins ? `${head} coin research is fine in here.`
+      : head;
+}
+
 /** A numeric exception is assembled by code, never granted to model-written text. */
 export function publicFactLine(fact: TgPublicFact): string | null {
   if (!fact || typeof fact !== "object") return null;
@@ -285,6 +298,10 @@ export function publicFactLine(fact: TgPublicFact): string | null {
         line = capabilitiesLine(fact.wired);
         break;
       }
+      if (fact.topic === "dm-policy") {
+        line = dmPolicyLine(fact.wired);
+        break;
+      }
       const answers = {
         overview: "Merrymen runs your trading agent. the web shows its trades, decisions and controls; Telegram is another view of the same agent.",
         onboarding: "open Merrymen on the web, sign in, then choose Create agent. pick a strategy and trading mode, review the limits and sign the permission. finish the wallet's backup or login steps, then check your agent's status. you can start with paper trading.",
@@ -301,9 +318,8 @@ export function publicFactLine(fact: TgPublicFact): string | null {
         wallet: "open Wallet & permissions on the web and follow the current review/renew step. revocation needs network fees; an interrupted renewal must be resumed before trading. after signing, check agent status. never share a recovery key or bot token.",
         groups: "check Settings → Telegram and test the bot; /status in your linked DM checks the connection. groups also need owner approval. privacy mode can hide posts: disable it in BotFather and re-add the bot, or make it admin. mentions and direct replies can help.",
         limits: "buys still need a Brain decision and must fit the owner's signed permissions and trading limits. group messages can't raise those limits or authorize a wallet change.",
-        "dm-policy": "who i watch or follow, my owner's own research and anyone's account details stay in DMs. boards, coin research and one trader's public Fomo data are fine in here.",
       } as const;
-      line = answers[fact.topic as Exclude<typeof fact.topic, "capabilities">] ?? null;
+      line = answers[fact.topic as Exclude<typeof fact.topic, "capabilities" | "dm-policy">] ?? null;
       break;
     }
     case "unavailable":

@@ -1616,6 +1616,16 @@ describe("fixed answers about itself, through the real handler (WP11; g1 b06, b1
     assert.doesNotMatch(tg.texts(CHAT)[0]!, /Fomo/);
   });
 
+  it("with no research wired, the DM policy never promises Fomo boards or a trader's Fomo data in here (review r3)", async () => {
+    fomo = null;
+    make();
+    await said(msg("pine why can't you answer that here?"));
+    const l = tg.texts(CHAT)[0]!;
+    assert.match(l, /^who i watch or follow, my owner's own research and anyone's account details stay in DMs\./);
+    assert.doesNotMatch(l, /Fomo|boards/);
+    assert.match(l, /coin research is fine in here\.$/, "the desk is wired here");
+  });
+
   it("'should i get one of these?' under a trending board is never the onboarding steps, nor banter about DMs the DM policy (review r2)", async () => {
     fomo!.answer = () => ({ text: "Trending on Fomo (board position is popularity, not quality):\n1. PONS on robinhood, market cap $2.1M", deflect: false, status: "ok" });
     make();
@@ -1641,8 +1651,9 @@ describe("fixed answers about itself, through the real handler (WP11; g1 b06, b1
   it("'why can't you answer in the group?' and a bare 'why?' under its deflection get the DM policy, never a market read", async () => {
     fomo!.answer = () => ({ text: TG_FOMO_DEFLECTION, deflect: true, free: true });
     make();
-    // The spy deflects whatever it is asked (live, a cohort-scoped board is one such ask).
-    await said(msg("pine what are the top coins among the traders you follow on fomo?"));
+    // The spy deflects whatever it is asked (live, a cohort-scoped board is one such ask; "the traders
+    // you follow" is a private ask before the research since review r3, so "our watched traders" here).
+    await said(msg("pine what are the top coins among our watched traders on fomo?"));
     const deflection = lastSent();
     assert.equal(deflection.text, TG_FOMO_DEFLECTION);
     const replyTo = { messageId: deflection.id, fromId: BOT.id, fromIsBot: true, text: deflection.text };

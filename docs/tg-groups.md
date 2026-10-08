@@ -1670,7 +1670,7 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | A Fomo read that failed or could not be reached | "couldn't reach fomo just now, try again in a bit." |
 | "shogun what can you do?" / "shogun help" | A fixed list of what this room can ask (Fomo, the desk, coin looks, as wired here) and "i never take trade orders from a group." No model, no lookup |
 | "shogun how do i get my own agent" | The onboarding answer |
-| "why can't you answer in the group?" under "That one is for a direct message, not the group." / a bare "why?" there | What stays in DMs (who it watches, the owner's research, account details) and what a room may hear (boards, coin research, one trader's public Fomo data). Never a market read |
+| "why can't you answer in the group?" under "That one is for a direct message, not the group." / a bare "why?" there | What stays in DMs (who it watches, the owner's research, account details) and what a room may hear, as wired here: boards, coin research and one trader's public Fomo data with Fomo; coin research with only the desk or coin looks; nothing more with neither. Never a market read |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
 | A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |

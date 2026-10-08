@@ -188,11 +188,20 @@ describe("fixed answers about itself (WP11): what it can do, its own agent, why 
     assert.notDeepEqual(publicFactRequest("why didn't you answer in the group?"), { kind: "site", topic: "dm-policy" });
     assert.deepEqual(publicFactRequest("why doesn't the bot reply in my group?"), { kind: "site", topic: "groups" });
     assert.deepEqual(publicFactRequest("can you show my wallet balance in the public group?"), { kind: "site", topic: "privacy" });
-    const l = publicFactLine({ kind: "site", topic: "dm-policy" })!;
-    assert.match(l, /who i watch or follow.*stay in DMs/);
-    assert.match(l, /one trader's public Fomo data are fine in here/);
-    const v = fixed(l);
-    assert.ok(v.ok, v.ok ? "" : v.reason);
-    assert.ok(l.length <= TG_LINE_MAX);
+    // What a room may hear instead names only what is wired here (review r3).
+    const HEAD = "who i watch or follow, my owner's own research and anyone's account details stay in DMs.";
+    for (const [wired, want] of [
+      [{ fomo: true, desk: true, coins: true }, `${HEAD} boards, coin research and one trader's public Fomo data are fine in here.`],
+      [{ fomo: false, desk: true, coins: false }, `${HEAD} coin research is fine in here.`],
+      [{ fomo: false, desk: false, coins: true }, `${HEAD} coin research is fine in here.`],
+      [{ fomo: false, desk: false, coins: false }, HEAD],
+      [undefined, HEAD],
+    ] as const) {
+      const l = publicFactLine({ kind: "site", topic: "dm-policy", ...(wired ? { wired } : {}) })!;
+      assert.equal(l, want, JSON.stringify(wired));
+      const v = fixed(l);
+      assert.ok(v.ok, v.ok ? "" : v.reason);
+      assert.ok(l.length <= TG_LINE_MAX);
+    }
   });
 });

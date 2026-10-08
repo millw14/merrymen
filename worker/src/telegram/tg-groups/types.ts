@@ -256,9 +256,10 @@ export type TgPublicFact =
       kind: "site";
       topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" | "onboarding" | "funding" | "withdrawals" | "modes" | "v4" | "readiness" | "drawdown" | "privacy" | "capabilities" | "dm-policy";
       /**
-       * "capabilities" only: what is wired in this process, set by the
-       * handler (never from the line), so the list names only what a room
-       * can really ask for.
+       * "capabilities" and "dm-policy" only: what is wired in this process,
+       * set by the handler (never from the line), so the list names only
+       * what a room can really ask for, and the DM policy promises nothing
+       * that is not wired here.
        */
       wired?: { fomo: boolean; desk: boolean; coins: boolean };
     }
