@@ -1712,6 +1712,22 @@ describe("a group research question, end to end", () => {
     }
   });
 
+  it("a pushback under another of its own lines is about that line, never the last Fomo subject (review on #306)", async () => {
+    const r = await room();
+    await r.say("pine what are people saying about $PONS on fomo?");
+    // Then something else it says that is not research.
+    const other = await r.say("pine gm", { advanceMs: 3 * 60_000 });
+    assert.ok(other.length > 0, "it answered the greeting");
+    const desk = r.lastOwn();
+    assert.doesNotMatch(desk.text, /Fomo/);
+    for (const [line, under] of [["recheck", desk], ["pine you sure?", desk], ["pine are you sure?", undefined]] as const) {
+      const asks = r.asks.length;
+      const out = await r.say(line, { ...(under ? { under } : {}), fromId: 5151, advanceMs: 60_000 });
+      assert.equal(r.asks.length, asks, `${line}: never asked of the research`);
+      for (const t of out) assert.doesNotMatch(t, /What traders on Fomo are saying/, `${line}: ${t}`);
+    }
+  });
+
   it("a board that never reached the room is never 'the second one' (review on #303)", async () => {
     const s = await setup();
     let clock = NOW;

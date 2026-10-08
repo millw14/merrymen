@@ -2706,6 +2706,28 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (lastFomo.size > 256 && !lastFomo.has(key)) lastFomo.delete(lastFomo.keys().next().value!);
     lastFomo.set(key, clock());
   };
+  /**
+   * A PUSHBACK ON ITS OWN RESEARCH ANSWER ("there has to be thesis", "check
+   * again"): in reply to one of its research lines, or, replying to nothing,
+   * when its own last line in the topic is one. Under any other line of its
+   * own (a desk read, small talk) or someone else's, a pushback is about that
+   * line, never the last Fomo subject (review on #306).
+   */
+  const pushbackOnFomo = (msg: TgMessage, text: string, threadId?: number): boolean => {
+    const me = selfNow();
+    if (!me || !pushbackOf(text, selfNamesOf(me))) return false;
+    const q = msg.replyTo;
+    if (q) {
+      if (q.fromId !== me.id || !isMsgId(q.messageId)) return false;
+      const at = fomoLines.get(msgKey(msg.chatId, q.messageId));
+      return at !== undefined && clock() - at <= FOMO_THREAD_MS;
+    }
+    const own = (store.room(msg.chatId)?.lines ?? []).filter((l) => l.own === true && l.threadId === threadId);
+    const last = own[own.length - 1];
+    if (!last || !isMsgId(last.messageId)) return false;
+    const at = fomoLines.get(msgKey(msg.chatId, last.messageId));
+    return at !== undefined && clock() - at <= FOMO_FOLLOW_MS;
+  };
   /** The most lines and characters one research answer may run to in a room. */
   const FOMO_MAX_LINES = 6;
   const FOMO_MAX_CHARS = 700;
@@ -2905,7 +2927,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // PUSHING BACK ON ITS OWN RESEARCH ANSWER ("there has to be thesis",
     // "check again"), in reply to it or right after it: read again, never
     // serve the same held "nothing here" (the AUTON incident, 2026-10-08).
-    const fresh = pushbackOf(j.line.text, selfNames) && (repliesToOwnFomo(j) || fomoRecent(chatId, j.threadId));
+    const fresh = pushbackOnFomo(j.msg, j.line.text, j.threadId);
     if (fresh) log("[tg-groups] research pushback: read again");
     const r = await readFomo(port, {
       text: j.line.text,
@@ -4308,8 +4330,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const deskOwned = desked?.kind === "analysis" || desked?.kind === "comparison"
           || (desked?.kind === "coin" && chainIn(text) === undefined && !/\b(?:saying|thes[ie]s)\b/iu.test(text));
         // Right after a research answer, a pushback on it ("there has to be
-        // thesis", "check again") goes back to the research, read again.
-        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && (fomoFollowUpOf(text, selfNamesOf(me)) || pushbackOf(text, selfNamesOf(me)))));
+        // thesis", "check again") goes back to the research, read again;
+        // under another of its lines it is about that line (pushbackOnFomo).
+        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && (fomoFollowUpOf(text, selfNamesOf(me)) || pushbackOnFomo(msg, text, threadId))));
         // A complaint with nothing of theirs open asks which question; one
         // replying to its answer to their open ask has that ask read again by
         // the router (act()). A new line while an earlier one went
