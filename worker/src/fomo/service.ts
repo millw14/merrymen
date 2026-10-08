@@ -721,7 +721,19 @@ interface ReadSpec<T> {
   call(c: FomoClient): Promise<ProviderResult<T>>;
   revive(payload: unknown): T | null;
   notFoundIsSubject?: boolean;
+  /**
+   * A held copy that says "nothing here" (an empty thesis page). Such a copy
+   * is reused only briefly (EMPTY_HOLD_MS) and never when the asker pushed
+   * back (ChargeContext.retryEmpty): the provider answers a page as empty or
+   * "not available" while it is still gathering a coin's theses, and an
+   * empty copy kept for a room's two-hour reuse told a room a coin with
+   * 4,190 theses had none (the AUTON incident, 2026-10-08).
+   */
+  empty?(data: T): boolean;
 }
+
+/** How long a held copy that says "nothing here" may be reused (ReadSpec.empty). */
+const EMPTY_HOLD_MS = 2 * 60_000;
 
 /** Who pays, at what priority, with what clock; plus an optional allowance (a research job's). */
 interface ChargeContext {
@@ -742,6 +754,12 @@ interface ChargeContext {
    * longer reuse window and never as a paid forced refresh.
    */
   noReuse?: boolean;
+  /**
+   * The asker pushed back on an answer ("check again", "there has to be
+   * theses"): a held copy that says "nothing here" (ReadSpec.empty) is read
+   * again rather than served. A copy with something in it keeps its window.
+   */
+  retryEmpty?: boolean;
 }
 
 function localSection<T>(name: string, data: T, retrievedAt: number | null, servedFrom: Freshness["servedFrom"] = "cache"): Section<T> {
@@ -1211,7 +1229,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     } catch (e) {
       log(`fomo: cache read failed: ${errText(e)}`);
     }
-    const heldData = entry && entry.retrievedAtMs !== null ? spec.revive(entry.payload) : null;
+    let heldData = entry && entry.retrievedAtMs !== null ? spec.revive(entry.payload) : null;
+    // A held "nothing here" is a short-lived answer: past EMPTY_HOLD_MS, or
+    // when the asker pushed back, it is read again (ReadSpec.empty).
+    if (heldData !== null && spec.empty?.(heldData) === true && entry && entry.retrievedAtMs !== null && (cc.retryEmpty === true || now - entry.retrievedAtMs >= EMPTY_HOLD_MS)) {
+      heldData = null;
+    }
     const heldMeta = entry && isObj(entry.meta) ? entry.meta : null;
     const heldSnap = heldData !== null && heldMeta ? snapshotOf(heldMeta.source, heldMeta.stale, heldMeta.ageSeconds) : null;
     const state: CacheEntryState | null = entry
@@ -1497,6 +1520,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         cls: "theses",
         call: (c) => c.thesesByToken(t.address, { network, ...(pages > 1 ? { pages } : {}) }),
         revive: R.theses,
+        empty: (d) => d.rows.length === 0,
       };
     },
     thesesByUser: (userId: string, limit: number): ReadSpec<ThesesPage> => ({
@@ -2277,11 +2301,15 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     a.achieved = { theses: rows.length, shown: shown.length, families: tv.families, authors: tv.authors, chainFilterHonoured: honoured };
     a.note("Theses are their authors' claims, not verified facts; stance is Merrymen's reading of the text.");
     const subject: ResolvedSubject | null = token ? { kind: "token", token, label: label ?? { symbol: null, name: null } } : trader ? { kind: "trader", trader } : null;
+    // An empty page is logged by its shape only (never the coin): the provider's
+    // own "available" flag and count tell a coin with no theses from a read
+    // that came back empty while the provider still holds some.
+    if (rows.length === 0 && page) log(`fomo: theses page empty (available ${page.available ?? "?"}, provider total ${page.totalAvailable ?? "?"}, source ${page.source ?? "?"}, served from ${section.servedFrom})`);
     return finish(ic, a, {
       cls: "theses",
       mode: args.freshness,
       subject,
-      data: { token, label, trader, theses: shownViews, stance: tv.stance, families: tv.families, uniqueAuthors: tv.authors, chainFilterHonoured: honoured },
+      data: { token, label, trader, theses: shownViews, stance: tv.stance, families: tv.families, uniqueAuthors: tv.authors, chainFilterHonoured: honoured, available: page?.available ?? null },
       rows: rows.length,
       essential: [section],
     });
@@ -3508,6 +3536,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     if (surface === "telegram-group" && asked && asked.freshness === "force-refresh") {
       asked.freshness = "prefer-fresh";
       ic.cc.noReuse = true;
+      // ...and a pushback ("check again") never gets a held "nothing here" again.
+      ic.cc.retryEmpty = true;
     }
     let env: FomoEnvelope;
     try {

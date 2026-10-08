@@ -169,6 +169,15 @@ most 30 days. "Should we follow this?" is analysis, not permission.
 
   "refresh", "latest", "check now" and "right now" force an upstream attempt. Identical
   concurrent refreshes share one in-flight call and never substitute an older result.
+  **A copy that says "nothing here" is short-lived** (the AUTON incident, 2026-10-08:
+  the provider answered one coin's thesis page empty, `available: false`, while it held
+  4,190 theses, and a room was told "no theses" three times from that copy): an empty
+  thesis page is reused for at most 2 min on any surface (`service.ts EMPTY_HOLD_MS`,
+  `ReadSpec.empty`), and never when the asker pushed back ("there has to be thesis",
+  "check again", `ChargeContext.retryEmpty`). An empty page the provider marks not
+  available, or one under a count it still holds, is said as "Fomo didn't return the
+  theses on X just now (it lists N). Ask me again in a minute.", never "no theses"; an
+  empty page is logged by its shape only (available, count, source, served from).
   **A Telegram group reads differently** (decisions D7 and D8, 2026-10-07;
   `freshness.ts GROUP_REUSE_MS`, `service.ts read`): a room reuses a copy longer, theses
   for 2 h, the trader board for 1 h and coin boards for 15 min (the other classes keep

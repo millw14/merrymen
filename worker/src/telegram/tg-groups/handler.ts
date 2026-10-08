@@ -92,6 +92,7 @@ import {
   isTradeTalk,
   metaLineOf,
   offerShaped,
+  pushbackOf,
   reactionOnly,
   routeWorthy,
   selfNamesOf,
@@ -2826,7 +2827,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */
-  const readFomo = async (port: TgFomoPort, q: { text: string; request?: TgFomoRequest; owner?: boolean; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
+  const readFomo = async (port: TgFomoPort, q: { text: string; request?: TgFomoRequest; owner?: boolean; fresh?: boolean; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
     if (ms <= 0) return "timeout";
     const ask = { ...q, timeoutMs: ms };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2901,10 +2902,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const left = replyByMs - RESEARCH_SEND_MS - clock();
     // "typing…" while the research is read: the room sees it is on its way.
     const stopTyping = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
+    // PUSHING BACK ON ITS OWN RESEARCH ANSWER ("there has to be thesis",
+    // "check again"), in reply to it or right after it: read again, never
+    // serve the same held "nothing here" (the AUTON incident, 2026-10-08).
+    const fresh = pushbackOf(j.line.text, selfNames) && (repliesToOwnFomo(j) || fomoRecent(chatId, j.threadId));
+    if (fresh) log("[tg-groups] research pushback: read again");
     const r = await readFomo(port, {
       text: j.line.text,
       ...(request ? { request } : {}),
       ...(owner ? { owner } : {}),
+      ...(fresh ? { fresh } : {}),
       chatId,
       ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
       ...(selfNames.length ? { selfNames } : {}),
@@ -4300,7 +4307,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // people saying about $PONS now"): that is the coin's theses, never a chart.
         const deskOwned = desked?.kind === "analysis" || desked?.kind === "comparison"
           || (desked?.kind === "coin" && chainIn(text) === undefined && !/\b(?:saying|thes[ie]s)\b/iu.test(text));
-        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && fomoFollowUpOf(text, selfNamesOf(me))));
+        // Right after a research answer, a pushback on it ("there has to be
+        // thesis", "check again") goes back to the research, read again.
+        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && (fomoFollowUpOf(text, selfNamesOf(me)) || pushbackOf(text, selfNamesOf(me)))));
         // A complaint with nothing of theirs open asks which question; one
         // replying to its answer to their open ask has that ask read again by
         // the router (act()). A new line while an earlier one went

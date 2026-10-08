@@ -708,9 +708,10 @@ describe("a coin with no theses, in a room (review r2)", () => {
   const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
   const none: TokenThesesData = { ...theses(), theses: [], stance: { supporting: 0, opposing: 0, neutral: 0 }, families: 0, uniqueAuthors: 0 };
   const cases: Array<[string, FomoEnvelope<TokenThesesData>]> = [
-    ["live", env("fomo_get_token_theses", "empty", none)],
+    // Genuinely none: the provider counts none either (an empty page under a count is "didn't return just now").
+    ["live", env("fomo_get_token_theses", "empty", none, { coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] } })],
     ["a windowed read", env("fomo_get_token_theses", "empty", none, { coverage: { requested: { window: "24h" }, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] } })],
-    ["a cached copy", env("fomo_get_token_theses", "empty", none, { freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: NOW - 180_000, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW - 180_000, lastRefreshOutcome: "ok", cacheAgeMs: 180_000, servedFrom: "cache" } })],
+    ["a cached copy", env("fomo_get_token_theses", "empty", none, { coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] }, freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: NOW - 180_000, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW - 180_000, lastRefreshOutcome: "ok", cacheAgeMs: 180_000, servedFrom: "cache" } })],
   ];
   for (const [name, e] of cases) {
     it(`${name}: 'That is Fomo's record', every line admitted as research`, () => {
@@ -722,6 +723,25 @@ describe("a coin with no theses, in a room (review r2)", () => {
       assert.match(renderEnvelope(e, O), /That is the provider's record/);
     });
   }
+
+  it("an empty read the provider marks not available, or one under a count it still holds, is never 'no theses' (the AUTON incident, 2026-10-08)", () => {
+    const cov = (providerTotal: number | null) => ({ coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal, capped: false, missing: [], notes: [] } });
+    const unavailable = env("fomo_get_token_theses", "empty", { ...none, available: false }, cov(null));
+    const counted = env("fomo_get_token_theses", "empty", none, cov(4190));
+    for (const [e, want] of [
+      [unavailable, /^Fomo didn't return the theses on PONS on robinhood just now\. Ask me again in a minute\.$/],
+      [counted, /^Fomo didn't return the theses on PONS on robinhood just now \(it lists 4,190\)\. Ask me again in a minute\.$/],
+    ] as const) {
+      const text = groupScrub(renderAnswer([e], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, G));
+      assert.match(text.split("\n")[0]!, want, text);
+      assert.doesNotMatch(text, /No theses were returned/);
+      for (const l of text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
+      assert.match(renderEnvelope(e, O), /The provider didn't return the theses on/);
+    }
+    // A windowed read that came back empty is still "none in that window", whatever the all-time count.
+    const windowed = env("fomo_get_token_theses", "empty", none, { coverage: { ...cov(4190).coverage, requested: { window: "24h" } } });
+    assert.match(renderEnvelope(windowed, G), /No theses were returned for PONS on robinhood in that window/);
+  });
 });
 
 describe("a coin's theses in a room: what they argue, not counts (plan WP9 P1, D6)", () => {

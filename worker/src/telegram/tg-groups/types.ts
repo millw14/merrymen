@@ -562,6 +562,13 @@ export interface TgFomoPort {
     request?: TgFomoRequest;
     /** The asker is the owner (trusted sender id, never through a chat): her moves come back too. */
     owner?: boolean;
+    /**
+     * The asker pushed back on the last research answer ("there has to be
+     * theses", "check again"): read again rather than serve a held "nothing
+     * here" (fomo/chat.ts forceFresh; a room still never forces a paid
+     * refresh of a copy with something in it).
+     */
+    fresh?: boolean;
     chatId: number;
     threadId?: number;
     timeoutMs?: number;

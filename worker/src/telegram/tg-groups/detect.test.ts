@@ -46,6 +46,7 @@ import {
   lineMood,
   metaLineOf,
   offerShaped,
+  pushbackOf,
   reactionOnly,
   routeWorthy,
   selfNamesOf,
@@ -1137,4 +1138,17 @@ describe("metaLineOf: a line about its own silence (live 2026-10-07)", () => {
   ];
   for (const t of no) it(`content of its own: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), null));
   it("never throws on junk", () => assert.equal(metaLineOf(undefined), null));
+});
+
+describe("pushbackOf (the AUTON incident, 2026-10-08)", () => {
+  it("pushing back on an answer: read it again", () => {
+    for (const t of ["there has to be thesis.", "there must be some", "check again", "pine look again pls", "are you sure?", "u sure", "that's wrong", "that’s not right", "try again", "refresh it", "recheck", "there are definitely theses"]) {
+      assert.equal(pushbackOf(t, ["pine"]), true, t);
+    }
+  });
+  it("an ordinary line is not one", () => {
+    for (const t of ["what are people saying about pons", "thanks", "lol", "how's the market", "send it", "has to be the dev", "i'm sure it'll pump"]) {
+      assert.equal(pushbackOf(t), false, t);
+    }
+  });
 });

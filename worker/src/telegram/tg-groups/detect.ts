@@ -1765,6 +1765,21 @@ export function routeWorthy(text: unknown, selfNames: readonly string[] = [], kn
   });
 }
 
+/**
+ * PUSHING BACK ON AN ANSWER: "there has to be thesis", "check again", "are
+ * you sure", "that's wrong", "look again", "try again". Read only beside its
+ * own research answer (handler.ts), where it means "read it again", never
+ * "say the same thing".
+ */
+const PUSHBACK =
+  /\b(?:there (?:has|have|got) to be|there must be|has to be some|must be some|there (?:are|is) (?:def(?:initely)? |for sure |surely )?(?:some|theses|thesis|a thesis)|check again|look again|try again|search again|re-?check|recheck|refresh|are (?:you|u) sure|(?:you|u) sure|that'?s (?:wrong|not right|not true|cap)|not (?:right|true)|wrong (?:one|coin)?|impossible|no way)\b/u;
+
+export function pushbackOf(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const t = norm(unnamed(text, selfNames)).replace(/[’‘ʼ]/gu, "'");
+  return t.length <= 120 && PUSHBACK.test(t);
+}
+
 /** Laughter, an ack or an emoji: a reaction, not a question, whatever it replies to. */
 const REACTION_ONLY = /^(?:l+o+l+|lmf?a+o+|ha(?:ha)+h?|he(?:he)+|facts|true|same|fr|ikr|nice|bet|k|ok|okay|word|based|real|wow|damn|crazy|insane)$/u;
 

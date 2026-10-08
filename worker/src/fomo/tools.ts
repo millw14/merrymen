@@ -408,6 +408,8 @@ export interface TokenThesesData {
   families: number;
   uniqueAuthors: number;
   chainFilterHonoured: boolean | null;
+  /** The provider's own "available" flag on the page: false means it had nothing ready, not that there is nothing. */
+  available?: boolean | null;
 }
 
 export interface CohortActor {

@@ -94,6 +94,13 @@ export interface AnswerFomoInput {
    */
   readOnly?: boolean;
   /**
+   * The asker pushed back on the last answer ("there has to be theses",
+   * "check again"): every read is asked as a forced refresh. The service
+   * still never lets a room force a paid refresh of a copy with something in
+   * it (decision D8), but a held "nothing here" is read again (retryEmpty).
+   */
+  forceFresh?: boolean;
+  /**
    * The surface's own last word on a plan, before anything is remembered,
    * deflected, clarified or looked up: false and the question is not handled
    * here at all. A group uses it to leave a coin question the planner could
@@ -316,7 +323,11 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
   const planned = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
   if (!planned) return { handled: false };
-  const plan = audience === "group" ? roomPnlPlan(planned, input.text) : planned;
+  const roomPlan = audience === "group" ? roomPnlPlan(planned, input.text) : planned;
+  const plan: FomoQuestionPlan =
+    input.forceFresh === true
+      ? { ...roomPlan, freshness: "force-refresh", toolCalls: roomPlan.toolCalls.map((c) => ({ ...c, args: { ...c.args, freshness: "force-refresh" } })) }
+      : roomPlan;
   try {
     if (input.wanted && input.wanted(plan, memory) !== true) return { handled: false };
   } catch {

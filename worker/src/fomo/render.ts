@@ -715,6 +715,15 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
   const subject = d.token ? coin(d.token, d.label, audience) : d.trader ? trader(d.trader) : "this subject";
   const total = d.stance.supporting + d.stance.opposing + d.stance.neutral;
   if (total === 0) {
+    // AN EMPTY READ IS NOT "NONE" WHEN THE PROVIDER SAYS OTHERWISE: it marked
+    // the page not available, or it still counts theses on the coin (the AUTON
+    // incident, 2026-10-08: a room was told a coin with 4,190 theses had none).
+    const held = finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 && !env.coverage.requested.window ? env.coverage.providerTotal : null;
+    if (d.available === false || held !== null) {
+      const count = held !== null ? ` (it lists ${held.toLocaleString("en-US")})` : "";
+      const line = `The provider didn't return the theses on ${subject} just now${count}. Ask me again in a minute.`;
+      return [audience === "group" ? roomNote(line) : line];
+    }
     const line = `No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`;
     // A room hears "Fomo's record": the gate reads "the provider" as plumbing, and with it refused a coin with no theses heard "ask me in a direct message".
     return [audience === "group" ? roomNote(line) : line];

@@ -1547,6 +1547,90 @@ describe("a group research question, end to end", () => {
     }
   });
 
+  it("the AUTON incident: an empty 'not available' thesis read is said as such, and 'there has to be thesis' reads again (2026-10-08)", async () => {
+    let thesisReads = 0;
+    const s = await setup({
+      theses: () => {
+        thesisReads += 1;
+        // The provider's first answer: nothing ready for this coin yet. Then the real page.
+        return thesisReads === 1 ? { theses: [], available: false } : fixture("theses-token");
+      },
+    });
+    let clock = NOW;
+    s.clock.now = clock;
+    store?.close();
+    store = new TgGroupsStore(path.join(home, "tg-groups-auton.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    store.ensureRoom(GROUP, { title: "frens", kind: "supergroup" });
+    store.setStatus(GROUP, "approved", 4242);
+    store.update(GROUP, (r) => { r.helloSaid = true; });
+    const tg = new FakeTg();
+    let tstate = { ownerId: 4242 } as unknown as TelegramState;
+    const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    groups?.stop();
+    await groups?.drain();
+    groups = createTgGroups({
+      opts: () => ({ token: "123:TOKEN", fetchFn: tg.fetchFn }),
+      store,
+      getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [4242] }) as unknown as ResolvedConfig,
+      stateRef,
+      port: () => coins,
+      fomo: () => port,
+      self: () => ({ id: 999, username: "pinebot", name: "Pine" }),
+      privacyOff: () => false,
+      note: () => {},
+      dashboardBase: () => "https://app.test",
+      agentKey: () => "agent-1",
+      now: () => clock,
+      rand: () => 0.99,
+      env: {},
+      hosted: true,
+      sleep: async (ms) => { clock += Math.max(0, ms); },
+      timer: () => new Promise(() => {}),
+      log: () => {},
+    });
+    let id = 700;
+    const say = async (text: string): Promise<void> => {
+      groups!.onMessage({ updateId: id, chatId: GROUP, fromId: 4242, fromFirstName: "Milla", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++, dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens" });
+      await groups!.drain();
+    };
+    await say("pine what are people saying about $PONS on fomo?");
+    const first = tg.texts(GROUP).slice(-1)[0] ?? "";
+    assert.match(first, /didn't return the theses on PONS[^.]* just now\. Ask me again in a minute\./, first);
+    assert.doesNotMatch(first, /No theses were returned/);
+    clock += 20_000;
+    s.clock.now = clock;
+    await say("pine there has to be thesis.");
+    assert.equal(thesisReads, 2, "the pushback read again rather than serve the held empty page");
+    const second = tg.texts(GROUP).slice(-1)[0] ?? "";
+    assert.match(second, /What traders on Fomo are saying about PONS/, second);
+  });
+
+  it("a held empty thesis page is reused for two minutes at most, then read again", async () => {
+    let thesisReads = 0;
+    const s = await setup({ theses: () => { thesisReads += 1; return { theses: [], available: true }; } });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP });
+    s.clock.now += 60_000;
+    await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP });
+    assert.equal(thesisReads, 1, "inside two minutes the empty copy is reused");
+    s.clock.now += 61_000;
+    await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP });
+    assert.equal(thesisReads, 2, "past two minutes it is read again, not kept for the room's two hours");
+    await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP, fresh: true });
+    assert.equal(thesisReads, 3, "a pushback reads an empty copy again at once");
+  });
+
+  it("a thesis page with something in it keeps the room's reuse window, even on a pushback", async () => {
+    let thesisReads = 0;
+    const s = await setup({ theses: () => { thesisReads += 1; return fixture("theses-token"); } });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP });
+    s.clock.now += 5 * 60_000;
+    await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP, fresh: true });
+    assert.equal(thesisReads, 1, "a room never forces a paid refresh of a copy with theses in it (D8)");
+  });
+
   it("a board that never reached the room is never 'the second one' (review on #303)", async () => {
     const s = await setup();
     let clock = NOW;
