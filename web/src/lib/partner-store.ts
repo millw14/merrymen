@@ -80,6 +80,12 @@ export interface PartnerStore {
   readMessages(connectionId: string): Promise<PartnerMessage[]>;
   getExchange(connectionId: string, requestId: string): Promise<PartnerExchange | null>;
   appendExchange(connectionId: string, exchange: Omit<PartnerExchange, "createdAt">): Promise<{ created: boolean; exchange: PartnerExchange }>;
+  /**
+   * One holder at a time, across replicas. A caller waits (bounded, holding no
+   * connection) and then gets <kind>_busy with retryAfter. Store calls inside
+   * run on the lock's connection, and each write commits on its own: there is
+   * no enclosing transaction to roll back.
+   */
   withConversationLock<T>(connectionId: string, fn: () => Promise<T>): Promise<T>;
   withEnrollmentLock<T>(tenant: PartnerAddress, fn: () => Promise<T>): Promise<T>;
 }
