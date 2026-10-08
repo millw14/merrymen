@@ -429,6 +429,8 @@ test('Pay reads the account again: a payment, a plan change or a sign-in made el
     ['moved to Feast elsewhere', { status: 200, body: accountJson({ plan: { ...accountJson().plan, selected: 'feast' }, due_raw: (1_000_000n * UNIT).toString(), due_tokens: '1000000' }) }, /What is due changed since this page loaded/],
     ['another wallet signed in', { status: 200, body: accountJson({ account: { id: 'acct_2', name: 'Other', wallet: OTHER_WALLET, created_at: null } }) }, /signed in with another wallet, so nothing was sent/],
     ['unreadable', { status: 503, body: { error: { code: 'billing_unavailable', message: 'Billing is unavailable' } } }, /could not be read just now, so nothing was sent/],
+    // The session ended: the console signs out, as for any other request, rather than calling it unreadable.
+    ['session ended', { status: 401, body: { error: { code: 'signed_out', message: 'Sign in to manage your API keys' } } }, /Your session ended\. Connect your wallet again to continue\./],
   ] as const) {
     sent = []; calls = [];
     // The page loaded with Crumbs selected and 100,000 due to start it; by the click the account has moved on.
@@ -475,6 +477,13 @@ test('just after a payment starts a plan, the next period is not offered as a pa
   assert.equal(canPay(page.container), true); assert.match(text(page.container), /Renew for the next period: 100,000 MERRYMEN/);
   await click(buttonFor(page.container, /^Not now$/));
   assert.equal(canPay(page.container), false);
+  // The page stayed open past the period's end: Crumbs renewed from credit, and the next renewal has a new date.
+  const renewedLater = accountJson({ plan: { ...RUNNING, starts_at: '2026-11-07T00:00:00.000Z', ends_at: '2026-12-07T00:00:00.000Z' }, due_for: 'renewal' });
+  routes['GET account'] = () => ({ status: 200, body: renewedLater });
+  await click(buttonFor(page.container, /^Pay ahead for the next period$/));
+  await click(payButton(page.container));
+  assert.equal(sent.length, 1, 'nothing is sent ahead for a period that has passed'); assert.match(text(page.container), /What is due changed since this page loaded/);
+  assert.equal(canPay(page.container), false, 'a new period\'s renewal starts folded again'); assert.match(text(page.container), /To renew on 7 Dec 2026: 100,000 MERRYMEN/);
   await click(buttonFor(page.container, /^Pay ahead for the next period$/));
   await click(payButton(page.container));
   assert.equal(sent.length, 2, 'the second payment was asked for'); assert.match(statusOf(page.container, HASH_B), /^Credited/);
