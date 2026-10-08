@@ -47,6 +47,7 @@ import {
   answerStatus,
   createTgFomoPort,
   groupWords,
+  looseCoin,
   ownerMoves,
   requestText,
   tgGroupConversationKey,
@@ -236,6 +237,42 @@ describe("createTgFomoPort", () => {
     }
     assert.equal(traderAsked(plan("what are the theses on $PONS on fomo?")), null);
     assert.equal(traderAsked(null), null);
+  });
+
+  it("a coin the planner could not place is left to the router, never answered about the whole feed (g1 c07)", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    for (const q of ["who's selling pons on fomo?", "who is buying pons on fomo", "research pons on fomo", "what's happening with pons on fomo?"]) {
+      assert.equal(await port.ask({ text: q, chatId: GROUP }), null, q);
+    }
+    assert.equal(s.calls.length, 0, "nothing looked up");
+    assert.equal(s.provider.length, 0);
+    // The crowd, and a feed-wide ask, are still the feed's.
+    for (const q of ["what are fomo traders selling?", "who's selling on fomo?", "who's buying on fomo rn", "who has been selling on fomo lately"]) {
+      const a = await port.ask({ text: q, chatId: GROUP });
+      assert.ok(a && !a.deflect, q);
+      assert.equal(s.calls[s.calls.length - 1]!.tool, "fomo_get_token_activity", q);
+      assert.equal(s.calls[s.calls.length - 1]!.args.token, undefined, q);
+      s.clock.now += 60_000;
+    }
+    // A coin the planner placed is answered as before, and so is the router's grounded request.
+    const placed = await port.ask({ text: "who's selling $PONS on fomo?", chatId: GROUP });
+    assert.ok(placed && !placed.deflect);
+    assert.equal(s.calls[s.calls.length - 1]!.args.token, "PONS");
+    const routed = await port.ask({ text: "who's selling pons on fomo?", request: { kind: "coin", symbol: "PONS", aspect: "sellers" }, chatId: GROUP });
+    assert.ok(routed && !routed.deflect);
+    assert.equal(s.calls[s.calls.length - 1]!.args.token, "PONS");
+    // No broker: the same line is not claimed as research either.
+    const none = createTgFomoPort(() => null, { now: () => s.clock.now });
+    assert.equal(await none.ask({ text: "who's selling pons on fomo?", chatId: GROUP }), null);
+  });
+
+  it("looseCoin: only a word where one coin's name goes, never a chain, a time or filler", () => {
+    const p = (t: string) => classifyFomoQuestion(t, { memory: null, now: NOW })!;
+    for (const t of ["who's selling pons on fomo?", "research pons on fomo", "what's going on with pons on fomo"]) assert.equal(looseCoin(t, p(t)), true, t);
+    for (const t of ["who's selling on fomo?", "who's buying solana coins on fomo", "who's selling the most on fomo", "who's selling $PONS on fomo", "what are fomo traders buying", "who's buying rn on fomo"]) {
+      assert.equal(looseCoin(t, p(t)), false, t);
+    }
   });
 
   it("a trader question is deflected before anything is looked up", async () => {
@@ -440,6 +477,21 @@ describe("a model's checked choice, asked as the planner's own question", () => 
     }
     // A chain that is not on the list is never written into the question.
     assert.equal(requestText({ kind: "board", board: "trending", chain: "polygon" as never }), "what's trending on fomo?");
+  });
+
+  it("a leaderboard row is asked as one rank and one trader's question, which plans that row of the board", () => {
+    for (const rank of [1, 2, 3, 4] as const) {
+      for (const about of ["earnings", "holdings", "trades", "profile"] as const) {
+        for (const [window, w] of [[undefined, "24h"], ["7d", "7d"], ["30d", "30d"], ["all", "all"]] as const) {
+          const q = requestText({ kind: "leaderboard", ...(window ? { window } : {}), row: { rank, about } })!;
+          const plan = classifyFomoQuestion(q, { memory: null, now: NOW });
+          assert.equal(plan?.intent, "rankings-traders", q);
+          assert.deepEqual(plan?.rowAsk, { rank, about }, q);
+          assert.deepEqual(plan?.toolCalls.map((c) => [c.tool, c.args]), [["fomo_get_rankings", { board: "traders", window: w }]], q);
+        }
+      }
+    }
+    assert.equal(requestText({ kind: "leaderboard", row: { rank: 9 as never, about: "trades" } }), "who are the top traders on fomo in the last 24h?");
   });
 
   it("'about' is the fixed capabilities answer, and a trader or a ticker that is not one has no question", () => {

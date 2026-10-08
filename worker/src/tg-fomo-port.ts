@@ -34,6 +34,7 @@
 
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion, type AnswerFomoResult } from "./fomo/chat";
+import { chainFromUserText } from "./fomo/identity";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, TokenActivityData, TokenThesesData } from "./fomo/tools";
@@ -87,6 +88,16 @@ const TICKER = /^[A-Z0-9][A-Z0-9_-]{0,19}$/;
 const CHAIN_WORDS: Readonly<Record<TgFomoChain, string>> = { robinhood: "robinhood", solana: "solana", base: "base", ethereum: "eth", bsc: "bsc" };
 const onChain = (c: unknown): string => (typeof c === "string" && Object.hasOwn(CHAIN_WORDS, c) ? ` on ${CHAIN_WORDS[c as TgFomoChain]}` : "");
 
+/** A leaderboard row in the planner's own rank words (intent.ts ROW_RANK). */
+const ROW_WORDS: Readonly<Record<number, string>> = { 1: "top", 2: "second best", 3: "third best", 4: "fourth best" };
+/** What about that row, in words the planner reads as that one-trader question (intent.ts rowAskOf). */
+const ROW_ABOUT: Readonly<Record<string, string>> = {
+  earnings: " and what did he make money on?",
+  holdings: " and what is he holding?",
+  trades: " and what has he been trading?",
+  profile: "? tell me about him",
+};
+
 /**
  * THE FIXED QUESTION FOR A REQUEST. Each one plans exactly the intended read
  * through the deterministic planner (tg-fomo-port.test.ts pins every one), so
@@ -97,6 +108,8 @@ export function requestText(r: TgFomoRequest): string | null {
   switch (r.kind) {
     case "leaderboard": {
       const when = r.window === "7d" ? "this week" : r.window === "30d" ? "this month" : r.window === "all" ? "of all time" : "in the last 24h";
+      const row = r.row;
+      if (row && Object.hasOwn(ROW_WORDS, row.rank) && Object.hasOwn(ROW_ABOUT, row.about)) return `who is the ${ROW_WORDS[row.rank]} trader on fomo ${when}${ROW_ABOUT[row.about]}`;
       return `who are the top traders on fomo ${when}?`;
     }
     case "board": {
@@ -144,6 +157,47 @@ export function traderAsked(plan: FomoQuestionPlan | null | undefined): { handle
   if (handles.length !== 1 || !ASKABLE_HANDLE.test(handles[0]!)) return null;
   const about: TgTraderAbout = plan.intent === "trader-holdings" ? "holdings" : plan.intent === "trader-activity" ? "trades" : "profile";
   return { handle: handles[0]!, about };
+}
+
+// ─── A coin the planner could not place ─────────────────────────────────────
+
+/**
+ * Where a coin's name goes in a question about one coin: "who's selling pons",
+ * "what's happening with pons", "research pons". Group 1 is the word there.
+ */
+const LOOSE_SUBJECT =
+  /\b(?:selling|sold|sells|buying|bought|buys|dumping|dumped|aping|aped|accumulating|accumulated|loading up on|holding|holds|happening with|going on with|up with|research|researching|look into|looking into|dig into|digging into|analy[sz]e|analy[sz]ing|thoughts on|theses (?:on|for|about)|thesis (?:on|for|about)|saying about|think (?:of|about))\s+\$?([a-z][a-z0-9]{1,15})\b/iu;
+/** Words that sit there without being a coin: "who's selling on fomo", "who's buying rn". */
+const NOT_A_COIN = new Set(
+  ("on in at it its this that the a an now rn today tonight lately recently right fomo coin coins token tokens anything " +
+    "something everything stuff what which here there too more much most any some these those them him her me us you up off " +
+    "out into and or with for from to by hard heavy big so again still yet all fast early late already just really even " +
+    "also lol bro guys rn atm currently market memes memecoins traders people everyone everybody whales one ones").split(" "),
+);
+/** Intents whose subject is one coin, or the whole feed when none is named. */
+const COIN_SUBJECT_INTENTS: ReadonlySet<string> = new Set([
+  "token-activity", "token-buyers", "token-sellers", "token-theses", "research-coin", "words-vs-actions", "changes-since",
+]);
+
+/**
+ * A GROUP QUESTION ABOUT A COIN THE PLANNER COULD NOT PLACE. The planner
+ * reads a coin from a $tag, an UPPERCASE ticker or a name at the end ("about
+ * pepe"); "who's selling pons on fomo?" names none of those, so its plan is
+ * the whole feed's sellers, and "research pons on fomo" asks "which coin?".
+ * Either answers a different question than the one asked (rule 5). Such a
+ * plan is not taken here: the line goes on to the router, whose one call
+ * names the coin from the line's own words (route.ts groundedCoin), and its
+ * fixed question names it as a $tag. True: leave the line to the router.
+ */
+export function looseCoin(text: string, plan: FomoQuestionPlan): boolean {
+  if (!COIN_SUBJECT_INTENTS.has(plan.intent) || plan.subjects.some((s) => s.kind === "token" || s.kind === "trader")) return false;
+  if (plan.usesMemory.includes("token")) return false;
+  if (plan.toolCalls.some((c) => typeof c.args.token === "string" || typeof c.args.chain === "string" || typeof c.args.trader === "string")) return false;
+  const m = LOOSE_SUBJECT.exec(typeof text === "string" ? text.normalize("NFKC") : "");
+  const word = m?.[1]?.toLowerCase() ?? "";
+  if (!word || NOT_A_COIN.has(word) || /^\d+$/.test(word)) return false;
+  // A chain word is the planner's ("buying solana coins" is a chain's slice).
+  return chainFromUserText(word) === null;
 }
 
 // ─── The owner's moves ──────────────────────────────────────────────────────
@@ -390,9 +444,15 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         // soul, via the handler), so "@thisbot theses on $PONS?" is a coin
         // question and not a question about a trader called thisbot.
         const selfNames = selfNamesOf(q.selfNames);
+        // A line (never a routed request, whose coin the router grounded) is
+        // left to the router when it asks about a coin the planner could not
+        // place (looseCoin).
+        let loose = false;
+        const wanted = q.request ? undefined : (plan: FomoQuestionPlan): boolean => !(loose = looseCoin(text, plan));
         if (!b) {
           // Honest about it, but only for a question the research would have taken.
-          return classifyFomoQuestion(text, { memory: null, now: t, selfNames }) ? { text: TG_FOMO_UNAVAILABLE, deflect: false, status: "unavailable" } : null;
+          const plan = classifyFomoQuestion(text, { memory: null, now: t, selfNames });
+          return plan && (!wanted || wanted(plan)) ? { text: TG_FOMO_UNAVAILABLE, deflect: false, status: "unavailable" } : null;
         }
         const conversationKey = tgGroupConversationKey(q.chatId, q.threadId);
         const timeoutMs = typeof q.timeoutMs === "number" && Number.isFinite(q.timeoutMs) ? Math.max(1, Math.min(q.timeoutMs, 30_000)) : 25_000;
@@ -409,8 +469,12 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           groupId: String(q.chatId),
           maxChars,
           selfNames,
+          ...(wanted ? { wanted } : {}),
         }).finally(() => bounded.done());
-        if (!r.handled) return null;
+        if (!r.handled) {
+          if (loose) log("[tg-fomo] group ask left to the router (a coin the planner could not place)");
+          return null;
+        }
         remember(q.chatId, conversationKey);
         if (r.text.trim() === GROUP_DM_DEFLECTION) {
           log("[tg-fomo] group ask deflected");

@@ -418,6 +418,19 @@ describe("answerFomoQuestion", () => {
     assert.deepEqual(s.brokerCalls.map((c) => c.tool), ["fomo_get_research_status"]);
   });
 
+  it("a plan the surface does not want is not handled: nothing remembered, deflected or looked up", async () => {
+    const s = await setup();
+    const seen: string[] = [];
+    const r = await s.ask("who's selling pons on fomo?", { audience: "group", surface: "telegram-group", groupId: "-100123", wanted: (p) => (seen.push(p.intent), false) });
+    assert.equal(r.handled, false);
+    assert.deepEqual(seen, ["token-activity"]);
+    assert.equal(s.brokerCalls.length, 0);
+    assert.deepEqual(s.order, [], "nothing remembered");
+    const thrown = await s.ask("who's selling pons on fomo?", { wanted: () => { throw new Error("x"); } });
+    assert.equal(thrown.handled, false, "a hook that throws takes nothing");
+    assert.equal(s.brokerCalls.length, 0);
+  });
+
   it("a failed lookup is reported as failed, never as a successful one, and leaves memory unresolved", async () => {
     const s = await setup();
     s.serve.set("thesis-token", () => json({ error: "upstream" }, 500));

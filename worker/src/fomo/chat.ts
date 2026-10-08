@@ -87,6 +87,14 @@ export interface AnswerFomoInput {
    * DM), so that text from a room can never change her state.
    */
   readOnly?: boolean;
+  /**
+   * The surface's own last word on a plan, before anything is remembered,
+   * deflected, clarified or looked up: false and the question is not handled
+   * here at all. A group uses it to leave a coin question the planner could
+   * not place ("who's selling pons on fomo?") to its router, rather than
+   * answer it about the whole feed (tg-fomo-port.ts looseCoin).
+   */
+  wanted?: (plan: FomoQuestionPlan) => boolean;
 }
 
 export type AnswerFomoResult =
@@ -205,6 +213,11 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
   const plan = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
   if (!plan) return { handled: false };
+  try {
+    if (input.wanted && input.wanted(plan) !== true) return { handled: false };
+  } catch {
+    return { handled: false };
+  }
 
   // ANSWERED BY CODE, NOTHING LOOKED UP OR REMEMBERED: what it can do with
   // Fomo, and, in a group, whether research is on here at all. A group never

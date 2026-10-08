@@ -710,3 +710,93 @@ describe("planner invariants", () => {
     assert.ok(Date.now() - started < 1_000);
   });
 });
+
+describe("a chain's coins, a row of the trader board, and what a trader made money on (live 2026-10-07)", () => {
+  const plan = (text: string, memory: SubjectMemory | null = null, selfNames?: string[]) => classifyFomoQuestion(text, { memory, now: NOW, ...(selfNames ? { selfNames } : {}) });
+  const callsOf = (text: string, memory: SubjectMemory | null = null) => {
+    const p = plan(text, memory);
+    return p ? p.toolCalls.map((c) => [c.tool, c.args]) : null;
+  };
+
+  it("'<chain> coins' is that chain's slice of a token board, trending unless another board is named", () => {
+    const want: Array<[string, Record<string, unknown>]> = [
+      ["what about robinhood coins on fomo", { board: "trending-tokens", chain: "robinhood" }],
+      ["robinhood chain coins on fomo", { board: "trending-tokens", chain: "robinhood" }],
+      ["what are the robinhood chain coins on fomo?", { board: "trending-tokens", chain: "robinhood" }],
+      ["top robinhood coins on fomo", { board: "trending-tokens", chain: "robinhood" }],
+      ["trending hood coins on fomo?", { board: "trending-tokens", chain: "robinhood" }],
+      ["graduated base tokens on fomo", { board: "graduated-tokens", chain: "base" }],
+      ["most held sol coins on fomo?", { board: "most-held-tokens", chain: "solana" }],
+      ["any eth memes on fomo", { board: "trending-tokens", chain: "eth" }],
+      ["bsc coins on fomo?", { board: "trending-tokens", chain: "bsc" }],
+    ];
+    for (const [q, args] of want) assert.deepEqual(callsOf(q), [["fomo_get_rankings", args]], q);
+  });
+
+  it("unchanged: a shouted ticker, the switch, the owner's own coins, discovery", () => {
+    assert.equal(plan("is fomo on robinhood?"), null);
+    assert.deepEqual(callsOf("theses on SOL coins"), [["fomo_get_token_theses", { token: "SOL" }]]);
+    assert.deepEqual(callsOf("SOL coins on fomo?"), [["fomo_get_token_activity", { token: "SOL" }]]);
+    assert.equal(plan("my robinhood coins are down"), null);
+    assert.equal(plan("my robinhood coins on fomo"), null, "the owner's own coins are never a board");
+    assert.deepEqual(callsOf("new coins on base on fomo?"), [["fomo_find_opportunities", { chain: "base" }]]);
+    assert.equal(plan("robinhood coins are pumping"), null, "no Fomo named and no Fomo conversation");
+  });
+
+  it("inside a Fomo conversation the chain alone re-asks the board on that chain, before the remembered coin", () => {
+    // The 23:00 conversation: theses on a coin, then that chain's coins.
+    const after = applyPlan(null, plan("what are they saying about anyps5 on fomo")!, NOW).memory;
+    for (const q of ["what about robinhood coins on fomo", "what about robinhood coins?", "only robinhood ones"]) {
+      assert.deepEqual(callsOf(q, after), [["fomo_get_rankings", { board: "trending-tokens", chain: "robinhood" }]], q);
+    }
+  });
+
+  it("the live compound: one row of the leaderboard, with what about it, and no 'which trader?'", () => {
+    for (const q of [
+      "who's the best trader on fomo today and what did he make money on",
+      "@Merrymanme_bot who's the best trader on fomo today and what did he make money on",
+    ]) {
+      const p = plan(q, null, ["@Merrymanme_bot", "Shogun"])!;
+      assert.equal(p.intent, "rankings-traders", q);
+      assert.equal(p.clarification, null, q);
+      assert.deepEqual(p.rowAsk, { rank: 1, about: "earnings" }, q);
+      assert.deepEqual(p.toolCalls.map((c) => [c.tool, c.args]), [["fomo_get_rankings", { board: "traders", window: "24h" }]], q);
+    }
+    assert.deepEqual(plan("who's #1 on fomo today and what's he holding")!.rowAsk, { rank: 1, about: "holdings" });
+    assert.deepEqual(plan("what is the top trader on fomo holding")!.rowAsk, { rank: 1, about: "holdings" });
+    assert.deepEqual(plan("what did the best trader on fomo make money on")!.rowAsk, { rank: 1, about: "earnings" });
+    assert.deepEqual(plan("what is the second best trader on fomo holding")!.rowAsk, { rank: 2, about: "holdings" });
+    assert.deepEqual(plan("who's the third best trader on fomo this week and what has he been trading?")!.rowAsk, { rank: 3, about: "trades" });
+    assert.deepEqual(plan("who's the top trader on fomo of all time? tell me about him")!.rowAsk, { rank: 1, about: "profile" });
+  });
+
+  it("a row ask needs one rank, one trader's question, and nobody named", () => {
+    const noRow = (q: string) => assert.equal(plan(q)?.rowAsk, undefined, q);
+    // The plural board and its crowd.
+    noRow("top traders on fomo today, what are they buying");
+    noRow("who are the top traders on fomo today");
+    // The board alone.
+    noRow("who's the best trader on fomo");
+    assert.equal(plan("who's the best trader on fomo")!.intent, "rankings-traders");
+    // A trader by name is that trader, not a row.
+    assert.equal(plan("what is @x holding on fomo")!.intent, "trader-holdings");
+    // "he" with no board and nothing remembered.
+    assert.equal(plan("what did he buy"), null);
+    // Two asks: the board and the crowd.
+    noRow("who's the top trader on fomo and what are people buying");
+    // Who was earliest is not who ranks first.
+    noRow("who's the first trader to buy pons on fomo");
+  });
+
+  it("'who made the most' is the leaderboard; 'what did trader X make money on' is their trades, for what they made", () => {
+    assert.deepEqual(callsOf("who made the most money on fomo today"), [["fomo_get_rankings", { board: "traders", window: "24h" }]]);
+    assert.deepEqual(callsOf("who made the most on fomo this week"), [["fomo_get_rankings", { board: "traders", window: "7d" }]]);
+    const p = plan("what did trader unipcs make money on on fomo today")!;
+    assert.equal(p.intent, "trader-activity");
+    assert.equal(p.earnings, true);
+    assert.deepEqual(p.toolCalls.map((c) => [c.tool, c.args]), [["fomo_get_trader_activity", { trader: "unipcs", window: "24h" }]]);
+    assert.equal(plan("what did trader unipcs buy on fomo today")!.earnings, undefined, "a plain trades question is not an earnings one");
+    assert.equal(plan("did @CryptoKaleo take profit on it?", MEMORIES.token!)!.earnings, undefined, "taking profit is a sell, not what they made");
+    assert.equal(plan("did we make money on PONS"), null, "the owner's own book is never a feed question");
+  });
+});

@@ -179,6 +179,18 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   via FOMO API (independent; not affiliated with fomo.family)"), then material freshness
   and coverage limits. Provider-reported, independently verified and Merrymen
   interpretation are labelled differently. No Fomo permalink is ever invented.
+- **Chains and rows (planner, `fomo/intent.ts`):** a chain word right before a list noun
+  ("robinhood coins", "hood tokens", "base memes", "only robinhood ones") asks for that
+  chain's slice of a token board, trending unless another board is named; it needs Fomo
+  named or a live Fomo conversation, and never follows "my", "our" or "your" ("my
+  robinhood coins are down" is the owner's book). A shouted ticker stays a coin ("SOL
+  coins on fomo?"). One row of the trader leaderboard asked in the same breath as the
+  board ("who's the best trader on fomo today and what did he make money on", "what is
+  the second best trader on fomo holding") plans the leaderboard with `rowAsk` (rank 1-4,
+  and earnings, holdings, trades or profile): its "he" is that row, never a "which
+  trader?" question, and "the first trader to buy it" is not a rank. "Who made the most on
+  fomo today" is the leaderboard. "What did trader X make money on" plans their trades
+  with `earnings` (never "take profit", a sell, and never the owner's own book).
 - **Follow-ups:** the resolved coin, chain, trader, window and dossier revision carry
   across turns per conversation, for 30 minutes. A correction replaces the subject before
   the next lookup. A same-ticker coin on another chain triggers one focused clarification;
@@ -759,7 +771,11 @@ Surface limits:
   An addressed line reaches the research when it names the platform in a question or a
   request, or as a short list ask with no question mark ("trending on fomo", "robinhood
   chain coins on fomo", "top traders on fomo today": list words and the platform, nothing
-  else, so "top fomo moment lol" stays chat); the planner still decides. Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
+  else, so "top fomo moment lol" stays chat); the planner still decides. A question about
+  one coin the planner could not place ("who's selling pons on fomo?", "research pons on
+  fomo": no `$tag`, no UPPERCASE ticker) is not answered about the whole feed or with
+  "which coin?": the port leaves it to the router (`tg-fomo-port.ts looseCoin`), whose one
+  call names the coin from the line's own words. Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
   leaderboard (Milla's call, 2026-10-07): its handles and their provider-reported money
   made on closed trades, never who Merrymen follows. One trader's holdings, trades or
   profile, and the owner's own research state, stay in a DM. Lines pass the group gate as
