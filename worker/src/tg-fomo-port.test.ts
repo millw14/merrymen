@@ -1507,6 +1507,45 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     }
   });
 
+  it("a board reused 50 minutes later keeps its age in the room: the owner's moves line and a row's answer take a board row, never the age (review r2)", async () => {
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    const six = () => {
+      const b = fixture("leaderboard-24h");
+      const base = (b.traders as Rec[])[1]!;
+      b.traders = [...(b.traders as Rec[]), ...[3, 4, 5, 6].map((r) => ({ ...base, rank: r, handle: `trader${r}`, userId: `${String(r).padStart(8, "0")}-2537-522a-8307-3f9970c081be`, pnlUsd: -1000 * r }))];
+      return b;
+    };
+    {
+      const w = await world({ leaderboard: six });
+      const first = await w.say("shogun who are the top traders on fomo today?", undefined, 60_000, OWNER_ID + 1);
+      assert.equal(first.split("\n").length, 5, first);
+      const reads = w.s.provider.length;
+      const mine = await w.say("shogun who are the top traders on fomo today?", undefined, 50 * 60_000, OWNER_ID);
+      assert.equal(w.s.provider.length, reads, "the room's copy, reused (D7)");
+      const lines = mine.split("\n");
+      assert.deepEqual(lines.slice(-2), ["From a copy fetched 50 min ago.", "sent the trade moves for these to your DM."], mine);
+      assert.equal(lines.filter((l) => /^\d+\. /.test(l)).length, 3, mine);
+      assert.ok(lines.length <= 6, mine);
+      for (const l of lines) assert.ok(admitTgLine(l, research).ok, l);
+      groups?.stop();
+      await groups?.drain();
+      store?.close();
+    }
+    {
+      const w = await world({ leaderboard: six });
+      await w.say("shogun who are the top traders on fomo this week?", undefined, 60_000, OWNER_ID + 1);
+      const row = await w.say("shogun who's #1 on fomo this week and what's he holding", undefined, 50 * 60_000, OWNER_ID + 2);
+      const lines = row.split("\n");
+      assert.ok(lines.includes("From a copy fetched 50 min ago."), row);
+      assert.ok(lines.some((l) => /^CryptoKaleo on Fomo holds /.test(l)), row);
+      assert.ok(lines.some((l) => /^Largest held by CryptoKaleo: /.test(l)), row);
+      assert.ok(lines.includes("1. CryptoKaleo +$151.4k"), "the row the answer is about stays");
+      assert.equal(lines.filter((l) => /^\d+\. /.test(l)).length, 2, row);
+      assert.ok(lines.length <= 6, row);
+      for (const l of lines) assert.ok(admitTgLine(l, research).ok, l);
+    }
+  });
+
   it("a chain only the replied board's rows name never narrows 'send it?'", async () => {
     const w = await world();
     await w.say("shogun what's trending on fomo?");

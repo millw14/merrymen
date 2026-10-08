@@ -2695,9 +2695,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   /** The most lines and characters one research answer may run to in a room. */
   const FOMO_MAX_LINES = 6;
   const FOMO_MAX_CHARS = 700;
+  /** The copy's age (fomo/render.ts freshnessLine), as a room hears it. */
+  const FOMO_AGE_LINE = /^(?:From a copy fetched |Data age: |The provider's own copy is from |Fomo's own copy is from )/;
+  /** A board's row ("12. PONS on robinhood, market cap $2.1M", "2. kaleo +$151.4k"). */
+  const FOMO_BOARD_ROW = /^\d+\. /;
+  /** Whom a trader row names, or which coin a coin row names. */
+  const FOMO_ROW_SUBJECT = /^\d+\. (.+?) [+-]?\$[\d.,]+[kMBT]?$|^\d+\. (.+?), market cap /;
   const FOMO_LATE = "the research didn't come back in time; ask again in a bit.";
   const FOMO_BUSY = "i've done enough research lookups in here for now; ask again in a few minutes.";
   const FOMO_UNSAYABLE = "i can't put that research into words for a group; ask me in a direct message.";
+  /**
+   * A read that came back with nothing in it, when none of its lines is
+   * sayable: never FOMO_UNSAYABLE, whose "ask me in a direct message" would
+   * make an empty answer sound private.
+   */
+  const FOMO_NOTHING = "nothing on fomo for that one right now.";
   /**
    * A lookup that failed, could not be reached or was refused by a budget,
    * when nothing of its answer is sayable: said plainly, never as
@@ -2735,19 +2747,54 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       kept.push(v.text);
     }
     if (refused) log(`[tg-groups] research lines dropped by the gate (${refused})`);
+    // THE COPY'S AGE KEEPS A SLOT OF ITS OWN (docs/fomo.md: a reused copy is
+    // always labelled with its age), like the tail below: a 50-minute-old
+    // board is never said as current because the line cap cut its last line.
+    // Alone it says nothing, so an answer with nothing else sayable is not one.
+    const ageAt = kept.findIndex((l) => FOMO_AGE_LINE.test(l));
+    const age = ageAt >= 0 ? kept.splice(ageAt, 1)[0]! : null;
+    if (!kept.length) return null;
     // A tail line (the owner's "sent the trade moves … to your DM") keeps the
     // last slot; refused by the gate, it is dropped and the answer still goes.
     const last = tail !== undefined ? admitTgLine(tail, { agentName, kind: "research", recentOwn: [] }) : null;
     const end = last?.ok ? last.text : null;
+    // What the room hears without the age: lines in order, within the caps.
+    const slots = FOMO_MAX_LINES - (end ? 1 : 0);
+    const budget = FOMO_MAX_CHARS - (end ? end.length + 1 : 0);
     const out: string[] = [];
-    let used = end ? end.length + 1 : 0;
+    let used = 0;
     for (const l of kept) {
-      if (out.length >= FOMO_MAX_LINES - (end ? 1 : 0) || used + l.length + 1 > FOMO_MAX_CHARS) break;
+      if (out.length >= slots || used + l.length + 1 > budget) break;
       out.push(l);
       used += l.length + 1;
     }
+    if (age) {
+      // Room for the age comes out of the board's rows, lowest first: never
+      // out of a row's answer or the Robinhood Chain line, which say what was
+      // asked, never the row that answer is about (its subject is named
+      // below it), never the first row (a board with no row is no board);
+      // with no such row, out of whatever comes last.
+      const asked = (row: string): boolean => {
+        const m = FOMO_ROW_SUBJECT.exec(row);
+        const who = m?.[1] ?? m?.[2];
+        return !!who && out.some((l) => !FOMO_BOARD_ROW.test(l) && l.includes(who));
+      };
+      const chars = (): number => out.reduce((n, l) => n + l.length + 1, 0);
+      while (out.length > 0 && (out.length > slots - 1 || chars() + age.length + 1 > budget)) {
+        const first = out.findIndex((l) => FOMO_BOARD_ROW.test(l));
+        let row = -1;
+        for (let i = out.length - 1; first >= 0 && i > first; i--) {
+          if (FOMO_BOARD_ROW.test(out[i]!) && !asked(out[i]!)) {
+            row = i;
+            break;
+          }
+        }
+        if (row >= 0) out.splice(row, 1);
+        else out.pop();
+      }
+    }
     if (!out.length) return null;
-    return [...out, ...(end ? [end] : [])].join("\n");
+    return [...out, ...(age ? [age] : []), ...(end ? [end] : [])].join("\n");
   };
 
   /** A coin's theses as the group model worded them, by coin and copy, for half an hour (theses.ts). */
@@ -2921,7 +2968,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     }
     const failedRead = r.status === "failed" || r.status === "unavailable" || r.status === "budget-limited";
-    const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : FOMO_UNSAYABLE);
+    const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
     return send(text);
   };
 

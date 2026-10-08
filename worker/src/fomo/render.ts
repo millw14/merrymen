@@ -704,7 +704,11 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
   if (!d) return [];
   const subject = d.token ? coin(d.token, d.label, audience) : d.trader ? trader(d.trader) : "this subject";
   const total = d.stance.supporting + d.stance.opposing + d.stance.neutral;
-  if (total === 0) return [`No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`];
+  if (total === 0) {
+    const line = `No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`;
+    // A room hears "Fomo's record": the gate reads "the provider" as plumbing, and with it refused a coin with no theses heard "ask me in a direct message".
+    return [audience === "group" ? roomNote(line) : line];
+  }
   if (audience === "group" && d.token && !d.trader && d.theses.length > 0) return groupTheses(env, d, total);
   const out = [
     `${subject}: ${plural(total, "thesis", "theses")} from ${plural(d.uniqueAuthors, "author", "authors")} in ${plural(d.families, "evidence family", "evidence families")} — Merrymen's reading: ${d.stance.supporting} supporting, ${d.stance.opposing} opposing, ${d.stance.neutral} ${leanWords("neutral")}.`,
@@ -1119,7 +1123,8 @@ function envelopeParts(env: FomoEnvelope, audience: Audience, now: number, view:
   if (!lines.length) lines.push(env.message ? sanitizeText(env.message, 240) : "Nothing usable came back from Fomo.");
   const limits: string[] = [];
   const f = freshnessLine(env, now);
-  if (f) limits.push(f);
+  // A room hears the copy's age in words the gate admits ("the provider" and "the refresh failed" read as plumbing): never without it.
+  if (f) limits.push(audience === "group" ? roomNote(f).replace(/\(the refresh failed\)/, "(it could not be refreshed)") : f);
   const c = coverageLine(env, audience);
   if (c) limits.push(c);
   return { main: lines, limits };

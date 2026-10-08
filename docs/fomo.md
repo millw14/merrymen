@@ -173,7 +173,10 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   `freshness.ts GROUP_REUSE_MS`, `service.ts read`): a room reuses a copy longer, theses
   for 2 h, the trader board for 1 h and coin boards for 15 min (the other classes keep
   their own windows, and no class past its "oldest copy served"), always labelled with its
-  age ("From a copy fetched 41 min ago."); and a room's "now" or "latest" is never a paid
+  age ("From a copy fetched 41 min ago."): the age line keeps a slot of its own in the
+  room's six lines, taken from the board's lowest row (never the row an answer is about,
+  a row's answer or the Robinhood Chain line), and an answer whose only sayable line is
+  its age is not said; and a room's "now" or "latest" is never a paid
   forced refresh: it is an ordinary read in the class's own window, without the group's
   longer one. The owner's DM, the app and MCP read as above.
 - **Envelopes:** every result carries a request id, resolved subject, requested versus
@@ -855,7 +858,9 @@ Surface limits:
   her quoted excerpts. A read that failed, could not be reached or was refused is said
   plainly in the room ("couldn't reach fomo just now, try again in a bit.", or the room's
   budget line above), never as "ask me in a direct message", which would make a failure
-  sound private. Group answers carry no
+  sound private; a coin with no theses is "No theses were returned for QUIET on
+  robinhood. That is Fomo's record, not proof nobody has a view.", and an empty read none
+  of whose lines a room may hear is "nothing on fomo for that one right now.". Group answers carry no
   attribution line and no skill caveat (Milla, 2026-10-07: the room has had a post about
   the source); owner answers keep both. When the owner asks in a group, her moves for the
   rows (the DM questions to ask next, and `/buy SYM` only for a Robinhood Chain coin her

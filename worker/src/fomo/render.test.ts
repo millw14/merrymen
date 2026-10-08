@@ -598,6 +598,46 @@ describe("a board says what its chain filter did, and where Robinhood Chain stan
   });
 });
 
+describe("a copy's age, in a room, is always in words the gate admits (review r2)", () => {
+  it("an old provider copy and a failed refresh are said, never dropped", () => {
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    const fresh = (o: Partial<FomoEnvelope["freshness"]>) => env("fomo_get_token_theses", "ok", theses(), { freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: NOW, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW, lastRefreshOutcome: "ok", cacheAgeMs: 0, servedFrom: "live", ...o } });
+    const cases: Array<[FomoEnvelope, RegExp]> = [
+      [fresh({ providerAsOf: NOW - 12 * 60_000 }), /^Fomo's own copy is from 12m ago\.$/m],
+      [fresh({ servedFrom: "stale-cache", cacheAgeMs: 2 * 3_600_000, lastRefreshOutcome: "failed" }), /^Data age: 2h \(it could not be refreshed\)\.$/m],
+      [fresh({ servedFrom: "stale-cache", cacheAgeMs: 2 * 3_600_000, lastRefreshOutcome: "skipped-budget" }), /^Data age: 2h \(the refresh was skipped to stay within the research budget\)\.$/m],
+    ];
+    for (const [e, want] of cases) {
+      const text = groupScrub(renderEnvelope(e, G));
+      assert.match(text, want, text);
+      const age = text.split("\n").find((l) => /^(?:Fomo's own copy|Data age)/.test(l))!;
+      assert.ok(admitTgLine(age, research).ok, age);
+      // The owner keeps her wording.
+      assert.doesNotMatch(renderEnvelope(e, O), /Fomo's own copy|it could not be refreshed/);
+    }
+  });
+});
+
+describe("a coin with no theses, in a room (review r2)", () => {
+  const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+  const none: TokenThesesData = { ...theses(), theses: [], stance: { supporting: 0, opposing: 0, neutral: 0 }, families: 0, uniqueAuthors: 0 };
+  const cases: Array<[string, FomoEnvelope<TokenThesesData>]> = [
+    ["live", env("fomo_get_token_theses", "empty", none)],
+    ["a windowed read", env("fomo_get_token_theses", "empty", none, { coverage: { requested: { window: "24h" }, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] } })],
+    ["a cached copy", env("fomo_get_token_theses", "empty", none, { freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: NOW - 180_000, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW - 180_000, lastRefreshOutcome: "ok", cacheAgeMs: 180_000, servedFrom: "cache" } })],
+  ];
+  for (const [name, e] of cases) {
+    it(`${name}: 'That is Fomo's record', every line admitted as research`, () => {
+      const text = groupScrub(renderAnswer([e], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, G));
+      const lines = text.split("\n");
+      assert.match(lines[0]!, /^No theses were returned for PONS on robinhood( in that window)?\. That is Fomo's record, not proof nobody has a view\.$/, text);
+      for (const l of lines) assert.ok(admitTgLine(l, research).ok, `${name}: ${l}`);
+      // The owner keeps her wording.
+      assert.match(renderEnvelope(e, O), /That is the provider's record/);
+    });
+  }
+});
+
 describe("a coin's theses in a room: what they argue, not counts (plan WP9 P1, D6)", () => {
   interface Row { id: string; text: string; likes: number; isDev: boolean; userId: string; handle: string; ts: string }
   const rich = (JSON.parse(readFileSync(new URL("./testdata/theses-token-rich.json", import.meta.url), "utf8")) as { theses: Row[]; totalAvailable: number });

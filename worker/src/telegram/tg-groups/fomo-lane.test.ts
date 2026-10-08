@@ -1577,3 +1577,102 @@ describe("a trader whose handle the gate refuses is never named apart from their
     }
   }
 });
+
+describe("a coin with no theses is said as Fomo's record, never 'ask me in a direct message' (review r2)", () => {
+  const QUIET = { key: "eip155:4663:0x1111111111111111111111111111111111111111", chain: { namespace: "eip155", networkId: 4663, slug: "robinhood" }, address: "0x1111111111111111111111111111111111111111" };
+  const emptyTheses = (cacheAgeMs: number, window: string | null) => ({
+    requestId: "r-theses", tool: "fomo_get_token_theses", status: "empty", subject: { kind: "token", token: QUIET, label: { symbol: "QUIET", name: "Quiet" } }, candidates: [],
+    data: { token: QUIET, label: { symbol: "QUIET", name: "Quiet" }, trader: null, theses: [], stance: { supporting: 0, opposing: 0, neutral: 0 }, families: 0, uniqueAuthors: 0, chainFilterHonoured: true },
+    evidence: [],
+    freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: clock - cacheAgeMs, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: clock - cacheAgeMs, lastRefreshOutcome: "ok", cacheAgeMs, servedFrom: cacheAgeMs > 0 ? "cache" : "live" },
+    coverage: { requested: window ? { window } : {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] },
+    usage: { providerCalls: cacheAgeMs > 0 ? 0 : 2, cacheHits: cacheAgeMs > 0 ? 1 : 0, creditsCharged: null, creditsRemaining: null }, dossierRevision: null, reason: null, message: null,
+  });
+  const brokerFor = (cacheAgeMs: number, window: string | null) => ({
+    call: async () => emptyTheses(cacheAgeMs, window),
+    memory: { get: async () => null, set: async () => {}, clear: async () => {} },
+    report: async () => {},
+    configured: () => true,
+  }) as never;
+
+  for (const [name, age, window] of [["live", 0, null], ["a cached copy", 3 * MIN, null], ["a windowed read", 0, "24h"]] as Array<[string, number, string | null]>) {
+    it(`${name}: the room hears there are none, from a member and from the owner`, async () => {
+      for (const fromId of [ANN, OWNER]) {
+        const port = createTgFomoPort(() => brokerFor(age, window), { now: () => clock });
+        make({ fomo: () => port });
+        const before = tg.texts(CHAT).length;
+        clock += 2 * MIN;
+        await said(msg("pine what are people saying about $QUIET on fomo?", { fromId }));
+        const out = tg.texts(CHAT).slice(before);
+        assert.equal(out.length, 1, out.join("\n---\n"));
+        const lines = out[0]!.split("\n");
+        assert.match(lines[0]!, /^No theses were returned for QUIET on robinhood( in that window)?\. That is Fomo's record, not proof nobody has a view\.$/, out[0]);
+        assert.doesNotMatch(out[0]!, /direct message/, out[0]);
+        for (const l of lines) assert.ok(admitTgLine(l, { agentName: BOT.name, kind: "research", recentOwn: [] }).ok, l);
+        groups.stop();
+        await groups.drain();
+      }
+    });
+  }
+
+  it("an empty read none of whose lines is sayable is said as nothing on Fomo, never the age line alone or a direct message", async () => {
+    // Only the age line passes the gate: the room still hears that there is nothing, not a bare age.
+    fomo!.answer = () => ({ text: "No theses were returned for QUIET on robinhood. That is the provider's record, not proof nobody has a view.\nFrom a copy fetched 3 min ago.", deflect: false, status: "empty" });
+    make();
+    await said(msg("pine what are people saying about $QUIET on fomo?"));
+    assert.deepEqual(tg.texts(CHAT), ["nothing on fomo for that one right now."]);
+    assert.ok(admitTgLine("nothing on fomo for that one right now.", { agentName: BOT.name, kind: "research", recentOwn: [] }).ok);
+  });
+});
+
+describe("a reused copy keeps its age line in the room, whatever fills the line cap (review r2)", () => {
+  const research = (l: string) => admitTgLine(l, { agentName: BOT.name, kind: "research", recentOwn: [] }).ok;
+  const AGE = "From a copy fetched 50 min ago.";
+  const TRADERS = ["Top traders on Fomo, last 24h, by money made on closed trades:", "1. CryptoKaleo +$151.4k", "2. frankdegods -$4.2k", "3. trader3 -$3k", "4. trader4 -$4k"];
+  const MOVES = { kind: "traders" as const, room: "sent the trade moves for these to your DM.", dm: "<b>Your moves on these Fomo traders</b> (ask me here):" };
+
+  it("the owner's trader board: header, three rows, the age, then her moves line", async () => {
+    fomo!.answer = () => ({ text: [...TRADERS, AGE].join("\n"), deflect: false, status: "ok", moves: MOVES });
+    make();
+    await said(msg("pine top traders on fomo today?", { fromId: OWNER, fromFirstName: "Milla" }));
+    const room = tg.texts(CHAT);
+    assert.equal(room.length, 1);
+    assert.deepEqual(room[0]!.split("\n"), [...TRADERS.slice(0, 4), AGE, MOVES.room]);
+    for (const l of room[0]!.split("\n")) assert.ok(research(l), l);
+  });
+
+  it("the owner's trending board: the Robinhood Chain line stays, a row gives way", async () => {
+    const board = ["Trending on Fomo (board position is popularity, not quality):", "1. ETAC on solana, market cap $874.6k", "2. CATE on solana, market cap $874.6k", "3. STONK on solana, market cap $874.6k", "On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st)."];
+    fomo!.answer = () => ({ text: [...board, "From a copy fetched 14 min ago."].join("\n"), deflect: false, status: "ok", moves: { ...MOVES, kind: "coins" } });
+    make();
+    await said(msg("pine what's trending on fomo?", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.deepEqual(tg.texts(CHAT)[0]!.split("\n"), [...board.slice(0, 3), board[4]!, "From a copy fetched 14 min ago.", MOVES.room]);
+  });
+
+  it("a member's row ask: the row's answer whole, the row it is about, the age; a lower row and the limits give way", async () => {
+    const answer = [
+      "Top traders on Fomo, last 7d, by money made on closed trades:", "1. CryptoKaleo +$151.4k", "2. frankdegods -$4.2k", "3. trader3 -$3k",
+      "CryptoKaleo on Fomo holds 2 coins worth $3.1k (source-reported snapshot, valued at current prices).",
+      "Largest held by CryptoKaleo: PONS on robinhood $3.1k, FU2O on solana $13.",
+      "Holdings are a snapshot valued at current prices: a change in value can be price, not buying.",
+      AGE,
+    ];
+    fomo!.answer = () => ({ text: answer.join("\n"), deflect: false, status: "ok" });
+    make();
+    await said(msg("pine who's #1 on fomo this week and what's he holding?"));
+    assert.deepEqual(tg.texts(CHAT)[0]!.split("\n"), [...answer.slice(0, 3), answer[4]!, answer[5]!, AGE]);
+  });
+
+  it("the row asked about is never the one that gives way", async () => {
+    const answer = [
+      "Top traders on Fomo, last 7d, by money made on closed trades:", "1. CryptoKaleo +$151.4k", "2. frankdegods -$4.2k", "3. trader3 -$3k",
+      "trader3 on Fomo holds 2 coins worth $3.1k (source-reported snapshot, valued at current prices).",
+      "Largest held by trader3: PONS on robinhood $3.1k, FU2O on solana $13.",
+      AGE,
+    ];
+    fomo!.answer = () => ({ text: answer.join("\n"), deflect: false, status: "ok" });
+    make();
+    await said(msg("pine who's #3 on fomo this week and what's he holding?"));
+    assert.deepEqual(tg.texts(CHAT)[0]!.split("\n"), [answer[0]!, answer[1]!, answer[3]!, answer[4]!, answer[5]!, AGE]);
+  });
+});
