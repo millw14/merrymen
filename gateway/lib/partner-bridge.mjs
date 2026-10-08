@@ -39,7 +39,8 @@ const isObject = v => !!v && typeof v === "object" && !Array.isArray(v);
  * only after the gateway has accepted the partner's key, so these answers are
  * about the bridge: a 401 `unauthorized` comes only from the runtime's check of
  * this bridge's signature (MERRYMEN_PARTNER_BRIDGE_SECRET differs between the
- * two services, their clocks disagree, or its nonce store failed), and "Hosted
+ * two services, their clocks disagree, or the request's nonce was already used;
+ * a nonce store that cannot answer is a 503 there, relayed as such), and "Hosted
  * API only" from a web app not running in hosted mode. Relayed, they read as
  * the contract's "your key is wrong" and "no such endpoint" to a partner whose
  * key is fine. The runtime's own refusals of a partner's input use other codes.
