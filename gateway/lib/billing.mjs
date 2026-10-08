@@ -969,6 +969,8 @@ export async function createBilling({
       if (err?.name === "TransactionReceiptNotFoundError") return { answer: pending(hash, "not_found_yet") };
       throw err;
     }
+    // The ledger keys on the receipt's own hash. One for another transaction is an RPC fault, not a payment.
+    if (lower(receipt.transactionHash) !== hash) throw new ChainError("receipt for another transaction");
     if (receipt.status !== "success") return { answer: fail(422, "payment_failed", "This transaction failed on chain, so nothing was sent.") };
     const [latest, block] = await Promise.all([read(publicClient.getBlockNumber()), read(publicClient.getBlock({ blockNumber: receipt.blockNumber }))]);
     const ageMs = ledger.now() - Number(block.timestamp) * 1000;

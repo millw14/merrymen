@@ -250,6 +250,18 @@ test("a gateway that could not reach the RPC at boot checks the chain before cre
   assert.equal((await f.submit(hash)).json.error.code, "payments_unavailable");
 });
 
+test("a receipt for a different transaction than the one asked about is an RPC fault, never a credit", async () => {
+  const f = await fixture();
+  const real = f.pay();
+  f.settleChain();
+  const asked = `0x${"5".repeat(64)}`;
+  f.chain.alias(asked, real);
+  const r = await f.submit(asked);
+  assert.deepEqual([r.status, r.json.error.code], [503, "chain_unavailable"]);
+  assert.deepEqual(await f.payments(), []);
+  assert.equal((await f.submit(real)).status, 200);
+});
+
 test("a receipt whose block the RPC no longer has is not credited yet", async () => {
   const f = await fixture();
   const hash = f.pay();

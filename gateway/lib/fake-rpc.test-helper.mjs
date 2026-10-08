@@ -61,6 +61,8 @@ export async function startFakeChain({ chainId = TOKEN.chainId, head = 5_000, ti
       if (BigInt(blockNumber) > chain.head) chain.head = BigInt(blockNumber);
     },
     drop(hash) { const r = receipts.get(hash.toLowerCase()); receipts.delete(hash.toLowerCase()); if (r) chain.reorgBlock(r.blockNumber); },
+    /** Asking for `asked` returns the receipt of `actual`: a faulty or lying RPC. */
+    alias(asked, actual) { receipts.set(asked.toLowerCase(), receipts.get(actual.toLowerCase())); },
     /** The receipt keeps reporting the block hash it has now, whatever later happens at that height. */
     pin(hash) { const r = receipts.get(hash.toLowerCase()); r.pinnedBlockHash = chain.block(r.blockNumber).hash; },
   };
