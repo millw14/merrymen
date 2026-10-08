@@ -117,11 +117,15 @@ grant or perform wallet backups. It takes exactly these options:
 Any other option set to a value other than `undefined` is refused,
 `trencherFactory`, adapter addresses, `ponsClassVaultFactory`, `extraTokens`
 and renewal options included: partner enrollment seals only the platform's own
-routes and listed coins, and grants no Trencher permission. Every refusal (an
-unknown option, a chain, limits activation would refuse, an owner that is not
-a signer) is thrown before any chain read, `onStatus` call or signature
-request; the first three say "Nothing was signed." A grant it returns
-activates unmodified, while activation refuses one that seals anything more.
+routes and listed coins, and grants no Trencher permission. An unknown option,
+an unsupported chain and limits that activation would refuse are all refused
+before any chain read, `onStatus` call or signature request, with "Nothing was
+signed."; so are a missing owner and one without an address or `signMessage`.
+An owner without `signTypedData` fails only at the signature request, after
+the chain reads. A grant it returns, passed on unmodified, is never refused as
+`unsupported_permission`, while activation refuses one that seals anything
+more. Activation can still refuse it for other reasons, such as a wallet
+already linked to another of your users or an expired challenge.
 
 `partnerGrantDigest` hashes the canonical grant. `signMerrymanAuthorization`
 checks the exact app, connection, user, access scopes, owner, smart account,
