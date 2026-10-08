@@ -28,7 +28,7 @@ separate: it prepares and signs permissions locally, then calls your backend.
 Holder `mmk_` keys for `/v1/chat/completions` cannot authorize partner requests.
 
 Visit [Merrymen Developers](https://merrymen.dev/api), sign in with a wallet,
-create your developer account (new keys need one once partner billing is on),
+create your developer account (the portal asks for one before your first key),
 and create a key for your application. Copy the key immediately: it is shown
 only once. The portal includes an SDK download, integration tutorial, and a
 real authenticated key test. Each developer can have five active keys and may
@@ -473,9 +473,11 @@ paid for keeps the requests and rate it started with until it ends.
    wallet (an EOA). Only payments sent **from that wallet** are credited to its
    account.
 2. Create your developer account: a name of 1–48 characters, one account per
-   wallet. While billing is on, new keys need one. Keys made without one
-   (before accounts existed, or while billing was off) keep working, and count
-   against Free until their wallet creates an account.
+   wallet. Creating it is free and sends no transaction. The portal asks for
+   it before it creates a new key (and while billing is on, the gateway
+   refuses a new key without one). Keys made without an account, such as
+   those from before accounts existed, keep working, and count against Free
+   until their wallet creates an account.
 3. Choose a plan. Before you confirm, the console shows what confirming will
    do: start the plan now, upgrade the running period now, change plan at the
    next renewal, cancel renewal, or wait for a payment.
@@ -593,8 +595,10 @@ Every counted answer, and `/meta`, carries these headers:
 | `x-merrymen-quota-reset` | When the window ends, in Unix seconds |
 | `x-merrymen-quota-enforced` | `true` when a spent quota is refused (`enforce`), `false` under `observe` |
 
-They are absent while billing is off, for operator keys, and on answers that
-are not counted (other than `/meta` and a 402).
+They are absent while billing is off, for operator keys, on discovery and
+`/health`, and on refusals made before counting (401, 403, 429, 413). An answer
+whose request was given back still carries them, with that request returned
+to `remaining`.
 
 A spent quota under `enforce` is HTTP 402, with `Retry-After` (seconds until
 the window ends), the quota headers and:

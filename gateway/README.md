@@ -241,9 +241,11 @@ A number that does not parse falls back to its default, and boot logs it.
 What each mode does, and what it falls back to:
 
 - **off**: nothing is metered, every key keeps its own per-key rate, and
-  keys are minted without an account, as before billing. Developers can still
-  create accounts and read `GET /developer/v1/plans`; choosing a plan and
-  submitting a payment answer 503 `billing_off`.
+  this gateway mints keys without an account, as before billing (the site's
+  console still asks a developer to create an account before a new key, since
+  this gateway answers `account_missing`). Developers can still create
+  accounts and read `GET /developer/v1/plans`; choosing a plan and submitting
+  a payment answer 503 `billing_off`.
 - **observe**: accounts, plans, payments and metering all work, and partners
   get the quota headers and `/meta`'s `billing`, but no quota is refused, and
   each key keeps its own per-minute bucket at its own rate or its plan's,

@@ -663,9 +663,9 @@ partner's backend. Its first line names the build (`SDK_VERSION`).
 
 Developers issue their own keys at `https://merrymen.dev/api`: five active keys
 per wallet, scopes `read:agents`, `write:agents` and `chat:agents`, 30 requests
-a minute each while partner billing is off. With billing on (§5d), new keys
-need a developer account, and their quota and rate come from the account's
-plan. Sign-in is an ordinary wallet (EOA) signature checked on the
+a minute each while partner billing is off. The console asks for a developer
+account before a new key, and with billing on (§5d) the gateway requires one;
+then the account's plan sets its keys' quota and rate. Sign-in is an ordinary wallet (EOA) signature checked on the
 gateway with no RPC call, so smart-contract wallets cannot sign in and no chain
 endpoint can vouch for a signature. A session lasts up to eight hours; the
 site's logout revokes it on the gateway (best effort, five-second timeout)
@@ -805,9 +805,10 @@ flow it has today.
 
 1. **Deploy with billing off** (`MERRYMEN_BILLING` unset). Boot logs
    `[gateway] partner billing: off, nothing is metered`. Partners see no
-   change except a per-IP limit of 600 a minute (was 240), and developers can
-   already create accounts in the console. Confirm `MERRYMEN_DATA_DIR=/data`
-   is a service variable and set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.
+   change except a per-IP limit of 600 a minute (was 240). Developers can
+   already create accounts, and the console asks for one before a new key.
+   Confirm `MERRYMEN_DATA_DIR=/data` is a service variable and set
+   `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.
 2. **Observe** (`MERRYMEN_BILLING=observe`, no treasury yet). Boot logs, on
    stderr, `[gateway] partner billing: observe, metered, no quota refused, each
    key at its own rate or its plan's if higher; payments UNAVAILABLE`, which is
@@ -837,9 +838,10 @@ flow it has today.
    missing; if it says `payments UNAVAILABLE`, the payments RPC is missing or
    answers a chain other than 4663 (a `[billing]` line above says which
    chain); quotas are then enforced while nobody can pay, so go back to
-   observe until it is fixed. From now on a spent quota is a 402, and each account's keys share
-   one per-minute bucket at its plan's rate: a developer with several keys on
-   Free drops from 30 a minute per key to 30 a minute for all of them.
+   observe until it is fixed. From now on a spent quota is a 402, and each
+   account's keys share one per-minute bucket at its plan's rate: a developer
+   with several keys on Free drops from 30 a minute per key to 30 a minute
+   for all of them.
 6. **Watch** for `[billing] PAYMENT REVERSED`, `LEDGER CORRUPT`, `ANOTHER
    PROCESS APPENDED`, `CLOCK` and `ledger append failed` (what each means is
    in the gateway README). `node billing-cli.mjs reconcile` re-checks recent
