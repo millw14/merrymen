@@ -60,6 +60,12 @@ export const PARTNER_PREFIX = "/partner/v1";
  */
 export function createPartnerApi({ partners, store, forward, billing = null, tunables = {}, version = "2026-10-08" }) {
   const T = { ...PARTNER_TUNABLES, ...tunables };
+  /**
+   * Units reserved by requests that have not been answered yet. Each leaves
+   * through metered(), counted or given back; what is still here at shutdown
+   * is a request the process is about to cut off (releaseUnfinished()).
+   */
+  const unfinished = new Set();
 
   /**
    * The wallet a key's requests count against, or null when nothing is
@@ -151,6 +157,7 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
       const { code, message, ...quota } = r.error;
       return { fail: { status: r.status, json: { error: { code, message, request_id: rid, ...quota } }, headers: r.headers } };
     }
+    if (r.ticket) unfinished.add(r.ticket);
     return { key: v.key, rid, rpm, ticket: r.ticket, quota: r.headers };
   }
 
@@ -163,6 +170,8 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
   function metered(g, result) {
     if (!g.ticket) return result;
     let quota = g.quota;
+    // Already given back by a shutdown that gave up on it: nothing more to do.
+    if (!unfinished.delete(g.ticket)) return { ...result, headers: { ...result.headers, ...quota } };
     const code = result.json?.error?.code;
     if (isPlatformFailure(result.status, typeof code === "string" ? code : undefined)) {
       billing.release(g.ticket);
@@ -174,6 +183,19 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
   return {
     /** The per-minute rate a key gets, as /meta reports it; the developer portal lists keys with it. */
     ratePerMin: (key) => rateOf(key).rpm,
+
+    /**
+     * At shutdown, once the drain has given up: give back the unit of every
+     * request still running. The process exits before they are answered, so
+     * the partner never gets the answer it would be charged for, and resends.
+     * Returns how many.
+     */
+    releaseUnfinished() {
+      const n = unfinished.size;
+      for (const ticket of unfinished) billing.release(ticket);
+      unfinished.clear();
+      return n;
+    },
 
     /** Is this ours to answer at all? */
     owns(pathname) {

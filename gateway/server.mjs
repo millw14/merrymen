@@ -380,8 +380,9 @@ server.listen(PORT, () => {
  * would drop up to that much metering. New connections stop at once; requests
  * already inside get up to 3 s to finish, so their answers reach the partner
  * and what they counted, or gave back on a platform failure, is in what is
- * saved (one still running after that is cut off, as it always was). Then
- * queued billing writes finish (5 s at most, lib/billing.mjs close()). The
+ * saved. One still running after that is cut off, as it always was, and gives
+ * its unit back first: the partner never gets that answer and will resend.
+ * Then queued billing writes finish (5 s at most, lib/billing.mjs close()). The
  * ledger itself needs nothing here: each record is flushed by the append that
  * made it. A second signal exits at once, and so does a close still hanging
  * after 10 s, rather than waiting for the host's SIGKILL. The host must allow
@@ -402,6 +403,8 @@ async function stop(signal) {
   const sweep = setInterval(() => server.closeIdleConnections(), 50);
   await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, DRAIN_MS))]);
   clearInterval(sweep);
+  const cut = partnerApi.releaseUnfinished();
+  if (cut) console.log(`[gateway] ${signal}: ${cut} partner request${cut === 1 ? "" : "s"} still running ${cut === 1 ? "was" : "were"} cut off: ${cut === 1 ? "its unit is" : "their units are"} given back`);
   await billing.close();
   process.exit(0);
 }

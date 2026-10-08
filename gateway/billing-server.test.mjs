@@ -300,6 +300,43 @@ test("requests in flight at SIGTERM are answered, and what they counted is what 
   assert.deepEqual(windows.map((w) => [w.total, w.keys]), [[1, { [keyId]: 1 }]], "the answered request counted; the failed one gave its unit back");
 });
 
+test("a request still running when the 3 s drain ends is cut off, gives its unit back, and the exit is not held", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "merrymen-billing-cutoff-"));
+  cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const web = await startWeb();
+  const owner = `0x${"e5".repeat(20)}`;
+  const { key, keyId, secret } = makeKey();
+  // The runtime answers at once, except for one chat that it holds past the
+  // drain (the bridge allows the runtime 45 s).
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  cleanup.push(() => releaseSlow()); // before the stub runtime closes (cleanups run last-first)
+  web.reply = async (req) => {
+    if (req.url.includes("pa_slow")) await slow;
+    return { status: 200, body: { agent: { id: "pa_quick" } } };
+  };
+  const gw = await startGateway({
+    MERRYMEN_DATA_DIR: dir, MERRYMEN_BILLING: "observe",
+    MERRYMEN_PARTNER_BRIDGE_SECRET: BRIDGE, MERRYMEN_PARTNER_APP_ORIGIN: web.origin,
+    MERRYMEN_PARTNER_KEYS: JSON.stringify([{ keyId, appId: "cutoff-production", owner, name: "Cutoff", hash: hashSecret(SECRET, secret),
+      scopes: ["read:agents"], rpm: 30, status: "active", created_at: new Date().toISOString() }]),
+  });
+  assert.equal((await partner(gw, key, "/agents/pa_quick")).status, 200);
+  const cut = partner(gw, key, "/agents/pa_slow").then(() => "answered", (err) => err?.cause?.code ?? err?.name ?? "failed");
+  for (let i = 0; i < 300 && web.seen.length < 2; i++) await delay(10);
+  assert.equal(web.seen.length, 2, "the slow request reached the runtime");
+
+  const signalled = Date.now();
+  const exited = await gw.stop("SIGTERM");
+  const took = Date.now() - signalled;
+  assert.deepEqual(exited, { code: 0, signal: null }, gw.stdout() + gw.stderr());
+  assert.ok(took >= 2_500 && took < 6_000, `exited ${took} ms after SIGTERM: the 3 s drain, not the 10 s deadline`);
+  assert.notEqual(await cut, "answered", "the slow request was cut off");
+  assert.match(gw.stdout(), /1 partner request still running was cut off: its unit is given back/);
+  const windows = Object.values(JSON.parse(await readFile(path.join(dir, "usage.json"), "utf8")).windows);
+  assert.deepEqual(windows.map((w) => [w.total, w.keys]), [[1, { [keyId]: 1 }]], "only the answered request is saved as used");
+});
+
 test("every degraded billing mode is said at boot", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "merrymen-billing-boot-"));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
