@@ -117,7 +117,7 @@ class SpyFomo implements TgFomoPort {
     this.asks.push({ ...q });
     if (this.hold) await this.hold;
     if (q.request?.kind === "board" || /trending on fomo/i.test(q.text)) return { text: BOARD, deflect: false, status: "ok" };
-    if (q.request?.kind === "trader") return { text: "That one is for a direct message, not the group.", deflect: true, free: true };
+    if (q.request?.kind === "trader") return { text: `${q.request.handle} on Fomo holds 3 coins worth $12k (source-reported snapshot, valued at current prices).`, deflect: false, status: "ok" };
     return null;
   }
   async forget(): Promise<void> {}

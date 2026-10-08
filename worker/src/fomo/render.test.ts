@@ -19,7 +19,7 @@ import {
   renderAnswer,
   renderEnvelope,
 } from "./render";
-import type { RankingsData, ResearchCoinData, ResearchStatusData, TokenActivityData, TokenThesesData, TraderContextData } from "./tools";
+import type { RankingsData, ResearchCoinData, ResearchStatusData, TokenActivityData, TokenThesesData, TraderActivityData, TraderContextData } from "./tools";
 import type { FomoEnvelope, FomoToolName, ResolvedSubject, ResultStatus, TokenIdentity } from "./types";
 
 const NOW = Date.UTC(2026, 9, 4, 16, 5);
@@ -104,18 +104,80 @@ describe("renderEnvelope", () => {
     assert.ok(renderEnvelope(env("fomo_get_token_theses", "ok", theses(INJECTION)), O).endsWith(FOMO_ATTRIBUTION));
   });
 
-  it("deflects a trader question in a group to a direct message", () => {
+  it("gives a group one trader's holdings by their public handle, never whether Merrymen watches them or their P&L (Milla, 2026-10-07)", () => {
     const ctx: TraderContextData = {
       trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
       formerHandle: false,
       focus: "context",
-      holdings: null,
-      cohort: null,
-      profile: null,
+      holdings: {
+        rows: [{ token: T, symbol: "PONS", chain: "robinhood", amount: 1, priceUsd: 1, valueUsd: 3_120, change24hPct: null, robinhood: true }],
+        rowsTotal: 1, truncated: false, totalValueUsdFloor: 3_120, complete: true, dropped: 0, byChain: [],
+      },
+      cohort: { member: true, followable: true, version: 3, size: 120 },
+      profile: { source: "cohort-evidence", asOf: NOW - 3_600_000, mayBeOlder: true, pnlUsd: { "24h": 12_000 }, volumeUsd: null, trades: null, accountAgeDays: null, averageHoldTimeSeconds: null },
     };
-    const e = env("fomo_get_trader_context", "ok", ctx, { subject: { kind: "trader", trader: ctx.trader } });
-    assert.equal(renderEnvelope(e, G), GROUP_DM_DEFLECTION);
-    assert.match(renderEnvelope(e, O), /frankdegods on Fomo/);
+    const notes = ["P&L for 7d was left out: the followed-cohort record it came from is older than that window.", "Holdings are a snapshot valued at current prices: a change in value can be price, not buying."];
+    const e = env("fomo_get_trader_context", "ok", ctx, { subject: { kind: "trader", trader: ctx.trader }, coverage: { ...env("fomo_get_trader_context", "ok", ctx).coverage, notes } });
+    const group = renderEnvelope(e, G);
+    assert.notEqual(group, GROUP_DM_DEFLECTION);
+    assert.deepEqual(group.split("\n"), [
+      "frankdegods on Fomo holds 1 coin worth $3.1k (provider-reported snapshot, valued at current prices).",
+      "Largest: PONS on robinhood $3.1k.",
+      "Holdings are a snapshot valued at current prices: a change in value can be price, not buying.",
+    ]);
+    assert.doesNotMatch(group, /cohort|watched|follow|P&L|12,000|\$12k|6dcf7c78/i);
+    // The owner keeps all of it.
+    const owner = renderEnvelope(e, O);
+    assert.match(owner, /frankdegods on Fomo holds 1 coin worth \$3,120/);
+    assert.match(owner, /In Merrymen's watched-trader cohort: yes/);
+    assert.match(owner, /realised P&L/);
+    // A trader's own theses are still a direct message's.
+    const own = env("fomo_get_token_theses", "ok", { ...theses(), trader: ctx.trader }, { subject: { kind: "trader", trader: ctx.trader } });
+    assert.equal(renderEnvelope(own, G), GROUP_DM_DEFLECTION);
+  });
+
+  it("gives a group one trader's trades in short money, with no position P&L wording and no provider plumbing", () => {
+    const act: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "7d", side: null, sources: ["positions", "feed"],
+      positions: [
+        { tradeId: "t1", token: T, label: { symbol: "PONS", name: null }, status: "open", costBasisUsd: 3_000, realizedPnlUsd: 0, unrealizedPnlUsd: 120.5, boughtAmount: 1, soldAmount: 0, transferredInAmount: 0, transferredOutAmount: 0, openedAt: NOW - 3_600_000, closedAt: null, source: "captured" },
+      ],
+      fills: [],
+      events: [
+        { evidenceId: "fomo:event/e1", kind: "buy", trader: { userId: FRANK, handle: "frankdegods" }, token: T, label: { symbol: "PONS", name: null }, fillUsd: 1_234_567, positionValueUsd: 40_000, positionRealizedPnlUsdCumulative: 12, at: NOW - 120_000, verification: "provider-verified", source: "rest-lookup", inCohort: true },
+      ],
+      counts: { buys: 1, sells: 0, transfers: 0, other: 0 },
+    };
+    const e = env("fomo_get_trader_activity", "ok", act, { subject: { kind: "trader", trader: act.trader } });
+    assert.deepEqual(renderEnvelope(e, G).split("\n"), [
+      "frankdegods in the last 7d: 1 buy and 0 sells in the feed.",
+      "• bought PONS on robinhood 2m ago, fill $1.2M (matched on chain)",
+      "Positions (provider-reported): PONS open (cost $3k, $0 realised, +$121 not yet realised).",
+    ]);
+    assert.match(renderEnvelope(e, O), /frankdegods on Fomo in the last 7d: 1 buy/);
+  });
+
+  it("what one trader made or lost money on: realised to date, highest first, a received-only position never a win", () => {
+    const pos = (symbol: string, realized: number | null, o: Partial<TraderActivityData["positions"][number]> = {}): TraderActivityData["positions"][number] => ({
+      tradeId: symbol, token: T, label: { symbol, name: null }, status: "closed", costBasisUsd: 1_000, realizedPnlUsd: realized, unrealizedPnlUsd: 0,
+      boughtAmount: 1, soldAmount: 1, transferredInAmount: 0, transferredOutAmount: 0, openedAt: NOW - 3_600_000, closedAt: NOW - 60_000, source: "feed", ...o,
+    });
+    const act: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "24h", side: null, sources: ["positions", "feed"],
+      positions: [pos("SMALL", 900), pos("GIFT", 50_000, { boughtAmount: 0, transferredInAmount: 10 }), pos("BIG", 4_200), pos("NULL", null), pos("DOWN", -300), pos("WORSE", -1_000), pos("EVEN", 0)],
+      fills: [], events: [], counts: { buys: 0, sells: 0, transfers: 0, other: 0 },
+    };
+    const e = env("fomo_get_trader_activity", "ok", act, { subject: { kind: "trader", trader: act.trader } });
+    const earnings = { intent: "trader-activity", earnings: true } as unknown as FomoQuestionPlan;
+    assert.equal(
+      renderAnswer([e], earnings, G),
+      "frankdegods on trades opened or closed in the last 24h (provider-reported, realised to date): made the most on BIG +$4.2k, SMALL +$900; lost the most on WORSE -$1k, DOWN -$300.",
+    );
+    assert.match(renderAnswer([e], earnings, O), /^frankdegods on Fomo on trades opened or closed in the last 24h \(provider-reported, realised to date\): made the most on \$BIG \+\$4,200, \$SMALL \+\$900; lost the most on \$WORSE -\$1,000, \$DOWN -\$300\.\n/);
+    const flat = env("fomo_get_trader_activity", "ok", { ...act, positions: [pos("EVEN", 0), pos("GIFT", 50_000, { boughtAmount: 0, transferredInAmount: 10 })] }, { subject: { kind: "trader", trader: act.trader } });
+    assert.equal(renderAnswer([flat], earnings, G), "frankdegods: nothing realised either way on trades opened or closed in the last 24h (provider-reported).");
   });
 
   it("gives a group Fomo's public leaderboard: handles and short P&L, a few rows, never who Merrymen follows", () => {

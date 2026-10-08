@@ -111,7 +111,7 @@ disposes. Execution is the existing intent → policy → executor path.
 | Rendering and chat | none shared | `worker/src/fomo/render.ts` (answer-first text, model evidence block, runtime rules) and `chat.ts` (the one pipeline every chat surface calls) |
 | Key custody and processes | vendor keys orchestrator-only (`CHILD_SECRET_STRIP`) | Key held by the orchestrator, the web process and the self-hosted worker. Stripped from hosted children under both names. Hosted children ask the orchestrator over a new IPC channel (`fomo/broker.ts`), and the orchestrator stamps the tenant from which child asked. |
 | App chat | `web/src/app/api/chat/route.ts`, `web/src/lib/agent-chat.ts` | `web/src/lib/fomo-chat.ts` and `fomo-runtime.ts`. Factual questions are answered by code from tool results; analytical ones get a fenced evidence block and runtime rules. |
-| Telegram | `telegram/service.ts`, `answer.ts`, `chat-tools.ts`, `tg-groups/*` | DM: the planner runs first, and read tools are registered in the model loop. Groups: `TgFomoPort` (`worker/src/tg-fomo-port.ts`) returns coin-level aggregates and Fomo's public leaderboard, and deflects questions about one trader to DMs. |
+| Telegram | `telegram/service.ts`, `answer.ts`, `chat-tools.ts`, `tg-groups/*` | DM: the planner runs first, and read tools are registered in the model loop. Groups: `TgFomoPort` (`worker/src/tg-fomo-port.ts`) returns coin-level aggregates, Fomo's public leaderboard and one named trader's public data, and deflects the owner's own research state and who Merrymen watches to DMs. |
 | MCP | `web/src/mcp/tools/*` | `web/src/mcp/tools/fomo.ts` |
 | Fleet ingestion | orchestrator passes | `worker/src/orchestrator-fomo.ts`: one singleton-lease leader runs the alerts stream, cohort refresh, research queue, jobs, publication drafts and retention. Every replica writes `fomo.json` for its own children (`fomo/child-file.ts`). |
 | Discovery funnel | `trencher-brain.ts` `TRENCH_VOLUME_MIN = 100_000`, `trencher-discovery.ts` `DISCOVERY_SLICE = 20` | `worker/src/early-candidates.ts`: an early path ahead of both, with every execution guard kept. `worker/src/decision-funnel.ts` instruments every stage. |
@@ -666,8 +666,8 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   trader."
 - **Backlog.** A `/tail` that waited out an outage is held, like an order; a late
   `/untail` runs, since it only stops something.
-- **Asked in a group.** Groups never order trades and never hear a trader or a tail
-  (docs/tg-groups.md rules 1 and 3). Her addressed line is read by code the same way,
+- **Asked in a group.** Groups never order trades and never hear a tail
+  (docs/tg-groups.md rules 1 and 3; a trader's public data they may hear). Her addressed line is read by code the same way,
   where the research lane is wired, and only what code read (trader, hours, clamp,
   take, or a stop) goes to her DM through `TgOwnerPort.proposeTail`, which checks her
   id and the allowlist again, proves her DM with a typing action, and runs the `/tail`
@@ -777,8 +777,15 @@ Surface limits:
   "which coin?": the port leaves it to the router (`tg-fomo-port.ts looseCoin`), whose one
   call names the coin from the line's own words. Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
   leaderboard (Milla's call, 2026-10-07): its handles and their provider-reported money
-  made on closed trades, never who Merrymen follows. One trader's holdings, trades or
-  profile, and the owner's own research state, stay in a DM. Lines pass the group gate as
+  made on closed trades, never who Merrymen follows. Milla, 2026-10-07: a named trader's
+  public Fomo data may be answered in a group, for anyone who asks, the owner included:
+  who they are, what they hold (count, value, the largest three), what they traded in
+  the window (buys and sells, fills and positions), and what they made or lost money on
+  (below). By public handle without the `@`, money in short form, and never whether
+  Merrymen watches or follows them: the room's render leaves out the watched-cohort line,
+  any note about that record, and the profile P&L figures (they are read from that record
+  when it has one, so whether a room saw them would say who it watches). A trader's own
+  theses, the owner's own research state and the watch list stay in a DM. Lines pass the group gate as
   `research` (every clause but money), with money in short form ($151.4k) and four rows a
   board. Boards cover every chain by default (Milla, 2026-10-07); asked for one ("robinhood
   coins", "on base", "solana ones") the board is cut to that chain from the same read, at
@@ -804,10 +811,20 @@ Surface limits:
   (no platform or venue named) is asked as the trending board, with the desk's market
   read as the fallback when the answer's `status` (`TgFomoAnswer.status`, from the
   envelopes) is a budget refusal, unavailable or failed, or the read takes past 12 s
-  (docs/tg-groups.md "Market analysis"). The owner's ask about one trader by
-  name (routed, or planned and deflected in the room) is answered read-only in her DM
-  (`AnswerFomoInput.readOnly`) as one of three fixed questions (profile, holdings, this
-  week's trades), at most six per 10 minutes.
+  (docs/tg-groups.md "Market analysis"). A routed trader pick is asked as one of four
+  fixed questions (profile, holdings, trades, earnings, over the window the line names,
+  else this week) and answered in the room; the owner's trader asks no longer go to her
+  DM. **What one trader made or lost money on** ("what did trader X make money on",
+  `FomoQuestionPlan.earnings`): their positions opened or closed in the window, read with
+  the largest page one read keeps (50), ranked by the provider's realised P&L to date,
+  highest first, unknown left out, the top three winners and two losers in one line; a
+  position only received by transfer is never a win; never the leaderboard's per-coin
+  figures, which have no window. **One row of the board** ("who's the best trader on
+  fomo today and what did he make money on", `FomoQuestionPlan.rowAsk`): the board, then
+  that row's trader by the user id the provider's board gave (`fomo/chat.ts rowCall`,
+  never a name from the text) over the board's window, for every audience; a group's
+  board shows a row fewer so the row's answer fits, and a row the board does not have is
+  said.
 - **App chat:** at most 4 lookups per question. Analysis answers count against a
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.

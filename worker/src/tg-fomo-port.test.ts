@@ -11,8 +11,12 @@
  *     the text says;
  *   - what reaches the room has no handle, address, link or cashtag, and is
  *     attributed in words the group gate admits;
- *   - a trader question and an owner-state question are deflected before
- *     anything is looked up or written, and no watch can be made from a group;
+ *   - one named trader's public data (who they are, what they hold, what
+ *     they traded, what they made or lost money on) is answered in the room,
+ *     for anyone, never whether Merrymen watches them (Milla, 2026-10-07);
+ *   - an owner-state, watch-list or trader-theses question is deflected
+ *     before anything is looked up or written, and no watch can be made from
+ *     a group;
  *   - no broker: a research question is told research is unavailable, and
  *     anything else is left alone.
  */
@@ -55,7 +59,6 @@ import {
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
   TG_FOMO_UNAVAILABLE,
-  traderAsked,
 } from "./tg-fomo-port";
 
 type Rec = Record<string, unknown>;
@@ -102,6 +105,8 @@ async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec }
     if (p.startsWith("/v2/thesis/token/")) return json(fixture("theses-token"));
     if (/\/stats$/.test(p)) return json(fixture("token-stats"));
     if (/\/balances$/.test(p)) return json(fixture("balances"));
+    const positions = /^\/v2\/users\/([0-9a-f-]{36})\/positions$/.exec(p);
+    if (positions) return json(positionsAt(positions[1]!, clock.now));
     if (p.startsWith("/v2/leaderboard/tokens/")) return json(caps.trending ? caps.trending() : fixture("token-board-trending"));
     if (p.startsWith("/v2/leaderboard/")) {
       // The board answers for the window asked, captured a minute ago.
@@ -145,6 +150,24 @@ async function setup(caps: { groupHourlyCredits?: number; trending?: () => Rec }
     configured: () => direct.configured(),
   };
   return { raw, broker, calls, provider, tenants, memory, clock };
+}
+
+/**
+ * One trader's positions page around `now`, from the fixture's shape: two
+ * winners and a loser closed in the last hour, one open, one only received
+ * by transfer (never a win, whatever its figure).
+ */
+function positionsAt(userId: string, now: number): Rec {
+  const body = fixture("positions");
+  const [open, received, loser] = body.trades as Rec[];
+  const at = (ms: number) => new Date(now - ms).toISOString();
+  const trades: Rec[] = [
+    { ...open, userId, createdAt: at(3_600_000), closedAt: null },
+    { ...received, userId, createdAt: at(3_600_000), realizedPnlUsd: 500 },
+    { ...loser, userId, createdAt: at(5 * 3_600_000), closedAt: at(1_800_000) },
+    { ...loser, userId, tradeId: "c0000000-0000-4000-8000-000000000001", token: { symbol: "ROO", address: "0x51fb760000000000000000000000000000000b0c" }, realizedPnlUsd: 4_200, createdAt: at(5 * 3_600_000), closedAt: at(600_000) },
+  ];
+  return { ...body, key: userId, count: trades.length, trades };
 }
 
 const count = (raw: DatabaseSync, table: string): number => Number((raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
@@ -202,42 +225,50 @@ describe("createTgFomoPort", () => {
     }
   });
 
-  it("the owner's trader question names the trader for her DM; nobody else's does", async () => {
+  it("one named trader's public data is answered in the room, for the owner and anyone, by handle, every line sayable (Milla, 2026-10-07)", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    const asks: Array<[string, { handle: string; about: string }]> = [
-      ["who is trader unipcs on fomo?", { handle: "unipcs", about: "profile" }],
-      ["what is @CryptoKaleo holding on fomo?", { handle: "CryptoKaleo", about: "holdings" }],
-      ["what has @frankdegods bought on fomo this week?", { handle: "frankdegods", about: "trades" }],
+    const asks: Array<[string, string, Record<string, unknown>, RegExp]> = [
+      ["who is trader CryptoKaleo on fomo?", "fomo_get_trader_context", { trader: "CryptoKaleo" }, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k \(source-reported snapshot, valued at current prices\)\.\nLargest: PONS on robinhood \$3\.1k, FU2O on solana \$13\./],
+      ["what is @CryptoKaleo holding on fomo?", "fomo_get_trader_context", { trader: "CryptoKaleo" }, /^CryptoKaleo on Fomo holds 2 coins/],
+      ["what has @CryptoKaleo bought on fomo this week?", "fomo_get_trader_activity", { trader: "CryptoKaleo", side: "buy", window: "7d" }, /^CryptoKaleo in the last 7d: \d+ buys? and 0 sells in the feed\./],
+      ["what did trader CryptoKaleo make money on on fomo today?", "fomo_get_trader_activity", { trader: "CryptoKaleo", window: "24h", limit: 50 }, /^CryptoKaleo on trades opened or closed in the last 24h \(source-reported, realised to date\): made the most on ROO \+\$4\.2k; lost the most on plumber -\$10\.9k\./],
     ];
-    for (const [q, trader] of asks) {
-      assert.deepEqual(await port.ask({ text: q, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, trader, free: true }, q);
-      assert.deepEqual(await port.ask({ text: q, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true }, `${q} (not the owner)`);
+    for (const owner of [true, false]) {
+      for (const [q, tool, args, text] of asks) {
+        s.clock.now += 6 * 60_000;
+        const before = s.calls.length;
+        const a = await port.ask({ text: q, chatId: GROUP, ...(owner ? { owner } : {}) });
+        assert.ok(a && !a.deflect, q);
+        assert.deepEqual(s.calls.slice(before).map((c) => [c.tool, c.args, c.opts.audience]), [[tool, args, "group"]], q);
+        assert.match(a.text, text, `${q}: ${a.text}`);
+        assert.doesNotMatch(a.text, /cohort|watched|follow|P&L|provider\b|@|0x[0-9a-fA-F]{6}|\$[A-Za-z]|1f08e6ab/i, a.text);
+        for (const l of a.text.split("\n")) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, `${q}: ${l}`);
+        assert.equal(a.moves, undefined, "no moves for one trader's answer");
+        assert.ok(!("trader" in a), "nothing is handed to a DM");
+      }
     }
-    // Her own state, a watched-cohort board, a request: deflected with no trader.
-    for (const q of ["who's the top of our watched traders on fomo today", "what are you researching on fomo?"]) {
-      const a = await port.ask({ text: q, chatId: GROUP, owner: true });
-      assert.ok(a?.deflect && !("trader" in a), q);
-    }
-    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP, owner: true }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
-    assert.equal(s.calls.length, 0, "nothing looked up for any of them");
   });
 
-  it("the fixed questions her DM is asked plan the read she asked for, and only reads", () => {
+  it("a trader's fixed questions plan the read the router chose, and only reads", () => {
     const plan = (q: string) => classifyFomoQuestion(q, { memory: null, now: NOW, selfNames: [] });
-    const want: Array<[string, string, "profile" | "holdings" | "trades"]> = [
-      ["who is trader unipcs on fomo?", "fomo_get_trader_context", "profile"],
-      ["what is trader unipcs holding on fomo?", "fomo_get_trader_context", "holdings"],
-      ["what has trader unipcs been trading on fomo this week?", "fomo_get_trader_activity", "trades"],
+    const want: Array<[Parameters<typeof requestText>[0], string, Record<string, unknown>, boolean]> = [
+      [{ kind: "trader", handle: "unipcs", about: "profile" }, "fomo_get_trader_context", { trader: "unipcs" }, false],
+      [{ kind: "trader", handle: "@unipcs", about: "holdings" }, "fomo_get_trader_context", { trader: "unipcs" }, false],
+      [{ kind: "trader", handle: "unipcs", about: "trades" }, "fomo_get_trader_activity", { trader: "unipcs", window: "7d" }, false],
+      [{ kind: "trader", handle: "unipcs", about: "trades", window: "24h" }, "fomo_get_trader_activity", { trader: "unipcs", window: "24h" }, false],
+      [{ kind: "trader", handle: "unipcs", about: "earnings" }, "fomo_get_trader_activity", { trader: "unipcs", window: "7d", limit: 50 }, true],
+      [{ kind: "trader", handle: "unipcs", about: "earnings", window: "30d" }, "fomo_get_trader_activity", { trader: "unipcs", window: "30d", limit: 50 }, true],
+      [{ kind: "trader", handle: "unipcs", about: "earnings", window: "all" }, "fomo_get_trader_activity", { trader: "unipcs", window: "all", limit: 50 }, true],
     ];
-    for (const [q, tool, about] of want) {
+    for (const [r, tool, args, earnings] of want) {
+      const q = requestText(r)!;
       const p = plan(q);
-      assert.deepEqual(p?.toolCalls.map((c) => c.tool), [tool], q);
+      assert.deepEqual(p?.toolCalls.map((c) => [c.tool, c.args]), [[tool, args]], q);
+      assert.equal(p!.earnings === true, earnings, q);
       assert.ok(!p!.toolCalls.some((c) => isMutationTool(c.tool)), q);
-      assert.deepEqual(traderAsked(p), { handle: "unipcs", about }, q);
     }
-    assert.equal(traderAsked(plan("what are the theses on $PONS on fomo?")), null);
-    assert.equal(traderAsked(null), null);
+    for (const handle of ["", "a", "uni pcs", "x".repeat(31), "$PONS"]) assert.equal(requestText({ kind: "trader", handle, about: "profile" }), null, handle);
   });
 
   it("a coin the planner could not place is left to the router, never answered about the whole feed (g1 c07)", async () => {
@@ -282,11 +313,11 @@ describe("createTgFomoPort", () => {
     assert.equal(looseCoin("research anyps5 on fomo", after("research anyps5 on fomo")), true, "never the remembered PONS for a line about anyps5");
   });
 
-  it("a trader question is deflected before anything is looked up", async () => {
+  it("the owner's state, the watch list and a trader's own theses are deflected before anything is looked up", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    for (const q of ["what is @CryptoKaleo holding on fomo?", "what has @frankdegods bought on fomo this week?", "who's the top of our watched traders on fomo today"]) {
-      const a = await port.ask({ text: q, chatId: GROUP });
+    for (const q of ["what is @CryptoKaleo saying about $PONS on fomo?", "who's the top of our watched traders on fomo today", "what are you researching on fomo?"]) {
+      const a = await port.ask({ text: q, chatId: GROUP, owner: true });
       assert.deepEqual(a, { text: TG_FOMO_DEFLECTION, deflect: true, free: true }, q);
     }
     assert.equal(s.calls.length, 0);
@@ -351,11 +382,12 @@ describe("createTgFomoPort", () => {
       const stored = await s.broker.memory.get(`tg-group:${GROUP}:0`);
       assert.doesNotMatch(String(stored), /pinebot/i, q);
     }
-    // Another account's handle is still a trader, and still deflected.
+    // Another account's handle is still a trader: that trader, never the bot.
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    assert.deepEqual(await port.ask({ text: "@pinebot what is @CryptoKaleo holding on fomo?", chatId: GROUP, selfNames }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
-    assert.equal(s.calls.length, 0);
+    const a = await port.ask({ text: "@pinebot what is @CryptoKaleo holding on fomo?", chatId: GROUP, selfNames });
+    assert.ok(a && !a.deflect);
+    assert.deepEqual(s.calls.map((c) => [c.tool, c.args]), [["fomo_get_trader_context", { trader: "CryptoKaleo" }]]);
   });
 
   it("a line that is not research is left to the desk and the persona, with no lookup", async () => {
@@ -501,17 +533,19 @@ describe("a model's checked choice, asked as the planner's own question", () => 
     assert.equal(requestText({ kind: "leaderboard", row: { rank: 9 as never, about: "trades" } }), "who are the top traders on fomo in the last 24h?");
   });
 
-  it("'about' is the fixed capabilities answer, and a trader or a ticker that is not one has no question", () => {
+  it("'about' is the fixed capabilities answer, and a handle or a ticker that is not one has no question", () => {
     assert.equal(classifyFomoQuestion(requestText({ kind: "about" })!, { memory: null, now: NOW })?.intent, "capabilities");
-    assert.equal(requestText({ kind: "trader" }), null);
+    assert.equal(requestText({ kind: "trader", handle: "not a handle!", about: "profile" }), null);
     assert.equal(requestText({ kind: "coin", symbol: "not a ticker!", aspect: "theses" }), null);
   });
 
-  it("a trader request is deflected before anything is planned or spent", async () => {
+  it("a trader request is answered in the room from its fixed question, whatever the line said", async () => {
     const s = await setup();
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    assert.deepEqual(await port.ask({ text: "", request: { kind: "trader" }, chatId: GROUP }), { text: TG_FOMO_DEFLECTION, deflect: true, free: true });
-    assert.equal(s.calls.length, 0);
+    const a = await port.ask({ text: "do you know that guy from yesterday", request: { kind: "trader", handle: "CryptoKaleo", about: "holdings" }, chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.match(a.text, /^CryptoKaleo on Fomo holds 2 coins/);
+    assert.deepEqual(s.calls.map((c) => [c.tool, c.args]), [["fomo_get_trader_context", { trader: "CryptoKaleo" }]]);
   });
 
   it("a request is answered from its fixed question, whatever the line said", async () => {
@@ -738,7 +772,7 @@ describe("a group research question, end to end", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("the room gets coin-level aggregates through the group gate: no handles, addresses, links or cashtags; a trader question is deflected", async () => {
+  it("the room gets coin-level aggregates through the group gate: no handles, addresses, links or cashtags; a named trader is answered by handle", async () => {
     const s = await setup();
     let clock = NOW;
     store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
@@ -788,8 +822,9 @@ describe("a group research question, end to end", () => {
     await groups.drain();
     const second = tg.texts(GROUP);
     assert.equal(second.length, 2);
-    assert.equal(second[1], TG_FOMO_DEFLECTION);
-    assert.equal(s.calls.length, 1, "the trader question cost no lookup");
+    assert.match(second[1]!, /^CryptoKaleo on Fomo holds 2 coins worth \$3\.1k/);
+    assert.doesNotMatch(second[1]!, /@|0x[0-9a-fA-F]{6}|cohort|watched/i);
+    assert.deepEqual(s.calls.map((c) => c.tool), ["fomo_get_token_theses", "fomo_get_trader_context"]);
 
     // C8: addressed by @username (privacy mode's usual form), leading or trailing, it is still a coin question.
     for (const line of ["@pinebot theses on $PONS?", "what are the theses on $PONS @pinebot"]) {
@@ -951,12 +986,12 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
       const l = (store.room(GROUP)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
       return { id: l.messageId, text: l.text };
     };
-    const say = async (text: string, under?: { id: number; text: string }, advanceMs = 60_000): Promise<string> => {
+    const say = async (text: string, under?: { id: number; text: string }, advanceMs = 60_000, fromId = OWNER_ID): Promise<string> => {
       clock += advanceMs;
       s.clock.now = clock;
       const before = tg.texts(GROUP).length;
       const m: TgMessage = {
-        updateId: id, chatId: GROUP, fromId: OWNER_ID, fromFirstName: "Milla", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++,
+        updateId: id, chatId: GROUP, fromId, fromFirstName: fromId === OWNER_ID ? "Milla" : "Ann", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++,
         dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens",
         ...(under ? { replyTo: { messageId: under.id, fromId: SHOGUN.id, fromIsBot: true, text: under.text } } : {}),
       } as TgMessage;
@@ -1001,6 +1036,25 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     assert.deepEqual(sendIt.split("\n").slice(0, 3), HOOD_BOARD, sendIt);
     assert.equal(w.s.provider.length, read);
     for (const t of w.tg.texts(GROUP)) assert.doesNotMatch(t, /give me a sec|here we go/, t);
+  });
+
+  it("23:04 'who's the best trader on fomo today and what did he make money on': the board and his winners and losers, in the room, for her and for anyone", async () => {
+    const LIVE = "@Merrymanme_bot who's the best trader on fomo today and what did he make money on";
+    const BOARD = ["Top traders on Fomo, last 24h, by money made on closed trades:", "1. CryptoKaleo +$151.4k", "2. frankdegods -$4.2k"];
+    const EARNED = "CryptoKaleo on trades opened or closed in the last 24h (source-reported, realised to date): made the most on ROO +$4.2k; lost the most on plumber -$10.9k.";
+    for (const from of [OWNER_ID, OWNER_ID + 1]) {
+      const w = await world();
+      const out = await w.say(LIVE, undefined, 60_000, from);
+      const lines = out.split("\n");
+      assert.deepEqual(lines.slice(0, 4), [...BOARD, EARNED], out);
+      assert.deepEqual(w.s.calls.map((c) => [c.tool, c.args.trader ?? c.args.board]), [["fomo_get_rankings", "traders"], ["fomo_get_trader_activity", "1f08e6ab-5c73-5443-9225-bfc496cde51f"]]);
+      assert.equal(w.routePrompts.length, 0, "the planner read it: nothing for the router to guess");
+      for (const l of lines) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+      assert.doesNotMatch(out, /direct message|DMs? 🤫|cohort|watched|@|0x[0-9a-fA-F]{6}/i, out);
+      groups?.stop();
+      await groups?.drain();
+      store?.close();
+    }
   });
 
   it("a chain only the replied board's rows name never narrows 'send it?'", async () => {

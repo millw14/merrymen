@@ -14,7 +14,11 @@
  *   4. a clarification is replied verbatim, with no tool call
  *   5. the plan's tool calls run through the broker, in order, at most four,
  *      at interactive priority; mutations are dropped for a group, and a group
- *      question about a trader is deflected to a DM before anything is spent
+ *      question about the owner's own research state or who Merrymen watches
+ *      is deflected to a DM before anything is spent. One row of the trader
+ *      board asked about with it ("...and what did he make money on") is
+ *      looked up next, by the user id the provider's own board gave
+ *      (rowCall), never by a name from the text
  *   6. applyResult from the envelopes that actually answered → persist
  *   7. analysis asked for (and not "just the facts") and a composer given →
  *      the composer writes from fenced evidence under FOMO_CHAT_RULES;
@@ -29,7 +33,7 @@
  */
 
 import type { FomoBroker } from "./contract";
-import { classifyFomoQuestion, type FomoQuestionPlan } from "./intent";
+import { classifyFomoQuestion, sanitizePlanArgs, type FomoQuestionPlan, type FomoToolCall } from "./intent";
 import {
   evidenceForModel,
   FOMO_ATTRIBUTION,
@@ -45,7 +49,7 @@ import {
 } from "./render";
 import { applyPlan, applyResult, deserialize, serialize, type SubjectMemory } from "./subject-memory";
 import { isMutationTool } from "./tools";
-import type { TokenThesesData, TraderActivityData } from "./tools";
+import type { RankingsData, TokenThesesData, TraderActivityData } from "./tools";
 import type { FomoEnvelope, FomoSurface, FomoToolName, ResolvedSubject, ResultStatus } from "./types";
 
 export interface FomoComposeInput {
@@ -116,22 +120,59 @@ const DEFAULT_MAX_CHARS = 3_500;
 /** Statuses that mean a lookup actually returned something real. */
 const ANSWERED: ReadonlySet<ResultStatus> = new Set(["ok", "empty", "partial", "capped", "stale"]);
 
-/**
- * One trader's holdings, trades or profile. The public leaderboard is not
- * here: a group hears it, handles and P&L included (Milla, 2026-10-07).
- */
+/** One trader's profile, holdings or trades (and what they made or lost money on). */
 const TRADER_INTENTS: ReadonlySet<string> = new Set(["trader-holdings", "trader-activity", "trader-context"]);
 const OWNER_ONLY_INTENTS: ReadonlySet<string> = new Set(["research-status", "why-skipped", "health", "watch", "unwatch"]);
 
-/** A group may hear coin-level aggregates and the public leaderboard; anything about one trader (or the owner's own state) goes to a DM. */
+/**
+ * WHAT A GROUP NEVER HEARS ANSWERED: the owner's own research state, and who
+ * Merrymen watches or follows. Coin-level aggregates, the public leaderboard
+ * and ONE NAMED TRADER'S PUBLIC FOMO DATA are a room's, for anyone who asks,
+ * the owner included (Milla, 2026-10-07: a named trader's public Fomo data
+ * may be answered in a group): who they are, what they hold, what they
+ * traded, what they made or lost money on (provider-reported). The renderer
+ * leaves out of a room whether Merrymen watches them (render.ts). A trader's
+ * own theses, or a coin read narrowed to one trader, still go to a DM.
+ */
 function groupMustDeflect(plan: FomoQuestionPlan): boolean {
-  if (TRADER_INTENTS.has(plan.intent) || OWNER_ONLY_INTENTS.has(plan.intent)) return true;
+  if (OWNER_ONLY_INTENTS.has(plan.intent)) return true;
   // The leaderboard cut to the traders Merrymen watches ("top traders we
   // watch") IS the watch list, and who it follows is never a room's.
   if (plan.intent === "rankings-traders" && plan.cohortScope) return true;
-  if (plan.toolCalls.some((c) => c.tool === "fomo_get_rankings" && c.args.board === "traders" && c.args.cohort_only === true)) return true;
+  if (plan.toolCalls.some((c) => c.args.cohort_only === true && (c.tool === "fomo_get_rankings" || TRADER_TOOLS.has(c.tool)))) return true;
+  if (TRADER_INTENTS.has(plan.intent)) return false;
   if (plan.subjects.some((s) => s.kind === "trader")) return true;
-  return plan.toolCalls.some((c) => typeof c.args.trader === "string" || c.tool === "fomo_get_trader_context" || c.tool === "fomo_get_trader_activity");
+  return plan.toolCalls.some((c) => typeof c.args.trader === "string" || TRADER_TOOLS.has(c.tool));
+}
+
+const TRADER_TOOLS: ReadonlySet<string> = new Set(["fomo_get_trader_context", "fomo_get_trader_activity"]);
+
+/** The most positions an earnings read keeps, so its winners and losers are ranked over more than the default page. */
+const EARNINGS_LIMIT = 50;
+const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * THE LOOKUP FOR ONE ROW OF THE TRADER BOARD (plan.rowAsk): that row's
+ * trader, by the user id the provider's own answered board gave (never a
+ * name from the text), asked what the line asked over the board's window.
+ * Null: the board did not answer, has no such row, or its id is not one.
+ */
+function rowCall(plan: FomoQuestionPlan, envelopes: readonly FomoEnvelope[]): FomoToolCall | null {
+  const ask = plan.rowAsk;
+  if (!ask) return null;
+  const board = envelopes.find((e) => e.tool === "fomo_get_rankings" && ANSWERED.has(e.status) && e.data !== null);
+  const d = board?.data as RankingsData | undefined;
+  if (!d || d.board !== "traders") return null;
+  const row = d.traders.find((r) => r.rank === ask.rank) ?? (d.traders.every((r) => r.rank === null) ? d.traders[ask.rank - 1] : undefined);
+  const userId = row?.trader.userId;
+  if (typeof userId !== "string" || !UUID.test(userId)) return null;
+  const fresh = plan.freshness !== "prefer-fresh" ? { freshness: plan.freshness } : {};
+  if (ask.about === "holdings" || ask.about === "profile") return { tool: "fomo_get_trader_context", args: sanitizePlanArgs({ trader: userId, ...fresh }) };
+  const window = d.window ?? plan.window ?? "24h";
+  return {
+    tool: "fomo_get_trader_activity",
+    args: sanitizePlanArgs({ trader: userId, window, ...(ask.about === "earnings" ? { limit: EARNINGS_LIMIT } : {}), ...fresh }),
+  };
 }
 
 /** Every subject an answering envelope resolved, including the second one a two-subject read carries. */
@@ -248,7 +289,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   const calls = plan.toolCalls.filter((c) => (audience === "owner" && input.readOnly !== true) || !isMutationTool(c.tool)).slice(0, MAX_CALLS_PER_QUESTION);
   const envelopes: FomoEnvelope[] = [];
   const toolsCalled: FomoToolName[] = [];
-  for (const [i, c] of calls.entries()) {
+  const run = async (c: FomoToolCall, i: number): Promise<void> => {
     let env: FomoEnvelope;
     try {
       env = await broker.call(c.tool, { ...c.args }, {
@@ -263,7 +304,11 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
     }
     envelopes.push(env);
     toolsCalled.push(c.tool);
-  }
+  };
+  for (const [i, c] of calls.entries()) await run(c, i);
+  // 5b. One row of the board, from the board just read (rowCall).
+  const row = calls.length < MAX_CALLS_PER_QUESTION ? rowCall(plan, envelopes) : null;
+  if (row) await run(row, calls.length);
 
   // 6. Remember what was actually resolved, only from envelopes that answered.
   const answered = envelopes.filter((e) => ANSWERED.has(e.status));

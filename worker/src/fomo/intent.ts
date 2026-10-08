@@ -1373,6 +1373,7 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     sinceRevision,
     depth: DEEP.test(c) ? "deep" : QUICK.test(c) ? "quick" : "standard",
     chain: ex.chains.length === 1 ? ex.chains[0]! : null,
+    earnings: detected?.earnings === true && intent === "trader-activity",
   });
   if (!calls) return ask(TRADER_INTENTS.has(intent) ? ASK_TRADER : ASK_TOKEN);
   return plan(null, calls);
@@ -1450,6 +1451,8 @@ interface CallOptions {
   sinceRevision: number | null;
   depth: (typeof RESEARCH_DEPTHS)[number];
   chain: string | null;
+  /** What they made or lost money on: their positions are ranked, so as many as one read keeps (MAX_LIMIT). */
+  earnings: boolean;
 }
 
 function tokenRef(q: SubjectQuery | undefined): Record<string, unknown> | null {
@@ -1492,7 +1495,7 @@ function buildCalls(intent: FomoIntent, resolved: readonly SubjectQuery[], o: Ca
     case "trader-context":
       return trader ? [call("fomo_get_trader_context", { trader, ...win, ...fresh })] : null;
     case "trader-activity":
-      return trader ? [call("fomo_get_trader_activity", { trader, ...(token ?? {}), ...sideArg, ...win, ...lim, ...fresh })] : null;
+      return trader ? [call("fomo_get_trader_activity", { trader, ...(token ?? {}), ...sideArg, ...win, ...(o.earnings && !o.limit ? { limit: MAX_LIMIT } : lim), ...fresh })] : null;
     case "token-theses":
       if (!token && !trader) return null;
       return [call("fomo_get_token_theses", { ...(token ?? {}), ...(trader ? { trader } : {}), ...win, ...lim, ...fresh })];

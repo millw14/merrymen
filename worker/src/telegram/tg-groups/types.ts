@@ -409,8 +409,13 @@ export interface TgDeskThinkRequest {
  *
  *   null              not a research question, or research is unavailable
  *                     here: the line goes on to the desk and the persona
- *   deflect: true     a question about a trader or the owner's own research
- *                     state, which a group never hears; `text` says so
+ *   deflect: true     a question about the owner's own research state, who
+ *                     Merrymen watches, or a trader's own theses, which a
+ *                     group never hears; `text` says so
+ *
+ * One named trader's public Fomo data (who they are, what they hold, what
+ * they traded, what they made or lost money on) IS answered in a room, for
+ * anyone (Milla, 2026-10-07), and never says whether Merrymen watches them.
  */
 /**
  * A research question a model chose for an addressed group line (route.ts),
@@ -426,8 +431,12 @@ export type TgFomoRequest =
   | { kind: "small-coins"; chain?: TgFomoChain }
   | { kind: "about" }
   | { kind: "status" }
-  /** One trader: never answered in a room (the owner's goes to her DM, handler.ts). */
-  | { kind: "trader" };
+  /**
+   * One Fomo trader by the handle the line itself wrote (route.ts
+   * groundedTrader), and what about them; answered in the room. The window
+   * is read from the line's words, never a model's.
+   */
+  | { kind: "trader"; handle: string; about: TgTraderAbout; window?: "24h" | "7d" | "30d" | "all" };
 
 /**
  * WHAT THE OWNER CAN DO WITH AN ANSWER she asked for in a group: the
@@ -472,11 +481,6 @@ export interface TgFomoAnswer {
   deflect: boolean;
   /** Only when the owner asked (`owner` on the ask): her next moves. */
   moves?: TgFomoMoves;
-  /**
-   * Only when the owner asked about one trader by name and the room was
-   * deflected: the handle as the planner read it, for her DM (handler.ts).
-   */
-  trader?: { handle: string; about: TgTraderAbout };
   /** A deflection made before anything was looked up: it spends none of the room's research answers. */
   free?: boolean;
   /**
@@ -516,27 +520,14 @@ export interface TgFomoPort {
 export type TgOwnerOutcome = "sent" | "dm-first" | "busy" | "unavailable" | "gone";
 
 /**
- * THE OWNER'S OWN ASKS, ANSWERED IN HER DM (service.ts builds it). A group
- * never hears one: a trader is private research (rule 3), so the room gets
- * "sent it to your DMs" once her DM has it. Only the owner's own line, by the
- * trusted sender id, reaches here, and service.ts checks that id again.
+ * THE OWNER'S OWN ASKS THAT GO TO HER DM (service.ts builds it): a tail, the
+ * one thing a room line can start that changes what Merrymen does, is carded
+ * there. The room hears only where it went. Only the owner's own line, by the
+ * trusted sender id, reaches here, and service.ts checks that id again. (One
+ * trader's public data is answered in the room itself, for her as for anyone:
+ * Milla, 2026-10-07.)
  */
 export interface TgOwnerPort {
-  /**
-   * Read-only research on one Fomo trader, asked as a fixed question code
-   * writes and answered in her DM. Never changes anything. Never throws.
-   */
-  research(q: {
-    handle: string;
-    fromId: number;
-    about?: TgTraderAbout;
-    /**
-     * Whether her line is still wanted (a newer line of the burst, or a
-     * forget, says no): checked before the lookup and again right before the
-     * DM is sent, so a superseded or forgotten ask sends and writes nothing.
-     */
-    stillWanted?: () => boolean;
-  }): Promise<TgOwnerOutcome>;
   /**
    * HER TAIL, ASKED FOR IN THE ROOM (docs/fomo.md "Tailing a trader"): the
    * same confirm card her DM gives /tail, sent to her DM, where nothing is

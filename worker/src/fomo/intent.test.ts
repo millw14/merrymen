@@ -794,8 +794,11 @@ describe("a chain's coins, a row of the trader board, and what a trader made mon
     const p = plan("what did trader unipcs make money on on fomo today")!;
     assert.equal(p.intent, "trader-activity");
     assert.equal(p.earnings, true);
-    assert.deepEqual(p.toolCalls.map((c) => [c.tool, c.args]), [["fomo_get_trader_activity", { trader: "unipcs", window: "24h" }]]);
+    // Ranked over the largest page one read keeps, so the winners are not just the first 20 rows.
+    assert.deepEqual(p.toolCalls.map((c) => [c.tool, c.args]), [["fomo_get_trader_activity", { trader: "unipcs", window: "24h", limit: 50 }]]);
+    assert.deepEqual(plan("what did trader unipcs make money on on fomo, top 5")!.toolCalls[0]!.args.limit, 5, "a stated limit stands");
     assert.equal(plan("what did trader unipcs buy on fomo today")!.earnings, undefined, "a plain trades question is not an earnings one");
+    assert.equal(plan("what did trader unipcs buy on fomo today")!.toolCalls[0]!.args.limit, undefined);
     assert.equal(plan("did @CryptoKaleo take profit on it?", MEMORIES.token!)!.earnings, undefined, "taking profit is a sell, not what they made");
     assert.equal(plan("did we make money on PONS"), null, "the owner's own book is never a feed question");
   });

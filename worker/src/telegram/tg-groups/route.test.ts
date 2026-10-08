@@ -41,7 +41,7 @@ describe("parseRoute", () => {
   it("Milla's lines: the board, a trader by name, a tail", () => {
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("shogun who's on top fomo today?")), { action: "fomo", request: { kind: "leaderboard", window: "24h" } });
     assert.deepEqual(parseRoute({ action: "fomo_leaderboard" }, ctxOf("i'm sorry who's the top trader")), { action: "fomo", request: { kind: "leaderboard" } });
-    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("do you know unipcs on fomo")), { action: "fomo-trader", handle: "unipcs", about: "profile" });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("do you know unipcs on fomo")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "profile" } });
     assert.deepEqual(parseRoute({ action: "fomo_tail", trader: "unipcs" }, ctxOf("can you tail unipcs trades for the next 3 hours")), { action: "fomo-tail" });
   });
 
@@ -87,7 +87,7 @@ describe("parseRoute", () => {
   });
 
   it("$ and @ in front count as the name; a shape that is not a ticker or handle does not", () => {
-    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "@unipcs" }, ctxOf("you know @unipcs?")), { action: "fomo-trader", handle: "unipcs", about: "profile" });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "@unipcs" }, ctxOf("you know @unipcs?")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "profile" } });
     assert.equal(parseRoute({ action: "fomo_trader", trader: "uni pcs" }, ctxOf("you know uni pcs?")), null);
     assert.equal(parseRoute({ action: "fomo_coin", coin: "0x39dbed3a00000000000000000000000000000c0d" }, ctxOf("0x39dbed3a00000000000000000000000000000c0d theses?")), null);
   });
@@ -406,7 +406,7 @@ describe("the router's fixes (review, 2026-10-07)", () => {
     assert.equal(parseRoute({ action: "fomo_coin", coin: "alice" }, ctxOf("pine is @alice any good")), null);
     assert.equal(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("you know $unipcs?")), null);
     assert.deepEqual(parseRoute({ action: "coin_read", coin: "alice" }, ctxOf("is $alice any good")), { action: "coin", name: "alice" });
-    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "handle:unipcs" }, ctxOf("you know @unipcs?")), { action: "fomo-trader", handle: "unipcs", about: "profile" });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "handle:unipcs" }, ctxOf("you know @unipcs?")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "profile" } });
   });
 
   it("the prompt shows $ and @ as words the model can read, and the reply quote as it was checked", () => {
@@ -416,10 +416,16 @@ describe("the router's fixes (review, 2026-10-07)", () => {
     assert.ok((/«(x+)…?»/.exec(p)?.[1]?.length ?? 0) <= 120);
   });
 
-  it("what about a trader: profile, holdings or trades", () => {
-    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "holdings" }, ctxOf("what's unipcs sitting on")), { action: "fomo-trader", handle: "unipcs", about: "holdings" });
-    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "trades" }, ctxOf("what has unipcs been aping")), { action: "fomo-trader", handle: "unipcs", about: "trades" });
-    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "wallet" }, ctxOf("unipcs?")), { action: "fomo-trader", handle: "unipcs", about: "profile" });
+  it("what about a trader: profile, holdings, trades or earnings, with the window read from the line", () => {
+    assert.deepEqual(
+      parseRoute({ action: "fomo_trader", trader: "unipcs", about: "earnings" }, ctxOf("what did unipcs make money on this week")),
+      { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "earnings", window: "7d" } },
+    );
+    assert.deepEqual((ROUTE_SPEC.schema as { properties: Record<string, unknown> }).properties.about, { type: "string", enum: ["profile", "holdings", "trades", "earnings"] });
+    assert.equal(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("do you know unipcs on fomo", { fomo: false })), null, "no research here: nothing to answer it");
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "holdings" }, ctxOf("what's unipcs sitting on")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "holdings" } });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "trades" }, ctxOf("what has unipcs been aping")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "trades" } });
+    assert.deepEqual(parseRoute({ action: "fomo_trader", trader: "unipcs", about: "wallet" }, ctxOf("unipcs?")), { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "profile" } });
   });
 
   it("names the desk never reads are never a coin, whoever picks them", () => {
@@ -508,7 +514,7 @@ describe("a yes under its own line (live 2026-10-07)", () => {
     const offer = "want me to look up unipcs on fomo?";
     assert.deepEqual(
       parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("yes", { replied: offer, asked: "is unipcs any good on fomo" })),
-      { action: "fomo-trader", handle: "unipcs", about: "profile" },
+      { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "profile" } },
     );
     assert.equal(parseRoute({ action: "fomo_trader", trader: "frank" }, ctxOf("yes", { replied: "want me to look up frank on fomo?", asked: "who's good on fomo lately" })), null, "the persona invented frank");
     assert.equal(parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("yes", { replied: offer, asked: null })), null, "no person's line behind the offer");
@@ -562,7 +568,7 @@ describe("their earlier question, when they say it was missed (route.ts reask, r
     assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "pons", aspect: "theses" }, ctx), { action: "fomo", request: { kind: "coin", symbol: "PONS", aspect: "theses" } });
     assert.deepEqual(
       parseRoute({ action: "fomo_trader", trader: "unipcs" }, ctxOf("you didn't answer", { reaskOf: "is unipcs any good on fomo" })),
-      { action: "fomo-trader", handle: "unipcs", about: "profile" },
+      { action: "fomo", request: { kind: "trader", handle: "unipcs", about: "profile" } },
     );
     assert.equal(parseRoute({ action: "fomo_coin", coin: "frog" }, ctx), null, "never a name nobody wrote");
   });

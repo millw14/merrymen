@@ -102,7 +102,7 @@ export function routeSpec(can: RouteServes): TgChoiceSpec {
         chain: { type: "string", enum: [...ROUTE_CHAINS] },
         coin: { type: "string", maxLength: 24 },
         trader: { type: "string", maxLength: 32 },
-        about: { type: "string", enum: ["profile", "holdings", "trades"] },
+        about: { type: "string", enum: ["profile", "holdings", "trades", "earnings"] },
       },
     },
   };
@@ -115,7 +115,7 @@ const ACTION_LINES: Record<RouteAction, string> = {
   fomo_coin: "fomo_coin: Fomo's view of ONE coin: its theses (aspect theses), who is buying it (buyers), who is selling it (sellers), a full research dive (research), or what is going on with it (activity). Put its name in coin.",
   fomo_crowd: "fomo_crowd: what Fomo's traders as a group are buying or selling (side buy or sell). Put a chain in chain only when they want one chain's coins.",
   fomo_small_coins: "fomo_small_coins: small or early coins getting attention on Fomo. Put a chain in chain only when they want one chain's coins.",
-  fomo_trader: "fomo_trader: ONE Fomo trader by name: who they are, how they do or whether you know them (about profile), what they hold (about holdings), what they bought or sold lately (about trades). Put the name in trader.",
+  fomo_trader: "fomo_trader: ONE Fomo trader by name: who they are, how they do or whether you know them (about profile), what they hold (about holdings), what they bought or sold lately (about trades), what they made or lost money on (about earnings). Put the name in trader.",
   fomo_tail: "fomo_tail: they want you to follow, track, tail or keep tabs on a trader's trades for a while, or to stop doing that.",
   fomo_about: "fomo_about: what Fomo is, or what you can do with it.",
   market_read: "market_read: how the crypto or memecoin market is doing overall.",
@@ -238,7 +238,6 @@ export interface RouteCtx extends RouteServes {
 export type TgRoute =
   | { action: "chat" }
   | { action: "fomo"; request: TgFomoRequest }
-  | { action: "fomo-trader"; handle: string; about: TgTraderAbout }
   | { action: "fomo-tail" }
   | { action: "market" }
   | { action: "coin"; name: string }
@@ -449,10 +448,13 @@ export function parseRoute(raw: unknown, ctx: RouteCtx): TgRoute | null {
     case "fomo_about":
       return fomo({ kind: "about" });
     case "fomo_trader": {
-      if (!ctx.fomo) return null;
+      // One trader's public Fomo data, answered in the room for anyone
+      // (Milla, 2026-10-07): only by a name the line itself wrote.
       const handle = groundedTrader(o.trader, ctx);
-      const about: TgTraderAbout = o.about === "holdings" ? "holdings" : o.about === "trades" ? "trades" : "profile";
-      return handle ? { action: "fomo-trader", handle, about } : null;
+      if (!handle) return null;
+      const about: TgTraderAbout = o.about === "holdings" ? "holdings" : o.about === "trades" ? "trades" : o.about === "earnings" ? "earnings" : "profile";
+      const window = windowIn(line);
+      return fomo({ kind: "trader", handle, about, ...(window ? { window } : {}) });
     }
     case "fomo_tail":
       // The trader and the hours are read by code from the line itself

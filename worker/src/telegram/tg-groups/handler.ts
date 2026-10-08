@@ -141,7 +141,6 @@ import type {
   TgPublicFact,
   TgRoom,
   TgTailAsk,
-  TgTraderAbout,
 } from "./types";
 import { chainIn, readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
 import { readSubject, type SubjectReading } from "./understand";
@@ -339,7 +338,7 @@ export interface TgGroupsDeps {
    * line goes on to the desk and the persona as before.
    */
   fomo?: () => TgFomoPort | null;
-  /** The owner's asks that are answered in her DM (a trader by name). Absent: the room's deflection. */
+  /** The owner's asks that go to her DM (a tail). Absent: no DM to send one to. */
   owner?: () => TgOwnerPort | null;
   /** getMe's id and username, plus the soul name; null until getMe answered. */
   self: () => BotSelf | null;
@@ -2789,14 +2788,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       log("[tg-groups] said research");
       return "sent";
     };
-    // A trader request is deflected by the port before anything is planned
-    // or spent, so it takes none of the room's research answers.
-    const free = request?.kind === "trader";
-    const slot = free ? null : fomoRoom(chatId);
-    if (!free && !slot) return how.fallback ? "not-research" : send(FOMO_BUSY);
-    const refund = (): void => {
-      if (slot) fomoRefund(slot);
-    };
+    const slot = fomoRoom(chatId);
+    if (!slot) return how.fallback ? "not-research" : send(FOMO_BUSY);
+    const refund = (): void => fomoRefund(slot);
     stageOf(chatId, "research: ask");
     // The bot's own names go with the line: an addressed line almost always
     // carries "@thisbot", which the research must not read as a trader.
@@ -2840,15 +2834,6 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     rememberFomo(chatId, j.threadId);
     // Deflected before anything was looked up: it cost nothing, so it takes nothing.
     if (r.deflect && r.free === true) refund();
-    // HER PLAIN ASK ABOUT ONE TRADER ("who is trader unipcs on fomo?"): the
-    // room is deflected, and her DM gets the answer instead.
-    if (owner && r.deflect && r.trader && !request) {
-      const where = await ownerTraderAsk(chatId, j, o, r.trader.handle, r.trader.about);
-      if (where !== "room") {
-        refund();
-        return where === "dm" ? "sent" : "not-wanted";
-      }
-    }
     // HER MOVES: the commands go to her DM first, and the room hears that they
     // went only when the DM landed (never a claim that is not true), at most
     // once per room and kind in MOVES_EVERY_MS.
@@ -2979,34 +2964,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /**
-   * HER OWN ASK ABOUT ONE TRADER, ANSWERED IN HER DM: a trader is never
-   * discussed in the room (rule 3), so the room hears only where it went.
-   * "dm": her DM has it, or was asked to be opened, and the room was told (or
-   * rightly left alone); "gone": the line stopped being wanted first;
-   * "room": not hers, or her DM could not take it, and the caller says the
-   * room's deflection.
-   */
-  const ownerTraderAsk = async (chatId: number, j: LineJob, o: SpeakOpts, handle: string, about: TgTraderAbout): Promise<"dm" | "gone" | "room"> => {
-    const owner = j.isOwner ? ownerNow() : null;
-    if (!owner) return "room";
-    if (o.stillWanted && !o.stillWanted()) return "gone";
-    stageOf(chatId, "owner research");
-    const outcome = await owner.research({ handle, fromId: j.line.fromId, about, ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}) });
-    if (outcome === "gone") return "gone";
-    if (outcome !== "sent" && outcome !== "dm-first") return "room";
-    const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, {
-      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
-      replyByMs: j.bornAtMs + RESEARCH_REPLY_MS,
-    });
-    // "dm me first" is said once an hour; the DM itself is the answer to "sent".
-    if (!said && j.addressed !== null) log(`[tg-groups] owner research ${outcome === "sent" ? "sent, room line not said" : "dm-first, room line not said (told this hour, or dropped)"}`);
-    return "dm";
-  };
-
-  /**
    * A FOMO TAIL ASKED FOR IN THE ROOM (docs/fomo.md "Tailing a trader";
-   * docs/tg-groups.md rules 1 and 3). Groups never order trades and never
-   * hear a trader or a tail, so:
+   * docs/tg-groups.md rules 1 and 3). Groups never order trades, and who
+   * Merrymen tails is never a room's (a trader's public data is, Milla
+   * 2026-10-07; what Merrymen watches is not), so:
    *
    * - the owner's line (j.isOwner: the trusted sender id, never a line sent
    *   through a chat) goes to her DM as the confirm card, through
@@ -3077,14 +3038,6 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           // the line itself, and her line that named no one gets the usage.
           const r = await tailLine(chatId, j, opts, parseTailRequest(j.line.text, selfNamesOf(selfNow())));
           return done(r === null, r ?? undefined);
-        }
-        case "fomo-trader": {
-          const where = await ownerTraderAsk(chatId, j, opts, route.handle, route.about);
-          if (where === "dm") return;
-          if (where === "gone") return done(false, "not-wanted");
-          const r = await fomoAnswer(chatId, j, opts, { kind: "trader" });
-          if (r === "not-research") return await asBefore();
-          return done(r === "sent", r === "sent" ? undefined : r);
         }
         case "reask": {
           // Their earlier ask, run again as the reply to it (reaskAgain); this

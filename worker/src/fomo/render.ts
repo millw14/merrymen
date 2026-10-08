@@ -16,11 +16,13 @@
  *   4. The attribution line.
  *
  * GROUP AUDIENCE. Telegram groups get coin-level aggregates: no addresses, no
- * links, no cashtags, no quoted third-party text, money in short form. The one
- * exception for names is Fomo's public leaderboard, whose handles a group
- * hears with their P&L (never as @mentions, never who Merrymen follows). A
- * question about one trader is deflected to a direct message. A final scrub
- * runs over the whole group text as a second line of defence.
+ * links, no cashtags, no quoted third-party text, money in short form. Names
+ * a group hears are Fomo's public ones: the leaderboard's handles with their
+ * P&L, and one named trader's public data (who they are, what they hold,
+ * what they traded and what they made or lost money on, provider-reported;
+ * Milla, 2026-10-07), never as @mentions and never who Merrymen follows or
+ * watches. The owner's own research state is deflected to a direct message.
+ * A final scrub runs over the whole group text as a second line of defence.
  *
  * NO PERMALINKS. Nothing here writes a URL. The provider supplies no verified
  * links in the envelope, and Merrymen never invents one.
@@ -83,7 +85,7 @@ export const FOMO_CAPABILITIES_OWNER = [
 export const FOMO_CAPABILITIES_GROUP = [
   "I can look up Fomo, the social-trading app, for this chat: who's on top today or this week, what's trending, what fomo traders are buying, and the theses on a coin.",
   "Ask me straight out, like \"who's the top trader on fomo today?\" or \"what's trending on fomo?\" For a coin, name it after \"theses on\".",
-  "One trader's holdings, and what I'm watching, are for a direct message.",
+  "One trader by their Fomo handle works here too: what they hold, what they traded, what they made the most on. What I'm watching is for a direct message.",
 ].join("\n");
 
 /** "Is Fomo working?" in a group: whether research is on here. The owner's own research state stays in a direct message. */
@@ -315,6 +317,8 @@ function freshnessLine(env: FomoEnvelope, now: number): string | null {
  * what the figures are and where they come from).
  */
 const SKILL_CAVEAT = /not a measure of skill|not a skill measure/i;
+/** A note about Merrymen's own watched or followed traders. */
+const WATCH_WORDS = /\bcohort\b|\bwatch(?:ed|es|ing|list)?\b|\bfollow(?:ed|s|ing)?\b/i;
 
 function coverageLine(env: FomoEnvelope, audience: Audience = "owner"): string | null {
   const c = env.coverage;
@@ -323,9 +327,15 @@ function coverageLine(env: FomoEnvelope, audience: Audience = "owner"): string |
   else if (env.status === "partial" && env.reason !== "deep-research-queued") parts.push("Part of this could not be read.");
   if (c.capped) parts.push("More records exist than were read, so counts are a floor.");
   // Notes that change what the answer means: limits, removed rows, transfers that are not trades, stored copies, unread parts.
+  // About one trader, a room never hears a note that says where Merrymen's
+  // watched-trader record stands on them (who it watches is never a room's),
+  // nor one about P&L figures a room's render never shows (and whose word
+  // the group gate refuses, which would cost the whole line).
+  const traderNote = audience === "group" && isTraderTool(env.tool);
   const keep = c.notes.filter((n) =>
     /floor|filter|gap|snapshot|truncat|caps holdings|not the whole|removed|left out|unknown, not zero|not a measure|not skill|not proven|transfer|carried|could not be|not compared|not complete|reach back/i.test(n)
-      && !(audience === "group" && SKILL_CAVEAT.test(n)),
+      && !(audience === "group" && SKILL_CAVEAT.test(n))
+      && !(traderNote && (WATCH_WORDS.test(n) || /\bP&L\b/.test(n))),
   );
   for (const n of keep.slice(0, 3)) parts.push(n);
   return parts.length ? parts.join(" ") : null;
@@ -338,13 +348,18 @@ function isTraderTool(tool: FomoToolName): boolean {
 }
 
 /**
- * True when an envelope can only be answered with one trader's identity, or
- * the owner's own research (deflected in groups). The public leaderboard is
- * not: a group hears it, handles and all (bodyRankings).
+ * True when an envelope is the owner's own research (her state, a watch, a
+ * tail), the watch list itself, or a trader's own theses: deflected in
+ * groups. One trader's public profile, holdings and trades are not (Milla,
+ * 2026-10-07: a named trader's public Fomo data may be answered in a group),
+ * and neither is the public leaderboard: a group hears both, handles and all
+ * (bodyRankings, bodyTraderContext, bodyTraderActivity), never who Merrymen
+ * follows or watches.
  */
 export function needsDirectMessage(env: FomoEnvelope): boolean {
-  if (isTraderTool(env.tool) || env.tool === "fomo_get_research_status" || env.tool === "fomo_watch_coin" || env.tool === "fomo_unwatch_coin") return true;
+  if (env.tool === "fomo_get_research_status" || env.tool === "fomo_watch_coin" || env.tool === "fomo_unwatch_coin") return true;
   if (env.tool === "fomo_tail_trader" || env.tool === "fomo_untail_trader" || env.tool === "fomo_extend_tail") return true;
+  if (isTraderTool(env.tool)) return false;
   if (env.subject?.kind === "trader") return true;
   // A leaderboard cut to Merrymen's watched traders names the watch list itself (chat.ts deflects it first).
   if (env.tool === "fomo_get_rankings" && (env.data as RankingsData | null)?.board === "traders" && env.coverage.requested.cohortOnly === true) return true;
@@ -355,13 +370,24 @@ export function needsDirectMessage(env: FomoEnvelope): boolean {
 function eventLine(e: ActivityEventView, audience: Audience, now: number, withWho: boolean): string {
   const verb =
     e.kind === "buy" ? "bought" : e.kind === "sell" ? "sold" : e.kind === "transfer-in" ? "received by transfer (not a purchase)" : e.kind === "transfer-out" ? "sent out by transfer (not a sale)" : e.kind === "airdrop" ? "received as an airdrop (not a purchase)" : e.kind;
-  const whoPart = withWho && audience === "owner" ? `${who(e.trader.handle, e.trader.userId)} ` : "";
-  const money: string[] = [];
-  if (finite(e.fillUsd)) money.push(`fill ${usd(e.fillUsd)}`);
-  else if (e.kind === "buy" || e.kind === "sell") money.push("fill size unknown");
-  if (finite(e.positionValueUsd)) money.push(`position marked ${usd(e.positionValueUsd)} after`);
-  if (finite(e.positionRealizedPnlUsdCumulative)) money.push(`position P&L to date ${signedUsd(e.positionRealizedPnlUsdCumulative)}`);
-  return `• ${whoPart}${verb} ${coin(e.token, e.label, audience, false)} ${ago(now, e.at)}${money.length ? ` — ${money.join(", ")}` : ""} (${basisOf(e.verification)})`;
+  if (audience === "group") {
+    // A room's line: the fill in short form, and nothing of the position's
+    // mark or P&L (those figures are the owner's DM detail). Never who.
+    const fill = finite(e.fillUsd) ? `, fill ${money(e.fillUsd, audience)}` : e.kind === "buy" || e.kind === "sell" ? ", fill size unknown" : "";
+    return `• ${verb} ${coin(e.token, e.label, audience, false)} ${ago(now, e.at)}${fill} (${groupBasisOf(e.verification)})`;
+  }
+  const whoPart = withWho ? `${who(e.trader.handle, e.trader.userId)} ` : "";
+  const figures: string[] = [];
+  if (finite(e.fillUsd)) figures.push(`fill ${usd(e.fillUsd)}`);
+  else if (e.kind === "buy" || e.kind === "sell") figures.push("fill size unknown");
+  if (finite(e.positionValueUsd)) figures.push(`position marked ${usd(e.positionValueUsd)} after`);
+  if (finite(e.positionRealizedPnlUsdCumulative)) figures.push(`position P&L to date ${signedUsd(e.positionRealizedPnlUsdCumulative)}`);
+  return `• ${whoPart}${verb} ${coin(e.token, e.label, audience, false)} ${ago(now, e.at)}${figures.length ? ` — ${figures.join(", ")}` : ""} (${basisOf(e.verification)})`;
+}
+
+/** basisOf in words the group gate admits ("provider" alone it reads as plumbing). */
+function groupBasisOf(v: string): string {
+  return v === "independently-verified" ? "verified by Merrymen" : v === "provider-verified" ? "matched on chain" : "provider-reported";
 }
 
 function claimLine(label: string, c: ClaimView | null, audience: Audience): string[] {
@@ -405,6 +431,7 @@ function availabilityLine(a: string): string {
 function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audience, now: number): string[] {
   const d = env.data;
   if (!d) return [];
+  if (audience === "group") return groupTraderContext(d);
   const out: string[] = [];
   const name = trader(d.trader);
   const h = d.holdings;
@@ -439,11 +466,44 @@ function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audie
   return out;
 }
 
-function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Audience, now: number): string[] {
+/**
+ * ONE TRADER AS A ROOM HEARS THEM (Milla, 2026-10-07: a named trader's public
+ * Fomo data may be answered in a group): their public handle, what they hold
+ * and what it is worth, money in short form. Never whether Merrymen watches
+ * or follows them, and no P&L figures here: those come from Merrymen's own
+ * watched-trader record when it has one, so whether a room saw them would
+ * say who it watches. The leaderboard and "what did they make money on"
+ * (bodyTraderActivity's earnings view) are a room's ways to those.
+ */
+function groupTraderContext(d: TraderContextData): string[] {
+  const name = `${publicHandle(d.trader.handle)} on Fomo`;
+  const out: string[] = [];
+  const h = d.holdings;
+  if (h) {
+    const total = finite(h.totalValueUsdFloor) ? ` worth ${h.truncated ? "at least " : ""}${money(h.totalValueUsdFloor, "group")}` : "";
+    out.push(
+      h.rowsTotal === 0
+        ? `${name} shows no holdings in Fomo's snapshot (that is the snapshot, not proof of an empty wallet).`
+        : `${name} holds ${plural(h.rowsTotal, "coin", "coins")}${total} (provider-reported snapshot, valued at current prices).`,
+    );
+    const rows = h.rows.slice(0, 3).map((r) => `${(r.symbol ? sym({ symbol: r.symbol, name: null }, "group") : null) ?? "a coin"} on ${r.chain ?? "an unknown chain"} ${money(r.valueUsd, "group")}`);
+    if (rows.length) out.push(`Largest: ${rows.join(", ")}.`);
+  } else {
+    out.push(`${name}: the holdings snapshot could not be read.`);
+  }
+  if (d.formerHandle) out.push("That handle is one they used before; the account has since renamed.");
+  return out;
+}
+
+/** Received only, never bought: its "cost" is a transfer valuation, not money the trader put in. */
+const receivedOnly = (p: { transferredInAmount: number | null; boughtAmount: number | null }): boolean => (p.transferredInAmount ?? 0) > 0 && (p.boughtAmount ?? 0) === 0;
+
+function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Audience, now: number, view: View): string[] {
   const d = env.data;
   if (!d) return [];
-  const name = trader(d.trader);
+  const name = audience === "group" ? publicHandle(d.trader.handle) : trader(d.trader);
   const scope = `${d.window === "all" ? "on record" : `in the last ${d.window}`}${d.token ? ` on ${coin(d.token, null, audience)}` : ""}`;
+  if (view.earnings) return earningsLines(d, audience, name);
   const c = d.counts;
   const out: string[] = [];
   if (d.events.length === 0 && d.positions.length === 0 && d.fills.length === 0) {
@@ -451,16 +511,42 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
     return out;
   }
   out.push(`${name} ${scope}: ${plural(c.buys, "buy", "buys")} and ${plural(c.sells, "sell", "sells")} in the feed${c.transfers ? `, plus ${plural(c.transfers, "transfer", "transfers")} (not purchases)` : ""}.`);
-  for (const e of d.events.slice(0, 5)) out.push(eventLine(e, audience, now, false));
-  for (const f of d.fills.slice(0, 3)) out.push(`• fill: ${f.side} ${usd(f.usd)} ${ago(now, f.at)} (provider-reported)`);
+  const group = audience === "group";
+  for (const e of d.events.slice(0, group ? 3 : 5)) out.push(eventLine(e, audience, now, false));
+  for (const f of d.fills.slice(0, group ? 2 : 3)) out.push(`• fill: ${f.side} ${money(f.usd, audience)} ${ago(now, f.at)} (provider-reported)`);
   const pos = d.positions.slice(0, 3).map((p) => {
-    const name = `${sym(p.label, audience) ?? "a coin"} ${p.status ?? "status unknown"}`;
-    // Received, never bought: its "cost" is a transfer valuation, not money the trader put in.
-    if ((p.transferredInAmount ?? 0) > 0 && (p.boughtAmount ?? 0) === 0) return `${name}, received by transfer (not bought)`;
-    return `${name}, cost ${usd(p.costBasisUsd)}, realised P&L to date ${signedUsd(p.realizedPnlUsd)}${p.status === "open" ? `, unrealised ${signedUsd(p.unrealizedPnlUsd)}` : ""}`;
+    const label = `${sym(p.label, audience) ?? "a coin"} ${p.status ?? "status unknown"}`;
+    if (receivedOnly(p)) return `${label}, received by transfer (not bought)`;
+    // A room hears the same figures in short form and plain words ("P&L" is a word the group gate keeps for the owner's book).
+    if (group) return `${label} (cost ${money(p.costBasisUsd, audience)}, ${signedMoney(p.realizedPnlUsd, audience)} realised${p.status === "open" ? `, ${signedMoney(p.unrealizedPnlUsd, audience)} not yet realised` : ""})`;
+    return `${label}, cost ${usd(p.costBasisUsd)}, realised P&L to date ${signedUsd(p.realizedPnlUsd)}${p.status === "open" ? `, unrealised ${signedUsd(p.unrealizedPnlUsd)}` : ""}`;
   });
   if (pos.length) out.push(`Positions (provider-reported): ${pos.join("; ")}.`);
   return out;
+}
+
+/**
+ * WHAT ONE TRADER MADE OR LOST MONEY ON (plan.earnings, or a leaderboard
+ * row asked that): their positions opened or closed in the window, ranked by
+ * the provider's realised P&L to date, highest first, unknown left out. A
+ * position only received by transfer is never a win. Never the leaderboard's
+ * per-coin figures, which have no window (docs/fomo.md). One line, so a room
+ * that also hears the board still hears it whole.
+ */
+function earningsLines(d: TraderActivityData, audience: Audience, name: string): string[] {
+  // "trades", not "positions opened or closed": the group gate reads that as a trade alert.
+  const scope = d.window === "all" ? "on record" : `opened or closed in the last ${d.window}`;
+  const known = d.positions.filter((p) => !receivedOnly(p) && finite(p.realizedPnlUsd));
+  const won = known.filter((p) => p.realizedPnlUsd! > 0).sort((a, b) => b.realizedPnlUsd! - a.realizedPnlUsd!).slice(0, 3);
+  const lost = known.filter((p) => p.realizedPnlUsd! < 0).sort((a, b) => a.realizedPnlUsd! - b.realizedPnlUsd!).slice(0, 2);
+  const item = (p: (typeof known)[number]): string => `${sym(p.label, audience) ?? "a coin"} ${audience === "group" ? signedMoney(p.realizedPnlUsd, audience) : signedUsd(p.realizedPnlUsd)}`;
+  if (!won.length && !lost.length) {
+    return [`${name}: nothing realised either way on trades ${scope} (provider-reported).`];
+  }
+  const parts: string[] = [];
+  if (won.length) parts.push(`made the most on ${won.map(item).join(", ")}`);
+  if (lost.length) parts.push(`lost the most on ${lost.map(item).join(", ")}`);
+  return [`${name} on trades ${scope} (provider-reported, realised to date): ${parts.join("; ")}.`];
 }
 
 function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now: number): string[] {
@@ -547,21 +633,20 @@ export function ordinal(n: number): string {
 /** Fomo's trader board has no chain: said once, instead of silently answering for every chain. */
 export const TRADER_BOARD_ALL_CHAINS = "Fomo's trader board covers every chain; it can't be narrowed to one.";
 
-function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): string[] {
+function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience, view: View = NO_VIEW): string[] {
   const d = env.data;
   if (!d) return [];
   if (d.board === "traders") {
     const chainNote = d.chain ? [TRADER_BOARD_ALL_CHAINS] : [];
     if (!d.traders.length) return ["The leaderboard returned no rows for that scope.", ...chainNote];
     if (audience === "group") {
-      // THE ONE PLACE A GROUP HEARS TRADERS NAMED (Milla's call, 2026-10-07):
       // Fomo's own public leaderboard, its handles and its provider-reported
-      // P&L. Never who Merrymen follows, and never a trader's holdings or
-      // trades, which stay in a direct message.
+      // P&L (Milla's call, 2026-10-07). Never who Merrymen follows.
       // "P&L" and "profit" are words the group gate keeps for its own book: plain words instead.
+      // With one row asked about too, a row fewer: the row's answer still fits the room's lines.
       const scope = windowWords(d.window);
       const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades:`];
-      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS - chainNote.length)) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
+      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS - chainNote.length - (view.row ? 1 : 0))) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
       return [...out, ...chainNote];
     }
     const out = [`Top traders by provider-reported ${d.window ?? ""} realised P&L (not a skill measure):`];
@@ -808,20 +893,35 @@ function bodyTail(env: FomoEnvelope<TailData | UntailData | ExtendTailData>, aud
   return out;
 }
 
-function body(env: FomoEnvelope, audience: Audience, now: number): string[] {
+/**
+ * What the question asked of its envelopes beyond their data (renderAnswer
+ * reads it from the plan): what one trader made or lost money on, and
+ * whether one row of the trader board was asked about with the board.
+ */
+interface View {
+  earnings: boolean;
+  row: boolean;
+}
+const NO_VIEW: View = { earnings: false, row: false };
+
+function viewOf(plan: FomoQuestionPlan | null): View {
+  return { earnings: plan?.earnings === true || plan?.rowAsk?.about === "earnings", row: !!plan?.rowAsk };
+}
+
+function body(env: FomoEnvelope, audience: Audience, now: number, view: View = NO_VIEW): string[] {
   switch (env.tool) {
     case "fomo_resolve_subject":
       return bodyResolve(env as FomoEnvelope<ResolveData>, audience);
     case "fomo_get_trader_context":
       return bodyTraderContext(env as FomoEnvelope<TraderContextData>, audience, now);
     case "fomo_get_trader_activity":
-      return bodyTraderActivity(env as FomoEnvelope<TraderActivityData>, audience, now);
+      return bodyTraderActivity(env as FomoEnvelope<TraderActivityData>, audience, now, view);
     case "fomo_get_token_theses":
       return bodyTheses(env as FomoEnvelope<TokenThesesData>, audience, now);
     case "fomo_get_token_activity":
       return bodyTokenActivity(env as FomoEnvelope<TokenActivityData>, audience, now);
     case "fomo_get_rankings":
-      return bodyRankings(env as FomoEnvelope<RankingsData>, audience);
+      return bodyRankings(env as FomoEnvelope<RankingsData>, audience, view);
     case "fomo_find_opportunities":
       return bodyOpportunities(env as FomoEnvelope<OpportunitiesData>, audience, now);
     case "fomo_research_coin":
@@ -838,20 +938,47 @@ function body(env: FomoEnvelope, audience: Audience, now: number): string[] {
   }
 }
 
-/** The lines for one envelope, without attribution: status lead or body, then limits. */
-function envelopeLines(env: FomoEnvelope, audience: Audience, now: number): string[] {
-  if (audience === "group" && needsDirectMessage(env)) return [GROUP_DM_DEFLECTION];
+/** The lines for one envelope, without attribution: status lead or body (`main`), then its limits. */
+function envelopeParts(env: FomoEnvelope, audience: Audience, now: number, view: View = NO_VIEW): { main: string[]; limits: string[] } {
+  if (audience === "group" && needsDirectMessage(env)) return { main: [GROUP_DM_DEFLECTION], limits: [] };
   const lead = statusLead(env, audience);
-  if (lead && (env.data === null || env.status === "needs-clarification")) return [lead];
-  const lines = body(env, audience, now);
+  if (lead && (env.data === null || env.status === "needs-clarification")) return { main: [lead], limits: [] };
+  const lines = body(env, audience, now, view);
   // An older answer shown because a refresh could not run: say why first, then the labelled answer.
   if (lead && env.status !== "failed") lines.unshift(lead);
   if (!lines.length) lines.push(env.message ? sanitizeText(env.message, 240) : "Nothing usable came back from Fomo.");
+  const limits: string[] = [];
   const f = freshnessLine(env, now);
-  if (f) lines.push(f);
+  if (f) limits.push(f);
   const c = coverageLine(env, audience);
-  if (c) lines.push(c);
-  return lines;
+  if (c) limits.push(c);
+  return { main: lines, limits };
+}
+
+function envelopeLines(env: FomoEnvelope, audience: Audience, now: number, view: View = NO_VIEW): string[] {
+  const p = envelopeParts(env, audience, now, view);
+  return [...p.main, ...p.limits];
+}
+
+/**
+ * THE BOARD AND ITS ROW, as one answer ("who's the best trader on fomo today
+ * and what did he make money on"): the board, then that row's trader, then
+ * both reads' limits, so a room's line cap never cuts the row's answer for a
+ * board's "from a copy fetched 3 min ago". A row the board does not have, or
+ * one that could not be looked up, is said rather than left out.
+ */
+function rowAnswerLines(envs: readonly FomoEnvelope[], plan: FomoQuestionPlan, audience: Audience, now: number, view: View): string[] {
+  const parts = envs.map((e) => envelopeParts(e, audience, now, view));
+  const main = parts.flatMap((p) => p.main);
+  const rank = plan.rowAsk!.rank;
+  const board = envs.find((e) => e.tool === "fomo_get_rankings");
+  const traders = board && (board.status === "ok" || board.status === "partial" || board.status === "capped" || board.status === "stale")
+    ? (board.data as RankingsData | null)?.traders ?? null
+    : null;
+  if (traders && traders.length > 0 && !envs.some((e) => isTraderTool(e.tool))) {
+    main.push(traders.some((r) => r.rank === rank) || traders.length >= rank ? `I couldn't look up the ${ordinal(rank)} trader on that board.` : `That board has no ${ordinal(rank)} trader.`);
+  }
+  return [...main, ...parts.flatMap((p) => p.limits)];
 }
 
 /** Cut at a line boundary, keeping the tail (attribution) intact. */
@@ -894,11 +1021,15 @@ export function renderAnswer(envs: readonly FomoEnvelope[], plan: FomoQuestionPl
   if (plan?.clarification) return plan.clarification;
   if (!envs.length) return finalize("Nothing was looked up.", opts.audience);
   if (opts.audience === "group" && envs.some(needsDirectMessage)) return GROUP_DM_DEFLECTION;
+  const view = viewOf(plan);
   const lines: string[] = [];
-  envs.forEach((env, i) => {
-    if (i > 0) lines.push("");
-    lines.push(...envelopeLines(env, opts.audience, opts.now));
-  });
+  if (plan?.rowAsk) lines.push(...rowAnswerLines(envs, plan, opts.audience, opts.now, view));
+  else {
+    envs.forEach((env, i) => {
+      if (i > 0) lines.push("");
+      lines.push(...envelopeLines(env, opts.audience, opts.now, view));
+    });
+  }
   const anyAnswered = envs.some((e) => e.status !== "needs-clarification");
   const tail: string[] = [];
   if (plan?.analysisRequested && !plan.infoOnly) tail.push(NOT_PERMISSION_LINE);

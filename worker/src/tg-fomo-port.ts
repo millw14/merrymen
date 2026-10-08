@@ -14,13 +14,16 @@
  * the text. The conversation key is built from that same chat id and topic.
  * The asker's words reach only the deterministic planner, as data.
  *
- * WHAT A GROUP NEVER HEARS. The planner deflects a question about one trader
- * or the owner's own research state before anything is spent; the renderer
- * gives a group coin-level aggregates (no wallets, addresses, links, cashtags
- * or quoted third-party text, money in short form) and scrubs the result. The
- * one place a group hears traders named is Fomo's public leaderboard: its
- * handles and their P&L, never as @mentions, never who Merrymen follows
- * (Milla's call, 2026-10-07). A group answer carries no source line and no
+ * WHAT A GROUP NEVER HEARS. The planner deflects a question about the
+ * owner's own research state, or who Merrymen watches, before anything is
+ * spent; the renderer gives a group coin-level aggregates (no wallets,
+ * addresses, links, cashtags or quoted third-party text, money in short
+ * form) and scrubs the result. Traders a group hears named are Fomo's public
+ * ones: the leaderboard's handles and their P&L, and ONE NAMED TRADER'S
+ * PUBLIC DATA, for anyone who asks, the owner included (who they are, what
+ * they hold, what they traded, what they made or lost money on,
+ * provider-reported), never as @mentions and never whether Merrymen watches
+ * or follows them (Milla's calls, 2026-10-07). A group answer carries no source line and no
  * skill caveat: the room has had a post about where the data comes from
  * (Milla, 2026-10-07), so the renderer leaves both to the owner's answers.
  * This file rewrites the renderer's fixed wording into words the group gate
@@ -39,7 +42,7 @@ import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
-import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgTraderAbout } from "./telegram/tg-groups/types";
+import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
 export const TG_FOMO_MAX_CHARS = 600;
@@ -48,10 +51,11 @@ export const TG_FOMO_MAX_CHARS = 600;
 export const TG_FOMO_NOT_PERMISSION = "This is research, not a signal to buy or sell.";
 
 /**
- * A question a group never hears answered: a trader, or the owner's own
- * research state. GROUP_DM_DEFLECTION says "I'll answer that in a direct
- * message", and nothing here sends that message, so the room is told where
- * the question belongs instead of being promised an answer.
+ * A question a group never hears answered: the owner's own research state,
+ * who Merrymen watches, or a trader's own theses. GROUP_DM_DEFLECTION says
+ * "I'll answer that in a direct message", and nothing here sends that
+ * message, so the room is told where the question belongs instead of being
+ * promised an answer.
  */
 export const TG_FOMO_DEFLECTION = "That one is for a direct message, not the group.";
 
@@ -97,12 +101,15 @@ const ROW_ABOUT: Readonly<Record<string, string>> = {
   trades: " and what has he been trading?",
   profile: "? tell me about him",
 };
+/** A Fomo handle the planner reads as one trader ("trader X"). */
+const TRADER_HANDLE = /^[A-Za-z0-9_]{2,30}$/;
+const whenWords = (w: unknown, fallback: string): string => (w === "24h" ? "today" : w === "7d" ? "this week" : w === "30d" ? "this month" : w === "all" ? "of all time" : fallback);
 
 /**
  * THE FIXED QUESTION FOR A REQUEST. Each one plans exactly the intended read
  * through the deterministic planner (tg-fomo-port.test.ts pins every one), so
  * the model's choice reaches the provider only as that planner's arguments.
- * Null: nothing to ask (a trader, or a ticker that is not one).
+ * Null: nothing to ask (a ticker or a handle that is not one).
  */
 export function requestText(r: TgFomoRequest): string | null {
   switch (r.kind) {
@@ -142,21 +149,25 @@ export function requestText(r: TgFomoRequest): string | null {
       return "what can you do with fomo?";
     case "status":
       return "is fomo working?";
+    case "trader": {
+      // One trader, by the handle the line wrote (route.ts groundedTrader),
+      // answered in the room (Milla, 2026-10-07).
+      const h = String(r.handle ?? "").replace(/^@+/, "");
+      if (!TRADER_HANDLE.test(h)) return null;
+      switch (r.about) {
+        case "holdings":
+          return `what is trader ${h} holding on fomo?`;
+        case "trades":
+          return `what has trader ${h} been trading on fomo ${whenWords(r.window, "this week")}?`;
+        case "earnings":
+          return `what did trader ${h} make money on on fomo ${whenWords(r.window, "this week")}?`;
+        default:
+          return `who is trader ${h} on fomo?`;
+      }
+    }
     default:
       return null;
   }
-}
-
-/**
- * The one trader a deflected plan was about, and what about them; null for
- * anything else (two traders, the owner's own state, a cohort board).
- */
-export function traderAsked(plan: FomoQuestionPlan | null | undefined): { handle: string; about: TgTraderAbout } | null {
-  if (!plan || !["trader-context", "trader-holdings", "trader-activity"].includes(plan.intent)) return null;
-  const handles = plan.subjects.flatMap((s) => (s.kind === "trader" && typeof s.handle === "string" ? [s.handle.replace(/^@/, "")] : []));
-  if (handles.length !== 1 || !ASKABLE_HANDLE.test(handles[0]!)) return null;
-  const about: TgTraderAbout = plan.intent === "trader-holdings" ? "holdings" : plan.intent === "trader-activity" ? "trades" : "profile";
-  return { handle: handles[0]!, about };
 }
 
 // ─── A coin the planner could not place ─────────────────────────────────────
@@ -446,8 +457,6 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
     async ask(q): Promise<TgFomoAnswer | null> {
       try {
         if (!q || !isUsableChatId(q.chatId)) return null;
-        // One trader is never answered in a room: deflected before anything is planned or spent.
-        if (q.request?.kind === "trader") return { text: TG_FOMO_DEFLECTION, deflect: true, free: true };
         const text = q.request ? requestText(q.request) : typeof q.text === "string" ? q.text : null;
         if (!text || !text.trim()) return null;
         const b = brokerNow();
@@ -490,12 +499,8 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         remember(q.chatId, conversationKey);
         if (r.text.trim() === GROUP_DM_DEFLECTION) {
           log("[tg-fomo] group ask deflected");
-          // HER ASK ABOUT ONE TRADER goes to her DM (handler.ts): the handle
-          // as the planner read it, never for anyone else, never for a
-          // structured request (the router names its own) or the owner's state.
-          const trader = q.owner === true && !q.request ? traderAsked(r.plan) : null;
           const free = r.toolsCalled.length === 0;
-          return { text: TG_FOMO_DEFLECTION, deflect: true, ...(trader ? { trader } : {}), ...(free ? { free } : {}) };
+          return { text: TG_FOMO_DEFLECTION, deflect: true, ...(free ? { free } : {}) };
         }
         log(`[tg-fomo] group ask answered (${r.toolsCalled.length} lookup(s))${q.request ? " (routed)" : ""}`);
         const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false, status: answerStatus(r.envelopes) };
