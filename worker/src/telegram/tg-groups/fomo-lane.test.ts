@@ -27,7 +27,7 @@ import type { BotSelf } from "./detect";
 import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
-import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgDeskOutcome, TgDeskPort, TgFomoAnswer, TgFomoPort, TgFomoRequest, TgOwnerOutcome, TgTailAsk, TrencherReadiness } from "./types";
+import type { CoinLook, CoinOutcome, NominateResult, TgCoinsPort, TgDeskAsk, TgDeskOutcome, TgDeskPort, TgFomoAnswer, TgFomoPort, TgFomoRequest, TgOwnerOutcome, TgTailAsk, TgThesesMaterial, TrencherReadiness } from "./types";
 
 const SEC = 1_000;
 const MIN = 60 * SEC;
@@ -1173,5 +1173,108 @@ describe("short list asks with no question mark reach the research (2026-10-07)"
     await said(msg("pine top fomo moment lol"));
     await said(msg("pine the top coins on fomo are trash", { fromId: ANN + 1 }));
     assert.deepEqual(fomo!.asks, []);
+  });
+});
+
+describe("a coin's theses in the group model's own words (plan WP9 P2, D5)", () => {
+  const HEAD = "What traders on Fomo are saying about PONS on Robinhood Chain (25 recent theses from 20 traders):";
+  const TAIL = "Their claims, not facts; newest 25 of 41.";
+  const DIGEST = [HEAD, "For it: it's still early and a strong community.", "Most of it is about the community.", TAIL].join("\n");
+  const MATERIAL: TgThesesMaterial = {
+    key: "eip155:4663:0x39dbed3a00000000000000000000000000000c0d@1",
+    coin: "PONS",
+    head: [HEAD],
+    tail: [TAIL],
+    fallback: DIGEST,
+    samples: ["first real meme on robinhood chain, still early", "community is strong, raids every hour on twitter", "liquidity is thin for its size, careful"],
+  };
+  let choice: Record<string, unknown> | string;
+  let thesesCalls: number;
+  const useModel = (): void => {
+    envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
+    envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
+    envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
+    envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { tools?: unknown };
+      if (JSON.stringify(body.tools ?? "").includes("summarise_theses")) {
+        thesesCalls++;
+        const message = typeof choice === "string" ? { content: choice } : { tool_calls: [{ function: { name: "summarise_theses", arguments: JSON.stringify(choice) } }] };
+        return { ok: true, json: async () => ({ choices: [{ message }] }) };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "ngl no clue" } }] }) };
+    }) as never;
+  };
+
+  beforeEach(() => {
+    thesesCalls = 0;
+    choice = { gist: "Mostly the idea that it's the meme of Robinhood Chain", for: ["a busy community running raids"], against: ["thin liquidity for its size"] };
+    fomo!.answer = () => ({ text: DIGEST, deflect: false, status: "ok", theses: MATERIAL });
+  });
+
+  it("the model's checked lines reach the room, between the digest's header and its closing line", async () => {
+    useModel();
+    make();
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    assert.equal(thesesCalls, 1);
+    assert.deepEqual(tg.texts(CHAT), [[HEAD, "Mostly the idea that it's the meme of Robinhood Chain.", "For it: a busy community running raids.", "Against it: thin liquidity for its size.", TAIL].join("\n")]);
+    assert.ok(logs.includes("[tg-groups] theses worded"));
+  });
+
+  it("no model: the code digest, as it was", async () => {
+    make();
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    assert.deepEqual(tg.texts(CHAT), [DIGEST]);
+  });
+
+  it("MERRYMEN_TG_THESES_MODEL=0: the code digest, and no call", async () => {
+    useModel();
+    envVars.MERRYMEN_TG_THESES_MODEL = "0";
+    make();
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    assert.equal(thesesCalls, 0);
+    assert.deepEqual(tg.texts(CHAT), [DIGEST]);
+  });
+
+  it("a refused phrase never reaches the room; nothing left is the code digest", async () => {
+    useModel();
+    choice = { gist: "PONS is going to 10m, buy before the listing", for: ["it's a 100x setup", "a busy community running raids"], against: ["the dev rugged everyone"] };
+    make();
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    const out = tg.texts(CHAT);
+    assert.equal(out.length, 1);
+    assert.doesNotMatch(out[0]!, /10m|100x|buy before|rugged/);
+    assert.match(out[0]!, /\nFor it: a busy community running raids\.\n/);
+
+    choice = { gist: "going to 10m", for: ["buy now"] };
+    clock += 2 * MIN;
+    fomo!.answer = () => ({ text: DIGEST, deflect: false, status: "ok", theses: { ...MATERIAL, key: "another@2" } });
+    await said(msg("pine and the theses on $PONS on fomo?", { fromId: ANN + 1 }));
+    assert.equal(tg.texts(CHAT)[1], DIGEST);
+  });
+
+  it("the same coin and copy within half an hour costs no second call ('tell me what it's about from thesis')", async () => {
+    useModel();
+    make();
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    clock += 2 * MIN;
+    await said(msg("pine tell me what it's about from the theses on $PONS on fomo", { fromId: ANN + 1 }));
+    assert.equal(thesesCalls, 1);
+    const out = tg.texts(CHAT);
+    assert.equal(out.length, 2);
+    assert.equal(out[1], out[0]);
+  });
+
+  it("under 1.5 s left of the reply deadline: the code digest, with no call", async () => {
+    useModel();
+    fomo!.answer = () => {
+      clock += 24 * SEC;
+      return { text: DIGEST, deflect: false, status: "ok", theses: MATERIAL };
+    };
+    make();
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    assert.equal(thesesCalls, 0);
+    assert.deepEqual(tg.texts(CHAT), [DIGEST]);
+    assert.ok(logs.includes("[tg-groups] theses late"));
   });
 });

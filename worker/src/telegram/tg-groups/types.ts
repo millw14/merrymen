@@ -476,9 +476,33 @@ export interface TgBoardRow {
   about: TgTraderAbout;
 }
 
+/**
+ * A COIN'S THESES, AS MATERIAL FOR THE GROUP MODEL'S PARAPHRASE (theses.ts,
+ * plan WP9 P2; tg-fomo-port.ts builds it). Plain data, because tg-groups
+ * never imports fomo/: the code-written digest's opening and closing lines,
+ * the whole digest as the fallback, and at most twelve cleaned samples, one
+ * per family, each at most 160 characters with links, addresses, handles and
+ * $tags taken out and injection-shaped rows dropped. The samples reach the
+ * model only inside a fence; nothing from them is ever sent as written.
+ */
+export interface TgThesesMaterial {
+  /** The coin and the copy it was read from: the same key is the same theses. */
+  key: string;
+  /** The coin's display name, the one run of digits a phrase may hold. */
+  coin: string;
+  /** The digest's lines up to its header, and from its closing line on (limits included). */
+  head: string[];
+  tail: string[];
+  /** The code-written digest, said when the paraphrase cannot be. */
+  fallback: string;
+  samples: string[];
+}
+
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;
+  /** A coin's theses, for the group model to put in its own words (theses.ts); `text` is the code digest. */
+  theses?: TgThesesMaterial;
   /** Only when the owner asked (`owner` on the ask): her next moves. */
   moves?: TgFomoMoves;
   /** A deflection made before anything was looked up: it spends none of the room's research answers. */

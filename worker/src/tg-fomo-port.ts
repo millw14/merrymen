@@ -31,18 +31,25 @@
  * still gates every line before it is sent, as a `research` line, and drops
  * what the gate refuses rather than bending the gate.
  *
- * NO MODEL. A group answer is deterministic: no compose, so no model can be
- * talked into wording a trader's wallet into a room.
+ * NO MODEL HERE. A group answer is deterministic: no compose, so no model
+ * can be talked into wording a trader's wallet into a room. The one model
+ * step a room's research answer may take is the group model's paraphrase of
+ * a coin's theses (tg-groups/theses.ts, decision D5): this port hands it
+ * cleaned, fenced material (thesesMaterial), never an identity, and the
+ * code-written digest is what the room hears whenever that step cannot run
+ * or its phrases do not pass.
  */
 
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion, type AnswerFomoResult } from "./fomo/chat";
+import { contentFree } from "./fomo/digest";
+import { redactExecutables } from "./fomo/dossier";
 import { chainFromUserText, isRobinhoodToken } from "./fomo/identity";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
-import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
-import type { OpportunitiesData, RankingsData, ResearchCoinData, TokenActivityData, TokenThesesData } from "./fomo/tools";
+import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
+import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
-import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest } from "./telegram/tg-groups/types";
+import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgThesesMaterial } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
 export const TG_FOMO_MAX_CHARS = 600;
@@ -334,6 +341,82 @@ export function ownerMoves(r: AnswerFomoResult, buyable: (s: string) => boolean 
   return { kind: "coin", room: "sent the trade moves for it to your DM.", dm: [`<b>Your moves on ${escHtml(one.symbol)}</b>:`, ...coinMoves(one, buyable).slice(1)].join("\n") };
 }
 
+// ─── A coin's theses, for the group model's paraphrase ──────────────────────
+
+/** At most this many samples, one per family, each at most this long; fewer than the minimum is no material. */
+export const THESES_SAMPLES_MAX = 12;
+export const THESES_SAMPLE_CHARS = 160;
+export const THESES_SAMPLES_MIN = 3;
+
+/**
+ * A row written at a model, not about a coin ("ignore all previous
+ * instructions…", "you are now…", "system:"): dropped whole, never cleaned.
+ */
+const INJECTION_SHAPED =
+  /\b(?:ignore|disregard|forget|override|bypass)\b[^.!?\n]{0,40}\b(?:instructions?|prompts?|rules|previous|above|system|guidelines)\b|\b(?:system|developer|assistant)\s*(?:prompt|message|:)|\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:[a-z]+\s+){0,2}(?:ai|assistant|bot|model|chatbot)\b|\bact\s+as\b|\bjailbreak|\bprompt\b|\btell\s+(?:the|this)\s+(?:group|chat|room)\b/i;
+/** A lure, not a view: a claim page, a seed phrase, a wallet to connect. */
+const LURE = /\b(?:airdrops?|claim(?:ing|s)?|presale|whitelist|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|dm\s+me)\b/i;
+
+/**
+ * One thesis as a sample the group model may read: their words with every
+ * link, address, handle and $tag taken out, no fence characters, at most
+ * THESES_SAMPLE_CHARS. Null for a row with nothing left to say, or one shaped
+ * as an instruction or a lure.
+ */
+export function thesesSample(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  let s = groupScrub(redactExecutables(text.normalize("NFKC")))
+    .replace(/\[(?:link|address|handle|someone)\]/g, " ")
+    .replace(/[\u0000-\u001f\u007f`<>{}[\]|\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/([,.;:!?])(?:\s*[,.;:!?])+/g, "$1")
+    .replace(/^[\s,.;:!?-]+/, "")
+    .trim();
+  if (!s || contentFree(s) || INJECTION_SHAPED.test(s) || LURE.test(s)) return null;
+  if (s.length > THESES_SAMPLE_CHARS) s = `${s.slice(0, THESES_SAMPLE_CHARS - 1).replace(/\s+\S*$/, "")}…`;
+  return s;
+}
+
+const likesOf = (v: ThesisView): number => (typeof v.likes === "number" && Number.isFinite(v.likes) ? v.likes : -1);
+const postedOf = (v: ThesisView): number => (typeof v.postedAt === "number" && Number.isFinite(v.postedAt) ? v.postedAt : -1);
+
+/**
+ * THE MATERIAL FOR A ROOM'S THESIS PARAPHRASE (tg-groups/theses.ts): only for
+ * one coin's theses answered on their own, with at least THESES_SAMPLES_MIN
+ * usable samples. Never a trader's theses (those are deflected), never a
+ * compound answer, never the coin's dev's own posts.
+ */
+export function thesesMaterial(r: AnswerFomoResult, text: string): TgThesesMaterial | null {
+  if (!r.handled || r.envelopes.length !== 1) return null;
+  const env = r.envelopes[0]!;
+  if (env.tool !== "fomo_get_token_theses" || !["ok", "partial", "capped", "stale"].includes(env.status)) return null;
+  const d = env.data as TokenThesesData | null;
+  if (!d || !d.token || d.trader || !Array.isArray(d.theses)) return null;
+  const at = env.freshness.retrievedAt;
+  if (typeof at !== "number" || !Number.isFinite(at)) return null;
+  const coin = String(d.label?.symbol ?? "").replace(/^\$+/, "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 20);
+  const lines = text.split("\n");
+  const h = lines.findIndex((l) => l.startsWith(GROUP_THESES_HEAD));
+  const t = lines.findIndex((l) => l.startsWith(GROUP_THESES_TAIL));
+  if (h < 0 || t <= h) return null;
+  const byFamily = new Map<string, ThesisView>();
+  for (const v of d.theses) {
+    if (!v || v.isDev === true) continue;
+    const cur = byFamily.get(v.family);
+    if (!cur || likesOf(v) > likesOf(cur) || (likesOf(v) === likesOf(cur) && postedOf(v) > postedOf(cur))) byFamily.set(v.family, v);
+  }
+  const samples: string[] = [];
+  const reps = [...byFamily.values()].sort((a, b) => likesOf(b) - likesOf(a) || postedOf(b) - postedOf(a));
+  for (const v of reps) {
+    if (samples.length >= THESES_SAMPLES_MAX) break;
+    const s = thesesSample(v.excerpt);
+    if (s && !samples.includes(s)) samples.push(s);
+  }
+  if (samples.length < THESES_SAMPLES_MIN) return null;
+  return { key: `${d.token.key}@${Math.trunc(at)}`, coin, head: lines.slice(0, h + 1), tail: lines.slice(t), fallback: text, samples };
+}
+
 /** "tg-group:<chatId>:<threadId|0>": per room and forum topic, from the trusted update. */
 export function tgGroupConversationKey(chatId: number, threadId?: number): string {
   const topic = typeof threadId === "number" && Number.isSafeInteger(threadId) && threadId > 0 ? threadId : 0;
@@ -504,6 +587,9 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         }
         log(`[tg-fomo] group ask answered (${r.toolsCalled.length} lookup(s))${q.request ? " (routed)" : ""}`);
         const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false, status: answerStatus(r.envelopes) };
+        // A coin's theses: material for the group model to say in its own words (tg-groups/theses.ts).
+        const theses = thesesMaterial(r, said.text);
+        if (theses) said.theses = theses;
         // Her moves, only when she asked: the trusted sender id (handler.ts), never a chat.
         if (q.owner === true) {
           let moves: TgFomoMoves | null = null;

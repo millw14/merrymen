@@ -143,6 +143,7 @@ import type {
   TgTailAsk,
 } from "./types";
 import { chainIn, readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
+import { THESES_BOX_MS, ThesesWordings, wordTheses } from "./theses";
 import { readSubject, type SubjectReading } from "./understand";
 import { mentionFor, say, styleFor, styleWords, type SpeakCtx, type TgIntent } from "./voice";
 
@@ -2712,6 +2713,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return [...out, ...(end ? [end] : [])].join("\n");
   };
 
+  /** A coin's theses as the group model worded them, by coin and copy, for half an hour (theses.ts). */
+  const thesesWordings = new ThesesWordings();
+
   /** How often the owner's moves go out per room and kind of answer. */
   const MOVES_EVERY_MS = 30 * MIN;
   const movesAt = new Map<string, number>();
@@ -2834,11 +2838,37 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     rememberFomo(chatId, j.threadId);
     // Deflected before anything was looked up: it cost nothing, so it takes nothing.
     if (r.deflect && r.free === true) refund();
+    // A COIN'S THESES IN THE GROUP MODEL'S OWN WORDS (theses.ts, decision
+    // D5): one checked call inside what is left of the deadline, kept for
+    // half an hour; anything short of that is the code digest (r.text).
+    let body = r.text;
+    if (!r.deflect && r.theses) {
+      const stopWording = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
+      const worded = await wordTheses({
+        model: modelNow(),
+        gate,
+        chatId,
+        material: r.theses,
+        agentName: selfNow()?.name ?? "",
+        env: env(),
+        boxMs: Math.min(THESES_BOX_MS, replyByMs - RESEARCH_SEND_MS - clock()),
+        // Her moves line, when it goes, takes the last slot.
+        maxLines: FOMO_MAX_LINES - (owner && r.moves ? 1 : 0),
+        maxChars: FOMO_MAX_CHARS - (owner && r.moves ? r.moves.room.length + 1 : 0),
+        now: clock(),
+        kept: thesesWordings,
+        // Like routing, a paraphrase only spends the half of the allowance kept for what is nice to have.
+        reserve: { day: Math.max(ROUTE_RESERVE_DAY, Math.ceil(gate.dailyAllowance / 2)), hour: Math.max(ROUTE_RESERVE_HOUR, Math.ceil(gate.hourAllowance / 2)) },
+      }).finally(stopWording);
+      // Counts and kinds only: never a phrase, a coin or a sample.
+      log(`[tg-groups] theses ${worded.why}${worded.dropped ? ` (${worded.dropped} phrase(s) dropped)` : ""}`);
+      if (worded.lines) body = worded.lines.join("\n");
+    }
     // HER MOVES: the commands go to her DM first, and the room hears that they
     // went only when the DM landed (never a claim that is not true), at most
     // once per room and kind in MOVES_EVERY_MS.
     let movesLine: string | undefined;
-    if (owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(r.text) !== null) {
+    if (owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(body) !== null) {
       stageOf(chatId, "research: owner moves");
       if (await dmOwner(r.moves.dm)) {
         movesSaid(chatId, r.moves.kind);
@@ -2846,7 +2876,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         log("[tg-groups] owner moves sent to the DM");
       }
     }
-    const text = fomoSayable(r.text, movesLine) ?? FOMO_UNSAYABLE;
+    const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? FOMO_UNSAYABLE;
     return send(text);
   };
 
