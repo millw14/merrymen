@@ -21,7 +21,8 @@
  * instructions, nothing in the first person or naming the agent, Merrymen or
  * this room (never a pick or a position in its voice), no lure (an airdrop,
  * a presale, free tokens, someone to message; nothing waited on is a claim),
- * no crime laid at anyone's door (OUT_ACCUSE: theft, a stolen or pulled
+ * no crime laid at anyone's door (OUT_ACCUSE: theft, robbery, looting,
+ * siphoning, swindling, fraud, deceit, faking, an arrest, a stolen or pulled
  * pool, laundering, wash trading, lying, a criminal), no name of a person or
  * account (namesSomeone), no trade advice in its voice (OUT_ADVICE),
  * and the group gate as an `answer` line,
@@ -175,11 +176,15 @@ const OUT_LURE =
  */
 const SECOND_PERSON = /\b(?:you|your|yours|you're|youre|you've|you'll|y'all|ya'll|ur)\b|\bu\b(?!\.s\b)/i;
 /**
- * A CRIME LAID AT SOMEONE'S DOOR, said back to a room: theft, a stolen or
+ * A CRIME LAID AT SOMEONE'S DOOR, said back to a room: theft, robbery,
+ * looting, siphoning or draining the treasury, swindling, defrauding, a
+ * grifter, fleecing, deceit, ripping off, faking (an audit) or botting (the
+ * volume), an arrest, an indictment or jail, "is a con", a stolen or
  * pulled pool, walking off with the money, laundering, wash trading or
  * manipulation, lying, a cash grab, dumping on followers, a criminal, a
  * predator. Never the bare "lies" or "lying" ("the value lies in…", "lying
- * low"). Theses are claims about
+ * low"), "rob" inside a word ("a robust community"), the bare "loot" or "con"
+ * ("one con is the thin liquidity"). Theses are claims about
  * identifiable people (a coin's dev, its team), and worries stay worries
  * (THESES_SYSTEM): the gate's accusation clause knows rug, scam, honeypot,
  * ponzi, fraud and a dev dumping, not these. Kept here, not in the shared
@@ -189,7 +194,7 @@ const SECOND_PERSON = /\b(?:you|your|yours|you're|youre|you've|you'll|y'all|ya'l
  * vault") costs one phrase.
  */
 const OUT_ACCUSE =
-  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|(?:ran|walked|made|went|got)\s+(?:off|away)\s+with|(?:disappeared|vanished|fled)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool)|manipulat\w*|wash[\s-]?trad\w*|insider\s+trading|cash[\s-]?grab|lied|liars?|(?:dump(?:ed|ing|s)?|sold|selling)\s+on\s+(?:his|her|their|the)\s+(?:followers|holders|community|buyers|fans))\b/i;
+  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|(?:ran|walked|made|went|got)\s+(?:off|away)\s+with|(?:disappeared|vanished|fled)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool)|rob(?:s|bed|bing|bery|beries)?|loot(?:ed|ing)|siphon(?:s|ed|ing)?|swindl\w*|defraud\w*|grift\w*|fleec(?:e|ed|es|ing)|deceiv\w*|ripp(?:ed|ing)\s+(?:\w+\s+)?off|rip-?offs?|drain(?:s|ed|ing)?\s+(?:the\s+|their\s+|its\s+)?(?:treasury|funds|wallets?|holders)|arrest\w*|indict\w*|jail(?:ed)?|fak(?:ed|ing)\s+(?!out\b)|bott(?:ed|ing)\s+(?:the\s+)?volume|(?:is|was)\s+a\s+(?:total\s+|complete\s+|known\s+)?con\b|manipulat\w*|wash[\s-]?trad\w*|insider\s+trading|cash[\s-]?grab|lied|liars?|(?:dump(?:ed|ing|s)?|sold|selling)\s+on\s+(?:his|her|their|the)\s+(?:followers|holders|community|buyers|fans))\b/i;
 /**
  * TRADE ADVICE IN THE AGENT'S VOICE: a trade verb opening the phrase or one
  * of its clauses ("get some before the listing", "still early, join in",

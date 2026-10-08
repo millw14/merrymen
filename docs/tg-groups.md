@@ -1445,7 +1445,10 @@ someone to message or contact: "contact the admins to verify your wallet",
 about the team allocation" stay; the same shapes keep a thesis from the
 samples at all), nothing addressed to the room ("you", "your": a summary of
 other people's claims never speaks to anyone), no crime or misconduct laid at anyone's
-door (theft, a stolen or pulled pool, walking or making off with the money,
+door (theft, robbery, looting, siphoning or draining the treasury,
+swindling, defrauding, a grifter, fleecing, deceit, ripping off, a faked
+audit or botted volume, an arrest, an indictment or jail, "is a con", a
+stolen or pulled pool, walking or making off with the money,
 laundering, wash trading, manipulation, insider trading, a cash grab, lying
 or liars, dumping or selling on followers or holders, a criminal: worries
 stay worries, "fears it could collapse"; never the bare "lies" or "lying",

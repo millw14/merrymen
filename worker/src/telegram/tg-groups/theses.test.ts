@@ -271,7 +271,13 @@ describe("checkWording", () => {
     assert.equal(wording.gist, null);
     assert.deepEqual(wording.against, []);
     assert.equal(dropped, 4);
-    for (const x of ["the dev is a criminal", "the dev is a pedo", "the team is laundering money", "the devs ran off with the funds", "they drained the pool", "the dev took all the liquidity", "a con man running it", "the stolen funds were never returned", "the dev embezzled the treasury"]) {
+    for (const x of [
+      "the dev is a criminal", "the dev is a pedo", "the team is laundering money", "the devs ran off with the funds", "they drained the pool", "the dev took all the liquidity", "a con man running it", "the stolen funds were never returned", "the dev embezzled the treasury",
+      // Review r4.
+      "the team robbed holders", "the team looted the treasury", "worries the dev drained the treasury", "the devs swindled the community", "the dev siphoned the treasury",
+      "worries the founder defrauded buyers on a past coin", "the dev is a grifter", "fears the dev faked the audit", "the founder was arrested before", "the team ripped off holders",
+      "the team botted the volume", "the dev was a known con", "the team fleeced early buyers",
+    ]) {
       assert.deepEqual(checkWording({ against: [x] }, MATERIAL, "Shogun").wording.against, [], x);
       assert.equal(checkWording({ gist: x }, MATERIAL, "Shogun").wording.gist, null, x);
       assert.deepEqual(checkWording({ for: [x] }, MATERIAL, "Shogun").wording.forIt, [], x);
@@ -280,6 +286,8 @@ describe("checkWording", () => {
     // Worries and plain facts stay.
     const fair = ["thin liquidity for its size", "liquidity is locked", "worries about the dev's wallet", "fears it could collapse", "worries the dev could pull liquidity", "contract owner renounced", "the community took over after the dev left"];
     assert.deepEqual(checkWording({ against: fair.slice(0, 3), for: fair.slice(3, 6) }, MATERIAL, "Shogun").wording, { gist: null, forIt: fair.slice(3, 6), against: fair.slice(0, 3), waitingOn: [] });
+    const fairer = ["a robust community", "a loot box game meme", "one con is the thin liquidity", "worries early wallets drain liquidity slowly", "a bundled launch worries some", "fears a fake-out before the listing"];
+    assert.deepEqual(checkWording({ for: fairer.slice(0, 3), against: fairer.slice(3) }, MATERIAL, "Shogun").wording, { gist: null, forIt: fairer.slice(0, 3), against: fairer.slice(3), waitingOn: [] });
     assert.equal(checkWording({ gist: "The community took over after the dev left" }, MATERIAL, "Shogun").wording.gist, "The community took over after the dev left");
     // What a room hears from such a wording: none of it.
     const mixed = checkWording({ ...accusing, against: [...accusing.against.slice(0, 2), "thin liquidity for its size"], for: ["the dev is a criminal", "a busy community running raids"] }, MATERIAL, "Shogun").wording;
