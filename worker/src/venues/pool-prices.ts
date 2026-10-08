@@ -145,6 +145,34 @@ export function spotIdentity(r: RoutedPrice): string {
   return leg ? `${r.route}:${leg.pool.toLowerCase()}:${leg.tokenIsToken0 ? 0 : 1}:${leg.cashDecimals}` : "";
 }
 
+/** The route a sampled series is kept for: a spot route, or the spot alternative riding a TWAP one. */
+export function spotOf(r: RoutedPrice): RoutedPrice | null {
+  return r.spotOnly ? r : r.spotAlternative?.spotOnly ? r.spotAlternative : null;
+}
+
+/**
+ * WHETHER A CURRENT TWAP ROUTE STANDS when a refresh can only find a spot one.
+ *
+ * Kept (the refresh treated as a failed read, ageing toward MAX_ROUTE_AGE_SEC):
+ *  - the spot route is on ANOTHER pool and is not deeper — it came back only
+ *    because the TWAP pool's read failed this time (a rate limit, a timeout);
+ *    were it deeper, the TWAP route would have carried it as an alternative.
+ *  - it is the SAME pool and that pool keeps a real oracle ring (cardinality
+ *    over 1) whose window just came up short — a ring overrun by a burst of
+ *    swaps looks exactly like this, and a TWAP must not be traded for a spot
+ *    price on it.
+ * Taken at once: the same pool with a single observation. That pool can only
+ *  have "answered" before by extrapolating one quiet observation; its first
+ *  swap ends that, and its spot is now the truth — keeping the old reading
+ *  would freeze a pre-trade price, depth and divergence for minutes.
+ */
+export function keepTwapOver(previous: { routed: RoutedPrice | null; fetchedAt: number } | undefined, routed: RoutedPrice, nowSec: number): boolean {
+  const prev = previous?.routed;
+  if (!prev || prev.spotOnly || !routed.spotOnly || nowSec - previous!.fetchedAt > MAX_ROUTE_AGE_SEC) return false;
+  const samePool = !!prev.pool && prev.pool.toLowerCase() === routed.spotOnly.pool.toLowerCase();
+  return samePool ? routed.spotOnly.oracleCardinality > 1 : routed.liquidityUsdg <= prev.liquidityUsdg;
+}
+
 /** Human-readable provenance for a sampled price, beside `describeRoute`. */
 export function describeSampled(r: RoutedPrice, s: SampledPrice): string {
   const depth = Number(s.liquidityUsdg) / 1e6;
@@ -198,19 +226,15 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
           } catch {
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
-          // A CURRENT TWAP ROUTE IS NEVER TRADED FOR A SPOT ONE. A token with
-          // a pool whose oracle answered last time, and a second pool too new
-          // to have one, comes back as the second whenever the first's read
-          // fails — a rate limit, a timeout. Treated as that failure instead:
-          // the TWAP route is kept, ageing, and retired by MAX_ROUTE_AGE_SEC if
-          // it really is gone.
-          if (routed?.spotOnly && previous?.routed && !previous.routed.spotOnly && nowSec - previous.fetchedAt <= MAX_ROUTE_AGE_SEC) return;
+          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) return;
           if (routed) {
             cache.set(key, { routed, fetchedAt: nowSec });
-            // The full read's spot IS this tick's reading. A route that has
-            // grown an oracle needs no series: the pool keeps its own now.
-            if (routed.spotOnly) {
-              sampler.record(key, { atSec: nowSec, price18: routed.price18 ?? routed.price8 * 10_000_000_000n, liquidityUsdg: routed.liquidityUsdg }, spotIdentity(routed));
+            // The full read's spot IS this tick's reading — of the spot route,
+            // or of the deeper oracle-less alternative riding a TWAP route. A
+            // route with neither needs no series: its pool keeps its own.
+            const spot = spotOf(routed);
+            if (spot) {
+              sampler.record(key, { atSec: nowSec, price18: spot.price18 ?? spot.price8 * 10_000_000_000n, liquidityUsdg: spot.liquidityUsdg }, spotIdentity(spot));
             } else sampler.drop(key);
             refreshed.add(key);
             return;
@@ -231,9 +255,10 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
         tokens.map(async (t) => {
           const key = cacheKey(t);
           const hit = cache.get(key);
-          if (refreshed.has(key) || !hit?.routed?.spotOnly || nowSec - hit.fetchedAt > MAX_ROUTE_AGE_SEC) return;
-          const spot = await readSpotLeg(client, hit.routed.spotOnly);
-          if (spot) sampler.record(key, { atSec: nowSec, price18: spot.price18, liquidityUsdg: spot.liquidityUsdg }, spotIdentity(hit.routed));
+          const route = hit?.routed ? spotOf(hit.routed) : null;
+          if (refreshed.has(key) || !hit || !route?.spotOnly || nowSec - hit.fetchedAt > MAX_ROUTE_AGE_SEC) return;
+          const spot = await readSpotLeg(client, route.spotOnly);
+          if (spot) sampler.record(key, { atSec: nowSec, price18: spot.price18, liquidityUsdg: spot.liquidityUsdg }, spotIdentity(route));
         }),
       );
 
@@ -265,6 +290,18 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
         // The guard is re-applied on every read, against the CURRENT settings —
         // a cached route must never carry a stale verdict.
         const verdict = poolPriceUsable(r, guard);
+        // TOO THIN, WITH A DEEPER MARKET BESIDE IT: the deeper market answers.
+        // A dust pool with a working oracle must not leave a coin whose real
+        // market is a deep new pool unpriced — and a held one force-sold as
+        // unpriceable. Only for depth: a TWAP refused as divergent is being
+        // pushed, and that refusal stands.
+        if (!verdict.ok && verdict.kind === "too-thin" && r.spotAlternative) {
+          const alt = r.spotAlternative;
+          const quote = sampledQuote(alt, sampler.read(cacheKey(t), nowSec, spotIdentity(alt)), guard);
+          if ("refusal" in quote) refused.push({ symbol: t.symbol, ...quote.refusal });
+          else quotes.set(t.symbol, quote.quote);
+          continue;
+        }
         if (!verdict.ok) {
           refused.push({ symbol: t.symbol, kind: verdict.kind, reason: verdict.reason });
           continue;

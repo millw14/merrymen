@@ -61,6 +61,15 @@ export interface PoolPrice {
    * not the same fact and never becomes a spot price.
    */
   oracleCardinality: number;
+  /**
+   * observe() over the window was REFUSED BY THE POOL — Uniswap's "OLD": its
+   * history is shorter than the window. A cardinality-1 pool that traded
+   * recently answers this way, and so does a grown ring that has not yet
+   * filled the window. That is the only fact a spot route may stand on
+   * (spotRoute). An observe() that failed any other way — a timeout, a rate
+   * limit — is not it, and never becomes a spot price.
+   */
+  historyShort: boolean;
   /** TWAP, cash per whole token, 8dp — use for valuation and safety. */
   price8: bigint;
   /** Spot, same units — use for execution sizing only. */
@@ -420,6 +429,7 @@ export async function readPoolPrice(
     // must NOT silently degrade to spot, which is the whole thing we're avoiding.
     let twap8 = 0n;
     let twap18 = 0n;
+    let historyShort = false;
     try {
       const [tickCumulatives] = (await client.readContract({
         address: best.pool,
@@ -432,8 +442,9 @@ export async function readPoolPrice(
         twap8 = tickToPrice({ tick, ...shape, decimals: 8 });
         twap18 = tickToPrice({ tick, ...shape, decimals: 18 });
       }
-    } catch {
+    } catch (e) {
       twap8 = 0n; // oracle can't serve this window — poolPriceUsable will refuse
+      historyShort = revertedOld(e);
     }
 
     return {
@@ -441,6 +452,7 @@ export async function readPoolPrice(
       fee: best.fee,
       tokenIsToken0,
       oracleCardinality: Number(slot0[3]),
+      historyShort,
       price8: twap8,
       spot8,
       price18: twap18,
@@ -512,6 +524,17 @@ export interface RoutedPrice {
    * divergence (the reason pool-price.ts measures TWAP divergence at 18dp).
    */
   price18?: bigint;
+  /** The token's own pool on this route (the leg that is not WETH/USDG). */
+  pool?: `0x${string}`;
+  /**
+   * On a TWAP route only, and only for a caller that asked (`allowSpot`): a
+   * DEEPER route through a pool with no oracle history yet. The TWAP route is
+   * still the answer; this rides with it so a caller whose depth floor refuses
+   * the TWAP route can fall back to the deeper market (pool-prices.ts) rather
+   * than leave the coin unpriced because someone opened a dust pool with an
+   * oracle beside it.
+   */
+  spotAlternative?: RoutedPrice;
 }
 
 /** Enough to re-read one oracle-less pool's spot without searching for it again. */
@@ -522,6 +545,8 @@ export interface SpotLeg {
   cashDecimals: number;
   /** USD per whole cash unit, 8dp: 1e8 for USDG, the WETH/USDG TWAP for WETH. */
   cashUsd8: bigint;
+  /** The pool's oracle ring size: over 1 means it has an oracle whose history is merely short. */
+  oracleCardinality: number;
   /**
    * Depth of the OTHER leg (WETH/USDG) at the full read, USDG 6dp — a two-hop
    * route is only as deep as its thinner leg. Null on a direct route.
@@ -609,47 +634,74 @@ export async function readRoutedPrice(
           liquidityUsdg: cashRawToUsdg(direct.liquidityCashRaw, direct.cashDecimals, 100_000_000n),
           divergenceBps: direct.divergenceBps,
           twapWindowSec: windowSec,
+          pool: direct.pool,
         }
       : null;
 
-  // Every early exit below used to be `return directRoute`. A TWAP route still
-  // always wins; only when there is none does a caller that asked get a spot.
-  const fallback = (): RoutedPrice | null =>
-    directRoute ?? (args.allowSpot ? spotRoute(direct, leg, wethLeg, args.tokenDecimals) : null);
+  // THE TWAP CHOICE, EXACTLY AS IT WAS BEFORE SPOT ROUTES EXISTED. A caller
+  // that did not ask for spot gets this and nothing else.
+  const twapRoute = ((): RoutedPrice | null => {
+    if (!leg || !wethLeg || leg.price8 <= 0n || wethLeg.price8 <= 0n) return directRoute;
 
-  if (!leg || !wethLeg || leg.price8 <= 0n || wethLeg.price8 <= 0n) return fallback();
+    // The TOKEN/WETH pool's depth is denominated in WETH — 18 raw decimals, and
+    // each whole WETH is worth wethLeg.price8. Converting it explicitly through
+    // cashRawToUsdg is the whole point: doing this scaling by hand is how the
+    // number ends up 1e12 too large, which silently makes the depth floor
+    // unreachable on the WETH route — i.e. on most of this chain.
+    const legDepthUsdg = cashRawToUsdg(leg.liquidityCashRaw, leg.cashDecimals, wethLeg.price8);
+    const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
 
-  // The TOKEN/WETH pool's depth is denominated in WETH — 18 raw decimals, and
-  // each whole WETH is worth wethLeg.price8. Converting it explicitly through
-  // cashRawToUsdg is the whole point: doing this scaling by hand is how the
-  // number ends up 1e12 too large, which silently makes the depth floor
-  // unreachable on the WETH route — i.e. on most of this chain.
-  const legDepthUsdg = cashRawToUsdg(leg.liquidityCashRaw, leg.cashDecimals, wethLeg.price8);
-  const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
+    const wethRoute: RoutedPrice = {
+      // The token leg combines at 18dp; anything less quantizes a sub-cent
+      // memecoin's WETH price into single-digit integers.
+      price8: combineLegs(leg.price18, wethLeg.price8),
+      spot8: combineLegs(leg.spot18, wethLeg.spot8),
+      route: "weth",
+      // A deep WETH/USDG pool does NOT make a shallow memecoin pool safe: the
+      // route is only as manipulable as its thinnest leg.
+      liquidityUsdg: legDepthUsdg < wethDepthUsdg ? legDepthUsdg : wethDepthUsdg,
+      divergenceBps: Math.max(leg.divergenceBps, wethLeg.divergenceBps),
+      twapWindowSec: windowSec,
+      pool: leg.pool,
+    };
+    if (wethRoute.price8 <= 0n) return directRoute;
+    if (!directRoute) return wethRoute;
+    // Deeper wins. Ties go to direct — one hop, one pool to reason about.
+    return wethRoute.liquidityUsdg > directRoute.liquidityUsdg ? wethRoute : directRoute;
+  })();
+  if (!args.allowSpot) return twapRoute;
 
-  const wethRoute: RoutedPrice = {
-    // The token leg combines at 18dp; anything less quantizes a sub-cent
-    // memecoin's WETH price into single-digit integers.
-    price8: combineLegs(leg.price18, wethLeg.price8),
-    spot8: combineLegs(leg.spot18, wethLeg.spot8),
-    route: "weth",
-    // A deep WETH/USDG pool does NOT make a shallow memecoin pool safe: the
-    // route is only as manipulable as its thinnest leg.
-    liquidityUsdg: legDepthUsdg < wethDepthUsdg ? legDepthUsdg : wethDepthUsdg,
-    divergenceBps: Math.max(leg.divergenceBps, wethLeg.divergenceBps),
-    twapWindowSec: windowSec,
-  };
-  if (wethRoute.price8 <= 0n) return fallback();
-  if (!directRoute) return wethRoute;
-  // Deeper wins. Ties go to direct — one hop, one pool to reason about.
-  return wethRoute.liquidityUsdg > directRoute.liquidityUsdg ? wethRoute : directRoute;
+  // A TWAP ROUTE STILL COMES BACK FIRST. A spot route is the answer only when
+  // there is no TWAP route at all, and otherwise rides with it as an
+  // alternative when it is the deeper market (see RoutedPrice.spotAlternative).
+  const spot = spotRoute(direct, leg, wethLeg, args.tokenDecimals);
+  if (!twapRoute) return spot;
+  return spot && spot.liquidityUsdg > twapRoute.liquidityUsdg ? { ...twapRoute, spotAlternative: spot } : twapRoute;
 }
 
 /**
- * The deeper of the two routes whose TOKEN pool has no oracle for the window,
- * priced at its spot. Same depth rule as the TWAP routes — the shallower leg
- * bounds a two-hop route — and the WETH/USDG leg must still have its own TWAP:
- * only the memecoin's pool is allowed to be new. Null when neither has a spot.
+ * Did the pool itself refuse observe() for want of history — Uniswap v3's
+ * "OLD" — as opposed to the call failing on the way? viem carries a revert's
+ * reason on the error or a cause; a transport failure carries none.
+ */
+export function revertedOld(e: unknown): boolean {
+  for (let x: unknown = e, depth = 0; x && typeof x === "object" && depth < 6; x = (x as { cause?: unknown }).cause, depth++) {
+    const r = x as { reason?: unknown; message?: unknown; shortMessage?: unknown };
+    if (r.reason === "OLD") return true;
+    for (const text of [r.shortMessage, r.message]) {
+      if (typeof text !== "string") continue;
+      if (/^\s*OLD\s*$/.test(text) || /execution reverted:\s*OLD\b/.test(text) || /reverted with the following reason:\s*OLD\b/.test(text)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The deeper of the two routes whose TOKEN pool has no oracle history for the
+ * window, priced at its spot. Same depth rule as the TWAP routes — the
+ * shallower leg bounds a two-hop route — and the WETH/USDG leg must still have
+ * its own TWAP: only the memecoin's pool is allowed to be new. Null when
+ * neither has a spot.
  */
 function spotRoute(
   direct: PoolPrice | null,
@@ -657,12 +709,13 @@ function spotRoute(
   wethLeg: PoolPrice | null,
   tokenDecimals: number,
 ): RoutedPrice | null {
-  // ONLY A POOL WITH NO HISTORY AT ALL. A price8 of zero is also what a TWAP
-  // reads for a coin cheaper than 8dp can carry, and what an observe() that
-  // failed for any reason leaves behind — neither means the pool has no
-  // oracle, and treating them so would trade its TWAP for a spot price.
+  // ONLY A POOL WHOSE OWN ORACLE SAID ITS HISTORY IS TOO SHORT (historyShort).
+  // A price8 of zero is also what a TWAP reads for a coin cheaper than 8dp can
+  // carry, and what an observe() that failed on the way leaves behind —
+  // neither means the pool has no history, and treating them so would trade a
+  // TWAP for a spot price.
   const directSpot: RoutedPrice | null =
-    direct && direct.oracleCardinality <= 1 && direct.price8 <= 0n && direct.spot8 > 0n
+    direct && direct.historyShort && direct.spot8 > 0n
       ? {
           price8: direct.spot8,
           // Cash is USDG, so cash per token at 18dp is already USD at 18dp.
@@ -672,18 +725,20 @@ function spotRoute(
           liquidityUsdg: cashRawToUsdg(direct.liquidityCashRaw, direct.cashDecimals, 100_000_000n),
           divergenceBps: 0,
           twapWindowSec: 0,
+          pool: direct.pool,
           spotOnly: {
             pool: direct.pool,
             tokenIsToken0: direct.tokenIsToken0,
             tokenDecimals,
             cashDecimals: direct.cashDecimals,
             cashUsd8: 100_000_000n,
+            oracleCardinality: direct.oracleCardinality,
             otherLegDepthUsdg: null,
           },
         }
       : null;
   let wethSpot: RoutedPrice | null = null;
-  if (leg && wethLeg && leg.oracleCardinality <= 1 && leg.price8 <= 0n && leg.spot18 > 0n && wethLeg.price8 > 0n) {
+  if (leg && wethLeg && leg.historyShort && leg.spot18 > 0n && wethLeg.price8 > 0n) {
     const legDepthUsdg = cashRawToUsdg(leg.liquidityCashRaw, leg.cashDecimals, wethLeg.price8);
     const wethDepthUsdg = cashRawToUsdg(wethLeg.liquidityCashRaw, wethLeg.cashDecimals, 100_000_000n);
     const price8 = combineLegs(leg.spot18, wethLeg.price8);
@@ -697,12 +752,14 @@ function spotRoute(
         // The WETH/USDG leg still has an oracle, and its divergence still counts.
         divergenceBps: wethLeg.divergenceBps,
         twapWindowSec: 0,
+        pool: leg.pool,
         spotOnly: {
           pool: leg.pool,
           tokenIsToken0: leg.tokenIsToken0,
           tokenDecimals,
           cashDecimals: leg.cashDecimals,
           cashUsd8: wethLeg.price8,
+          oracleCardinality: leg.oracleCardinality,
           otherLegDepthUsdg: wethDepthUsdg,
         },
       };

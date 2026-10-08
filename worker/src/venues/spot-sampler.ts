@@ -101,11 +101,13 @@ export class SpotSampler {
       this.series.delete(key);
       entry = undefined;
     }
-    if (!entry) {
-      entry = { source, samples: [] };
-      this.series.set(key, entry);
-      while (this.series.size > SERIES_CAP) this.series.delete(this.series.keys().next().value as string);
-    }
+    if (!entry) entry = { source, samples: [] };
+    // RE-INSERTED ON EVERY READING, so Map order is recency and the cap evicts
+    // the series read longest ago — never a coin still being sampled (a held
+    // one included) just because it was the first one ever seen.
+    this.series.delete(key);
+    this.series.set(key, entry);
+    while (this.series.size > SERIES_CAP) this.series.delete(this.series.keys().next().value as string);
     const s = entry.samples;
     const last = s[s.length - 1];
     if (last && sample.atSec <= last.atSec) return;

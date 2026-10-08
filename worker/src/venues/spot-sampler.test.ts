@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { PublicClient } from "viem";
 import { CASH, type StockToken } from "../../../packages/core/src/index";
-import { createPoolPriceReader, sampledDivergenceBps } from "./pool-prices";
-import { readRoutedPrice } from "./pool-price";
+import { createPoolPriceReader, keepTwapOver, sampledDivergenceBps } from "./pool-prices";
+import { readRoutedPrice, revertedOld, type RoutedPrice } from "./pool-price";
 import {
   SAMPLE_MAX_GAP_SEC,
   SAMPLE_MIN_COUNT,
@@ -108,6 +108,18 @@ describe("SpotSampler — when a series counts", () => {
     assert.equal(r.ready, false);
   });
 
+  it("evicts the series read longest ago, never one still being sampled", () => {
+    const s = new SpotSampler();
+    s.record("held", sample(1000, 1));
+    for (let i = 0; i < 511; i++) s.record(`old-${i}`, sample(1000, 1));
+    // The held coin keeps being read; 511 others were seen once.
+    s.record("held", sample(1060, 1));
+    s.record("newcomer", sample(1060, 1));
+    assert.equal(s.size(), 512);
+    assert.ok(s.read("held", 1060), "a coin read this tick survives the cap");
+    assert.equal(s.read("old-0", 1060), null, "the least recently read one went");
+  });
+
   it("judges a very cheap coin at 18dp, so its own rounding is not a divergence", () => {
     // ~$1e-7: at 8dp these readings are the integers 10, 9, 9, 9, 10 — a 6% real
     // move that 8dp arithmetic reads as an 11% divergence.
@@ -148,7 +160,7 @@ const GUARD = { minLiquidityUsdg: usdgD(25_000), maxDivergenceBps: 500 };
  * exactly as a cardinality-1 pool's does. sqrtPriceX96 = 2^96 × m, so price
  * scales with m²; depth L = 5e10 is $50,000 at m = 1.
  */
-function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean; pool?: `0x${string}`; cardinality?: number; observeFails?: boolean }) {
+function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean; pool?: `0x${string}`; cardinality?: number; observeFails?: boolean; observeTransport?: boolean }) {
   const calls: string[] = [];
   const client = {
     async readContract(args: { address: string; functionName: string; args?: readonly unknown[] }): Promise<unknown> {
@@ -172,6 +184,7 @@ function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean; poo
         case "liquidity":
           return state.liquidity ?? usdgD(50_000);
         case "observe":
+          if (state.observeTransport) throw new Error("request timed out");
           if (!state.oracle || state.observeFails) throw new Error("OLD");
           return [[0n, 0n], [0n, 0n]];
         default:
@@ -203,15 +216,36 @@ describe("readRoutedPrice — a pool with no oracle", () => {
     assert.equal(r.liquidityUsdg, usdgD(50_000));
   });
 
-  it("never turns a pool WITH an oracle into a spot price when its observe() fails", async () => {
-    // A timeout, a rate limit, or an outsider filling the ring: the oracle did
-    // not answer this time. That is not a pool with no oracle.
-    const { client } = freshPool({ m: 1, oracle: true, observeFails: true });
+  it("never turns a pool into a spot price because its observe() failed on the way", async () => {
+    // A timeout or a rate limit: the oracle did not answer, which is not the
+    // pool saying its history is short.
+    const { client } = freshPool({ m: 1, oracle: true, observeTransport: true });
     const r = await readRoutedPrice(client, {
       token: CATE.address, tokenDecimals: 18, cash: CASH.USDG as `0x${string}`, cashDecimals: 6, weth: CASH.WETH as `0x${string}`,
       allowSpot: true,
     });
     assert.equal(r, null);
+  });
+
+  it("samples a grown ring whose history is still shorter than the window", async () => {
+    // Someone grew the ring (CHUMP and WOJAK grew this way); until it fills
+    // the window the pool itself answers OLD, exactly as a single slot does.
+    const { client } = freshPool({ m: 1, oracle: true, observeFails: true, cardinality: 10 });
+    const r = await readRoutedPrice(client, {
+      token: CATE.address, tokenDecimals: 18, cash: CASH.USDG as `0x${string}`, cashDecimals: 6, weth: CASH.WETH as `0x${string}`,
+      allowSpot: true,
+    });
+    assert.equal(r?.spotOnly?.oracleCardinality, 10);
+  });
+
+  it("reads the pool's own OLD, and nothing else, as short history", () => {
+    assert.equal(revertedOld(new Error("OLD")), true);
+    assert.equal(revertedOld({ shortMessage: "x", cause: { reason: "OLD" } }), true);
+    assert.equal(revertedOld(new Error('The contract function "observe" reverted with the following reason:\nOLD')), true);
+    assert.equal(revertedOld(new Error("execution reverted: OLD")), true);
+    assert.equal(revertedOld(new Error("request timed out")), false);
+    assert.equal(revertedOld(new Error("HOLD the line")), false);
+    assert.equal(revertedOld(null), false);
   });
 
   it("never replaces a route that has an oracle", async () => {
@@ -299,15 +333,83 @@ describe("createPoolPriceReader — a sampled price", () => {
     assert.equal(moved?.sampled?.ready, false, "a new pool's first reading authorises nothing");
   });
 
-  it("keeps a current TWAP route when a refresh can only find a spot one", async () => {
-    const state = { m: 1, oracle: true, observeFails: false };
+  it("takes a single-slot pool's spot at once when its quiet extrapolation ends", async () => {
+    // A cardinality-1 pool quiet for the window answers observe() by
+    // extrapolating its one observation; its next swap ends that. Keeping the
+    // old reading would freeze a pre-trade price for minutes.
+    const state = { m: 1, oracle: true, cardinality: 1, observeFails: false };
     const { client } = freshPool(state);
     const reader = createPoolPriceReader({ ttlSec: 60 });
     assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1000 })).quotes.get("CATE")?.source, "pool");
-    // The oracle stops answering, and the pool now reads as a fresh one would.
-    Object.assign(state, { oracle: false, cardinality: 1 });
+    Object.assign(state, { observeFails: true, m: Math.sqrt(0.5) });
     const q = (await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE");
-    assert.equal(q?.source, "pool", "a TWAP route inside MAX_ROUTE_AGE_SEC is not traded for a spot one");
+    assert.equal(q?.source, "sampled");
+  });
+
+  it("keeps a TWAP route on a real oracle ring that just came up short", async () => {
+    // A burst of swaps can overrun a ring; that is not the pool losing its oracle.
+    const state = { m: 1, oracle: true, cardinality: 300, observeFails: false };
+    const { client } = freshPool(state);
+    const reader = createPoolPriceReader({ ttlSec: 60 });
+    await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1000 });
+    state.observeFails = true;
+    assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE")?.source, "pool");
+  });
+
+  it("keepTwapOver: another pool's spot route stands in only when it is the deeper market", () => {
+    const twap = { price8: 1n, spot8: 1n, route: "direct", liquidityUsdg: usdgD(100_000), divergenceBps: 0, twapWindowSec: 900, pool: POOL } as RoutedPrice;
+    const spot = (pool: `0x${string}`, depth: number, cardinality = 1) => ({
+      price8: 1n, spot8: 1n, route: "weth", liquidityUsdg: usdgD(depth), divergenceBps: 0, twapWindowSec: 0, pool,
+      spotOnly: { pool, tokenIsToken0: true, tokenDecimals: 18, cashDecimals: 18, cashUsd8: 1n, oracleCardinality: cardinality, otherLegDepthUsdg: null },
+    }) as RoutedPrice;
+    const other = "0x00000000000000000000000000000000000000ee" as const;
+    const prev = { routed: twap, fetchedAt: 1000 };
+    assert.equal(keepTwapOver(prev, spot(other, 50_000), 1060), true, "a shallower pool came back only because the TWAP read failed");
+    assert.equal(keepTwapOver(prev, spot(other, 500_000), 1060), false, "a deeper one would have ridden the TWAP route anyway");
+    assert.equal(keepTwapOver(prev, spot(POOL, 50_000, 1), 1060), false, "a single slot's extrapolation ended");
+    assert.equal(keepTwapOver(prev, spot(POOL, 50_000, 300), 1060), true, "a real ring came up short");
+    assert.equal(keepTwapOver(prev, spot(other, 50_000), 1000 + 601), false, "past MAX_ROUTE_AGE_SEC nothing is kept");
+  });
+
+  it("prices a coin off its deep new pool when a dust pool with an oracle sits beside it", async () => {
+    // The two-market chain: a $50 CATE/USDG pool with a working oracle, a deep
+    // CATE/WETH pool too new for one, and the WETH/USDG pool.
+    const USDG = (CASH.USDG as string).toLowerCase(), WETH = (CASH.WETH as string).toLowerCase(), cate = CATE.address.toLowerCase();
+    const DUST = "0x00000000000000000000000000000000000000d5", DEEP = "0x00000000000000000000000000000000000000de", WP = "0x00000000000000000000000000000000000000e7";
+    const Q = 2 ** 96;
+    // CATE = 1e-6 WETH, WETH = $2,000, so CATE = $0.002.
+    const pools: Record<string, { token0: string; sqrt: number; L: bigint; cash: bigint; tick: number | null; card: number }> = {
+      [DUST]: { token0: cate, sqrt: Math.sqrt(0.002 * 1e6 / 1e18) * Q, L: 1_118_000_000_000_000n, cash: 50_000_000n, tick: Math.round(Math.log(0.002 * 1e6 / 1e18) / Math.log(1.0001)), card: 50 },
+      [DEEP]: { token0: cate, sqrt: Math.sqrt(1e-6) * Q, L: 100_000_000_000_000_000_000_000n, cash: 100n * 10n ** 18n, tick: null, card: 1 },
+      [WP]: { token0: WETH, sqrt: Math.sqrt(2000 * 1e6 / 1e18) * Q, L: 100_000_000_000_000_000_000n, cash: 10n ** 15n, tick: Math.round(Math.log(2000 * 1e6 / 1e18) / Math.log(1.0001)), card: 500 },
+    };
+    const client = {
+      async readContract(a: { address: string; functionName: string; args?: readonly unknown[] }): Promise<unknown> {
+        const p = pools[a.address.toLowerCase()];
+        switch (a.functionName) {
+          case "getPool": {
+            const [x, y, fee] = (a.args as [string, string, number]).map((v) => String(v).toLowerCase());
+            const pair = new Set([x, y]);
+            if (Number(fee) !== 100) return "0x0000000000000000000000000000000000000000";
+            if (pair.has(cate) && pair.has(USDG)) return DUST;
+            if (pair.has(cate) && pair.has(WETH)) return DEEP;
+            if (pair.has(WETH) && pair.has(USDG)) return WP;
+            return "0x0000000000000000000000000000000000000000";
+          }
+          case "balanceOf": return pools[String(a.args![0]).toLowerCase()]?.cash ?? 0n;
+          case "token0": return p!.token0;
+          case "slot0": return [BigInt(Math.round(p!.sqrt)), 0, 0, p!.card, p!.card, 0, true];
+          case "liquidity": return p!.L;
+          case "observe": if (p!.tick === null) throw new Error("OLD"); return [[0n, BigInt(p!.tick * 900)], [0n, 0n]];
+          default: throw new Error(`unexpected ${a.functionName}`);
+        }
+      },
+    } as unknown as PublicClient;
+    const reader = createPoolPriceReader();
+    const { quotes, refused } = await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1000 });
+    const q = quotes.get("CATE");
+    assert.equal(q?.source, "sampled", `the deep market answers, not the dust pool: ${JSON.stringify(refused)}`);
+    assert.ok(q!.liquidityUsdg! > usdgD(25_000));
   });
 
   it("drops the series once the pool keeps an oracle of its own", async () => {
