@@ -1,9 +1,23 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { privateKeyToAccount } from "viem/accounts";
-import { verifyMessage } from "viem";
-import { signMerrymanAuthorization, partnerGrantDigest, type StoredGrant, type PartnerEnrollmentClaim } from "./browser";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
+import { generatePrivateKey, privateKeyToAccount, toAccount } from "viem/accounts";
+import { verifyMessage, type Hex } from "viem";
+import { derivationOf, type MerrymenSettings } from "@merrymen/core";
+// FIRST, before ./browser: the fixture trusts its stub Trencher bytecode by
+// setting the env var trencher-permission.ts reads once, when session.ts loads.
+import { TRENCHER_FACTORY, withStubChain, type KernelState } from "../web/src/lib/canonical-wall-fixture";
+import {
+  prepareMerryman, signMerrymanAuthorization, partnerGrantDigest,
+  type LocalAccount, type PrepareMerrymanOptions, type StoredGrant, type PartnerEnrollmentClaim,
+} from "./browser";
 import { partnerEnrollmentMessage } from "../packages/core/src/partner-enrollment";
+import { prepareAgentGrant } from "../web/src/lib/session";
+import { createPartnerEnrollmentService } from "../web/src/lib/partner-enrollment";
+import { FilePartnerStore } from "../web/src/lib/partner-store";
+import { PartnerError } from "../web/src/lib/partner-bridge";
 
 const owner = privateKeyToAccount(`0x${"11".repeat(32)}`);
 const grant: StoredGrant = {
@@ -82,5 +96,111 @@ describe("browser partner authorization", () => {
     const key = fixture();
     key.grant = { ...grant, demoOwnerPrivateKey: `0x${"11".repeat(32)}` };
     await assert.rejects(signMerrymanAuthorization(key), /owner private key/);
+  });
+});
+
+/**
+ * ── prepareMerryman, over a stub chain and the REAL partner activation ───────
+ *
+ * The chain is canonical-wall-fixture's stub, which answers exactly the reads
+ * the signer makes and refuses anything else. Activation is
+ * createPartnerEnrollmentService from web/src/lib/partner-enrollment.ts, so
+ * "activation accepts this grant" is that code's verdict, not a copy of its
+ * allowed-field list that could drift from it.
+ */
+const ACCOUNT = "0x00000000000000000000000000000000000a11ce" as const;
+const CAPS = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 };
+const APP = { app_id: "prism-production", key_id: "000000000001", name: "Prism", scopes: ["read:agents", "write:agents", "chat:agents"] };
+const SCOPES = ["read:agents", "chat:agents"];
+const SETTINGS = { name: "Robin", strategy: "steady-basket" as const, basket_symbols: ["AAPL", "MSFT"], live_trading_enabled: false };
+const SECRET = "sdk-test-partner-enrollment-secret-at-least-32-bytes";
+
+/** An owner wallet that can only be asked to sign: no key is reachable through it. */
+function wallet() {
+  const key = generatePrivateKey();
+  const signer = privateKeyToAccount(key);
+  const log: string[] = [];
+  const owner: LocalAccount = toAccount({
+    address: signer.address,
+    signMessage: async (args) => { log.push("sign:message"); return signer.signMessage(args); },
+    signTypedData: async (args) => { log.push("sign:typed-data"); return signer.signTypedData(args); },
+    signTransaction: async (args) => { log.push("sign:transaction"); return signer.signTransaction(args); },
+  });
+  return { owner, key, log };
+}
+
+/** prepareMerryman on the stub chain; statuses and signatures share one log, in order. */
+function attempt(options: Record<string, unknown> = {}) {
+  const w = wallet();
+  const reads: NonNullable<KernelState["reads"]> = [];
+  const grant = withStubChain(ACCOUNT, () => prepareMerryman({
+    owner: w.owner, caps: CAPS, onStatus: (status: string) => { w.log.push(`status:${status}`); }, ...options,
+  } as PrepareMerrymanOptions), { currentNonce: 0, undeployed: true, reads });
+  return { ...w, reads, grant };
+}
+
+/** Refused before the chain is read, a status is shown or the owner is asked anything. */
+async function refusedUpFront(options: Record<string, unknown>, why: RegExp) {
+  const a = attempt(options);
+  await assert.rejects(a.grant, why);
+  assert.deepEqual(a.log, [], "no status and no signature request");
+  assert.deepEqual(a.reads, [], "no chain read");
+}
+
+const stores: { store: FilePartnerStore; home: string }[] = [];
+after(() => {
+  for (const { store, home } of stores) {
+    store.close();
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+/** Challenge, owner authorization and activation, exactly as a partner backend forwards them. */
+async function activate(grant: StoredGrant, owner: LocalAccount) {
+  const home = mkdtempSync(join(tmpdir(), "merrymen-sdk-"));
+  const store = new FilePartnerStore(home, undefined, () => SECRET);
+  stores.push({ store, home });
+  const saved = new Map<string, StoredGrant>();
+  const service = createPartnerEnrollmentService({
+    store, secret: () => SECRET,
+    derive: async () => derivationOf(ACCOUNT),
+    grants: { get: async (t) => saved.get(t) ?? null, put: async (t, g) => { saved.set(t, g); }, tenantForAccount: async () => null },
+    settings: { get: async () => null, put: async () => {} },
+    identities: { ensure: async (tenant, account) => ({ tenant, slug: "0000000000000001", accounts: [account], createdAt: 1, updatedAt: 1 }) },
+  });
+  const { connection } = await store.create({ partnerId: APP.app_id, partnerName: APP.name, externalUserId: "usr_123", name: "Robin", scopes: SCOPES });
+  const challenge = await service.challenge(APP, connection, {
+    owner: grant.owner, smart_account: grant.smartAccount, chain_id: grant.chainId, grant_hash: partnerGrantDigest(grant), settings: SETTINGS,
+  });
+  const authorization = await signMerrymanAuthorization({
+    owner, grant, challenge, settings: SETTINGS,
+    expectedAppId: APP.app_id, expectedAgentId: connection.id, expectedExternalUserId: "usr_123", expectedScopes: SCOPES,
+  });
+  const result = await service.activate(APP, connection, JSON.parse(JSON.stringify(authorization)));
+  return { result, stored: saved.get(grant.owner.toLowerCase()) };
+}
+const partnerCode = (code: string) => (error: unknown) => error instanceof PartnerError && error.code === code;
+
+describe("prepareMerryman", () => {
+  it("refuses a Trencher factory before any chain read or signature", async () => {
+    await refusedUpFront({ trencherFactory: TRENCHER_FACTORY }, /does not grant Trencher permissions: remove trencherFactory/);
+  });
+
+  it("does not offer trencherFactory in its option type", () => {
+    const options: PrepareMerrymanOptions = {
+      owner: wallet().owner, caps: CAPS,
+      // @ts-expect-error Partner enrollment grants no Trencher permission.
+      trencherFactory: TRENCHER_FACTORY,
+    };
+    assert.ok(options);
+  });
+
+  it("refuses it because activation refuses the fields a Trencher factory seals", async () => {
+    // If activation ever accepts Trencher, this fails, and the refusal above
+    // should be revisited rather than kept out of habit.
+    const { owner } = wallet();
+    const trench = await withStubChain(ACCOUNT, () => prepareAgentGrant(owner, { caps: CAPS, onStatus: () => {}, trencherFactory: TRENCHER_FACTORY }));
+    assert.equal(trench.trencherFactoryAddress, TRENCHER_FACTORY);
+    await assert.rejects(activate(trench, owner), partnerCode("bad_request"));
   });
 });

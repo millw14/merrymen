@@ -15,13 +15,33 @@ export type { PartnerEnrollmentSettings, PartnerEnrollmentClaim };
 export type { StoredGrant, GrantCaps } from "../packages/core/src/grant";
 export type { LocalAccount } from "viem";
 
-export interface PrepareMerrymanOptions extends Omit<PrepareAgentOptions, "onStatus"> {
+/**
+ * The dashboard signer's options, minus what partner activation refuses.
+ *
+ * NO TRENCHER. `trencherFactory` seals `trencherFactoryAddress` and
+ * `trencherVaultAddress` into the grant, and partner activation accepts neither
+ * field (validGrant in web/src/lib/partner-enrollment.ts): enrollment
+ * deliberately grants no Trencher permission. Offered here, the option let an
+ * owner approve a permission whose activation then failed with a 400.
+ */
+export interface PrepareMerrymanOptions extends Omit<PrepareAgentOptions, "onStatus" | "trencherFactory"> {
   owner: LocalAccount;
   onStatus?: (status: string) => void;
 }
 
-/** Derive and sign the same permission wall the Merrymen dashboard uses. */
+/**
+ * Derive and sign the same permission wall the Merrymen dashboard uses.
+ *
+ * Anything partner activation would refuse is refused HERE, before a chain read
+ * or a signature: the owner must never approve a permission that activation
+ * then throws away.
+ */
 export async function prepareMerryman({ owner, onStatus = () => {}, ...options }: PrepareMerrymanOptions): Promise<StoredGrant> {
+  // The type above omits it; plain-JavaScript callers still pass it, and
+  // prepareAgentGrant would honour it.
+  if ((options as { trencherFactory?: unknown }).trencherFactory !== undefined) {
+    throw new Error("Partner enrollment does not grant Trencher permissions: remove trencherFactory. Nothing was signed.");
+  }
   const grant = await prepareAgentGrant(owner, { ...options, onStatus });
   if (carriesOwnerKey(grant)) throw new Error("An owner private key must never be included in a partner grant.");
   return grant;
