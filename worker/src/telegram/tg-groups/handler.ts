@@ -1884,6 +1884,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     fadedAt.deleteWhere((k) => k.startsWith(prefix));
     lastAddressed.deleteWhere((k) => k.startsWith(prefix));
     landedOn.deleteWhere((k) => k.startsWith(prefix));
+    // Open and lost asks too: with landedOn gone an answered ask would read as lost, and a
+    // later "shogun" would re-run a forgotten line instead of getting its hail.
+    openAsks.deleteWhere((k) => k.startsWith(prefix));
+    lostAsks.deleteWhere((k) => k.startsWith(prefix));
+    personaFomoLines.deleteWhere((k) => k.startsWith(prefix));
     coinMissed.deleteWhere((k) => k.startsWith(prefix));
     askedIn.deleteWhere((k) => k.startsWith(prefix));
     for (const key of lastDesk.keys()) if (key.startsWith(prefix)) lastDesk.delete(key);
@@ -4177,8 +4182,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           ...(trendingAsk ? { trending: true } : {}),
           ...(meta !== null ? { meta } : {}),
           ...(meta === "complaint" && !live ? { noOpenAsk: true } : {}),
-          ...(meta === "complaint" && answeredHere && live ? { reaskOf: live.job.line.text } : {}),
-          ...(meta === null && addressed !== null && live && openState === "lost" && !live.reasked ? { reaskable: live } : {}),
+          // A /forgetme'd line never reaches the router as their earlier question.
+          ...(meta === "complaint" && answeredHere && live && !forgotten(live.job) ? { reaskOf: live.job.line.text } : {}),
+          ...(meta === null && addressed !== null && live && openState === "lost" && !live.reasked && !forgotten(live.job) ? { reaskable: live } : {}),
         };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.

@@ -473,6 +473,40 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     for (const o of tg.out().slice(before)) assert.doesNotMatch(o.text, /mostly red/);
   });
 
+  it("after /forget, an answered ask is not 'lost': 'shogun' gets its hail and a complaint asks which question", async () => {
+    make();
+    await said(msg("shogun how's the market?"));
+    assert.match(tg.out().slice(-1)[0]!.text, /mostly red/);
+    groups.forgetChat(CHAT);
+    clock += 40 * SEC;
+    const looks = desk.asks.length;
+    const hail = msg("shogun");
+    await said(hail);
+    assert.deepEqual(tg.out().slice(-1), [{ text: "hey 👋", replyTo: hail.messageId }]);
+    assert.ok(!logs.some((l) => l.startsWith("[tg-groups] an unanswered ask re-asked")), "nothing forgotten is re-run");
+    clock += 40 * SEC;
+    const complaint = msg("shogun i asked a question");
+    await said(complaint);
+    assert.deepEqual(tg.out().slice(-1), [{ text: "which question? i might've missed it, ask me again", replyTo: complaint.messageId }]);
+    assert.equal(desk.asks.length, looks);
+  });
+
+  it("a forgotten line never reaches the router as their earlier question, after /forget or /forgetme", async () => {
+    for (const forget of [() => groups.forgetChat(CHAT), () => groups.forgetMe(CHAT, MILLA)]) {
+      make();
+      routePrompts.length = 0;
+      tg.failNext = 1;
+      await said(msg("shogun how's the market looking for robinhood?"));
+      await forget();
+      clock += 20 * SEC;
+      await said(msg("shogun what do you think of the new logo lol"));
+      assert.ok(routePrompts.every((p) => !p.includes("how's the market looking for robinhood")), routePrompts.join("\n---\n"));
+      groups.stop();
+      await groups.drain();
+      clock += 11 * MIN;
+    }
+  });
+
   it("a re-asked line that carried a CA is never claimed or nominated again (rule 1)", async () => {
     make({ desk: () => null });
     tg.failNext = 5;
