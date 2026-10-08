@@ -17,6 +17,18 @@ export type { StoredGrant, GrantCaps } from "../packages/core/src/grant";
 export type { LocalAccount } from "viem";
 
 /**
+ * WHICH SDK THIS IS. The bundle compiles in the dashboard's own signer
+ * (web/src/lib/session.ts), so a dashboard change is an SDK change that nothing
+ * else announces. PARTNER_API_VERSION is the contract this SDK speaks: the
+ * api_version GET /partner/v1/meta reports. SDK_VERSION adds the build, a
+ * fingerprint of the bundle's own bytes stamped by sdk/build.mjs, so builds of
+ * different code never share a version. "+source" means it is running unbundled.
+ */
+export const PARTNER_API_VERSION = "2026-09-18";
+declare const __MERRYMEN_SDK_BUILD__: string | undefined;
+export const SDK_VERSION = `${PARTNER_API_VERSION}+${typeof __MERRYMEN_SDK_BUILD__ === "string" ? __MERRYMEN_SDK_BUILD__ : "source"}`;
+
+/**
  * The dashboard signer's options, minus what partner activation refuses.
  *
  * NO TRENCHER. `trencherFactory` seals `trencherFactoryAddress` and

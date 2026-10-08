@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { generatePrivateKey, privateKeyToAccount, toAccount } from "viem/accounts";
 import { verifyMessage, type Hex } from "viem";
 import { derivationOf, type MerrymenSettings } from "@merrymen/core";
@@ -10,7 +12,7 @@ import { derivationOf, type MerrymenSettings } from "@merrymen/core";
 // setting the env var trencher-permission.ts reads once, when session.ts loads.
 import { TRENCHER_FACTORY, withStubChain, type KernelState } from "../web/src/lib/canonical-wall-fixture";
 import {
-  prepareMerryman, signMerrymanAuthorization, partnerGrantDigest,
+  prepareMerryman, signMerrymanAuthorization, partnerGrantDigest, PARTNER_API_VERSION, SDK_VERSION,
   type LocalAccount, type PrepareMerrymanOptions, type StoredGrant, type PartnerEnrollmentClaim,
 } from "./browser";
 import { partnerEnrollmentMessage } from "../packages/core/src/partner-enrollment";
@@ -314,5 +316,32 @@ describe("prepareMerryman", () => {
     assert.notEqual(grant.sessionKeyAddress.toLowerCase(), a.owner.address.toLowerCase());
     // An address alone is not a signer: refused before anything is read or shown.
     await refusedUpFront({ owner: { address: a.owner.address } }, /explicit wallet signer/);
+  });
+});
+
+describe("SDK version", () => {
+  it("speaks the partner API contract version the gateway reports", () => {
+    // The gateway's /meta api_version default; a contract bump there must move this too.
+    const gateway = readFileSync(new URL("../gateway/lib/partner-api.mjs", import.meta.url), "utf8");
+    assert.equal(/\bversion = "([^"]+)"/.exec(gateway)?.[1], PARTNER_API_VERSION);
+    assert.equal(SDK_VERSION, `${PARTNER_API_VERSION}+source`, "unbundled, the build is named as source");
+  });
+
+  it("is stamped into the built bundle as a fingerprint of its contents, and printed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "merrymen-sdk-build-"));
+    try {
+      const out = join(home, "browser.mjs");
+      const build = () => execFileSync(process.execPath, [fileURLToPath(new URL("./build.mjs", import.meta.url)), "--outfile", out], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const printed = build();
+      const version = new RegExp(`${PARTNER_API_VERSION}\\+[0-9a-f]{12}`).exec(printed)?.[0];
+      assert.ok(version, `the build prints its version: ${printed}`);
+      const code = readFileSync(out, "utf8");
+      assert.ok(code.startsWith(`/* merrymen-browser ${version} */\n`), "the file names its version on its first line");
+      assert.ok(!code.includes("placeholder"));
+      assert.equal((await import(pathToFileURL(out).href)).SDK_VERSION, version, "and the module exports it");
+      assert.match(build(), new RegExp(`${version.replace("+", "\\+")}\\b`), "the same sources build the same version");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
