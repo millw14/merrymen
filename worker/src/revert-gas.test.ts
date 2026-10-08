@@ -22,6 +22,17 @@ const INDEX = readFileSync(`${HERE}index.ts`, "utf8");
 const BRANCH = INDEX.slice(INDEX.indexOf("const onChain = e instanceof UserOpReverted;"));
 const ROW = BRANCH.slice(0, BRANCH.indexOf("...sim,"));
 
+describe("a typed revert reaches its row at all", () => {
+  it("is not taken for an operation still in flight when its receipt carries gas proof", () => {
+    // The submitted-then-threw guard used to read `if (submittedRow)`, which
+    // every broadcast revert satisfies — so the revert row below never ran.
+    const said = INDEX.indexOf("was submitted, and then something after it failed");
+    const guardAt = INDEX.lastIndexOf("if (submittedRow", said);
+    assert.ok(guardAt > 0 && said > 0);
+    assert.equal(INDEX.slice(guardAt, INDEX.indexOf("{", guardAt) + 1), "if (submittedRow && !(e instanceof UserOpReverted && e.gasProof)) {");
+  });
+});
+
 describe("the trade path's revert row", () => {
   it("takes its gas from the revert's receipt proof, through gasFields", () => {
     assert.ok(BRANCH.length > 0 && ROW.length > 0, "the revert branch moved; re-point this test");

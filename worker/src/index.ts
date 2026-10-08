@@ -10941,7 +10941,18 @@ async function main() {
       // above: the pre-broadcast row stands, the charge stays counted, and the
       // stranded-op resolver settles it from the chain. The budget must NOT be
       // released here, which is why this sits above the rollback.
-      if (submittedRow) {
+      //
+      // A TYPED REVERT WITH ITS RECEIPT'S GAS PROOF IS NOT THAT CASE, and the
+      // guard said so in words and not in code: it read `if (submittedRow)`, so
+      // since 8a6270fb every on-chain revert of a broadcast op was told "this is
+      // NOT a revert", held against the caps, never suppressed when retrying
+      // could not fix it, and left for the resolver. The chain has answered:
+      // it falls through to the revert branch below, which settles the
+      // pre-broadcast row in place with the receipt's gas. A revert WITHOUT
+      // proof (a bundler that omitted the per-operation figures) still waits
+      // here for the resolver, which reads its gas off the EntryPoint event —
+      // settling it now would write a row with no gas that nothing completes.
+      if (submittedRow && !(e instanceof UserOpReverted && e.gasProof)) {
         // AND THE CALLER IS TOLD IT WENT OUT. No row was written on this path,
         // so the outcome used to read as null — "never reached the ledger,
         // nothing was sent; try again" — about an operation that WAS sent and
