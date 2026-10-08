@@ -313,7 +313,8 @@ check the host's clock.
 - **The RPC** is a separate client from the holder gate's, with no retries, no
   cache and 10 s a read. It must answer `eth_chainId` 4663, checked at boot,
   before each credit and before each reconciliation. On any other chain,
-  payments are unavailable; the mode is not changed, so check the boot line.
+  payments are unavailable, but the mode is not changed: under `enforce`,
+  quotas are still refused while nobody can pay. Check the boot line.
   If it cannot be reached at boot, that is logged, and the check happens
   before each credit. It is trusted to report receipts truthfully: one that
   lies can give away API usage, never move anyone's tokens. Its URL is never
