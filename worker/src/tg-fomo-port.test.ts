@@ -290,6 +290,20 @@ describe("createTgFomoPort", () => {
     assert.equal(s.calls.slice(mid).some((c) => typeof c.args.trader === "string"), false, "never the #1 trader's holdings");
   });
 
+  it("a group cap of 0: 'Fomo research isn't available here right now.', hour after hour, never a time to try again", async () => {
+    const s = await setup({ groupHourlyCredits: 0 });
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    for (let hour = 0; hour < 2; hour++) {
+      s.clock.now += 60 * 60_000;
+      const a = await port.ask({ text: "what are the theses on $PONS on fomo?", chatId: GROUP });
+      assert.ok(a && !a.deflect);
+      assert.equal(a.text, "Fomo research isn't available here right now.", a.text);
+      assert.doesNotMatch(a.text, /try again/);
+      assert.ok(admitTgLine(a.text, { agentName: "Pine", kind: "research", recentOwn: [] }).ok);
+    }
+    assert.deepEqual(s.provider, [], "nothing was read");
+  });
+
   it("what a trader made, with the positions read failing: 'could not be read just now', never 'nothing realised' (named and a board's row)", async () => {
     const s = await setup({ positionsFail: true });
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });

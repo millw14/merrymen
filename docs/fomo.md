@@ -758,7 +758,11 @@ resets: the owner hears which allowance ran out ("your hourly Fomo research allo
 used up; it resets at 15:00 UTC"), a room hears one wording for every cap, "fomo lookups
 for this room are used up for now, try again after 15:00 UTC." (hourly caps reset at the
 next clock hour, daily ones at 00:00 UTC; `budget.ts refusalResetAt`), never a credit or
-an amount. Nothing upgrades a plan, tops up credits or
+an amount. The daily caps and pools are checked before the hourly ones, so when both are
+spent the reset promised is midnight, never an hour that would refuse again. A cap below
+what one read costs (a group cap of 0 included) never resets on a clock: the owner hears
+that a configured cap is below one read, a room hears "Fomo research isn't available here
+right now.", never a time. Nothing upgrades a plan, tops up credits or
 switches provider. On the Free plan (about 6,450 credits/day) the fleet gets roughly one
 cohort refresh, a few holdings lookups and about one thesis page a day: enough to verify,
 not to operate. **Builder** (about 322k/day) is the realistic minimum for a fleet;
@@ -771,7 +775,7 @@ answers use one call on the existing house model.
 |---|---|---|
 | `MERRYMEN_FOMO_API_KEY` (alias `FOMO_API_KEY`) | web, orchestrator; self-hosted worker or settings `fomoApiKey` | provider key, stripped from hosted children |
 | `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget. A self-hosted worker reads it too, so its budget matches the install's web |
-| `MERRYMEN_FOMO_GROUP_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per Telegram group per clock hour. Default 2,500 |
+| `MERRYMEN_FOMO_GROUP_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per Telegram group per clock hour. Default 2,500. `0` turns group research off (a room hears "Fomo research isn't available here right now."); a nonzero cap below 2,500, the dearest read (resolving a named trader), can never answer one, and the boot log says so, as it does for an owner cap whose own share (three quarters) falls below it |
 | `MERRYMEN_FOMO_TENANT_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per clock hour, the owner's groups included. Default 6,000 |
 | `MERRYMEN_FOMO_TENANT_DAILY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per UTC day. Default 20,000. The three caps are whole numbers only (`budget.ts fomoBudgetFrom`, the one reader for orchestrator, web and a self-hosted worker); a bad value is logged by name, never echoed, and its default applies; each cap is held under the shared pool, and the boot line states the limits in force. Research-credit caps only, never a trading limit. Keep a group's cap at most three quarters of the owner's hourly one |
 | `MERRYMEN_TG_THESES_MODEL=0` | worker children | turns off the group model's paraphrase of a coin's theses: rooms hear the code-written digest only |

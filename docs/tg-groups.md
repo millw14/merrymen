@@ -113,7 +113,10 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    plainly ("couldn't reach fomo just now, try again in a bit.", or "fomo
    lookups for this room are used up for now, try again after 15:00 UTC."),
    never as "ask me in a direct message", which would make a failure sound
-   private and would not be true.
+   private and would not be true. The time is the latest reset among the
+   caps that refused it (a spent daily pool wins over a spent hourly cap), and
+   a cap no read fits (a group cap of 0) is "Fomo research isn't available
+   here right now.", never a time that would come and go.
    Unprompted failures (model, chain, Brain, Telegram) are silent in the group
    and at most logged.
 

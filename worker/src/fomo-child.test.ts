@@ -1796,7 +1796,8 @@ describe("the child's broker", () => {
     const broker = await selfHostedFomoBroker({ apiKey: "test_key_not_a_credential_0000", access: () => ({ dataAccess: true, monitoring: false, follow: false }), db, now: () => T0, planCreditsPerMonth: 37_500_000, budget: { groupHourlyCredits: 0 }, fetchImpl: (async () => assert.fail("a group with a zero cap reads nothing")) as typeof fetch });
     const env = await broker.call("fomo_get_rankings", { board: "traders" }, { surface: "telegram-group", audience: "group", conversationKey: "tg-group:1:0", priority: "interactive", groupId: "-1" });
     assert.equal(env.status, "budget-limited");
-    assert.equal(env.reason, "budget-group-hourly");
+    // 0 is no group research: a cap no read fits, never "used up until the next hour".
+    assert.equal(env.reason, "budget-below-one-read");
   });
 
   it("self-hosted, the durable money state lands in fomo.sqlite through the direct broker", async () => {

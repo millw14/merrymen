@@ -40,7 +40,7 @@ import {
   type FomoInvokeContext,
   type FomoServiceExt,
 } from "./service";
-import { renderEnvelope } from "./render";
+import { FOMO_GROUP_OFF, renderEnvelope } from "./render";
 import * as store from "./store";
 import type {
   ExtendTailData,
@@ -1793,10 +1793,19 @@ describe("a room's research lasts the evening (WP10: D7, D8, D10)", () => {
     assert.equal(room, "fomo lookups for this room are used up for now, try again after 00:00 UTC.");
     assert.doesNotMatch(room, /credit|\d{3,}|group's|your/);
 
-    const t = await harness({ budget: { ...GENEROUS, tenantHourlyCredits: 100 } });
+    // An hourly share that fits one board read (300 of 400) but not two: spent, it resets at the hour.
+    const t = await harness({ budget: { ...GENEROUS, tenantHourlyCredits: 400 } });
     t.clock.now = Date.parse("2026-10-07T14:59:59Z");
-    const mine = await t.invoke("fomo_get_rankings", { board: "traders" });
+    assert.equal((await t.invoke("fomo_get_rankings", { board: "traders" })).status, "ok");
+    const mine = await t.invoke("fomo_get_rankings", { board: "traders", window: "7d" });
     assert.equal(mine.message, "Fomo research is rationed right now: your hourly Fomo research allowance is used up; it resets at 15:00 UTC.");
+    // A cap below what one read costs never resets on a clock: no time is promised, to her or a room.
+    const low = await harness({ budget: { ...GENEROUS, tenantHourlyCredits: 100 } });
+    low.clock.now = Date.parse("2026-10-07T14:59:59Z");
+    const never = await low.invoke("fomo_get_rankings", { board: "traders" });
+    assert.equal(never.reason, "budget-below-one-read");
+    assert.equal(never.message, "Fomo research is rationed right now: a configured research cap is below what one read costs.");
+    assert.equal(renderEnvelope(never, { audience: "group", maxChars: 600, now: low.clock.now }), FOMO_GROUP_OFF);
   });
 });
 
@@ -1807,7 +1816,8 @@ describe("one owner's budget refusal is theirs alone (C23)", () => {
     const B = "0xbbbb000000000000000000000000000000000002";
     const refused = await h.invoke("fomo_get_token_theses", { token: PONS, chain: "robinhood" }, { tenant: A });
     assert.equal(refused.status, "budget-limited");
-    assert.match(refused.reason ?? "", /budget-tenant-/);
+    // A's caps (300) are below one thesis page: A's own refusal either way, never the fleet's.
+    assert.match(refused.reason ?? "", /budget-(?:tenant-|below-one-read)/);
     assert.equal((await h.service.ownerHealth(A, NOW)).state, "budget-limited", "A is told about A's own cap");
     assert.notEqual((await h.service.ownerHealth(B, NOW)).state, "budget-limited", "B is not");
     assert.equal((await h.service.health(NOW)).budgetLimited, false, "the process-wide health is not");

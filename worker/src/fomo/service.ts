@@ -872,6 +872,8 @@ function budgetMessage(reason: string | null, now: number): string {
     case "budget-shared-daily":
     case "budget-class-reserve":
       return `Fomo research is rationed right now: the shared daily research pool is used up${when}.`;
+    case "budget-below-one-read":
+      return "Fomo research is rationed right now: a configured research cap is below what one read costs.";
     case "job-allowance":
       return "Fomo research is rationed right now: this research job's credit allowance is spent.";
     default:

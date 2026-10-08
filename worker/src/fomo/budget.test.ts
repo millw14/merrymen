@@ -25,6 +25,8 @@ import {
   type ChargeRequest,
   type FomoBudgetConfig,
 } from "./budget";
+import { admitTgLine } from "../telegram/tg-groups/gate";
+import { FOMO_GROUP_OFF, groupRefusalLine } from "./render";
 import type { RetrievalPriority } from "./types";
 
 const NOW = Date.UTC(2026, 9, 4, 12, 0, 0);
@@ -206,14 +208,18 @@ describe("FomoBudget: tenant and group caps", () => {
     assert.deepEqual(await drain(budget, "interactive", g), { n: 2, reason: "group-hourly" });
     assert.deepEqual(await drain(budget, "interactive", { ...g, tenant: "t2" }), { n: 0, reason: "group-hourly" });
     assert.equal((await budget.tryCharge(req("interactive", { ...g, groupId: "g2" }))).ok, true);
-    assert.deepEqual(await budget.tryCharge(req("interactive", { surface: "telegram-group", groupId: null })), { ok: false, reason: "group-hourly" });
-    assert.deepEqual(await budget.tryCharge(req("interactive", { surface: "telegram-group", groupId: "  " })), { ok: false, reason: "group-hourly" });
+    // Fail-closed, and never a clock time: a group it cannot name is no group hour to wait for.
+    assert.deepEqual(await budget.tryCharge(req("interactive", { surface: "telegram-group", groupId: null })), { ok: false, reason: "no-group" });
+    assert.deepEqual(await budget.tryCharge(req("interactive", { surface: "telegram-group", groupId: "  " })), { ok: false, reason: "no-group" });
+    assert.equal(refusalResetAt("no-group", NOW), null);
   });
 
   it("a single charge larger than a limit is refused without touching the counter", async () => {
     const { budget, port } = make({ tenantHourlyCredits: 1_000 });
     const r = await budget.tryCharge(req("position-protection", { credits: 1_250 }));
-    assert.deepEqual(r, { ok: false, reason: "tenant-hourly" });
+    // It can never fit, in any hour: no reset time is promised (refusalResetAt is null).
+    assert.deepEqual(r, { ok: false, reason: "below-one-read" });
+    assert.equal(refusalResetAt(r.ok ? null : r.reason, NOW), null);
     assert.ok(port.keys().every((k) => port.used(k) === 0));
   });
 
@@ -233,6 +239,47 @@ describe("FomoBudget: tenant and group caps", () => {
     const keys = port.keys();
     assert.ok(keys.includes(`fomo:credits:tenant:a%3Aall%3Ah:all:h:${Math.floor(NOW / HOUR)}`), keys.join("\n"));
     assert.ok(keys.includes(`fomo:credits:group:x%3Ay:h:${Math.floor(NOW / HOUR)}`));
+  });
+});
+
+describe("FomoBudget: the reason reported is the one with the latest reset (review 2026-10-08)", () => {
+  const free = budgetConfigFor(FREE_PLAN_CREDITS_PER_MONTH);
+  const at = Date.UTC(2026, 9, 7, 14, 20, 0);
+  const room = (credits: number, over: Partial<ChargeRequest> = {}) => req("interactive", { surface: "telegram-group", groupId: "g1", credits, now: at, ...over });
+
+  it("the room's hourly cap and the shared pool both spent: the pool's reason, so the room hears 00:00, not the next hour", async () => {
+    const budget = new FomoBudget({ port: new MemoryAllowance(), config: free, now: () => at });
+    // Another owner spends most of the interactive pool in the morning.
+    for (let i = 0; i < 11; i++) assert.equal((await budget.tryCharge(req("interactive", { tenant: "t9", surface: "telegram-dm", credits: 250, now: at }))).ok, true);
+    // The room reads one coin (a search and a thesis page), then a second coin's search.
+    for (const c of [250, 1_250, 250]) assert.equal((await budget.tryCharge(room(c))).ok, true, String(c));
+    const r = await budget.tryCharge(room(1_250));
+    assert.deepEqual(r, { ok: false, reason: "class-reserve" });
+    const reason = r.ok ? null : `budget-${r.reason}`;
+    assert.equal(new Date(refusalResetAt(reason, at)!).toISOString(), "2026-10-08T00:00:00.000Z");
+    assert.equal(groupRefusalLine(reason, at), "fomo lookups for this room are used up for now, try again after 00:00 UTC.");
+  });
+
+  it("only the room's hourly cap spent: the next hour, as before", async () => {
+    const budget = new FomoBudget({ port: new MemoryAllowance(), config: free, now: () => at });
+    for (const c of [250, 1_250, 250]) assert.equal((await budget.tryCharge(room(c))).ok, true, String(c));
+    const r = await budget.tryCharge(room(1_250));
+    assert.deepEqual(r, { ok: false, reason: "group-hourly" });
+    assert.equal(groupRefusalLine("budget-group-hourly", at), "fomo lookups for this room are used up for now, try again after 15:00 UTC.");
+  });
+
+  it("a group cap of 0, or below one read: the room hears research is not on here, never a time, hour after hour", async () => {
+    for (const groupHourlyCredits of [0, 1_000]) {
+      const budget = new FomoBudget({ port: new MemoryAllowance(), config: { ...free, groupHourlyCredits }, now: () => at });
+      for (const now of [at, at + HOUR]) {
+        const r = await budget.tryCharge(room(1_250, { now }));
+        assert.deepEqual(r, { ok: false, reason: "below-one-read" }, String(groupHourlyCredits));
+        const line = groupRefusalLine(r.ok ? null : `budget-${r.reason}`, now);
+        assert.equal(line, FOMO_GROUP_OFF);
+        assert.doesNotMatch(line, /try again/);
+      }
+    }
+    assert.ok(admitTgLine(FOMO_GROUP_OFF, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
   });
 });
 
@@ -486,6 +533,11 @@ describe("refusalResetAt and the configured caps", () => {
     }
     assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "x", MERRYMEN_FOMO_TENANT_DAILY_CREDITS: "y" }).problems.length, 2);
     assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "  " }).problems.length, 0, "blank is unset");
+    // A nonzero cap below the dearest read (a named trader's, 2,500) can never answer one: said at boot.
+    assert.deepEqual(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "1000" }).problems, ["fomo: MERRYMEN_FOMO_GROUP_HOURLY_CREDITS is below what one named-trader read costs (2500 credits), so a room can never get one"]);
+    assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "1500" }).problems.length, 1, "1500 leaves an owner 1125 an hour");
+    assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "0" }).problems.length, 0, "0 is the documented off");
+    assert.equal(fomoBudgetFrom({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "2500" }).problems.length, 0, "the default fits one");
   });
 
   it("the defaults are unchanged, and an override is still held under the shared pool", () => {

@@ -196,6 +196,8 @@ interface Step<R extends string> {
   key: string;
   limit: number;
   reason: R;
+  /** The reason when the limit is below the amount itself (it can never fit, in any window); `reason` otherwise. */
+  tooBig?: R;
 }
 
 interface Taken {
@@ -236,7 +238,8 @@ async function takeAll<R extends string>(
   for (const s of steps) {
     // Checked here so the port never sees amount > limit (see AllowancePort).
     let ok = false;
-    if (s.limit > 0 && amount <= s.limit) {
+    const fits = s.limit > 0 && amount <= s.limit;
+    if (fits) {
       try {
         ok = await port.take(s.key, amount, s.limit, nowMs);
       } catch (err) {
@@ -246,7 +249,7 @@ async function takeAll<R extends string>(
     }
     if (!ok) {
       await rollback();
-      return { ok: false, reason: s.reason };
+      return { ok: false, reason: !fits && s.tooBig !== undefined ? s.tooBig : s.reason };
     }
     taken.push({ key: s.key, amount });
   }
@@ -347,6 +350,7 @@ export function refusalResetAt(reason: string | null | undefined, nowMs: number)
   const r = reason.startsWith("budget-") ? reason.slice("budget-".length) : reason;
   if (r === "group-hourly" || r === "tenant-hourly") return (hourIndex(nowMs) + 1) * HOUR_MS;
   if (r === "tenant-daily" || r === "shared-daily" || r === "class-reserve") return Date.parse(`${utcDay(nowMs)}T00:00:00.000Z`) + 24 * HOUR_MS;
+  // below-one-read and no-group never reset on a clock, like a job's own allowance.
   return null;
 }
 
@@ -400,7 +404,14 @@ export interface FomoBudgetConfig {
   tenantProtectionReserve?: number;
 }
 
-export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "shared-daily" | "class-reserve";
+/**
+ * Why a charge was refused. Each clock-bound one resets at the next hour or
+ * at 00:00 UTC (refusalResetAt). Two never reset on a clock: `below-one-read`
+ * (a configured cap is below this one read's cost, the documented 0 for a
+ * group included, so no window will ever fit it) and `no-group` (a group
+ * request that cannot name its group cannot be capped).
+ */
+export type ChargeRefusal = "tenant-hourly" | "tenant-daily" | "group-hourly" | "shared-daily" | "class-reserve" | "below-one-read" | "no-group";
 
 export interface ChargeRequest {
   priority: RetrievalPriority;
@@ -510,7 +521,7 @@ export class FomoBudget {
     const amount = Math.ceil(req.credits);
     const groupId = typeof req.groupId === "string" && req.groupId.trim() ? req.groupId : null;
     // A group question that cannot name its group cannot be capped: refuse it.
-    if (req.surface === "telegram-group" && groupId === null) return { ok: false, reason: "group-hourly" };
+    if (req.surface === "telegram-group" && groupId === null) return { ok: false, reason: "no-group" };
     if (amount === 0) return noopGrant();
 
     const pr = priorityOf(req.priority);
@@ -522,15 +533,26 @@ export class FomoBudget {
     const t = seg(req.tenant);
     const k = (...parts: string[]): string => [this.prefix, "credits", ...parts].join(":");
 
+    // THE DAILY STEPS FIRST, then the hourly ones. Every step must still pass, so what is
+    // granted does not change; only the reason reported does. A refusal reports the FIRST
+    // step that failed, and its reset time is promised to the room and the owner: midnight
+    // UTC is never earlier than the next hour (and every hourly counter starts fresh then
+    // too), so a spent daily cap or pool must win over a spent hourly one, or "try again
+    // after 15:00" is refused again at 15:00 until midnight.
+    //
+    // A tenant or group cap below this one read's cost can never fit, in any window (the
+    // documented 0 for a group included): `below-one-read`, no clock time promised. The
+    // pools keep their own reasons: an empty pool is the fleet's, said as such.
+    const cap = "below-one-read" as const;
     const steps: Step<ChargeRefusal>[] = [];
-    if (groupId !== null) steps.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly" });
-    if (!protect) steps.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly" });
-    steps.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly" });
-    if (!protect) steps.push({ key: k("tenant", t, "np", "d", day), limit: L.tenantDaily, reason: "tenant-daily" });
-    steps.push({ key: k("tenant", t, "all", "d", day), limit: c.tenantDailyCredits, reason: "tenant-daily" });
+    if (!protect) steps.push({ key: k("tenant", t, "np", "d", day), limit: L.tenantDaily, reason: "tenant-daily", tooBig: cap });
+    steps.push({ key: k("tenant", t, "all", "d", day), limit: c.tenantDailyCredits, reason: "tenant-daily", tooBig: cap });
     if (L.poolDiscovery !== null) steps.push({ key: k("pool", "discovery", "d", day), limit: L.poolDiscovery, reason: "class-reserve" });
     if (L.poolNonProtection !== null) steps.push({ key: k("pool", "np", "d", day), limit: L.poolNonProtection, reason: "class-reserve" });
     steps.push({ key: k("pool", "all", "d", day), limit: L.poolAll, reason: "shared-daily" });
+    if (groupId !== null) steps.push({ key: k("group", seg(groupId), "h", String(h)), limit: L.groupHourly, reason: "group-hourly", tooBig: cap });
+    if (!protect) steps.push({ key: k("tenant", t, "np", "h", String(h)), limit: L.tenantHourly, reason: "tenant-hourly", tooBig: cap });
+    steps.push({ key: k("tenant", t, "all", "h", String(h)), limit: c.tenantHourlyCredits, reason: "tenant-hourly", tooBig: cap });
 
     const r = await takeAll(this.port, steps, amount, req.now, this.onError);
     if (!r.ok) return r;
@@ -614,6 +636,14 @@ export function fomoBudgetFrom(env: Env): { budget: Partial<FomoBudgetConfig>; p
     }
     budget[field] = n;
   }
+  // A nonzero cap below the dearest read a room or owner surface makes can never answer it, in
+  // any hour: said once at boot, as the limit in force (0 is the documented "off", said by docs).
+  const dearest = ROUTE_COST["wallet-resolution"];
+  const keep = 1 - DEFAULT_PRIORITY_SHARES["position-protection"];
+  const low = (v: number | undefined, share: number): boolean => typeof v === "number" && v > 0 && Math.floor(v * share) < dearest;
+  if (low(budget.groupHourlyCredits, 1)) problems.push(`fomo: ${FOMO_CAP_ENV.groupHourlyCredits} is below what one named-trader read costs (${dearest} credits), so a room can never get one`);
+  if (low(budget.tenantHourlyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantHourlyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) an hour`);
+  if (low(budget.tenantDailyCredits, keep)) problems.push(`fomo: ${FOMO_CAP_ENV.tenantDailyCredits} leaves an owner's own research less than one named-trader read (${dearest} credits) a day`);
   return { budget, problems };
 }
 

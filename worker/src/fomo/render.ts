@@ -255,6 +255,10 @@ export function groupScrub(text: string): string {
  */
 export const GROUP_FOMO_UNREACHED = "couldn't reach fomo just now, try again in a bit.";
 export function groupRefusalLine(reason: string | null | undefined, now: number): string {
+  // A cap below one read (the documented 0 included), or a group it cannot name: no hour will
+  // fit it, so never "try again after …" and never "in a bit": research is not on here.
+  const r = typeof reason === "string" ? reason.replace(/^budget-/, "") : "";
+  if (r === "below-one-read" || r === "no-group") return FOMO_GROUP_OFF;
   const at = refusalResetAt(reason, now);
   return at !== null ? `fomo lookups for this room are used up for now, try again after ${utcClockText(at)} UTC.` : GROUP_FOMO_UNREACHED;
 }
