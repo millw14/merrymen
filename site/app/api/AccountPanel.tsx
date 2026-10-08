@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EXPLORER } from "../../lib/chain";
 import {
-  TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount,
+  TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount, renewalBy,
   normalizePreview, payWithWallet, paymentsReady, previewSentence, priceLabel, short, stillPayable, switchToRobinhood, txHash, waitingMessage, walletError, watchPayment,
   type AccountView, type Eip1193, type PayCheck, type PlanPreview, type PlansView, type WatchEnd,
 } from "../../lib/developer-billing";
@@ -150,7 +150,7 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
       ? <p className="dev-billing-note">Plan details could not be loaded just now. Reload the page to choose a plan or pay; nothing is lost meanwhile.</p>
       : on ? <PlanChooser view={view} plans={plans} busy={busy} run={run} onAccount={onAccount} reload={reload} />
         : <p className="dev-billing-note">Paid plans are coming soon. Your account is ready, and every key you create belongs to it.</p>}
-    {due !== null && treasury !== null && <PaymentPanel wallet={address} amount={due} treasury={treasury} busy={busy} run={run} waiting={waiting}
+    {due !== null && treasury !== null && <PaymentPanel wallet={address} amount={due} treasury={treasury} renewBy={renewalBy(view)} busy={busy} run={run} waiting={waiting}
       confirmPayable={confirmPayable} onSent={hash => follow(hash, true)} onPasted={hash => follow(hash, false)} />}
     {due !== null && on && treasury === null && <p className="dev-billing-note">Payments are not open yet, so nothing can be paid here. Nothing is lost: your selection waits.</p>}
     {watches.length > 0 && <div className="dev-pay-watches">{watches.map(w => <PaymentWatch key={w.hash} watch={w} spread={spread} minAgeSec={plans.confirmations?.min_age_sec}
@@ -164,20 +164,23 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
 /* ── What the account has ─────────────────────────────────────────────────── */
 
 export function AccountSummary({ view, plans, keys }: { view: AccountView; plans: PlansView; keys: Key[] }) {
-  const { plan, usage } = view, credit = BigInt(view.credit_raw);
+  const { plan, usage } = view, credit = BigInt(view.credit_raw), renewBy = renewalBy(view);
   const selected = plans.plans.find(p => p.id === plan.selected);
+  const due = view.due_raw ? `${formatTokens(view.due_raw, { decimals: 0, round: "up" })} MERRYMEN` : "";
   const pct = usage && usage.limit > 0 ? Math.min(100, Math.round(usage.used / usage.limit * 100)) : 0;
   const keyName = (id: string) => keys.find(k => k.key_id === id)?.name ?? id;
   return <div className="dev-account-summary">
     <div className="dev-account-plan">
       <span>PLAN</span><strong>{plan.name}</strong>
       <small>{plan.id === "free" ? "No payment" : plan.ends_at ? `Until ${formatDate(plan.ends_at)}` : ""}{plan.renews_on_next_request ? " · renews on your next API request" : ""}</small>
-      {selected && plan.selected !== plan.id && <small>Next: {selected.name}{view.due_raw ? " once it is paid" : plan.ends_at ? ` from ${formatDate(plan.ends_at)}` : ""}</small>}
+      {selected && plan.selected !== plan.id && <small>Next: {selected.name}{view.due_raw ? `${renewBy ? ` from ${formatDate(renewBy)},` : ""} once it is paid` : plan.ends_at ? ` from ${formatDate(plan.ends_at)}` : ""}</small>}
     </div>
     <div className="dev-account-credit">
       <span>CREDIT</span><strong>{formatTokens(credit, { decimals: 2 })} <small>MERRYMEN</small></strong>
       {credit < 0n ? <small className="dev-warn">A reversed payment left a shortfall. Paid plans do not start or renew until it is covered.</small>
-        : view.due_raw ? <small>Due: {formatTokens(view.due_raw, { decimals: 0, round: "up" })} MERRYMEN</small> : <small>Nothing due</small>}
+        : !due ? <small>Nothing due</small>
+          // The next period's price, owed only when this one ends: not "due" today.
+          : renewBy ? <small>To renew on {formatDate(renewBy)}: {due}</small> : <small>Due: {due}</small>}
     </div>
     {usage && plans.billing.mode !== "off" && <div className="dev-usage">
       <div className="dev-usage-head"><span>USAGE</span><span>{group(usage.used)} of {group(usage.limit)} requests{usage.resets_at ? ` · resets ${formatDate(usage.resets_at)}` : ""}</span></div>
@@ -247,8 +250,8 @@ export function WalletPay({ check, amount, busy, balance, onConnect, onSwitch, o
 /** Unanswered payments, if any: then the panel offers no new payment, only a way to add a hash. */
 type Waiting = { count: number; checking: boolean } | null;
 
-function PaymentPanel({ wallet, amount, treasury, busy, run, waiting, confirmPayable, onSent, onPasted }: {
-  wallet: string; amount: bigint; treasury: string; busy: string; run: Run; waiting: Waiting;
+function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, confirmPayable, onSent, onPasted }: {
+  wallet: string; amount: bigint; treasury: string; renewBy: string | null; busy: string; run: Run; waiting: Waiting;
   confirmPayable: (treasury: string) => Promise<void>; onSent: (hash: string) => void; onPasted: (hash: string) => void;
 }) {
   const [check, setCheck] = useState<PayCheck | null>(null);
@@ -288,7 +291,10 @@ function PaymentPanel({ wallet, amount, treasury, busy, run, waiting, confirmPay
     {paste}
   </section>;
   return <section className="dev-pay" aria-labelledby="dev-pay-title">
-    <h3 id="dev-pay-title">Pay {tokens} MERRYMEN</h3>
+    {renewBy
+      ? <><h3 id="dev-pay-title">Renew for the next period: {tokens} MERRYMEN</h3>
+        <p className="dev-billing-note">Your plan runs until {formatDate(renewBy)} either way, and nothing is owed before then. Credit you send now is used to renew it when this period ends.</p></>
+      : <h3 id="dev-pay-title">Pay {tokens} MERRYMEN</h3>}
     <dl className="dev-pay-details">
       <div><dt>Amount</dt><dd><code>{tokens} MERRYMEN</code><button type="button" aria-label="Copy amount" onClick={() => copy("amount", (amount / 10n ** 18n).toString())}>{copied === "amount" ? "Copied ✓" : "Copy"}</button></dd></div>
       <div><dt>To (Merrymen payments wallet)</dt><dd><code>{treasury}</code><button type="button" aria-label="Copy Merrymen payments wallet address" onClick={() => copy("treasury", treasury)}>{copied === "treasury" ? "Copied ✓" : "Copy"}</button><a href={`${EXPLORER}/address/${treasury}`} target="_blank" rel="noreferrer">Blockscout ↗</a></dd></div>

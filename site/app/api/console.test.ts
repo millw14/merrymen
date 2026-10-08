@@ -92,6 +92,17 @@ test('no payment panel without a live treasury, and nothing at all to pay when b
   const unknown = panel({ kind: 'ready', view: view() }, FALLBACK_PLANS);
   assert.match(unknown, /Plan details could not be loaded just now\. Reload the page to choose a plan or pay/); assert.doesNotMatch(unknown, /coming soon|Payments are not open/);
   assert.equal(keyLimits(FALLBACK_PLANS, { kind: 'ready', view: view() }), 'Up to 5 active keys · Create, read and chat scopes · Plan limits could not be loaded just now');
+  // Just after a payment starts Crumbs the gateway already reports the next period's price as due, for renewal:
+  // that is owed when this period ends, not now, and must not read as a bill for the payment just made.
+  const running = { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-01T00:00:00.000Z', ends_at: '2026-10-31T00:00:00.000Z', selected: 'crumbs', renews_on_next_request: false };
+  const renewal = panel({ kind: 'ready', view: view({ plan: running, credit_raw: '0', due_raw: (100_000n * UNIT).toString(), due_for: 'renewal' }) });
+  assert.match(renewal, /To renew on 31 Oct 2026: 100,000 MERRYMEN/); assert.doesNotMatch(renewal, /Due: |Pay 100,000 MERRYMEN/);
+  assert.match(renewal, /Renew for the next period: 100,000 MERRYMEN<\/h3>/); assert.match(renewal, /runs until 31 Oct 2026 either way, and nothing is owed before then/);
+  // Activation is due now, as is a renewal once the plan has lapsed to Free.
+  for (const due_for of ['activation', 'renewal', undefined]) {
+    const now = panel({ kind: 'ready', view: view({ credit_raw: '0', due_raw: (100_000n * UNIT).toString(), due_for }) });
+    assert.match(now, /Due: 100,000 MERRYMEN/, String(due_for)); assert.match(now, /<h3 id="dev-pay-title">Pay 100,000 MERRYMEN<\/h3>/, String(due_for));
+  }
   // Nothing due, nothing to pay.
   assert.doesNotMatch(panel({ kind: 'ready', view: view({ due_raw: null }) }), /Pay |Paste the transaction hash/);
   // A shortfall is said plainly.

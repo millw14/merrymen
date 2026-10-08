@@ -133,6 +133,12 @@ export interface AccountView {
   credit_raw: string;
   /** Base units still to send for what is selected, or null when nothing is due. */
   due_raw: string | null;
+  /**
+   * What `due_raw` pays for, as the gateway says: starting the selected plan,
+   * upgrading the running one, or renewing (the next period's price, owed only
+   * once the running period ends). Null when unsaid.
+   */
+  due_for: "activation" | "upgrade" | "renewal" | null;
   usage: { used: number; limit: number; resets_at: string | null; by_key: { key_id: string; used: number }[] } | null;
   /** Newest first, at most 50. */
   history: HistoryItem[];
@@ -162,13 +168,23 @@ export function normalizeAccount(input: unknown): AccountView | null {
     plan: { id: plan.id, name: label(plan.name, 32) || plan.id, starts_at: iso(plan.starts_at), ends_at: iso(plan.ends_at),
       selected: typeof plan.selected === "string" ? plan.selected : plan.id, renews_on_next_request: plan.renews_on_next_request === true },
     credit_raw: credit, due_raw: dueRaw !== null && BigInt(dueRaw) > 0n ? dueRaw : null,
+    due_for: dueRaw !== null && BigInt(dueRaw) > 0n && ["activation", "upgrade", "renewal"].includes(body.due_for as string) ? body.due_for as AccountView["due_for"] : null,
     usage: used !== null && limit !== null ? { used, limit, resets_at: iso(usage?.resets_at), by_key: byKey(usage?.by_key) } : null,
     // Newest first, whatever order the gateway sends: the reader wants the latest at the top, and a long list keeps its latest 50.
     history: history.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 50),
   };
 }
 
-export type PreviewEffect = "activate_now" | "upgrade_now" | "at_renewal" | "waiting_for_payment" | "cancel_renewal";
+/**
+ * When what is due only renews a plan that is running, the day it is needed
+ * by (the period's end); null when it is needed now. Right after a payment
+ * starts a plan, the gateway already reports the next period's price as due:
+ * read as "due now", that asks a developer who has just paid to pay again.
+ */
+export const renewalBy = (view: AccountView): string | null =>
+  view.due_raw !== null && view.due_for === "renewal" && view.plan.id !== "free" && view.plan.ends_at !== null ? view.plan.ends_at : null;
+
+export type PreviewEffect ="activate_now" | "upgrade_now" | "at_renewal" | "waiting_for_payment" | "cancel_renewal";
 export interface PlanPreview { effect: PreviewEffect; charge_now_raw: string; due_raw: string | null; starts_at: string | null; ends_at: string | null }
 export function normalizePreview(input: unknown): PlanPreview | null {
   const body = record(input), effect = body?.effect;

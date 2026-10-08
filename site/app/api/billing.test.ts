@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import {
   FALLBACK_PLANS, POLL_GIVE_UP_MS, POLL_MAX_CHECKS, ROBINHOOD_CHAIN, TOKEN, UNIT, amountToSend, balanceOfCalldata, ceilToWholeToken, chainIdOf, formatTokens, historyLabel, nextPollDelay,
-  normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, stillPayable, switchToRobinhood,
+  normalizeAccount, normalizePlans, normalizePreview, payEligibility, payWithWallet, paymentOutcome, paymentsReady, previewSentence, renewalBy, stillPayable, switchToRobinhood,
   endMessage, tokensToRaw, transferCalldata, txHash, waitingMessage, walletError, watchPayment, type Eip1193,
 } from '../../lib/developer-billing';
 
@@ -238,6 +238,17 @@ test('the account view keeps exact amounts and drops what it cannot read', () =>
   assert.equal(normalizeAccount(account({ due_raw: undefined, due_tokens: '40000' }))!.due_raw, (40_000n * UNIT).toString());
   assert.equal(normalizeAccount(account({ credit_raw: '-5000000000000000000' }))!.credit_raw, '-5000000000000000000');
   assert.equal(normalizeAccount(account({ usage: undefined }))!.usage, null);
+  // What the amount due is for, as the gateway says; nothing due is due for nothing.
+  for (const [due_for, expected] of [['renewal', 'renewal'], ['upgrade', 'upgrade'], ['activation', 'activation'], ['later', null], [undefined, null]] as const) {
+    assert.equal(normalizeAccount(account({ due_for }))!.due_for, expected, String(due_for));
+  }
+  assert.equal(normalizeAccount(account({ due_for: 'renewal', due_raw: null, due_tokens: null }))!.due_for, null);
+  // Only a renewal of a plan still running waits for the period's end; on Free (lapsed), or for anything else, it is due now.
+  const running = { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-01T00:00:00.000Z', ends_at: '2026-10-31T00:00:00.000Z', selected: 'crumbs' };
+  assert.equal(renewalBy(normalizeAccount(account({ plan: running, due_for: 'renewal' }))!), '2026-10-31T00:00:00.000Z');
+  assert.equal(renewalBy(normalizeAccount(account({ plan: running, due_for: 'upgrade' }))!), null);
+  assert.equal(renewalBy(normalizeAccount(account({ due_for: 'renewal' }))!), null, 'lapsed to Free');
+  assert.equal(renewalBy(normalizeAccount(account({ plan: running, due_for: 'renewal', due_raw: null, due_tokens: null }))!), null);
   assert.equal(normalizeAccount({ ...account(), account: { id: 'acct_1', wallet: 'nope' } }), null);
   // Names come from whoever made the account: right-to-left overrides and zero-width characters are dropped, so one cannot pass for another.
   assert.equal(normalizeAccount(account({ account: { id: 'acct_1', name: 'Pri\u202esm\u200b\u0007', wallet: WALLET } }))!.account.name, 'Prism');
