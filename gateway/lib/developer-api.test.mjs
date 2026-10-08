@@ -23,14 +23,14 @@ after(() => Promise.all(dirs.map(d => rm(d, { recursive: true, force: true }))))
 const portalSecret = "portal-test-secret-with-at-least-32-bytes";
 const gatewaySecret = "gateway-test-secret-with-at-least-32-bytes";
 /** A billing core on its own ledger, as server.mjs builds it; off by default, as it ships. */
-async function billingFor({ mode = "off", now = Date.now } = {}) {
+async function billingFor({ mode = "off", now = Date.now, ...extra } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "merrymen-developer-billing-"));
   dirs.push(dataDir);
-  return { dataDir, billing: await createBilling({ dataDir, mode, now, log: () => {}, timers: false }) };
+  return { dataDir, billing: await createBilling({ dataDir, mode, now, log: () => {}, timers: false, ...extra }) };
 }
-async function fixture({ store = createStore(), mode, ...options } = {}) {
+async function fixture({ store = createStore(), mode, billingOptions = {}, ...options } = {}) {
   let time = Date.now();
-  const { billing, dataDir } = await billingFor({ mode, now: () => time });
+  const { billing, dataDir } = await billingFor({ mode, now: () => time, ...billingOptions });
   const partners = createPartners({ secret: gatewaySecret });
   const partnerApi = createPartnerApi({ partners, store, billing });
   // `restart` is a new process on the same secrets and the same store.
@@ -360,6 +360,31 @@ test("payment checks are limited to 30 a minute per wallet", async () => {
   assert.equal(limited.status, 429); assert.equal(limited.json.error.code, "rate_limited");
   const other = await f.onboard(privateKeyToAccount(generatePrivateKey()));
   assert.equal((await f.call("/payments", { tx_hash: hash }, other.session)).json.error.code, "payments_unavailable", "each wallet has its own");
+});
+test("a payment check waiting on the chain holds up no key: its reads stay out of the key-mutation queue", async () => {
+  // The receipt read stays open until the test answers it. Nothing here waits
+  // on the chain's own timeout, which is set far beyond the one below.
+  let answer;
+  const receipt = new Promise((_, reject) => { answer = () => reject(Object.assign(new Error("not mined"), { name: "TransactionReceiptNotFoundError" })); });
+  let asked = 0;
+  const publicClient = { getChainId: async () => 4663, getTransactionReceipt: () => { asked += 1; return receipt; } };
+  const f = await fixture({ mode: "enforce", billingOptions: { treasury: `0x${"7e".repeat(20)}`, startBlock: 1, publicClient, readTimeoutMs: 60_000 } });
+  const { session } = await f.onboard();
+  const paying = f.call("/payments", { tx_hash: `0x${"ab".repeat(32)}` }, session);
+  try {
+    for (let i = 0; i < 100 && asked === 0; i++) await new Promise(setImmediate); // bounded by count
+    assert.equal(asked, 1, "the payment check is waiting on its receipt");
+    let timer;
+    const late = new Promise(resolve => { timer = setTimeout(() => resolve("still waiting"), 2_000); });
+    const minted = await Promise.race([f.call("/keys", { name: "While paying" }, session), late]);
+    clearTimeout(timer);
+    assert.equal(minted.status, 201, "a key is minted while a payment check waits on the chain");
+    assert.equal((await f.call("/revoke", { key_id: minted.json.key_id }, session)).status, 200);
+  } finally {
+    answer();
+  }
+  const pending = await paying;
+  assert.deepEqual([pending.status, pending.json.code, pending.json.stage], [202, "payment_pending", "not_found_yet"]);
 });
 test("a key lists the rate its account's plan gives it, not the one stored when it was minted", async () => {
   // Billing off: what was stored, as before billing.
