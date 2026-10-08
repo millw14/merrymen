@@ -81,9 +81,11 @@ async function startGateway(env) {
   });
   const origin = `http://127.0.0.1:${port}`;
   return {
-    origin, stdout: () => out, stderr: () => err,
+    origin, stdout: () => out, stderr: () => err, exited,
     /** Send a signal and wait for the process to end. */
     stop: (signal = "SIGTERM") => { child.kill(signal); return exited; },
+    /** Send a signal and return at once. */
+    signal: (signal) => child.kill(signal),
   };
 }
 
@@ -335,6 +337,44 @@ test("a request still running when the 3 s drain ends is cut off, gives its unit
   assert.match(gw.stdout(), /1 partner request still running was cut off: its unit is given back/);
   const windows = Object.values(JSON.parse(await readFile(path.join(dir, "usage.json"), "utf8")).windows);
   assert.deepEqual(windows.map((w) => [w.total, w.keys]), [[1, { [keyId]: 1 }]], "only the answered request is saved as used");
+});
+
+test("a shutdown still going at the 10 s deadline exits 1 then, rather than wait for the host's SIGKILL", async () => {
+  // A request held past the drain keeps stop() waiting its 3 s. The process is
+  // then frozen (SIGSTOP: a starved or paused container) until both the drain
+  // and the deadline have passed. Woken past the deadline, it must exit 1
+  // then, not carry on saving into the host's SIGKILL. Removing the deadline
+  // from server.mjs makes this exit 0 instead.
+  const dir = await mkdtemp(path.join(tmpdir(), "merrymen-billing-deadline-"));
+  cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const web = await startWeb();
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  cleanup.push(() => releaseSlow()); // before the stub runtime closes (cleanups run last-first)
+  web.reply = async () => { await slow; return { status: 200, body: { agent: { id: "pa_slow" } } }; };
+  const owner = `0x${"f6".repeat(20)}`;
+  const { key, keyId, secret } = makeKey();
+  const gw = await startGateway({
+    MERRYMEN_DATA_DIR: dir, MERRYMEN_BILLING: "observe",
+    MERRYMEN_PARTNER_BRIDGE_SECRET: BRIDGE, MERRYMEN_PARTNER_APP_ORIGIN: web.origin,
+    MERRYMEN_PARTNER_KEYS: JSON.stringify([{ keyId, appId: "deadline-production", owner, name: "Deadline", hash: hashSecret(SECRET, secret),
+      scopes: ["read:agents"], rpm: 30, status: "active", created_at: new Date().toISOString() }]),
+  });
+  const held = partner(gw, key, "/agents/pa_slow").catch(() => "cut off");
+  for (let i = 0; i < 300 && web.seen.length < 1; i++) await delay(10);
+  assert.equal(web.seen.length, 1, "the held request reached the runtime");
+
+  gw.signal("SIGTERM");
+  for (let i = 0; i < 300 && !gw.stdout().includes("SIGTERM: saving usage counts"); i++) await delay(10);
+  assert.match(gw.stdout(), /SIGTERM: saving usage counts/);
+  gw.signal("SIGSTOP");
+  await delay(11_000);
+  gw.signal("SIGCONT");
+  let timer;
+  const exited = await Promise.race([gw.exited, new Promise((resolve) => { timer = setTimeout(() => resolve("still running"), 10_000); })]);
+  clearTimeout(timer);
+  assert.deepEqual(exited, { code: 1, signal: null }, gw.stdout() + gw.stderr());
+  await held;
 });
 
 test("every degraded billing mode is said at boot", async () => {
