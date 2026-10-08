@@ -283,6 +283,12 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       const done = await e.service.activate(principal, pending.connection, activation);
       assert.equal(done.connection.tenant, e.owner);
       assert.equal((await first.byTenant(principal.app_id, e.owner))?.id, pending.connection.id);
+      // A lost response: the same authorization is answered from the recorded proof, writing nothing.
+      const applied = [...e.events];
+      const again = await e.service.activate(principal, pending.connection, activation);
+      assert.equal(again.replayed, true);
+      assert.deepEqual(again.connection, done.connection);
+      assert.deepEqual(e.events, applied);
     });
 
     await t.test("a failure after the nonce is spent under the lock does not reopen the signed token", async () => {

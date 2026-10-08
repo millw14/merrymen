@@ -107,12 +107,43 @@ test("live consent enables trading only after the signed grant was stored", asyn
   assert.equal(f.savedSettings.get(f.owner.address.toLowerCase())?.liveTradingEnabled, true);
 });
 
-test("a consumed owner authorization cannot activate again", async () => {
+test("re-presenting a completed activation answers with the current connection and applies nothing again", async () => {
   const f = await fixture();
-  const activation = await f.activationFor();
-  await f.service.activate(principal, f.connection, activation);
-  await assert.rejects(f.service.activate(principal, f.connection, activation), errorCode("challenge_used"));
-  assert.equal(f.events.filter(e => e === "grant").length, 1);
+  const tenant = f.owner.address.toLowerCase();
+  const activation = await f.activationFor(f.grant, { ...settings, live_trading_enabled: true });
+  const first = await f.service.activate(principal, f.connection, activation);
+  assert.equal(first.replayed, false);
+  const applied = [...f.events];
+  // The owner turns live trading off afterwards; a lost-response retry must not turn it back on.
+  f.savedSettings.set(tenant, { ...f.savedSettings.get(tenant)!, liveTradingEnabled: false });
+  const again = await f.service.activate(principal, f.connection, activation);
+  assert.equal(again.replayed, true);
+  assert.deepEqual(again.connection, first.connection);
+  assert.equal(again.smartAccount, ACCOUNT);
+  assert.deepEqual(f.events, applied, "no grant, settings or identity write on a retry");
+  assert.equal(f.savedSettings.get(tenant)?.liveTradingEnabled, false);
+  // The same token with a changed grant, or a signature by anyone else, is still refused.
+  await assert.rejects(f.service.activate(principal, f.connection, { ...activation, grant: { ...f.grant, caps: { ...f.grant.caps, dailyUsdg: 40 } } }), errorCode("grant_digest_mismatch"));
+  const stranger = await privateKeyToAccount(generatePrivateKey()).signMessage({ message: (await f.challengeFor()).message });
+  await assert.rejects(f.service.activate(principal, f.connection, { ...activation, signature: stranger }), errorCode("wrong_owner"));
+  assert.deepEqual(f.events, applied);
+});
+
+test("only the latest completed activation is answered again; an earlier or unfinished one stays used", async () => {
+  const f = await fixture();
+  const original = await f.activationFor();
+  const initial = await f.service.activate(principal, f.connection, original);
+  const renewal = await f.activationFor(f.grant, settings, initial.connection);
+  await f.service.activate(principal, initial.connection, renewal);
+  await assert.rejects(f.service.activate(principal, initial.connection, original), errorCode("challenge_used"));
+  assert.equal((await f.service.activate(principal, initial.connection, renewal)).replayed, true);
+  // Bound and paper-installed, but live trading failed: not complete, so not answerable as a success.
+  let failLive = true;
+  const g = await fixture({ settings: { get: async () => null, put: async (_tenant, s) => { if (s.liveTradingEnabled && failLive) throw new Error("settings database unavailable"); } } });
+  const live = await g.activationFor(g.grant, { ...settings, live_trading_enabled: true });
+  await assert.rejects(g.service.activate(principal, g.connection, live), errorCode("enrollment_storage_failed"));
+  failLive = false;
+  await assert.rejects(g.service.activate(principal, g.connection, live), errorCode("challenge_used"));
 });
 
 test("contention for the owner's enrollment lock leaves the signature usable for a retry", async () => {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import {
-  FilePartnerStore, getPartnerStore, ONBOARDING_TTL_SECONDS, PARTNER_HISTORY_EXCHANGES,
+  activatedBy, FilePartnerStore, getPartnerStore, ONBOARDING_TTL_SECONDS, PARTNER_HISTORY_EXCHANGES,
   PartnerStoreError, type PartnerCreate,
 } from "./partner-store";
 
@@ -153,6 +153,24 @@ test("embedded proof binding scopes the connection to its partner and is idempot
   await assert.rejects(store.bindAuthorized(pending.connection.id, "partner-a", B, ["chat:agent"]), /different owner/);
   await assert.rejects(store.bindAuthorized(pending.connection.id, "partner-a", A, ["read:agent", "chat:agent"]), /different owner or consent/);
   assert.equal(await store.byToken(pending.token!), null);
+});
+
+test("an activation proof is recorded only on a connection linked to that owner, and names one exact authorization", async () => {
+  const { store } = fixture();
+  const pending = await store.create(input());
+  const proof = { nonce: "a".repeat(48), grantHash: `0x${"1".repeat(64)}` };
+  const changed = (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_changed";
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-a", A, proof), changed, "not while pending");
+  await store.bindAuthorized(pending.connection.id, "partner-a", A, ["chat:agent"]);
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-a", B, proof), changed, "not for another owner");
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-b", A, proof), changed, "not across apps");
+  const recorded = await store.recordActivation(pending.connection.id, "partner-a", A, proof);
+  assert.ok(activatedBy(recorded, proof));
+  assert.ok(!activatedBy(recorded, { ...proof, nonce: "b".repeat(48) }));
+  assert.ok(!activatedBy(recorded, { ...proof, grantHash: `0x${"2".repeat(64)}` }));
+  assert.ok(!JSON.stringify(recorded).includes(proof.nonce), "only a hash of the nonce is kept");
+  await store.revoke("partner-a", pending.connection.id);
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-a", A, proof), changed, "never on a revoked connection");
 });
 
 test("embedded binding cannot bypass per-partner wallet uniqueness or revive revocation", async () => {

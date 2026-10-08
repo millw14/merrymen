@@ -86,7 +86,11 @@ export function createPartnerService(deps: {
       const input = objectBody(raw);
       if (resource === "challenge") return { status: 200, body: await deps.enrollment.challenge(partner, connection, input) };
       const activated = await deps.enrollment.activate(partner, connection, input);
-      return { status: 200, body: { ...view(activated.connection, await deps.readRuntime(activated.connection.tenant!)),
+      // Activation has committed. A failed status read used to answer 503, and
+      // the partner's retry then met a spent challenge: report the success with
+      // the worker's state marked unknown instead.
+      const runtime = await deps.readRuntime(activated.connection.tenant!).catch(() => null);
+      return { status: 200, body: { ...view(activated.connection, runtime ?? undefined), ...(runtime ? {} : { runtime_available: false }),
         wallet: { smart_account: activated.smartAccount, chain_id: activated.chainId } } };
     }
     if (!resource && method === "GET") {

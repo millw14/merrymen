@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FilePartnerStore } from "./partner-store";
+import { FilePartnerStore, type PartnerConnection } from "./partner-store";
 import { createPartnerService } from "./partner-service";
 import { verifyPartnerRequest } from "./partner-bridge";
 import { PartnerRuntimeError } from "./partner-runtime";
@@ -223,6 +223,32 @@ test("a retry that outwaits a running generation gets a retryable conversation_b
   const retried = await call("POST", path, body);
   assert.deepEqual(retried.body, answered.body);
   assert.equal(generated, 1);
+});
+
+test("an activation that committed is reported as a success even when the status read then fails", async () => {
+  let linked: PartnerConnection | null = null;
+  const enrollment = {
+    challenge: async () => { throw new Error("unused"); },
+    activate: async () => ({ connection: linked!, smartAccount: tenant, chainId: 4663, replayed: false }),
+  } as unknown as ServiceDeps["enrollment"];
+  const { store, call } = fixture({ enrollment, readRuntime: async () => { throw new PartnerRuntimeError(503, "runtime_unavailable", "The agent's current permission could not be read."); } });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  linked = await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const activated = await call("POST", `/agents/${created.body.id}/activate`, { grant: {}, challenge_token: "x", signature: "0x" });
+  assert.equal(activated.status, 200);
+  assert.equal(activated.body.id, created.body.id);
+  assert.equal(activated.body.status, "connected");
+  assert.equal(activated.body.runtime_available, false);
+  assert.equal(activated.body.agent, undefined);
+  assert.deepEqual(activated.body.wallet, { smart_account: tenant, chain_id: 4663 });
+  // With the runtime readable, the detail carries it and no unavailability marker.
+  const healthy = fixture({ enrollment });
+  const other = await healthy.call("POST", "/agents", { external_user_id: "user-2" });
+  linked = await healthy.store.bindAuthorized(other.body.id, key.appId, tenant, ["read:agents"]);
+  const full = await healthy.call("POST", `/agents/${other.body.id}/activate`, { grant: {}, challenge_token: "x", signature: "0x" });
+  assert.equal(full.body.status, "starting");
+  assert.equal(full.body.runtime_available, undefined);
+  assert.equal(full.body.agent.id, "robin");
 });
 
 test("key chat scope cannot substitute for owner consent", async () => {

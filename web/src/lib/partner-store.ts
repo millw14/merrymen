@@ -37,7 +37,11 @@ export interface PartnerConnection {
   expiresAt: number;
   createdAt: number;
   updatedAt: number;
+  /** The owner-signed embedded activation that last completed on this connection. */
+  activation?: { nonceHash: string; grantHash: string; at: number };
 }
+/** What identifies one signed embedded activation: its challenge nonce and the exact grant it authorized. */
+export interface PartnerActivationProof { nonce: string; grantHash: string }
 export interface PartnerCreate {
   partnerId: string;
   partnerName: string;
@@ -67,6 +71,8 @@ export interface PartnerStore {
   bind(raw: string, tenant: PartnerAddress, consentedScopes: string[]): Promise<PartnerConnection>;
   /** Internal only: caller has verified a fresh grant ownership proof. */
   bindAuthorized(id: string, partnerId: string, tenant: PartnerAddress, consentedScopes: string[]): Promise<PartnerConnection>;
+  /** Internal only: after a verified activation has COMPLETED on a connection linked to this tenant. */
+  recordActivation(id: string, partnerId: string, tenant: PartnerAddress, proof: PartnerActivationProof): Promise<PartnerConnection>;
   revokeByTenant(id: string, tenant: PartnerAddress): Promise<boolean>;
   revoke(partnerId: string, id: string): Promise<boolean>;
   list(partnerId: string): Promise<PartnerConnection[]>;
@@ -137,6 +143,10 @@ export function fitPartnerReply(reply: string): string {
   // Never keep half of a surrogate pair: the stored JSON would carry a lone one.
   if (/[\ud800-\udbff]/.test(clean[end - 1])) end--;
   return `${clean.slice(0, end).trimEnd()}…`;
+}
+/** True when exactly this signed activation is the one recorded as completed on the connection. */
+export function activatedBy(connection: PartnerConnection, proof: PartnerActivationProof): boolean {
+  return !!connection.activation && connection.activation.nonceHash === hash(`enrollment:${proof.nonce}`) && connection.activation.grantHash === proof.grantHash;
 }
 /** A proposal the store would refuse as too large; the reply is kept without it. */
 export function partnerCommandFits(command: unknown): boolean {
@@ -306,6 +316,18 @@ export class SqlPartnerStore implements PartnerStore {
         return c;
       }
       return this.link(db, c, owner, scopes);
+    });
+  }
+  async recordActivation(id: string, partnerId: string, tenant: PartnerAddress, proof: PartnerActivationProof): Promise<PartnerConnection> {
+    const owner = address(tenant);
+    if (typeof proof?.nonce !== "string" || typeof proof.grantHash !== "string") throw new PartnerStoreError(400, "invalid_input", "invalid activation proof");
+    return this.transaction(async db => {
+      const c = await this.scoped(partnerId, id, db, true);
+      // Never on a revoked or re-owned connection: a recorded proof answers retries.
+      if (!c || c.status !== "linked" || c.tenant !== owner) throw new PartnerStoreError(409, "connection_changed", "the agent connection changed during activation");
+      const next: PartnerConnection = { ...c, activation: { nonceHash: hash(`enrollment:${proof.nonce}`), grantHash: proof.grantHash, at: this.clock() }, updatedAt: this.clock() };
+      await this.save(db, next);
+      return next;
     });
   }
   private async revokeWhere(id: string, field: "partner_id" | "tenant", value: string): Promise<boolean> {

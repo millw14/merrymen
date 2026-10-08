@@ -14,7 +14,7 @@ import {
 import type { GrantStore } from "../../../worker/src/grant-store";
 import type { SettingsStore } from "../../../worker/src/settings-store";
 import type { IdentityStore } from "../../../worker/src/identity-store";
-import { getPartnerStore, type PartnerConnection, type PartnerStore } from "./partner-store";
+import { activatedBy, getPartnerStore, type PartnerConnection, type PartnerStore } from "./partner-store";
 import { onlyFields, PartnerError, requirePartnerScope, type PartnerPrincipal } from "./partner-bridge";
 import { AGENT_NAME_RE, AGENT_NAME_RULE, normalizeAgentName } from "./agent-name-rule";
 
@@ -27,6 +27,14 @@ const CHAINS = new Set([4663, 46630]);
 const SYMBOLS = new Set(STOCK_TOKENS.map(t => t.symbol));
 const CONSENT_SCOPES = new Set(["read:agents", "chat:agents"]);
 const fail = (status: number, code: string, message: string): never => { throw new PartnerError(status, code, message); };
+
+export interface PartnerActivation {
+  connection: PartnerConnection;
+  smartAccount: Address;
+  chainId: number;
+  /** True when this answered a retry of an activation that had already completed; nothing was written. */
+  replayed: boolean;
+}
 
 export interface PartnerEnrollmentDependencies {
   store: PartnerStore;
@@ -200,8 +208,20 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
       // and the same authorization can simply be retried. The lock pins a
       // connection, not a transaction, so the nonce below commits on its own:
       // a later write failure still cannot roll it back and reopen the token.
-      return store().withEnrollmentLock(grant.owner, async () => {
-        if (!await store().consumeNonce(`enrollment:${claim.nonce}`, Math.ceil(claim.expires_at / 1000))) return fail(409, "challenge_used", "This enrollment authorization has already been used");
+      return store().withEnrollmentLock(grant.owner, async (): Promise<PartnerActivation> => {
+        const proof = { nonce: claim.nonce, grantHash: claim.grant_hash };
+        if (!await store().consumeNonce(`enrollment:${claim.nonce}`, Math.ceil(claim.expires_at / 1000))) {
+          // The retry of an activation that COMPLETED, its response lost (a
+          // timeout, a failed status read): answer with the connection as it is
+          // now. Only this exact signed grant matches the recorded proof, and
+          // nothing is applied again: no grant, settings or live trading.
+          const current = await store().byId(principal.app_id, connection.id);
+          if (current?.status === "linked" && current.tenant === grant.owner && activatedBy(current, proof) &&
+              canonicalJson(connectionContext(principal, current)) === canonicalJson(claim.scopes)) {
+            return { connection: current, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: true };
+          }
+          return fail(409, "challenge_used", "This enrollment authorization has already been used");
+        }
         const current = await store().byId(principal.app_id, connection.id);
         if (!current) return fail(404, "not_found", "No such agent");
         const currentScopes = connectionContext(principal, current);
@@ -227,7 +247,10 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
           await grantStore.put(grant.owner, grant);
           const bound = await store().bindAuthorized(current.id, principal.app_id, grant.owner, claim.scopes);
           if (claim.settings.live_trading_enabled) await settingsStore.put(grant.owner, { ...safe, liveTradingEnabled: true });
-          return { connection: bound, smartAccount: grant.smartAccount, chainId: grant.chainId };
+          // Last: only an activation that finished every step may later be
+          // answered as a lost response instead of challenge_used.
+          const recorded = await store().recordActivation(bound.id, principal.app_id, grant.owner, proof);
+          return { connection: recorded, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: false };
         } catch (error) {
           if (error instanceof PartnerError || (error && typeof error === "object" && "status" in error && "code" in error)) throw error;
           return fail(503, "enrollment_storage_failed", "Enrollment could not be fully saved. Request a fresh challenge and retry; inspect agent status before continuing");
