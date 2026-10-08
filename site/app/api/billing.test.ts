@@ -214,6 +214,10 @@ test('the account view keeps exact amounts and drops what it cannot read', () =>
   assert.equal(normalizeAccount({ ...account(), account: { id: 'acct_1', wallet: 'nope' } }), null);
   // Names come from whoever made the account: right-to-left overrides and zero-width characters are dropped, so one cannot pass for another.
   assert.equal(normalizeAccount(account({ account: { id: 'acct_1', name: 'Pri\u202esm\u200b\u0007', wallet: WALLET } }))!.account.name, 'Prism');
+  // One from each invisible range the gateway's name rule still lets through.
+  for (const c of ['\u061c', '\u180e', '\u200b', '\u200f', '\u202a', '\u202e', '\u2060', '\u2064', '\u2066', '\u2069', '\ufeff']) {
+    assert.equal(normalizeAccount(account({ account: { id: 'acct_1', name: `Pr${c}ism`, wallet: WALLET } }))!.account.name, 'Prism', c.codePointAt(0)!.toString(16));
+  }
 });
 
 test('a plan preview says what confirming does, in whole tokens', () => {

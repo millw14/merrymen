@@ -67,9 +67,16 @@ export const FALLBACK_PLANS: PlansView = {
 const record = (v: unknown): Record<string, unknown> | null => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
 const count = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
 const RAW = /^-?\d{1,78}$/;
+const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 const raw = (v: unknown) => typeof v === "string" && RAW.test(v) ? BigInt(v).toString() : null;
-/** A display name from the gateway, stripped to printable text. React escapes it; this keeps it short and visible. */
-const label = (v: unknown, max = 48) => typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim().slice(0, max) : "";
+/**
+ * A display name from the gateway, stripped to printable text. React escapes
+ * it; this keeps it short and visible. Every invisible formatting character
+ * goes (Arabic letter mark, Mongolian vowel separator, zero-width and
+ * directional marks, word joiner and invisible operators, isolates, BOM), so
+ * one name cannot pass for another.
+ */
+const label = (v: unknown, max = 48) => typeof v === "string" ? v.replace(INVISIBLE, "").trim().slice(0, max) : "";
 const iso = (v: unknown) => typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : null;
 export const isAddress = (v: unknown): v is string => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
 
