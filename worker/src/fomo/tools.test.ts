@@ -187,6 +187,48 @@ describe("validation", () => {
     assert.ok(handle.ok && handle.args.query.kind === "handle");
   });
 
+  it("tail tools: a trader and 1 to 12 whole hours (default 3, tell-only by default); untail takes exactly one of trader or all", () => {
+    const tail = FOMO_TOOL_DEFS.fomo_tail_trader;
+    const d = tail.validate({ trader: "@unipcs" });
+    assert.ok(d.ok);
+    if (d.ok) assert.deepEqual(d.args, { trader: { kind: "handle", value: "unipcs" }, hours: 3, consider: false });
+    const full = tail.validate({ trader: USER, hours: 12, consider: true });
+    assert.ok(full.ok && full.args.trader.kind === "user-id" && full.args.hours === 12 && full.args.consider === true);
+    for (const [raw, why] of [
+      [{}, /trader-required/],
+      [{ trader: "unipcs", hours: 13 }, /hours/],
+      [{ trader: "unipcs", hours: 0 }, /hours/],
+      [{ trader: "unipcs", hours: 2.5 }, /hours/],
+      [{ trader: "unipcs", consider: "yes" }, /consider/],
+      [{ trader: "evil.example.com" }, /trader-invalid/],
+      [{ trader: "unipcs", tenant: "0xevil" }, /unknown-argument:tenant/],
+      [{ trader: "unipcs", amount: 5 }, /unknown-argument:amount/],
+    ] as [unknown, RegExp][]) {
+      const v = tail.validate(raw);
+      assert.equal(v.ok, false, JSON.stringify(raw));
+      if (!v.ok) assert.match(v.reason, why, JSON.stringify(raw));
+    }
+    const untail = FOMO_TOOL_DEFS.fomo_untail_trader;
+    const one = untail.validate({ trader: "unipcs" });
+    assert.ok(one.ok && one.args.all === false && one.args.trader?.value === "unipcs");
+    const all = untail.validate({ all: true });
+    assert.ok(all.ok && all.args.all === true && all.args.trader === null);
+    for (const raw of [{}, { all: false }, { trader: "unipcs", all: true }, { all: "true" }, { trader: "a/b" }]) assert.equal(untail.validate(raw).ok, false, JSON.stringify(raw));
+    const extend = FOMO_TOOL_DEFS.fomo_extend_tail;
+    const plusOne = extend.validate({ trader: USER });
+    assert.ok(plusOne.ok && plusOne.args.trader.kind === "user-id" && plusOne.args.hours === 1, "one hour unless asked");
+    for (const raw of [{}, { trader: USER, hours: 0 }, { trader: USER, hours: 13 }, { trader: USER, consider: true }, { trader: "a/b" }]) {
+      assert.equal(extend.validate(raw).ok, false, JSON.stringify(raw));
+    }
+    for (const n of ["fomo_tail_trader", "fomo_untail_trader", "fomo_extend_tail"] as const) {
+      assert.ok(MUTATION_TOOL_NAMES.includes(n));
+      assert.equal(FOMO_TOOL_DEFS[n].mutation, true);
+      assert.equal(FOMO_TOOL_DEFS[n].ownerOnly, true);
+      assert.ok(!toolSpecs().some((t) => t.name === n), `${n} is never offered to a model`);
+      assert.deepEqual(toolSpecs([n]), [], `${n} is not offered even when asked for`);
+    }
+  });
+
   it("the module reads no environment", () => {
     const src = readFileSync(new URL("./tools.ts", import.meta.url), "utf8");
     assert.ok(!/process\.env/.test(src));

@@ -15,6 +15,7 @@ import {
   startNotifier,
   tradeDigestLine,
   tradeLine,
+  type NotifierDeps,
 } from "./notifier";
 import { loadTelegramState, parseRefusalRepeats, type RefusalRepeat } from "./state";
 import type { ResolvedConfig } from "../settings";
@@ -42,9 +43,10 @@ async function withNotifier(
     nextPeriod: () => Promise<void>;
     state: () => ReturnType<typeof loadTelegramState>;
     sends: Array<{ chatId: number; text: string }>;
+    bodies: Array<Record<string, unknown>>;
     prompts: string[];
   }) => Promise<void>,
-  options: { agentId?: string | null; immediate?: boolean; narrate?: boolean } = {},
+  options: { agentId?: string | null; immediate?: boolean; narrate?: boolean; tailNotices?: NotifierDeps["tailNotices"]; notify?: boolean; ownerId?: number | null } = {},
 ): Promise<void> {
   const home = mkdtempSync(path.join(tmpdir(), "merrymen-notifier-digest-"));
   const priorHome = process.env.MERRYMEN_HOME;
@@ -59,8 +61,9 @@ async function withNotifier(
   ); CREATE TABLE agents (smart_account TEXT PRIMARY KEY, live_blocker TEXT);
   CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, symbol TEXT, action TEXT, reason TEXT);`);
   let clock = NOTIFY_NOW;
-  let state: ReturnType<typeof loadTelegramState> = { ...loadTelegramState(), ownerId: NOTIFY_OWNER, lastNotifiedTradeId: 0 };
+  let state: ReturnType<typeof loadTelegramState> = { ...loadTelegramState(), ownerId: options.ownerId === undefined ? NOTIFY_OWNER : options.ownerId, lastNotifiedTradeId: 0 };
   const sends: Array<{ chatId: number; text: string }> = [];
+  const bodies: Array<Record<string, unknown>> = [];
   const prompts: string[] = [];
   const notes: string[] = [];
   globalThis.fetch = (async (url, init) => {
@@ -72,10 +75,11 @@ async function withNotifier(
     assert.match(String(url), /^https:\/\/api\.telegram\.org\/bot123:TEST\/sendMessage$/u, "only the fake Telegram transport is used");
     const body = JSON.parse(String(init?.body)) as { chat_id: number; text: string };
     sends.push({ chatId: body.chat_id, text: body.text });
+    bodies.push(body as unknown as Record<string, unknown>);
     return new Response(JSON.stringify({ ok: true, result: { message_id: sends.length } }), { status: 200 });
   }) as typeof fetch;
   const cfg = {
-    telegramEnabled: true, telegramBotToken: "123:TEST", telegramNotifyEnabled: true,
+    telegramEnabled: true, telegramBotToken: "123:TEST", telegramNotifyEnabled: options.notify ?? true,
     telegramNotifyEveryMin: options.immediate ? 0 : NOTIFY_PERIOD_MIN, telegramDigestHour: 99, tickSeconds: 60,
     customTokens: [], telegramPcControlEnabled: false, telegramCapabilities: [],
     ...(options.narrate ? { llmProvider: "custom", llmApiKey: "TEST-KEY", llmBaseUrl: "https://model.test/v1", llmProviderModel: "test" } : {}),
@@ -108,6 +112,7 @@ async function withNotifier(
           getChainId: () => null,
           getAgentId: () => options.agentId === undefined ? NOTIFY_AGENT : options.agentId,
           now: () => clock,
+          ...(options.tailNotices ? { tailNotices: options.tailNotices } : {}),
         });
         await settle();
       },
@@ -119,6 +124,7 @@ async function withNotifier(
       },
       state: () => state,
       sends,
+      bodies,
       prompts,
     });
   } finally {
@@ -738,4 +744,50 @@ test("a counted record read back from a file keeps only well-formed entries", ()
   assert.deepEqual(parseRefusalRepeats({ a: good, b: { ...good, held: -1 }, c: { ...good, what: 7 }, d: null }), { a: good });
   assert.deepEqual(parseRefusalRepeats(undefined), {});
   assert.deepEqual(parseRefusalRepeats([good]), {});
+});
+
+// ── Fomo tail notices ───────────────────────────────────────────────────────
+
+test("tail notices go to the owner past the pass's gates, claimed before each send, previews off, with Stop and +1h", async () => {
+  const order: string[] = [];
+  const keyboard = [[{ text: "Stop tail", callbackData: "ftl:stop:u-1" }, { text: "+1h", callbackData: "ftl:ext:u-1" }]];
+  const tailNotices = async () => [
+    { html: "👀 <b>unipcs</b> bought <b>PONS</b>", keyboard, claim: async () => (order.push("claim-1"), true) },
+    { html: "Tail on <b>unipcs</b> ended.", keyboard: [], claim: async () => (order.push("claim-2"), true) },
+  ];
+  await withNotifier(async (h) => {
+    await h.start();
+    const tails = h.bodies.filter((b) => String(b.text).includes("unipcs"));
+    assert.equal(tails.length, 2);
+    assert.equal(tails[0]!.chat_id, NOTIFY_OWNER);
+    assert.equal(tails[0]!.parse_mode, "HTML");
+    assert.deepEqual(tails[0]!.link_preview_options, { is_disabled: true });
+    assert.deepEqual(tails[0]!.reply_markup, { inline_keyboard: [[{ text: "Stop tail", callback_data: "ftl:stop:u-1" }, { text: "+1h", callback_data: "ftl:ext:u-1" }]] });
+    assert.equal(tails[1]!.reply_markup, undefined, "an end summary has no buttons");
+    assert.deepEqual(order, ["claim-1", "claim-2"]);
+  }, { tailNotices });
+});
+
+test("a tail notice whose claim fails is not sent, and stops the rest", async () => {
+  let asked = 0;
+  const tailNotices = async () => [
+    { html: "first unipcs", claim: async () => false },
+    { html: "second unipcs", claim: async () => true },
+  ];
+  await withNotifier(async (h) => {
+    await h.start();
+    assert.ok(!h.sends.some((x) => x.text.includes("unipcs")));
+  }, { tailNotices: async () => (asked++, tailNotices()) });
+  assert.equal(asked, 1);
+});
+
+test("with notifications off, or no linked owner, tail notices are never even asked for", async () => {
+  for (const options of [{ notify: false }, { ownerId: null }]) {
+    let asked = 0;
+    await withNotifier(async (h) => {
+      await h.start();
+      assert.deepEqual(h.sends, []);
+    }, { ...options, tailNotices: async () => (asked++, [{ html: "x unipcs", claim: async () => true }]) });
+    assert.equal(asked, 0, JSON.stringify(options));
+  }
 });

@@ -947,6 +947,125 @@ describe("watches", () => {
   });
 });
 
+describe("tails", () => {
+  const add = (db: Db, tenant: string, userId: string, nowMs: number, expiresAtMs = nowMs + 3 * HOUR, consider = false, handle: string | null = `h-${userId}`) =>
+    S.addTail(db, { tenant, userId, handle, consider, nowMs, expiresAtMs, createdVia: "telegram-dm" });
+
+  it("caps active tails at 3 per owner, requires an expiry within 12 hours, and renewing does not count", async () => {
+    const { db } = await fresh();
+    assert.equal(S.FOMO_LIMITS.activeTailsPerTenant, 3);
+    assert.equal(S.FOMO_LIMITS.tailMinMs, HOUR);
+    assert.equal(S.FOMO_LIMITS.tailMaxMs, 12 * HOUR);
+    for (let i = 0; i < 3; i++) assert.equal((await add(db, A, `u-${i}`, T0)).ok, true);
+    assert.deepEqual(await add(db, A, "u-4", T0), { ok: false, reason: "cap-reached", active: 3 });
+    // Renewing an active tail is not a new one: it may change the hours and consider, and keeps its start.
+    const renewed = await add(db, A, "u-1", T0 + MIN, T0 + 6 * HOUR, true, "@NewName");
+    assert.ok(renewed.ok && !renewed.created, "renewing an active tail does not count");
+    assert.ok(renewed.ok && renewed.tail.createdAtMs === T0 && renewed.tail.expiresAtMs === T0 + 6 * HOUR && renewed.tail.consider === true);
+    assert.ok(renewed.ok && renewed.tail.handle === "NewName", "the display handle keeps its case and loses the @");
+    assert.ok((await add(db, B, "u-4", T0)).ok, "the cap is per owner");
+    assert.deepEqual(await add(db, B, "u-5", T0, T0), { ok: false, reason: "expiry-not-future" });
+    assert.deepEqual(await add(db, B, "u-5", T0, T0 + 12 * HOUR + 1), { ok: false, reason: "expiry-too-far" });
+    assert.ok((await add(db, B, "u-5", T0, T0 + 12 * HOUR)).ok, "exactly twelve hours is allowed");
+    await assert.rejects(S.addTail(db, { tenant: A, userId: "u-9", handle: null, consider: "yes" as never, nowMs: T0, expiresAtMs: T0 + HOUR, createdVia: "telegram-dm" }), /consider/);
+    await assert.rejects(S.addTail(db, { tenant: A, userId: "u-9", handle: null, consider: false, nowMs: T0, expiresAtMs: T0 + HOUR, createdVia: "fax" as never }), /surface/);
+    // Three hours later u-0 and u-2 have ended; u-1 (renewed to six hours) is still on, so there is room for two.
+    const later = T0 + 3 * HOUR;
+    assert.deepEqual((await S.activeTails(db, A, later)).map((t) => [t.userId, t.consider, t.createdVia]), [["u-1", true, "telegram-dm"]]);
+    const back = await add(db, A, "u-0", later);
+    assert.ok(back.ok && back.created && back.tail.createdAtMs === T0, "re-activating a tail that ended under 15 minutes ago continues it (keeps its start) and counts");
+    assert.ok((await add(db, A, "u-7", later)).ok);
+    assert.deepEqual(await add(db, A, "u-8", later), { ok: false, reason: "cap-reached", active: 3 });
+  });
+
+  it("a tail ended under 15 minutes ago is continued (its end summary is not lost); later it restarts", async () => {
+    const { db } = await fresh();
+    assert.equal(S.FOMO_LIMITS.tailEndedKeepMs, 15 * MIN);
+    await add(db, A, "u-1", T0, T0 + HOUR);
+    await add(db, A, "u-2", T0, T0 + HOUR);
+    const soon = await add(db, A, "u-1", T0 + HOUR + 14 * MIN, T0 + 3 * HOUR);
+    assert.ok(soon.ok && soon.created && soon.tail.createdAtMs === T0 && soon.tail.expiresAtMs === T0 + 3 * HOUR);
+    const late = await add(db, A, "u-2", T0 + HOUR + 15 * MIN, T0 + 3 * HOUR);
+    assert.ok(late.ok && late.created && late.tail.createdAtMs === T0 + HOUR + 15 * MIN, "15 minutes on, it is a new tail");
+  });
+
+  it("concurrent adds cannot pass the cap together", async () => {
+    const { db } = await fresh();
+    const r = await Promise.all(Array.from({ length: 8 }, (_, i) => add(db, A, `race-${i}`, T0)));
+    assert.equal(r.filter((x) => x.ok).length, 3);
+    assert.equal((await S.activeTails(db, A, T0)).length, 3);
+  });
+
+  it("routes a trader to the owners tailing it, lists ended tails, and removes on request", async () => {
+    const { db } = await fresh();
+    await add(db, A, "u-1", T0, T0 + HOUR, true);
+    await add(db, B, "u-1", T0, T0 + 2 * HOUR);
+    await add(db, B, "u-2", T0, T0 + 3 * HOUR, false, null);
+    const owners = async (at: number, limit = 10) => [...(await S.tailOwners(db, at, limit))];
+    assert.deepEqual(await owners(T0 + 1), [
+      ["u-1", [a, B]],
+      ["u-2", [B]],
+    ]);
+    assert.deepEqual(await owners(T0 + HOUR), [
+      ["u-1", [B]],
+      ["u-2", [B]],
+    ], "an ended tail routes nothing");
+    assert.deepEqual(await owners(T0 + 1, 1), [["u-1", [a, B]]], "the limit counts traders, each with all its owners");
+    assert.deepEqual(await owners(T0 + 3 * HOUR), []);
+    // A's tail ended at T0 + 1h: an end summary can find it for a while, and never another owner's.
+    assert.deepEqual((await S.recentlyEndedTails(db, A, T0 + HOUR - 15 * MIN, T0 + HOUR + MIN)).map((t) => t.userId), ["u-1"]);
+    assert.deepEqual(await S.recentlyEndedTails(db, A, T0 + HOUR, T0 + 2 * HOUR), [], "ended before the window");
+    assert.deepEqual(await S.recentlyEndedTails(db, A, T0, T0 + HOUR - 1), [], "not ended yet");
+    assert.deepEqual(await S.recentlyEndedTails(db, B, T0 + HOUR - 15 * MIN, T0 + HOUR + MIN), []);
+    assert.equal((await S.activeTails(db, B, T0 + 1)).find((t) => t.userId === "u-2")?.handle, null);
+    assert.equal(await S.removeTail(db, B, "u-1"), true);
+    assert.equal(await S.removeTail(db, B, "u-1"), false);
+    assert.deepEqual([...(await S.tailOwners(db, T0 + 1, 10))], [["u-1", [a]], ["u-2", [B]]]);
+    // Stopping all stops only the active ones, and only the owner's own.
+    await add(db, B, "u-3", T0, T0 + HOUR);
+    assert.equal(await S.removeAllTails(db, B, T0 + HOUR), 1, "u-3 had ended already; only u-2 is stopped");
+    assert.deepEqual(await S.activeTails(db, B, T0 + HOUR), [], "nothing of B's is active any more");
+    assert.equal((await S.activeTails(db, A, T0 + 1)).length, 1, "A's tail is untouched");
+    assert.deepEqual((await S.recentlyEndedTails(db, B, T0, T0 + HOUR)).map((t) => t.userId), ["u-3"], "the ended row stays for its summary");
+  });
+
+  it("an extension only ever moves a running tail's end later, never past 12 hours from now, and never revives one", async () => {
+    const { db } = await fresh();
+    await add(db, A, "u-1", T0, T0 + 3 * HOUR, true);
+    const one = await S.extendTail(db, { tenant: A, userId: "u-1", addMs: HOUR, nowMs: T0 + MIN });
+    assert.ok(one.ok && one.previousExpiresAtMs === T0 + 3 * HOUR && one.tail.expiresAtMs === T0 + 4 * HOUR && !one.capped);
+    assert.ok(one.ok && one.tail.createdAtMs === T0 && one.tail.consider === true, "its start and consider are kept");
+    // Near the limit: cut to 12 hours from now, never past it.
+    await add(db, A, "u-2", T0, T0 + 12 * HOUR);
+    const capped = await S.extendTail(db, { tenant: A, userId: "u-2", addMs: HOUR, nowMs: T0 + 30 * MIN });
+    assert.ok(capped.ok && capped.tail.expiresAtMs === T0 + 12 * HOUR + 30 * MIN && capped.capped);
+    const full = await S.extendTail(db, { tenant: A, userId: "u-2", addMs: HOUR, nowMs: T0 + 30 * MIN });
+    assert.ok(full.ok && full.tail.expiresAtMs === full.previousExpiresAtMs && full.capped, "at the limit nothing is added, and nothing is taken away");
+    // A tail that runs longer than "now + 12h" could only be cut by a cap: it never is.
+    const shorter = await S.extendTail(db, { tenant: A, userId: "u-2", addMs: HOUR, nowMs: T0 });
+    assert.ok(shorter.ok && shorter.tail.expiresAtMs === T0 + 12 * HOUR + 30 * MIN, "never shortened");
+    assert.equal((await S.activeTails(db, A, T0)).find((t) => t.userId === "u-2")?.expiresAtMs, T0 + 12 * HOUR + 30 * MIN);
+    // Ended, unknown, another owner's: nothing.
+    await add(db, A, "u-3", T0, T0 + HOUR);
+    assert.deepEqual(await S.extendTail(db, { tenant: A, userId: "u-3", addMs: HOUR, nowMs: T0 + HOUR }), { ok: false, reason: "not-active" });
+    assert.deepEqual(await S.extendTail(db, { tenant: A, userId: "u-404", addMs: HOUR, nowMs: T0 }), { ok: false, reason: "not-active" });
+    assert.deepEqual(await S.extendTail(db, { tenant: B, userId: "u-1", addMs: HOUR, nowMs: T0 }), { ok: false, reason: "not-active" });
+    assert.equal((await S.activeTails(db, A, T0)).find((t) => t.userId === "u-1")?.expiresAtMs, T0 + 4 * HOUR, "B's attempt changed nothing of A's");
+    await assert.rejects(S.extendTail(db, { tenant: A, userId: "u-1", addMs: 0, nowMs: T0 }), /must add time/);
+  });
+
+  it("ended tails are kept a day for their summary, then pruned", async () => {
+    const { db, raw } = await fresh();
+    await add(db, A, "u-old", T0 - 2 * DAY, T0 - 2 * DAY + HOUR);
+    await add(db, A, "u-recent", T0 - 2 * HOUR, T0 - HOUR);
+    await add(db, A, "u-live", T0, T0 + HOUR);
+    await S.pruneFomo(db, T0);
+    const left = (raw.prepare("SELECT user_id FROM fomo_tails ORDER BY user_id").all() as { user_id: string }[]).map((r) => r.user_id);
+    assert.deepEqual(left, ["u-live", "u-recent"]);
+    assert.equal(S.FOMO_RETENTION.expiredTailsMs, DAY);
+  });
+});
+
 describe("tenant routes", () => {
   it("data access is the master switch, and a stale snapshot never undoes a newer one", async () => {
     const { db } = await fresh();
@@ -1122,6 +1241,8 @@ describe("tenant isolation", () => {
     await S.insertAssessment(db, assessment("as-a", A, T0));
     await S.upsertOutcome(db, { tenant: A, assessmentId: "as-a", horizonLabel: "1h", observedAtMs: T0, price8: "1", note: null });
     await S.addPositionDep(db, { tenant: A, userId: "u-1", tokenKey: TOKEN.key, reason: "held", nowMs: T0, expiresAtMs: T0 + DAY });
+    await S.addTail(db, { tenant: A, userId: "u-1", handle: "alice", consider: true, nowMs: T0 - 2 * HOUR, expiresAtMs: T0 + HOUR, createdVia: "telegram-dm" });
+    await S.addTail(db, { tenant: A, userId: "u-2", handle: "bob", consider: false, nowMs: T0 - 2 * HOUR, expiresAtMs: T0 - HOUR, createdVia: "telegram-dm" });
     const pub = await S.insertPublicationDraft(db, {
       tenant: A, destination: "x", kind: "watching", subjectKey: TOKEN.key, contentRev: 1, body: "b", evidenceRef: null, decisionId: null,
       consentScope: null, dedupeKey: "iso", fleetKey: null, nowMs: T0,
@@ -1136,6 +1257,8 @@ describe("tenant isolation", () => {
       assert.ok(await S.getSubject(db, who, "conv"));
       assert.equal((await S.activeWatches(db, who, T0)).length, 1);
       assert.deepEqual(await S.heldTokensFor(db, who, 0), [TOKEN.key]);
+      assert.deepEqual((await S.activeTails(db, who, T0)).map((t) => t.userId), ["u-1"]);
+      assert.deepEqual((await S.recentlyEndedTails(db, who, T0 - DAY, T0)).map((t) => t.userId), ["u-2"]);
     }
 
     // Another owner sees none of it.
@@ -1157,6 +1280,9 @@ describe("tenant isolation", () => {
     assert.deepEqual(await S.funnelForToken(db, B, TOKEN.key, 10), []);
     assert.deepEqual(await S.funnelSummary(db, B, 0), { events: {}, latestByToken: {} });
     assert.deepEqual(await S.heldTokensFor(db, B, 0), []);
+    assert.deepEqual(await S.activeTails(db, B, T0), []);
+    assert.deepEqual(await S.recentlyEndedTails(db, B, T0 - DAY, T0), []);
+    assert.deepEqual([...(await S.tailOwners(db, T0, 10))], [["u-1", [a]]], "a tailed trader names only the owner tailing it");
 
     // And cannot change it.
     assert.equal(await S.completeRequest(db, B, "req-a", "ok", T0), false);
@@ -1164,6 +1290,9 @@ describe("tenant isolation", () => {
     assert.equal(await S.clearSubject(db, B, "conv"), false);
     assert.equal(await S.removeWatch(db, B, TOKEN.key), false);
     assert.equal(await S.removePositionDep(db, B, "u-1", TOKEN.key), false);
+    assert.equal(await S.removeTail(db, B, "u-1"), false);
+    assert.equal(await S.removeAllTails(db, B, T0), 0);
+    assert.equal((await S.activeTails(db, A, T0)).length, 1, "A's tail survives B's stops");
     assert.equal(await S.transitionPublication(db, pub!, "draft", "cancelled", { nowMs: T0, tenant: B }), false);
     assert.equal(await S.upsertOutcome(db, { tenant: B, assessmentId: "as-a", horizonLabel: "1h", observedAtMs: T0 + 1, price8: "2", note: null }), false);
     assert.equal(await S.setSubject(db, B, "conv", JSON.stringify({ version: 1, b: true }), T0 + 1), true, "B's own conversation of the same key");

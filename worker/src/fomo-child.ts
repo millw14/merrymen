@@ -58,7 +58,7 @@ import { entryTokenOf, type Classified } from "./decision-funnel";
 import type { EarlyOffer, EarlyOfferResult } from "./early-candidates";
 import { createDirectBroker, createIpcBroker, type BrokerPort } from "./fomo/broker";
 import { readChildFomoFile, type ChildFomoRead, type ChildFomoReadReason } from "./fomo/child-file";
-import { SELF_HOSTED_TENANT, type ChildFomoFile, type ChildSignal, type FomoAccess, type FomoBroker, type MemoryRead } from "./fomo/contract";
+import { SELF_HOSTED_TENANT, type ChildFomoFile, type ChildSignal, type ChildTail, type FomoAccess, type FomoBroker, type MemoryRead } from "./fomo/contract";
 import {
   FOLLOW_BOOK,
   FOLLOW_DEFAULTS,
@@ -92,6 +92,12 @@ export const FOLLOW_SOURCE = "fomo-follow";
 export const FOMO_CHILD = Object.freeze({
   /** The orchestrator rewrites the file at most every 60 s; reading it more often than this buys nothing. */
   fileReadEveryMs: 10_000,
+  /**
+   * How long a tail stopped from her DM lends nothing, whatever the child
+   * file still says: past a whole orchestrator pass (childFileEveryMs, a
+   * minute) plus this file's own read interval, with room to spare.
+   */
+  tailRevokedHoldMs: 3 * 60_000,
   /** held-tokens reports, at most this often (contract.ts BrokerReport). */
   heldTokensEveryMs: 5 * 60_000,
   /** A coin's funnel stage is reported again no sooner than this. */
@@ -164,6 +170,8 @@ export const FOMO_CHILD = Object.freeze({
 export const FOMO_STATE_KEYS = Object.freeze({
   exploration: "state:fomo-exploration",
   followEntries: "state:fomo-follow-entries",
+  /** Which tail notices were told (fomo/tail-notices.ts TailSentLog): claimed before each send, so never twice. */
+  tailNotified: "state:fomo-tail-notified",
 });
 
 // ─── The broker this child talks through ───────────────────────────────────
@@ -1739,6 +1747,21 @@ export interface FomoChildDeps {
 
 export type FomoChildReadReason = ChildFomoReadReason | "tenant-unknown" | "not-read";
 
+/** Why a follow nomination could not act right now: a closed list, each one of followAllowed's, the rail's, pause's, scout's or the vault's own conditions. */
+export type FollowBlocker = "follow-off" | "not-fast-trencher" | "scout-off" | "paused" | "live-not-allowed" | "rail-refused" | "no-vault";
+
+/**
+ * WHAT FOLLOWING WOULD DO WITH ONE MORE BUY, RIGHT NOW: read-only, from the
+ * same conditions the follow path itself uses (followAllowed, effectiveAccess,
+ * the rail, liveFollowAllowed, the pause, the scout budget). `mode` is the rail
+ * an entry would go to, "off" when following itself is off. Can act only with
+ * no blockers. Reporting this changes nothing: the entry gates stay the gates.
+ */
+export interface FollowReadiness {
+  mode: "off" | "paper" | "live";
+  blockers: FollowBlocker[];
+}
+
 export interface FomoChildHealth {
   at: number | null;
   read: FomoChildReadReason;
@@ -1885,7 +1908,18 @@ interface Tracked {
   assessment: FollowAssessment;
   until: number;
   triggers: TraderEvent[];
+  /**
+   * Keys of the triggers only a considered tail admitted (contract.ts
+   * ChildSignal.tailTriggerKeys): never a position dependency, so a tail's
+   * trader stops mattering when the tail does.
+   */
+  tailKeys: string[];
   strength: DossierStrength | null;
+}
+
+/** The triggers an entry may report as position dependencies: never one only a tail admitted. */
+function dependencyTriggers(tracked: Tracked): TraderEvent[] {
+  return tracked.triggers.filter((e) => !tracked.tailKeys.includes(e.eventKey));
 }
 
 export class FomoChild {
@@ -1899,6 +1933,15 @@ export class FomoChild {
   private file: ChildFomoFile | null = null;
   private fileReason: FomoChildReadReason = "not-read";
   private fileReadAt = Number.NEGATIVE_INFINITY;
+  /**
+   * THE TAILS' OWN READ OF fomo.json (tails()), apart from the tick's: the
+   * notices must not depend on the trading tick, which returns early with no
+   * grant, an expired one, a killed agent or an unreadable market, and the
+   * follow path must not see its file change between ticks. Read at most
+   * every fileReadEveryMs, by the notifier's own asking.
+   */
+  private tailFile: ChildFomoFile | null = null;
+  private tailFileReadAt = Number.NEGATIVE_INFINITY;
   private lastTickAt: number | null = null;
   private access: FomoAccess = NO_ACCESS;
   private context: string | null = null;
@@ -1920,6 +1963,12 @@ export class FomoChild {
   private seq = 0;
   /** Coins whose follow nomination was withdrawn (setup deteriorated) → until when their entries are dropped. */
   private withdrawn = new Map<string, number>();
+  /**
+   * Tails the owner just stopped or turned to tell-only, by trader ("*": all)
+   * → when. The child file catches up within a pass; until then (and for
+   * TAIL_REVOKED_HOLD_MS) that trader's tail-only triggers count for nothing.
+   */
+  private tailRevokedAt = new Map<string, number>();
 
   constructor(private readonly deps: FomoChildDeps) {
     this.now = deps.now ?? Date.now;
@@ -1983,6 +2032,8 @@ export class FomoChild {
       if (this.file && this.access.dataAccess && (this.access.monitoring || this.access.follow)) {
         this.assessAll(this.file, live, now);
       }
+      // Whatever the pass did: a nomination only a tail stood behind goes when the tail does.
+      this.dropLapsedTails(now);
       // Reports go only where the OWNER has research on: nothing tenant-private
       // leaves this process for an owner who turned it off.
       if (owner.dataAccess && (owner.monitoring || owner.follow)) {
@@ -2256,6 +2307,59 @@ export class FomoChild {
    * is remembered as withdrawn so gateEntry drops a BUY that arrives anyway.
    */
   private withdraw(address: string, a: FollowAssessment, now: number): void {
+    this.withdrawNomination(address, now, `follow-withdrawn:${a.state.toLowerCase()}`, `the newer assessment is ${a.state}`);
+  }
+
+  /**
+   * IS A TAIL STILL BEHIND THIS NOMINATION? Its tail-only triggers (the buys
+   * only a considered tail let in, ChildSignal.tailTriggerKeys) count only
+   * while every such trader's tail is running and considered in the newest
+   * child file, and was not just stopped from her DM: a stopped, expired or
+   * tell-only tail, or tails switched off (no tails block), takes back the
+   * authority it lent. Fails closed: no file, no tail.
+   */
+  private tailStillBehind(tracked: Pick<Tracked, "triggers" | "tailKeys">, now: number): boolean {
+    if (tracked.tailKeys.length === 0) return true;
+    const traders = new Set(tracked.triggers.filter((e) => tracked.tailKeys.includes(e.eventKey)).map((e) => lower(e.trader.userId)));
+    if (traders.size === 0) return false;
+    const all = this.tailRevokedAt.get("*");
+    const tails = this.file?.tails ?? [];
+    for (const id of traders) {
+      const revoked = this.tailRevokedAt.get(id) ?? all;
+      if (revoked !== undefined && now - revoked < FOMO_CHILD.tailRevokedHoldMs) return false;
+      const t = tails.find((x) => lower(x.userId) === id);
+      if (!t || t.ended || t.consider !== true || !(t.expiresAt > now)) return false;
+    }
+    return true;
+  }
+
+  /** Every nomination only a lapsed tail stood behind is withdrawn now, not at its TTL. */
+  private dropLapsedTails(now: number): void {
+    for (const [k, at] of this.tailRevokedAt) if (now - at >= FOMO_CHILD.tailRevokedHoldMs) this.tailRevokedAt.delete(k);
+    for (const [address, t] of [...this.tracked]) {
+      if (t.tailKeys.length > 0 && !this.tailStillBehind(t, now)) this.withdrawNomination(address, now, "follow-withdrawn:tail-ended", "the tail behind it ended");
+    }
+  }
+
+  /**
+   * HER TAIL STOPPED, OR TURNED TELL-ONLY (telegram/service.ts, right after
+   * the store said so): the nominations it lent its buys to are withdrawn at
+   * once, and its tail-only triggers count for nothing until the child file
+   * has caught up. `userId` null: every tail. Never throws.
+   */
+  tailRevoked(userId: string | null): void {
+    try {
+      const now = this.now();
+      const k = typeof userId === "string" && userId.trim() ? lower(userId.trim()) : "*";
+      this.tailRevokedAt.set(k, now);
+      if (this.tailRevokedAt.size > FOMO_CHILD.reportedMax) this.tailRevokedAt.delete(this.tailRevokedAt.keys().next().value as string);
+      this.dropLapsedTails(now);
+    } catch (e) {
+      this.once(`tail-revoked:${e instanceof Error ? e.name : "error"}`, `[fomo] a stopped tail's nominations could not be withdrawn now (${e instanceof Error ? e.name : "error"}); the entry gate still refuses them`);
+    }
+  }
+
+  private withdrawNomination(address: string, now: number, detail: string, why: string): void {
     const book = this.deps.earlyBook();
     if (!this.tracked.has(address) && this.followBook.nominated(address) === null) {
       let earlyFollow = false;
@@ -2276,14 +2380,21 @@ export class FomoChild {
     this.withdrawn.set(address, now + FOMO_CHILD.withdrawnMemoryMs);
     if (this.withdrawn.size > FOMO_CHILD.reportedMax) this.withdrawn.delete(this.withdrawn.keys().next().value as string);
     try {
-      this.deps.funnel?.note(address, null, { stage: "RESEARCH_INCOMPLETE", detail: `follow-withdrawn:${a.state.toLowerCase()}`, decisionId: null });
+      this.deps.funnel?.note(address, null, { stage: "RESEARCH_INCOMPLETE", detail, decisionId: null });
     } catch {
       // filing is best effort
     }
-    this.log(`[fomo] follow nomination withdrawn: the newer assessment is ${a.state}`);
+    this.log(`[fomo] follow nomination withdrawn: ${why}`);
   }
 
   private nominate(hint: Extract<ExecutionHint, { kind: "nominate" }>, a: FollowAssessment, s: ChildSignal): void {
+    const triggers = s.triggers.filter((e) => a.triggerEventKeys.includes(e.eventKey));
+    const tailKeys = (s.tailTriggerKeys ?? []).filter((k) => a.triggerEventKeys.includes(k));
+    // A tail she just stopped lends nothing, even from a file not yet rewritten.
+    if (tailKeys.length > 0 && !this.tailStillBehind({ triggers, tailKeys }, this.now())) {
+      this.once("tail-lapsed-nominate", "[fomo] a follow nomination a lapsed tail would have stood behind was not made");
+      return;
+    }
     const book = this.deps.earlyBook();
     if (!book) {
       this.once("early-not-ready", "[fomo] early-candidate book not ready; follow nominations wait");
@@ -2299,7 +2410,8 @@ export class FomoChild {
     this.tracked.set(address, {
       assessment: a,
       until: hint.expiresAt + FOMO_CHILD.trackedGraceMs,
-      triggers: s.triggers.filter((e) => a.triggerEventKeys.includes(e.eventKey)),
+      triggers,
+      tailKeys,
       strength: dossierStrength(s.dossier),
     });
     const res = book.offer(address, {
@@ -2473,6 +2585,13 @@ export class FomoChild {
       if (!open && !tracked && !earlyFollow && !early && !withdrawn) return { kind: "none" };
 
       const drop = (reason: string): FollowGate => this.drop(token, reason, intent.decisionId);
+      // THE TAIL MUST STILL STAND BEHIND IT AT THE ORDER: a BUY reviewed on a
+      // tail she has since stopped, let expire or made tell-only is dropped,
+      // whatever the nomination's own TTL says.
+      if (tracked && tracked.tailKeys.length > 0 && !this.tailStillBehind(tracked, now)) {
+        this.withdrawNomination(token, now, "follow-withdrawn:tail-ended", "the tail behind it ended");
+        return drop("tail-ended");
+      }
       // A coin Fomo research touched — nominated, offered, remembered by the
       // early book or withdrawn — enters only while its NEWEST assessment is
       // still an entry: a BUY reviewed on a setup that has since gone (sellers
@@ -2740,16 +2859,23 @@ export class FomoChild {
       setupExpiresAt: a?.setupExpiresAt ?? null,
       horizonEndsAt: horizon !== null ? now + horizon : null,
       strengthAtEntry: tracked?.strength ?? null,
-      traders: [...new Set((tracked?.triggers ?? []).map((e) => lower(e.trader.userId)).filter(Boolean))].slice(0, FOMO_CHILD.dependencyMaxTraders),
+      traders: [...new Set((tracked ? dependencyTriggers(tracked) : []).map((e) => lower(e.trader.userId)).filter(Boolean))].slice(0, FOMO_CHILD.dependencyMaxTraders),
       entryId,
     };
   }
 
-  /** The triggering traders' activity keeps routing while the position is open (bounded, expiring). */
+  /**
+   * The triggering traders' activity keeps routing while the position is open
+   * (bounded, expiring). Never a trader only her tail admitted: that one's
+   * buys counted in the review while she asked, and a 14-day dependency
+   * would keep them triggering her follow review, and route their every
+   * event to every monitoring owner, long after Stop, the tail's end or
+   * MERRYMEN_FOMO_TAILS=0.
+   */
   private reportDependencies(token: string, tracked: Tracked | null, now: number): void {
     const broker = this.deps.broker();
     if (!broker || !tracked) return;
-    const users = [...new Set(tracked.triggers.filter((e) => e.kind === "buy").map((e) => e.trader.userId).filter((u) => typeof u === "string" && u.length > 0))].slice(
+    const users = [...new Set(dependencyTriggers(tracked).filter((e) => e.kind === "buy").map((e) => e.trader.userId).filter((u) => typeof u === "string" && u.length > 0))].slice(
       0,
       FOMO_CHILD.dependencyMaxTraders,
     );
@@ -2873,6 +2999,96 @@ export class FomoChild {
 
   latestAssessment(tokenKey: string): FollowAssessment | null {
     return this.assessments.get(tokenKey) ?? null;
+  }
+
+  /**
+   * The owner's tails (contract.ts ChildTail), for the tail notices. Copies.
+   * None when Fomo is off here or data access is off (the owner's setting, read
+   * now, or the file's): the notices then say nothing.
+   *
+   * ITS OWN READ, NOT THE TICK'S (review 2026-10-07). The tick reads the file
+   * only inside the trading tick, which an owner who only researches (data
+   * access on, no signed grant: all a tail needs) never runs, and which stops
+   * when she kills her agent: her tails were then never told, or frozen as
+   * last read with no end summary. This reads fomo.json itself, at most every
+   * fileReadEveryMs, and never touches the tick's file or access, so the
+   * follow path sees exactly what it saw. A stale or unreadable file is no
+   * tails (the reader's own bounds).
+   */
+  tails(): ChildTail[] {
+    const access = this.tailAccess();
+    if (!access?.dataAccess) return [];
+    return (this.tailFile?.tails ?? []).map((t) => ({ ...t, events: t.events.map((e) => ({ ...e, label: { ...e.label } })), totals: t.totals ? { ...t.totals } : null }));
+  }
+
+  /**
+   * WHETHER HER TAILED COINS GET MY OWN READ AT ALL: research runs only with
+   * data access and monitoring or follow on (the tick's assessAll gate, and
+   * the orchestrator's: an owner with both off gets `signals: []`). False:
+   * a buy notice never waits three minutes for an assessment that cannot
+   * come, and says plainly why there is no read. From her settings read now
+   * and the tails' own file read; Fomo off here, or unknown, is false.
+   */
+  tailsResearched(): boolean {
+    const a = this.tailAccess();
+    return !!a && a.dataAccess && (a.monitoring || a.follow);
+  }
+
+  /** The tails' own file read (refreshed at most every fileReadEveryMs) narrowed by her settings now; null when Fomo is off here or her settings cannot be read. */
+  private tailAccess(): FomoAccess | null {
+    if (this.isOff()) return null;
+    const now = this.now();
+    if (now - this.tailFileReadAt >= FOMO_CHILD.fileReadEveryMs) {
+      this.tailFileReadAt = now;
+      try {
+        const tenant = this.deps.ownTenant();
+        const read = tenant ? (this.deps.readFile ?? readChildFomoFile)(this.deps.home(), tenant, now) : null;
+        this.tailFile = read && read.reason === "ok" ? read.file : null;
+      } catch {
+        this.tailFile = null;
+      }
+    }
+    try {
+      const s = this.deps.live().settings;
+      return effectiveAccess({ dataAccess: s.dataAccess, monitoring: s.monitoring, follow: s.follow }, this.tailFile?.access ?? null);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether this agent holds a Robinhood coin now (by token key), as of the last tick. Unknown is no. */
+  holds(tokenKey: string): boolean {
+    for (const address of this.held.keys()) if (robinhoodKey(address) === tokenKey) return true;
+    return false;
+  }
+
+  /**
+   * WHAT FOLLOWING WOULD DO WITH A BUY NOW (FollowReadiness). Read-only: the
+   * same conditions followAllowed, effectiveAccess, the rail verdict,
+   * liveFollowAllowed, the pause, the scout budget and the vault (every
+   * follow entry is a vault-custody entry: verifyAskAllowed and
+   * grantCoversToken both require it) apply at the entry, read at the moment
+   * of asking. Nothing here decides or changes anything.
+   */
+  followReadiness(): FollowReadiness {
+    if (this.isOff()) return { mode: "off", blockers: ["follow-off"] };
+    let live: FomoLiveFacts;
+    try {
+      live = this.deps.live();
+    } catch {
+      return { mode: "off", blockers: ["follow-off"] };
+    }
+    const blockers: FollowBlocker[] = [];
+    const owner: FomoAccess = { dataAccess: live.settings.dataAccess, monitoring: live.settings.monitoring, follow: live.settings.follow };
+    if (!effectiveAccess(owner, this.file?.access ?? null).follow) blockers.push("follow-off");
+    if (live.settings.strategy !== "trencher" || live.settings.trencherFast !== true) blockers.push("not-fast-trencher");
+    if (live.settings.scoutEnabled !== true || !(typeof live.settings.scoutBudgetUsdg === "number" && live.settings.scoutBudgetUsdg > 0)) blockers.push("scout-off");
+    if (live.paused === true) blockers.push("paused");
+    if (live.vault !== true) blockers.push("no-vault");
+    if (live.rail !== "paper" && live.rail !== "live") blockers.push("rail-refused");
+    else if (live.rail === "live" && live.liveFollowAllowed !== true) blockers.push("live-not-allowed");
+    const mode = blockers.includes("follow-off") ? "off" : live.rail === "paper" ? "paper" : live.rail === "live" ? "live" : "off";
+    return { mode, blockers };
   }
 
   health(): FomoChildHealth {

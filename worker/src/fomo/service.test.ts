@@ -43,15 +43,18 @@ import {
 import { renderEnvelope } from "./render";
 import * as store from "./store";
 import type {
+  ExtendTailData,
   OpportunitiesData,
   RankingsData,
   ResearchCoinData,
   ResearchStatusData,
   ResolveData,
+  TailData,
   TokenActivityData,
   TokenThesesData,
   TraderActivityData,
   TraderContextData,
+  UntailData,
   WatchData,
 } from "./tools";
 import type { CohortVersion, FollowAssessment, FomoEnvelope, FomoToolName, TraderEvent } from "./types";
@@ -151,7 +154,7 @@ function routeOf(p: string): string {
 }
 
 async function harness(
-  opts: { key?: boolean; access?: FomoAccess; budget?: FomoBudgetConfig; background?: FomoBudgetConfig; db?: Db; raw?: DatabaseSync; latencyMs?: number } = {},
+  opts: { key?: boolean; access?: FomoAccess; budget?: FomoBudgetConfig; background?: FomoBudgetConfig; db?: Db; raw?: DatabaseSync; latencyMs?: number; liveFeed?: boolean; tailsEnabled?: boolean } = {},
 ): Promise<Harness> {
   const raw = opts.raw ?? new DatabaseSync(":memory:");
   const db = opts.db ?? wrapSqlite(raw);
@@ -183,6 +186,8 @@ async function harness(
     usage: new UsageMeter(),
     now: () => clock.now,
     log: (l) => logs.push(l),
+    ...(opts.liveFeed !== undefined ? { liveFeed: opts.liveFeed } : {}),
+    ...(opts.tailsEnabled !== undefined ? { tailsEnabled: opts.tailsEnabled } : {}),
   });
   let n = 0;
   const ctx = (over: Partial<FomoInvokeContext> = {}): FomoInvokeContext => ({
@@ -690,6 +695,248 @@ describe("owner tools", () => {
     assert.equal(u.data?.removed, true);
     const again = await h.invoke<WatchData>("fomo_unwatch_coin", { token: PONS, chain: "robinhood" });
     assert.equal(again.status, "empty");
+  });
+});
+
+describe("tails", () => {
+  const HOUR = 3_600_000;
+
+  it("needs the hosted live feed: refused on an install without it, with nothing read or stored", async () => {
+    const h = await harness();
+    const env = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 3 });
+    assert.equal(env.status, "unavailable");
+    assert.equal(env.reason, "tail-needs-live-feed");
+    assert.match(env.message ?? "", /hosted service/);
+    assert.equal(h.calls.length, 0);
+    assert.equal(rows(h.raw, "fomo_tails"), 0);
+    const off = await harness({ liveFeed: false });
+    assert.equal((await off.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo" })).reason, "tail-needs-live-feed");
+    assert.equal(
+      renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW }).split("\n")[0],
+      "Tailing needs Fomo's live feed, which only the hosted service has; this install can answer Fomo questions but can't tail.",
+      "said as it is, never as a failed read",
+    );
+  });
+
+  it("MERRYMEN_FOMO_TAILS=0: refused as switched off, nothing read or stored; stopping still works and status says they are on hold", async () => {
+    const on = await harness({ liveFeed: true });
+    await on.invoke<TailData>("fomo_tail_trader", { trader: KALEO, consider: true });
+    const h = await harness({ liveFeed: true, tailsEnabled: false, db: on.db, raw: on.raw });
+    const env = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 3, consider: true });
+    assert.equal(env.status, "unavailable");
+    assert.equal(env.reason, "tails-disabled");
+    assert.equal(env.data, null);
+    assert.equal(h.calls.length, 0, "not even the handle is resolved");
+    assert.deepEqual((await store.activeTails(h.db, OWNER, NOW)).map((t) => t.userId), [KALEO], "nothing new stored");
+    const text = renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW });
+    assert.match(text, /^Tailing is switched off on this service right now, so I haven't started one/);
+    assert.doesNotMatch(text, /^Tailing CryptoKaleo|until \d\d:\d\d UTC|couldn't read/, "never 'Tailing X until', never a failed read");
+    const status = await h.invoke<ResearchStatusData>("fomo_get_research_status", {});
+    assert.equal(status.data?.tailsOff, true);
+    assert.match(renderEnvelope(status, { audience: "owner", maxChars: 4000, now: NOW }), /Tailing on Fomo is switched off right now, so I'm not telling you about trader 1f08e6ab…; each tail still ends on time\./);
+    assert.equal((await h.invoke<UntailData>("fomo_untail_trader", { all: true })).data?.removed, 1, "a stored tail can always be stopped");
+    assert.equal((await on.invoke<ResearchStatusData>("fomo_get_research_status", {})).data?.tailsOff, undefined);
+  });
+
+  it("a known handle is free; an unknown one costs exactly one search, never the profile route", async () => {
+    const h = await harness({ liveFeed: true });
+    await store.upsertTrader(h.db, { userId: FRANK, handle: "frankdegods", displayName: null, verified: null }, NOW - 1000);
+    const known = await h.invoke<TailData>("fomo_tail_trader", { trader: "@FrankDeGods", hours: 2 });
+    assert.equal(known.status, "ok", JSON.stringify(known).slice(0, 300));
+    assert.equal(h.calls.length, 0, "the local record answers, at no cost");
+    assert.deepEqual(known.data, {
+      action: "tail",
+      trader: { userId: FRANK, handle: "frankdegods" },
+      created: true,
+      expiresAtMs: NOW + 2 * HOUR,
+      consider: false,
+      activeTails: 1,
+      routable: true,
+      following: false,
+    });
+    assert.equal(known.subject?.kind, "trader");
+    const unknown = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", consider: true });
+    assert.equal(unknown.status, "ok");
+    assert.equal(h.count("/v2/search"), 1);
+    assert.equal(h.calls.length, 1, "one search and nothing else");
+    assert.ok(!h.calls.some((c) => c.startsWith("/v2/users")), "never the 2,500-credit profile route");
+    assert.equal(unknown.usage.creditsCharged, 250);
+    assert.equal(unknown.data?.expiresAtMs, NOW + 3 * HOUR, "three hours by default");
+    assert.equal(unknown.data?.consider, true);
+    assert.equal(unknown.data?.activeTails, 2);
+    const stored = await store.activeTails(h.db, OWNER, NOW);
+    // Oldest first, then by id: both started at the same moment.
+    assert.deepEqual(stored.map((t) => [t.userId, t.handle, t.consider, t.createdVia]), [
+      [KALEO, "CryptoKaleo", true, "app-chat"],
+      [FRANK, "frankdegods", false, "app-chat"],
+    ]);
+    // A user id nobody has seen is taken as given: no read is spent to learn a handle.
+    const before = h.calls.length;
+    const byId = await h.invoke<TailData>("fomo_tail_trader", { trader: STAR, hours: 12 });
+    assert.equal(byId.status, "ok");
+    assert.deepEqual(byId.data?.trader, { userId: STAR, handle: null });
+    assert.equal(h.calls.length, before);
+  });
+
+  it("caps at three active tails; renewing one is not a fourth and may change its hours and consider", async () => {
+    const h = await harness({ liveFeed: true });
+    for (const t of [KALEO, FRANK, STAR]) assert.equal((await h.invoke<TailData>("fomo_tail_trader", { trader: t })).status, "ok");
+    const fourth = await h.invoke<TailData>("fomo_tail_trader", { trader: "0f08e6ab-5c73-5443-9225-bfc496cde51f" });
+    assert.equal(fourth.status, "failed");
+    assert.equal(fourth.reason, "tail-cap-reached");
+    assert.match(fourth.message ?? "", /3 tails running/);
+    h.clock.now = NOW + 10 * 60_000;
+    const renewed = await h.invoke<TailData>("fomo_tail_trader", { trader: KALEO, hours: 6, consider: true });
+    assert.equal(renewed.status, "ok");
+    assert.equal(renewed.data?.created, false);
+    assert.equal(renewed.data?.expiresAtMs, NOW + 10 * 60_000 + 6 * HOUR);
+    assert.equal(renewed.data?.consider, true);
+    assert.equal(renewed.data?.activeTails, 3);
+  });
+
+  it("routable says whether research routing can follow; alerts need only data access", async () => {
+    const h = await harness({ liveFeed: true, access: { dataAccess: true, monitoring: false, follow: false } });
+    const env = await h.invoke<TailData>("fomo_tail_trader", { trader: KALEO });
+    assert.equal(env.status, "ok", "stored: alerts come from the stored feed at no cost");
+    assert.equal(env.data?.routable, false);
+    const follow = await harness({ liveFeed: true, access: { dataAccess: true, monitoring: false, follow: true } });
+    const followed = await follow.invoke<TailData>("fomo_tail_trader", { trader: KALEO, consider: true });
+    assert.deepEqual([followed.data?.routable, followed.data?.following], [true, true]);
+    assert.match(renderEnvelope(followed, { audience: "owner", maxChars: 2000, now: NOW }), /one signal into my normal review/);
+    assert.match(renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW }), /tell you only/);
+    // Tell-only with monitoring and follow off: no read of the coin will come, and it is said (review 2026-10-07).
+    assert.match(renderEnvelope(env, { audience: "owner", maxChars: 2000, now: NOW }), /Monitoring and following are both off, so I won't have my own read of their coins/);
+    assert.doesNotMatch(renderEnvelope(followed, { audience: "owner", maxChars: 2000, now: NOW }), /won't have my own read/);
+    const monitorOnly = await harness({ liveFeed: true });
+    const watched = await monitorOnly.invoke<TailData>("fomo_tail_trader", { trader: KALEO, consider: true });
+    assert.deepEqual([watched.data?.routable, watched.data?.following], [true, false]);
+    assert.match(renderEnvelope(watched, { audience: "owner", maxChars: 2000, now: NOW }), /Following is off, so their buys only reach my research, never a trade/);
+    const offBoth = await h.invoke<TailData>("fomo_tail_trader", { trader: FRANK, consider: true });
+    assert.match(renderEnvelope(offBoth, { audience: "owner", maxChars: 2000, now: NOW }), /Monitoring and following are both off, so I'll only tell you, without my own read of their coins/);
+    const noAccess = await harness({ liveFeed: true, access: { dataAccess: false, monitoring: true, follow: true } });
+    assert.equal((await noAccess.invoke<TailData>("fomo_tail_trader", { trader: KALEO })).status, "not-authorized");
+    assert.equal(rows(noAccess.raw, "fomo_tails"), 0);
+  });
+
+  it("stops by handle (any case) or id, or all, at no cost; research status lists what runs", async () => {
+    const h = await harness({ liveFeed: true });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", consider: true });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: FRANK, hours: 2 });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: STAR, hours: 1 });
+    const status = await h.invoke<ResearchStatusData>("fomo_get_research_status", {});
+    assert.deepEqual(status.data?.tails, [
+      { userId: KALEO, handle: "CryptoKaleo", expiresAtMs: NOW + 3 * HOUR, consider: true },
+      { userId: STAR, handle: null, expiresAtMs: NOW + HOUR, consider: false },
+      { userId: FRANK, handle: null, expiresAtMs: NOW + 2 * HOUR, consider: false },
+    ]);
+    const calls = h.calls.length;
+    const one = await h.invoke<UntailData>("fomo_untail_trader", { trader: "@cryptokaleo" });
+    assert.equal(one.status, "ok");
+    assert.deepEqual(one.data, { action: "untail", trader: { userId: KALEO, handle: "CryptoKaleo" }, all: false, removed: 1, activeTails: 2 });
+    const again = await h.invoke<UntailData>("fomo_untail_trader", { trader: "CryptoKaleo" });
+    assert.equal(again.status, "empty");
+    assert.equal(again.data?.removed, 0);
+    assert.equal(again.data?.trader, null, "an unmatched handle names nobody");
+    const byId = await h.invoke<UntailData>("fomo_untail_trader", { trader: FRANK });
+    assert.equal(byId.data?.removed, 1);
+    const all = await h.invoke<UntailData>("fomo_untail_trader", { all: true });
+    assert.deepEqual(all.data, { action: "untail", trader: null, all: true, removed: 1, activeTails: 0 });
+    assert.equal((await h.invoke<UntailData>("fomo_untail_trader", { all: true })).status, "empty");
+    assert.equal(h.calls.length, calls, "stopping never reads the provider");
+    for (const bad of [{}, { all: false }, { trader: "x_1", all: true }, { trader: "a.b" }]) {
+      const env = await h.invoke("fomo_untail_trader", bad);
+      assert.equal(env.reason, "invalid-args", JSON.stringify(bad));
+    }
+    assert.equal((await h.invoke("fomo_tail_trader", { trader: KALEO, hours: 13 })).reason, "invalid-args");
+    assert.equal((await h.invoke("fomo_tail_trader", { trader: KALEO, hours: 0 })).reason, "invalid-args");
+    assert.equal((await h.invoke("fomo_tail_trader", { hours: 2 })).reason, "invalid-args");
+  });
+
+  it("stopping a tail that ended on its own says it ended, by name, and leaves its row for the summary; a stopped one by id says so plainly (review 2026-10-07)", async () => {
+    const h = await harness({ liveFeed: true });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 1 });
+    const later = { now: NOW + HOUR + 60_000 };
+    for (const ref of [KALEO, "CryptoKaleo", "@cryptokaleo"]) {
+      const env = await h.invoke<UntailData>("fomo_untail_trader", { trader: ref }, later);
+      assert.equal(env.status, "empty", ref);
+      assert.equal(env.reason, "tail-ended");
+      const said = renderEnvelope(env, { audience: "owner", maxChars: 2000, now: later.now });
+      assert.match(said, /^Your tail on CryptoKaleo already ended at 17:05 UTC\./, ref);
+      assert.doesNotMatch(said, /weren't tailing|[0-9a-f]{8}…/);
+    }
+    assert.equal(rows(h.raw, "fomo_tails"), 1, "the ended row stays: its end summary is read from it");
+    // A tail she stopped is gone: a Stop press (by id) is told so, never an id fragment.
+    await h.invoke<TailData>("fomo_tail_trader", { trader: FRANK, hours: 2 });
+    await h.invoke<UntailData>("fomo_untail_trader", { trader: FRANK });
+    const gone = await h.invoke<UntailData>("fomo_untail_trader", { trader: FRANK });
+    assert.equal(gone.reason, "tail-not-active");
+    assert.match(renderEnvelope(gone, { audience: "owner", maxChars: 2000, now: NOW }), /^That tail has already stopped\./);
+    assert.doesNotMatch(renderEnvelope(gone, { audience: "owner", maxChars: 2000, now: NOW }), /trader [0-9a-f]{8}/);
+    // A handle she never tailed is still that.
+    assert.match(renderEnvelope(await h.invoke<UntailData>("fomo_untail_trader", { trader: "nobody_here" }), { audience: "owner", maxChars: 2000, now: NOW }), /^You weren't tailing that trader\./);
+  });
+
+  it("+1h makes a running tail longer, never shorter, never past 12 hours from now, never a revived one; at no cost", async () => {
+    const h = await harness({ liveFeed: true });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 3 });
+    const calls = h.calls.length;
+    const one = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: KALEO }, { now: NOW + 60_000 });
+    assert.equal(one.status, "ok");
+    assert.deepEqual(one.data, { action: "extend", trader: { userId: KALEO, handle: "CryptoKaleo" }, previousExpiresAtMs: NOW + 3 * HOUR, expiresAtMs: NOW + 4 * HOUR, capped: false, activeTails: 1 });
+    assert.match(renderEnvelope(one, { audience: "owner", maxChars: 2000, now: NOW }), /^Tailing CryptoKaleo until 20:05 UTC now\./);
+    const byHandle = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: "cryptokaleo", hours: 12 });
+    assert.ok(byHandle.data?.capped && byHandle.data.expiresAtMs === NOW + 12 * HOUR, "capped at 12 hours from now");
+    const again = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: KALEO });
+    assert.equal(again.data?.expiresAtMs, NOW + 12 * HOUR, "nothing added, nothing taken");
+    assert.match(renderEnvelope(again, { audience: "owner", maxChars: 2000, now: NOW }), /already runs as long as a tail can/);
+    assert.equal(h.calls.length, calls, "extending never reads the provider");
+    const ended = await h.invoke<ExtendTailData>("fomo_extend_tail", { trader: KALEO }, { now: NOW + 12 * HOUR });
+    assert.equal(ended.status, "empty");
+    assert.equal(ended.reason, "tail-not-active");
+    assert.match(renderEnvelope(ended, { audience: "owner", maxChars: 2000, now: NOW }), /^That tail has already ended\./);
+    assert.deepEqual(await store.activeTails(h.db, OWNER, NOW + 12 * HOUR), [], "not revived");
+    const g = await h.invoke("fomo_extend_tail", { trader: KALEO }, { audience: "group", surface: "telegram-group", groupId: "-100123" });
+    assert.equal(g.reason, "owner-only");
+    const off = await harness({ liveFeed: true, tailsEnabled: false });
+    assert.equal((await off.invoke("fomo_extend_tail", { trader: KALEO })).reason, "tails-disabled");
+  });
+
+  it("a group can neither start nor stop a tail, nor see one", async () => {
+    const h = await harness({ liveFeed: true });
+    await h.invoke<TailData>("fomo_tail_trader", { trader: KALEO });
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123" };
+    for (const [tool, args] of [
+      ["fomo_tail_trader", { trader: FRANK }],
+      ["fomo_untail_trader", { trader: KALEO }],
+      ["fomo_untail_trader", { all: true }],
+    ] as const) {
+      const env = await h.invoke(tool, args, g);
+      assert.equal(env.status, "not-authorized", tool);
+      assert.equal(env.reason, "owner-only");
+      assert.equal(env.data, null);
+    }
+    assert.equal(h.calls.length, 0);
+    assert.deepEqual((await store.activeTails(h.db, OWNER, NOW)).map((t) => t.userId), [KALEO], "nothing changed");
+  });
+
+  it("renders for the owner in plain words, and a group is deflected", async () => {
+    const h = await harness({ liveFeed: true });
+    const told = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 2 });
+    const text = renderEnvelope(told, { audience: "owner", maxChars: 2000, now: NOW });
+    assert.match(text, /^Tailing CryptoKaleo on Fomo until 18:05 UTC \(2 h\)\./);
+    assert.match(text, /tell you only; I won't trade on it/);
+    assert.match(text, /no alert is not proof they didn't trade/);
+    assert.doesNotMatch(text, /cop(y|ies)\b(?! their)/i);
+    const considered = await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", hours: 2, consider: true });
+    assert.match(renderEnvelope(considered, { audience: "owner", maxChars: 2000, now: NOW }), /^Still tailing CryptoKaleo[^]*Following is off, so their buys only reach my research/);
+    assert.equal(renderEnvelope(told, { audience: "group", maxChars: 2000, now: NOW }), "I'll answer that in a direct message.");
+    const stop = await h.invoke<UntailData>("fomo_untail_trader", { trader: "CryptoKaleo" });
+    assert.match(renderEnvelope(stop, { audience: "owner", maxChars: 2000, now: NOW }), /^Stopped tailing CryptoKaleo\./);
+    const none = await h.invoke<UntailData>("fomo_untail_trader", { trader: "CryptoKaleo" });
+    assert.match(renderEnvelope(none, { audience: "owner", maxChars: 2000, now: NOW }), /^You weren't tailing that trader\./);
+    await h.invoke<TailData>("fomo_tail_trader", { trader: "CryptoKaleo", consider: true });
+    const status = await h.invoke<ResearchStatusData>("fomo_get_research_status", {});
+    assert.match(renderEnvelope(status, { audience: "owner", maxChars: 4000, now: NOW }), /Tailing on Fomo: CryptoKaleo until 19:05 UTC \(their buys go to my normal review\)\./);
   });
 });
 

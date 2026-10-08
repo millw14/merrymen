@@ -153,9 +153,25 @@ export interface InterestSnapshot {
   watchedTokens: ReadonlyMap<string, readonly string[]>;
   heldTokens: ReadonlyMap<string, readonly string[]>;
   monitoringTenants: readonly string[];
+  /**
+   * Trader user id → the routable owners TAILING that trader now
+   * (store.ts fomo_tails). Only those owners: a tail never fans out to the
+   * other monitoring tenants the way a dependency does. Absent: nobody.
+   */
+  tailed?: ReadonlyMap<string, readonly string[]>;
 }
 
-export type InterestReason = "held" | "watched" | "cohort" | "dependency" | "robinhood-thesis";
+export type InterestReason = "held" | "watched" | "cohort" | "dependency" | "robinhood-thesis" | "tailed";
+
+/**
+ * Research routed for ONE owner's tail of ONE trader, per rolling hour: buys
+ * and theses only, and at most this many. A tail asks for fresh research on
+ * the trader's coins; it must not turn one busy trader into an open credit
+ * line (each routed event can become a dossier refresh).
+ */
+export const TAIL_ROUTES_PER_HOUR = 6;
+/** (owner, trader) pairs whose hourly tail budget is remembered; the oldest is forgotten past this. */
+const TAIL_BUDGET_KEYS = 2_000;
 
 export interface RoutedItem {
   kind: "event" | "correction";
@@ -558,6 +574,8 @@ class IngestorImpl implements Ingestor {
   private emittedTasks: BoundedMap<string, true>;
   private recent: BoundedMap<string, RecentRouted>;
   private discoveryTimes: number[] = [];
+  /** `${tenant}\u0000${userId}` → times this tail's events were routed in the last hour (TAIL_ROUTES_PER_HOUR). */
+  private tailTimes = new Map<string, number[]>();
 
   private pending = new Set<Promise<unknown>>();
   private counters = { duplicates: 0, persisted: 0, retracted: 0, tasksEmitted: 0, deadLetters: 0, orphansRouted: 0 };
@@ -1241,6 +1259,23 @@ class IngestorImpl implements Ingestor {
     return true;
   }
 
+  /** One more routed event for this owner's tail of this trader, if its hour allows it. */
+  private takeTailBudget(tenant: string, userId: string, now: number): boolean {
+    const key = `${tenant}\u0000${userId}`;
+    const horizon = now - 3_600_000;
+    const times = (this.tailTimes.get(key) ?? []).filter((t) => t > horizon);
+    if (times.length >= TAIL_ROUTES_PER_HOUR) {
+      this.tailTimes.set(key, times);
+      return false;
+    }
+    times.push(now);
+    // Re-inserted, so the map's order is least recently used first and the oldest pair is the one forgotten.
+    this.tailTimes.delete(key);
+    this.tailTimes.set(key, times);
+    while (this.tailTimes.size > TAIL_BUDGET_KEYS) this.tailTimes.delete(this.tailTimes.keys().next().value as string);
+    return true;
+  }
+
   private audienceFor(e: TraderEvent, snap: InterestSnapshot, now: number): Audience {
     const tenants = new Map<string, RetrievalPriority>();
     const reasons = new Map<string, InterestReason[]>();
@@ -1258,6 +1293,17 @@ class IngestorImpl implements Ingestor {
       for (const t of snap.watchedTokens.get(tk) ?? []) add(t, "interactive", "watched");
     }
     const uid = e.trader.userId;
+    // A TAILED TRADER reaches only the owners tailing them, for buys and
+    // theses only, a few an hour each (TAIL_ROUTES_PER_HOUR): interactive
+    // research on the coin they just bought or wrote about, so the owner's
+    // notice can carry a fresh read. Never the dependency rule's fan-out.
+    const tailing = uid ? snap.tailed?.get(uid) : undefined;
+    if (tailing && tailing.length > 0 && (e.kind === "buy" || e.kind === "thesis")) {
+      for (const t of tailing) {
+        if (this.takeTailBudget(t, uid, now)) add(t, "interactive", "tailed");
+        else this.drop("tail-rate-limited");
+      }
+    }
     const fromDependency = !!uid && snap.dependencies.has(uid);
     const fromCohort = !!uid && snap.cohort.has(uid);
     if (fromDependency || fromCohort) {

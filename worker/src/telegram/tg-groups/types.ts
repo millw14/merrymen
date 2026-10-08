@@ -507,7 +507,34 @@ export interface TgOwnerPort {
      */
     stillWanted?: () => boolean;
   }): Promise<TgOwnerOutcome>;
+  /**
+   * HER TAIL, ASKED FOR IN THE ROOM (docs/fomo.md "Tailing a trader"): the
+   * same confirm card her DM gives /tail, sent to her DM, where nothing is
+   * created until she presses a button on it; a stop runs as /untail would
+   * there. `tail` is what code read from her line (handler.ts:
+   * parseTailRequest), never the line itself; null: the line asked for a tail
+   * but named no trader code could read, and her DM gets the /tail usage.
+   * The room hears only where it went. Never throws.
+   */
+  proposeTail?(q: { tail: TgTailAsk | null; fromId: number }): Promise<TgOwnerOutcome>;
+  /**
+   * Whether a tail can work here at all (telegram/fomo-tail.ts
+   * FomoTailsState): not "on", her start line is no tail and goes on to the
+   * research lane as before; with the switch off a stop is still read, so
+   * stored tails can be stopped. Absent: "on". Never throws.
+   */
+  tailsState?(): "on" | "switched-off" | "no-live-feed";
 }
+
+/**
+ * A tail read from her group line: a start with the trader and hours, a stop
+ * (null: all of them), or a stop that names nobody it can act on ("stop
+ * tailing him"): her DM lists her tails and asks which, and nothing stops.
+ */
+export type TgTailAsk =
+  | { kind: "start"; handle: string; hours: number; clamped: boolean; take: boolean }
+  | { kind: "stop"; handle: string | null }
+  | { kind: "stop-which" };
 
 /**
  * THE DESK, as tg-groups sees it. index.ts builds it from worker/src/desk/;

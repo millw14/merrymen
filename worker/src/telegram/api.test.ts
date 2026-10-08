@@ -455,6 +455,11 @@ const HIDDEN_ALIASES = new Set([
   "getfile", // get
   "sh", "shell", // run
   "hotkey", // key
+  // Fomo tails: the linked owner's, in her own DM only (docs/fomo.md "Asking for
+  // a tail"). Not in the static menu, which every allowlisted chat gets and
+  // which a process with Fomo off must keep as it was before Fomo; she finds
+  // /tail in her trader-board moves (tg-fomo-port.ts ownerMoves).
+  "tail", "untail", "tails",
 ]);
 
 /** Every `case "x":` label inside parseSlash's switch (source-scraped so a NEW

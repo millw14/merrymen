@@ -50,7 +50,7 @@
  *
  * TRANSACTIONS DO NOT NEST on either backend. Functions that open their own
  * (upsertTrader(s), insertEvents, insertCohortVersion, insertDossierRevision,
- * enqueueJob, addWatch, addPositionDep, upsertOutcome, ensureFomoSchema,
+ * enqueueJob, addWatch, addTail, addPositionDep, upsertOutcome, ensureFomoSchema,
  * applyFomoAlters on Postgres) take the ROOT Db, never one handed to a db.tx
  * callback.
  *
@@ -74,6 +74,7 @@ import type {
   ExecutionAvailability,
   FollowAssessment,
   FomoSurface,
+  FomoTail,
   Freshness,
   FreshnessClass,
   FunnelStage,
@@ -312,6 +313,18 @@ CREATE TABLE IF NOT EXISTS fomo_watches (
 );
 CREATE INDEX IF NOT EXISTS fomo_watches_token ON fomo_watches (token_key, expires_at_ms);
 CREATE INDEX IF NOT EXISTS fomo_watches_expiry ON fomo_watches (expires_at_ms);
+CREATE TABLE IF NOT EXISTS fomo_tails (
+  tenant TEXT NOT NULL,
+  user_id TEXT NOT NULL,                   -- the provider user id, never a handle
+  handle TEXT,                             -- display only
+  consider INTEGER NOT NULL,               -- 1: the owner asked for their buys to reach the normal follow review
+  created_at_ms INTEGER NOT NULL,
+  expires_at_ms INTEGER NOT NULL,
+  created_via TEXT NOT NULL,
+  PRIMARY KEY (tenant, user_id)
+);
+CREATE INDEX IF NOT EXISTS fomo_tails_user ON fomo_tails (user_id, expires_at_ms);
+CREATE INDEX IF NOT EXISTS fomo_tails_expiry ON fomo_tails (expires_at_ms);
 CREATE TABLE IF NOT EXISTS fomo_tenant_routes (
   tenant TEXT NOT NULL PRIMARY KEY,
   data_access INTEGER NOT NULL,
@@ -521,6 +534,20 @@ export const FOMO_LIMITS = {
   activeWatchesPerTenant: 25,
   /** A watch must expire, and within this. */
   watchMaxMs: 30 * DAY_MS,
+  /** Active tails one owner may hold (a tail is a few hours of one trader's alerts). */
+  activeTailsPerTenant: 3,
+  /** The shortest tail the tools offer (store: any future expiry within tailMaxMs). */
+  tailMinMs: 3_600_000,
+  /** A tail must expire, and within this. */
+  tailMaxMs: 12 * 3_600_000,
+  /**
+   * An ended tail is carried in its owner's file this long, for its end
+   * summary (orchestrator-fomo.ts TAIL_ENDED_KEEP_MS); tailing the same
+   * trader again inside it CONTINUES that tail (addTail).
+   */
+  tailEndedKeepMs: 15 * 60_000,
+  /** Distinct tailed traders the fleet's research routing reads (orchestrator-fomo.ts fleetInterest). */
+  tailedTradersFleet: 200,
   /** Active position dependencies one owner may hold. */
   activePositionDepsPerTenant: 30,
   /** A dependency must expire within this; the lifecycle pass renews it while the position is open. */
@@ -961,7 +988,7 @@ export function followAssessmentOf(v: unknown): FollowAssessment | null {
  * row. sqlite gets the same from its single writer. Unlike an advisory lock it
  * needs no dialect and no second key namespace to keep distinct.
  */
-async function lockTenant(tx: Db, tenant: string, scope: "jobs" | "watches" | "position-deps" | "held-tokens", nowMs: number): Promise<void> {
+async function lockTenant(tx: Db, tenant: string, scope: "jobs" | "watches" | "tails" | "position-deps" | "held-tokens", nowMs: number): Promise<void> {
   await tx
     .prepare(
       `INSERT INTO fomo_tenant_locks (tenant, lock_scope, touched_at_ms) VALUES (?, ?, ?)
@@ -2814,6 +2841,177 @@ export async function watchedTokenKeys(db: Db, nowMs: number, limit: number): Pr
   return rows.flatMap((r) => (typeof r.token_key === "string" ? [r.token_key] : []));
 }
 
+// ── tails ───────────────────────────────────────────────────────────────────
+
+export type AddTailResult =
+  | { ok: true; created: boolean; tail: FomoTail }
+  | { ok: false; reason: "cap-reached"; active: number }
+  | { ok: false; reason: "expiry-not-future" | "expiry-too-far" };
+
+/**
+ * Tail a Fomo trader for an owner, addWatch's rules exactly: a tail MUST
+ * expire, within `tailMaxMs` (a forgotten tail keeps telling the owner about a
+ * stranger's trades long after anyone asked). At most `activeTailsPerTenant`
+ * are active at once; renewing a tail that is still active does not count
+ * against that and may change its expiry and `consider`, re-activating an
+ * expired one does count. Counted and written under the owner's lock row, so
+ * two concurrent adds cannot pass the cap together. Owner state only: nothing
+ * here sizes, orders or grants.
+ *
+ * ONE ROW PER (OWNER, TRADER), SO A TAIL THAT ENDED LESS THAN
+ * `tailEndedKeepMs` AGO IS CONTINUED, NOT REPLACED. Its row is what its end
+ * summary is read from in that window; restarting it there would overwrite
+ * the row and lose the summary. So it keeps its start (the same tail
+ * instance: the child's notices, caps and sent log carry on, and the minutes
+ * between are covered too), and one end summary at the new end tells the
+ * whole span from that start. Later than that, re-activating restarts it.
+ */
+export async function addTail(
+  db: Db,
+  t: { tenant: string; userId: string; handle: string | null; consider: boolean; nowMs: number; expiresAtMs: number; createdVia: FomoSurface },
+): Promise<AddTailResult> {
+  const tenant = tenantOf(t.tenant);
+  const userId = keyOf(t.userId, "userId", 128);
+  const now = intOf(t.nowMs, "nowMs");
+  const expires = intOf(t.expiresAtMs, "expiresAtMs");
+  if (!isIn(SURFACES, t.createdVia)) throw new TypeError("fomo store: unknown surface");
+  if (typeof t.consider !== "boolean") throw new TypeError("fomo store: consider must be a boolean");
+  if (expires <= now) return { ok: false, reason: "expiry-not-future" };
+  if (expires - now > FOMO_LIMITS.tailMaxMs) return { ok: false, reason: "expiry-too-far" };
+  const handle = typeof t.handle === "string" ? textOf(t.handle.trim().replace(/^@+/, ""), FOMO_LIMITS.handleChars) || null : null;
+  const consider = t.consider ? 1 : 0;
+  return db.tx(async (tx): Promise<AddTailResult> => {
+    await lockTenant(tx, tenant, "tails", now);
+    const existing = (await tx
+      .prepare("SELECT created_at_ms, expires_at_ms FROM fomo_tails WHERE tenant = ? AND user_id = ?")
+      .get(tenant, userId)) as Row | undefined;
+    const wasActive = existing !== undefined && (num(existing.expires_at_ms) ?? 0) > now;
+    const justEnded = existing !== undefined && !wasActive && (num(existing.expires_at_ms) ?? 0) > now - FOMO_LIMITS.tailEndedKeepMs;
+    if (!wasActive) {
+      const c = (await tx
+        .prepare("SELECT COUNT(*) AS n FROM fomo_tails WHERE tenant = ? AND expires_at_ms > ?")
+        .get(tenant, now)) as Row | undefined;
+      const active = num(c?.n) ?? 0;
+      if (active >= FOMO_LIMITS.activeTailsPerTenant) return { ok: false, reason: "cap-reached", active };
+    }
+    const createdAt = wasActive || justEnded ? num(existing?.created_at_ms) ?? now : now;
+    await tx
+      .prepare(
+        `INSERT INTO fomo_tails (tenant, user_id, handle, consider, created_at_ms, expires_at_ms, created_via) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (tenant, user_id) DO UPDATE SET handle = excluded.handle, consider = excluded.consider, created_at_ms = excluded.created_at_ms,
+           expires_at_ms = excluded.expires_at_ms, created_via = excluded.created_via`,
+      )
+      .run(tenant, userId, handle, consider, createdAt, expires, t.createdVia);
+    return {
+      ok: true,
+      created: !wasActive,
+      tail: { tenant, userId, handle, consider: consider === 1, createdAtMs: createdAt, expiresAtMs: expires, createdVia: t.createdVia },
+    };
+  });
+}
+
+/** Stop one tail now (its row goes; nothing is summarised for a tail the owner stopped). True when there was one. */
+export async function removeTail(db: Db, tenant: string, userId: string): Promise<boolean> {
+  const r = await db.prepare("DELETE FROM fomo_tails WHERE tenant = ? AND user_id = ?").run(tenantOf(tenant), keyOf(userId, "userId", 128));
+  return r.changes > 0;
+}
+
+/** Stop every ACTIVE tail of one owner; returns how many were stopped. Ended rows are left to retention. */
+export async function removeAllTails(db: Db, tenant: string, nowMs: number): Promise<number> {
+  const r = await db.prepare("DELETE FROM fomo_tails WHERE tenant = ? AND expires_at_ms > ?").run(tenantOf(tenant), intOf(nowMs, "nowMs"));
+  return r.changes;
+}
+
+const TAIL_COLUMNS = "tenant, user_id, handle, consider, created_at_ms, expires_at_ms, created_via";
+
+function tailOf(r: Row): FomoTail | null {
+  const created = num(r.created_at_ms);
+  const expires = num(r.expires_at_ms);
+  const consider = flag(r.consider);
+  if (typeof r.tenant !== "string" || typeof r.user_id !== "string" || created === null || expires === null || consider === null || !isIn(SURFACES, r.created_via)) {
+    return null;
+  }
+  return { tenant: r.tenant, userId: r.user_id, handle: str(r.handle), consider, createdAtMs: created, expiresAtMs: expires, createdVia: r.created_via };
+}
+
+/** An owner's unexpired tails, oldest first. */
+export async function activeTails(db: Db, tenant: string, nowMs: number): Promise<FomoTail[]> {
+  const rows = (await db
+    .prepare(`SELECT ${TAIL_COLUMNS} FROM fomo_tails WHERE tenant = ? AND expires_at_ms > ? ORDER BY created_at_ms, user_id`)
+    .all(tenantOf(tenant), intOf(nowMs, "nowMs"))) as Row[];
+  return rows.flatMap((r) => tailOf(r) ?? []);
+}
+
+/** An owner's tails that ended (expired) after `sinceMs` and by `nowMs`, oldest end first: what an end-of-tail summary reads. */
+export async function recentlyEndedTails(db: Db, tenant: string, sinceMs: number, nowMs: number): Promise<FomoTail[]> {
+  const rows = (await db
+    .prepare(`SELECT ${TAIL_COLUMNS} FROM fomo_tails WHERE tenant = ? AND expires_at_ms > ? AND expires_at_ms <= ? ORDER BY expires_at_ms, user_id`)
+    .all(tenantOf(tenant), intOf(sinceMs, "sinceMs"), intOf(nowMs, "nowMs"))) as Row[];
+  return rows.flatMap((r) => tailOf(r) ?? []);
+}
+
+export type ExtendTailResult =
+  | { ok: true; tail: FomoTail; previousExpiresAtMs: number; capped: boolean }
+  | { ok: false; reason: "not-active" };
+
+/**
+ * MAKE ONE RUNNING TAIL LONGER by `addMs` (the +1h button on a notice):
+ * never past `tailMaxMs` from now, and never shorter than it already runs.
+ * addTail with a short span would REPLACE the end and could cut it; this only
+ * ever moves the end later (or leaves it, at the limit, `capped`). An ended
+ * tail is never revived here: tailing it again is a new tail, counted
+ * against the cap, through addTail. Read and written under the owner's lock
+ * row, like addTail, so a concurrent stop or renewal is not lost. Owner state
+ * only: nothing here sizes, orders or grants.
+ */
+export async function extendTail(db: Db, t: { tenant: string; userId: string; addMs: number; nowMs: number }): Promise<ExtendTailResult> {
+  const tenant = tenantOf(t.tenant);
+  const userId = keyOf(t.userId, "userId", 128);
+  const now = intOf(t.nowMs, "nowMs");
+  const add = intOf(t.addMs, "addMs");
+  if (add <= 0) throw new TypeError("fomo store: an extension must add time");
+  return db.tx(async (tx): Promise<ExtendTailResult> => {
+    await lockTenant(tx, tenant, "tails", now);
+    const row = (await tx.prepare(`SELECT ${TAIL_COLUMNS} FROM fomo_tails WHERE tenant = ? AND user_id = ?`).get(tenant, userId)) as Row | undefined;
+    const cur = row ? tailOf(row) : null;
+    if (!cur || cur.expiresAtMs <= now) return { ok: false, reason: "not-active" };
+    const limit = now + FOMO_LIMITS.tailMaxMs;
+    const wanted = cur.expiresAtMs + add;
+    const next = Math.max(cur.expiresAtMs, Math.min(wanted, limit));
+    if (next > cur.expiresAtMs) {
+      await tx.prepare("UPDATE fomo_tails SET expires_at_ms = ? WHERE tenant = ? AND user_id = ? AND expires_at_ms = ?").run(next, tenant, userId, cur.expiresAtMs);
+    }
+    return { ok: true, tail: { ...cur, expiresAtMs: next }, previousExpiresAtMs: cur.expiresAtMs, capped: wanted > limit };
+  });
+}
+
+/**
+ * EVERY TRADER ANYBODY IS TAILING NOW → the owners tailing them (the only
+ * tenants a tailed trader's events are routed to for it), at most `limit`
+ * traders by id, each owner list sorted. ONE query for the whole fleet: the
+ * leader's routing reads this every interest refresh, so it must not cost a
+ * round trip per tailed trader. Rows are bounded by the trader limit times
+ * the owners tailing each (each owner holds at most activeTailsPerTenant).
+ */
+export async function tailOwners(db: Db, nowMs: number, limit: number): Promise<Map<string, string[]>> {
+  const now = intOf(nowMs, "nowMs");
+  const rows = (await db
+    .prepare(
+      `SELECT user_id, tenant FROM fomo_tails
+        WHERE expires_at_ms > ? AND user_id IN (SELECT DISTINCT user_id FROM fomo_tails WHERE expires_at_ms > ? ORDER BY user_id LIMIT ?)
+        ORDER BY user_id, tenant`,
+    )
+    .all(now, now, pageOf(limit, FOMO_LIMITS.tailedTradersFleet))) as Row[];
+  const out = new Map<string, string[]>();
+  for (const r of rows) {
+    if (typeof r.user_id !== "string" || typeof r.tenant !== "string") continue;
+    const list = out.get(r.user_id);
+    if (list) list.push(r.tenant);
+    else out.set(r.user_id, [r.tenant]);
+  }
+  return out;
+}
+
 // ── tenant routes ───────────────────────────────────────────────────────────
 
 /**
@@ -3516,6 +3714,8 @@ export interface FomoRetentionPolicy {
   researchQueueMs: number;
   subjectsMs: number;
   expiredWatchesMs: number;
+  /** An ended tail is kept this long (an end-of-tail summary reads it), then goes. */
+  expiredTailsMs: number;
   usageDays: number;
   /** Measured trader evidence older than this is gone (the cohort re-measures within days). */
   traderEvidenceMs: number;
@@ -3535,6 +3735,7 @@ export const FOMO_RETENTION: Readonly<FomoRetentionPolicy> = {
   researchQueueMs: 7 * DAY_MS,
   subjectsMs: 30 * DAY_MS,
   expiredWatchesMs: 7 * DAY_MS,
+  expiredTailsMs: DAY_MS,
   usageDays: 400,
   traderEvidenceMs: 30 * DAY_MS,
   heldTokensMs: 2 * DAY_MS,
@@ -3579,6 +3780,7 @@ export function fomoRetentionStatements(nowMs: number, policy: FomoRetentionPoli
       [now - policy.subjectsMs],
     ],
     ["DELETE FROM fomo_watches WHERE expires_at_ms < ?", [now - policy.expiredWatchesMs]],
+    ["DELETE FROM fomo_tails WHERE expires_at_ms < ?", [now - policy.expiredTailsMs]],
     ["DELETE FROM fomo_position_deps WHERE expires_at_ms < ?", [now]],
     ["DELETE FROM fomo_usage WHERE day < ?", [usageDay(Math.max(0, now - policy.usageDays * DAY_MS))]],
     ["DELETE FROM fomo_trader_evidence WHERE measured_at_ms < ?", [now - policy.traderEvidenceMs]],

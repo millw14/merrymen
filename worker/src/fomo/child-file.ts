@@ -28,7 +28,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { sanitizeText } from "../research/news";
-import type { ChildFomoFile, ChildSignal, FomoAccess } from "./contract";
+import type { ChildFomoFile, ChildSignal, ChildTail, ChildTailEvent, FomoAccess } from "./contract";
 import { DOSSIER_TOPICS, type DossierTopic } from "./dossier";
 import { tokenFromKey } from "./identity";
 import { tenantKey, traderEventOf } from "./store";
@@ -64,6 +64,9 @@ export const CHILD_FOMO_LIMITS = Object.freeze({
   claimTextChars: 400,
   listItemChars: 300,
   keyChars: 256,
+  /** Tails per state: at most this many active and this many recently ended (store.ts activeTailsPerTenant). */
+  tails: 3,
+  tailEvents: 20,
 });
 
 export type ChildFomoReadReason = "ok" | "absent" | "unreadable" | "wrong-tenant" | "stale" | "invalid";
@@ -115,6 +118,7 @@ const REASONS: Record<Reason, true> = {
   dependency: true,
   "early-discovery": true,
   "robinhood-thesis": true,
+  tailed: true,
 };
 
 const STANCES: Record<DossierClaim["stance"], true> = { supporting: true, opposing: true, neutral: true };
@@ -495,17 +499,120 @@ function signalOf(v: unknown): ChildSignal | null {
   const reasons: Reason[] = [];
   for (const r of v.reasons) if (isIn(REASONS, r) && !reasons.includes(r)) reasons.push(r);
   const lens = lensOf(v.lens);
+  const triggers = triggersOf(v.triggers, token.key);
+  // Only keys of this signal's own (kept) triggers, each once: a key naming
+  // nothing here, or anything that is not a string, is dropped.
+  const own = new Set(triggers.map((e) => e.eventKey));
+  const tailTriggerKeys = Array.isArray(v.tailTriggerKeys)
+    ? [...new Set(v.tailTriggerKeys.filter((k): k is string => typeof k === "string" && own.has(k)))].slice(0, CHILD_FOMO_LIMITS.triggers)
+    : [];
   return {
     token,
     label: labelOf(v.label),
     priority: v.priority,
     reasons,
-    triggers: triggersOf(v.triggers, token.key),
+    triggers,
+    ...(tailTriggerKeys.length > 0 ? { tailTriggerKeys } : {}),
     firstSeenAt,
     dossier: dossierOf(v.dossier, token.key),
     lens,
     lensRefs: lensRefsOf(v.lensRefs, lens),
   };
+}
+
+// ── tails ───────────────────────────────────────────────────────────────────
+
+const TAIL_EVENT_KINDS: Record<ChildTailEvent["kind"], true> = { buy: true, sell: true, thesis: true };
+/** A plain Fomo handle (tools.ts HANDLE): anything else is shown as no handle at all. */
+const TAIL_HANDLE = /^[A-Za-z0-9_]{1,30}$/;
+
+/**
+ * One tailed trader's event, rebuilt from `unknown`. An identity that does not
+ * re-parse drops the event (it would name the wrong coin in a notice); their
+ * words are third-party text, sanitised and capped.
+ */
+function tailEventOf(v: unknown): ChildTailEvent | null {
+  if (!isRecord(v) || !isIn(TAIL_EVENT_KINDS, v.kind)) return null;
+  const eventKey = exact(v.eventKey, CHILD_FOMO_LIMITS.keyChars);
+  const at = time(v.at);
+  const observedAt = time(v.observedAt);
+  if (!eventKey || at === null || observedAt === null) return null;
+  const hasToken = v.token !== null && v.token !== undefined;
+  const token = hasToken ? tokenOf(v.token) : null;
+  if (hasToken && !token) return null;
+  const pv = v.positionValueUsd;
+  if (!(pv === null || pv === undefined || (typeof pv === "number" && Number.isFinite(pv) && pv >= 0))) return null;
+  return {
+    eventKey,
+    kind: v.kind,
+    token,
+    label: labelOf(v.label),
+    at,
+    observedAt,
+    positionValueUsd: typeof pv === "number" ? pv : null,
+    text: clean(v.text, CHILD_FOMO_LIMITS.eventTextChars),
+  };
+}
+
+function tailTotalsOf(v: unknown): ChildTail["totals"] {
+  if (!isRecord(v) || typeof v.capped !== "boolean") return null;
+  const buys = count(v.buys);
+  const sells = count(v.sells);
+  const theses = count(v.theses);
+  const coins = count(v.coins);
+  if (buys === null || sells === null || theses === null || coins === null) return null;
+  return { buys, sells, theses, coins, capped: v.capped };
+}
+
+function tailOf(v: unknown): ChildTail | null {
+  if (!isRecord(v)) return null;
+  const userId = exact(v.userId, 128);
+  const createdAt = time(v.createdAt);
+  const expiresAt = time(v.expiresAt);
+  if (!userId || createdAt === null || expiresAt === null || expiresAt <= createdAt) return null;
+  if (typeof v.ended !== "boolean" || typeof v.consider !== "boolean" || !Array.isArray(v.events)) return null;
+  const seen = new Set<string>();
+  const events: ChildTailEvent[] = [];
+  for (const x of v.events) {
+    const e = tailEventOf(x);
+    if (!e || seen.has(e.eventKey)) continue;
+    seen.add(e.eventKey);
+    events.push(e);
+  }
+  events.sort((a, b) => b.at - a.at || (a.eventKey < b.eventKey ? -1 : a.eventKey > b.eventKey ? 1 : 0));
+  return {
+    userId,
+    handle: typeof v.handle === "string" && TAIL_HANDLE.test(v.handle) ? v.handle : null,
+    createdAt,
+    expiresAt,
+    ended: v.ended,
+    consider: v.consider,
+    events: events.slice(0, CHILD_FOMO_LIMITS.tailEvents),
+    totals: tailTotalsOf(v.totals),
+  };
+}
+
+/**
+ * The tails block, or undefined when the file has none (an older writer, or
+ * an owner with no tail). A block that is not a list reads as no tails; a bad
+ * entry is dropped, one trader appears once, and at most CHILD_FOMO_LIMITS.tails
+ * active and as many ended are kept, active first.
+ */
+function tailsOf(v: unknown): ChildTail[] | undefined {
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v)) return [];
+  const seen = new Set<string>();
+  const active: ChildTail[] = [];
+  const ended: ChildTail[] = [];
+  for (const x of v) {
+    const t = tailOf(x);
+    if (!t || seen.has(t.userId)) continue;
+    const list = t.ended ? ended : active;
+    if (list.length >= CHILD_FOMO_LIMITS.tails) continue;
+    seen.add(t.userId);
+    list.push(t);
+  }
+  return [...active, ...ended];
 }
 
 /**
@@ -569,7 +676,9 @@ export function normalizeChildFomoFile(v: unknown): { file: ChildFomoFile; dropp
     seen.add(s.token.key);
     signals.push(s);
   }
-  return { file: { version: 1, writtenAt, tenant, access, health, signals }, droppedSignals: dropped };
+  // Tails exist only under data access (the writer's rule, kept by the reader too).
+  const tails = access.dataAccess ? tailsOf(v.tails) : undefined;
+  return { file: { version: 1, writtenAt, tenant, access, health, signals, ...(tails !== undefined ? { tails } : {}) }, droppedSignals: dropped };
 }
 
 const bytesOf = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), "utf8");

@@ -25,15 +25,31 @@ export function mintNonce(): string {
   return out;
 }
 
-const DATA_RE = /^mm:(y|n):([a-z2-7]{10})$/;
+/**
+ * `y` yes, `n` no, and `c`: the second yes a Fomo tail's card may carry
+ * ("👀 + consider their buys"). A `c` is honoured only for a parked tail
+ * (service.ts handleCallback), and even then only as a request the service
+ * checks again: a client can send any data it likes.
+ */
+const DATA_RE = /^mm:(y|c|n):([a-z2-7]{10})$/;
 
 /** The keyboard under a question. */
 export function confirmKeyboard(nonce: string, yes = "✅ Yes, do it", no = "✖ No"): InlineKeyboard {
   return [[{ text: yes, callbackData: `mm:y:${nonce}` }, { text: no, callbackData: `mm:n:${nonce}` }]];
 }
 
-/** A press, read back. Null for anything we did not mint. */
-export function parseConfirmData(data: string): { yes: boolean; nonce: string } | null {
+/**
+ * The keyboard under a Fomo tail's card: "Tell me only" always, "+ consider
+ * their buys" only when following could act when the card was made, and No.
+ */
+export function tailConfirmKeyboard(nonce: string, considerOffered: boolean): InlineKeyboard {
+  const yes = [{ text: "👀 Tell me only", callbackData: `mm:y:${nonce}` }];
+  if (considerOffered) yes.push({ text: "👀 + consider their buys", callbackData: `mm:c:${nonce}` });
+  return [yes, [{ text: "✖ No", callbackData: `mm:n:${nonce}` }]];
+}
+
+/** A press, read back. Null for anything we did not mint. `consider` only for `mm:c:`. */
+export function parseConfirmData(data: string): { yes: boolean; consider: boolean; nonce: string } | null {
   const m = DATA_RE.exec(data);
-  return m ? { yes: m[1] === "y", nonce: m[2]! } : null;
+  return m ? { yes: m[1] !== "n", consider: m[1] === "c", nonce: m[2]! } : null;
 }
