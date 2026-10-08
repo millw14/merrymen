@@ -735,7 +735,7 @@ export async function createBilling({
   // leave a trace in the ledger it is paid into, not only in a deploy log.
   if (mode !== "off" && !readOnly) {
     await ledger.enqueue(async () => {
-      const cur ={ treasury, previous: [...previous].sort(), start_block: Number.isSafeInteger(startBlock) ? startBlock : null };
+      const cur = { treasury, previous: [...previous].sort(), start_block: Number.isSafeInteger(startBlock) ? startBlock : null };
       const last = ledger.state.config;
       if (last && last.treasury === cur.treasury && last.start_block === cur.start_block
         && JSON.stringify([...last.previous].sort()) === JSON.stringify(cur.previous)) return;
@@ -750,7 +750,7 @@ export async function createBilling({
 
   // ── usage counters ──
   const usageFile = path.join(dataDir, USAGE_FILE);
-  /** `${owner}|${window start}` -> {end, total, keys: Map(keyId -> n)} */
+  /** `${owner}|${Free window start}` or `${owner}|${period_id}` -> {end, total, keys: Map(keyId -> n)} */
   const usage = new Map();
   let usageDirty = false;
   let usageWriting = null;
@@ -1073,6 +1073,11 @@ export async function createBilling({
     if (!publicClient || (mode === "off" && !dryRun)) return [];
     while (reconciling) await reconciling;
     const run = (async () => {
+      // On any other chain every receipt is "missing": that would reverse
+      // every recent payment. Ask which chain this is before believing it.
+      let chainId;
+      try { chainId = await read(publicClient.getChainId()); } catch (err) { log(`[billing] reconcile skipped: chain unreadable (${errName(err)})`); return []; }
+      if (chainId !== TOKEN.chainId) { log(`[billing] reconcile skipped: the payments RPC answers chain ${chainId}, not ${TOKEN.chainId}`); return []; }
       const since = ledger.now() - RECONCILE_WINDOW_MS;
       const findings = [];
       for (const p of [...ledger.state.payments.values()]) {

@@ -33,6 +33,8 @@ export async function startFakeChain({ chainId = TOKEN.chainId, head = 5_000, ti
     calls: [],
     /** When set, every call answers this JSON-RPC error (an RPC outage). */
     down: false,
+    /** Methods that answer an error while the rest work. */
+    failing: new Set(),
     /** Milliseconds to wait before answering, to exercise timeouts. */
     delayMs: 0,
     block(n) {
@@ -100,7 +102,7 @@ export async function startFakeChain({ chainId = TOKEN.chainId, head = 5_000, ti
       try { payload = JSON.parse(body); } catch { res.writeHead(400); return res.end(); }
       const one = (call) => {
         chain.calls.push(call.method);
-        if (chain.down) return { jsonrpc: "2.0", id: call.id, error: { code: -32000, message: "upstream exploded at https://rpc.example/SECRET-KEY" } };
+        if (chain.down || chain.failing.has(call.method)) return { jsonrpc: "2.0", id: call.id, error: { code: -32000, message: "upstream exploded at https://rpc.example/SECRET-KEY" } };
         try { return { jsonrpc: "2.0", id: call.id, result: answer(call.method, call.params ?? []) }; } catch (err) {
           return { jsonrpc: "2.0", id: call.id, error: { code: err.code ?? -32000, message: err.message } };
         }

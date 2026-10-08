@@ -366,8 +366,19 @@ test("reconciliation reverses a dropped transfer, but not on a lagging node, an 
   f.chain.head = head;
   f.chain.down = true;
   assert.deepEqual(await f.billing.reconcile(), []);
-  assert.match(f.logs.join("\n"), /reconcile could not re-read/);
+  assert.match(f.logs.join("\n"), /reconcile skipped: chain unreadable/);
+  // An RPC repointed at another chain finds no receipt for anything: that is
+  // not evidence that every payment vanished.
   f.chain.down = false;
+  f.chain.chainId = 46630;
+  assert.deepEqual(await f.billing.reconcile(), []);
+  assert.match(f.logs.join("\n"), /reconcile skipped: the payments RPC answers chain 46630/);
+  f.chain.chainId = 4663;
+  // An error reading one receipt leaves that payment for the next run.
+  f.chain.failing.add("eth_getTransactionReceipt");
+  assert.deepEqual(await f.billing.reconcile(), []);
+  assert.match(f.logs.join("\n"), /reconcile could not re-read/);
+  f.chain.failing.clear();
   assert.deepEqual((await f.billing.reconcile({ dryRun: true })).map((x) => x.why), ["receipt_missing"]);
   assert.equal((await f.records()).filter((r) => r.type === "reversal").length, 0, "a dry run writes nothing");
   f.clock.t += 31 * 60_000;
