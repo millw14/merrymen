@@ -4303,7 +4303,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           ...(meta === "complaint" && !live ? { noOpenAsk: true } : {}),
           // A /forgetme'd line never reaches the router as their earlier question.
           ...(meta === "complaint" && answeredHere && live && !forgotten(live.job) ? { reaskOf: live.job.line.text } : {}),
-          ...(meta === null && addressed !== null && live && openState === "lost" && !live.reasked && !forgotten(live.job) ? { reaskable: live } : {}),
+          // Never a nudge whose routed re-run already ran (live.rerun): her next line is no complaint about it.
+          ...(meta === null && addressed !== null && live && openState === "lost" && !live.reasked && !live.rerun && !forgotten(live.job) ? { reaskable: live } : {}),
         };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.

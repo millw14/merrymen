@@ -800,6 +800,37 @@ describe("other words for 'you missed it' go to the router (route.ts reask)", ()
     assert.equal(desk.asks.length, looks, "nothing is read again");
   });
 
+  it("after a routed re-run lands, her next line is never routed with the nudge as her unanswered question (review r3)", async () => {
+    make();
+    tg.failNext = 1;
+    const ask = msg("shogun how's the market?");
+    await said(ask);
+    clock += 20 * SEC;
+    picks.push({ action: "reask" });
+    const nudge = msg("shogun bro you skipped mine earlier");
+    await said(nudge);
+    assert.equal(tg.out().slice(-1)[0]!.replyTo, ask.messageId, "the re-run landed on her ask");
+    const routed = routePrompts.length;
+    // A hail 40 s later: its template, no routing call.
+    clock += 40 * SEC;
+    const hail = msg("yo shogun");
+    await said(hail);
+    assert.equal(routePrompts.length, routed, "no routing call for a hail");
+    const answered = tg.out().filter((o) => o.replyTo === hail.messageId);
+    assert.equal(answered.length, 1, JSON.stringify(tg.out().slice(-2)));
+    assert.ok(HAILS.includes(answered[0]!.text), answered[0]!.text);
+    // A new question with a reask pick queued is answered itself, and never re-runs the nudge.
+    clock += 40 * SEC;
+    picks.push({ action: "reask" });
+    const looks = desk.asks.length;
+    const fresh = msg("shogun how's the market looking now?");
+    await said(fresh);
+    assert.ok(tg.out().some((o) => o.replyTo === fresh.messageId), "her new question is answered");
+    assert.ok(!tg.out().slice(-3).some((o) => o.replyTo === nudge.messageId), "the nudge is never re-run");
+    assert.ok(routePrompts.slice(routed).every((p) => !p.includes("bro you skipped mine earlier")), "never put to the router as her unanswered question");
+    assert.ok(desk.asks.length > looks, "her question was read");
+  });
+
   it("a poke while the routed re-run is still being read gets its 👀 (review r2)", async () => {
     make();
     tg.failNext = 1;
