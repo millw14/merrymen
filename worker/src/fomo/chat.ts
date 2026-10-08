@@ -49,7 +49,7 @@ import {
   shownTraderRows,
   type Audience,
 } from "./render";
-import { applyPlan, applyResult, deserialize, MAX_BOARD_ROWS, serialize, type BoardMemory, type SubjectMemory } from "./subject-memory";
+import { applyPlan, applyResult, deserialize, isMemoryUsable, MAX_BOARD_ROWS, serialize, type BoardMemory, type SubjectMemory } from "./subject-memory";
 import { isMutationTool } from "./tools";
 import type { RankingsData, TokenThesesData, TraderActivityData } from "./tools";
 import type { FomoEnvelope, FomoSurface, FomoToolName, ResolvedSubject, ResultStatus } from "./types";
@@ -197,6 +197,28 @@ function roomPnlPlan(plan: FomoQuestionPlan, text: string): FomoQuestionPlan {
   };
 }
 
+/**
+ * A PUSHBACK THE PLANNER CANNOT READ ("check again", "are you sure?",
+ * "that's wrong"): the remembered coin's theses, asked again (review on
+ * #306). Only when the conversation's last answer was a coin's theses, the
+ * class whose "nothing here" is short-lived: planned from the planner's own
+ * pure follow-up of that subject, at its ordinary freshness, so a held empty
+ * page is read again (retryEmpty) and a page with theses keeps its window.
+ */
+function pushbackPlan(memory: SubjectMemory | null, now: number, ctx: Parameters<typeof classifyFomoQuestion>[1]): FomoQuestionPlan | null {
+  if (!isMemoryUsable(memory, now) || memory.lastIntent !== "token-theses") return null;
+  const p = classifyFomoQuestion("refresh it", ctx);
+  if (!p || p.intent !== "token-theses" || p.clarification || p.toolCalls.length === 0) return null;
+  return {
+    ...p,
+    freshness: "prefer-fresh",
+    toolCalls: p.toolCalls.map((c) => {
+      const { freshness: _forced, ...args } = c.args;
+      return { ...c, args };
+    }),
+  };
+}
+
 /** The most positions an earnings read keeps, so its winners and losers are ranked over more than the default page. */
 const EARNINGS_LIMIT = 50;
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -322,7 +344,8 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
 
   // 2. The deterministic plan.
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
-  const planned = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
+  const ctx = { memory, now, ...(selfNames.length ? { selfNames } : {}) };
+  const planned = classifyFomoQuestion(input.text, ctx) ?? (input.retryEmpty === true ? pushbackPlan(memory, now, ctx) : null);
   if (!planned) return { handled: false };
   const plan = audience === "group" ? roomPnlPlan(planned, input.text) : planned;
   try {

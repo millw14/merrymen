@@ -1745,6 +1745,29 @@ describe("a group research question, end to end", () => {
     }
   });
 
+  it("a pushback with no thesis word in it ('check again', 'are you sure?', 'that's wrong') reads the empty page again (review on #306)", async () => {
+    for (const [line, reply] of [["pine check again", false], ["pine are you sure?", true], ["pine that's wrong", false], ["you sure?", true]] as const) {
+      let thesisReads = 0;
+      const r = await room({ theses: () => (thesisReads += 1, thesisReads === 1 ? { theses: [], available: false } : fixture("theses-token")) });
+      const first = await r.say("pine what are people saying about $PONS on fomo?");
+      assert.match(first.join("\n"), /didn't return the theses on PONS/, line);
+      const out = await r.say(line, { ...(reply ? { under: r.lastOwn() } : {}), advanceMs: 20_000 });
+      assert.equal(thesisReads, 2, `${line}: read again, not the persona over the held empty page`);
+      assert.match(out.join("\n"), /What traders on Fomo are saying about PONS/, `${line}: ${out.join(" | ")}`);
+      assert.ok(r.logs.includes("[tg-groups] research pushback: read again"), line);
+    }
+  });
+
+  it("a pushback the research does not take is never logged as read again, and reads nothing (review on #306)", async () => {
+    const r = await room();
+    await r.say("pine who's the top trader on fomo?");
+    const calls = r.s.calls.length;
+    await r.say("pine are you sure?", { under: r.lastOwn(), advanceMs: 20_000 });
+    assert.equal(r.asks.slice(-1)[0]?.fresh, true, "asked as a pushback");
+    assert.equal(r.s.calls.length, calls, "a board's pushback plans nothing: no lookup");
+    assert.ok(!r.logs.includes("[tg-groups] research pushback: read again"), r.logs.join("\n"));
+  });
+
   it("a pushback under another of its own lines is about that line, never the last Fomo subject (review on #306)", async () => {
     const r = await room();
     await r.say("pine what are people saying about $PONS on fomo?");

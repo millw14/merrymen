@@ -2928,7 +2928,6 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // "check again"), in reply to it or right after it: read again, never
     // serve the same held "nothing here" (the AUTON incident, 2026-10-08).
     const fresh = pushbackOnFomo(j.msg, j.line.text, j.threadId);
-    if (fresh) log("[tg-groups] research pushback: read again");
     const r = await readFomo(port, {
       text: j.line.text,
       ...(request ? { request } : {}),
@@ -2955,6 +2954,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       refund();
       return "not-research";
     }
+    // Said only once the research took it: a pushback it could not read is the persona's, and read nothing.
+    if (fresh) log("[tg-groups] research pushback: read again");
     if (how.fallback && !r.deflect && (r.status === "budget-limited" || r.status === "unavailable" || r.status === "failed" || fomoSayable(r.text) === null)) {
       // A refusal costs the provider nothing: the room's ask is given back.
       if (r.status === "budget-limited" || r.status === "unavailable") refund();
