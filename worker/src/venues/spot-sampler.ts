@@ -79,17 +79,30 @@ export interface SampledPrice {
 }
 
 export class SpotSampler {
-  private readonly series = new Map<string, SpotSample[]>();
+  private readonly series = new Map<string, { source: string; samples: SpotSample[] }>();
 
-  /** Add a reading. Out-of-order or same-second readings replace nothing and are dropped. */
-  record(key: string, sample: SpotSample): void {
+  /**
+   * Add a reading. Out-of-order or same-second readings replace nothing and are dropped.
+   *
+   * `source` NAMES WHAT WAS READ — the pool and the route through it. A series
+   * is one pool's history: when the route moves to another pool (a deeper fee
+   * tier opened, say), that pool's first reading must not join the old pool's
+   * readings and inherit their readiness. A reading from a different source
+   * starts the series over.
+   */
+  record(key: string, sample: SpotSample, source = ""): void {
     if (sample.price8 <= 0n || !Number.isFinite(sample.atSec)) return;
-    let s = this.series.get(key);
-    if (!s) {
-      s = [];
-      this.series.set(key, s);
+    let entry = this.series.get(key);
+    if (entry && entry.source !== source) {
+      this.series.delete(key);
+      entry = undefined;
+    }
+    if (!entry) {
+      entry = { source, samples: [] };
+      this.series.set(key, entry);
       while (this.series.size > SERIES_CAP) this.series.delete(this.series.keys().next().value as string);
     }
+    const s = entry.samples;
     const last = s[s.length - 1];
     if (last && sample.atSec <= last.atSec) return;
     // A gap long enough to break the series ends it: the new reading starts over.
@@ -110,8 +123,11 @@ export class SpotSampler {
    * than one gap. Each reading holds until the next one; the oldest kept one is
    * clipped to the window's start.
    */
-  read(key: string, nowSec: number): SampledPrice | null {
-    const s = this.series.get(key);
+  read(key: string, nowSec: number, source = ""): SampledPrice | null {
+    const entry = this.series.get(key);
+    // Another pool's history is not this one's.
+    if (entry && entry.source !== source) return null;
+    const s = entry?.samples;
     const last = s?.[s.length - 1];
     if (!s || !last || nowSec - last.atSec > SAMPLE_MAX_GAP_SEC) return null;
     const start = nowSec - SAMPLE_WINDOW_SEC;

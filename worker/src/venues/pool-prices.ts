@@ -135,6 +135,16 @@ export function sampledDivergenceBps(guard: PriceGuard): number {
   return guard.maxDivergenceBps * 2;
 }
 
+/**
+ * What a sampled series is a history OF: the pool read, and the route through
+ * it. Lowercased. A series recorded under one identity is never read under
+ * another (spot-sampler.ts), so a route that moves to a new pool starts over.
+ */
+export function spotIdentity(r: RoutedPrice): string {
+  const leg = r.spotOnly;
+  return leg ? `${r.route}:${leg.pool.toLowerCase()}:${leg.tokenIsToken0 ? 0 : 1}:${leg.cashDecimals}` : "";
+}
+
 /** Human-readable provenance for a sampled price, beside `describeRoute`. */
 export function describeSampled(r: RoutedPrice, s: SampledPrice): string {
   const depth = Number(s.liquidityUsdg) / 1e6;
@@ -192,7 +202,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
             cache.set(key, { routed, fetchedAt: nowSec });
             // The full read's spot IS this tick's reading. A route that has
             // grown an oracle needs no series: the pool keeps its own now.
-            if (routed.spotOnly) sampler.record(key, { atSec: nowSec, price8: routed.price8, liquidityUsdg: routed.liquidityUsdg });
+            if (routed.spotOnly) sampler.record(key, { atSec: nowSec, price8: routed.price8, liquidityUsdg: routed.liquidityUsdg }, spotIdentity(routed));
             else sampler.drop(key);
             refreshed.add(key);
             return;
@@ -215,7 +225,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
           const hit = cache.get(key);
           if (refreshed.has(key) || !hit?.routed?.spotOnly || nowSec - hit.fetchedAt > MAX_ROUTE_AGE_SEC) return;
           const spot = await readSpotLeg(client, hit.routed.spotOnly);
-          if (spot) sampler.record(key, { atSec: nowSec, ...spot });
+          if (spot) sampler.record(key, { atSec: nowSec, ...spot }, spotIdentity(hit.routed));
         }),
       );
 
@@ -239,7 +249,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
         }
         const r = hit.routed;
         if (r.spotOnly) {
-          const quote = sampledQuote(r, sampler.read(cacheKey(t), nowSec), guard);
+          const quote = sampledQuote(r, sampler.read(cacheKey(t), nowSec, spotIdentity(r)), guard);
           if ("refusal" in quote) refused.push({ symbol: t.symbol, ...quote.refusal });
           else quotes.set(t.symbol, quote.quote);
           continue;

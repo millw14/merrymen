@@ -95,6 +95,19 @@ describe("SpotSampler — when a series counts", () => {
     assert.equal(s.read("a", 1000)!.price8, p8(1));
   });
 
+  it("never lets one pool inherit another's history", () => {
+    const s = new SpotSampler();
+    for (const at of [1000, 1060, 1120, 1180]) s.record("a", sample(at, 1), "pool-1");
+    assert.equal(s.read("a", 1180, "pool-1")!.ready, true);
+    // Asked about another pool, the series answers nothing...
+    assert.equal(s.read("a", 1180, "pool-2"), null);
+    // ...and that pool's first reading starts over rather than joining it.
+    s.record("a", sample(1240, 1), "pool-2");
+    const r = s.read("a", 1240, "pool-2")!;
+    assert.equal(r.readings, 1);
+    assert.equal(r.ready, false);
+  });
+
   it("only averages what is inside the window", () => {
     const s = new SpotSampler();
     // A long-ago price, then the window's worth of a different one.
@@ -123,7 +136,7 @@ const GUARD = { minLiquidityUsdg: usdgD(25_000), maxDivergenceBps: 500 };
  * exactly as a cardinality-1 pool's does. sqrtPriceX96 = 2^96 × m, so price
  * scales with m²; depth L = 5e10 is $50,000 at m = 1.
  */
-function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean }) {
+function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean; pool?: `0x${string}` }) {
   const calls: string[] = [];
   const client = {
     async readContract(args: { address: string; functionName: string; args?: readonly unknown[] }): Promise<unknown> {
@@ -133,7 +146,7 @@ function freshPool(state: { m: number; liquidity?: bigint; oracle?: boolean }) {
           const [a, b, fee] = args.args as [string, string, number];
           const usdg = (CASH.USDG as string).toLowerCase();
           return fee === 100 && (a.toLowerCase() === usdg || b.toLowerCase() === usdg)
-            ? POOL
+            ? state.pool ?? POOL
             : "0x0000000000000000000000000000000000000000";
         }
         case "balanceOf":
@@ -245,6 +258,20 @@ describe("createPoolPriceReader — a sampled price", () => {
     const { client } = freshPool({ m: 1, liquidity: usdgD(10_000) });
     const { refused } = await createPoolPriceReader().read({ client, tokens: [CATE], guard: GUARD, nowSec: 1000 });
     assert.ok(refused.every((r) => r.kind !== "no-pool"), JSON.stringify(refused));
+  });
+
+  it("starts over when the route moves to another pool, instead of inheriting its readiness", async () => {
+    const state: { m: number; pool?: `0x${string}` } = { m: 1 };
+    const { client } = freshPool(state);
+    // A TTL of 60s: every read below is a full route refresh.
+    const reader = createPoolPriceReader({ ttlSec: 60 });
+    for (const nowSec of [1000, 1060, 1120]) await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec });
+    assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1180 })).quotes.get("CATE")?.sampled?.ready, true);
+    state.pool = "0x00000000000000000000000000000000000000fe";
+    const moved = (await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1240 })).quotes.get("CATE");
+    assert.equal(moved?.source, "sampled");
+    assert.equal(moved?.sampled?.readings, 1);
+    assert.equal(moved?.sampled?.ready, false, "a new pool's first reading authorises nothing");
   });
 
   it("drops the series once the pool keeps an oracle of its own", async () => {
