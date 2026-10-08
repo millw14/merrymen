@@ -106,6 +106,7 @@ function subscribeDesktop(onChange: () => void) {
 
 export function App() {
   const bodyRef = useRef<HTMLDivElement>(null);
+  const modeSceneRef = useRef<HTMLDivElement>(null);
   /**
    * THE LATEST ANSWER OF EVERY READ, and the screens drawn from them.
    *
@@ -208,11 +209,7 @@ export function App() {
     if (pathname === "/perps" && (requestedPerpsView === "account" || requestedPerpsView === "feed" || requestedPerpsView === "trade" || requestedPerpsView === "positions"))
       setPerpsNavigation(previous => ({ owner: chatKey, view: requestedPerpsView, revision: (previous?.revision ?? 0) + 1 }));
   }, [pathname, requestedPerpsView, chatKey]);
-  const entrance = usePerpsEntrance(perpsEntranceOwner(account?.session ?? null));
-  useEffect(() => {
-    entrance.cancelPending();
-    if (pathname !== "/perps") entrance.finish();
-  }, [pathname, entrance.cancelPending, entrance.finish]);
+  const entrance = usePerpsEntrance(perpsEntranceOwner(account?.session ?? null), pathname, modeSceneRef);
   const [pendingPerpsStyle, setPendingPerpsStyle] = useState<{ owner: string | null; style: PerpsStyleId } | null>(null);
   const consumePerpsStyle = useCallback(() => setPendingPerpsStyle(null), []);
   /**
@@ -336,6 +333,10 @@ export function App() {
       if (screen.kind !== "perps") void entrance.enter(() => setScreen(next));
       return;
     }
+    if ((screen.kind === "perps" || perpsSetup) && next.kind === "tab" && next.tab === "feed") {
+      entrance.leave(() => { setSidebarSection("feed"); setScreen(next); });
+      return;
+    }
     entrance.cancelPending();
     // There is nothing to fund before an agent exists, and the deposit panel
     // reads `account.status.grant` — so the guard stays, and it sends people to
@@ -347,6 +348,10 @@ export function App() {
     setScreen(next);
   };
   const goTab = (next: Tab) => {
+    if ((screen.kind === "perps" || perpsSetup) && next === "feed") {
+      openScreen({ kind: "tab", tab: "feed" });
+      return;
+    }
     entrance.cancelPending();
     /**
      * THE SAME BUTTON, A DIFFERENT PLACE TO PUT IT.
@@ -362,9 +367,6 @@ export function App() {
     }
     if (desktop && next === "feed") {
       setSidebarSection("feed");
-      // A route-backed Perps view must leave that view when the wordmark's
-      // Feed action is chosen; the old desktop detail pages had no such mode.
-      if (screen.kind === "perps" || perpsSetup) setScreen({ kind: "tab", tab: "feed" });
       return;
     }
     setTab(next);
@@ -499,6 +501,7 @@ export function App() {
 
   return (
     <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
+      ref={modeSceneRef}
       className={ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={perpsSurface ? "perps" : screen.kind === "tab" ? screen.tab : screen.kind}
     >
@@ -891,6 +894,12 @@ export function App() {
           <SoundToggle on={soundOn} onToggle={toggleSound} />
         </TickerStrip>
       )}
-    </div>{screen.kind === "perps" && entrance.playing && <PerpsEntrance onDone={entrance.finish} />}</div></WiredProvider>
+    </div>{entrance.transition && <PerpsEntrance
+      onDone={entrance.finish}
+      scene={entrance.transition.scene}
+      direction={entrance.transition.direction}
+      dramatic={entrance.transition.dramatic}
+      ready={entrance.ready}
+    />}</div></WiredProvider>
   );
 }
