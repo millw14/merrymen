@@ -385,7 +385,7 @@ describe("createPoolPriceReader — a sampled price", () => {
     assert.ok(refused.every((r) => r.kind !== "no-pool"), JSON.stringify(refused));
   });
 
-  it("keeps a held coin's pool through one refresh that finds another, and starts over only when it moves", async () => {
+  it("starts over when the route moves to another pool, instead of inheriting its readiness", async () => {
     const state: { m: number; pool?: `0x${string}` } = { m: 1 };
     const { client } = freshPool(state);
     // A TTL of 60s: every read below is a full route refresh.
@@ -393,29 +393,21 @@ describe("createPoolPriceReader — a sampled price", () => {
     for (const nowSec of [1000, 1060, 1120]) await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec });
     assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1180 })).quotes.get("CATE")?.sampled?.ready, true);
     state.pool = "0x00000000000000000000000000000000000000fe";
-    // One refresh naming another pool is what a failed read of this one looks like: kept.
-    const kept = (await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1240 })).quotes.get("CATE");
-    assert.equal(kept?.sampled?.ready, true, "the series is not thrown away on one refresh");
-    // Once the route is past MAX_ROUTE_AGE_SEC the move is taken — and the new pool inherits nothing.
-    const moved = (await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1800 })).quotes.get("CATE");
+    const moved = (await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1240 })).quotes.get("CATE");
     assert.equal(moved?.source, "sampled");
     assert.equal(moved?.sampled?.readings, 1);
     assert.equal(moved?.sampled?.ready, false, "a new pool's first reading authorises nothing");
   });
-
-  it("takes a single-slot pool's spot at once when its quiet extrapolation ends", async () => {
-    // A cardinality-1 pool quiet for the window answers observe() by
-    // extrapolating its one observation; its next swap ends that. Keeping the
-    // old reading would freeze a pre-trade price for minutes.
+  it("holds a single-slot pool's quiet TWAP like any other until MAX_ROUTE_AGE_SEC, then samples it", async () => {
+    // The same tolerance a failed TWAP read has always had; then the spot.
     const state = { m: 1, oracle: true, cardinality: 1, observeFails: false };
     const { client } = freshPool(state);
     const reader = createPoolPriceReader({ ttlSec: 60 });
     assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1000 })).quotes.get("CATE")?.source, "pool");
     Object.assign(state, { observeFails: true, m: Math.sqrt(0.5) });
-    const q = (await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE");
-    assert.equal(q?.source, "sampled");
+    assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE")?.source, "pool");
+    assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1601 })).quotes.get("CATE")?.source, "sampled");
   });
-
   it("keeps a TWAP route on a real oracle ring that just came up short", async () => {
     // A burst of swaps can overrun a ring; that is not the pool losing its oracle.
     const state = { m: 1, oracle: true, cardinality: 300, observeFails: false };
@@ -426,23 +418,20 @@ describe("createPoolPriceReader — a sampled price", () => {
     assert.equal((await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE")?.source, "pool");
   });
 
-  it("keepTwapOver: a TWAP stands against any spot route but its own single slot's", () => {
+  it("keepTwapOver: a current TWAP stands against any spot route, as it does against a failed read", () => {
     const other = "0x00000000000000000000000000000000000000ee" as const;
     const spot = (pool: `0x${string}`, depth: number, cardinality = 1) => ({
       price8: 1n, spot8: 1n, route: "weth", liquidityUsdg: usdgD(depth), divergenceBps: 0, twapWindowSec: 0, pool,
       spotOnly: { pool, tokenIsToken0: true, tokenDecimals: 18, cashDecimals: 18, cashUsd8: 1n, oracleCardinality: cardinality, otherLegDepthUsdg: null },
     }) as RoutedPrice;
-    const twap = (cardinality: number) =>
-      ({ price8: 1n, spot8: 1n, route: "direct", liquidityUsdg: usdgD(100_000), divergenceBps: 0, twapWindowSec: 900, pool: POOL, poolCardinality: cardinality }) as RoutedPrice;
-    const at = (routed: RoutedPrice) => ({ routed, fetchedAt: 1000 });
-    assert.equal(keepTwapOver(at(twap(300)), spot(other, 50_000), 1060), true, "another tier's spot, the TWAP read having failed");
-    assert.equal(keepTwapOver(at(twap(300)), spot(other, 500_000), 1060), true, "even a deeper one");
-    assert.equal(keepTwapOver(at(twap(300)), spot(POOL, 50_000, 300), 1060), true, "its own ring overrun");
-    assert.equal(keepTwapOver(at(twap(1)), spot(other, 50_000), 1060), true, "a single slot's TWAP still stands against ANOTHER pool");
-    assert.equal(keepTwapOver(at(twap(1)), spot(POOL, 50_000), 1060), false, "its own single slot's extrapolation ended");
-    assert.equal(keepTwapOver(at(twap(300)), spot(other, 50_000), 1000 + 601), false, "past MAX_ROUTE_AGE_SEC nothing is kept");
+    const twap = { price8: 1n, spot8: 1n, route: "direct", liquidityUsdg: usdgD(100_000), divergenceBps: 0, twapWindowSec: 900, pool: POOL } as RoutedPrice;
+    const at = { routed: twap, fetchedAt: 1000 };
+    assert.equal(keepTwapOver(at, spot(other, 50_000), 1060), true, "another tier's spot");
+    assert.equal(keepTwapOver(at, spot(other, 500_000), 1060), true, "even a deeper one");
+    assert.equal(keepTwapOver(at, spot(POOL, 50_000, 300), 1060), true, "its own ring come up short");
+    assert.equal(keepTwapOver(at, spot(other, 50_000), 1000 + 601), false, "past MAX_ROUTE_AGE_SEC nothing is kept");
+    assert.equal(keepTwapOver({ routed: spot(other, 1), fetchedAt: 1000 }, spot(POOL, 1), 1060), false, "a spot route is never held over another");
   });
-
   it("keeps a working TWAP when a failed read leaves only another tier's spot", async () => {
     const m = market();
     m.pool(DUST, { pair: [cate, WETH_], fee: 3000, usd: 0.002, depth: "mid-weth", observe: "twap" });
@@ -451,17 +440,6 @@ describe("createPoolPriceReader — a sampled price", () => {
     assert.equal((await reader.read({ client: m.client, tokens: [CATE], guard: GUARD, nowSec: 1000 })).quotes.get("CATE")?.source, "pool");
     m.spec(DUST).observe = "transport";
     assert.equal((await reader.read({ client: m.client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE")?.source, "pool");
-  });
-
-  it("lets a quiet single-slot TWAP go when that pool's own oracle now says OLD, whichever pool the spot is on", async () => {
-    const m = market();
-    m.pool(DUST, { pair: [cate, WETH_], fee: 3000, usd: 0.002, depth: "mid-weth", observe: "twap", card: 1 });
-    m.pool(DEEP, { pair: [cate, WETH_], fee: 100, usd: 0.002, depth: "deep-weth", observe: "OLD" });
-    const reader = createPoolPriceReader({ ttlSec: 60 });
-    assert.equal((await reader.read({ client: m.client, tokens: [CATE], guard: GUARD, nowSec: 1000 })).quotes.get("CATE")?.source, "pool");
-    // The quiet pool trades: its single observation can no longer be extrapolated.
-    m.spec(DUST).observe = "OLD";
-    assert.equal((await reader.read({ client: m.client, tokens: [CATE], guard: GUARD, nowSec: 1060 })).quotes.get("CATE")?.source, "sampled");
   });
 
   it("keeps a working WETH-pool TWAP for a coin too cheap for 8dp", async () => {

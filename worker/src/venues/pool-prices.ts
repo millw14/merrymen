@@ -28,7 +28,6 @@
 import type { PublicClient } from "viem";
 import { CASH, type PriceQuote, type StockToken } from "../../../packages/core/src/index";
 import {
-  observeSaysOld,
   poolPriceUsable,
   readRoutedPrice,
   readSpotLeg,
@@ -147,37 +146,22 @@ export function spotIdentity(r: RoutedPrice): string {
 }
 
 /**
- * WHETHER A CURRENT TWAP ROUTE STANDS when a refresh can only find a spot one.
+ * WHETHER A CURRENT TWAP ROUTE STANDS when a refresh can only find a spot one:
+ * it does, until MAX_ROUTE_AGE_SEC — the same tolerance every TWAP route
+ * already had for a read that fails (null keeps the cached route, ageing). A
+ * spot route coming back where a TWAP was is that failure, or a ring that
+ * cannot serve the window right now, and a TWAP is not traded for a spot
+ * price on either.
  *
- * It stands — the refresh treated as a failed read, ageing toward
- * MAX_ROUTE_AGE_SEC — against any spot route but one: the TWAP pool's OWN
- * single observation. Such a pool can only have "answered" by extrapolating
- * one quiet observation; its next swap ends that, and keeping the old reading
- * would freeze a pre-trade price for minutes. Everything else — a real ring
- * overrun by a burst of swaps, a read of the TWAP pool that failed and left
- * another pool's spot as the only answer — comes back exactly like this, and a
- * TWAP is not traded for a spot price on it. An unknown ring size is treated
- * as a real one.
+ * DELIBERATELY NO FINER THAN THAT. Five review rounds tried to tell a quiet
+ * single-slot pool's first trade from a failed read, and a spot pool's real
+ * move from a transient one, and every rule for it opened a new way to price a
+ * held coin off the wrong pool or force-sell it. Routes otherwise move exactly
+ * as they always have.
  */
 export function keepTwapOver(previous: { routed: RoutedPrice | null; fetchedAt: number } | undefined, routed: RoutedPrice, nowSec: number): boolean {
   const prev = previous?.routed;
-  if (!prev || prev.spotOnly || !routed.spotOnly || nowSec - previous!.fetchedAt > MAX_ROUTE_AGE_SEC) return false;
-  const samePool = !!prev.pool && prev.pool.toLowerCase() === routed.spotOnly.pool.toLowerCase();
-  return !(samePool && (prev.poolCardinality ?? 2) <= 1);
-}
-
-/**
- * WHETHER A CURRENT SPOT ROUTE STANDS when a refresh finds one through a
- * DIFFERENT pool. It does, until MAX_ROUTE_AGE_SEC: that is what one failed
- * read of the coin's pool looks like (bestCashPool falling to another tier),
- * and switching would throw its series away and measure a drain against
- * another pool's depth. The cached pool keeps being re-read; if it is really
- * gone, its re-reads fail, the route ages out, and the new pool is taken.
- */
-export function keepSpotOver(previous: { routed: RoutedPrice | null; fetchedAt: number } | undefined, routed: RoutedPrice, nowSec: number): boolean {
-  const prev = previous?.routed?.spotOnly;
-  if (!prev || !routed.spotOnly || nowSec - previous!.fetchedAt > MAX_ROUTE_AGE_SEC) return false;
-  return prev.pool.toLowerCase() !== routed.spotOnly.pool.toLowerCase();
+  return !!prev && !prev.spotOnly && !!routed.spotOnly && nowSec - previous!.fetchedAt <= MAX_ROUTE_AGE_SEC;
 }
 
 /** Human-readable provenance for a sampled price, beside `describeRoute`. */
@@ -233,15 +217,7 @@ export function createPoolPriceReader(opts?: { ttlSec?: number; sampler?: SpotSa
           } catch {
             routed = null; // readRoutedPrice usually swallows its own errors anyway
           }
-          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) {
-            // UNLESS THE TWAP WAS ONE QUIET OBSERVATION AND THAT POOL HAS NOW
-            // TRADED. Its own oracle says so directly; one more call, only for
-            // a single-slot TWAP route. A failed call keeps the TWAP.
-            const prev = previous!.routed!;
-            const quietEnded = (prev.poolCardinality ?? 2) <= 1 && !!prev.pool && await observeSaysOld(client, prev.pool);
-            if (!quietEnded) return;
-          }
-          if (routed?.spotOnly && keepSpotOver(previous, routed, nowSec)) return;
+          if (routed?.spotOnly && keepTwapOver(previous, routed, nowSec)) return;
           if (routed) {
             cache.set(key, { routed, fetchedAt: nowSec });
             // The full read's spot IS this tick's reading. A route with an

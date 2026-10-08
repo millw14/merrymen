@@ -546,8 +546,6 @@ export interface RoutedPrice {
   price18?: bigint;
   /** The token's own pool on this route (the leg that is not WETH/USDG). */
   pool?: `0x${string}`;
-  /** That pool's oracle ring size, on a TWAP route: one means the "TWAP" was a quiet pool's single observation, extrapolated. */
-  poolCardinality?: number;
 }
 
 /** Enough to re-read one oracle-less pool's spot without searching for it again. */
@@ -648,7 +646,6 @@ export async function readRoutedPrice(
           divergenceBps: direct.divergenceBps,
           twapWindowSec: windowSec,
           pool: direct.pool,
-          poolCardinality: direct.oracleCardinality,
         }
       : null;
 
@@ -679,7 +676,6 @@ export async function readRoutedPrice(
       divergenceBps: Math.max(leg.divergenceBps, wethLeg.divergenceBps),
       twapWindowSec: windowSec,
       pool: leg.pool,
-      poolCardinality: leg.oracleCardinality,
     };
     if (wethRoute.price8 <= 0n) return directRoute;
     if (!directRoute) return wethRoute;
@@ -697,19 +693,6 @@ export async function readRoutedPrice(
   // new pool leaves the coin refused as too thin — exactly what every such
   // coin was before sampling existed.
   return twapRoute ?? spotRoute(direct, leg, wethLeg, args.tokenDecimals);
-}
-
-/**
- * Does this pool's own oracle say, right now, that its history is shorter than
- * the window? A read that fails on the way answers false: not a fact.
- */
-export async function observeSaysOld(client: PublicClient, pool: `0x${string}`, windowSec = DEFAULT_TWAP_WINDOW_SEC): Promise<boolean> {
-  try {
-    await client.readContract({ address: pool, abi: POOL_ABI, functionName: "observe", args: [[windowSec, 0]] });
-    return false;
-  } catch (e) {
-    return revertedOld(e);
-  }
 }
 
 /**
