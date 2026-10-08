@@ -1,5 +1,5 @@
 /**
- * THE PARTNER API END TO END, ACROSS EVERY SEAM A PARTNER'S REQUEST CROSSES.
+ * THE PARTNER API END TO END, ACROSS THE SEAMS BETWEEN ITS PROCESSES.
  *
  *   partner backend --fetch, Bearer mmp_--> gateway/server.mjs (a real child process)
  *     --HMAC bridge, Node fetch--> web middleware (the real one)
@@ -18,7 +18,13 @@
  * injected (as partner-enrollment.test.ts and partner-service.test.ts inject
  * them), and the "web" server is a node:http server that hands each request to
  * the real middleware and then to the service, where Next would route it to
- * web/src/app/api/partner/[...path]/route.ts. Nothing leaves 127.0.0.1.
+ * web/src/app/api/partner/[...path]/route.ts. That route is copied here, not
+ * run: in hosted mode it needs Postgres and a live worker. Its hosted-mode
+ * gate is mirrored (and its "off" answer checked below), but a change to
+ * route.ts itself, which can fail every partner request just as the
+ * middleware did, does not fail this file. Moving route.ts's body into a
+ * factory that both it and this harness call would close that gap.
+ * Nothing leaves 127.0.0.1.
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -33,7 +39,7 @@ import { NextRequest } from "next/server";
 import type { Address } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { getActionSelector } from "@zerodev/sdk";
-import { buildWallPolicies, derivationOf, type MerrymenSettings, type StoredGrant } from "@merrymen/core";
+import { buildWallPolicies, derivationOf, isHostedMode, type MerrymenSettings, type StoredGrant } from "@merrymen/core";
 import { partnerGrantDigest, signMerrymanAuthorization } from "../../../sdk/browser";
 import { hashSecret, makeKey } from "../../../gateway/lib/partners.mjs";
 import { checkCanonicalWall } from "./canonical-wall";
@@ -99,8 +105,11 @@ async function serveWeb(req: IncomingMessage, res: ServerResponse) {
   } else if (verdict.headers.has("x-middleware-override-headers") || verdict.headers.has("x-middleware-rewrite")) {
     // Next would rewrite the request before the route saw it; this harness does not, so say so.
     throw new Error(`the middleware now rewrites ${incoming.method} ${pathname}: apply that here as Next does`);
+  } else if (pathname.startsWith("/api/partner/") && !isHostedMode()) {
+    // route.ts's first line, answered word for word: the bridge recognises it as the web app's, not the partner's.
+    response = Response.json({ error: { code: "not_found", message: "Hosted API only" } }, { status: 404 });
   } else if (pathname.startsWith("/api/partner/")) {
-    // What route.ts does for /api/partner/[...path], with this test's store and worker side.
+    // What route.ts does next for /api/partner/[...path], with this test's store and worker side.
     try { response = await service.handle(request(), pathname.slice("/api/partner".length)); }
     catch (error) { response = partnerFailure(error); }
   } else {
@@ -482,5 +491,18 @@ test("a grant sealing the partner's own adapter is refused through the gateway, 
   assert.equal(savedGrants.has(owner.address.toLowerCase()), false, "nothing was installed");
   assert.equal(expectStatus(await partner("GET", `/agents/${created.id}`), 200).status, "pending_authorization");
   assert.deepEqual(refusals, []);
+  assert.deepEqual(harnessFailures, []);
+});
+
+test("a web app outside hosted mode is the platform's outage, not the partner's 404", async () => {
+  // route.ts refuses everything when MERRYMEN_HOSTED is off, the same way the
+  // middleware did in the outage. The partner must hear that the runtime is
+  // down, with a request_id, not that its agents do not exist.
+  delete process.env.MERRYMEN_HOSTED;
+  let answer: Answer;
+  try { answer = await partner("GET", "/agents"); } finally { process.env.MERRYMEN_HOSTED = "1"; }
+  expectStatus(answer, 503);
+  assert.equal(answer.body.error.code, "upstream_unavailable");
+  assert.deepEqual(refusals, [], "the middleware let it through; the route refused it");
   assert.deepEqual(harnessFailures, []);
 });
