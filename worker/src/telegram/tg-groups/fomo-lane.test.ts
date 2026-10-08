@@ -1177,6 +1177,48 @@ describe("a bare 'what's trending' is Fomo's board where Fomo is wired, with the
     }
   });
 
+  it("'what's trending on solana' or 'on base' that Fomo refuses: Fomo's own plain line, never the desk's Robinhood Chain read (review r3)", async () => {
+    const REFUSAL = "fomo lookups for this room are used up for now, try again after 22:00 UTC.";
+    for (const [i, line] of ["pine what's trending on solana", "pine what's trending on base?", "pine whats trending on eth?"].entries()) {
+      fomo!.answer = () => ({ text: REFUSAL, deflect: false, status: "budget-limited" });
+      desk!.asks.length = 0;
+      make();
+      const before = tg.texts(CHAT).length;
+      clock += 3 * MIN;
+      await said(msg(line, { fromId: ANN + 30 + i }));
+      assert.deepEqual(desk!.asks, [], `${line}: the desk reads Robinhood Chain, not that chain`);
+      assert.deepEqual(tg.texts(CHAT).slice(before), [REFUSAL], line);
+      groups.stop();
+      await groups.drain();
+    }
+    // A port that fails or answers nothing for that chain: Fomo could not be reached, never the desk.
+    for (const [i, answer] of [() => null, () => { throw new Error("down"); }].entries()) {
+      fomo!.answer = answer as SpyFomo["answer"];
+      desk!.asks.length = 0;
+      make();
+      const before = tg.texts(CHAT).length;
+      clock += 3 * MIN;
+      await said(msg("pine what's trending on solana", { fromId: ANN + 40 + i }));
+      assert.deepEqual(desk!.asks, []);
+      assert.deepEqual(tg.texts(CHAT).slice(before), ["couldn't reach fomo just now, try again in a bit."]);
+      groups.stop();
+      await groups.drain();
+    }
+    // The bare ask, and Robinhood Chain's own (the desk's chain), still fall back to the desk.
+    for (const [i, line] of ["pine what's trending?", "pine what's trending on robinhood?"].entries()) {
+      fomo!.answer = () => ({ text: REFUSAL, deflect: false, status: "budget-limited" });
+      desk!.asks.length = 0;
+      make();
+      const before = tg.texts(CHAT).length;
+      clock += 3 * MIN;
+      await said(msg(line, { fromId: ANN + 50 + i }));
+      assert.deepEqual(desk!.asks, [{ kind: "market" }], line);
+      for (const t of tg.texts(CHAT).slice(before)) assert.doesNotMatch(t, /used up|couldn't reach fomo/, line);
+      groups.stop();
+      await groups.drain();
+    }
+  });
+
   it("a port that does not take it, or a late read, gives the desk's market read; the read is boxed so the desk keeps its time", async () => {
     fomo!.answer = () => null;
     make();

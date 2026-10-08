@@ -2372,8 +2372,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // Every chain, unless the line names one ("what's trending on solana"):
         // then that chain's slice of the board (Milla, 2026-10-07).
         const onChain = j.trending === true ? chainIn(j.line.text) : undefined;
+        // The desk reads Robinhood Chain only: it stands in for a bare trending ask, or one naming
+        // that chain, never for Solana's or Base's board. Those get Fomo's own plain line instead
+        // (its refusal with the reset time, FOMO_BUSY, FOMO_LATE, FOMO_UNREACHED): rule 5.
+        const deskStandsIn = onChain === undefined || onChain === "robinhood";
         const r = j.trending === true
-          ? await fomoAnswer(chatId, j, replyOpts, { kind: "board", board: "trending", ...(onChain ? { chain: onChain } : {}) }, { fallback: true })
+          ? await fomoAnswer(chatId, j, replyOpts, { kind: "board", board: "trending", ...(onChain ? { chain: onChain } : {}) }, deskStandsIn ? { fallback: true } : { unreached: true })
           : await fomoAnswer(chatId, j, replyOpts);
         if (r === "sent") return null;
         if (r !== "not-research") {
@@ -2854,7 +2858,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * the read gets at most FOMO_FALLBACK_MS, so the desk still has its time
    * inside the same deadline.
    */
-  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest, how: { fallback?: boolean } = {}): Promise<"sent" | "not-research" | Quiet> => {
+  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest, how: { fallback?: boolean; unreached?: boolean } = {}): Promise<"sent" | "not-research" | Quiet> => {
     const port = fomoNow();
     if (!port) return "not-research";
     const replyByMs = j.bornAtMs + RESEARCH_REPLY_MS;
@@ -2905,13 +2909,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
       ...(selfNames.length ? { selfNames } : {}),
     }, how.fallback ? Math.min(FOMO_FALLBACK_MS, left) : left).finally(stopTyping);
+    // `unreached`: a request with no other answer (another chain's trending board) says Fomo could not be reached.
     if (r === null) {
       refund();
-      return "not-research";
+      return how.unreached ? send(FOMO_UNREACHED) : "not-research";
     }
     if (r === "failed") {
       refund();
-      return "not-research";
+      return how.unreached ? send(FOMO_UNREACHED) : "not-research";
     }
     if (r === "timeout") {
       log(`[tg-groups] research ask timed out${how.fallback ? ", the fallback answers" : ""}`);
