@@ -19,7 +19,8 @@ import {
 This is an ESM browser bundle. The static module supports cross-origin loading;
 the authenticated partner API remains server-to-server. For a pinned copy,
 check out a reviewed repository commit, install dependencies at the repository
-root (the build imports `esbuild`, a pinned devDependency) and run:
+root (the build imports `esbuild`, a pinned dependency because the production
+image builds the SDK after `npm ci --omit=dev`) and run:
 
 ```bash
 npm run build:sdk    # sdk/dist/browser.js, plus the copy hosted web serves
