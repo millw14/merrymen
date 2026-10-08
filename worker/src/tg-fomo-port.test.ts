@@ -255,6 +255,41 @@ describe("createTgFomoPort", () => {
     }
   });
 
+  it("a P&L question about one trader in a room is what they made or lost on their trades, every line sayable", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    for (const q of ["what's @CryptoKaleo's pnl on fomo?", "how much did @CryptoKaleo make this week on fomo?"]) {
+      s.clock.now += 6 * 60_000;
+      const before = s.calls.length;
+      const a = await port.ask({ text: q, chatId: GROUP });
+      assert.ok(a && !a.deflect, q);
+      assert.deepEqual(s.calls.slice(before).map((c) => [c.tool, c.args]), [["fomo_get_trader_activity", { trader: "CryptoKaleo", window: "7d", limit: 50 }]], q);
+      assert.match(a.text, /^CryptoKaleo on trades opened or closed in the last 7d \(source-reported, realised to date\): /, `${q}: ${a.text}`);
+      for (const l of a.text.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, `${q}: ${l}`);
+    }
+    // A profile ask ends with how to ask what they made, sayable.
+    s.clock.now += 6 * 60_000;
+    const who = await port.ask({ text: "who is trader CryptoKaleo on fomo?", chatId: GROUP });
+    assert.match(who!.text, /\nFor what they made or lost on their trades, ask: what did trader CryptoKaleo make money on this week on fomo\?/, who!.text);
+    for (const l of who!.text.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, l);
+  });
+
+  it("after a trader board, 'what's #1 trending' and 'the number one coin' are no row of it", async () => {
+    const s = await setup();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    await port.ask({ text: "who are the top traders on fomo today?", chatId: GROUP });
+    s.clock.now += 2 * 60_000;
+    const before = s.calls.length;
+    const a = await port.ask({ text: "what's #1 trending on fomo?", chatId: GROUP });
+    assert.ok(a && !a.deflect);
+    assert.deepEqual(s.calls.slice(before).map((c) => [c.tool, c.args.board]), [["fomo_get_rankings", "trending-tokens"]]);
+    assert.match(a.text, /^Trending on Fomo/, a.text);
+    s.clock.now += 2 * 60_000;
+    const mid = s.calls.length;
+    await port.ask({ text: "what's the number one coin on fomo right now?", chatId: GROUP });
+    assert.equal(s.calls.slice(mid).some((c) => typeof c.args.trader === "string"), false, "never the #1 trader's holdings");
+  });
+
   it("what a trader made, with the positions read failing: 'could not be read just now', never 'nothing realised' (named and a board's row)", async () => {
     const s = await setup({ positionsFail: true });
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
@@ -808,6 +843,18 @@ describe("every room line about one trader passes the group gate as it is sent (
       /^That board has no 3rd trader\.$/m,
       /^I couldn't look up the 1st trader on that board\.$/m,
     ]) assert.match(all, want);
+  });
+
+  it("a thesis, a perp, a listing or 'other' is never a room's trade bullet", () => {
+    const kinds = ["thesis", "perp", "listing", "other", "buy", "sell"];
+    const text = say([envOf("fomo_get_trader_activity", activity({
+      side: "sell",
+      events: kinds.map((kind, i) => ({ evidenceId: `e${i}`, kind, trader: KALEO, token: T, label: { symbol: "PONS", name: null }, fillUsd: null, positionValueUsd: null, positionRealizedPnlUsdCumulative: null, at: NOW - 60_000 * (i + 1), verification: "provider-reported", source: "rest-lookup", inCohort: false })),
+    }))], { intent: "trader-activity" });
+    const bullets = text.split("\n").filter((l) => l.startsWith("• "));
+    assert.deepEqual(bullets.map((l) => l.split(" ")[1]), ["bought", "sold"], text);
+    assert.doesNotMatch(text, /^• (?:thesis|perp|listing|other)\b/m, text);
+    for (const l of text.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
   });
 
   it("the group capabilities line and the row question are admitted", () => {

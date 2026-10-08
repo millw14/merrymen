@@ -122,6 +122,8 @@ export interface FomoQuestionPlan {
 export interface FomoRowAsk {
   rank: 1 | 2 | 3 | 4;
   about: "earnings" | "trades" | "holdings" | "profile";
+  /** A trades ask's side ("what did the best trader sell"), read like a named trader's. */
+  side?: "buy" | "sell";
 }
 
 export interface FomoQuestionContext {
@@ -449,7 +451,14 @@ const GLOBAL_FLOW = /\bwhat (?:are|have|did|is) (?:the )?(?:top |best |smart |ou
  * and "who's #1 on fomo" are the leaderboard without the word "trader";
  * "who's the top coin" is not.
  */
-const RANK_TRADERS = /\b(?:top|best|leading|biggest|most profitable|highest earning|winning|hottest|smartest|top performing|best performing|strongest|richest) (?:\d{1,3} )?(?:fomo )?(?:traders|trader|performers|wallets|earners|winners|accounts)\b|\b(?:trader|traders) (?:leaderboard|rankings?|board)\b|\bleaderboard\b|\brank(?:ed|ing|ings)? (?:of )?(?:the )?traders\b|\bwho (?:is|are) (?:the )?(?:top|best|leading) (?:\d{1,3} )?(?:traders?|performers?)\b|\bwho (?:is|are) (?:the )?(?:top|best|leading|number one|#1|no 1|winning|on top|killing it|up the most|printing)(?! (?:\d{1,3} )?(?:fomo )?(?:coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)|\bwho (?:has |is )?(?:made|makes|making|won|wins|winning|printed|prints|printing|earned|earns|earning) the most\b/;
+const RANK_TRADERS = /\b(?:top|best|leading|biggest|most profitable|highest earning|winning|hottest|smartest|top performing|best performing|strongest|richest) (?:\d{1,3} )?(?:fomo )?(?:traders|trader|performers|wallets|earners|winners|accounts)\b|\b(?:trader|traders) (?:leaderboard|rankings?|board)\b|\bleaderboard\b|\brank(?:ed|ing|ings)? (?:of )?(?:the )?traders\b|\bwho (?:is|are) (?:the )?(?:top|best|leading) (?:\d{1,3} )?(?:traders?|performers?)\b|\bwho (?:is|are) (?:the )?(?:top|best|leading|number one|#1|no 1|winning|on top|killing it|up the most|printing)(?! (?:\d{1,3} )?(?:fomo )?(?:coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)/;
+/**
+ * "Who made the most" is the leaderboard, but only when nothing follows
+ * "the most" but Fomo, a time or the board: "who made the most on PONS" asks
+ * about one coin, which the all-coins trader board says nothing about.
+ */
+const EARNERS_NOT_ON_SUBJECT = String.raw`(?! (?:money |profits? |gains |bread |bank )?(?:on|from|off|with|in) (?!(?:the )?fomo\b|today\b|tonight\b|this (?:week|month|year)\b|(?:the )?(?:last|past) \S+|(?:the )?(?:board|leaderboard)\b))`;
+const RANK_EARNERS = new RegExp(String.raw`\bwho (?:has |is )?(?:made|makes|making|won|wins|winning|printed|prints|printing|earned|earns|earning) the most\b${EARNERS_NOT_ON_SUBJECT}`);
 
 /**
  * ONE ROW OF THE TRADER BOARD, by rank, in the singular: "the best trader",
@@ -458,7 +467,7 @@ const RANK_TRADERS = /\b(?:top|best|leading|biggest|most profitable|highest earn
  * buy it" asks who was earliest, not who ranks first. Group 1 is the rank.
  */
 const ROW_RANK = /\b(?:the )?(top|best|#1|number one|no 1|leading|winning|most profitable|highest earning|(?:second|2nd|third|3rd|fourth|4th) (?:best|top|place|ranked)|#[234]|number (?:two|three|four)|no [234]) (?:fomo )?(?:trader|performer|wallet|earner|account)\b(?!s)/;
-const ROW_WHO = /\bwho (?:is|was) (?:the )?(top|best|#1|number one|no 1|leading|winning|on top|(?:second|2nd|third|3rd|fourth|4th) (?:best|top|place)|#[234]|number (?:two|three|four)|no [234])(?! (?:\d{1,3} )?(?:fomo )?(?:traders|coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)|\bwho (?:has |is )?(made|makes|won|printed|earned) the most\b/;
+const ROW_WHO = new RegExp(String.raw`\bwho (?:is|was) (?:the )?(top|best|#1|number one|no 1|leading|winning|on top|(?:second|2nd|third|3rd|fourth|4th) (?:best|top|place)|#[234]|number (?:two|three|four)|no [234])(?! (?:\d{1,3} )?(?:fomo )?(?:traders|coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)|\bwho (?:has |is )?(made|makes|won|printed|earned) the most\b${EARNERS_NOT_ON_SUBJECT}`);
 /**
  * What they made or lost money on: "what did he make money on", "made a
  * profit on", "what did he win on". Never "how much" (that is the board's
@@ -469,6 +478,19 @@ const EARNINGS = /\b(?:make|makes|made|making|earn|earns|earned|earning) (?:\S+ 
 const ROW_HOLDINGS = /\b(?:holding|holds|hold|holdings|bags?|portfolio|positions?|sitting on|own|owns)\b/;
 const ROW_TRADES = /\b(?:buy|buys|buying|bought|sell|sells|selling|sold|trades|trading|traded|aped|aping|dumped|dumping|moves|activity|been up to)\b/;
 const ROW_PROFILE = /\b(?:tell me (?:more )?about (?:him|her|them)|who is (?:he|she)|how (?:is|has) (?:he|she) (?:been )?(?:doing|performing)|(?:his|her) (?:profile|stats|track record|win ?rate|followers|record))\b/;
+
+/**
+ * A question about one trader's P&L or how they are doing ("what's @X's pnl",
+ * "how much did @X make this week", "how is @X doing"). In a room it is
+ * answered from what they made or lost on their trades (chat.ts), never from
+ * a profile P&L that may come from Merrymen's watched-trader record.
+ */
+const TRADER_PNL = /\b(?:pnl|p&l|p\/l|profit and loss|performance|performing)\b|\bhow (?:is|has|did|was) (?:\S+ ){1,2}?(?:been )?(?:doing|done|performing|performed)\b|\bhow much (?:did|has|have|does|do|is|was) (?:\S+ ){1,2}?(?:made|make|making|earned|earn|earning|won|win|lost|lose|up|down)\b/;
+
+export function traderPnlAsk(text: unknown): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  return TRADER_PNL.test(words(text).map((w) => w.canon).join(" "));
+}
 
 function rowRank(word: string): FomoRowAsk["rank"] {
   if (/^(?:second|2nd)\b|#2|\btwo\b|no 2/.test(word)) return 2;
@@ -498,7 +520,9 @@ function rowAskOf(c: string, ex: Extracted): FomoRowAsk | null {
         : ROW_PROFILE.test(rest)
           ? "profile"
           : null;
-  return about ? { rank: rowRank(m[1] ?? m[2] ?? ""), about } : null;
+  if (!about) return null;
+  const side = about === "trades" ? sideOf(rest) : null;
+  return { rank: rowRank(m[1] ?? m[2] ?? ""), about, ...(side === "buy" || side === "sell" ? { side } : {}) };
 }
 /**
  * A ROW OF THE BOARD THE CONVERSATION WAS JUST SHOWN: "the second one", "the
@@ -523,12 +547,26 @@ const ROW_REF_FILLER = new Set("and what is about how the then now ok okay so al
 function rowRefOf(c: string, board: BoardMemory, self: SelfRef): { rank: number; bare: boolean } | null {
   const m = ROW_REF.exec(c);
   if (!m) return null;
+  // A coin noun right after it ("the number one coin", "#1 trending coin", "the top one trending") is a coin's rank.
+  if (ROW_REF_COIN_AFTER.test(c.slice(m.index + m[0].length))) return null;
   const word = m[1] ?? m[2] ?? m[3] ?? "";
   const rank = word === "last" ? Math.max(...board.rows.map((r) => r.rank)) : ROW_NUMBERS[word] ?? Number(word);
   if (!Number.isSafeInteger(rank) || rank < 1) return null;
-  const rest = `${c.slice(0, m.index)} ${c.slice(m.index + m[0].length)}`.split(" ").filter((w) => w && !ROW_REF_FILLER.has(w) && !self.words.has(w));
-  return { rank, bare: rest.length === 0 };
+  const restLine = `${c.slice(0, m.index)} ${c.slice(m.index + m[0].length)}`;
+  const rest = restLine.split(" ").filter((w) => w && !ROW_REF_FILLER.has(w) && !self.words.has(w));
+  if (rest.length === 0) return { rank, bare: true };
+  // Anything more must ask something of one trader: never a coin or board question ("what's #1
+  // trending"), never a line that only says a number ("number one priority is safety", "i'm number one").
+  if (RANK_TOKENS.test(c)) return null;
+  let asked = rest.join(" ");
+  for (const [, re] of WINDOW_RULES) asked = asked.replace(new RegExp(re.source, "g"), " ");
+  asked = asked.replace(/\s+/g, " ").trim();
+  const traderAsk = !asked || EARNINGS.test(restLine) || ROW_HOLDINGS.test(restLine) || ROW_TRADES.test(restLine) || ROW_PROFILE.test(restLine)
+    || /\b(?:tell me|profile|stats|record|doing|performing|who)\b/.test(restLine);
+  return traderAsk ? { rank, bare: false } : null;
 }
+/** A coin noun right after a row reference: that is a coin's rank, never a row of the trader board. */
+const ROW_REF_COIN_AFTER = /^\s*(?:(?:trending|hot|hottest|popular|top|new|graduated) )?(?:coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?|trending)\b/;
 
 /** "Which one on the board: the 1st, 2nd or 3rd?", for the rows it has. */
 function askRow(board: BoardMemory): string {
@@ -1046,7 +1084,7 @@ interface Signals {
 /** "What are people holding?", "who is the top trader?", "which wallets sold?": a crowd or a board, not one trader. */
 function crowdQuestion(c: string): boolean {
   return CROWD.test(c) || COHORT.test(c) || SELLERS.test(c) || BUYERS.test(c) || HOLDERS.test(c) || GLOBAL_FLOW.test(c)
-    || RANK_TRADERS.test(c) || RANK_TOKENS.test(c);
+    || RANK_TRADERS.test(c) || RANK_EARNERS.test(c) || RANK_TOKENS.test(c);
 }
 
 function detectIntent(s: Signals): Detected | null {
@@ -1095,7 +1133,7 @@ function detectIntent(s: Signals): Detected | null {
   if (sellers) return { intent: "token-sellers", inherent: tradersWord };
   if (buyers) return { intent: "token-buyers", inherent: tradersWord };
   if (HOLDERS.test(c)) return { intent: "token-activity", inherent: tradersWord };
-  if (RANK_TRADERS.test(c)) return { intent: "rankings-traders", inherent: tradersWord };
+  if (RANK_TRADERS.test(c) || (RANK_EARNERS.test(c) && s.tokenCount === 0)) return { intent: "rankings-traders", inherent: tradersWord };
   if (RANK_TOKENS.test(c)) {
     return { intent: "rankings-tokens", inherent: false, board: boardOf(c) };
   }
@@ -1199,7 +1237,10 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   // one holding", "#3?", or "he" after "who's the best trader"): that row's
   // trader, by the user id the provider's board gave, as if named here. A
   // "he" after a board of several, with no trader to point at, asks which.
-  const shown = !rowAsk && ex.traders.length === 0 && ex.tokens.length === 0 && !RANK_TRADERS.test(c) ? rememberedBoard(memory, ctx.now) : null;
+  // Never in a coin or board question ("what's the number one coin", "#1 on the trending board").
+  const shown = !rowAsk && ex.traders.length === 0 && ex.tokens.length === 0 && !RANK_TRADERS.test(c) && !RANK_EARNERS.test(c) && !RANK_TOKENS.test(c)
+    ? rememberedBoard(memory, ctx.now)
+    : null;
   let rowRef: { rank: number; bare: boolean } | null = null;
   let askWhichRow: string | null = null;
   if (shown) {

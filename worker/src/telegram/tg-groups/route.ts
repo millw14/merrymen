@@ -115,7 +115,7 @@ const ACTION_LINES: Record<RouteAction, string> = {
   fomo_coin: "fomo_coin: Fomo's view of ONE coin: its theses (aspect theses), who is buying it (buyers), who is selling it (sellers), a full research dive (research), or what is going on with it (activity). Put its name in coin.",
   fomo_crowd: "fomo_crowd: what Fomo's traders as a group are buying or selling (side buy or sell). Put a chain in chain only when they want one chain's coins.",
   fomo_small_coins: "fomo_small_coins: small or early coins getting attention on Fomo. Put a chain in chain only when they want one chain's coins.",
-  fomo_trader: "fomo_trader: ONE Fomo trader by name: who they are, how they do or whether you know them (about profile), what they hold (about holdings), what they bought or sold lately (about trades), what they made or lost money on (about earnings). Put the name in trader.",
+  fomo_trader: "fomo_trader: ONE Fomo trader by name: who they are or whether you know them (about profile), what they hold (about holdings), what they bought or sold lately (about trades), what they made or lost money on, their P&L, how much they made or how they are doing (about earnings). Put the name in trader.",
   fomo_tail: "fomo_tail: they want you to follow, track, tail or keep tabs on a trader's trades for a while, or to stop doing that.",
   fomo_about: "fomo_about: what Fomo is, or what you can do with it.",
   market_read: "market_read: how the crypto or memecoin market is doing overall.",

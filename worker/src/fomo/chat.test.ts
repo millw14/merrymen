@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 
 import { wrapSqlite, type Db } from "../db";
+import { admitTgLine } from "../telegram/tg-groups/gate";
 import { FomoBudget, MemoryAllowance } from "./budget";
 import { answerFomoQuestion, type AnswerFomoInput, type FomoComposeInput } from "./chat";
 import type { BrokerCallOptions, FomoBroker } from "./contract";
@@ -370,6 +371,31 @@ describe("answerFomoQuestion", () => {
     assert.match(owner.text, /watched-trader cohort/);
   });
 
+  it("in a group: a P&L question about one trader is what they made or lost on their trades, never holdings alone", async () => {
+    const s = await setup();
+    s.serve.set(`/v2/users/${KALEO}/positions`, () => json(positionsAt(KALEO, s.clock.now)));
+    const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-pnl" };
+    for (const [q, window] of [["what's @CryptoKaleo's pnl on fomo?", "7d"], ["how much did @CryptoKaleo make this week on fomo?", "7d"], ["how is @CryptoKaleo doing on fomo today?", "24h"]] as const) {
+      s.brokerCalls.length = 0;
+      const r = await s.ask(q, g);
+      assert.ok(r.handled, q);
+      assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_trader_activity", { trader: "CryptoKaleo", window, limit: 50 }]], q);
+      assert.match(r.text, /^CryptoKaleo (?:on trades|: )/, `${q}: ${r.text}`);
+    }
+    // The owner's DM keeps its profile answer, P&L included.
+    s.brokerCalls.length = 0;
+    await s.ask("what's @CryptoKaleo's pnl on fomo?");
+    assert.deepEqual(s.brokerCalls.map((c) => c.tool), ["fomo_get_trader_context"]);
+    // A profile ask in a room ends with how to ask what they made, for every trader alike.
+    const who = await s.ask("who is trader CryptoKaleo on fomo?", g);
+    assert.ok(who.handled);
+    const hint = "For what they made or lost on their trades, ask: what did trader CryptoKaleo make money on this week on fomo?";
+    assert.ok(who.text.split("\n").includes(hint), who.text);
+    assert.ok(admitTgLine(hint, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+    const holds = await s.ask("what is @CryptoKaleo holding?", g);
+    assert.ok(holds.handled && !holds.text.includes(hint), "a holdings ask is answered as asked");
+  });
+
   it("in a group: a trader ask that names nobody asks which trader, and looks nothing up", async () => {
     const s = await setup();
     const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-mem" };
@@ -466,6 +492,39 @@ describe("answerFomoQuestion", () => {
       const watched = await s.ask("who are the top traders we watch today?", { conversationKey: "owner-cohort" });
       assert.ok(watched.handled && /CryptoKaleo/.test(watched.text), "it answered with rows");
       assert.equal(deserialize(await s.service.memoryGet(OWNER, "owner-cohort"))?.board, undefined);
+    });
+
+    it("a row's buy or sell question asks the row's trader for that side", async () => {
+      const s = await board();
+      await s.ask("what did the best trader sell today on fomo?", { audience: "group", surface: "telegram-group", groupId: "-100123", conversationKey: "group-side" });
+      assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_rankings", { board: "traders", window: "24h" }], ["fomo_get_trader_activity", { trader: KALEO, window: "24h", side: "sell" }]]);
+    });
+
+    it("a room remembers only the rows it heard: 'the last one' is its 4th, 'the fifth one' asks which", async () => {
+      const s = await board();
+      const ten = { ...fixture("leaderboard-24h") } as Record<string, unknown>;
+      const base = (ten.traders as Array<Record<string, unknown>>)[0]!;
+      ten.traders = Array.from({ length: 10 }, (_, i) => ({ ...base, rank: i + 1, handle: `trader${i + 1}`, userId: `${String(i + 1).padStart(8, "0")}-5c73-5443-9225-bfc496cde51f` }));
+      ten.count = 10;
+      s.serve.set("/v2/leaderboard/24h", () => json({ ...ten, capturedAt: new Date(s.clock.now - 60_000).toISOString() }));
+      const g = { audience: "group" as const, surface: "telegram-group" as const, groupId: "-100123", conversationKey: "group-ten" };
+      const shown = await s.ask("who are the top traders on fomo today?", g);
+      assert.ok(shown.handled);
+      assert.match(shown.text, /\n4\. trader4 /);
+      assert.doesNotMatch(shown.text, /\n5\. /, "a room hears four rows");
+      const mem = deserialize(await s.service.memoryGet(OWNER, "group-ten"));
+      assert.deepEqual(mem?.board?.rows.map((r) => r.rank), [1, 2, 3, 4]);
+      s.brokerCalls.length = 0;
+      await s.ask("what's the last one holding?", g);
+      assert.deepEqual(s.brokerCalls.map((c) => [c.tool, c.args]), [["fomo_get_trader_context", { trader: "00000004-5c73-5443-9225-bfc496cde51f" }]]);
+      s.brokerCalls.length = 0;
+      const fifth = await s.ask("what's the fifth one holding?", g);
+      assert.ok(fifth.handled && fifth.clarification, fifth.handled ? fifth.text : "");
+      assert.match(fifth.handled ? fifth.text : "", /^Which one on the board: /);
+      assert.equal(s.brokerCalls.length, 0);
+      // The owner's own board keeps ten.
+      await s.ask("who are the top traders on fomo today?", { conversationKey: "owner-ten" });
+      assert.equal(deserialize(await s.service.memoryGet(OWNER, "owner-ten"))?.board?.rows.length, 10);
     });
 
     it("holdings and trades of a row: the trader's context or activity, by id", async () => {

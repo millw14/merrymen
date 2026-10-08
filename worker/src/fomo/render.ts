@@ -494,10 +494,10 @@ function availabilityLine(a: string): string {
   }
 }
 
-function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audience, now: number): string[] {
+function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audience, now: number, view: View = NO_VIEW): string[] {
   const d = env.data;
   if (!d) return [];
-  if (audience === "group") return groupTraderContext(d);
+  if (audience === "group") return groupTraderContext(d, view.profile === true);
   const out: string[] = [];
   const name = trader(d.trader);
   const h = d.holdings;
@@ -539,9 +539,11 @@ function bodyTraderContext(env: FomoEnvelope<TraderContextData>, audience: Audie
  * or follows them, and no P&L figures here: those come from Merrymen's own
  * watched-trader record when it has one, so whether a room saw them would
  * say who it watches. The leaderboard and "what did they make money on"
- * (bodyTraderActivity's earnings view) are a room's ways to those.
+ * (bodyTraderActivity's earnings view) are a room's ways to those: a profile
+ * ask ends with how to ask the second, for every trader alike, so it says
+ * nothing about who is watched (a P&L ask is read as earnings, chat.ts).
  */
-function groupTraderContext(d: TraderContextData): string[] {
+function groupTraderContext(d: TraderContextData, profile = false): string[] {
   const name = `${publicHandle(d.trader.handle)} on Fomo`;
   const out: string[] = [];
   const h = d.holdings;
@@ -558,8 +560,13 @@ function groupTraderContext(d: TraderContextData): string[] {
     out.push(`${name}: the holdings snapshot could not be read.`);
   }
   if (d.formerHandle) out.push("That handle is one they used before; the account has since renamed.");
+  const handle = publicHandle(d.trader.handle);
+  if (profile && handle !== "an unnamed trader") out.push(`For what they made or lost on their trades, ask: what did trader ${handle} make money on this week on fomo?`);
   return out;
 }
+
+/** The event kinds a room's trader-activity bullets name, each with a verb of its own (eventLine). */
+const ROOM_EVENT_KINDS: ReadonlySet<string> = new Set(["buy", "sell", "transfer-in", "transfer-out", "airdrop"]);
 
 /** Received only, never bought: its "cost" is a transfer valuation, not money the trader put in. */
 const receivedOnly = (p: { transferredInAmount: number | null; boughtAmount: number | null }): boolean => (p.transferredInAmount ?? 0) > 0 && (p.boughtAmount ?? 0) === 0;
@@ -579,7 +586,10 @@ function bodyTraderActivity(env: FomoEnvelope<TraderActivityData>, audience: Aud
   }
   out.push(`${name} ${scope}: ${plural(c.buys, "buy", "buys")} and ${plural(c.sells, "sell", "sells")} in the feed${c.transfers ? `, plus ${plural(c.transfers, "transfer", "transfers")} (not purchases)` : ""}.`);
   const group = audience === "group";
-  for (const e of d.events.slice(0, group ? 3 : 5)) out.push(eventLine(e, audience, now, false));
+  // A room hears trades and transfers only: a thesis, a perp, a listing or "other" has no verb of its own,
+  // and would be printed as one ("• thesis PONS…", "• other PONS…") under a buy or sell question.
+  const shown = group ? d.events.filter((e) => ROOM_EVENT_KINDS.has(e.kind)) : d.events;
+  for (const e of shown.slice(0, group ? 3 : 5)) out.push(eventLine(e, audience, now, false));
   for (const f of d.fills.slice(0, group ? 2 : 3)) out.push(`• fill: ${f.side} ${money(f.usd, audience)} ${ago(now, f.at)} (provider-reported)`);
   const pos = d.positions.slice(0, 3).map((p) => {
     const label = `${sym(p.label, audience) ?? "a coin"} ${p.status ?? "status unknown"}`;
@@ -747,6 +757,15 @@ export function ordinal(n: number): string {
 /** Fomo's trader board has no chain: said once, instead of silently answering for every chain. */
 export const TRADER_BOARD_ALL_CHAINS = "Fomo's trader board covers every chain; it can't be narrowed to one.";
 
+/**
+ * How many rows of a trader board the audience hears: a room four, a row
+ * fewer for the chain note and for a row asked about with it; the owner ten.
+ * chat.ts remembers only these, so "the last one" is the last row heard.
+ */
+export function shownTraderRows(d: Pick<RankingsData, "chain">, audience: Audience, rowAsk: boolean): number {
+  return audience === "group" ? GROUP_BOARD_ROWS - (d.chain ? 1 : 0) - (rowAsk ? 1 : 0) : 10;
+}
+
 function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience, view: View = NO_VIEW): string[] {
   const d = env.data;
   if (!d) return [];
@@ -760,7 +779,7 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience, view:
       // With one row asked about too, a row fewer: the row's answer still fits the room's lines.
       const scope = windowWords(d.window);
       const out = [`Top traders on Fomo${scope ? `, ${scope}` : ""}, by money made on closed trades:`];
-      for (const r of d.traders.slice(0, GROUP_BOARD_ROWS - chainNote.length - (view.row ? 1 : 0))) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
+      for (const r of d.traders.slice(0, shownTraderRows(d, audience, view.row))) out.push(`${r.rank ?? "–"}. ${publicHandle(r.trader.handle)} ${signedMoney(r.pnlUsd, audience)}`);
       return [...out, ...chainNote];
     }
     const out = [`Top traders by provider-reported ${d.window ?? ""} realised P&L (not a skill measure):`];
@@ -1015,11 +1034,17 @@ function bodyTail(env: FomoEnvelope<TailData | UntailData | ExtendTailData>, aud
 interface View {
   earnings: boolean;
   row: boolean;
+  /** Who a trader is (trader-context, or a row's profile): a room is told how to ask what they made. */
+  profile?: boolean;
 }
 const NO_VIEW: View = { earnings: false, row: false };
 
 function viewOf(plan: FomoQuestionPlan | null): View {
-  return { earnings: plan?.earnings === true || plan?.rowAsk?.about === "earnings", row: !!plan?.rowAsk };
+  return {
+    earnings: plan?.earnings === true || plan?.rowAsk?.about === "earnings",
+    row: !!plan?.rowAsk,
+    profile: plan?.intent === "trader-context" || plan?.rowAsk?.about === "profile",
+  };
 }
 
 function body(env: FomoEnvelope, audience: Audience, now: number, view: View = NO_VIEW): string[] {
@@ -1027,7 +1052,7 @@ function body(env: FomoEnvelope, audience: Audience, now: number, view: View = N
     case "fomo_resolve_subject":
       return bodyResolve(env as FomoEnvelope<ResolveData>, audience);
     case "fomo_get_trader_context":
-      return bodyTraderContext(env as FomoEnvelope<TraderContextData>, audience, now);
+      return bodyTraderContext(env as FomoEnvelope<TraderContextData>, audience, now, view);
     case "fomo_get_trader_activity":
       return bodyTraderActivity(env as FomoEnvelope<TraderActivityData>, audience, now, view);
     case "fomo_get_token_theses":

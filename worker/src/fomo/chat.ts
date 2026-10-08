@@ -33,7 +33,7 @@
  */
 
 import type { FomoBroker } from "./contract";
-import { classifyFomoQuestion, sanitizePlanArgs, type FomoQuestionPlan, type FomoToolCall } from "./intent";
+import { classifyFomoQuestion, sanitizePlanArgs, traderPnlAsk, type FomoQuestionPlan, type FomoToolCall } from "./intent";
 import {
   evidenceForModel,
   FOMO_ATTRIBUTION,
@@ -46,6 +46,8 @@ import {
   groupScrub,
   NOT_PERMISSION_LINE,
   renderAnswer,
+  shownTraderRows,
+  type Audience,
 } from "./render";
 import { applyPlan, applyResult, deserialize, MAX_BOARD_ROWS, serialize, type BoardMemory, type SubjectMemory } from "./subject-memory";
 import { isMutationTool } from "./tools";
@@ -149,6 +151,29 @@ function groupMustDeflect(plan: FomoQuestionPlan): boolean {
 
 const TRADER_TOOLS: ReadonlySet<string> = new Set(["fomo_get_trader_context", "fomo_get_trader_activity"]);
 
+/**
+ * A ROOM'S P&L QUESTION ABOUT ONE TRADER ("what's @X's pnl", "how much did @X
+ * make this week", "how is @X doing"): what they made or lost on their trades
+ * over the window the line names (this week otherwise), the read an earnings
+ * ask makes. A room never hears the profile's P&L (render.ts
+ * groupTraderContext: it may come from the watched-trader record), so their
+ * holdings alone would leave the question unanswered without saying so.
+ */
+function roomPnlPlan(plan: FomoQuestionPlan, text: string): FomoQuestionPlan {
+  if (plan.intent !== "trader-context" || plan.clarification || plan.cohortScope || plan.rowAsk || plan.toolCalls.length !== 1) return plan;
+  const ctx = plan.toolCalls[0]!;
+  if (ctx.tool !== "fomo_get_trader_context" || typeof ctx.args.trader !== "string" || !traderPnlAsk(text)) return plan;
+  const window = plan.window ?? "7d";
+  const fresh = ctx.args.freshness !== undefined ? { freshness: ctx.args.freshness } : {};
+  return {
+    ...plan,
+    intent: "trader-activity",
+    earnings: true,
+    window,
+    toolCalls: [{ tool: "fomo_get_trader_activity", args: sanitizePlanArgs({ trader: ctx.args.trader, window, limit: EARNINGS_LIMIT, ...fresh }) }],
+  };
+}
+
 /** The most positions an earnings read keeps, so its winners and losers are ranked over more than the default page. */
 const EARNINGS_LIMIT = 50;
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -173,7 +198,8 @@ function rowCall(plan: FomoQuestionPlan, envelopes: readonly FomoEnvelope[]): Fo
   const window = d.window ?? plan.window ?? "24h";
   return {
     tool: "fomo_get_trader_activity",
-    args: sanitizePlanArgs({ trader: userId, window, ...(ask.about === "earnings" ? { limit: EARNINGS_LIMIT } : {}), ...fresh }),
+    // The side the line asked ("what did the best trader sell"), as buildCalls passes a named trader's.
+    args: sanitizePlanArgs({ trader: userId, window, ...(ask.side ? { side: ask.side } : {}), ...(ask.about === "earnings" ? { limit: EARNINGS_LIMIT } : {}), ...fresh }),
   };
 }
 
@@ -181,15 +207,18 @@ function rowCall(plan: FomoQuestionPlan, envelopes: readonly FomoEnvelope[]): Fo
  * THE BOARD TO REMEMBER, so "the second one" and "#3" mean its rows next
  * (subject-memory.ts board): Fomo's public trader board as it answered, its
  * ranks, user ids and handles only. Never one cut to Merrymen's watched
- * traders.
+ * traders. Only the rows the audience heard (render.ts shownTraderRows), and
+ * the row it was answered about with the board: in a room "the last one" is
+ * the last row it saw, and "the fifth one" one it never saw asks which.
  */
-function boardMemoryOf(plan: FomoQuestionPlan, envelopes: readonly FomoEnvelope[], now: number): BoardMemory | null {
+function boardMemoryOf(plan: FomoQuestionPlan, envelopes: readonly FomoEnvelope[], now: number, audience: Audience): BoardMemory | null {
   const env = envelopes.find((e) => e.tool === "fomo_get_rankings" && ANSWERED.has(e.status) && e.data !== null);
   const d = env?.data as RankingsData | undefined;
   if (!env || !d || d.board !== "traders" || plan.cohortScope || env.coverage.requested.cohortOnly === true) return null;
-  const rows = d.traders
-    .map((r, i) => ({ rank: typeof r.rank === "number" ? r.rank : i + 1, userId: r.trader.userId, handle: r.trader.handle }))
-    .slice(0, MAX_BOARD_ROWS);
+  const all = d.traders.map((r, i) => ({ rank: typeof r.rank === "number" ? r.rank : i + 1, userId: r.trader.userId, handle: r.trader.handle }));
+  const rows = all.slice(0, Math.min(MAX_BOARD_ROWS, shownTraderRows(d, audience, !!plan.rowAsk)));
+  const asked = plan.rowAsk ? all.find((r) => r.rank === plan.rowAsk!.rank) : undefined;
+  if (asked && !rows.some((r) => r.rank === asked.rank) && rows.length < MAX_BOARD_ROWS) rows.push(asked);
   return rows.length ? { window: d.window ?? null, singular: plan.singular === true, about: plan.rowAsk?.about ?? null, at: now, rows } : null;
 }
 
@@ -270,8 +299,9 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
 
   // 2. The deterministic plan.
   const selfNames = Array.isArray(input.selfNames) ? input.selfNames.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
-  const plan = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
-  if (!plan) return { handled: false };
+  const planned = classifyFomoQuestion(input.text, { memory, now, ...(selfNames.length ? { selfNames } : {}) });
+  if (!planned) return { handled: false };
+  const plan = audience === "group" ? roomPnlPlan(planned, input.text) : planned;
   try {
     if (input.wanted && input.wanted(plan) !== true) return { handled: false };
   } catch {
@@ -333,7 +363,7 @@ export async function answerFomoQuestion(input: AnswerFomoInput): Promise<Answer
   if (answered.length) {
     const last = answered[answered.length - 1]!;
     const revision = [...answered].reverse().find((e) => e.dossierRevision)?.dossierRevision ?? null;
-    const board = boardMemoryOf(plan, answered, now);
+    const board = boardMemoryOf(plan, answered, now, audience);
     const m3 = applyResult(step.memory, { subjects: answered.flatMap(subjectsOf), dossierRevision: revision, requestId: last.requestId, ...(board ? { board } : {}) }, now);
     await remember(broker, conversationKey, m3);
   }
