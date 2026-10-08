@@ -360,6 +360,27 @@ test("billing time never runs behind the ledger, across a clock step back and a 
   assert.equal(f.billing.now(), START + 10_000);
 });
 
+test("one record written while the host clock ran far ahead does not pin billing time there", async () => {
+  const f = await fixture();
+  await f.account();
+  await f.grant(200_000);
+  await f.plan("crumbs"); // paid for [START, START + 30 days)
+  // The host clock jumps a year ahead for a moment (a bad NTP step), long
+  // enough for one write, and is then corrected.
+  f.clock.t = START + 365 * DAY;
+  await f.account(OTHER, "Other");
+  f.clock.t = START + DAY;
+  assert.ok(f.billing.now() <= START + DAY + 5 * 60_000, `billing time ${new Date(f.billing.now()).toISOString()} follows the clock`);
+  assert.equal(f.billing.planFor(OWNER).id, "crumbs", "the paid period has 29 days left, not none");
+  assert.equal(f.billing.needsSettle(OWNER), false, "and nothing renews it a year early");
+  assert.match(f.logs.join("\n"), /ahead of this host's clock/);
+  // The same after a restart, which replays that record.
+  await f.restart();
+  assert.ok(f.billing.now() <= START + DAY + 5 * 60_000);
+  assert.equal(await f.billing.settle(OWNER), 0);
+  assert.deepEqual((await f.charges()).map((c) => c.reason), ["activate"]);
+});
+
 test("the tail takes the operator CLI's lines, and treats anything else as a second writer", async () => {
   const f = await fixture();
   await f.account();

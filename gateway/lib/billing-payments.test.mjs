@@ -193,6 +193,18 @@ test("the start block itself is open: a transfer mined in it is credited, one bl
   assert.deepEqual([r.json.payment.block_number, r.json.credit_tokens], [100, "100000"]);
 });
 
+test("a transfer's age is measured on the host's clock, not on billing time held ahead after a clock step back", async () => {
+  const f = await fixture({ minAgeSec: 60 });
+  f.clock.t = START + 4 * 60_000;
+  assert.equal((await f.billing.createAccount(OTHER, "Other")).status, 201); // the ledger's latest record: 4 min on
+  f.clock.t = START; // the host clock steps back 4 minutes
+  assert.equal(f.billing.now(), START + 4 * 60_000, "billing time does not run backwards");
+  const hash = f.pay(); // stamped START: no time at all has passed for it
+  f.chain.advance(3);
+  const r = await f.submit(hash);
+  assert.deepEqual([r.status, r.json.stage, r.json.ready_in_sec], [202, "confirming", 60], "not yet the minute old the reorg margin asks for");
+});
+
 test("refusals that need no chain read: a malformed hash, no account, no treasury, billing off", async () => {
   const f = await fixture();
   for (const bad of ["", "0x1234", `0x${"g".repeat(64)}`, `${"a".repeat(66)}`, 42, null]) {

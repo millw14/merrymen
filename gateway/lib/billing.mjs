@@ -52,7 +52,8 @@
  *   dataDir, mode ("off"|"observe"|"enforce"), treasury, previousTreasuries,
  *   startBlock, minConfirmations, minAgeSec  — as parseBillingConfig returns them
  *   publicClient   viem client for chain reads (createPaymentsClient); null = no payments
- *   now            clock (ms); billing.now() never runs behind the ledger
+ *   now            clock (ms); billing.now() is the clock, or the ledger's latest record
+ *                  when that is ahead of it by at most 5 minutes (a clock step back)
  *   log            one string per call; default console.error
  *   plans          the plan table (lib/billing-plans.mjs PLANS)
  *   keyRegistry    async () => Map of partner keys (lib/partners.mjs loadRegistry),
@@ -130,6 +131,13 @@ const RECONCILE_WINDOW_MS = 30 * 60_000;
 const SETTLE_WAIT_MS = 2_000;
 const READ_TIMEOUT_MS = 10_000;
 const CLOSE_DRAIN_MS = 5_000;
+/**
+ * How far the ledger's latest record may hold billing time ahead of this
+ * host's clock. A step back of the clock within it is absorbed (time does not
+ * run backwards); a record from further ahead (a clock that ran fast for one
+ * write) must not pin billing time there, ending every paid period early.
+ */
+const MAX_AHEAD_MS = 5 * 60_000;
 const HISTORY = 50;
 /** More matching logs than this in one transaction is not a payment anybody sends by hand. */
 const MAX_LOGS = 256;
@@ -441,7 +449,22 @@ export async function openLedger({ dataDir, now: clock = Date.now, log = console
   }
 
   const blocked = () => fatal ?? (failed ? "failed" : null);
-  const nowMs = () => Math.max(clock(), state.maxAt);
+  let warnedAhead = 0;
+  /**
+   * Billing time: the clock, or the ledger's latest record when that is ahead
+   * by no more than MAX_AHEAD_MS, so a clock step back does not reopen ended
+   * periods or rewind usage windows. A record from further ahead is logged
+   * and otherwise ignored here: one write made while the host clock ran a
+   * year fast must not end every paid period and renew it at that time.
+   */
+  const nowMs = () => {
+    const c = clock();
+    if (state.maxAt > c + MAX_AHEAD_MS && warnedAhead !== state.maxAt) {
+      warnedAhead = state.maxAt;
+      log(`[billing] CLOCK: ${LEDGER_FILE} has a record from ${iso(state.maxAt)}, ${Math.round((state.maxAt - c) / 60_000)} min ahead of this host's clock (${iso(c)}). Billing time follows the clock (at most ${MAX_AHEAD_MS / 60_000} min ahead of it); check the host's clock.`);
+    }
+    return Math.max(c, Math.min(state.maxAt, c + MAX_AHEAD_MS));
+  };
 
   function enqueue(fn) {
     const run = queue.then(fn);
@@ -470,7 +493,7 @@ export async function openLedger({ dataDir, now: clock = Date.now, log = console
     // Before every append, not only the first: the CLI writes this file too.
     if (await repairTail(file)) { log(`[billing] ${LEDGER_FILE} ended in a torn line: cut before appending`); await rebuild(); }
     if (blocked()) throw new BillingUnavailable(blocked());
-    const rec = { id: hex(16), type: fields.type, at: Math.max(at ?? clock(), state.maxAt), ...fields };
+    const rec = { id: hex(16), type: fields.type, at: at ?? nowMs(), ...fields };
     const line = `${JSON.stringify(rec)}\n`;
     if (Buffer.byteLength(line) > MAX_LINE_BYTES) throw new Error(`ledger record over ${MAX_LINE_BYTES} bytes`);
     try {
@@ -1054,7 +1077,9 @@ export async function createBilling({
     if (lower(receipt.transactionHash) !== hash) throw new ChainError("receipt for another transaction");
     if (receipt.status !== "success") return { answer: fail(422, "payment_failed", "This transaction failed on chain, so nothing was sent.") };
     const [latest, block] = await Promise.all([read(publicClient.getBlockNumber()), read(publicClient.getBlock({ blockNumber: receipt.blockNumber }))]);
-    const ageMs = ledger.now() - Number(block.timestamp) * 1000;
+    // Against the host's clock, not billing time, which may run up to
+    // MAX_AHEAD_MS ahead of it: the minimum age is a reorg margin.
+    const ageMs = clock() - Number(block.timestamp) * 1000;
     // The RPC disagrees with itself about which block holds this receipt: a
     // reorg in progress, or nodes out of step. Ask again later.
     if (lower(block.hash) !== lower(receipt.blockHash)) return { answer: confirming(hash, 0, ageMs) };
