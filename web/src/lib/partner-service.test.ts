@@ -30,9 +30,9 @@ after(() => {
 });
 
 type ServiceDeps = Parameters<typeof createPartnerService>[0];
-function fixture(overrides: Partial<ServiceDeps> = {}) {
+function fixture(overrides: Partial<ServiceDeps> = {}, waits?: ConstructorParameters<typeof FilePartnerStore>[3]) {
   const home = mkdtempSync(join(tmpdir(), "merrymen-partner-service-"));
-  const store = new FilePartnerStore(home, undefined, () => secret);
+  const store = new FilePartnerStore(home, undefined, () => secret, waits);
   fixtures.push({ home, store });
   let replies = 0;
   const service = createPartnerService({ store, secret,
@@ -194,6 +194,35 @@ test("a model reply that is too long, has control characters or an oversized pro
   // Saved like any other reply: a retry returns it rather than generating again.
   assert.deepEqual((await call("POST", path, { message: "tell me everything", request_id: "request_long" })).body, long.body);
   assert.equal((await call("GET", path)).body.messages.length, 6);
+});
+
+test("a retry that outwaits a running generation gets a retryable conversation_busy, then the saved reply", async () => {
+  let started!: () => void, finish!: () => void;
+  const generating = new Promise<void>(resolve => { started = resolve; });
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  let generated = 0;
+  const { store, call } = fixture({ reply: async () => {
+    generated++;
+    started();
+    await finished;
+    return { reply: "The one answer.", generation: "model" as const, runtime };
+  } }, { conversation: 100, enrollment: 100 });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const path = `/agents/${created.body.id}/messages`, body = { message: "status", request_id: "request_1" };
+  const original = call("POST", path, body);
+  await generating;
+  const busy = await call("POST", path, body);
+  assert.equal(busy.status, 409);
+  assert.equal(busy.body.error.code, "conversation_busy");
+  assert.equal(busy.body.error.retry_after, 2, "the hint rides in the body, which the gateway forwards");
+  assert.equal(busy.headers.get("retry-after"), "2");
+  finish();
+  const answered = await original;
+  assert.equal(answered.status, 200);
+  const retried = await call("POST", path, body);
+  assert.deepEqual(retried.body, answered.body);
+  assert.equal(generated, 1);
 });
 
 test("key chat scope cannot substitute for owner consent", async () => {

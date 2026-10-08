@@ -8,7 +8,7 @@ import { getActionSelector } from "@zerodev/sdk";
 import { buildWallPolicies, derivationOf, type MerrymenSettings, type StoredGrant } from "@merrymen/core";
 import { partnerGrantDigest } from "../../../packages/core/src/partner-enrollment";
 import { createPartnerEnrollmentService, PARTNER_ENROLLMENT_TTL_MS, type PartnerEnrollmentDependencies } from "./partner-enrollment";
-import { FilePartnerStore, type PartnerConnection } from "./partner-store";
+import { FilePartnerStore, PartnerStoreError, type PartnerConnection } from "./partner-store";
 import { PartnerError, type PartnerPrincipal } from "./partner-bridge";
 
 const SECRET = "test-partner-enrollment-secret-at-least-32-characters";
@@ -24,7 +24,8 @@ const errorCode = (code: string) => (error: unknown) => error instanceof Partner
 async function fixture(overrides: Partial<PartnerEnrollmentDependencies> = {}) {
   let now = 1_800_000_000_000;
   const home = mkdtempSync(join(tmpdir(), "merrymen-enrollment-"));
-  const store = new FilePartnerStore(home, () => Math.floor(now / 1000), () => SECRET);
+  // Short lock waits: a contention test should not sit out the production bound.
+  const store = new FilePartnerStore(home, () => Math.floor(now / 1000), () => SECRET, { conversation: 100, enrollment: 100 });
   fixtures.push({ store, home });
   const ownerKey = generatePrivateKey();
   const owner = privateKeyToAccount(ownerKey);
@@ -111,6 +112,27 @@ test("a consumed owner authorization cannot activate again", async () => {
   const activation = await f.activationFor();
   await f.service.activate(principal, f.connection, activation);
   await assert.rejects(f.service.activate(principal, f.connection, activation), errorCode("challenge_used"));
+  assert.equal(f.events.filter(e => e === "grant").length, 1);
+});
+
+test("contention for the owner's enrollment lock leaves the signature usable for a retry", async () => {
+  const f = await fixture();
+  const activation = await f.activationFor();
+  let entered!: () => void, free!: () => void;
+  const inside = new Promise<void>(resolve => { entered = resolve; });
+  const freed = new Promise<void>(resolve => { free = resolve; });
+  // Another activation for the same owner, still in progress past the wait.
+  const holder = f.store.withEnrollmentLock(f.owner.address, async () => { entered(); await freed; });
+  await inside;
+  try {
+    await assert.rejects(f.service.activate(principal, f.connection, activation),
+      (e: unknown) => e instanceof PartnerStoreError && e.status === 409 && e.code === "enrollment_busy" && e.retryAfter! > 0);
+  } finally { free(); }
+  await holder;
+  assert.equal(f.events.length, 0);
+  // The same owner signature still works: busy never spent its nonce.
+  const result = await f.service.activate(principal, f.connection, activation);
+  assert.equal(result.connection.status, "linked");
   assert.equal(f.events.filter(e => e === "grant").length, 1);
 });
 

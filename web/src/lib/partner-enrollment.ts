@@ -194,11 +194,14 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
       catch { return fail(503, "derivation_unavailable", "The account derivation could not be verified; retry when the chain is available"); }
       if (!derived.ok) return fail(503, "derivation_unavailable", derived.why);
       if (!accountsMatch(derived, grant.smartAccount).ok) return fail(403, "account_mismatch", "The agent wallet does not derive from this owner");
-      // Consume outside the long enrollment transaction: a later write failure
-      // must not roll back single-use authorization and reopen a signed token.
-      if (!await store().consumeNonce(`enrollment:${claim.nonce}`, Math.ceil(claim.expires_at / 1000))) return fail(409, "challenge_used", "This enrollment authorization has already been used");
-
+      // Wait for this owner's enrollment lock BEFORE spending the signature. It
+      // was spent first, so a concurrent activation lost it to enrollment_busy
+      // and the owner had to sign again; now contention leaves the nonce unused
+      // and the same authorization can simply be retried. The lock pins a
+      // connection, not a transaction, so the nonce below commits on its own:
+      // a later write failure still cannot roll it back and reopen the token.
       return store().withEnrollmentLock(grant.owner, async () => {
+        if (!await store().consumeNonce(`enrollment:${claim.nonce}`, Math.ceil(claim.expires_at / 1000))) return fail(409, "challenge_used", "This enrollment authorization has already been used");
         const current = await store().byId(principal.app_id, connection.id);
         if (!current) return fail(404, "not_found", "No such agent");
         const currentScopes = connectionContext(principal, current);

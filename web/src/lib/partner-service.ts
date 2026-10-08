@@ -14,10 +14,14 @@ export function partnerFailure(error: unknown): Response {
   // PartnerRuntimeError is a PartnerError: its status and code are answers too.
   // Anything else may carry internal detail and becomes a generic 503.
   const known = error instanceof PartnerError || error instanceof PartnerStoreError;
+  // A busy lock is safe to resend unchanged. The hint rides in the body too:
+  // the gateway forwards a status and JSON, not this response's headers.
+  const retryAfter = error instanceof PartnerStoreError && Number.isSafeInteger(error.retryAfter) && error.retryAfter! > 0 ? error.retryAfter! : null;
   return Response.json({ error: { code: known ? error.code : "upstream_unavailable",
     message: known ? error.message : "Agent service is temporarily unavailable",
+    ...(retryAfter ? { retry_after: retryAfter } : {}),
     request_id: `req_${randomBytes(6).toString("hex")}` } },
-  { status: known ? error.status : 503, headers: { "Cache-Control": "no-store" } });
+  { status: known ? error.status : 503, headers: { "Cache-Control": "no-store", ...(retryAfter ? { "Retry-After": String(retryAfter) } : {}) } });
 }
 
 function view(connection: PartnerConnection, runtime?: Runtime, token?: string | null) {

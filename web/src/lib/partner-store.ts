@@ -14,11 +14,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isHostedMode } from "@merrymen/core";
 import { merrymenHome } from "@merrymen/home";
-import { makePgDb, wrapSqlite, type Db } from "../../../worker/src/db";
+import { LockBusyError, makePgDb, withAdvisoryLock, wrapSqlite, type Db } from "../../../worker/src/db";
 
 export type PartnerAddress = `0x${string}`;
 export class PartnerStoreError extends Error {
-  constructor(public status: number, public code: string, message: string) {
+  /** retryAfter: seconds after which the same request may simply be sent again. */
+  constructor(public status: number, public code: string, message: string, public retryAfter?: number) {
     super(message);
     this.name = "PartnerStoreError";
   }
@@ -79,6 +80,16 @@ export interface PartnerStore {
 
 export const ONBOARDING_TTL_SECONDS = 30 * 60;
 export const PARTNER_HISTORY_EXCHANGES = 40;
+type LockKind = "conversation" | "enrollment";
+/**
+ * How long a request waits for another holding its lock: a transport retry of a
+ * chat still being generated, or two activations for one owner. The wait holds
+ * no pooled connection, and both bounds sit well inside the gateway's 45-second
+ * upstream timeout. Past it the answer is <kind>_busy with a retry hint.
+ */
+export const PARTNER_LOCK_WAIT_MS: Readonly<Record<LockKind, number>> = { conversation: 20_000, enrollment: 10_000 };
+const LOCK_CLASS: Readonly<Record<LockKind, number>> = { conversation: 1_297_692_083, enrollment: 1_297_692_084 };
+const BUSY_RETRY_AFTER_SECONDS = 2;
 const NONCE_RETENTION_SECONDS = 10 * 60;
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -180,13 +191,14 @@ const exchangeOf = (row: unknown): PartnerExchange | null => row ? JSON.parse((r
 /** Shared database implementation; the SQLite backend tests the production SQL. */
 export class SqlPartnerStore implements PartnerStore {
   private ready: Promise<Db> | null = null;
-  private transactionContext = new AsyncLocalStorage<Db>();
-  private conversations = new Map<string, Promise<void>>();
+  /** The connection a partner lock pinned (transaction: false), or the transaction running on it. */
+  private context = new AsyncLocalStorage<{ db: Db; transaction: boolean }>();
   constructor(
     private connect: () => Promise<Db>,
     private dialect: "postgres" | "sqlite" = "postgres",
     private clock: () => number = nowSeconds,
     private secret: () => string = bridgeSecret,
+    private waits: Readonly<Record<LockKind, number>> = PARTNER_LOCK_WAIT_MS,
   ) {}
 
   private database(): Promise<Db> {
@@ -202,10 +214,13 @@ export class SqlPartnerStore implements PartnerStore {
     return this.ready;
   }
   private async transaction<T>(fn: (db: Db) => Promise<T>): Promise<T> {
-    const active = this.transactionContext.getStore();
-    return active ? fn(active) : (await this.database()).tx(fn);
+    const active = this.context.getStore();
+    if (active?.transaction) return fn(active.db);
+    // Under a partner lock the transaction runs on the lock's own connection.
+    const db = active?.db ?? await this.database();
+    return db.tx(tx => this.context.run({ db: tx, transaction: true }, () => fn(tx)));
   }
-  private async reader(): Promise<Db> { return this.transactionContext.getStore() ?? this.database(); }
+  private async reader(): Promise<Db> { return this.context.getStore()?.db ?? this.database(); }
   private lockSuffix(): string { return this.dialect === "postgres" ? " FOR UPDATE" : ""; }
   private async save(db: Db, c: PartnerConnection): Promise<void> {
     await db.prepare(`UPDATE partner_connections SET tenant = ?, status = ?, token_hash = ?, expires_at = ?, record_json = ? WHERE id = ?`)
@@ -362,40 +377,48 @@ export class SqlPartnerStore implements PartnerStore {
   async withEnrollmentLock<T>(tenant: PartnerAddress, fn: () => Promise<T>): Promise<T> {
     return this.withLock("enrollment", address(tenant), fn);
   }
-  private async withLock<T>(kind: "conversation" | "enrollment", id: string, fn: () => Promise<T>): Promise<T> {
-    if (this.transactionContext.getStore()) throw new Error("nested partner locks are not supported");
-    if (this.dialect === "postgres") {
-      return (await this.database()).tx(async db => {
-        const key = createHash("sha256").update(id).digest().readInt32BE();
-        const result = await db.prepare("SELECT pg_try_advisory_xact_lock(?, ?) AS acquired").get(kind === "conversation" ? 1_297_692_083 : 1_297_692_084, key) as { acquired: boolean };
-        if (!result.acquired) throw new PartnerStoreError(409, `${kind}_busy`, `another ${kind} request is in progress for this agent`);
-        // All nested reads/writes share this pinned connection. Otherwise ten
-        // concurrent chats could hold every pool slot while waiting for one.
-        return this.transactionContext.run(db, fn);
-      });
-    }
-    const lockId = `${kind}:${id}`;
-    const previous = this.conversations.get(lockId) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>(resolve => { release = resolve; });
-    const queued = previous.then(() => current);
-    this.conversations.set(lockId, queued);
-    await previous;
-    try { return await fn(); }
-    finally {
-      release();
-      if (this.conversations.get(lockId) === queued) this.conversations.delete(lockId);
+  /**
+   * WAIT YOUR TURN, BOUNDED, WITHOUT HOLDING A CONNECTION WHILE YOU WAIT.
+   *
+   * The Postgres lock used to be TRIED once inside a transaction, so any overlap
+   * failed at once: a chat retry got conversation_busy instead of the reply the
+   * first request was about to save, and a second activation for an owner got
+   * enrollment_busy after its single-use signature had been spent. Waiting
+   * inside a transaction would hold a pooled connection per waiter instead.
+   *
+   * withAdvisoryLock queues callers in this process and retries a session lock
+   * across replicas, holding a connection only while it holds the lock. Every
+   * nested read and write runs on that one pinned connection (so ten holders
+   * can never sit on every pool slot waiting for an eleventh), and each write
+   * commits as its own short transaction: nothing holds a transaction open
+   * through a model call, and a nonce consumed under the lock stays consumed
+   * whatever fails after it. SQLite takes the same in-process queue.
+   */
+  private async withLock<T>(kind: LockKind, id: string, fn: () => Promise<T>): Promise<T> {
+    if (this.context.getStore()) throw new Error("nested partner locks are not supported");
+    const key = createHash("sha256").update(id).digest().readInt32BE();
+    let entered = false;
+    try {
+      return await withAdvisoryLock(await this.database(), LOCK_CLASS[kind], key, db => {
+        entered = true;
+        return this.context.run({ db, transaction: false }, fn);
+      }, this.waits[kind]);
+    } catch (error) {
+      if (!entered && error instanceof LockBusyError) {
+        throw new PartnerStoreError(409, `${kind}_busy`, `another ${kind} request is still in progress for this agent; retry shortly`, BUSY_RETRY_AFTER_SECONDS);
+      }
+      throw error;
     }
   }
 }
 
 export class FilePartnerStore extends SqlPartnerStore {
   private raw: DatabaseSync;
-  constructor(home: string, clock: () => number = nowSeconds, secret: () => string = bridgeSecret) {
+  constructor(home: string, clock: () => number = nowSeconds, secret: () => string = bridgeSecret, waits: Readonly<Record<LockKind, number>> = PARTNER_LOCK_WAIT_MS) {
     mkdirSync(home, { recursive: true });
     const raw = new DatabaseSync(join(home, "partner-connections.sqlite"));
     raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    super(async () => wrapSqlite(raw), "sqlite", clock, secret);
+    super(async () => wrapSqlite(raw), "sqlite", clock, secret, waits);
     this.raw = raw;
   }
   close(): void { this.raw.close(); }
