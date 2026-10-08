@@ -57,12 +57,28 @@ export type UnpriceableCause =
   | "zero-price"
   | "curve-priced"
   | "v4-priced"
+  | "sampled-priced"
+  | "sampling"
   | "feed-priced"
   | "unknown-source"
   | "not-watched";
 
 /** The quote fields this needs. Typed from `PriceQuote` so a new SOURCE breaks the build. */
-type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
+type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source" | "sampled">;
+
+/**
+ * What else the CALLER accepts for an entry, beyond a pool quote.
+ *
+ * `sampled`: a price from the worker's own series of a pool too new to keep an
+ * oracle (venues/spot-sampler.ts). Accepted only where the caller can say the
+ * buy is bounded without the scout budget — a fast Trencher entry into its
+ * vault, which the contract caps at $5 a buy and $25 a day (paper or live) —
+ * and even then only once the series is READY. Absent means pool only, which
+ * is what every caller written before it asks.
+ */
+export interface EntryEvidence {
+  sampled?: boolean;
+}
 
 /**
  * The gate and its explanation, from ONE expression.
@@ -85,6 +101,7 @@ type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
 export function unpriceableCause(
   quote: QuoteEvidence | undefined,
   requirePoolSource: boolean,
+  accept: EntryEvidence = {},
 ): UnpriceableCause | null {
   if (!quote) return "no-quote";
   if (quote.stale) return "stale-price";
@@ -97,6 +114,10 @@ export function unpriceableCause(
       return "curve-priced";
     case "v4":
       return "v4-priced";
+    case "sampled":
+      if (!accept.sampled) return "sampled-priced";
+      // A series still filling values a holding; it has not yet earned a buy.
+      return quote.sampled?.ready === true ? null : "sampling";
     case "chainlink":
     case "broker":
       return "feed-priced";
@@ -130,8 +151,9 @@ export function unpriceableCause(
 export function priceability(
   quote: QuoteEvidence | undefined,
   requirePoolSource: boolean,
+  accept: EntryEvidence = {},
 ): { priceable: boolean; unpriceable?: UnpriceableCause } {
-  const cause = unpriceableCause(quote, requirePoolSource);
+  const cause = unpriceableCause(quote, requirePoolSource, accept);
   return cause === null ? { priceable: true } : { priceable: false, unpriceable: cause };
 }
 
@@ -171,6 +193,8 @@ const UNPRICEABLE_WHY: Record<UnpriceableCause, string> = {
   "zero-price": "its quote came back at zero",
   "curve-priced": "priced off its bonding curve, which has no oracle — enough to value it, not to buy it",
   "v4-priced": "priced off a v4 pool, which has no oracle — enough to value it, not to buy it",
+  "sampled-priced": "its pool is too new for an oracle — our own price readings can value it, not buy it here",
+  "sampling": "its pool is too new for an oracle, and our own price readings of it are still filling in",
   "feed-priced": "the only price under this symbol is a stock feed, not this token's own market",
   // BOTH AXES, because the check is both. The site tests symbol AND address,
   // and the symbol is the conjunct that fails on the ordinary path: discovery
@@ -200,6 +224,8 @@ export interface Candidate {
   ageSec: number;
   price8: bigint;
   volume24hUsd?: number;
+  /** How hot its pool is now (trencher-brain.ts trenchHeat) — a review-order input only. */
+  heat?: number;
 }
 
 /** What we remember about something already held, so exits can be judged. */
@@ -260,9 +286,19 @@ export const TRENCHER_DEFAULTS: TrencherConfig = {
 
 export type EntryVerdict = { enter: true } | { enter: false; why: string };
 
-/** Faster exits without relaxing entry quality or increasing position size. */
+/**
+ * Faster exits without relaxing entry quality, and HALF the entry size.
+ *
+ * $2.50, not $5, because the vault's limit is DOLLARS: 25 USDG of buys per
+ * contract day, at most 5 a buy (TrencherVault.sol). At $5 an entry that was
+ * five trades a day, spent by mid-morning on whatever ranked first. At $2.50 it
+ * is ten, for the same dollars at risk — a trencher that trades, not one that
+ * waits a day for its window. No limit moves: the per-buy cap, the daily cap,
+ * the owner's per-trade cap and the wall are all exactly where they were.
+ */
 export const TRENCHER_FAST: TrencherConfig = {
   ...TRENCHER_DEFAULTS,
+  perEntryUsdg: 2_500_000n, // $2.50
   stopLossBps: 1_000,
   takeProfitBps: 2_000,
   maxHoldSec: 30 * 60,

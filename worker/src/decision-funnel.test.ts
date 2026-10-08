@@ -131,7 +131,7 @@ describe("classifyStage maps the existing vocabularies, keeping the original rea
   it("discovery screens, a coin not on the tape, and a size under the floor", () => {
     const vol = classifyStage({ kind: "discovery", screen: "volume-below-min" });
     assert.equal(vol.stage, "DISCOVERY_SCREENED_OUT");
-    assert.match(vol.detail, /^volume-below-min: 24h volume under \$100,000$/);
+    assert.match(vol.detail, /^volume-below-min: 24h volume under \$100,000 and last hour under \$25,000$/);
     assert.equal(stageOf(classifyStage({ kind: "discovery", screen: "buyers-below-min" })), "DISCOVERY_SCREENED_OUT");
     assert.equal(stageOf(classifyStage({ kind: "discovery", screen: "beyond-discovery-slice" })), "DISCOVERY_SCREENED_OUT");
     assert.equal(stageOf(classifyStage({ kind: "discovery", screen: "venue-not-supported", venue: "uniswap-v4" })), "UNSUPPORTED_ROUTE");

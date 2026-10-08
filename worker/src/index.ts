@@ -135,7 +135,7 @@ import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
-import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, trenchHeat, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
 import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
@@ -263,6 +263,7 @@ import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
 import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
+import { ethPrice8FromFeed, ethUsdFeed, priceGasAt, type EthFeed } from "./eth-feed";
 import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply, type Hold } from "./exec-backoff";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
@@ -312,7 +313,7 @@ import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
 import { getName, nameSeat } from "./soul";
 import { createNameReconciler, mirrorNameOnArm } from "./name-reconcile";
-import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
+import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, sampledGainUsdg, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
   describeDiscovery,
@@ -3609,7 +3610,34 @@ async function main() {
         return null;
       }
     },
+    async getBlockTime(blockNumber) {
+      try {
+        return Number((await client.getBlock({ blockNumber })).timestamp);
+      } catch {
+        return null;
+      }
+    },
   });
+  /**
+   * A COST SETTLED AFTER THE FACT, PRICED AT THE MOMENT IT WAS BURNED.
+   *
+   * The resolver and the orphan sweep both write gas they learn about late,
+   * and both wrote it unpriced: the live path's price is the pool's NOW, which
+   * is not what an hour-old operation cost. Unpriced owner gas withholds the
+   * agent's whole P&L on the board. The Chainlink round in force at the op's
+   * own block is what it did cost (eth-feed.ts priceGasAt), and it is written
+   * WITH the row, into the same journal entry, never patched in later.
+   * Only the owner's cost: a sponsored op cost the owner nothing.
+   */
+  async function recoveredGasUsdg(
+    chain: ReconcileChain,
+    gas: { gasWei: bigint; gasPayer: "owner" | "sponsor" },
+    blockNumber: bigint | null | undefined,
+  ): Promise<number | null> {
+    if (gas.gasPayer !== "owner" || gas.gasWei <= 0n || blockNumber === null || blockNumber === undefined || !chain.getBlockTime) return null;
+    const at = await chain.getBlockTime(blockNumber);
+    return at === null ? null : priceGasAt(ethFeed(), gas.gasWei, at);
+  }
   /**
    * SETTLE OPS WE SUBMITTED AND LOST TRACK OF.
    *
@@ -3737,8 +3765,9 @@ async function main() {
         }
         // An install's gas is its entire expense. Both payer and cost must be
         // recorded before its submitted recovery row can become terminal.
+        const recoveredUsdg = await recoveredGasUsdg(chain, r, r.blockNumber);
         const wrote = row.kind === KEY_INSTALL_KIND
-          ? await settleKeyInstall({ addTrade }, agentId, { userOpHash: r.userOpHash, success: r.success,
+          ? await settleKeyInstall({ addTrade, priceGas: async () => recoveredUsdg }, agentId, { userOpHash: r.userOpHash, success: r.success,
               proof: { txHash: r.txHash as `0x${string}`, gasWei: r.gasWei, gasUnits: r.gasUnits, gasPayer: r.gasPayer } })
           : await addTrade({
           agent_id: agentId,
@@ -3754,7 +3783,7 @@ async function main() {
           user_op_hash: r.userOpHash,
           tx_hash: r.txHash,
           status: r.success ? "landed" : "reverted",
-          ...gasFields(r),
+          ...gasFields(r, recoveredUsdg),
           ...(r.success ? { basis_source: "receipt" as const } : { reject_rule: "reverted on-chain (resolved)" }),
         });
         if (!wrote) continue;
@@ -4006,6 +4035,8 @@ async function main() {
         // op can only ever over-count spend, never under-count — the safe
         // direction.
         const sym = o.acquired ? symbolOfToken(o.acquired.token as `0x${string}`) : null;
+        // ITS GAS, from the event that found it, priced at its own block.
+        const orphanGas = o.gas ? gasFields(o.gas, await recoveredGasUsdg(chain, o.gas, o.blockNumber)) : null;
         const wrote = await addTrade({
           agent_id: agentId,
           kind: "swap",
@@ -4015,6 +4046,7 @@ async function main() {
           tx_hash: o.txHash,
           status: "landed",
           basis_source: "receipt",
+          ...(orphanGas ?? {}),
           // The legs, when the receipt named them without ambiguity. These were
           // NULL on every reconciled row, so the position such a row opened had
           // no token on its trade and no cost anywhere — see below.
@@ -5322,6 +5354,13 @@ async function main() {
   // map each tick and read by the scout ceiling — deliberately NOT reachable
   // from an intent, so a strategy can't declare its own target priceable.
   let lastUnpriceable: Set<string> = new Set();
+  /**
+   * The subset of `lastUnpriceable` priced off our own sampled series of a pool
+   * too new to keep an oracle (venues/spot-sampler.ts). Unpriceable for every
+   * buy the scout budget bounds, EXCEPT a fast Trencher vault entry — which the
+   * contract caps at $5 a buy and $25 a day. See scoutUnpriceableFor.
+   */
+  let lastSampled: Set<string> = new Set();
   let lastQuarantinedUsdg = 0n;
   /** Has a tick computed `lastQuarantinedUsdg` yet? Before that its 0 is a default, not a reading (the follow ceiling reads it). */
   let lastQuarantinedKnown = false;
@@ -5442,6 +5481,13 @@ async function main() {
    */
   let ethPriceCache: { price8: bigint; atSec: number } | null = null;
   const ETH_PRICE_TTL_SEC = 300;
+  /** The Chainlink ETH/USD feed on the current mainnet client (eth-feed.ts). Rebuilt if the client is. */
+  let ethFeedCache: { client: unknown; feed: EthFeed } | null = null;
+  function ethFeed(): EthFeed {
+    const client = mainnetClient();
+    if (ethFeedCache?.client !== client) ethFeedCache = { client, feed: ethUsdFeed(client) };
+    return ethFeedCache.feed;
+  }
   /**
    * What a unit of gas costs right now, in wei. Null when the chain would not say.
    *
@@ -5486,14 +5532,34 @@ async function main() {
         nowSec: now,
       });
       const q = quotes.get("WETH");
-      if (q && q.price8 > 0n) {
+      // The pool's own TWAP only. The reader can answer a pool with no oracle
+      // off our sampled series (spot-sampler.ts); for ETH itself the feed
+      // below is the better fallback than a few minutes of our readings.
+      if (q && q.source === "pool" && q.price8 > 0n) {
         ethPriceCache = { price8: q.price8, atSec: now };
         return { price8: q.price8 };
       }
-      return { price8: null, reason: refused[0]?.reason ?? "the WETH/USDG pool did not pass the price guards" };
+      return await ethFromFeed(now, refused[0]?.reason ?? "the WETH/USDG pool did not pass the price guards");
     } catch (e) {
-      return { price8: null, reason: e instanceof Error ? e.message : String(e) };
+      return await ethFromFeed(now, e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /**
+   * THE FALLBACK WHEN THE POOL IS REFUSED: Chainlink's ETH/USD round, if it is
+   * recent (eth-feed.ts). Every tick the WETH/USDG pool failed its guards used
+   * to leave that tick's trades with unpriced gas — and unpriced gas withholds
+   * the agent's whole P&L on the board. The pool stays first: it is what every
+   * WETH-routed memecoin is valued through, and one figure should price both.
+   * Both refusals are kept in the reason when neither answers.
+   */
+  async function ethFromFeed(now: number, poolReason: string): Promise<{ price8: bigint | null; reason?: string }> {
+    const fed = await ethPrice8FromFeed(ethFeed(), now).catch(() => ({ price8: null, reason: "the Chainlink ETH/USD feed did not answer" }));
+    if (fed.price8 !== null) {
+      ethPriceCache = { price8: fed.price8, atSec: now };
+      return { price8: fed.price8 };
+    }
+    return { price8: null, reason: `${poolReason}; ${fed.reason ?? "the Chainlink ETH/USD feed did not answer"}` };
   }
 
   async function mergePoolPrices(prices: Map<string, PriceQuote>, agentId: string): Promise<void> {
@@ -5870,7 +5936,10 @@ async function main() {
             active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"spent"}),
             active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"windowStart"}),
           ]);
-          autonomousBudget = BigInt(nowSec) >= start+86_400n || spent+5_000_000n <= 25_000_000n;
+          // Room for one more FAST entry (TRENCHER_FAST.perEntryUsdg) in the
+          // vault's 25 USDG day — not for a $5 one, or the last $2.50 of the
+          // window would go unused.
+          autonomousBudget = BigInt(nowSec) >= start+86_400n || spent+TRENCHER_FAST.perEntryUsdg <= 25_000_000n;
         } catch { autonomousBudget = false; autonomousBudgetUnread = true; }
       }
       const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
@@ -5961,10 +6030,16 @@ async function main() {
           // the same line `lastUnpriceable` draws for the scout budget below.
           // The verdict and its explanation come from one call so they cannot
           // disagree — they did, and the owner read the disagreement.
-          ...priceability(quote, true),
+          ...priceability(quote, true, {
+            // A ready sampled series may open a VAULT entry (capped on chain,
+            // paper or live) and nothing else (strategies/trencher.ts) — the
+            // same line scoutUnpriceableFor draws, by custody and not by rail.
+            sampled: autonomous,
+          }),
           price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
           // An early pool may not report 24h volume: absent, never 0.
-          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, ...(p.volume24hUsd !== null ? { volume24hUsd: p.volume24hUsd } : {}) });
+          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, ...(p.volume24hUsd !== null ? { volume24hUsd: p.volume24hUsd } : {}),
+          heat: trenchHeat(p) });
       }
       return out;
     }
@@ -8159,6 +8234,28 @@ async function main() {
     return rows?.find((r) => r.token === token.toLowerCase())?.symbol ?? undefined;
   }
 
+  /**
+   * A SAMPLED COIN IN A TRENCHER VAULT ENTRY IS BOUNDED ALREADY. Its price came
+   * from our own series of a pool too new for an oracle, which is why every
+   * other buy of it stays inside the scout budget (default $0). A fast Trencher
+   * entry into its vault does not: the vault contract caps it at $5 a buy and
+   * $25 a day, and strategies/trencher.ts only offers it once the series is
+   * ready. Only the sampled coins leave the set — a curve, v4 or unpriced coin
+   * is budgeted exactly as before.
+   *
+   * DECIDED BY THE INTENT ALONE, never by the rail. A paper exemption here read
+   * paperActive() awaits before the fork reads the rail (execMode), and a
+   * deposit or gas reading landing in between flipped a paper-judged buy onto
+   * the live rail with no scout gate. A paper book that holds a Trencher grant
+   * enters through the same vault path, so it keeps the exemption by custody.
+   */
+  function scoutUnpriceableFor(intent: TradeIntent): ReadonlySet<string> {
+    const bounded = intent.kind === "swap" && intent.custody === "trencher";
+    return bounded && lastSampled.size > 0
+      ? new Set([...lastUnpriceable].filter((a) => !lastSampled.has(a)))
+      : lastUnpriceable;
+  }
+
   async function scoutContextFor(intent: TradeIntent): Promise<ScoutContext | undefined> {
     // ── BOTH VENUES, NOT JUST THE POOL ONE ────────────────────────────────
     //
@@ -8210,7 +8307,7 @@ async function main() {
     const { isClassBuy, buyUnpriceable } = scoutFlagsFor(intent, {
       vault: active.limits.ponsClassVault,
       cash: CASH.USDG as `0x${string}`,
-      lastUnpriceable,
+      lastUnpriceable: scoutUnpriceableFor(intent),
     });
     return {
       limits: {
@@ -10870,7 +10967,18 @@ async function main() {
       // above: the pre-broadcast row stands, the charge stays counted, and the
       // stranded-op resolver settles it from the chain. The budget must NOT be
       // released here, which is why this sits above the rollback.
-      if (submittedRow) {
+      //
+      // A TYPED REVERT WITH ITS RECEIPT'S GAS PROOF IS NOT THAT CASE, and the
+      // guard said so in words and not in code: it read `if (submittedRow)`, so
+      // since 8a6270fb every on-chain revert of a broadcast op was told "this is
+      // NOT a revert", held against the caps, never suppressed when retrying
+      // could not fix it, and left for the resolver. The chain has answered:
+      // it falls through to the revert branch below, which settles the
+      // pre-broadcast row in place with the receipt's gas. A revert WITHOUT
+      // proof (a bundler that omitted the per-operation figures) still waits
+      // here for the resolver, which reads its gas off the EntryPoint event —
+      // settling it now would write a row with no gas that nothing completes.
+      if (submittedRow && !(e instanceof UserOpReverted && e.gasProof)) {
         // AND THE CALLER IS TOLD IT WENT OUT. No row was written on this path,
         // so the outcome used to read as null — "never reached the ledger,
         // nothing was sent; try again" — about an operation that WAS sent and
@@ -10950,6 +11058,26 @@ async function main() {
           `${intent.kind} ${revertVerdict.rule} — not retried again until the next arm, because retrying cannot fix it`,
         );
       }
+      // WHAT THE REVERT COST, AND WHO PAID IT. A reverted operation still burns
+      // gas, and the executor hands over the receipt's per-operation cost and
+      // payer with the revert (executor.ts perOperationGasProof). This row used
+      // to be written without any of it, and one gasless reverted row is enough
+      // for the board to withhold the agent's whole P&L for the run
+      // (web book-performance.ts gasAt: an "unrecorded" cost). The payer comes
+      // from the receipt, not the sponsorship setting; the price is this
+      // moment's, like a landed trade's. No proof (an older bundler) writes the
+      // row as before, for the receipt backfill to complete.
+      const revertProof = onChain ? e.gasProof : undefined;
+      let revertGas: ReturnType<typeof gasFields> = null;
+      if (revertProof) {
+        let priced: number | null = null;
+        if (revertProof.gasPayer === "owner" && revertProof.gasWei > 0n) {
+          const eth = await ethPrice8();
+          const cost = priceGas(revertProof.gasWei, eth.price8, eth.reason);
+          priced = cost.usdg === null ? null : usdgNum(cost.usdg);
+        }
+        revertGas = gasFields(revertProof, priced);
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -10959,6 +11087,8 @@ async function main() {
         // Resolves the pre-broadcast row in place when there is one — a revert
         // has a hash; a failure before submit does not, and inserts.
         ...(onChain ? { user_op_hash: e.userOpHash } : {}),
+        ...(revertProof ? { tx_hash: revertProof.txHash } : {}),
+        ...(revertGas ?? {}),
         // REVERTED MEANS THE CHAIN REVERTED IT. Everything reaching this line
         // without `onChain` never got there: no operation was submitted (the
         // branch above returns when one was), so this is a build, an encode or a
@@ -11821,7 +11951,9 @@ async function main() {
       ...watchTokens
         .filter((t) => {
           const q = market.prices.get(t.symbol);
-          return !q || q.source === "curve" || q.source === "v4";
+          // A sampled price is a thinner claim than a pool's own oracle, and
+          // outside a vault entry it is budgeted like one (lastSampled).
+          return !q || q.source === "curve" || q.source === "v4" || q.source === "sampled";
         })
         .map((t) => t.address.toLowerCase()),
       // CLASS TOKENS ARE NEVER IN watchTokens — they postdate the grant, which
@@ -11836,6 +11968,9 @@ async function main() {
       // reader of the set and keeps the two answers consistent.
       ...classBook.tokens,
     ]);
+    lastSampled = new Set(
+      watchTokens.filter((t) => market.prices.get(t.symbol)?.source === "sampled").map((t) => t.address.toLowerCase()),
+    );
     // The scout BUDGET must count curve-marked holdings too.
     //
     // Keeping them in `lastUnpriceable` above preserves the scout GATE, but the
@@ -11849,9 +11984,29 @@ async function main() {
     // Gate closed, ceiling open. Cost, not mark, because the budget bounds what
     // was SPENT on this class of thing — and because a curve mark is exactly
     // the number that should not be deciding how much more may be spent.
+    //
+    // AND SAMPLED HOLDINGS, FOR THE SAME REASON. A coin priced off our own
+    // series of an oracle-less pool (venues/spot-sampler.ts) is budgeted at the
+    // gate (lastUnpriceable) and then, once held, HAS a price — so it left the
+    // quarantine exactly as a curve holding does, and the next scout buy saw
+    // its cost as zero. Before sampling such a coin had no price and stayed in
+    // the quarantine at cost. Only the buys the gate budgeted count: a
+    // Trencher vault holding (capped on chain) is exempt at the gate
+    // (scoutUnpriceableFor), so it is left out here too — read from the vault
+    // on a live book, and on a paper one by the same test trenchOpen uses for
+    // a paper vault position. Every other sampled holding, paper included, was
+    // scout-gated and counts. A token
+    // held both in the vault and the wallet is left out whole — the vault's
+    // own cap bounds it, and the per-token cap still reads its basis.
     let curveCostUsdg = 0n;
     for (const p of positions) {
-      if (p.priceSource !== "curve") continue;
+      const token = p.token.toLowerCase();
+      const inVault = qMode === "live"
+        ? autoTrenchBalances.has(token)
+        : !!autoTrench && !!active && !!grantTrencher(active.grant) && !baseTokenAddress(token) &&
+          !!active.limits.knownTrencherAssets?.some((a) => a.toLowerCase() === token);
+      const sampledBudgeted = p.priceSource === "sampled" && !inVault;
+      if (p.priceSource !== "curve" && !sampledBudgeted) continue;
       curveCostUsdg += (await getBasis(agentId, qMode, p.symbol)).costUsdg;
     }
     // PLUS WHAT THE CLASS VAULT HOLDS, which the quarantine counts at zero.
@@ -12124,6 +12279,16 @@ async function main() {
     // charged, and a drawdown measured from the last honest peak. The breaker
     // still works -- a curve token falling is still measured against that peak.
     const curveMarked = curveMarkedSymbols(positions);
+    // AND A SAMPLED MARK RATCHETS NOTHING ABOVE COST. Peaks and the fee are
+    // judged on equity with every sampled holding at min(mark, cost)
+    // (positions.ts sampledGainUsdg); the drawdown itself is still measured
+    // on the real equity. Not a curve-style skip, which would freeze the
+    // whole book's peaks while the Trencher holds one $2.50 coin.
+    const sampledCost = new Map<string, bigint>();
+    for (const p of positions) {
+      if (p.priceSource === "sampled") sampledCost.set(p.symbol, (await getBasis(agentId, qMode, p.symbol)).costUsdg);
+    }
+    const peakEquityUsdg = equityUsdg - sampledGainUsdg(positions, (symbol) => sampledCost.get(symbol) ?? null);
     // WHAT THIS TICK MAY WRITE DOWN — the paper peak, the risk-period
     // observation, the fee and the mark, and the equity row — decided in
     // command-wake.ts tickRatchets, where a test runs every guard. A command
@@ -12153,7 +12318,7 @@ async function main() {
       // Raised past the recorded peak and written only on a regular tick with no
       // curve mark: an owner's order is not a sample of the cadence the peak is
       // measured on. See command-wake.ts tickRatchets.
-      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
+      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(peakEquityUsdg), (b) => setPaperBook(agentId, b)));
       markBook = "paper";
       // The mark is the paper book's now, until a live tick re-reads the live
       // one (livePeaksStale); a live lift observed above the live mark means
@@ -12203,7 +12368,10 @@ async function main() {
           curveMarked: curveMarked.length,
           held: true,
           breakerObservationUsdg: heldBreakerObservationUsdg({
-            equityUsdg,
+            // The same figure every other peak is judged on: sampled holdings
+            // at min(mark, cost). A held look still observes the breaker, and
+            // raw equity here would let a sampled mark raise its peak.
+            equityUsdg: peakEquityUsdg,
             cashUsdg: balances.cashUsdg,
             expectedCashUsdg: await heldCashBaseline(agentId),
           }),
@@ -12251,7 +12419,7 @@ async function main() {
       // — null asks without observing (risk-period.ts markRiskPeriod), and
       // tickRatchets passes null on a command tick or under a curve mark. On a
       // held tick it passes the held observation, never the raw equity.
-      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
+      const riskPeak = await ratchet.riskPeak(usdgNum(peakEquityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -12275,7 +12443,7 @@ async function main() {
       }
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
-      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, feeBpsThisTick);
+      const accrual = accrueAboveHwm(peakEquityUsdg, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
       // `setAgentHwm` is a one-way ratchet in SQL, with a real
@@ -12806,7 +12974,8 @@ async function main() {
                 const c = basisBySymbol.get(pp.symbol);
                 return c === null || c === undefined ? null : Number(c);
               })(),
-              priceSource: pp.priceSource === "pool" ? "pool" : "chainlink",
+              // A sampled price is a pool's own spot, averaged by us: a pool price.
+              priceSource: pp.priceSource === "pool" || pp.priceSource === "sampled" ? "pool" : "chainlink",
               quarantined: false,
             })),
             // NULL SURVIVES AS NULL all the way to Brain, which refuses on it.
