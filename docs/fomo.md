@@ -788,7 +788,7 @@ Surface limits:
   trending board came back empty." An unfiltered board whose shown rows hold no Robinhood
   Chain coin shows three rows and ends "On Robinhood Chain, the chain I trade: PONS (12th),
   CACHE (31st)." (positions in words: the gate reads "#12" as a handle), or "None of the
-  top 100 are on Robinhood Chain, the chain I trade." The owner's DM answer gets the same
+  top 100 trending coins are on Robinhood Chain, the chain I trade." The owner's DM answer gets the same
   line under its ten rows. Fomo's trader board has no chain filter: asked for one, the
   board says "Fomo's trader board covers every chain; it can't be narrowed to one." The
   crowd ("what are fomo traders buying?") also names the feed page's top three coins by

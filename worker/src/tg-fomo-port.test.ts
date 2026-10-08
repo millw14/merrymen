@@ -577,7 +577,7 @@ describe("a board on one chain or every chain, as a room hears it", () => {
     const s = await setup({ trending: () => incidentBoard(30, false) });
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
     const all = await port.ask({ text: "what's trending on fomo?", chatId: GROUP });
-    assert.match(all!.text, /\nNone of the top 30 are on Robinhood Chain, the chain I trade\.$/);
+    assert.match(all!.text, /\nNone of the top 30 trending coins are on Robinhood Chain, the chain I trade\.$/);
     sayable(all!.text);
     const hood = await port.ask({ text: "robinhood chain coins on fomo", chatId: GROUP });
     assert.equal(hood!.text, "None of the top 30 trending coins on Fomo are on Robinhood Chain right now.");

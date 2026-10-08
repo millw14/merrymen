@@ -576,12 +576,12 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): stri
   // one chain when asked): an empty board, a chain with no rows on it, and a
   // chain's rows, each said as what it is, never "no rows for that scope".
   if (d.boardRows === 0) return [`The ${lower} board came back empty.`];
-  const top = finite(d.boardRows) ? `the top ${d.boardRows}` : "the board";
+  const top = finite(d.boardRows) ? `the top ${d.boardRows}` : "the";
   const unplaced = finite(d.unplaced) && d.unplaced > 0 ? ` (${plural(d.unplaced, "row", "rows")} could not be placed on a chain)` : "";
   if (d.chain) {
     const where = chainLabel(d.chain);
     if (!d.tokens.length) return [`None of ${top} ${lower} coins on Fomo are on ${where} right now${unplaced}.`];
-    const out = [`${name} on Fomo, ${where} only (${finite(d.matched) ? `${d.matched} of ${top}` : `from ${top}`}):`];
+    const out = [`${name} on Fomo, ${where} only${finite(d.matched) && finite(d.boardRows) ? ` (${d.matched} of ${top})` : ""}:`];
     for (const r of d.tokens.slice(0, shownMax)) out.push(row(r));
     return out;
   }
@@ -600,7 +600,7 @@ function bodyRankings(env: FomoEnvelope<RankingsData>, audience: Audience): stri
     hoodLine = d.robinhood.rows > 0 && named.length
       ? `On Robinhood Chain, the chain I trade: ${named.join(", ")}.`
       : d.robinhood.rows === 0
-        ? `None of ${top} are on Robinhood Chain, the chain I trade.`
+        ? `None of ${top} ${lower} coins are on Robinhood Chain, the chain I trade.`
         : null;
   }
   const out = [`${name} on Fomo (board position is popularity, not quality):`];

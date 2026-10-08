@@ -442,7 +442,7 @@ describe("a board says what its chain filter did, and where Robinhood Chain stan
     assert.doesNotMatch(g, /chain I trade/);
     assert.equal(g.split("\n").length, 3);
     const none = board({ tokens: [row(1, "ETAC", solToken(1))], boardRows: 30, matched: 30, unplaced: 0, robinhood: { rows: 0, top: [] } });
-    assert.match(renderEnvelope(none, G), /\nNone of the top 30 are on Robinhood Chain, the chain I trade\.$/);
+    assert.match(renderEnvelope(none, G), /\nNone of the top 30 trending coins are on Robinhood Chain, the chain I trade\.$/);
   });
 
   it("one chain asked: its rows under an honest header, or none of the top N on it, or an empty board", () => {
@@ -458,6 +458,10 @@ describe("a board says what its chain filter did, and where Robinhood Chain stan
     assert.equal(renderEnvelope({ ...eth, status: "empty" }, G), "None of the top 12 newly graduated coins on Fomo are on Ethereum right now.");
     const empty = board({ chain: "robinhood", tokens: [], boardRows: 0, matched: 0, unplaced: 0 });
     assert.equal(renderEnvelope({ ...empty, status: "empty" }, G), "The trending board came back empty.");
+    // An answer without the counts (built before they existed) still reads as a sentence.
+    const bare = board({ chain: "robinhood", tokens: [row(1, "PONS", T)] });
+    assert.match(renderEnvelope(bare, G), /^Trending on Fomo, Robinhood Chain only:\n1\. PONS on robinhood/);
+    assert.equal(renderEnvelope({ ...board({ chain: "solana", tokens: [] }), status: "empty" }, G), "None of the trending coins on Fomo are on Solana right now.");
   });
 
   it("the trader board with a chain asked says it covers every chain, and still fits a room", () => {
