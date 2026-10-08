@@ -219,13 +219,21 @@ never refused as `unsupported_permission` (see below). The owner signs twice in
 all: one typed-data signature for the permission inside `prepareMerryman`, and
 one message signature in `signMerrymanAuthorization`.
 
-`settings.name` must be 1–24 characters, start with a letter or number and
-contain at least one letter; `strategy` is `steady-basket` or
-`llm-strategist`; `basket_symbols` contains 1–10 supported stock symbols;
-`live_trading_enabled` must be an explicit boolean. Use clean, unique symbols and
-an already trimmed name so the server's normalized settings match what you show
-and sign. Supported enrollment chains are Robinhood mainnet `4663` and testnet
-`46630`; fund and use the same chain selected for the grant.
+`settings.name` is 1–24 characters: letters, digits, combining marks, spaces,
+apostrophes (`'`), periods and hyphens (and the zero-width joiners some scripts
+need), starting with a letter or digit and containing at least one letter, so
+`Bot_1`, `Robin!` or a name with an emoji is refused. `strategy` is
+`steady-basket` or `llm-strategist`; `basket_symbols` contains 1–10 supported
+stock symbols; `live_trading_enabled` must be an explicit boolean. A value
+outside these rules is 400 `invalid_settings`. The challenge carries the
+settings as the server will store them: the name NFC-normalized, trimmed and
+with each run of whitespace made one space, and repeated symbols dropped.
+`signMerrymanAuthorization` refuses a challenge whose settings differ from
+yours, so normalize the name the same way
+(`name.normalize("NFC").trim().replace(/\s+/g, " ")`) and send unique symbols
+before you show them to the owner. Supported enrollment chains are Robinhood
+mainnet `4663` and testnet `46630`; fund and use the same chain selected for
+the grant.
 
 The signed session grant contains a **session private key**, which Merrymen needs
 to run only the delegated permissions. Treat the activation payload as a secret:
