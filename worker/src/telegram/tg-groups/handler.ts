@@ -636,6 +636,14 @@ interface OpenAsk {
   research: boolean;
   /** Re-run once already: never twice. */
   reasked: boolean;
+  /** A poke on it already got its 👀: later ones while it runs get nothing more. */
+  eyed?: boolean;
+}
+
+/** An open ask run again: the same line, a fresh deadline, none of its own re-ask marks. */
+function againOf(job: LineJob, bornAtMs: number, ingressOrder: number): LineJob {
+  const { reaskable: _r, reaskOf: _o, noOpenAsk: _n, meta: _m, ...rest } = job;
+  return { ...rest, bornAtMs, ingressOrder, reasked: true };
 }
 
 /** One outgoing group line, composed and waiting to be sent. */
@@ -2390,8 +2398,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // is read again, in the light of that complaint, before the desk takes
       // the complaint for a market read (live 22:59: "I said what's trending
       // on fomo"). A chat pick leaves it to the lanes below, as before.
-      if (routable && typeof j.reaskOf === "string" && (await routeLine(chatId, j, replyOpts, persona, { reaskOf: j.reaskOf })) === "taken") return null;
-      if (fomoThread && (await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
+      // One routing call per line at most.
+      let routedOnce = false;
+      if (routable && typeof j.reaskOf === "string") {
+        routedOnce = true;
+        if ((await routeLine(chatId, j, replyOpts, persona, { reaskOf: j.reaskOf })) === "taken") return null;
+      }
+      if (fomoThread && !routedOnce) {
+        routedOnce = true;
+        if ((await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
+      }
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
       const deskAsk = researchable ? deskAskFor(j, context, coinQuestion, intent) : null;
@@ -2443,7 +2459,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // A line from someone whose earlier ask went unanswered is always worth
       // it: the router may re-run that ask (reask).
       const unanswered = j.reaskable && askStateOf(j.reaskable) === "lost" && !j.reaskable.reasked ? j.reaskable : null;
-      if (routable && !fomoThread && (unanswered || routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId)))) {
+      if (routable && !fomoThread && !routedOnce && (unanswered || routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId)))) {
         const routed = await routeLine(chatId, j, replyOpts, persona, unanswered ? { reask: true, reaskOf: unanswered.job.line.text } : {});
         if (routed === "taken") return null;
       }
@@ -3402,8 +3418,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const open = j.reaskable;
     if (!open || open.reasked || askStateOf(open) !== "lost" || forgotten(open.job)) return false;
     const now = clock();
-    const again: LineJob = { ...open.job, bornAtMs: now, ingressOrder: ++ingressOrder, reasked: true };
+    const again = againOf(open.job, now, ++ingressOrder);
     open.reasked = true;
+    open.eyed = false;
     open.job = again;
     lostAsks.delete(msgKey(again.msg.chatId, again.line.messageId));
     lastAddressed.set(`${again.msg.chatId}:${again.line.fromId}`, { messageId: again.line.messageId, atMs: now });
@@ -4088,15 +4105,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           // A POKE WHILE ITS ASK IS BEING WORKED ON: a 👀 on it (no model
           // call, no reply slot), and the answer still lands on the ask.
           log("[tg-groups] addressed line got 👀 (poke-while-working)");
-          track(reactTo(chatId, messageId, "👀", { ownerAddressed: isOwner, stillWanted: () => !forgottenSince(chatId, msg.fromId, now) }));
+          if (!open.eyed) {
+            open.eyed = true;
+            track(reactTo(chatId, messageId, "👀", { ownerAddressed: isOwner, stillWanted: () => !forgottenSince(chatId, msg.fromId, now) }));
+          }
           return;
         }
         if (meta !== null && open && openState === "lost" && !open.reasked) {
           // NOTHING ANSWERED THEIR ASK: run it again, once, as the reply to
           // it. A /forgetme since still cancels it (seenAtMs is kept), and it
           // is never claimed or nominated again (lineOutcome: reasked).
-          const again: LineJob = { ...open.job, bornAtMs: now, ingressOrder: ++ingressOrder, reasked: true };
+          const again = againOf(open.job, now, ++ingressOrder);
           open.reasked = true;
+          open.eyed = false;
           open.job = again;
           lostAsks.delete(msgKey(chatId, again.line.messageId));
           lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId: again.line.messageId, atMs: now });

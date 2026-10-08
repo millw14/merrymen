@@ -319,6 +319,24 @@ describe("a poke while its read runs never drops the read (d1 probe 1b reversed)
     assert.deepEqual(desk.asks, []);
   });
 
+  it("three pokes while it runs: one 👀, and still one answer, to the question", async () => {
+    make();
+    let open!: () => void;
+    desk.hold = new Promise<void>((r) => { open = r; });
+    const ask = msg("shogun how's the market?");
+    groups.onMessage(ask);
+    await settle();
+    for (const poke of ["?", "shogun", "hello??"]) {
+      clock += 3 * SEC;
+      groups.onMessage(msg(poke));
+      await settle();
+    }
+    open();
+    await groups.drain();
+    assert.equal(tg.reactions().length, 1);
+    assert.deepEqual(tg.out().map((o) => o.replyTo), [ask.messageId]);
+  });
+
   it("two real questions five seconds apart: only the last is answered (the burst is unchanged)", async () => {
     make();
     let open!: () => void;
@@ -487,6 +505,17 @@ describe("other words for 'you missed it' go to the router (route.ts reask)", ()
     await said(msg("shogun what's the best trader doing lately?"));
     assert.ok(logs.includes("[tg-groups] route no-answer"), JSON.stringify(logs));
     assert.equal(desk.asks.length, 0);
+  });
+
+  it("'you didn't answer' under a Fomo answer to her question costs one routing call, not two", async () => {
+    fomo = new SpyFomo();
+    make();
+    await said(msg("shogun what's trending on fomo?"));
+    const board = lastOwn();
+    clock += 30 * SEC;
+    picks.push({ action: "chat" });
+    await said(under("you didn't answer", board));
+    assert.equal(routePrompts.length, 1);
   });
 
   it("'you didn't answer' under its answer to her question: the router reads that question again", async () => {
