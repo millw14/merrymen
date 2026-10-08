@@ -104,16 +104,22 @@ type LockKind = "conversation" | "enrollment";
 export const PARTNER_LOCK_WAIT_MS: Readonly<Record<LockKind, number>> = { conversation: 20_000, enrollment: 10_000 };
 const LOCK_CLASS: Readonly<Record<LockKind, number>> = { conversation: 1_297_692_083, enrollment: 1_297_692_084 };
 /**
- * Partner locks held at once per Postgres pool, in this process; more wait
- * their turn, bounded and holding nothing. A holder pins one pooled connection
- * for its turn (a whole model call), and the ledger reads it makes inside (the
- * grants and feed routes and chat facts, through withReadDb) draw more from
- * the same memoized DATABASE_URL pool: pg's default ten, which openPgDb leaves
- * as is. Ten holders each waiting for an eleventh connection hung every
- * database user on the replica. Half the pool stays free for those reads and
- * everything else.
+ * Partner locks held at once per Postgres pool, in this process, by kind; more
+ * wait their turn, bounded and holding no lock. A holder pins one pooled
+ * connection for its turn (a whole model call), and the ledger reads it makes
+ * inside (the grants and feed routes and chat facts, through withReadDb) draw
+ * more from the same memoized DATABASE_URL pool: pg's default ten, which
+ * openPgDb leaves as is. Ten holders each waiting for an eleventh connection
+ * hung every database user on the replica, so five in all, and half the pool
+ * stays free for those reads and everything else.
+ *
+ * SEPARATE BY KIND. One shared five let slow chats, from any app, take every
+ * slot for as long as their model calls ran, and every activation behind them
+ * answered enrollment_busy. An activation's turn is a few short writes, so one
+ * slot of its own serves it; chats share the other four, each bounded by the
+ * runtime's model deadline (partner-runtime.ts).
  */
-export const PARTNER_LOCK_HOLDERS = 5;
+export const PARTNER_LOCK_HOLDERS: Readonly<Record<LockKind, number>> = { conversation: 4, enrollment: 1 };
 const BUSY_RETRY_AFTER_SECONDS = 2;
 const NONCE_RETENTION_SECONDS = 10 * 60;
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -223,12 +229,13 @@ CREATE TABLE IF NOT EXISTS partner_exchanges (
 CREATE INDEX IF NOT EXISTS partner_exchanges_history ON partner_exchanges (connection_id, ordinal);
 `;
 
-/** Partner locks per Db in this process: each lock's queue tail, and the holder slots taken and awaited. */
-interface LockGate { tails: Map<string, Promise<void>>; held: number; waiting: Array<() => void> }
+/** Partner locks per Db in this process: each lock's queue tail, and per kind the holder slots taken and awaited. */
+interface Slots { held: number; waiting: Array<() => void> }
+interface LockGate { tails: Map<string, Promise<void>>; slots: Record<LockKind, Slots> }
 const gates = new WeakMap<Db, LockGate>();
 function gateOf(db: Db): LockGate {
   let gate = gates.get(db);
-  if (!gate) gates.set(db, gate = { tails: new Map(), held: 0, waiting: [] });
+  if (!gate) gates.set(db, gate = { tails: new Map(), slots: { conversation: { held: 0, waiting: [] }, enrollment: { held: 0, waiting: [] } } });
   return gate;
 }
 /** True once `p` settles, either way, false if `deadline` passes first. */
@@ -239,7 +246,7 @@ async function settlesBy(p: Promise<unknown>, deadline: number): Promise<boolean
   } finally { clearTimeout(timer); }
 }
 /** A holder slot by `deadline`, or false. A released slot passes straight to the next waiter. */
-async function takeSlot(gate: LockGate, limit: number, deadline: number): Promise<boolean> {
+async function takeSlot(gate: Slots, limit: number, deadline: number): Promise<boolean> {
   if (gate.held < limit) { gate.held++; return true; }
   let grant!: () => void;
   const granted = new Promise<void>(r => { grant = r; });
@@ -250,7 +257,7 @@ async function takeSlot(gate: LockGate, limit: number, deadline: number): Promis
   gate.waiting.splice(at, 1);
   return false;
 }
-function releaseSlot(gate: LockGate): void {
+function releaseSlot(gate: Slots): void {
   const next = gate.waiting.shift();
   if (next) next(); else gate.held--;
 }
@@ -496,8 +503,10 @@ export class SqlPartnerStore implements PartnerStore {
    * inside a transaction would hold a pooled connection per waiter instead.
    *
    * In order, all within one deadline: queue behind this process's earlier
-   * caller for the same lock; take one of PARTNER_LOCK_HOLDERS slots (so a
-   * retry waiting on its own conversation holds none); then withAdvisoryLock,
+   * caller for the same lock; take one of PARTNER_LOCK_HOLDERS slots for its
+   * kind (so a retry queued in THIS process behind its own conversation holds
+   * none; one polling a lock held by another replica does hold one while it
+   * polls, which is why hosted web runs one replica); then withAdvisoryLock,
    * which retries a session lock across replicas, holding a connection only
    * while it holds the lock. Its checkout from a saturated pool has no deadline
    * of its own, so it is raced against this one: an attempt still waiting at
@@ -525,7 +534,7 @@ export class SqlPartnerStore implements PartnerStore {
     let slot = false, state = "waiting" as "waiting" | "entered" | "abandoned";
     try {
       if (!await settlesBy(ahead, deadline)) throw new LockBusyError();
-      if (!(slot = await takeSlot(gate, this.dialect === "postgres" ? PARTNER_LOCK_HOLDERS : Infinity, deadline))) throw new LockBusyError();
+      if (!(slot = await takeSlot(gate.slots[kind], this.dialect === "postgres" ? PARTNER_LOCK_HOLDERS[kind] : Infinity, deadline))) throw new LockBusyError();
       const attempt = withAdvisoryLock(db, LOCK_CLASS[kind], key, locked => {
         if (state === "abandoned") throw new LockBusyError();
         state = "entered";
@@ -542,7 +551,7 @@ export class SqlPartnerStore implements PartnerStore {
       }
       throw error;
     } finally {
-      if (slot) releaseSlot(gate);
+      if (slot) releaseSlot(gate.slots[kind]);
       leave();
       if (gate.tails.get(name) === tail) gate.tails.delete(name);
     }

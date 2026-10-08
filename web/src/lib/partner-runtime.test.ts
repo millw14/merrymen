@@ -57,6 +57,23 @@ describe("consented partner runtime", () => {
     assert.equal(result.reply, "I bought PRISM in paper mode; its recorded reason was momentum.");
     assert.equal(result.command, undefined);
   });
+  it("bounds the model call it makes under the conversation lock, and answers with the status instead", async () => {
+    let seen: AbortSignal | undefined;
+    const started = Date.now();
+    const adapter = createPartnerRuntime({ ...dependencies(), replyTimeoutMs: 50,
+      // A provider that never answers until it is aborted.
+      complete: async (_creds, request) => {
+        seen = request.signal;
+        return new Promise<string>((_resolve, reject) => request.signal?.addEventListener("abort", () => reject(request.signal!.reason)));
+      },
+      reply: async (_body, options) => ({ reply: await options!.complete!({} as never, { system: "s", prompt: "p" }) }),
+    });
+    const result = await adapter.replyToPartner(TENANT, { message: "How are you?" });
+    assert.ok(seen, "the model call carries a signal");
+    assert.ok(seen!.aborted, "and it was aborted at the deadline");
+    assert.equal(result.generation, "status");
+    assert.ok(Date.now() - started < 5_000, "the partner is answered at the deadline, not when the provider gives up");
+  });
   it("grounds the model in the verified account and ignores financial state supplied by the caller", async () => {
     let captured: AgentChatBody | undefined;
     const adapter = createPartnerRuntime({ ...dependencies(), reply: async (body, options) => {

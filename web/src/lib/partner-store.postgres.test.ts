@@ -279,7 +279,7 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       }))), new Promise<"deadlocked">(resolve => { timer = setTimeout(() => resolve("deadlocked"), 15_000); })]).finally(() => clearTimeout(timer));
       assert.notEqual(results, "deadlocked", "lock holders waited on each other for a pool connection");
       assert.ok((results as boolean[]).every(Boolean));
-      assert.ok(most <= PARTNER_LOCK_HOLDERS, `${most} holders at once`);
+      assert.ok(most <= PARTNER_LOCK_HOLDERS.conversation, `${most} holders at once`);
     });
 
     await t.test("requests queued behind one conversation take no holder slot from the others", async () => {
@@ -292,13 +292,30 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       const holder = first.withConversationLock(busy, async () => { entered.release(); await release.promise; });
       await entered.promise;
       // More transport retries of the held conversation than there are slots.
-      const retries = Array.from({ length: PARTNER_LOCK_HOLDERS + 1 }, () => first.withConversationLock(busy, async () => "retry"));
+      const retries = Array.from({ length: PARTNER_LOCK_HOLDERS.conversation + 1 }, () => first.withConversationLock(busy, async () => "retry"));
       await delay(100);
       try {
         assert.equal(await Promise.race([first.withConversationLock(other, async () => "other"), delay(2000).then(() => "starved")]), "other");
       } finally { release.release(); }
       await holder;
-      assert.deepEqual(await Promise.all(retries), Array(PARTNER_LOCK_HOLDERS + 1).fill("retry"));
+      assert.deepEqual(await Promise.all(retries), Array(PARTNER_LOCK_HOLDERS.conversation + 1).fill("retry"));
+    });
+
+    await t.test("chats holding every conversation slot do not hold up an activation", async () => {
+      const ids = await Promise.all(Array.from({ length: PARTNER_LOCK_HOLDERS.conversation }, async (_, i) => {
+        const pending = await first.create(create("busy-chats", `user-${i}`));
+        await first.bind(pending.token!, `0x${(i + 0x100).toString(16).padStart(40, "0")}`, SCOPES);
+        return pending.connection.id;
+      }));
+      const inside = barrier(), release = barrier();
+      let entered = 0;
+      const chats = ids.map(id => first.withConversationLock(id, async () => { if (++entered === ids.length) inside.release(); await release.promise; }));
+      await inside.promise;
+      try {
+        // Every conversation slot is taken by a turn that will not end on its own.
+        assert.equal(await Promise.race([first.withEnrollmentLock(A, async () => "enrolled"), delay(2000).then(() => "starved")]), "enrolled");
+      } finally { release.release(); }
+      await Promise.all(chats);
     });
 
     await t.test("a lock's wait bound covers checking a connection out of a saturated pool", async () => {

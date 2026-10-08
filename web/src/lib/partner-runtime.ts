@@ -7,6 +7,7 @@
 import { isHostedMode } from "../../../packages/core/src/index";
 import { mintSession, SESSION_COOKIE } from "./auth";
 import { generateAgentReply, type AgentReply } from "./agent-chat";
+import { llmText } from "../../../worker/src/llm";
 import { fitChatState } from "./chat-state";
 import { ledgerChatReply } from "./chat-ledger-facts";
 import { PartnerError } from "./partner-bridge";
@@ -53,6 +54,9 @@ interface RuntimeDependencies {
   feed: Reader;
   settings: Reader;
   reply: typeof generateAgentReply;
+  /** The model call under the reply; given the deadline below as its signal. */
+  complete: typeof llmText;
+  replyTimeoutMs: number;
   facts: typeof ledgerChatReply;
   session: typeof mintSession;
   hosted: () => boolean;
@@ -66,6 +70,8 @@ const defaults: RuntimeDependencies = {
   feed: async (req) => (await import("../app/api/feed/route")).GET(req),
   settings: async (req) => (await import("../app/api/settings/route")).GET(req),
   reply: generateAgentReply,
+  complete: llmText,
+  replyTimeoutMs: 25_000,
   facts: ledgerChatReply,
   session: mintSession,
   hosted: isHostedMode,
@@ -255,7 +261,15 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
       try {
         const body = { message: input.message, history: input.history, state };
         const factualReply = await deps.facts(body, runtime.smart_account, Math.floor(deps.now() / 1000));
-        answer = await deps.reply(body, { surface: "partner", factualReply });
+        // A DEADLINE ON THE MODEL. This runs under the connection's conversation
+        // lock, which holds one of a few pooled connections per replica for the
+        // call's whole length, and the providers' own defaults run to minutes.
+        // A stalled provider then blocked every other app's chats. Past 25s the
+        // call is aborted and the partner gets the factual status below, well
+        // inside the gateway's 45s upstream timeout.
+        const signal = AbortSignal.timeout(deps.replyTimeoutMs);
+        answer = await deps.reply(body, { surface: "partner", factualReply,
+          complete: (creds, request) => deps.complete(creds, { ...request, signal }) });
       } catch {
         answer = { reply: null, why: "llm-error" };
       }
