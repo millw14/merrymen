@@ -473,7 +473,7 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     assert.equal(tg.out().filter((o) => o.replyTo === ask.messageId).length, 1, "only her first, refused, send");
   });
 
-  it("/forgetme in between: nothing is re-run and nothing is sent for her line", async () => {
+  it("/forgetme in between: nothing is re-run and nothing is sent for her line; her complaint asks which question", async () => {
     make();
     tg.failNext = 1;
     await said(msg("shogun how's the market?"));
@@ -482,9 +482,53 @@ describe("'i asked a question' after nothing answered runs her ask again, once (
     const before = tg.out().length;
     const looks = desk.asks.length;
     clock += 10 * SEC;
-    await said(msg("shogun i asked a question"));
+    const complaint = msg("shogun i asked a question");
+    await said(complaint);
     assert.equal(desk.asks.length, looks, "her forgotten line is never read again");
     for (const o of tg.out().slice(before)) assert.doesNotMatch(o.text, /mostly red/);
+    assert.deepEqual(tg.out().slice(before).filter((o) => o.replyTo === complaint.messageId), [{ text: "which question? i might've missed it, ask me again", replyTo: complaint.messageId }]);
+  });
+
+  it("/forgetme while her ask is read, then 'shogun', 'shogun?' or 'hello?? shogun': its hail, never a 👀 promising the forgotten ask (review r2)", async () => {
+    const HAILS = ["hey 👋", "yo", "sup", "hey hey", "heyy", "yo 👋", "hey there", "hi 👋", "ayy", "oh hey", "sup 👀", "hey, what's up"];
+    for (const poke of ["shogun", "shogun?", "hello?? shogun"]) {
+      for (const after of [10, 100]) {
+        fomo = new SpyFomo();
+        make();
+        // Her read is held, then forgotten while it runs.
+        let open: () => void = () => {};
+        fomo.hold = new Promise<void>((r) => { open = r; });
+        groups.onMessage(msg("shogun what's trending on fomo?"));
+        await settle();
+        clock += 5 * SEC;
+        await groups.forgetMe(CHAT, MILLA);
+        await settle();
+        clock += after * SEC;
+        const before = tg.out().length;
+        const eyes = tg.reactions().length;
+        const hail = msg(poke);
+        groups.onMessage(hail);
+        await settle();
+        const answered = tg.out().slice(before).filter((o) => o.replyTo === hail.messageId);
+        const eyed = tg.reactions().slice(eyes).filter((r) => r.emoji === "👀").length;
+        const rerun = logs.some((l) => l.startsWith("[tg-groups] an unanswered ask re-asked"));
+        // Released before anything is asserted, so a failure never leaves the read held.
+        open();
+        await groups.drain();
+        // Its hail template (it never says the same one twice running in a room).
+        assert.equal(answered.length, 1, `${poke} at +${after}s`);
+        assert.ok(HAILS.includes(answered[0]!.text), `${poke} at +${after}s: ${answered[0]!.text}`);
+        assert.equal(eyed, 0, `${poke} at +${after}s: no 👀`);
+        assert.ok(!rerun, "nothing forgotten is re-run");
+        for (const o of tg.out()) assert.doesNotMatch(o.text, /Trending on Fomo/, "the forgotten read never lands");
+        assert.equal(fomo.asks.length, 1, "never read again");
+        groups.stop();
+        await groups.drain();
+        clock += 11 * MIN;
+        tg.calls.length = 0;
+        logs.length = 0;
+      }
+    }
   });
 
   it("after /forget, an answered ask is not 'lost': 'shogun' gets its hail and a complaint asks which question", async () => {

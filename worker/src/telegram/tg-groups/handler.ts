@@ -2644,14 +2644,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return true;
   };
   /** What each chat last asked the desk, so "do a quick analysis" right after reads the same thing. */
-  const lastDesk = new Map<string, { ask: TgDeskAsk; atMs: number; ingressOrder: number; migrated?: boolean }>();
+  const lastDesk = new Map<string, { ask: TgDeskAsk; atMs: number; ingressOrder: number; migrated?: boolean; fromId?: number }>();
   const deskKey = (chatId: number, threadId?: number): string => `${chatId}:${threadId ?? 0}`;
   const DESK_FOLLOW_MS = 15 * MIN;
-  const rememberDesk = (chatId: number, ask: TgDeskAsk, atMs: number, order: number | undefined, threadId?: number, migrated = false): void => {
+  /** `fromId`: who asked it, so a subject they asked before their /forgetme is never read again for anyone (deskAskFor). */
+  const rememberDesk = (chatId: number, ask: TgDeskAsk, atMs: number, order: number | undefined, threadId?: number, migrated = false, fromId?: number): void => {
     const key = deskKey(chatId, threadId);
     if (order === undefined || (lastDesk.get(key)?.ingressOrder ?? -1) >= order) return;
     if (lastDesk.size > 256 && !lastDesk.has(key)) lastDesk.delete(lastDesk.keys().next().value!);
-    lastDesk.set(key, { ask, atMs, ingressOrder: order, ...(migrated ? { migrated: true } : {}) });
+    lastDesk.set(key, { ask, atMs, ingressOrder: order, ...(migrated ? { migrated: true } : {}), ...(typeof fromId === "number" ? { fromId } : {}) });
   };
 
   // ── social-trading research (docs/fomo.md "Telegram groups") ──────────────
@@ -3294,7 +3295,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // An unresolved explicit reply must not silently borrow a newer coin.
     if (j.line.replyTo !== undefined && discussion) return null;
     const general = lastDesk.get(deskKey(j.msg.chatId));
-    const prev = lastDesk.get(deskKey(j.msg.chatId, j.threadId)) ?? (general?.migrated ? general : undefined);
+    const remembered = lastDesk.get(deskKey(j.msg.chatId, j.threadId)) ?? (general?.migrated ? general : undefined);
+    // A subject asked by someone forgotten since is not this topic's any more.
+    const prev = remembered && !(remembered.fromId !== undefined && forgottenSince(j.msg.chatId, remembered.fromId, remembered.atMs)) ? remembered : undefined;
     if (prev?.ask.kind === "comparison" && intent?.kind === "discussion" && intent.topic === "setup" && deskQuestionIntent(j.line.text) !== "comparison") return null;
     if (prev && clock() - prev.atMs <= DESK_FOLLOW_MS && (prev.ask.kind === "market" || coinFactsOn())) return !lore || prev.ask.kind === "coin" ? prev.ask : null;
     // A complaint with no subject anywhere ("i asked a question", "why can't
@@ -3554,7 +3557,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const opts = { ...o, replyByMs };
     // Remember the actual subject even on failure: a reply asking for a proper
     // analysis should retry that subject, not turn into unrelated banter.
-    rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder, j.threadId);
+    rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder, j.threadId, false, j.line.fromId);
     if (!allowed) return deskMiss(chatId, ask, "rate-limit", opts, note);
     const stopTyping = keepTyping(chatId, replyByMs, o.threadId, "upload_photo", o);
     try {
@@ -3602,7 +3605,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     };
     const ask: TgDeskAsk = { kind: "coin", address };
     const order = messageIngressOrder.get(msgKey(chatId, poster.messageId));
-    rememberDesk(chatId, ask, seenAt, order, threadId);
+    rememberDesk(chatId, ask, seenAt, order, threadId, false, poster.fromId);
     const note = deskNoteFor(store.coin(chatId, address)) ?? o.note;
     let sent: { chatId: number; messageId?: number } | null;
     if (o.busy) sent = await deskMiss(chatId, ask, "rate-limit", opts, note);
@@ -3622,7 +3625,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (sent && sent.chatId !== chatId && !forgottenSince(chatId, poster.fromId, seenAt) && !forgottenSince(sent.chatId, poster.fromId, seenAt)) {
       // Migration carries the subject, retaining its original receipt order
       // and lifetime; a newer destination ask still wins.
-      rememberDesk(sent.chatId, ask, seenAt, order, undefined, true);
+      rememberDesk(sent.chatId, ask, seenAt, order, undefined, true, poster.fromId);
     }
     return sent !== null;
   };
@@ -4184,7 +4187,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // decides the burst: that ask stays the line to answer (openAsks).
         // Small talk and such lines are never an ask of their own.
         const meta = addressed !== null ? metaLineOf(text, selfNamesOf(me)) : null;
-        const open = addressed !== null ? openAskOf(chatId, msg.fromId, threadId) : null;
+        const ownOpen = addressed !== null ? openAskOf(chatId, msg.fromId, threadId) : null;
+        // A /forgetme'd ask is nothing open: no 👀 promising it, never re-run,
+        // so their hail, poke or complaint gets its own answer.
+        const open = ownOpen && !forgotten(ownOpen.job) ? ownOpen : null;
         const openState = open ? askStateOf(open) : null;
         // An ask the coin flow owns (noReask) is never run again: past the 👀 while it runs, nothing is open.
         const live = open && !open.noReask ? open : null;
