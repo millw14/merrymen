@@ -401,5 +401,44 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
     if (publishable && bps !== null && Number.isFinite(bps)) performance.pnlBps = bps;
     if (!gas.complete && (performance.pnlBps !== null || performance.pnlUsdg !== null)) performance.pnlEstimated = true;
   }
+  if (performance.pnlBps === null) await estimateFromFirstMark(db, account, epoch, measured, gas?.gas ?? 0, performance);
   return { performance, liveRank, paperPnlBps: null };
+}
+
+/**
+ * WHEN THE EXACT RETURN CANNOT BE MEASURED, THE NEAREST ONE THAT CAN.
+ *
+ * Capital unevidenced or never assessed, no deposit on record, or a cost
+ * horizon nobody can date: each withholds the exact return, and the board
+ * printed a blank. This measures the book against its own first live
+ * valuation this run instead, net of the flows booked after it and of the
+ * gas on record — the paper book's method, on a live book. It is flagged
+ * `pnlEstimated`, printed as approximate, and never ranked: liveRank is
+ * untouched. Nothing here runs for a return under review (readBookPerformance
+ * withholds it after), and an unread flow tape leaves the blank as it was.
+ */
+async function estimateFromFirstMark(db: Db, account: string, epoch: number, measured: { equity: number; at: number },
+  gasUsdg: number, performance: BookPerformance): Promise<void> {
+  try {
+    const held = await heldSql(db);
+    const first = await db.prepare(`SELECT equity_usdg, at FROM equity
+      WHERE LOWER(agent_id) = ? AND epoch = ? AND mode = 'live' AND equity_usdg > 0 AND ${held.measurable()}
+      ORDER BY at ASC, id ASC LIMIT 1`).get(account.toLowerCase(), epoch) as Record<string, unknown> | undefined;
+    const base = finite(first?.equity_usdg);
+    const from = finite(first?.at);
+    if (base === null || base <= 0 || from === null || from >= measured.at) return;
+    let inflow = 0;
+    let net = 0;
+    for (const f of await readDistinctFlows(db, account, epoch)) {
+      if (f.at <= from || f.at > measured.at) continue;
+      if (f.direction === "in") inflow += f.amountUsdg;
+      net += f.direction === "in" ? f.amountUsdg : -f.amountUsdg;
+    }
+    const pnl = measured.equity - base - net - (Number.isFinite(gasUsdg) && gasUsdg > 0 ? gasUsdg : 0);
+    const bps = pnl / (base + inflow) * 10_000;
+    if (!Number.isFinite(pnl) || !Number.isFinite(bps)) return;
+    performance.pnlBps = bps;
+    performance.pnlUsdg = performance.publicBook ? pnl : null;
+    performance.pnlEstimated = true;
+  } catch { /* unread: the return stays unavailable */ }
 }

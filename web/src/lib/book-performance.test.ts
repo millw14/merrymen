@@ -137,6 +137,32 @@ test("unpriced or unrecorded gas withholds the rank and marks the return approxi
   }
 });
 
+test("unevidenced capital still yields an approximate return against the first valuation, net of later flows, never ranked", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("UPDATE agents SET contributions_known = 0").run();
+    await mark(db, 100, 10);
+    await op(db, 12, { gas: 0 });
+    // A 50 deposit after the first valuation is capital, not gain.
+    await db.prepare("INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at) VALUES (?, 2, 'in', 50, 'chain-log', 20)").run(ACCOUNT);
+    await mark(db, 165, 30);
+    const result = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(result.liveRank.pnlBps, null);
+    assert.equal(result.liveRank.unrankedWhy, "contributions-unevidenced");
+    assert.equal(result.performance.pnlEstimated, true);
+    assert.equal(result.performance.pnlUsdg, 15);
+    assert.equal(result.performance.pnlBps, 1000, "15 over 100 + 50");
+    // One valuation alone has nothing to measure against.
+    const { raw: raw2, db: one } = await ledger();
+    try {
+      await one.prepare("UPDATE agents SET contributions_known = 0").run();
+      await mark(one, 100, 10);
+      await op(one, 5, { gas: 0 });
+      assert.equal((await readBookPerformance(one, ACCOUNT, 2, true)).performance.pnlBps, null);
+    } finally { raw2.close(); }
+  } finally { raw.close(); }
+});
+
 test("gas-pending is said only where every other gate passed; an earlier refusal keeps its own words", async () => {
   const { raw, db } = await ledger();
   try {

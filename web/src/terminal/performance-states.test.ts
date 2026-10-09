@@ -199,7 +199,8 @@ test("Finley and Ajinde: trades no valuation includes say so, without touching a
   assert.equal(finley.querySelector(".chg")!.textContent, "Awaiting first valuation");
   const ajinde = rows.find((r) => r.textContent!.includes("Ajinde"))!;
   assert.equal(ajinde.querySelector(".chg")!.textContent, "−0.0042%");
-  assert.equal(ajinde.querySelector(".performance-note")!.textContent, "awaiting valuation");
+  // The board carries no note under the figure; the title says it.
+  assert.equal(ajinde.querySelector(".performance-note"), null);
   assert.match(ajinde.querySelector(".rank-return")!.getAttribute("title")!, /newer trade is not in this return yet/);
   assert.equal((await profilePage(agents[0]!)).figure, "Awaiting first valuation");
   assert.match(sidebar(agents).body.textContent!, /Awaiting first valuation/);
@@ -242,7 +243,7 @@ test("a return under review says so everywhere and shows no percentage, even if 
   for (const text of [r.textContent!, card, found!, page.text]) assert.doesNotMatch(text, /43\.2|\+\$43/);
 });
 
-test("a stale valuation says when it was taken in visible text, and the board says when the newest was", async () => {
+test("a stale valuation says when it was taken off the board; the board itself stays clean and keeps it in the title", async () => {
   const stale = NOW - 3 * 3_600;
   const { agents } = await read([
     row("Old", { performance: performance({ equityAt: stale, pnlAt: stale }) }),
@@ -251,20 +252,19 @@ test("a stale valuation says when it was taken in visible text, and the board sa
   assert.equal(staleSince(agents, NOW), stale, "the NEWEST valuation, not the oldest");
   for (const preview of [false, true]) {
     const doc = board(agents, preview);
-    const banner = doc.querySelector(".performance-banner")!;
-    assert.match(banner.textContent!, /^No new valuations since \S.*\. Each figure is as of its agent's last valuation\.$/);
-    assert.doesNotMatch(banner.textContent!, /paus|halt|held|recover|incident/i, "staleness only, never a cause");
-    for (const r of doc.querySelectorAll(".rank")) assert.match(r.querySelector(".performance-asof")!.textContent!, /^as of \S/);
+    assert.equal(doc.querySelector(".performance-banner"), null, "no banner on the leaderboard");
+    for (const r of doc.querySelectorAll(".rank")) {
+      assert.equal(r.querySelector(".performance-asof"), null);
+      assert.match(r.querySelector(".rank-value")!.getAttribute("title")!, /Valued \S/);
+    }
   }
   assert.ok(sidebar(agents).querySelector(".performance-asof"), "the sidebar says it too");
   assert.match((await searchRows(agents, "old"))[0]!, /as of \S/);
   assert.match((await profilePage(agents[0]!)).text, /as of \S/);
-  // A row the recovery hold kept already says "Last valued" on the board, so
-  // it is not said twice there — and the other surfaces, which do not print
-  // that, still say when.
+  // A row the recovery hold kept: the board stays clean, the other surfaces say when.
   const { agents: kept } = await read([row("Kept", { mode: "idle", notRunning: true, performance: performance({ equityAt: stale, pnlAt: stale }) })]);
   const keptRow = board(kept).querySelector(".rank")!;
-  assert.match(keptRow.textContent!, /Last valued \S/);
+  assert.doesNotMatch(keptRow.textContent!, /Last valued/);
   assert.equal(keptRow.querySelector(".performance-asof"), null);
   assert.ok(sidebar(kept).querySelector(".performance-asof"));
   // Fresh: nothing about time is added.

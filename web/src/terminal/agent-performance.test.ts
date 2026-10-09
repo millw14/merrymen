@@ -84,14 +84,14 @@ test("private, unknown, held and older-server data do not manufacture an amount 
   assert.doesNotMatch(privateRow.outerHTML, /9876|5432/);
   const unknown = rows.find(r => r.textContent!.includes("Unknown"))!;
   assert.equal(unknown.querySelector(".rank-have")!.textContent, "—");
-  assert.equal(unknown.querySelector(".chg")!.textContent, "—");
+  assert.equal(unknown.querySelector(".chg")!.textContent, "Awaiting valuation");
   assert.doesNotMatch(unknown.textContent!, /99\.0%|0\.0%|\$0\.00/);
   const held = rows.find(r => r.textContent!.includes("Held"))!;
-  assert.match(held.querySelector(".rank-book")!.textContent!, /Live · Pending/);
+  assert.equal(held.querySelector(".rank-book")!.textContent, "Live", "pending is in the title, not under the figure");
   const title = held.querySelector(".rank-value")!.getAttribute("title")!;
   assert.match(title, /Valued .*P&L measured .*pending reconciliation/);
   const gas = rows.find(r => r.textContent!.includes("Gas"))!;
-  assert.equal(gas.querySelector(".chg")!.textContent, "—");
+  assert.equal(gas.querySelector(".chg")!.textContent, "Awaiting valuation");
   assert.doesNotMatch(gas.textContent!, /Gas accounting/);
   // A return with some gas off the record is printed, marked approximate.
   const approx = rows.find(r => r.textContent!.includes("Approx"))!;
@@ -155,12 +155,12 @@ test("a malformed performance field stays unavailable rather than coercing empty
   } })]);
   const doc = board(agents);
   assert.equal(doc.querySelector(".rank-have")!.textContent, "—");
-  assert.equal(doc.querySelector(".chg")!.textContent, "—");
+  assert.equal(doc.querySelector(".chg")!.textContent, "Awaiting valuation");
   assert.match(doc.querySelector(".rank-value")!.getAttribute("title")!, /Valuation time unavailable.*Measured P&L unavailable/);
   assert.doesNotMatch(doc.body.textContent!, /99\.0%|0\.0%|\$0\.00/);
 });
 
-test("a row the recovery hold kept says Not running and when it was last valued, and nothing about expiry", async () => {
+test("a row the recovery hold kept says Not running, keeps when it was last valued in its title, and nothing about expiry", async () => {
   const { agents } = await read([
     row("Held", { mode: "idle", notRunning: true, performance: performance({ publicBook: false, equityAt: 1_791_083_000 }) }),
     row("Unvalued", { mode: "idle", notRunning: true, performance: undefined, pnlBps: null }),
@@ -173,9 +173,8 @@ test("a row the recovery hold kept says Not running and when it was last valued,
     const rows = [...doc.querySelectorAll(".rank")];
     const held = rows.find(r => r.textContent!.includes("Held"))!;
     assert.ok([...held.querySelectorAll(".tag")].some(t => t.textContent === "Not running"));
-    const valued = [...held.querySelectorAll(".rank-book")].map(b => b.textContent!);
-    assert.ok(valued.some(t => /^Last valued \S/.test(t)), `visible as-of time: ${valued.join(" | ")}`);
-    assert.match(held.querySelector(".rank-value")!.getAttribute("title")!, /^Not running\. /);
+    assert.doesNotMatch(held.textContent!, /Last valued/, "the board carries no as-of line");
+    assert.match(held.querySelector(".rank-value")!.getAttribute("title")!, /^Not running\. .*Valued \S/);
     assert.equal(held.querySelector(".rank-have")!.textContent, "Private", "a private book stays private");
     const unvalued = rows.find(r => r.textContent!.includes("Unvalued"))!;
     assert.ok([...unvalued.querySelectorAll(".tag")].some(t => t.textContent === "Not running"));
