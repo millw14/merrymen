@@ -487,6 +487,9 @@ to someone in distress goes out shushed or not.
   Fomo answer, or is a short pointer ("it", "this one", "rip"; never "lol"
   or "damn") within ten minutes of it, and never to a line that names
   another coin (a cashtag, an address, or a coin the room knows by name).
+  A permit is the coin's on the chain it was measured or answered on: a line
+  naming another chain ("the auton on base") is about another coin of that
+  ticker and gets none.
   The gate (`TgGateCtx.rug`) then lifts only "rugged" or "rug" said of no
   one, "it", "this one", "the chart" or the coin; everything else stays
   refused: a person who rugged, dumped, sold on anyone, stole, pulled the

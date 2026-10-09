@@ -1018,7 +1018,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
       return say(line, { ...free, coin });
     }
     const lines = coinFactsLines(read.facts, sym, ask, now());
-    return say(lines.join("\n"), { ...free, coin, collapse: { coin: sym, collapsed: collapseOf(read.facts), atMs: read.facts.observedAt } });
+    return say(lines.join("\n"), { ...free, coin, collapse: { coin: sym, ...(network ? { chain: network } : {}), collapsed: collapseOf(read.facts), atMs: read.facts.observedAt } });
   };
 
   return {

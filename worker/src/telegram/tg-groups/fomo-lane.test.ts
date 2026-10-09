@@ -2078,6 +2078,24 @@ describe("rug banter: only with a collapse permit, never at a person, never a br
     assert.equal(last(), "auton? rugged for real", "the coin alone keeps its permit");
   });
 
+  it("a measured permit is the coin's on its chain: the same ticker on another chain gets none (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? { ...facts(true)(), collapse: { coin: "AUTON", chain: "solana", collapsed: true, atMs: clock } } : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    clock += 3 * 60 * MIN;
+    content = "auton rugged lol";
+    await said(msg("pine the auton on base looks strong"));
+    assert.notEqual(last(), "auton rugged lol");
+    clock += MIN;
+    content = "auton? rugged for real";
+    await said(msg("pine auton on solana huh"));
+    assert.equal(last(), "auton? rugged for real", "the measured coin, on its own chain, keeps its permit");
+  });
+
   it("a coin it holds gets no permit: 'rugged' is refused even after a measured collapse", async () => {
     withModel();
     fomo!.answer = answers(true);

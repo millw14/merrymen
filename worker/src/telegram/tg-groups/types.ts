@@ -578,10 +578,11 @@ export interface TgFomoAnswer {
   coin?: { symbol: string; chain?: TgFomoChain; aspect: TgFomoCoinAspect };
   /**
    * A facts answer's measurement: whether the coin collapsed (desk/facts.ts
-   * collapseOf) and when that was read. The handler sets or clears the
-   * room's collapse permit from it (WP9); never a figure.
+   * collapseOf), on which chain, and when that was read. The handler sets or
+   * clears the room's collapse permit from it (WP9), for that chain's coin
+   * only; never a figure.
    */
-  collapse?: { coin: string; collapsed: boolean; atMs: number };
+  collapse?: { coin: string; chain?: TgFomoChain; collapsed: boolean; atMs: number };
   /** A coin's theses, for the group model to put in its own words (theses.ts); `text` is the code digest. */
   theses?: TgThesesMaterial;
   /** Only when the owner asked (`owner` on the ask): her next moves. */

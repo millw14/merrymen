@@ -140,6 +140,7 @@ import type {
   TgDeskPort,
   TgDeskThought,
   TgFomoAnswer,
+  TgFomoChain,
   TgFomoPort,
   TgFomoRequest,
   TgGroupFactsPort,
@@ -805,7 +806,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * current Fomo coin rugged (30 minutes, never over a measurement that found
    * no collapse in the last 12 hours), "clear" when a measurement found none.
    */
-  type Permit = { coin: string; source: TgCollapse["source"] | "clear"; atMs: number; untilMs: number };
+  type Permit = { coin: string; chain?: TgFomoChain; source: TgCollapse["source"] | "clear"; atMs: number; untilMs: number };
   const collapses = new Map<string, Map<string, Permit>>();
   const MEASURED_PERMIT_MS = 12 * 60 * MIN;
   const ROOM_PERMIT_MS = 30 * MIN;
@@ -2831,7 +2832,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const coin = typeof c.coin === "string" ? c.coin.trim() : "";
     if (!coin) return;
     const t = clock();
-    putPermit(chatId, threadId, { coin, source: c.collapsed ? "measured" : "clear", atMs: t, untilMs: t + MEASURED_PERMIT_MS });
+    putPermit(chatId, threadId, { coin, ...(c.chain ? { chain: c.chain } : {}), source: c.collapsed ? "measured" : "clear", atMs: t, untilMs: t + MEASURED_PERMIT_MS });
     log(`[tg-groups] collapse ${c.collapsed ? "measured" : "not measured"}`);
   };
   /**
@@ -2856,7 +2857,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const had = permitsOf(msg.chatId, threadId, false)?.get(current.symbol.toLowerCase());
     const t = clock();
     if (had && had.untilMs > t && (had.source === "measured" || had.source === "clear")) return;
-    putPermit(msg.chatId, threadId, { coin: current.symbol, source: "room", atMs: t, untilMs: t + ROOM_PERMIT_MS });
+    putPermit(msg.chatId, threadId, { coin: current.symbol, ...(current.chain ? { chain: current.chain } : {}), source: "room", atMs: t, untilMs: t + ROOM_PERMIT_MS });
     log("[tg-groups] collapse said by the room");
   };
   /** Words a room calls a person by: a coin called one of them never gets a permit. */
@@ -2888,6 +2889,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       recentFomoCoin(chatId, threadId)?.symbol.toLowerCase() ?? "",
     ].filter((x) => x.length >= 2));
     const wordIn = (w: string): boolean => new RegExp(`(?<![\\p{L}\\p{N}_])\\$?${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`, "u").test(text);
+    const lineChain = chainIn(trigger.text);
     const otherCoinThan = (low: string): boolean => anyCa || tags.some((x) => x !== low) || [...known].some((k) => k !== low && wordIn(k));
     for (const p of m.values()) {
       if (p.untilMs <= t || p.source === "clear") continue;
@@ -2896,13 +2898,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (otherCoinThan(low)) continue;
       if (heldNames.some((h) => typeof h === "string" && h.trim().toLowerCase() === low)) continue;
       if (room.coins.some((c) => c.verdict === "bought" && !c.exitSaid && typeof c.name === "string" && c.name.trim().toLowerCase() === low)) continue;
+      // The permit is for the coin measured on its chain: a line naming another chain is about another coin of that ticker.
+      if (p.chain && lineChain && lineChain !== p.chain) continue;
+      const sameChain = (c: FomoCoin | undefined): boolean => !p.chain || !c?.chain || c.chain === p.chain;
       const named = wordIn(low);
       const repliedTo = isMsgId(trigger.replyTo) ? fomoCoinLines.get(msgKey(chatId, trigger.replyTo)) : undefined;
-      const under = !!repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= FOMO_THREAD_MS;
+      const under = !!repliedTo && repliedTo.symbol.toLowerCase() === low && sameChain(repliedTo) && t - repliedTo.at <= FOMO_THREAD_MS;
       const last = lastFomoCoin.get(deskKey(chatId, threadId));
       // A pointer at the coin ("it", "this one", "rip"), never an interjection: "lol" or "damn" may be about anything.
       const pointer = text.split(/\s+/u).filter(Boolean).length <= 6 && /\b(?:it|this|that|this one|that one|rip)\b/u.test(text)
-        && ((!!repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= 10 * MIN) || (!!last && last.symbol.toLowerCase() === low && t - last.at <= 10 * MIN));
+        && ((!!repliedTo && repliedTo.symbol.toLowerCase() === low && sameChain(repliedTo) && t - repliedTo.at <= 10 * MIN) || (!!last && last.symbol.toLowerCase() === low && sameChain(last) && t - last.at <= 10 * MIN));
       if (!named && !under && !pointer) continue;
       const own = room.lines.filter((l) => l.own === true).slice(-8);
       const lastBrag = bragAt.get(chatId);

@@ -2514,7 +2514,7 @@ describe("a coin's facts: measured, with their source and time, and what could n
     assert.equal(s.provider.length, provider);
     assert.equal(a!.free, true);
     assert.deepEqual(a!.coin, { symbol: "AUTON", chain: "solana", aspect: "facts" });
-    assert.deepEqual(a!.collapse, { coin: "AUTON", collapsed: true, atMs: AUTON_NOW });
+    assert.deepEqual(a!.collapse, { coin: "AUTON", chain: "solana", collapsed: true, atMs: AUTON_NOW });
     assert.ok(idx.routes.every((r) => r.includes(AUTON_MINT) || r.includes("FiYyzx")), "the remembered mint, verbatim");
   });
 
@@ -2566,7 +2566,7 @@ describe("a coin's facts: measured, with their source and time, and what could n
     const a = await createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: createCoinFactsReader({ fetchJson: fetch, now: () => AUTON_NOW, limiter: new FactsLimiter({ now: () => AUTON_NOW }) }) })
       .ask({ text: "x", request: { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" }, chatId: GROUP });
     assert.match(a!.text, /so it is 40% below that\./, a!.text);
-    assert.deepEqual(a!.collapse, { coin: "AUTON", collapsed: false, atMs: AUTON_NOW });
+    assert.deepEqual(a!.collapse, { coin: "AUTON", chain: "solana", collapsed: false, atMs: AUTON_NOW });
   });
 });
 
