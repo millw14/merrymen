@@ -550,6 +550,20 @@ export interface TgThesesQuotes {
 /** What a single-coin answer was about: its theses (the digest), its theses quoted, its activity, a research dive, or its facts. */
 export type TgFomoCoinAspect = "theses" | "quotes" | "activity" | "research" | "facts";
 
+/**
+ * THE COLLAPSE PERMIT (docs/tg-groups.md "Rugged coins"; Milla, 2026-10-09):
+ * the persona may say this coin "rugged", and add a playful Merrymen brag,
+ * because a facts lookup measured its collapse ("measured") or someone in the
+ * room said it rugged ("room"). A sayable name only: no figure, no address.
+ * `brag`: false when a brag went out lately (none back to back).
+ */
+export interface TgCollapse {
+  coin: string;
+  source: "measured" | "room";
+  atMs: number;
+  brag: boolean;
+}
+
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;

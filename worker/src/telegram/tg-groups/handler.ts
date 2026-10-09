@@ -96,6 +96,7 @@ import {
   pushbackOf,
   reactionOnly,
   routeWorthy,
+  roomSaysRugged,
   selfNamesOf,
   thesesQuotesOf,
   type BotSelf,
@@ -106,6 +107,7 @@ import { admitThought, deskCaption, deskMissLine, deskQuestionEvidence, deskQues
 import { admitTgLine } from "./gate";
 import { publicCoinReason, publicCoinStatus, publicFactRequest, type PublicFactRequest } from "./facts";
 import { quotesSayable } from "./quotes";
+import { MERRY_BRAG } from "./third-party";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
 import {
   describeTgGroupsModel,
@@ -133,6 +135,7 @@ import type {
   CoinLook,
   TgCoinMemo,
   TgCoinsPort,
+  TgCollapse,
   TgDeskAsk,
   TgDeskPort,
   TgDeskThought,
@@ -795,6 +798,20 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    */
   type FomoCoin = NonNullable<TgFomoAnswer["coin"]> & { at: number };
   const fomoCoinLines = new Lru<string, FomoCoin>(LRU_MAX);
+  /**
+   * THE COLLAPSE PERMITS (docs/tg-groups.md "Rugged coins"), per topic and
+   * coin, in memory only (a restart forgets them, which is safe): "measured"
+   * by a facts answer (12 hours), "room" when someone here said the room's
+   * current Fomo coin rugged (30 minutes, never over a measurement that found
+   * no collapse in the last 12 hours), "clear" when a measurement found none.
+   */
+  type Permit = { coin: string; source: TgCollapse["source"] | "clear"; atMs: number; untilMs: number };
+  const collapses = new Map<string, Map<string, Permit>>();
+  const MEASURED_PERMIT_MS = 12 * 60 * MIN;
+  const ROOM_PERMIT_MS = 30 * MIN;
+  /** When each chat last said a Merrymen brag: none again for 20 minutes. */
+  const bragAt = new Map<number, number>();
+  const BRAG_GAP_MS = 20 * MIN;
   /** When each recent message reached this process, for the staleness of a coin line about it. */
   const received = new Lru<string, number>(LRU_MAX);
   const messageIngressOrder = new Lru<string, number>(LRU_MAX);
@@ -1421,6 +1438,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.coinName ? { coinName: o.coinName } : {}),
       // Fomo research is wired here: the persona knows the feature exists, so a question that missed the research lane is pointed at it, never denied.
       ...(fomoNow() !== null ? { fomo: true } : {}),
+      // The collapse permit for the coin this line is about (docs/tg-groups.md "Rugged coins").
+      ...(() => {
+        const c = collapseFor(chatId, o.threadId, o.trigger, room, heldNames);
+        return c ? { collapse: c } : {};
+      })(),
       nowMs: clock(),
       rand,
     };
@@ -1446,6 +1468,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     store.update(chatId, (r) => {
       r.lastOwnAtMs = now;
     });
+    // A Merrymen brag said: the next waits (MERRY_BRAG, BRAG_GAP_MS).
+    if (MERRY_BRAG.test(text)) {
+      if (bragAt.size > 512 && !bragAt.has(chatId)) bragAt.delete(bragAt.keys().next().value!);
+      bragAt.set(chatId, now);
+    }
   };
 
   /**
@@ -1922,6 +1949,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     for (const key of lastFomo.keys()) if (key.startsWith(prefix)) lastFomo.delete(key);
     // The coin its Fomo answers were about, by message and by topic.
     fomoCoinLines.deleteWhere((k) => k.startsWith(prefix));
+    for (const key of collapses.keys()) if (key.startsWith(prefix)) collapses.delete(key);
+    bragAt.delete(chatId);
     for (const key of lastFomoCoin.keys()) if (key.startsWith(prefix)) lastFomoCoin.delete(key);
     // The research side's subject memory for this room too ("it" no longer
     // points at the coin the room was discussing). Detached; never throws.
@@ -2775,6 +2804,93 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const c = lastFomoCoin.get(deskKey(chatId, threadId));
     return c && clock() - c.at <= FOMO_COIN_MS ? c : null;
   };
+  const permitsOf = (chatId: number, threadId: number | undefined, create: boolean): Map<string, Permit> | null => {
+    const key = deskKey(chatId, threadId);
+    let m = collapses.get(key);
+    if (!m && create) {
+      if (collapses.size >= 512) collapses.delete(collapses.keys().next().value!);
+      m = new Map();
+      collapses.set(key, m);
+    }
+    return m ?? null;
+  };
+  const putPermit = (chatId: number, threadId: number | undefined, p: Permit): void => {
+    const m = permitsOf(chatId, threadId, true)!;
+    const k = p.coin.toLowerCase();
+    m.delete(k);
+    if (m.size >= 16) m.delete(m.keys().next().value!);
+    m.set(k, p);
+  };
+  /**
+   * A FACTS ANSWER'S MEASUREMENT (TgFomoAnswer.collapse), whether or not its
+   * send went through (the measurement is true either way): a collapse is a
+   * measured permit for twelve hours; no collapse clears every permit for
+   * the coin and keeps a room's word from setting one for twelve hours.
+   */
+  const noteCollapse = (chatId: number, threadId: number | undefined, c: NonNullable<TgFomoAnswer["collapse"]>): void => {
+    const coin = typeof c.coin === "string" ? c.coin.trim() : "";
+    if (!coin) return;
+    const t = clock();
+    putPermit(chatId, threadId, { coin, source: c.collapsed ? "measured" : "clear", atMs: t, untilMs: t + MEASURED_PERMIT_MS });
+    log(`[tg-groups] collapse ${c.collapsed ? "measured" : "not measured"}`);
+  };
+  /**
+   * SOMEONE HERE SAYS THE ROOM'S COIN RUGGED ("auton rugged lol", or "it
+   * rugged" under its Fomo answer): a room permit for half an hour, only for
+   * the room's current Fomo coin (this topic's last one, or the one the line
+   * replies under), never a coin a rival shill names, never over a recent
+   * measurement that found no collapse, never over a measured permit.
+   */
+  const noteRoomRugged = (msg: TgMessage, text: string, threadId: number | undefined, me: BotSelf | null): void => {
+    const said = roomSaysRugged(text, selfNamesOf(me));
+    if (!said) return;
+    const q = msg.replyTo;
+    const under = me && q && q.fromId === me.id && isMsgId(q.messageId) ? fomoCoinLines.get(msgKey(msg.chatId, q.messageId)) : undefined;
+    const current = (under && clock() - under.at <= FOMO_THREAD_MS ? under : null) ?? recentFomoCoin(msg.chatId, threadId);
+    if (!current) return;
+    if (said.coin && said.coin !== current.symbol.toUpperCase()) return;
+    const had = permitsOf(msg.chatId, threadId, false)?.get(current.symbol.toLowerCase());
+    const t = clock();
+    if (had && had.untilMs > t && (had.source === "measured" || had.source === "clear")) return;
+    putPermit(msg.chatId, threadId, { coin: current.symbol, source: "room", atMs: t, untilMs: t + ROOM_PERMIT_MS });
+    log("[tg-groups] collapse said by the room");
+  };
+  /** Words a room calls a person by: a coin called one of them never gets a permit. */
+  const PERSON_COIN = /^(?:dev|devs|team|they|he|she|him|her|someone|kol|whale|whales|admin|admins|mod|mods)$/iu;
+  /**
+   * THE PERMIT FOR THE LINE BEING ANSWERED, or null: only when the line names
+   * the coin, replies under that coin's Fomo answer, or is a short pointer
+   * ("it", "this one", "rip") within ten minutes of it. Never for a coin it
+   * holds or bought and has not exited (how it did is private, rule 3), never
+   * a coin named like someone in the room. `brag` is false while a brag is
+   * among its last eight lines or went out in the last twenty minutes.
+   */
+  const collapseFor = (chatId: number, threadId: number | undefined, trigger: TgLine | undefined, room: TgRoom, heldNames: readonly string[]): TgCollapse | null => {
+    const m = permitsOf(chatId, threadId, false);
+    if (!m || !trigger || trigger.own || typeof trigger.text !== "string") return null;
+    const t = clock();
+    const text = trigger.text.normalize("NFKC").toLowerCase();
+    const people = new Set([room.ownerName ?? "", ...room.people.map((x) => x.name)].map((n) => n.trim().toLowerCase()).filter(Boolean));
+    for (const p of m.values()) {
+      if (p.untilMs <= t || p.source === "clear") continue;
+      const low = p.coin.toLowerCase();
+      if (people.has(low) || PERSON_COIN.test(low)) continue;
+      if (heldNames.some((h) => typeof h === "string" && h.trim().toLowerCase() === low)) continue;
+      if (room.coins.some((c) => c.verdict === "bought" && !c.exitSaid && typeof c.name === "string" && c.name.trim().toLowerCase() === low)) continue;
+      const named = new RegExp(`(?<![\\p{L}\\p{N}_])\\$?${low.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`, "u").test(text);
+      const repliedTo = isMsgId(trigger.replyTo) ? fomoCoinLines.get(msgKey(chatId, trigger.replyTo)) : undefined;
+      const under = !!repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= FOMO_THREAD_MS;
+      const last = lastFomoCoin.get(deskKey(chatId, threadId));
+      const pointer = text.split(/\s+/u).filter(Boolean).length <= 6 && /\b(?:it|this|that|this one|that one|rip|oof|f|lmao|lol|damn|bruh|wow|yikes)\b/u.test(text)
+        && ((!!repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= 10 * MIN) || (!!last && last.symbol.toLowerCase() === low && t - last.at <= 10 * MIN));
+      if (!named && !under && !pointer) continue;
+      const own = room.lines.filter((l) => l.own === true).slice(-8);
+      const lastBrag = bragAt.get(chatId);
+      const brag = !own.some((l) => MERRY_BRAG.test(l.text)) && !(lastBrag !== undefined && t - lastBrag < BRAG_GAP_MS);
+      return { coin: p.coin, source: p.source, atMs: p.atMs, brag };
+    }
+    return null;
+  };
   /**
    * A PUSHBACK ON ITS OWN RESEARCH ANSWER ("there has to be thesis", "check
    * again"): in reply to one of its research lines, or, replying to nothing,
@@ -3036,6 +3152,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       log(`[tg-groups] research ${r.status ?? "unsayable"}, the fallback answers`);
       return "not-research";
     }
+    // A FACTS ANSWER'S MEASUREMENT sets or clears the collapse permit, sent or not.
+    if (!r.deflect && r.collapse) noteCollapse(chatId, j.threadId, r.collapse);
     // A deflection is still an answer about research: a follow-up here goes back to it
     // (taken back below if nothing reaches the room).
     const fomoKey = deskKey(chatId, j.threadId);
@@ -4430,6 +4548,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // the line names on Fomo or on another chain than Robinhood. Anything
         // else ("what happened to pons" with no Fomo behind it) stays the
         // desk's and the router's, as before. Read before the desk takes it.
+        // A HUMAN SAYING THE ROOM'S FOMO COIN RUGGED: the room's collapse permit (WP9).
+        if (!msg.fromIsBot) noteRoomRugged(msg, text, threadId, me);
         const factsAsk = fomoHere ? fomoFactsOf(text, selfNamesOf(me)) : null;
         let fomoFacts: TgFomoRequest | null = null;
         if (factsAsk) {

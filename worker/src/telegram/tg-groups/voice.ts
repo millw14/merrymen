@@ -42,7 +42,7 @@ import { admitTgLine, tidyTgLine, type TgGateCtx, type TgLineKind, type TgVerdic
 import { promptSafe, renderMemory } from "./memory";
 import { publicFactLine } from "./facts";
 import { callText, type TgModel, type TgModelGate } from "./model";
-import type { CoinKind, CoinVerdict, TgLine, TgPublicFact, TgRoom } from "./types";
+import type { CoinKind, CoinVerdict, TgCollapse, TgLine, TgPublicFact, TgRoom } from "./types";
 
 // ── the contract ────────────────────────────────────────────────────────────
 
@@ -106,6 +106,13 @@ export interface SpeakCtx {
   coinName?: string;
   /** Fomo research is wired for this agent (the group research lane): the persona is told it exists. */
   fomo?: boolean;
+  /**
+   * THE COLLAPSE PERMIT for the coin this line is about (handler.ts): only for
+   * an answer or an ambient line, the persona may say the coin rugged and make
+   * one playful Merrymen brag (gate.ts TgGateCtx.rug, the prompt's RUGGED
+   * block). Never for a roast, a kind line, the coin flow or a template.
+   */
+  collapse?: TgCollapse;
   nowMs: number;
   rand: () => number;
 }
@@ -948,12 +955,60 @@ function lastEcho(line: string, recent: readonly string[]): number {
 function gateCtxFor(intent: TgIntent, ctx: SpeakCtx): TgGateCtx {
   const sayable = (n: unknown): n is string => typeof n === "string" && n.trim() !== "";
   const people = [ctx.ownerName, ctx.senderName, intent.kind === "welcome" ? intent.name : null].filter(sayable);
-  const names = [...people, ctx.coinName].filter(sayable);
+  // THE COLLAPSE PERMIT reaches the gate only for an answer or an ambient
+  // line (never a roast, a kind line, the coin flow or a template-only line),
+  // with the coin's own name kept out of the people's names it is checked against.
+  const collapse = collapseFor(intent, ctx);
+  const sameCoin = (n: string): boolean => !!collapse && n.trim().toLowerCase() === collapse.coin.trim().toLowerCase();
+  const names = [...people, ctx.coinName].filter(sayable).filter((n) => !sameCoin(n) || people.includes(n));
   // A buy line is judged by the fill it is about (a paper fill stays paper
   // after a switch to live); every other line by the mode it trades in now,
   // so nothing it says can claim the other kind of money.
   const paper = intent.kind === "coin-bought" ? intent.paper === true : ctx.mode === "paper";
-  return { agentName: String(ctx.agentName ?? ""), kind: gateKindFor(intent), paper, recentOwn: recentOwn(ctx.room, 8), names, cashtagNames: people };
+  return {
+    agentName: String(ctx.agentName ?? ""),
+    kind: gateKindFor(intent),
+    paper,
+    recentOwn: recentOwn(ctx.room, 8),
+    names,
+    cashtagNames: people,
+    ...(collapse ? { rug: { coins: [collapse.coin], brag: collapse.brag === true } } : {}),
+  };
+}
+
+/** The permit, for the intents that may use it: an answer in a normal mood, or an ambient line. */
+function collapseFor(intent: TgIntent, ctx: SpeakCtx): TgCollapse | null {
+  const c = ctx?.collapse;
+  if (!c || typeof c.coin !== "string" || !c.coin.trim() || (c.source !== "measured" && c.source !== "room")) return null;
+  if (templateOnly(intent)) return null;
+  if (intent.kind === "answer") return intent.mood === "normal" ? c : null;
+  return intent.kind === "ambient" ? c : null;
+}
+
+/**
+ * THE RUGGED BLOCK OF THE PROMPT, with no digit anywhere (the coin goes
+ * through nameOf). The system prompt's NEVER WRITE line is unchanged: the
+ * permit is this one coin's, in this one prompt.
+ */
+const RUGGED_NEVER =
+  "Still never: say any person, dev, team, insider, whale or trader rugged, dumped, sold on anyone, stole, pulled liquidity or ran; call it a scam, a honeypot or fraud; tell anyone to buy, sell, hold or switch to anything, Merrymen's own coin included; promise any coin is safe or won't drop; any figure.";
+function ruggedBlock(c: TgCollapse): string {
+  const coin = nameOf(c.coin) || "this coin";
+  const brag = c.brag
+    ? "you may add one playful Merrymen brag in fresh words of your own (the spirit: it wasn't one of ours; merrymen wouldn't have let that happen 😤), never a joke you already made here."
+    : "You made a Merrymen joke lately: none this time.";
+  if (c.source === "measured") {
+    return [
+      `RUGGED: «${coin}» is measured as collapsed: almost all of its value is gone from its high (a lookup in this chat measured it). About «${coin}» only, you may say it rugged or got rugged${c.brag ? `, and ${brag}` : `. ${brag}`}`,
+      RUGGED_NEVER,
+      "Don't explain why it fell: the facts come from a separate lookup when someone asks for them.",
+    ].join(" ");
+  }
+  return [
+    `RUGGED: people here say «${coin}» rugged; you have not measured it. About «${coin}» only, you may go along with the word and the joke${c.brag ? `, and ${brag}` : `. ${brag}`}`,
+    "Never a figure, a reason, or a claim that you checked.",
+    RUGGED_NEVER,
+  ].join(" ");
 }
 
 /**
@@ -1225,6 +1280,7 @@ export function buildPrompt(intent: TgIntent, ctx: SpeakCtx): { system: string; 
     ...(quoted.length > 0 ? quoted : ["(nothing yet)"]),
     "</untrusted>",
     instruction(intent, ctx, owner),
+    ...(collapseFor(intent, ctx) ? [ruggedBlock(collapseFor(intent, ctx)!)] : []),
   ]
     .filter((s) => s !== "")
     .join("\n");

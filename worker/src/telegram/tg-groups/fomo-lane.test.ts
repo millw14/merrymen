@@ -1945,3 +1945,158 @@ describe("a coin's facts, asked of the room's Fomo coin (WP8, Milla 2026-10-09)"
     assert.ok(!tg.texts(CHAT).some((t) => /enough research lookups/.test(t)), tg.texts(CHAT).join("\n---\n"));
   });
 });
+
+describe("rug banter: only with a collapse permit, never at a person, never a brag back to back (WP9)", () => {
+  /** The model's next line, whatever it is asked (a routing call gets words, which is no pick). */
+  let content = "";
+  let modelCalls = 0;
+  const withModel = (): void => {
+    envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
+    envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
+    envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
+    envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    modelCalls = 0;
+    globalThis.fetch = (async () => {
+      modelCalls += 1;
+      return { ok: true, json: async () => ({ choices: [{ message: { content } }] }) };
+    }) as never;
+  };
+  const theses = (): TgFomoAnswer => ({
+    text: "What traders on Fomo are saying about AUTON on Solana (25 recent theses from 13 traders):\nAgainst it: fears it could collapse.\nTheir claims, not facts; newest 25 of 4,199.",
+    deflect: false,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "theses" },
+  });
+  const facts = (collapsed: boolean) => (): TgFomoAnswer => ({
+    text: "AUTON on Solana, from GeckoTerminal at 12:00 UTC:\nI can't see who sold, why it fell, or whether liquidity was pulled.",
+    deflect: false,
+    free: true,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "facts" },
+    collapse: { coin: "AUTON", collapsed, atMs: clock },
+  });
+  const last = (): string => tg.texts(CHAT).slice(-1)[0] ?? "";
+  const answers = (collapsed: boolean) => (q: SpyAsk): TgFomoAnswer => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts(collapsed)() : theses());
+
+  it("no permit: 'auton rugged lol' from the model is dropped, and the room hears a template or nothing", async () => {
+    withModel();
+    fomo!.answer = theses;
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    content = "auton rugged lol";
+    const before = tg.texts(CHAT).length;
+    await said(msg("pine lmao auton"));
+    assert.ok(tg.texts(CHAT).slice(before).every((t) => !/rug/i.test(t)), tg.texts(CHAT).slice(before).join(" | "));
+  });
+
+  it("a measured collapse: the brag goes out once; the next brag waits; a person is never the one who rugged", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    clock += MIN;
+    content = "rugged cause it wasn't merrymen 😤";
+    await said(msg("pine lmao auton"));
+    assert.equal(last(), "rugged cause it wasn't merrymen 😤");
+    clock += MIN;
+    content = "should've been a merrymen coin";
+    await said(msg("pine rip"));
+    assert.notEqual(last(), "should've been a merrymen coin", "a brag right after a brag is refused (brag: false)");
+    clock += MIN;
+    content = "the dev rugged it";
+    await said(msg("pine auton tho"));
+    assert.notEqual(last(), "the dev rugged it");
+    // Twenty minutes on, and with no brag in its last eight lines, a fresh one may go.
+    for (let i = 0; i < 8; i++) {
+      clock += 3 * MIN;
+      content = `nah fr ${["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"][i]} vibes today`;
+      await said(msg(`pine you good ${i}`));
+    }
+    clock += MIN;
+    content = "auton? should've been one of ours 😤";
+    await said(msg("pine auton lol"));
+    assert.equal(last(), "auton? should've been one of ours 😤");
+  });
+
+  it("a coin it holds gets no permit: 'rugged' is refused even after a measured collapse", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    class HeldPort extends FakePort {
+      override heldNames(): string[] {
+        return ["AUTON"];
+      }
+    }
+    make({ port: () => new HeldPort() });
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    content = "auton rugged lol";
+    await said(msg("pine lmao auton"));
+    assert.notEqual(last(), "auton rugged lol");
+  });
+
+  it("the room's word: 'auton rugged lol' about the room's Fomo coin permits; a question, a negation or another coin does not", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    for (const line of ["did it rug?", "not a rug", "pepe rugged"]) {
+      clock += 10 * SEC;
+      await said(msg(line, { fromId: ANN + 1, fromFirstName: "Bob" }));
+    }
+    assert.ok(!logs.includes("[tg-groups] collapse said by the room"), "nothing set yet");
+    clock += 10 * SEC;
+    content = "auton rugged lol";
+    await said(msg("pine lol auton"));
+    assert.notEqual(last(), "auton rugged lol", "no permit yet");
+    clock += 10 * SEC;
+    await said(msg("auton rugged lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"));
+    clock += 10 * SEC;
+    content = "yeah auton rugged";
+    await said(msg("pine auton huh"));
+    assert.equal(last(), "yeah auton rugged");
+  });
+
+  it("a fresh measurement that finds no collapse clears the room's word", async () => {
+    withModel();
+    fomo!.answer = answers(false);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += 10 * SEC;
+    await said(msg("auton rugged lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"));
+    clock += 10 * SEC;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse not measured"));
+    clock += 10 * SEC;
+    content = "yeah auton rugged";
+    await said(msg("pine auton huh"));
+    assert.notEqual(last(), "yeah auton rugged");
+    // And the room's word cannot set it again over that measurement.
+    clock += 10 * SEC;
+    await said(msg("auton rugged lol", { fromId: ANN + 2, fromFirstName: "Cy" }));
+    clock += 10 * SEC;
+    await said(msg("pine auton for real"));
+    assert.notEqual(last(), "yeah auton rugged");
+  });
+
+  it("the owner's forget clears every permit", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    groups.forgetChat(CHAT);
+    await groups.drain();
+    clock += MIN;
+    content = "auton rugged lol";
+    await said(msg("pine lmao auton"));
+    assert.notEqual(last(), "auton rugged lol");
+  });
+});
