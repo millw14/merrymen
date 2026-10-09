@@ -792,7 +792,7 @@ on merrymen.dev/api. Today both pages conflict with paid plans:
 | gateway | `MERRYMEN_PAYMENTS_PREVIOUS_TREASURIES` | Optional, comma-separated: old treasuries still accepted after a rotation. |
 | gateway | `MERRYMEN_PAYMENTS_RPC` | Optional; defaults to `MERRYMEN_GATEWAY_RPC`. Must answer chain 4663 (checked at boot, before each credit and before each reconciliation), or payments are unavailable. Trusted to report receipts. |
 | gateway | `MERRYMEN_PAYMENTS_MIN_CONFIRMATIONS` / `MERRYMEN_PAYMENTS_MIN_AGE_SEC` | Optional: `64` blocks and `120` seconds by default, both required before a transfer is credited. |
-| gateway | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `12` or more. A shutdown saves the request counts and exits within 10 s; a shorter wait before SIGKILL loses up to 10 s of counts on every deploy. |
+| gateway | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `12` or more. A shutdown lets requests in flight finish, saves the units it gives back, and exits within 10 s; a shorter wait before SIGKILL can charge partners for requests the deploy cut off. Counts of served requests are already on disk. |
 | site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | As in §5c; the `/api` page also reads it to show the plans. |
 | site | (Vercel function duration) | The `/api/developer/[action]` route sets `maxDuration = 60` and gives a payment check 45 s upstream, since each check reads the chain. The site's Vercel plan must allow a 60-second function. |
 

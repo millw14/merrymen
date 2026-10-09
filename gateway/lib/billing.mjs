@@ -110,6 +110,8 @@
  *     {ok:true, metered, ticket, headers}  or  {ok:false, status:402, error:{code:
  *     "quota_exhausted", message, plan, limit, used, resets_at, upgrade_url}, headers}
  *     (the caller adds request_id; headers carry the quota and retry-after)
+ *   await billing.flush()               after a counted reserve and BEFORE serving: true once the
+ *                                       count is on disk (usage.json); false -> enforce refuses (503)
  *   billing.release(ticket)             when isPlatformFailure(status, code) holds
  *   billing.meta(owner, keyCreatedAt) -> {billing|null, rate_per_min|null, headers} for /meta
  *   quotaHeaders(...) and isPlatformFailure(...) are exported.
@@ -961,15 +963,27 @@ export async function createBilling({
     await rename(tmp, usageFile);
   }
 
-  /** usage.json, written whole and renamed into place. A crash loses at most the counts since the last flush. */
+  /**
+   * usage.json, written whole and renamed into place. Resolves true once every
+   * count made before the call is on disk, false if the write failed. A write
+   * already in flight when a count was made does not hold it, so this waits for
+   * that write and then writes again; counts made meanwhile share the next write,
+   * so under load requests commit in groups. The partner gate awaits it before
+   * serving a counted request (a crash must not forget a unit it served); the
+   * 10 s timer and shutdown pick up what nothing awaited (a give-back).
+   */
+  let usageFailed = false;
   async function flush() {
     while (usageWriting) await usageWriting;
-    if (!usageDirty || mode === "off") return;
+    if (mode === "off") return true;
+    if (!usageDirty) return !usageFailed;
     usageDirty = false;
     usageWriting = writeUsage()
-      .catch((err) => { usageDirty = true; log(`[billing] could not write ${USAGE_FILE} (${errName(err)})`); })
+      .then(() => { usageFailed = false; })
+      .catch((err) => { usageDirty = true; usageFailed = true; log(`[billing] could not write ${USAGE_FILE} (${errName(err)})`); })
       .finally(() => { usageWriting = null; });
     await usageWriting;
+    return !usageFailed;
   }
 
   // ── Free window anchors ──

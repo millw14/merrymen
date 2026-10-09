@@ -997,6 +997,24 @@ test("a held settle still times out when nothing else keeps the process alive", 
   assert.match(r.stdout, /prepare=false/, "served on the state before the settle, after the wait");
 });
 
+test("flush() says whether every count made before it is on disk, for counts made together too", async () => {
+  const f = await fixture();
+  await f.account();
+  const tickets = Array.from({ length: 20 }, () => f.billing.reserve({ owner: OWNER, keyId: "k1" }));
+  assert.ok(tickets.every((t) => t.ok && t.metered));
+  const results = await Promise.all(tickets.map(() => f.billing.flush()));
+  assert.ok(results.every(Boolean));
+  const saved = JSON.parse(await readFile(path.join(f.dir, "usage.json"), "utf8"));
+  assert.equal(Object.values(saved.windows)[0].total, 20);
+  // A write that fails says so, and the counts are written by the next one.
+  await mkdir(path.join(f.dir, "usage.json.tmp"));
+  f.billing.reserve({ owner: OWNER, keyId: "k1" });
+  assert.equal(await f.billing.flush(), false);
+  await rm(path.join(f.dir, "usage.json.tmp"), { recursive: true });
+  assert.equal(await f.billing.flush(), true);
+  assert.equal(Object.values(JSON.parse(await readFile(path.join(f.dir, "usage.json"), "utf8")).windows)[0].total, 21);
+});
+
 test("reads never append: views, previews, meta and the settle check leave the ledger byte-identical", async () => {
   const f = await fixture();
   await f.account();

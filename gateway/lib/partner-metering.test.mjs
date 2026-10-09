@@ -9,7 +9,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createBilling, openLedger } from "./billing.mjs";
@@ -342,4 +342,37 @@ test("a metered request makes the charge a crash left undone; /meta, a 429 and a
   assert.deepEqual(charges.map((c) => [c.reason, c.tier, c.price_raw]), [["activate", "crumbs", T(100_000)]]);
   await f.call("/agents");
   assert.equal((await f.raw()).split("\n").filter((l) => l.includes('"type":"charge"')).length, 1, "settled once");
+});
+
+test("a served request's count is on disk before the answer, so a crash cannot forget it", async () => {
+  // Codex review on #308 (P1): counts used to reach usage.json only every 10 s,
+  // so a crash right after answering handed those requests out again.
+  const f = await fixture();
+  const answers = await Promise.all([f.call("/agents"), f.call("/agents")]);
+  assert.deepEqual(answers.map((r) => r.status), [200, 200]);
+  const saved = JSON.parse(await readFile(path.join(f.dir, "usage.json"), "utf8"));
+  assert.equal(Object.values(saved.windows).reduce((n, w) => n + w.total, 0), 2, "both counts were written before either answer");
+  await f.reboot(); // a crash: no close(), no shutdown flush
+  assert.equal(f.used(), 2);
+  assert.equal((await f.call("/agents")).status, 200);
+  assert.equal((await f.call("/agents")).status, 402, "the third of three was the last, after the crash as before");
+});
+
+test("a count that cannot be written is not served under enforce, and is served under observe", async () => {
+  for (const mode of ["enforce", "observe"]) {
+    const f = await fixture({ mode });
+    // usage.json's temp file cannot be created: every usage write fails.
+    await mkdir(path.join(f.dir, "usage.json.tmp"));
+    const r = await f.call("/agents");
+    if (mode === "enforce") {
+      assert.equal(r.status, 503); assert.equal(r.json.error.code, "billing_unavailable"); assert.match(r.json.error.request_id, /^req_/);
+      assert.equal(f.forwards.length, 0, "never reached the runtime");
+      assert.equal(f.used(), 0, "the unit was given back");
+    } else {
+      assert.equal(r.status, 200, "observe refuses nothing");
+      assert.equal(f.used(), 1);
+    }
+    await rm(path.join(f.dir, "usage.json.tmp"), { recursive: true });
+    assert.equal((await f.call("/agents")).status, 200, `${mode}: served again once usage can be written`);
+  }
 });

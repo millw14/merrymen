@@ -166,7 +166,17 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
       const { code, message, ...quota } = r.error;
       return { fail: { status: r.status, json: { error: { code, message, request_id: rid, ...quota } }, headers: r.headers } };
     }
-    if (r.ticket) unfinished.add(r.ticket);
+    if (r.ticket) {
+      // On disk before it is served: a crash after the answer must not forget
+      // the unit, or the partner gets those requests again for free. Requests
+      // that arrive together share one write. If it cannot be written, enforce
+      // gives the unit back and serves nothing; observe refuses nothing.
+      if (!(await billing.flush()) && billing.enforced) {
+        billing.release(r.ticket);
+        return { fail: partnerError(503, "billing_unavailable", "Usage could not be recorded just now; try again shortly", rid) };
+      }
+      unfinished.add(r.ticket);
+    }
     return { key: v.key, rid, rpm, ticket: r.ticket, quota: r.headers };
   }
 
@@ -184,6 +194,7 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
     const code = result.json?.error?.code;
     if (isPlatformFailure(result.status, typeof code === "string" ? code : undefined)) {
       billing.release(g.ticket);
+      void billing.flush(); // saved soon, not awaited: the answer is not held for a give-back
       quota = billing.meta(g.key.owner, g.key.created_at).headers;
     }
     return { ...result, headers: { ...result.headers, ...quota } };
