@@ -504,7 +504,8 @@ to someone in distress goes out shushed or not.
   instead", "merrymen coins never rug", "stick to merrymen"); any figure
   beside it. A brag waits while one is among its last eight lines or went
   out in the last 20 minutes, and there is no brag template, so a brag never
-  recurs from a pool. No permit for a coin it holds, one it bought and has
+  recurs from a pool. A brag in other words ("wasn't ours", "one of us") is
+  a brag, and any line said under a permit that allowed a brag spends it. No permit for a coin it holds, one it bought and has
   not exited (how it did is private, rule 3), or a coin named like someone in
   the room. The system prompt's NEVER WRITE line is unchanged; the prompt's
   RUGGED block carries the permit for that one coin. Permits live in memory

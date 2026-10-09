@@ -67,6 +67,7 @@ import {
   SEND_FOR,
   SPELLED_DOMAIN,
   SPELLED_LINK,
+  SPENT_BRAG,
   U,
 } from "./third-party";
 
@@ -1774,7 +1775,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (paper === false && r.low.some(claimsPaper)) return refuse("paper-unsaid");
 
   // NO BRAG BACK TO BACK: with the permit's brag spent, a Merrymen mention waits.
-  if (rug && !rug.brag && some(r.low, MERRY_BRAG)) return refuse("repeat");
+  if (rug && !rug.brag && some(r.low, kind === "quote" ? MERRY_BRAG : SPENT_BRAG)) return refuse("repeat");
 
   // NEVER ITS OWN SENTENCE AGAIN. similarity() reads a-z content words, so a
   // short line with none ("ok ok 🤐") is never a repeat. A line in another

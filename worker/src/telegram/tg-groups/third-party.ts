@@ -225,6 +225,14 @@ export const MERRY_SHILL = U(new RegExp(String.raw`\b${MERRY}\b[^.!?\n]{0,40}\b$
 
 /** A Merrymen brag already said: what makes the next one wait (no brag back to back). */
 export const MERRY_BRAG = U(/\bmerry\s?m[ae]n\b|\bone of ours\b/i);
+/**
+ * A BRAG IN ANY WORDS THE PROMPT INVITES ("wasn't ours", "should've been
+ * ours", "not one of us", Sherwood), for the persona's own lines under a
+ * permit and its own recent lines: a paraphrase is as spent as the word
+ * "merrymen". A false match ("ours is better") only holds a brag back
+ * (review, 2026-10-09). A stranger's quote is still read by MERRY_BRAG.
+ */
+export const SPENT_BRAG = U(/\bmerry\s?m[ae]n\b|\b(?:one\s+of\s+)?ours\b|\bone\s+of\s+us\b|\bsherwood\b/i);
 
 /**
  * A POST-RUG DRAINER LURE, for quotes only: a refund, compensation, recovery,

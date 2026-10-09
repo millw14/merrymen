@@ -108,7 +108,7 @@ import { admitThought, deskCaption, deskMissLine, deskQuestionEvidence, deskQues
 import { admitTgLine } from "./gate";
 import { publicCoinReason, publicCoinStatus, publicFactRequest, type PublicFactRequest } from "./facts";
 import { quotesSayable } from "./quotes";
-import { MERRY_BRAG } from "./third-party";
+import { SPENT_BRAG } from "./third-party";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
 import {
   describeTgGroupsModel,
@@ -1470,11 +1470,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     store.update(chatId, (r) => {
       r.lastOwnAtMs = now;
     });
-    // A Merrymen brag said: the next waits (MERRY_BRAG, BRAG_GAP_MS).
-    if (MERRY_BRAG.test(text)) {
-      if (bragAt.size > 512 && !bragAt.has(chatId)) bragAt.delete(bragAt.keys().next().value!);
-      bragAt.set(chatId, now);
-    }
+    // A Merrymen brag said, in any words: the next waits (SPENT_BRAG, BRAG_GAP_MS).
+    if (SPENT_BRAG.test(text)) noteBrag(chatId, now);
+  };
+  const noteBrag = (chatId: number, at: number): void => {
+    if (bragAt.size > 512 && !bragAt.has(chatId)) bragAt.delete(bragAt.keys().next().value!);
+    bragAt.set(chatId, at);
   };
 
   /**
@@ -1550,6 +1551,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!sent) return null;
     // A migrated chat has no message the old reply id means.
     recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    // A line said under a permit that allowed a brag spends it, whatever its
+    // words: the next brag waits even when this one was a paraphrase (review, 2026-10-09).
+    if (ctx.collapse?.brag === true && (intent.kind === "answer" || intent.kind === "ambient")) noteBrag(sent.chatId, clock());
     // The persona asking which Fomo board or coin was meant: the answer to it
     // is read in its light (repliesToOwnFomo). So is its offer ("i can pull
     // the fomo board for robinhood chain coins if you want"), and anything it
@@ -2913,7 +2917,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (!named && !under && !pointer) continue;
       const own = room.lines.filter((l) => l.own === true).slice(-8);
       const lastBrag = bragAt.get(chatId);
-      const brag = !own.some((l) => MERRY_BRAG.test(l.text)) && !(lastBrag !== undefined && t - lastBrag < BRAG_GAP_MS);
+      const brag = !own.some((l) => SPENT_BRAG.test(l.text)) && !(lastBrag !== undefined && t - lastBrag < BRAG_GAP_MS);
       return { coin: p.coin, source: p.source, atMs: p.atMs, brag };
     }
     return null;

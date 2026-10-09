@@ -2108,6 +2108,48 @@ describe("rug banter: only with a collapse permit, never at a person, never a br
     assert.equal(last(), "auton? rugged for real", "the measured coin, on its own chain, keeps its permit");
   });
 
+  it("a brag in other words ('wasn't ours') is spent too: the next waits, and the prompt says so (review, 2026-10-09)", async () => {
+    withModel();
+    const prompts: string[] = [];
+    const modelFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+      prompts.push(String(init?.body ?? ""));
+      return modelFetch(url as never, init as never);
+    }) as never;
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    content = "rugged. wasn't ours 😤";
+    await said(msg("pine lmao auton"));
+    assert.equal(last(), "rugged. wasn't ours 😤");
+    clock += MIN;
+    prompts.length = 0;
+    content = "auton? should've been ours 😤";
+    await said(msg("pine auton tho"));
+    assert.notEqual(last(), "auton? should've been ours 😤");
+    assert.ok(prompts.some((p) => p.includes("none this time")), "the prompt says no brag this time");
+  });
+
+  it("a line said under a brag-allowed permit spends the brag, whatever its words (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    content = "rugged. not on our watch 😤";
+    await said(msg("pine lmao auton"));
+    assert.equal(last(), "rugged. not on our watch 😤");
+    clock += MIN;
+    content = "auton? should've been ours 😤";
+    await said(msg("pine auton tho"));
+    assert.notEqual(last(), "auton? should've been ours 😤");
+  });
+
   it("a coin it holds gets no permit: 'rugged' is refused even after a measured collapse", async () => {
     withModel();
     fomo!.answer = answers(true);

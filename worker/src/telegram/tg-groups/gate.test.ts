@@ -1857,6 +1857,10 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
     }
     it(`${kind}: with the permit even a figure nothing to do with money is refused`, () => assert.equal(v("rugged in 2 hours lol", kind), "figures"));
   }
+  it("with the brag spent (brag false) a brag in other words waits too (review, 2026-10-09)", () => {
+    for (const t of ["rugged. wasn't ours 😤", "auton? should've been ours 😤", "rugged, not one of us"]) assert.equal(v(t, "banter", { coins: ["AUTON"], brag: false }), "repeat", t);
+    assert.equal(v("rugged. wasn't ours 😤", "banter", { coins: ["AUTON"], brag: true }), "ok");
+  });
   it("with the brag spent (brag false) any Merrymen mention waits, and the bare word still passes", () => {
     for (const t of ADMIT.filter((x) => /merry|ours/.test(x))) assert.equal(v(t, "banter", { coins: ["AUTON"], brag: false }), "repeat", t);
     assert.equal(v("auton rugged lol", "banter", { coins: ["AUTON"], brag: false }), "ok");

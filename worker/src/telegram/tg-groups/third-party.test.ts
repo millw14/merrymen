@@ -28,6 +28,7 @@ import {
   SEND_FOR,
   SPELLED_DOMAIN,
   SPELLED_LINK,
+  SPENT_BRAG,
   U,
 } from "./third-party";
 import { U as gateU } from "./gate";
@@ -213,6 +214,11 @@ describe("the new clauses", () => {
   it("MERRY_BRAG: what counts as a brag already said", () => {
     hits(MERRY_BRAG, ["rugged cause it wasn't merrymen 😤", "should've been one of ours", "not a merryman in sight", "merry men wouldn't"]);
     misses(MERRY_BRAG, ["merry christmas", "rugged lol", "ours is better"]);
+  });
+
+  it("SPENT_BRAG: a brag in the prompt's other words is spent too (review, 2026-10-09)", () => {
+    hits(SPENT_BRAG, ["rugged. wasn't ours 😤", "auton? should've been ours 😤", "not one of us", "rugged cause it wasn't merrymen 😤", "sherwood would never"]);
+    misses(SPENT_BRAG, ["merry christmas", "rugged lol", "yours truly", "one of the best"]);
   });
 
   it("POST_RUG_LURE: what a rugged coin's page fills with (review, 2026-10-09)", () => {
