@@ -2984,6 +2984,24 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
   });
 
+  it("a doxxing thesis in more shapes is never quoted: a name after 'the dev is', family, school, a street, a passport (review r2)", () => {
+    leftOut([
+      "the dev is tunde adeyemi from lagos, his kid goes to lincoln elementary",
+      "dev resides in austin, works for coinbase, wife is sarah smith",
+      "dev's name is tunde adeyemi",
+      "dev's address: 221b baker street",
+      "dev's address is 12 north main street, springfield",
+      "dev lives on maple avenue in springfield",
+      "dev lives with his mom in ohio",
+      "dev is johnsmith at gmail",
+      "dev's github is tadeyemi",
+      "the dev's mom is mary smith from leeds",
+      "dev's house is the blue one on elm road",
+      "the dev's passport says tunde adeyemi born 1998",
+    ]);
+    quoted(["the dev is very active in tg", "the dev's github is active, commits daily", "team works hard", "liquidity lives on raydium"]);
+  });
+
   it("a violent or sexual crime, abuse, bribery, a police case or a health status laid on a person is never quoted (review r2)", () => {
     leftOut([
       "kaleo beats his wife and molested a kid",

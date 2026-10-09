@@ -315,18 +315,36 @@ export const SPELLED_LINK = U(
  * "works at a bank"), a home or street address, a house number on a street,
  * a phone, an email, a whatsapp or a profile ("his insta is…", "on
  * linkedin"), "his name is…", a dox. After a rug, doxxing the dev is the
- * likeliest post, and private data never passes (rule 3). "Liquidity lives
+ * likeliest post, and private data never passes (rule 3). Also (review r2)
+ * "the dev is <first> <last> from <town>", "dev's name is", a role's mom,
+ * wife, kids, house, school or passport, resides, lives on or with, works
+ * for, someone named, a multi-word street, a passport, a birth year, a mail
+ * provider, a github handle told. "Liquidity lives
  * on raydium" stays: only a person lives somewhere, and a bare "number"
  * ("the number one coin") is never one (review, 2026-10-09).
  */
 const PRIVATE_SUBJECT = String.raw`(?:dev|devs|he|she|they|team|founder|ceo|owner|creator|guy|kid|dude)`;
+/** Whose details (review r2): the dev and the like, and a possessive. */
+const PRIVATE_ROLE = String.raw`(?:dev|devs|deployer|founder|creator|ceo|owner|he|she|his|her|their|guy|dude)`;
+/** A profile handle told: "github is tadeyemi", never "github is active". */
+const NOT_A_HANDLE = String.raw`(?:active|dead|quiet|empty|public|private|clean|legit|real|fake|new|old|busy|live|down|up|great|good|solid|open|closed|gone|full|pretty|very|super|still|really|not|a|an|the)`;
 export const PRIVATE_THIRD = U(
   new RegExp(
     String.raw`\b(?:real|full|legal|irl|first|last)\s*-?\s*names?\b|\bsurnames?\b|\b(?:his|her|their)\s+name\s+is\b` +
       String.raw`|\b${PRIVATE_SUBJECT}\b[^.!?\n]{0,20}?\b(?:(?:lives?|living|based)\s+(?:in|at|near)|works?\s+at)\b` +
       String.raw`|\b(?:home|house|street|mailing|postal)\s+address(?:es)?\b|\bdox+\w*` +
-      String.raw`|\b\d+\s+\p{L}+\s+(?:street|st|road|rd|avenue|ave|lane|ln|blvd|boulevard|drive|dr|close|court|way)\b` +
-      String.raw`|\b(?:phone|whatsapp|e-?mail|insta(?:gram)?|linkedin|facebook)\b|\big(?:\s*:|\s+is\b)|\birl\b`,
+      String.raw`|\b(?:phone|whatsapp|e-?mail|insta(?:gram)?|linkedin|facebook)\b|\big(?:\s*:|\s+is\b)|\birl\b` +
+      // Review r2: a role's name, address, family, home, school or papers ("dev's name is", "the dev's mom is", "his kid goes to").
+      String.raw`|\b${PRIVATE_ROLE}(?:'s|’s|s')?\s+(?:real\s+|full\s+)?(?:name|address|addy|mom|mum|mother|dad|father|wife|husband|gf|bf|girlfriend|boyfriend|kids?|son|daughter|family|parents|house|home|apartment|flat|school|passport|birthday)\b` +
+      String.raw`|\b(?:${PRIVATE_SUBJECT}|deployer)\b[^.!?\n]{0,20}?\b(?:resides?|residing|lives?\s+(?:on|with)|works?\s+for|employed\s+(?:by|at)|(?:goes|went)\s+to\s+(?:school|college|uni|university))\b` +
+      String.raw`|\b(?:${PRIVATE_SUBJECT}|deployer|someone|man|woman)\s+(?:(?:is|was)\s+)?named\s+\p{L}|\b(?:${PRIVATE_SUBJECT}|deployer|someone|man|woman)\s+(?:is|was)\s+called\s+\p{L}` +
+      String.raw`|\b(?:dev|deployer|founder|creator|ceo|owner)\s+(?:is|=|was)\s+\p{L}+\s+\p{L}+\s+(?:from|of)\s+\p{L}` +
+      // A house number then up to three words and a street word ("221b baker street", "12 north main street").
+      String.raw`|\b\d+\p{L}?\s+(?:\p{L}+\s+){1,3}(?:street|st|road|rd|avenue|ave|lane|ln|blvd|boulevard|drive|dr|close|court|way)\b` +
+      String.raw`|\b(?:on|at)\s+(?!(?:the|a|an|this|that|our|its|their|his|her|my|your)\b)(?:\p{L}+\s+){1,2}(?:street|road|avenue|lane|boulevard)\b` +
+      String.raw`|\bpassports?\b|\bssn\b|\bsocial\s+security\b|\bdate\s+of\s+birth\b|\bborn\s+(?:in\s+)?(?:19|20)\d\d\b` +
+      String.raw`|\b(?:at|@)\s*(?:gmail|googlemail|proton(?:mail)?|yahoo|outlook|hotmail|icloud)\b|\b(?:gmail|protonmail|hotmail)\b` +
+      String.raw`|\b(?:github|gitlab)\s+(?:is|=|:)\s+(?!${NOT_A_HANDLE}\b)[\p{L}\p{N}_-]+`,
     "i",
   ),
 );

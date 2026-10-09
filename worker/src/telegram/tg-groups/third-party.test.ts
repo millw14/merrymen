@@ -273,6 +273,24 @@ describe("the new clauses", () => {
     misses(SPELLED_LINK, ["launched on pumpfun, graduated fast", "pump fun graduates are cooked", "auton/sol pair is thin", "50/50 on this one", "24/7 volume", "safety net is gone", "net flows positive", "x is buzzing about it", "polka dot pattern on the logo", "tg/x both quiet", "the dot com bubble", "rides the polkadot narrative", "dot-com era pricing", "the io narrative"]);
   });
 
+  it("PRIVATE_THIRD: more doxxing shapes, a name after 'the dev is', family, school, a multi-word street, a passport (review r2)", () => {
+    hits(PRIVATE_THIRD, [
+      "the dev is tunde adeyemi from lagos, his kid goes to lincoln elementary",
+      "dev resides in austin, works for coinbase, wife is sarah smith",
+      "dev's name is tunde adeyemi",
+      "dev's address: 221b baker street",
+      "dev's address is 12 north main street, springfield",
+      "dev lives on maple avenue in springfield",
+      "dev lives with his mom in ohio",
+      "dev is johnsmith at gmail",
+      "dev's github is tadeyemi",
+      "the dev's mom is mary smith from leeds",
+      "dev's house is the blue one on elm road",
+      "the dev's passport says tunde adeyemi born 1998",
+    ]);
+    misses(PRIVATE_THIRD, ["on the road to 1b", "the dev is very active in tg", "the dev's github is active, commits daily", "team works hard", "dev called the top", "liquidity lives on raydium", "the number one ai coin on sol"]);
+  });
+
   it("PERSON_HARM: a violent or sexual crime, abuse, bribery, a police case or a health status laid on a person (review r2)", () => {
     hits(PERSON_HARM, [
       "kaleo beats his wife and molested a kid",

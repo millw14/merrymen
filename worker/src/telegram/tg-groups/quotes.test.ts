@@ -97,6 +97,22 @@ describe("quotesSayable", () => {
     gateDrops(["auton v2 is live, swap at the official link", "refunds live for holders", "holders will be made whole, check telegram", "approve the refund contract", "use the auton refund bot", "open a support ticket on their discord to get refunded"], "lure");
   });
 
+  it("more doxxing shapes are the gate's to drop too, as private (review r2)", () => {
+    gateDrops([
+      "the dev is tunde adeyemi from lagos, his kid goes to lincoln elementary",
+      "dev resides in austin, works for coinbase, wife is sarah smith",
+      "dev's name is tunde adeyemi",
+      "dev's address: 221b baker street",
+      "dev's address is 12 north main street, springfield",
+      "dev lives on maple avenue in springfield",
+      "dev lives with his mom in ohio",
+      "dev's github is tadeyemi",
+      "the dev's mom is mary smith from leeds",
+      "dev's house is the blue one on elm road",
+      "the dev's passport says tunde adeyemi born 1998",
+    ], "private");
+  });
+
   it("a crime, abuse, a police case or a health status laid on a named trader is the gate's to drop too, as accuse (review r2)", () => {
     gateDrops([
       "kaleo beats his wife and molested a kid",
