@@ -2167,7 +2167,11 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
  * nothing.
  */
 const FOMO_FOLLOW_UP =
-  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb)\b/u;
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|list|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|paraphras\w*|in their words|the (?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
+/** "Don't summarise", "no summary", "without paraphrasing": an ask, with no question mark (the theses themselves). */
+const NEGATED_SUMMARY = /\b(?:don'?t|dont|do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u;
+/** "Summarise them", "sum it up", "recap": asked for, with no question mark (the digest, again). */
+const SUMMARY_REQUEST = /^(?:(?:pls|please|ok|okay|so|just|now|can (?:you|u)|could (?:you|u))\s+)*(?:summari[sz]e|sum (?:it|them|these|those|that) up|recap|tl;?dr)\b/u;
 const FOLLOW_UP_MAX_WORDS = 10;
 /**
  * A ROW OF THE BOARD IT JUST SAID, or the trader it just named: "the second
@@ -2190,6 +2194,155 @@ export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []):
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}#]+/u, "");
   if (!t || COIN_STOP.test(t)) return false;
   if (wordsOf(t).length > FOLLOW_UP_MAX_WORDS) return false;
-  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames);
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames) || NEGATED_SUMMARY.test(t) || SUMMARY_REQUEST.test(t);
   return asked && (FOMO_FOLLOW_UP.test(t) || FOMO_ROW_REF.test(t) || (FOMO_PERSON.test(t) && FOMO_TRADER_VERB.test(t)));
+}
+
+// ── a coin's theses, quoted; a coin's facts; a room saying it rugged ───────
+
+/**
+ * The line as fomo/intent.ts reads its words (its `words`/`canonOf`): names
+ * out, lowercase, edge punctuation and commas gone, "don't" as "do not",
+ * "thesis" as "theses". Only what the quote cue below needs.
+ */
+function quoteCanon(text: string, selfNames: readonly string[]): string {
+  return norm(unnamed(text, selfNames))
+    .replace(/\b(?:don'?t|dont)\b/gu, "do not")
+    .replace(/\b(?:didn'?t|didnt)\b/gu, "did not")
+    .replace(/\b(?:can'?t|cant)\b/gu, "can not")
+    .replace(/\bwhat'?s\b/gu, "what is")
+    .replace(/\b(?:thesis|thesises|thesies|thesi)\b/gu, "theses")
+    .replace(/[,;|"“”()[\]{}<>!?¿¡…*~`]+/gu, " ")
+    .replace(/(?<![\p{L}\p{N}])[.:]+|[.:]+(?![\p{L}\p{N}])/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+/*
+ * THE QUOTE CUE, A COPY OF fomo/intent.ts QUOTES (this directory cannot
+ * import fomo/): keep the two in step; detect.test.ts pins that they agree
+ * on a shared table of lines.
+ */
+const QUOTE_NUM = String.raw`(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)`;
+const QUOTES: readonly RegExp[] = [
+  /\b(?:quote|quotes|quoted|verbatim|word for word|exact words|exactly what|in their (?:own )?words|raw (?:theses|posts|text|texts|words)|actual (?:theses|posts|words|texts?)|full (?:theses|text|texts|posts))\b/u,
+  /\bwhat (?:did|do|does) (?:they|people|traders|folks|the traders|he|she) (?:say|said|write|wrote|post|posted) exactly\b/u,
+  /\b(?:do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u,
+  /\b(?:show|give|post|paste|send|list|drop) (?:me |us )?(?:(?:all (?:of )?)?(?:the|these|those|their) (?:theses|posts|takes|quotes|texts?|tweets|messages|words)\b|(?:them|these|those|em)(?: (?:all|pls|please|now|here|again))*$)/u,
+  new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent) ${QUOTE_NUM}\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)`, "u"),
+  /(?:^|\b(?:can|could|would|will) (?:you|u) |\b(?:pls|please|just|now|then|and|so|ok|okay|yo) )list\b|\blist (?:them|these|those|the|their|all|out|me|em|it)\b/u,
+];
+const QUOTES_MAX = 10;
+const QUOTE_WORDS: Readonly<Record<string, number>> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
+};
+const QUOTE_COUNT = new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent|list|show me|give me) (${QUOTE_NUM})\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)|\b(${QUOTE_NUM}) (?:of (?:the |their )?)?(?:theses|quotes|posts|takes|of them)\b`, "u");
+
+/**
+ * A COIN'S THESES ASKED FOR THEMSELVES, not the digest ("can you list the
+ * last 10", "show me these thesis, dont summarise", "what did they say
+ * exactly"; Milla, 2026-10-09): how many (at most ten; `asked` keeps the raw
+ * count), or null. Read by code from the line, never a model: a routed theses
+ * request carries quotes only from here (route.ts), and the handler's reply
+ * to a theses answer builds its request from it.
+ */
+export function thesesQuotesOf(text: string, selfNames: readonly string[] = []): { n: number; asked: number } | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  const c = quoteCanon(text, selfNames);
+  if (!c || !QUOTES.some((re) => re.test(c))) return null;
+  const m = QUOTE_COUNT.exec(c);
+  const raw = m ? (m[1] ?? m[2] ?? "") : "";
+  const n = /^\d+$/u.test(raw) ? Number(raw) : QUOTE_WORDS[raw] ?? QUOTES_MAX;
+  const asked = Number.isSafeInteger(n) && n >= 1 ? n : QUOTES_MAX;
+  return { n: Math.min(asked, QUOTES_MAX), asked };
+}
+
+/** Words a facts ask's coin slot holds without naming a coin. */
+const FACTS_STOP: ReadonlySet<string> = new Set([
+  "it", "its", "this", "that", "him", "her", "you", "u", "me", "us", "them", "the", "market", "chart", "everything", "everyone", "everybody",
+  "he", "she", "they", "we", "i", "coin", "token", "one", "there", "here", "price", "crypto", "memes", "today", "now",
+]);
+/** A coin as a facts ask names it: a ticker shape, "$" off, never a stop word. */
+function factsCoin(word: string | undefined): string | null {
+  const w = String(word ?? "").replace(/^\$+/u, "").replace(/[^\p{L}\p{N}_-]+$/u, "").replace(/^[^\p{L}\p{N}]+/u, "");
+  if (!w || FACTS_STOP.has(w.toLowerCase())) return null;
+  const up = w.toUpperCase();
+  return /^[A-Z0-9][A-Z0-9_-]{0,19}$/u.test(up) && !/^\d+$/u.test(up) ? up : null;
+}
+const FACTS_WHAT = /\bwhat(?:'s| is|s| has been) (?:happening|going on) (?:to|with) (\S+)|\bwhat (?:happened|has happened|went wrong) (?:to|with) (\S+)|\bwhat went wrong (?:for|on) (\S+)/u;
+const FACTS_WHY =
+  /\bwhy (?:did|is|has|does|was) (\S+) (?:(?:just|get|got|been|go|gone|so|totally|completely)\s+)*(?:rug|rugged|rugging|dump|dumped|dumping|die|died|dying|dead|crash|crashed|crashing|tank|tanked|tanking|fall|fell|falling|drop|dropped|dropping|collapse|collapsed|collapsing|to zero|down|nuke|nuked|bleed|bleeding|bled)\b|\bdid (\S+) (?:just )?(?:rug|get rugged|die|crash|collapse|go to zero)\b/u;
+const FACTS_DATA = /\b(?:show|give|send|post|pull up) (?:me|us) (?:the )?(?:actual |real |hard )?(?:data|facts|numbers|stats|figures)\b|^(?:the |any |actual |real |just the )?facts(?: pls| please)?\s*[?？]*$|\bwhat are the (?:actual |real )?facts\b|\b(?:actual|real|hard) (?:facts|data|numbers)\b/u;
+const FACTS_DEV = /\bdid (?:the )?(?:dev|devs|team|deployer|creator|creators|insiders?)s? (?:just |really |actually )?(?:dump|dumped|sell|sold|rug|rugged|exit|exited|pull|pulled|cash out|cashed out)\b|\b(?:is|are|was|were) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:still )?(?:holding|selling|dumping)\b|\bhow much (?:does|did) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:hold|have|own)\b/u;
+const FACTS_SHOW = /\b(?:show|give|send|post|pull up) (?:me|us)\b/u;
+/** The market, a major or the world as what "happened": the desk's, never one coin's facts. */
+const FACTS_NOT_A_COIN = /\b(?:to|with|did|is|has|does|was|for|on) (?:the |this |that )?(?:market|markets|economy|world|crypto|memes|memecoins|everything|everyone|sol|eth|btc|bitcoin|solana|ethereum|robinhood|base|bsc|bnb|chain)\b/u;
+
+/**
+ * WHAT HAPPENED TO A COIN, ASKED FOR AS FACTS ("what happened to auton",
+ * "why did it rug", "show me the data", "did the dev dump?", "facts?";
+ * Milla, 2026-10-09): which ask, and the coin the line names (uppercased) or
+ * null when it names none ("it", "this"), which the handler resolves from the
+ * Fomo answer it replies to or the room's last Fomo coin. A statement ("the
+ * dev dumped lol") is never one: only a question or a "show me".
+ */
+export function fomoFactsOf(text: string, selfNames: readonly string[] = []): { ask: "what" | "why" | "data" | "dev"; coin: string | null } | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}$]+/u, "");
+  if (!t || FACTS_NOT_A_COIN.test(t)) return null;
+  const asked = /[?？]/u.test(text) || isQuestionShaped(text, selfNames) || FACTS_SHOW.test(t) || /^(?:the |any |actual |real |just the )?facts\b/u.test(t);
+  if (!asked) return null;
+  const dev = FACTS_DEV.exec(t);
+  if (dev) return { ask: "dev", coin: null };
+  const why = FACTS_WHY.exec(t);
+  if (why) return { ask: "why", coin: factsCoin(why[1] ?? why[2]) };
+  const what = FACTS_WHAT.exec(t);
+  if (what) return { ask: "what", coin: factsCoin(what[1] ?? what[2] ?? what[3]) };
+  if (FACTS_DATA.test(t)) return { ask: "data", coin: null };
+  return null;
+}
+
+/** Who a rug is said of when it is a person, never a coin: such a line sets no permit. */
+const RUG_PERSON_WORDS: ReadonlySet<string> = new Set([
+  "dev", "devs", "team", "deployer", "deployers", "creator", "creators", "insider", "insiders", "founder", "founders", "they", "he", "she",
+  "we", "i", "you", "u", "someone", "somebody", "whale", "whales", "kol", "kols", "admin", "admins", "mods", "mod",
+]);
+/** Subjects that point at the coin under discussion without naming it. */
+const RUG_POINTERS: ReadonlySet<string> = new Set(["it", "this", "that", "one", "chart", "coin", "token", "thing", "it's", "this's", "that's"]);
+const RUG_SAID: readonly RegExp[] = [
+  /(?:^|\s)([\p{L}\p{N}$_'-]+)\s+(?:(?:just|totally|fully|def|literally|basically|completely|officially|straight up|already)\s+)*(?:(?:got|has|have|been|has been|just got)\s+)?rugged\b(?!\s*-?\s*pull)/u,
+  /(?:^|\s)([\p{L}\p{N}$_-]+)(?:'s|\s+is|\s+was)\s+(?:(?:a|an|another|such a|full|total|complete|classic|certified|absolute)\s+)+rug\b(?!\s*-?\s*pull)/u,
+];
+const RUG_SAID_BARE = /^(?:(?:lol|lmao|lmfao|rip|yeah|yep|welp|well|damn|oof|man|bro|ngl|ok|so)\s+)*(?:(?:full|total|complete|classic|absolute|certified)\s+rug|rugged)(?:\s+(?:lol|lmao|lmfao|af|asf|hard|fr|ngl|bro|fam|rip))*\s*$/u;
+const RUG_NEGATION = /\b(?:not|never|didn'?t|didnt|hasn'?t|hasnt|isn'?t|isnt|wasn'?t|wasnt|no|ain'?t|aint|won'?t|wont|wouldn'?t|cant|can'?t|if|unless|might|could|maybe|gonna|going to|will)\b/u;
+
+/**
+ * SOMEONE IN THE ROOM SAYS A COIN RUGGED ("auton rugged lol", "it rugged",
+ * "full rug", "this was a rug"): the coin named (uppercased) or null for a
+ * pointer ("it", "this one"). Null for a question ("did it rug?"), a negation
+ * or a maybe ("not a rug", "it didn't rug", "this could rug"), and a person
+ * as the subject ("the dev rugged it", "they rugged"). The handler sets the
+ * room's collapse permit from it only for the room's current Fomo coin, and
+ * checks the room's own names there (WP9).
+ */
+export function roomSaysRugged(text: string, selfNames: readonly string[] = []): { coin: string | null } | null {
+  if (typeof text !== "string" || !text.trim() || /[?？¿]/u.test(text)) return null;
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}$]+/u, "");
+  if (!t || /^(?:did|is|was|has|does|do|will|would|could|can|should|are)\b/u.test(t)) return null;
+  for (const clause of t.split(/[.!,;:—–…\n]+/u).map((c) => c.trim()).filter(Boolean)) {
+    if (!/\brug(?:ged)?\b/u.test(clause)) continue;
+    const at = clause.search(/\brug(?:ged)?\b/u);
+    const before = clause.slice(0, at).split(/\s+/u).filter(Boolean).slice(-4).join(" ");
+    if (RUG_NEGATION.test(before)) return null;
+    if (RUG_SAID_BARE.test(clause)) return { coin: null };
+    for (const re of RUG_SAID) {
+      const m = re.exec(clause);
+      if (!m) continue;
+      const subject = m[1]!.replace(/^\$+/u, "").replace(/'s$/u, "");
+      if (RUG_PERSON_WORDS.has(subject) || /^(?:the|a|an)$/u.test(subject)) return null;
+      if (RUG_POINTERS.has(subject)) return { coin: null };
+      return { coin: factsCoin(subject) };
+    }
+  }
+  return null;
 }

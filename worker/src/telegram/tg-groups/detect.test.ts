@@ -28,6 +28,7 @@ import {
   extractCas,
   extractCashtags,
   fomoAskOf,
+  fomoFactsOf,
   fomoFollowUpOf,
   greetingOf,
   hasForeignMint,
@@ -51,7 +52,10 @@ import {
   routeWorthy,
   selfNamesOf,
   type BotSelf,
+  roomSaysRugged,
+  thesesQuotesOf,
 } from "./detect";
+import { quotesAskedIn } from "../../fomo/intent";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1161,5 +1165,71 @@ describe("pushbackOf (the AUTON incident, 2026-10-08)", () => {
     ]) {
       assert.equal(pushbackOf(t, ["pine"]), false, t);
     }
+  });
+});
+
+describe("the theses themselves, a coin's facts, and a room saying it rugged (Milla, 2026-10-09)", () => {
+  const names = ["Shogun", "@shogunbot"];
+  it("the live lines reach the research as follow-ups, and two of them ask for the theses themselves", () => {
+    for (const t of ["can you list the last 10", "show me these thesis, dont summarise", "what are people saying about it on thesis on fomo"]) {
+      assert.equal(fomoFollowUpOf(t, names), true, t);
+    }
+    assert.deepEqual(thesesQuotesOf("can you list the last 10", names), { n: 10, asked: 10 });
+    assert.deepEqual(thesesQuotesOf("show me these thesis, dont summarise", names), { n: 10, asked: 10 });
+    assert.equal(thesesQuotesOf("what are people saying about it on thesis on fomo", names), null, "the digest stays the default");
+  });
+
+  it("the quote cue here agrees with the planner's (fomo/intent.ts), row for row", () => {
+    const rows = [
+      "can you list the last 10", "show me these thesis, dont summarise", "what did they say exactly", "show me the last 5", "list the last 25 theses on $AUTON",
+      "list the last ten", "give me the newest three", "quote them", "word for word pls", "in their own words", "don't summarise it", "no summary, the actual theses",
+      "show me them all", "what are people saying about it", "summarise them", "show me the data", "what happened in the last 10 minutes", "any theses?",
+      "what are the theses on $AUTON", "theses on $AUTON in the last 24h", "list the trending coins", "the last one",
+    ];
+    for (const t of rows) assert.deepEqual(thesesQuotesOf(t, names), quotesAskedIn(t), t);
+  });
+
+  it("'summarise them' and 'don't summarise' are asked even with no question mark", () => {
+    assert.equal(fomoFollowUpOf("summarise them", names), true);
+    assert.equal(fomoFollowUpOf("dont summarise", names), true);
+    assert.equal(fomoFollowUpOf("lol summaries are mid", names), false);
+  });
+
+  it("fomoFactsOf: what happened, why, the data, the dev; never a statement or the market", () => {
+    const rows: Array<[string, ReturnType<typeof fomoFactsOf>]> = [
+      ["what happened to auton", { ask: "what", coin: "AUTON" }],
+      ["what happened to $AUTON?", { ask: "what", coin: "AUTON" }],
+      ["shogun what happened to it", { ask: "what", coin: null }],
+      ["what's happening with pons", { ask: "what", coin: "PONS" }],
+      ["why did it rug", { ask: "why", coin: null }],
+      ["why did auton rug?", { ask: "why", coin: "AUTON" }],
+      ["did auton rug?", { ask: "why", coin: "AUTON" }],
+      ["show me the data", { ask: "data", coin: null }],
+      ["facts?", { ask: "data", coin: null }],
+      ["did the dev dump?", { ask: "dev", coin: null }],
+      ["the dev dumped lol", null],
+      ["auton rugged", null],
+      ["what happened to the market today", null],
+      ["what happened to sol", null],
+    ];
+    for (const [t, want] of rows) assert.deepEqual(fomoFactsOf(t, names), want, t);
+  });
+
+  it("roomSaysRugged: a statement that a coin rugged, never a question, a negation, a maybe or a person", () => {
+    const rows: Array<[string, ReturnType<typeof roomSaysRugged>]> = [
+      ["auton rugged lol", { coin: "AUTON" }],
+      ["auton just got rugged", { coin: "AUTON" }],
+      ["it rugged", { coin: null }],
+      ["full rug lol", { coin: null }],
+      ["this was a rug", { coin: null }],
+      ["did it rug?", null],
+      ["not a rug", null],
+      ["it didn't rug", null],
+      ["this could rug", null],
+      ["the dev rugged it", null],
+      ["they rugged", null],
+      ["rugby is on", null],
+    ];
+    for (const [t, want] of rows) assert.deepEqual(roomSaysRugged(t, names), want, t);
   });
 });

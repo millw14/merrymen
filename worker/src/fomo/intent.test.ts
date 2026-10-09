@@ -991,3 +991,54 @@ describe("a chain's coins, a row of the trader board, and what a trader made mon
     assert.equal(plan("did we make money on PONS"), null, "the owner's own book is never a feed question");
   });
 });
+
+describe("the theses themselves, on an explicit ask (Milla, 2026-10-09)", () => {
+  const AUTON_MINT = "39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz";
+  const auton = (lastIntent: FomoIntent | null): SubjectMemory =>
+    mem({ subjects: [{ kind: "token", tokenKey: `solana:mainnet:${AUTON_MINT}`, address: AUTON_MINT, chain: "solana", symbol: "AUTON" }], lastIntent });
+  const plan = (text: string, memory: SubjectMemory | null = auton("token-theses")) => classifyFomoQuestion(text, { memory, now: NOW });
+
+  it("the live lines, after AUTON's digest: the newest ten, from memory, on the remembered mint", () => {
+    for (const text of ["can you list the last 10", "show me these thesis, dont summarise", "what did they say exactly", "list the last ten", "show me them all"]) {
+      const p = plan(text);
+      assert.equal(p?.intent, "token-theses", text);
+      assert.equal(p?.quotes, 10, text);
+      assert.equal(p?.quotesAsked, undefined, text);
+      assert.deepEqual(p?.toolCalls, [{ tool: "fomo_get_token_theses", args: { token: AUTON_MINT, chain: "solana" } }], text);
+      assert.ok(p?.usesMemory.includes("token"), text);
+    }
+    assert.deepEqual(plan("can you list the last 10")?.usesMemory, ["intent", "token"]);
+  });
+
+  it("a count is read from the line, at most ten; the read keeps its page", () => {
+    assert.equal(plan("show me the last 5")?.quotes, 5);
+    assert.equal(plan("give me the newest three")?.quotes, 3);
+    const many = plan("list the last 25 theses on $AUTON");
+    assert.equal(many?.quotes, 10);
+    assert.equal(many?.quotesAsked, 25);
+    assert.deepEqual(many?.toolCalls, [{ tool: "fomo_get_token_theses", args: { token: "AUTON" } }], "no limit: the page is read as for the digest");
+  });
+
+  it("never after a board, a trader or a coin's activity, never a trader's own theses", () => {
+    assert.equal(plan("list the last 10", mem({ lastIntent: "rankings-traders", window: "7d" })), null);
+    assert.equal(plan("list the last 10", mem({ lastIntent: "rankings-tokens" })), null);
+    assert.equal(plan("list the last 10", auton("token-activity")), null);
+    assert.equal(plan("what did they say exactly", auton(null)), null);
+    const trader = plan("what are kaleo's theses, list them");
+    assert.equal(trader?.quotes, undefined, "a trader's theses are never quoted");
+  });
+
+  it("the digest stays the default: summarise, what are people saying, any theses", () => {
+    for (const text of ["summarise them", "what are people saying about it", "what are people saying about it on thesis on fomo", "any theses?", "what are the theses on $AUTON"]) {
+      const p = plan(text);
+      assert.equal(p?.quotes, undefined, text);
+    }
+  });
+
+  it("'show me the data' and a time window are never quotes", () => {
+    assert.notEqual(plan("show me the data")?.intent, "token-theses");
+    assert.equal(plan("show me the data")?.quotes, undefined);
+    assert.equal(plan("what happened in the last 10 minutes")?.quotes, undefined);
+    assert.equal(plan("theses on $AUTON in the last 24h")?.quotes, undefined);
+  });
+});
