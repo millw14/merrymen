@@ -591,16 +591,47 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
     s = `${cut.replace(/\s+\S*$/u, "").replace(/[\s,;:.…-]+$/u, "")}…`;
   }
   if (!/[\p{L}\p{N}]/u.test(s) || contentFree(s)) return null;
+  // A quote dressed as the room answer's own frame ("From a copy fetched just now.", "their words, not facts").
+  if (QUOTE_FRAME.test(s)) return null;
   const reads = [s, ...tgLineReadings(s)];
   if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, CONTACT_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, SEND_FOR, QUOTE_TARGET, SECOND_PERSON].some((re) => reads.some((t) => re.test(t)))) return null;
   const handle = typeof v.author?.handle === "string" ? v.author.handle.replace(/^@+/, "").trim() : "";
-  const who = handle && sayableTraderHandle(handle) ? handle : "a trader";
+  const who = quoteHandleOk(handle) ? handle : "a trader";
   const posted = typeof v.postedAt === "number" && Number.isFinite(v.postedAt) ? v.postedAt : null;
   // "12m ago" reads as twelve million to the money clause elsewhere: minutes in words.
   const age = posted === null ? "" : agoText(Math.max(0, now - posted)).replace(/^(\d+)m ago$/u, "$1 min ago");
   const line = quoteLine({ who, age, text: s });
   const v2 = admitTgLine(line, { agentName: "", kind: "quote", recentOwn: [], rug: { coins: coin ? [coin] : [], brag: false } });
   return v2.ok ? { who, age, text: s } : null;
+}
+
+/**
+ * Words a quote's author handle may never wear, read with its joins spaced
+ * out ("fomo_support", "MerrymenOfficial", "refund_bot"): support, a help
+ * desk, an admin or mod, "official", a team, a dev, a bot, a refund or
+ * recovery, Merrymen, Fomo, Telegram. Such an author is "a trader".
+ */
+const IMPERSONATES = /\b(?:support|help\s*desk|admins?|mods?|moderators?|official|team|devs?|bot|refunds?|recovery|merrym[ae]n|fomo|telegram)\b/i;
+/** The lines code says around the quotes; a thesis that echoes one is dressing as the answer itself. */
+const QUOTE_FRAME = /\bfrom a copy fetched\b|\btheir words,? not facts\b|\bthe newest \d+ theses\b|\b\d+ of these \d+ left out\b/i;
+
+/**
+ * WHETHER A QUOTE'S AUTHOR MAY BE NAMED: a handle the room may hear
+ * (sayableTraderHandle) that, with its underscores, dots, dashes, case and
+ * digit joins spaced out ("airdrop_bot" is "airdrop bot", "AirdropBot" is
+ * "Airdrop Bot", "send_1_sol" is "send 1 sol"), impersonates no one and
+ * passes the gate as a quote's author: never a lure, a slur or a threat
+ * wearing a handle (review, 2026-10-09).
+ */
+function quoteHandleOk(handle: string): boolean {
+  if (!handle || !sayableTraderHandle(handle)) return false;
+  const spaced = handle
+    .replace(/[_.\-]+/gu, " ")
+    .replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2")
+    .replace(/(\p{L})(\p{N})|(\p{N})(\p{L})/gu, "$1$3 $2$4")
+    .trim();
+  if (IMPERSONATES.test(spaced)) return false;
+  return admitTgLine(quoteLine({ who: spaced, age: "", text: "x" }), { agentName: "", kind: "quote", recentOwn: [] }).ok;
 }
 
 /** "• kaleo, 2h ago: “…”": how a room hears one quote (tg-groups/quotes.ts says the same). */

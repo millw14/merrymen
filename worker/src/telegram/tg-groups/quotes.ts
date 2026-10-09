@@ -33,6 +33,23 @@ export function quoteLineOf(q: { who: string; age: string; text: string }): stri
   return `• ${q.who}${q.age ? `, ${q.age}` : ""}: “${q.text}”`;
 }
 
+/** Letters and digits only, lowercased: "Shogun_Bot" and "shogunbot" read alike. */
+const compact = (x: string): string => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/**
+ * The agent's own name as a quote may not carry it: inside an author's
+ * handle ("Shogun", "shogun_bot", "ShogunOfficial"), or as words in the
+ * quote's text ("note to shogun: …", "Shogun: the newest 10 are fake").
+ * Null for a name too short to read safely.
+ */
+function selfReadingOf(agentName: string): { inHandle: (who: string) => boolean; inText: (text: string) => boolean } | null {
+  const name = compact(agentName);
+  if (name.length < 3) return null;
+  const words = agentName.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const inText = new RegExp(`(?<![\\p{L}\\p{N}])${words.join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`, "iu");
+  return { inHandle: (who) => compact(who).includes(name), inText: (text) => inText.test(text) };
+}
+
 /**
  * What the room hears for a quote ask, or null when not even the header is
  * sayable (the caller then says the digest). `quoted` counts the quotes said;
@@ -56,10 +73,18 @@ export function quotesSayable(m: TgThesesQuotes, ageLine: string | null, agentNa
   );
   if (!head) return null;
   const age = ageLine ? research(ageLine) : null;
-  // Each quote judged again, as a stranger's words, by the room's gate.
+  // Each quote judged again, as a stranger's words, by the room's gate. An
+  // author named like the agent itself is "a trader"; a quote that names
+  // the agent is someone talking to it or dressing as it, and is left out.
   let leftOut = Math.max(0, n - Math.min(m.quotes.length, QUOTES_MAX));
   const admitted: string[] = [];
-  for (const q of m.quotes.slice(0, QUOTES_MAX)) {
+  const self = selfReadingOf(agentName);
+  for (const q0 of m.quotes.slice(0, QUOTES_MAX)) {
+    const q = self && self.inHandle(String(q0?.who ?? "")) ? { ...q0, who: "a trader" } : q0;
+    if (self && self.inText(String(q?.text ?? ""))) {
+      leftOut += 1;
+      continue;
+    }
     const v = admitTgLine(quoteLineOf(q), { agentName, kind: "quote", recentOwn: [], rug: { coins: [coin], brag: false } });
     if (v.ok && !v.text.includes("\n")) admitted.push(v.text);
     else leftOut += 1;
