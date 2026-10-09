@@ -247,6 +247,8 @@ export interface PreviewContext {
   currentId?: string;
   /** The account's credit in base units: what cancelling leaves on the account. */
   credit_raw?: string;
+  /** Whether this page can take a payment now (paymentsReady); unless false, it can. */
+  paymentsOpen?: boolean;
 }
 
 /**
@@ -285,8 +287,11 @@ export function previewSentence(preview: PlanPreview, plan: Plan, current: strin
       // The chosen plan cannot be paid from credit, but a lapsed period's plan can: confirming renews that one now.
       const renewed = preview.charge_now_tier ? context.plans?.find(p => p.id === preview.charge_now_tier)?.name ?? preview.charge_now_tier : null;
       const renews = charge ? `${formatTokens(preview.charge_now_raw)} MERRYMEN of your credit renews ${renewed ? `${renewed} now, the plan your last period was on` : "your last paid plan now"}. ` : "";
+      const arrives = preview.due_raw ? `${formatTokens(preview.due_raw, { round: "up", decimals: 0 })} MERRYMEN arrives` : "your payment arrives";
+      // No treasury yet (billing observed, payments closed): there is no payment step below to point to.
+      if (context.paymentsOpen === false) return `${renews}${plan.name} starts once payments open and ${arrives}.${share("at most ")} Your selection waits until then.`;
       // Paid later, an upgrade covers less of the period, so its quota is "at most" what it would be now.
-      return `${renews}${plan.name} starts as soon as ${preview.due_raw ? `${formatTokens(preview.due_raw, { round: "up", decimals: 0 })} MERRYMEN arrives` : "your payment arrives"}.${share("at most ")} Confirm, then pay below.`;
+      return `${renews}${plan.name} starts as soon as ${arrives}.${share("at most ")} Confirm, then pay below.`;
     }
   }
 }

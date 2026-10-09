@@ -85,7 +85,11 @@ test('no payment panel without a live treasury, and nothing at all to pay when b
     const page = panel({ kind: 'ready', view: view() }, plans);
     assert.ok(!page.includes(TREASURY)); assert.doesNotMatch(page, /Pay 40,000|Paste the transaction hash/);
   }
-  assert.match(panel({ kind: 'ready', view: view() }, live('observe', { treasury: null })), /Payments are not open yet/);
+  const closed = panel({ kind: 'ready', view: view() }, live('observe', { treasury: null }));
+  assert.match(closed, /Payments are not open yet/);
+  // Choosing a plan works then (credit an operator added can start one), and the chooser says so rather than implying a payment step.
+  assert.match(closed, /Choose a plan/); assert.match(closed, /Payments are not open yet\. You can choose a plan now: a paid plan starts once it is paid, or from credit you already have\./);
+  assert.doesNotMatch(panel({ kind: 'ready', view: view() }), /You can choose a plan now/);
   const off = panel({ kind: 'ready', view: view() }, live('off'));
   assert.match(off, /Paid plans are coming soon/); assert.doesNotMatch(off, /Choose a plan|Pay 40,000|requests used/i);
   // The plans fell back while the account answered: billing may be on, so neither "coming soon" nor a way to pay, and no per-key rate.

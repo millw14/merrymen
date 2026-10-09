@@ -98,7 +98,10 @@ test('the Plans section shows the four plans, how requests count and how plans a
 test('without live billing and a treasury the Plans section says coming soon and offers nothing to pay', () => {
   for (const [why, plans] of [['fallback', FALLBACK_PLANS], ['off', live('off')], ['no treasury', live('observe', { treasury: null })], ['other token', live('enforce', { currency: { address: TREASURY, chain_id: 4663, decimals: 18 } })]] as const) {
     const page = html(PlansSection, { plans });
-    assert.match(page, /PAID PLANS COMING SOON/, why); assert.match(page, /nothing is charged and there is nothing to send/, why);
+    assert.match(page, /PAID PLANS COMING SOON/, why);
+    // With billing on but nowhere to pay, the workspace still lets a plan be chosen: the section must not say that cannot happen.
+    if (plans.source === 'live' && plans.billing.mode !== 'off') assert.match(page, /Until payments open there is nothing to send; a plan chosen in your workspace waits until it can be paid\./, why);
+    else assert.match(page, /nothing is charged and there is nothing to send/, why);
     assert.doesNotMatch(page, /Choose a plan/, why); assert.ok(!page.includes(TREASURY), why);
     assert.ok(page.includes('100,000 MERRYMEN'), `${why}: the table still shows`);
   }

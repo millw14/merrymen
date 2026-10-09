@@ -21,7 +21,10 @@ export function PlansSection({ plans }: { plans: PlansView }) {
     </article>)}</div>
     {ready
       ? <div className="dev-plans-cta"><a className="dev-primary" href="#api-keys">Choose a plan ↗</a><span>Sign in, create your developer account, then pick a plan in your workspace.</span></div>
-      : <p className="dev-plans-note" role="note">Paid plans are coming soon. Until they open, nothing is charged and there is nothing to send.{plans.source === "fallback" ? " These are the published plans; live details could not be loaded just now." : ""}</p>}
+      // Billing on but nowhere to pay yet: the workspace already lets a plan be chosen, so do not say nothing can happen.
+      : plans.source === "live" && plans.billing.mode !== "off"
+        ? <p className="dev-plans-note" role="note">Paid plans are coming soon. Until payments open there is nothing to send; a plan chosen in your workspace waits until it can be paid.</p>
+        : <p className="dev-plans-note" role="note">Paid plans are coming soon. Until they open, nothing is charged and there is nothing to send.{plans.source === "fallback" ? " These are the published plans; live details could not be loaded just now." : ""}</p>}
     {ready && !plans.billing.enforced && <p className="dev-plans-note" role="note">Requests are counted against each plan but not yet refused when a plan runs out.</p>}
     <p className="dev-small-print">API plans are paid, unlike the Merry Circle, which you join by holding. Paying moves MERRYMEN out of your wallet, and Merry Circle tiers and hosted energy follow the balance you hold. <a href={`${EXPLORER}/token/${TOKEN.address}`} target="_blank" rel="noreferrer">$MERRYMEN token contract ↗</a></p>
   </section>;

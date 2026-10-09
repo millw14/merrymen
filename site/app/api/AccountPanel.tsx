@@ -226,6 +226,7 @@ function PlanChooser({ view, plans, busy, run, onAccount, reload }: { view: Acco
   const plan = plans.plans.find(p => p.id === choice);
   return <div className="dev-plan-choice">
     <fieldset disabled={!!busy}><legend>Choose a plan</legend>
+      {!paymentsReady(plans) && <p className="dev-billing-note">Payments are not open yet. You can choose a plan now: a paid plan starts once it is paid, or from credit you already have.</p>}
       <div className="dev-plan-options">{plans.plans.map(p => <label key={p.id} className={choice === p.id ? "chosen" : ""}>
         <input type="radio" name="dev-plan" value={p.id} checked={choice === p.id} onChange={() => { setChoice(p.id); setPreview(null); }} />
         <strong>{p.name}</strong><span>{priceLabel(p)}</span><small>{group(p.requests)} requests · {p.rpm}/min{p.id === view.plan.id ? " · current" : p.id === view.plan.selected ? " · selected" : ""}</small>
@@ -238,7 +239,7 @@ function PlanChooser({ view, plans, busy, run, onAccount, reload }: { view: Acco
     })}>{busy === "plan-preview" ? "Checking…" : "Review change"}</button>
       : plan && <div className="dev-plan-preview" role="region" aria-label="Plan change preview">
         <p>{previewSentence(preview.preview, plan, view.plan.name, plans.plans.find(p => p.id === view.plan.selected)?.name,
-          { plans: plans.plans, currentId: view.plan.id, credit_raw: view.credit_raw })}</p>
+          { plans: plans.plans, currentId: view.plan.id, credit_raw: view.credit_raw, paymentsOpen: paymentsReady(plans) })}</p>
         <div><button className="dev-primary" disabled={!!busy} onClick={() => run("plan-confirm", async () => {
           const next = normalizeAccount(await request("plan", { tier: preview.tier, confirm: true }));
           setPreview(null);

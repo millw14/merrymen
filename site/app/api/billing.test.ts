@@ -364,6 +364,15 @@ test('choosing the running plan again says it renews and what is dropped; cancel
   assert.equal(previewSentence(cancel, free, 'Crumbs', 'Crumbs', { credit_raw: '0' }), 'Crumbs runs to the end of its period (14 Feb 2027), then your account moves to Free. Nothing is charged.');
 });
 
+test('with payments not open, a preview does not promise a payment step that is not there', () => {
+  const crumbs = FALLBACK_PLANS.plans[1];
+  const waiting = normalizePreview({ effect: 'waiting_for_payment', charge_now_raw: '0', due_raw: (100_000n * UNIT).toString(), starts_at: null, ends_at: null })!;
+  const closed = previewSentence(waiting, crumbs, 'Free', 'Free', { paymentsOpen: false });
+  assert.equal(closed, 'Crumbs starts once payments open and 100,000 MERRYMEN arrives. Your selection waits until then.');
+  assert.doesNotMatch(closed, /pay below/);
+  assert.match(previewSentence(waiting, crumbs, 'Free', 'Free', { paymentsOpen: true }), /Confirm, then pay below\.$/);
+});
+
 test('a plan preview says what confirming does, in whole tokens', () => {
   const loaf = FALLBACK_PLANS.plans[2];
   const p = (body: Record<string, unknown>) => normalizePreview({ charge_now_raw: '0', due_raw: null, starts_at: null, ends_at: '2026-11-07T12:00:00.000Z', ...body })!;
