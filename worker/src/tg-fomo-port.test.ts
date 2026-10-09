@@ -2855,4 +2855,9 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     ]);
     quoted(["if this sends we are so back", "send it back to the highs", "sent the chart to my friends", "dev sent supply to a cex"]);
   });
+
+  it("a send with many words before what comes back", () => {
+    leftOut(["send 1 sol to the dev wallet and get 2 back", "send 2 sol to this wallet, get 4 back instantly", "send any amount of sol to the dev and it comes back doubled", "send any amount to the dev wallet and it comes back doubled", "s3nd 1 sol to get 2 back"]);
+    quoted(["sending this, it already doubled", "dev sent the lp to the burn address, never getting it back", "sent it to 10m and it came back down"]);
+  });
 });

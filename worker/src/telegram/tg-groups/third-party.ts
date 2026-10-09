@@ -140,14 +140,18 @@ export const OUT_HANDOUT =
  * send, so a quote that asks for one is never said back. In English too, a
  * send of a coin ("deposit 1 sol get 2 sol", "send sol to the burn address")
  * and a send with something coming back ("they send 1 sol back", "sends 2
- * back") or a reason to send ("to verify", "to unlock"); "send it", "send it
- * to 10m" and "transfer tax is 5%" stay (review, 2026-10-09).
+ * back") or a reason to send ("to verify", "to unlock"); and with any words
+ * between the send and what comes back ("send 2 sol to this wallet, get 4
+ * back instantly", "send any amount of sol to the dev and it comes back
+ * doubled", "s3nd 1 sol to get 2 back"). "send it", "send it to 10m",
+ * "transfer tax is 5%" and "dev sent the lp to the burn address, never
+ * getting it back" stay (review, 2026-10-09).
  */
 const SEND_VERB = String.raw`(?:send|sends|sent|sending|transfer|transfers|transferred|transferring|deposit|deposits|deposited|depositing|give|gives)`;
 const SEND_COIN = String.raw`(?:sol|eth|usdc|usdt|bnb|btc|matic|avax|trx|ton)`;
 export const SEND_FOR = U(
   new RegExp(
-    /\b(?:send|sent|sending|transfer|transferring|deposit|depositing)\s+(?:\S+\s+){0,3}?(?:to\s+(?:get|receive)|(?:and|&|n)\s+(?:get|receive|recieve)|receive|recieve|get\s+\S+\s+back|for\s+\S+\s+back)\b|\b(?:doubl(?:e|ed|ing)|tripl(?:e|ed|ing)|2x|x2|3x|x3|10x)\s+(?:your|ur|their|ya)\b|\b(?:env[ií]a|envi[ée]n?|manda|mandas|deposita|transfiere)\s+\S*\d/
+    /\b(?:s[e3]nd|s[e3]nt|s[e3]nding|transfer|transferring|deposit|depositing)\s+(?:\S+\s+){0,3}?(?:to\s+(?:get|receive)|(?:and|&|n)\s+(?:get|receive|recieve)|receive|recieve|get\s+\S+\s+back|for\s+\S+\s+back)\b|\b(?:s[e3]nd|s[e3]nt|s[e3]nding|transfer|transferring|deposit|depositing)\s+[^.!?\n]{0,60}?\b(?:get\s+(?:\S+\s+){0,2}?back|receive|recieve|(?:comes?|came|coming|sent|send|paid)\s+back\s+(?:doubled|tripled|double|triple|x2|2x|x3|3x))\b|\b(?:doubl(?:e|ed|ing)|tripl(?:e|ed|ing)|2x|x2|3x|x3|10x)\s+(?:your|ur|their|ya)\b|\b(?:env[ií]a|envi[ée]n?|manda|mandas|deposita|transfiere)\s+\S*\d/
       .source +
       String.raw`|\b${SEND_VERB}\s+(?:\S+\s+){0,2}?(?:[$＄]?\d[\d.,]*\s*)?${SEND_COIN}\b` +
       String.raw`|\b${SEND_VERB}\b[^.!?\n]{0,60}?(?:\b\d[\d.,]*\s*(?:x\s+)?(?:\S+\s+)?back\b|\bto\s+(?:verify|unlock|activate|validate)\b)`,

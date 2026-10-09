@@ -100,4 +100,8 @@ describe("quotesSayable", () => {
   it("a reworded doubling or send is the gate's to drop too", () => {
     gateDrops(["send 1 sol to the dev wallet and he sends 2 back, legit", "deposit 1 sol get 2 sol", "sent 2 and they sent 4 back", "send sol to the dev wallet, it comes back"], "lure");
   });
+
+  it("a send with many words before what comes back is the gate's to drop too", () => {
+    gateDrops(["send any amount of sol to the dev and it comes back doubled", "send any amount to the dev wallet and it comes back doubled", "s3nd 1 sol to get 2 back"], "lure");
+  });
 });

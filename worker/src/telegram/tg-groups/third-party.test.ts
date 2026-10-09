@@ -122,6 +122,11 @@ describe("the new clauses", () => {
     misses(SEND_FOR, ["transfer tax is 5%", "send it back to the highs", "if this sends we are so back", "send it to 10m", "dev sent supply to a cex", "gave back all its gains", "sent it to 2m and back down to 500k"]);
   });
 
+  it("SEND_FOR: more than three words between the send and what comes back (review, 2026-10-09)", () => {
+    hits(SEND_FOR, ["send 1 sol to the dev wallet and get 2 back", "send 2 sol to this wallet, get 4 back instantly", "send any amount of sol to the dev and it comes back doubled", "s3nd 1 sol to get 2 back"]);
+    misses(SEND_FOR, ["send it back to ath", "sent it to 10m and it came back down", "sending this, it already doubled", "dev sent the lp to the burn address, never getting it back"]);
+  });
+
   it("CTA_PLACEHOLDER: a call to action beside a link, handle or address that was taken out", () => {
     hits(CTA_PLACEHOLDER, ["join [link]", "join for the raid [link]", "dm [handle] for the alpha", "claim at [address]", "[link] sign up now", "check out [link]", "go to [link] and connect"]);
     misses(CTA_PLACEHOLDER, [...HARMLESS, "called it [handle] early, he is still in long term", "roadmap on [link]"]);
