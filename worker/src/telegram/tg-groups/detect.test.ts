@@ -1236,6 +1236,18 @@ describe("the theses themselves, a coin's facts, and a room saying it rugged (Mi
       ["auton rugged", null],
       ["what happened to the market today", null],
       ["what happened to sol", null],
+      // A person, the room or anything but a coin, and a bare "facts" (review, 2026-10-09).
+      ["shogun what happened to you last night?", null],
+      ["what happened to him?", null],
+      ["what went wrong with the trade?", null],
+      ["what happened to the fomo leaderboard?", null],
+      ["why did he dump?", null],
+      ["facts", null],
+      ["show me the numbers on pepe", { ask: "data", coin: "PEPE" }],
+      ["what are the facts on bonk?", { ask: "data", coin: "BONK" }],
+      ["what happened to the coin?", { ask: "what", coin: null }],
+      ["why did the coin dump?", { ask: "why", coin: null }],
+      ["show me the data on it", { ask: "data", coin: null }],
     ];
     for (const [t, want] of rows) assert.deepEqual(fomoFactsOf(t, names), want, t);
   });

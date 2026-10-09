@@ -564,6 +564,11 @@ topic's last single-coin Fomo answer (30 minutes), or a coin the line names
 Fomo behind it stays the desk's and the router's; "what's happening with X"
 (the present) is the coin's Fomo activity, as before. It is read before the
 desk and the router, and a "did it rug?" question is a facts ask, not banter.
+A line about a person, the room or anything but a coin ("what happened to
+you last night?", "why did he dump?", "what went wrong with the trade?") is
+never one, nor a bare "facts" (slang for "true"; "facts?" still asks); a data
+or dev ask naming a coin at its end ("show me the numbers on pepe") is about
+that coin, so another coin than the room's is left to the desk and the router.
 
 * **Resolution, memory first.** The room's remembered coin (same symbol, and
   chain when named) costs nothing; else Fomo's resolver once (one read

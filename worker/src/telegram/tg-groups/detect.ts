@@ -2274,15 +2274,43 @@ function factsCoin(word: string | undefined): string | null {
   const up = w.toUpperCase();
   return /^[A-Z0-9][A-Z0-9_-]{0,19}$/u.test(up) && !/^\d+$/u.test(up) ? up : null;
 }
+/** Words that point at the coin under discussion without naming it: the room's Fomo coin. */
+const FACTS_POINTERS: ReadonlySet<string> = new Set(["it", "its", "it's", "this", "that", "coin", "token", "chart", "price", "one"]);
+/** After "the", "my", "this": the coin's own nouns, never "the trade", "the chat" or "the leaderboard". */
+const FACTS_POINTER_NOUNS: ReadonlySet<string> = new Set(["coin", "token", "chart", "price", "one", "project", "ticker", "memecoin"]);
+/**
+ * WHAT A FACTS ASK'S SLOT HOLDS (review, 2026-10-09): a pointer at the
+ * room's coin ("it", "this", "the coin": `{ coin: null }`), a coin it names
+ * (`{ coin: "PEPE" }`), or null for anything else: a person ("you", "him",
+ * "he"), the room, the market or a day ("everyone", "today"), and "the X"
+ * or "my X" that is no coin ("the trade", "the fomo leaderboard").
+ */
+function factsSlot(slot: string | undefined): { coin: string | null } | null {
+  const words = String(slot ?? "").toLowerCase().replace(/[?？!.,;:]+$/u, "").split(/\s+/u).filter(Boolean);
+  if (words.length === 0) return null;
+  const [first, second] = [words[0]!, words[1]];
+  if (/^(?:the|my|our|your|his|her|their|this|that)$/u.test(first)) {
+    if (second === undefined) return FACTS_POINTERS.has(first) ? { coin: null } : null;
+    return FACTS_POINTER_NOUNS.has(second.replace(/^\$+/u, "")) ? { coin: null } : null;
+  }
+  if (FACTS_POINTERS.has(first)) return { coin: null };
+  const coin = factsCoin(first);
+  return coin ? { coin } : null;
+}
+/** "…on pepe", "…for $BONK", "…of auton": the coin a data or dev ask names at its end. */
+const FACTS_NAMED_AT_END = /\b(?:on|for|of|about) ((?:the |this |that )?\$?[\p{L}\p{N}_-]{2,20})[?？!. ]*$/u;
 /**
  * "What happened to X", "what went wrong with X": the past, which is facts.
  * Never "what's happening with X" (the present): that is the coin's activity
  * on Fomo, the planner's own question (tg-fomo-port.ts requestText).
  */
-const FACTS_WHAT = /\bwhat (?:happened|has happened|went wrong) (?:to|with) (\S+)|\bwhat went wrong (?:for|on) (\S+)|\bwhat(?:'s| has) happened (?:to|with) (\S+)/u;
-const FACTS_WHY =
-  /\bwhy (?:did|is|has|does|was) (\S+) (?:(?:just|get|got|been|go|gone|so|totally|completely)\s+)*(?:rug|rugged|rugging|dump|dumped|dumping|die|died|dying|dead|crash|crashed|crashing|tank|tanked|tanking|fall|fell|falling|drop|dropped|dropping|collapse|collapsed|collapsing|to zero|down|nuke|nuked|bleed|bleeding|bled)\b|\bdid (\S+) (?:just )?(?:rug|get rugged|die|crash|collapse|go to zero)\b/u;
-const FACTS_DATA = /\b(?:show|give|send|post|pull up) (?:me|us) (?:the )?(?:actual |real |hard )?(?:data|facts|numbers|stats|figures)\b|^(?:the |any |actual |real |just the )?facts(?: pls| please)?\s*[?？]*$|\bwhat are the (?:actual |real )?facts\b|\b(?:actual|real|hard) (?:facts|data|numbers)\b/u;
+const SLOT = String.raw`((?:the|my|our|your|this|that) \S+|\S+)`;
+const FACTS_WHAT = new RegExp(String.raw`\bwhat (?:happened|has happened|went wrong) (?:to|with) ${SLOT}|\bwhat went wrong (?:for|on) ${SLOT}|\bwhat(?:'s| has) happened (?:to|with) ${SLOT}`, "u");
+const FACTS_WHY = new RegExp(
+  String.raw`\bwhy (?:did|is|has|does|was) ${SLOT} (?:(?:just|get|got|been|go|gone|so|totally|completely)\s+)*(?:rug|rugged|rugging|dump|dumped|dumping|die|died|dying|dead|crash|crashed|crashing|tank|tanked|tanking|fall|fell|falling|drop|dropped|dropping|collapse|collapsed|collapsing|to zero|down|nuke|nuked|bleed|bleeding|bled)\b|\bdid ${SLOT} (?:just )?(?:rug|get rugged|die|crash|collapse|go to zero)\b`,
+  "u",
+);
+const FACTS_DATA = /\b(?:show|give|send|post|pull up) (?:me|us) (?:the )?(?:actual |real |hard )?(?:data|facts|numbers|stats|figures)\b|^(?:the |any |actual |real |just the )?facts(?: pls| please)?\s*[?？]+$|\bwhat are the (?:actual |real )?facts\b|\b(?:actual|real|hard) (?:facts|data|numbers)\b/u;
 const FACTS_DEV = /\bdid (?:the )?(?:dev|devs|team|deployer|creator|creators|insiders?)s? (?:just |really |actually )?(?:dump|dumped|sell|sold|rug|rugged|exit|exited|pull|pulled|cash out|cashed out)\b|\b(?:is|are|was|were) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:still )?(?:holding|selling|dumping)\b|\bhow much (?:does|did) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:hold|have|own)\b/u;
 const FACTS_SHOW = /\b(?:show|give|send|post|pull up) (?:me|us)\b/u;
 /** The market, a major or the world as what "happened": the desk's, never one coin's facts. */
@@ -2294,21 +2322,31 @@ const FACTS_NOT_A_COIN = /\b(?:to|with|did|is|has|does|was) (?:the |this |that )
  * Milla, 2026-10-09): which ask, and the coin the line names (uppercased) or
  * null when it names none ("it", "this"), which the handler resolves from the
  * Fomo answer it replies to or the room's last Fomo coin. A statement ("the
- * dev dumped lol") is never one: only a question or a "show me".
+ * dev dumped lol") is never one: only a question or a "show me". Nor is a
+ * line about a person, the room or anything but a coin ("what happened to
+ * you last night?", "why did he dump?", "what went wrong with the trade?"),
+ * nor a bare "facts" (slang for "true"); a data or dev ask that names a coin
+ * at its end ("show me the numbers on pepe") is about that coin.
  */
 export function fomoFactsOf(text: string, selfNames: readonly string[] = []): { ask: "what" | "why" | "data" | "dev"; coin: string | null } | null {
   if (typeof text !== "string" || !text.trim()) return null;
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}$]+/u, "");
   if (!t || FACTS_NOT_A_COIN.test(t)) return null;
-  const asked = /[?？]/u.test(text) || isQuestionShaped(text, selfNames) || FACTS_SHOW.test(t) || /^(?:the |any |actual |real |just the )?facts\b/u.test(t);
+  const asked = /[?？]/u.test(text) || isQuestionShaped(text, selfNames) || FACTS_SHOW.test(t);
   if (!asked) return null;
-  const dev = FACTS_DEV.exec(t);
-  if (dev) return { ask: "dev", coin: null };
+  const namedAtEnd = (): string | null => factsSlot(FACTS_NAMED_AT_END.exec(t)?.[1])?.coin ?? null;
+  if (FACTS_DEV.test(t)) return { ask: "dev", coin: namedAtEnd() };
   const why = FACTS_WHY.exec(t);
-  if (why) return { ask: "why", coin: factsCoin(why[1] ?? why[2]) };
+  if (why) {
+    const slot = factsSlot(why[1] ?? why[2]);
+    return slot ? { ask: "why", coin: slot.coin } : null;
+  }
   const what = FACTS_WHAT.exec(t);
-  if (what) return { ask: "what", coin: factsCoin(what[1] ?? what[2] ?? what[3]) };
-  if (FACTS_DATA.test(t)) return { ask: "data", coin: null };
+  if (what) {
+    const slot = factsSlot(what[1] ?? what[2] ?? what[3]);
+    return slot ? { ask: "what", coin: slot.coin } : null;
+  }
+  if (FACTS_DATA.test(t)) return { ask: "data", coin: namedAtEnd() };
   return null;
 }
 

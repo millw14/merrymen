@@ -1935,6 +1935,26 @@ describe("a coin's facts, asked of the room's Fomo coin (WP8, Milla 2026-10-09)"
     assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
   });
 
+  it("a chat line, a person or another coin is never the room's coin's facts (review, 2026-10-09)", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    const before = fomo!.asks.length;
+    for (const line of ["pine what happened to you last night?", "pine what happened to him?", "pine what went wrong with the trade?", "pine what happened to the fomo leaderboard?", "pine why did he dump?", "pine show me the numbers on pepe", "pine what are the facts on bonk?"]) {
+      clock += MIN;
+      await said(msg(line));
+    }
+    assert.ok(fomo!.asks.slice(before).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")), JSON.stringify(fomo!.asks.slice(before)));
+    // "facts" alone is slang for "true", even under the answer.
+    clock += MIN;
+    await said(msg("facts", { replyTo: { messageId: 5_000, fromId: BOT.id, fromIsBot: true, text: tg.texts(CHAT)[0]! } }));
+    assert.ok(fomo!.asks.slice(before).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")));
+    // The coin itself still is.
+    clock += MIN;
+    await said(msg("pine what happened to the coin?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+  });
+
   it("a facts answer that bought nothing gives the room's research slot back", async () => {
     fomo!.answer = facts;
     make();
