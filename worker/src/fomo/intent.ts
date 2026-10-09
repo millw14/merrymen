@@ -486,7 +486,9 @@ function summaryAskIn(ws: readonly Word[], self: SelfRef): boolean {
     if (named(ws.length - k) && SUMMARY_ASK.test(ws.slice(0, ws.length - k).map((w) => w.canon).join(" "))) return true;
   }
   return false;
-}/** The most theses a room hears quoted, whatever was asked. */
+}
+
+/** The most theses one quote answer holds (to the owner's DM in a group), whatever was asked. */
 export const QUOTES_MAX = 10;
 const QUOTE_WORDS: Readonly<Record<string, number>> = {
   two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,

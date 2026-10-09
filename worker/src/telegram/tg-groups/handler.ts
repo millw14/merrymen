@@ -289,20 +289,24 @@ const LINK_HERE_LINES: readonly string[] = [
 ];
 
 /**
+ * The room's line when a coin's theses went to the owner's DM (Milla,
+ * 2026-10-09: "Owner's DM"). Said only once the DM landed with at least one
+ * quote in it: never a claim that is not true.
+ */
+const QUOTES_DM_LINES: readonly string[] = [
+  "sent them to your DMs 🤫",
+  "they're in your DMs 🤫",
+  "check your DMs, sent them there 🤫",
+  "DM'd you the theses 🤫",
+  "slid them into your DMs 🤫",
+];
+
+/**
  * A command whose answer could not reach the asker's DM: Telegram lets a bot
  * write only to someone who opened a DM with it. The room hears this instead
  * of "sent it to your DMs", which would be false. Every line names /start,
  * the one thing that opens that DM.
  */
-/** The room's line when a coin's theses went to the owner's DM (Milla, 2026-10-09: "Owner's DM"). */
-const QUOTES_DM_LINES: readonly string[] = [
-  "sent them to your DMs 🤫",
-  "they're in your DMs 🤫",
-  "check your DMs, the full list is there 🤫",
-  "DM'd you the theses 🤫",
-  "slid them into your DMs 🤫",
-];
-
 const DM_FIRST_LINES: readonly string[] = [
   "dm me /start first and i'll answer you there 🤝",
   "send me /start in DMs first, then i can answer there",
@@ -1588,10 +1592,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (isMsgId(messageId)) repliedTo.delete(msgKey(chatId, messageId));
   };
 
-  const dmOwner = async (html: string, keyboard?: InlineKeyboard): Promise<boolean> => {
+  /** `byMs` (on the handler's clock): one transport deadline for the DM, as deliver() sets for a room line. */
+  const dmOwner = async (html: string, keyboard?: InlineKeyboard, byMs?: number): Promise<boolean> => {
     const owner = ownerId();
-    const opts = optsNow();
-    if (owner === null || !opts || stopped) return false;
+    const base = optsNow();
+    if (owner === null || !base || stopped) return false;
+    const opts = byMs === undefined ? base : { ...base, deadlineAtMs: Date.now() + Math.max(0, byMs - clock()) };
     try {
       const r = await sendMessage(opts, owner, html, keyboard && keyboard.length > 0 ? { keyboard } : {});
       return r.ok;
@@ -3133,20 +3139,6 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /**
-   * ONE ADDRESSED RESEARCH QUESTION, ANSWERED IN THE ROOM: rate-bounded,
-   * inside the reply deadline from receipt, delivered through deliver() so
-   * the feature switch, the room's approval, the deadline, a shush and
-   * whether it is still wanted are all checked again right before the send.
-   * "not-research": the research did not take it, and the caller goes on.
-   *
-   * WITH A FALLBACK (a bare "what's trending", whose fallback is the desk's
-   * market read) nothing is said unless the research really answered: the
-   * room's research answers spent, a late read, a budget refusal, research
-   * unavailable or failed, or nothing sayable are all "not-research", and
-   * the read gets at most FOMO_FALLBACK_MS, so the desk still has its time
-   * inside the same deadline.
-   */
-  /**
    * What the room hears when her quotes went to her DM: one of a small fixed
    * pool, gated like every template, not the last few it said when another
    * will do.
@@ -3162,6 +3154,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     return QUOTES_DM_LINES[0]!;
   };
+
+  /**
+   * ONE ADDRESSED RESEARCH QUESTION, ANSWERED IN THE ROOM: rate-bounded,
+   * inside the reply deadline from receipt, delivered through deliver() so
+   * the feature switch, the room's approval, the deadline, a shush and
+   * whether it is still wanted are all checked again right before the send.
+   * "not-research": the research did not take it, and the caller goes on.
+   *
+   * WITH A FALLBACK (a bare "what's trending", whose fallback is the desk's
+   * market read) nothing is said unless the research really answered: the
+   * room's research answers spent, a late read, a budget refusal, research
+   * unavailable or failed, or nothing sayable are all "not-research", and
+   * the read gets at most FOMO_FALLBACK_MS, so the desk still has its time
+   * inside the same deadline.
+   */
   const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest, how: { fallback?: boolean; unreached?: boolean } = {}): Promise<"sent" | "not-research" | Quiet> => {
     const port = fomoNow();
     if (!port) return "not-research";
@@ -3268,15 +3275,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // and the digest. Anyone else's ask, or quotes she is not the asker of,
     // gets the digest in the room (the port builds quotes for her only).
     let quotesDm: string | null = null;
+    // None of them sayable: the honest line and the digest, in the room (both
+    // code's own), never a DM with no thesis in it and a room told one went.
+    let quotesNone: string | null = null;
     if (!r.deflect && r.quotes && owner) {
       const q = quotesSayable(r.quotes, fomoAgeLineOf(r.text), selfNow()?.name ?? "");
       if (q) {
         // Counts only: never a quote, a handle or a coin.
         log(`[tg-groups] theses quoted for the owner's DM (${q.quoted} quoted, ${q.leftOut} left out)`);
-        quotesDm = q.quoted > 0 ? q.text : [q.text, fomoSayable(r.text)].filter((x): x is string => typeof x === "string" && x !== "").join("\n");
+        if (q.quoted > 0) quotesDm = q.text;
+        else quotesNone = [q.text, fomoSayable(r.text)].filter((x): x is string => typeof x === "string" && x !== "").join("\n");
       }
     }
-    if (!r.deflect && r.theses && quotesDm === null) {
+    if (!r.deflect && r.theses && quotesDm === null && quotesNone === null) {
       const stopWording = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
       const worded = await wordTheses({
         model: modelNow(),
@@ -3306,11 +3317,26 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // The quotes in her DM; the room hears only that they went ("sent it to
     // your DMs 🤫"), never a claim that is not true: a DM that did not land
     // leaves the digest for the room instead.
+    /** Nothing reached the room: the follow-up window this answer opened is closed again. */
+    const unremember = (): void => {
+      if (fomoBefore === undefined) lastFomo.delete(fomoKey);
+      else lastFomo.set(fomoKey, fomoBefore);
+    };
+    // The DM goes only with time left for the room's line after it (deliver's
+    // own deadline); with less, the digest goes to the room instead.
+    const dmByMs = replyByMs - RESEARCH_SEND_MS / 2;
+    if (quotesDm !== null && dmByMs - clock() < RESEARCH_SEND_MS / 2) {
+      log("[tg-groups] theses quotes: too little time left for the owner's DM, the digest in the room");
+      quotesDm = null;
+    }
     if (quotesDm !== null) {
       // Re-read before anything leaves: a line she took back, or a newer one of the burst, sends nothing.
-      if ((o.stillWanted && !o.stillWanted()) || fomoNow() === null) return "not-wanted";
+      if ((o.stillWanted && !o.stillWanted()) || fomoNow() === null) {
+        unremember();
+        return "not-wanted";
+      }
       stageOf(chatId, "research: theses quotes to the owner's DM");
-      if (await dmOwner(esc(quotesDm))) {
+      if (await dmOwner(esc(quotesDm), undefined, dmByMs)) {
         log("[tg-groups] theses quotes sent to the owner's DM");
         // Said through this answer's own send (never the chat queue, which
         // this may be running on): a reply under it asks about the same coin.
@@ -3326,7 +3352,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // went only when the DM landed (never a claim that is not true), at most
     // once per room and kind in MOVES_EVERY_MS.
     let movesLine: string | undefined;
-    if (quotesDm === null && owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(body) !== null) {
+    if (!r.quotes && owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(body) !== null) {
       stageOf(chatId, "research: owner moves");
       if (await dmOwner(r.moves.dm)) {
         movesSaid(chatId, r.moves.kind);
@@ -3335,7 +3361,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     }
     const failedRead = r.status === "failed" || r.status === "unavailable" || r.status === "budget-limited";
-    const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
+    const text = quotesNone ?? fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
     const said = await send(text);
     // The coin it was about, by message and topic: "list the last 10" or "what happened to it" under it.
     if (said === "sent" && !r.deflect && r.coin) rememberFomoCoin(chatId, j.threadId, sentId, r.coin);
@@ -3350,10 +3376,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         fail("research", e);
       }
     }
-    if (said !== "sent") {
-      if (fomoBefore === undefined) lastFomo.delete(fomoKey);
-      else lastFomo.set(fomoKey, fomoBefore);
-    }
+    if (said !== "sent") unremember();
     return said;
   };
 

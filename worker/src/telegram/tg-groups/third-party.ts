@@ -8,7 +8,8 @@
  * judges a quote line as the `quote` kind (gate.ts), the handler's backstop.
  * One set of clauses serves all three, so a lure the paraphrase drops is a
  * lure the quote drops too (docs/tg-groups.md rule 3, as amended by Milla on
- * 2026-10-09: a coin's theses may be quoted in a room on an explicit ask).
+ * 2026-10-09: a coin's theses may be quoted on the owner's explicit ask, to
+ * her DM only, never a room).
  *
  * MOVED, NOT CHANGED. The clauses from tg-fomo-port.ts (INJECTION_SHAPED,
  * AT_THE_READER, LURE, SPELLED_DOMAIN, ABOUT_MERRYMEN, NON_LATIN) and from

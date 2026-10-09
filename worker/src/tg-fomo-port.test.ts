@@ -1377,7 +1377,7 @@ describe("groupWords", () => {
 
 class FakeTg {
   calls: Array<{ method: string; body: Record<string, unknown> }> = [];
-  /** Chats a send to fails in (a DM the bot cannot reach): recorded, never counted as sent. */
+  /** Chats a send to fails in (a DM the bot cannot reach): refused with a 403 and left out of `calls`. */
   failChats = new Set<number>();
   private nextId = 5_000;
   fetchFn: FetchLike = async (url, init) => {
@@ -2713,7 +2713,19 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     const restore = (): void => { globalThis.fetch = realFetch; };
     /** What reached Milla's DM, unescaped. */
     const dms = (): string[] => tg.texts(MILLA).map((t) => t.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"));
-    return { s, tg, logs, model, index, lastOwn, say, dms, restore, theses: () => s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length };
+    /** Time passing while a read is in flight (called from a provider hook). */
+    const advance = (ms: number): void => {
+      clock += ms;
+      s.clock.now = clock;
+    };
+    /** A line arriving while another is being answered: received, never drained here. */
+    const inject = (text: string, fromId = MILLA): void => {
+      groups!.onMessage({
+        updateId: id, chatId: GROUP, fromId, fromFirstName: fromId === MILLA ? "Milla" : "Bob", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++,
+        dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens",
+      } as TgMessage);
+    };
+    return { s, tg, logs, model, index, lastOwn, say, dms, advance, inject, restore, theses: () => s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length };
   }
 
   const QUOTE_LINE = /^• (?:[A-Za-z0-9_]{2,30}|a trader), (?:just now|\d+ min ago|\d+h ago|\d+ days ago): “[^“”]{1,161}”$/u;
@@ -2968,6 +2980,91 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
         assert.doesNotMatch(out, /The newest \d+ theses|•|“/u, out);
         assert.equal(r.dms().length, dms);
       }
+    } finally {
+      r.restore();
+    }
+  });
+
+  it("past the follow-up window, a reply under her DM notice alone asks again for the same coin, to her DM (review)", async () => {
+    const r = await shogunRoom();
+    try {
+      await r.say("shogun what's happening with $AUTON on solana on fomo?");
+      await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
+      await r.say("can you list the last 10", { under: r.lastOwn(), advanceMs: 30_000 });
+      const notice = r.lastOwn();
+      assert.match(notice.text, /DM/u, notice.text);
+      // Twenty minutes on, no Fomo answer in between: only the notice's own coin says which.
+      const dms = r.dms().length;
+      const out = (await r.say("show me the last 5", { under: notice, advanceMs: 20 * 60_000 })).join("\n");
+      assert.match(out, /DM/u, out);
+      assert.equal(r.dms().length, dms + 1);
+      assert.equal(r.dms().slice(-1)[0]!.split("\n")[0], "The newest 5 theses on AUTON on Solana, in their words (not facts):");
+    } finally {
+      r.restore();
+    }
+  });
+
+  it("none of the newest sayable: the room hears the honest line and the digest, never a DM with no thesis in it or a claim one went (review)", async () => {
+    const page = fixture("theses-auton");
+    // Every row in another language: each one left out by the port.
+    const spanish = { ...page, theses: (page.theses as Rec[]).map((t) => ({ ...t, text: "esto se va a la luna, el equipo sigue construyendo" })) };
+    const r = await shogunRoom({ theses: () => spanish });
+    try {
+      await r.say("shogun what's happening with $AUTON on solana on fomo?");
+      await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
+      const digest = r.lastOwn();
+      const dms = r.dms().length;
+      const out = (await r.say("can you list the last 10", { under: digest, advanceMs: 30_000 })).join("\n");
+      assert.match(out, /^None of the newest 10 theses on AUTON on Solana can be quoted here \(10 left out\)\.\nWhat traders on Fomo are saying about AUTON on Solana/u, out);
+      assert.doesNotMatch(out, /DM|•|“|esto/u, out);
+      assert.equal(r.dms().length, dms, "no DM");
+      assert.ok(r.logs.includes("[tg-groups] theses quoted for the owner's DM (0 quoted, 10 left out)"), r.logs.join("\n"));
+      assert.ok(!r.logs.includes("[tg-groups] theses quotes sent to the owner's DM"));
+    } finally {
+      r.restore();
+    }
+  });
+
+  it("a read that leaves too little time for her DM and the room's line after it: the digest in the room, no DM (review)", async () => {
+    let slowMs = 0;
+    let r: Awaited<ReturnType<typeof shogunRoom>> | null = null;
+    r = await shogunRoom({ theses: () => { r?.advance(slowMs); return fixture("theses-auton"); } });
+    try {
+      // A first ask is a fresh read; this one takes 27 s of the 30.
+      slowMs = 27_000;
+      const out = (await r.say("shogun quote the newest 10 theses on $AUTON on solana on fomo")).join("\n");
+      assert.equal(r.theses(), 1);
+      assert.match(out, /^What traders on Fomo are saying about AUTON on Solana/u, out);
+      assert.doesNotMatch(out, /DM|•|“/u, out);
+      assert.equal(r.dms().length, 0);
+      assert.ok(r.logs.includes("[tg-groups] theses quotes: too little time left for the owner's DM, the digest in the room"), r.logs.join("\n"));
+      // With time to spare, the same ask goes to her DM.
+      slowMs = 0;
+      const again = (await r.say("shogun quote the newest 10 theses on $AUTON on solana on fomo", { advanceMs: 60_000 })).join("\n");
+      assert.match(again, /DM/u, again);
+      assert.equal(r.dms().length, 1);
+    } finally {
+      r.restore();
+    }
+  });
+
+  it("a quote ask she follows up before it is answered sends no DM and leaves no follow-up window open (review)", async () => {
+    let r: Awaited<ReturnType<typeof shogunRoom>> | null = null;
+    let during: (() => void) | null = null;
+    r = await shogunRoom({ theses: () => { during?.(); during = null; return fixture("theses-auton"); } });
+    try {
+      // A newer line of her burst arrives while the theses are read: the quote answer is no longer wanted.
+      during = () => r!.inject("shogun gm");
+      await r.say("shogun quote the newest 10 theses on $AUTON on solana on fomo");
+      assert.equal(r.theses(), 1);
+      assert.equal(r.dms().length, 0, "no DM for an answer she moved on from");
+      assert.ok(!r.logs.includes("[tg-groups] theses quotes sent to the owner's DM"), r.logs.join("\n"));
+      // A minute on, a follow-up-shaped line is not a follow-up to an answer that was never given.
+      const said = r.logs.filter((l) => l === "[tg-groups] said research").length;
+      const calls = r.s.calls.length;
+      await r.say("shogun what about the sellers?", { advanceMs: 60_000 });
+      assert.equal(r.logs.filter((l) => l === "[tg-groups] said research").length, said, r.logs.join("\n"));
+      assert.equal(r.s.calls.length, calls, "no research read");
     } finally {
       r.restore();
     }

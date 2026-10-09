@@ -556,13 +556,15 @@ export function thesesMaterial(r: AnswerFomoResult, text: string): TgThesesMater
 
 // ─── A coin's theses, quoted (Milla, 2026-10-09) ───────────────────────────
 
-/** The most theses a room hears quoted, and how long each may run. */
+/** The most theses one quote answer holds (said to the owner's DM), and how long each may run. */
 export const QUOTES_MAX = 10;
 export const QUOTE_CHARS = 160;
 const QUOTE_SENTENCES = 3;
 
 /**
- * One thesis as a quote a room may hear, or null: LEFT OUT, never repaired.
+ * One thesis as a quote the owner's DM may get, or null: LEFT OUT, never
+ * repaired. Held to what a room may hear, so a DM she forwards carries no
+ * lure either.
  * The coin's dev's own posts, a call to action beside a link taken out, any
  * row a link or an address was taken out of, and anything the sample cleaner drops (links, addresses, handles and $tags out;
  * injection shapes, rows at the reader, lures, Merrymen, spelled domains and
@@ -668,14 +670,14 @@ function quoteHandleOk(handle: string): boolean {
   return admitTgLine(quoteLine({ who: spaced, age: "", text: "x" }), { agentName: "", kind: "quote", recentOwn: [] }).ok;
 }
 
-/** "• kaleo, 2h ago: “…”": how a room hears one quote (tg-groups/quotes.ts says the same). */
+/** "• kaleo, 2h ago: “…”": how one quote is said (tg-groups/quotes.ts says the same). */
 export function quoteLine(q: { who: string; age: string; text: string }): string {
   return `• ${q.who}${q.age ? `, ${q.age}` : ""}: “${q.text}”`;
 }
 
 /**
- * A COIN'S THESES, QUOTED, for a room that asked for them (FomoQuestionPlan
- * .quotes): the newest up to ten of one coin's theses read, newest first,
+ * A COIN'S THESES, QUOTED, for the owner's ask in a group (FomoQuestionPlan
+ * .quotes; said to her DM, never the room): the newest up to ten of one coin's theses read, newest first,
  * each through quoteOf, with how many were left out. Null unless the answer
  * is exactly one coin's theses read (never a trader's, never a compound
  * answer) with rows in it: an empty read keeps its own honest line. The
