@@ -2937,4 +2937,9 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     leftOut(["it rugged cause kaleo shilled it", "auton rugged, thanks kaleo", "this one rugged, kaleo knew", "it rugged, the dev took everything", "it rugged, dev's wallet emptied", "it rugged, the kols exited", "auton rugged, thanks to the dev", "rugged. dev = scum"]);
     quoted(["this is gonna rug, top holders own way too much", "rugged, holders got wrecked", "feels like a slow rug, volume is dying"]);
   });
+
+  it("a rug that lands on a person through punctuation or 'cause' is never quoted", () => {
+    leftOut(["rugged cause the deployer pulled out", "rugged, he pulled out", "the deployer? full rug", "rugged cause someone pulled out"]);
+    quoted(["rugged, holders got wrecked"]);
+  });
 });

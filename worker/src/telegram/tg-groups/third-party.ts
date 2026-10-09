@@ -313,12 +313,14 @@ export const CONTACT_LURE = U(
 
 /**
  * A PERSON BESIDE A RUG WORD THE PERMIT LIFTED: the permit says "rugged" of
- * a coin and of no one, so a line that also names the dev, the team, an
- * insider, a whale or a KOL, thanks someone for it, or says someone took,
+ * a coin and of no one, so a line that also names the dev, the deployer, the
+ * team, an insider, a whale or a KOL, points at a person ("they", "he",
+ * "someone": "the deployer? full rug", "rugged, he pulled out"), thanks
+ * someone for it, or says someone took,
  * emptied, cashed out, bailed, knew or shilled ("it rugged, the dev took
  * everything", "auton rugged, thanks kaleo", "rugged. dev = scum") puts the
  * rug on a person, and is refused (gate.ts; review, 2026-10-09). "This is
  * gonna rug, top holders own way too much" stays: holders are no one in
  * particular.
  */
-export const PERSON_BESIDE_RUG = U(/\b(?:devs?|team|insiders?|creators?|founders?|kols?|whales?|admins?|mods?|thanks|thx)\b|\b(?:took|emptied|cashed|bailed|knew|shill\w*)\b/i);
+export const PERSON_BESIDE_RUG = U(/\b(?:devs?|deployers?|team|insiders?|creators?|founders?|kols?|whales?|admins?|mods?|they|them|he|she|him|her|someone|somebody|thanks|thx)\b|\b(?:took|emptied|cashed|bailed|knew|shill\w*)\b/i);
