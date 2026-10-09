@@ -2591,8 +2591,8 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
   });
 
   /** The real handler, port, planner and service; a fake Bot API, provider and index; a model stub whose next line is `model.content`. */
-  async function shogunRoom() {
-    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+  async function shogunRoom(caps: SetupCaps = {}) {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH, ...caps });
     let clock = AUTON_NOW + 60_000;
     s.clock.now = clock;
     store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
@@ -2780,6 +2780,32 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     r.model.content = line;
     return r.say(trigger, { fromId: 31337, advanceMs: 25 * 60_000 });
   };
+
+  it("a coin named like a trader the room heard quoted gets no facts lookup on a bare name and no permit (review r2)", async () => {
+    // Fomo lists a KALEO coin on Solana (the index measures it collapsed): the room heard kaleo as a quote's author.
+    let symbol = "AUTON";
+    const r = await shogunRoom({ tokensSearch: () => ({ tokens: [{ symbol, address: AUTON_MINT, name: symbol.toLowerCase(), image: null, marketCapUsd: 36_000, networkId: 1399811149 }] }) });
+    try {
+      await r.say("shogun what's happening with $AUTON on solana on fomo?");
+      await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
+      await r.say("can you list the last 10", { under: r.lastOwn(), advanceMs: 30_000 });
+      assert.match(r.lastOwn().text, /^• kaleo, /mu);
+      symbol = "KALEO";
+      const facts = (await r.say("shogun why did kaleo dump on solana?", { advanceMs: 60_000 })).join("\n");
+      assert.doesNotMatch(facts, /^KALEO on Solana, from GeckoTerminal/mu, facts);
+      assert.ok(!r.logs.includes("[tg-groups] collapse measured"), r.logs.join("\n"));
+      r.model.content = "kaleo rugged lol";
+      const out = await r.say("shogun lmao kaleo", { fromId: 31337, advanceMs: 30_000 });
+      assert.ok(!out.includes("kaleo rugged lol"), out.join(" | "));
+      // Asked as "$KALEO" it is the coin's facts, measured; the collapse still sets no permit for a trader's name.
+      const tagged = (await r.say("shogun why did $KALEO dump on solana?", { advanceMs: 60_000 })).join("\n");
+      assert.match(tagged, /^KALEO on Solana, from GeckoTerminal/mu, tagged);
+      const again = await r.say("shogun lmao kaleo", { fromId: 31337, advanceMs: 30_000 });
+      assert.ok(!again.includes("kaleo rugged lol"), again.join(" | "));
+    } finally {
+      r.restore();
+    }
+  });
 
   it("under the permit the banter never lays the rug on a trader the room heard quoted (review r2)", async () => {
     const r = await measuredRoom();

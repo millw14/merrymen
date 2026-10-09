@@ -2837,6 +2837,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const noteCollapse = (chatId: number, threadId: number | undefined, c: NonNullable<TgFomoAnswer["collapse"]>): void => {
     const coin = typeof c.coin === "string" ? c.coin.trim() : "";
     if (!coin) return;
+    // A collapse measured for a coin named like a person the room heard from it is never stored as a permit (review r2).
+    if (c.collapsed && heardHere(chatId, coin)) return;
     const t = clock();
     putPermit(chatId, threadId, { coin, ...(c.chain ? { chain: c.chain } : {}), source: c.collapsed ? "measured" : "clear", atMs: t, untilMs: t + MEASURED_PERMIT_MS });
     log(`[tg-groups] collapse ${c.collapsed ? "measured" : "not measured"}`);
@@ -2860,6 +2862,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const current = said.coin ? (live ?? recentFomoCoin(msg.chatId, threadId)) : live;
     if (!current) return;
     if (said.coin && said.coin !== current.symbol.toUpperCase()) return;
+    if (heardHere(msg.chatId, current.symbol)) return;
     const had = permitsOf(msg.chatId, threadId, false)?.get(current.symbol.toLowerCase());
     const t = clock();
     if (had && had.untilMs > t && (had.source === "measured" || had.source === "clear")) return;
@@ -2884,6 +2887,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     return [...out].slice(0, 48);
   };
+  /** Whether a coin is named like a person this room heard from it (heardPeopleOf). */
+  const heardHere = (chatId: number, coin: string): boolean => {
+    const room = store.room(chatId);
+    const low = coin.trim().replace(/^\$+/u, "").toLowerCase();
+    return !!room && heardPeopleOf(room).some((n) => n.toLowerCase() === low);
+  };
   /** Words a room calls a person by: a coin called one of them never gets a permit. */
   const PERSON_COIN = /^(?:dev|devs|team|they|he|she|him|her|someone|kol|whale|whales|admin|admins|mod|mods)$/iu;
   /**
@@ -2900,7 +2909,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!m || !trigger || trigger.own || typeof trigger.text !== "string") return null;
     const t = clock();
     const text = trigger.text.normalize("NFKC").toLowerCase();
-    const people = new Set([room.ownerName ?? "", ...room.people.map((x) => x.name)].map((n) => n.trim().toLowerCase()).filter(Boolean));
+    // A coin named like someone the room heard from it as a person (a quote's author, a board's trader) is never a permit's: "kaleo rugged" says the trader rugged (review r2).
+    const people = new Set([room.ownerName ?? "", ...room.people.map((x) => x.name), ...heardPeopleOf(room)].map((n) => n.trim().toLowerCase()).filter(Boolean));
     // ANOTHER COIN IN THE LINE ("pine $pons is pumping", "auton and pons lol"):
     // a cashtag, a contract address, or a coin the room knows by name (its
     // coin posts, its other permits, the topic's last Fomo coin). The permit
@@ -4608,9 +4618,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const context = (under && now - under.at <= FOMO_THREAD_MS ? under : null) ?? recentFomoCoin(chatId, threadId);
           const lineChain = chainIn(text);
           const onFomo = /\bon fomo\b/iu.test(text) || (lineChain !== undefined && lineChain !== "robinhood");
+          // A bare name the room heard as a person ("why did kaleo dump", after kaleo's quote) is a question about
+          // that person, never a coin's facts: only "$KALEO" asks about a coin of that name (review r2).
+          const room0 = store.room(chatId);
+          const asPerson = !!factsAsk.coin && !!room0 && heardPeopleOf(room0).some((n) => n.toLowerCase() === factsAsk.coin!.toLowerCase())
+            && !extractCashtags(text).some((x) => x.toUpperCase() === factsAsk.coin!.toUpperCase());
           const named = factsAsk.coin;
           // The remembered coin only when the line names no other chain: "auton on base" is another AUTON.
-          if (context && (!named || named === context.symbol.toUpperCase()) && (!lineChain || !context.chain || lineChain === context.chain)) {
+          if (asPerson) {
+            // No facts at all: neither the person's namesake coin nor the remembered one.
+          } else if (context && (!named || named === context.symbol.toUpperCase()) && (!lineChain || !context.chain || lineChain === context.chain)) {
             fomoFacts = { kind: "coin", symbol: context.symbol, ...(context.chain ? { chain: context.chain } : {}), aspect: "facts", ask: factsAsk.ask };
           } else if (named && onFomo) {
             fomoFacts = { kind: "coin", symbol: named, ...(lineChain ? { chain: lineChain } : {}), aspect: "facts", ask: factsAsk.ask };
