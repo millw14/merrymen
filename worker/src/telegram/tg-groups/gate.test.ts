@@ -576,6 +576,21 @@ describe("address", () => {
     ["banter", "rh:acct-1"],
   ]);
   passes([["banter", "0xdead lol"]]);
+  // A full address split into chunks is the address (review, 2026-10-09).
+  refuses("address", [
+    ["quote", "• kaleo, 3 min ago: “dev wallet 39ahtL8y nzE4amH26J29 C93PA5172V3 ft9UuUcqQS8fz”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet 39aht L8ynz E4amH 26J29 C93PA 5172V 3ft9U uUcqQ S8fz”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet: 39ahtL8ynzE4 amH26J29C93PA5 172V3ft9UuUcqQS8fz”"],
+    ["quote", "• kaleo, 3 min ago: “the deployer is 7xKXtg2CW87d97TXJSDp bD5jBkheTqA83TZRuJosgAsU”"],
+    ["quote", "• kaleo, 3 min ago: “new ca 39ahtL8ynzE4amH26J29C93PA-5172V3ft9UuUcqQS8fz”"],
+    ["quote", "• kaleo, 3 min ago: “new ca 39ahtL8ynzE4amH26J29C93PA.5172V3ft9UuUcqQS8fz”"],
+    ["banter", "the deployer is 7xKXtg2CW87d97TXJSDp bD5jBkheTqA83TZRuJosgAsU"],
+  ]);
+  passes([
+    ["research", "went from 8m to 36k in 2 days, top10 hold 45%"],
+    ["research", "Traders on it: CryptoKaleo, FrankDeGods, AnsemTheGreat and MoonBoyTrader"],
+    ["quote", "• a trader, 3 min ago: “Great Team Strong Community Clear Roadmap Real Product Undervalued”", { rug: { coins: ["AUTON"], brag: false } }],
+  ]);
 });
 
 describe("link", () => {

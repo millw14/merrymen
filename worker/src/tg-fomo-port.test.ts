@@ -2860,4 +2860,14 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     leftOut(["send 1 sol to the dev wallet and get 2 back", "send 2 sol to this wallet, get 4 back instantly", "send any amount of sol to the dev and it comes back doubled", "send any amount to the dev wallet and it comes back doubled", "s3nd 1 sol to get 2 back"]);
     quoted(["sending this, it already doubled", "dev sent the lp to the burn address, never getting it back", "sent it to 10m and it came back down"]);
   });
+
+  it("a full address split into chunks is never quoted", () => {
+    leftOut([
+      "dev wallet 39ahtL8y nzE4amH26J29 C93PA5172V3 ft9UuUcqQS8fz",
+      "dev wallet 39aht L8ynz E4amH 26J29 C93PA 5172V 3ft9U uUcqQ S8fz",
+      "dev wallet: 39ahtL8ynzE4 amH26J29C93PA5 172V3ft9UuUcqQS8fz",
+      "the deployer is 7xKXtg2CW87d97TXJSDp bD5jBkheTqA83TZRuJosgAsU",
+      "new ca 39ahtL8ynzE4amH26J29C93PA-5172V3ft9UuUcqQS8fz",
+    ]);
+  });
 });

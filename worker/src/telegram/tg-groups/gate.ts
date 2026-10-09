@@ -689,6 +689,35 @@ function hasEncodedRun(t: string): boolean {
     if (/[0-9]/.test(run) && /[A-Za-z]/.test(run)) return true;
     if (run.length >= 32 && /[a-z]/.test(run) && /[A-Z]/.test(run)) return true;
   }
+  return hasChunkedRun(t);
+}
+
+/**
+ * A piece of an encoded run: three characters or more, holding a digit and a
+ * letter, or both cases in a shape no word has ("uUcqQ", "TqA"). A word in
+ * ordinary case ("Strong", "GeckoTerminal", "CryptoKaleo") is never one, so a
+ * list of names or a title is never read as an address.
+ */
+const encodedChunk = (c: string): boolean =>
+  c.length >= 3 && ((/[0-9]/.test(c) && /[A-Za-z]/.test(c)) || (/[a-z]/.test(c) && /[A-Z]/.test(c) && !/^[A-Za-z][a-z]+(?:[A-Z][a-z]+)*$/.test(c)));
+/**
+ * AN ADDRESS SPLIT INTO CHUNKS ("39aht L8ynz E4amH …", "…C93PA-5172V3…"),
+ * joined back and read as the one run it spells (review, 2026-10-09): the
+ * pieces of a full address in a room are the address. Any other word
+ * between two pieces starts the run again.
+ */
+function hasChunkedRun(t: string): boolean {
+  for (const m of t.matchAll(/[A-Za-z0-9]+(?:[\s._:,/-]{1,3}[A-Za-z0-9]+)+/g)) {
+    let joined = "";
+    for (const c of m[0].split(/[\s._:,/-]+/)) {
+      if (!encodedChunk(c)) {
+        joined = "";
+        continue;
+      }
+      joined += c;
+      if (/[A-Za-z0-9]{26,}/.test(joined) && ((/[0-9]/.test(joined) && /[A-Za-z]/.test(joined)) || (joined.length >= 32 && /[a-z]/.test(joined) && /[A-Z]/.test(joined)))) return true;
+    }
+  }
   return false;
 }
 
