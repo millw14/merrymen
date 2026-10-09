@@ -1837,6 +1837,16 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
     ["rugged. merrymen coins never rug", "advice"],
     ["rugged, merrymen coins are safe", "advice"],
     ["rugged, you should sell", "advice"],
+    ["rugged, swap to merrymen", "advice"],
+    ["rugged, get merrymen", "advice"],
+    ["rugged, pick merrymen", "advice"],
+    ["rugged, choose merrymen", "advice"],
+    ["rugged. y'all need merrymen", "advice"],
+    ["rugged, park it in merrymen", "advice"],
+    ["rugged, try merrymen", "advice"],
+    ["rugged, go with merrymen", "advice"],
+    ["rugged, put it in merrymen", "advice"],
+    ["rugged, swap into a merrymen coin", "advice"],
   ];
   for (const kind of ["banter", "answer", "coin"] as const) {
     for (const t of ADMIT) it(`${kind} admits with the permit: ${JSON.stringify(t)}`, () => assert.equal(v(t, kind), "ok"));

@@ -189,6 +189,16 @@ describe("the new clauses", () => {
       "rugged. merrymen coins never rug",
       "rugged, merrymen coins are safe",
       "one of ours would moon",
+      "rugged, swap to merrymen",
+      "rugged, get merrymen",
+      "rugged, pick merrymen",
+      "rugged, choose merrymen",
+      "rugged. y'all need merrymen",
+      "rugged, park it in merrymen",
+      "rugged, try merrymen",
+      "rugged, go with merrymen",
+      "rugged, put it in merrymen",
+      "rugged, swap into a merrymen coin",
     ]);
     misses(MERRY_SHILL, [
       "rugged cause it wasn't merrymen 😤",

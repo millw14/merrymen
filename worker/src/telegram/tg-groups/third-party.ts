@@ -213,11 +213,13 @@ export const RUG_CONTEXT_ACCUSE = U(
  * never an invitation: Merrymen (or "one of ours") within forty characters of
  * a buy, a hold, a switch, a promise or a pump ("rugged, buy merrymen
  * instead", "merrymen is the play", "merrymen coins never rug", "stick to
- * merrymen coins") is advice, and never said (WP3; HARD EXCLUSION: nothing
- * about buying or holding Merrymen's own coin).
+ * merrymen coins"; and "swap to", "get", "pick", "choose", "try", "need",
+ * "park it in", "put it in", "go with": review, 2026-10-09) is advice, and
+ * never said (WP3; HARD EXCLUSION: nothing about buying or holding
+ * Merrymen's own coin).
  */
 const MERRY = String.raw`(?:merry\s?m[ae]n|one\s+of\s+ours)`;
-const SHILL = String.raw`(?:buy|buys|buying|bought|ape|aped|aping|grab|grabbed|get\s+(?:a|some|in|into|on)|load|loaded|loading|stick|switch|rotate|hold|holding|hodl|bag|bags|invest|investing|play|move|only|moon|mooning|pump|pumping|send|sending|next|safe|safer|never\s+rugs?|can'?t\s+rug|won'?t\s+rug|don'?t\s+rug|doesn'?t\s+rug|never\s+dumps?|can'?t\s+dump|won'?t\s+dump|guarantee\w*|instead)`;
+const SHILL = String.raw`(?:buy|buys|buying|bought|ape|aped|aping|grab|grabbed|get|gets|getting|swap|swaps|swapped|swapping|pick|choose|try|need|park|put|go\s+with|load|loaded|loading|stick|switch|rotate|hold|holding|hodl|bag|bags|invest|investing|play|move|only|moon|mooning|pump|pumping|send|sending|next|safe|safer|never\s+rugs?|can'?t\s+rug|won'?t\s+rug|don'?t\s+rug|doesn'?t\s+rug|never\s+dumps?|can'?t\s+dump|won'?t\s+dump|guarantee\w*|instead)`;
 export const MERRY_SHILL = U(new RegExp(String.raw`\b${MERRY}\b[^.!?\n]{0,40}\b${SHILL}\b|\b${SHILL}\b[^.!?\n]{0,40}\b${MERRY}\b`, "i"));
 
 /** A Merrymen brag already said: what makes the next one wait (no brag back to back). */
