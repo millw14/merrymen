@@ -405,6 +405,48 @@ describe("TgModelGate: provider failures pause the model", () => {
     assert.match(logs[0] ?? "", /model-missing/);
   });
 
+  it("an account held over billing pauses ten minutes — a paid bill is back within ten, not at midnight, and never needs a restart", async () => {
+    const g = gate();
+    await g.run(
+      CHAT,
+      fail(
+        "groq 400 — organization_delinquent: Organization has been restricted because of overdue payment(s). Please update the payment method at https://console.groq.com/settings/billing/manage and then contact support.",
+      ),
+    );
+    assert.equal(store.llmPausedUntil(), clock + 10 * MIN);
+    assert.deepEqual(logs, ["[tg-groups] model call failed (billing), paused for ten minutes"]);
+    // Paid meanwhile: the next call after the pause is made, and answers.
+    clock += 10 * MIN;
+    assert.equal(g.available(CHAT), true);
+    assert.equal(await g.run(CHAT, async () => "back"), "back");
+  });
+
+  it("OpenAI's insufficient_quota is billing now, not a daily cap waiting for a midnight that changes nothing", async () => {
+    // A 429 whose code says "quota": it used to reach DAILY_CAP's "quota" and
+    // pause until UTC midnight, as if the day turning over paid the bill.
+    const g = gate();
+    await g.run(CHAT, fail("openai 429 — insufficient_quota: You exceeded your current quota, please check your plan and billing details."));
+    assert.equal(store.llmPausedUntil(), clock + 10 * MIN);
+    assert.match(logs[0] ?? "", /\(billing\)/);
+    // A 402 from an SDK, read by its status, is the same.
+    clock += 11 * MIN;
+    await g.run(CHAT, fail('402 {"error":{"message":"Insufficient credits"}}', { status: 402 }));
+    assert.equal(store.llmPausedUntil(), clock + 10 * MIN);
+    assert.match(logs[1] ?? "", /\(billing\)/);
+  });
+
+  it("Groq's daily limit, with its billing link, is still a daily cap", async () => {
+    const g = gate();
+    await g.run(
+      CHAT,
+      fail(
+        "groq 429 — rate_limit_exceeded: Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01hzq6v3kexample` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99837, Requested 1290. Please try again in 16m31.2s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+      ),
+    );
+    assert.equal(store.llmPausedUntil(), midnight);
+    assert.match(logs[0] ?? "", /daily-cap/);
+  });
+
   it("an SDK error read by its status: an Anthropic 429 pauses, its 401 pauses to midnight", async () => {
     const g = gate();
     await g.run(CHAT, fail('429 {"type":"error","error":{"type":"rate_limit_error"}}', { status: 429 }));

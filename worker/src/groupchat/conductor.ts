@@ -1732,6 +1732,17 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       model.stopped = true;
       return;
     }
+    if (kind === "billing") {
+      // AN ACCOUNT HELD OVER AN UNPAID BILL is fixed by somebody paying it,
+      // not by a restart — so a pause, never "off until restart", and the room
+      // finds the model again on its own once it is settled. Until then one
+      // request a quarter of an hour, not one a line (a held Groq account
+      // answered 400, which used to count as six failures before a pause).
+      model.pausedUntil = model.now + MODEL_PAUSE_MS;
+      model.silent = 0;
+      model.note = "model paused 15m (billing hold)";
+      return;
+    }
     if (kind === "rate-limited") {
       if (DAILY_CAP.test(raw)) {
         // THE PROVIDER'S DAY IS SPENT: nothing changes until it turns over.

@@ -228,7 +228,7 @@ export async function askAgent(
     }
     if (out.why === "no-llm") return { ok: false, failure: "no-llm" };
     if (out.why === "cut-off") return { ok: false, failure: timedOut ? "timeout" : "cut-off" };
-    if (out.why === "llm-error") return { ok: false, failure: "llm-error", facts: { llm: llmFailureOf(out.kind, out.provider) } };
+    if (out.why === "llm-error") return { ok: false, failure: "llm-error", facts: { llm: llmFailureOf(out.kind, out.provider, out.house) } };
     return { ok: false, failure: "unreadable" };
   } finally {
     clearTimeout(timer);

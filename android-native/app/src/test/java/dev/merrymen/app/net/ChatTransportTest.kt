@@ -67,6 +67,11 @@ class ChatTransportTest {
     assertEquals("rate-limited", r.kind)
     assertEquals("Groq", r.provider)
     assertEquals("llm-error", r.why)
+    assertEquals("an older server's reply has no house flag", null, r.house)
+    server.answer("""{"reply":null,"why":"llm-error","kind":"billing","provider":"Groq","house":true}""")
+    val held = (api.chat(ChatBody(message = "hi")) as ApiResult.Ok).value
+    assertEquals("billing", held.kind)
+    assertEquals(true, held.house)
   }
 
   // ── the headers interceptor leaves a streamed request's Accept alone ─────

@@ -7,7 +7,7 @@ import { sseEvent, streamSafe } from "./chat-stream";
 import { count } from "./format";
 import { resolveConfig } from "../../../worker/src/settings";
 import { resolveLlm, llmText, llmTextStream, type LlmCreds } from "../../../worker/src/llm";
-import { describeLlmFailure, type LlmFailureKind } from "../../../worker/src/llm-failure";
+import { describeLlmFailure, HOUSE_GATEWAY, type LlmFailureKind } from "../../../worker/src/llm-failure";
 import { redactSecrets } from "../../../worker/src/telegram/agent";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 
@@ -159,6 +159,13 @@ export interface AgentReply {
    * worker/src/llm-failure.ts is the one classifier; Telegram uses it too.
    */
   kind?: LlmFailureKind;
+  /**
+   * THE ACCOUNT THAT FAILED IS THE HOUSE'S, not one the owner brought — so
+   * the browser can say "ours to fix, not yours" instead of sending them to a
+   * Settings screen that cannot change it (onHouseAccount). The boolean only:
+   * never the key, nor any part of it. Set on every "llm-error".
+   */
+  house?: boolean;
   /** The brain's provider, as the owner would name it. Absent when it has no name worth saying. */
   provider?: string;
   /** The provider's words, redacted and in one shape — for whoever debugs it. Never rendered. */
@@ -174,6 +181,13 @@ export interface AgentChatOptions {
    * switches. Set by /api/chat on the server. Absent: not offered.
    */
   fomoSettings?: boolean;
+  /**
+   * Whether this deployment is hosted — set by /api/chat on the SERVER, where
+   * isHostedMode() may be read (client-env.test.ts keeps it out of lib/).
+   * Only hosted is the dashboard's own brain the house's (onHouseAccount);
+   * absent, no key is called the house's — only the holder gateway's upstream.
+   */
+  hosted?: boolean;
   /**
    * What `factualReply` reads: the owner's own saved records (the default), or
    * third-party research (a Fomo lookup). Under a recovery hold the two are
@@ -609,7 +623,7 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
     const fallback = recoveryFallback(options, signal);
     if (fallback) return fallback;
     if (!prepared || "early" in prepared) throw e;
-    return failedReply(e, options, prepared.creds);
+    return failedReply(e, options, prepared.creds, signal);
   }
 }
 
@@ -668,22 +682,92 @@ function providerLineOf(e: unknown, creds: LlmCreds): string {
  * transport error's own message can carry the key too (a key in a URL, say).
  * Redacted whole, and only then cut to length, so a key that straddled the cut
  * cannot leave its first half behind.
+ *
+ * AND IT IS LOGGED, which it never was. On 2026-10-09 every house-key call
+ * failed with Groq's "organization_delinquent" for hours while /api/chat wrote
+ * nothing, and the cause was found by reading the orchestrator's logs instead.
+ * One line per failure, in the interpreter's shape, from the line already
+ * redacted above — never the key. Not for a request the owner walked away
+ * from: their closed chat is not the model failing. The partner surface logs
+ * too, its reply unchanged; whose key it ran on is not decided for it here.
  */
-function failedReply(e: unknown, options: AgentChatOptions, creds: LlmCreds): AgentReply {
-  if (options.surface === "partner") return { reply: null, why: "llm-error" };
+function failedReply(e: unknown, options: AgentChatOptions, creds: LlmCreds, signal?: AbortSignal): AgentReply {
   const line = redactSecrets(providerLineOf(e, creds), [creds.apiKey].filter(Boolean));
-  if (/stream ended before the reply was finished/.test(line)) return { reply: null, why: "cut-off" };
+  const cutOff = /stream ended before the reply was finished/.test(line);
   // No status at all: the SDK never got an answer. describeLlmFailure knows
   // undici's "fetch failed"; the SDK says "Connection error." instead.
   const kind = e instanceof Anthropic.APIConnectionError ? "unreachable" : describeLlmFailure(line).kind;
+  const house = onHouseAccount(creds, kind, options);
+  if (!signal?.aborted) {
+    const whose = options.surface === "partner" ? "partner" : house ? "house" : "own";
+    const said = line.replace(/\s+/g, " ").trim().slice(0, 300) || "no message";
+    console.warn(`[chat] model call failed (${cutOff ? "cut-off" : kind}, ${whose}): ${said}`);
+  }
+  if (options.surface === "partner") return { reply: null, why: "llm-error" };
+  if (cutOff) return { reply: null, why: "cut-off" };
   const provider = providerName(creds.provider);
   return {
     reply: null,
     why: "llm-error",
     kind,
+    house,
     ...(provider ? { provider } : {}),
     ...(line ? { detail: line.slice(0, 300) } : {}),
   };
+}
+
+/**
+ * IS THE ACCOUNT THAT FAILED THE HOUSE'S, rather than one its owner brought?
+ * The boolean the browser says "ours to fix, not yours" by; nothing of a key.
+ *
+ * THE HOLDER GATEWAY FIRST, hosted or not. The "merrymen" provider is our own
+ * gateway, which forces the model and relays its upstream's status and body
+ * untouched (gateway/lib/core.mjs chat). So the house Groq account's hold on
+ * 2026-10-09 reached holders as "merrymen 400 — organization_delinquent", and
+ * a holder token is no env key: every holder was told a billing hold on THEIR
+ * account was theirs to settle, for a perk with no bill. A hold or a missing
+ * model there is ours. A refused token is not — the gateway's own 401 is a
+ * holder's expired claim — so key-rejected keeps to the owner's words.
+ *
+ * HOSTED, THE DASHBOARD'S BRAIN IS ALWAYS THE HOUSE'S. With no `credentials`
+ * injected it is resolveLlm(resolveConfig()): the web process's OWN settings
+ * file and env. Hosted, no tenant writes that file — their Settings go to the
+ * per-tenant store (api/settings route; order-ceiling.ts says the same) — so a
+ * key kept there is the operator's as surely as one in the env. Only creds a
+ * caller injected are told apart by value (onHouseKey).
+ *
+ * Self-hosted, the file and the env are the owner's own machine: theirs.
+ */
+function onHouseAccount(creds: LlmCreds, kind: LlmFailureKind, options: AgentChatOptions): boolean {
+  if (creds.provider === HOUSE_GATEWAY && (kind === "billing" || kind === "model-missing")) return true;
+  if (options.hosted !== true) return false;
+  return options.credentials ? onHouseKey(creds.apiKey, true) : true;
+}
+
+/**
+ * The env variables holding the deployment's own model keys: the fallback
+ * settings.ts gives each key field (`str(file.X, env.Y)` — groqApiKey,
+ * anthropicApiKey, llmApiKey), which every path in resolveLlm reads, the
+ * provider catalogue's credsFromProvider included. The same three the rooms
+ * refuse to spend (groupchat/voice.ts, telegram/tg-groups/model.ts).
+ */
+const HOUSE_KEY_ENV = ["GROQ_API_KEY", "MERRYMEN_LLM_API_KEY", "ANTHROPIC_API_KEY"] as const;
+
+/**
+ * IS THIS INJECTED KEY ONE OF THE HOUSE'S, rather than one its owner brought?
+ *
+ * Only hosted. Self-hosted, the env is the owner's own machine and every key
+ * on it is theirs to fix. Hosted, for creds a caller handed in (onHouseAccount
+ * settles the dashboard's own), it is told apart BY VALUE, as the rooms tell
+ * a fleet key apart: equal to an env house key is the house's, and anything
+ * else is a key the caller resolved from somebody's own settings. Trimmed both
+ * sides, as `str` trims. The key is compared here and goes nowhere; the answer
+ * is a boolean.
+ */
+export function onHouseKey(apiKey: string, hosted: boolean, env: Record<string, string | undefined> = process.env): boolean {
+  const key = (apiKey ?? "").trim();
+  if (!hosted || !key) return false;
+  return HOUSE_KEY_ENV.some((name) => env[name]?.trim() === key);
 }
 
 const json = (body: unknown, status: number) =>
@@ -771,7 +855,7 @@ export async function agentReplyResponse(
         // half arrived: `done` is the only final reply.
         if (fallback) send(sseEvent("done", fallback));
         else {
-          const { reply: _none, ...failed } = failedReply(e, options, creds);
+          const { reply: _none, ...failed } = failedReply(e, options, creds, stop.signal);
           send(sseEvent("error", failed));
         }
       } finally {

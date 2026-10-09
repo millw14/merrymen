@@ -709,13 +709,19 @@ data class ChatReply(
   val command: ChatCommand? = null,
   /**
    * The server's classification of a model failure: key-rejected |
-   * rate-limited | provider-down | unreachable | model-missing | other. It is
-   * what the owner is told, in the agent's voice ("your Groq key was
-   * rejected"), instead of a provider's raw text.
+   * rate-limited | provider-down | unreachable | model-missing | billing |
+   * other. It is what the owner is told, in the agent's voice ("your Groq key
+   * was rejected"), instead of a provider's raw text.
    */
   val kind: String? = null,
   /** Whose model failed, e.g. "Groq", for that sentence. */
   val provider: String? = null,
+  /**
+   * True when the key that failed was the deployment's own house key, not one
+   * the owner saved — a flag, never the key. Null (an older server) and false
+   * both mean the owner's own; nullable so a stray null cannot fail the decode.
+   */
+  val house: Boolean? = null,
 )
 
 /**
