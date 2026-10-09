@@ -18,7 +18,9 @@
  * them through U (below) on its own readings.
  *
  * NEW, FOR QUOTES AND THE RUG PERMIT: SEND_FOR, CTA_PLACEHOLDER, QUOTE_TARGET,
- * RUG_CONTEXT_ACCUSE, MERRY_SHILL and MERRY_BRAG, each compiled through U.
+ * RUG_CONTEXT_ACCUSE, MERRY_SHILL and MERRY_BRAG, each compiled through U;
+ * and, read only on the quote path (the port's quoteOf and the gate's
+ * `quote` kind), POST_RUG_LURE.
  *
  * No imports: this file is the leaf every one of them shares.
  */
@@ -198,3 +200,27 @@ export const MERRY_SHILL = U(new RegExp(String.raw`\b${MERRY}\b[^.!?\n]{0,40}\b$
 
 /** A Merrymen brag already said: what makes the next one wait (no brag back to back). */
 export const MERRY_BRAG = U(/\bmerry\s?m[ae]n\b|\bone of ours\b/i);
+
+/**
+ * A POST-RUG DRAINER LURE, for quotes only: a refund, compensation, recovery,
+ * reimbursement or being "made whole"; something to approve; a v2, a
+ * relaunch, a new contract or a migration to do now; a swap at an "official"
+ * place; somewhere to search, check or read (their x, the pinned post, the
+ * bio); a support ticket; a vip or paid group; a send that comes back more.
+ * After a coin collapses this is what its page fills with, and the stripped
+ * remnant of a link ("is the new site", "for the money back") still sends
+ * the room to it. "No recovery in sight" and "rugged, holders got wrecked"
+ * stay. Never read by the sample cleaner or the paraphrase (LURE, OUT_LURE
+ * unchanged); a rare false drop costs one counted quote (review, 2026-10-09).
+ */
+export const POST_RUG_LURE = U(
+  new RegExp(
+    String.raw`\b(?:refund\w*|reimburs\w*|compensat\w*|restitution|made\s+whole|giv(?:e|es|ing)\s+back|recover(?:y|ing)?\s+(?:\S+\s+){0,2}?(?:funds?|sol|eth|money|bags?|tokens?|wallets?|tool|bot|service|agent|app|site)|approv(?:e|es|al|ing)|v2|relaunch\w*|re-launch\w*|new\s+(?:ca|contract|token)|migrat(?:e|ion)\s+(?:now|today|here|asap|before|over)` +
+      String.raw`|swap\b[^.!?\n]{0,30}\b(?:official|site|link|bot|portal|new|v2)|official\s+(?:site|link|channel|bot|group|website|tg|telegram|discord|x|twitter)` +
+      String.raw`|(?:search|google|look\s+up|find)\b[^.!?\n]{0,30}\b(?:refund\w*|bot|link|site|channel|group|telegram|tg|discord|bio)` +
+      String.raw`|check\s+(?:out\s+)?(?:the\s+|their\s+|its\s+|his\s+)?(?:x|twitter|telegram|tg|discord|site|website|pinned|pin|bio|channel)|read\s+(?:the\s+)?pinned|links?\s+in\s+(?:the\s+|their\s+)?bio` +
+      String.raw`|(?:open|create|submit|raise)\s+(?:a\s+)?(?:support\s+)?ticket|support\s+ticket|(?:vip|alpha|paid|private)\s+(?:group|chat|channel|calls?)` +
+      String.raw`|(?:send|sent|sending|transfer\w*|deposit\w*|give)\s+(?:\S+\s+){0,2}?\d[\d.,]*[^.!?\n]{0,40}\b(?:get|got|gets|receive\w*|return\w*|sends?|take)\s+\S*\d)\b`,
+    "i",
+  ),
+);

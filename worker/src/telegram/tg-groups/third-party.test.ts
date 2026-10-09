@@ -19,6 +19,7 @@ import {
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
+  POST_RUG_LURE,
   QUOTE_TARGET,
   RUG_CONTEXT_ACCUSE,
   SECOND_PERSON,
@@ -167,5 +168,27 @@ describe("the new clauses", () => {
   it("MERRY_BRAG: what counts as a brag already said", () => {
     hits(MERRY_BRAG, ["rugged cause it wasn't merrymen 😤", "should've been one of ours", "not a merryman in sight", "merry men wouldn't"]);
     misses(MERRY_BRAG, ["merry christmas", "rugged lol", "ours is better"]);
+  });
+
+  it("POST_RUG_LURE: what a rugged coin's page fills with (review, 2026-10-09)", () => {
+    hits(POST_RUG_LURE, [
+      "auton v2 is live, swap at the official link",
+      "refunds live for holders",
+      "holders will be made whole, check telegram",
+      "approve the refund contract",
+      "compensation plan for holders, check their x",
+      "go to the pinned post on their x and approve the refund",
+      "v2 launched, migrate now",
+      "new contract is live, old one is dead",
+      "use the auton refund bot",
+      "search auton refund on telegram",
+      "open a support ticket on their discord to get refunded",
+      "admins are giving back sol",
+      "relaunch on pump, same ticker",
+      "join the vip group for the next one",
+      "read pinned for refund",
+      "i sent 1 sol and got 2 back, its real",
+    ]);
+    misses(POST_RUG_LURE, [...HARMLESS, "rugged, holders got wrecked", "holders still bagholding, no recovery in sight", "dead coin now, volume gone", "it got listed on a cex", "chart is cooked"]);
   });
 });

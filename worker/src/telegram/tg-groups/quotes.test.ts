@@ -81,4 +81,19 @@ describe("quotesSayable", () => {
     assert.equal(quoteLineOf(q("x", "a trader", "")), "• a trader: “x”");
     assert.equal(quoteLineOf(q("x", "kaleo", "3 min ago")), "• kaleo, 3 min ago: “x”");
   });
+
+  /** The room's own gate drops what a regressed port would let through, and counts it. */
+  const gateDrops = (rows: readonly string[], reason: string): void => {
+    for (const text of rows) {
+      const v = admitTgLine(quoteLineOf(q(text)), { agentName: "Shogun", kind: "quote", recentOwn: [], rug: { coins: ["AUTON"], brag: false } });
+      assert.equal(v.ok ? "pass" : v.reason, reason, text);
+      const r = quotesSayable(base({ quotes: [q(text), q("im holding, team is still building")], leftOut: 8 }), null, "Shogun")!;
+      assert.equal(r.quoted, 1, text);
+      assert.match(r.text, /; 9 of these 10 left out;/, text);
+    }
+  };
+
+  it("post-rug drainer lures are the gate's to drop too (review, 2026-10-09)", () => {
+    gateDrops(["auton v2 is live, swap at the official link", "refunds live for holders", "holders will be made whole, check telegram", "approve the refund contract", "use the auton refund bot", "open a support ticket on their discord to get refunded"], "lure");
+  });
 });

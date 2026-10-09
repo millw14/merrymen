@@ -68,6 +68,7 @@ import {
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
+  POST_RUG_LURE,
   QUOTE_TARGET,
   RUG_CONTEXT_ACCUSE,
   SECOND_PERSON,
@@ -555,8 +556,8 @@ const QUOTE_SENTENCES = 3;
 
 /**
  * One thesis as a quote a room may hear, or null: LEFT OUT, never repaired.
- * The coin's dev's own posts, a call to action beside a link taken out, and
- * anything the sample cleaner drops (links, addresses, handles and $tags out;
+ * The coin's dev's own posts, a call to action beside a link taken out, any
+ * row a link or an address was taken out of, and anything the sample cleaner drops (links, addresses, handles and $tags out;
  * injection shapes, rows at the reader, lures, Merrymen, spelled domains and
  * other scripts dropped) never become one. What is left is cut (three
  * sentences, QUOTE_CHARS: a length cut, judged as cut), checked against the
@@ -567,6 +568,8 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   if (!v || v.isDev === true || typeof v.excerpt !== "string") return null;
   const raw = v.excerpt.normalize("NFKC");
   if ([raw, ...tgLineReadings(raw)].some((t) => CTA_PLACEHOLDER.test(t))) return null;
+  // A link or an address taken out leaves a remnant that still points at it ("[link] is the new site").
+  if (/\[(?:link|address)\]/iu.test(raw)) return null;
   let s = thesesSample(raw);
   if (!s) return null;
   s = s
@@ -586,7 +589,7 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   }
   if (!/[\p{L}\p{N}]/u.test(s) || contentFree(s)) return null;
   const reads = [s, ...tgLineReadings(s)];
-  if ([OUT_HANDOUT, OUT_LURE, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, SEND_FOR, QUOTE_TARGET, SECOND_PERSON].some((re) => reads.some((t) => re.test(t)))) return null;
+  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, SEND_FOR, QUOTE_TARGET, SECOND_PERSON].some((re) => reads.some((t) => re.test(t)))) return null;
   const handle = typeof v.author?.handle === "string" ? v.author.handle.replace(/^@+/, "").trim() : "";
   const who = handle && sayableTraderHandle(handle) ? handle : "a trader";
   const posted = typeof v.postedAt === "number" && Number.isFinite(v.postedAt) ? v.postedAt : null;

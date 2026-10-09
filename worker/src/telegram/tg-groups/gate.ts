@@ -57,6 +57,7 @@ import {
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
+  POST_RUG_LURE,
   QUOTE_TARGET,
   RUG_CONTEXT_ACCUSE,
   SECOND_PERSON,
@@ -1589,7 +1590,7 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
  * this is the backstop if either regresses.
  */
 const QUOTE_CLAUSES: ReadonlyArray<[readonly RegExp[], (r: Readings) => readonly string[], string]> = [
-  [[INJECTION_SHAPED, AT_THE_READER, LURE, OUT_LURE, OUT_HANDOUT].map(U).concat([SEND_FOR, CTA_PLACEHOLDER]), (r) => r.low, "lure"],
+  [[INJECTION_SHAPED, AT_THE_READER, LURE, OUT_LURE, OUT_HANDOUT].map(U).concat([SEND_FOR, CTA_PLACEHOLDER, POST_RUG_LURE]), (r) => r.low, "lure"],
   [[U(SPELLED_DOMAIN)], (r) => r.low, "link"],
   [[U(ABOUT_MERRYMEN)], (r) => r.low, "meta"],
   [[NON_LATIN], (r) => r.cased, "script"],

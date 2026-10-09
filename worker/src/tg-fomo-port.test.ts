@@ -72,6 +72,9 @@ import { createCoinFactsReader, FactsLimiter, type FactsFetch } from "./desk/fac
 import { resetDeskReadsForTest } from "./desk/gecko";
 import type { CoinFactsReader } from "./coin-facts-types";
 import type { AnswerFomoResult } from "./fomo/chat";
+import { redactExecutables } from "./fomo/dossier";
+import { sanitizeText } from "./research/news";
+import { quotesSayable } from "./telegram/tg-groups/quotes";
 
 type Rec = Record<string, unknown>;
 
@@ -2756,5 +2759,86 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     } finally {
       r.restore();
     }
+  });
+});
+
+// ─── Quotes a room never hears (review of the quotes, 2026-10-09) ─────────
+
+const REVIEW_NOW = Date.parse("2026-10-09T01:15:00Z");
+type ReviewRow = string | { text: string; handle?: string | null };
+/**
+ * One coin's theses page with the given rows, newest first, each excerpt made
+ * the way fomo/service.ts makes it, asked for as quotes: what the port hands
+ * the room (thesesQuotes) and what the room hears (quotesSayable).
+ */
+function quotedFrom(rows: readonly ReviewRow[], agentName = "Shogun"): { quotes: NonNullable<ReturnType<typeof thesesQuotes>>; said: ReturnType<typeof quotesSayable> } {
+  const theses = rows.map((x, i) => {
+    const row = typeof x === "string" ? { text: x } : x;
+    return {
+      evidenceId: `e${i}`, author: { userId: `u${i}`, handle: row.handle === undefined ? "kaleo" : row.handle }, token: null,
+      postedAt: REVIEW_NOW - (i + 3) * 60_000, stance: "neutral", excerpt: sanitizeText(redactExecutables(sanitizeText(row.text, 2_000)), 280),
+      likes: 1, isDev: false, family: `f${i}`,
+    };
+  });
+  const env = { tool: "fomo_get_token_theses", status: "ok", data: { token: { key: "solana:mainnet:x", chain: { slug: "solana" } }, label: { symbol: "AUTON" }, trader: null, theses }, coverage: { providerTotal: 4199 }, freshness: {} };
+  const r = { handled: true, text: "", toolsCalled: [], analysis: false, clarification: false, plan: { intent: "token-theses", quotes: 10 }, envelopes: [env] } as unknown as AnswerFomoResult;
+  const quotes = thesesQuotes(r, REVIEW_NOW);
+  assert.ok(quotes, "a quote ask on a coin's page is answered with quotes");
+  return { quotes, said: quotesSayable(quotes, null, agentName) };
+}
+/** Each row on its own: left out by the port, counted, and never said. */
+function leftOut(rows: readonly string[]): void {
+  for (const text of rows) {
+    const { quotes, said } = quotedFrom([text]);
+    assert.deepEqual(quotes.quotes, [], `quoted: ${text}`);
+    assert.equal(quotes.leftOut, 1, text);
+    assert.ok(said && said.quoted === 0 && !said.text.includes("•"), `${text} -> ${said?.text}`);
+  }
+}
+/** Each row on its own: quoted. */
+function quoted(rows: readonly string[]): void {
+  for (const text of rows) {
+    const { quotes, said } = quotedFrom([text]);
+    assert.equal(quotes.quotes.length, 1, `left out: ${text}`);
+    assert.equal(said?.quoted, 1, `not said: ${text} -> ${said?.text}`);
+  }
+}
+/** Rug remarks, worries and facts every quote fix keeps. */
+const REVIEW_KEPT = [
+  "team is still building",
+  "chart will recover",
+  "the contract is verified and liquidity is locked",
+  "down from 8m to 36k in a week",
+  "worried the top 10 wallets hold 40% of supply",
+  "this is gonna rug, top holders own way too much",
+  "rugged, holders got wrecked",
+  "holders still bagholding, no recovery in sight",
+  "they said wen listing and the chart woke up, still early on agents",
+  "the agent framework is open source",
+];
+
+describe("quotes a room never hears (review, 2026-10-09)", () => {
+  it("post-rug drainer lures: refunds, compensation, being made whole, approvals, a v2 or a migration, official links, tickets", () => {
+    leftOut([
+      "refunds live for holders",
+      "holders will be made whole, check telegram",
+      "approve the refund contract",
+      "compensation plan for holders, check their x",
+      "go to the pinned post on their x and approve the refund",
+      "v2 launched, migrate now",
+      "new contract is live, old one is dead",
+      "use the auton refund bot",
+      "search auton refund on telegram",
+      "open a support ticket on their discord to get refunded",
+      "admins are giving back sol",
+      "auton v2 is live, swap at the official link",
+      "reimbursement for holders announced",
+      "join the vip group for the next one",
+      "read pinned for refund",
+      "find the refund link in their bio",
+    ]);
+    // What a link or an address taken out leaves behind still points at it.
+    leftOut(["auton(.)xyz is the new site", "autonrefund[.]io for the money back"]);
+    quoted(REVIEW_KEPT);
   });
 });
