@@ -850,14 +850,18 @@ export async function createBilling({
   // readOnly is the operator CLI's view of a running gateway's files: no probe,
   // no config line, no timers. It writes only through openLedger.
   if (readOnly) timers = false;
+  // Billing was asked for and the storage refused it. Then account creation is
+  // refused too: it would otherwise write billing.jsonl onto whatever disk the
+  // missing volume left behind, and the next deploy would wipe those accounts.
+  let storageRefused = false;
   if (mode !== "off" && !readOnly) {
     const problem = await dataDirProblem(dataDir, { persistent: dataDirPersistent });
     const unwritable = problem ? null : await probeWritable(dataDir);
     const why = problem ?? (unwritable && `is not writable (${unwritable})`);
-    if (why) { log(`[billing] ${dataDir} ${why}: billing is off`); mode = "off"; }
+    if (why) { log(`[billing] ${dataDir} ${why}: billing is off`); mode = "off"; storageRefused = true; }
   }
   const ledger = await openLedger({ dataDir, now: clock, log, lockWaitMs, ...(writeLine ? { writeLine } : {}) });
-  if (ledger.blocked() === "unreadable" && mode !== "off") { log("[billing] the ledger cannot be read: billing is off"); mode = "off"; }
+  if (ledger.blocked() === "unreadable" && mode !== "off") { log("[billing] the ledger cannot be read: billing is off"); mode = "off"; storageRefused = true; }
 
   treasury = treasury ? lower(treasury) : null;
   const previous = [...new Set((previousTreasuries ?? []).map(lower))].filter((a) => ADDRESS.test(a) && a !== treasury);
@@ -898,9 +902,14 @@ export async function createBilling({
       configWarned = true;
     }
   }
-  /** Every record createBilling writes goes through here (inside the queue): a pending config line first. */
+  /**
+   * Every record createBilling writes goes through here (inside the queue): a
+   * pending config line first, and nothing at all while it is still pending, so
+   * no payment, charge or account ever lands under a treasury the ledger does not name.
+   */
   async function append(fields, opts) {
     await recordConfigLocked();
+    if (configPending) throw new BillingUnavailable("config");
     return ledger.append(fields, opts);
   }
   /** The CLI's new lines, then a pending config line. */
@@ -1377,6 +1386,7 @@ export async function createBilling({
     },
     hasAccount: (owner) => !!account(owner),
     async createAccount(owner, name) {
+      if (storageRefused) return fail(503, "billing_unavailable", "Developer accounts are unavailable until billing storage is configured.");
       owner = lower(owner);
       if (!ADDRESS.test(owner)) return fail(400, "invalid_address", "Sign in with a wallet first.");
       if (!validName(name)) return fail(400, "invalid_name", "Account name must contain 1–48 characters");

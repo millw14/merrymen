@@ -144,6 +144,14 @@ test("billing never creates its data directory: a missing one turns billing off 
   assert.equal(b.mode, "off");
   assert.match(logs.join("\n"), /data does not exist .*billing is off/);
   await assert.rejects(stat(missing), { code: "ENOENT" }, "the check created nothing");
+  // Nor does a developer creating an account: that would write the ledger onto
+  // the container's disk, and the next deploy would wipe the account.
+  const created = await b.createAccount(`0x${"ab".repeat(20)}`, "Prism");
+  assert.equal(created.status, 503); assert.equal(created.json.error.code, "billing_unavailable");
+  await assert.rejects(stat(missing), { code: "ENOENT" }, "account creation created nothing either");
+  // Billing left off by the operator is not a storage refusal: accounts still work.
+  const plain = await createBilling({ dataDir: await tempDir(), mode: "off", timers: false, log: () => {}, keyRegistry: async () => new Map() });
+  assert.equal((await plain.createAccount(`0x${"ab".repeat(20)}`, "Prism")).status, 201);
 });
 
 test("billing needs its data directory on a mounted volume, unless the operator says the disk itself persists", async () => {
@@ -184,6 +192,28 @@ test("each change to where payments go leaves a config line in the ledger, and a
   assert.match(f.logs.join("\n"), /PAYMENTS CONFIG RECORDED: treasury 0x7f/);
   const off = await fixture({ mode: "off", ...opts });
   assert.equal(await off.raw(), "", "billing off writes nothing at boot");
+});
+
+test("while the config line cannot be written, nothing else is written either", async () => {
+  // Only the config line fails (a full disk at the wrong moment, say): every other
+  // write would succeed, and must still wait, so no account, payment or charge
+  // lands under a treasury the ledger does not name.
+  let failConfig = false;
+  const writeLine = async (file, line) => {
+    if (failConfig && line.includes('"type":"config"')) throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+    return appendFile(file, line, { flush: true });
+  };
+  const f = await fixture({ treasury: TREASURY, startBlock: 100, previousTreasuries: [], writeLine });
+  const moved = `0x${"7c".repeat(20)}`;
+  failConfig = true;
+  await f.restart({ treasury: moved, writeLine });
+  const refused = await f.billing.createAccount(`0x${"cd".repeat(20)}`, "Too early");
+  assert.equal(refused.status, 503); assert.equal(refused.json.error.code, "billing_unavailable");
+  assert.equal((await f.records()).filter((r) => r.type === "account").length, 0, "no account under the unrecorded treasury");
+  failConfig = false;
+  assert.equal((await f.billing.createAccount(`0x${"cd".repeat(20)}`, "Now")).status, 201);
+  assert.deepEqual((await f.records()).filter((r) => r.type === "config" || r.type === "account").map((r) => r.treasury ?? r.type),
+    [TREASURY, moved, "account"], "the config line first, then the account");
 });
 
 test("a config line a dead writer's lock kept out at boot is written later, by the tail or before a payment", async () => {
