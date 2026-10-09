@@ -110,6 +110,21 @@ test('without live billing and a treasury the Plans section says coming soon and
   assert.doesNotMatch(html(PlansSection, { plans: live('enforce') }), /not yet refused/);
 });
 
+test('the Plans copy matches what the gateway does in each billing mode: counted, and a rate shared by keys, only when it is', () => {
+  // Off (as the gateway ships) counts nothing and gives each key its own 30 a minute.
+  for (const [why, plans] of [['off', live('off')], ['fallback', FALLBACK_PLANS]] as const) {
+    const page = html(PlansSection, { plans });
+    assert.doesNotMatch(page, /Every API request counts toward your plan/, why);
+    assert.match(page, /Once plans open, every API request counts toward your plan; <code>\/meta<\/code> stays free/, why);
+  }
+  for (const mode of ['observe', 'enforce'] as const) assert.match(html(PlansSection, { plans: live(mode) }), /Every API request counts toward your plan; <code>\/meta<\/code> is free/, mode);
+  // One bucket for all of an account's keys exists only under enforce; off and observe keep one per key.
+  assert.match(html(PlansSection, { plans: live('enforce') }), /<strong>30<\/strong> requests a minute, shared by your keys<\/li>/);
+  for (const [why, plans] of [['off', live('off')], ['observe', live('observe')], ['fallback', FALLBACK_PLANS]] as const) {
+    assert.match(html(PlansSection, { plans }), /<strong>30<\/strong> requests a minute, shared by your keys once quotas are enforced<\/li>/, why);
+  }
+});
+
 test('the page renders the Plans section on the server, and the stale "no payment" line is gone', () => {
   const page = html(DeveloperConsole, { initialPlans: live() });
   assert.match(page, /id="plans"/); assert.match(page, /href="#plans"/); assert.ok(page.includes('400,000 MERRYMEN'));

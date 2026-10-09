@@ -134,6 +134,8 @@ test('the key footnote states the limit that applies: per key with billing off, 
   assert.equal(keyLimits(live('off'), { kind: 'missing' }), 'Up to 5 active keys · 30 requests/minute per key · Create, read and chat scopes');
   assert.equal(keyLimits(FALLBACK_PLANS, { kind: 'loading' }), 'Up to 5 active keys · 30 requests/minute per key · Create, read and chat scopes');
   assert.match(keyLimits(live(), { kind: 'missing' }), /Free: 30 requests\/minute and 1,000 requests per 30 days, shared by all your keys/);
+  // Observe keeps one per-minute bucket per key and refuses no quota: the footnote must not say the rate is shared.
+  assert.equal(keyLimits(live('observe'), { kind: 'missing' }), 'Up to 5 active keys · Free: 30 requests/minute per key, and 1,000 requests per 30 days counted for all your keys together, not yet enforced · Create, read and chat scopes');
   const crumbs = view({ plan: { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-01T00:00:00.000Z', ends_at: '2026-10-31T00:00:00.000Z', selected: 'crumbs' }, usage: { used: 1, limit: 50_000, by_key: [] } });
   assert.match(keyLimits(live(), { kind: 'ready', view: crumbs }), /Crumbs: 60 requests\/minute and 50,000 requests per 30 days/);
   // Upgraded to Loaf halfway: the period has the time-left share, not Loaf's 30-day figure.

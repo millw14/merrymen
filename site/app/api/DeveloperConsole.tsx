@@ -45,6 +45,8 @@ export function keyLimits(plans: PlansView, account: AccountState): string {
   // A period's own quota (an upgrade's time-left share, a long comp) is this period's, not a 30-day figure.
   const quota = requests === plan.requests ? `${group(requests)} requests per ${plans.period_days} days`
     : `${group(requests)} requests this period (then ${group(plan.requests)} per ${plans.period_days} days)`;
+  // Observe gives each key its own per-minute bucket and refuses no quota; only enforce shares one bucket per account.
+  if (!plans.billing.enforced) return `Up to 5 active keys · ${plan.name}: ${plan.rpm} requests/minute per key, and ${quota} counted for all your keys together, not yet enforced · Create, read and chat scopes`;
   return `Up to 5 active keys · ${plan.name}: ${plan.rpm} requests/minute and ${quota}, shared by all your keys · Create, read and chat scopes`;
 }
 /** "200 OK · …" for the key test, with this period's usage when /meta reports it. */
