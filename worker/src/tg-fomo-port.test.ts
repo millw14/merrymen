@@ -2763,6 +2763,38 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
       r.restore();
     }
   });
+  /** Steps 1 to 3 and the measured fall: the quotes heard, then a measured AUTON permit. */
+  async function measuredRoom() {
+    const r = await shogunRoom();
+    await r.say("shogun what's happening with $AUTON on solana on fomo?");
+    await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
+    await r.say("can you list the last 10", { under: r.lastOwn(), advanceMs: 30_000 });
+    const quoted = r.lastOwn();
+    assert.match(quoted.text, /^• kaleo, /mu, quoted.text);
+    await r.say("shogun what happened to auton", { advanceMs: 60_000 });
+    assert.ok(r.logs.includes("[tg-groups] collapse measured"), r.logs.join("\n"));
+    return { ...r, quoted };
+  }
+  /** A model line said under the measured permit, after a spent-free gap: what reached the room. */
+  const banter = async (r: Awaited<ReturnType<typeof measuredRoom>>, trigger: string, line: string): Promise<string[]> => {
+    r.model.content = line;
+    return r.say(trigger, { fromId: 31337, advanceMs: 25 * 60_000 });
+  };
+
+  it("under the permit the banter never tells the room to get out (review r2)", async () => {
+    const r = await measuredRoom();
+    try {
+      for (const line of ["auton rugged, sell whatever's left", "rugged lol, get out while you can"]) {
+        const out = await banter(r, "shogun lmao auton", line);
+        assert.ok(!out.includes(line), `${line} -> ${out.join(" | ")}`);
+      }
+      const ok = await banter(r, "shogun lmao auton", "auton rugged lol");
+      assert.deepEqual(ok, ["auton rugged lol"], "the permit itself still works");
+    } finally {
+      r.restore();
+    }
+  });
+
   it("past the follow-up window, under the quotes, only an explicit ask or a bare count is quoted by code; anything else is routed (review, 2026-10-09)", async () => {
     const r = await shogunRoom();
     try {

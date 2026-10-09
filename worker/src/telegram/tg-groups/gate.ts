@@ -1272,6 +1272,17 @@ function collapseDoneBy(t: string, doers: ReadonlySet<string>): boolean {
   return false;
 }
 const OUT_ACCUSE_U = U(OUT_ACCUSE);
+/**
+ * TELLING THE ROOM TO GET OUT, under a collapse permit (review r2): a clause
+ * that opens (after fillers, or after a bare "lol") with sell, exit, bail,
+ * dump, get out, cut your losses, stay away, avoid, don't touch or steer
+ * clear ("auton rugged, sell whatever's left", "rugged lol, get out while
+ * you can"). The RUGGED block makes it the likeliest follow-up; "i'd stay
+ * away tbh, rugged" (its own view) and "rugged, then dumped" stay.
+ */
+const RUG_EXIT_ADVICE = U(
+  /(?:^|[.!?,;:—–“‘«„"']\s*|\b(?:lol|lmao)\s+)(?:(?:lol|lmao|ngl|tbh|ok|okay|so|yeah|yo|bro|ser|fam|anon|guys|frens|just|pls|please|go|now|better|y'?all|you|u|ya)[\s,]+)*(?:sell|exit|bail|dump|get out|cut (?:your|ur|the|ya) loss(?:es)?|stay (?:away|out|clear)|avoid|don'?t (?:touch|buy|ape|hold)|steer clear)\b/,
+);
 
 /**
  * A RUG BLAMED ON SOMEONE IN A QUOTE, in any verb (review r2): "auton rugged,
@@ -1868,6 +1879,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (r.low.some((t) => ADVICE.some((re) => re.test(t)))) return refuse("advice");
   // Merrymen as a play beside a rugged coin ("buy merrymen instead"): advice, never a brag.
   if (rug && some(r.low, MERRY_SHILL)) return refuse("advice");
+  if (rug && kind !== "quote" && some(r.low, RUG_EXIT_ADVICE)) return refuse("advice");
   if ((kind === null || FIGURE_KINDS.has(kind)) && r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
   if ((kind === null || CLAIM_KINDS.has(kind)) && r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
   if ((kind === null || PROGRESS_KINDS.has(kind)) && r.low.some((t) => PROGRESS.some((re) => re.test(t.replace(PROGRESS_IDIOM, " "))))) return refuse("progress");

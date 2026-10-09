@@ -1927,6 +1927,16 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
     }
     it(`${kind}: with the permit even a figure nothing to do with money is refused`, () => assert.equal(v("rugged in 2 hours lol", kind), "figures"));
   }
+  it("telling the room to get out under the permit is advice, and its own view stays (review r2)", () => {
+    for (const kind of ["banter", "answer", "coin"] as const) {
+      for (const t of ["auton rugged, sell whatever's left", "auton rugged, exit now", "rugged lol, get out while you can", "rugged, stay away", "rugged. don't touch it", "rugged, avoid it", "it rugged. cut your losses", "auton rugged lol just sell", "rugged, steer clear"]) {
+        assert.equal(v(t, kind), "advice", `${kind}: ${t}`);
+      }
+      for (const t of ["rugged cause it wasn't merrymen 😤", "auton rugged lol", "auton dumped hard, rugged", "it ran then rugged lol", "rugged, holders got wrecked", "i'd stay away tbh, rugged", "rugged, then dumped"]) {
+        assert.equal(v(t, kind), "ok", `${kind}: ${t}`);
+      }
+    }
+  });
   it("with the brag spent (brag false) a brag in other words waits too (review, 2026-10-09)", () => {
     for (const t of ["rugged. wasn't ours 😤", "auton? should've been ours 😤", "rugged, not one of us"]) assert.equal(v(t, "banter", { coins: ["AUTON"], brag: false }), "repeat", t);
     assert.equal(v("rugged. wasn't ours 😤", "banter", { coins: ["AUTON"], brag: true }), "ok");
