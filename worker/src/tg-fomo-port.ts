@@ -822,6 +822,8 @@ export const FACTS_BUSY = "I've looked up enough market data in here for now; as
 export const factsUnreadLine = (sym: string): string => `Couldn't read the market data for ${sym} just now, try again in a bit.`;
 export const factsNotFoundLine = (sym: string, where: string): string => `I couldn't find a market for ${sym}${where ? ` on ${where}` : ""} to measure.`;
 export const factsWhichLine = (sym: string): string => `Which ${sym} do you mean? Fomo lists it on more than one chain; say the chain.`;
+/** Two coins of one ticker on the one chain: never "say the chain" again. */
+export const factsSameChainLine = (sym: string, where: string): string => `Fomo lists more than one ${sym} on ${where}, so I can't tell which one you mean.`;
 export const factsUnknownLine = (sym: string): string => `I couldn't find ${sym} on Fomo.`;
 export const factsUnsupportedLine = (sym: string): string => `I can't measure ${sym} on that chain.`;
 
@@ -1036,7 +1038,13 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
       charged = !!env && !(env.usage?.providerCalls === 0);
       if (!env || env.status === "failed" || env.status === "unavailable" || env.status === "not-authorized") return say(GROUP_FOMO_UNREACHED, { status: env?.status === "unavailable" ? "unavailable" : "failed" });
       if (env.status === "budget-limited") return say(groupRefusalLine(env.reason, now(), env.retryAt ?? null), { status: "budget-limited" });
-      if (env.status === "needs-clarification") return say(factsWhichLine(sym), charged ? {} : { free: true });
+      if (env.status === "needs-clarification") {
+        // Two coins of that ticker on the one chain asked (or the only chain they are on): asking for the chain
+        // again would loop, and the facts path takes no address, so say plainly it cannot tell (review r2).
+        const chains = new Set((env.candidates ?? []).flatMap((c) => (c?.subject?.kind === "token" ? [String(c.subject.token.chain.slug)] : [])));
+        const one = req.chain ? CHAIN_WORDS[req.chain] : chains.size === 1 ? [...chains][0]! : null;
+        return say(one ? factsSameChainLine(sym, chainLabel(one)) : factsWhichLine(sym), charged ? {} : { free: true });
+      }
       const subj = env.subject as ResolvedSubject | null;
       if (env.status === "not-found" || !subj || subj.kind !== "token") return say(factsUnknownLine(sym), charged ? {} : { free: true });
       token = subj.token;

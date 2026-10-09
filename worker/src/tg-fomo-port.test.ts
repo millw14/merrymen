@@ -2545,7 +2545,7 @@ describe("a coin's facts: measured, with their source and time, and what could n
     assert.equal(await ask(), null, "no reader wired: not answered here");
     const unknown = await createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: busy }).ask({ text: "x", request: { ...req, symbol: "NOPE", chain: undefined }, chatId: GROUP - 7 });
     assert.match(unknown!.text, /^I couldn't find NOPE on Fomo\.$|^Which NOPE do you mean\?/);
-    for (const t of ["I've looked up enough market data in here for now; ask again in a few minutes.", "Couldn't read the market data for AUTON just now, try again in a bit.", "I couldn't find a market for AUTON on Solana to measure.", "I couldn't find NOPE on Fomo.", "Which AUTON do you mean? Fomo lists it on more than one chain; say the chain."]) {
+    for (const t of ["I've looked up enough market data in here for now; ask again in a few minutes.", "Couldn't read the market data for AUTON just now, try again in a bit.", "I couldn't find a market for AUTON on Solana to measure.", "I couldn't find NOPE on Fomo.", "Which AUTON do you mean? Fomo lists it on more than one chain; say the chain.", "Fomo lists more than one AUTON on Solana, so I can't tell which one you mean."]) {
       assert.ok(admitTgLine(t, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, t);
     }
   });
@@ -2559,6 +2559,22 @@ describe("a coin's facts: measured, with their source and time, and what could n
       for (const l of lines) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, `${sym}: ${l}`);
     }
     assert.deepEqual(coinFactsLines(r.facts, "AUTON", "what", AUTON_NOW), PINNED_WHAT, "a sayable ticker is named as before");
+  });
+
+  it("two coins of one ticker on the chain asked are said plainly, never 'say the chain' again (review r2)", async () => {
+    const two = (): Rec => ({ tokens: [
+      { symbol: "AUTON", address: AUTON_MINT, name: "auton", image: null, marketCapUsd: 36_000, networkId: 1399811149 },
+      { symbol: "AUTON", address: "So11111111111111111111111111111111111111112", name: "auton two", image: null, marketCapUsd: 9_000, networkId: 1399811149 },
+    ] });
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: two });
+    s.clock.now = AUTON_NOW;
+    const reader: CoinFactsReader = async () => ({ ok: false, why: "busy" });
+    const req = { kind: "coin" as const, symbol: "AUTON", aspect: "facts" as const, ask: "what" as const };
+    for (const [chatId, chain] of [[GROUP - 11, "solana"], [GROUP - 12, undefined]] as const) {
+      const r = await createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: reader }).ask({ text: "x", request: { ...req, ...(chain ? { chain } : {}) }, chatId });
+      assert.equal(r!.text, "Fomo lists more than one AUTON on Solana, so I can't tell which one you mean.", String(chain));
+      assert.doesNotMatch(r!.text, /more than one chain|say the chain/u);
+    }
   });
 
   it("a coin 40% below its high is measured, and is no collapse", async () => {
