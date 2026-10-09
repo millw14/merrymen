@@ -219,6 +219,14 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
       if (!this.owns(pathname)) return null;
       const route = pathname.slice(PARTNER_PREFIX.length) || "/";
 
+      // The hosted runtime's own body limits (web/src/lib/partner-service.ts):
+      // 32 KiB, 256 KiB for an activation's grant. Refused here, before the key
+      // is checked or a request metered, so a body the runtime could never take
+      // costs no quota and never reaches it.
+      if (method === "POST" && Buffer.byteLength(body) > (route.endsWith("/activate") ? 256 * 1024 : 32 * 1024)) {
+        return partnerError(413, "bad_request", "Request body is too large");
+      }
+
       if (method === "GET" && route === "/") {
         return { status: 200, json: {
           service: "merrymen-partner-api", api_version: version,
