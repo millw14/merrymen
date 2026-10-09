@@ -2167,7 +2167,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
  * nothing.
  */
 const FOMO_FOLLOW_UP =
-  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|list|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|paraphras\w*|in their words|the (?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|paraphras\w*|in their words|the (?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
 /** "Don't summarise", "no summary", "without paraphrasing": an ask, with no question mark (the theses themselves). */
 const NEGATED_SUMMARY = /\b(?:don'?t|dont|do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u;
 /** "Summarise them", "sum it up", "recap": asked for, with no question mark (the digest, again). */
@@ -2195,7 +2195,8 @@ export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []):
   if (!t || COIN_STOP.test(t)) return false;
   if (wordsOf(t).length > FOLLOW_UP_MAX_WORDS) return false;
   const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames) || NEGATED_SUMMARY.test(t) || SUMMARY_REQUEST.test(t);
-  return asked && (FOMO_FOLLOW_UP.test(t) || FOMO_ROW_REF.test(t) || (FOMO_PERSON.test(t) && FOMO_TRADER_VERB.test(t)));
+  // A quote ask is a cue only as the planner reads it ("can you list the last 10", never "can you list some good movies").
+  return asked && (FOMO_FOLLOW_UP.test(t) || thesesQuotesOf(text, selfNames) !== null || FOMO_ROW_REF.test(t) || (FOMO_PERSON.test(t) && FOMO_TRADER_VERB.test(t)));
 }
 
 // ── a coin's theses, quoted; a coin's facts; a room saying it rugged ───────
@@ -2223,18 +2224,20 @@ function quoteCanon(text: string, selfNames: readonly string[]): string {
  * import fomo/): keep the two in step; detect.test.ts pins that they agree
  * on a shared table of lines.
  */
-const QUOTE_NUM = String.raw`(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)`;
+const QUOTE_NUM = String.raw`(?:\d{1,3}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)`;
 const QUOTES: readonly RegExp[] = [
   /\b(?:quote|quotes|quoted|verbatim|word for word|exact words|exactly what|in their (?:own )?words|raw (?:theses|posts|text|texts|words)|actual (?:theses|posts|words|texts?)|full (?:theses|text|texts|posts))\b/u,
   /\bwhat (?:did|do|does) (?:they|people|traders|folks|the traders|he|she) (?:say|said|write|wrote|post|posted) exactly\b/u,
   /\b(?:do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u,
   /\b(?:show|give|post|paste|send|list|drop) (?:me |us )?(?:(?:all (?:of )?)?(?:the|these|those|their) (?:theses|posts|takes|quotes|texts?|tweets|messages|words)\b|(?:them|these|those|em)(?: (?:all|pls|please|now|here|again))*$)/u,
   new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent) ${QUOTE_NUM}\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)`, "u"),
-  /(?:^|\b(?:can|could|would|will) (?:you|u) |\b(?:pls|please|just|now|then|and|so|ok|okay|yo) )list\b|\blist (?:them|these|those|the|their|all|out|me|em|it)\b/u,
+  new RegExp(String.raw`(?:^|\b(?:can|could|would|will) (?:you|u) |\b(?:pls|please|just|now|then|and|so|ok|okay|yo) )list(?: (?:them|these|those|em|it|all|out))*(?: (?:the |their )?(?:last|latest|newest|recent|most recent) ${QUOTE_NUM})?(?: (?:theses|posts|takes|quotes))?(?: (?:pls|please|now|here|again|for me))*$`, "u"),
 ];
+const QUOTE_OTHER_ASPECT = /\b(?:buy|buys|buyers?|bought|buying|sells?|sellers?|sold|selling|trades?|trading|holders?|holding|holdings|coins?|tokens?)\b/u;
+const QUOTE_THESES_NOUN = /\b(?:theses|quotes|posts|takes)\b/u;
 const QUOTES_MAX = 10;
 const QUOTE_WORDS: Readonly<Record<string, number>> = {
-  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
+  two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
 };
 const QUOTE_COUNT = new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent|list|show me|give me) (${QUOTE_NUM})\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)|\b(${QUOTE_NUM}) (?:of (?:the |their )?)?(?:theses|quotes|posts|takes|of them)\b`, "u");
 
@@ -2250,6 +2253,7 @@ export function thesesQuotesOf(text: string, selfNames: readonly string[] = []):
   if (typeof text !== "string" || !text.trim()) return null;
   const c = quoteCanon(text, selfNames);
   if (!c || !QUOTES.some((re) => re.test(c))) return null;
+  if (QUOTE_OTHER_ASPECT.test(c) && !QUOTE_THESES_NOUN.test(c)) return null;
   const m = QUOTE_COUNT.exec(c);
   const raw = m ? (m[1] ?? m[2] ?? "") : "";
   const n = /^\d+$/u.test(raw) ? Number(raw) : QUOTE_WORDS[raw] ?? QUOTES_MAX;

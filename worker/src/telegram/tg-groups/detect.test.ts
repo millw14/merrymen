@@ -1189,6 +1189,19 @@ describe("the theses themselves, a coin's facts, and a room saying it rugged (Mi
     for (const t of rows) assert.deepEqual(thesesQuotesOf(t, names), quotesAskedIn(t), t);
   });
 
+  it("a list or a 'last one' about something else is never quotes, nor a follow-up for a list alone (review, 2026-10-09)", () => {
+    for (const t of ["shogun can you list some good movies?", "shogun can you list your favourite coins?", "shogun who was the last one to sell?", "what was the latest one?", "shogun show me the last 5 buys", "can you list the last 10 sellers", "who are the last 5 buyers?", "the last one"]) {
+      assert.equal(thesesQuotesOf(t, names), null, t);
+      assert.deepEqual(thesesQuotesOf(t, names), quotesAskedIn(t.replace(/^shogun /u, "")), t);
+    }
+    assert.equal(fomoFollowUpOf("shogun can you list some good movies?", names), false);
+    assert.equal(fomoFollowUpOf("shogun can you list your favourite coins?", names), false);
+    for (const t of ["can you list the last 10", "pls list", "shogun list them", "show me the last 5"]) {
+      assert.ok(thesesQuotesOf(t, names), t);
+      assert.equal(fomoFollowUpOf(t, names), true, t);
+    }
+  });
+
   it("'summarise them' and 'don't summarise' are asked even with no question mark", () => {
     assert.equal(fomoFollowUpOf("summarise them", names), true);
     assert.equal(fomoFollowUpOf("dont summarise", names), true);

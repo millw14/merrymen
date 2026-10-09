@@ -454,21 +454,25 @@ const THESES = /\btheses\b/;
  * are people saying" and "any theses?" stay the digest; "show me the data" or
  * "the chart" are never quotes.
  */
-const QUOTE_NUM = String.raw`(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)`;
+const QUOTE_NUM = String.raw`(?:\d{1,3}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)`;
 const QUOTES: readonly RegExp[] = [
   /\b(?:quote|quotes|quoted|verbatim|word for word|exact words|exactly what|in their (?:own )?words|raw (?:theses|posts|text|texts|words)|actual (?:theses|posts|words|texts?)|full (?:theses|text|texts|posts))\b/,
   /\bwhat (?:did|do|does) (?:they|people|traders|folks|the traders|he|she) (?:say|said|write|wrote|post|posted) exactly\b/,
   /\b(?:do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/,
   /\b(?:show|give|post|paste|send|list|drop) (?:me |us )?(?:(?:all (?:of )?)?(?:the|these|those|their) (?:theses|posts|takes|quotes|texts?|tweets|messages|words)\b|(?:them|these|those|em)(?: (?:all|pls|please|now|here|again))*$)/,
   new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent) ${QUOTE_NUM}\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)`),
-  /(?:^|\b(?:can|could|would|will) (?:you|u) |\b(?:pls|please|just|now|then|and|so|ok|okay|yo) )list\b|\blist (?:them|these|those|the|their|all|out|me|em|it)\b/,
+  // A bare "list" only when nothing but a pointer, a "last N" and a theses noun follow ("can you list the last 10", "pls list"): never "can you list some good movies".
+  new RegExp(String.raw`(?:^|\b(?:can|could|would|will) (?:you|u) |\b(?:pls|please|just|now|then|and|so|ok|okay|yo) )list(?: (?:them|these|those|em|it|all|out))*(?: (?:the |their )?(?:last|latest|newest|recent|most recent) ${QUOTE_NUM})?(?: (?:theses|posts|takes|quotes))?(?: (?:pls|please|now|here|again|for me))*$`),
 ];
+/** Another aspect named ("the last 5 buys", "the last 10 sellers", "list the trending coins"): never quotes, unless the theses are named too. */
+const QUOTE_OTHER_ASPECT = /\b(?:buy|buys|buyers?|bought|buying|sells?|sellers?|sold|selling|trades?|trading|holders?|holding|holdings|coins?|tokens?)\b/;
+const QUOTE_THESES_NOUN = /\b(?:theses|quotes|posts|takes)\b/;
 /** "Summarise them", "sum it up", "recap", the whole line: the digest again, after a coin's theses. */
 const SUMMARY_ASK = /^(?:(?:can|could|would|will) you |pls |please |just |ok |okay |so |now |then |and )*(?:summari[sz]e|sum (?:them|it|these|those|that) up|recap|tldr|tl dr)(?: (?:them|it|these|those|that|the theses|em|all|again|for me|pls|please))*$/;
 /** The most theses a room hears quoted, whatever was asked. */
 export const QUOTES_MAX = 10;
 const QUOTE_WORDS: Readonly<Record<string, number>> = {
-  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
+  two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
 };
 const QUOTE_COUNT = new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent|list|show me|give me) (${QUOTE_NUM})\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)|\b(${QUOTE_NUM}) (?:of (?:the |their )?)?(?:theses|quotes|posts|takes|of them)\b`);
 
@@ -479,6 +483,7 @@ const QUOTE_COUNT = new RegExp(String.raw`\b(?:last|latest|newest|recent|most re
  */
 export function quotesOf(c: string): { n: number; asked: number } | null {
   if (typeof c !== "string" || !QUOTES.some((re) => re.test(c))) return null;
+  if (QUOTE_OTHER_ASPECT.test(c) && !QUOTE_THESES_NOUN.test(c)) return null;
   const m = QUOTE_COUNT.exec(c);
   const raw = m ? (m[1] ?? m[2] ?? "") : "";
   const n = /^\d+$/.test(raw) ? Number(raw) : QUOTE_WORDS[raw] ?? QUOTES_MAX;

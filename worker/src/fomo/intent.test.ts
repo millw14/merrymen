@@ -1035,6 +1035,18 @@ describe("the theses themselves, on an explicit ask (Milla, 2026-10-09)", () => 
     }
   });
 
+  it("a list or a 'last one' about something else is never quotes (review, 2026-10-09)", () => {
+    assert.equal(plan("can you list some good movies?"), null);
+    assert.equal(plan("can you list your favourite coins?"), null);
+    assert.equal(plan("who was the last one to sell?"), null);
+    assert.equal(plan("show me the last 5 buys"), null);
+    assert.equal(plan("can you list the last 10 sellers")?.quotes, undefined);
+    assert.equal(plan("who are the last 5 buyers?")?.quotes, undefined);
+    assert.equal(plan("what was the latest one?")?.quotes, undefined);
+    assert.equal(plan("the last one")?.quotes, undefined);
+    for (const text of ["can you list the last 10", "pls list", "list them", "show me the last 5", "list the last 25 theses on $AUTON"]) assert.ok(plan(text)?.quotes, text);
+  });
+
   it("'show me the data' and a time window are never quotes", () => {
     assert.notEqual(plan("show me the data")?.intent, "token-theses");
     assert.equal(plan("show me the data")?.quotes, undefined);
