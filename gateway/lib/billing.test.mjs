@@ -1006,7 +1006,9 @@ test("flush() says whether every count made before it is on disk, for counts mad
   assert.ok(results.every(Boolean));
   const saved = JSON.parse(await readFile(path.join(f.dir, "usage.json"), "utf8"));
   assert.equal(Object.values(saved.windows)[0].total, 20);
-  // A write that fails says so, and the counts are written by the next one.
+  // A write that fails says so to the counts it held, and the next one writes them.
+  // A count an earlier write already saved is not refused because a later one failed.
+  assert.equal(await f.billing.flush(), true, "nothing new: already on disk");
   await mkdir(path.join(f.dir, "usage.json.tmp"));
   f.billing.reserve({ owner: OWNER, keyId: "k1" });
   assert.equal(await f.billing.flush(), false);

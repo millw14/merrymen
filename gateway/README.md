@@ -290,7 +290,7 @@ billing writes stop until restart.
 | File | What it is |
 | --- | --- |
 | `billing.jsonl` | The ledger: one JSON record a line (`account`, `select`, `payment`, `charge`, `reversal`, `adjustment`, `config`), each flushed by the append that wrote it and at most 4 KiB. Replayed once at boot. Replay enforces the money rules itself: a transfer is credited once per (chain, transaction, sender), and a repeated record or charge id is ignored. A charge records the cost, quota and rate it was charged at, so editing `lib/billing-plans.mjs` never changes a period already paid for. A torn last line is cut before the next append. |
-| `usage.json` | Request counts per usage window. Written whole and renamed into place before each counted request is served (requests arriving together share one write), so a crash forgets no served request; under enforce, a count that cannot be written is refused with 503 `billing_unavailable` and given back. Give-backs for platform failures are saved by the next write, the 10 s timer or shutdown. Windows that ended more than 30 days ago are dropped. If it is unreadable, counts start empty and boot says so. |
+| `usage.json` | Request counts per usage window, written whole and renamed into place. Under enforce, a counted request is served only once a write covering its count has landed (requests arriving together share one write), so a crash forgets no served request; a count that has not landed within 2 s is given back and refused with 503 `billing_unavailable`. Observe writes soon after, without waiting. Give-backs for platform failures are saved by the next write, the 10 s timer or shutdown. Windows that ended more than 30 days ago are dropped. If it is unreadable, counts start empty and boot says so. |
 | `partners.jsonl` | The key registry, as before. Its torn tail is now cut before each append too. |
 | `billing.jsonl.lock`, `partners.jsonl.lock` | Held for each repair-and-append, by the gateway and by both CLIs, so one never cuts a line the other is still writing. A lock older than 10 s (a writer that died mid-append) is removed. An append that cannot take the lock within 5 s is refused with nothing written: the developer API answers 503 `billing_unavailable` for `billing.jsonl` and 503 `unavailable` for `partners.jsonl` (key create or revoke), and the CLI says to run the command again. |
 
@@ -385,8 +385,9 @@ how many. Queued billing writes then finish (5 s at most), `usage.json` is
 saved, and the process exits 0. A second signal exits 1 at once, and a
 shutdown still going after 10 s exits 1. Give the process that long before
 SIGKILL (on Railway, `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` of 12 or more), or
-a deploy loses the counts a crash would. The ledger needs nothing at
-shutdown: every record is flushed by the append that wrote it.
+a deploy can charge partners for the requests it cut off (served counts are
+already on disk under enforce). The ledger needs nothing at shutdown: every
+record is flushed by the append that wrote it.
 
 ### Operator CLI: `billing-cli.mjs`
 

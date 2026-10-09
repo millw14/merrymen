@@ -595,9 +595,10 @@ transfer is final again, it is credited again.
   at the earlier of the wallet's first API key (revoked keys included) and its
   account's creation, so revoking keys or creating the account later does not
   start a fresh window.
-- A counted request is recorded before it is answered, so a gateway crash never
-  forgets a request you were served. If the count cannot be recorded, enforce
-  answers 503 `billing_unavailable` (not counted; resend) rather than serving it.
+- Under enforcement a counted request is recorded before it is answered, so a
+  gateway crash never forgets a request you were served. If the count cannot
+  be recorded within 2 seconds, the gateway answers 503 `billing_unavailable`
+  (the unit is given back; resend) rather than serving it.
 
 Every counted answer, and `/meta`, carries these headers:
 

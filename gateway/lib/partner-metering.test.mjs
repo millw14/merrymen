@@ -9,7 +9,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createBilling, openLedger } from "./billing.mjs";
@@ -39,13 +39,13 @@ function countingStore() {
   } };
 }
 
-async function fixture({ mode = "enforce", plans = SMALL, keys = [key("k1")], forward = async () => ({ status: 200, json: { agents: [] } }), billing: wired = true } = {}) {
+async function fixture({ mode = "enforce", plans = SMALL, keys = [key("k1")], forward = async () => ({ status: 200, json: { agents: [] } }), billing: wired = true, ...billingOptions } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "merrymen-metering-"));
   dirs.push(dir);
   const clock = { t: START };
   const logs = [];
   const registry = new Map(keys.map((k) => [k.keyId, k]));
-  const boot = () => createBilling({ dataDir: dir, dataDirPersistent: true, mode, plans, now: () => clock.t, log: (l) => logs.push(l), timers: false, keyRegistry: async () => registry });
+  const boot = () => createBilling({ dataDir: dir, dataDirPersistent: true, mode, plans, now: () => clock.t, log: (l) => logs.push(l), timers: false, keyRegistry: async () => registry, ...billingOptions });
   const f = { dir, clock, logs, store: countingStore(), forwards: [], file: path.join(dir, "billing.jsonl") };
   f.forward = forward;
   const partners = { verify: async (raw) => { const k = registry.get(raw.replace(/^tok_/, "")); return k ? { ok: true, key: { ...k } } : { ok: false, status: 401, code: "unauthorized" }; },
@@ -375,4 +375,55 @@ test("a count that cannot be written is not served under enforce, and is served 
     await rm(path.join(f.dir, "usage.json.tmp"), { recursive: true });
     assert.equal((await f.call("/agents")).status, 200, `${mode}: served again once usage can be written`);
   }
+});
+
+test("a steady stream of counted requests shares usage writes, so waiting does not grow with the stream", async () => {
+  // A one-flag version let each finished write release only the request that
+  // started it: with requests every 2 ms and 20 ms writes, waits grew with the
+  // stream (measured: median 356 ms, worst 673 ms over 300 requests) instead of
+  // staying near one or two writes (31 ms, 53 ms).
+  const usageWrite = async (file, text) => { await new Promise((r) => setTimeout(r, 20)); await writeFile(file, text); };
+  const big = { ...SMALL, free: { ...SMALL.free, requests: 1_000, rpm: 10_000 } };
+  const f = await fixture({ plans: big, usageWrite });
+  const waits = [];
+  const calls = [];
+  for (let i = 0; i < 200; i++) {
+    const t0 = Date.now();
+    calls.push(f.call("/agents").then((r) => { waits.push(Date.now() - t0); return r; }));
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  const answers = await Promise.all(calls);
+  assert.ok(answers.every((r) => r.status === 200));
+  assert.equal(f.used(), 200);
+  assert.ok(Math.max(...waits) < 250, `longest wait ${Math.max(...waits)} ms`);
+});
+
+test("a usage write that stalls is refused within the bound under enforce, and never holds observe", async () => {
+  const stall = () => new Promise(() => {});
+  for (const mode of ["enforce", "observe"]) {
+    const f = await fixture({ mode, usageWrite: stall, usageWaitMs: 50 });
+    const started = Date.now();
+    const r = await f.call("/agents");
+    assert.ok(Date.now() - started < 1_000, `${mode}: answered without waiting on the stalled disk`);
+    if (mode === "enforce") {
+      assert.equal(r.status, 503); assert.equal(r.json.error.code, "billing_unavailable");
+      assert.equal(f.forwards.length, 0); assert.equal(f.used(), 0, "given back");
+    } else {
+      assert.equal(r.status, 200); assert.equal(f.used(), 1);
+    }
+  }
+});
+
+test("a request still waiting for its count to land is given back by shutdown, and not forwarded after", async () => {
+  let release;
+  const usageWrite = (file, text) => new Promise((resolve) => { release = async () => { await writeFile(file, text); resolve(); }; });
+  const f = await fixture({ usageWrite, usageWaitMs: 5_000 });
+  const pending = f.call("/agents");
+  await new Promise((r) => setTimeout(r, 20)); // it is now waiting on the write
+  assert.equal(f.api.releaseUnfinished(), 1, "shutdown sees the request that is waiting");
+  await release();
+  const r = await pending;
+  assert.equal(r.status, 503); assert.equal(r.json.error.code, "upstream_unavailable");
+  assert.equal(f.forwards.length, 0, "never forwarded after shutdown gave it back");
+  assert.equal(f.used(), 0, "given back once, not twice");
 });

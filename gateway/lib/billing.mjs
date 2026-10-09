@@ -63,6 +63,8 @@
  *   timers         false in tests: no 10 s tail/flush or 5 min reconcile timers
  *   readTimeoutMs  per chain read (10 s); give createPaymentsClient the same timeoutMs
  *   settleWaitMs   how long prepare() waits for a settle (2 s)
+ *   usageWaitMs    how long durable() waits for a counted request to reach usage.json (2 s)
+ *   usageWrite     (tmpPath, text) -> writes usage.json's temp file (tests slow, stall or count it)
  *   readOnly       the operator CLI's view: no write probe, no config line, no timers
  *   writeLine      (file, line) => Promise, the append itself; tests inject failures here
  *   lockWaitMs     how long an append waits for billing.jsonl.lock, held by another
@@ -110,8 +112,9 @@
  *     {ok:true, metered, ticket, headers}  or  {ok:false, status:402, error:{code:
  *     "quota_exhausted", message, plan, limit, used, resets_at, upgrade_url}, headers}
  *     (the caller adds request_id; headers carry the quota and retry-after)
- *   await billing.flush()               after a counted reserve and BEFORE serving: true once the
- *                                       count is on disk (usage.json); false -> enforce refuses (503)
+ *   await billing.durable()             under enforce, after a counted reserve and BEFORE serving:
+ *                                       true once a write covering the count landed (usage.json),
+ *                                       false if it failed or took over 2 s -> refuse (503)
  *   billing.release(ticket)             when isPlatformFailure(status, code) holds
  *   billing.meta(owner, keyCreatedAt) -> {billing|null, rate_per_min|null, headers} for /meta
  *   quotaHeaders(...) and isPlatformFailure(...) are exported.
@@ -141,6 +144,8 @@ const USAGE_FLUSH_MS = 10_000;
 const RECONCILE_MS = 5 * 60_000;
 const RECONCILE_WINDOW_MS = 30 * 60_000;
 const SETTLE_WAIT_MS = 2_000;
+/** How long the gate waits for a counted request to reach usage.json before enforce refuses it. */
+const USAGE_WAIT_MS = 2_000;
 const READ_TIMEOUT_MS = 10_000;
 const CLOSE_DRAIN_MS = 5_000;
 /**
@@ -852,6 +857,7 @@ export async function createBilling({
   minConfirmations = 64, minAgeSec = 120, publicClient = null,
   now: clock = Date.now, log = console.error, plans = PLANS, keyRegistry = loadRegistry,
   timers = true, writeLine, readTimeoutMs = READ_TIMEOUT_MS, settleWaitMs = SETTLE_WAIT_MS, readOnly = false, lockWaitMs = 5_000,
+  usageWrite = (file, text) => writeFile(file, text, { encoding: "utf8", flush: true }), usageWaitMs = USAGE_WAIT_MS,
   dataDirPersistent = false,
 } = {}) {
   validatePlans(plans);
@@ -934,7 +940,10 @@ export async function createBilling({
   const usageFile = path.join(dataDir, USAGE_FILE);
   /** `${owner}|${Free window start}` or `${owner}|${period_id}` -> {end, total, keys: Map(keyId -> n)} */
   const usage = new Map();
-  let usageDirty = false;
+  // Every count and give-back bumps usageGen. A write covers the generation it
+  // snapshotted; savedGen is the newest one a SUCCESSFUL write covered.
+  let usageGen = 0;
+  let savedGen = 0;
   let usageWriting = null;
   if (mode !== "off") {
     try {
@@ -959,31 +968,40 @@ export async function createBilling({
     const tmp = `${usageFile}.tmp`;
     // No mkdir: the directory was there at boot (the durability gate), and one
     // gone since is a volume gone, which a write on the container's disk hides.
-    await writeFile(tmp, JSON.stringify({ v: 1, windows }), { encoding: "utf8", flush: true });
+    await usageWrite(tmp, JSON.stringify({ v: 1, windows }));
     await rename(tmp, usageFile);
   }
 
   /**
-   * usage.json, written whole and renamed into place. Resolves true once every
-   * count made before the call is on disk, false if the write failed. A write
-   * already in flight when a count was made does not hold it, so this waits for
-   * that write and then writes again; counts made meanwhile share the next write,
-   * so under load requests commit in groups. The partner gate awaits it before
-   * serving a counted request (a crash must not forget a unit it served); the
-   * 10 s timer and shutdown pick up what nothing awaited (a give-back).
+   * usage.json, written whole and renamed into place. Resolves true once a
+   * successful write covered every count made before the call, false if the
+   * write this call started failed. One write runs at a time; everyone whose
+   * counts it covered returns when it lands, so a steady stream of requests
+   * shares writes instead of queueing one each. The partner gate awaits it
+   * (through durable(), bounded) before serving a counted request; the 10 s
+   * timer and shutdown pick up what nothing awaited (a give-back).
    */
-  let usageFailed = false;
   async function flush() {
-    while (usageWriting) await usageWriting;
     if (mode === "off") return true;
-    if (!usageDirty) return !usageFailed;
-    usageDirty = false;
-    usageWriting = writeUsage()
-      .then(() => { usageFailed = false; })
-      .catch((err) => { usageDirty = true; usageFailed = true; log(`[billing] could not write ${USAGE_FILE} (${errName(err)})`); })
-      .finally(() => { usageWriting = null; });
-    await usageWriting;
-    return !usageFailed;
+    const want = usageGen;
+    let attempted = false;
+    for (;;) {
+      if (savedGen >= want) return true;
+      if (usageWriting) { await usageWriting; continue; }
+      if (attempted) return false; // the write this call started, which covered `want`, failed
+      attempted = true;
+      const gen = usageGen; // the snapshot below is taken before writeUsage's first await
+      usageWriting = writeUsage()
+        .then(() => { savedGen = Math.max(savedGen, gen); })
+        .catch((err) => { log(`[billing] could not write ${USAGE_FILE} (${errName(err)})`); })
+        .finally(() => { usageWriting = null; });
+    }
+  }
+  /** flush(), but false after `ms` (a stalled volume must not hang every request). Its timer stays referenced: see withTimeout. */
+  async function durable(ms = usageWaitMs) {
+    let timer;
+    const late = new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); });
+    try { return await Promise.race([flush(), late]); } finally { clearTimeout(timer); }
   }
 
   // ── Free window anchors ──
@@ -1486,7 +1504,7 @@ export async function createBilling({
       win.total += 1;
       const id = String(keyId ?? "-");
       win.keys.set(id, (win.keys.get(id) ?? 0) + 1);
-      usageDirty = true;
+      usageGen += 1;
       return { ok: true, metered: true, ticket: { key, keyId: id }, headers: quotaHeaders(quotaOf(plan, win.total)) };
     },
     /** Give a unit back. Never below zero, and only to the window it came from. */
@@ -1496,7 +1514,7 @@ export async function createBilling({
       if (w.total > 0) w.total -= 1;
       const n = w.keys.get(ticket.keyId) ?? 0;
       if (n > 1) w.keys.set(ticket.keyId, n - 1); else w.keys.delete(ticket.keyId);
-      usageDirty = true;
+      usageGen += 1;
     },
     /** For /meta, unmetered: the effective rate and the plan, read without counting. */
     meta(owner, keyCreatedAt) {
@@ -1516,6 +1534,7 @@ export async function createBilling({
     tail,
     reconcile,
     flush,
+    durable,
     /** Stop the timers, let queued billing writes finish (5 s at most), then save usage. */
     async close() {
       for (const h of handles) clearInterval(h);

@@ -375,9 +375,11 @@ server.listen(PORT, () => {
 });
 
 /**
- * A deploy (SIGTERM) or Ctrl-C (SIGINT) saves the partner usage counts before
- * the process goes. usage.json is otherwise written every 10 s, so every deploy
- * would drop up to that much metering. New connections stop at once; requests
+ * A deploy (SIGTERM) or Ctrl-C (SIGINT) saves what is left of the partner usage
+ * before the process goes. Under enforce every served count is already in
+ * usage.json (the gate waits for it); what is left are units given back (a
+ * platform failure, a request cut off below) and observe's counts, which the
+ * 10 s timer would otherwise pick up. New connections stop at once; requests
  * already inside get up to 3 s to finish, so their answers reach the partner
  * and what they counted, or gave back on a platform failure, is in what is
  * saved. One still running after that is cut off, as it always was, and gives
@@ -387,7 +389,7 @@ server.listen(PORT, () => {
  * made it. A second signal exits at once, and so does a close still hanging
  * after 10 s, rather than waiting for the host's SIGKILL. The host must allow
  * that long between SIGTERM and SIGKILL for the save to land; otherwise a
- * deploy loses what a crash would.
+ * deploy charges partners for requests it cut off.
  */
 const DRAIN_MS = 3_000;
 let stopping = false;

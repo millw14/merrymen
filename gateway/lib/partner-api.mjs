@@ -167,15 +167,24 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
       return { fail: { status: r.status, json: { error: { code, message, request_id: rid, ...quota } }, headers: r.headers } };
     }
     if (r.ticket) {
-      // On disk before it is served: a crash after the answer must not forget
-      // the unit, or the partner gets those requests again for free. Requests
-      // that arrive together share one write. If it cannot be written, enforce
-      // gives the unit back and serves nothing; observe refuses nothing.
-      if (!(await billing.flush()) && billing.enforced) {
-        billing.release(r.ticket);
-        return { fail: partnerError(503, "billing_unavailable", "Usage could not be recorded just now; try again shortly", rid) };
-      }
+      // Visible to shutdown's give-back from the moment it is counted.
       unfinished.add(r.ticket);
+      if (billing.enforced) {
+        // On disk before it is served: a crash after the answer must not forget
+        // the unit, or the partner gets those requests again for free. Requests
+        // arriving together share a write; the wait is bounded (2 s), and a
+        // count that did not land is given back and refused rather than served.
+        const saved = await billing.durable();
+        // Shutdown gave it back while it waited: the process is going away.
+        if (!unfinished.has(r.ticket)) return { fail: partnerError(503, "upstream_unavailable", "The gateway is restarting; resend this request", rid) };
+        if (!saved) {
+          unfinished.delete(r.ticket);
+          billing.release(r.ticket);
+          return { fail: partnerError(503, "billing_unavailable", "Usage could not be recorded just now; try again shortly", rid) };
+        }
+      } else {
+        void billing.flush(); // observe enforces nothing, so it does not wait on the disk
+      }
     }
     return { key: v.key, rid, rpm, ticket: r.ticket, quota: r.headers };
   }
