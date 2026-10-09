@@ -34,7 +34,13 @@ import {
   SPENT_BRAG,
   U,
 } from "./third-party";
-import { quoteNotEnglish, U as gateU } from "./gate";
+import { admitTgLine, quoteNotEnglish, U as gateU } from "./gate";
+
+/** The gate's verdict under the AUTON permit, for a clause's end-to-end rows. */
+const gateReason = (t: string, kind: "answer" | "banter" | "quote"): string => {
+  const v = admitTgLine(t, { agentName: "Shogun", kind, recentOwn: [], rug: { coins: ["AUTON"], brag: false } });
+  return v.ok ? "ok" : v.reason;
+};
 
 const hits = (re: RegExp, rows: readonly string[]): void => {
   for (const r of rows) assert.ok(re.test(r.toLowerCase()), `${re.source.slice(0, 40)}… should match: ${r}`);
@@ -172,6 +178,15 @@ describe("the new clauses", () => {
       "exited with everything",
     ]);
     misses(RUG_CONTEXT_ACCUSE, [...HARMLESS, "liquidity pulled", "down from 8m to 36k in a week, liquidity pulled", "auton rugged lol", "rugged cause it wasn't merrymen"]);
+  });
+
+  it("RUG_CONTEXT_ACCUSE: a honeypot or an insider crime in other words, refused under the permit in answer, banter and quote (review r2)", () => {
+    hits(RUG_CONTEXT_ACCUSE, ["auton rugged, cant even sell it", "auton rugged, inside job", "auton rugged, rigged from day one", "auton rugged, a con job", "auton rugged, a setup from the start"]);
+    misses(RUG_CONTEXT_ACCUSE, [...HARMLESS, "sold some, still holding", "sells are heavy", "the setup looks clean", "rugby season"]);
+    for (const t of ["auton rugged, cant even sell it", "auton rugged, inside job", "auton rugged, rigged from day one", "auton rugged, a con job", "auton rugged, a setup from the start"]) {
+      for (const kind of ["answer", "banter"] as const) assert.equal(gateReason(t, kind), "accuse", `${kind}: ${t}`);
+      assert.equal(gateReason(`• a trader, 3 min ago: “${t}”`, "quote"), "accuse", `quote: ${t}`);
+    }
   });
 
   it("RUG_CONTEXT_ACCUSE and OUT_ACCUSE: up to four words between the dump and the 'on' (review, 2026-10-09)", () => {

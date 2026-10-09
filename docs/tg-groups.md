@@ -113,7 +113,8 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    dot ("bit ly slash", "autonrefund point com"), addresses split into chunks,
    accusations against people, a third party's private details (a real
    name or "his name is…", where someone lives or works, a home address, a
-   phone, an email, a whatsapp or a profile, a dox), scam or honeypot, price
+   phone, an email, a whatsapp or a profile, a dox), scam or honeypot (or
+   "can't sell", "inside job", "rigged", "con job"), price
    targets, a row in another language (quotes are English only) and
    lines at the reader dropped, never repaired), with how many were left out
    and "their words, not facts". The default is still the digest. A trader's
@@ -501,7 +502,8 @@ to someone in distress goes out shushed or not.
   "shilled it"); anyone but the coin itself who dumped, sold, ran, bailed,
   jeeted, vanished or took the money beside it ("auton rugged, kaleo ran";
   "auton dumped hard, rugged" stays); a crime laid at anyone's door ("the
-  dev is a crook"); scam, honeypot or fraud; "rugpull", "rugging", "soft
+  dev is a crook", "inside job", "rigged", "a con job"); scam, honeypot or
+  fraud, in those words or as "can't even sell it"; "rugpull", "rugging", "soft
   rug", "rugged us", "rugged by the dev"; Merrymen as a play ("buy merrymen
   instead", "merrymen coins never rug", "stick to merrymen"); any figure
   beside it. A brag waits while one is among its last eight lines or went
