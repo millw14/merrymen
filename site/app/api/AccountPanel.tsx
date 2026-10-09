@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { EXPLORER } from "../../lib/chain";
 import {
   TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount, renewalBy, reversedToCheck,
-  normalizePreview, payWithWallet, paymentsReady, previewSentence, priceLabel, short, stillDue, stillPayable, switchToRobinhood, txHash, waitingMessage, walletError, watchPayment,
+  SendUncertain, normalizePreview, payWithWallet, paymentsReady, previewSentence, priceLabel, short, stillDue, stillPayable, switchToRobinhood, txHash, waitingMessage, walletError, watchPayment,
   type AccountView, type Eip1193, type PayCheck, type PlanPreview, type PlansView, type WatchEnd,
 } from "../../lib/developer-billing";
 import { MAX_PENDING, PENDING_KEY, forgetPayment, pendingPayments, rememberPayment } from "../../lib/pending-payments";
@@ -68,6 +68,12 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
 }) {
   const [name, setName] = useState(defaultName);
   const [watches, setWatches] = useState<Watch[]>([]);
+  // A payment step's refusal, said in the payment panel next to the button and the paste form it is about: the
+  // console's own error line is below every key, out of sight, and "paste its hash below" points the wrong way there.
+  const [payError, setPayError] = useState("");
+  // The wallet failed after the developer approved: the payment may have gone out, with no hash on this page. Pay
+  // stays held back, as for an unanswered hash, until a hash is pasted or the developer says nothing was sent.
+  const [uncertain, setUncertain] = useState("");
   useEffect(() => { setName(defaultName); }, [defaultName]);
   const ready = state.kind === "ready";
   // The account as the payment panel was last drawn from it: what a click agreed to.
@@ -160,6 +166,15 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
   const waiting: Waiting = open.length === 0 ? null : { count: open.length, checking: open.some(w => w.phase === "checking") };
   // A reversed transfer may be final in another block: its hash is checked again before anything new is paid.
   const reversed = BigInt(view.credit_raw) < 0n && reversedToCheck(view.history).length > 0;
+  /** A payment step: its refusal stays with the payment panel; an ended session still signs the console out. */
+  const payStep: Run = (task, fn) => run(task, async () => {
+    setPayError("");
+    try { await fn(); } catch (e) {
+      if ((e as { code?: unknown } | null)?.code === "signed_out") throw e;
+      setPayError(e instanceof Error ? e.message : "Please try again.");
+    }
+  });
+  const watch = (hash: string, sent: boolean) => { setUncertain(""); follow(hash, sent); };
   return <div className="dev-billing">
     <AccountSummary view={view} plans={plans} keys={keys} busy={busy} onRecheck={hash => run("recheck", async () => follow(hash, false))} />
     {plans.source === "fallback"
@@ -167,8 +182,12 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
       ? <p className="dev-billing-note">Plan details could not be loaded just now. Reload the page to choose a plan or pay; nothing is lost meanwhile.</p>
       : on ? <PlanChooser view={view} plans={plans} busy={busy} run={run} onAccount={onAccount} reload={reload} />
         : <p className="dev-billing-note">Paid plans are coming soon. Your account is ready, and every key you create belongs to it.</p>}
-    {due !== null && treasury !== null && <PaymentPanel wallet={address} amount={due} treasury={treasury} renewBy={renewalBy(view)} reversed={reversed} busy={busy} run={run} waiting={waiting}
-      confirmPayable={confirmPayable} onSent={hash => follow(hash, true)} onPasted={hash => follow(hash, false)} />}
+    {due !== null && treasury !== null
+      ? <PaymentPanel wallet={address} amount={due} treasury={treasury} renewBy={renewalBy(view)} reversed={reversed} busy={busy} step={payStep} waiting={waiting}
+        error={payError} uncertain={uncertain} onUncertain={setUncertain}
+        confirmPayable={confirmPayable} onSent={hash => watch(hash, true)} onPasted={hash => watch(hash, false)} />
+      // The refusal that closed the panel (payments paused, nothing due any more) is still said where the panel was.
+      : payError && <p className="dev-error" role="alert">{payError}</p>}
     {due !== null && on && treasury === null && <p className="dev-billing-note">Payments are not open yet, so nothing can be paid here. Nothing is lost: your selection waits.</p>}
     {watches.length > 0 && <div className="dev-pay-watches">{watches.map(w => <PaymentWatch key={w.hash} wallet={address} watch={w} spread={spread} minAgeSec={plans.confirmations?.min_age_sec}
       onWaiting={onWaiting} onEnd={onEnd}
@@ -278,8 +297,16 @@ export function WalletPay({ check, amount, busy, balance, onConnect, onSwitch, o
 /** Unanswered payments, if any: then the panel offers no new payment, only a way to add a hash. */
 type Waiting = { count: number; checking: boolean } | null;
 
-function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, run, waiting, confirmPayable, onSent, onPasted }: {
-  wallet: string; amount: bigint; treasury: string; renewBy: string | null; reversed: boolean; busy: string; run: Run; waiting: Waiting;
+/**
+ * `step` runs a payment action whose refusal comes back here as `error`, said
+ * next to the button and the paste form. `uncertain` is set when the wallet
+ * failed after the developer approved: then, as for an unanswered hash, no
+ * payment is offered until a hash is pasted or the developer says their
+ * wallet sent nothing (`onUncertain("")`).
+ */
+function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, step, waiting, error, uncertain, onUncertain, confirmPayable, onSent, onPasted }: {
+  wallet: string; amount: bigint; treasury: string; renewBy: string | null; reversed: boolean; busy: string; step: Run; waiting: Waiting;
+  error: string; uncertain: string; onUncertain: (message: string) => void;
   confirmPayable: (treasury: string) => Promise<void>; onSent: (hash: string) => void; onPasted: (hash: string) => void;
 }) {
   const [check, setCheck] = useState<PayCheck | null>(null);
@@ -308,17 +335,26 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, run, 
   }, [recheck]);
   const copy = async (what: string, text: string) => { try { await navigator.clipboard.writeText(text); setCopied(what); setTimeout(() => setCopied(""), 1500); } catch { /* Selectable inline. */ } };
   const tokens = formatTokens(amount, { decimals: 0 });
-  const paste = <form className="dev-pay-paste" onSubmit={e => { e.preventDefault(); const hash = txHash(pasted); if (hash) void run("paste", async () => { onPasted(hash); setPasted(""); }); }}>
+  const paste = <form className="dev-pay-paste" onSubmit={e => { e.preventDefault(); const hash = txHash(pasted); if (hash) void step("paste", async () => { onPasted(hash); setPasted(""); }); }}>
     <label>{waiting ? "Sped it up, or sent another transfer? Paste the transaction hash." : "Already sent? Paste the transaction hash."}<input value={pasted} onChange={e => setPasted(e.target.value)} placeholder="0x…" pattern="\s*0x[0-9a-fA-F]{64}\s*" autoComplete="off" spellCheck={false} /></label>
     <button className="dev-secondary" disabled={!!busy || !txHash(pasted)}>Check payment</button>
   </form>;
+  // Above the paste form, which its words ("paste the hash below") point to.
+  const refused = error && <p className="dev-error" role="alert">{error}</p>;
   // An unanswered payment holds back the next one: its transfer may still be on its way, and a second click is a second payment.
   if (waiting) return <section className="dev-pay" aria-labelledby="dev-pay-title">
     <h3 id="dev-pay-title">{waiting.checking ? "Checking your payment" : "Payment not credited yet"}</h3>
     <p className="dev-warn" role="status">{waiting.checking
       ? `${waiting.count === 1 ? "Your payment is" : `${waiting.count} payments are`} being checked below. Paying again sends a second payment, and payments are not returned: wait for ${waiting.count === 1 ? "it" : "them"} to be credited.`
       : `${waiting.count === 1 ? "Your payment is" : `${waiting.count} payments are`} not credited yet. Check ${waiting.count === 1 ? "it" : "them"} again below, or forget ${waiting.count === 1 ? "it" : "them"}, before paying again: paying now sends a second payment.`}</p>
-    {paste}
+    {refused}{paste}
+  </section>;
+  // The wallet may have sent it, and its hash is not on this page: the same hold, until the developer has looked.
+  if (uncertain) return <section className="dev-pay" aria-labelledby="dev-pay-title">
+    <h3 id="dev-pay-title">Check your wallet before paying again</h3>
+    <p className="dev-warn" role="alert">{uncertain}</p>
+    {refused}{paste}
+    <div className="dev-pay-wallet"><button className="dev-textlink" disabled={!!busy} onClick={() => onUncertain("")}>My wallet shows nothing was sent: pay again</button></div>
   </section>;
   const shortfall = reversed && <p className="dev-warn">{tokens} MERRYMEN includes a reversed payment. Check that transaction again first (under Credit above): if it is final in another block, it is credited again. Paying now sends a new payment, and payments are not returned.</p>;
   const later = <p className="dev-billing-note">Your plan runs until {renewBy && formatDate(renewBy)} either way, and nothing is owed before then. Credit you send now renews it on your first API request after this period ends.</p>;
@@ -329,7 +365,7 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, run, 
     <h3 id="dev-pay-title">Renewal on {formatDate(renewBy)}: {tokens} MERRYMEN</h3>
     {later}{shortfall}
     <div className="dev-pay-wallet"><button className="dev-secondary" disabled={!!busy} onClick={() => setAheadFor(renewBy)}>Pay ahead for the next period</button></div>
-    {paste}
+    {refused}{paste}
   </section>;
   return <section className="dev-pay" aria-labelledby="dev-pay-title">
     {renewBy
@@ -341,23 +377,28 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, run, 
       <div><dt>Amount</dt><dd><code>{tokens} MERRYMEN</code><button type="button" aria-label="Copy amount" onClick={() => copy("amount", (amount / 10n ** 18n).toString())}>{copied === "amount" ? "Copied ✓" : "Copy"}</button></dd></div>
       <div><dt>To (Merrymen payments wallet)</dt><dd><code>{treasury}</code><button type="button" aria-label="Copy Merrymen payments wallet address" onClick={() => copy("treasury", treasury)}>{copied === "treasury" ? "Copied ✓" : "Copy"}</button><a href={`${EXPLORER}/address/${treasury}`} target="_blank" rel="noreferrer">Blockscout ↗</a></dd></div>
       <div><dt>Token</dt><dd><code>{TOKEN.address}</code><a href={`${EXPLORER}/token/${TOKEN.address}`} target="_blank" rel="noreferrer">$MERRYMEN ↗</a></dd></div>
-      <div><dt>Network</dt><dd>Robinhood Chain (chain ID 4663)</dd></div>
+      <div><dt>Network</dt><dd>Robinhood Chain (chain ID 4663) <small>(the transfer also needs a little ETH there for the network fee)</small></dd></div>
       <div><dt>From</dt><dd><code>{wallet}</code> <small>(the wallet you signed in with)</small></dd></div>
     </dl>
     <p className="dev-warn">Send only from {short(wallet)}. A transfer from any other wallet, an exchange, a smart account or a swap cannot be credited to this account, and payments are not returned.</p>
     <WalletPay check={check} amount={amount} busy={busy} balance={balance}
-      onConnect={() => run("connect-pay", async () => { const provider = ethereum(); if (provider) { try { await provider.request({ method: "eth_requestAccounts" }); } catch (e) { throw new Error(walletError(e)); } } await recheck(); })}
-      onSwitch={() => run("switch", async () => { const provider = ethereum(); if (provider) { try { await switchToRobinhood(provider); } catch (e) { throw new Error(walletError(e)); } } await recheck(); })}
-      onPay={() => run("pay", async () => {
+      onConnect={() => step("connect-pay", async () => { const provider = ethereum(); if (provider) { try { await provider.request({ method: "eth_requestAccounts" }); } catch (e) { throw new Error(walletError(e)); } } await recheck(); })}
+      onSwitch={() => step("switch", async () => { const provider = ethereum(); if (provider) { try { await switchToRobinhood(provider); } catch (e) { throw new Error(walletError(e)); } } await recheck(); })}
+      onPay={() => step("pay", async () => {
         const provider = ethereum();
         if (!provider) { await recheck(); return; }
         // The treasury, the payments switch, what is due and what for, and this browser's other payments, as they are now.
         await confirmPayable(treasury);
         let hash: string;
-        try { hash = await payWithWallet({ provider, wallet, treasury, amount }); } catch (e) { await recheck(); throw new Error(walletError(e)); }
+        try { hash = await payWithWallet({ provider, wallet, treasury, amount }); } catch (e) {
+          await recheck();
+          // It may have gone out: hold Pay back rather than offer it again under a warning the developer may not read.
+          if (e instanceof SendUncertain) { onUncertain(e.message); return; }
+          throw new Error(walletError(e));
+        }
         onSent(hash);
       })} />
-    {paste}
+    {refused}{paste}
     <p className="dev-small-print">Paying moves MERRYMEN out of your wallet. Merry Circle tiers and hosted energy follow the balance you hold.</p>
   </section>;
 }

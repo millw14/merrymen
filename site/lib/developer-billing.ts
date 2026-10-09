@@ -404,6 +404,12 @@ const codeOf = (e: unknown): unknown => {
   const err = e as { code?: unknown; data?: { originalError?: { code?: unknown } } } | null;
   return err?.data?.originalError?.code ?? err?.code;
 };
+/** A provider error's own words (the wrapped original's first), for the one refusal recognised by them. Never shown. */
+const messageOf = (e: unknown): string => {
+  const err = e as { message?: unknown; data?: { originalError?: { message?: unknown } } } | null;
+  const m = err?.data?.originalError?.message ?? err?.message;
+  return typeof m === "string" ? m : "";
+};
 /**
  * A wallet's refusal, said in words. Raw provider errors are not shown: they
  * read as a crash. "Nothing was sent" is said only where that is known: the
@@ -417,7 +423,7 @@ export function walletError(e: unknown): string {
     case 4100: return "Your wallet has not connected this page yet. Connect it and try again.";
     case 4902: return "Your wallet does not have Robinhood Chain yet.";
   }
-  return e instanceof PaymentRefused ? e.message : "Your wallet could not complete that. Nothing was sent; try again, or pay manually below.";
+  return e instanceof PaymentRefused ? e.message : "Your wallet could not complete that. Nothing was sent; try again, or send it from your wallet app with the details above and paste the hash below.";
 }
 export class PaymentRefused extends Error {}
 /** eth_sendTransaction failed after the wallet may have broadcast it: the page cannot know whether money left. */
@@ -457,6 +463,9 @@ export async function payWithWallet({ provider, wallet, treasury, amount }: { pr
   let hash: unknown;
   try { hash = await provider.request({ method: "eth_sendTransaction", params: [{ from: wallet, to: TOKEN.address, value: "0x0", data, chainId: CHAIN_HEX }] }); } catch (e) {
     if (NOT_SENT.has(codeOf(e))) throw e;
+    // A node refuses a transaction whose sender cannot pay its fee before it exists: nothing was sent, and the
+    // remedy is ETH for gas on Robinhood Chain, which nothing else on the page mentions.
+    if (/insufficient funds/i.test(messageOf(e))) throw new PaymentRefused(`This wallet does not have enough ETH on Robinhood Chain for the network fee, so nothing was sent. Add a little ETH to ${short(wallet)} on Robinhood Chain, then pay again.`);
     // An internal error, a relay timeout or a broadcast timeout can come after the user approved and the
     // wallet sent. "Try again" there is a second payment, and the first one's hash is not on this page.
     throw new SendUncertain("Your wallet reported an error, so this page cannot tell whether the payment was sent. Check your wallet's activity: if it shows this transfer, paste its hash below instead of paying again.");

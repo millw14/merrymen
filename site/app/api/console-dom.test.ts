@@ -515,6 +515,40 @@ test('just after a payment starts a plan, the next period is not offered as a pa
   await page.unmount();
 });
 
+test('a wallet error that may have sent the payment holds Pay back, and says so in the payment panel above the paste form', async () => {
+  // Five active keys and a revoked one: the console's own error line sits below all of them.
+  const keys = Array.from({ length: 6 }, (_, i) => ({ key_id: `key_${i}`, app_id: `app_${i}`, name: `App ${i}`, status: i < 5 ? 'active' : 'revoked',
+    scopes: ['read:agents'], rate_per_min: 30, created_at: '2026-10-01T00:00:00.000Z', prefix: `mmk_${i}` }));
+  routes['GET keys'] = () => ({ status: 200, body: { address: WALLET, keys } });
+  // The wallet approved, then failed with an internal error: whether it broadcast is unknown.
+  let sends = 0;
+  (window as unknown as { ethereum: unknown }).ethereum = { async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method === 'eth_accounts') return [WALLET];
+    if (method === 'eth_chainId') return '0x1237';
+    if (method === 'eth_call') return '0x' + (10_000_000n * UNIT).toString(16);
+    if (method === 'eth_sendTransaction') { sent.push(params?.[0]); if (++sends === 1) throw Object.assign(new Error('Internal JSON-RPC error.'), { code: -32603 }); return HASH_A; }
+    throw Object.assign(new Error(`unexpected ${method}`), { code: -32601 });
+  } };
+  const page = await mount();
+  await click(payButton(page.container));
+  assert.equal(sent.length, 1);
+  const panel = page.container.querySelector('.dev-pay');
+  const said = /cannot tell whether the payment was sent\. Check your wallet's activity: if it shows this transfer, paste its hash below instead of paying again\./;
+  assert.match(text(panel!), said, 'said inside the payment panel');
+  assert.equal(page.container.querySelector('.dev-error') === null, true, 'not in the console-wide error line under the keys');
+  const alert = [...panel!.querySelectorAll('[role="alert"]')].find(n => said.test(text(n)));
+  const paste = panel!.querySelector('.dev-pay-paste');
+  assert.equal(!!alert && !!paste && (alert.compareDocumentPosition(paste) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0, true, '"below" is where the paste form is');
+  assert.equal(canPay(page.container), false, 'no Pay while the first one may be on its way');
+  // Only an explicit step brings Pay back.
+  await click(buttonFor(page.container, /^My wallet shows nothing was sent: pay again$/));
+  assert.equal(canPay(page.container), true);
+  await click(payButton(page.container));
+  assert.equal(sent.length, 2); assert.deepEqual(saved(), [HASH_A]);
+  await drain(page.container, [HASH_A]);
+  await page.unmount();
+});
+
 test('a reversed payment is offered to be checked again before any new payment is asked for', async () => {
   // Crumbs ran out after its payment was reversed: credit is -100,000, and renewing it asks 200,000.
   const reversed = accountJson({

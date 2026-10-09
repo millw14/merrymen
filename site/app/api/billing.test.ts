@@ -118,6 +118,12 @@ test('the account and chain are read again at the click, and a mismatch sends no
     const said = await payWithWallet({ provider: w.provider, wallet: WALLET, treasury: TREASURY, amount: UNIT }).then(() => 'sent', walletError);
     assert.match(said, /cannot tell whether the payment was sent.*paste its hash below instead of paying again/, JSON.stringify(error)); assert.doesNotMatch(said, /Nothing was sent|try again/i);
   }
+  // No ETH for the network fee: the node refuses the transaction before it exists, so nothing was sent, and the fix is gas, not MERRYMEN.
+  for (const error of [{ code: -32000, message: 'insufficient funds for gas * price + value' }, { code: -32603, data: { originalError: { code: -32000, message: 'Insufficient funds for gas' } } }]) {
+    const w = wallet({ ...fine, eth_sendTransaction: () => { throw error; } });
+    const said = await payWithWallet({ provider: w.provider, wallet: WALLET, treasury: TREASURY, amount: UNIT }).then(() => 'sent', walletError);
+    assert.match(said, /does not have enough ETH on Robinhood Chain for the network fee, so nothing was sent/, JSON.stringify(error));
+  }
   // A refusal before signing is known: nothing left the wallet.
   for (const [code, words] of [[4001, /You cancelled/], [-32002, /already waiting/], [4100, /not connected this page/]] as const) {
     const w = wallet({ ...fine, eth_sendTransaction: () => { throw Object.assign(new Error('no'), { code }); } });
