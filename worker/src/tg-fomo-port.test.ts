@@ -2550,6 +2550,17 @@ describe("a coin's facts: measured, with their source and time, and what could n
     }
   });
 
+  it("a coin whose ticker the gate refuses keeps its source and time: 'This coin on Solana, from GeckoTerminal at …' (review r2)", async () => {
+    const r = await createCoinFactsReader({ fetchJson: autonIndex().fetch, now: () => AUTON_NOW })({ network: "solana", address: AUTON_MINT, chatId: GROUP, timeoutMs: 10_000, withInfo: false });
+    assert.ok(r.ok);
+    for (const sym of ["SCAM", "RUG", "HONEYPOT"]) {
+      const lines = coinFactsLines(r.facts, sym, "what", AUTON_NOW);
+      assert.equal(lines[0], "This coin on Solana, from GeckoTerminal at 01:15 UTC:", sym);
+      for (const l of lines) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, `${sym}: ${l}`);
+    }
+    assert.deepEqual(coinFactsLines(r.facts, "AUTON", "what", AUTON_NOW), PINNED_WHAT, "a sayable ticker is named as before");
+  });
+
   it("a coin 40% below its high is measured, and is no collapse", async () => {
     const hour = deskFixture("auton-ohlcv-hour") as { data: { attributes: { ohlcv_list: number[][] } } };
     // Every close floored at 60% of the highest one: a fall, not a collapse.

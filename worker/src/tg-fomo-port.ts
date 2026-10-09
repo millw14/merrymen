@@ -768,7 +768,10 @@ const FACTS_CHAINS: Readonly<Record<FactsNetwork, string>> = { robinhood: "Robin
  * "transactions". At most five lines.
  */
 export function coinFactsLines(f: CoinFacts, sym: string, ask: FactsAsk, now: number): string[] {
-  const out = [`${sym} on ${FACTS_CHAINS[f.network] ?? "its chain"}, from GeckoTerminal at ${hhmm(f.observedAt)} UTC:`];
+  // The header carries the source and the time, so it must always be sayable: a coin whose ticker the
+  // gate refuses (RUG, SCAM, HONEYPOT) is named "This coin" rather than lose its source and time (review r2).
+  const head = (name: string): string => `${name} on ${FACTS_CHAINS[f.network] ?? "its chain"}, from GeckoTerminal at ${hhmm(f.observedAt)} UTC:`;
+  const out = [admitTgLine(head(sym), { agentName: "", kind: "research", recentOwn: [] }).ok ? head(sym) : head("This coin")];
   // How far back the closes reach: the pool's whole life, or the last N days.
   const whole = f.barsFromMs !== null && f.poolCreatedAtMs !== null && f.barsFromMs <= f.poolCreatedAtMs + 3_600_000;
   const days = f.barsFromMs !== null ? Math.max(1, Math.round((now - f.barsFromMs) / 86_400_000)) : null;
