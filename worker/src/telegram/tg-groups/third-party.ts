@@ -257,7 +257,7 @@ export const POST_RUG_LURE = U(
     String.raw`\b(?:refund\w*|reimburs\w*|compensat\w*|restitution|made\s+whole|giv(?:e|es|ing)\s+back|recover(?:y|ing)?\s+(?:\S+\s+){0,2}?(?:funds?|sol|eth|money|bags?|tokens?|wallets?|tool|bot|service|agent|app|site)|approv(?:e|es|al|ing)|v2|relaunch\w*|re-launch\w*|new\s+(?:ca|contract|token)|migrat(?:e|ion)\s+(?:now|today|here|asap|before|over)` +
       String.raw`|swap\b[^.!?\n]{0,30}\b(?:official|site|link|bot|portal|new|v2)|official\s+(?:site|link|channel|bot|group|website|tg|telegram|discord|x|twitter)` +
       String.raw`|(?:search|google|look\s+up|find)\b[^.!?\n]{0,30}\b(?:refund\w*|bot|link|site|channel|group|telegram|tg|discord|bio)` +
-      String.raw`|check\s+(?:out\s+)?(?:the\s+|their\s+|its\s+|his\s+)?(?:x|twitter|telegram|tg|discord|site|website|pinned|pin|bio|channel)|read\s+(?:the\s+)?pinned|links?\s+in\s+(?:the\s+|their\s+)?bio` +
+      String.raw`|check\s+(?:out\s+)?(?:the\s+|their\s+|its\s+|his\s+)?(?:x|twitter|telegram|tg|discord|site|website|pinned|pin|bio|channel|description|desc|banner)|read\s+(?:the\s+)?pinned|links?\s+in\s+(?:the\s+|their\s+)?bio` +
       String.raw`|(?:open|create|submit|raise)\s+(?:a\s+)?(?:support\s+)?ticket|support\s+ticket|(?:vip|alpha|paid|private)\s+(?:group|chat|channel|calls?)` +
       String.raw`|(?:12|24|twelve|twenty[\s-]?four)\s+words|(?:recovery|secret|seed|s[e3]{2}d|mnemonic|backup)\s+(?:phrase|words?)|priv(?:ate)?\s*keys?` +
       String.raw`|connect\s+(?:the\s+|a\s+|ur\s+|their\s+|my\s+)?wallets?|wallet\s*connect` +
@@ -336,7 +336,11 @@ export const PRIVATE_THIRD = U(
  * fix", "hit my line", "talk to an admin", "dm the bot", "google
  * autonhelp", "on signal", "at proton", and a name ending in recovery,
  * support, helpdesk or rescue ("autonrecovery"). "My dm from the dev never
- * came" and "strong support here" stay.
+ * came" and "strong support here" stay. And a channel or group pointed at
+ * without its @ (review r2): "telegram autonarmy has the updates", "join the
+ * auton army on tg", "join the tg", "join autonarmy, …", a new, real, backup
+ * or official chat or group, "ask the mods", a QR code. "The telegram is
+ * dead", "telegram community is strong" and "new holders keep joining" stay.
  * The words of LURE and OUT_LURE are unchanged; "the telegram is dead" and
  * "contact with the team is lost" stay (review, 2026-10-09).
  */
@@ -348,7 +352,10 @@ export const CONTACT_LURE = U(
       String.raw`|\bsearch\s+[\p{L}\p{N}_]+\s+on\s+(?:google|telegram|tg|x|twitter)\b|(?<=[\p{L}\p{N}])(?<!(?:re|dis|pro|ac|ex))(?:claim|portal)\b` +
       String.raw`|\b(?:contact|ping|reach\s+out\s+to|write\s+to|message|d\s*\.?\s*m)\s+(?:me|us)\b|\b(?:in|into)\s+(?:my|our)\s+(?:dms?|inbox|pms?)\b|\b(?:dms?|inbox|pms?)\s+(?:are\s+|is\s+)?open\b` +
       String.raw`|\b(?:dm|pm|inbox|msg)\s+(?:for|if)\b|\bhit\s+(?:my|our)\s+line\b|\b(?:talk|speak)\s+to\s+(?:an?\s+|the\s+)?(?:admins?|mods?|support|bot)\b|\b(?:dm|pm|message|contact|ping|text)\s+the\s+bot\b` +
-      String.raw`|\b(?:google|look\s+up)\s+[\p{L}\p{N}_]+(?:help|support|recovery|rescue)\b|\bon\s+signal\b|\bat\s+(?:proton|gmail|outlook)\b|(?<=[\p{L}\p{N}])(?:recovery|support|helpdesk|rescue)\b`,
+      String.raw`|\b(?:google|look\s+up)\s+[\p{L}\p{N}_]+(?:help|support|recovery|rescue)\b|\bon\s+signal\b|\bat\s+(?:proton|gmail|outlook)\b|(?<=[\p{L}\p{N}])(?:recovery|support|helpdesk|rescue)\b` +
+      String.raw`|\b(?:telegram|tg|discord|twitter)\s+(?:(?:chat|group|channel|handle|account|page)\s+)?(?:is\s+|it'?s\s+)?[\p{L}\p{N}_]+\s+(?:has|have|posts?|got|for)\s+(?:all\s+)?(?:the\s+)?(?:real\s+|latest\s+|new\s+)?(?:updates?|news|alpha|info|calls?|links?|raids?)\b` +
+      String.raw`|\bjoin\s+(?:the\s+|our\s+)?(?:[\p{L}\p{N}_]+\s+){1,3}?(?:on|in)\s+(?:telegram|tg|discord|whatsapp|signal)\b|\bjoin\s+(?:the\s+)?(?:tg|telegram|discord)\b|\bjoin\s+[\p{L}\p{N}_]+\s*,` +
+      String.raw`|\b(?:new|real|backup|official|actual)\s+(?:chat|group|channel|tg|telegram|discord)\b|\bask\s+(?:the\s+|an?\s+)?(?:mods?|admins?|devs?|team|support)\b|\bqr\b`,
     "i",
   ),
 );

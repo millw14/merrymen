@@ -271,6 +271,23 @@ describe("the new clauses", () => {
     misses(SPELLED_LINK, ["launched on pumpfun, graduated fast", "pump fun graduates are cooked", "auton/sol pair is thin", "50/50 on this one", "24/7 volume", "safety net is gone", "net flows positive", "x is buzzing about it", "polka dot pattern on the logo", "tg/x both quiet", "the dot com bubble", "rides the polkadot narrative", "dot-com era pricing", "the io narrative"]);
   });
 
+  it("CONTACT_LURE and POST_RUG_LURE: a channel or group pointed at without its @ (review r2)", () => {
+    for (const r of [
+      "telegram autonarmy has the updates",
+      "twitter autonarmy posts the updates",
+      "join the auton army on tg",
+      "join autonarmy, the real holders are there",
+      "join the tg group for the real updates",
+      "new chat is autonholders, old one is dead",
+      "new group is up, old one got nuked",
+      "ask the mods for the new chat",
+      "check the description for the new chat",
+      "scan the qr code on the auton banner, works",
+    ]) assert.ok(CONTACT_LURE.test(r) || POST_RUG_LURE.test(r), r);
+    misses(CONTACT_LURE, ["the telegram is dead", "twitter engagement is huge", "telegram community is strong", "tg activity is wild", "discord members up 2x", "people joining the community daily", "new holders keep joining"]);
+    misses(POST_RUG_LURE, ["the telegram is dead", "twitter engagement is huge", "telegram community is strong", "tg activity is wild", "discord members up 2x", "people joining the community daily", "new holders keep joining"]);
+  });
+
   it("CONTACT_LURE: DM bait and recovery-scam contacts (review r2)", () => {
     hits(CONTACT_LURE, [
       "contact me for the fix",

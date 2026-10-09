@@ -2984,6 +2984,22 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
   });
 
+  it("a channel or group pointed at without its @ is never quoted (review r2)", () => {
+    leftOut([
+      "telegram autonarmy has the updates",
+      "twitter autonarmy posts the updates",
+      "join the auton army on tg",
+      "join autonarmy, the real holders are there",
+      "join the tg group for the real updates",
+      "new chat is autonholders, old one is dead",
+      "new group is up, old one got nuked",
+      "ask the mods for the new chat",
+      "check the description for the new chat",
+      "scan the qr code on the auton banner, works",
+    ]);
+    quoted(["the telegram is dead", "twitter engagement is huge", "telegram community is strong", "people joining the community daily", "new holders keep joining"]);
+  });
+
   it("DM bait and recovery-scam contacts, in the text or as the author, are never quoted or named (review r2)", () => {
     leftOut([
       "contact me for the fix",
