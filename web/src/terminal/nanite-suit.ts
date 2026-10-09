@@ -1104,7 +1104,7 @@ function createRenderer(ctx: CanvasRenderingContext2D, o: NaniteOptions, tl: Nan
     // paints them only where plates remain, so they fold away with the plates
     // instead of hanging over the live screen.
     if (t >= tl.revealStart) ctx.globalCompositeOperation = "source-atop";
-    const pct =Math.max(0, Math.min(100, Math.round((100 * locked) / n)));
+    const pct = Math.max(0, Math.min(100, Math.round((100 * locked) / n)));
     const hudA = 1 - smooth01((t - tl.hudOut0) / Math.max(1, tl.hudOut1 - tl.hudOut0));
     if (hudA > 0.01) {
       if (dramatic) {
