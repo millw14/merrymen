@@ -51,6 +51,7 @@
 "A summary every hour" = "A summary every hour";
 "above (the checkbox does that when you add it), you’ve" = "above (the checkbox does that when you add it), you’ve";
 "Account" = "Hesap";
+"act on Fomo research" = "act on Fomo research";
 "add chat id…" = "add chat id…";
 "Add funds" = "Para ekle";
 "Add funds." = "Para yatırın.";
@@ -72,6 +73,7 @@
 "and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens. Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed." = "and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens. Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.";
 "another program has the bot" = "another program has the bot";
 "Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again." = "Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again.";
+"answer Fomo questions" = "answer Fomo questions";
 "Any OpenAI-compatible endpoint, e.g. https://your-host/v1" = "Any OpenAI-compatible endpoint, e.g. https://your-host/v1";
 "Anyone who has this code can control your agent — do not share or screenshot it." = "Anyone who has this code can control your agent — do not share or screenshot it.";
 "Anything you already hold stays priced, valued and sellable — including its stop-loss and take-profit. This only changes what your agent may" = "Anything you already hold stays priced, valued and sellable — including its stop-loss and take-profit. This only changes what your agent may";
@@ -95,7 +97,7 @@
 "Build your agent." = "Ajanınızı oluşturun.";
 "bundler URL override" = "bundler URL override";
 "Buy" = "Al";
-"Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold again. Needs a class vault factory in Connections and a re-signed key — and the scout budget above still bounds it." = "Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold again. Needs a class vault factory in Connections and a re-signed key — and the scout budget above still bounds it.";
+"Buy a coin straight off a Pons launchpad's bonding curve, held in your own vault so it can be sold again. It buys nothing until scout mode above is on, with its budget and max per token each at least one entry; live trading is on; and a class vault factory is set in Connections, with your key re-signed after." = "Buy a coin straight off a Pons launchpad's bonding curve, held in your own vault so it can be sold again. It buys nothing until scout mode above is on, with its budget and max per token each at least one entry; live trading is on; and a class vault factory is set in Connections, with your key re-signed after.";
 "Buy amount per check" = "Buy amount per check";
 "Buy tokens without a reliable market price, within your scout budget. These positions are valued at purchase cost." = "Buy tokens without a reliable market price, within your scout budget. These positions are valued at purchase cost.";
 "Buys, sells and decisions." = "Alımlar, satışlar ve kararlar.";
@@ -115,7 +117,6 @@
 "Choose language" = "Dil seçin";
 "claim one" = "claim one";
 "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery." = "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery.";
-"class route" = "class route";
 "class route · buying a coin nobody listed" = "class route · buying a coin nobody listed";
 "Class vault factory contract" = "Class vault factory contract";
 "Claude / vision model" = "Claude / vision model";
@@ -199,6 +200,7 @@
 "in your trading basket" = "in your trading basket";
 "Keyboard" = "Keyboard";
 "Language" = "Dil";
+"launchpad buying (class route)" = "launchpad buying (class route)";
 "Leave an API key blank to keep the saved key." = "Leave an API key blank to keep the saved key.";
 "let trencher trade for real" = "let trencher trade for real";
 "link code:" = "link code:";
@@ -247,6 +249,7 @@
 "no link code: this bot is connected to another Merrymen agent" = "no link code: this bot is connected to another Merrymen agent";
 "no linked chats yet" = "no linked chats yet";
 "Normal — joins in now and then" = "Normal — joins in now and then";
+"Not copy trading. A trader buying is a reason to research, not an instruction: Brain decides, sizes stay inside your scout budget and per-token limit, and every cap, permission and the live-trading switch still apply." = "Not copy trading. A trader buying is a reason to research, not an instruction: Brain decides, sizes stay inside your scout budget and per-token limit, and every cap, permission and the live-trading switch still apply.";
 "not listening" = "not listening";
 "not set" = "not set";
 "not set up" = "not set up";
@@ -444,6 +447,8 @@
 "vs the pre-trade quote." = "vs the pre-trade quote.";
 "Wallet permissions." = "Cüzdan izinleri.";
 "watch for new pairs" = "watch for new pairs";
+"watch the Fomo trader cohort" = "watch the Fomo trader cohort";
+"Watching the trader cohort and acting on Fomo research run only on the hosted service. On this install Fomo answers the questions you ask, and nothing more." = "Watching the trader cohort and acting on Fomo research run only on the hosted service. On this install Fomo answers the questions you ask, and nothing more.";
 "Watchlist" = "İzleme listesi";
 "We couldn’t read your $MERRYMEN balance just now, so we can’t tell whether it will run. That’s our read failing, not your wallet." = "We couldn’t read your $MERRYMEN balance just now, so we can’t tell whether it will run. That’s our read failing, not your wallet.";
 "weekend-gap: total USDG deployed per gap window." = "weekend-gap: total USDG deployed per gap window.";
