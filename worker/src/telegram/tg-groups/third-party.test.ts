@@ -165,6 +165,13 @@ describe("the new clauses", () => {
     misses(RUG_CONTEXT_ACCUSE, [...HARMLESS, "liquidity pulled", "down from 8m to 36k in a week, liquidity pulled", "auton rugged lol", "rugged cause it wasn't merrymen"]);
   });
 
+  it("RUG_CONTEXT_ACCUSE and OUT_ACCUSE: up to four words between the dump and the 'on' (review, 2026-10-09)", () => {
+    hits(RUG_CONTEXT_ACCUSE, ["kaleo dumped his whole bag on retail", "kaleo dumped his bags on us", "whales dumped their bags on holders"]);
+    misses(RUG_CONTEXT_ACCUSE, ["sold half on the pump, holding a moonbag", "still not sold on it", "sold some on the way up, still holding"]);
+    hits(OUT_ACCUSE, ["dumped his whole bag on the holders", "sold all of it on their followers"]);
+    misses(OUT_ACCUSE, ["sold half on the pump, holding a moonbag", "still not sold on it"]);
+  });
+
   it("MERRY_SHILL: Merrymen as a play, never as a joke", () => {
     hits(MERRY_SHILL, [
       "rugged, buy merrymen instead",

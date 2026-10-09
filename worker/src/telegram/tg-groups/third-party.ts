@@ -15,7 +15,10 @@
  * theses.ts (OUT_LURE, SECOND_PERSON, OUT_ACCUSE, OUT_HANDOUT) are here
  * byte for byte as they were, and their old callers import them from here,
  * so the sample and the paraphrase behave exactly as before. The gate reads
- * them through U (below) on its own readings.
+ * them through U (below) on its own readings. One change since, on purpose:
+ * OUT_ACCUSE's dumping-on clause reads up to four words before the "on"
+ * ("dumped his whole bag on the holders"), as RUG_CONTEXT_ACCUSE does, so
+ * the paraphrase and the quotes agree (review, 2026-10-09).
  *
  * NEW, FOR QUOTES AND THE RUG PERMIT: SEND_FOR, CTA_PLACEHOLDER, QUOTE_TARGET,
  * RUG_CONTEXT_ACCUSE, MERRY_SHILL and MERRY_BRAG, each compiled through U;
@@ -118,7 +121,7 @@ export const SECOND_PERSON = /\b(?:you|your|yours|you're|youre|you've|you'll|y'a
  * vault") costs one phrase.
  */
 export const OUT_ACCUSE =
-  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|(?:ran|walked|made|went|got)\s+(?:off|away)\s+with|(?:disappeared|vanished|fled)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool)|rob(?:s|bed|bing|bery|beries)?|loot(?:ed|ing)|siphon(?:s|ed|ing)?|swindl\w*|defraud\w*|grift\w*|fleec(?:e|ed|es|ing)|deceiv\w*|ripp(?:ed|ing)\s+(?:\w+\s+)?off|rip-?offs?|drain(?:s|ed|ing)?\s+(?:the\s+|their\s+|its\s+)?(?:treasury|funds|wallets?|holders)|arrest\w*|indict\w*|jail(?:ed)?|fak(?:ed|ing)\s+(?!out\b)|bott(?:ed|ing)\s+(?:the\s+)?volume|(?:is|was)\s+a\s+(?:total\s+|complete\s+|known\s+)?con\b|manipulat\w*|wash[\s-]?trad\w*|insider\s+trading|cash[\s-]?grab|lied|liars?|(?:dump(?:ed|ing|s)?|sold|selling)\s+on\s+(?:his|her|their|the)\s+(?:followers|holders|community|buyers|fans))\b/i;
+  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|(?:ran|walked|made|went|got)\s+(?:off|away)\s+with|(?:disappeared|vanished|fled)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool)|rob(?:s|bed|bing|bery|beries)?|loot(?:ed|ing)|siphon(?:s|ed|ing)?|swindl\w*|defraud\w*|grift\w*|fleec(?:e|ed|es|ing)|deceiv\w*|ripp(?:ed|ing)\s+(?:\w+\s+)?off|rip-?offs?|drain(?:s|ed|ing)?\s+(?:the\s+|their\s+|its\s+)?(?:treasury|funds|wallets?|holders)|arrest\w*|indict\w*|jail(?:ed)?|fak(?:ed|ing)\s+(?!out\b)|bott(?:ed|ing)\s+(?:the\s+)?volume|(?:is|was)\s+a\s+(?:total\s+|complete\s+|known\s+)?con\b|manipulat\w*|wash[\s-]?trad\w*|insider\s+trading|cash[\s-]?grab|lied|liars?|(?:dump(?:ed|ing|s)?|sold|selling)\s+(?:[\w'%.]+\s+){0,4}?on\s+(?:his|her|their|the)\s+(?:followers|holders|community|buyers|fans))\b/i;
 /**
  * The airdrop story without the word, in ANY slot (OUT_LURE has the word):
  * "holders get a giveaway soon", "rewards for holders", "the holder
@@ -186,7 +189,8 @@ export const QUOTE_TARGET = U(new RegExp(String.raw`\b${FWD}\b(?:[^\p{L}\p{N}]+[
  * AN ACCUSATION AGAINST PEOPLE, IN A RUGGED COIN'S CONTEXT. The rug permit
  * (gate.ts) lifts the bare word "rugged" about a coin, never a person: so
  * dumping or selling ON people ("whales dumped on holders", "kaleo dumped on
- * everyone", "sold on us"), someone pulling, draining or taking the liquidity
+ * everyone", "sold on us", "kaleo dumped his whole bag on retail": up to
+ * four words before the "on"), someone pulling, draining or taking the liquidity
  * or the funds ("dev pulled the liquidity", "they drained the pool"), and
  * theft ("stole", "ran off with the money", "exited with the funds") are
  * refused wherever the permit applies, and in every quote.
@@ -194,7 +198,7 @@ export const QUOTE_TARGET = U(new RegExp(String.raw`\b${FWD}\b(?:[^\p{L}\p{N}]+[
 const PEOPLE = String.raw`(?:us|everyone|everybody|holders|bagholders|buyers|followers|community|people|retail|you|y'all|ya'll|the\s+(?:community|holders|buyers|bagholders|followers))`;
 export const RUG_CONTEXT_ACCUSE = U(
   new RegExp(
-    String.raw`\b(?:dump(?:ed|ing|s)?|sold|selling|sells)\s+on\s+(?:(?:the|their|his|her|its|all|all\s+the)\s+)?${PEOPLE}\b` +
+    String.raw`\b(?:dump(?:ed|ing|s)?|sold|selling|sells)\s+(?:[\p{L}\p{N}'%.]+\s+){0,4}?on\s+(?:(?:the|their|his|her|its|all|all\s+the)\s+)?${PEOPLE}\b` +
       String.raw`|\b[\p{L}\p{N}_']+\s+(?:(?:just|has|have|had|then|already|literally|basically|totally)\s+)*(?:pulled|pulls|pulling|drained|drains|draining|removed|removes|yanked|yanks|took|takes|rugged)\s+(?:out\s+)?(?:all\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|our\s+|his\s+|her\s+)?(?:liquidity|lp|pool|funds)\b` +
       String.raw`|\b(?:stole|stolen|steal(?:s|ing)?|thief|thieves|ran\s+(?:off\s+|away\s+)?with\s+(?:the|our|your|their|all|everyone'?s)\s+(?:money|funds|liquidity|lp|bag|bags)|exit(?:ed)?\s+with)\b`,
     "i",

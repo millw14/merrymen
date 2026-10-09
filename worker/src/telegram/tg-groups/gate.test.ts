@@ -1741,6 +1741,8 @@ describe("quote kind: a stranger's thesis said back in a room, held to every thi
     ["next 100x", "advice"],
     ["dev pulled the liquidity and ran off with the money", "accuse"],
     ["kaleo dumped on everyone", "accuse"],
+    ["kaleo dumped his whole bag on retail", "accuse"],
+    ["whales dumped their bags on holders", "accuse"],
     ["scam, stay away", "accuse"],
     ["honeypot? can't sell", "accuse"],
   ] as const) {
@@ -1820,6 +1822,8 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
     ["rugged, dev dumped", "accuse"],
     // The prototype's one miss, closed by RUG_CONTEXT_ACCUSE.
     ["rugged, whales dumped on holders", "accuse"],
+    ["auton rugged, kaleo dumped his bags on us", "accuse"],
+    ["rugged, whales dumped their bags on holders", "accuse"],
     ["rugged, buy merrymen instead", "advice"],
     ["rugged lol, get a merrymen coin instead", "advice"],
     ["rugged, ape merrymen", "advice"],
