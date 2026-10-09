@@ -482,8 +482,11 @@ export const QUOTE_HARM: readonly RegExp[] = [
  * someone for it, or says someone took,
  * emptied, cashed out, bailed, knew or shilled ("it rugged, the dev took
  * everything", "auton rugged, thanks kaleo", "rugged. dev = scum") puts the
- * rug on a person, and is refused (gate.ts; review, 2026-10-09). "This is
+ * rug on a person, and is refused (gate.ts; review, 2026-10-09). So is
+ * blame in other words (review r2): "kaleo did this", "because of kaleo",
+ * "thanks to", "due to", "kaleo's fault", "blame ansem", "behind it",
+ * "responsible". "This is
  * gonna rug, top holders own way too much" stays: holders are no one in
  * particular.
  */
-export const PERSON_BESIDE_RUG = U(/\b(?:devs?|deployers?|team|insiders?|creators?|founders?|kols?|whales?|admins?|mods?|they|them|he|she|him|her|someone|somebody|thanks|thx)\b|\b(?:took|emptied|cashed|bailed|knew|shill\w*)\b/i);
+export const PERSON_BESIDE_RUG = U(/\b(?:devs?|deployers?|team|insiders?|creators?|founders?|kols?|whales?|admins?|mods?|they|them|he|she|him|her|someone|somebody|thanks|thx)\b|\b(?:took|emptied|cashed|bailed|knew|shill\w*)\b|\b(?:did\s+(?:this|it|that)|because\s+of|thanks\s+to|due\s+to|fault|blam\w*|behind\s+(?:it|this|that)|responsible)\b/i);

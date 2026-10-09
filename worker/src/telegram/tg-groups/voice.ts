@@ -960,7 +960,9 @@ function gateCtxFor(intent: TgIntent, ctx: SpeakCtx): TgGateCtx {
   // with the coin's own name kept out of the people's names it is checked against.
   const collapse = collapseFor(intent, ctx);
   const sameCoin = (n: string): boolean => !!collapse && n.trim().toLowerCase() === collapse.coin.trim().toLowerCase();
-  const names = [...people, ctx.coinName].filter(sayable).filter((n) => !sameCoin(n) || people.includes(n));
+  // Under a permit the names the room heard from it as people (a quote's author, a board's trader) are names too: a rug word beside one is the rug laid on them (review r2).
+  const heard = collapse && Array.isArray(collapse.people) ? collapse.people.filter(sayable).filter((n) => !sameCoin(n)) : [];
+  const names = [...people, ctx.coinName, ...heard].filter(sayable).filter((n) => !sameCoin(n) || people.includes(n));
   // A buy line is judged by the fill it is about (a paper fill stays paper
   // after a switch to live); every other line by the mode it trades in now,
   // so nothing it says can claim the other kind of money.

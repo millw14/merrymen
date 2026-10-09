@@ -2866,6 +2866,24 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     putPermit(msg.chatId, threadId, { coin: current.symbol, ...(current.chain ? { chain: current.chain } : {}), source: "room", atMs: t, untilMs: t + ROOM_PERMIT_MS });
     log("[tg-groups] collapse said by the room");
   };
+  /**
+   * NAMES THE ROOM HAS HEARD FROM IT AS PEOPLE, in its own recent lines
+   * (review r2): each quote's author ("• kaleo, 3 min ago: …"; never "a
+   * trader") and each trader row of a board ("2. kaleo +$151.4k"). Under a
+   * permit the gate holds them as names a rug word may not sit beside.
+   */
+  const heardPeopleOf = (room: TgRoom): string[] => {
+    const out = new Set<string>();
+    for (const l of room.lines.filter((x) => x.own === true).slice(-24)) {
+      for (const row of String(l.text ?? "").split("\n")) {
+        const q = /^• ([A-Za-z0-9_.]{2,30}), /u.exec(row);
+        if (q) out.add(q[1]!);
+        const t = /^\d+\. (.+?) [+-]?\$[\d.,]+[kMBT]?$/u.exec(row);
+        if (t && t[1]!.length <= 30) out.add(t[1]!);
+      }
+    }
+    return [...out].slice(0, 48);
+  };
   /** Words a room calls a person by: a coin called one of them never gets a permit. */
   const PERSON_COIN = /^(?:dev|devs|team|they|he|she|him|her|someone|kol|whale|whales|admin|admins|mod|mods)$/iu;
   /**
@@ -2919,7 +2937,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const lastBrag = bragAt.get(chatId);
       const brag = !own.some((l) => SPENT_BRAG.test(l.text)) && !(lastBrag !== undefined && t - lastBrag < BRAG_GAP_MS);
       // The room's other coins go with it: the gate refuses a rug word beside one of them (review r2).
-      return { coin: p.coin, source: p.source, atMs: p.atMs, brag, others: [...known].filter((k) => k !== low).slice(0, 32) };
+      return { coin: p.coin, source: p.source, atMs: p.atMs, brag, others: [...known].filter((k) => k !== low).slice(0, 32), people: heardPeopleOf(room) };
     }
     return null;
   };

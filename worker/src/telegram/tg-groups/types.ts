@@ -564,6 +564,8 @@ export interface TgCollapse {
   brag: boolean;
   /** The other coins the room knows by name: a rug word beside one of them carries the rug to a coin nobody measured (review r2). */
   others?: string[];
+  /** Names the room has heard from it as people (a quote's author, a board's trader): never beside the rug word (review r2). */
+  people?: string[];
 }
 
 export interface TgFomoAnswer {

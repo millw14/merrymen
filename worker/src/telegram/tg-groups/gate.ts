@@ -1208,8 +1208,8 @@ const RUG_PRE = String.raw`(?:(?:got|gets|been|was|is|just|totally|fully|basical
 const RUG_PRE_QUOTE = String.raw`(?:(?:got|gets|been|was|is|just|totally|fully|basically|straight\s+up|officially|already|has|literally|completely|def|definitely|gonna|going\s+to|could|will|might|may|can|about\s+to|bound\s+to|likely|probably|another)\s+)*`;
 const RUG_ADJ = String.raw`(?:(?:a|an|full|total|another|classic|complete|certified|textbook|absolute|massive|straight)\s+)*`;
 const RUG_ADJ_QUOTE = String.raw`(?:(?:a|an|full|total|another|classic|complete|certified|textbook|absolute|massive|straight|slow|soft\s+and\s+slow|big)\s+)*`;
-/** Never "rug pull", never "rugged by …", never whom it was done to. */
-const RUG_NOT_AFTER = String.raw`(?![\p{L}\p{N}_])(?!\s*-?\s*pull)(?!\s+by\b)(?!\s+(?:(?:its|their|the|all|every|his|her|our|my|your|em|those|these|some)\s+)?(?:us|you|u|me|him|her|them|em|everyone|everybody|holders?|bagholders?|buyers?|people|community|investors?|frens|degens|apes|folks|y'?all|ya'?ll|anyone|anybody|followers|fans|retail)\b)`;
+/** Never "rug pull", never "rugged by …" or "rugged on …" (review r2), never whom it was done to. */
+const RUG_NOT_AFTER = String.raw`(?![\p{L}\p{N}_])(?!\s*-?\s*pull)(?!\s+by\b)(?!\s+on\b)(?!\s+(?:(?:its|their|the|all|every|his|her|our|my|your|em|those|these|some)\s+)?(?:us|you|u|me|him|her|them|em|everyone|everybody|holders?|bagholders?|buyers?|people|community|investors?|frens|degens|apes|folks|y'?all|ya'?ll|anyone|anybody|followers|fans|retail)\b)`;
 /** Where a clause opens: the start, punctuation, an opening quote mark, or a joining word. */
 const RUG_CLAUSE = String.raw`(?:^|[.!?,;:—–…“”"«»(]\s*|\s(?:and|but|so|cause|cuz|coz|because|bc|since|then)\s+)`;
 const escRug = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

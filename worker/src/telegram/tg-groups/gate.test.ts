@@ -1927,6 +1927,16 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
     }
     it(`${kind}: with the permit even a figure nothing to do with money is refused`, () => assert.equal(v("rugged in 2 hours lol", kind), "figures"));
   }
+  it("blame in other words beside a lifted rug word is accuse, and 'rugged on' is never lifted (review r2)", () => {
+    for (const kind of ["banter", "answer", "coin"] as const) {
+      for (const t of ["auton rugged, kaleo did this", "auton rugged on kaleo lol", "auton rugged, blame ansem", "auton rugged, kaleo's fault", "auton rugged because of kaleo", "rugged thanks to the kols", "auton rugged, kaleo was behind it", "rugged, kaleo is responsible"]) {
+        assert.equal(v(t, kind), "accuse", `${kind}: ${t}`);
+      }
+      // A name the room heard from it (a quote's author), handed in as a name, in any words.
+      assert.equal(reason("auton rugged, kaleo cooked lol", { kind, names: ["kaleo"], rug: PERMIT }), "accuse", kind);
+      for (const t of ["auton rugged lol", "rugged. wasn't ours 😤", "auton dumped hard, rugged"]) assert.equal(v(t, kind), "ok", `${kind}: ${t}`);
+    }
+  });
   it("a rug carried to another coin, or beside a coin the room knows, is accuse (review r2)", () => {
     const withOthers = { coins: ["AUTON"], brag: true, others: ["PONS", "froggy", "pepe"] };
     for (const kind of ["banter", "answer", "coin"] as const) {
