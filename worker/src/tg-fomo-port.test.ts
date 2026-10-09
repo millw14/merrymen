@@ -1377,10 +1377,15 @@ describe("groupWords", () => {
 
 class FakeTg {
   calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+  /** Chats a send to fails in (a DM the bot cannot reach): recorded, never counted as sent. */
+  failChats = new Set<number>();
   private nextId = 5_000;
   fetchFn: FetchLike = async (url, init) => {
     const method = url.split("/").pop() ?? "";
     const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    if (method === "sendMessage" && this.failChats.has(Number(body.chat_id))) {
+      return { ok: false, status: 403, json: async () => ({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }) };
+    }
     this.calls.push({ method, body });
     const env = method === "sendMessage" ? { ok: true, result: { message_id: this.nextId++ } } : { ok: true, result: true };
     return { ok: true, status: 200, json: async () => env };
@@ -2365,7 +2370,7 @@ describe("a coin's theses, quoted: the newest up to ten, each checked, never rep
     const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
     s.clock.now = AUTON_NOW;
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    const a = await port.ask({ text: "quote the newest 10 theses on $AUTON on solana on fomo", chatId: GROUP });
+    const a = await port.ask({ text: "quote the newest 10 theses on $AUTON on solana on fomo", chatId: GROUP, owner: true });
     assert.ok(a && !a.deflect && a.quotes, JSON.stringify(a));
     const q = a.quotes!;
     assert.equal(q.coin, "AUTON");
@@ -2400,7 +2405,7 @@ describe("a coin's theses, quoted: the newest up to ten, each checked, never rep
     const s = await setup({ theses: () => ({ ...page, theses: rows.slice(10) }), tokensSearch: AUTON_SEARCH });
     s.clock.now = AUTON_NOW;
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    const q = (await port.ask({ text: "quote the newest 10 theses on $AUTON on solana on fomo", chatId: GROUP }))!.quotes!;
+    const q = (await port.ask({ text: "quote the newest 10 theses on $AUTON on solana on fomo", chatId: GROUP, owner: true }))!.quotes!;
     assert.deepEqual(q.quotes.map((x) => x.text), ["Great team. Strong community. Clear roadmap."]);
     assert.equal(q.leftOut, 9);
   });
@@ -2409,7 +2414,7 @@ describe("a coin's theses, quoted: the newest up to ten, each checked, never rep
     const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
     s.clock.now = AUTON_NOW;
     const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
-    const q = (await port.ask({ text: "pine list the last 25 theses on $AUTON on solana on fomo", chatId: GROUP, selfNames: ["Pine"] }))!.quotes!;
+    const q = (await port.ask({ text: "pine list the last 25 theses on $AUTON on solana on fomo", chatId: GROUP, selfNames: ["Pine"], owner: true }))!.quotes!;
     assert.equal(q.n, 10);
     assert.equal(q.asked, 25);
   });
@@ -2421,7 +2426,7 @@ describe("a coin's theses, quoted: the newest up to ten, each checked, never rep
     await port.ask({ text: "what are the theses on $AUTON on solana on fomo?", chatId: GROUP });
     const before = s.provider.length;
     s.clock.now += 30_000;
-    const a = await port.ask({ text: "can you list the last 10", request: { kind: "coin", symbol: "AUTON", aspect: "theses", quotes: 10 }, chatId: GROUP });
+    const a = await port.ask({ text: "can you list the last 10", request: { kind: "coin", symbol: "AUTON", aspect: "theses", quotes: 10 }, chatId: GROUP, owner: true });
     assert.ok(a?.quotes, JSON.stringify(a));
     assert.equal(s.calls[s.calls.length - 1]!.args.token, AUTON_MINT, "the remembered mint, never a search by symbol");
     assert.equal(s.provider.length, before, "no provider call: the room's kept copy");
@@ -2430,6 +2435,25 @@ describe("a coin's theses, quoted: the newest up to ten, each checked, never rep
     s.clock.now += 30_000;
     await port.ask({ text: "x", request: { kind: "coin", symbol: "AUTON", chain: "base", aspect: "theses" }, chatId: GROUP });
     assert.equal(s.calls[s.calls.length - 1]!.args.chain, "base");
+  });
+
+  it("anyone else's quote ask builds no quotes: the digest only, so a stranger's words never reach the group (Milla, 2026-10-09: \"Owner's DM\")", async () => {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    for (const ask of [
+      { text: "quote the newest 10 theses on $AUTON on solana on fomo", chatId: GROUP },
+      { text: "can you list the last 10", request: { kind: "coin" as const, symbol: "AUTON", chain: "solana" as const, aspect: "theses" as const, quotes: 10 }, chatId: GROUP },
+      { text: "show me these thesis, dont summarise", request: { kind: "coin" as const, symbol: "AUTON", chain: "solana" as const, aspect: "theses" as const, quotes: 10 }, chatId: GROUP, owner: false },
+    ]) {
+      const a = await port.ask(ask);
+      assert.ok(a && !a.deflect, JSON.stringify(a));
+      assert.equal(a.quotes, undefined, ask.text);
+      assert.match(a.text, /^What traders on Fomo are saying about AUTON on Solana/, ask.text);
+      // No stranger's words in the digest either.
+      assert.doesNotMatch(a.text, /team is still building|top holders own way too much/u, ask.text);
+      s.clock.now += 1_000;
+    }
   });
 
   it("never a trader's own theses, and never from a compound or empty read", () => {
@@ -2687,7 +2711,9 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
       return tg.texts(chat).slice(before);
     };
     const restore = (): void => { globalThis.fetch = realFetch; };
-    return { s, tg, logs, model, index, lastOwn, say, restore, theses: () => s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length };
+    /** What reached Milla's DM, unescaped. */
+    const dms = (): string[] => tg.texts(MILLA).map((t) => t.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"));
+    return { s, tg, logs, model, index, lastOwn, say, dms, restore, theses: () => s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length };
   }
 
   const QUOTE_LINE = /^• (?:[A-Za-z0-9_]{2,30}|a trader), (?:just now|\d+ min ago|\d+h ago|\d+ days ago): “[^“”]{1,161}”$/u;
@@ -2708,47 +2734,69 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
       assert.equal(r.theses(), 1);
       const digest = r.lastOwn();
 
-      // 3. 30 s later, under the digest: "can you list the last 10" is the newest ten themselves.
+      // 3. 30 s later, under the digest: "can you list the last 10" from Milla
+      // is the newest ten themselves, in HER DM; the room hears only that they
+      // went there (Milla, 2026-10-09: "Owner's DM"). A stranger's words never
+      // land in the group.
       const providerBefore = r.s.provider.length;
       const modelBefore = r.model.calls;
+      const dmsBefore = r.dms().length;
       const three = await r.say("can you list the last 10", { under: digest, advanceMs: 30_000 });
       assert.equal(three.length, 1, three.join("\n---\n"));
-      const lines = three[0]!.split("\n");
+      assert.match(three[0]!, /DM/u, three[0]);
+      assert.doesNotMatch(three[0]!, /•|“|kaleo|theses/u, three[0]);
+      assert.equal(r.dms().length, dmsBefore + 1, "one DM: the quotes");
+      const dm3 = r.dms().slice(-1)[0]!;
+      const lines = dm3.split("\n");
       assert.equal(lines[0], "The newest 10 theses on AUTON on Solana, in their words (not facts):");
       const quotes = lines.filter((l) => l.startsWith("• "));
-      assert.ok(quotes.length >= 1 && quotes.length <= 10, three[0]);
+      assert.ok(quotes.length >= 1 && quotes.length <= 10, dm3);
       for (const l of quotes) assert.match(l, QUOTE_LINE);
       assert.deepEqual(quotes.map((l) => /^• ([^,]+),/u.exec(l)![1]), ["kaleo", "frankdegods", "a trader", "moonboy", "a trader"], "newest first");
       assert.match(lines[quotes.length + 1]!, /^Their words, not facts; \d+ of these 10 left out; Fomo lists 4,199\.$/);
-      assert.doesNotMatch(three[0]!, NEVER_IN_QUOTES);
+      assert.doesNotMatch(dm3, NEVER_IN_QUOTES);
       assert.equal(r.s.provider.length, providerBefore, "no provider call: the room's kept copy");
       // 5. With the paraphrase switched on, a quote ask still calls no model.
       assert.equal(r.model.calls, modelBefore, "no model call for a quote ask");
-      assert.ok(r.logs.some((l) => /^\[tg-groups\] theses quoted \(5 quoted, 5 left out\)$/.test(l)), r.logs.join("\n"));
-      const quoted = r.lastOwn();
+      assert.ok(r.logs.some((l) => /^\[tg-groups\] theses quoted for the owner's DM \(5 quoted, 5 left out\)$/.test(l)), r.logs.join("\n"));
+      assert.ok(r.logs.includes("[tg-groups] theses quotes sent to the owner's DM"), r.logs.join("\n"));
 
-      // 4. 35 s on, the copy 65 s old: the same quotes, aged "a minute ago", never "just now".
-      const four = (await r.say("show me these thesis, dont summarise", { under: quoted, advanceMs: 35_000 })).join("\n");
-      assert.equal(four.split("\n")[0], "The newest 10 theses on AUTON on Solana, in their words (not facts):");
-      assert.match(four, /\nFrom a copy fetched a minute ago\.$/, four);
-      assert.doesNotMatch(four, /just now\.$/m);
+      // 3b. The same ask from anyone else is the digest in the room: no quotes, no DM.
+      const bob = (await r.say("can you list the last 10", { under: digest, fromId: 31337, advanceMs: 20_000 })).join("\n");
+      assert.match(bob, /^What traders on Fomo are saying about AUTON on Solana/, bob);
+      assert.doesNotMatch(bob, /•|“|The newest/u, bob);
+      assert.equal(r.dms().length, dmsBefore + 1, "no DM for anyone else's ask");
+
+      // 4. 35 s on, the copy 65 s old: the same quotes in her DM, aged "a minute ago", never "just now".
+      const four = (await r.say("show me these thesis, dont summarise", { under: digest, advanceMs: 15_000 })).join("\n");
+      assert.match(four, /DM/u, four);
+      const dm4 = r.dms().slice(-1)[0]!;
+      assert.equal(r.dms().length, dmsBefore + 2);
+      assert.equal(dm4.split("\n")[0], "The newest 10 theses on AUTON on Solana, in their words (not facts):");
+      assert.match(dm4, /\nFrom a copy fetched a minute ago\.$/, dm4);
+      assert.doesNotMatch(dm4, /just now\.$/m);
       assert.equal(r.s.provider.length, providerBefore);
 
-      // 6a. "summarise them" is the digest again, never quotes.
-      const six = (await r.say("summarise them", { under: r.lastOwn(), advanceMs: 20_000 })).join("\n");
+      // 6a. "summarise them" is the digest again, in the room, never quotes.
+      const six = (await r.say("summarise them", { under: digest, advanceMs: 20_000 })).join("\n");
       assert.match(six, /^What traders on Fomo are saying about AUTON on Solana/, six);
       assert.doesNotMatch(six, /The newest/);
       // 6c. "shogun summarise them", replying to nothing, is the digest again too.
       const sixC = (await r.say("shogun summarise them", { advanceMs: 20_000 })).join("\n");
       assert.match(sixC, /^What traders on Fomo are saying about AUTON on Solana/, sixC);
+      assert.equal(r.dms().length, dmsBefore + 2, "a digest is never a DM");
 
-      // 7. Twenty minutes on, past the follow-up window, under the quotes: "show me the last 5", asked by code, memory first.
+      // 7. Twenty minutes on, past the follow-up window, under the digest: "show me the last 5", asked by code, memory first.
       const searches = r.s.provider.filter((p) => p === "/v2/tokens/search").length;
-      const seven = (await r.say("show me the last 5", { under: quoted, advanceMs: 20 * 60_000 })).join("\n");
-      assert.equal(seven.split("\n")[0], "The newest 5 theses on AUTON on Solana, in their words (not facts):", seven);
-      assert.ok(seven.split("\n").filter((l) => l.startsWith("• ")).length <= 5);
+      const seven = (await r.say("show me the last 5", { under: digest, advanceMs: 20 * 60_000 })).join("\n");
+      assert.match(seven, /DM/u, seven);
+      const dm7 = r.dms().slice(-1)[0]!;
+      assert.equal(dm7.split("\n")[0], "The newest 5 theses on AUTON on Solana, in their words (not facts):", dm7);
+      assert.ok(dm7.split("\n").filter((l) => l.startsWith("• ")).length <= 5);
       assert.equal(r.s.provider.filter((p) => p === "/v2/tokens/search").length, searches, "no tokens search: the remembered coin");
       assert.equal(r.theses(), 1, "still the one page");
+      // Nothing quoted ever reached the room.
+      assert.ok(!r.tg.texts(GROUP).some((t) => /^• |“/mu.test(t)), r.tg.texts(GROUP).join("\n---\n"));
 
       // 8. The facts, three ways: measured, sourced, no Fomo credit, no address, no accusation.
       const callsBefore = r.s.calls.length;
@@ -2790,17 +2838,31 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
       r.restore();
     }
   });
-  /** Steps 1 to 3 and the measured fall: the quotes heard, then a measured AUTON permit. */
+  /**
+   * Quotes never reach a room now (Milla, 2026-10-09: "Owner's DM"), so a
+   * trader the room has heard named comes from the public leaderboard:
+   * kaleo first, by handle (heardPeopleOf reads a board's rows too).
+   */
+  const KALEO_BOARD = (): Rec => {
+    const base = fixture("leaderboard-24h");
+    const t0 = (base.traders as Rec[])[0]!;
+    const handles = ["kaleo", "frankdegods", "degenthree"];
+    return { ...base, count: handles.length, traders: handles.map((handle, i) => ({ ...t0, rank: i + 1, userId: `0b1c2d3e-0000-4000-8000-00000000000${i + 1}`, handle, pnlUsd: 150_000 - i * 20_000 })) };
+  };
+  /** The room hears today's board, kaleo on top: what it has heard a trader named. */
+  const heardKaleo = async (r: Awaited<ReturnType<typeof shogunRoom>>): Promise<void> => {
+    const board = (await r.say("shogun who are the top traders on fomo today?", { advanceMs: 30_000 })).join("\n");
+    assert.match(board, /^1\. kaleo /mu, board);
+  };
+  /** Steps 1 and 2, a board with kaleo on it, and the measured fall: a measured AUTON permit. */
   async function measuredRoom() {
-    const r = await shogunRoom();
+    const r = await shogunRoom({ leaderboard: KALEO_BOARD });
     await r.say("shogun what's happening with $AUTON on solana on fomo?");
     await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
-    await r.say("can you list the last 10", { under: r.lastOwn(), advanceMs: 30_000 });
-    const quoted = r.lastOwn();
-    assert.match(quoted.text, /^• kaleo, /mu, quoted.text);
+    await heardKaleo(r);
     await r.say("shogun what happened to auton", { advanceMs: 60_000 });
     assert.ok(r.logs.includes("[tg-groups] collapse measured"), r.logs.join("\n"));
-    return { ...r, quoted };
+    return r;
   }
   /** A model line said under the measured permit, after a spent-free gap: what reached the room. */
   const banter = async (r: Awaited<ReturnType<typeof measuredRoom>>, trigger: string, line: string): Promise<string[]> => {
@@ -2808,15 +2870,14 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     return r.say(trigger, { fromId: 31337, advanceMs: 25 * 60_000 });
   };
 
-  it("a coin named like a trader the room heard quoted gets no facts lookup on a bare name and no permit (review r2)", async () => {
-    // Fomo lists a KALEO coin on Solana (the index measures it collapsed): the room heard kaleo as a quote's author.
+  it("a coin named like a trader the room heard on a board gets no facts lookup on a bare name and no permit (review r2)", async () => {
+    // Fomo lists a KALEO coin on Solana (the index measures it collapsed): the room heard kaleo as a trader on the board.
     let symbol = "AUTON";
-    const r = await shogunRoom({ tokensSearch: () => ({ tokens: [{ symbol, address: AUTON_MINT, name: symbol.toLowerCase(), image: null, marketCapUsd: 36_000, networkId: 1399811149 }] }) });
+    const r = await shogunRoom({ leaderboard: KALEO_BOARD, tokensSearch: () => ({ tokens: [{ symbol, address: AUTON_MINT, name: symbol.toLowerCase(), image: null, marketCapUsd: 36_000, networkId: 1399811149 }] }) });
     try {
       await r.say("shogun what's happening with $AUTON on solana on fomo?");
       await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
-      await r.say("can you list the last 10", { under: r.lastOwn(), advanceMs: 30_000 });
-      assert.match(r.lastOwn().text, /^• kaleo, /mu);
+      await heardKaleo(r);
       symbol = "KALEO";
       const facts = (await r.say("shogun why did kaleo dump on solana?", { advanceMs: 60_000 })).join("\n");
       assert.doesNotMatch(facts, /^KALEO on Solana, from GeckoTerminal/mu, facts);
@@ -2834,7 +2895,7 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     }
   });
 
-  it("under the permit the banter never lays the rug on a trader the room heard quoted (review r2)", async () => {
+  it("under the permit the banter never lays the rug on a trader the room heard on a board (review r2)", async () => {
     const r = await measuredRoom();
     try {
       for (const line of ["auton rugged, kaleo did this", "auton rugged on kaleo lol", "auton rugged, kaleo cooked lol"]) {
@@ -2872,25 +2933,57 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     }
   });
 
-  it("past the follow-up window, under the quotes, only an explicit ask or a bare count is quoted by code; anything else is routed (review, 2026-10-09)", async () => {
+  it("past the follow-up window, under the digest or her DM notice, only her explicit ask or a bare count is quoted by code, to her DM; anything else is routed (review, 2026-10-09)", async () => {
     const r = await shogunRoom();
     try {
       await r.say("shogun what's happening with $AUTON on solana on fomo?");
       await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
-      await r.say("can you list the last 10", { under: r.lastOwn(), advanceMs: 30_000 });
-      const quoted = r.lastOwn();
-      assert.match(quoted.text, /^The newest 10 theses on AUTON/u, quoted.text);
+      const digest = r.lastOwn();
+      await r.say("can you list the last 10", { under: digest, advanceMs: 30_000 });
+      const notice = r.lastOwn();
+      assert.match(notice.text, /DM/u, notice.text);
+      assert.match(r.dms().slice(-1)[0]!, /^The newest 10 theses on AUTON/u);
       let first = true;
       for (const line of ["who were the last 3 on the leaderboard?", "what about the last 2 traders", "what were kaleo's last 3 trades?", "what about the last 5 buyers", "list the trending coins"]) {
-        const out = (await r.say(line, { under: quoted, advanceMs: first ? 20 * 60_000 : 30_000 })).join("\n");
+        const dms = r.dms().length;
+        const out = (await r.say(line, { under: digest, advanceMs: first ? 20 * 60_000 : 30_000 })).join("\n");
         first = false;
-        assert.doesNotMatch(out, /The newest \d+ theses/u, `${line} -> ${out}`);
-        assert.ok(!r.logs.slice(-3).some((l) => /theses quoted/u.test(l)), line);
+        assert.doesNotMatch(out, /The newest \d+ theses|•|“/u, `${line} -> ${out}`);
+        assert.equal(r.dms().length, dms, `${line}: no DM`);
+        assert.ok(!r.logs.slice(-3).some((l) => /theses quote/u.test(l)), line);
       }
-      for (const [line, n] of [["show me the last 5", 5], ["can you list the last 10", 10]] as const) {
-        const out = (await r.say(line, { under: quoted, advanceMs: 30_000 })).join("\n");
-        assert.equal(out.split("\n")[0], `The newest ${n} theses on AUTON on Solana, in their words (not facts):`, `${line} -> ${out}`);
+      // Under the digest, and under the room's "sent them to your DMs" line: her DM gets the quotes.
+      for (const [line, n, under] of [["show me the last 5", 5, digest], ["can you list the last 10", 10, notice], ["show me the last 3", 3, notice]] as const) {
+        const dms = r.dms().length;
+        const out = (await r.say(line, { under, advanceMs: 30_000 })).join("\n");
+        assert.match(out, /DM/u, `${line} -> ${out}`);
+        assert.doesNotMatch(out, /•|“|The newest/u, `${line} -> ${out}`);
+        assert.equal(r.dms().length, dms + 1, line);
+        assert.equal(r.dms().slice(-1)[0]!.split("\n")[0], `The newest ${n} theses on AUTON on Solana, in their words (not facts):`, line);
       }
+      // Anyone else, under either: the digest in the room, no DM, no quote.
+      for (const under of [digest, notice]) {
+        const dms = r.dms().length;
+        const out = (await r.say("show me the last 5", { under, fromId: 31337, advanceMs: 30_000 })).join("\n");
+        assert.doesNotMatch(out, /The newest \d+ theses|•|“/u, out);
+        assert.equal(r.dms().length, dms);
+      }
+    } finally {
+      r.restore();
+    }
+  });
+
+  it("her quotes never reach the room when her DM fails: the digest instead, and no claim they were sent", async () => {
+    const r = await shogunRoom();
+    try {
+      await r.say("shogun what's happening with $AUTON on solana on fomo?");
+      await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
+      const digest = r.lastOwn();
+      r.tg.failChats.add(MILLA);
+      const out = (await r.say("can you list the last 10", { under: digest, advanceMs: 30_000 })).join("\n");
+      assert.match(out, /^What traders on Fomo are saying about AUTON on Solana/, out);
+      assert.doesNotMatch(out, /•|“|The newest|DM/u, out);
+      assert.ok(r.logs.includes("[tg-groups] theses quotes: the owner's DM failed, the digest in the room"), r.logs.join("\n"));
     } finally {
       r.restore();
     }
@@ -2904,7 +2997,7 @@ type ReviewRow = string | { text: string; handle?: string | null };
 /**
  * One coin's theses page with the given rows, newest first, each excerpt made
  * the way fomo/service.ts makes it, asked for as quotes: what the port hands
- * the room (thesesQuotes) and what the room hears (quotesSayable).
+ * the handler (thesesQuotes) and what the owner's DM gets (quotesSayable).
  */
 function quotedFrom(rows: readonly ReviewRow[], agentName = "Shogun"): { quotes: NonNullable<ReturnType<typeof thesesQuotes>>; said: ReturnType<typeof quotesSayable> } {
   const theses = rows.map((x, i) => {

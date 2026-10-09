@@ -38,7 +38,7 @@ describe("quotesSayable", () => {
 
   it("asked for more than ten, it says ten is the most it quotes", () => {
     const r = quotesSayable(base({ asked: 25 }), null, "Shogun")!;
-    assert.equal(r.text.split("\n")[0], "The newest 10 theses on AUTON on Solana (10 is the most I quote in a group), in their words (not facts):");
+    assert.equal(r.text.split("\n")[0], "The newest 10 theses on AUTON on Solana (10 is the most I quote at once), in their words (not facts):");
   });
 
   it("nothing left out, no count; no Fomo total, no total", () => {

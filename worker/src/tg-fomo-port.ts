@@ -18,11 +18,12 @@
  * owner's own research state, or who Merrymen watches, before anything is
  * spent; the renderer gives a group coin-level aggregates (no wallets,
  * addresses, links, cashtags or quoted third-party text, money in short
- * form) and scrubs the result. The one exception is a coin's theses asked
- * for themselves ("list the last 10", "don't summarise"; Milla, 2026-10-09):
- * up to ten of the newest, each cleaned, cut short, checked here and gated as
- * a `quote` by the handler, dropped and never repaired (thesesQuotes). Never
- * a trader's own theses, which a room never hears. Traders a group hears named are Fomo's public
+ * form) and scrubs the result. A coin's theses asked for themselves ("list
+ * the last 10", "don't summarise"; Milla, 2026-10-09) are built for the
+ * owner's ask only and go to HER DM, never the room: up to ten of the newest,
+ * each cleaned, cut short, checked here and gated as a `quote` by the
+ * handler, dropped and never repaired (thesesQuotes). Anyone else's such ask
+ * gets the digest. Never a trader's own theses. Traders a group hears named are Fomo's public
  * ones: the leaderboard's handles and their P&L, and ONE NAMED TRADER'S
  * PUBLIC DATA, for anyone who asks, the owner included (who they are, what
  * they hold, what they traded, what they made or lost money on,
@@ -1135,10 +1136,12 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false, status: answerStatus(r.envelopes) };
         // A remembered trader board: the rows the text shows, so the handler can say which the room heard (heard()).
         if (r.board) said.board = { at: r.board.at, ranks: boardRanksIn(said.text) };
-        // A COIN'S THESES QUOTED, on an explicit ask (Milla, 2026-10-09): the
-        // room hears the quotes (tg-groups/quotes.ts), the digest stays the
-        // fallback, and no paraphrase is asked for (no model call at all).
-        const quotes = thesesQuotes(r, t);
+        // A COIN'S THESES QUOTED, on the OWNER'S explicit ask only (Milla,
+        // 2026-10-09: "Owner's DM"): her DM gets the quotes (tg-groups/quotes.ts),
+        // the digest stays the fallback, and no paraphrase is asked for (no
+        // model call at all). Anyone else's ask is the digest: a stranger's
+        // words never reach the group, so they are never built for it.
+        const quotes = q.owner === true ? thesesQuotes(r, t) : null;
         if (quotes) {
           said.quotes = quotes;
           log(`[tg-fomo] theses quoted (${quotes.quotes.length} kept, ${quotes.leftOut} left out)`);

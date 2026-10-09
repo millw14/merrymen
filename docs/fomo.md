@@ -776,7 +776,7 @@ Free 250k, Starter 2.5M, Builder 12.5M, Growth 37.5M, Scale 112.5M.
 | Holdings question | 250 | |
 | Theses question | 1,250 per page | |
 | A tail | 0–250 to resolve the trader, at most 2 × 1,250 thesis reads | alerts come from the stored feed: 0 |
-| A room's theses quoted | nothing beyond the theses read | cut from the room's kept copy: no read, no model call |
+| A coin's theses quoted to the owner's DM | nothing beyond the theses read | cut from the room's kept copy: no read, no model call |
 | A coin's facts in a room | 0 (the coin from the room's memory), else one resolver read | the market data is GeckoTerminal's public index, bounded per room and agent |
 
 The shared daily pool is `plan × (1 − 20%) / 31`, split 25% position protection, 45%
@@ -895,10 +895,12 @@ Surface limits:
   crowd ("what are fomo traders buying?") also names the feed page's top three coins by
   distinct buyers (sellers, for selling), as counts, never who. "What can you do with fomo" and "is fomo working?" are answered by code with no
   lookup: a fixed list, and whether research is on here. **What people are saying about
-  a coin** (its theses) is never counted in a room, and never quoted unless someone asks for
-  the theses themselves ("list the last 10", "show me these theses, don't summarise", "what
-  did they say exactly"; Milla, 2026-10-09): then the newest up to ten, cleaned, cut to about
-  160 characters, each checked by the port (`thesesQuotes`: the coin's dev's own posts, a call
+  a coin** (its theses) is never counted in a room, and never quoted in one. When the
+  owner asks for the theses themselves in a group ("list the last 10", "show me these theses,
+  don't summarise", "what did they say exactly"; Milla, 2026-10-09, "Owner's DM"), the
+  newest up to ten go to her DM and the room hears only that they went (a DM that does not
+  land leaves the room the digest); anyone else's such ask is the digest. The quotes are
+  cleaned, cut to about 160 characters, each checked by the port (`thesesQuotes`: the coin's dev's own posts, a call
   to action beside a link taken out, lures, sends, targets and accusations left out) and gated
   again as a `quote` by the handler, dropped and counted, never repaired, under "in their words
   (not facts)" with how many were left out; never a trader's own theses. No stance counts and
@@ -1019,18 +1021,20 @@ every open Trencher position's cost instead, which errs toward refusing. So:
   read identically by the orchestrator and the web process; rooms reuse copies longer, a
   room's "now" never forces a paid refresh, and a refusal says when to try again.
 - **Theses.** A room hears a code digest of what they argue, and the group model's
-  paraphrase of cleaned, fenced thesis texts, never a verbatim quote (amended 2026-10-09: the
-  theses themselves, quoted, on an explicit ask only; below); the paraphrase is
+  paraphrase of cleaned, fenced thesis texts, never a verbatim quote (2026-10-09: the theses
+  themselves, quoted, go to the owner's DM on her explicit ask only; below); the paraphrase is
   off unless `MERRYMEN_TG_THESES_MODEL=1` (Milla, 2026-10-08). Group answers carry no stance
   counts and no "evidence families".
 
 ## Decided (Milla, 2026-10-09: the AUTON night)
 
-- **Quotes on request.** When someone asks for a coin's theses themselves (list, show, the
-  last N, don't summarise, their exact words, quotes), a room hears up to ten of the newest,
-  each a short cleaned quote with a sayable handle or "a trader" and its age, every line gated
-  as a `quote`, a failing one dropped and counted, "their words, not facts". The digest stays
-  the default answer.
+- **Quotes on request, to the owner's DM.** When the owner asks in a group for a coin's theses
+  themselves (list, show, the last N, don't summarise, their exact words, quotes), her DM gets
+  up to ten of the newest, each a short cleaned quote with a sayable handle or "a trader" and
+  its age, every line gated as a `quote`, a failing one dropped and counted, "their words, not
+  facts"; the room hears "sent them to your DMs". Anyone else's such ask gets the digest: a
+  stranger's words never land in the group (amended the same day, after review showed quotes
+  in a room kept needing new blocklists). The digest stays the default answer.
 - **Rug banter.** The persona may say a coin rugged and make a playful Merrymen brag, only when
   a facts lookup measured a collapse or the room itself said the coin rugged; never a person,
   never scam or honeypot as fact, never advice, never Merrymen as a play, no brag back to back.

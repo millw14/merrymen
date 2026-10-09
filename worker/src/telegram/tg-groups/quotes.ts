@@ -1,17 +1,19 @@
 /**
- * A COIN'S THESES, QUOTED IN A ROOM (docs/tg-groups.md rule 3 as amended by
- * Milla on 2026-10-09; docs/fomo.md "Telegram groups").
+ * A COIN'S THESES, QUOTED IN THE OWNER'S DM (docs/tg-groups.md rule 3 as
+ * amended by Milla on 2026-10-09; docs/fomo.md "Telegram groups").
  *
- * Only on an explicit ask ("list the last 10", "show me these theses, don't
- * summarise", "what did they say exactly"): the port (tg-fomo-port.ts
- * thesesQuotes) hands over the newest up to ten of one coin's theses,
- * cleaned, cut and pre-checked; this file says them. The default answer to
- * "what are people saying" is still the code digest.
+ * Only on the owner's explicit ask in a group ("list the last 10", "show me
+ * these theses, don't summarise", "what did they say exactly"): the port
+ * (tg-fomo-port.ts thesesQuotes, built for the owner only) hands over the
+ * newest up to ten of one coin's theses, cleaned, cut and pre-checked; this
+ * file words them, the handler sends them to her DM and the room hears only
+ * that they went there. A stranger's words never land in the group: anyone
+ * else's ask gets the code digest, as "what are people saying" does.
  *
  * EVERY QUOTE IS GATED AGAIN, as the `quote` kind (gate.ts: every common
  * clause plus the third-party ones), with the coin's collapse permit for the
  * bare "rug" of a stranger's fear and no Merrymen brag. A refused quote is
- * DROPPED, never repaired, and counted: the room hears how many were left
+ * DROPPED, never repaired, and counted: she hears how many were left
  * out, and that these are their words, not facts. The header and the closing
  * line are code's own, gated as `research`.
  *
@@ -20,7 +22,7 @@
 import { admitTgLine, quoteEncodedPieces, QUOTES_ENCODED_MAX } from "./gate";
 import type { TgThesesQuotes } from "./types";
 
-/** The most quotes a room hears, the most lines the answer runs to, and its length (Telegram allows 4,096). */
+/** The most quotes one answer holds, the most lines it runs to, and its length (Telegram allows 4,096). */
 export const QUOTES_MAX = 10;
 export const QUOTES_MAX_LINES = 13;
 export const QUOTES_MAX_CHARS = 2_400;
@@ -28,7 +30,7 @@ export const QUOTES_MAX_CHARS = 2_400;
 /** The closing words, always said: a quote is a claim, never a fact. */
 export const QUOTES_TAIL = "Their words, not facts";
 
-/** "• kaleo, 2h ago: “…”": one quote as the room hears it (tg-fomo-port.ts quoteLine says the same). */
+/** "• kaleo, 2h ago: “…”": one quote as it is said (tg-fomo-port.ts quoteLine says the same). */
 export function quoteLineOf(q: { who: string; age: string; text: string }): string {
   return `• ${q.who}${q.age ? `, ${q.age}` : ""}: “${q.text}”`;
 }
@@ -62,10 +64,11 @@ function selfReadingOf(agentName: string): { inHandle: (who: string) => boolean;
 }
 
 /**
- * What the room hears for a quote ask, or null when not even the header is
- * sayable (the caller then says the digest). `quoted` counts the quotes said;
- * with none, `text` is the honest line that none could be, and the caller
- * says the digest after it. `ageLine` is the copy's age (fomo/render.ts), last.
+ * What the owner's DM gets for a quote ask, as plain text (the handler
+ * escapes it), or null when not even the header is sayable (the caller then
+ * says the digest in the room). `quoted` counts the quotes said; with none,
+ * `text` is the honest line that none could be, and the caller adds the
+ * digest after it. `ageLine` is the copy's age (fomo/render.ts), last.
  */
 export function quotesSayable(m: TgThesesQuotes, ageLine: string | null, agentName: string): { text: string; quoted: number; leftOut: number } | null {
   if (!m || !Array.isArray(m.quotes)) return null;
@@ -79,12 +82,12 @@ export function quotesSayable(m: TgThesesQuotes, ageLine: string | null, agentNa
   if (n === 0) return null;
   const head = research(
     m.asked > QUOTES_MAX
-      ? `The newest ${QUOTES_MAX} theses on ${coin}${where} (${QUOTES_MAX} is the most I quote in a group), in their words (not facts):`
+      ? `The newest ${QUOTES_MAX} theses on ${coin}${where} (${QUOTES_MAX} is the most I quote at once), in their words (not facts):`
       : `The newest ${n} theses on ${coin}${where}, in their words (not facts):`,
   );
   if (!head) return null;
   const age = ageLine ? research(ageLine) : null;
-  // Each quote judged again, as a stranger's words, by the room's gate. An
+  // Each quote judged again, as a stranger's words, by the group gate. An
   // author named like the agent itself is "a trader"; a quote that names
   // the agent is someone talking to it or dressing as it, and is left out.
   let leftOut = Math.max(0, n - Math.min(m.quotes.length, QUOTES_MAX));

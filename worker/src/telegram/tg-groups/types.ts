@@ -524,8 +524,8 @@ export interface TgThesesMaterial {
 }
 
 /**
- * A COIN'S THESES, QUOTED (Milla, 2026-10-09: on an explicit ask only).
- * THIRD-PARTY WORDS: each quote is one stranger's thesis, cleaned (links,
+ * A COIN'S THESES, QUOTED (Milla, 2026-10-09: on the owner's explicit ask
+ * only, and said to her DM, never a room: "Owner's DM"). THIRD-PARTY WORDS: each quote is one stranger's thesis, cleaned (links,
  * addresses, handles, $tags and markup out), cut to at most ~160 characters,
  * pre-gated by the port as the `quote` kind and gated again by the handler
  * (quotes.ts), dropped and never repaired. Never a trader's own theses, never
@@ -571,7 +571,7 @@ export interface TgCollapse {
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;
-  /** A coin's theses quoted, on an explicit ask (quotes.ts says them); `text` is the digest, the fallback. */
+  /** A coin's theses quoted, on the owner's explicit ask only (quotes.ts words them for her DM); `text` is the digest, the fallback. */
   quotes?: TgThesesQuotes;
   /**
    * The one coin a single-coin answer is about (theses, quotes, activity,

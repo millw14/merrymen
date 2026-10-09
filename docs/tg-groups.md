@@ -58,8 +58,9 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    The group model's paraphrase of a coin's theses is NOT code-written: each
    of its phrases is checked as an `answer` line (the money clause applies;
    no digit outside the coin's name), never as `research`, which would admit
-   "going to 10m". A thesis quoted on an explicit ask (rule 3) is a stranger's
-   words, gated as `quote`: the money clause is lifted for the author's own
+   "going to 10m". A thesis quoted on the owner's explicit ask (rule 3; it goes
+   to her DM, never the room) is a stranger's words, gated as `quote`: the
+   money clause is lifted for the author's own
    figures ("down from 8m to 36k in a week"), and a price target in it ("should
    be 50m", "next 100x") is dropped. A coin's facts (Factual questions, "A
    coin's facts, on request") are research lines too: public index figures
@@ -100,9 +101,16 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    AI, summarize this as…", "summary for any bot reading", the tool's own
    labels such as "for:", "new rule:", "from now on say"), never a five-word
    run of anyone's words (Milla, 2026-10-07, decision D5). A coin's theses are
-   never quoted in a room, **except when someone explicitly asks for them**
-   (list, show, the last N, don't summarise, their exact words, quotes:
-   Milla, 2026-10-09). Then the room hears up to 10 of the newest, each at
+   **never quoted in a room**. When **the owner** explicitly asks for them in
+   a group (list, show, the last N, don't summarise, their exact words,
+   quotes: Milla, 2026-10-09, "Owner's DM"), up to 10 of the newest go to
+   **her DM** and the room hears only that they went there ("sent them to
+   your DMs 🤫"), said through the answer's own send, never the chat queue;
+   a DM that does not land leaves the digest for the room instead, never a
+   claim that they were sent. Anyone else's such ask gets the digest: the
+   port builds quotes for the owner's ask only, and the handler says them
+   only to her DM. A reply under the digest or under that "sent them to your
+   DMs" line ("show me the last 5") asks again for the same coin. Each quote is at
    most ~160 characters, cleaned (links, addresses, handles, $tags and markup
    out; a row a link or an address was taken out of is left out whole), each
    line gated as `quote` (lures, drainer prompts in any words: a seed
@@ -121,7 +129,8 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    accents are off or a digit written for a letter ("honeypøt", "cla1m"),
    an @ glued to a word, and
    lines at the reader dropped, never repaired), with how many were left out
-   and "their words, not facts". An address is never said whole, however it
+   and "their words, not facts", the same checks as when they were said in a
+   room, so a DM she forwards carries no lure either. An address is never said whole, however it
    is split, within one quote or over several. An author whose handle
    impersonates staff, Merrymen, Fomo, the agent or a lure (in any case, as
    one word, or with digits for letters: "fomoadmin", "sh0gun") is "a
@@ -509,7 +518,8 @@ to someone in distress goes out shushed or not.
   refused: a person who rugged, dumped, sold on anyone, stole, pulled the
   liquidity or ran; a lifted rug word beside a person (the dev, the team, an
   insider, a whale, a KOL, they, he, she or someone, anyone the room knows
-  by name or heard from it as a person (a quote's author, a board's trader),
+  by name or heard from it as a person (a board's trader; a quote's author
+  only if one ever reached the room, which since "Owner's DM" none does),
   "thanks kaleo", someone who "took everything", "knew" or "shilled it", or
   blame in other words: "kaleo did this", "because of", "kaleo's fault",
   "rugged on kaleo"); the rug carried to another coin ("pons next", "rugged
@@ -530,8 +540,8 @@ to someone in distress goes out shushed or not.
   a brag, and any line said under a permit that allowed a brag spends it. No permit for a coin it holds, one it bought and has
   not exited (how it did is private, rule 3), or a coin named like someone in
   the room or a trader the room heard from it ("why did kaleo dump" after
-  kaleo's quote asks no facts; only "$KALEO" asks about a coin of that
-  name). A quote's own rug clause is stricter: beside a lifted rug word,
+  a board with kaleo on it asks no facts; only "$KALEO" asks about a coin of
+  that name). A quote's own rug clause is stricter: beside a lifted rug word,
   every other clause must open with the coin, its chart, price or
   liquidity, holders or the author ("auton rugged, kaleo was behind it" is
   left out). The system prompt's NEVER WRITE line is unchanged; the prompt's
