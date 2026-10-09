@@ -401,7 +401,9 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
     if (publishable && bps !== null && Number.isFinite(bps)) performance.pnlBps = bps;
     if (!gas.complete && (performance.pnlBps !== null || performance.pnlUsdg !== null)) performance.pnlEstimated = true;
   }
-  if (performance.pnlBps === null) await estimateFromFirstMark(db, account, epoch, measured, gas?.gas ?? 0, performance);
+  // Only on a READ gas tape with a filled trade: a book that never traded has
+  // drift, not a return, and an unread tape is not a zero cost.
+  if (performance.pnlBps === null && gas && gas.landed > 0) await estimateFromFirstMark(db, account, epoch, measured, gas.gas, performance);
   return { performance, liveRank, paperPnlBps: null };
 }
 
@@ -418,6 +420,7 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
  * withholds it after), and an unread flow tape leaves the blank as it was.
  */
 async function estimateFromFirstMark(db: Db, account: string, epoch: number, measured: { equity: number; at: number },
+  /** Gas on record through `measured.at`, from a read that succeeded. */
   gasUsdg: number, performance: BookPerformance): Promise<void> {
   try {
     const held = await heldSql(db);
@@ -427,6 +430,9 @@ async function estimateFromFirstMark(db: Db, account: string, epoch: number, mea
     const base = finite(first?.equity_usdg);
     const from = finite(first?.at);
     if (base === null || base <= 0 || from === null || from >= measured.at) return;
+    // Gas before the baseline is already in it: charge only what came after.
+    const before = await gasAt(db, account, epoch, from);
+    const gasAfter = Math.max(0, gasUsdg - before.gas);
     let inflow = 0;
     let net = 0;
     for (const f of await readDistinctFlows(db, account, epoch)) {
@@ -434,7 +440,7 @@ async function estimateFromFirstMark(db: Db, account: string, epoch: number, mea
       if (f.direction === "in") inflow += f.amountUsdg;
       net += f.direction === "in" ? f.amountUsdg : -f.amountUsdg;
     }
-    const pnl = measured.equity - base - net - (Number.isFinite(gasUsdg) && gasUsdg > 0 ? gasUsdg : 0);
+    const pnl = measured.equity - base - net - gasAfter;
     const bps = pnl / (base + inflow) * 10_000;
     if (!Number.isFinite(pnl) || !Number.isFinite(bps)) return;
     performance.pnlBps = bps;

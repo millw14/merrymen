@@ -71,6 +71,7 @@ test("private, unknown, held and older-server data do not manufacture an amount 
     row("Unknown", { pnlBps: 9900, performance: performance({ equityUsdg: null, pnlUsdg: null, pnlBps: null }) }),
     row("Held", { performance: performance({ held: true, equityAt: 1_790_000_200, pnlAt: 1_790_000_100 }) }),
     row("Gas", { performance: performance({ pnlUsdg: null, pnlBps: null, gasComplete: false }) }),
+    row("Nodeposit", { pnlBps: null, unrankedWhy: "no-deposit", performance: performance({ pnlUsdg: null, pnlBps: null, valuation: "current", fills: 3, fillsAtMark: 3 }) }),
     row("Approx", { pnlBps: null, unrankedWhy: "gas-pending", performance: performance({ pnlUsdg: 12.5, pnlBps: 1250, gasComplete: false, pnlEstimated: true }) }),
     row("Legacy", { performance: undefined, pnlBps: 25 }),
   ]);
@@ -93,6 +94,8 @@ test("private, unknown, held and older-server data do not manufacture an amount 
   const gas = rows.find(r => r.textContent!.includes("Gas"))!;
   assert.equal(gas.querySelector(".chg")!.textContent, "Awaiting valuation");
   assert.doesNotMatch(gas.textContent!, /Gas accounting/);
+  // A withheld return says the server's reason, not "awaiting".
+  assert.equal(rows.find(r => r.textContent!.includes("Nodeposit"))!.querySelector(".chg")!.textContent, "no deposit");
   // A return with some gas off the record is printed, marked approximate.
   const approx = rows.find(r => r.textContent!.includes("Approx"))!;
   assert.equal(approx.querySelector(".chg")!.textContent, "≈ +12.5%");

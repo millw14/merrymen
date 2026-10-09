@@ -152,6 +152,27 @@ test("unevidenced capital still yields an approximate return against the first v
     assert.equal(result.performance.pnlEstimated, true);
     assert.equal(result.performance.pnlUsdg, 15);
     assert.equal(result.performance.pnlBps, 1000, "15 over 100 + 50");
+    // Gas spent before the baseline is already in it and is not charged again.
+    const { raw: raw3, db: early } = await ledger();
+    try {
+      await early.prepare("UPDATE agents SET contributions_known = 0").run();
+      await op(early, 5, { gas: 3, wei: "3000" });
+      await mark(early, 100, 10);
+      await op(early, 12, { gas: 1, wei: "1000", hash: "0xLATER" });
+      await mark(early, 120, 30);
+      const r = await readBookPerformance(early, ACCOUNT, 2, true);
+      assert.equal(r.performance.pnlUsdg, 19, "120 − 100 − the 1 spent after the baseline");
+    } finally { raw3.close(); }
+    // A book with no filled trade has drift, not a return.
+    const { raw: raw4, db: idle } = await ledger();
+    try {
+      await idle.prepare("UPDATE agents SET contributions_known = 0").run();
+      await mark(idle, 100, 10);
+      await mark(idle, 130, 30);
+      const r = await readBookPerformance(idle, ACCOUNT, 2, true);
+      assert.equal(r.performance.pnlBps, null);
+      assert.equal(r.performance.pnlEstimated, undefined);
+    } finally { raw4.close(); }
     // One valuation alone has nothing to measure against.
     const { raw: raw2, db: one } = await ledger();
     try {

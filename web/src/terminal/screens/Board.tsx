@@ -12,6 +12,7 @@ import {
 } from "../live";
 import { strategyName } from "../strategy";
 import { Empty, ReadEmpty, Face, Stamp, NameBlock } from "../ui";
+import { unrankedShort } from "@/lib/rank-pnl";
 import { performanceOf } from "../agent-performance";
 import { boardOrder, type BoardRow } from "../board-order";
 import { useNow } from "../clock";
@@ -224,6 +225,10 @@ function noReturn(a: LiveAgent): string {
   const legacy = a.performance ? undefined
     : [a.pnlBps, a.paperPnlBps].find((n): n is number => typeof n === "number" && Number.isFinite(n) && n !== 0);
   if (legacy !== undefined) return `≈ ${pctBps(legacy)}`;
+  // The actual reason when the server gave one, unless the fills show the
+  // valuation simply has not caught up yet.
+  const pending = a.performance?.valuation === "awaiting" || a.performance?.fillsAtMark === 0;
+  if (!pending && a.unrankedWhy) return unrankedShort(a.unrankedWhy);
   return "Awaiting valuation";
 }
 
