@@ -47,6 +47,7 @@ import { merrymenHome } from "@merrymen/home";
 import { isHostedMode, type MerrymenSettings } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
+import { ownerMismatch } from "@/lib/order-owner";
 import { withReadDb } from "@/lib/ledger";
 import { isBotToken } from "@/lib/telegram-claims";
 import { telegramListening, type Listening, type TelegramRuntime } from "@/lib/telegram-listening";
@@ -286,6 +287,10 @@ export interface TelegramStatus {
 
 export async function GET(req: Request) {
   const tenant = isHostedMode() ? tenantOf(req) : null;
+  const owner = new URL(req.url).searchParams.get("owner");
+  if (isHostedMode() && owner !== null && ownerMismatch(owner, tenant)) {
+    return NextResponse.json({ error: "This browser is signed in with a different wallet. Reload Settings before connecting Telegram." }, { status: 409 });
+  }
   const settings = await settingsFor(tenant);
   const token = effectiveToken(settings);
   const hasToken = typeof token === "string" && token.length > 8;
