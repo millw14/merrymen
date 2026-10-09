@@ -71,6 +71,7 @@ test("private, unknown, held and older-server data do not manufacture an amount 
     row("Unknown", { pnlBps: 9900, performance: performance({ equityUsdg: null, pnlUsdg: null, pnlBps: null }) }),
     row("Held", { performance: performance({ held: true, equityAt: 1_790_000_200, pnlAt: 1_790_000_100 }) }),
     row("Gas", { performance: performance({ pnlUsdg: null, pnlBps: null, gasComplete: false }) }),
+    row("Approx", { pnlBps: null, unrankedWhy: "gas-pending", performance: performance({ pnlUsdg: 12.5, pnlBps: 1250, gasComplete: false, pnlEstimated: true }) }),
     row("Legacy", { performance: undefined, pnlBps: 25 }),
   ]);
   assert.equal(live.agents[0]!.performance!.equityUsdg, null, "private dollars are discarded at the mapping boundary");
@@ -83,14 +84,20 @@ test("private, unknown, held and older-server data do not manufacture an amount 
   assert.doesNotMatch(privateRow.outerHTML, /9876|5432/);
   const unknown = rows.find(r => r.textContent!.includes("Unknown"))!;
   assert.equal(unknown.querySelector(".rank-have")!.textContent, "—");
-  assert.equal(unknown.querySelector(".chg")!.textContent, "Unavailable");
+  assert.equal(unknown.querySelector(".chg")!.textContent, "—");
   assert.doesNotMatch(unknown.textContent!, /99\.0%|0\.0%|\$0\.00/);
   const held = rows.find(r => r.textContent!.includes("Held"))!;
   assert.match(held.querySelector(".rank-book")!.textContent!, /Live · Pending/);
   const title = held.querySelector(".rank-value")!.getAttribute("title")!;
   assert.match(title, /Valued .*P&L measured .*pending reconciliation/);
   const gas = rows.find(r => r.textContent!.includes("Gas"))!;
-  assert.equal(gas.querySelector(".chg")!.textContent, "Gas accounting unavailable");
+  assert.equal(gas.querySelector(".chg")!.textContent, "—");
+  assert.doesNotMatch(gas.textContent!, /Gas accounting/);
+  // A return with some gas off the record is printed, marked approximate.
+  const approx = rows.find(r => r.textContent!.includes("Approx"))!;
+  assert.equal(approx.querySelector(".chg")!.textContent, "≈ +12.5%");
+  assert.match(approx.querySelector(".rank-pnl")!.textContent!, /^≈ \+\$12\.50 P&L$/);
+  assert.equal(approx.querySelector(".n")!.textContent, "—", "an approximate return is never ranked");
   const legacy = rows.find(r => r.textContent!.includes("Legacy"))!;
   assert.equal(legacy.querySelector(".rank-have")!.textContent, "—", "the old curve is never reused as current equity");
   assert.equal(legacy.querySelector(".chg")!.textContent, "+0.3%");
@@ -114,6 +121,33 @@ test("desktop discovery cards keep the same value, precise return and private-do
   assert.doesNotMatch(cards[1]!.outerHTML, /9876|5432|\$/);
 });
 
+test("retired accounts are listed under their count with their frozen final returns, private dollars withheld", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async input => new Response(JSON.stringify(String(input).includes("/api/leaderboard")
+    ? { source: "sqlite", agents: [row("Alive")], retired: 3, retiredAgents: [
+      { slug: "ghost", name: "Ghost", book: "live", pnlBps: 420, pnlUsdg: 4.2, estimated: true, trades: 7, lastValuedAt: 1_790_000_100 },
+      { slug: null, name: "Robin", book: "paper", pnlBps: -150, pnlUsdg: null, estimated: false, trades: 2, lastValuedAt: null },
+      { slug: null, name: "Robin", book: null, pnlBps: null, pnlUsdg: null, estimated: false, trades: 0, lastValuedAt: null },
+    ] }
+    : { tokens: [], theses: [], rows: [], assets: [], quotes: [] }));
+  let live;
+  try { live = await loadLive(); } finally { globalThis.fetch = original; }
+  assert.equal(live.retiredAgents.length, 3);
+  const doc = new JSDOM(renderToStaticMarkup(React.createElement(Board, {
+    agents: live.agents, retired: live.retired, retiredAgents: live.retiredAgents,
+    theses: [], mine: null, onProfile: noop, onDesk: noop,
+  }))).window.document;
+  assert.match(doc.querySelector(".board-retired summary")!.textContent!, /Retired accounts \(3\)/);
+  const rows = [...doc.querySelectorAll(".board-retired-list .rank")];
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0]!.querySelector(".chg")!.textContent, "≈ +4.2%");
+  assert.match(rows[0]!.querySelector(".rank-pnl")!.textContent!, /≈ \+\$4\.20 P&L/);
+  assert.equal(rows[1]!.querySelector(".chg")!.textContent, "−1.5%");
+  assert.equal(rows[1]!.querySelector(".rank-pnl"), null);
+  assert.equal(rows[1]!.querySelector("button")!.hasAttribute("disabled"), true, "an unlinked account has no profile");
+  assert.equal(rows[2]!.querySelector(".chg")!.textContent, "No trades");
+});
+
 test("a malformed performance field stays unavailable rather than coercing empty data into zero", async () => {
   const { agents } = await read([row("Malformed", { pnlBps: 9900, performance: {
     book: "live", publicBook: true, pnlBps: "", equityUsdg: "0", pnlUsdg: null,
@@ -121,7 +155,7 @@ test("a malformed performance field stays unavailable rather than coercing empty
   } })]);
   const doc = board(agents);
   assert.equal(doc.querySelector(".rank-have")!.textContent, "—");
-  assert.equal(doc.querySelector(".chg")!.textContent, "Unavailable");
+  assert.equal(doc.querySelector(".chg")!.textContent, "—");
   assert.match(doc.querySelector(".rank-value")!.getAttribute("title")!, /Valuation time unavailable.*Measured P&L unavailable/);
   assert.doesNotMatch(doc.body.textContent!, /99\.0%|0\.0%|\$0\.00/);
 });

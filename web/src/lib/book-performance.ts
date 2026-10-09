@@ -77,6 +77,13 @@ export interface BookPerformance {
    * paper or idle book's return is shown without being ranked.
    */
   underReview: boolean;
+  /**
+   * The return is published WITHOUT the gas costs not yet on record
+   * (gasComplete false): a ceiling, not the exact net figure. Pages print it
+   * as approximate and it is never ranked — the rank stays "gas-pending".
+   * Optional so an older server, which never estimates, reads as exact.
+   */
+  pnlEstimated?: boolean;
 }
 
 export interface GasOps { sponsored: number; priced: number; unpriced: number; unrecorded: number }
@@ -269,8 +276,10 @@ export async function readBookPerformance(db: Db, account: string, epoch: number
   const review = { flows: false };
   const read = await readBookFigures(db, account, epoch, publicBook, review);
   if (!review.flows && !underReturnReview(account)) return read;
+  // Withheld, so nothing about it is estimated either.
+  const { pnlEstimated: _withheld, ...figures } = read.performance;
   return {
-    performance: { ...read.performance, pnlUsdg: null, pnlBps: null, underReview: true },
+    performance: { ...figures, pnlUsdg: null, pnlBps: null, underReview: true },
     liveRank: { pnlBps: null, unrankedWhy: "review-pending" },
     paperPnlBps: null,
   };
@@ -364,11 +373,14 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
   let liveRank = rankPnl({ contributed, latest: measured.equity, gasUsdg: gas?.gas ?? 0, landed: gas?.landed ?? 0, contributionsKnown });
   if (inputs[0].status === "rejected" && contributionsUnderReview(inputs[0].reason)) review.flows = true;
   if (inputs[0].status === "rejected" || !gas) liveRank = unavailable();
+  // What rankPnl would have published, before missing gas withdraws it: the
+  // return below is shown on that evidence, as an estimate, unranked.
+  const publishable = liveRank.pnlBps !== null;
   // A READ gas tape that is missing a cost is its own reason, and only where
   // rankPnl would have published: every other refusal is the truer thing to
   // say first. An unread tape stays "quality-unknown" above — that is about
   // the read, and this is about the record.
-  else if (!gas.complete && liveRank.pnlBps !== null) liveRank = { pnlBps: null, unrankedWhy: "gas-pending" };
+  if (inputs[0].status === "fulfilled" && gas && !gas.complete && liveRank.pnlBps !== null) liveRank = { pnlBps: null, unrankedWhy: "gas-pending" };
   performance.gasComplete = gas?.complete ?? null;
   performance.gasOps = gas?.ops ?? null;
   // A read that found no flows is unfunded; an unread one is unknown.
@@ -377,11 +389,17 @@ async function readBookFigures(db: Db, account: string, epoch: number, publicBoo
   // Net contributions may be zero or negative after a withdrawal. A dollar
   // gain still has meaning with a proved funding history and executed trade;
   // the percentage/rank keeps refusing a nonpositive denominator.
-  if (contributed !== null && contributionsKnown === true && gas?.complete && gas.landed > 0) {
+  //
+  // A GAS TAPE MISSING SOME COSTS still yields a return: the priced gas is
+  // charged and the unpriced is not, so the figure is a ceiling on the exact
+  // one. It is shown flagged `pnlEstimated` and stays unranked, so it is never
+  // ordered among exact returns; gas-repair.ts completes the tape.
+  if (contributed !== null && contributionsKnown === true && gas && gas.landed > 0) {
     const pnl = measured.equity - contributed! - gas.gas;
     if (Number.isFinite(pnl)) performance.pnlUsdg = performance.publicBook ? pnl : null;
     const bps = contributed > 0 ? pnl / contributed * 10_000 : null;
-    if (liveRank.pnlBps !== null && bps !== null && Number.isFinite(bps)) performance.pnlBps = bps;
+    if (publishable && bps !== null && Number.isFinite(bps)) performance.pnlBps = bps;
+    if (!gas.complete && (performance.pnlBps !== null || performance.pnlUsdg !== null)) performance.pnlEstimated = true;
   }
   return { performance, liveRank, paperPnlBps: null };
 }

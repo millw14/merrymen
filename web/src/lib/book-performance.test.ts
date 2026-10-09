@@ -109,7 +109,7 @@ test("a complete withdrawal preserves evidenced dollar profit or loss without in
   }
 });
 
-test("exact live performance and rank refuse unpriced or unrecorded gas, while proved sponsorship is free", async () => {
+test("unpriced or unrecorded gas withholds the rank and marks the return approximate, while proved sponsorship is free", async () => {
   for (const [cost, complete] of [
     [{ gas: null, wei: "123" }, false],
     [{ gas: null }, false],
@@ -124,8 +124,11 @@ test("exact live performance and rank refuse unpriced or unrecorded gas, while p
       await op(db, 5, cost);
       const result = await readBookPerformance(db, ACCOUNT, 2, true);
       assert.equal(result.performance.gasComplete, complete, JSON.stringify(cost));
-      assert.equal(result.performance.pnlUsdg, complete ? 10 : null);
-      assert.equal(result.performance.pnlBps, complete ? 1000 : null);
+      // The return stands either way; without every cost on record it leaves
+      // the unpriced gas out, says so, and is never ranked.
+      assert.equal(result.performance.pnlUsdg, 10);
+      assert.equal(result.performance.pnlBps, 1000);
+      assert.equal(result.performance.pnlEstimated === true, !complete);
       assert.equal(result.liveRank.pnlBps, complete ? 1000 : null);
       // Its own reason: the deposits ARE evidenced (contributions_known = 1),
       // so "quality-unknown" would say the opposite of what the profile says.
@@ -189,7 +192,7 @@ test("an unread settlement-column probe cannot fall back to a submission-time co
   } finally { raw.close(); }
 });
 
-test("legacy settlements with unknown time refuse an exact cost horizon unless their owner cost is proved zero", async () => {
+test("legacy settlements with unknown time refuse an exact cost horizon, and an exact rank, unless their owner cost is proved zero", async () => {
  for (const status of ["landed", "reverted"]) {
   for (const hasSettlementColumn of [true, false]) {
   for (const [cost, known] of [
@@ -209,7 +212,11 @@ test("legacy settlements with unknown time refuse an exact cost horizon unless t
       await mark(db, 120, 30, "live", true);
       const result = await readBookPerformance(db, ACCOUNT, 2, true);
       assert.equal(result.performance.gasComplete, known, JSON.stringify(cost));
-      assert.equal(result.performance.pnlUsdg, known ? 10 : null);
+      // Unknown-time costs give an approximate return: never ranked, never
+      // more than the gain with no gas at all.
+      assert.equal(result.performance.pnlEstimated === true, !known);
+      assert.ok(result.performance.pnlUsdg !== null && result.performance.pnlUsdg <= 10);
+      if (known) assert.equal(result.performance.pnlUsdg, 10);
       assert.equal(result.liveRank.pnlBps, known ? 1000 : null);
     } finally { raw.close(); }
   }

@@ -65,7 +65,7 @@ export function Search({
             {a.last && <p className="meta">{lastLine(a.last)}</p>}
           </div>
           <span className="performance-figure">
-            <span title={performance.title} className={`px ${figure == null || figure === 0 ? "" : figure > 0 ? "up" : "down"}${performance.state !== null ? " performance-state" : ""}`}>{performance.state ?? pctBps(performance.bps)}</span>
+            <span title={performance.title} className={`px ${figure == null || figure === 0 ? "" : figure > 0 ? "up" : "down"}${performance.state !== null ? " performance-state" : ""}`}>{performance.state ?? `${performance.estimated && performance.bps != null ? "≈ " : ""}${pctBps(performance.bps)}`}</span>
             {performance.note !== null && <small className="performance-note">{performance.note}</small>}
             {performance.asOf !== null && <small className="performance-asof">{performance.asOf}</small>}
           </span>

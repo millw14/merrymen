@@ -7,6 +7,7 @@ import {
   type LiveAgent,
   type LiveMine,
   type ReadState,
+  type RetiredAgent,
   type Thesis,
 } from "../live";
 import { strategyName } from "../strategy";
@@ -34,6 +35,7 @@ export function Board({
   onDesk,
   read = "ok",
   retired = null,
+  retiredAgents = [],
 }: {
   compact?: boolean;
   preview?: boolean;
@@ -44,6 +46,8 @@ export function Board({
    * could not tell, and then nothing was folded and nothing is said.
    */
   retired?: number | null;
+  /** The folded accounts with their final returns, listed under the count. */
+  retiredAgents?: RetiredAgent[];
   agents: LiveAgent[];
   theses: Thesis[];
   mine: LiveMine | null;
@@ -134,12 +138,20 @@ export function Board({
           Only a number is printed: null means the server could not tell, and
           then it folded nothing. Zero folded nothing either. */}
       {folded > 0 && (
-        <p
-          className="board-retired"
-          title="Accounts nothing is running any more: killed, expired, or never linked to a named agent. One agent re-granted can leave more than one."
-        >
-          Retired accounts ({folded})
-        </p>
+        <details className="board-retired">
+          <summary title="Accounts nothing is running any more: killed, expired, or never linked to a named agent. One agent re-granted can leave more than one.">
+            Retired accounts ({folded})
+          </summary>
+          {/* FROZEN FINAL RETURNS: nothing runs these, so each figure is the
+              last its book recorded, never ranked among the agents above. */}
+          {retiredAgents.length > 0 && (
+            <div className="board-retired-list">
+              {retiredAgents.map((r, i) => (
+                <RetiredRank key={`${r.slug ?? r.name}-${i}`} row={r} onProfile={onProfile} />
+              ))}
+            </div>
+          )}
+        </details>
       )}
     </div>
   );
@@ -197,11 +209,63 @@ function Rank({
           </span>
           <span className="rank-return" title={performance.title}>
             <span className={`chg ${displayedReturn == null || displayedReturn === 0 ? "" : displayedReturn > 0 ? "up" : "down"}${performance.state !== null ? " performance-state" : ""}`}>
-              {performance.state ?? (displayedReturn == null ? performance.gasIncomplete ? "Gas accounting unavailable" : a.performance ? "Unavailable" : a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn))}
+              {performance.state ?? (displayedReturn == null ? noReturn(a) : `${performance.estimated ? "≈ " : ""}${pctBps(displayedReturn)}`)}
             </span>
             {performance.pnl !== null && <small className="rank-pnl">{performance.pnl} P&L</small>}
             {performance.note !== null && <small className="rank-book performance-note">{performance.note}</small>}
-            {performance.gasIncomplete && displayedReturn != null && <small className="rank-book">Gas accounting unavailable</small>}
+          </span>
+        </div>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * WHAT A ROW WITH NO RETURN SAYS, short: a book that never traded says so,
+ * and anything else is a plain dash rather than a warning. The row's tooltip
+ * (performanceOf's title) carries the detail.
+ */
+function noReturn(a: LiveAgent): string {
+  const trades = (a.liveFills ?? a.landed ?? 0) + (a.paperFills ?? a.filledPaper ?? 0);
+  if (trades === 0) return "No trades yet";
+  if (!a.performance && a.unrankedWhy) return unrankedShort(a.unrankedWhy);
+  return "—";
+}
+
+function RetiredRank({ row, onProfile }: { row: RetiredAgent; onProfile: (slug: string) => void }) {
+  const ret = row.pnlBps;
+  const approx = row.estimated ? "≈ " : "";
+  const pnl = row.pnlUsdg === null ? null
+    : `${approx}${row.pnlUsdg > 0 ? "+" : row.pnlUsdg < 0 ? "−" : ""}${money(Math.abs(row.pnlUsdg))}`;
+  return (
+    <div className="rank retired">
+      <button
+        type="button"
+        className="rank-hit"
+        disabled={row.slug === null}
+        onClick={() => row.slug && onProfile(row.slug)}
+      >
+        <span className="n">—</span>
+        <Face name={row.name} slug={row.slug ?? row.name} />
+        <div className="rank-who">
+          <div className="rank-name"><NameBlock title={row.name} /></div>
+          <div className="rank-meta">
+            <span className="rank-trades">
+              {row.trades > 0 ? `${row.trades} ${row.book === "paper" ? "paper " : ""}trade${row.trades === 1 ? "" : "s"}` : "No trades"}
+            </span>
+            <Stamp>Retired</Stamp>
+          </div>
+        </div>
+        <div className="rank-nums">
+          <span className="rank-value">
+            {row.book && <small className="rank-book">{row.book === "paper" ? "Paper" : "Live"}</small>}
+            {row.lastValuedAt !== null && <small className="rank-book">Final {shortDateTime(row.lastValuedAt * 1000)}</small>}
+          </span>
+          <span className="rank-return">
+            <span className={`chg ${ret == null || ret === 0 ? "" : ret > 0 ? "up" : "down"}`}>
+              {ret == null ? (row.trades === 0 ? "No trades" : "—") : `${approx}${pctBps(ret)}`}
+            </span>
+            {pnl !== null && <small className="rank-pnl">{pnl} P&L</small>}
           </span>
         </div>
       </button>

@@ -511,6 +511,7 @@ export function App() {
         <DesktopSidebar
           reads={live.reads}
           retired={live.retired}
+          retiredAgents={live.retiredAgents}
           mine={displayMine}
           hasAgent={!!mine}
           tokens={live.tokens}
@@ -568,6 +569,7 @@ export function App() {
             theses={live.theses}
             read={live.reads.board}
             retired={live.retired}
+            retiredAgents={live.retiredAgents}
             mine={mine}
             tokenTab={tokenTab}
             onTokenTab={setTokenTab}

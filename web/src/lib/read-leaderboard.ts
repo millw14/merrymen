@@ -108,6 +108,31 @@ export interface LeaderboardRead {
    * would claim there are none. Nothing is folded when it is null.
    */
   retired: number | null;
+  /**
+   * THE FOLDED ACCOUNTS THEMSELVES, each with the last return its book
+   * recorded — frozen, since nothing runs them. Listed under the count so a
+   * reader can see what those agents did; never ranked, and dollars only for
+   * a published book, as above. Empty when `retired` is null.
+   */
+  retiredAgents: RetiredRow[];
+}
+
+export interface RetiredRow {
+  /** Null for an account the identity store never linked; it has no profile. */
+  slug: string | null;
+  name: string;
+  /** The book its last valuation named: "live", "paper", or null when none. */
+  book: "live" | "paper" | null;
+  /** Its final return, basis points. Null when it never produced one. */
+  pnlBps: number | null;
+  /** Final P&L in USDG, only for a published book. */
+  pnlUsdg: number | null;
+  /** The return leaves out gas costs never recorded (BookPerformance.pnlEstimated). */
+  estimated: boolean;
+  /** Trades it made: live fills, or paper fills for a paper book. */
+  trades: number;
+  /** When its book was last valued, unix seconds. */
+  lastValuedAt: number | null;
 }
 
 /** Points in the sparkline. Enough to show a shape, few enough to inline. */
@@ -121,7 +146,7 @@ export async function readLeaderboard(
   readSettings: (tenant: `0x${string}`) => Promise<{ publicBook?: boolean } | null> = (tenant) => getSettingsStore().get(tenant),
 ): Promise<LeaderboardRead> {
   return readDb(async (db): Promise<LeaderboardRead> => {
-    if (!db) return { source: "none", agents: [], retired: null };
+    if (!db) return { source: "none", agents: [], retired: null, retiredAgents: [] };
 
     const slugFor = new Map<string, string>();
     const tenantFor = new Map<string, `0x${string}`>();
@@ -178,7 +203,7 @@ export async function readLeaderboard(
     } catch {
       // A ledger written by an older worker has no `mode`. An empty board is
       // the honest render of that, never a 500.
-      return { source: "sqlite", agents: [], retired: null };
+      return { source: "sqlite", agents: [], retired: null, retiredAgents: [] };
     }
 
     // One row per public identity after a re-grant; the newest account wins.
@@ -202,6 +227,7 @@ export async function readLeaderboard(
     // either, so its old ones would be counted as agents of their own. And a
     // fold with no count is rows leaving the board without a word.
     let retired: number | null = null;
+    let folded: typeof rows = [];
     // Rows the recovery hold kept on the board that nothing is running.
     const notRunning = new Set<string>();
     if (slugsRead) try {
@@ -256,13 +282,14 @@ export async function readLeaderboard(
           expiresAt: num(l?.expires_at),
           held: tenant !== undefined && held.has(`${tenant.toLowerCase()} ${account}`),
         };
-        if (isRetired(lifecycle, now)) return false;
+        if (isRetired(lifecycle, now)) { folded.push(r); return false; }
         if (heldNotRunning(lifecycle, now)) notRunning.add(r.smart_account);
         return true;
       });
       retired = before - rows.length;
     } catch {
       /* lifecycle columns arrive with worker migrations; unknown until they do */
+      folded = [];
     }
     const agents = await Promise.all(
       rows.map(async (r): Promise<LeaderRow> => {
@@ -366,7 +393,45 @@ export async function readLeaderboard(
       return b.pnlBps - a.pnlBps;
     });
 
-    return { source: "sqlite", agents, retired };
+    const retiredAgents = await Promise.all(folded.map(async (r): Promise<RetiredRow> => {
+      const account = r.smart_account;
+      const epoch = Number(r.epoch ?? 1);
+      const tenant = tenantFor.get(account.toLowerCase());
+      let publicBook = false;
+      try {
+        publicBook = tenant !== undefined && (await readSettings(tenant))?.publicBook === true;
+      } catch { /* no private amounts published */ }
+      let paperFills = 0;
+      let liveFills = 0;
+      try {
+        const t = await readOperationCounts(db, account, epoch, "landed");
+        paperFills = t.paperFills;
+        liveFills = t.liveFills;
+      } catch { /* older ledger */ }
+      let p: BookPerformance | null = null;
+      try { p = (await readBookPerformance(db, account, epoch, publicBook)).performance; } catch { /* unread: no return */ }
+      const bps = p?.pnlBps;
+      const book = p?.book ?? null;
+      return {
+        slug: slugFor.get(account.toLowerCase()) ?? null,
+        name: String(r.name ?? "Agent"),
+        book,
+        pnlBps: typeof bps === "number" && Number.isFinite(bps) ? bps : null,
+        pnlUsdg: p?.publicBook && typeof p.pnlUsdg === "number" && Number.isFinite(p.pnlUsdg) ? p.pnlUsdg : null,
+        estimated: p?.pnlEstimated === true,
+        trades: book === "paper" ? paperFills : liveFills || paperFills,
+        lastValuedAt: p?.equityAt ?? null,
+      };
+    }));
+    // Highest final return first, then the ones with none, busiest first.
+    retiredAgents.sort((a, b) => {
+      if (a.pnlBps === null && b.pnlBps === null) return b.trades - a.trades;
+      if (a.pnlBps === null) return 1;
+      if (b.pnlBps === null) return -1;
+      return b.pnlBps - a.pnlBps;
+    });
+
+    return { source: "sqlite", agents, retired, retiredAgents };
   });
 }
 

@@ -130,11 +130,13 @@ export function DesktopSidebar({
   onTab,
   reads,
   retired = null,
+  retiredAgents = [],
 }: Actions & {
   /** Whether each read happened — an empty list is not automatically a quiet one. */
   reads: LiveState["reads"];
   /** Accounts the board folded into a count. See Board. */
   retired?: number | null;
+  retiredAgents?: import("./live").RetiredAgent[];
   tokens: LiveToken[];
   agents: LiveAgent[];
   theses: Thesis[];
@@ -312,7 +314,7 @@ export function DesktopSidebar({
               // The board's words in the figure's place (performanceOf), and
               // never coloured as a gain or a loss.
               const figure = performance.state === null ? performance.bps : null;
-              const said = performance.state ?? pctBps(performance.bps);
+              const said = performance.state ?? `${performance.estimated && performance.bps != null ? "≈ " : ""}${pctBps(performance.bps)}`;
               return (
               <button
                 className="sidebar-agent"
@@ -348,7 +350,6 @@ export function DesktopSidebar({
                   </strong>
                   {performance.pnl !== null && <small>{performance.pnl} P&L</small>}
                   {performance.note !== null && <small className="performance-note">{performance.note}</small>}
-                  {performance.gasIncomplete && performance.state === null && <small>Gas accounting unavailable</small>}
                   {performance.asOf !== null && <small className="performance-asof">{performance.asOf}</small>}
                 </span>
               </button>
@@ -385,6 +386,7 @@ export function DesktopSidebar({
           compact
           read={reads.board}
           retired={retired}
+          retiredAgents={retiredAgents}
           agents={agents}
           theses={theses}
           mine={mine}
