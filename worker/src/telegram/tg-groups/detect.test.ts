@@ -1200,7 +1200,10 @@ describe("the theses themselves, a coin's facts, and a room saying it rugged (Mi
       ["what happened to auton", { ask: "what", coin: "AUTON" }],
       ["what happened to $AUTON?", { ask: "what", coin: "AUTON" }],
       ["shogun what happened to it", { ask: "what", coin: null }],
-      ["what's happening with pons", { ask: "what", coin: "PONS" }],
+      // The present is the coin's activity on Fomo, never its facts.
+      ["what's happening with pons", null],
+      ["what's happening with $AUTON on solana on fomo?", null],
+      ["what went wrong with pons?", { ask: "what", coin: "PONS" }],
       ["why did it rug", { ask: "why", coin: null }],
       ["why did auton rug?", { ask: "why", coin: "AUTON" }],
       ["did auton rug?", { ask: "why", coin: "AUTON" }],

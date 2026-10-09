@@ -2566,3 +2566,195 @@ describe("a coin's facts: measured, with their source and time, and what could n
     assert.deepEqual(a!.collapse, { coin: "AUTON", collapsed: false, atMs: AUTON_NOW });
   });
 });
+
+// ─── Live 2026-10-09 replayed: the AUTON quotes, facts and rug banter ────────
+
+describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
+  let home: string;
+  let store: TgGroupsStore;
+  let groups: TgGroups | null = null;
+  const MILLA = 4242;
+  const OTHER = -100777;
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tg-auton-replay-"));
+    __resetMemoryPassThrottleForTest();
+    resetDeskReadsForTest();
+  });
+  afterEach(async () => {
+    groups?.stop();
+    await groups?.drain();
+    store?.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /** The real handler, port, planner and service; a fake Bot API, provider and index; a model stub whose next line is `model.content`. */
+  async function shogunRoom() {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+    let clock = AUTON_NOW + 60_000;
+    s.clock.now = clock;
+    store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    for (const chat of [GROUP, OTHER]) {
+      store.ensureRoom(chat, { title: "frens", kind: "supergroup" });
+      store.setStatus(chat, "approved", MILLA);
+      store.update(chat, (r) => { r.helloSaid = true; });
+    }
+    const tg = new FakeTg();
+    let tstate = { ownerId: MILLA } as unknown as TelegramState;
+    const stateRef: StateRef = { get: () => tstate, set: (x) => { tstate = x; } };
+    const index = autonIndex();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: createCoinFactsReader({ fetchJson: index.fetch, now: () => s.clock.now }) });
+    const logs: string[] = [];
+    const model = { content: "", calls: 0 };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      model.calls += 1;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: model.content } }] }) };
+    }) as never;
+    groups = createTgGroups({
+      opts: () => ({ token: "123:TOKEN", fetchFn: tg.fetchFn }),
+      store,
+      getCfg: () => ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [MILLA] }) as unknown as ResolvedConfig,
+      stateRef,
+      port: () => coins,
+      fomo: () => port,
+      self: () => ({ id: 999, username: "shogunbot", name: "Shogun" }),
+      privacyOff: () => false,
+      note: () => {},
+      dashboardBase: () => "https://app.test",
+      agentKey: () => "agent-shogun",
+      now: () => clock,
+      rand: () => 0.99,
+      env: {
+        MERRYMEN_TG_THESES_MODEL: "1",
+        MERRYMEN_TG_GROUPS_LLM_KEY: "k-test",
+        MERRYMEN_TG_GROUPS_LLM_PROVIDER: "openai",
+        MERRYMEN_TG_GROUPS_LLM_BASE_URL: "https://llm.test/v1",
+        MERRYMEN_TG_GROUPS_MODEL: "fake",
+      },
+      hosted: true,
+      sleep: async (ms) => { clock += Math.max(0, ms); },
+      timer: () => new Promise(() => {}),
+      log: (l) => logs.push(l),
+    });
+    let id = 1_000;
+    const lastOwn = (chat = GROUP): { id: number; text: string } => {
+      const l = (store.room(chat)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+      return { id: l.messageId, text: l.text };
+    };
+    const say = async (text: string, o: { under?: { id: number; text: string }; fromId?: number; advanceMs?: number; chat?: number } = {}): Promise<string[]> => {
+      clock += o.advanceMs ?? 0;
+      s.clock.now = clock;
+      const chat = o.chat ?? GROUP;
+      const before = tg.texts(chat).length;
+      const fromId = o.fromId ?? MILLA;
+      groups!.onMessage({
+        updateId: id, chatId: chat, fromId, fromFirstName: fromId === MILLA ? "Milla" : "Bob", fromIsBot: false, text, date: Math.floor(clock / 1000), messageId: id++,
+        dateSec: Math.floor(clock / 1000), chatType: "supergroup", chatTitle: "frens",
+        ...(o.under ? { replyTo: { messageId: o.under.id, fromId: 999, fromIsBot: true, text: o.under.text } } : {}),
+      } as TgMessage);
+      await groups!.drain();
+      s.clock.now = clock;
+      return tg.texts(chat).slice(before);
+    };
+    const restore = (): void => { globalThis.fetch = realFetch; };
+    return { s, tg, logs, model, index, lastOwn, say, restore, theses: () => s.provider.filter((p) => p.startsWith("/v2/thesis/token/")).length };
+  }
+
+  const QUOTE_LINE = /^• (?:[A-Za-z0-9_]{2,30}|a trader), (?:just now|\d+ min ago|\d+h ago|\d+ days ago): “[^“”]{1,161}”$/u;
+  const NEVER_IN_QUOTES = /dm me|alpha group|t\.me|join|send 1|SOL to get|这|connect your wallet|pulled the liquidity|dumped on|scam|honeypot|50m|100x|ngmi|\[link\]|@|\$|#|Against it:|39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz/u;
+
+  it("steps 1 to 10: activity, the digest, the quotes asked for, the facts, the banter, never a trader's theses", async () => {
+    const r = await shogunRoom();
+    try {
+      // 1. Shogun's AUTON activity answer on an empty feed: "activity was", never "were".
+      const one = (await r.say("shogun what's happening with $AUTON on solana on fomo?")).join("\n");
+      assert.match(one, /No matching activity was returned for AUTON/, one);
+      assert.doesNotMatch(one, /were returned/);
+
+      // 2. "what are people saying about it on thesis on fomo" under it: the digest, one page read.
+      const two = (await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 })).join("\n");
+      assert.match(two, /^What traders on Fomo are saying about AUTON on Solana \(/, two);
+      assert.match(two, /Their claims, not facts; newest \d+ of 4199/, two);
+      assert.equal(r.theses(), 1);
+      const digest = r.lastOwn();
+
+      // 3. 30 s later, under the digest: "can you list the last 10" is the newest ten themselves.
+      const providerBefore = r.s.provider.length;
+      const modelBefore = r.model.calls;
+      const three = await r.say("can you list the last 10", { under: digest, advanceMs: 30_000 });
+      assert.equal(three.length, 1, three.join("\n---\n"));
+      const lines = three[0]!.split("\n");
+      assert.equal(lines[0], "The newest 10 theses on AUTON on Solana, in their words (not facts):");
+      const quotes = lines.filter((l) => l.startsWith("• "));
+      assert.ok(quotes.length >= 1 && quotes.length <= 10, three[0]);
+      for (const l of quotes) assert.match(l, QUOTE_LINE);
+      assert.deepEqual(quotes.map((l) => /^• ([^,]+),/u.exec(l)![1]), ["kaleo", "frankdegods", "a trader", "moonboy", "a trader"], "newest first");
+      assert.match(lines[quotes.length + 1]!, /^Their words, not facts; \d+ of these 10 left out; Fomo lists 4,199\.$/);
+      assert.doesNotMatch(three[0]!, NEVER_IN_QUOTES);
+      assert.equal(r.s.provider.length, providerBefore, "no provider call: the room's kept copy");
+      // 5. With the paraphrase switched on, a quote ask still calls no model.
+      assert.equal(r.model.calls, modelBefore, "no model call for a quote ask");
+      assert.ok(r.logs.some((l) => /^\[tg-groups\] theses quoted \(5 quoted, 5 left out\)$/.test(l)), r.logs.join("\n"));
+      const quoted = r.lastOwn();
+
+      // 4. 35 s on, the copy 65 s old: the same quotes, aged "a minute ago", never "just now".
+      const four = (await r.say("show me these thesis, dont summarise", { under: quoted, advanceMs: 35_000 })).join("\n");
+      assert.equal(four.split("\n")[0], "The newest 10 theses on AUTON on Solana, in their words (not facts):");
+      assert.match(four, /\nFrom a copy fetched a minute ago\.$/, four);
+      assert.doesNotMatch(four, /just now\.$/m);
+      assert.equal(r.s.provider.length, providerBefore);
+
+      // 6a. "summarise them" is the digest again, never quotes.
+      const six = (await r.say("summarise them", { under: r.lastOwn(), advanceMs: 20_000 })).join("\n");
+      assert.match(six, /^What traders on Fomo are saying about AUTON on Solana/, six);
+      assert.doesNotMatch(six, /The newest/);
+
+      // 7. Twenty minutes on, past the follow-up window, under the quotes: "show me the last 5", asked by code, memory first.
+      const searches = r.s.provider.filter((p) => p === "/v2/tokens/search").length;
+      const seven = (await r.say("show me the last 5", { under: quoted, advanceMs: 20 * 60_000 })).join("\n");
+      assert.equal(seven.split("\n")[0], "The newest 5 theses on AUTON on Solana, in their words (not facts):", seven);
+      assert.ok(seven.split("\n").filter((l) => l.startsWith("• ")).length <= 5);
+      assert.equal(r.s.provider.filter((p) => p === "/v2/tokens/search").length, searches, "no tokens search: the remembered coin");
+      assert.equal(r.theses(), 1, "still the one page");
+
+      // 8. The facts, three ways: measured, sourced, no Fomo credit, no address, no accusation.
+      const callsBefore = r.s.calls.length;
+      const what = (await r.say("shogun what happened to auton", { advanceMs: 60_000 })).join("\n");
+      assert.deepEqual(what.split("\n"), PINNED_WHAT);
+      assert.equal(r.s.calls.length, callsBefore, "0 Fomo credits: the coin came from the room's memory");
+      assert.ok(r.logs.includes("[tg-groups] collapse measured"));
+      const why = (await r.say("shogun why did it rug?", { advanceMs: 20_000 })).join("\n");
+      assert.match(why, /\nThe data shows when and how far it fell, not why; I can't see who sold or whether liquidity was pulled\.$/, why);
+      const dev = (await r.say("shogun did the dev dump?", { advanceMs: 20_000 })).join("\n");
+      assert.match(dev, /\nGeckoTerminal lists its creator as holding about 4\.8% of supply now/, dev);
+      for (const t of [what, why, dev]) assert.doesNotMatch(t, /dumped|\brug|scam|honeypot|wallet|39ahtL8|CreatorAddress/i, t);
+
+      // 9. Rug banter on the measured permit: one brag, then none back to back, never a person.
+      r.model.content = "rugged cause it wasn't merrymen 😤";
+      assert.deepEqual(await r.say("shogun lmao auton", { fromId: 31337, advanceMs: 30_000 }), ["rugged cause it wasn't merrymen 😤"]);
+      r.model.content = "should've been a merrymen coin";
+      const rip = await r.say("shogun rip", { fromId: 31337, advanceMs: 30_000 });
+      assert.ok(rip.length <= 1 && !rip.includes("should've been a merrymen coin"), rip.join(" | "));
+      r.model.content = "the dev rugged it";
+      const devLine = await r.say("shogun auton tho", { fromId: 31337, advanceMs: 30_000 });
+      assert.ok(!devLine.includes("the dev rugged it"), devLine.join(" | "));
+      // A fresh chat with no permit: "rugged" is refused.
+      r.model.content = "auton rugged lol";
+      const fresh = await r.say("shogun lmao auton", { fromId: 31337, chat: OTHER, advanceMs: 30_000 });
+      assert.ok(!fresh.includes("auton rugged lol"), fresh.join(" | "));
+
+      // 10. A trader's own theses are never quoted in a room, whatever the line asks.
+      const kaleo = (await r.say("shogun what are kaleo's theses on fomo? list them", { advanceMs: 30_000 })).join("\n");
+      assert.doesNotMatch(kaleo, /The newest|“/u, kaleo);
+
+      // 6b. After a trending board, "list the last 10" is never quotes.
+      await r.say("shogun what's trending on fomo?", { advanceMs: 60_000 });
+      const pages = r.theses();
+      const after = (await r.say("shogun list the last 10", { advanceMs: 30_000 })).join("\n");
+      assert.doesNotMatch(after, /The newest \d+ theses/, after);
+      assert.equal(r.theses(), pages);
+    } finally {
+      r.restore();
+    }
+  });
+});

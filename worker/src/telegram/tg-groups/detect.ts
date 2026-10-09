@@ -2269,7 +2269,12 @@ function factsCoin(word: string | undefined): string | null {
   const up = w.toUpperCase();
   return /^[A-Z0-9][A-Z0-9_-]{0,19}$/u.test(up) && !/^\d+$/u.test(up) ? up : null;
 }
-const FACTS_WHAT = /\bwhat(?:'s| is|s| has been) (?:happening|going on) (?:to|with) (\S+)|\bwhat (?:happened|has happened|went wrong) (?:to|with) (\S+)|\bwhat went wrong (?:for|on) (\S+)/u;
+/**
+ * "What happened to X", "what went wrong with X": the past, which is facts.
+ * Never "what's happening with X" (the present): that is the coin's activity
+ * on Fomo, the planner's own question (tg-fomo-port.ts requestText).
+ */
+const FACTS_WHAT = /\bwhat (?:happened|has happened|went wrong) (?:to|with) (\S+)|\bwhat went wrong (?:for|on) (\S+)|\bwhat(?:'s| has) happened (?:to|with) (\S+)/u;
 const FACTS_WHY =
   /\bwhy (?:did|is|has|does|was) (\S+) (?:(?:just|get|got|been|go|gone|so|totally|completely)\s+)*(?:rug|rugged|rugging|dump|dumped|dumping|die|died|dying|dead|crash|crashed|crashing|tank|tanked|tanking|fall|fell|falling|drop|dropped|dropping|collapse|collapsed|collapsing|to zero|down|nuke|nuked|bleed|bleeding|bled)\b|\bdid (\S+) (?:just )?(?:rug|get rugged|die|crash|collapse|go to zero)\b/u;
 const FACTS_DATA = /\b(?:show|give|send|post|pull up) (?:me|us) (?:the )?(?:actual |real |hard )?(?:data|facts|numbers|stats|figures)\b|^(?:the |any |actual |real |just the )?facts(?: pls| please)?\s*[?？]*$|\bwhat are the (?:actual |real )?facts\b|\b(?:actual|real|hard) (?:facts|data|numbers)\b/u;
