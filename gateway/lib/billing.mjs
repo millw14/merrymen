@@ -993,12 +993,12 @@ export async function createBilling({
   function planOf(owner, now, keyCreatedAt, acct = account(owner)) {
     const p = acct && activePeriod(acct, now);
     if (p) return { id: p.tier, name: nameOf(p.tier), requests: p.requests, rpm: p.rpm, start: p.starts_at, end: p.ends_at,
-      period: true, window: `${owner}|${p.period_id}` };
+      price: p.tier_price, period: true, window: `${owner}|${p.period_id}` };
     const anchor = anchorOf(owner, acct, keyCreatedAt);
     const start = anchor + Math.floor((now - anchor) / PERIOD_MS) * PERIOD_MS;
     const free = plans.free;
     return { id: "free", name: free.name, requests: free.requests, rpm: free.rpm, start, end: start + PERIOD_MS,
-      period: false, window: `${owner}|${start}` };
+      price: free.price_raw, period: false, window: `${owner}|${start}` };
   }
 
   const enforced = mode === "enforce";
@@ -1421,8 +1421,12 @@ export async function createBilling({
       const used = w?.total ?? 0;
       if (enforced && used >= plan.requests) {
         const resetIn = Math.max(1, Math.ceil((plan.end - ledger.now()) / 1000));
+        // On the dearest plan there is nothing larger to choose, and a running
+        // period is not renewed early: the quota comes back when it resets.
+        const larger = Object.values(plans).some((t) => t.price_raw > plan.price);
+        const next = larger ? `Choose a larger plan at ${UPGRADE_URL}.` : `${plan.name} is the largest plan, so its quota resets then; there is no larger plan to move to.`;
         return { ok: false, status: 402,
-          error: { code: "quota_exhausted", message: `This account has used its ${plan.requests} requests on ${plan.name} until ${iso(plan.end)}. Choose a larger plan at ${UPGRADE_URL}.`,
+          error: { code: "quota_exhausted", message: `This account has used its ${plan.requests} requests on ${plan.name} until ${iso(plan.end)}. ${next}`,
             plan: plan.id, limit: plan.requests, used, resets_at: iso(plan.end), upgrade_url: UPGRADE_URL },
           headers: { ...quotaHeaders(quotaOf(plan, used)), "retry-after": String(resetIn) } };
       }

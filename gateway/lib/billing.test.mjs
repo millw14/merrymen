@@ -953,6 +953,28 @@ test("enforce refuses a spent quota with 402 and structured fields, and does not
   assert.equal(f.billing.meta(OTHER).billing.requests_used, 0, "another wallet has its own quota");
 });
 
+test("a spent quota on the dearest plan does not send the developer to a larger plan that does not exist", async () => {
+  const tiny = { ...PLANS, free: { ...PLANS.free, requests: 2 }, feast: { ...PLANS.feast, requests: 2 } };
+  const f = await fixture({ mode: "enforce", plans: tiny });
+  await f.account();
+  assert.equal(f.billing.reserve({ owner: OWNER, keyId: "k1" }).ok, true);
+  assert.equal(f.billing.reserve({ owner: OWNER, keyId: "k1" }).ok, true);
+  const free = f.billing.reserve({ owner: OWNER, keyId: "k1" }).error;
+  assert.match(free.message, /^This account has used its 2 requests on Free until .*\. Choose a larger plan at https:\/\/merrymen\.dev\/api#plans\.$/);
+  await f.grant(1_000_000);
+  assert.equal((await f.plan("feast")).json.plan.id, "feast");
+  assert.equal(f.billing.reserve({ owner: OWNER, keyId: "k1" }).ok, true);
+  assert.equal(f.billing.reserve({ owner: OWNER, keyId: "k1" }).ok, true);
+  const top = f.billing.reserve({ owner: OWNER, keyId: "k1" });
+  assert.equal(top.status, 402);
+  const ends = new Date(START + P).toISOString();
+  assert.equal(top.error.message, `This account has used its 2 requests on Feast until ${ends}. Feast is the largest plan, so its quota resets then; there is no larger plan to move to.`);
+  assert.doesNotMatch(top.error.message, /Choose a larger plan/);
+  // The structured fields keep their contract: partners read these, not the prose.
+  assert.deepEqual({ ...top.error, message: undefined }, { code: "quota_exhausted", message: undefined, plan: "feast", limit: 2, used: 2, resets_at: ends,
+    upgrade_url: "https://merrymen.dev/api#plans" });
+});
+
 test("observe counts past the limit without refusing, and remaining never goes below zero", async () => {
   const f = await fixture({ plans: small });
   let last;

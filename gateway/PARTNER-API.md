@@ -623,7 +623,10 @@ the window ends), the quota headers and:
 
 Read the fields, not the message. A 402 is not counted, the same request is
 refused again until `resets_at` unless the plan changes, and the gateway does
-not log it.
+not log it. On the largest plan (Feast) there is no larger plan to move to,
+and a running period is not renewed early: the quota comes back at
+`resets_at`, and the message says so. `upgrade_url` is still present there,
+as on every 402.
 
 `/meta` reports the plan in `billing`:
 
@@ -694,7 +697,7 @@ The codes that call for a retry, and how:
 | Code | Status | What to do |
 | --- | --- | --- |
 | `rate_limited` | 429 | Back off with jitter. |
-| `quota_exhausted` | 402 | Your account's plan quota is spent. The same request is refused until `error.resets_at` (`Retry-After` gives the seconds), unless the plan changes; a larger plan is at `error.upgrade_url`. |
+| `quota_exhausted` | 402 | Your account's plan quota is spent. The same request is refused until `error.resets_at` (`Retry-After` gives the seconds), unless the plan changes; a larger plan, if there is one, is at `error.upgrade_url` (on Feast, the largest, wait for `resets_at`). |
 | `upstream_unavailable` | 503 | No complete answer from the hosted runtime (unreachable, timed out, or misconfigured). Back off and retry; writes are safe to resend as described above. |
 | `upstream_invalid_response` | 503 | The runtime answered, but not with its JSON envelope (a proxy or error page). Back off as for `upstream_unavailable`, and report the `request_id` if it persists. |
 | `runtime_unavailable` | 503 | The worker's state could not be read. Retry later. |
