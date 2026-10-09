@@ -217,10 +217,13 @@ export const RUG_CONTEXT_ACCUSE = U(
  * merrymen coins"; and "swap to", "get", "pick", "choose", "try", "need",
  * "park it in", "put it in", "go with": review, 2026-10-09) is advice, and
  * never said (WP3; HARD EXCLUSION: nothing about buying or holding
- * Merrymen's own coin).
+ * Merrymen's own coin). "Ours" and "our coin" are Merrymen too, and its
+ * holders, tokens that unlock, joining, a wallet, a payment, a vip room or
+ * "only go up" are a play (review r2: "merrymen tokens unlock the vip room",
+ * "ours only go up", "merrymen holders are fine tho").
  */
-const MERRY = String.raw`(?:merry\s?m[ae]n|one\s+of\s+ours)`;
-const SHILL = String.raw`(?:buy|buys|buying|bought|ape|aped|aping|grab|grabbed|get|gets|getting|swap|swaps|swapped|swapping|pick|choose|try|need|park|put|go\s+with|load|loaded|loading|stick|switch|rotate|hold|holding|hodl|bag|bags|invest|investing|play|move|only|moon|mooning|pump|pumping|send|sending|next|safe|safer|never\s+rugs?|can'?t\s+rug|won'?t\s+rug|don'?t\s+rug|doesn'?t\s+rug|never\s+dumps?|can'?t\s+dump|won'?t\s+dump|guarantee\w*|instead)`;
+const MERRY = String.raw`(?:merry\s?m[ae]n|one\s+of\s+ours|ours|our\s+(?:own\s+)?(?:coins?|tokens?))`;
+const SHILL = String.raw`(?:buy|buys|buying|bought|ape|aped|aping|grab|grabbed|get|gets|getting|swap|swaps|swapped|swapping|pick|choose|try|need|park|put|go\s+with|load|loaded|loading|stick|switch|rotate|hold|holding|hodl|bag|bags|invest|investing|play|move|only|moon|mooning|pump|pumping|send|sending|next|safe|safer|never\s+rugs?|can'?t\s+rug|won'?t\s+rug|don'?t\s+rug|doesn'?t\s+rug|never\s+dumps?|can'?t\s+dump|won'?t\s+dump|guarantee\w*|instead|holders?|unlock\w*|join|go(?:es)?\s+up|up\s+only|wallets?|pay(?:s|ing|ment|ments)?|vip)`;
 export const MERRY_SHILL = U(new RegExp(String.raw`\b${MERRY}\b[^.!?\n]{0,40}\b${SHILL}\b|\b${SHILL}\b[^.!?\n]{0,40}\b${MERRY}\b`, "i"));
 
 /** A Merrymen brag already said: what makes the next one wait (no brag back to back). */
