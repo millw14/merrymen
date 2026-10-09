@@ -2463,7 +2463,7 @@ function autonIndex(): { fetch: FactsFetch; routes: string[] } {
 }
 const PINNED_WHAT = [
   "AUTON on Solana, from GeckoTerminal at 01:15 UTC:",
-  "About $36k now (fully diluted); its highest hourly close on its main pool was about $5.75M, Oct 7 at 04:00 UTC, so it is 99.4% below that.",
+  "About $36k now (fully diluted); its highest hourly close on its main pool was about $5.75M, Oct 7 at 05:00 UTC, so it is 99.4% below that.",
   "The biggest drop: about 95% in three hours from 13:00 UTC on Oct 8.",
   "Main pool liquidity about $16k; in the last 24h, 1,576 sellers and 1,157 buyers.",
   "I can't see who sold, why it fell, or whether liquidity was pulled.",

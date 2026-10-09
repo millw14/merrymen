@@ -159,15 +159,18 @@ export const STEEPEST_MIN_PCT = 50;
 
 /**
  * What the hourly closes measure against the price now: the highest close
- * (never a wick), how far below it the coin is, and the biggest fall between
- * closes one to three hours apart (from the first close's time).
+ * (never a wick) and when it settled, how far below it the coin is, and the
+ * biggest fall between closes one to three hours apart (from the first
+ * close's time). A bar's time is its start; its close settles at its end, or
+ * at `nowMs` for the bar still forming.
  */
-export function measureBars(bars: readonly Bar[], priceNow: number, supply: number | null): Pick<CoinFacts, "high" | "barsFromMs" | "drawdownPct" | "steepest"> {
+export function measureBars(bars: readonly Bar[], priceNow: number, supply: number | null, nowMs = Infinity): Pick<CoinFacts, "high" | "barsFromMs" | "drawdownPct" | "steepest"> {
   const sorted = [...bars].filter((b) => b && Number.isFinite(b.close) && b.close > 0 && Number.isFinite(b.time)).sort((a, b) => a.time - b.time);
   if (sorted.length === 0) return { high: null, barsFromMs: null, drawdownPct: null, steepest: null };
   let top = sorted[0]!;
   for (const b of sorted) if (b.close > top.close) top = b;
-  const high = { closeUsd: top.close, fdvUsd: supply !== null ? top.close * supply : null, atMs: top.time * 1000 };
+  // When that close settled: its bar's end, as the steepest drop below is timed (review, 2026-10-09).
+  const high = { closeUsd: top.close, fdvUsd: supply !== null ? top.close * supply : null, atMs: Math.min((top.time + 3600) * 1000, nowMs) };
   const drawdownPct = Math.max(0, (1 - priceNow / top.close) * 100);
   let steepest: CoinFacts["steepest"] = null;
   for (let i = 0; i < sorted.length; i++) {
@@ -307,7 +310,7 @@ export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => n
         ]);
         const bars = barsRead.failed ? [] : parseHourlyBars(barsRead.body, addr, now())?.bars ?? [];
         const supply = main.isBase && main.fdvUsd !== null ? main.fdvUsd / main.priceUsd : null;
-        const measured = measureBars(bars, main.priceUsd, supply);
+        const measured = measureBars(bars, main.priceUsd, supply, observedAt);
         const info = infoRead && !infoRead.failed ? parseFactsInfo(infoRead.body, network, addr) : null;
         const facts: CoinFacts = {
           network,

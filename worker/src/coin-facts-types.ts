@@ -24,7 +24,7 @@ export interface CoinFacts {
   priceUsd: number;
   /** Fully diluted value now, from the main pool (only when the coin is the pool's base token). */
   fdvNowUsd: number | null;
-  /** The highest HOURLY CLOSE on the main pool (never a wick high), with its FDV when the supply is known, and the bar's start. */
+  /** The highest HOURLY CLOSE on the main pool (never a wick high), with its FDV when the supply is known, and when that close settled (the bar's end, or the read time for the bar still forming). */
   high: { closeUsd: number; fdvUsd: number | null; atMs: number } | null;
   /** How far back the hourly closes reach, and when the main pool was created: a high before the bars is not seen. */
   barsFromMs: number | null;

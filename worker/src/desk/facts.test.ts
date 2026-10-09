@@ -63,9 +63,9 @@ describe("AUTON, measured (live probe 2026-10-09 01:15 UTC)", () => {
     assert.equal(f.network, "solana");
     assert.equal(f.observedAt, NOW);
     near(f.fdvNowUsd, 36_245, 1, "FDV now");
-    // The highest HOURLY CLOSE, never the $8.0M wick: the hour from 04:00 UTC on Oct 7.
+    // The highest HOURLY CLOSE, never the $8.0M wick: the hour from 04:00 UTC on Oct 7, which closed at 05:00.
     near(f.high?.closeUsd, 0.0057625, 0.0000001, "highest close");
-    assert.equal(f.high?.atMs, Date.parse("2026-10-07T04:00:00Z"));
+    assert.equal(f.high?.atMs, Date.parse("2026-10-07T05:00:00Z"));
     near(f.high?.fdvUsd, 5_748_000, 2_000, "FDV at the highest close");
     near(f.drawdownPct, 99.37, 0.02, "below the highest close");
     // The biggest fall within three hourly closes: about 95% in the three hours from 13:00 UTC on Oct 8.
@@ -159,6 +159,11 @@ describe("AUTON, measured (live probe 2026-10-09 01:15 UTC)", () => {
     }
     assert.equal(parseFactsInfo(fixture("auton-info"), "solana", MINT.toLowerCase()), null, "a Solana mint is matched exactly");
     assert.deepEqual(measureBars([], 1, null), { high: null, barsFromMs: null, drawdownPct: null, steepest: null });
+    // A high in the bar still forming is timed when it was read, never in the future.
+    const forming = Date.parse("2026-10-09T01:15:00Z");
+    const bar = Date.parse("2026-10-09T01:00:00Z") / 1000;
+    assert.equal(measureBars([{ time: bar - 3600, close: 1 }, { time: bar, close: 2 }] as never, 2, null, forming).high?.atMs, forming);
+    assert.equal(measureBars([{ time: bar - 3600, close: 2 }, { time: bar, close: 1 }] as never, 1, null, forming).high?.atMs, bar * 1000);
   });
 });
 
