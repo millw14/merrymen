@@ -218,20 +218,34 @@ export function stillDue(answer: unknown, shown: AccountView): DueCheck {
 }
 
 export type PreviewEffect ="activate_now" | "upgrade_now" | "at_renewal" | "waiting_for_payment" | "cancel_renewal";
-export interface PlanPreview { effect: PreviewEffect; charge_now_raw: string; due_raw: string | null; starts_at: string | null; ends_at: string | null }
+export interface PlanPreview {
+  effect: PreviewEffect; charge_now_raw: string;
+  /** A tier other than the chosen one that the charge now renews (a lapsed period's), or null. */
+  charge_now_tier: string | null;
+  due_raw: string | null; starts_at: string | null; ends_at: string | null;
+}
 export function normalizePreview(input: unknown): PlanPreview | null {
   const body = record(input), effect = body?.effect;
   if (!body || !["activate_now", "upgrade_now", "at_renewal", "waiting_for_payment", "cancel_renewal"].includes(effect as string)) return null;
   const due = raw(body.due_raw) ?? (typeof body.due_tokens === "string" ? tokensToRaw(body.due_tokens)?.toString() ?? null : null);
-  return { effect: effect as PreviewEffect, charge_now_raw: raw(body.charge_now_raw) ?? "0", due_raw: due !== null && BigInt(due) > 0n ? due : null, starts_at: iso(body.starts_at), ends_at: iso(body.ends_at) };
+  const tier = typeof body.charge_now_tier === "string" && /^[a-z0-9_-]{1,32}$/.test(body.charge_now_tier) ? body.charge_now_tier : null;
+  return { effect: effect as PreviewEffect, charge_now_raw: raw(body.charge_now_raw) ?? "0", charge_now_tier: tier,
+    due_raw: due !== null && BigInt(due) > 0n ? due : null, starts_at: iso(body.starts_at), ends_at: iso(body.ends_at) };
+}
+
+/** What previewSentence may also know about the account and the page. */
+export interface PreviewContext {
+  /** The plan table, to name a tier the gateway gives by id. */
+  plans?: Plan[];
 }
 
 /**
  * What confirming would do, in one sentence the developer agrees to.
  * `selected` names the plan waiting for payment, if any: choosing Free before
- * it starts drops it.
+ * it starts drops it. Every charge confirming makes is named, with what it
+ * buys: a lapsed period's renewal paid from credit included.
  */
-export function previewSentence(preview: PlanPreview, plan: Plan, current: string, selected?: string): string {
+export function previewSentence(preview: PlanPreview, plan: Plan, current: string, selected?: string, context: PreviewContext = {}): string {
   const until = preview.ends_at ? ` until ${formatDate(preview.ends_at)}` : "";
   const charge = BigInt(preview.charge_now_raw) > 0n ? `${formatTokens(preview.charge_now_raw)} MERRYMEN comes out of your credit` : "";
   switch (preview.effect) {
@@ -242,7 +256,12 @@ export function previewSentence(preview: PlanPreview, plan: Plan, current: strin
     case "upgrade_now": return `You move to ${plan.name} now for the rest of this period${until}. ${charge || "Nothing is charged"}, and the requests you have used so far carry over.`;
     case "at_renewal": return `${plan.name} takes over when ${current} ends${preview.starts_at ? ` on ${formatDate(preview.starts_at)}` : ""}. Nothing is charged now.`;
     case "cancel_renewal": return `${current} runs to the end of its period${preview.starts_at ? ` (${formatDate(preview.starts_at)})` : ""}, then your account moves to ${plan.name}. Nothing is charged.`;
-    case "waiting_for_payment": return `${plan.name} starts as soon as ${preview.due_raw ? `${formatTokens(preview.due_raw, { round: "up", decimals: 0 })} MERRYMEN arrives` : "your payment arrives"}. Confirm, then pay below.`;
+    case "waiting_for_payment": {
+      // The chosen plan cannot be paid from credit, but a lapsed period's plan can: confirming renews that one now.
+      const renewed = preview.charge_now_tier ? context.plans?.find(p => p.id === preview.charge_now_tier)?.name ?? preview.charge_now_tier : null;
+      const renews = charge ? `${formatTokens(preview.charge_now_raw)} MERRYMEN of your credit renews ${renewed ? `${renewed} now, the plan your last period was on` : "your last paid plan now"}. ` : "";
+      return `${renews}${plan.name} starts as soon as ${preview.due_raw ? `${formatTokens(preview.due_raw, { round: "up", decimals: 0 })} MERRYMEN arrives` : "your payment arrives"}. Confirm, then pay below.`;
+    }
   }
 }
 

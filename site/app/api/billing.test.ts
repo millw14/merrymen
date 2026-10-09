@@ -320,6 +320,20 @@ test('history is newest first whatever order it arrives in, and a long one keeps
   }
 });
 
+test('a preview that renews another plan from credit says so before anything is confirmed', () => {
+  // Crumbs lapsed after its renewal was cancelled, 150,000 of credit left; Feast is chosen.
+  const feast = FALLBACK_PLANS.plans[3];
+  const preview = normalizePreview({ effect: 'waiting_for_payment', charge_now_raw: (100_000n * UNIT).toString(), charge_now_tier: 'crumbs',
+    due_raw: (850_000n * UNIT).toString(), starts_at: null, ends_at: null, period_requests: 1_000_000 })!;
+  assert.equal(preview.charge_now_tier, 'crumbs');
+  assert.equal(previewSentence(preview, feast, 'Free', 'Free', { plans: FALLBACK_PLANS.plans }),
+    '100,000 MERRYMEN of your credit renews Crumbs now, the plan your last period was on. Feast starts as soon as 850,000 MERRYMEN arrives. Confirm, then pay below.');
+  // A gateway that does not name the tier still names the charge.
+  assert.match(previewSentence({ ...preview, charge_now_tier: null }, feast, 'Free'), /^100,000 MERRYMEN of your credit renews your last paid plan now\. Feast starts as soon as/);
+  // Nothing charged now: nothing said about credit.
+  assert.equal(previewSentence({ ...preview, charge_now_raw: '0', charge_now_tier: null }, feast, 'Free'), 'Feast starts as soon as 850,000 MERRYMEN arrives. Confirm, then pay below.');
+});
+
 test('a plan preview says what confirming does, in whole tokens', () => {
   const loaf = FALLBACK_PLANS.plans[2];
   const p = (body: Record<string, unknown>) => normalizePreview({ charge_now_raw: '0', due_raw: null, starts_at: null, ends_at: '2026-11-07T12:00:00.000Z', ...body })!;
