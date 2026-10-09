@@ -43,6 +43,13 @@ export interface CoinFacts {
   holders: { count: number; top10Pct: number | null; updatedAtMs: number | null } | null;
   /** The creator's holding share as the index lists it now (never the creator's address). */
   creatorHoldingPct: number | null;
+  /**
+   * Whether the token's info (holders, the creator's share) was read: "read",
+   * "failed" (an error, a timeout, too little time left, a body that did not
+   * parse or was another token's), or "not-asked". A null holding after a
+   * failed read is unread, never "none".
+   */
+  info: "read" | "failed" | "not-asked";
   /** How many pools the index listed for the coin. */
   poolsSeen: number;
 }

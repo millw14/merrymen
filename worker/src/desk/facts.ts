@@ -322,6 +322,7 @@ export function createCoinFactsReader(o: { fetchJson?: FactsFetch; now?: () => n
           sellers24h: main.sellers24h,
           holders: info?.holders ?? null,
           creatorHoldingPct: info?.creatorHoldingPct ?? null,
+          info: !q.withInfo ? "not-asked" : info ? "read" : "failed",
           poolsSeen: all.length,
         };
         return { ok: true, facts };

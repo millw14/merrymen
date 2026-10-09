@@ -2973,4 +2973,26 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
       assert.match(said!.text, /1 of these 2 left out/u, text);
     }
   });
+
+  it("a creator's holding or the holders not read is said as not read, never as none", async () => {
+    resetDeskReadsForTest();
+    const idx = autonIndex();
+    const failInfo: FactsFetch = async (route, timeoutMs) => (route.includes("/info") ? { ok: false, failure: "http-429" } : idx.fetch(route, timeoutMs));
+    const r = await createCoinFactsReader({ fetchJson: failInfo, now: () => AUTON_NOW })({ network: "solana", address: AUTON_MINT, chatId: GROUP, timeoutMs: 10_000, withInfo: true });
+    assert.ok(r.ok);
+    assert.equal(r.facts.info, "failed");
+    const dev = coinFactsLines(r.facts, "AUTON", "dev", AUTON_NOW);
+    assert.equal(dev[2], "Couldn't read the creator's holding from GeckoTerminal just now.");
+    assert.ok(dev.every((l) => !/lists no holding/u.test(l)), dev.join("\n"));
+    const data = coinFactsLines(r.facts, "AUTON", "data", AUTON_NOW);
+    assert.ok(data.includes("Couldn't read the holders from GeckoTerminal just now."), data.join("\n"));
+    // Read, and no holding listed: said as the index lists it.
+    assert.equal(coinFactsLines({ ...r.facts, info: "read" }, "AUTON", "dev", AUTON_NOW)[2], "GeckoTerminal doesn't list a holding share for its creator.");
+    for (const l of [...dev, ...data, "GeckoTerminal doesn't list a holding share for its creator."]) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+    // Not asked for (a "what" ask): nothing about the holders at all.
+    resetDeskReadsForTest();
+    const plain = await createCoinFactsReader({ fetchJson: idx.fetch, now: () => AUTON_NOW })({ network: "solana", address: AUTON_MINT, chatId: GROUP, timeoutMs: 10_000, withInfo: false });
+    assert.ok(plain.ok);
+    assert.equal(plain.facts.info, "not-asked");
+  });
 });

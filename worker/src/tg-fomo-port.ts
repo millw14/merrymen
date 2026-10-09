@@ -750,9 +750,12 @@ export function coinFactsLines(f: CoinFacts, sym: string, ask: FactsAsk, now: nu
     out.push(`About ${f.fdvNowUsd !== null ? `${usdShort(f.fdvNowUsd)} now (fully diluted)` : `${priceShort(f.priceUsd)} a coin now`}${change}; its hourly closes could not be read.`);
   }
   if (ask === "dev") {
+    // A holding not read is said as not read, never as none (that would read as "the dev sold it all").
     out.push(f.creatorHoldingPct !== null
       ? `GeckoTerminal lists its creator as holding about ${pct1(f.creatorHoldingPct)} of supply now (it doesn't say when that was last updated).`
-      : "GeckoTerminal lists no holding for its creator.");
+      : f.info === "read"
+        ? "GeckoTerminal doesn't list a holding share for its creator."
+        : "Couldn't read the creator's holding from GeckoTerminal just now.");
   }
   if (f.steepest && ask !== "dev") {
     out.push(`The biggest drop: about ${Math.round(f.steepest.pct)}% in ${HOUR_WORDS[f.steepest.hours] ?? `${f.steepest.hours} hours`} from ${hhmm(f.steepest.fromMs)} UTC on ${dayOf(f.steepest.fromMs)}.`);
@@ -765,6 +768,8 @@ export function coinFactsLines(f: CoinFacts, sym: string, ask: FactsAsk, now: nu
     const top = f.holders.top10Pct !== null ? `; the top 10 hold ${pct1(f.holders.top10Pct)}` : "";
     const at = f.holders.updatedAtMs !== null ? ` (GeckoTerminal's count from ${dayOf(f.holders.updatedAtMs)}, ${hhmm(f.holders.updatedAtMs)} UTC)` : " (GeckoTerminal's count)";
     out.push(`Holders ${f.holders.count.toLocaleString("en-US")}${top}${at}.`);
+  } else if (ask === "data" && f.info !== "read") {
+    out.push("Couldn't read the holders from GeckoTerminal just now.");
   }
   out.push(
     ask === "why"

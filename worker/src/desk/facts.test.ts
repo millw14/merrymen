@@ -166,7 +166,7 @@ describe("collapseOf: measured, worth saying, and nearly all gone", () => {
   const f = (over: Partial<CoinFacts>): CoinFacts => ({
     network: "solana", observedAt: NOW, priceUsd: 1, fdvNowUsd: 1_000_000, high: { closeUsd: 2, fdvUsd: 2_000_000, atMs: NOW - 86_400_000 },
     barsFromMs: null, poolCreatedAtMs: null, drawdownPct: 50, steepest: null, liquidityUsd: 50_000, change24hPct: -5,
-    buyers24h: null, sellers24h: null, holders: null, creatorHoldingPct: null, poolsSeen: 1, ...over,
+    buyers24h: null, sellers24h: null, holders: null, creatorHoldingPct: null, info: "read", poolsSeen: 1, ...over,
   });
   it("40% below its high is no collapse; 90% below is", () => {
     assert.equal(collapseOf(f({ drawdownPct: 40 })), false);

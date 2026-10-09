@@ -591,7 +591,12 @@ desk and the router, and a "did it rug?" question is a facts ask, not banter.
   sellers and buyers; "data" adds holders and the top ten's share with the
   count's time; "dev" says the creator's holding share as listed now; every
   answer ends with what could not be read ("I can't see who sold, why it
-  fell, or whether liquidity was pulled."). A figure not read is left out;
+  fell, or whether liquidity was pulled."). When the token's info could not
+  be read, "dev" says "Couldn't read the creator's holding from GeckoTerminal
+  just now." and "data" says the same of the holders, never "no holding"
+  (that would read as the creator having sold); a holding the index does
+  not list is "GeckoTerminal doesn't list a holding share for its creator."
+  A figure not read is left out;
   a failed read is "Couldn't read the market data for AUTON just now, try
   again in a bit."
 * A facts answer's measurement sets or clears the room's collapse permit
