@@ -243,6 +243,10 @@ export function normalizePreview(input: unknown): PlanPreview | null {
 export interface PreviewContext {
   /** The plan table, to name a tier the gateway gives by id. */
   plans?: Plan[];
+  /** The running plan's id, to tell choosing it again from choosing another; by name when absent. */
+  currentId?: string;
+  /** The account's credit in base units: what cancelling leaves on the account. */
+  credit_raw?: string;
 }
 
 /**
@@ -263,8 +267,20 @@ export function previewSentence(preview: PlanPreview, plan: Plan, current: strin
       if (plan.price_raw === "0") return `Your account stays on ${plan.name}${selected && selected !== plan.name ? ` and the pending ${selected} selection is dropped` : ""}. Nothing is charged.`;
       return `${plan.name} starts now${until ? ` and runs${until}` : ""}. ${charge ? `${charge}.` : "Nothing is charged."}`;
     case "upgrade_now": return `You move to ${plan.name} now for the rest of this period${until}. ${charge || "Nothing is charged"}, and the requests you have used so far carry over.${share("")}`;
-    case "at_renewal": return `${plan.name} takes over when ${current} ends${preview.starts_at ? ` on ${formatDate(preview.starts_at)}` : ""}. Nothing is charged now.`;
-    case "cancel_renewal": return `${current} runs to the end of its period${preview.starts_at ? ` (${formatDate(preview.starts_at)})` : ""}, then your account moves to ${plan.name}. Nothing is charged.`;
+    case "at_renewal": {
+      const on = preview.starts_at ? ` on ${formatDate(preview.starts_at)}` : "";
+      if (context.currentId ? plan.id === context.currentId : plan.name === current) {
+        // The running plan chosen again: it renews as it would have, and whatever was pending instead goes.
+        const pending = !selected || selected === current ? "" : selected === "Free" ? ", so renewal is on again" : `, and the pending ${selected} change is dropped`;
+        return `${current} renews when this period ends${on} (${priceLabel(plan)}, from your credit or a payment)${pending}. Nothing is charged now.`;
+      }
+      return `${plan.name} takes over when ${current} ends${on}. Nothing is charged now.`;
+    }
+    case "cancel_renewal": {
+      const credit = context.credit_raw && RAW.test(context.credit_raw) && BigInt(context.credit_raw) > 0n
+        ? ` Your ${formatTokens(context.credit_raw, { decimals: 2 })} MERRYMEN of credit stays on this account for later charges; it is not returned.` : "";
+      return `${current} runs to the end of its period${preview.starts_at ? ` (${formatDate(preview.starts_at)})` : ""}, then your account moves to ${plan.name}. Nothing is charged.${credit}`;
+    }
     case "waiting_for_payment": {
       // The chosen plan cannot be paid from credit, but a lapsed period's plan can: confirming renews that one now.
       const renewed = preview.charge_now_tier ? context.plans?.find(p => p.id === preview.charge_now_tier)?.name ?? preview.charge_now_tier : null;

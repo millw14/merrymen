@@ -350,6 +350,20 @@ test('an upgrade preview gives the quota the period gets, not the plan card\'s 3
   assert.equal(normalizePreview({ effect: 'upgrade_now', period_requests: -1 })!.period_requests, null);
 });
 
+test('choosing the running plan again says it renews and what is dropped; cancelling says where the credit goes', () => {
+  const [free, crumbs] = FALLBACK_PLANS.plans;
+  const again = normalizePreview({ effect: 'at_renewal', charge_now_raw: '0', due_raw: null, starts_at: '2027-02-14T08:00:00.000Z', ends_at: '2027-03-16T08:00:00.000Z' })!;
+  const renews = 'Crumbs renews when this period ends on 14 Feb 2027 (100,000 MERRYMEN, from your credit or a payment)';
+  assert.equal(previewSentence(again, crumbs, 'Crumbs', 'Free', { currentId: 'crumbs' }), `${renews}, so renewal is on again. Nothing is charged now.`);
+  assert.equal(previewSentence(again, crumbs, 'Crumbs', 'Loaf', { currentId: 'crumbs' }), `${renews}, and the pending Loaf change is dropped. Nothing is charged now.`);
+  assert.equal(previewSentence(again, crumbs, 'Crumbs'), `${renews}. Nothing is charged now.`, 'by name when the id is not given');
+  assert.doesNotMatch(previewSentence(again, crumbs, 'Crumbs', 'Loaf', { currentId: 'crumbs' }), /takes over when Crumbs ends/);
+  const cancel = normalizePreview({ effect: 'cancel_renewal', charge_now_raw: '0', due_raw: null, starts_at: '2027-02-14T08:00:00.000Z', ends_at: null })!;
+  assert.equal(previewSentence(cancel, free, 'Crumbs', 'Crumbs', { credit_raw: (100_000n * UNIT).toString() }),
+    'Crumbs runs to the end of its period (14 Feb 2027), then your account moves to Free. Nothing is charged. Your 100,000 MERRYMEN of credit stays on this account for later charges; it is not returned.');
+  assert.equal(previewSentence(cancel, free, 'Crumbs', 'Crumbs', { credit_raw: '0' }), 'Crumbs runs to the end of its period (14 Feb 2027), then your account moves to Free. Nothing is charged.');
+});
+
 test('a plan preview says what confirming does, in whole tokens', () => {
   const loaf = FALLBACK_PLANS.plans[2];
   const p = (body: Record<string, unknown>) => normalizePreview({ charge_now_raw: '0', due_raw: null, starts_at: null, ends_at: '2026-11-07T12:00:00.000Z', ...body })!;
