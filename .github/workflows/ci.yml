@@ -132,8 +132,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Production's partner store is Postgres, and its locks, slot limits, list
-    # ordering and reconnect SQL exist only on that dialect. The app-test shards
-    # have no database, so they skip this suite; this job is the one that runs it.
+    # ordering and reconnect SQL exist only on that dialect. Managed Telegram
+    # creation also needs real transactions for intents, claims and sealed settings.
+    # The app-test shards have no database, so this job runs both store suites.
     services:
       postgres:
         # By digest, like the actions above: a moved tag is a supply-chain rewrite.
@@ -163,11 +164,12 @@ jobs:
         # green: this job fails unless it actually ran.
         run: |
           set -o pipefail
-          npx tsx --test --test-reporter=spec web/src/lib/partner-store.postgres.test.ts | tee "$RUNNER_TEMP/postgres.out"
+          npx tsx --test --test-reporter=spec web/src/lib/partner-store.postgres.test.ts web/src/lib/telegram-managed-store.postgres.test.ts | tee "$RUNNER_TEMP/postgres.out"
           grep -q '^ℹ skipped 0$' "$RUNNER_TEMP/postgres.out"
           grep -q '^ℹ pass [1-9]' "$RUNNER_TEMP/postgres.out"
         env:
           MERRYMEN_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          MERRYMEN_TEST_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
 
   app:
     name: app
