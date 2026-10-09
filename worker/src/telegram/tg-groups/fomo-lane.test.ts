@@ -2081,6 +2081,25 @@ describe("rug banter: only with a collapse permit, never at a person, never a br
     assert.equal(last(), "yeah auton rugged");
   });
 
+  it("the room's word: a pointer replying to nothing sets nothing; under the coin's answer it does (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    for (const line of ["yeah froggy, it rugged", "lost everything on my last play, it rugged", "bought some pons yesterday. it rugged", "the market rugged today"]) {
+      clock += 10 * SEC;
+      await said(msg(line, { fromId: ANN + 1, fromFirstName: "Bob" }));
+    }
+    assert.ok(!logs.includes("[tg-groups] collapse said by the room"), logs.join("\n"));
+    clock += 10 * SEC;
+    content = "yeah auton rugged";
+    await said(msg("pine auton huh"));
+    assert.notEqual(last(), "yeah auton rugged", "no permit from a pointer replying to nothing");
+    clock += 10 * SEC;
+    await said(msg("it rugged", { fromId: ANN + 1, fromFirstName: "Bob", replyTo: { messageId: 5_000, fromId: BOT.id, fromIsBot: true, text: tg.texts(CHAT)[0]! } }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"), "under the coin's answer, the pointer is that coin");
+  });
+
   it("a fresh measurement that finds no collapse clears the room's word", async () => {
     withModel();
     fomo!.answer = answers(false);

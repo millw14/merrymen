@@ -2846,7 +2846,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!said) return;
     const q = msg.replyTo;
     const under = me && q && q.fromId === me.id && isMsgId(q.messageId) ? fomoCoinLines.get(msgKey(msg.chatId, q.messageId)) : undefined;
-    const current = (under && clock() - under.at <= FOMO_THREAD_MS ? under : null) ?? recentFomoCoin(msg.chatId, threadId);
+    const live = under && clock() - under.at <= FOMO_THREAD_MS ? under : null;
+    // A pointer ("it rugged") only under the coin's own live answer: replying
+    // to nothing it may be about any coin ("yeah froggy, it rugged"). A line
+    // naming the coin may fall back to the topic's last one (review, 2026-10-09).
+    const current = said.coin ? (live ?? recentFomoCoin(msg.chatId, threadId)) : live;
     if (!current) return;
     if (said.coin && said.coin !== current.symbol.toUpperCase()) return;
     const had = permitsOf(msg.chatId, threadId, false)?.get(current.symbol.toLowerCase());
