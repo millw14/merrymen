@@ -97,6 +97,10 @@ describe("quotesSayable", () => {
     gateDrops(["auton v2 is live, swap at the official link", "refunds live for holders", "holders will be made whole, check telegram", "approve the refund contract", "use the auton refund bot", "open a support ticket on their discord to get refunded"], "lure");
   });
 
+  it("a relaunch or handout reworded is the gate's to drop too, and counted (review r2)", () => {
+    gateDrops(["auton version two launching, old holders covered", "auton v 2 is coming", "auton 2.0 launching friday", "re launch on pump tomorrow", "holders are covered, team confirmed", "free drop for everyone holding", "bonus tokens coming soon", "holders get new ones free", "tokens for old holders next week"], "lure");
+  });
+
   it("a reworded doubling or send is the gate's to drop too", () => {
     gateDrops(["send 1 sol to the dev wallet and he sends 2 back, legit", "deposit 1 sol get 2 sol", "sent 2 and they sent 4 back", "send sol to the dev wallet, it comes back"], "lure");
   });

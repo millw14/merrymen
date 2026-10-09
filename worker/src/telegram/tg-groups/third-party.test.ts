@@ -271,6 +271,11 @@ describe("the new clauses", () => {
     misses(SPELLED_LINK, ["launched on pumpfun, graduated fast", "pump fun graduates are cooked", "auton/sol pair is thin", "50/50 on this one", "24/7 volume", "safety net is gone", "net flows positive", "x is buzzing about it", "polka dot pattern on the logo", "tg/x both quiet", "the dot com bubble", "rides the polkadot narrative", "dot-com era pricing", "the io narrative"]);
   });
 
+  it("POST_RUG_LURE: the relaunch and the handout reworded (review r2)", () => {
+    hits(POST_RUG_LURE, ["auton version two launching, old holders covered", "auton v 2 is coming", "auton 2.0 launching friday", "re launch on pump tomorrow", "holders are covered, team confirmed", "free drop for everyone holding", "bonus tokens coming soon", "holders get new ones free", "tokens for old holders next week"]);
+    misses(POST_RUG_LURE, [...HARMLESS, "web 2.0 vibes", "2 versions of the chart", "the launch was clean", "uncovered a bug"]);
+  });
+
   it("CONTACT_LURE and POST_RUG_LURE: a channel or group pointed at without its @ (review r2)", () => {
     for (const r of [
       "telegram autonarmy has the updates",

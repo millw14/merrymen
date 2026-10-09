@@ -245,7 +245,11 @@ export const SPENT_BRAG = U(/\bmerry\s?m[ae]n\b|\b(?:one\s+of\s+)?ours\b|\bone\s
  * wallet, walletconnect; syncing with a dapp, wallet rectification or
  * validation, a dapp, a "safeguard" bot, redeeming; unlocking, unsticking or
  * unfreezing sells; dropping, posting or commenting wallets or addresses;
- * filling a form; "in the pinned"; bridging before a freeze.
+ * filling a form; "in the pinned"; bridging before a freeze. The relaunch
+ * and the handout reworded too: "v 2", "version two", "2.0 launching", "re
+ * launch", "holders covered", "free drop", "holders get … free", "bonus
+ * tokens", "tokens for holders" (OUT_HANDOUT, which the digest reads, is
+ * unchanged).
  * After a coin collapses this is what its page fills with, and the stripped
  * remnant of a link ("is the new site", "for the money back") still sends
  * the room to it. "No recovery in sight" and "rugged, holders got wrecked"
@@ -265,6 +269,8 @@ export const POST_RUG_LURE = U(
       String.raw`|(?:unlock|unstick|unfreeze)\w*\s+(?:the\s+)?sells?|sells?\s+(?:unlock|work\s+again)` +
       String.raw`|(?:drop|post|reply\s+with|comment)\s+(?:the\s+|their\s+|ur\s+)?(?:wallets?|address(?:es)?)` +
       String.raw`|(?:fill|submit)\s+(?:out\s+)?(?:the\s+|a\s+)?forms?|in\s+the\s+pinned|bridge\b[^.!?\n]{0,30}\bbefore` +
+      String.raw`|v\s*\.?\s*2|version\s+(?:2|two)|\d\.0\s+(?:launch\w*|live|is\s+live|drop\w*)|re[\s-]+launch\w*|(?:old\s+)?holders?\s+(?:are\s+|will\s+be\s+|get\s+|got\s+)?covered` +
+      String.raw`|free\s+drops?|holders?\s+(?:get|gets|getting|will\s+get)\s+(?:\S+\s+){0,2}?free|bonus\s+tokens?|tokens?\s+for\s+(?:all\s+|old\s+)?holders` +
       String.raw`|(?:send|sent|sending|transfer\w*|deposit\w*|give)\s+(?:\S+\s+){0,2}?\d[\d.,]*[^.!?\n]{0,40}\b(?:get|got|gets|receive\w*|return\w*|sends?|take)\s+\S*\d)\b`,
     "i",
   ),
