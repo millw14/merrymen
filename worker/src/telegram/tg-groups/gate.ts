@@ -133,8 +133,10 @@ export interface TgGateCtx {
    * against people in a rug's context (RUG_CONTEXT_ACCUSE), Merrymen as a play
    * (MERRY_SHILL), a brag when `brag` is false, and, for answer, banter and
    * coin lines, any figure at all (the numbers are the facts answer's).
+   * `others`: the other coins the room knows by name; a rug word beside one
+   * of them is refused (review r2: "auton rugged, pons next").
    */
-  rug?: { coins: string[]; brag: boolean };
+  rug?: { coins: string[]; brag: boolean; others?: string[] };
 }
 
 export type TgVerdict = { ok: true; text: string } | { ok: false; reason: string };
@@ -1222,7 +1224,7 @@ const RUG_PERSON = /^(?:dev|devs|deployer|deployers|team|insider|insiders|creato
  * off), never one that is a person's name in `names`, the agent's own name,
  * or a word for a person.
  */
-function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, names: readonly string[]): { mask: RegExp; brag: boolean; doers: ReadonlySet<string> } | null {
+function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, names: readonly string[]): { mask: RegExp; brag: boolean; doers: ReadonlySet<string>; others: string[] } | null {
   if (kind === null || !RUG_KINDS.has(kind)) return null;
   const rug = ctx?.rug;
   if (!rug || typeof rug !== "object") return null;
@@ -1242,8 +1244,27 @@ function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, nam
     `${RUG_CLAUSE}${RUG_LEAD}(?:(?:${subjects.join("|")})${RUG_LINK}\\s+)?${quote ? RUG_PRE_QUOTE : RUG_PRE}${quote ? RUG_ADJ_QUOTE : RUG_ADJ}(?:rugged|rug)${RUG_NOT_AFTER}`,
     "gu",
   );
-  return { mask, brag: rug.brag === true, doers: new Set([...RUG_DOERS, ...[...coins].filter((c) => !/\s/u.test(c))]) };
+  // The room's other coins, folded as the coins are, never one of the permit's own.
+  const others = new Set<string>();
+  for (const o of strings(rug.others).slice(0, 32)) {
+    const base = o.replace(/^\s*[$＄﹩]+/u, "");
+    for (const v of [shownOf(base), canonOf(base), bareOf(base), foldOf(bareOf(base).toLowerCase())]) {
+      const low = v.toLowerCase().trim();
+      if (low.length >= 2 && /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,30}$/u.test(low) && !coins.has(low)) others.add(low);
+    }
+  }
+  return { mask, brag: rug.brag === true, doers: new Set([...RUG_DOERS, ...[...coins].filter((c) => !/\s/u.test(c))]), others: [...others] };
 }
+
+/**
+ * THE RUG CARRIED TO ANOTHER COIN, beside a lifted rug word (review r2): "auton
+ * rugged, pons next", "rugged like pepe lol", "pons too probably", "just like
+ * froggy did". The permit is one measured coin's; a rug word followed by
+ * next, too, also, like, again or follows says a coin nobody measured rugged
+ * or will. Persona kinds only (a quote's fear stays its author's).
+ */
+const RUG_EXTEND = /(?<![\p{L}\p{N}_])rug(?:ged)?(?![\p{L}\p{N}_])[\s\S]*(?<![\p{L}\p{N}_])(?:next|too|also|as\s+well|same\s+as|like|again|either|follow(?:s|ed|ing)?)(?![\p{L}\p{N}_])/u;
+const wholeWordIn = (t: string, w: string): boolean => new RegExp(`(?<![\\p{L}\\p{N}_])${escRug(w).replace(/ /g, "\\s+")}(?![\\p{L}\\p{N}_])`, "u").test(t);
 
 /**
  * WHO DID THE COLLAPSE, beside a lifted rug word: a subject that dumped,
@@ -1896,6 +1917,9 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (rug && some(r.low, OUT_ACCUSE_U)) return refuse("accuse");
   if (rug && r.low.some((t) => RUG_WORD.test(t)) && r.low.some((t) => collapseDoneBy(t, rug.doers))) return refuse("accuse");
   if (rug && kind === "quote" && r.low.some((t) => RUG_WORD.test(t) && rugBlamesSomeone(quoteBody(t), rug.doers))) return refuse("accuse");
+  // The rug carried to another coin: "pons next", "rugged like pepe", or another coin the room knows named beside it.
+  if (rug && kind !== "quote" && r.low.some((t) => RUG_WORD.test(t) && RUG_EXTEND.test(t))) return refuse("accuse");
+  if (rug && r.low.some((t) => RUG_WORD.test(t)) && rug.others.some((o) => r.low.some((t) => wholeWordIn(t, o)))) return refuse("accuse");
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
   if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");

@@ -1927,6 +1927,19 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
     }
     it(`${kind}: with the permit even a figure nothing to do with money is refused`, () => assert.equal(v("rugged in 2 hours lol", kind), "figures"));
   }
+  it("a rug carried to another coin, or beside a coin the room knows, is accuse (review r2)", () => {
+    const withOthers = { coins: ["AUTON"], brag: true, others: ["PONS", "froggy", "pepe"] };
+    for (const kind of ["banter", "answer", "coin"] as const) {
+      for (const t of ["auton rugged, pons next", "rugged like pepe lol", "auton rugged, just like froggy did", "auton rugged. pons too probably", "rugged. froggy next lol"]) {
+        assert.equal(v(t, kind), "accuse", `${kind}: ${t}`);
+        assert.equal(v(t, kind, withOthers), "accuse", `${kind} with others: ${t}`);
+      }
+      // Another coin the room knows, named beside the rug word in any words.
+      assert.equal(v("auton rugged, pons is cooked", kind, withOthers), "accuse", kind);
+      assert.equal(v("auton rugged, pons is cooked", kind), "ok", `${kind}: without others the gate cannot know pons`);
+      for (const t of ["auton rugged lol", "rugged cause it wasn't merrymen 😤", "auton? yeah it rugged"]) assert.equal(v(t, kind, withOthers), "ok", `${kind}: ${t}`);
+    }
+  });
   it("telling the room to get out under the permit is advice, and its own view stays (review r2)", () => {
     for (const kind of ["banter", "answer", "coin"] as const) {
       for (const t of ["auton rugged, sell whatever's left", "auton rugged, exit now", "rugged lol, get out while you can", "rugged, stay away", "rugged. don't touch it", "rugged, avoid it", "it rugged. cut your losses", "auton rugged lol just sell", "rugged, steer clear"]) {

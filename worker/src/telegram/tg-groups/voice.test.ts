@@ -988,6 +988,12 @@ describe("say with a collapse permit: the gate gets it for an answer, never for 
     assert.equal(await say({ kind: "ambient", topic: "banter" }, c({ collapse: { ...permit, brag: false } }), model, gate), null, "brag spent: silence for an ambient line");
   });
 
+  it("the room's other coins reach the gate with the permit: a rug word beside one is never said (review r2)", async () => {
+    content = "auton rugged, pons is cooked";
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: { ...permit, others: ["pons"] } }), model, gate), "auton rugged, pons is cooked");
+    assert.equal(await say({ kind: "answer", mood: "normal" }, c({ collapse: permit }), model, gate), "auton rugged, pons is cooked", "without the room's other coins the gate cannot know pons");
+  });
+
   it("a coin named like someone being talked to is never the permit's subject", async () => {
     content = "alice rugged lol";
     assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: { ...permit, coin: "alice" }, senderName: "alice" }), model, gate), "alice rugged lol");

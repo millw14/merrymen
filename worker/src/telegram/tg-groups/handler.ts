@@ -2918,7 +2918,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const own = room.lines.filter((l) => l.own === true).slice(-8);
       const lastBrag = bragAt.get(chatId);
       const brag = !own.some((l) => SPENT_BRAG.test(l.text)) && !(lastBrag !== undefined && t - lastBrag < BRAG_GAP_MS);
-      return { coin: p.coin, source: p.source, atMs: p.atMs, brag };
+      // The room's other coins go with it: the gate refuses a rug word beside one of them (review r2).
+      return { coin: p.coin, source: p.source, atMs: p.atMs, brag, others: [...known].filter((k) => k !== low).slice(0, 32) };
     }
     return null;
   };

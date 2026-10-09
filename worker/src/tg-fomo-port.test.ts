@@ -2781,6 +2781,18 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     return r.say(trigger, { fromId: 31337, advanceMs: 25 * 60_000 });
   };
 
+  it("under the permit the banter never carries the rug to another coin (review r2)", async () => {
+    const r = await measuredRoom();
+    try {
+      for (const line of ["auton rugged, pons next", "rugged like pepe lol"]) {
+        const out = await banter(r, "shogun lmao auton", line);
+        assert.ok(!out.includes(line), `${line} -> ${out.join(" | ")}`);
+      }
+    } finally {
+      r.restore();
+    }
+  });
+
   it("under the permit the banter never tells the room to get out (review r2)", async () => {
     const r = await measuredRoom();
     try {

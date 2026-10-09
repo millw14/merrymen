@@ -972,7 +972,7 @@ function gateCtxFor(intent: TgIntent, ctx: SpeakCtx): TgGateCtx {
     recentOwn: recentOwn(ctx.room, 8),
     names,
     cashtagNames: people,
-    ...(collapse ? { rug: { coins: [collapse.coin], brag: collapse.brag === true } } : {}),
+    ...(collapse ? { rug: { coins: [collapse.coin], brag: collapse.brag === true, ...(Array.isArray(collapse.others) ? { others: collapse.others } : {}) } } : {}),
   };
 }
 

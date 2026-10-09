@@ -562,6 +562,8 @@ export interface TgCollapse {
   source: "measured" | "room";
   atMs: number;
   brag: boolean;
+  /** The other coins the room knows by name: a rug word beside one of them carries the rug to a coin nobody measured (review r2). */
+  others?: string[];
 }
 
 export interface TgFomoAnswer {
