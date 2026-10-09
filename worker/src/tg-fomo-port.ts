@@ -640,8 +640,8 @@ const foldedHandle = (handle: string): string =>
 /** What a handle read as one word may never hold anywhere in it: staff, Merrymen, Fomo, a lure, a crime, harm. */
 const IMPERSONATES_FOLDED =
   /fomo|merrym[ae]n|telegram|support|admin|official|staff|helpdesk|customer(?:care|service)|refund|recover|verified|moderator|airdrop|giveaway|kill(?:your|ur|the|them|him|her)|kys|hangthe|rapist|scam|^buy|^sell|sendsol|sendeth|doubleyour/u;
-/** The lines code says around the quotes; a thesis that echoes one is dressing as the answer itself. */
-const QUOTE_FRAME = /\bfrom a copy fetched\b|\btheir words,? not facts\b|\bthe newest \d+ theses\b|\b\d+ of these \d+ left out\b/i;
+/** The lines code says around the quotes, or the agent of the room cited ("the agent in this group said…"; review r2): a thesis that echoes one is dressing as the answer itself. */
+const QUOTE_FRAME = /\bfrom a copy fetched\b|\btheir words,? not facts\b|\bthe newest \d+ theses\b|\b\d+ of these \d+ left out\b|\bthe\s+(?:agent|bot|ai)\s+(?:in|of)\s+(?:this|the)\s+(?:group|chat|room)\b/i;
 
 /**
  * WHETHER A QUOTE'S AUTHOR MAY BE NAMED: a handle the room may hear

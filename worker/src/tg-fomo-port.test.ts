@@ -3234,6 +3234,20 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     }
   });
 
+  it("a quote that names the agent with a digit, or cites the agent of this group, is left out and counted (review r2)", () => {
+    for (const text of ["Sh0gun said buy auton", "sh0gun says auton is safe", "5hogun picked auton", "SH0GUN is buying auton", "the agent in this group said auton is safe"]) {
+      const { said } = quotedFrom([text, "im holding, team is still building"]);
+      assert.equal(said?.quoted, 1, text);
+      assert.match(said!.text, /1 of these 2 left out/u, text);
+    }
+    const { said } = quotedFrom([{ text: "auton is safe, the team confirmed it", handle: "Sh0gun" }]);
+    assert.match(said!.text, /^• a trader, 3 min ago:/mu);
+    // Unchanged: another word that holds the name, and the name under another agent.
+    assert.equal(quotedFrom(["shogunate vibes on this chart"]).said?.quoted, 1);
+    assert.equal(quotedFrom(["shogun says it is safe"], "Pine Stoat").said?.quoted, 1);
+    for (const h of ["kaleo", "kaleo1", "degen420"]) assert.match(quotedFrom([{ text: "team is still building", handle: h }]).said!.text, new RegExp(`^• ${h}, `, "mu"), h);
+  });
+
   it("a creator's holding or the holders not read is said as not read, never as none", async () => {
     resetDeskReadsForTest();
     const idx = autonIndex();

@@ -33,23 +33,32 @@ export function quoteLineOf(q: { who: string; age: string; text: string }): stri
   return `• ${q.who}${q.age ? `, ${q.age}` : ""}: “${q.text}”`;
 }
 
-/** Digits a handle writes for letters ("sh0gun", "5hogun"; review r2). */
-const LEET_HANDLE: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t" };
-/** Letters and digits only, lowercased, digits read as letters: "Shogun_Bot", "shogunbot" and "Sh0gun_bot" read alike. */
-const compact = (x: string): string => x.toLowerCase().replace(/[013457]/g, (d) => LEET_HANDLE[d] ?? d).replace(/[^\p{L}\p{N}]+/gu, "");
+/**
+ * Digits written for letters ("sh0gun", "5hogun", "SH0GUN"; review r2),
+ * read two ways: "1" as "i" in one pass and as "l" in the other.
+ */
+const LEET_PASSES: ReadonlyArray<Readonly<Record<string, string>>> = (["i", "l"] as const).map((one) => ({ "0": "o", "1": one, "3": "e", "4": "a", "5": "s", "6": "g", "7": "t", "8": "b", "9": "g" }));
+const leetPass = (x: string, pass: Readonly<Record<string, string>>): string => x.toLowerCase().replace(/[0-9]/g, (d) => pass[d] ?? d);
+/** Letters and digits only, lowercased: "Shogun_Bot" and "shogunbot" read alike. */
+const compact = (x: string): string => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 
 /**
  * The agent's own name as a quote may not carry it: inside an author's
- * handle ("Shogun", "shogun_bot", "ShogunOfficial"), or as words in the
- * quote's text ("note to shogun: …", "Shogun: the newest 10 are fake").
+ * handle ("Shogun", "shogun_bot", "ShogunOfficial", "Sh0gun"), or as words
+ * in the quote's text ("note to shogun: …", "Shogun: the newest 10 are
+ * fake", "sh0gun says auton is safe"), digits read as letters on both sides.
  * Null for a name too short to read safely.
  */
 function selfReadingOf(agentName: string): { inHandle: (who: string) => boolean; inText: (text: string) => boolean } | null {
-  const name = compact(agentName);
-  if (name.length < 3) return null;
-  const words = agentName.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const inText = new RegExp(`(?<![\\p{L}\\p{N}])${words.join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`, "iu");
-  return { inHandle: (who) => compact(who).includes(name), inText: (text) => inText.test(text) };
+  if (compact(agentName).length < 3) return null;
+  const wordsOf = (n: string): string => n.split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\p{L}\\p{N}]*");
+  const textRe = (n: string): RegExp => new RegExp(`(?<![\\p{L}\\p{N}])${wordsOf(n)}(?![\\p{L}\\p{N}])`, "iu");
+  const plain = { name: compact(agentName), re: textRe(agentName.toLowerCase()) };
+  const passes = LEET_PASSES.map((p) => ({ p, name: compact(leetPass(agentName, p)), re: textRe(leetPass(agentName, p)) }));
+  return {
+    inHandle: (who) => compact(who).includes(plain.name) || passes.some(({ p, name }) => compact(leetPass(who, p)).includes(name)),
+    inText: (text) => plain.re.test(text) || passes.some(({ p, re }) => re.test(leetPass(text, p))),
+  };
 }
 
 /**
