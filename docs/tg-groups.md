@@ -115,10 +115,18 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    name or "his name is…", where someone lives or works, a home address, a
    phone, an email, a whatsapp or a profile, a dox), scam or honeypot (or
    "can't sell", "inside job", "rigged", "con job"), price
-   targets, a row in another language (quotes are English only) and
+   targets, a row in another language (quotes are English only), threats
+   or harm wished on anyone, a violent or sexual crime, abuse, a police
+   case or a health status laid on a person, a letter outside a-z once
+   accents are off or a digit written for a letter ("honeypøt", "cla1m"),
+   an @ glued to a word, and
    lines at the reader dropped, never repaired), with how many were left out
-   and "their words, not facts". The default is still the digest. A trader's
-   own theses are never quoted.
+   and "their words, not facts". An address is never said whole, however it
+   is split, within one quote or over several. An author whose handle
+   impersonates staff, Merrymen, Fomo, the agent or a lure (in any case, as
+   one word, or with digits for letters: "fomoadmin", "sh0gun") is "a
+   trader". The default is still the digest. A trader's own theses are
+   never quoted.
 
 4. **Only the owner shapes the agent.** Group members cannot write owner
    facts, bump the relationship, rename it, change settings, confirm
@@ -491,27 +499,42 @@ to someone in distress goes out shushed or not.
   or "damn") within ten minutes of it, and never to a line that names
   another coin (a cashtag, an address, or a coin the room knows by name).
   A permit is the coin's on the chain it was measured or answered on: a line
-  naming another chain ("the auton on base") is about another coin of that
-  ticker and gets none.
+  naming another chain ("the auton on base"), replying under another chain's
+  same-ticker answer, or replying to nothing while the topic's last coin is
+  another chain's, is about another coin of that ticker and gets none, and
+  the room saying another chain's coin rugged ("auton rugged on base") sets
+  nothing for the room's coin.
   The gate (`TgGateCtx.rug`) then lifts only "rugged" or "rug" said of no
   one, "it", "this one", "the chart" or the coin; everything else stays
   refused: a person who rugged, dumped, sold on anyone, stole, pulled the
   liquidity or ran; a lifted rug word beside a person (the dev, the team, an
   insider, a whale, a KOL, they, he, she or someone, anyone the room knows
-  by name, "thanks kaleo", someone who "took everything", "knew" or
-  "shilled it"); anyone but the coin itself who dumped, sold, ran, bailed,
+  by name or heard from it as a person (a quote's author, a board's trader),
+  "thanks kaleo", someone who "took everything", "knew" or "shilled it", or
+  blame in other words: "kaleo did this", "because of", "kaleo's fault",
+  "rugged on kaleo"); the rug carried to another coin ("pons next", "rugged
+  like pepe", or beside a coin the room knows); telling anyone to get out
+  ("sell whatever's left", "stay away", "cut your losses"; "i'd stay away"
+  is its own view and stays); anyone but the coin itself who dumped, sold, ran, bailed,
   jeeted, vanished or took the money beside it ("auton rugged, kaleo ran";
   "auton dumped hard, rugged" stays); a crime laid at anyone's door ("the
   dev is a crook", "inside job", "rigged", "a con job"); scam, honeypot or
   fraud, in those words or as "can't even sell it"; "rugpull", "rugging", "soft
   rug", "rugged us", "rugged by the dev"; Merrymen as a play ("buy merrymen
-  instead", "merrymen coins never rug", "stick to merrymen"); any figure
+  instead", "merrymen coins never rug", "stick to merrymen", and its own
+  token, holders, unlocking, a wallet, a payment or "ours only go up": HARD
+  EXCLUSION); any figure
   beside it. A brag waits while one is among its last eight lines or went
   out in the last 20 minutes, and there is no brag template, so a brag never
   recurs from a pool. A brag in other words ("wasn't ours", "one of us") is
   a brag, and any line said under a permit that allowed a brag spends it. No permit for a coin it holds, one it bought and has
   not exited (how it did is private, rule 3), or a coin named like someone in
-  the room. The system prompt's NEVER WRITE line is unchanged; the prompt's
+  the room or a trader the room heard from it ("why did kaleo dump" after
+  kaleo's quote asks no facts; only "$KALEO" asks about a coin of that
+  name). A quote's own rug clause is stricter: beside a lifted rug word,
+  every other clause must open with the coin, its chart, price or
+  liquidity, holders or the author ("auton rugged, kaleo was behind it" is
+  left out). The system prompt's NEVER WRITE line is unchanged; the prompt's
   RUGGED block carries the permit for that one coin. Permits live in memory
   (a restart forgets them) and the owner's forget clears them.
 * Anything that reads as self-harm or real distress switches off banter: a
@@ -584,7 +607,9 @@ that coin, so another coin than the room's is left to the desk and the router.
   chain when named) costs nothing; else Fomo's resolver once (one read
   charged to the room's cap, like any lookup); a ticker on several chains
   asks "Which AUTON do you mean? Fomo lists it on more than one chain; say
-  the chain.", none says "I couldn't find AUTON on Fomo."
+  the chain.", and two on the chain asked (or on the one chain they share)
+  says "Fomo lists more than one AUTON on Solana, so I can't tell which one
+  you mean."; none says "I couldn't find AUTON on Fomo."
 * **The reads** (`desk/facts.ts`): GeckoTerminal's public index on the fleet
   quota and the desk's one-minute memo: the token's pools, the main pool's
   hourly closes (about 41 days) and, for "data" and "dev", the token's info.
@@ -602,7 +627,8 @@ that coin, so another coin than the room's is left to the desk and the router.
   collapse.
 * **The lines** (research lines, at most six, no address, no "wallet", no
   "rug", "scam" or "dumped", "fell" never "crashed"): the source and time
-  first ("AUTON on Solana, from GeckoTerminal at 01:15 UTC:"), then FDV now
+  first ("AUTON on Solana, from GeckoTerminal at 01:15 UTC:"; a ticker the
+  gate refuses, such as RUG or SCAM, is "This coin on Solana, …"), then FDV now
   and the highest close with how far below it is, the biggest drop within
   three hourly closes (50% or more), the main pool's liquidity and its 24h
   sellers and buyers; "data" adds holders and the top ten's share with the
