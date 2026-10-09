@@ -304,6 +304,8 @@ describe("the new clauses", () => {
       "mua auton ngay di, se len 100x",
     ]) assert.ok(NOT_ENGLISH.test(r) || quoteNotEnglish(r), r);
     for (const r of ["rugged, holders got wrecked", "dead coin now, volume gone", "chart looks bad", "wagmi frens", "Great Team Strong Community Clear Roadmap Real Product Undervalued", "die hard holders only", "con: thin liquidity"]) assert.ok(!NOT_ENGLISH.test(r.toLowerCase()) && !quoteNotEnglish(r), r);
+    // An English contraction is never another language's word ("i've": never Turkish "ve").
+    for (const r of ["i've been holding since launch, we've seen worse", "they’ve been building, should've bought more"]) assert.ok(!NOT_ENGLISH.test(r.toLowerCase()), r);
   });
 
   it("PRIVATE_THIRD: more doxxing shapes, a name after 'the dev is', family, school, a multi-word street, a passport (review r2)", () => {

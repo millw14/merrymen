@@ -3129,7 +3129,7 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
       "kupuj auton teraz, pojdzie na 100x",
       "mua auton ngay di, se len 100x",
     ]);
-    quoted(["rugged, holders got wrecked", "dead coin now, volume gone", "chart looks bad", "die hard holders only", "lfg wagmi ser frens, cooking"]);
+    quoted(["rugged, holders got wrecked", "dead coin now, volume gone", "chart looks bad", "die hard holders only", "lfg wagmi ser frens, cooking", "i've been holding since launch, we've seen worse", "they’ve been building, should've bought more"]);
   });
 
   it("a doxxing thesis in more shapes is never quoted: a name after 'the dev is', family, school, a street, a passport (review r2)", () => {

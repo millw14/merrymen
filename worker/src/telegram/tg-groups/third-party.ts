@@ -405,7 +405,7 @@ export const CONTACT_LURE = U(
  */
 export const NOT_ENGLISH = U(
   new RegExp(
-    String.raw`\b(?:el|los|las|una|unos|que|qué|del|por|para|ahora|agora|antes|cuando|voy|vamos|muy|pero|como|esta|está|este|estos|uma|não|nao|vai|você|voce|mas|muito|também|une|des|du|est|est-ce|il|ils|elle|avec|pas|sont|c'est|nous|vous|très|tres|rue|ist|und|der|das|ein|eine|nicht|ich|wir|sehr|auch|che|sono|della|molto|perché|anche|questo|è|é|yang|nya|ini|itu|sekarang|tidak|sudah|akan|dengan|untuk|dari|jalan|rumah|al|het|een|niet|zijn|bir|ve|bu|çok|için)\b`,
+    String.raw`\b(?<![\x27’])(?:el|los|las|una|unos|que|qué|del|por|para|ahora|agora|antes|cuando|voy|vamos|muy|pero|como|esta|está|este|estos|uma|não|nao|vai|você|voce|mas|muito|também|une|des|du|est|est-ce|il|ils|elle|avec|pas|sont|c'est|nous|vous|très|tres|rue|ist|und|der|das|ein|eine|nicht|ich|wir|sehr|auch|che|sono|della|molto|perché|anche|questo|è|é|yang|nya|ini|itu|sekarang|tidak|sudah|akan|dengan|untuk|dari|jalan|rumah|al|het|een|niet|zijn|bir|ve|bu|çok|için)\b`,
     "i",
   ),
 );
