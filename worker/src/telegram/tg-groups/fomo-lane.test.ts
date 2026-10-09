@@ -2286,6 +2286,27 @@ describe("rug banter: only with a collapse permit, never at a person, never a br
     assert.ok(logs.includes("[tg-groups] collapse said by the room"), "under the coin's answer, the pointer is that coin");
   });
 
+  it("the room saying another chain's AUTON rugged sets nothing for the room's Solana AUTON (review r2)", async () => {
+    withModel();
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts(true)() : { ...theses(), coin: { symbol: "AUTON", chain: "solana", aspect: "theses" } });
+    make();
+    await said(msg("pine what are people saying about $AUTON on solana on fomo?"));
+    const answer = (store.room(CHAT)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+    clock += 10 * SEC;
+    await said(msg("auton rugged on base lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    clock += 10 * SEC;
+    await said(msg("it rugged on base", { fromId: ANN + 1, fromFirstName: "Bob", replyTo: { messageId: answer.messageId, fromId: BOT.id, fromIsBot: true, text: answer.text } }));
+    assert.ok(!logs.includes("[tg-groups] collapse said by the room"), logs.join("\n"));
+    clock += 10 * SEC;
+    content = "solana auton? rugged for real";
+    await said(msg("pine auton on solana huh"));
+    assert.notEqual(last(), "solana auton? rugged for real");
+    // Said of the room's own coin, it still sets the room's word.
+    clock += 10 * SEC;
+    await said(msg("auton rugged on solana lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"), logs.join("\n"));
+  });
+
   it("a fresh measurement that finds no collapse clears the room's word", async () => {
     withModel();
     fomo!.answer = answers(false);

@@ -2862,6 +2862,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const current = said.coin ? (live ?? recentFomoCoin(msg.chatId, threadId)) : live;
     if (!current) return;
     if (said.coin && said.coin !== current.symbol.toUpperCase()) return;
+    // "auton rugged on base lol" is about another AUTON than the room's Solana one (review r2).
+    const saidChain = chainIn(text);
+    if (saidChain && current.chain && saidChain !== current.chain) return;
     if (heardHere(msg.chatId, current.symbol)) return;
     const had = permitsOf(msg.chatId, threadId, false)?.get(current.symbol.toLowerCase());
     const t = clock();
