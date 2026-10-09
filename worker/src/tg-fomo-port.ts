@@ -57,7 +57,7 @@ import { chainLabel, FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROU
 import { collapseOf, type CoinFacts, type CoinFactsReader, type FactsNetwork } from "./coin-facts-types";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, ResolvedSubject, TokenIdentity, TokenLabel } from "./fomo/types";
-import { admitTgLine, tgLineReadings } from "./telegram/tg-groups/gate";
+import { admitTgLine, tgLineReadings, tgQuoteLeetReadings } from "./telegram/tg-groups/gate";
 import {
   ABOUT_MERRYMEN,
   AT_THE_READER,
@@ -597,7 +597,8 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   if (!/[\p{L}\p{N}]/u.test(s) || contentFree(s)) return null;
   // A quote dressed as the room answer's own frame ("From a copy fetched just now.", "their words, not facts").
   if (QUOTE_FRAME.test(s)) return null;
-  const reads = [s, ...tgLineReadings(s)];
+  // Digits read as letters too ("cla1m", "appr0ve"): the gate's quote kind reads the same.
+  const reads = [s, ...tgLineReadings(s), ...tgQuoteLeetReadings(s)];
   if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, CONTACT_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, SEND_FOR, QUOTE_TARGET, SECOND_PERSON].some((re) => reads.some((t) => re.test(t)))) return null;
   const handle = typeof v.author?.handle === "string" ? v.author.handle.replace(/^@+/, "").trim() : "";
   const who = quoteHandleOk(handle) ? handle : "a trader";

@@ -1687,20 +1687,37 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
 // ── a stranger's words ──────────────────────────────────────────────────────
 
 /**
+ * DIGITS AND SIGNS WRITTEN FOR LETTERS, for the `quote` kind's clauses only
+ * (review r2): "cla1m", "a1rdr0p", "m1grate", "appr0ve", "s33d phrase" and
+ * "snapsh0t" read as the words they spell. Only a digit or sign beside a
+ * letter is read as one ("10x", "3x" and "4h" keep their digits where no
+ * letter touches them, and the figure clauses never read this), and "1" is
+ * read both as "i" and as "l" ("c1aim").
+ */
+const QUOTE_LEET: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "$": "s", "@": "a" };
+const leetOf = (t: string, one: "i" | "l"): string =>
+  t.replace(/(?<=\p{L})[013457$@]+|[013457$@]+(?=\p{L})/gu, (run) => [...run].map((c) => (c === "1" ? one : (QUOTE_LEET[c] ?? c))).join(""));
+const quoteReads = (r: Readings): string[] => uniq([...r.low, ...r.low.map((t) => leetOf(t, "i")), ...r.low.map((t) => leetOf(t, "l"))]);
+/** A quote's lowercased readings with its digits read as letters, for a caller with clauses of its own (the port's quoteOf). */
+export function tgQuoteLeetReadings(text: string): string[] {
+  return quoteReads(readingsOf(typeof text === "string" ? text : ""));
+}
+
+/**
  * THE `quote` KIND'S OWN CLAUSES (third-party.ts), read after the markup
  * clause and before every common one, each with the reason it is logged as.
  * The sample cleaner and the port's quote filter drop the same rows first;
  * this is the backstop if either regresses.
  */
 const QUOTE_CLAUSES: ReadonlyArray<[readonly RegExp[], (r: Readings) => readonly string[], string]> = [
-  [[INJECTION_SHAPED, AT_THE_READER, LURE, OUT_LURE, OUT_HANDOUT].map(U).concat([SEND_FOR, CTA_PLACEHOLDER, POST_RUG_LURE, CONTACT_LURE]), (r) => r.low, "lure"],
-  [[U(SPELLED_DOMAIN), SPELLED_LINK], (r) => r.low, "link"],
+  [[INJECTION_SHAPED, AT_THE_READER, LURE, OUT_LURE, OUT_HANDOUT].map(U).concat([SEND_FOR, CTA_PLACEHOLDER, POST_RUG_LURE, CONTACT_LURE]), quoteReads, "lure"],
+  [[U(SPELLED_DOMAIN), SPELLED_LINK], quoteReads, "link"],
   [[U(ABOUT_MERRYMEN)], (r) => r.low, "meta"],
   [[NON_LATIN], (r) => r.cased, "script"],
   [[U(SECOND_PERSON)], (r) => r.low, "at-the-reader"],
   [[QUOTE_TARGET], (r) => r.low, "advice"],
-  [[U(OUT_ACCUSE), RUG_CONTEXT_ACCUSE], (r) => r.low, "accuse"],
-  [[PRIVATE_THIRD], (r) => r.low, "private"],
+  [[U(OUT_ACCUSE), RUG_CONTEXT_ACCUSE], quoteReads, "accuse"],
+  [[PRIVATE_THIRD], quoteReads, "private"],
 ];
 
 // ── the gate ────────────────────────────────────────────────────────────────

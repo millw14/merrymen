@@ -1772,6 +1772,10 @@ describe("quote kind: a stranger's thesis said back in a room, held to every thi
   ] as const) {
     it(`refuses as ${why}: ${JSON.stringify(t)}`, () => assert.equal(verdict(t), why));
   }
+  it("digits written for letters are read as the lure they spell (review r2)", () => {
+    for (const t of ["cla1m is open for holders", "a1rdr0p going out to holders", "m1grate before friday", "appr0ve the contract and sells work again", "c0mpensation going out to holders", "snapsh0t taken, holders covered", "s33d phrase into the bot to fix sells", "c1aim is live for holders"]) assert.equal(verdict(t), "lure", t);
+    for (const t of ["down from 8m to 36k in a week", "4h chart looks bad", "worried the top 10 wallets hold 40% of supply"]) assert.equal(verdict(t), "ok", t);
+  });
   it("a link placeholder as it arrives, a call to action beside it included, is never said", () => {
     assert.notEqual(verdict("join for the raid [link]"), "ok");
     assert.notEqual(verdict("dm [handle] for the alpha"), "ok");

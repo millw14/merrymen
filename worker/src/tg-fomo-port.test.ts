@@ -2984,6 +2984,11 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
   });
 
+  it("digits written for letters never carry a lure into a quote (review r2)", () => {
+    leftOut(["cla1m is open for holders", "a1rdr0p going out to holders", "m1grate before friday", "appr0ve the contract and sells work again", "c0mpensation going out to holders", "snapsh0t taken, holders covered", "s33d phrase into the bot to fix sells", "c1aim is live for holders"]);
+    quoted([...REVIEW_KEPT, "10x incoming, 3x already, 5m mcap", "4h chart looks bad"]);
+  });
+
   it("a channel or group pointed at without its @ is never quoted (review r2)", () => {
     leftOut([
       "telegram autonarmy has the updates",
