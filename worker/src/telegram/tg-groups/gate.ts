@@ -1208,7 +1208,7 @@ function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, nam
  * gate cannot know by name is refused (review, 2026-10-09).
  */
 const RUG_DOER = U(
-  /\b([\p{L}\p{N}_'$]+)\s+(?:(?:just|already|then|literally|basically|totally|has|have|had|prob|probably|def)\s+)*(?:dumped|dumping|dumps|ran|bailed|jeeted|jeeting|jeets|exited|vanished|disappeared|ghosted|cashed\s+out|pulled\s+out|sold|selling|took\s+(?:the|our|all|everyone'?s|their|his|her)\s+(?:money|bags?|funds|liquidity|lp))\b/gi,
+  /\b([\p{L}\p{N}_'$]+)\s+(?:(?:just|already|then|literally|basically|totally|has|have|had|prob|probably|def)\s+)*(?:dumped|dumping|dumps|ran|bailed|jeeted|jeeting|jeets|exited|vanished|disappeared|ghosted|cashed\s+out|pulled\s+out|sold|selling|took\s+(?:the|our|all|everyone'?s|their|his|her)\s+(?:money|bags?|funds|liquidity|lp))\b/giu,
 );
 /** What may have dumped or run beside a lifted rug word, beside the permit's own coins. */
 const RUG_DOERS: readonly string[] = [
