@@ -5284,8 +5284,8 @@ function tidy(out: string, name: string): string {
  * an empty answer or PASS — the conductor then uses a template, so a failure
  * here costs a flourish, never a line and never a throw.
  *
- * THE TIMEOUT DOES NOT CANCEL THE CALL. llmText takes no signal, and it lives in
- * a file this module must not edit; the race only stops the room from waiting,
+ * THE TIMEOUT DOES NOT CANCEL THE CALL. This module passes llmText no signal
+ * (it now takes an optional one); the race only stops the room from waiting,
  * and the losing promise is caught so it cannot surface as an unhandled
  * rejection later.
  *

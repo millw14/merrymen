@@ -20,7 +20,7 @@ import { createStore, hasRedis } from "./lib/store.mjs";
 import { CLAIM_HTML } from "./lib/claimPage.mjs";
 import { addSignup, signupCount } from "./lib/signups.mjs";
 import { createPartners } from "./lib/partners.mjs";
-import { createPartnerApi } from "./lib/partner-api.mjs";
+import { createPartnerApi, partnerError } from "./lib/partner-api.mjs";
 import { createPartnerBridge } from "./lib/partner-bridge.mjs";
 import { createDeveloperApi } from "./lib/developer-api.mjs";
 
@@ -83,17 +83,22 @@ const gw = createGateway({
 });
 
 // ── http plumbing ────────────────────────────────────────────────────────────
+/**
+ * An oversized upload is refused, not cut off. This used to destroy the socket
+ * on the first byte over the cap, before any handler could answer, so every
+ * documented 413 arrived as a connection reset that a caller cannot tell from
+ * an outage. Past the cap nothing is buffered: the rest is read and discarded
+ * while the refusal goes out, up to a ceiling past which nobody is owed one.
+ */
+const DRAIN_LIMIT_BYTES = 16 * MAX_BODY_BYTES;
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on("data", (c) => {
       size += c.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("payload too large"));
-        req.destroy();
-        return;
-      }
+      if (size > DRAIN_LIMIT_BYTES) return req.destroy();
+      if (size > MAX_BODY_BYTES) return reject(new Error("payload too large"));
       chunks.push(c);
     });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
@@ -148,7 +153,8 @@ function respond(res, r) {
     res.writeHead(r.status, { "content-type": r.contentType || "application/json", ...cors });
     return res.end(r.text);
   }
-  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...cors });
+  // `headers` is set by the partner bridge alone, for a relayed Retry-After.
+  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...r.headers, ...cors });
   res.end(JSON.stringify(r.json ?? {}));
 }
 
@@ -163,6 +169,8 @@ const partnerApi = createPartnerApi({ partners, store,
   forward: createPartnerBridge({ secret: process.env.MERRYMEN_PARTNER_BRIDGE_SECRET,
     origin: process.env.MERRYMEN_PARTNER_APP_ORIGIN || "https://app.merrymen.dev" }),
 });
+// No chain client, deliberately: developer sign-in is checked locally, so no RPC
+// can vouch for a signature (see refusal() in lib/developer-api.mjs).
 const developerApi = createDeveloperApi({ portalSecret: process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET,
   gatewaySecret: SECRET, partners, partnerApi, store });
 
@@ -183,9 +191,12 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && pathname === "/healthz") return respond(res, gw.health());
     if (pathname.startsWith("/developer/v1/")) {
-      let body = {};
-      try { if (req.method === "POST") { const raw = await readBody(req); if (Buffer.byteLength(raw) > 8192) return respond(res, { status: 413, json: { error: { message: "Request too large" } } }); body = JSON.parse(raw); } }
-      catch { return respond(res, { status: 400, json: { error: { message: "Invalid request" } } }); }
+      // Size is plumbing; shape is the developer API's rule, so it gets raw text.
+      let body;
+      if (req.method === "POST") {
+        try { body = await readBody(req); } catch { body = null; }
+        if (body === null || Buffer.byteLength(body) > 8192) return respond(res, { status: 413, json: { error: { code: "request_too_large", message: "Request too large" } } });
+      }
       return respond(res, await developerApi.handle({ method: req.method, path: pathname.slice("/developer/v1".length),
         authorization: req.headers.authorization, session: req.headers["x-developer-session"], body,
         ip: req.headers["x-developer-ip"] || ip }));
@@ -303,8 +314,9 @@ const server = createServer(async (req, res) => {
     if (partnerApi.owns(pathname)) {
       let body = "";
       if (req.method === "POST") {
+        // partnerError, like every other partner refusal: a report needs its request_id.
         try { body = await readBody(req); }
-        catch { return respond(res, { status: 413, json: { error: { code: "bad_request", message: "Request body is too large" } } }); }
+        catch { return respond(res, partnerError(413, "bad_request", "Request body is too large")); }
       }
       const r = await partnerApi.handle({
         method: req.method,
@@ -326,4 +338,9 @@ server.listen(PORT, () => {
   console.log(`[gateway] Merrymen AI listening on :${PORT} — model forced to "${MODEL}", min hold ${MIN_TOKENS} $MERRYMEN`);
   console.log(`[gateway] discovery: ${BITQUERY_KEY ? "Bitquery ON (named queries only)" : "Bitquery OFF (no key set)"}`);
   if (!hasRedis) console.log("[gateway] state store: in-memory (fine for a single process; set KV_REST_API_URL/TOKEN for multi-instance).");
+  // Optional services, so not fatal, but say so at boot: otherwise the first
+  // sign of a missing secret is a partner's or developer's 503.
+  for (const [name, routes] of [["MERRYMEN_PARTNER_BRIDGE_SECRET", "partner agent routes"], ["MERRYMEN_DEVELOPER_PORTAL_SECRET", "developer portal routes"]]) {
+    if (Buffer.byteLength(process.env[name] || "") < 32) console.error(`[gateway] ${name} is unset or under 32 bytes: ${routes} will answer 503.`);
+  }
 });

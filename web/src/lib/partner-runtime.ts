@@ -7,8 +7,10 @@
 import { isHostedMode } from "../../../packages/core/src/index";
 import { mintSession, SESSION_COOKIE } from "./auth";
 import { generateAgentReply, type AgentReply } from "./agent-chat";
+import { llmText } from "../../../worker/src/llm";
 import { fitChatState } from "./chat-state";
 import { ledgerChatReply } from "./chat-ledger-facts";
+import { PartnerError } from "./partner-bridge";
 import type { FeedResponse } from "../app/api/feed/route";
 import type { AgentStatus } from "../app/api/grants/route";
 import type { SettingsView } from "../app/api/settings/route";
@@ -34,9 +36,15 @@ export interface PartnerRuntime {
   ledger_available: boolean;
 }
 
-export class PartnerRuntimeError extends Error {
-  constructor(public status: number, public code: string, message: string) {
-    super(message);
+/**
+ * A PartnerError, so partnerFailure answers with this status and code. As a
+ * bare Error every runtime refusal (a 400 for a bad message, 503
+ * runtime_unavailable) reached the partner as a generic upstream_unavailable.
+ * Messages here are written for partners and never carry provider details.
+ */
+export class PartnerRuntimeError extends PartnerError {
+  constructor(status: number, code: string, message: string) {
+    super(status, code, message);
     this.name = "PartnerRuntimeError";
   }
 }
@@ -46,11 +54,17 @@ interface RuntimeDependencies {
   feed: Reader;
   settings: Reader;
   reply: typeof generateAgentReply;
+  /** The model call under the reply; given the deadline below as its signal. */
+  complete: typeof llmText;
+  replyTimeoutMs: number;
   facts: typeof ledgerChatReply;
   session: typeof mintSession;
   hosted: () => boolean;
   now: () => number;
 }
+
+/** Less than this left of a request's budget and the status reply is given without asking the model. */
+const MIN_MODEL_MS = 1_000;
 
 const defaults: RuntimeDependencies = {
   // Lazy imports keep the adapter's pure tests independent of route startup and
@@ -59,6 +73,8 @@ const defaults: RuntimeDependencies = {
   feed: async (req) => (await import("../app/api/feed/route")).GET(req),
   settings: async (req) => (await import("../app/api/settings/route")).GET(req),
   reply: generateAgentReply,
+  complete: llmText,
+  replyTimeoutMs: 18_000,
   facts: ledgerChatReply,
   session: mintSession,
   hosted: isHostedMode,
@@ -234,7 +250,7 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
     async readPartnerRuntime(tenant: Tenant): Promise<PartnerRuntime> {
       return (await snapshot(tenant)).runtime;
     },
-    async replyToPartner(tenant: Tenant, input: { message: string; history?: unknown }): Promise<{
+    async replyToPartner(tenant: Tenant, input: { message: string; history?: unknown; deadline?: number }): Promise<{
       reply: string;
       command?: AgentReply["command"];
       generation: "model" | "status";
@@ -248,7 +264,20 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
       try {
         const body = { message: input.message, history: input.history, state };
         const factualReply = await deps.facts(body, runtime.smart_account, Math.floor(deps.now() / 1000));
-        answer = await deps.reply(body, { surface: "partner", factualReply });
+        // A DEADLINE ON THE MODEL. This runs under the connection's conversation
+        // lock, which holds one of a few pooled connections per replica for the
+        // call's whole length, and the providers' own defaults run to minutes.
+        // A stalled provider then blocked every other app's chats. The call gets
+        // at most replyTimeoutMs, and never more than is left of the request's
+        // `deadline` (its lock wait already spent part of it); past that it is
+        // aborted and the partner gets the factual status below. Shorter than the
+        // 20s a resend of the same request_id waits for the lock, so a transport
+        // retry normally finds the saved reply rather than conversation_busy.
+        const budget = (input.deadline ?? Infinity) - deps.now();
+        if (budget < MIN_MODEL_MS) throw new Error("no time left for the model");
+        const signal = AbortSignal.timeout(Math.min(deps.replyTimeoutMs, budget));
+        answer = await deps.reply(body, { surface: "partner", factualReply,
+          complete: (creds, request) => deps.complete(creds, { ...request, signal }) });
       } catch {
         answer = { reply: null, why: "llm-error" };
       }

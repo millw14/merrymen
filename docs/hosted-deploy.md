@@ -610,7 +610,7 @@ both for a repo build rooted at `/gateway` and for a `railway up` run from
 
 **Preserve the volume.** `/data/ios-beta.jsonl` is the iOS beta waiting list
 (`gateway/lib/signups.mjs`), and `/data/partners.jsonl` is the append-only partner
-key registry, including revocations. Nonces, rate limits and the balance cache
+key registry, including revocations, for portal and CLI keys alike. Nonces, rate limits and the balance cache
 are in-process unless shared KV is configured. Losing the waiting-list file
 silently resets the count; losing the partner registry loses issued keys and
 its durable revocation overrides. Re-point the existing service and retain
@@ -630,11 +630,20 @@ grants and partner connections in the shared database; the orchestrator runs
 the normal tenant worker. Deploy the gateway and web changes together. An
 updated gateway alone cannot provide enrollment or chat.
 
+The developer portal at `https://merrymen.dev/api` is a third piece: the
+marketing site (`site/`, its own Vercel project) proxies wallet sign-in and key
+management to the gateway's `/developer/v1` routes, which write keys to the
+same partner registry on the gateway's volume.
+
 | Service | Variable | Requirement |
 | --- | --- | --- |
-| gateway + web | `MERRYMEN_PARTNER_BRIDGE_SECRET` | The same dedicated random secret, at least 32 bytes, on both services. Keep separate from holder/session secrets and never distribute to partners. |
+| gateway + web | `MERRYMEN_PARTNER_BRIDGE_SECRET` | The same dedicated random secret, at least 32 bytes, on both services. Keep separate from holder/session secrets and never distribute to partners. Rotating it voids outstanding enrollment challenges, and `POST /agents` for a user with an unexpired pending authorization fails until its 30 minutes pass. |
 | gateway | `MERRYMEN_PARTNER_APP_ORIGIN` | `https://app.merrymen.dev` (the default); HTTPS required outside localhost development. |
 | web | `MERRYMEN_PUBLIC_ORIGIN` | `https://app.merrymen.dev`, also used for optional hosted onboarding links. |
+| gateway + site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | The same random secret, at least 32 bytes, on the gateway and the site. It proves a request came through the site and cannot sign anyone in on its own. A hash of it is mixed into the developer session key, so rotating it (both services together) signs every developer out while partner keys keep working: the switch for a leaked session cookie. It ends sessions, not what one did: afterwards list the affected developer's keys (portal `GET /keys` or `node partners-cli.mjs list`), revoke any minted while the cookie was exposed, and reissue any it revoked. Unset or shorter, the gateway's `/developer/v1` answers 503 `unavailable` and the site answers 503 "Developer sign-in is temporarily unavailable". Server-only, never `NEXT_PUBLIC_*`. |
+| site | `MERRYMEN_DEVELOPER_GATEWAY_ORIGIN` | Optional, server-only. Defaults to `https://ai.merrymen.dev`; set it to point a preview or local site at another gateway. Must be a bare `https://` origin (plain `http://` only for `localhost` or `127.0.0.1`); anything else makes the portal answer 503 rather than send the secret elsewhere. |
+| gateway | `MERRYMEN_GATEWAY_SECRET` | Already required for holder tokens. It also peppers every partner key's stored hash and derives the key that signs developer sign-in challenges and sessions, so rotating it invalidates every partner key and signs every developer out. |
+| gateway | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Optional for a single process. Without them (the in-memory store), developer sessions are bound to the process: every gateway restart or deploy signs developers out, because their logouts would not survive it. With KV, sessions and logouts survive deploys, and an unreachable KV makes session checks, logouts and sign-ins answer 503 `unavailable` rather than guess. |
 
 Keep the usual shared `DATABASE_URL`/`MERRYMEN_STORE_DEK` and orchestrator worker
 configuration from the sections above. Web needs an LLM credential for generated
@@ -642,18 +651,60 @@ chat replies; without one, partner chat returns a factual status fallback. The
 bridge secret is never a `NEXT_PUBLIC_*` variable and is not needed by partners.
 The web build includes the browser SDK at `/sdk/merrymen-browser.js`; this static
 module permits browser imports, while authenticated partner calls stay on each
-partner's backend.
+partner's backend. Its first line names the build (`SDK_VERSION`).
 
-Issue partner keys using the gateway CLI and a stable `--app-id`; retain that
-app ID when rotating keys. See [the partner integration guide](../gateway/PARTNER-API.md)
-for issuance, owner consent, embedded setup and API examples. The partner key is
-not a substitute for the owner's signed grant.
+Developers issue their own keys at `https://merrymen.dev/api`: five active keys
+per wallet, 30 requests per minute each, scopes `read:agents`, `write:agents`
+and `chat:agents`. Sign-in is an ordinary wallet (EOA) signature checked on the
+gateway with no RPC call, so smart-contract wallets cannot sign in and no chain
+endpoint can vouch for a signature. A session lasts up to eight hours; the
+site's logout revokes it on the gateway (best effort, five-second timeout)
+before clearing the cookie. The gateway CLI still issues operator keys, with a
+stable `--app-id` retained across rotations, for other scopes, a custom quota
+or a key no developer wallet owns. See
+[the partner integration guide](../gateway/PARTNER-API.md) for issuance, owner
+consent, embedded setup and API examples. The partner key is not a substitute
+for the owner's signed grant.
+
+Partner chat answers one message per connection at a time, and activation one
+per owner wallet, through Postgres advisory locks that hold across replicas.
+Each web replica holds at most six of these locks at once, four chats and two
+activations, so slow chats never stop activations: a holder pins a connection
+from that replica's Postgres pool (pg's default of ten) for its turn, and four
+connections stay free for everything else. A chat's model call is held to 18
+seconds, and to what is left of the request's 40-second budget. A waiting
+request holds no connection. A chat waits up to 20 seconds and an activation
+up to 10, counting queueing and connection checkout, then gets 409
+`conversation_busy` or `enrollment_busy` with `Retry-After: 2`. Busy answers
+under heavy chat load are this bound working, not a fault.
 
 Verify `GET /partner/v1/health`, then authenticated `/meta`, then an explicitly
 authorized test connection through creation, challenge, activation, worker
-heartbeat and chat. Health and metadata alone do not test the bridge or worker.
-Confirm the reported mode and funding blocker before claiming an agent is
-trading. Disconnecting app access leaves the owner's worker and grant in place.
+heartbeat and chat. Health and metadata alone do not test the bridge or worker:
+both are answered by the gateway without calling web, so a gateway whose
+bridge is broken still reports healthy. Confirm the reported mode and funding
+blocker before claiming an agent is trading. Disconnecting app access leaves
+the owner's worker and grant in place.
+
+**When partner calls fail.** Partners see only the error code and a
+`request_id`; the gateway logs the rest, one line per non-2xx bridge answer,
+starting `[gateway] partner bridge: <METHOD> <route> <request_id> key <keyId>`.
+Grep for the partner's `request_id`. No line means the runtime answered with a
+2xx, or the gateway refused the request itself (an unknown or revoked key, a
+missing scope, a rate limit, an oversize body), which it does not log. What the
+line ends with:
+
+| Log line ends with | Partner sees | Meaning and fix |
+| --- | --- | --- |
+| `not sent: MERRYMEN_PARTNER_BRIDGE_SECRET is unset or under 32 bytes` | 503 `upstream_unavailable` | Set the bridge secret on the gateway. The gateway also says so at boot. |
+| `got no answer: <error name> (<cause>)`, or `answered HTTP <status>, then its body failed: ...` | 503 `upstream_unavailable` | Web unreachable, DNS, a redirect, or no complete answer within 45 seconds. Check `MERRYMEN_PARTNER_APP_ORIGIN` and the web service. |
+| `answered HTTP 401 unauthorized: the runtime refused this gateway, not the partner...` | 503 `upstream_unavailable` | Web refused the bridge signature: the bridge secret differs between the services, or their clocks are more than 60 seconds apart (rarely, a replayed request). The same line with `404 not_found` means web is not in hosted mode (`MERRYMEN_HOSTED=1`). |
+| `answered HTTP <status> <content-type>, not the runtime's JSON` | 503 `upstream_invalid_response` | Something in front of the partner route answered instead of it: a proxy page, or a middleware refusal such as `text/plain` 403 "blocked: cross-site request to the local API", which is what took down every partner POST and DELETE until `/api/partner/*` was exempted from that block. |
+| `answered HTTP <status> <code>` | that status and code | The runtime's own answer, relayed as written; `upstream_unavailable` here means web hit an unexpected error, or lacks the bridge secret itself. |
+
+The gateway also logs at boot when `MERRYMEN_PARTNER_BRIDGE_SECRET` or
+`MERRYMEN_DEVELOPER_PORTAL_SECRET` is unset or under 32 bytes. The site logs
+`[developer] ...` when its portal secret or gateway origin is unusable.
 
 ## 6. Deploy & verify
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.
