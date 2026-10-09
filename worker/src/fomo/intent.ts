@@ -116,6 +116,16 @@ export interface FomoQuestionPlan {
    * fomo"): a bare "he" after it is its 1st row. Only with "rankings-traders".
    */
   singular?: true;
+  /**
+   * THE THESES THEMSELVES, NOT THE DIGEST ("list the last 10", "show me
+   * these theses, don't summarise", "what did they say exactly"; Milla,
+   * 2026-10-09): how many of the newest to quote, 1 to QUOTES_MAX. Only with
+   * "token-theses", a coin and no trader (a trader's own theses never reach a
+   * room). The read keeps its page: the limit is not narrowed to the count.
+   */
+  quotes?: number;
+  /** The count the line asked for, when it was more than QUOTES_MAX ("the last 25"). */
+  quotesAsked?: number;
 }
 
 export type FomoRowRank = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
@@ -434,6 +444,77 @@ const RESEARCH_STATUS: readonly RegExp[] = [
 ];
 
 const THESES = /\btheses\b/;
+/**
+ * THE THESES THEMSELVES, NOT THE DIGEST (Milla, 2026-10-09): "list them",
+ * "show me these theses", "the last 10", "don't summarise", "what did they
+ * say exactly", "quotes", "word for word". Read on the canonical text (so
+ * "dont" is "do not" and "thesis" is "theses"). tg-groups/detect.ts
+ * thesesQuotesOf reads the same cue on a raw line (it cannot import this
+ * file), and detect.test.ts pins that the two agree. "Summarise them", "what
+ * are people saying" and "any theses?" stay the digest; "show me the data" or
+ * "the chart" are never quotes.
+ */
+const QUOTE_NUM = String.raw`(?:\d{1,3}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)`;
+const QUOTES: readonly RegExp[] = [
+  /\b(?:quote|quotes|quoted|verbatim|word for word|exact words|exactly what|in their (?:own )?words|raw (?:theses|posts|text|texts|words)|actual (?:theses|posts|words|texts?)|full (?:theses|text|texts|posts))\b/,
+  /\bwhat (?:did|do|does) (?:they|people|traders|folks|the traders|he|she) (?:say|said|write|wrote|post|posted) exactly\b/,
+  /\b(?:do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/,
+  /\b(?:show|give|post|paste|send|list|drop) (?:me |us )?(?:(?:all (?:of )?)?(?:the|these|those|their) (?:theses|posts|takes|quotes|texts?|tweets|messages|words)\b|(?:them|these|those|em)(?: (?:all|pls|please|now|here|again))*$)/,
+  new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent) ${QUOTE_NUM}\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)`),
+  // A bare "list" only when nothing but a pointer, a "last N" and a theses noun follow ("can you list the last 10", "pls list"): never "can you list some good movies".
+  new RegExp(String.raw`(?:^|\b(?:can|could|would|will) (?:you|u) |\b(?:pls|please|just|now|then|and|so|ok|okay|yo) )list(?: (?:them|these|those|em|it|all|out))*(?: (?:the |their )?(?:last|latest|newest|recent|most recent) ${QUOTE_NUM})?(?: (?:theses|posts|takes|quotes))?(?: (?:pls|please|now|here|again|for me))*$`),
+];
+/** Another aspect named ("the last 5 buys", "the last 10 sellers", "list the trending coins"): never quotes, unless the theses are named too. */
+const QUOTE_OTHER_ASPECT = /\b(?:buy|buys|buyers?|bought|buying|sells?|sellers?|sold|selling|trades?|trading|holders?|holding|holdings|coins?|tokens?)\b/;
+const QUOTE_THESES_NOUN = /\b(?:theses|quotes|posts|takes)\b/;
+/** "Summarise them", "sum it up", "recap", the whole line: the digest again, after a coin's theses. */
+const SUMMARY_ASK = /^(?:(?:can|could|would|will) you |pls |please |just |ok |okay |so |now |then |and )*(?:summari[sz]e|sum (?:them|it|these|those|that) up|recap|tldr|tl dr)(?: (?:them|it|these|those|that|the theses|em|all|again|for me|pls|please))*$/;
+
+/**
+ * The summary cue, with the agent's own name before or after it ("shogun
+ * summarise them", "summarise them shogun"): the cue is the whole line, so a
+ * name beside it can never be content (withoutSelf takes a leading name only
+ * after a pause or a greeting, and a group line nearly always opens with it).
+ */
+function summaryAskIn(ws: readonly Word[], self: SelfRef): boolean {
+  if (SUMMARY_ASK.test(ws.map((w) => w.canon).join(" "))) return true;
+  for (const n of self.names) {
+    const k = n.length;
+    if (ws.length <= k) continue;
+    const named = (from: number): boolean => n.every((x, i) => ws[from + i]!.bare.toLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, "") === x);
+    if (named(0) && SUMMARY_ASK.test(ws.slice(k).map((w) => w.canon).join(" "))) return true;
+    if (named(ws.length - k) && SUMMARY_ASK.test(ws.slice(0, ws.length - k).map((w) => w.canon).join(" "))) return true;
+  }
+  return false;
+}
+
+/** The most theses one quote answer holds (to the owner's DM in a group), whatever was asked. */
+export const QUOTES_MAX = 10;
+const QUOTE_WORDS: Readonly<Record<string, number>> = {
+  two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
+};
+const QUOTE_COUNT = new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent|list|show me|give me) (${QUOTE_NUM})\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)|\b(${QUOTE_NUM}) (?:of (?:the |their )?)?(?:theses|quotes|posts|takes|of them)\b`);
+
+/**
+ * How many theses a quote ask wants, or null when the line is no quote ask:
+ * the count it names ("the last 5", "ten of them"), else QUOTES_MAX; `asked`
+ * keeps the raw count when it was more than a room hears.
+ */
+export function quotesOf(c: string): { n: number; asked: number } | null {
+  if (typeof c !== "string" || !QUOTES.some((re) => re.test(c))) return null;
+  if (QUOTE_OTHER_ASPECT.test(c) && !QUOTE_THESES_NOUN.test(c)) return null;
+  const m = QUOTE_COUNT.exec(c);
+  const raw = m ? (m[1] ?? m[2] ?? "") : "";
+  const n = /^\d+$/.test(raw) ? Number(raw) : QUOTE_WORDS[raw] ?? QUOTES_MAX;
+  const asked = Number.isSafeInteger(n) && n >= 1 ? n : QUOTES_MAX;
+  return { n: Math.min(asked, QUOTES_MAX), asked };
+}
+
+/** quotesOf on a raw line, read into canonical words first: what tg-groups/detect.ts thesesQuotesOf must agree with. */
+export function quotesAskedIn(text: string): { n: number; asked: number } | null {
+  return typeof text === "string" ? quotesOf(words(text).map((w) => w.canon).join(" ")) : null;
+}
+
 const OWN_THESES = /\b(?:your|my|our) theses\b|\btheses (?:for|behind) (?:buying|selling|the trade|this trade|that trade|entering|exiting|your)\b/;
 const SAYING: readonly RegExp[] = [
   /\bwhat (?:are|is|do|does|did|has|have) (?!you\b|u\b|i\b|we\b)(?:\S+ ){0,3}?(?:saying|say|said|think|thinking|posting|posted|writing|wrote|feel|feeling)(?: (?:about|on|of|regarding)\b|$)/,
@@ -1317,6 +1398,8 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   const freshness = freshnessOf(c);
   const infoOnly = INFO_ONLY.test(c);
   const short = c.split(" ").length <= FOLLOW_UP_MAX_WORDS;
+  // "List the last 10", "show me these theses, don't summarise": the theses themselves (Milla, 2026-10-09).
+  const quoteAsk = quotesOf(c);
 
   const detected: Detected | null = rowAsk
     ? { intent: "rankings-traders", inherent: TRADERS_WORD.test(c) }
@@ -1355,6 +1438,14 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     const context = detected.inherent || fomo || cohort || (usable && history) || (history && short && explicitCount === 0);
     if (!context) return null;
     intent = detected.intent;
+  } else if ((quoteAsk || summaryAskIn(ws, self)) && usable && memory!.lastIntent === "token-theses" && memTokens.length === 1 && explicitCount === 0 && !traderDeixis) {
+    // A BARE QUOTE ASK ("can you list the last 10", "what did they say
+    // exactly") right after a coin's theses: those theses, from memory. Only
+    // after a theses answer about one coin: under a board, a trader or a
+    // coin's activity it plans nothing, so "list the last 10" there is never quotes.
+    // "Summarise them" there is the digest again.
+    intent = "token-theses";
+    usesMemory.push("intent");
   } else if (history && (pureFollowUp || (correction && short))
     // "are they buying?" after a trader answer: a "they" that is not the trader does not continue a trader question.
     && !(theyPronoun && !theyTrader && TRADER_INTENTS.has(memory!.lastIntent!))) {
@@ -1393,6 +1484,8 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   const subjects: SubjectQuery[] = [...explicitTokens, ...ex.traders].slice(0, 2);
 
   let window: PlanWindow | null = statedWindow;
+  /** Set once the plan is known to be one coin's theses (see FomoQuestionPlan.quotes). */
+  let quoted: { n: number; asked: number } | null = null;
   let side: PlanSide | null = null;
   const plan = (clarification: string | null, toolCalls: FomoToolCall[]): FomoQuestionPlan => ({
     intent,
@@ -1412,6 +1505,7 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     ...(detected?.earnings && intent === "trader-activity" ? { earnings: true as const } : {}),
     // Only the 1st row: after "who's the 5th best trader", a bare "he" asks which row, never row 1.
     ...(intent === "rankings-traders" && (rowAsk ? rowAsk.rank === 1 : rankPhraseOf(c)?.rank === 1) ? { singular: true as const } : {}),
+    ...(quoted && intent === "token-theses" ? { quotes: quoted.n, ...(quoted.asked > QUOTES_MAX ? { quotesAsked: quoted.asked } : {}) } : {}),
   });
   const ask = (question: string) => plan(question, []);
   if (askWhichRow) return ask(askWhichRow);
@@ -1556,11 +1650,14 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     }
   }
 
+  // Quotes of one coin's theses, never a trader's (a room never hears those).
+  if (quoteAsk && intent === "token-theses" && resolved.some((r) => r.kind === "token") && !resolved.some((r) => r.kind === "trader")) quoted = quoteAsk;
   const calls = buildCalls(intent, resolved, {
     window,
     side,
     freshness,
-    limit: limitOf(c),
+    // A quote ask keeps the page (its count is how many are quoted, not how many are read).
+    limit: quoted ? null : limitOf(c),
     cohort,
     board,
     sinceRevision,

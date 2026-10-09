@@ -292,6 +292,12 @@ describe("renderEnvelope", () => {
     const empty = renderEnvelope(env("fomo_get_token_activity", "empty", act), O);
     assert.match(empty, /No matching sells were returned/);
     assert.match(empty, /not the same as nobody trading/);
+    // Live 2026-10-09: "No matching activity were returned for AUTON on solana…".
+    const anySide = renderEnvelope(env("fomo_get_token_activity", "empty", { ...act, side: null }), O);
+    assert.match(anySide, /No matching activity was returned for /);
+    assert.doesNotMatch(anySide, /activity were/);
+    const buys = renderEnvelope(env("fomo_get_token_activity", "empty", { ...act, side: "buy" }), O);
+    assert.match(buys, /No matching buys were returned/);
     const failed = renderEnvelope(env("fomo_get_token_activity", "failed", null, { reason: "timeout" }), O);
     assert.match(failed, /couldn't read that from Fomo \(the provider did not answer in time\)/);
     assert.ok(!/No matching/.test(failed));
@@ -701,6 +707,23 @@ describe("a copy's age, in a room, is always in words the gate admits (review r2
       // The owner keeps her wording.
       assert.doesNotMatch(renderEnvelope(e, O), /Fomo's own copy|it could not be refreshed/);
     }
+  });
+
+  it("a copy over a minute old is 'a minute ago', never 'just now' (live 2026-10-09: a 63 s copy)", () => {
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    const cached = (ms: number) => env("fomo_get_token_theses", "ok", theses(), { freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: NOW - ms, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW - ms, lastRefreshOutcome: "ok", cacheAgeMs: ms, servedFrom: "cache" } });
+    for (const audience of [G, O]) {
+      const at63 = renderEnvelope(cached(63_000), audience);
+      assert.match(at63, /^From a copy fetched a minute ago\.$/m, at63);
+      assert.doesNotMatch(at63, /just now/);
+      assert.match(renderEnvelope(cached(89_000), audience), /^From a copy fetched a minute ago\.$/m);
+      // 90 s on, agoText's own wording.
+      assert.match(renderEnvelope(cached(120_000), audience), /^From a copy fetched 2m ago\.$/m);
+      // Under a minute: no age line at all.
+      assert.doesNotMatch(renderEnvelope(cached(30_000), audience), /From a copy fetched/);
+    }
+    const line = groupScrub(renderEnvelope(cached(63_000), G)).split("\n").find((l) => l.startsWith("From a copy"))!;
+    assert.ok(admitTgLine(line, research).ok, line);
   });
 });
 

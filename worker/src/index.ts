@@ -298,6 +298,7 @@ import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
 import { COIN_LOOK, chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
 import { createDesk } from "./desk/desk";
+import { createCoinFactsReader, FactsLimiter } from "./desk/facts";
 import type { TgDeskPort } from "./telegram/tg-groups/types";
 import { readDexTokenPairs } from "./venues/dexscreener";
 import { startNotifier } from "./telegram/notifier";
@@ -14846,6 +14847,11 @@ async function main() {
     // ticker shape /buy parses and the same watch-set resolution it uses.
     buyable: (symbol) => /^[A-Za-z]{1,6}$/.test(symbol) && resolveOrderToken(symbol, watchTokens).kind === "token",
     tailsAvailable: () => !fomoOff && fomoTailsState() === "on",
+    // A coin's measured facts for a room that asks what happened to it
+    // (docs/tg-groups.md "A coin's facts, on request"): GeckoTerminal's public
+    // index on the fleet quota, at most 4 reads per room per 10 minutes and 20
+    // per agent per hour, 10 s each. Independent of the desk's switch.
+    facts: createCoinFactsReader({ limiter: new FactsLimiter() }),
   });
 
   // Kept for the SIGTERM handler below, which stops the poll on the way out.

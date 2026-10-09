@@ -22,7 +22,10 @@
  * what they traded and what they made or lost money on, provider-reported;
  * Milla, 2026-10-07), never as @mentions and never who Merrymen follows or
  * watches. A coin's theses are a digest of what they argue (digest.ts),
- * never quoted and never counted. The owner's own research state is
+ * never counted, and never quoted by this renderer: a room that asks for the
+ * theses themselves hears them quoted by tg-fomo-port.ts thesesQuotes and
+ * tg-groups/quotes.ts, gated line by line (Milla, 2026-10-09). The owner's
+ * own research state is
  * deflected to a direct message. A final scrub runs over the whole group
  * text as a second line of defence.
  *
@@ -367,7 +370,11 @@ function freshnessLine(env: FomoEnvelope, now: number): string | null {
             : "it could not be refreshed";
     return `Data age: ${age} (${why}).`;
   }
-  if (f.servedFrom === "cache" && finite(f.cacheAgeMs) && f.cacheAgeMs > 60_000) return `From a copy fetched ${agoText(f.cacheAgeMs)}.`;
+  if (f.servedFrom === "cache" && finite(f.cacheAgeMs) && f.cacheAgeMs > 60_000) {
+    // A copy over a minute old is never "just now" (agoText says that under
+    // 90 s, which thesis ages keep): live 2026-10-09, a 63 s copy was.
+    return `From a copy fetched ${f.cacheAgeMs < 90_000 ? "a minute ago" : agoText(f.cacheAgeMs)}.`;
+  }
   if (finite(f.providerAsOf) && now - f.providerAsOf > 10 * 60_000) return `The provider's own copy is from ${ago(now, f.providerAsOf)}.`;
   return null;
 }
@@ -761,7 +768,9 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
   const scope = d.window === "all" ? "on record" : `in the last ${d.window}`;
   const out: string[] = [];
   if (d.events.length === 0) {
-    out.push(`No matching ${d.side === "buy" ? "buys" : d.side === "sell" ? "sells" : "activity"} were returned for ${subject} ${scope}. That is not the same as nobody trading: the feed only shows positions above roughly $3,000.`);
+    // "activity was", "buys were" (live 2026-10-09: "No matching activity were returned").
+    const what = d.side === "buy" ? "buys were" : d.side === "sell" ? "sells were" : "activity was";
+    out.push(`No matching ${what} returned for ${subject} ${scope}. That is not the same as nobody trading: the feed only shows positions above roughly $3,000.`);
   } else {
     const b = d.distinctBuyers;
     const s = d.distinctSellers;
@@ -803,7 +812,7 @@ function windowWords(w: string | null | undefined): string {
 }
 
 /** A chain as people say it: "Robinhood Chain", "Solana", "Ethereum". */
-function chainLabel(slug: string | null | undefined): string {
+export function chainLabel(slug: string | null | undefined): string {
   const s = typeof slug === "string" ? chainFromUserText(slug)?.slug ?? slug : "";
   const named: Record<string, string> = { robinhood: "Robinhood Chain", solana: "Solana", base: "Base", eth: "Ethereum", bsc: "BSC", arc: "Arc", hyperliquid: "Hyperliquid" };
   return named[s] ?? (/^[a-z][a-z0-9-]{0,23}$/.test(s) ? s : "that chain");

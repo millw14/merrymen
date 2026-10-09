@@ -1,0 +1,25 @@
+{
+ "_fixture": "trimmed from GeckoTerminal's public API, read 2026-10-09 ~01:15 UTC (AUTON on Solana); fields the facts reader does not use removed; the creator's address replaced with a fabricated one of the same shape (the reader must never keep it)",
+ "data": {
+  "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+  "type": "token",
+  "attributes": {
+   "address": "39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+   "name": "auton",
+   "symbol": "AUTON",
+   "holders": {
+    "count": 5683,
+    "distribution_percentage": {
+     "top_10": "34.1077",
+     "11_20": "9.3504",
+     "21_40": "10.5343",
+     "rest": "46.0076"
+    },
+    "last_updated": "2026-10-08T14:48:21Z"
+   },
+   "is_honeypot": "unknown",
+   "developer_address": "CreatorAddressFabricatedForTests1111111111",
+   "developer_holding_percentage": "4.81"
+  }
+ }
+}

@@ -25,7 +25,7 @@ const memo = new Map<string, { until: number; value: unknown }>();
 const pending = new Map<string, Promise<unknown>>();
 
 /** One request per key per minute, shared by every caller in this process. */
-async function memoized<T extends FeedResult>(key: string, run: () => Promise<T>, unavailable: (why: string) => T): Promise<T> {
+export async function memoized<T extends FeedResult>(key: string, run: () => Promise<T>, unavailable: (why: string) => T): Promise<T> {
   const k = `${geckoSource().id}:${key}`;
   const hit = memo.get(k);
   if (hit && hit.until > Date.now()) return hit.value as T;
@@ -49,7 +49,7 @@ export function resetDeskReadsForTest(): void {
   pending.clear();
 }
 
-async function getJson(route: string, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
+export async function getJson(route: string, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
   // Fleet pacing can outlive an optional caller's read budget. Never begin a
   // request after that caller has already cancelled it.
   if (signal?.aborted || timeoutMs < 1) return { ok: false, failure: "unavailable" };
