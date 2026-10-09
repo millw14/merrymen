@@ -3342,7 +3342,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // this may be running on): a reply under it asks about the same coin.
         const told = await send(quotesDmNotice(chatId));
         if (told === "sent" && r.coin) rememberFomoCoin(chatId, j.threadId, sentId, r.coin);
-        if (told !== "sent") log(`[tg-groups] theses quotes: the room's DM notice was not said (${told})`);
+        if (told !== "sent") {
+          log(`[tg-groups] theses quotes: the room's DM notice was not said (${told})`);
+          // The room saw nothing: no follow-up window for an answer it never heard.
+          unremember();
+        }
         // Answered in her DM, whether or not the room's notice landed.
         return "sent";
       }

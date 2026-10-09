@@ -3070,6 +3070,26 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
     }
   });
 
+  it("her DM landed but the room's line did not: the room keeps no follow-up window for an answer it never heard (review)", async () => {
+    const r = await shogunRoom();
+    try {
+      // The room refuses every send for this ask; her DM still lands.
+      r.tg.failChats.add(GROUP);
+      await r.say("shogun quote the newest 10 theses on $AUTON on solana on fomo");
+      assert.equal(r.dms().length, 1, "her DM landed");
+      assert.ok(r.logs.some((l) => l.startsWith("[tg-groups] theses quotes: the room's DM notice was not said")), r.logs.join("\n"));
+      r.tg.failChats.delete(GROUP);
+      // A minute on, a follow-up-shaped line is not a follow-up to an answer the room never heard.
+      const said = r.logs.filter((l) => l === "[tg-groups] said research").length;
+      const calls = r.s.calls.length;
+      await r.say("shogun what about the sellers?", { advanceMs: 60_000 });
+      assert.equal(r.logs.filter((l) => l === "[tg-groups] said research").length, said, r.logs.join("\n"));
+      assert.equal(r.s.calls.length, calls, "no research read");
+    } finally {
+      r.restore();
+    }
+  });
+
   it("her quotes never reach the room when her DM fails: the digest instead, and no claim they were sent", async () => {
     const r = await shogunRoom();
     try {
