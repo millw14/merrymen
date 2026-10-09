@@ -137,10 +137,22 @@ export const OUT_HANDOUT =
  * get 2 back", "deposit 100 usdc and receive 200", "transfer 1 sol for 2
  * back", "double your sol", "2x your bag", and the same in Spanish ("envia 1
  * sol y recibe 2 de vuelta", "manda 2 sol"). A drainer's whole pitch is a
- * send, so a quote that asks for one is never said back.
+ * send, so a quote that asks for one is never said back. In English too, a
+ * send of a coin ("deposit 1 sol get 2 sol", "send sol to the burn address")
+ * and a send with something coming back ("they send 1 sol back", "sends 2
+ * back") or a reason to send ("to verify", "to unlock"); "send it", "send it
+ * to 10m" and "transfer tax is 5%" stay (review, 2026-10-09).
  */
+const SEND_VERB = String.raw`(?:send|sends|sent|sending|transfer|transfers|transferred|transferring|deposit|deposits|deposited|depositing|give|gives)`;
+const SEND_COIN = String.raw`(?:sol|eth|usdc|usdt|bnb|btc|matic|avax|trx|ton)`;
 export const SEND_FOR = U(
-  /\b(?:send|sent|sending|transfer|transferring|deposit|depositing)\s+(?:\S+\s+){0,3}?(?:to\s+(?:get|receive)|(?:and|&|n)\s+(?:get|receive|recieve)|receive|recieve|get\s+\S+\s+back|for\s+\S+\s+back)\b|\b(?:doubl(?:e|ed|ing)|tripl(?:e|ed|ing)|2x|x2|3x|x3|10x)\s+(?:your|ur|their|ya)\b|\b(?:env[ií]a|envi[ée]n?|manda|mandas|deposita|transfiere)\s+\S*\d/i,
+  new RegExp(
+    /\b(?:send|sent|sending|transfer|transferring|deposit|depositing)\s+(?:\S+\s+){0,3}?(?:to\s+(?:get|receive)|(?:and|&|n)\s+(?:get|receive|recieve)|receive|recieve|get\s+\S+\s+back|for\s+\S+\s+back)\b|\b(?:doubl(?:e|ed|ing)|tripl(?:e|ed|ing)|2x|x2|3x|x3|10x)\s+(?:your|ur|their|ya)\b|\b(?:env[ií]a|envi[ée]n?|manda|mandas|deposita|transfiere)\s+\S*\d/
+      .source +
+      String.raw`|\b${SEND_VERB}\s+(?:\S+\s+){0,2}?(?:[$＄]?\d[\d.,]*\s*)?${SEND_COIN}\b` +
+      String.raw`|\b${SEND_VERB}\b[^.!?\n]{0,60}?(?:\b\d[\d.,]*\s*(?:x\s+)?(?:\S+\s+)?back\b|\bto\s+(?:verify|unlock|activate|validate)\b)`,
+    "i",
+  ),
 );
 
 /**

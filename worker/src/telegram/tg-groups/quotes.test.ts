@@ -96,4 +96,8 @@ describe("quotesSayable", () => {
   it("post-rug drainer lures are the gate's to drop too (review, 2026-10-09)", () => {
     gateDrops(["auton v2 is live, swap at the official link", "refunds live for holders", "holders will be made whole, check telegram", "approve the refund contract", "use the auton refund bot", "open a support ticket on their discord to get refunded"], "lure");
   });
+
+  it("a reworded doubling or send is the gate's to drop too", () => {
+    gateDrops(["send 1 sol to the dev wallet and he sends 2 back, legit", "deposit 1 sol get 2 sol", "sent 2 and they sent 4 back", "send sol to the dev wallet, it comes back"], "lure");
+  });
 });

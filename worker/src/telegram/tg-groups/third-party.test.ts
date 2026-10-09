@@ -107,6 +107,21 @@ describe("the new clauses", () => {
     misses(SEND_FOR, [...HARMLESS, "send it", "they will send it higher", "sent the chart to my friends", "doubled since launch"]);
   });
 
+  it("SEND_FOR: a send of a coin, or a send with something coming back, in small rewordings (review, 2026-10-09)", () => {
+    hits(SEND_FOR, [
+      "send 1 sol to the dev wallet and he sends 2 back, legit",
+      "send 0.1 sol to verify and they send 1 sol back",
+      "transfer 1 sol, they return 2 within an hour",
+      "deposit 1 sol get 2 sol",
+      "i sent 1 sol and got 2 back, its real",
+      "give 1 sol take 2 sol",
+      "send sol to the burn address to unlock refund",
+      "send 1 to the dev and get 2 back",
+      "sent 2 and they sent 4 back",
+    ]);
+    misses(SEND_FOR, ["transfer tax is 5%", "send it back to the highs", "if this sends we are so back", "send it to 10m", "dev sent supply to a cex", "gave back all its gains", "sent it to 2m and back down to 500k"]);
+  });
+
   it("CTA_PLACEHOLDER: a call to action beside a link, handle or address that was taken out", () => {
     hits(CTA_PLACEHOLDER, ["join [link]", "join for the raid [link]", "dm [handle] for the alpha", "claim at [address]", "[link] sign up now", "check out [link]", "go to [link] and connect"]);
     misses(CTA_PLACEHOLDER, [...HARMLESS, "called it [handle] early, he is still in long term", "roadmap on [link]"]);

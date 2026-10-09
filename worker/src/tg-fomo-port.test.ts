@@ -2841,4 +2841,18 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     leftOut(["auton(.)xyz is the new site", "autonrefund[.]io for the money back"]);
     quoted(REVIEW_KEPT);
   });
+
+  it("a doubling or a send, reworded: a coin sent, something coming back, a send to verify or unlock", () => {
+    leftOut([
+      "send 1 sol to the dev wallet and he sends 2 back, legit",
+      "send 0.1 sol to verify and they send 1 sol back",
+      "transfer 1 sol, they return 2 within an hour",
+      "deposit 1 sol get 2 sol",
+      "give 1 sol take 2 sol",
+      "send sol to the burn address to unlock refund",
+      "sent 2 and they sent 4 back",
+      "send sol to the dev wallet, it comes back",
+    ]);
+    quoted(["if this sends we are so back", "send it back to the highs", "sent the chart to my friends", "dev sent supply to a cex"]);
+  });
 });
