@@ -20,7 +20,7 @@
  * NEW, FOR QUOTES AND THE RUG PERMIT: SEND_FOR, CTA_PLACEHOLDER, QUOTE_TARGET,
  * RUG_CONTEXT_ACCUSE, MERRY_SHILL and MERRY_BRAG, each compiled through U;
  * and, read only on the quote path (the port's quoteOf and the gate's
- * `quote` kind), POST_RUG_LURE, SPELLED_LINK and PRIVATE_THIRD.
+ * `quote` kind), POST_RUG_LURE, SPELLED_LINK, PRIVATE_THIRD and CONTACT_LURE.
  *
  * No imports: this file is the leaf every one of them shares.
  */
@@ -279,6 +279,25 @@ export const PRIVATE_THIRD = U(
       String.raw`|\b(?:home|house|street|mailing|postal)\s+address(?:es)?\b|\bdox+\w*` +
       String.raw`|\b\d+\s+\p{L}+\s+(?:street|st|road|rd|avenue|ave|lane|ln|blvd|boulevard|drive|dr|close|court|way)\b` +
       String.raw`|\b(?:phone|whatsapp|e-?mail|insta(?:gram)?|linkedin|facebook)\b|\big(?:\s*:|\s+is\b)|\birl\b`,
+    "i",
+  ),
+);
+
+/**
+ * A CONTACT LURE OR A CHANNEL POINTER, for quotes only: "inbox me", "pm us",
+ * "hmu", "hit me up", a channel named without its @ ("telegram: autonarmy",
+ * "join autonarmy on telegram"), a link or a contact "pinned" or "in the
+ * bio", "search <name> on google", and a name ending in "claim" or "portal"
+ * ("autonclaim", "autonportal"; never "reclaim", "proclaim", "acclaim").
+ * The words of LURE and OUT_LURE are unchanged; "the telegram is dead" and
+ * "contact with the team is lost" stay (review, 2026-10-09).
+ */
+export const CONTACT_LURE = U(
+  new RegExp(
+    String.raw`\b(?:pm|inbox|dm|text|msg)\s+(?:me|us)\b|\bhmu\b|\bhit\s+(?:me|us)\s+up\b` +
+      String.raw`|\b(?:telegram|tg|discord|whatsapp|signal|twitter|x)\s*[:=]\s*[\p{L}\p{N}_]|\bjoin\s+(?:the\s+|our\s+)?[\p{L}\p{N}_]+\s+(?:on|in)\s+(?:telegram|tg|discord|whatsapp|signal)\b` +
+      String.raw`|\blink\s+(?:is\s+)?(?:pinned|in\s+(?:the\s+)?(?:bio|description|comments?|replies))\b|\b(?:contact|address|ca|link)\s+(?:is\s+)?in\s+(?:the\s+|my\s+)?(?:description|bio|comments?|replies|pinned)\b` +
+      String.raw`|\bsearch\s+[\p{L}\p{N}_]+\s+on\s+(?:google|telegram|tg|x|twitter)\b|(?<=[\p{L}\p{N}])(?<!(?:re|dis|pro|ac|ex))(?:claim|portal)\b`,
     "i",
   ),
 );

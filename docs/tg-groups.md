@@ -106,7 +106,8 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    most ~160 characters, cleaned (links, addresses, handles, $tags and markup
    out; a row a link or an address was taken out of is left out whole), each
    line gated as `quote` (lures, drainer prompts, refund, v2 and
-   support-ticket lures, sends, calls to action, links spelled out without a
+   support-ticket lures, someone to message or a channel named without its @,
+   sends, calls to action, links spelled out without a
    dot ("bit ly slash", "autonrefund point com"), addresses split into chunks,
    accusations against people, a third party's private details (a real
    name or "his name is…", where someone lives or works, a home address, a

@@ -48,6 +48,7 @@ import { fnv1a } from "../../memory/tokens";
 import {
   ABOUT_MERRYMEN,
   AT_THE_READER,
+  CONTACT_LURE,
   CTA_PLACEHOLDER,
   INJECTION_SHAPED,
   LURE,
@@ -1621,7 +1622,7 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
  * this is the backstop if either regresses.
  */
 const QUOTE_CLAUSES: ReadonlyArray<[readonly RegExp[], (r: Readings) => readonly string[], string]> = [
-  [[INJECTION_SHAPED, AT_THE_READER, LURE, OUT_LURE, OUT_HANDOUT].map(U).concat([SEND_FOR, CTA_PLACEHOLDER, POST_RUG_LURE]), (r) => r.low, "lure"],
+  [[INJECTION_SHAPED, AT_THE_READER, LURE, OUT_LURE, OUT_HANDOUT].map(U).concat([SEND_FOR, CTA_PLACEHOLDER, POST_RUG_LURE, CONTACT_LURE]), (r) => r.low, "lure"],
   [[U(SPELLED_DOMAIN), SPELLED_LINK], (r) => r.low, "link"],
   [[U(ABOUT_MERRYMEN)], (r) => r.low, "meta"],
   [[NON_LATIN], (r) => r.cased, "script"],

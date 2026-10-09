@@ -117,4 +117,8 @@ describe("quotesSayable", () => {
   it("a doxxing thesis is the gate's to drop too, with reason 'private'", () => {
     gateDrops(["the dev's real name is john smith, lives at 12 baker street london", "the dev lives in lagos and his name is tunde", "his name is tunde, from lagos", "dev's whatsapp is out there", "the deployer hangs out at 4 park close"], "private");
   });
+
+  it("contact lures and channel pointers are the gate's to drop too", () => {
+    gateDrops(["inbox me for the alpha", "hmu for the group", "telegram: autonarmy, come raid", "raid the tweet, link pinned", "telegram is autonportal, raid now", "join autonarmy on telegram"], "lure");
+  });
 });

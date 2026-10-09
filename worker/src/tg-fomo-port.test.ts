@@ -2904,4 +2904,22 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     leftOut(["the dev's real name is john smith, lives at 12 baker street london", "the dev lives in lagos and his name is tunde", "his name is tunde, from lagos", "the dev's first name is tunde", "dev's whatsapp is out there", "found his facebook, same guy", "the deployer hangs out at 4 park close"]);
     quoted(["the number one ai coin on sol", "big wallets are holding"]);
   });
+
+  it("contact lures and channel pointers are never quoted", () => {
+    leftOut([
+      "inbox me for the alpha",
+      "hmu for the group",
+      "pm me for the alpha group",
+      "text me for the alpha",
+      "hit me up for the call group",
+      "telegram: autonarmy, come raid",
+      "raid the tweet, link pinned",
+      "search autonclaim on google",
+      "telegram is autonportal, raid now",
+      "contact address in the description",
+      "join autonarmy on telegram",
+      "go to autonclaim and connect",
+    ]);
+    quoted(["the telegram is dead", "dev went quiet on telegram", "the team said in the tg they are building", "contact with the team is lost", "chart needs to reclaim the high"]);
+  });
 });
