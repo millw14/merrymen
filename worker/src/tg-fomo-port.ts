@@ -613,9 +613,10 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
  * Words a quote's author handle may never wear, read with its joins spaced
  * out ("fomo_support", "MerrymenOfficial", "refund_bot"): support, a help
  * desk, an admin or mod, "official", a team, a dev, a bot, a refund or
- * recovery, Merrymen, Fomo, Telegram. Such an author is "a trader".
+ * recovery, Merrymen, Fomo, Telegram; or a helper's word fused to a name
+ * ("autonrecovery", "dm_autonhelp"). Such an author is "a trader".
  */
-const IMPERSONATES = /\b(?:support|help\s*desk|admins?|mods?|moderators?|official|team|devs?|bot|refunds?|recovery|merrym[ae]n|fomo|telegram)\b/i;
+const IMPERSONATES = /\b(?:support|help\s*desk|admins?|mods?|moderators?|official|team|devs?|bot|refunds?|recovery|merrym[ae]n|fomo|telegram)\b|(?<=[\p{L}\p{N}])(?:recovery|support|help(?:desk)?|rescue)\b/iu;
 /** The lines code says around the quotes; a thesis that echoes one is dressing as the answer itself. */
 const QUOTE_FRAME = /\bfrom a copy fetched\b|\btheir words,? not facts\b|\bthe newest \d+ theses\b|\b\d+ of these \d+ left out\b/i;
 

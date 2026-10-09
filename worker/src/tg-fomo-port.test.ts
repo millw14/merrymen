@@ -2956,6 +2956,31 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["the telegram is dead", "dev went quiet on telegram", "the team said in the tg they are building", "contact with the team is lost", "chart needs to reclaim the high"]);
   });
 
+  it("DM bait and recovery-scam contacts, in the text or as the author, are never quoted or named (review r2)", () => {
+    leftOut([
+      "contact me for the fix",
+      "ping me if stuck",
+      "reach out to me for help with sells",
+      "my dms are open for anyone stuck",
+      "slide into my dms for the fix",
+      "dm for the fix",
+      "hit my line for the fix",
+      "talk to an admin, they sort it",
+      "talk to autonrecovery, they fixed mine",
+      "dm the bot to unstick sells",
+      "google autonhelp for the fix",
+      "on signal for the fix",
+      "write to us at proton",
+    ]);
+    quoted(["strong support here", "my dm from the dev never came"]);
+    for (const handle of ["contact_me", "ping_me", "dm_autonhelp", "autonrecovery"]) {
+      const { said } = quotedFrom([{ text: "team is still building", handle }]);
+      assert.match(said!.text, /^• a trader, 3 min ago: “team is still building”$/mu, handle);
+    }
+    const { said } = quotedFrom([{ text: "team is still building", handle: "kaleo" }]);
+    assert.match(said!.text, /^• kaleo, 3 min ago:/mu);
+  });
+
   it("a drainer's ask in other words: the 12 words, a private key, the wallet connected, a dapp, sells unlocked, a form (review r2)", () => {
     leftOut([
       "enter the 12 words on the site to unlock sells",

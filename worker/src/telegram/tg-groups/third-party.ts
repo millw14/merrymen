@@ -318,6 +318,12 @@ export const PRIVATE_THIRD = U(
  * "join autonarmy on telegram"), a link or a contact "pinned" or "in the
  * bio", "search <name> on google", and a name ending in "claim" or "portal"
  * ("autonclaim", "autonportal"; never "reclaim", "proclaim", "acclaim").
+ * And DM bait and recovery-scam contacts (review r2): "contact me", "ping
+ * me", "reach out to me", "into my dms", "my dms are open", "dm for the
+ * fix", "hit my line", "talk to an admin", "dm the bot", "google
+ * autonhelp", "on signal", "at proton", and a name ending in recovery,
+ * support, helpdesk or rescue ("autonrecovery"). "My dm from the dev never
+ * came" and "strong support here" stay.
  * The words of LURE and OUT_LURE are unchanged; "the telegram is dead" and
  * "contact with the team is lost" stay (review, 2026-10-09).
  */
@@ -326,7 +332,10 @@ export const CONTACT_LURE = U(
     String.raw`\b(?:pm|inbox|dm|text|msg)\s+(?:me|us)\b|\bhmu\b|\bhit\s+(?:me|us)\s+up\b` +
       String.raw`|\b(?:telegram|tg|discord|whatsapp|signal|twitter|x)\s*[:=]\s*[\p{L}\p{N}_]|\bjoin\s+(?:the\s+|our\s+)?[\p{L}\p{N}_]+\s+(?:on|in)\s+(?:telegram|tg|discord|whatsapp|signal)\b` +
       String.raw`|\blink\s+(?:is\s+)?(?:pinned|in\s+(?:the\s+)?(?:bio|description|comments?|replies))\b|\b(?:contact|address|ca|link)\s+(?:is\s+)?in\s+(?:the\s+|my\s+)?(?:description|bio|comments?|replies|pinned)\b` +
-      String.raw`|\bsearch\s+[\p{L}\p{N}_]+\s+on\s+(?:google|telegram|tg|x|twitter)\b|(?<=[\p{L}\p{N}])(?<!(?:re|dis|pro|ac|ex))(?:claim|portal)\b`,
+      String.raw`|\bsearch\s+[\p{L}\p{N}_]+\s+on\s+(?:google|telegram|tg|x|twitter)\b|(?<=[\p{L}\p{N}])(?<!(?:re|dis|pro|ac|ex))(?:claim|portal)\b` +
+      String.raw`|\b(?:contact|ping|reach\s+out\s+to|write\s+to|message|d\s*\.?\s*m)\s+(?:me|us)\b|\b(?:in|into)\s+(?:my|our)\s+(?:dms?|inbox|pms?)\b|\b(?:dms?|inbox|pms?)\s+(?:are\s+|is\s+)?open\b` +
+      String.raw`|\b(?:dm|pm|inbox|msg)\s+(?:for|if)\b|\bhit\s+(?:my|our)\s+line\b|\b(?:talk|speak)\s+to\s+(?:an?\s+|the\s+)?(?:admins?|mods?|support|bot)\b|\b(?:dm|pm|message|contact|ping|text)\s+the\s+bot\b` +
+      String.raw`|\b(?:google|look\s+up)\s+[\p{L}\p{N}_]+(?:help|support|recovery|rescue)\b|\bon\s+signal\b|\bat\s+(?:proton|gmail|outlook)\b|(?<=[\p{L}\p{N}])(?:recovery|support|helpdesk|rescue)\b`,
     "i",
   ),
 );

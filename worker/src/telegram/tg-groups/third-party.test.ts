@@ -243,6 +243,25 @@ describe("the new clauses", () => {
     misses(POST_RUG_LURE, [...HARMLESS, "rugged, holders got wrecked", "holders still bagholding, no recovery in sight", "dead coin now, volume gone", "it got listed on a cex", "chart is cooked"]);
   });
 
+  it("CONTACT_LURE: DM bait and recovery-scam contacts (review r2)", () => {
+    hits(CONTACT_LURE, [
+      "contact me for the fix",
+      "ping me if stuck",
+      "reach out to me for help with sells",
+      "my dms are open for anyone stuck",
+      "slide into my dms for the fix",
+      "dm for the fix",
+      "hit my line for the fix",
+      "talk to an admin, they sort it",
+      "talk to autonrecovery, they fixed mine",
+      "dm the bot to unstick sells",
+      "google autonhelp for the fix",
+      "on signal for the fix",
+      "write to us at proton",
+    ]);
+    misses(CONTACT_LURE, ["whelp, it rugged", "strong support here", "my dm from the dev never came"]);
+  });
+
   it("POST_RUG_LURE: the drainer's asks in other words (review r2)", () => {
     hits(POST_RUG_LURE, [
       "enter the 12 words on the site to unlock sells",
