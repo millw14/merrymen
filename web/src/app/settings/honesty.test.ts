@@ -395,7 +395,14 @@ describe("Telegram groups (docs/tg-groups.md)", () => {
   it("they live inside the Telegram section, not under Advanced", () => {
     const telegram = SRC.indexOf('id="telegram"');
     const block = SRC.indexOf('t("settings.section.telegramGroups")');
-    const end = SRC.indexOf("</details>", telegram);
+    // The secondary existing-bot path is its own expandable drawer. Match
+    // the outer section's close, rather than the first nested drawer's close.
+    const start = SRC.lastIndexOf("<details", telegram);
+    let depth = 0, end = -1;
+    for (const tag of SRC.slice(start).matchAll(/<\/?details\b[^>]*>/g)) {
+      depth += tag[0].startsWith("</") ? -1 : 1;
+      if (depth === 0) { end = start + tag.index!; break; }
+    }
     assert.ok(telegram > 0 && block > telegram && block < end, "the Telegram groups block is not inside <details id=\"telegram\">");
   });
 
