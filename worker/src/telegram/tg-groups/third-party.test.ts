@@ -22,6 +22,7 @@ import {
   OUT_LURE,
   POST_RUG_LURE,
   PRIVATE_THIRD,
+  QUOTE_HARM,
   QUOTE_TARGET,
   RUG_CONTEXT_ACCUSE,
   SECOND_PERSON,
@@ -269,6 +270,23 @@ describe("the new clauses", () => {
       "hxxps autonhub xyz",
     ]);
     misses(SPELLED_LINK, ["launched on pumpfun, graduated fast", "pump fun graduates are cooked", "auton/sol pair is thin", "50/50 on this one", "24/7 volume", "safety net is gone", "net flows positive", "x is buzzing about it", "polka dot pattern on the logo", "tg/x both quiet", "the dot com bubble", "rides the polkadot narrative", "dot-com era pricing", "the io narrative"]);
+  });
+
+  it("QUOTE_HARM: harm wished on or threatened against someone else (review r2)", () => {
+    for (const r of [
+      "the dev should be shot, hope he dies",
+      "we know where the dev lives, someone swat him",
+      "holders should kill themselves",
+      "holders got raped on this one",
+      "hang the dev",
+      "the dev needs a bullet",
+      "gonna beat the dev up when i find him",
+      "rope time for holders",
+      "the dev should kill himself",
+      "im going to kill the dev when i find him",
+      "hope the dev gets hit by a bus",
+    ]) assert.ok(QUOTE_HARM.some((re) => re.test(r)), r);
+    for (const r of ["learn the ropes before aping", "shorts got killed today", "volume needs to die down first", "therapist said hold"]) assert.ok(!QUOTE_HARM.some((re) => re.test(r)), r);
   });
 
   it("POST_RUG_LURE: the relaunch and the handout reworded (review r2)", () => {

@@ -1772,6 +1772,22 @@ describe("quote kind: a stranger's thesis said back in a room, held to every thi
   ] as const) {
     it(`refuses as ${why}: ${JSON.stringify(t)}`, () => assert.equal(verdict(t), why));
   }
+  it("harm wished on or threatened against a third person is refused as a threat (review r2)", () => {
+    for (const t of [
+      "the dev should be shot, hope he dies",
+      "we know where the dev lives, someone swat him",
+      "holders should kill themselves",
+      "holders got raped on this one",
+      "hang the dev",
+      "the dev needs a bullet",
+      "gonna beat the dev up when i find him",
+      "rope time for holders",
+      "the dev should kill himself",
+      "im going to kill the dev when i find him",
+      "hope the dev gets hit by a bus",
+    ]) assert.equal(verdict(t), "threat", t);
+    for (const t of ["learn the ropes before aping", "shorts got killed today", "volume needs to die down first", "therapist said hold"]) assert.equal(verdict(t), "ok", t);
+  });
   it("digits written for letters are read as the lure they spell (review r2)", () => {
     for (const t of ["cla1m is open for holders", "a1rdr0p going out to holders", "m1grate before friday", "appr0ve the contract and sells work again", "c0mpensation going out to holders", "snapsh0t taken, holders covered", "s33d phrase into the bot to fix sells", "c1aim is live for holders"]) assert.equal(verdict(t), "lure", t);
     for (const t of ["down from 8m to 36k in a week", "4h chart looks bad", "worried the top 10 wallets hold 40% of supply"]) assert.equal(verdict(t), "ok", t);

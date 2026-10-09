@@ -2984,6 +2984,23 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
   });
 
+  it("third-person threats, wishes of death, swatting, self-harm and rape language are never quoted (review r2)", () => {
+    leftOut([
+      "the dev should be shot, hope he dies",
+      "we know where the dev lives, someone swat him",
+      "holders should kill themselves",
+      "holders got raped on this one",
+      "hang the dev",
+      "the dev needs a bullet",
+      "gonna beat the dev up when i find him",
+      "rope time for holders",
+      "the dev should kill himself",
+      "im going to kill the dev when i find him",
+      "hope the dev gets hit by a bus",
+    ]);
+    quoted(["learn the ropes before aping", "shorts got killed today", "volume needs to die down first", "therapist said hold"]);
+  });
+
   it("a relaunch or a handout reworded is never quoted (review r2)", () => {
     leftOut(["auton version two launching, old holders covered", "auton v 2 is coming", "auton 2.0 launching friday", "re launch on pump tomorrow", "holders are covered, team confirmed", "free drop for everyone holding", "bonus tokens coming soon", "holders get new ones free", "tokens for old holders next week"]);
   });

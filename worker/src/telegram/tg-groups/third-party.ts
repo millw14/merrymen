@@ -367,6 +367,31 @@ export const CONTACT_LURE = U(
 );
 
 /**
+ * HARM WISHED ON OR THREATENED AGAINST SOMEONE ELSE, for quotes only (review
+ * r2): the common THREAT and SELFHARM clauses read the second person, which
+ * the persona would say, and a stranger's quote speaks of third persons: a
+ * violent verb on the dev, the team, holders or "him" ("hang the dev",
+ * "gonna beat the dev up"), someone who "should be shot" or "deserves to
+ * die", a wish of death ("hope he dies"), "needs a bullet", where the dev
+ * lives or pulling up on him, swatting, self-harm wished on others ("should
+ * kill themselves", "rope time"), and rape language. Never said back in a
+ * room, whoever wrote it. "Learn the ropes", "shorts got killed" and "volume
+ * needs to die down" stay.
+ */
+const HARM_PERSON = String.raw`(?:the\s+|that\s+|this\s+|these\s+|those\s+|every\s+|all\s+(?:the\s+)?)?(?:devs?|deployers?|team|founders?|creators?|owners?|holders?|bagholders?|whales?|jeets?|kols?|insiders?|scammers?|guy|dude|kid|him|her|them|he|she|they|his|their)`;
+const HARM_VERB = String.raw`(?:kill|murder|shoot|stab|hang|lynch|beat|punch|strangle|choke|swat|hunt(?:\s+down)?|track\s+down|torture|behead|execute|rape)`;
+export const QUOTE_HARM: readonly RegExp[] = [
+  new RegExp(String.raw`\b${HARM_VERB}\s+${HARM_PERSON}\b`, "i"),
+  /\b(?:should|deserves?\s+to|needs?\s+to|ought\s+to|must|gotta|has\s+to|have\s+to|gonna|going\s+to|will)\s+(?:\w+\s+)?(?:be|get)\s+(?:shot|killed|murdered|hanged|hung|lynched|stabbed|beaten|raped|tortured|executed|swatted|doxx?ed)\b/i,
+  /\b(?:should|deserves?\s+to|needs?\s+to|ought\s+to|gotta|has\s+to)\s+(?:just\s+)?die\b(?!\s+(?:down|out|off))/i,
+  /\b(?:hope|hoping|wish|pray)\s+(?:\w+\s+){0,3}?(?:dies|die|dead|burns?\s+(?:alive|in)|rots?|gets?\s+(?:hit|shot|killed|cancer|hanged|hung|raped|stabbed|murdered))\b(?!\s+(?:down|out|off))/i,
+  /\bneeds?\s+a\s+bullet\b|\bbullet\s+(?:in|for|through)\s+(?:the\s+)?(?:dev|deployer|team|his|her|their|him|them)\b/i,
+  /\bwhere\s+(?:the\s+)?(?:devs?|deployers?|founders?|team|creators?|owners?|he|she|they|him|her|them)\s+(?:lives?|sleeps?|stays?)\b|\bpull\s+up\s+(?:on|to)\s+(?:the\s+)?(?:dev|deployer|team|him|her|them|his|their)\b|\bswat(?:s|ting|ted)?\b/i,
+  /\bkill\s+(?:him|her|them|my|our|your|ur|yo)\s*sel(?:f|ves)\b|\bkms\b|\brop(?:e|es|ed|ing)\b(?<!\bropes\b)|\bend\s+it\s+all\b|\bunalive\w*/i,
+  /\brap(?:e|es|ed|ing|ist|ists|ey)\b/i,
+].map(U);
+
+/**
  * A PERSON BESIDE A RUG WORD THE PERMIT LIFTED: the permit says "rugged" of
  * a coin and of no one, so a line that also names the dev, the deployer, the
  * team, an insider, a whale or a KOL, points at a person ("they", "he",
