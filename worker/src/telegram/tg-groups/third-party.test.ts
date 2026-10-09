@@ -243,6 +243,34 @@ describe("the new clauses", () => {
     misses(POST_RUG_LURE, [...HARMLESS, "rugged, holders got wrecked", "holders still bagholding, no recovery in sight", "dead coin now, volume gone", "it got listed on a cex", "chart is cooked"]);
   });
 
+  it("SPELLED_LINK: a link without its dot in more spellings, a dotless host with a path, a name then a TLD (review r2)", () => {
+    hits(SPELLED_LINK, [
+      "t,me/autonarmy is where they hang",
+      "t_me/autonarmy is where they hang",
+      "tdotme/autonarmy is where they hang",
+      "discordgg/autonarmy is lively",
+      "dsc gg autonarmy is lively",
+      "chart at bitly/3xYz9Q",
+      "tinyurl/autonchart has the data",
+      "linktree/autonarmy has everything",
+      "pumpfun/auton has the chart",
+      "x/autonarmy posts the updates",
+      "autonhub;xyz has the chart",
+      "autonhub:xyz has the chart",
+      "autonhub-com has the chart",
+      "autonhub 'dot' xyz has the chart",
+      "autonhub -dot- xyz has the chart",
+      "autonhub _dot_ xyz has the chart",
+      "autonhub period xyz has the chart",
+      "autonhub dt xyz has the chart",
+      "the new site is autonhub com",
+      "chart lives at autonhub xyz",
+      "devs moved everything to autonlabs io",
+      "hxxps autonhub xyz",
+    ]);
+    misses(SPELLED_LINK, ["launched on pumpfun, graduated fast", "pump fun graduates are cooked", "auton/sol pair is thin", "50/50 on this one", "24/7 volume", "safety net is gone", "net flows positive", "x is buzzing about it", "polka dot pattern on the logo", "tg/x both quiet", "the dot com bubble", "rides the polkadot narrative", "dot-com era pricing", "the io narrative"]);
+  });
+
   it("CONTACT_LURE: DM bait and recovery-scam contacts (review r2)", () => {
     hits(CONTACT_LURE, [
       "contact me for the fix",

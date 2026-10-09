@@ -277,15 +277,28 @@ export const POST_RUG_LURE = U(
  * "punto", "dott") or a comma before a top-level domain ("autonrefund,com"),
  * a link host with its dot gone ("bit ly", "tme", "x com", "vercel app"),
  * and "visit <name> com". Each can be rebuilt into a working link, and a
- * quote never carries one (review, 2026-10-09).
+ * quote never carries one (review, 2026-10-09). Also (review r2) ";" or ":"
+ * as the dot, "period" or "dt", "dot" wrapped in punctuation, a hyphen for
+ * the dot, a host without its dot and with a path ("t,me/", "t_me/",
+ * "tdotme/", "bitly/", "pumpfun/auton", "x/autonarmy"), "hxxps", and a name
+ * then a space and com, org, io or xyz ("autonhub com"). "Launched on
+ * pumpfun", "tg/x both quiet" and "safety net" stay; "<name>. fun" cannot be
+ * told from a sentence break and is not read.
  */
 const LINK_TLD = String.raw`(?:com|net|org|io|xyz|gg|ly|app|fun|vip|site|info|cc|tv)`;
 export const SPELLED_LINK = U(
   new RegExp(
     String.raw`\bslash\s+[\p{L}\p{N}_]` +
-      String.raw`|[\p{L}\p{N}_-](?:\s+(?:point|punto|dott|d0t|dawt)\s+|,)${LINK_TLD}\b` +
-      String.raw`|\b(?:discord\s+gg|bit\s+ly|linktr\s+ee|t\s+me|tme|(?:vercel|netlify)\s+app|(?:x|twitter)\s+com)\b` +
-      String.raw`|\bvisit\s+[\p{L}\p{N}_-]+\s+${LINK_TLD}\b`,
+      String.raw`|[\p{L}\p{N}_-](?:\s+(?:point|punto|dott|d0t|dawt|period|dt)\s+|[,;:])${LINK_TLD}\b` +
+      // 'dot' wrapped in any punctuation ("'dot'", "-dot-", "_dot_"), and a hyphen in place of the dot.
+      String.raw`|[\p{L}\p{N}](?:\s*[^\p{L}\p{N}\s]+\s*dot[^\p{L}\p{N}]*|\s*dot\s*[^\p{L}\p{N}\s]+\s*)${LINK_TLD}\b` +
+      String.raw`|[\p{L}\p{N}](?<!\bdot)-(?:com|net|org|io|xyz)\b` +
+      String.raw`|\b(?:discord\s*gg|dsc\s*gg|bit\s*ly|linktr\s*ee|t\s+me|tme|tdotme|tinyurl|linktree|(?:vercel|netlify)\s+app|(?:x|twitter)\s+com)\b` +
+      // A host with its dot gone and a path after it ("t,me/", "t_me/", "pumpfun/auton", "x/autonarmy").
+      String.raw`|\b(?:t|telegram)[\s,;:_-]*(?:dot)?[\s,;:_-]*me\s*\/|\b(?:x|twitter|tg|discord|pump\s*fun|cutt\s*ly|rb\s*gy|is\s*gd)\s*\/\s*[\p{L}\p{N}_]{3}` +
+      String.raw`|\bhxxps?\b` +
+      // "visit <name> com", and a name of four letters or more then a space and com, org, io or xyz (never the bare "net": "safety net").
+      String.raw`|\b(?:visit\s+[\p{L}\p{N}_-]+\s+(?:com|net|org|io|xyz)|(?!dot\b)[\p{L}\p{N}_-]{4,}\s+(?:com|org|io|xyz))\b`,
     "i",
   ),
 );

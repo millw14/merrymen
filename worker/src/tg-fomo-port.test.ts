@@ -2956,6 +2956,34 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["the telegram is dead", "dev went quiet on telegram", "the team said in the tg they are building", "contact with the team is lost", "chart needs to reclaim the high"]);
   });
 
+  it("a link without its dot in more spellings, a dotless host with a path, or a name then a TLD is never quoted (review r2)", () => {
+    leftOut([
+      "t,me/autonarmy is where they hang",
+      "t_me/autonarmy is where they hang",
+      "tdotme/autonarmy is where they hang",
+      "discordgg/autonarmy is lively",
+      "dsc gg autonarmy is lively",
+      "chart at bitly/3xYz9Q",
+      "tinyurl/autonchart has the data",
+      "linktree/autonarmy has everything",
+      "pumpfun/auton has the chart",
+      "x/autonarmy posts the updates",
+      "autonhub;xyz has the chart",
+      "autonhub:xyz has the chart",
+      "autonhub-com has the chart",
+      "autonhub 'dot' xyz has the chart",
+      "autonhub -dot- xyz has the chart",
+      "autonhub _dot_ xyz has the chart",
+      "autonhub period xyz has the chart",
+      "autonhub dt xyz has the chart",
+      "the new site is autonhub com",
+      "chart lives at autonhub xyz",
+      "devs moved everything to autonlabs io",
+      "hxxps autonhub xyz",
+    ]);
+    quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
+  });
+
   it("DM bait and recovery-scam contacts, in the text or as the author, are never quoted or named (review r2)", () => {
     leftOut([
       "contact me for the fix",
