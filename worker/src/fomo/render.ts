@@ -367,7 +367,11 @@ function freshnessLine(env: FomoEnvelope, now: number): string | null {
             : "it could not be refreshed";
     return `Data age: ${age} (${why}).`;
   }
-  if (f.servedFrom === "cache" && finite(f.cacheAgeMs) && f.cacheAgeMs > 60_000) return `From a copy fetched ${agoText(f.cacheAgeMs)}.`;
+  if (f.servedFrom === "cache" && finite(f.cacheAgeMs) && f.cacheAgeMs > 60_000) {
+    // A copy over a minute old is never "just now" (agoText says that under
+    // 90 s, which thesis ages keep): live 2026-10-09, a 63 s copy was.
+    return `From a copy fetched ${f.cacheAgeMs < 90_000 ? "a minute ago" : agoText(f.cacheAgeMs)}.`;
+  }
   if (finite(f.providerAsOf) && now - f.providerAsOf > 10 * 60_000) return `The provider's own copy is from ${ago(now, f.providerAsOf)}.`;
   return null;
 }
@@ -761,7 +765,9 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
   const scope = d.window === "all" ? "on record" : `in the last ${d.window}`;
   const out: string[] = [];
   if (d.events.length === 0) {
-    out.push(`No matching ${d.side === "buy" ? "buys" : d.side === "sell" ? "sells" : "activity"} were returned for ${subject} ${scope}. That is not the same as nobody trading: the feed only shows positions above roughly $3,000.`);
+    // "activity was", "buys were" (live 2026-10-09: "No matching activity were returned").
+    const what = d.side === "buy" ? "buys were" : d.side === "sell" ? "sells were" : "activity was";
+    out.push(`No matching ${what} returned for ${subject} ${scope}. That is not the same as nobody trading: the feed only shows positions above roughly $3,000.`);
   } else {
     const b = d.distinctBuyers;
     const s = d.distinctSellers;
