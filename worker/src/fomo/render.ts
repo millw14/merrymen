@@ -809,7 +809,7 @@ function windowWords(w: string | null | undefined): string {
 }
 
 /** A chain as people say it: "Robinhood Chain", "Solana", "Ethereum". */
-function chainLabel(slug: string | null | undefined): string {
+export function chainLabel(slug: string | null | undefined): string {
   const s = typeof slug === "string" ? chainFromUserText(slug)?.slug ?? slug : "";
   const named: Record<string, string> = { robinhood: "Robinhood Chain", solana: "Solana", base: "Base", eth: "Ethereum", bsc: "BSC", arc: "Arc", hyperliquid: "Hyperliquid" };
   return named[s] ?? (/^[a-z][a-z0-9-]{0,23}$/.test(s) ? s : "that chain");

@@ -64,8 +64,10 @@ import {
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
   TG_FOMO_UNAVAILABLE,
+  thesesQuotes,
   thesesSample,
 } from "./tg-fomo-port";
+import type { AnswerFomoResult } from "./fomo/chat";
 
 type Rec = Record<string, unknown>;
 
@@ -87,7 +89,7 @@ interface Setup {
   clock: { now: number };
 }
 
-interface SetupCaps { groupHourlyCredits?: number; tenantDailyCredits?: number; thesisCost?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean; leaderboard?: () => Rec; search?: () => Rec; moreAlerts?: () => Rec[] }
+interface SetupCaps { groupHourlyCredits?: number; tenantDailyCredits?: number; thesisCost?: number; trending?: () => Rec; theses?: () => Rec; positionsFail?: boolean; feedCutShort?: boolean; leaderboard?: () => Rec; search?: () => Rec; moreAlerts?: () => Rec[]; tokensSearch?: () => Rec }
 
 async function setup(caps: SetupCaps = {}): Promise<Setup> {
   const raw = new DatabaseSync(":memory:");
@@ -99,7 +101,7 @@ async function setup(caps: SetupCaps = {}): Promise<Setup> {
     const u = new URL(String(input));
     provider.push(u.pathname);
     const p = u.pathname;
-    if (p === "/v2/tokens/search") return json(fixture("tokens-search"));
+    if (p === "/v2/tokens/search") return json(caps.tokensSearch ? caps.tokensSearch() : fixture("tokens-search"));
     if (p === "/v2/search") return json(caps.search ? caps.search() : fixture("search"));
     if (p === "/v2/alerts") {
       const b = fixture("alerts");
@@ -187,6 +189,12 @@ function positionsAt(userId: string, now: number): Rec {
 }
 
 const count = (raw: DatabaseSync, table: string): number => Number((raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
+/**
+ * What a room's research text never carries. Checked on `text` (the digest
+ * and every code-written line); a quote ask's `quotes` are third-party words
+ * by design (Milla, 2026-10-09) and have checks of their own (thesesQuotes,
+ * the gate's `quote` kind), so this helper never reads them.
+ */
 const NO_IDENTITY = [/@[A-Za-z0-9_]{2,}/, /0x[0-9a-fA-F]{6,}/, /https?:\/\//i, /\bfomo\.family\b/i, /\$[A-Za-z]/, /frankdegods|CryptoKaleo|0xdetweiler/i, /their words/];
 
 describe("createTgFomoPort", () => {
@@ -2321,5 +2329,112 @@ describe("live 2026-10-07, 23:01-23:03 replayed through the real handler, port, 
     const out = await w.say("send it?", w.lastOwn(), 2 * 60_000);
     assert.match(out, /^Trending on Fomo \(board position is popularity, not quality\):\n1\. ETAC on solana/);
     assert.doesNotMatch(out, /only/);
+  });
+});
+
+// ─── A coin's theses, quoted on an explicit ask (Milla, 2026-10-09) ─────────
+
+const AUTON_MINT = "39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz";
+/** The provider's token search, answering AUTON on Solana. */
+const AUTON_SEARCH = (): Rec => ({ tokens: [{ symbol: "AUTON", address: AUTON_MINT, name: "auton", image: null, marketCapUsd: 36_000, networkId: 1399811149 }] });
+/** 2026-10-09 01:15 UTC: when the AUTON rows were probed. */
+const AUTON_NOW = Date.parse("2026-10-09T01:15:00Z");
+
+describe("a coin's theses, quoted: the newest up to ten, each checked, never repaired (WP5)", () => {
+  it("a quote request is asked as one fixed question the planner reads as quotes, on the named chain", () => {
+    assert.equal(requestText({ kind: "coin", symbol: "AUTON", chain: "solana", aspect: "theses", quotes: 10 }), "quote the newest 10 theses on $AUTON on solana on fomo");
+    assert.equal(requestText({ kind: "coin", symbol: "auton", aspect: "theses", quotes: 25 }), "quote the newest 10 theses on $AUTON on fomo");
+    assert.equal(requestText({ kind: "coin", symbol: "AUTON", chain: "solana", aspect: "theses" }), "what are the theses on $AUTON on solana on fomo?");
+    assert.equal(requestText({ kind: "coin", symbol: "AUTON", aspect: "facts", ask: "what" }), null, "facts never reach the Fomo planner");
+    const plan = classifyFomoQuestion(requestText({ kind: "coin", symbol: "AUTON", chain: "solana", aspect: "theses", quotes: 10 })!, { memory: null, now: NOW })!;
+    assert.equal(plan.intent, "token-theses");
+    assert.equal(plan.quotes, 10);
+    assert.deepEqual(plan.toolCalls.map((c) => [c.tool, c.args]), [["fomo_get_token_theses", { token: "AUTON", chain: "solana" }]]);
+    const five = classifyFomoQuestion(requestText({ kind: "coin", symbol: "AUTON", aspect: "theses", quotes: 5 })!, { memory: null, now: NOW })!;
+    assert.equal(five.quotes, 5);
+  });
+
+  it("the newest ten of AUTON's page: the dev's posts, lures, a call to action, a repeat and another script left out and counted", async () => {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const a = await port.ask({ text: "quote the newest 10 theses on $AUTON on solana on fomo", chatId: GROUP });
+    assert.ok(a && !a.deflect && a.quotes, JSON.stringify(a));
+    const q = a.quotes!;
+    assert.equal(q.coin, "AUTON");
+    assert.equal(q.where, "Solana");
+    assert.equal(q.n, 10);
+    assert.equal(q.asked, 10);
+    assert.equal(q.total, 4199);
+    assert.deepEqual(q.quotes.map((x) => x.who), ["kaleo", "frankdegods", "a trader", "moonboy", "a trader"], "newest first; an id run and a .eth handle are 'a trader'");
+    assert.deepEqual(q.quotes.map((x) => x.age), ["3 min ago", "10 min ago", "13 min ago", "30 min ago", "40 min ago"]);
+    assert.equal(q.quotes[0]!.text, "im holding, team is still building");
+    assert.equal(q.quotes[1]!.text, "this is gonna rug, top holders own way too much");
+    assert.equal(q.quotes[2]!.text, "worried the top 10 wallets hold 40% of supply");
+    assert.ok(q.quotes[3]!.text.endsWith("…") && Array.from(q.quotes[3]!.text).length <= 160, q.quotes[3]!.text);
+    assert.equal(q.quotes[4]!.text, "they said 'wen listing' and the chart woke up, still early on agents");
+    assert.equal(q.leftOut, 5, "the dev's post, the dm lure, 'join [link]', the repeat and the Chinese row");
+    // Third-party words, but nothing a room may never hear.
+    const said = q.quotes.map((x) => `• ${x.who}${x.age ? `, ${x.age}` : ""}: “${x.text}”`);
+    for (const l of said) {
+      assert.ok(Array.from(l).length <= 200, l);
+      assert.doesNotMatch(l, /@|\$|#|\[link\]|\[address\]|https?:|t\.me|[1-9A-HJ-NP-Za-km-z]{32,}|dm me|join|send 1|这/u, l);
+      assert.ok(admitTgLine(l, { agentName: "Pine", kind: "quote", recentOwn: [], rug: { coins: ["AUTON"], brag: false } }).ok, l);
+    }
+    // The digest stays the fallback, and no paraphrase material is handed over: no model call for a quote ask.
+    assert.match(a.text, /^What traders on Fomo are saying about AUTON on Solana/);
+    assert.equal(a.theses, undefined);
+    assert.deepEqual(a.coin, { symbol: "AUTON", chain: "solana" });
+  });
+
+  it("past the newest ten: a cut at three sentences, and every lure, target and accusation of the probes left out", async () => {
+    const page = fixture("theses-auton");
+    const rows = (page.theses as Rec[]).slice().sort((x, y) => Date.parse(String(y.ts)) - Date.parse(String(x.ts)));
+    const s = await setup({ theses: () => ({ ...page, theses: rows.slice(10) }), tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const q = (await port.ask({ text: "quote the newest 10 theses on $AUTON on solana on fomo", chatId: GROUP }))!.quotes!;
+    assert.deepEqual(q.quotes.map((x) => x.text), ["Great team. Strong community. Clear roadmap."]);
+    assert.equal(q.leftOut, 9);
+  });
+
+  it("a line asking for the last 25 hears ten, and says it asked for more", async () => {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    const q = (await port.ask({ text: "pine list the last 25 theses on $AUTON on solana on fomo", chatId: GROUP, selfNames: ["Pine"] }))!.quotes!;
+    assert.equal(q.n, 10);
+    assert.equal(q.asked, 25);
+  });
+
+  it("a routed theses request is asked about the room's remembered coin, by its own address, from the kept copy", async () => {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now });
+    await port.ask({ text: "what are the theses on $AUTON on solana on fomo?", chatId: GROUP });
+    const before = s.provider.length;
+    s.clock.now += 30_000;
+    const a = await port.ask({ text: "can you list the last 10", request: { kind: "coin", symbol: "AUTON", aspect: "theses", quotes: 10 }, chatId: GROUP });
+    assert.ok(a?.quotes, JSON.stringify(a));
+    assert.equal(s.calls[s.calls.length - 1]!.args.token, AUTON_MINT, "the remembered mint, never a search by symbol");
+    assert.equal(s.provider.length, before, "no provider call: the room's kept copy");
+    assert.equal(a!.free, true);
+    // A request for another chain's AUTON is asked by its own words.
+    s.clock.now += 30_000;
+    await port.ask({ text: "x", request: { kind: "coin", symbol: "AUTON", chain: "base", aspect: "theses" }, chatId: GROUP });
+    assert.equal(s.calls[s.calls.length - 1]!.args.chain, "base");
+  });
+
+  it("never a trader's own theses, and never from a compound or empty read", () => {
+    const view = { evidenceId: "e", author: { userId: "u", handle: "kaleo" }, token: null, postedAt: AUTON_NOW - 60_000, stance: "neutral", excerpt: "im holding, team is still building", likes: 1, isDev: false, family: "f" };
+    const env = (data: Rec) => ({ tool: "fomo_get_token_theses", status: "ok", data, coverage: { providerTotal: 1 }, freshness: {} });
+    const token = { key: "solana:mainnet:x", chain: { slug: "solana" } };
+    const base = { handled: true, text: "", toolsCalled: [], analysis: false, clarification: false, plan: { intent: "token-theses", quotes: 10 } };
+    const r = (envelopes: unknown[]) => ({ ...base, envelopes }) as unknown as AnswerFomoResult;
+    assert.ok(thesesQuotes(r([env({ token, label: { symbol: "AUTON" }, trader: null, theses: [view] })]), AUTON_NOW));
+    assert.equal(thesesQuotes(r([env({ token, label: { symbol: "AUTON" }, trader: { userId: "u", handle: "kaleo" }, theses: [view] })]), AUTON_NOW), null, "a trader's theses");
+    assert.equal(thesesQuotes(r([env({ token, label: { symbol: "AUTON" }, trader: null, theses: [] })]), AUTON_NOW), null, "an empty read keeps its own line");
+    assert.equal(thesesQuotes(r([env({ token, label: { symbol: "AUTON" }, trader: null, theses: [view] }), env({ token, label: { symbol: "B" }, trader: null, theses: [view] })]), AUTON_NOW), null, "a compound answer");
+    assert.equal(thesesQuotes({ ...r([env({ token, label: { symbol: "AUTON" }, trader: null, theses: [view] })]), plan: { intent: "token-theses" } } as unknown as AnswerFomoResult, AUTON_NOW), null, "no quote ask, no quotes");
   });
 });
