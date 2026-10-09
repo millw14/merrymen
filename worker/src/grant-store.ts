@@ -79,8 +79,14 @@ export interface GrantStore {
   get(tenant: `0x${string}`): Promise<StoredGrant | null>;
   /** Every tenant with a grant — for the orchestrator to lease and arm. */
   listTenants(): Promise<`0x${string}`[]>;
-  /** Public grant expiry for process scheduling; no session key is decrypted. */
-  listTenantExpiries?(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null }>>;
+  /**
+   * Public grant expiry for process scheduling; no session key is decrypted.
+   * `updatedAt` is the record's server-stamped write time (unix seconds), or
+   * null when it cannot be read: what the orchestrator's re-sign watch
+   * (MERRYMEN_RESUME_AUTO_PAPER, ledger-resume.ts grantRowKey) tells one
+   * signature of the row from the next by, beside the expiry.
+   */
+  listTenantExpiries?(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null; updatedAt?: number | null }>>;
   /**
    * Which tenant already holds this smart account, or null.
    *
@@ -320,17 +326,18 @@ export class FileGrantStore implements GrantStore {
       throw error;
     }
   }
-  async listTenantExpiries(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null }>> {
+  async listTenantExpiries(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null; updatedAt: number | null }>> {
     const tenants = await this.listTenants();
     return Promise.all(tenants.map(async (tenant) => {
       try {
         const rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredRecord;
         const expiry = rec.grant.expiresAt;
-        return { tenant, expiresAt: typeof expiry === "number" && Number.isFinite(expiry) ? expiry : null };
+        return { tenant, expiresAt: typeof expiry === "number" && Number.isFinite(expiry) ? expiry : null,
+          updatedAt: typeof rec.updatedAt === "number" && Number.isFinite(rec.updatedAt) ? rec.updatedAt : null };
       } catch {
         // An unreadable grant must not be treated as armed. Leave its row in
         // the roster so existing cleanup and repair paths can still find it.
-        return { tenant, expiresAt: null };
+        return { tenant, expiresAt: null, updatedAt: null };
       }
     }));
   }
@@ -534,14 +541,15 @@ export class PgGrantStore implements GrantStore {
     const { rows } = await c.query(`SELECT tenant FROM grants`);
     return rows.map((r) => String(r.tenant) as `0x${string}`);
   }
-  async listTenantExpiries(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null }>> {
+  async listTenantExpiries(): Promise<Array<{ tenant: `0x${string}`; expiresAt: number | null; updatedAt: number | null }>> {
     const c = await this.client();
-    const { rows } = await c.query(`SELECT tenant, grant_json->>'expiresAt' AS expires_at FROM grants`);
+    const { rows } = await c.query(`SELECT tenant, grant_json->>'expiresAt' AS expires_at, updated_at FROM grants`);
     return rows.map((row) => {
-      const expiry = Number(row.expires_at);
+      const expiry = Number(row.expires_at), stamp = Number(row.updated_at);
       return {
         tenant: String(row.tenant) as `0x${string}`,
         expiresAt: row.expires_at !== null && Number.isFinite(expiry) ? expiry : null,
+        updatedAt: row.updated_at !== null && row.updated_at !== undefined && Number.isFinite(stamp) ? stamp : null,
       };
     });
   }

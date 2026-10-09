@@ -20,6 +20,7 @@
  */
 
 import type { PriceQuote } from "../../../packages/core/src/index";
+import { ENTRY_GATE_WHY, entryGateFor } from "../entry-gates";
 import type { TradeIntent } from "../policy";
 import { breakerIdle, type Snapshot, type Strategy, type Tick } from "./types";
 import type { Why } from "./reasons";
@@ -56,12 +57,28 @@ export type UnpriceableCause =
   | "zero-price"
   | "curve-priced"
   | "v4-priced"
+  | "sampled-priced"
+  | "sampling"
   | "feed-priced"
   | "unknown-source"
   | "not-watched";
 
 /** The quote fields this needs. Typed from `PriceQuote` so a new SOURCE breaks the build. */
-type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
+type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source" | "sampled">;
+
+/**
+ * What else the CALLER accepts for an entry, beyond a pool quote.
+ *
+ * `sampled`: a price from the worker's own series of a pool too new to keep an
+ * oracle (venues/spot-sampler.ts). Accepted only where the caller can say the
+ * buy is bounded without the scout budget — a fast Trencher entry into its
+ * vault, which the contract caps at $5 a buy and $25 a day (paper or live) —
+ * and even then only once the series is READY. Absent means pool only, which
+ * is what every caller written before it asks.
+ */
+export interface EntryEvidence {
+  sampled?: boolean;
+}
 
 /**
  * The gate and its explanation, from ONE expression.
@@ -84,6 +101,7 @@ type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
 export function unpriceableCause(
   quote: QuoteEvidence | undefined,
   requirePoolSource: boolean,
+  accept: EntryEvidence = {},
 ): UnpriceableCause | null {
   if (!quote) return "no-quote";
   if (quote.stale) return "stale-price";
@@ -96,6 +114,10 @@ export function unpriceableCause(
       return "curve-priced";
     case "v4":
       return "v4-priced";
+    case "sampled":
+      if (!accept.sampled) return "sampled-priced";
+      // A series still filling values a holding; it has not yet earned a buy.
+      return quote.sampled?.ready === true ? null : "sampling";
     case "chainlink":
     case "broker":
       return "feed-priced";
@@ -129,8 +151,9 @@ export function unpriceableCause(
 export function priceability(
   quote: QuoteEvidence | undefined,
   requirePoolSource: boolean,
+  accept: EntryEvidence = {},
 ): { priceable: boolean; unpriceable?: UnpriceableCause } {
-  const cause = unpriceableCause(quote, requirePoolSource);
+  const cause = unpriceableCause(quote, requirePoolSource, accept);
   return cause === null ? { priceable: true } : { priceable: false, unpriceable: cause };
 }
 
@@ -170,6 +193,8 @@ const UNPRICEABLE_WHY: Record<UnpriceableCause, string> = {
   "zero-price": "its quote came back at zero",
   "curve-priced": "priced off its bonding curve, which has no oracle — enough to value it, not to buy it",
   "v4-priced": "priced off a v4 pool, which has no oracle — enough to value it, not to buy it",
+  "sampled-priced": "its pool is too new for an oracle — our own price readings can value it, not buy it here",
+  "sampling": "its pool is too new for an oracle, and our own price readings of it are still filling in",
   "feed-priced": "the only price under this symbol is a stock feed, not this token's own market",
   // BOTH AXES, because the check is both. The site tests symbol AND address,
   // and the symbol is the conjunct that fails on the ordinary path: discovery
@@ -199,6 +224,8 @@ export interface Candidate {
   ageSec: number;
   price8: bigint;
   volume24hUsd?: number;
+  /** How hot its pool is now (trencher-brain.ts trenchHeat) — a review-order input only. */
+  heat?: number;
 }
 
 /** What we remember about something already held, so exits can be judged. */
@@ -259,9 +286,19 @@ export const TRENCHER_DEFAULTS: TrencherConfig = {
 
 export type EntryVerdict = { enter: true } | { enter: false; why: string };
 
-/** Faster exits without relaxing entry quality or increasing position size. */
+/**
+ * Faster exits without relaxing entry quality, and HALF the entry size.
+ *
+ * $2.50, not $5, because the vault's limit is DOLLARS: 25 USDG of buys per
+ * contract day, at most 5 a buy (TrencherVault.sol). At $5 an entry that was
+ * five trades a day, spent by mid-morning on whatever ranked first. At $2.50 it
+ * is ten, for the same dollars at risk — a trencher that trades, not one that
+ * waits a day for its window. No limit moves: the per-buy cap, the daily cap,
+ * the owner's per-trade cap and the wall are all exactly where they were.
+ */
 export const TRENCHER_FAST: TrencherConfig = {
   ...TRENCHER_DEFAULTS,
+  perEntryUsdg: 2_500_000n, // $2.50
   stopLossBps: 1_000,
   takeProfitBps: 2_000,
   maxHoldSec: 30 * 60,
@@ -442,6 +479,19 @@ export interface TrencherDeps {
  * always more urgent than getting in.
  */
 export function makeTrencher(deps: TrencherDeps): Strategy {
+  /**
+   * Candidates skipped for an entry gate, keyed token|rule — said once each.
+   * The refusal used to be where an owner learned to re-sign; the skip must
+   * not take that away.
+   *
+   * NOT CLEARED BY AN ARM. Only a strategy-settings change builds a new
+   * strategy (index.ts makeStrategy); an arm — a re-sign included — reuses
+   * this one, so on its own the set would outlive every grant in the
+   * process, as index.ts's noExitAnnounced does. So a coin's notes are
+   * forgotten the first time it is seen UNGATED below: a re-sign that covers
+   * it, and a later one that drops it again, is a new fact with its own note.
+   */
+  const gateNoted = new Set<string>();
   return {
     name: "trencher",
     async tick(snap: Snapshot): Promise<Tick> {
@@ -537,6 +587,33 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       for (const c of await deps.candidates()) {
         if (heldSymbols.has(c.symbol)) continue;
         if (snap.pausedTokens.has(c.token.toLowerCase())) continue;
+        // ── A BUY THE WALL IS CERTAIN TO REFUSE IS NOT A CANDIDATE ────────
+        //
+        // BEFORE shouldEnter and BEFORE the Brain: a coin the key cannot sell
+        // back passed every entry bound, took this tick's one entry, and with
+        // the Brain required was a paid review first — then `no-exit`, every
+        // tick. Skipping it lets the next candidate have the slot.
+        //
+        // WATCHED TOKENS ONLY. An unwatched candidate already fails shouldEnter
+        // with its own sentence ("no watched token matches"), which names the
+        // remedy that applies to it; gating it here would swap that for one
+        // that does not. And never a custody candidate: the autonomous rail is
+        // judged against its vault's chain-verified assets, not these lists.
+        const asked = !c.custodyVault && c.unpriceable !== "not-watched";
+        const gate = asked ? entryGateFor(snap.entryGates, c.token) : null;
+        if (gate) {
+          const key = `${c.token.toLowerCase()}|${gate}`;
+          if (!gateNoted.has(key)) {
+            gateNoted.add(key);
+            deps.onNote?.("warn", `trencher: skipping ${c.symbol} — ${ENTRY_GATE_WHY[gate]}`);
+          }
+          continue;
+        }
+        // Asked, with the hint read, and nothing gates it: whatever was said
+        // about this coin no longer holds, so the next gate on it is news.
+        if (asked && snap.entryGates) {
+          for (const rule of Object.keys(ENTRY_GATE_WHY)) gateNoted.delete(`${c.token.toLowerCase()}|${rule}`);
+        }
         let size = deps.cfg.perEntryUsdg;
         // Respect the daily headroom as a sizing hint, exactly as other
         // strategies do — the wall still refuses anything over, this just stops

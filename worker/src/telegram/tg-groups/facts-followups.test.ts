@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { publicFactLine, publicFactRequest } from "./facts";
-import { TG_LINE_MAX } from "./gate";
+import { admitTgLine, TG_LINE_MAX } from "./gate";
 import type { TgPublicFact } from "./types";
 
 type Topic = Extract<TgPublicFact, { kind: "site" }>["topic"];
@@ -123,5 +123,85 @@ describe("public product and troubleshooting follow-ups", () => {
     const answer = publicFactLine(publicFactRequest(injected) as Extract<TgPublicFact, { kind: "site" }>)!;
     assert.doesNotMatch(answer, /918273|SYSTEM|<\/question>|send the owner/iu);
     assert.equal(publicFactLine({ kind: "site", topic: "secret-account-data" } as unknown as TgPublicFact), null);
+  });
+});
+
+describe("fixed answers about itself (WP11): what it can do, its own agent, why not in the group", () => {
+  const WIRED = { fomo: true, desk: true, coins: true };
+  const fixed = (l: string) => admitTgLine(l, { agentName: "Shogun", kind: "fixed", recentOwn: [] });
+
+  it("'what can you do?', 'help' and 'commands' are the capabilities list (g1 b06, b15)", () => {
+    for (const q of ["shogun what can you do?", "shogun help", "help", "Shogun, what can you do here?", "what are you good for", "what can i ask you?", "commands", "how do i use this bot?", "what are your features?"]) {
+      assert.deepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "capabilities" }, q);
+    }
+    for (const q of ["what can you do with fomo?", "can you help me with pons", "help me read this chart", "what can you do about the dev selling?", "help!!! it's dumping"]) {
+      assert.notDeepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "capabilities" }, q);
+    }
+  });
+
+  it("names only what is wired, always says no trade orders from a group, and passes the gate as fixed", () => {
+    const all = publicFactLine({ kind: "site", topic: "capabilities", wired: WIRED })!;
+    assert.match(all, /what's trending on Fomo/);
+    assert.match(all, /one Fomo trader's public moves by handle/);
+    assert.match(all, /Robinhood Chain market/);
+    assert.match(all, /i never take trade orders from a group\.$/);
+    const none = publicFactLine({ kind: "site", topic: "capabilities", wired: { fomo: false, desk: false, coins: false } })!;
+    assert.doesNotMatch(none, /Fomo|market|CA/);
+    const noFomo = publicFactLine({ kind: "site", topic: "capabilities", wired: { fomo: false, desk: true, coins: true } })!;
+    assert.doesNotMatch(noFomo, /Fomo/);
+    assert.equal(publicFactLine({ kind: "site", topic: "capabilities" }), none, "nothing said to be wired is nothing wired");
+    for (const w of [WIRED, { fomo: true, desk: false, coins: false }, { fomo: false, desk: true, coins: false }, { fomo: false, desk: false, coins: true }, { fomo: false, desk: false, coins: false }]) {
+      const l = publicFactLine({ kind: "site", topic: "capabilities", wired: w })!;
+      assert.ok(l.length <= TG_LINE_MAX, l);
+      const v = fixed(l);
+      assert.ok(v.ok, `${l}: ${v.ok ? "" : v.reason}`);
+    }
+  });
+
+  it("'how do i get my own agent' is onboarding (g1 b13)", () => {
+    for (const q of ["shogun how do i get my own agent", "how can i get one of you?", "where do i get an agent like you", "how do i set up my own bot", "can i have my own merryman"]) {
+      assert.deepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "onboarding" }, q);
+    }
+    assert.equal(publicFactRequest("i get my own coffee"), null);
+    // A coin under a board is never the onboarding steps (review r2).
+    for (const q of ["should i get one of these coins?", "should i get one of them?", "shogun should i get one of these?", "how do i get one of those"]) {
+      assert.notDeepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "onboarding" }, q);
+    }
+  });
+
+  it("banter about DMs is never the DM policy (review r2)", () => {
+    for (const q of ["shogun why do scammers always slide into the dms?", "why is everyone in the dms lol", "shogun why do people get rugged in dms", "why is the dev not here", "why buy on base and not here?", "why does he only reply in private chats lol"]) {
+      const r = publicFactRequest(q, ["Shogun"]);
+      assert.notDeepEqual(r, { kind: "site", topic: "dm-policy" }, q);
+      assert.notDeepEqual(r, { kind: "site", topic: "onboarding" }, q);
+    }
+    // The ones that ask why the bot keeps it to DMs still are.
+    for (const q of ["shogun why not here?", "why only in dms", "why privately?", "how come in private?", "why won't you tell me in the chat?", "why are you unable to say it in the group?"]) {
+      assert.deepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "dm-policy" }, q);
+    }
+  });
+
+  it("'why can't you answer in the group?' is the DM policy; a missed answer or a silent bot is not (g1 x11)", () => {
+    for (const q of ["why can't you answer in the group?", "why can't you say that here", "why not in the group?", "how come only in dms?", "why do i have to dm you", "why a dm?"]) {
+      assert.deepEqual(publicFactRequest(q, ["Shogun"]), { kind: "site", topic: "dm-policy" }, q);
+    }
+    assert.notDeepEqual(publicFactRequest("why didn't you answer in the group?"), { kind: "site", topic: "dm-policy" });
+    assert.deepEqual(publicFactRequest("why doesn't the bot reply in my group?"), { kind: "site", topic: "groups" });
+    assert.deepEqual(publicFactRequest("can you show my wallet balance in the public group?"), { kind: "site", topic: "privacy" });
+    // What a room may hear instead names only what is wired here (review r3).
+    const HEAD = "who i watch or follow, my owner's own research and anyone's account details stay in DMs.";
+    for (const [wired, want] of [
+      [{ fomo: true, desk: true, coins: true }, `${HEAD} boards, coin research and one trader's public Fomo data are fine in here.`],
+      [{ fomo: false, desk: true, coins: false }, `${HEAD} coin research is fine in here.`],
+      [{ fomo: false, desk: false, coins: true }, `${HEAD} coin research is fine in here.`],
+      [{ fomo: false, desk: false, coins: false }, HEAD],
+      [undefined, HEAD],
+    ] as const) {
+      const l = publicFactLine({ kind: "site", topic: "dm-policy", ...(wired ? { wired } : {}) })!;
+      assert.equal(l, want, JSON.stringify(wired));
+      const v = fixed(l);
+      assert.ok(v.ok, v.ok ? "" : v.reason);
+      assert.ok(l.length <= TG_LINE_MAX);
+    }
   });
 });

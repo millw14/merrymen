@@ -166,6 +166,16 @@ export const DASHBOARD_ONLY: Readonly<Record<string, string>> = Object.freeze({
    */
   telegramGroups:
     "Telegram groups are switched in Settings → Telegram on the dashboard (or Settings in the app): whether I hang out in groups, whether I look at coins people post there, and how chatty I am. Anyone in a group can talk to me, so none of that changes by text.",
+  /**
+   * FOMO RESEARCH, never by text (docs/fomo.md). The three Fomo permissions —
+   * answering Fomo questions, letting the trader cohort route research here,
+   * and letting that research nominate entries — are dashboard switches. The
+   * last one can lead to real money, and a chat reached by a link code is not
+   * where that is decided. Watching ONE coin for a while is a different thing
+   * and is offered in chat (bounded and expiring).
+   */
+  fomo:
+    "Fomo research has three switches, all in Settings → Fomo research on the dashboard: answering Fomo questions, letting the watched-trader cohort send research here, and letting that research suggest coins to the memecoin review. I can't change any of them from chat. Asking me about a trader or coin never changes them either. The watched-trader cohort and acting on research run only on the hosted service; a self-hosted install answers questions and does nothing more.",
 });
 
 /** Limits sealed in the signed permission — a signature is the only way to change them. */

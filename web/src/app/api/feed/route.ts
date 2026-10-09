@@ -16,6 +16,8 @@ import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
 import { hostedAgentFor } from "@/lib/agent-for";
 import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
 import { readMeasuredMark } from "@/lib/held-marks";
+import { CapitalFlowsWithheld, netFlows, readDistinctFlows, type FlowRecord } from "@/lib/distinct-flows";
+import { distinctTrades } from "@/lib/distinct-trades";
 import type { FeedMeasured } from "@/lib/feed-pnl";
 
 /**
@@ -159,9 +161,17 @@ export interface FeedResponse {
    */
   measured: FeedMeasured | null;
   /**
-   * Gas paid in USDG, and how many landed trades' gas could NOT be priced.
-   * P&L is equity − contributions − gas; the count is what says whether that is
-   * the full gas cost or only the priceable part.
+   * WHY `netContributionsUsdg` IS NULL when the flows are on record but cannot
+   * be summed (distinct-flows.ts): "review" for one transfer booked two ways,
+   * "unread" for records that contradict each other. Null otherwise. Without
+   * it a withheld figure reaches the owner's desk as null contributions, and
+   * the desk calls a funded account "no deposit on record".
+   */
+  contributionsWithheld: "review" | "unread" | null;
+  /**
+   * Gas paid in USDG, and how many settled operations' (landed or reverted)
+   * gas could NOT be priced. P&L is equity − contributions − gas; the count is
+   * what says whether that is the full gas cost or only the priceable part.
    */
   gasUsdg: number;
   gasUnpricedTrades: number;
@@ -192,6 +202,7 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
     agent: await identityOf(null, tenant),
     netContributionsUsdg: null,
     measured: null,
+    contributionsWithheld: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
     landed: 0,
@@ -237,6 +248,7 @@ export async function GET(req: Request) {
     let name: string | null = null;
     let netContributionsUsdg: number | null = null;
     let measured: FeedMeasured | null = null;
+    let contributionsWithheld: FeedResponse["contributionsWithheld"] = null;
     let gasUsdg = 0;
     let gasUnpricedTrades = 0;
     // WHOSE numbers these are. Re-granting mints a new smart account and leaves
@@ -382,42 +394,52 @@ export async function GET(req: Request) {
     } catch {
       /* columns not migrated yet */
     }
+    // EACH MOVEMENT ONCE (distinct-flows.ts): a carry or a log on record twice
+    // is one deposit. Rows that contradict each other throw, and both figures
+    // stay null — no return — rather than sum them or pick one, and the
+    // response says why, so the desk does not read null as "no deposit".
+    //
+    // A DELIBERATE CORRECTION, besides: under EVERY spelling of the account
+    // (LOWER(agent_id)), as the public board and the profile read it. This read
+    // `agent_id = ?`, exact, so a deposit booked under the checksummed spelling
+    // was in the book's cash and missing from what was subtracted from it —
+    // the owner's own money published as profit. The equity reads beside it
+    // are unchanged.
+    let flows: FlowRecord[] | null = null;
     try {
-      const row = (await db
-        .prepare(
-          `SELECT COUNT(*) AS n,
-                  COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-             FROM flows WHERE agent_id = ?${epochWhere}`,
-        )
-        .get(scope, ...epochArg)) as { n: number; net: number } | undefined;
-      netContributionsUsdg = !row || row.n === 0 ? null : row.net;
-    } catch {
-      /* flows arrives with a worker migration — null, never zero */
+      flows = await readDistinctFlows(db, scope, epoch);
+      const { n, net } = netFlows(flows);
+      netContributionsUsdg = n === 0 ? null : net;
+    } catch (error) {
+      // Flows arrives with a worker migration (null, never zero), or its rows are withheld.
+      if (error instanceof CapitalFlowsWithheld) contributionsWithheld = error.verdict;
     }
     try {
       // The return's pair: the newest measured mark and what was booked by it.
       // Read on its own, not off the tail of `equity`: a dropped op holds for
       // 26 hours, and 900 rows is not always that far back.
       const m = await readMeasuredMark(db, scope, epoch);
-      if (m) {
-        const row = (await db
-          .prepare(
-            `SELECT COUNT(*) AS n,
-                    COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ?${epochWhere} AND at <= ?`,
-          )
-          .get(scope, ...epochArg, m.at)) as { n: number; net: number } | undefined;
-        measured = { equityUsdg: m.equity, at: fmtEpoch(m.at), netContributionsUsdg: !row || row.n === 0 ? null : row.net };
+      if (m && flows) {
+        // The same movements, collapsed over the whole run, then cut off at the mark.
+        const { n, net } = netFlows(flows, m.at);
+        measured = { equityUsdg: m.equity, at: fmtEpoch(m.at), netContributionsUsdg: n === 0 ? null : net };
       }
     } catch {
-      /* no equity or flows table yet: nothing measured, and the page says so */
+      /* no equity or flows table yet, or withheld flows: nothing measured, and the page says so */
     }
     try {
+      // A DELIBERATE CORRECTION: one row per OPERATION (distinctTrades), and
+      // reverted operations as well as landed ones. This summed raw landed
+      // rows, so a redeploy's re-recorded copy of a paid op charged its gas
+      // twice, and a revert, which burns gas too, was never charged at all. It
+      // now counts what the profile and the board charge (readOperationCounts,
+      // gasAt), over the whole run as before.
       const row = (await db
         .prepare(
-          `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
-                  SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-             FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
+          `SELECT COALESCE(SUM(t.gas_usdg), 0) AS usdg,
+                  COUNT(CASE WHEN t.gas_wei IS NOT NULL AND t.gas_usdg IS NULL THEN 1 END) AS unpriced
+             FROM ${distinctTrades(`LOWER(t.agent_id) = LOWER(?)${epochWhere}`)}
+            WHERE t.status IN ('landed', 'reverted')`,
         )
         .get(scope, ...epochArg)) as { usdg: number; unpriced: number | null } | undefined;
       gasUsdg = row?.usdg ?? 0;
@@ -456,6 +478,7 @@ export async function GET(req: Request) {
       agent: await identityOf(name, tenant),
       netContributionsUsdg,
       measured,
+      contributionsWithheld,
       gasUsdg,
       gasUnpricedTrades,
       landed,

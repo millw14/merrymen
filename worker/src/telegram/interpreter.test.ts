@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { coerceLlmCommand, interpretWithLlm, narrateChat, parseSlash, type Command } from "./interpreter";
-import { executeCommand, type CommandDeps } from "./executor";
+import { TAIL_USAGE, coerceLlmCommand, interpretWithLlm, narrateChat, parseSlash, type Command } from "./interpreter";
+import { TAIL_CONFIRM_TTL_SEC, TAIL_OWNER_ONLY_TEXT, executeCommand, type CommandDeps } from "./executor";
+import { parseConfirmData, tailConfirmKeyboard } from "./buttons";
 import type { LlmCreds } from "../llm";
 
 describe("narrateChat — warm free-text voice, triggers nothing", () => {
@@ -842,4 +843,140 @@ describe("several settings at once", () => {
     off.setPending(parked);
     assert.match(await executeCommand({ kind: "confirm" }, off), /control was turned off/);
   });
+});
+
+describe("the classifier where Fomo is off in this process", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+  async function classify(fomoOff: boolean | undefined, returns: Record<string, unknown>) {
+    let sent: { system: string; enum: string[] } | null = null;
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { messages: { role: string; content: string }[]; tools: { function: { parameters: { properties: { setting: { enum: string[] } } } } }[] };
+      sent = { system: body.messages[0]!.content, enum: body.tools[0]!.function.parameters.properties.setting.enum };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "", tool_calls: [{ id: "c", type: "function", function: { name: "command", arguments: JSON.stringify(returns) } }] } }] }) };
+    }) as never;
+    const creds = { provider: "test", transport: "openai", baseUrl: "http://x", apiKey: "k", model: "m", vision: false } as LlmCreds;
+    const r = await interpretWithLlm("turn on fomo research", { state: "cash 20", ...(fomoOff === undefined ? {} : { fomoOff }) }, creds);
+    return { r, sent: sent! };
+  }
+
+  it("names no Fomo switch in its prompt or its closed set, and returns none", async () => {
+    const off = await classify(true, { kind: "set", setting: "fomo", value: "on" });
+    assert.doesNotMatch(off.sent.system, /\bfomo\w*\b — /i, "no Fomo switch in the catalog it reads");
+    assert.ok(!off.sent.enum.some((k) => /^fomo/i.test(k)));
+    assert.deepEqual(off.r.cmd, { kind: "set", setting: "unknown", value: "on" });
+    const on = await classify(undefined, { kind: "set", setting: "fomo", value: "on" });
+    assert.match(on.sent.system, /fomoDataAccess — answer Fomo questions/);
+    assert.ok(on.sent.enum.includes("fomo"));
+    assert.deepEqual(on.r.cmd, { kind: "set", setting: "fomo", value: "on" });
+  });
+});
+
+describe("Fomo tails as commands (docs/fomo.md \"Tailing a trader\")", () => {
+  it("/tail NAME [hours], /untail [NAME|all], /tails parse to their own kinds; anything else is the usage", () => {
+    assert.deepEqual(parseSlash("/tail unipcs 3h"), { kind: "tail", handle: "unipcs", hours: 3, clamped: false });
+    assert.deepEqual(parseSlash("/tail@pinebot @unipcs"), { kind: "tail", handle: "unipcs", hours: 3, clamped: false });
+    assert.deepEqual(parseSlash("/tail unipcs 24"), { kind: "tail", handle: "unipcs", hours: 12, clamped: true });
+    assert.deepEqual(parseSlash("/untail unipcs"), { kind: "untail", handle: "unipcs" });
+    assert.deepEqual(parseSlash("/untail all"), { kind: "untail", handle: null });
+    assert.deepEqual(parseSlash("/untail"), { kind: "untail", handle: null });
+    assert.deepEqual(parseSlash("/tails"), { kind: "tails" });
+    for (const bad of ["/tail", "/tail it 3h", "/tail unipcs please", "/untail unipcs now"]) {
+      assert.deepEqual(parseSlash(bad), { kind: "unknown", text: TAIL_USAGE }, bad);
+    }
+  });
+
+  it("the classifier can never produce one: its enum has no tail, and an unknown kind is chat", () => {
+    for (const kind of ["tail", "untail", "tails"]) {
+      const c = coerceLlmCommand({ kind, handle: "unipcs", hours: 3 }, "tail unipcs for 3 hours");
+      assert.equal(c.kind, "chat", kind);
+    }
+    // An analysis-only message never stages one either (MUTATION_KINDS).
+    assert.equal(coerceLlmCommand({ kind: "tail" }, "what if you tailed unipcs?").kind, "chat");
+  });
+
+  function tailDeps(owner: boolean, over: Partial<CommandDeps> = {}) {
+    const d = deps(over);
+    const seen: string[] = [];
+    d.fomoTails = {
+      owner,
+      propose: async (cmd) => {
+        seen.push(`propose:${cmd.handle}:${cmd.hours}:${cmd.take === true}`);
+        d.setPending({ kind: "fomo-tail", userId: "1f08e6ab-5c73-5443-9225-bfc496cde51f", handle: cmd.handle, hours: cmd.hours, considerOffered: true, expiresAt: 1_000_000 + TAIL_CONFIRM_TTL_SEC });
+        return "CARD";
+      },
+      start: async (p, consider) => {
+        seen.push(`start:${p.handle}:${p.hours}:${consider}`);
+        return "STARTED";
+      },
+      stop: async (h) => {
+        seen.push(`stop:${h}`);
+        return "STOPPED";
+      },
+      list: async () => {
+        seen.push("list");
+        return "LIST";
+      },
+    };
+    return Object.assign(d, { seen });
+  }
+
+  it("only the owner in her own DM gets them; anyone else is told it is the owner's, and nothing is called", async () => {
+    const other = tailDeps(false);
+    for (const cmd of [{ kind: "tail", handle: "unipcs", hours: 3, clamped: false }, { kind: "untail", handle: null }, { kind: "tails" }] as Command[]) {
+      assert.equal(await executeCommand(cmd, other), TAIL_OWNER_ONLY_TEXT);
+    }
+    assert.deepEqual(other.seen, []);
+    assert.deepEqual(other.calls, []);
+    const her = tailDeps(true, { controlEnabled: false });
+    assert.equal(await executeCommand({ kind: "tail", handle: "unipcs", hours: 3, clamped: false }, her), "CARD", "not a trading control: the control switch does not gate it");
+    assert.equal(await executeCommand({ kind: "untail", handle: "unipcs" }, her), "STOPPED");
+    assert.equal(await executeCommand({ kind: "tails" }, her), "LIST");
+    const none = deps();
+    assert.match(await executeCommand({ kind: "tail", handle: "unipcs", hours: 3, clamped: false }, none), /isn't available here/);
+  });
+
+  it("the card parks first; a confirm is tell-only unless the consider button asked, and the press is passed on to be re-checked", async () => {
+    const her = tailDeps(true);
+    assert.equal(await executeCommand({ kind: "tail", handle: "unipcs", hours: 3, clamped: false }, her), "CARD");
+    assert.deepEqual(her.seen, ["propose:unipcs:3:false"], "nothing is started by asking");
+    assert.equal(await executeCommand({ kind: "confirm" }, her), "STARTED");
+    assert.deepEqual(her.seen.slice(1), ["start:unipcs:3:false"]);
+    await executeCommand({ kind: "tail", handle: "unipcs", hours: 2, clamped: false }, her);
+    await executeCommand({ kind: "confirm", consider: true }, her);
+    assert.deepEqual(her.seen.slice(-1), ["start:unipcs:2:true"]);
+    assert.match(await executeCommand({ kind: "confirm" }, her), /nothing pending/i, "a card is answered once");
+  });
+
+  it("No cancels it; an expired card starts nothing; ownership lost before the press starts nothing", async () => {
+    const her = tailDeps(true);
+    await executeCommand({ kind: "tail", handle: "unipcs", hours: 3, clamped: false }, her);
+    assert.match(await executeCommand({ kind: "cancel" }, her), /cancelled/i);
+    let t = 1_000_000;
+    const late = tailDeps(true, { now: () => t });
+    await executeCommand({ kind: "tail", handle: "unipcs", hours: 3, clamped: false }, late);
+    t += TAIL_CONFIRM_TTL_SEC + 1;
+    assert.match(await executeCommand({ kind: "confirm", consider: true }, late), /expired/i);
+    const moved = tailDeps(true);
+    await executeCommand({ kind: "tail", handle: "unipcs", hours: 3, clamped: false }, moved);
+    moved.fomoTails = { ...moved.fomoTails!, owner: false };
+    assert.equal(await executeCommand({ kind: "confirm" }, moved), TAIL_OWNER_ONLY_TEXT);
+    assert.equal(moved.getPending(), null, "the card is gone");
+    for (const d of [her, late, moved]) assert.ok(!d.seen.some((x) => x.startsWith("start:")));
+  });
+
+  it("the card's buttons: tell only always, consider only when offered, No; a consider press reads back as one", () => {
+    const n = "abcdefghij";
+    const offered = tailConfirmKeyboard(n, true);
+    assert.deepEqual(offered.flat().map((b) => ("callbackData" in b ? b.callbackData : "")), [`mm:y:${n}`, `mm:c:${n}`, `mm:n:${n}`]);
+    assert.deepEqual(offered.flat().map((b) => b.text), ["👀 Tell me only", "👀 + consider their buys", "✖ No"]);
+    assert.deepEqual(tailConfirmKeyboard(n, false).flat().map((b) => b.text), ["👀 Tell me only", "✖ No"]);
+    assert.deepEqual(parseConfirmData(`mm:c:${n}`), { yes: true, consider: true, nonce: n });
+    assert.deepEqual(parseConfirmData(`mm:y:${n}`), { yes: true, consider: false, nonce: n });
+    for (const forged of ["mm:C:abcdefghij", "mm:c:", "mm:cc:abcdefghij", "ftl:stop:x"]) assert.equal(parseConfirmData(forged), null, forged);
+    for (const b of offered.flat()) assert.ok(Buffer.byteLength("callbackData" in b ? b.callbackData! : "") <= 64);
+  });
+
 });

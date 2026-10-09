@@ -112,6 +112,18 @@ function crossSiteApi(req: NextRequest): boolean {
   return unsafe && browser && site !== "same-origin";
 }
 
+/**
+ * The partner bridge is server-to-server and carries no ambient credential to forge: the
+ * gateway signs method, path, principal and body with a single-use nonce
+ * (lib/partner-bridge.ts), and the route reads no cookie. The cross-site block above would
+ * refuse it anyway, because Node's fetch sends `Sec-Fetch-Mode: cors` with no Origin, which
+ * reads as an opaque browser request — every partner POST and DELETE was 403'd that way.
+ * Exact prefix only: /api/partner-connect is cookie-authenticated and keeps the block.
+ */
+function signedServerApi(pathname: string): boolean {
+  return pathname === "/api/partner" || pathname.startsWith("/api/partner/");
+}
+
 // Exact public files/text endpoints only. A dotted agent name or approval identifier still
 // renders a document, so a generic file-extension exclusion is unsafe here.
 const STATIC_ASSETS = new Set([
@@ -156,7 +168,7 @@ export function middleware(req: NextRequest) {
     if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
       return new NextResponse("blocked: unexpected Host header (possible DNS-rebinding)", { status: 403 });
     }
-    if (crossSiteApi(req)) {
+    if (!signedServerApi(pathname) && crossSiteApi(req)) {
       return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
     }
     return NextResponse.next();

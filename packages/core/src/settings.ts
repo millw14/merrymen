@@ -418,6 +418,37 @@ export interface MerrymenSettings {
   /** Minutes between discovery polls. The gateway allows only a few a minute. */
   discoveryIntervalMin?: number;
   /**
+   * FOMO RESEARCH — THREE PERMISSIONS, NEVER ONE SWITCH (docs/fomo.md).
+   *
+   * Reading what traders on Fomo are doing, letting the shared trader cohort
+   * route signals to this agent, and letting that research become entries are
+   * three different things an owner decides, so they are three settings:
+   *
+   *   fomoDataAccess        answer Fomo questions when asked (app chat,
+   *                         Telegram, MCP). Read-only. ON by default; turning
+   *                         it off is enforced below the model, on every
+   *                         surface, even while the rest of the agent runs.
+   *   fomoMonitoringEnabled let the fleet's 150-trader cohort and this agent's
+   *                         watched coins route events here for research.
+   *                         Off by default. Never trades by itself.
+   *   fomoFollowEnabled     let that research NOMINATE coins into the existing
+   *                         memecoin review, sized inside the scout budget.
+   *                         Off by default. It is not a copy-trade: Brain
+   *                         decides, and every cap, grant and wall still binds.
+   *
+   * None of them is live-trading consent, and none of them is X posting
+   * consent; those stay their own switches.
+   */
+  fomoDataAccess?: boolean;
+  fomoMonitoringEnabled?: boolean;
+  fomoFollowEnabled?: boolean;
+  /**
+   * The Fomo data API key. SELF-HOSTED ONLY: hosted, the house holds one key
+   * for the fleet (a per-tenant key would also be the "rotating keys" the
+   * provider's terms forbid), so it is a house field a tenant cannot write.
+   */
+  fomoApiKey?: string;
+  /**
    * SCOUT MODE — buying tokens too new or too thin to price.
    *
    * A freshly launched pool has no TWAP history and almost no depth, which is
@@ -707,6 +738,7 @@ export const SECRET_SETTING_KEYS = [
   "virtualsApiKey",
   "bitqueryApiKey",
   "merrymenToken",
+  "fomoApiKey",
 ] as const;
 export type SecretSettingKey = (typeof SECRET_SETTING_KEYS)[number];
 
@@ -761,6 +793,7 @@ export const HOUSE_KEY_FIELDS = [
   "rialtoApiKeyHeader",
   "bitqueryApiKey",
   "merrymenToken",
+  "fomoApiKey",
   "virtualsApiKey",
   "telegramTranscribeKey",
   "telegramTranscribeBase",
@@ -891,6 +924,11 @@ export const SETTINGS_DEFAULTS = {
   // inherits the main budget — the owner has to name a number themselves.
   discoveryEnabled: true,
   discoveryIntervalMin: 10,
+  // Reading is on (it changes nothing and spends no owner money); monitoring
+  // and following are off until the owner chooses them.
+  fomoDataAccess: true,
+  fomoMonitoringEnabled: false,
+  fomoFollowEnabled: false,
   trencherLiveEnabled: false,
   trencherFastEnabled: false,
   // Off by default like every other switch that spends money.

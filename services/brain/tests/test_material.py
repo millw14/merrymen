@@ -226,5 +226,8 @@ def test_only_a_scarce_lens_may_hold_a_slot():
     """
     from brain.graph import PULSE_RESERVED_LENSES
 
-    assert PULSE_RESERVED_LENSES == frozenset({"builder"})
+    # `trader-flow` joined deliberately: it is sent only when tracked traders
+    # were seen on the coin, and it is not a reading of the tape. Its case is
+    # argued beside PULSE_RESERVED_LENSES and pinned in test_trader_flow.py.
+    assert PULSE_RESERVED_LENSES == frozenset({"builder", "trader-flow"})
     assert PULSE_RESERVED_LENSES <= LENS_KEYS, "a reserved lens no desk may carry is dead weight"

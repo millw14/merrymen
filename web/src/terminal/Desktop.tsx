@@ -34,7 +34,9 @@ import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
 import { performanceOf } from "./agent-performance";
+import { useNow } from "./clock";
 import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
+import { notRunningNote } from "./worker-stale";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -145,6 +147,8 @@ export function DesktopSidebar({
   const [filter, setFilter] = useState("all");
   const watchlist = useWatchlist();
   const [sort, setSort] = useState<"name" | "change">("name");
+  // For "as of" on a stale valuation (performanceOf); a minute is fine enough.
+  const nowSec = Math.floor(useNow(60_000) / 1000);
   const held = new Set(positionsOf(mine).map((p) => p.symbol));
   const list = tokens.filter((t) => filter === "held" ? held.has(t.symbol) : filter === "watch" ? watchlist.ids.includes(t.id) : true);
   list.sort((a, b) =>
@@ -304,7 +308,11 @@ export function DesktopSidebar({
           {agents
             .filter((a) => a.slug !== mine.slug)
             .map((a) => {
-              const performance = performanceOf(a);
+              const performance = performanceOf(a, nowSec);
+              // The board's words in the figure's place (performanceOf), and
+              // never coloured as a gain or a loss.
+              const figure = performance.state === null ? performance.bps : null;
+              const said = performance.state ?? pctBps(performance.bps);
               return (
               <button
                 className="sidebar-agent"
@@ -322,24 +330,26 @@ export function DesktopSidebar({
                   */}
                   <small>{tradeLine(a)}</small>
                 </span>
-                <span className="sidebar-agent-performance" title={performance.title} aria-label={`${performance.bookLabel} current value ${performance.value}, return ${pctBps(performance.bps)}, ${tradeLine(a)}`}>
+                <span className="sidebar-agent-performance" title={performance.title} aria-label={`${performance.bookLabel} current value ${performance.value}, return ${said}, ${tradeLine(a)}`}>
                   <strong>{performance.value}</strong>
                   {a.performance && <small>{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
                   <strong
                     className={
-                      performance.bps == null
-                        ? ""
-                        : performance.bps < 0
+                      figure == null
+                        ? performance.state !== null ? "performance-state" : ""
+                        : figure < 0
                           ? "down"
-                          : performance.bps > 0
+                          : figure > 0
                             ? "up"
                             : ""
                     }
                   >
-                    {pctBps(performance.bps)}
+                    {said}
                   </strong>
                   {performance.pnl !== null && <small>{performance.pnl} P&L</small>}
-                  {performance.gasIncomplete && <small>Gas accounting unavailable</small>}
+                  {performance.note !== null && <small className="performance-note">{performance.note}</small>}
+                  {performance.gasIncomplete && performance.state === null && <small>Gas accounting unavailable</small>}
+                  {performance.asOf !== null && <small className="performance-asof">{performance.asOf}</small>}
                 </span>
               </button>
               );
@@ -405,12 +415,14 @@ export function DesktopPortfolio({
 }) {
   const recovery = pausedRecovery(mine.recovery);
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, recovery);
+  const silence = notRunningNote(displayedAutonomy);
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
       <section>
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
-          <span className={`desktop-running ${stopped || recovery ? "paused" : ""}`}>
+          {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
+          <span className={`desktop-running ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`}>
             {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
           </span>
         </div>
@@ -478,6 +490,18 @@ export function DesktopPortfolio({
             </button>
           </div>
         )}
+        {/* SINCE WHEN IT HAS BEEN QUIET: the desk's sentence, as a line. No
+            link — nothing an owner signs or sends restarts a process. */}
+        {silence && <p className="meta">{silence}</p>}
+        {/* A KEY ABOUT TO EXPIRE: a line and a link, never the banner above —
+            nothing is wrong yet. Never beside that banner either (the verdict
+            drops the chip wherever a renewal is already offered), and never
+            during a hold, which the chip itself does not know about. */}
+        {!recovery && displayedAutonomy.expiresSoon && (
+          <p className="meta">
+            <a href="/grant#resign">{displayedAutonomy.expiresSoon.label}</a>
+          </p>
+        )}
         {/* WHAT IS CONNECTED — the same two lines the phone shows on Home.
 
             Home.tsx only renders below 1100px: above it, App swaps the home
@@ -494,7 +518,7 @@ export function DesktopPortfolio({
             `hasAgent` is true by construction here: this component takes a
             non-nullable `LiveMine`, and App renders it only on `desktop &&
             mine`. The type is the gate. */}
-        <AgentStrip hasAgent recovery={mine.recovery}/>
+        <AgentStrip hasAgent recovery={mine.recovery} funds={mine.recoveryFunds}/>
       </section>
       {selectedToken && (
         <section className="desktop-token-context">

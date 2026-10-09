@@ -16,6 +16,7 @@
  * worker restart mid-weekend picks up exactly where it left off.
  */
 
+import { entryGateFor, lockedLegs } from "../entry-gates";
 import type { TradeIntent } from "../policy";
 import { breakerIdle, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
@@ -44,6 +45,9 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
   // did nothing BECAUSE of it say so.
   const brake = breakerIdle(snap);
   let withheld = false;
+  // Entries skipped because the signed key cannot sell the leg back — the exit
+  // at the open would be the sell it cannot make, so the wall refuses the buy.
+  let locked = 0;
 
   for (const leg of cfg.legs) {
     if (snap.pausedTokens.has(leg.token.toLowerCase())) continue;
@@ -57,6 +61,11 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
       if (slice === 0n || snap.cashUsdg < slice) continue;
       if (brake) {
         withheld = true;
+        continue;
+      }
+      // Behind the breaker, which withholds every entry and says so first.
+      if (entryGateFor(snap.entryGates, leg.token)) {
+        locked += 1;
         continue;
       }
       intents.push({
@@ -82,5 +91,12 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
     }
   }
 
-  return brake && withheld && intents.length === 0 ? { intents, why, idle: brake } : { intents, why };
+  // A gap strategy enters only at the close, so "every leg it could have
+  // entered" is the honest reading of legs-locked here: nothing was proposed,
+  // and every entry the window offered was one the key does not cover.
+  return brake && withheld && intents.length === 0
+    ? { intents, why, idle: brake }
+    : locked > 0 && intents.length === 0
+      ? { intents, why, idle: { code: "legs-locked", legs: cfg.legs.length, locked: lockedLegs(snap.entryGates, cfg.legs) } }
+      : { intents, why };
 }

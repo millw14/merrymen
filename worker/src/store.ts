@@ -19,6 +19,7 @@ import {
 } from "./energy-days";
 import type { EnergyCounters, LastGood } from "./energy";
 import { energyDayUnrestored } from "./energy-seed";
+import { BUDGET_SEED_SCHEMA, budgetUnrestored } from "./budget-seed";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
@@ -38,6 +39,7 @@ export type { DecisionLifecycle } from "./decision-lifecycle";
 // The one definition of a flow's identity. Imported rather than restated so
 // the reader and the writer cannot disagree about what makes a flow unique.
 import { flowKey } from "./deposit-log";
+import { OWNER_OPERATION_COLUMNS, type OwnerOperationRow } from "./owner-operations";
 // The paper/live boundary. A rule rather than a convention, enforced at the one
 // function every flow writer passes through — see addFlow.
 import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
@@ -49,8 +51,10 @@ import { fillSymbolFor, nonCashLeg } from "./token-label";
 import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
 let driver: Db | null = null;
-/** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
- *  the file; a running worker never closes its ledger. */
+/** The sqlite handle behind `driver`. Kept so closeStoreForTest() can release
+ *  the file, and closeStore() on a drained worker's way out — a running worker
+ *  never closes its ledger — and so a cap reader can tell it is reading a sqlite
+ *  ledger, the only kind ever seeded (withBudgetSeed). */
 let ledgerFile: DatabaseSync | null = null;
 
 /**
@@ -362,6 +366,56 @@ const SQLITE_SCHEMA = `
       entry_sec INTEGER NOT NULL DEFAULT (unixepoch()),
       PRIMARY KEY (agent_id, mode, symbol)
     );
+    -- AN OPERATION THE OWNER'S OWN KEY SIGNED, which is not an agent trade.
+    --
+    -- The in-flight reconciler finds every successful operation of the account
+    -- the ledger has no row for. One signed by the ROOT validator (the owner's
+    -- sudo key, proved from the nonce the EntryPoint's own event carries) is a
+    -- withdrawal, a revocation or a vault sweep the owner chose, and recording
+    -- it in trades made it an agent trade: counted toward the caps, shown on
+    -- every tape, journaled as a fill, and its USDG leg hidden from the deposit
+    -- scanner. It is recorded here instead (owner-operations.ts says what each
+    -- column means), and nowhere else: never trades, flows, positions,
+    -- cost_basis, the journal or a peak. Its USDG capital legs stay the
+    -- deposit scanner's flows.
+    --
+    -- APPEND-ONLY AND IDEMPOTENT BY IDENTITY, PER ACCOUNT: (chain_id,
+    -- LOWER(agent_id), user_op_hash) is unique, the child inserts ON CONFLICT
+    -- DO NOTHING, and so does the mirror (ledger-mirror.ts), which copies by
+    -- that identity. The account is in it because Postgres holds every
+    -- tenant's records in one table: keyed on the hash alone, another
+    -- tenant's child could record this tenant's operation hash under its own
+    -- account first, and the genuine record would then never land (first row
+    -- wins). The tenant column is NULL in a child and stamped by the mirror
+    -- from its own grant, never from the child. Admission lets a row answer an
+    -- operation only for the tenant's own account, and only after re-deriving
+    -- it from the receipt (ledger-resume.ts).
+    CREATE TABLE IF NOT EXISTS owner_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant TEXT,
+      agent_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      user_op_hash TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      block_number INTEGER NOT NULL,
+      block_time INTEGER NOT NULL,
+      log_index INTEGER NOT NULL,
+      nonce TEXT NOT NULL,
+      validator TEXT NOT NULL CHECK (validator = 'root'),
+      disposition TEXT NOT NULL CHECK (disposition IN ('acknowledged', 'review')),
+      review_reason TEXT,
+      usdg_legs_json TEXT NOT NULL,
+      covers_logs_json TEXT NOT NULL,
+      token_moves_json TEXT NOT NULL,
+      paymaster TEXT NOT NULL,
+      gas_wei TEXT,
+      source TEXT NOT NULL,
+      recorded_epoch INTEGER NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      CHECK ((disposition = 'acknowledged' AND review_reason IS NULL) OR (disposition = 'review' AND review_reason IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS owner_operations_account_identity ON owner_operations (chain_id, LOWER(agent_id), user_op_hash);
+    CREATE INDEX IF NOT EXISTS owner_operations_agent_time ON owner_operations (agent_id, created_at DESC);
 `;
 
 /**
@@ -972,6 +1026,18 @@ const SQLITE_ALTERS: string[] = [
   // amounts since the class ledger shipped, and then dropped them on the floor.
   // This is where they land, so the difference survives the fold.
   "ALTER TABLE class_positions ADD COLUMN swept_raw TEXT",
+  // ── OWNER RECORDS ARE UNIQUE PER ACCOUNT, NOT ACROSS THE FLEET ─────────
+  //
+  // The first cut of owner_operations made (chain_id, user_op_hash) unique.
+  // In the shared Postgres that let one tenant's child pre-empt another
+  // tenant's genuine record by recording the same hash under its own account
+  // first. SQLITE_SCHEMA now builds owner_operations_account_identity on
+  // (chain_id, LOWER(agent_id), user_op_hash), and this drops the old index
+  // wherever an earlier build made it. Safe on a populated table: every row
+  // set the old index admitted, the per-account one admits too (it is a
+  // strictly weaker constraint), so the new index has already built by the
+  // time this runs; and IF EXISTS makes it a no-op everywhere else.
+  "DROP INDEX IF EXISTS owner_operations_identity",
 ];
 
 // Financial readers treat account casing as one account and scope every read
@@ -1008,6 +1074,11 @@ function initSqlite(): Db {
   const db = new DatabaseSync(DB_FILE);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SQLITE_SCHEMA);
+  // HERE AND NOT IN SQLITE_SCHEMA: the seed lives only in a child's own sqlite
+  // (budget-seed.ts), and that batch is also the shared ledger's migration —
+  // applyLedgerSchema and initPostgres run it — where nothing would ever write
+  // or read the table.
+  db.exec(BUDGET_SEED_SCHEMA);
   for (const ddl of SQLITE_ALTERS) {
     try {
       db.exec(ddl);
@@ -1130,6 +1201,30 @@ function getDb(): Db {
  * call it without knowing whether the store was ever touched.
  */
 export function closeStoreForTest(): void {
+  const open = ledgerFile;
+  ledgerFile = null;
+  driver = null;
+  open?.close();
+}
+
+/**
+ * Close the ledger ON THE WAY OUT: a worker that drained on SIGTERM (index.ts),
+ * after its intent chain emptied or its drain budget ran out.
+ *
+ * The sqlite file is closed, which checkpoints the write-ahead log into it, so
+ * whoever opens it next — the orchestrator's mirror, the next process — finds
+ * the database file whole by itself. WAL is crash-safe either way; this is a
+ * clean exit being clean, not the thing that makes an unclean one safe.
+ *
+ * The Postgres pool is left to the process exit: nothing is buffered in it, and
+ * a statement the exit cuts off is rolled back by the server, as for any
+ * dropped connection.
+ *
+ * NOTHING MAY BE WRITTEN AFTER THIS. Its one caller exits on the next line, in
+ * the same turn of the event loop, so no queued statement ever runs against the
+ * closed handle.
+ */
+export function closeStore(): void {
   const open = ledgerFile;
   ledgerFile = null;
   driver = null;
@@ -2444,6 +2539,30 @@ export async function recentTradeTxHashes(agentId: string, limit = 2000): Promis
 }
 
 /**
+ * THE OPERATIONS THE LEDGER'S TRADE ROWS IN ONE TRANSACTION ARE: their
+ * user-operation hashes, lowercased — or null when any row in it carries none,
+ * since such a row could be any operation of the transaction. Every row of the
+ * transaction, whatever its status or age (no recency bound: a misbooked
+ * root-key 'swap' row must be found however many rows came after it).
+ *
+ * The deposit scanner asks this only of a trade's transaction whose receipt
+ * shows the owner's own root operation moving USDG of the account
+ * (deposit-log.ts findTransferFlows, `tradeOpsInTx`), so it is rare and never
+ * on the trading path.
+ */
+export async function tradeOpsInTx(agentId: string, txHash: string): Promise<Set<string> | null> {
+  const rows = (await getDb()
+    .prepare(`SELECT user_op_hash FROM trades WHERE agent_id = ? AND LOWER(tx_hash) = ?`)
+    .all(agentId, txHash.toLowerCase())) as { user_op_hash: string | null }[];
+  const ops = new Set<string>();
+  for (const r of rows) {
+    if (!r.user_op_hash) return null;
+    ops.add(r.user_op_hash.toLowerCase());
+  }
+  return ops;
+}
+
+/**
  * Total gas paid on landed operations, in wei.
  *
  * Reported SEPARATELY rather than folded into equity, deliberately. Gas leaves
@@ -3505,20 +3624,124 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
 }
 
 /**
+ * A CAP READER'S SUM, WITH THE TRAILING DAY A REBUILT CHILD WAS GIVEN BACK
+ * (budget-seed.ts) — in ONE statement, so the child's rows and the seed are
+ * read from one snapshot, and an operation written between two reads can be
+ * neither counted twice nor missed.
+ *
+ *   figure      what one ledger row adds to this cap: `amount_usdg`, or 1 for an op
+ *   where       the reader's own predicate on a ledger row, its window included
+ *   seedFigure  the same figure on a seed row
+ *
+ * Per seed row STILL INSIDE THE SEED'S OWN WINDOW (pending, or settled within
+ * 24h), keyed by operation hash:
+ *   - the child's ledger holds no row for it → the seed's figure;
+ *   - it holds one that has stopped counting — reverted, dropped, settled more
+ *     than 24h ago → nothing: the child's row is the later word;
+ *   - it holds one that still counts → what the seed says ABOVE the child's
+ *     own figure for it, never below zero. The reconciler's bare copy of a
+ *     transfer is a swap, so for the transfer allowance this is the whole
+ *     transfer; for spend and ops it is nothing when the two agree.
+ * A seed row past its window adds nothing in any case: that is where the cap
+ * before the rebuild let it go, and the child's own copy, while it still
+ * counts, keeps counting through `own`.
+ *
+ * WHAT THIS COSTS, because it is paid on every refreshBudget — every tick,
+ * after every recordTrade — and node:sqlite is synchronous, so it is paid by
+ * the child's whole event loop: a stop-loss, Telegram, the heartbeat. Three
+ * subqueries per seed row, each an equality SEEK on trades_agent_userop
+ * (agent_id, user_op_hash). Not lower(user_op_hash): an expression no index
+ * serves range-scanned every hashed row the agent ever wrote, per subquery per
+ * seed row — measured at 0.4-0.9 s a refresh at 20k rows and 48 seeds, a year
+ * of trading. Both hashes are written lowercase — viem hands the executor and
+ * the reconciler lowercase hex, and readBudgetSeed lowers the shared side — so
+ * the plain match finds every copy the child wrote. One spelt otherwise is not
+ * found, and the seed then counts in full beside it: over, never under. And
+ * only seed rows still in their window are visited — the ones that have aged
+ * out stay in the table until the next seed replaces it, and must not cost.
+ *
+ * The seed is the LIVE rail's (a paper fill has no hash to count it once by),
+ * so only a live reader adds it — and only on a sqlite ledger, the only kind
+ * the orchestrator seeds and the only kind with the table (initSqlite). A
+ * store on the shared Postgres reads exactly what it read before.
+ * `own + seeded` is the cap's settled half.
+ *
+ * Exported for its query-plan test (budget-seed.test.ts), not for use.
+ */
+export function withBudgetSeed(q: {
+  agentId: string;
+  rail: BudgetRail;
+  figure: string;
+  where: string;
+  params: readonly unknown[];
+  seedFigure: string;
+  seedParams?: readonly unknown[];
+}): { sql: string; params: unknown[] } {
+  const own = `SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE agent_id = ? AND ${q.where}`;
+  getDb(); // opened first, so `ledgerFile` says which backend this is
+  if (q.rail !== "live" || !ledgerFile) return { sql: `SELECT (${own}) AS own, 0 AS seeded`, params: [q.agentId, ...q.params] };
+  const live = railFilter("live");
+  const sameOp = "agent_id = ? AND user_op_hash = s.op_hash";
+  return {
+    sql: `SELECT (${own}) AS own,
+      (SELECT COALESCE(SUM(CASE WHEN k.known = 0 THEN k.x
+                                WHEN k.counting = 0 THEN 0
+                                WHEN k.x > k.own_x THEN k.x - k.own_x
+                                ELSE 0 END), 0)
+         FROM (SELECT ${q.seedFigure} AS x,
+                      (SELECT COUNT(*) FROM trades WHERE ${sameOp}) AS known,
+                      (SELECT COUNT(*) FROM trades WHERE ${sameOp} AND status IN (${live.sql})
+                         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)) AS counting,
+                      (SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE ${sameOp} AND ${q.where}) AS own_x
+                 FROM budget_seed s
+                WHERE lower(s.agent_id) = lower(?)
+                  AND (s.pending = 1 OR s.settled_at > unixepoch() - 86400)) k) AS seeded`,
+    params: [
+      q.agentId, ...q.params,
+      ...(q.seedParams ?? []),
+      q.agentId,
+      q.agentId, ...live.params,
+      q.agentId, ...q.params,
+      q.agentId,
+    ],
+  };
+}
+
+/** Run a withBudgetSeed reader: the two halves, as numbers whatever the backend returned them as. */
+async function seededSum(q: { sql: string; params: unknown[] }): Promise<number> {
+  const row = (await getDb().prepare(q.sql).get(...q.params)) as { own?: unknown; seeded?: unknown } | undefined;
+  return Number(row?.own ?? 0) + Number(row?.seeded ?? 0);
+}
+
+/**
+ * Is the trailing day from before this ledger was rebuilt still missing
+ * (budget-seed.ts)? The orchestrator's seed has not put it back, so no cap
+ * here can be read as complete: refreshBudget reads the day as spent, and
+ * getTransferredTodayUsdg refuses to answer.
+ */
+export function budgetDayUnrestored(): boolean {
+  return budgetUnrestored(merrymenHome());
+}
+
+/**
  * Settled-op count in the trailing 24h, plus every unresolved live operation.
  * A pending operation never releases its slot merely because it is old; when
  * it lands, its 24h window starts at observed settlement, not submission.
+ * Plus, on the live rail, the seeded operations this ledger does not already
+ * count (withBudgetSeed).
  */
 export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): Promise<number> {
   const { sql, params } = railFilter(rail);
-  const row = await getDb()
-    .prepare(
-      `SELECT COUNT(*) AS n FROM trades
-       WHERE agent_id = ? AND status IN (${sql})
-         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId, ...params) as { n: number } | undefined;
-  return row?.n ?? 0;
+  return seededSum(
+    withBudgetSeed({
+      agentId,
+      rail,
+      figure: "1",
+      where: `status IN (${sql}) AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
+      params,
+      seedFigure: "1",
+    }),
+  );
 }
 
 /** Rename the agent — the user-given merryman name (shown on the dashboard). */
@@ -3555,16 +3778,29 @@ export async function setAgentName(agentId: string, name: string): Promise<void>
   }
 }
 
-/** Pending transfers reserve allowance until resolved; settled spend rolls for 24h. */
+/**
+ * Pending transfers reserve allowance until resolved; settled spend rolls for 24h.
+ *
+ * THROWS while the trailing day from before a rebuild is not back
+ * (budgetDayUnrestored): the transfers it holds are somewhere this ledger
+ * cannot see, and an allowance nobody can read never authorizes a send — the
+ * caller reads the throw as unreadable (transfer-budget.ts).
+ */
 export async function getTransferredTodayUsdg(agentId: string): Promise<number> {
-  const row = await getDb()
-    .prepare(
-      `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN ('landed', 'submitted') AND kind = 'transfer'
+  if (budgetDayUnrestored()) {
+    throw new Error("the trailing day's transfers from before this ledger was rebuilt are not restored yet");
+  }
+  return seededSum(
+    withBudgetSeed({
+      agentId,
+      rail: "live",
+      figure: "amount_usdg",
+      where: `status IN ('landed', 'submitted') AND kind = 'transfer'
          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId) as { spent: number } | undefined;
-  return row?.spent ?? 0;
+      params: [],
+      seedFigure: "s.transfer_usdg",
+    }),
+  );
 }
 
 /**
@@ -3586,14 +3822,21 @@ export async function getSpentTodayUsdg(
   const sells = cashToken
     ? ` AND NOT (kind IN ('swap', 'curve-trade') AND LOWER(COALESCE(buy_token, '')) = ?)`
     : "";
-  const row = await getDb()
-    .prepare(
-      `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'${sells}
+  return seededSum(
+    withBudgetSeed({
+      agentId,
+      rail,
+      figure: "amount_usdg",
+      where: `status IN (${sql}) AND kind != 'vault-withdraw'${sells}
          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId, ...params, ...(cashToken ? [cashToken.toLowerCase()] : [])) as { spent: number } | undefined;
-  return row?.spent ?? 0;
+      params: [...params, ...(cashToken ? [cashToken.toLowerCase()] : [])],
+      // THE SAME EXEMPTION ON THE SEED: its net spend where it was read for
+      // this cash token, its gross otherwise — never less than this reader
+      // would have counted had the rows been its own.
+      seedFigure: "CASE WHEN s.cash_token = ? THEN s.spend_usdg ELSE s.gross_usdg END",
+      seedParams: [cashToken ? cashToken.toLowerCase() : null],
+    }),
+  );
 }
 
 /**
@@ -3632,7 +3875,45 @@ export async function listOpHashes(agentId: string): Promise<Set<string>> {
     .all(agentId)) as { user_op_hash: string | null }[];
   const set = new Set<string>();
   for (const r of rows) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
+  // AND EVERY OWNER OPERATION ALREADY RECORDED (recordOwnerOperation), so a
+  // later arm does not find it again. Best effort: a read that fails leaves
+  // the op to be found and recorded again, which its unique identity makes a
+  // no-op — never a trades row (index.ts reconcileInFlightAtArm).
+  try {
+    const owner = (await getDb()
+      .prepare(`SELECT user_op_hash FROM owner_operations WHERE agent_id = ?`)
+      .all(agentId)) as { user_op_hash: string | null }[];
+    for (const r of owner) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
+  } catch {
+    // an older ledger without the table records no owner operation yet
+  }
   return set;
+}
+
+/**
+ * RECORD AN OPERATION THE OWNER'S OWN KEY SIGNED — never as a trade.
+ *
+ * One INSERT with a unique identity, (chain_id, LOWER(agent_id), user_op_hash), ON CONFLICT DO
+ * NOTHING: 'inserted' the first time, 'present' after, so a crash on either
+ * side of it leaves nothing to replay (the record moves no money, and a
+ * second insert changes nothing). 'failed' on any error, and NEVER a fallback
+ * to a trades row: an owner operation left unrecorded is found again at the
+ * next arm, and is still never booked as the agent's.
+ */
+export async function recordOwnerOperation(row: OwnerOperationRow): Promise<"inserted" | "present" | "failed"> {
+  try {
+    const cols = OWNER_OPERATION_COLUMNS;
+    const res = await getDb()
+      .prepare(
+        `INSERT INTO owner_operations (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
+         ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) DO NOTHING`,
+      )
+      .run(...cols.map((c) => row[c]));
+    return Number(res.changes) > 0 ? "inserted" : "present";
+  } catch (e) {
+    console.error("[store] owner operation not recorded:", e instanceof Error ? e.message : String(e));
+    return "failed";
+  }
 }
 
 /**

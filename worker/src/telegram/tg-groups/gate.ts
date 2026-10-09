@@ -45,6 +45,35 @@ import { containsSecret } from "../agent";
 import { stripThinkingBlock } from "../interpreter";
 import { REPEAT_LIMIT, similarity } from "../../social-post";
 import { fnv1a } from "../../memory/tokens";
+import {
+  ABOUT_MERRYMEN,
+  AT_THE_READER,
+  CONTACT_LURE,
+  CTA_PLACEHOLDER,
+  INJECTION_SHAPED,
+  LURE,
+  MERRY_BRAG,
+  ENGLISH_WORDS,
+  MERRY_SHILL,
+  NON_LATIN,
+  NOT_ENGLISH,
+  OUT_ACCUSE,
+  OUT_HANDOUT,
+  OUT_LURE,
+  PERSON_BESIDE_RUG,
+  PERSON_HARM,
+  POST_RUG_LURE,
+  PRIVATE_THIRD,
+  QUOTE_HARM,
+  QUOTE_TARGET,
+  RUG_CONTEXT_ACCUSE,
+  SECOND_PERSON,
+  SEND_FOR,
+  SPELLED_DOMAIN,
+  SPELLED_LINK,
+  SPENT_BRAG,
+  U,
+} from "./third-party";
 
 /**
  * What a line is for. It decides which clauses beyond the common ones apply:
@@ -53,8 +82,25 @@ import { fnv1a } from "../../memory/tokens";
  * `buy` must say paper when it was paper; `fixed` (a code template) is not
  * held to the repeat clause, since a template recurs by design and pacing caps
  * how often.
+ *
+ * `research` is a line code wrote from Fomo research (fomo/render.ts through
+ * tg-fomo-port.ts), never a model's: a public leaderboard's realised P&L or a
+ * coin's market cap, under a header naming Fomo. Rule 2 keeps the OWNER's money
+ * out of a group and lets a deterministic factual reply carry published
+ * public figures with their source, so the money clause alone is lifted.
+ * Every other clause holds, and like a template it may recur.
+ *
+ * `quote` is one stranger's thesis said back in a room, on an explicit ask
+ * only (Milla, 2026-10-09; tg-fomo-port.ts thesesQuotes builds the line
+ * "• kaleo, 2h ago: “…”"). Code wrote the frame, a stranger wrote the words:
+ * so the money clause is lifted as for research (their "down from 8m to 36k"
+ * is theirs), a first person is the author's, not the agent's (no claim
+ * clause), and on top of every common clause the third-party clauses
+ * (third-party.ts) refuse a lure, a drainer prompt, a send, a call to action,
+ * a line at the reader or at the room, a price target, an accusation against
+ * people, Merrymen named, and another script. Like research it may recur.
  */
-export type TgLineKind = "banter" | "answer" | "roast" | "kind" | "coin" | "buy" | "fade" | "fixed";
+export type TgLineKind = "banter" | "answer" | "roast" | "kind" | "coin" | "buy" | "fade" | "fixed" | "research" | "quote";
 
 export interface TgGateCtx {
   /** The agent's own name: taken off as a leading label, and may appear in the line. */
@@ -77,6 +123,20 @@ export interface TgGateCtx {
    * cashtag clause is for. A coin, buy or fade line allows no cashtag at all.
    */
   cashtagNames?: string[];
+  /**
+   * THE COLLAPSE PERMIT (docs/tg-groups.md "Rugged coins"): the coins the bare
+   * word "rugged" (or the noun "rug") may be said about, as their sayable
+   * names, and whether a Merrymen brag may go with it. Read only for the
+   * `quote`, `answer`, `banter` and `coin` kinds; every other kind, and the
+   * desk's read, ignore it. Never a person's name: a coin that is one of
+   * `names` is dropped here too. With it set, these also hold: an accusation
+   * against people in a rug's context (RUG_CONTEXT_ACCUSE), Merrymen as a play
+   * (MERRY_SHILL), a brag when `brag` is false, and, for answer, banter and
+   * coin lines, any figure at all (the numbers are the facts answer's).
+   * `others`: the other coins the room knows by name; a rug word beside one
+   * of them is refused (review r2: "auton rugged, pons next").
+   */
+  rug?: { coins: string[]; brag: boolean; others?: string[] };
 }
 
 export type TgVerdict = { ok: true; text: string } | { ok: false; reason: string };
@@ -99,22 +159,29 @@ const RAW_CEILING = TG_LINE_MAX * 16;
 const refuse = (reason: string): TgVerdict => ({ ok: false, reason });
 
 /**
- * A WORD BOUNDARY THAT KNOWS WHAT A LETTER IS. JavaScript's \b is ASCII-only
- * even under the u flag, so beside an accented letter it sees a boundary that
- * is not there: "slïppage" held a stop-loss "sl" and "tpé" a take-profit
- * "tp". Every word-list clause is compiled through U, which puts this in
- * place of each \b and adds the u flag.
+ * A WORD BOUNDARY THAT KNOWS WHAT A LETTER IS (third-party.ts U, moved there
+ * so that leaf imports nothing from here): every word-list clause is compiled
+ * through U, which puts a Unicode-aware edge in place of each \b.
  */
-const WORD_EDGE = "(?:(?<=[\\p{L}\\p{N}_])(?![\\p{L}\\p{N}_])|(?<![\\p{L}\\p{N}_])(?=[\\p{L}\\p{N}_]))";
-function U(re: RegExp): RegExp {
-  return new RegExp(re.source.replace(/\\b/g, WORD_EDGE), re.flags.includes("u") ? re.flags : `${re.flags}u`);
-}
+export { U };
 
-const KINDS: ReadonlySet<string> = new Set(["banter", "answer", "roast", "kind", "coin", "buy", "fade", "fixed"]);
+const KINDS: ReadonlySet<string> = new Set(["banter", "answer", "roast", "kind", "coin", "buy", "fade", "fixed", "research", "quote"]);
 /** Lines about a coin: not one digit or number word, in any sense. */
 const FIGURE_KINDS: ReadonlySet<string> = new Set(["coin", "buy", "fade"]);
-/** Lines that may tease: never about looks, bodies or family. */
-const TEASE_KINDS: ReadonlySet<string> = new Set(["roast", "banter", "answer"]);
+/** Lines that may tease: never about looks, bodies or family. Research quotes names it did not choose, so it is held to the same. */
+const TEASE_KINDS: ReadonlySet<string> = new Set(["roast", "banter", "answer", "research", "quote"]);
+/**
+ * Code-written lines: a template, research rendered from a lookup, or a quote
+ * code framed. Never the repeat clause (two identical asks may get the same
+ * quotes); only research and a quote may carry a published figure.
+ */
+const CODE_KINDS: ReadonlySet<string> = new Set(["fixed", "research", "quote"]);
+/** Kinds whose money clause is lifted: research's published figures, and a quote's author's own. */
+const MONEY_FREE_KINDS: ReadonlySet<string> = new Set(["research", "quote"]);
+/** Kinds the collapse permit (TgGateCtx.rug) is read for. */
+const RUG_KINDS: ReadonlySet<string> = new Set(["quote", "answer", "banter", "coin"]);
+/** Of those, the persona's own lines: with a permit they hold no figure at all. */
+const RUG_FIGURE_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "coin"]);
 
 // ── tidy ────────────────────────────────────────────────────────────────────
 
@@ -303,6 +370,8 @@ const LOOKALIKE: Readonly<Record<string, string>> = {
   α: "a", β: "b", ε: "e", η: "n", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", τ: "t", υ: "u", χ: "x", ω: "w", γ: "y",
   ᴀ: "a", ʙ: "b", ᴄ: "c", ᴅ: "d", ᴇ: "e", ғ: "f", ɢ: "g", ʜ: "h", ɪ: "i", ᴊ: "j", ᴋ: "k", ʟ: "l", ᴍ: "m",
   ɴ: "n", ᴏ: "o", ᴘ: "p", ǫ: "q", ʀ: "r", ꜱ: "s", ᴛ: "t", ᴜ: "u", ᴠ: "v", ᴡ: "w", ʏ: "y", ᴢ: "z",
+  // Latin letters with no decomposition that are drawn like plain ones (review r2): "honeypøt", "scɑm", "kiłł", "ɡrifter".
+  ɑ: "a", ɡ: "g", ø: "o", ɔ: "o", ł: "l", đ: "d", ħ: "h", ɛ: "e", ɩ: "i", ʋ: "v",
 };
 
 function foldOf(lower: string): string {
@@ -381,6 +450,30 @@ function readingsOf(text: string): Readings {
 }
 
 const some = (readings: readonly string[], re: RegExp): boolean => readings.some((t) => re.test(t));
+
+/**
+ * Every lowercased reading the gate's vocabulary clauses read (accents and
+ * invisible characters gone, lookalikes folded, letters spelled out one by
+ * one joined), for a caller with clauses of its own (theses.ts), so "h a l f"
+ * or "ha​lf" is judged as the word the room will read.
+ */
+export function tgLineReadings(text: string): string[] {
+  return readingsOf(typeof text === "string" ? text : "").low;
+}
+
+/**
+ * The tokens of a line that could be pieces of an address, on its likeliest
+ * reading (QUOTE_ENCODED_MAX): quotes.ts adds up the distinct ones over the
+ * quotes it says, so the same "Web3" in five quotes counts once.
+ */
+export function quoteEncodedPieces(text: string): string[] {
+  let best: string[] = [];
+  for (const t of readingsOf(typeof text === "string" ? text : "").cased) {
+    const p = encodedPiecesOf(t);
+    if (p.join("").length > best.join("").length) best = p;
+  }
+  return best;
+}
 
 // ── model talk ──────────────────────────────────────────────────────────────
 
@@ -490,8 +583,46 @@ const TRADE_CLAIM: readonly RegExp[] = [
   /\b(?:already|still)\s+(?:holding|in (?:on )?it|got (?:some|a bag))\b/,
   /\b(?:i|i'?ve|ive)\s+(?:got|have)\s+(?:a bag|a (?:little|small) bag|a position|a stake)\b/,
 ].map(U);
-/** Line kinds with no trade facts behind them: where TRADE_CLAIM applies. */
-const CLAIM_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast"]);
+/** Line kinds with no trade facts behind them: where TRADE_CLAIM applies. Research reports other people's trades, never its own. */
+const CLAIM_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast", "research"]);
+
+/**
+ * PROGRESS NOTHING IS MAKING. The persona never has a lookup running: Fomo
+ * research, the desk and her DM handoff are lanes that answer for
+ * themselves, and nothing the persona says starts one. So a persona line may
+ * not stall ("give me a sec", "one sec", "hang tight"), claim it is fetching
+ * ("on it", "pulling it now", "lemme check"), deliver what never came ("here
+ * we go", "here you go", "sent it") or promise to come back ("i'll let you
+ * know", "i'll keep tabs on him"). Live 2026-10-07: "do it" → "give me a sec"
+ * → "done?" → "yeah here we go", and nothing was ever sent. Code-written
+ * lines are not judged by it: the coin flow's "on it, gimme a sec" is said
+ * while its look really runs, and "drop the CA and i'll pull the chart" is
+ * what the desk does with a CA.
+ */
+const PROGRESS_FILLER = String.raw`(?:(?:ok(?:ay)?|k|kk|yep|yup|yeah|ya|yea|sure|bet|aight|alright|got (?:it|you|u|ya)|say less|np|cool|done|and|so)[\s,!.…]*)*`;
+/** A clause opens at the start or after punctuation, never after a digit's decimal point ("took 0.5 seconds"). */
+const PROGRESS_START = String.raw`(?:^|(?<!\p{N})[.!?,;:—–…]\s*)`;
+const PROGRESS_STALL = String.raw`(?:(?:give|gimme|giv) (?:me |us )?(?:a |one |a few |half a |\d+ )?(?:sec|secs|second|seconds|min|mins|minute|minutes|moment|tick|bit)|(?:one|a|just a|half a|\d+) (?:sec|secs|second|seconds|min|mins|minute|moment|tick)|bear with me|be right back|on it|working on it|coming (?:right )?up|here (?:we|you|ya) go|here it (?:is|comes)|there (?:you|ya) go)`;
+const PROGRESS: readonly RegExp[] = [
+  // A stall or a delivery, as a whole clause: "give me a sec", "yep on it 🫡", "yeah here we go". Not "here we go again", "on it like".
+  new RegExp(String.raw`${PROGRESS_START}${PROGRESS_FILLER}${PROGRESS_STALL}(?! again| to\b| on to\b| of\b| with\b)(?:\s*(?:$|[.!?,;:—–…]|\p{Extended_Pictographic}|\s(?:lol|ngl|fr|tbh|bro|fren|boss)\b))`, "u"),
+  // "hold on" / "hang tight" only as the whole line or before a stall: "hang on, are you serious?" is not one.
+  new RegExp(String.raw`^${PROGRESS_FILLER}(?:hold|hang) (?:on|tight)(?:\s*(?:$|[.!…]|\p{Extended_Pictographic})|,?\s+(?:lemme|let me|grabbing|pulling|getting|checking|fetching|one sec|a sec))`, "u"),
+  U(/\bbrb\b/),
+  // Doing it right now.
+  U(/\b(?:i'?m|im|i am|currently|rn i'?m) (?:pulling|fetching|grabbing|getting|loading|checking|looking (?:it |that |them )?up|looking into|digging|running|sending|posting|dropping|searching|scanning|compiling|putting (?:it |that )?together)\b/),
+  new RegExp(String.raw`(?:^|[.!?,;:—–…]\s*|\b(?:now|ok|yep|yeah)\s+)(?:pulling|fetching|grabbing|loading|sending|posting|dropping|checking) (?:it|that|them|those|this|the (?:board|list|theses|thesis|chart|leaderboard|data|numbers|info|rankings?|coins?|traders?))(?: (?:up|in|over|out|now|rn|for (?:you|u)))*\s*(?:$|[.!?,;:—–…]|\p{Extended_Pictographic})`, "u"),
+  // About to.
+  U(/\b(?:let me|lemme|i'?ll|ill|i will|gonna|going to|about to|bout to) (?:go |just |quickly |quick )?(?:pull|fetch|grab|load|check|look (?:it |that |them |this )?up|look into|dig (?:in|into|up)|run|send|post|drop|find|search|get (?:it|that|them|those|this|you|u|back to))\b/),
+  // Later.
+  U(/\b(?:i'?ll|ill|i will|will) (?:let (?:you|u|ya) know|ping (?:you|u|ya)|update (?:you|u|ya)|report back|get back to (?:you|u|ya)|keep (?:you|u|ya) posted|keep (?:an eye|tabs|watch) on|watch (?:it|that|them|him|her)|track (?:it|that|them|him|her)|follow (?:it|that|them|him|her))\b/),
+  // Done.
+  new RegExp(String.raw`${PROGRESS_START}${PROGRESS_FILLER}(?:just )?(?:sent|posted|dropped|pulled|shared) (?:it|that|them|those|the (?:board|list|theses|thesis|chart|leaderboard|data|numbers|info|rankings?))(?: (?:up|over|in|above|below|here|for (?:you|u)))*\s*(?:$|[.!?,;:—–…]|\p{Extended_Pictographic}|\s(?:lol|ngl|fr|tbh)\b)`, "u"),
+];
+/** "drop the CA and i'll pull the chart": what the desk does with a CA, not a promise of the persona's own. */
+const PROGRESS_IDIOM = U(/\b(?:drop|post|paste|share|send)(?: me)? (?:the |its |a |their )?(?:robinhood chain |rh )?(?:ca|contract(?: address)?|address)\b[^.!?]*/g);
+/** The persona's own lines. Never a template the coin flow says while its look runs ("coin"), never code ("fixed", "research"), never a kind line. */
+const PROGRESS_KINDS: ReadonlySet<string> = new Set(["answer", "banter", "roast"]);
 
 /** Markup or a transcript label: judged after the link clause, so "pump [.] fun" is logged as the link it is. */
 function markupRefusal(r: Readings, names: readonly string[]): boolean {
@@ -585,8 +716,63 @@ function hasEncodedRun(t: string): boolean {
     if (/[0-9]/.test(run) && /[A-Za-z]/.test(run)) return true;
     if (run.length >= 32 && /[a-z]/.test(run) && /[A-Z]/.test(run)) return true;
   }
+  return hasChunkedRun(t);
+}
+
+/**
+ * A piece of an encoded run: three characters or more, holding a digit and a
+ * letter, or both cases in a shape no word has ("uUcqQ", "TqA"). A word in
+ * ordinary case ("Strong", "GeckoTerminal", "CryptoKaleo") is never one, so a
+ * list of names or a title is never read as an address.
+ */
+const encodedChunk = (c: string): boolean =>
+  c.length >= 3 && ((/[0-9]/.test(c) && /[A-Za-z]/.test(c)) || (/[a-z]/.test(c) && /[A-Z]/.test(c) && !/^[A-Za-z][a-z]+(?:[A-Z][a-z]+)*$/.test(c)));
+/**
+ * AN ADDRESS SPLIT INTO CHUNKS ("39aht L8ynz E4amH …", "…C93PA-5172V3…"),
+ * joined back and read as the one run it spells (review, 2026-10-09): the
+ * pieces of a full address in a room are the address. Any other word
+ * between two pieces starts the run again.
+ */
+function hasChunkedRun(t: string): boolean {
+  for (const m of t.matchAll(/[A-Za-z0-9]+(?:[\s._:,/-]{1,3}[A-Za-z0-9]+)+/g)) {
+    let joined = "";
+    for (const c of m[0].split(/[\s._:,/-]+/)) {
+      if (!encodedChunk(c)) {
+        joined = "";
+        continue;
+      }
+      joined += c;
+      if (/[A-Za-z0-9]{26,}/.test(joined) && ((/[0-9]/.test(joined) && /[A-Za-z]/.test(joined)) || (joined.length >= 32 && /[a-z]/.test(joined) && /[A-Z]/.test(joined)))) return true;
+    }
+  }
   return false;
 }
+
+/**
+ * AN ADDRESS SPREAD OVER A QUOTE, for the `quote` kind only (review r2,
+ * 2026-10-09): every token of the row that could be a piece of a base58
+ * address is counted, however the pieces are split (by 2, 3 or 4, as words,
+ * or with ";", "~", "+", an emoji or "and" between them), and a row with 16
+ * such characters or more is refused. 16, not 26: an address split in half
+ * over two quotes is two rows of 22, and each is refused (quotes.ts also adds
+ * them up over the quotes it says). A token counts when it is two characters
+ * or more, in the base58 alphabet only (no 0, O, I or l), not shaped like a
+ * word ("Strong", "GeckoTerminal", "AI", "gm") or a figure ("36k", "24h",
+ * "3rd"), and mixes a digit and a letter or both cases: "zkEVM", "ai16z" and
+ * "Web3" count, and a row of such jargon stays under 16.
+ */
+const PLAIN_TOKEN = /^[A-Z]?[a-z]+(?:[A-Z][a-z]+)*$|^[A-Z]+$|^[a-z]+$|^\d+$/;
+const FIGURE_TOKEN = /^\d+(?:k|m|b|bn|x|h|d|w|mo|y|min|s|st|nd|rd|th|am|pm)$/i;
+const NOT_BASE58 = /[^1-9A-HJ-NP-Za-km-z]/;
+function encodedPiecesOf(t: string): string[] {
+  return t.split(/[^A-Za-z0-9]+/).filter((tok) =>
+    tok.length >= 2 && !NOT_BASE58.test(tok) && !PLAIN_TOKEN.test(tok) && !FIGURE_TOKEN.test(tok) &&
+    ((/[0-9]/.test(tok) && /[A-Za-z]/.test(tok)) || (/[a-z]/.test(tok) && /[A-Z]/.test(tok))));
+}
+const encodedCharsOf = (t: string): number => encodedPiecesOf(t).reduce((n, p) => n + p.length, 0);
+/** The most of what could be an address's characters one quote line may hold, and all the quotes of one answer together. */
+export const QUOTE_ENCODED_MAX = 16;
+export const QUOTES_ENCODED_MAX = 26;
 
 /**
  * Anything a reader could follow out of the chat: any scheme (hxxp too),
@@ -949,8 +1135,9 @@ const ADVICE: readonly RegExp[] = [
     String.raw`${IN_THEIR_PLACE}[^.!?\n]{0,40}?\b${TRADE_ACT}\b|\b${TRADE_ACT}\b[^.!?\n]{0,40}?${IN_THEIR_PLACE}`,
   ),
   /\b(?:you'?d|youd|ud|u'?d|you would|u would|y'?all would|you guys would) be (?:dumb|crazy|stupid|silly|nuts|mad|insane|foolish|a fool|an idiot|a clown) not to\b/,
-  // "better get in", "lol y'all better grab some": the imperative, opening a clause.
-  /(?:^|[.!?,;:—–]\s*)(?:(?:lol|lmao|ngl|tbh|ok|okay|so|yeah|yo|well|bro|ser|fam|anon|guys|frens)[\s,]+)*(?:(?:y'?all|you|u|ya)\s*(?:'d\s+|had\s+)?)?better\s+(?:get in|grab|buy|ape|load|sell|dump|jump in|hop in|hop on)\b/,
+  // "better get in", "lol y'all better grab some": the imperative, opening a
+  // clause, or opening a quote ("“ape now before it pumps”", review 2026-10-09).
+  /(?:^|[.!?,;:—–“‘«„"']\s*)(?:(?:lol|lmao|ngl|tbh|ok|okay|so|yeah|yo|well|bro|ser|fam|anon|guys|frens)[\s,]+)*(?:(?:y'?all|you|u|ya)\s*(?:'d\s+|had\s+)?)?better\s+(?:get in|grab|buy|ape|load|sell|dump|jump in|hop in|hop on)\b/,
   // "y'all sleeping on this": the room is missing out. "i'm sleeping on it" is deciding tomorrow.
   /(?<!\b(?:i'?m|im|i am|i was|i'?ll be|i'?d be|still)\s)\bsleeping on (?:this|it|these|that|those)\b/,
   /\bgo buy\b|\bbuy (?:it |this |that )?(?:now|asap|rn|immediately|before)\b|\bget in (?:now|early|before|while|asap|rn)\b/,
@@ -960,7 +1147,7 @@ const ADVICE: readonly RegExp[] = [
   /\bto the moon\b|\b(?:gonna|going to|will|about to|bout to) (?:moon|explode|skyrocket|go parabolic|pump|rip|fly)\b|\bnext (?:big thing|moonshot|gem|pepe|doge)\b/,
   /\b(?:everyone|everybody|y'?all|you all|you guys|guys|frens|fam|chat|anons?|ser)\b[^.!?\n]{0,40}\b(?:buy|grab|ape|aping|load up|get in|sell|dump)\b/,
   /\b(?:buy|grab|ape into|load up on|get in on|sell|dump)\b[^.!?\n]{0,40}\b(?:now|rn|asap|while (?:it|you|u)|before it)\b/,
-  /(?:^|[.!?,;:—–]\s*)(?:just\s+|pls\s+|please\s+|go\s+)?(?:buy|grab|ape|sell|dump|load up on|get in on|long|short|bid)\s+(?:it|this|that|these|those|some|now|rn|asap|the dip|more|here|in)\b/,
+  /(?:^|[.!?,;:—–“‘«„"']\s*)(?:just\s+|pls\s+|please\s+|go\s+)?(?:buy|grab|ape|sell|dump|load up on|get in on|long|short|bid)\s+(?:it|this|that|these|those|some|now|rn|asap|the dip|more|here|in)\b/,
   /\bcome ape\b|\bape (?:in )?with (?:me|us)\b/,
 ].map(U);
 /**
@@ -979,12 +1166,29 @@ const ADVICE_COIN: readonly RegExp[] = [
 
 /**
  * ACCUSATIONS (the coin flow's "fud" is the agent's own view, never an
- * accusation voiced as fact): rug, scam, honeypot, a dev dumping, an exit
- * scam, fraud. A fade says what the review saw — thin, the same few wallets —
- * not what it cannot know.
+ * accusation voiced as fact). Two parts:
+ *
+ *   ACCUSE_HARD, absolute in every kind and the desk's read: scam, honeypot,
+ *   an exit scam, a ponzi, fraud, whoever made or holds the supply dumping,
+ *   selling, rugging or running, a pump and dump.
+ *
+ *   RUG_WORD, the bare rug word ("rug", "rugged", "rugpull", "soft rug").
+ *   Refused everywhere, except the shapes the collapse permit lifts
+ *   (TgGateCtx.rug, docs/tg-groups.md "Rugged coins"): "rugged" or the noun
+ *   "rug", said of no one, of "it", "this one", "the chart" or one of the
+ *   permit's coins, at the start of a clause ("auton rugged lol", "it got
+ *   rugged", "full rug", "chart says rugged"), never followed by "pull", "by"
+ *   or whom it was done to ("rugged us", "rugged its holders"). For a quote
+ *   also a fear of one ("this is gonna rug", "feels like a slow rug"). Any
+ *   other rug word left over is refused: "rugpull", "rugging", "soft rug",
+ *   "they rugged", "the dev rugged it", "kaleo rugged us", "rugged by the dev".
+ *
+ * With no permit both together are exactly the clause this was before, so
+ * every line that passed or failed it still does. A fade says what the review
+ * saw (thin, the same few wallets), not what it cannot know.
  */
-const ACCUSE: readonly RegExp[] = [
-  /\b(?:soft|hard)?[\s-]?rug(?:s|ged|ging|gers?|pulls?|pulled|pulling|puller)?\b|\brug[\s-]+pull(?:s|ed|ing)?\b/,
+const RUG_WORD = U(/\b(?:soft|hard)?[\s-]?rug(?:s|ged|ging|gers?|pulls?|pulled|pulling|puller)?\b|\brug[\s-]+pull(?:s|ed|ing)?\b/);
+const ACCUSE_HARD: readonly RegExp[] = [
   /\bscam(?:s|med|ming|mer|mers|my|coin)?\b|\bhoney[\s-]?pots?\b|\bexit[\s-]+scam\b|\bponzi\b|\bfraud(?:s|ulent|ster|sters)?\b/,
   // Whoever made or holds the supply, dumping it: "dev dumped", "dev's been
   // dumping", "deployer's selling", "insiders are dumping on you", "team
@@ -992,6 +1196,143 @@ const ACCUSE: readonly RegExp[] = [
   /\b(?:the )?(?:devs?|deployers?|team(?:\s+wallets?)?|insiders?|creators?|founders?)(?:'(?:s|re|ve)|\s+(?:is|are|was|were|has|have|had|just|already|been|keeps?|kept|still))*\s+(?:[\w']+\s+){0,2}?(?:and\s+|&\s+|n\s+)?(?:dumped|dumping|dumps?|sold|selling|sells|rugged|ran|bailed|exited|abandoned)\b/,
   /\bpump[\s-]*(?:and|&|n)[\s-]*dump\b|\bp&d\b|\bpnd\b/,
 ].map(U);
+
+/** Fillers a clause may open with before the rug word's subject: "lol", "yeah", "rip", "feels like". */
+const RUG_LEAD = String.raw`(?:(?:lol|lmao|lmfao|rip|yeah|yea|yep|yup|welp|well|ok|okay|so|and|but|ngl|tbh|fr|bro|bruh|damn|oof|man|nah|ya|ye|ah|aw|sadly|ofc|haha|yikes|f|honestly|imo|lowkey|def|now|then|just|already|(?:feels|felt|looks|looked|smells|seems|sounds)\s+like)[\s,]+)*`;
+/** What the rug word may be said of, beside the permit's coins. Never a person. */
+const RUG_SUBJECTS = ["it", "this", "that", "this one", "that one", "another one", "one more", "the chart", "chart", "the coin", "this coin", "that coin"];
+/** Words between the subject and the rug word: "it's", "is", "just got", "chart says". */
+const RUG_LINK = String.raw`(?:'s|\s+(?:is|was|has|have|had|just|got|gets|getting|totally|fully|basically|straight\s+up|completely|officially|literally|def|definitely|says|said|screams|looks|looks\s+like|feels\s+like|already|been|now))*`;
+/** Before the rug word: "got", "was", "just"; for a quote also a fear of it ("gonna", "could", "might"). */
+const RUG_PRE = String.raw`(?:(?:got|gets|been|was|is|just|totally|fully|basically|straight\s+up|officially|already|has|literally|completely|def|definitely)\s+)*`;
+const RUG_PRE_QUOTE = String.raw`(?:(?:got|gets|been|was|is|just|totally|fully|basically|straight\s+up|officially|already|has|literally|completely|def|definitely|gonna|going\s+to|could|will|might|may|can|about\s+to|bound\s+to|likely|probably|another)\s+)*`;
+const RUG_ADJ = String.raw`(?:(?:a|an|full|total|another|classic|complete|certified|textbook|absolute|massive|straight)\s+)*`;
+const RUG_ADJ_QUOTE = String.raw`(?:(?:a|an|full|total|another|classic|complete|certified|textbook|absolute|massive|straight|slow|soft\s+and\s+slow|big)\s+)*`;
+/** Never "rug pull", never "rugged by …" or "rugged on …" (review r2), never whom it was done to. */
+const RUG_NOT_AFTER = String.raw`(?![\p{L}\p{N}_])(?!\s*-?\s*pull)(?!\s+by\b)(?!\s+on\b)(?!\s+(?:(?:its|their|the|all|every|his|her|our|my|your|em|those|these|some)\s+)?(?:us|you|u|me|him|her|them|em|everyone|everybody|holders?|bagholders?|buyers?|people|community|investors?|frens|degens|apes|folks|y'?all|ya'?ll|anyone|anybody|followers|fans|retail)\b)`;
+/** Where a clause opens: the start, punctuation, an opening quote mark, or a joining word. */
+const RUG_CLAUSE = String.raw`(?:^|[.!?,;:—–…“”"«»(]\s*|\s(?:and|but|so|cause|cuz|coz|because|bc|since|then)\s+)`;
+const escRug = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Words that name a person or people: never a rug's subject, whatever a caller hands in as a coin. */
+const RUG_PERSON = /^(?:dev|devs|deployer|deployers|team|insider|insiders|creator|creators|founder|founders|they|them|he|she|him|her|someone|somebody|everyone|whales?|kol|kols|admins?|mods?)$/u;
+
+/**
+ * The permit as the gate reads it, or null: only for a rug kind, only with
+ * `ctx.rug` set. The subjects are the fixed pronoun list plus each coin in
+ * every form the readings take (shown, canon, bare, folded; a leading "$"
+ * off), never one that is a person's name in `names`, the agent's own name,
+ * or a word for a person.
+ */
+function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, names: readonly string[]): { mask: RegExp; brag: boolean; doers: ReadonlySet<string>; others: string[] } | null {
+  if (kind === null || !RUG_KINDS.has(kind)) return null;
+  const rug = ctx?.rug;
+  if (!rug || typeof rug !== "object") return null;
+  const people = new Set(lowNames(agentName, names).flatMap((n) => [n, bareOf(n).toLowerCase(), foldOf(bareOf(n).toLowerCase())]));
+  const coins = new Set<string>();
+  for (const c of strings(rug.coins).slice(0, 8)) {
+    const base = c.replace(/^\s*[$＄﹩]+/u, "");
+    for (const v of [shownOf(base), canonOf(base), bareOf(base), foldOf(bareOf(base).toLowerCase())]) {
+      const low = v.toLowerCase().trim();
+      if (!/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,30}$/u.test(low) || people.has(low) || RUG_PERSON.test(low) || /(?:^|\s)rug/u.test(low)) continue;
+      coins.add(low);
+    }
+  }
+  const subjects = [...RUG_SUBJECTS, ...coins].sort((a, b) => b.length - a.length).map((x) => escRug(x).replace(/ /g, "\\s+"));
+  const quote = kind === "quote";
+  const mask = new RegExp(
+    `${RUG_CLAUSE}${RUG_LEAD}(?:(?:${subjects.join("|")})${RUG_LINK}\\s+)?${quote ? RUG_PRE_QUOTE : RUG_PRE}${quote ? RUG_ADJ_QUOTE : RUG_ADJ}(?:rugged|rug)${RUG_NOT_AFTER}`,
+    "gu",
+  );
+  // The room's other coins, folded as the coins are, never one of the permit's own.
+  const others = new Set<string>();
+  for (const o of strings(rug.others).slice(0, 32)) {
+    const base = o.replace(/^\s*[$＄﹩]+/u, "");
+    for (const v of [shownOf(base), canonOf(base), bareOf(base), foldOf(bareOf(base).toLowerCase())]) {
+      const low = v.toLowerCase().trim();
+      if (low.length >= 2 && /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,30}$/u.test(low) && !coins.has(low)) others.add(low);
+    }
+  }
+  return { mask, brag: rug.brag === true, doers: new Set([...RUG_DOERS, ...[...coins].filter((c) => !/\s/u.test(c))]), others: [...others] };
+}
+
+/**
+ * THE RUG CARRIED TO ANOTHER COIN, beside a lifted rug word (review r2): "auton
+ * rugged, pons next", "rugged like pepe lol", "pons too probably", "just like
+ * froggy did". The permit is one measured coin's; a rug word followed by
+ * next, too, also, like, again or follows says a coin nobody measured rugged
+ * or will. Persona kinds only (a quote's fear stays its author's).
+ */
+const RUG_EXTEND = /(?<![\p{L}\p{N}_])rug(?:ged)?(?![\p{L}\p{N}_])[\s\S]*(?<![\p{L}\p{N}_])(?:next|too|also|as\s+well|same\s+as|like|again|either|follow(?:s|ed|ing)?)(?![\p{L}\p{N}_])/u;
+const wholeWordIn = (t: string, w: string): boolean => new RegExp(`(?<![\\p{L}\\p{N}_])${escRug(w).replace(/ /g, "\\s+")}(?![\\p{L}\\p{N}_])`, "u").test(t);
+
+/**
+ * WHO DID THE COLLAPSE, beside a lifted rug word: a subject that dumped,
+ * sold, ran, bailed, jeeted, exited, vanished, ghosted, pulled out, cashed
+ * out or took the money ("auton rugged, kaleo ran", "rugged, dev jeeted
+ * everything"). Only the coin, a pointer at it, its price, chart or
+ * liquidity, the author ("i") or a joining word may be that subject: "auton
+ * dumped hard, rugged" and "it ran then rugged lol" stay, and a trader the
+ * gate cannot know by name is refused (review, 2026-10-09).
+ */
+const RUG_DOER = U(
+  /\b([\p{L}\p{N}_'$]+)\s+(?:(?:just|already|then|literally|basically|totally|has|have|had|prob|probably|def)\s+)*(?:dumped|dumping|dumps|ran|bailed|jeeted|jeeting|jeets|exited|vanished|disappeared|ghosted|cashed\s+out|pulled\s+out|sold|selling|took\s+(?:the|our|all|everyone'?s|their|his|her)\s+(?:money|bags?|funds|liquidity|lp))\b/giu,
+);
+/** What may have dumped or run beside a lifted rug word, beside the permit's own coins. */
+const RUG_DOERS: readonly string[] = [
+  "it", "its", "this", "that", "one", "chart", "coin", "token", "price", "mcap", "mc", "volume", "liquidity", "lp", "pool", "market", "i",
+  "then", "and", "so", "but", "just", "already", "also", "still", "literally", "basically", "totally", "has", "have", "had", "got", "was", "is",
+  "lol", "lmao", "hard", "fully", "finally", "rugged", "rug",
+];
+/** A lifted rug word beside a collapse someone did (RUG_DOER) whose subject is not one of the permit's doers. */
+function collapseDoneBy(t: string, doers: ReadonlySet<string>): boolean {
+  for (const m of t.matchAll(RUG_DOER)) {
+    const who = (m[1] ?? "").replace(/^\$+/u, "").replace(/'s$/u, "");
+    if (!doers.has(who)) return true;
+  }
+  return false;
+}
+const OUT_ACCUSE_U = U(OUT_ACCUSE);
+/**
+ * TELLING THE ROOM TO GET OUT, under a collapse permit (review r2): a clause
+ * that opens (after fillers, or after a bare "lol") with sell, exit, bail,
+ * dump, get out, cut your losses, stay away, avoid, don't touch or steer
+ * clear ("auton rugged, sell whatever's left", "rugged lol, get out while
+ * you can"). The RUGGED block makes it the likeliest follow-up; "i'd stay
+ * away tbh, rugged" (its own view) and "rugged, then dumped" stay.
+ */
+const RUG_EXIT_ADVICE = U(
+  /(?:^|[.!?,;:—–“‘«„"']\s*|\b(?:lol|lmao)\s+)(?:(?:lol|lmao|ngl|tbh|ok|okay|so|yeah|yo|bro|ser|fam|anon|guys|frens|just|pls|please|go|now|better|y'?all|you|u|ya)[\s,]+)*(?:sell|exit|bail|dump|get out|cut (?:your|ur|the|ya) loss(?:es)?|stay (?:away|out|clear)|avoid|don'?t (?:touch|buy|ape|hold)|steer clear)\b/,
+);
+
+/**
+ * A RUG BLAMED ON SOMEONE IN A QUOTE, in any verb (review r2): "auton rugged,
+ * kaleo was behind it", "kaleo orchestrated it", "kaleo planned the whole
+ * thing", "it rugged, hope kaleo burns". The gate cannot know a stranger's
+ * quote's names, so beside a lifted rug word every other clause must open
+ * (after fillers and one article) with what may have collapsed (the
+ * permit's doers: the coin, a pointer, its chart, price or liquidity), a
+ * collective of holders, or the author; a clause with no subject ("then
+ * dumped") is no one's. "Rugged, holders got wrecked" and "this is gonna
+ * rug, top holders own way too much" stay. For the quote kind only.
+ */
+const RUG_COLLECTIVE = ["holders", "holder", "top", "supply", "wallets", "we", "my", "our", "feels", "felt", "looks", "seems", "another", "chart's", "it's", "down", "up", "gonna", "rip", "dumped", "dumping", "ran", "then"];
+const RUG_CLAUSE_SPLIT = /[.!?,;:—–…“”"«»()]+|\s(?:and|but|so|cause|cuz|coz|because|bc|since|then|hope|wish)\s+/u;
+const RUG_CLAUSE_LEAD = new RegExp(`^${RUG_LEAD}(?:(?:the|a|an)\\s+)?`, "u");
+function rugBlamesSomeone(body: string, doers: ReadonlySet<string>): boolean {
+  for (const raw of body.split(RUG_CLAUSE_SPLIT)) {
+    const c = raw.trim().replace(RUG_CLAUSE_LEAD, "");
+    if (!c || RUG_WORD.test(c)) continue;
+    const first = (c.split(/\s+/u)[0] ?? "").replace(/^\$+/u, "");
+    if (first && !doers.has(first) && !RUG_COLLECTIVE.includes(first)) return true;
+  }
+  return false;
+}
+
+/** A reading with every lifted rug word taken out: what RUG_WORD then reads. */
+function rugMasked(t: string, mask: RegExp): string {
+  return t.replace(mask, (m) => m.replace(/(?:rugged|rug)$/u, " "));
+}
 
 /**
  * CLAIMS TO BE HUMAN (rule 6) and a human life it does not have. It is an AI
@@ -1066,6 +1407,8 @@ const SEXUAL_IDIOM = U(/\btit for tat\b/g);
 const SELFHARM: readonly RegExp[] = [
   /\bk[\s.*_-]*y[\s.*_-]*s\b/,
   /\bkill (?:yo)?ur ?self\b|\bkill (?:your|ur) ?selves\b|\bkill yourselves\b/,
+  // Wished on others too (review r2): "holders should kill themselves", "he should kill himself".
+  /\bkill (?:him|her|them|their|my|our) ?sel(?:f|ves)\b/,
   /\bgo die\b|\bdie in a (?:fire|hole|ditch)\b|\b(?:you|u) should (?:just )?die\b/,
   /\bunalive (?:yo)?ur ?self\b|\bunalive (?:your|ur) ?self\b|\bend (?:your|ur) (?:life|self)\b|\bend yourself\b/,
   /\b(?:hang|neck|off|delete|shoot|drown) (?:yo)?urself\b|\bslit (?:your|ur) wrists?\b/,
@@ -1405,15 +1748,81 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
   return [agentName, ...names].map((n) => canonOf(n.replace(/^\s*[@＠]+/u, "")).toLowerCase()).filter((n) => n !== "");
 }
 
+// ── a stranger's words ──────────────────────────────────────────────────────
+
+/**
+ * DIGITS AND SIGNS WRITTEN FOR LETTERS, for the `quote` kind's clauses only
+ * (review r2): "cla1m", "a1rdr0p", "m1grate", "appr0ve", "s33d phrase" and
+ * "snapsh0t" read as the words they spell. Only a digit or sign beside a
+ * letter is read as one ("10x", "3x" and "4h" keep their digits where no
+ * letter touches them, and the figure clauses never read this), and "1" is
+ * read both as "i" and as "l" ("c1aim").
+ */
+const QUOTE_LEET: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "$": "s", "@": "a" };
+const leetOf = (t: string, one: "i" | "l"): string =>
+  t.replace(/(?<=\p{L})[013457$@]+|[013457$@]+(?=\p{L})/gu, (run) => [...run].map((c) => (c === "1" ? one : (QUOTE_LEET[c] ?? c))).join(""));
+const quoteReads = (r: Readings): string[] => uniq([...r.low, ...r.low.map((t) => leetOf(t, "i")), ...r.low.map((t) => leetOf(t, "l"))]);
+/** The quoted words of a quote line ("• kaleo, 3 min ago: “…”"), without the author and age code framed it with. */
+const quoteBody = (t: string): string => {
+  const i = t.indexOf("“");
+  return i >= 0 ? t.slice(i + 1).replace(/”\s*$/u, "") : t;
+};
+/**
+ * A QUOTE IN NO ENGLISH AT ALL (review r2): five words or more, and not one
+ * of them, in any common ending ("holders", "rugged", "pumping"), a BIP-39
+ * word or one of ENGLISH_WORDS. NOT_ENGLISH (a clause) reads the function
+ * words of the common Latin-script languages; this is for the rest ("kupuj
+ * auton teraz, pojdzie na 100x"). Read on the quoted words only, never the
+ * author and age code framed them with, and only when every reading agrees.
+ */
+let englishWords: ReadonlySet<string> | null = null;
+function noEnglishWord(body: string): boolean {
+  const known = (englishWords ??= new Set([...BIP39_ENGLISH.join(" ").split(" "), ...ENGLISH_WORDS]));
+  const words = body.toLowerCase().replace(APOSTROPHES, "'").split(/[^\p{L}\p{N}']+/u).filter((w) => /\p{L}/u.test(w));
+  if (words.length < 5) return false;
+  const stems = (w: string): string[] => [w, w.replace(/'s$/u, ""), w.replace(/s$/u, ""), w.replace(/es$/u, ""), w.replace(/ed$/u, ""), w.replace(/d$/u, ""), w.replace(/ing$/u, ""), w.replace(/ing$/u, "e"), w.replace(/ly$/u, ""), w.replace(/ie[sd]$/u, "y")];
+  return !words.some((w) => stems(w).some((x) => known.has(x)));
+}
+/** Whether a quote's text is in no English at all, as the gate's quote kind reads it (the port's quoteOf leaves it out too). */
+export function quoteNotEnglish(text: string): boolean {
+  const r = readingsOf(typeof text === "string" ? text : "");
+  return r.low.length > 0 && r.low.every((t) => noEnglishWord(quoteBody(t)));
+}
+/** A quote's lowercased readings with its digits read as letters, for a caller with clauses of its own (the port's quoteOf). */
+export function tgQuoteLeetReadings(text: string): string[] {
+  return quoteReads(readingsOf(typeof text === "string" ? text : ""));
+}
+
+/**
+ * THE `quote` KIND'S OWN CLAUSES (third-party.ts), read after the markup
+ * clause and before every common one, each with the reason it is logged as.
+ * The sample cleaner and the port's quote filter drop the same rows first;
+ * this is the backstop if either regresses.
+ */
+const QUOTE_CLAUSES: ReadonlyArray<[readonly RegExp[], (r: Readings) => readonly string[], string]> = [
+  [[INJECTION_SHAPED, AT_THE_READER, LURE, OUT_LURE, OUT_HANDOUT].map(U).concat([SEND_FOR, CTA_PLACEHOLDER, POST_RUG_LURE, CONTACT_LURE]), quoteReads, "lure"],
+  [[U(SPELLED_DOMAIN), SPELLED_LINK], quoteReads, "link"],
+  [[U(ABOUT_MERRYMEN)], (r) => r.low, "meta"],
+  [[NON_LATIN], (r) => r.cased, "script"],
+  [[NOT_ENGLISH], (r) => r.low, "script"],
+  [[U(SECOND_PERSON)], (r) => r.low, "at-the-reader"],
+  [[QUOTE_TARGET], (r) => r.low, "advice"],
+  [[U(OUT_ACCUSE), RUG_CONTEXT_ACCUSE, PERSON_HARM], quoteReads, "accuse"],
+  [[PRIVATE_THIRD], quoteReads, "private"],
+  [QUOTE_HARM, (r) => r.low, "threat"],
+];
+
 // ── the gate ────────────────────────────────────────────────────────────────
 
 /**
  * MAY THE AGENT SAY THIS IN A GROUP? `ok` carries the exact text to send.
  *
  * Reason codes (stable, log-only): empty · pass · hidden-chars · meta · dodge ·
- * too-long · secret · address · link · handle · cashtag · hateful · selfharm · threat ·
- * sexual · profanity · appearance · money · figures · alert · advice · claim · accuse ·
- * private · ops · human · emoji · paper-unsaid · repeat.
+ * too-long · secret · address · link · handle · cashtag · lure · script ·
+ * at-the-reader · hateful · selfharm · threat · sexual · profanity · appearance ·
+ * money · figures · alert · advice · claim · progress · accuse · private · ops ·
+ * human · emoji · paper-unsaid · repeat. (lure, script and at-the-reader are the
+ * `quote` kind's own; a quote's link, meta, advice and accuse may be too.)
  *
  * Ordered so the reason names the most specific and most serious fault: a
  * secret before an address (a key is also hex), a slur before a word list.
@@ -1447,6 +1856,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (r.cased.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t)) || r.joined.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t))) {
     return refuse("address");
   }
+  if (kind === "quote" && Math.max(0, ...r.cased.map(encodedCharsOf)) >= QUOTE_ENCODED_MAX) return refuse("address");
   if (r.cased.some((t) => LINK_SHAPES.some((re) => re.test(t))) || r.joined.some((t) => LINK_SHAPES.some((re) => re.test(t)))) return refuse("link");
   if (some(r.cased, HANDLE)) return refuse("handle");
   // A line about a coin says no cashtag at all; any other says only a
@@ -1454,14 +1864,24 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   const tagNames = kind === null || FIGURE_KINDS.has(kind) ? [] : Array.isArray(ctx?.cashtagNames) ? strings(ctx.cashtagNames) : names;
   if (cashtagRefusal([...r.cased, ...r.low], tagNames)) return refuse("cashtag");
   if (markupRefusal(r, lowNames(agentName, names))) return refuse("meta");
+  // A STRANGER'S WORDS (the `quote` kind): never a lure, a link spelled out,
+  // Merrymen, another script, a line at the reader, a target or an accusation.
+  if (kind === "quote") {
+    const quoteRefusal = QUOTE_CLAUSES.find(([res, readings]) => res.some((re) => some(readings(r), re)));
+    if (quoteRefusal) return refuse(quoteRefusal[2]);
+    if (r.low.every((t) => noEnglishWord(quoteBody(t)))) return refuse("script");
+  }
 
-  // The worst first: hate, harm, threats, sex — then looks.
+  // The worst first: hate, harm, threats, sex — then looks. A stranger's
+  // quote is read with its digits as letters too ("d1ck", "p0rn", "s3x",
+  // "h0neypot"; review r2): the persona's own lines keep the readings they had.
+  const vocab = kind === "quote" ? quoteReads(r) : r.low;
   if (hasSlur(tidied) || r.low.some(traitAttack)) return refuse("hateful");
   if ((kind === null || TEASE_KINDS.has(kind)) && some(r.low, GO_BACK_TO)) return refuse("hateful");
-  if (r.low.some((t) => SELFHARM.some((re) => re.test(t)))) return refuse("selfharm");
-  if (r.low.some((t) => THREAT.some((re) => re.test(t.replace(THREAT_IDIOM, " "))))) return refuse("threat");
-  if (r.low.some((t) => SEXUAL.test(t.replace(SEXUAL_IDIOM, " ")))) return refuse("sexual");
-  if (some(r.low, PROFANITY)) return refuse("profanity");
+  if (vocab.some((t) => SELFHARM.some((re) => re.test(t)))) return refuse("selfharm");
+  if (vocab.some((t) => THREAT.some((re) => re.test(t.replace(THREAT_IDIOM, " "))))) return refuse("threat");
+  if (vocab.some((t) => SEXUAL.test(t.replace(SEXUAL_IDIOM, " ")))) return refuse("sexual");
+  if (some(vocab, PROFANITY)) return refuse("profanity");
   if ((kind === null || TEASE_KINDS.has(kind)) && r.low.some((t) => APPEARANCE.some((re) => re.test(t.replace(APPEARANCE_IDIOM, " "))))) {
     return refuse("appearance");
   }
@@ -1469,16 +1889,37 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   // NAMES OUT for the figure, money and ops clauses only (see nameStripper).
   const strip = nameStripper(agentName, names);
   const unnamed = strip ? r.low.map((t) => t.replace(strip, " ")) : r.low;
-  if (unnamed.some((t) => MONEY.some((re) => re.test(t)))) return refuse("money");
-  if (kind === null || FIGURE_KINDS.has(kind)) {
+  // THE COLLAPSE PERMIT (TgGateCtx.rug), for the kinds that read it.
+  const rug = rugPermitOf(ctx, kind, agentName, names);
+  if (!(kind !== null && MONEY_FREE_KINDS.has(kind)) && unnamed.some((t) => MONEY.some((re) => re.test(t)))) return refuse("money");
+  if (kind === null || FIGURE_KINDS.has(kind) || (rug !== null && RUG_FIGURE_KINDS.has(kind))) {
     if (unnamed.some((t) => NUMERAL.test(t) || QUANTITY.test(t) || CJK_NUMERAL.test(t))) return refuse("figures");
   }
 
   if (r.low.some((t) => ALERT.some((re) => re.test(t))) || some(r.cased, ALERT_CAPS) || ALERT_EMOJI.test(r.shown)) return refuse("alert");
   if (r.low.some((t) => ADVICE.some((re) => re.test(t)))) return refuse("advice");
+  // Merrymen as a play beside a rugged coin ("buy merrymen instead"): advice, never a brag.
+  if (rug && some(r.low, MERRY_SHILL)) return refuse("advice");
+  if (rug && kind !== "quote" && some(r.low, RUG_EXIT_ADVICE)) return refuse("advice");
   if ((kind === null || FIGURE_KINDS.has(kind)) && r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
   if ((kind === null || CLAIM_KINDS.has(kind)) && r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
-  if (r.low.some((t) => ACCUSE.some((re) => re.test(t)))) return refuse("accuse");
+  if ((kind === null || PROGRESS_KINDS.has(kind)) && r.low.some((t) => PROGRESS.some((re) => re.test(t.replace(PROGRESS_IDIOM, " "))))) return refuse("progress");
+  if (vocab.some((t) => ACCUSE_HARD.some((re) => re.test(t)))) return refuse("accuse");
+  if (r.low.some((t) => RUG_WORD.test(rug ? rugMasked(t, rug.mask) : t))) return refuse("accuse");
+  if (rug && some(r.low, RUG_CONTEXT_ACCUSE)) return refuse("accuse");
+  // A rug word the permit lifted, beside a person (a dev, a whale, someone
+  // thanked, anyone in the room or the agent itself): the rug laid at their door.
+  if (rug && r.low.some((t) => RUG_WORD.test(t)) && (some(r.low, PERSON_BESIDE_RUG) || (strip !== null && r.low.some((t) => t !== t.replace(strip, " "))))) {
+    return refuse("accuse");
+  }
+  // Under a permit, a crime laid at anyone's door ("the dev is a crook"), and
+  // a collapse someone did beside a lifted rug word ("auton rugged, kaleo ran").
+  if (rug && some(r.low, OUT_ACCUSE_U)) return refuse("accuse");
+  if (rug && r.low.some((t) => RUG_WORD.test(t)) && r.low.some((t) => collapseDoneBy(t, rug.doers))) return refuse("accuse");
+  if (rug && kind === "quote" && r.low.some((t) => RUG_WORD.test(t) && rugBlamesSomeone(quoteBody(t), rug.doers))) return refuse("accuse");
+  // The rug carried to another coin: "pons next", "rugged like pepe", or another coin the room knows named beside it.
+  if (rug && kind !== "quote" && r.low.some((t) => RUG_WORD.test(t) && RUG_EXTEND.test(t))) return refuse("accuse");
+  if (rug && r.low.some((t) => RUG_WORD.test(t)) && rug.others.some((o) => r.low.some((t) => wholeWordIn(t, o)))) return refuse("accuse");
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
   if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");
@@ -1492,13 +1933,16 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (paper === true && some(r.low, SAYS_REAL_MONEY)) return refuse("paper-unsaid");
   if (paper === false && r.low.some(claimsPaper)) return refuse("paper-unsaid");
 
+  // NO BRAG BACK TO BACK: with the permit's brag spent, a Merrymen mention waits.
+  if (rug && !rug.brag && some(r.low, kind === "quote" ? MERRY_BRAG : SPENT_BRAG)) return refuse("repeat");
+
   // NEVER ITS OWN SENTENCE AGAIN. similarity() reads a-z content words, so a
   // short line with none ("ok ok 🤐") is never a repeat. A line in another
   // script has no a-z words for it to read, so three words or more said again
   // word for word are a repeat. "lol" after "lol" is one: a person does not
   // send the same "lol" twice running, and pacing decides which of its own
   // lines the caller hands in.
-  if (kind !== "fixed") {
+  if (kind === null || !CODE_KINDS.has(kind)) {
     const mine = canonOf(tidied).toLowerCase();
     for (const prev of strings(ctx?.recentOwn)) {
       const was = canonOf(prev).toLowerCase();
@@ -1718,7 +2162,7 @@ export function admitDeskText(raw: unknown, ctx: TgDeskGateCtx): TgVerdict {
   if (r.low.some((t) => ADVICE.some((re) => re.test(t)))) return refuse("advice");
   if (r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
   if (r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
-  if (r.low.some((t) => ACCUSE.some((re) => re.test(t)))) return refuse("accuse");
+  if (r.low.some((t) => ACCUSE_HARD.some((re) => re.test(t)) || RUG_WORD.test(t))) return refuse("accuse");
   if (r.low.some((t) => PRIVATE_OWN.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))) || DESK_OWN_BOOK.test(t))) return refuse("private");
   if (r.low.some((t) => DESK_OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
   if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -33,6 +33,38 @@ test("real durable handoff requires current scope/writer proof, preserves financ
  await handoffRecoveryReplyOffset(o);assert.equal(JSON.parse(readFileSync(file,"utf8")).offset,101);assert.equal(readFileSync(book,"utf8"),"original nonce/basis/risk/source");
  const before=readFileSync(file);await assert.rejects(handoffRecoveryReplyOffset({...o,mayWrite:()=>false}));await assert.rejects(handoffRecoveryReplyOffset({...o,smartAccount:`0x${"3".repeat(40)}`}));assert.deepEqual(readFileSync(file),before);
  rmSync(file);symlinkSync(book,file);await assert.rejects(handoffRecoveryReplyOffset(o));assert.equal(readFileSync(book,"utf8"),"original nonce/basis/risk/source");
+});
+test("every refusal names its check by a fixed code, never a value, and the text is the same for all",async t=>{
+ const code=(fn:()=>unknown)=>{try{fn();}catch(e){assert.equal((e as Error).message,"Reply poll handoff refused; original holds remain intact.");return (e as {code?:string}).code;}return "accepted";};
+ assert.equal(code(()=>mergeRecoveryReplyOffset(null,"801",1)),"HANDOFF_SHAPE");
+ assert.equal(code(()=>mergeRecoveryReplyOffset([],"801",1)),"HANDOFF_SHAPE");
+ assert.equal(code(()=>mergeRecoveryReplyOffset({offset:1},"801",-1)),"HANDOFF_ROW");
+ // A missing offset is refused whoever wrote it: among them the orchestrator's restored link as it was before it wrote `offset: 0` (restoredTelegramFile).
+ assert.equal(code(()=>mergeRecoveryReplyOffset({linkCode:"K7M2QX",ownerId:7,linkedAt:5},"801",1)),"HANDOFF_OFFSET");
+ assert.equal(code(()=>mergeRecoveryReplyOffset({offset:null},"801",1)),"HANDOFF_OFFSET");
+ assert.equal(code(()=>mergeRecoveryReplyOffset({offset:1.5},"801",1)),"HANDOFF_OFFSET");
+ assert.equal(code(()=>mergeRecoveryReplyOffset({offset:0,botId:801},"801",1)),"HANDOFF_BOT");
+ assert.equal(code(()=>mergeRecoveryReplyOffset({offset:0,botId:"802",priorBots:{}},"801",1)),"HANDOFF_PRIOR_BOTS");
+ assert.equal(code(()=>mergeRecoveryReplyOffset({offset:0,botId:"802",priorBots:[{botId:"801",offset:-1}]},"801",1)),"HANDOFF_PRIOR_BOTS");
+ assert.equal(code(()=>mergeRecoveryReplyOffset({offset:0,botId:"802",priorBots:[{botId:"9",offset:1},{botId:"9",offset:2}]},"801",1)),"HANDOFF_PRIOR_BOTS");
+ const f=fixture(t),file=path.join(f.home,"telegram.json");
+ f.raw.prepare("INSERT INTO recovery_reply_offsets VALUES(?,?,?,?,?,200,101,100,1000)").run("801",tenant,smartAccount,4663,"a".repeat(16));
+ const o={tenant,smartAccount,chainId:4663,token:"801:rotated_fixture",home:f.home,shared:f.shared,mayWrite:()=>true};
+ const handoff=async(over:Partial<typeof o>={})=>{try{await handoffRecoveryReplyOffset({...o,...over});return "accepted";}catch(e){assert.equal((e as Error).message,"Reply poll handoff refused; original holds remain intact.");return (e as {code?:string}).code;}};
+ const put=(body:string,mode=0o600)=>{rmSync(file,{recursive:true,force:true});writeFileSync(file,body);chmodSync(file,mode);};
+ assert.equal(await handoff({mayWrite:()=>false}),"HANDOFF_WRITER");
+ assert.equal(await handoff({token:"not-a-token"}),"HANDOFF_TOKEN");
+ assert.equal(await handoff({smartAccount:`0x${"3".repeat(40)}`}),"HANDOFF_ROW");
+ put(JSON.stringify({offset:10,botId:"801"}),0o644);assert.equal(await handoff(),"HANDOFF_MODE");
+ put(JSON.stringify({offset:10,botId:"801"}));linkSync(file,path.join(f.home,"second-name"));assert.equal(await handoff(),"HANDOFF_LINKS");rmSync(path.join(f.home,"second-name"));
+ rmSync(file);writeFileSync(path.join(f.home,"elsewhere.json"),JSON.stringify({offset:10}),{mode:0o600});symlinkSync(path.join(f.home,"elsewhere.json"),file);assert.equal(await handoff(),"HANDOFF_SYMLINK");
+ rmSync(file);mkdirSync(file);assert.equal(await handoff(),"HANDOFF_NOT_FILE");
+ put(" ".repeat(256*1024+1));assert.equal(await handoff(),"HANDOFF_SIZE");
+ put("{not json");assert.equal(await handoff(),"HANDOFF_PARSE");
+ put(String.fromCharCode(0xfeff)+JSON.stringify({offset:10,botId:"801"}));assert.equal(await handoff(),"HANDOFF_PARSE");
+ put(JSON.stringify({linkCode:"K7M2QX",ownerId:7}));assert.equal(await handoff(),"HANDOFF_OFFSET");
+ put(JSON.stringify({offset:10,botId:801}));assert.equal(await handoff(),"HANDOFF_BOT");
+ put(JSON.stringify({offset:10,botId:"801"}));assert.equal(await handoff(),"accepted");assert.equal(JSON.parse(readFileSync(file,"utf8")).offset,101);
 });
 test("retained group privacy blocks local reads, transforms future publish/import and preserves execution claims/budgets",async t=>{
  const f=fixture(t),state=group(),text=JSON.stringify(state),file=path.join(f.home,"tg-groups.json"),seen=new Map<string,string>();writeFileSync(file,text,{mode:0o600});

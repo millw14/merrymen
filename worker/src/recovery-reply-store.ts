@@ -28,27 +28,121 @@ const GRANTS = `SELECT tenant,chain_id,updated_at,grant_json->>'smartAccount' AS
  grant_json#>>'{replacementStop,sessionKeyAddress}' AS stop_session,grant_json#>>'{replacementStop,stoppedAt}' AS stop_at,
  COALESCE(grant_json#>>'{replacementStop,sessionKeyHash}' ~ '^[0-9a-f]{64}$',false) AS stop_hash_valid,
  xmin::text||':'||ctid::text||':'||encode(sha256(convert_to(grant_json::text,'UTF8')),'hex') AS incarnation FROM grants`;
+/** At most this many grant rows. More is not a roster this listener was reviewed for. */
+export const REPLY_ROSTER_CAP = 256;
+/** One row, fully validated, or a refusal. The receipt is the whole projected row, incarnation included. */
+function rosterGrant(r: Record<string, unknown>): ReplyGrant {
+    const chainId = integer(r.chain_id), granted = integer(r.granted), expires = integer(r.expires);
+    if (typeof r.tenant !== "string" || !ADDRESS.test(r.tenant) || r.tenant !== r.tenant.toLowerCase()
+        || typeof r.account !== "string" || !ADDRESS.test(r.account) || typeof r.owner !== "string" || !ADDRESS.test(r.owner)
+        || typeof r.session !== "string" || !ADDRESS.test(r.session) || chainId <= 0 || chainId > 2147483647
+        || integer(r.grant_chain) !== chainId || granted <= 0 || integer(r.updated_at) <= 0 || (expires !== 0 && expires <= granted)
+        || (expires === 0 && (typeof r.stop_session !== "string" || !ADDRESS.test(r.stop_session) || integer(r.stop_at) <= 0 || r.stop_hash_valid !== true))
+        || typeof r.incarnation !== "string" || !/^[0-9]+:\([0-9]+,[0-9]+\):[0-9a-f]{64}$/.test(r.incarnation))
+        throw recoveryReplyRefused();
+    return { tenant: r.tenant as `0x${string}`, account: r.account.toLowerCase(), chainId, receipt: JSON.stringify(r) };
+}
+/** Strict: any malformed or ambiguous row refuses the whole read (coverage and other all-or-nothing callers). */
 export async function readReplyRoster(db: ReplyQuery): Promise<ReplyGrant[]> {
-    const { rows } = await db.query(`${GRANTS} ORDER BY tenant LIMIT 257`);
-    if (rows.length > 256)
+    const { rows } = await db.query(`${GRANTS} ORDER BY tenant LIMIT ${REPLY_ROSTER_CAP + 1}`);
+    if (rows.length > REPLY_ROSTER_CAP)
         throw recoveryReplyRefused();
     const tenants = new Set<string>(), accounts = new Set<string>();
     return rows.map(r => {
-        const chainId = integer(r.chain_id), granted = integer(r.granted), expires = integer(r.expires);
-        if (typeof r.tenant !== "string" || !ADDRESS.test(r.tenant) || r.tenant !== r.tenant.toLowerCase()
-            || typeof r.account !== "string" || !ADDRESS.test(r.account) || typeof r.owner !== "string" || !ADDRESS.test(r.owner)
-            || typeof r.session !== "string" || !ADDRESS.test(r.session) || chainId <= 0 || chainId > 2147483647
-            || integer(r.grant_chain) !== chainId || granted <= 0 || integer(r.updated_at) <= 0 || (expires !== 0 && expires <= granted)
-            || (expires === 0 && (typeof r.stop_session !== "string" || !ADDRESS.test(r.stop_session) || integer(r.stop_at) <= 0 || r.stop_hash_valid !== true))
-            || typeof r.incarnation !== "string" || !/^[0-9]+:\([0-9]+,[0-9]+\):[0-9a-f]{64}$/.test(r.incarnation))
+        const grant = rosterGrant(r);
+        if (tenants.has(grant.tenant) || accounts.has(grant.account))
             throw recoveryReplyRefused();
-        const account = r.account.toLowerCase();
-        if (tenants.has(r.tenant) || accounts.has(account))
-            throw recoveryReplyRefused();
-        tenants.add(r.tenant);
-        accounts.add(account);
-        return { tenant: r.tenant as `0x${string}`, account, chainId, receipt: JSON.stringify(r) };
+        tenants.add(grant.tenant);
+        accounts.add(grant.account);
+        return grant;
     });
+}
+/** The roster read cannot be trusted at all: more rows than the cap. Fleet-wide, by design. */
+export class ReplyRosterCapExceeded extends Error {
+    constructor() {
+        super(recoveryReplyRefused().message);
+        this.name = "ReplyRosterCapExceeded";
+    }
+}
+/**
+ * THE SAME ROSTER, READ ROW BY ROW, for the listener's supervisor.
+ *
+ * readReplyRoster above refuses everything when one row is wrong, and the
+ * listener used to inherit that: one tenant's half-written grant stopped every
+ * bot. Here a row that does not validate costs only its own tenant:
+ *
+ *   - `tenants` is every row whose tenant column is itself an address, in
+ *     its lowercase form — the FENCE. The listener holds the tenant lease of
+ *     each, malformed grant or not, so an ordinary worker can never arm a
+ *     tenant beside it just because that tenant's row was unreadable. A
+ *     checksummed (mixed-case) tenant column is fenced too: the lease key is
+ *     computed from the lowercase address (PgTenantLeaseManager.acquire), so
+ *     it is the same lease an ordinary worker would take.
+ *   - `grants` are the rows that validate AND are unambiguous: the only
+ *     tenants an actor may be admitted for.
+ *   - `skipped` are fenced tenants with a malformed row (a mixed-case tenant
+ *     column included: the strict read refuses it, so it is never served),
+ *     two rows for one tenant, or two rows that claim one smart account
+ *     (both are skipped: neither may answer for it).
+ *   - `unnamed` counts rows whose tenant column is not an address at all;
+ *     there is nothing to fence or to name in a log for those.
+ *
+ * Only a failed query or more than REPLY_ROSTER_CAP rows throws.
+ */
+export interface ReplyRosterScan {
+    tenants: `0x${string}`[];
+    grants: ReplyGrant[];
+    skipped: `0x${string}`[];
+    unnamed: number;
+}
+export async function scanReplyRoster(db: ReplyQuery): Promise<ReplyRosterScan> {
+    const { rows } = await db.query(`${GRANTS} ORDER BY tenant LIMIT ${REPLY_ROSTER_CAP + 1}`);
+    if (rows.length > REPLY_ROSTER_CAP)
+        throw new ReplyRosterCapExceeded();
+    const tenants = new Set<`0x${string}`>(), bad = new Set<string>(), byAccount = new Map<string, string[]>(), valid: ReplyGrant[] = [];
+    let unnamed = 0;
+    for (const r of rows) {
+        if (typeof r.tenant !== "string" || !ADDRESS.test(r.tenant)) {
+            unnamed++;
+            continue;
+        }
+        const tenant = r.tenant.toLowerCase() as `0x${string}`;
+        if (tenants.has(tenant) || r.tenant !== tenant)
+            bad.add(tenant);
+        tenants.add(tenant);
+        let grant: ReplyGrant;
+        try {
+            grant = rosterGrant(r);
+        }
+        catch {
+            bad.add(tenant);
+            continue;
+        }
+        valid.push(grant);
+        byAccount.set(grant.account, [...(byAccount.get(grant.account) ?? []), tenant]);
+    }
+    for (const owners of byAccount.values())
+        if (owners.length > 1)
+            for (const t of owners)
+                bad.add(t);
+    return {
+        tenants: [...tenants],
+        grants: valid.filter(g => !bad.has(g.tenant)),
+        skipped: [...tenants].filter(t => bad.has(t)),
+        unnamed,
+    };
+}
+/**
+ * THE TENANT'S OWN GRANT ROW CHANGED (or went away) since its receipt was
+ * taken, or another row now claims its smart account. The same message as
+ * every refusal — the type only lets the listener log `roster-changed` for
+ * this tenant instead of guessing.
+ */
+export class ReplyGrantChanged extends Error {
+    constructor() {
+        super(recoveryReplyRefused().message);
+        this.name = "ReplyGrantChanged";
+    }
 }
 export interface ReplySnapshot {
     grant: ReplyGrant;
@@ -66,9 +160,16 @@ export interface ReplySnapshot {
 /** Returns null for explicitly unavailable scope. Corrupt/unknown reads refuse. */
 export async function readReplySnapshot(db: ReplyQuery, grant: ReplyGrant, dek: Buffer, lock = false): Promise<ReplySnapshot | null> {
     const suffix = lock ? " FOR SHARE NOWAIT" : "";
-    const current = await db.query(`${GRANTS} WHERE tenant=$1${suffix}`, [grant.tenant]);
+    // THIS tenant's grant row, plus any OTHER row that claims the same smart
+    // account. An unrelated tenant's write never matches, so it never reaches
+    // here (the 2026-10-05 trigger); a second row claiming this account is
+    // exactly the ambiguity the roster refuses, and finding it here, before
+    // every operation, stops this actor at once instead of at the
+    // supervisor's next pass. The account test reads at most the roster's 256
+    // rows, far less than the whole-roster receipt it replaces.
+    const current = await db.query(`${GRANTS} WHERE tenant=$1 OR lower(grant_json->>'smartAccount')=$2${suffix}`, [grant.tenant, grant.account]);
     if (current.rows.length !== 1 || JSON.stringify(current.rows[0]) !== grant.receipt)
-        throw recoveryReplyRefused();
+        throw new ReplyGrantChanged();
     const settings = await db.query(`SELECT sealed,xmin::text||':'||ctid::text AS incarnation FROM tenant_settings WHERE tenant=$1${suffix}`, [grant.tenant]);
     if (!settings.rows.length)
         return null;

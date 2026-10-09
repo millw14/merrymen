@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, brainNoDecisionNote, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchScreenReason, trenchBrainSignals, trenchHeat, TRENCH_H1_VOLUME_MIN, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
@@ -12,6 +12,7 @@ import { applyFill, ZERO_BASIS } from "./basis";
 import { checkPolicy, type AgentLimits } from "./policy";
 import { CASH } from "../../packages/core/src/index";
 import { NominationBook } from "./trencher-nominate";
+import { EARLY_PAGES_MAX, earlyScreenReason } from "./early-candidates";
 
 const TOKEN = "0x0000000000000000000000000000000000000011" as const;
 const USDG = "0x0000000000000000000000000000000000000022" as const;
@@ -73,7 +74,9 @@ test("Brain receives short-window momentum and depth in dollars without fabricat
   assert.equal(social.windows.m5.buys, 10);
   assert.equal(social.windows.m5.sellers, 8);
   assert.equal(liquidity.onchainRouteDepthUsd, 250_000);
-  assert.equal(liquidity.maxEntryAsPercentOfRouteDepth, .002);
+  // A $2.50 fast entry against $250,000 of route depth.
+  assert.equal(liquidity.maxEntryUsd, 2.5);
+  assert.equal(liquidity.maxEntryAsPercentOfRouteDepth, .001);
   for (const depth of [null, NaN, Infinity, -1]) {
     const l = JSON.parse(trenchBrainSignals(p, 120_000, depth).liquidity);
     assert.equal(l.onchainRouteDepthUsd, null);
@@ -89,8 +92,10 @@ test("discovery includes later pages, deduplicates pools and survives partial ou
     if (opts?.page === 3) throw new Error("page unavailable");
     return { failed: false, pools: opts?.page === 2 ? [later] : [pool()] };
   });
-  assert.equal(calls.length, 6);
-  assert.equal(new Set(calls).size, 6);
+  // Three pages of two lists, and the first page of new pools.
+  assert.equal(calls.length, 7);
+  assert.equal(new Set(calls).size, 7);
+  assert.ok(calls.includes("new_pools:1"));
   assert.equal(tape.length, 2);
   assert.ok(tape.some(p => p.tokenAddress === ROUTER));
   await assert.rejects(fetchTrenchTape(async () => ({ failed: true, pools: [] })), /All Trencher/);
@@ -122,6 +127,26 @@ test("volume screening rejects missing, thin, inactive and one-sided tape; ranks
   assert.equal(highVolumePools([pool({ volume24hUsd: null }), pool({ volume24hUsd: 99_999 }), pool({ buyers24h: 19 }), pool({ sells24h: 0 }), pool({ buckets: emptyGeckoBuckets() })]).length, 0);
   const ranked = highVolumePools([pool(), pool({ volume24hUsd: 300_000 }), pool({ tokenAddress: ROUTER, volume24hUsd: 400_000 })]);
   assert.deepEqual(ranked.map(p => p.volume24hUsd), [400_000, 300_000]);
+});
+
+test("the hottest coin NOW ranks first, not yesterday's busiest", () => {
+  const h1 = (volumeUsd: number | null, changePct: number | null) => ({ changePct, volumeUsd, buys: 5, sells: 5, buyers: 5, sellers: 5 });
+  const steady = pool({ volume24hUsd: 5_000_000, buckets: { ...pool().buckets, h1: h1(100_000, 0.5) } });
+  const hot = pool({ tokenAddress: ROUTER, volume24hUsd: 400_000, buckets: { ...pool().buckets, h1: h1(150_000, 40) } });
+  assert.deepEqual(highVolumePools([steady, hot]).map(p => p.tokenAddress), [ROUTER, TOKEN]);
+  // Movement doubles at most, either way: a fall heats a coin as a rise does.
+  assert.equal(trenchHeat(pool({ buckets: { ...pool().buckets, h1: h1(10_000, -250) } })), 20_000);
+  // No hourly figure is ranked off the day spread evenly, never off zero.
+  assert.equal(trenchHeat(pool({ volume24hUsd: 240_000 })), 10_000);
+});
+
+test("a coin hours old clears the volume screen on its last hour", () => {
+  const young = (v: number) => pool({ volume24hUsd: 60_000, buckets: { ...pool().buckets, h1: { changePct: 5, volumeUsd: v, buys: 5, sells: 5, buyers: 5, sellers: 5 } } });
+  assert.equal(trenchScreenReason(young(TRENCH_H1_VOLUME_MIN)), null);
+  assert.equal(trenchScreenReason(young(TRENCH_H1_VOLUME_MIN - 1)), "volume-below-min");
+  // Every other rule still applies to it.
+  assert.equal(trenchScreenReason({ ...young(TRENCH_H1_VOLUME_MIN), buyers24h: 19 }), "buyers-below-min");
+  assert.equal(trenchScreenReason({ ...young(TRENCH_H1_VOLUME_MIN), sells24h: 0 }), "no-sells-24h");
 });
 
 test("cash and wrapped native assets cannot enter the memecoin universe even with qualifying volume", () => {
@@ -425,7 +450,7 @@ test("a nominated coin's own page rides the tape: read with it, screened like it
   const failures = await reader.refreshNominated();
   assert.deepEqual(failures, []);
   assert.deepEqual(tokenReads.sort(), [NOMINATED, ROUTER.toLowerCase()].sort());
-  assert.equal(feedReads, 6, "a nomination's own refresh does not re-read the six feed pages");
+  assert.equal(feedReads, 7, "a nomination's own refresh does not re-read the seven feed pages");
   const snap = reader.snapshot();
   assert.deepEqual(snap.pools.map(p => p.tokenAddress), [NOMINATED], "the quiet nominated coin fails highVolumePools like any tape row");
 
@@ -483,4 +508,168 @@ test("at most NOMINATED_PAGES_MAX nominated pages are ever read", async () => {
   reader.setNominated(Array.from({ length: NOMINATED_PAGES_MAX + 3 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`));
   await reader.refreshNominated();
   assert.equal(reads.length, NOMINATED_PAGES_MAX);
+});
+
+test("the tape screen, named: highVolumePools keeps exactly the pools trenchScreenReason passes", () => {
+  const variants: Partial<GeckoPool>[] = [
+    {}, { volume24hUsd: 99_999 }, { volume24hUsd: 100_000 }, { volume24hUsd: null }, { volume24hUsd: Number.NaN },
+    { buyers24h: 19 }, { buyers24h: null }, { buys24h: 0 }, { sells24h: 0 }, { sells24h: null },
+    { buckets: emptyGeckoBuckets() }, { tokenAddress: USDG }, { tokenAddress: CASH.USDG.toLowerCase() as `0x${string}` },
+  ];
+  const pools = variants.map((over, i) => pool({ poolId: `p${i}`, poolAddress: `0x${(i + 1).toString(16).padStart(40, "0")}` as `0x${string}`, dex: "d", ...over }));
+  const kept = new Set(highVolumePools(pools, true).map(p => p.poolId));
+  for (const p of pools) assert.equal(kept.has(p.poolId), trenchScreenReason(p) === null, p.poolId);
+  assert.equal(trenchScreenReason(pool({ volume24hUsd: 99_999 })), "volume-below-min");
+  assert.equal(trenchScreenReason(pool({ buckets: emptyGeckoBuckets() })), "no-m5-volume");
+});
+
+test("screenedOut names coins the screen dropped — never one with a passing pool", async () => {
+  const quiet = "0x00000000000000000000000000000000000000c1" as const;
+  const reader = new TrenchTapeReader(async (feed, opts) => feed === "pools" && opts?.page === 1
+    ? { failed: false, pools: [
+        pool(), pool({ poolAddress: ROUTER, volume24hUsd: 5 }), // TOKEN: one pool passes, so not screened out
+        pool({ tokenAddress: quiet, poolAddress: quiet, volume24hUsd: 50_000 }),
+        pool({ tokenAddress: quiet, poolAddress: AGENT as `0x${string}`, volume24hUsd: 90_000, buyers24h: 3 }),
+      ] }
+    : { failed: false, pools: [] }, () => 1000);
+  await reader.refresh();
+  assert.deepEqual(reader.screenedOut(), [{ tokenAddress: quiet, reason: "volume-below-min" }], "the busiest failing pool's reason");
+  assert.equal(reader.snapshot().pools.length, 1, "and the snapshot is what it always was");
+});
+
+test("a refusal is not called an outage: the gate refusing on book quality says so", async () => {
+  const refused = (reason: string) => ({ ok: false, kind: "refused", reason, detail: "", cost: { model_calls: 0, tokens_in: 0, tokens_out: 0, usd: 0 } }) as const;
+  const quality = brainNoDecisionNote("MEME", refused("portfolio-quality-insufficient"));
+  assert.doesNotMatch(quality, /unavailable/i);
+  assert.match(quality, /portfolio gate refused on book quality \(portfolio-quality-insufficient\)/);
+  assert.match(brainNoDecisionNote("MEME", refused("budget-exhausted")), /model budget ran out/);
+  assert.match(brainNoDecisionNote("MEME", refused("<script>")), /unrecognised-reason/, "service text is not repeated");
+  assert.match(brainNoDecisionNote("MEME", { ok: false, kind: "unreachable", detail: "x" }), /^Brain unavailable: unreachable/);
+  // And through launch, which is where the line is written.
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("paper");
+  const notes: string[] = [];
+  review.launch("paper", input, TOKEN, async () => ({ ran: true, result: refused("portfolio-quality-insufficient") }) as unknown as ShadowOutcome, n => notes.push(n));
+  await setImmediate();
+  assert.equal(notes.length, 1);
+  assert.doesNotMatch(notes[0]!, /Brain unavailable/);
+});
+
+test("onReviewed hears each completed review with held and stale flags, and cannot break it", async () => {
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("paper");
+  const seen: { token: string; symbol: string; held: boolean; priceStale: boolean }[] = [];
+  review.onReviewed = ({ token, symbol, held, priceStale }) => { seen.push({ token, symbol, held, priceStale }); throw new Error("observer bug"); };
+  const notes: string[] = [];
+  review.launch("paper", { ...input, market: { ...input.market, priceStale: true } } as ShadowInputs, TOKEN, async () => answer(), n => notes.push(n));
+  await setImmediate();
+  assert.deepEqual(seen, [{ token: TOKEN, symbol: "MEME", held: false, priceStale: true }]);
+  assert.deepEqual(notes, ["Brain reviewed MEME: buy"], "the review went on as if nobody were listening");
+  assert.ok(review.take("MEME", TOKEN, 1_000_000n, 5));
+});
+
+test("a review that produced no decision leaves an earlier ready order alone", async () => {
+  let t = 1000;
+  const review = new TrenchBrainReview(() => t);
+  review.reset("paper");
+  const drops: unknown[] = [];
+  review.onDrop = (w, id, info) => drops.push([w, id, info]);
+  review.launch("paper", input, TOKEN, async () => answer(), () => {});
+  await setImmediate();
+  t += 30_000;
+  review.launch("paper", input, TOKEN, async () => ({ ran: true, result: { ok: false, kind: "unreachable", detail: "down" } }) as unknown as ShadowOutcome, () => {});
+  await setImmediate();
+  assert.deepEqual(drops, []);
+  assert.equal(review.take("MEME", TOKEN, 1_000_000n, 5)?.decisionId, "decision-1");
+});
+
+// ─── Early candidates (early-candidates.ts) ───────────────────────────────
+//
+// A separate page set and a separate, route-specific screen for coins the
+// early book holds. Everything below pins that the REGULAR tape — and
+// highVolumePools itself — is exactly what it was.
+
+const EARLY_COIN = "0x00000000000000000000000000000000000000e1" as const;
+const earlyPool = (over: Partial<GeckoPool> = {}) => pool({
+  tokenAddress: EARLY_COIN, poolAddress: EARLY_COIN, poolId: EARLY_COIN, dex: "uniswap-v3-robinhood", reserveUsd: 30_000,
+  volume24hUsd: 20_000, buyers24h: 12, buys24h: 40, sells24h: 25, ...over,
+});
+
+test("regular tape and highVolumePools are unchanged by the early path; early coins ride beside them", async () => {
+  const regular = [pool(), pool({ tokenAddress: ROUTER, poolAddress: ROUTER, volume24hUsd: 400_000 }), pool({ tokenAddress: AGENT as `0x${string}`, poolAddress: AGENT as `0x${string}`, volume24hUsd: 5 })];
+  const make = () => new TrenchTapeReader(async (feed, opts) => feed === "pools" && opts?.page === 1 ? { failed: false, pools: regular, observedAt: 1000 } : { failed: false, pools: [], observedAt: 1000 },
+    () => 1000, async (address) => ({ failed: false, pools: address === EARLY_COIN ? [earlyPool(), earlyPool({ poolAddress: `0x${"e".repeat(40)}`, poolId: "x", sells24h: 0 })] : [], observedAt: 1000 }));
+  const plain = make();
+  const before = await plain.refresh();
+  assert.deepEqual(before.pools, highVolumePools(regular, true), "no early set: exactly highVolumePools");
+  assert.deepEqual(before.early, []);
+  const withEarly = make();
+  withEarly.setEarly([EARLY_COIN, "junk"]);
+  const after = await withEarly.refresh();
+  assert.deepEqual(after.pools.slice(0, before.pools.length), before.pools, "the regular part is identical, in the same order");
+  assert.deepEqual(after.early.map(p => p.poolAddress), [EARLY_COIN], "only the early pool that passes the early screen");
+  assert.deepEqual(after.pools.slice(before.pools.length), after.early);
+  assert.equal(trenchScreenReason(earlyPool()), "volume-below-min");
+  assert.equal(earlyScreenReason(earlyPool()), null);
+  // A quiet NON-early coin on the same tape is still dropped, and still filed under the volume screen.
+  assert.deepEqual(withEarly.screenedOut(), plain.screenedOut());
+  assert.ok(withEarly.screenedOut().every(s => s.tokenAddress !== EARLY_COIN), "an early coin is answered by its own screen");
+  assert.deepEqual(withEarly.earlyScreenedOut(), [], "it passed one");
+  // highVolumePools never admits it, whatever is set on a reader.
+  assert.deepEqual(highVolumePools([...regular, earlyPool()], true), highVolumePools(regular, true));
+  // The early page on the tape is reported as such, until a sync drops it.
+  assert.deepEqual([...withEarly.earlyPageAddresses()], [EARLY_COIN.toLowerCase()]);
+  assert.deepEqual([...plain.earlyPageAddresses()], [], "no early set, no early page");
+  // Leaving the book drops the page now.
+  withEarly.setEarly([]);
+  assert.deepEqual(withEarly.snapshot().pools, before.pools);
+  assert.deepEqual([...withEarly.earlyPageAddresses()], []);
+});
+
+test("early pages: bounded, separate from nominations, never read twice, and a screened-out coin is named by the early rule", async () => {
+  const reads: string[] = [];
+  const reader = new TrenchTapeReader(async () => ({ failed: false, pools: [] }), () => 1000, async (address) => {
+    reads.push(address);
+    return { failed: false, pools: address === EARLY_COIN ? [earlyPool({ sells24h: 0 }), earlyPool({ poolAddress: `0x${"e".repeat(40)}`, dex: "uniswap-v4-robinhood", volume24hUsd: 900 })] : [], observedAt: 1000 };
+  });
+  reader.setEarly(Array.from({ length: EARLY_PAGES_MAX + 2 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`));
+  await reader.refreshEarly();
+  assert.equal(reads.length, EARLY_PAGES_MAX);
+  reads.length = 0;
+  reader.setNominated([EARLY_COIN]);
+  reader.setEarly([EARLY_COIN]);
+  await reader.refresh();
+  assert.deepEqual(reads, [EARLY_COIN], "a coin both nominated and early is read once");
+  assert.deepEqual(reader.earlyScreenedOut(), [{ tokenAddress: EARLY_COIN, reason: "no-sells-24h" }], "the supported venue's reason wins over a busier v4 pool's");
+  assert.deepEqual(reader.screenedOut(), []);
+  assert.equal(reader.snapshot().pools.length, 0);
+});
+
+test("recentLaunches records reviews actually launched, and a context change forgets them", async () => {
+  let now = 1000;
+  const review = new TrenchBrainReview(() => now);
+  review.reset("live");
+  review.launch("live", input, TOKEN, async () => answer({ action: "hold" }), () => {});
+  review.launch("live", input, ROUTER, async () => answer({ action: "hold" }), () => {}); // inside the interval: not launched
+  await setImmediate();
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  review.launch("live", input, ROUTER.toUpperCase().replace("0X", "0x"), async () => answer({ action: "hold" }), () => {});
+  await setImmediate();
+  assert.deepEqual(review.recentLaunches(), [TOKEN, ROUTER]);
+  review.reset("other");
+  assert.deepEqual(review.recentLaunches(), []);
+});
+
+test("without an early lane the rotation is exactly what it was", () => {
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("live");
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: EARLY_COIN, volume24hUsd: 20_000 }];
+  assert.equal(review.candidate(eligible)?.token, TOKEN);
+  review.earlyLane = () => null;
+  assert.equal(review.candidate(eligible)?.token, TOKEN);
+  review.earlyLane = () => ({ held: new Set(), waiting: [], reserved: true });
+  assert.equal(review.candidate(eligible)?.token, TOKEN, "an empty lane is no lane");
+  review.earlyLane = () => ({ held: new Set([EARLY_COIN]), waiting: [EARLY_COIN], reserved: true });
+  assert.equal(review.candidate(eligible)?.token, EARLY_COIN, "a reserved slot with an eligible waiting coin");
+  assert.equal(review.candidate([{ token: TOKEN }], new Set())?.token, TOKEN, "an early coin that is not eligible gets nothing");
 });

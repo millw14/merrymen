@@ -27,6 +27,7 @@ import {
   TELEGRAM_CONDITION_ALERTS_DDL,
   TELEGRAM_HOLD_NOTIFIED_DDL,
   TELEGRAM_LIVENESS_DDL,
+  TELEGRAM_PAUSED_AT_DDL,
   TELEGRAM_STATE_DDL,
   clearHoldNotified,
   ensureTelegramSchema,
@@ -88,7 +89,9 @@ describe("the restore gate holds instead of returning", () => {
     const start = calls(hold, "startHolderProcess")[0];
     assert.ok(link && start, "it restores the link, and it starts the hold process");
     assert.ok(link.getEnd() < start.getStart(), "the link first: a link restored after the bot is polled is read from a replaced file");
-    assert.equal(link.arguments.map((a) => a.getText()).join(","), "tenant");
+    // The tenant, and the stand-in shared database the reconcile tests restore
+    // through (retirementMemoryStoreForTest), unset in production.
+    assert.equal(link.arguments.map((a) => a.getText()).join(","), "tenant,retirementMemoryStoreForTest?.shared");
     // Under the lease spawnChild checked, asked again after the last await.
     const late = bodyCalls(hold, "lateSpawnRefusal")[0];
     assert.ok(late && link.getEnd() < late.getStart() && late.getEnd() < start.getStart());
@@ -145,6 +148,19 @@ describe("held tenants reach only the loops they belong in", () => {
       .sort();
     assert.deepEqual(readers, [
       "adoptHolderForTest",
+      // MERRYMEN_RESUME_AUTO_PAPER asks `holders.has` of a re-signed tenant
+      // and nothing else: one with a hold process is past the continuity
+      // gate (held by the paper-restore gate instead, which retryHold and
+      // handHoldBack answer), so its re-sign is settled with nothing
+      // previewed or approved. No held tenant is visited, started or serviced.
+      "autoAdmitResignedPaper",
+      // The SIGTERM drain (fleet-drain.ts): it writes a hold's home down as
+      // held, so its final pass never copies the book and handles its memory
+      // forget-only; it signals the hold process and waits for it to go; and
+      // a home whose process is still running gets no final pass at all.
+      "drainFinalPass",
+      "drainHomes",
+      "fleetProcessesGone",
       "handHoldBack",
       "honourFleetHalt",
       "isHeldForTest",
@@ -159,8 +175,8 @@ describe("held tenants reach only the loops they belong in", () => {
       "reportIdle",
       "retireExpiredGrants",
       "retryHold",
-      "runOrchestrator",
       "scheduleRestart",
+      "signalFleetForDrain",
       "spawnChild",
       "spawnHolder",
       "standDownHolder",
@@ -168,6 +184,9 @@ describe("held tenants reach only the loops they belong in", () => {
       "startHolderProcess",
       "sweepTgGroups",
       "watchHolder",
+      // The heartbeat COUNTS them (holders.size) and does nothing else: no
+      // held tenant is visited, started or serviced by it.
+      "writeOrchestratorHeartbeat",
     ]);
   });
 
@@ -256,12 +275,19 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.ok(removedFiles);
     assert.deepEqual(removedFiles.elements.map((e) => ts.isStringLiteral(e) ? e.text : e.getText()), ["settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"]);
     assert.doesNotMatch(retainedBook.thenStatement.getText(), /recursive:\s*true|rmSync\(home\b|ledger-source-blocked|ledger-import/, "retaining accounting also retains its recovery barriers");
-    // FLEET_HALT, one loop of which the main loop runs in place of a pass, and stop().
+    // FLEET_HALT, one loop of which the main loop runs in place of a pass, and
+    // stop(), which is the drain: every hold process is signalled with the
+    // children, and one a handover or stand-down still waits on is finished.
     const halt = fn("honourFleetHalt").body!.getText();
     assert.match(halt, /for \(const t of \[\.\.\.holders\.keys\(\)\]\) standDownHolder\(t\);/);
     const run = fn("runOrchestrator").body!.getText();
     assert.match(run, /if \(haltRequested\(\)\) \{\s*await honourFleetHalt\(\);\s*\} else \{/);
-    assert.match(run, /for \(const held of holders\.values\(\)\) held\.proc\?\.kill\("SIGTERM"\);/);
+    assert.match(run, /const stop = \(signal: NodeJS\.Signals\) => \{\s*void drainFleet\(signal\);\s*\};/);
+    assert.match(fn("drainFleet").body!.getText(), /signalFleet: signalFleetForDrain,/);
+    const holdLoop = loopsOver(fn("signalFleetForDrain"), "holders").map((l) => l.statement.getText());
+    assert.equal(holdLoop.length, 1, "one loop over hold processes");
+    assert.match(holdLoop[0]!, /held\.proc\.kill\(signal\);/);
+    assert.match(holdLoop[0]!, /killLeaving\(held\);/);
   });
 
   it("THE HANDOVER STOPS THE HOLD PROCESS AND WAITS FOR IT BEFORE A WORKER STARTS", () => {
@@ -413,7 +439,9 @@ describe("a held tenant's practice reset", () => {
     const hold = all(spawn, (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true")[0] as ts.IfStatement;
     assert.ok(gate.getEnd() < hold.getStart());
     const holder = calls(hold.thenStatement, "spawnHolder")[0]!;
-    assert.equal(holder.arguments.at(-1)!.getText(), "honour", "so the hold does not look at the same reset again this pass");
+    // `honour`, and after it only the registered book's generation (normaliseRegisteredHome).
+    assert.equal(holder.arguments[5]!.getText(), "honour", "so the hold does not look at the same reset again this pass");
+    assert.equal(holder.arguments.length, 7);
   });
 
   it("retryHold HONOURS IT ONLY AFTER ITS OWN RESTORE FAILED, INSIDE THE RETRY'S CLAIM, AND HANDS BACK ONLY THROUGH handHoldBack", () => {
@@ -553,11 +581,11 @@ describe("the durable notice record", () => {
     try {
       assert.deepEqual(await ensureTelegramSchema(db), [], "a fresh database: the table and every column, nothing failed");
       const cols = (raw.prepare("PRAGMA table_info(tenant_telegram)").all() as { name: string }[]).map((c) => c.name);
-      for (const c of ["hold_notified", "bot_id", "poll_ok_at", "poll_err", "poll_err_at", "child_state", "condition_alerts"]) assert.ok(cols.includes(c), c);
+      for (const c of ["hold_notified", "bot_id", "poll_ok_at", "poll_err", "poll_err_at", "child_state", "condition_alerts", "paused_at"]) assert.ok(cols.includes(c), c);
       await db.prepare("INSERT INTO tenant_telegram (tenant, owner_id, updated_at) VALUES (?, ?, 0)").run("0xabc", 4242);
       // sqlite's ADD COLUMN has no IF NOT EXISTS: each ALTER fails, and is handed back, not thrown.
       const again = await ensureTelegramSchema(db);
-      const migrations = [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL, TELEGRAM_CONDITION_ALERTS_DDL];
+      const migrations = [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL, TELEGRAM_CONDITION_ALERTS_DDL, TELEGRAM_PAUSED_AT_DDL];
       assert.equal(again.length, migrations.length);
       assert.ok(again.every((e) => /duplicate column/i.test(String(e))), again.map(String).join("; "));
       for (const ddl of migrations) {

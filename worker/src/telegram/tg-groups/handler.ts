@@ -46,6 +46,7 @@
  * in code here. See types.ts.
  */
 import { isHostedMode } from "../../../../packages/core/src/index";
+import { parseTailRequest, tailAsksToTake, type TailRequest } from "../../../../packages/core/src/tail-request";
 import type { ResolvedConfig } from "../../settings";
 import {
   answerCallbackQuery,
@@ -69,10 +70,15 @@ import {
   addressedHow,
   addressedSmallTalk,
   asksAboutCoin,
+  consents,
   deskAskOf,
+  deskNameOk,
   extractCaHits,
   extractCas,
   extractCashtags,
+  fomoAskOf,
+  fomoFactsOf,
+  fomoFollowUpOf,
   greetingOf,
   hasForeignMint,
   hasOtherChainLink,
@@ -85,13 +91,24 @@ import {
   isQuestionToRoom,
   isShush,
   isTradeTalk,
+  metaLineOf,
+  offerShaped,
+  pushbackOf,
+  reactionOnly,
+  routeWorthy,
+  roomSaysRugged,
   selfNamesOf,
+  thesesQuotesOf,
+  quoteAskByCode,
   type BotSelf,
+  type DeskIntent,
   type SmallTalk,
 } from "./detect";
 import { admitThought, deskCaption, deskMissLine, deskQuestionEvidence, deskQuestionIntent, thinkWithModel } from "./desk";
 import { admitTgLine } from "./gate";
 import { publicCoinReason, publicCoinStatus, publicFactRequest, type PublicFactRequest } from "./facts";
+import { quotesSayable } from "./quotes";
+import { SPENT_BRAG } from "./third-party";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
 import {
   describeTgGroupsModel,
@@ -119,15 +136,25 @@ import type {
   CoinLook,
   TgCoinMemo,
   TgCoinsPort,
+  TgCollapse,
   TgDeskAsk,
   TgDeskPort,
   TgDeskThought,
+  TgFomoAnswer,
+  TgFomoChain,
+  TgFomoPort,
+  TgFomoRequest,
   TgGroupFactsPort,
   TgLine,
+  TgOwnerPort,
   TgPerson,
   TgPublicFact,
   TgRoom,
+  TgTailAsk,
 } from "./types";
+import { chainIn, readRoute, RouteBreaker, ROUTE_TIMEOUT_MS, type TgRoute } from "./route";
+import { THESES_BOX_MS, ThesesWordings, wordTheses } from "./theses";
+import { readSubject, type SubjectReading } from "./understand";
 import { mentionFor, say, styleFor, styleWords, type SpeakCtx, type TgIntent } from "./voice";
 
 // ─── The numbers ───────────────────────────────────────────────────────────
@@ -142,6 +169,23 @@ const STALE_MS = 90 * SEC;
 /** An explicit research answer has one budget from receipt through its send. */
 const RESEARCH_REPLY_MS = 30 * SEC;
 const RESEARCH_SEND_MS = 5 * SEC;
+/** What a routing call must leave the research it picks, of the reply deadline. */
+const ROUTE_LEAVES_MS = 8 * SEC;
+/** How long a reply to its own Fomo line is read in that line's light. */
+const FOMO_THREAD_MS = 2 * 60 * MIN;
+/** The persona asking back which Fomo board or coin was meant. */
+const FOMO_ASK_BACK = /\b(?:fomo|theses|thesis|trending|top traders?|leaderboard|graduated|most held|robinhood)\b/iu;
+/** A routing call with less time than this is not worth making. */
+const ROUTE_MIN_BOX_MS = 1_500;
+/** How long someone's ask stays open for "i asked a question" to re-run it (decision D12). */
+const REASK_OPEN_MS = 10 * MIN;
+/** "Typing…" lasts about five seconds in Telegram: while a read runs it is sent again this often. */
+const TYPING_EVERY_MS = 4 * SEC;
+/** Said to "i asked a question" from someone with no question open (decision D12). Code-written, gated as fixed. */
+const WHICH_QUESTION = "which question? i might've missed it, ask me again";
+/** The allowance routing never touches: the day's (at least 20, or a tenth) and this chat's hour. */
+const ROUTE_RESERVE_DAY = 20;
+const ROUTE_RESERVE_HOUR = 4;
 /** One person's addressed lines closer together than this are one burst: only their last is answered. */
 const BURST_MS = 15 * SEC;
 /** A question to the room waits this long, so pacing can see whether anyone answered it. */
@@ -245,6 +289,19 @@ const LINK_HERE_LINES: readonly string[] = [
 ];
 
 /**
+ * The room's line when a coin's theses went to the owner's DM (Milla,
+ * 2026-10-09: "Owner's DM"). Said only once the DM landed with at least one
+ * quote in it: never a claim that is not true.
+ */
+const QUOTES_DM_LINES: readonly string[] = [
+  "sent them to your DMs 🤫",
+  "they're in your DMs 🤫",
+  "check your DMs, sent them there 🤫",
+  "DM'd you the theses 🤫",
+  "slid them into your DMs 🤫",
+];
+
+/**
  * A command whose answer could not reach the asker's DM: Telegram lets a bot
  * write only to someone who opened a DM with it. The room hears this instead
  * of "sent it to your DMs", which would be false. Every line names /start,
@@ -298,6 +355,15 @@ export interface TgGroupsDeps {
    * coin question gets the public snapshot as before.
    */
   desk?: () => TgDeskPort | null;
+  /**
+   * Social-trading research (docs/fomo.md): coin-level public aggregates for
+   * an addressed research question, implemented outside this directory
+   * (worker/src/tg-fomo-port.ts). Absent or null: no research lane, and the
+   * line goes on to the desk and the persona as before.
+   */
+  fomo?: () => TgFomoPort | null;
+  /** The owner's asks that go to her DM (a tail). Absent: no DM to send one to. */
+  owner?: () => TgOwnerPort | null;
   /** getMe's id and username, plus the soul name; null until getMe answered. */
   self: () => BotSelf | null;
   /** getMe's can_read_all_group_messages: false means privacy mode is on; null unknown. */
@@ -323,6 +389,12 @@ export interface TgGroupsDeps {
    * answers.
    */
   timer?: (ms: number) => Promise<void>;
+  /**
+   * The pause between two "typing…" actions while a read runs
+   * (TYPING_EVERY_MS): resolves once `ms` have passed. Real time when absent,
+   * never `sleep`. Injectable so a test can count the actions.
+   */
+  tick?: (ms: number) => Promise<void>;
   /** Operator log (console by default). The same rule as `note`: no content. */
   log?: (s: string) => void;
 }
@@ -550,6 +622,71 @@ interface LineJob {
   threadId?: number;
   /** The question-to-the-room second look (see QUESTION_WAIT_MS). */
   deferred?: boolean;
+  /**
+   * An addressed social-trading research ask (fomoAskOf, or a follow-up to
+   * this chat's last research answer), decided when the line arrived. Such a
+   * line runs off the chat queue, so act() may wait on the research inline.
+   */
+  fomo?: boolean;
+  /**
+   * WHAT HAPPENED TO A COIN, asked of the room's Fomo coin (detect.ts
+   * fomoFactsOf, the coin from the line, the answer it replies to or the
+   * topic's last Fomo coin): the request code built, answered as measured
+   * facts before the desk and the router (tg-fomo-port.ts factsAnswer).
+   */
+  fomoFacts?: TgFomoRequest;
+  /**
+   * A bare "what's trending" (no platform or venue named) where research is
+   * wired: Fomo's trending board, asked for as that request, with the desk's
+   * market read as the fallback when Fomo cannot answer (act()).
+   */
+  trending?: boolean;
+  /**
+   * A line about its own silence (detect.ts metaLineOf): "i asked a
+   * question", "?", its name alone. Never what decides the burst.
+   */
+  meta?: "complaint" | "poke" | "name-only";
+  /** A complaint from someone with no question open in the last 10 minutes: they get WHICH_QUESTION. */
+  noOpenAsk?: boolean;
+  /**
+   * A complaint replying to its answer to their open question: the router
+   * reads that question again, in the light of the complaint (route.ts reaskOf).
+   */
+  reaskOf?: string;
+  /** Their earlier question that nothing answered: the router may re-run it (route.ts reask). */
+  reaskable?: OpenAsk;
+  /** A re-run of an earlier ask that nothing answered: never claimed or nominated again (rule 1). */
+  reasked?: boolean;
+}
+
+/** Someone's last ask in a chat and topic, while it may still be re-asked. */
+interface OpenAsk {
+  job: LineJob;
+  /** It ran off the chat queue (research, a desk ask, a coin), so its re-run does too. */
+  research: boolean;
+  /** Re-run once already: never twice. */
+  reasked: boolean;
+  /** A poke on it already got its 👀: later ones while it runs get nothing more. */
+  eyed?: boolean;
+  /**
+   * Never re-run: the coin flow owns the line (it acts on it, or stays quiet
+   * by rule, e.g. another chain's coin), and a re-run skips the flow
+   * (lineOutcome: reasked), so the persona would answer a coin nobody looked
+   * at. Past its 👀 while the look runs, it counts as nothing open.
+   */
+  noReask?: boolean;
+  /**
+   * The earlier ask this line had re-run through the router's reask
+   * (reaskAgain), when this line stayed their open ask: it is running only
+   * while that re-run is, never for its whole deadline with nothing in flight.
+   */
+  rerun?: OpenAsk;
+}
+
+/** An open ask run again: the same line, a fresh deadline, none of its own re-ask marks. */
+function againOf(job: LineJob, bornAtMs: number, ingressOrder: number): LineJob {
+  const { reaskable: _r, reaskOf: _o, noOpenAsk: _n, meta: _m, ...rest } = job;
+  return { ...rest, bornAtMs, ingressOrder, reasked: true };
 }
 
 /** One outgoing group line, composed and waiting to be sent. */
@@ -595,6 +732,12 @@ interface SpeakOpts {
   stillWanted?: () => boolean;
   /** An ambient line waits like someone who has been reading (pacing.ts typingDelayMs). */
   ambient?: boolean;
+  /**
+   * The line it answers is in a Fomo research thread (a research ask, or a
+   * reply to one of its Fomo lines): the persona's answer joins that thread,
+   * so a reply to it is read in its light (repliesToOwnFomo), by message.
+   */
+  researchThread?: boolean;
   /** Told why, when nothing is sent (see Quiet). */
   miss?: (why: Quiet) => void;
   accountAnswer?: (chatId: number) => Quiet | AnswerSlot;
@@ -630,8 +773,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
   const fail = (stage: string, e: unknown): void => log(`[tg-groups] ${stage} failed (${errName(e)})`);
+  /**
+   * Addressed lines that ended with nothing said or set on them
+   * (`${chatId}:${messageId}`): an open ask among them may be re-asked.
+   */
+  const lostAsks = new Lru<string, true>(LRU_MAX);
   /** An addressed line ended with nothing said or set on it: the code, never the content (see Quiet). */
-  const quietLine = (why: Quiet): void => log(`[tg-groups] addressed line got nothing (${why})`);
+  const quietLine = (why: Quiet, j?: LineJob): void => {
+    if (j && isMsgId(j.line.messageId)) lostAsks.set(msgKey(j.msg.chatId, j.line.messageId), true);
+    log(`[tg-groups] addressed line got nothing (${why})`);
+  };
   const note = (level: "ok" | "warn", msg: string): void => {
     try {
       d.note(level, msg);
@@ -646,6 +797,36 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   // claims do); losing them to a restart costs at most one extra casual line.
   /** Messages that already got their one immediate reply ("never two replies to one message"). */
   const repliedTo = new Lru<string, true>(LRU_MAX);
+  /** Its own Fomo lines (research answers, and the persona asking which one they meant), by message: when said. */
+  const fomoLines = new Lru<string, number>(LRU_MAX);
+  /** Of those, the persona's own (an ask-back, an offer, a line in a research thread): "ok" and "bet" under one are a yes. */
+  const personaFomoLines = new Lru<string, true>(LRU_MAX);
+  const markFomoLine = (chatId: number, messageId: number | undefined, persona = false): void => {
+    if (!isMsgId(messageId)) return;
+    fomoLines.set(msgKey(chatId, messageId), clock());
+    if (persona) personaFomoLines.set(msgKey(chatId, messageId), true);
+  };
+  /**
+   * THE ONE COIN EACH OF ITS SINGLE-COIN FOMO ANSWERS WAS ABOUT, by message
+   * (TgFomoAnswer.coin: a plain symbol and chain, never an address): "list the
+   * last 10" or "what happened to it" under the answer knows the coin.
+   */
+  type FomoCoin = NonNullable<TgFomoAnswer["coin"]> & { at: number };
+  const fomoCoinLines = new Lru<string, FomoCoin>(LRU_MAX);
+  /**
+   * THE COLLAPSE PERMITS (docs/tg-groups.md "Rugged coins"), per topic and
+   * coin, in memory only (a restart forgets them, which is safe): "measured"
+   * by a facts answer (12 hours), "room" when someone here said the room's
+   * current Fomo coin rugged (30 minutes, never over a measurement that found
+   * no collapse in the last 12 hours), "clear" when a measurement found none.
+   */
+  type Permit = { coin: string; chain?: TgFomoChain; source: TgCollapse["source"] | "clear"; atMs: number; untilMs: number };
+  const collapses = new Map<string, Map<string, Permit>>();
+  const MEASURED_PERMIT_MS = 12 * 60 * MIN;
+  const ROOM_PERMIT_MS = 30 * MIN;
+  /** When each chat last said a Merrymen brag: none again for 20 minutes. */
+  const bragAt = new Map<number, number>();
+  const BRAG_GAP_MS = 20 * MIN;
   /** When each recent message reached this process, for the staleness of a coin line about it. */
   const received = new Lru<string, number>(LRU_MAX);
   const messageIngressOrder = new Lru<string, number>(LRU_MAX);
@@ -659,6 +840,34 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * and must not drop an answer already being written for the first.
    */
   const lastAddressed = new Lru<string, { messageId: number; atMs: number }>(LRU_MAX);
+  /**
+   * NEVER LOSE HER REQUEST. Each person's last substantive line said to it,
+   * per chat and topic (`${chatId}:${fromId}:${threadId|0}`), for REASK_OPEN_MS.
+   * A poke while it is still being worked on gets a 👀 and leaves it the line
+   * to answer; "i asked a question" after nothing answered it runs it again,
+   * once (onMessage). Live 2026-10-07: "what's trending", then "shogun" ten
+   * seconds in, and the slow market read was dropped as a burst.
+   */
+  const openAsks = new Lru<string, OpenAsk>(LRU_MAX);
+  const askKey = (chatId: number, fromId: number, threadId?: number): string => `${chatId}:${fromId}:${threadId ?? 0}`;
+  /** Their open ask in this chat and topic, while it may still be re-asked. */
+  const openAskOf = (chatId: number, fromId: number, threadId?: number): OpenAsk | null => {
+    const a = openAsks.get(askKey(chatId, fromId, threadId));
+    return a && clock() - a.job.seenAtMs <= REASK_OPEN_MS ? a : null;
+  };
+  /**
+   * Where an open ask stands: something landed on it (a reply or a
+   * reaction), it ended with nothing (lostAsks, or past its deadline with
+   * nothing landed), or it is still being worked on.
+   */
+  const askStateOf = (a: OpenAsk): "running" | "answered" | "lost" => {
+    const k = msgKey(a.job.msg.chatId, a.job.line.messageId);
+    if (landedOn.has(k)) return "answered";
+    if (lostAsks.has(k)) return "lost";
+    // A nudge that had their earlier ask re-run is waiting on nothing of its own.
+    if (a.rerun) return askStateOf(a.rerun) === "running" ? "running" : "lost";
+    return clock() - a.job.bornAtMs <= (a.research ? RESEARCH_REPLY_MS : STALE_MS) ? "running" : "lost";
+  };
   /**
    * The bot's own status per chat as the last my_chat_member said: true when
    * it is an admin there. An admin hears every line whatever privacy mode
@@ -867,6 +1076,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const portNow = (): TgCoinsPort | null => {
     try {
       return d.port() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** The research port, unless the operator switched the lane off (MERRYMEN_TG_GROUPS_FOMO=0). */
+  const fomoNow = (): TgFomoPort | null => {
+    try {
+      if ((env().MERRYMEN_TG_GROUPS_FOMO ?? "").trim() === "0") return null;
+      return d.fomo?.() ?? null;
     } catch {
       return null;
     }
@@ -1233,6 +1451,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.trigger ? { trigger: o.trigger } : {}),
       ...(o.senderName ? { senderName: o.senderName } : {}),
       ...(o.coinName ? { coinName: o.coinName } : {}),
+      // Fomo research is wired here: the persona knows the feature exists, so a question that missed the research lane is pointed at it, never denied.
+      ...(fomoNow() !== null ? { fomo: true } : {}),
+      // The collapse permit for the coin this line is about (docs/tg-groups.md "Rugged coins").
+      ...(() => {
+        const c = collapseFor(chatId, o.threadId, o.trigger, room, heldNames);
+        return c ? { collapse: c } : {};
+      })(),
       nowMs: clock(),
       rand,
     };
@@ -1258,6 +1483,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     store.update(chatId, (r) => {
       r.lastOwnAtMs = now;
     });
+    // A Merrymen brag said, in any words: the next waits (SPENT_BRAG, BRAG_GAP_MS).
+    if (SPENT_BRAG.test(text)) noteBrag(chatId, now);
+  };
+  const noteBrag = (chatId: number, at: number): void => {
+    if (bragAt.size > 512 && !bragAt.has(chatId)) bragAt.delete(bragAt.keys().next().value!);
+    bragAt.set(chatId, at);
   };
 
   /**
@@ -1333,6 +1564,18 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!sent) return null;
     // A migrated chat has no message the old reply id means.
     recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    // A line said under a permit that allowed a brag spends it, whatever its
+    // words: the next brag waits even when this one was a paraphrase (review, 2026-10-09).
+    if (ctx.collapse?.brag === true && (intent.kind === "answer" || intent.kind === "ambient")) noteBrag(sent.chatId, clock());
+    // The persona asking which Fomo board or coin was meant: the answer to it
+    // is read in its light (repliesToOwnFomo). So is its offer ("i can pull
+    // the fomo board for robinhood chain coins if you want"), and anything it
+    // says inside a research thread: a yes under it goes to the router with
+    // the line it answers (live 2026-10-07: "do it" under such an offer got
+    // "give me a sec", and nothing came).
+    if (intent.kind === "answer" && fomoNow() !== null && (o.researchThread === true || (FOMO_ASK_BACK.test(text) && (/[?？]/u.test(text) || offerShaped(text))))) {
+      markFomoLine(sent.chatId, sent.messageId, true);
+    }
     log(`[tg-groups] said ${intent.kind}`);
     return sent;
   };
@@ -1349,10 +1592,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (isMsgId(messageId)) repliedTo.delete(msgKey(chatId, messageId));
   };
 
-  const dmOwner = async (html: string, keyboard?: InlineKeyboard): Promise<boolean> => {
+  /** `byMs` (on the handler's clock): one transport deadline for the DM, as deliver() sets for a room line. */
+  const dmOwner = async (html: string, keyboard?: InlineKeyboard, byMs?: number): Promise<boolean> => {
     const owner = ownerId();
-    const opts = optsNow();
-    if (owner === null || !opts || stopped) return false;
+    const base = optsNow();
+    if (owner === null || !base || stopped) return false;
+    const opts = byMs === undefined ? base : { ...base, deadlineAtMs: Date.now() + Math.max(0, byMs - clock()) };
     try {
       const r = await sendMessage(opts, owner, html, keyboard && keyboard.length > 0 ? { keyboard } : {});
       return r.ok;
@@ -1714,9 +1959,24 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     fadedAt.deleteWhere((k) => k.startsWith(prefix));
     lastAddressed.deleteWhere((k) => k.startsWith(prefix));
     landedOn.deleteWhere((k) => k.startsWith(prefix));
+    // Open and lost asks too: with landedOn gone an answered ask would read as lost, and a
+    // later "shogun" would re-run a forgotten line instead of getting its hail.
+    openAsks.deleteWhere((k) => k.startsWith(prefix));
+    lostAsks.deleteWhere((k) => k.startsWith(prefix));
+    personaFomoLines.deleteWhere((k) => k.startsWith(prefix));
     coinMissed.deleteWhere((k) => k.startsWith(prefix));
     askedIn.deleteWhere((k) => k.startsWith(prefix));
     for (const key of lastDesk.keys()) if (key.startsWith(prefix)) lastDesk.delete(key);
+    for (const key of lastFomo.keys()) if (key.startsWith(prefix)) lastFomo.delete(key);
+    // The coin its Fomo answers were about, by message and by topic.
+    fomoCoinLines.deleteWhere((k) => k.startsWith(prefix));
+    for (const key of collapses.keys()) if (key.startsWith(prefix)) collapses.delete(key);
+    bragAt.delete(chatId);
+    for (const key of lastFomoCoin.keys()) if (key.startsWith(prefix)) lastFomoCoin.delete(key);
+    // The research side's subject memory for this room too ("it" no longer
+    // points at the coin the room was discussing). Detached; never throws.
+    const fomo = fomoNow();
+    if (fomo?.forget) void Promise.resolve().then(() => fomo.forget?.(chatId)).catch((e) => fail("fomo forget", e));
   };
 
   // ─── The memory pass ─────────────────────────────────────────────────────
@@ -1772,6 +2032,44 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return false;
   };
 
+  /** How many of the room's latest lines say which coins are being talked about. */
+  const KNOWN_COIN_LINES = 30;
+
+  /**
+   * THE COINS THIS CHAT KNOWS BY NAME, for reading an opinion ask: the ones
+   * it holds, the ones posted here, the $tags said here lately and the coins
+   * the desk already read here. "what do you think about pepe" after a room
+   * full of $PEPE is about the coin; in a room that never said it, it may be
+   * anything (detect.ts deskAskOf, understand.ts).
+   */
+  const knownCoinNames = (chatId: number): string[] => {
+    const names = new Set<string>();
+    try {
+      for (const n of portNow()?.heldNames() ?? []) if (typeof n === "string") names.add(n);
+    } catch {
+      /* no held names is no context */
+    }
+    const stored = store.room(chatId);
+    if (!stored) return [...names];
+    const room = freshView(stored, clock());
+    for (const c of room.coins) if (c.name) names.add(c.name);
+    for (const l of room.lines.slice(-KNOWN_COIN_LINES)) {
+      for (const tag of extractCashtags(l.text)) names.add(tag);
+      if (l.own && l.deskAsk?.kind === "coin" && "query" in l.deskAsk) names.add(l.deskAsk.query);
+    }
+    return [...names];
+  };
+
+  /** A line's desk ask, read with what this chat already knows. */
+  const deskIntentOf = (text: string, chatId: number): DeskIntent | null =>
+    deskAskOf(text, selfNamesOf(selfNow()), { knownCoins: knownCoinNames(chatId) });
+
+  /** The same, with a loose opinion ask (nothing yet says it is a coin) left out: for decisions that cannot wait for the conversation to settle it. */
+  const firmDeskIntentOf = (text: string, chatId: number): DeskIntent | null => {
+    const intent = deskIntentOf(text, chatId);
+    return intent?.kind === "coin" && intent.loose ? null : intent;
+  };
+
   /**
    * SMALL TALK SAID TO IT, a room's welcome included. detect.ts reads a line
    * that is small talk and nothing more ("hey there merryman", "thanks
@@ -1813,7 +2111,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       insult: insultLevel(text, names),
       distress: isDistress(text),
       botQuestion: isBotQuestion(text),
-      privateAsk: isPrivateAsk(text),
+      // Who it follows or watches is private only where research is wired.
+      privateAsk: isPrivateAsk(text, { research: fomoNow() !== null }),
       injection: isInjection(text),
       tradeTalk: isTradeTalk(text),
       questionToRoom: isQuestionToRoom(text),
@@ -1899,10 +2198,108 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /**
+   * The casual group line after a slash command, or after an ask that was
+   * answered in the asker's DM (TgCommandNotice). Rate-limited here.
+   */
+  const commandNotice = async (
+    chatId: number,
+    messageId: number | undefined,
+    fromId: number,
+    what: TgCommandNotice,
+    threadId?: number,
+    // For a routed ask: re-checked inside the queued send, like every lane's.
+    extra: { stillWanted?: () => boolean; replyByMs?: number } = {},
+  ): Promise<boolean> => {
+    let said = false;
+    try {
+      if (!canTalk(chatId)) return false;
+      const now = clock();
+      // "sent it to your DMs" and "done, couldn't DM you" each answer one
+      // command that ran for someone entitled to run it: every one is said.
+      // Refusals and "dm me first" at most once per person per hour.
+      // Checked again in queue order, and counted only once one was said: a
+      // notice dropped on its way (a deadline, a newer line) leaves the hour.
+      const k = what !== "dm-sent" && what !== "done-no-dm" ? `${what}:${chatId}:${fromId}` : null;
+      const limited = (): boolean => {
+        if (k === null) return false;
+        const last = refusedAt.get(k);
+        return last !== undefined && clock() - last < REFUSE_EVERY_MS;
+      };
+      const counted = (): void => {
+        if (k !== null) refusedAt.set(k, clock());
+      };
+      if (limited()) return false;
+      // These answer a command the sender was entitled to run, so they go
+      // out in a shushed chat like the owner calling it.
+      const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
+      const reply: SpeakOpts = {
+        ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
+        ...(isMsgId(threadId) ? { threadId } : {}),
+        bornAtMs: now,
+        ownerAddressed: entitled,
+        ...(extra.stillWanted ? { stillWanted: extra.stillWanted } : {}),
+        ...(typeof extra.replyByMs === "number" ? { replyByMs: extra.replyByMs } : {}),
+      };
+      const fixedPool: readonly string[] | null =
+        what === "owner-only"
+          ? OWNER_ONLY_LINES
+          : what === "link-here"
+            ? LINK_HERE_LINES
+            : what === "dm-first"
+              ? DM_FIRST_LINES
+              : what === "done-no-dm"
+                ? DONE_NO_DM_LINES
+                : null;
+      await enqueue(
+        chatId,
+        async () => {
+          if (limited()) return;
+          if (fixedPool) {
+            // Its own small fixed pool, gated like every template.
+            const pool = fixedPool;
+            const room = store.room(chatId);
+            const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
+            const start = Math.floor(roll() * pool.length);
+            let text: string | null = null;
+            for (let i = 0; i < pool.length && text === null; i++) {
+              const cand = pool[(start + i) % pool.length] ?? "";
+              const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
+              if (v.ok) text = v.text;
+            }
+            if (!text) return;
+            const sent = await deliver({
+              chatId,
+              intent: { kind: "private-read-refuse" },
+              text,
+              ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
+              ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
+              bornAtMs: now,
+              ...(reply.replyByMs !== undefined ? { replyByMs: reply.replyByMs } : {}),
+              ...(reply.stillWanted ? { stillWanted: reply.stillWanted } : {}),
+              followUp: false,
+              ownerAddressed: entitled,
+            });
+            if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
+            said = !!sent;
+            if (said) counted();
+            return;
+          }
+          said = !!(await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply));
+          if (said) counted();
+        },
+        { force: true },
+      );
+    } catch (e) {
+      fail("notice", e);
+    }
+    return said;
+  };
+
+  /**
    * Act on pacing's decision. Books are kept only after a line or reaction
    * actually landed. Null when something landed; else why nothing did (Quiet).
    */
-  const act = async (dec: PaceDecision, j: LineJob): Promise<Quiet | null> => {
+  const act = async (dec: PaceDecision, j: LineJob, fallback?: TgIntent): Promise<Quiet | null> => {
     const chatId = j.msg.chatId;
     const messageId = j.line.messageId;
     // Why the line, or the reaction, did not go out: the send path says.
@@ -2007,13 +2404,139 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
 
     if (!reserveReply(chatId, messageId)) return "already-answered";
+    // What the persona says when nothing below takes the line (the desk's
+    // intent shadows the name in the block): a hail's template when the
+    // line was only lifted to an answer for the router (lineOutcome).
+    const persona: TgIntent = fallback ?? intent;
     if (dec.act === "answer" && dec.mood !== "injection" && dec.mood !== "bot-question") {
-      const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j);
+      const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j) ?? repliedDmPolicy(j);
       const context = coinContext(j);
       const coinQuestion = asksAboutCoin(j.line.text, selfNamesOf(selfNow())) || /\b(?:why|how come)\b/iu.test(j.line.text);
+      // SOCIAL-TRADING RESEARCH FIRST for an addressed research question
+      // (docs/fomo.md): coin-level public aggregates, every line gated. It
+      // waits inline because the line's whole job already runs off the chat
+      // queue (onMessage: `fomo` lines are research), and a question the
+      // research does not take must still reach the desk below.
+      //
+      // A FOMO TAIL ASKED FOR OUT LOUD ("pine can you tail unipcs for 3
+      // hours"), read by code (packages/core tail-request.ts), never by a
+      // model, and only where the research lane is wired. It is not research,
+      // so the research lane does not take it (it could read "keep tabs on
+      // trader X on fomo?" as a profile question); it is handled right after
+      // that lane, before the desk and the router: her line goes to her DM as
+      // the confirm card, anyone else's gets the owner-only line (tailLine).
+      //
+      // Where a tail cannot work (TgOwnerPort.tailsState: switched off, or no
+      // live feed on this install), a start is no tail and goes on to the
+      // research lane as before; with the switch off a stop still is one.
+      const tailsHere = tailsStateNow();
+      const tailParsed =
+        fomoNow() !== null && tailsHere !== "no-live-feed" && dec.mood !== "private-ask" && j.addressed !== null && !isInjection(j.line.text)
+          ? parseTailRequest(j.line.text, selfNamesOf(selfNow()))
+          : null;
+      const tailAsk = tailParsed && (tailsHere === "on" || tailParsed.kind !== "start") ? tailParsed : null;
+      // A BARE "WHAT'S TRENDING" (j.trending) is Fomo's trending board, asked
+      // as that request; when Fomo cannot answer it (busy, late, a budget
+      // refusal, unavailable, failed) it goes on to the desk's market read
+      // below, inside the same deadline (decision D1, 2026-10-07).
+      let trendingFellBack = false;
+      // WHAT HAPPENED TO THE ROOM'S FOMO COIN, as measured facts, before the desk and the router.
+      if (j.fomoFacts && !tailAsk && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
+        const r = await fomoAnswer(chatId, j, replyOpts, j.fomoFacts);
+        if (r === "sent") return null;
+        if (r !== "not-research") {
+          releaseReply(chatId, messageId);
+          return r;
+        }
+      }
+      if (j.fomo === true && !tailAsk && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
+        // Every chain, unless the line names one ("what's trending on solana"):
+        // then that chain's slice of the board (Milla, 2026-10-07).
+        const onChain = j.trending === true ? chainIn(j.line.text) : undefined;
+        // The desk reads Robinhood Chain only: it stands in for a bare trending ask, or one naming
+        // that chain, never for Solana's or Base's board. Those get Fomo's own plain line instead
+        // (its refusal with the reset time, FOMO_BUSY, FOMO_LATE, FOMO_UNREACHED): rule 5.
+        const deskStandsIn = onChain === undefined || onChain === "robinhood";
+        const r = j.trending === true
+          ? await fomoAnswer(chatId, j, replyOpts, { kind: "board", board: "trending", ...(onChain ? { chain: onChain } : {}) }, deskStandsIn ? { fallback: true } : { unreached: true })
+          : await fomoAnswer(chatId, j, replyOpts);
+        if (r === "sent") return null;
+        if (r !== "not-research") {
+          releaseReply(chatId, messageId);
+          return r;
+        }
+        trendingFellBack = j.trending === true;
+      }
+      if (tailAsk) {
+        // Off the chat queue, like the desk below: the room's line after it
+        // (commandNotice) is queued on this chat, and the handoff to her DM
+        // must not hold up the room.
+        track((async () => {
+          const r = await tailLine(chatId, j, replyOpts, tailAsk);
+          if (r === null) return;
+          releaseReply(chatId, messageId);
+          if (j.addressed !== null) quietLine(r, j);
+        })());
+        return null;
+      }
+      // AN OPINION ASK THAT NOTHING YET MARKS AS A COIN ("what do you think
+      // about sex"): the conversation settles it, once, through the group's
+      // model (understand.ts). A topic is the persona's to answer below; a
+      // coin, or no answer at all, keeps the desk's read.
+      const researchable = !request && dec.mood !== "private-ask" && !isInjection(j.line.text);
+      let intent = deskIntentOf(j.line.text, chatId);
+      let reading: SubjectReading | null = null;
+      if (researchable && intent?.kind === "coin" && intent.loose && d.desk && coinFactsOn()) {
+        stageOf(chatId, "read: coin or topic");
+        reading = await readSubject({ model: modelNow(), gate, chatId, room: store.room(chatId), trigger: j.line, name: intent.name });
+        if (reading === "topic") {
+          log("[tg-groups] an opinion ask read as a topic, not a coin");
+          intent = null;
+        }
+      }
+      // A REPLY TO ITS OWN FOMO LINE ("which coin?" → "pons", "top traders
+      // or trending?" → "trending"): what it means is in the line it answers,
+      // so the router reads it before the desk takes "$pons" for a chart or
+      // "trending" for the market, however short it is.
+      const routable = researchable && dec.mood === "normal" && j.addressed !== null && reading !== "topic";
+      // A trending ask Fomo could not answer is the desk's now, never routed back to Fomo.
+      const fomoThread = routable && !trendingFellBack && repliesToOwnFomo(j);
+      // Whatever the persona says to a line in a research thread stays in it.
+      if (j.fomo === true || fomoThread) replyOpts = { ...replyOpts, researchThread: true };
+      // "YOU DIDN'T ANSWER" UNDER ITS ANSWER TO THEIR QUESTION: the question
+      // is read again, in the light of that complaint, before the desk takes
+      // the complaint for a market read (live 22:59: "I said what's trending
+      // on fomo"). A chat pick leaves it to the lanes below, as before.
+      // One routing call per line at most.
+      let routedOnce = false;
+      if (routable && typeof j.reaskOf === "string") {
+        routedOnce = true;
+        if ((await routeLine(chatId, j, replyOpts, persona, { reaskOf: j.reaskOf })) === "taken") return null;
+      }
+      // A QUOTE ASK UNDER ONE OF ITS THESES ANSWERS ("show me the last 5",
+      // past the fifteen-minute follow-up window): the theses of the coin that
+      // answer was about, asked as a request code builds from the line's own
+      // words (detect.ts thesesQuotesOf), never routed by a model.
+      if (fomoThread && !routedOnce) {
+        const under = repliedFomoCoin(j);
+        // Only an explicit ask, or a line that is nothing but a count or a list ask: anything else is the router's.
+        const quotes = under && (under.aspect === "theses" || under.aspect === "quotes") && quoteAskByCode(j.line.text, selfNamesOf(selfNow())) ? thesesQuotesOf(j.line.text, selfNamesOf(selfNow())) : null;
+        if (under && quotes) {
+          const r = await fomoAnswer(chatId, j, replyOpts, { kind: "coin", symbol: under.symbol, ...(under.chain ? { chain: under.chain } : {}), aspect: "theses", quotes: quotes.n });
+          if (r === "sent") return null;
+          if (r !== "not-research") {
+            releaseReply(chatId, messageId);
+            return r;
+          }
+        }
+      }
+      if (fomoThread && !routedOnce) {
+        routedOnce = true;
+        if ((await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
+      }
       // THE DESK FIRST for a market or coin read: evidence, a chart and a
       // reasoned answer, off the chat queue like the public facts below.
-      const deskAsk = !request && dec.mood !== "private-ask" && !isInjection(j.line.text) ? deskAskFor(j, context, coinQuestion) : null;
+      const deskAsk = researchable ? deskAskFor(j, context, coinQuestion, intent) : null;
       if (deskAsk) {
         const allowed = deskRoom(chatId);
         const note = deskAsk.kind === "coin" && "address" in deskAsk && context?.address === deskAsk.address ? deskNoteFor(context.memo) : undefined;
@@ -2023,13 +2546,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const deskOpts = deskAsk.kind !== "market" ? { ...timedOpts, stillWanted: () => wanted() && coinFactsOn() } : timedOpts;
         track((async () => {
           const sent = await deskAnswer(chatId, j, deskAsk, deskOpts, note, allowed);
-          if (!sent) { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
+          if (!sent) { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost(), j); }
         })());
         return null;
       }
-      if (!request && dec.mood !== "private-ask" && !isInjection(j.line.text)
-        && (deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "discussion"
-          || (deskAskOf(j.line.text, selfNamesOf(selfNow()))?.kind === "analysis" && deskQuestionIntent(j.line.text) !== "overview"))) {
+      if (researchable && (intent?.kind === "discussion" || (intent?.kind === "analysis" && deskQuestionIntent(j.line.text) !== "overview"))) {
         const sent = await deskClarify(chatId, replyOpts, j);
         if (!sent) { releaseReply(chatId, messageId); return whyLost(); }
         return null;
@@ -2045,12 +2566,34 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const fact = request ? await requestedFact(request, chatId) : await coinFact(context!);
           const sent = await speak(chatId, { kind: "public-fact", fact }, factualOpts);
           if (sent) noteAnswered(sent.chatId, j, false);
-          else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
+          else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost(), j); }
         })());
         return null;
       }
+      // "I ASKED A QUESTION" FROM SOMEONE WITH NOTHING OPEN: which one? A
+      // fixed line, never a guessed market read (decision D12).
+      if (j.meta === "complaint" && j.noOpenAsk === true) {
+        const sent = await whichQuestion(chatId, j, replyOpts);
+        if (!sent) { releaseReply(chatId, messageId); return whyLost(); }
+        noteAnswered(sent.chatId, j, false);
+        return null;
+      }
+      // NO RULE KNEW THIS LINE. Before the persona answers it, the group's
+      // model picks once from what it can do (route.ts), and code checks the
+      // pick. Not for a line read as an ordinary topic or one with nothing
+      // the router serves, and only from the first half of the allowance.
+      // A line from someone whose earlier ask went unanswered is always worth
+      // it: the router may re-run that ask (reask).
+      const unanswered = j.reaskable && askStateOf(j.reaskable) === "lost" && !j.reaskable.reasked ? j.reaskable : null;
+      // A Fomo follow-up the planner could not read that names a chain ("shogun on base?"): the router
+      // reads it, and grounds the chain from the line itself (route.ts groundedChain).
+      const fomoChain = j.fomo === true && chainIn(j.line.text) !== undefined;
+      if (routable && !fomoThread && !routedOnce && (unanswered || fomoChain || routeWorthy(j.line.text, selfNamesOf(selfNow()), knownCoinNames(chatId)))) {
+        const routed = await routeLine(chatId, j, replyOpts, persona, unanswered ? { reask: true, reaskOf: unanswered.job.line.text } : {});
+        if (routed === "taken") return null;
+      }
     }
-    const sent = await speak(chatId, intent, replyOpts);
+    const sent = await speak(chatId, persona, replyOpts);
     if (!sent) {
       releaseReply(chatId, messageId);
       return whyLost();
@@ -2154,6 +2697,18 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return null;
   };
 
+  /**
+   * "WHY?" UNDER ITS OWN "THAT ONE IS FOR A DIRECT MESSAGE": what stays in
+   * DMs and what a room may hear (facts.ts dm-policy), never a guessed
+   * market read or the persona's guess at its own rules.
+   */
+  const repliedDmPolicy = (j: LineJob): PublicFactRequest | null => {
+    if (j.addressed === null || !/\b(?:why|how come)\b/iu.test(j.line.text) || !isMsgId(j.line.replyTo)) return null;
+    const stored = store.room(j.msg.chatId);
+    const replied = stored ? freshView(stored, clock()).lines.find((l) => l.messageId === j.line.replyTo) : undefined;
+    return replied?.own && /\b(?:for|in) a direct message\b/iu.test(replied.text) ? { kind: "site", topic: "dm-policy" } : null;
+  };
+
   /** Time-box a read without holding the per-chat queue. Late evidence is ignored. */
   const readFact = async <T>(read: () => Promise<T>): Promise<T | null> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2199,14 +2754,867 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return true;
   };
   /** What each chat last asked the desk, so "do a quick analysis" right after reads the same thing. */
-  const lastDesk = new Map<string, { ask: TgDeskAsk; atMs: number; ingressOrder: number; migrated?: boolean }>();
+  const lastDesk = new Map<string, { ask: TgDeskAsk; atMs: number; ingressOrder: number; migrated?: boolean; fromId?: number }>();
   const deskKey = (chatId: number, threadId?: number): string => `${chatId}:${threadId ?? 0}`;
   const DESK_FOLLOW_MS = 15 * MIN;
-  const rememberDesk = (chatId: number, ask: TgDeskAsk, atMs: number, order: number | undefined, threadId?: number, migrated = false): void => {
+  /** `fromId`: who asked it, so a subject they asked before their /forgetme is never read again for anyone (deskAskFor). */
+  const rememberDesk = (chatId: number, ask: TgDeskAsk, atMs: number, order: number | undefined, threadId?: number, migrated = false, fromId?: number): void => {
     const key = deskKey(chatId, threadId);
     if (order === undefined || (lastDesk.get(key)?.ingressOrder ?? -1) >= order) return;
     if (lastDesk.size > 256 && !lastDesk.has(key)) lastDesk.delete(lastDesk.keys().next().value!);
-    lastDesk.set(key, { ask, atMs, ingressOrder: order, ...(migrated ? { migrated: true } : {}) });
+    lastDesk.set(key, { ask, atMs, ingressOrder: order, ...(migrated ? { migrated: true } : {}), ...(typeof fromId === "number" ? { fromId } : {}) });
+  };
+
+  // ── social-trading research (docs/fomo.md "Telegram groups") ──────────────
+
+  /**
+   * HOW OFTEN THE RESEARCH MAY BE ASKED, like the desk's looks: each ask can
+   * spend the owner's research credits, so a chat gets at most FOMO_PER_CHAT
+   * and the agent FOMO_PER_AGENT in any ten minutes. An ask the research does
+   * not take (not a research question) gives its slot back, and so does an
+   * answer that bought nothing (TgFomoAnswer.free: every read a kept copy, no
+   * paraphrase call): only answers that read from the provider count.
+   */
+  const FOMO_WINDOW_MS = 10 * MIN;
+  const FOMO_PER_CHAT = 6;
+  const FOMO_PER_AGENT = 30;
+  const fomoAsks: Array<{ chatId: number; atMs: number }> = [];
+  const fomoRoom = (chatId: number): { atMs: number; chatId: number } | null => {
+    const now = clock();
+    while (fomoAsks.length && now - fomoAsks[0]!.atMs > FOMO_WINDOW_MS) fomoAsks.shift();
+    if (fomoAsks.length >= FOMO_PER_AGENT || fomoAsks.filter((l) => l.chatId === chatId).length >= FOMO_PER_CHAT) return null;
+    const slot = { chatId, atMs: now };
+    fomoAsks.push(slot);
+    return slot;
+  };
+  const fomoRefund = (slot: { atMs: number; chatId: number }): void => {
+    const i = fomoAsks.indexOf(slot);
+    if (i >= 0) fomoAsks.splice(i, 1);
+  };
+  /** When each chat topic last got a research answer: a short follow-up there ("what about the sellers?") goes to the research too. */
+  const lastFomo = new Map<string, number>();
+  const FOMO_FOLLOW_MS = 15 * MIN;
+  const fomoRecent = (chatId: number, threadId?: number): boolean => {
+    const at = lastFomo.get(deskKey(chatId, threadId));
+    return at !== undefined && clock() - at <= FOMO_FOLLOW_MS;
+  };
+  const rememberFomo = (chatId: number, threadId?: number): void => {
+    const key = deskKey(chatId, threadId);
+    if (lastFomo.size > 256 && !lastFomo.has(key)) lastFomo.delete(lastFomo.keys().next().value!);
+    lastFomo.set(key, clock());
+  };
+  /** The coin each topic's last single-coin Fomo answer was about, for half an hour. */
+  const lastFomoCoin = new Map<string, FomoCoin>();
+  const FOMO_COIN_MS = 30 * MIN;
+  const rememberFomoCoin = (chatId: number, threadId: number | undefined, messageId: number | undefined, coin: NonNullable<TgFomoAnswer["coin"]>): void => {
+    const c: FomoCoin = { symbol: coin.symbol, ...(coin.chain ? { chain: coin.chain } : {}), aspect: coin.aspect, at: clock() };
+    if (isMsgId(messageId)) fomoCoinLines.set(msgKey(chatId, messageId), c);
+    const key = deskKey(chatId, threadId);
+    if (lastFomoCoin.size > 256 && !lastFomoCoin.has(key)) lastFomoCoin.delete(lastFomoCoin.keys().next().value!);
+    lastFomoCoin.set(key, c);
+  };
+  /** The coin of the Fomo answer this line replies to, while that answer's thread is live. */
+  const repliedFomoCoin = (j: LineJob): FomoCoin | null => {
+    const me = selfNow();
+    const q = j.msg.replyTo;
+    if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return null;
+    const c = fomoCoinLines.get(msgKey(j.msg.chatId, q.messageId));
+    return c && clock() - c.at <= FOMO_THREAD_MS ? c : null;
+  };
+  /** This topic's last Fomo coin, inside half an hour. */
+  const recentFomoCoin = (chatId: number, threadId?: number): FomoCoin | null => {
+    const c = lastFomoCoin.get(deskKey(chatId, threadId));
+    return c && clock() - c.at <= FOMO_COIN_MS ? c : null;
+  };
+  const permitsOf = (chatId: number, threadId: number | undefined, create: boolean): Map<string, Permit> | null => {
+    const key = deskKey(chatId, threadId);
+    let m = collapses.get(key);
+    if (!m && create) {
+      if (collapses.size >= 512) collapses.delete(collapses.keys().next().value!);
+      m = new Map();
+      collapses.set(key, m);
+    }
+    return m ?? null;
+  };
+  const putPermit = (chatId: number, threadId: number | undefined, p: Permit): void => {
+    const m = permitsOf(chatId, threadId, true)!;
+    const k = p.coin.toLowerCase();
+    m.delete(k);
+    if (m.size >= 16) m.delete(m.keys().next().value!);
+    m.set(k, p);
+  };
+  /**
+   * A FACTS ANSWER'S MEASUREMENT (TgFomoAnswer.collapse), whether or not its
+   * send went through (the measurement is true either way): a collapse is a
+   * measured permit for twelve hours; no collapse clears every permit for
+   * the coin and keeps a room's word from setting one for twelve hours.
+   */
+  const noteCollapse = (chatId: number, threadId: number | undefined, c: NonNullable<TgFomoAnswer["collapse"]>): void => {
+    const coin = typeof c.coin === "string" ? c.coin.trim() : "";
+    if (!coin) return;
+    // A collapse measured for a coin named like a person the room heard from it is never stored as a permit (review r2).
+    if (c.collapsed && heardHere(chatId, coin)) return;
+    const t = clock();
+    putPermit(chatId, threadId, { coin, ...(c.chain ? { chain: c.chain } : {}), source: c.collapsed ? "measured" : "clear", atMs: t, untilMs: t + MEASURED_PERMIT_MS });
+    log(`[tg-groups] collapse ${c.collapsed ? "measured" : "not measured"}`);
+  };
+  /**
+   * SOMEONE HERE SAYS THE ROOM'S COIN RUGGED ("auton rugged lol", or "it
+   * rugged" under its Fomo answer): a room permit for half an hour, only for
+   * the room's current Fomo coin (this topic's last one, or the one the line
+   * replies under), never a coin a rival shill names, never over a recent
+   * measurement that found no collapse, never over a measured permit.
+   */
+  const noteRoomRugged = (msg: TgMessage, text: string, threadId: number | undefined, me: BotSelf | null): void => {
+    const said = roomSaysRugged(text, selfNamesOf(me));
+    if (!said) return;
+    const q = msg.replyTo;
+    const under = me && q && q.fromId === me.id && isMsgId(q.messageId) ? fomoCoinLines.get(msgKey(msg.chatId, q.messageId)) : undefined;
+    const live = under && clock() - under.at <= FOMO_THREAD_MS ? under : null;
+    // A pointer ("it rugged") only under the coin's own live answer: replying
+    // to nothing it may be about any coin ("yeah froggy, it rugged"). A line
+    // naming the coin may fall back to the topic's last one (review, 2026-10-09).
+    const current = said.coin ? (live ?? recentFomoCoin(msg.chatId, threadId)) : live;
+    if (!current) return;
+    if (said.coin && said.coin !== current.symbol.toUpperCase()) return;
+    // "auton rugged on base lol" is about another AUTON than the room's Solana one (review r2).
+    const saidChain = chainIn(text);
+    if (saidChain && current.chain && saidChain !== current.chain) return;
+    if (heardHere(msg.chatId, current.symbol)) return;
+    const had = permitsOf(msg.chatId, threadId, false)?.get(current.symbol.toLowerCase());
+    const t = clock();
+    if (had && had.untilMs > t && (had.source === "measured" || had.source === "clear")) return;
+    putPermit(msg.chatId, threadId, { coin: current.symbol, ...(current.chain ? { chain: current.chain } : {}), source: "room", atMs: t, untilMs: t + ROOM_PERMIT_MS });
+    log("[tg-groups] collapse said by the room");
+  };
+  /**
+   * NAMES THE ROOM HAS HEARD FROM IT AS PEOPLE, in its own recent lines
+   * (review r2): each quote's author ("• kaleo, 3 min ago: …"; never "a
+   * trader") and each trader row of a board ("2. kaleo +$151.4k"). Under a
+   * permit the gate holds them as names a rug word may not sit beside.
+   */
+  const heardPeopleOf = (room: TgRoom): string[] => {
+    const out = new Set<string>();
+    for (const l of room.lines.filter((x) => x.own === true).slice(-24)) {
+      for (const row of String(l.text ?? "").split("\n")) {
+        const q = /^• ([A-Za-z0-9_.]{2,30}), /u.exec(row);
+        if (q) out.add(q[1]!);
+        const t = /^\d+\. (.+?) [+-]?\$[\d.,]+[kMBT]?$/u.exec(row);
+        if (t && t[1]!.length <= 30) out.add(t[1]!);
+      }
+    }
+    return [...out].slice(0, 48);
+  };
+  /** Whether a coin is named like a person this room heard from it (heardPeopleOf). */
+  const heardHere = (chatId: number, coin: string): boolean => {
+    const room = store.room(chatId);
+    const low = coin.trim().replace(/^\$+/u, "").toLowerCase();
+    return !!room && heardPeopleOf(room).some((n) => n.toLowerCase() === low);
+  };
+  /** Words a room calls a person by: a coin called one of them never gets a permit. */
+  const PERSON_COIN = /^(?:dev|devs|team|they|he|she|him|her|someone|kol|whale|whales|admin|admins|mod|mods)$/iu;
+  /**
+   * THE PERMIT FOR THE LINE BEING ANSWERED, or null: only when the line names
+   * the coin, replies under that coin's Fomo answer, or is a short pointer
+   * ("it", "this one", "rip"; never "lol" or "damn") within ten minutes of
+   * it, and never when the line names another coin. Never for a coin it
+   * holds or bought and has not exited (how it did is private, rule 3), never
+   * a coin named like someone in the room. `brag` is false while a brag is
+   * among its last eight lines or went out in the last twenty minutes.
+   */
+  const collapseFor = (chatId: number, threadId: number | undefined, trigger: TgLine | undefined, room: TgRoom, heldNames: readonly string[]): TgCollapse | null => {
+    const m = permitsOf(chatId, threadId, false);
+    if (!m || !trigger || trigger.own || typeof trigger.text !== "string") return null;
+    const t = clock();
+    const text = trigger.text.normalize("NFKC").toLowerCase();
+    // A coin named like someone the room heard from it as a person (a quote's author, a board's trader) is never a permit's: "kaleo rugged" says the trader rugged (review r2).
+    const people = new Set([room.ownerName ?? "", ...room.people.map((x) => x.name), ...heardPeopleOf(room)].map((n) => n.trim().toLowerCase()).filter(Boolean));
+    // ANOTHER COIN IN THE LINE ("pine $pons is pumping", "auton and pons lol"):
+    // a cashtag, a contract address, or a coin the room knows by name (its
+    // coin posts, its other permits, the topic's last Fomo coin). The permit
+    // is never handed to a line that may be about that coin (review, 2026-10-09).
+    const tags = extractCashtags(trigger.text).map((x) => x.toLowerCase());
+    const anyCa = extractCaHits(trigger.text).length > 0 || hasForeignMint(trigger.text);
+    const known = new Set<string>([
+      ...room.coins.map((c) => (typeof c.name === "string" ? c.name.trim().toLowerCase() : "")),
+      ...[...m.keys()],
+      recentFomoCoin(chatId, threadId)?.symbol.toLowerCase() ?? "",
+    ].filter((x) => x.length >= 2));
+    const wordIn = (w: string): boolean => new RegExp(`(?<![\\p{L}\\p{N}_])\\$?${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`, "u").test(text);
+    const lineChain = chainIn(trigger.text);
+    const otherCoinThan = (low: string): boolean => anyCa || tags.some((x) => x !== low) || [...known].some((k) => k !== low && wordIn(k));
+    for (const p of m.values()) {
+      if (p.untilMs <= t || p.source === "clear") continue;
+      const low = p.coin.toLowerCase();
+      if (people.has(low) || PERSON_COIN.test(low)) continue;
+      if (otherCoinThan(low)) continue;
+      if (heldNames.some((h) => typeof h === "string" && h.trim().toLowerCase() === low)) continue;
+      if (room.coins.some((c) => c.verdict === "bought" && !c.exitSaid && typeof c.name === "string" && c.name.trim().toLowerCase() === low)) continue;
+      // The permit is for the coin measured on its chain. The chain this line's coin is on: the one it names, else
+      // the same-ticker Fomo answer it replies under, else (replying to nothing) the topic's last same-ticker Fomo
+      // coin. Another chain is another coin of that ticker: a Base AUTON's collapse never lands on a reply under
+      // the Solana AUTON's answer (review r2).
+      const sameChain = (c: FomoCoin | undefined): boolean => !p.chain || !c?.chain || c.chain === p.chain;
+      const repliedTo = isMsgId(trigger.replyTo) ? fomoCoinLines.get(msgKey(chatId, trigger.replyTo)) : undefined;
+      const liveUnder = repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= FOMO_THREAD_MS ? repliedTo : undefined;
+      const recent = recentFomoCoin(chatId, threadId);
+      const aboutChain = lineChain ?? liveUnder?.chain ?? (!repliedTo && recent && recent.symbol.toLowerCase() === low ? recent.chain : undefined);
+      if (p.chain && aboutChain && aboutChain !== p.chain) continue;
+      const named = wordIn(low);
+      const under = !!repliedTo && repliedTo.symbol.toLowerCase() === low && sameChain(repliedTo) && t - repliedTo.at <= FOMO_THREAD_MS;
+      const last = lastFomoCoin.get(deskKey(chatId, threadId));
+      // A pointer at the coin ("it", "this one", "rip"), never an interjection: "lol" or "damn" may be about anything.
+      const pointer = text.split(/\s+/u).filter(Boolean).length <= 6 && /\b(?:it|this|that|this one|that one|rip)\b/u.test(text)
+        && ((!!repliedTo && repliedTo.symbol.toLowerCase() === low && sameChain(repliedTo) && t - repliedTo.at <= 10 * MIN) || (!!last && last.symbol.toLowerCase() === low && sameChain(last) && t - last.at <= 10 * MIN));
+      if (!named && !under && !pointer) continue;
+      const own = room.lines.filter((l) => l.own === true).slice(-8);
+      const lastBrag = bragAt.get(chatId);
+      const brag = !own.some((l) => SPENT_BRAG.test(l.text)) && !(lastBrag !== undefined && t - lastBrag < BRAG_GAP_MS);
+      // The room's other coins go with it: the gate refuses a rug word beside one of them (review r2).
+      return { coin: p.coin, source: p.source, atMs: p.atMs, brag, others: [...known].filter((k) => k !== low).slice(0, 32), people: heardPeopleOf(room) };
+    }
+    return null;
+  };
+  /**
+   * A PUSHBACK ON ITS OWN RESEARCH ANSWER ("there has to be thesis", "check
+   * again"): in reply to one of its research lines, or, replying to nothing,
+   * when its own last line in the topic is one. Under any other line of its
+   * own (a desk read, small talk) or someone else's, a pushback is about that
+   * line, never the last Fomo subject (review on #306).
+   */
+  const pushbackOnFomo = (msg: TgMessage, text: string, threadId?: number): boolean => {
+    const me = selfNow();
+    if (!me || !pushbackOf(text, selfNamesOf(me))) return false;
+    const q = msg.replyTo;
+    if (q) {
+      if (q.fromId !== me.id || !isMsgId(q.messageId)) return false;
+      const at = fomoLines.get(msgKey(msg.chatId, q.messageId));
+      return at !== undefined && clock() - at <= FOMO_THREAD_MS;
+    }
+    const own = (store.room(msg.chatId)?.lines ?? []).filter((l) => l.own === true && l.threadId === threadId);
+    const last = own[own.length - 1];
+    if (!last || !isMsgId(last.messageId)) return false;
+    const at = fomoLines.get(msgKey(msg.chatId, last.messageId));
+    return at !== undefined && clock() - at <= FOMO_FOLLOW_MS;
+  };
+  /** The most lines and characters one research answer may run to in a room. */
+  const FOMO_MAX_LINES = 6;
+  const FOMO_MAX_CHARS = 700;
+  /** The copy's age (fomo/render.ts freshnessLine), as a room hears it. */
+  const FOMO_AGE_LINE = /^(?:From a copy fetched |Data age: |The provider's own copy is from |Fomo's own copy is from )/;
+  /** The copy's age line of a research answer, if it has one. */
+  const fomoAgeLineOf = (text: string): string | null => text.split("\n").map((l) => l.trim()).find((l) => FOMO_AGE_LINE.test(l)) ?? null;
+  /** A board's row ("12. PONS on robinhood, market cap $2.1M", "2. kaleo +$151.4k"). */
+  const FOMO_BOARD_ROW = /^\d+\. /;
+  /** Whom a trader row names, or which coin a coin row names. */
+  const FOMO_ROW_SUBJECT = /^\d+\. (.+?) [+-]?\$[\d.,]+[kMBT]?$|^\d+\. (.+?), market cap /;
+  const FOMO_LATE = "the research didn't come back in time; ask again in a bit.";
+  const FOMO_BUSY = "i've done enough research lookups in here for now; ask again in a few minutes.";
+  const FOMO_UNSAYABLE = "i can't put that research into words for a group; ask me in a direct message.";
+  /**
+   * A read that came back with nothing in it, when none of its lines is
+   * sayable: never FOMO_UNSAYABLE, whose "ask me in a direct message" would
+   * make an empty answer sound private.
+   */
+  const FOMO_NOTHING = "nothing on fomo for that one right now.";
+  /**
+   * A lookup that failed, could not be reached or was refused by a budget,
+   * when nothing of its answer is sayable: said plainly, never as
+   * FOMO_UNSAYABLE, whose "ask me in a direct message" would make a failure
+   * sound private (fomo/render.ts GROUP_FOMO_UNREACHED, the same words).
+   */
+  const FOMO_UNREACHED = "couldn't reach fomo just now, try again in a bit.";
+  /**
+   * The longest a research read with a fallback may take: what is left of the
+   * reply deadline after it still holds the desk's look and a send.
+   */
+  const FOMO_FALLBACK_MS = 12 * SEC;
+
+  /**
+   * WHAT OF A RESEARCH ANSWER A ROOM MAY HEAR: each line through the group
+   * line gate on its own, as a `research` line (no @handles, addresses,
+   * links, cashtags, advice, claims, private state or plumbing; the published
+   * figures a code-built board carries, a leaderboard's money made or a
+   * coin's market cap, may stand), refused lines DROPPED, never repaired, and
+   * at most FOMO_MAX_LINES lines and FOMO_MAX_CHARS characters. A group answer
+   * carries no source line: the room has had its post about where the data
+   * comes from (Milla, 2026-10-07). Null when nothing sayable is left.
+   */
+  const fomoSayable = (text: string, tail?: string): string | null => {
+    const agentName = selfNow()?.name ?? "";
+    const lines = text.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+    const kept: string[] = [];
+    let refused = 0;
+    for (const l of lines) {
+      const v = admitTgLine(l, { agentName, kind: "research", recentOwn: [] });
+      if (!v.ok) {
+        refused += 1;
+        continue;
+      }
+      kept.push(v.text);
+    }
+    if (refused) log(`[tg-groups] research lines dropped by the gate (${refused})`);
+    // THE COPY'S AGE KEEPS A SLOT OF ITS OWN (docs/fomo.md: a reused copy is
+    // always labelled with its age), like the tail below: a 50-minute-old
+    // board is never said as current because the line cap cut its last line.
+    // Alone it says nothing, so an answer with nothing else sayable is not one.
+    const ageAt = kept.findIndex((l) => FOMO_AGE_LINE.test(l));
+    const age = ageAt >= 0 ? kept.splice(ageAt, 1)[0]! : null;
+    if (!kept.length) return null;
+    // A tail line (the owner's "sent the trade moves … to your DM") keeps the
+    // last slot; refused by the gate, it is dropped and the answer still goes.
+    const last = tail !== undefined ? admitTgLine(tail, { agentName, kind: "research", recentOwn: [] }) : null;
+    const end = last?.ok ? last.text : null;
+    // What the room hears without the age: lines in order, within the caps.
+    const slots = FOMO_MAX_LINES - (end ? 1 : 0);
+    const budget = FOMO_MAX_CHARS - (end ? end.length + 1 : 0);
+    const out: string[] = [];
+    let used = 0;
+    for (const l of kept) {
+      if (out.length >= slots || used + l.length + 1 > budget) break;
+      out.push(l);
+      used += l.length + 1;
+    }
+    if (age) {
+      // Room for the age comes out of the board's rows, lowest first: never
+      // out of a row's answer or the Robinhood Chain line, which say what was
+      // asked, never the row that answer is about (its subject is named
+      // below it), never the first row (a board with no row is no board);
+      // with no such row, out of whatever comes last.
+      const asked = (row: string): boolean => {
+        const m = FOMO_ROW_SUBJECT.exec(row);
+        const who = m?.[1] ?? m?.[2];
+        return !!who && out.some((l) => !FOMO_BOARD_ROW.test(l) && l.includes(who));
+      };
+      const chars = (): number => out.reduce((n, l) => n + l.length + 1, 0);
+      while (out.length > 0 && (out.length > slots - 1 || chars() + age.length + 1 > budget)) {
+        const first = out.findIndex((l) => FOMO_BOARD_ROW.test(l));
+        let row = -1;
+        for (let i = out.length - 1; first >= 0 && i > first; i--) {
+          if (FOMO_BOARD_ROW.test(out[i]!) && !asked(out[i]!)) {
+            row = i;
+            break;
+          }
+        }
+        if (row >= 0) out.splice(row, 1);
+        else out.pop();
+      }
+    }
+    if (!out.length) return null;
+    return [...out, ...(age ? [age] : []), ...(end ? [end] : [])].join("\n");
+  };
+
+  /** A coin's theses as the group model worded them, by coin, copy and the theses read, for half an hour (theses.ts). */
+  const thesesWordings = new ThesesWordings();
+
+  /** How often the owner's moves go out per room and kind of answer. */
+  const MOVES_EVERY_MS = 30 * MIN;
+  const movesAt = new Map<string, number>();
+  const movesDue = (chatId: number, kind: string): boolean => {
+    const at = movesAt.get(`${chatId}:${kind}`);
+    return at === undefined || clock() - at >= MOVES_EVERY_MS;
+  };
+  const movesSaid = (chatId: number, kind: string): void => {
+    if (movesAt.size > 512) movesAt.delete(movesAt.keys().next().value!);
+    movesAt.set(`${chatId}:${kind}`, clock());
+  };
+
+  /** A research read, time-boxed. "timeout" and "failed" are told apart from a plain "not research" (null). */
+  const readFomo = async (port: TgFomoPort, q: { text: string; request?: TgFomoRequest; owner?: boolean; fresh?: boolean; chatId: number; threadId?: number; selfNames?: readonly string[] }, ms: number): Promise<Awaited<ReturnType<TgFomoPort["ask"]>> | "timeout" | "failed"> => {
+    if (ms <= 0) return "timeout";
+    const ask = { ...q, timeoutMs: ms };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = d.timer ? d.timer(ms).then(() => "timeout" as const) : new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), ms);
+        timer.unref?.();
+      });
+      return await Promise.race([Promise.resolve().then(() => port.ask(ask)), expired]);
+    } catch (e) {
+      fail("research", e);
+      return "failed";
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  /**
+   * What the room hears when her quotes went to her DM: one of a small fixed
+   * pool, gated like every template, not the last few it said when another
+   * will do.
+   */
+  const quotesDmNotice = (chatId: number): string => {
+    const recentOwn = (store.room(chatId)?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
+    const start = Math.floor(roll() * QUOTES_DM_LINES.length);
+    for (const recent of [recentOwn, []]) {
+      for (let i = 0; i < QUOTES_DM_LINES.length; i++) {
+        const v = admitTgLine(QUOTES_DM_LINES[(start + i) % QUOTES_DM_LINES.length]!, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn: recent, names: [] });
+        if (v.ok) return v.text;
+      }
+    }
+    return QUOTES_DM_LINES[0]!;
+  };
+
+  /**
+   * ONE ADDRESSED RESEARCH QUESTION, ANSWERED IN THE ROOM: rate-bounded,
+   * inside the reply deadline from receipt, delivered through deliver() so
+   * the feature switch, the room's approval, the deadline, a shush and
+   * whether it is still wanted are all checked again right before the send.
+   * "not-research": the research did not take it, and the caller goes on.
+   *
+   * WITH A FALLBACK (a bare "what's trending", whose fallback is the desk's
+   * market read) nothing is said unless the research really answered: the
+   * room's research answers spent, a late read, a budget refusal, research
+   * unavailable or failed, or nothing sayable are all "not-research", and
+   * the read gets at most FOMO_FALLBACK_MS, so the desk still has its time
+   * inside the same deadline.
+   */
+  const fomoAnswer = async (chatId: number, j: LineJob, o: SpeakOpts, request?: TgFomoRequest, how: { fallback?: boolean; unreached?: boolean } = {}): Promise<"sent" | "not-research" | Quiet> => {
+    const port = fomoNow();
+    if (!port) return "not-research";
+    const replyByMs = j.bornAtMs + RESEARCH_REPLY_MS;
+    let lost: Quiet = "send-failed";
+    /** Where the answer landed in this chat, for the coin it was about. */
+    let sentId: number | undefined;
+    const send = async (text: string): Promise<"sent" | Quiet> => {
+      const sent = await deliver({
+        chatId,
+        intent: { kind: "answer", mood: "normal" },
+        text,
+        ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+        ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+        ...(o.mention ? { mention: o.mention } : {}),
+        bornAtMs: j.bornAtMs,
+        replyByMs,
+        followUp: false,
+        ownerAddressed: o.ownerAddressed === true,
+        // Still wanted only while the research lane stays wired and the asker still wants it.
+        stillWanted: () => (!o.stillWanted || o.stillWanted()) && fomoNow() !== null,
+        miss: (why) => {
+          lost = why;
+          o.miss?.(why);
+        },
+        accountAnswer: accountResearchAnswer(j.line, j.seenAtMs),
+      });
+      if (!sent) return lost;
+      recordOwn(sent.chatId, sent.messageId, text.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined, undefined, sent.chatId === chatId ? o.threadId : undefined);
+      markFomoLine(sent.chatId, sent.messageId);
+      sentId = sent.chatId === chatId ? sent.messageId : undefined;
+      log("[tg-groups] said research");
+      return "sent";
+    };
+    const slot = fomoRoom(chatId);
+    if (!slot) return how.fallback ? "not-research" : send(FOMO_BUSY);
+    const refund = (): void => fomoRefund(slot);
+    stageOf(chatId, "research: ask");
+    // The bot's own names go with the line: an addressed line almost always
+    // carries "@thisbot", which the research must not read as a trader.
+    const selfNames = selfNamesOf(selfNow());
+    // The owner is the trusted sender id, never a line sent through a chat (j.isOwner excludes `via`).
+    const owner = j.isOwner === true;
+    const left = replyByMs - RESEARCH_SEND_MS - clock();
+    // "typing…" while the research is read: the room sees it is on its way.
+    const stopTyping = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
+    // PUSHING BACK ON ITS OWN RESEARCH ANSWER ("there has to be thesis",
+    // "check again"), in reply to it or right after it: read again, never
+    // serve the same held "nothing here" (the AUTON incident, 2026-10-08).
+    const fresh = pushbackOnFomo(j.msg, j.line.text, j.threadId);
+    const r = await readFomo(port, {
+      text: j.line.text,
+      ...(request ? { request } : {}),
+      ...(owner ? { owner } : {}),
+      ...(fresh ? { fresh } : {}),
+      chatId,
+      ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
+      ...(selfNames.length ? { selfNames } : {}),
+    }, how.fallback ? Math.min(FOMO_FALLBACK_MS, left) : left).finally(stopTyping);
+    // `unreached`: a request with no other answer (another chain's trending board) says Fomo could not be reached.
+    if (r === null) {
+      refund();
+      return how.unreached ? send(FOMO_UNREACHED) : "not-research";
+    }
+    if (r === "failed") {
+      refund();
+      return how.unreached ? send(FOMO_UNREACHED) : "not-research";
+    }
+    if (r === "timeout") {
+      log(`[tg-groups] research ask timed out${how.fallback ? ", the fallback answers" : ""}`);
+      return how.fallback ? "not-research" : send(FOMO_LATE);
+    }
+    if (typeof r !== "object" || typeof r.text !== "string") {
+      refund();
+      return "not-research";
+    }
+    // Said only once the research took it: a pushback it could not read is the persona's, and read nothing.
+    if (fresh) log("[tg-groups] research pushback: read again");
+    if (how.fallback && !r.deflect && (r.status === "budget-limited" || r.status === "unavailable" || r.status === "failed" || fomoSayable(r.text) === null)) {
+      // A refusal costs the provider nothing: the room's ask is given back.
+      if (r.status === "budget-limited" || r.status === "unavailable") refund();
+      log(`[tg-groups] research ${r.status ?? "unsayable"}, the fallback answers`);
+      return "not-research";
+    }
+    // A FACTS ANSWER'S MEASUREMENT sets or clears the collapse permit, sent or not.
+    if (!r.deflect && r.collapse) noteCollapse(chatId, j.threadId, r.collapse);
+    // A deflection is still an answer about research: a follow-up here goes back to it
+    // (taken back below if nothing reaches the room).
+    const fomoKey = deskKey(chatId, j.threadId);
+    const fomoBefore = lastFomo.get(fomoKey);
+    rememberFomo(chatId, j.threadId);
+    // Deflected before anything was looked up: it cost nothing, so it takes nothing.
+    if (r.deflect && r.free === true) refund();
+    // A COIN'S THESES IN THE GROUP MODEL'S OWN WORDS (theses.ts, decision
+    // D5): one checked call inside what is left of the deadline, kept for
+    // half an hour; anything short of that is the code digest (r.text).
+    let body = r.text;
+    // Whether the paraphrase made (or may have made) a model call: such an answer keeps its slot.
+    let thesesFree = true;
+    // A COIN'S THESES QUOTED, on her explicit ask, go to HER DM and nowhere
+    // else (Milla, 2026-10-09: "Owner's DM"; quotes.ts): a stranger's words
+    // never land in the group. Each quote gated again, dropped and counted,
+    // never repaired; no paraphrase call. With none sayable, the honest line
+    // and the digest. Anyone else's ask, or quotes she is not the asker of,
+    // gets the digest in the room (the port builds quotes for her only).
+    let quotesDm: string | null = null;
+    // None of them sayable: the honest line and the digest, in the room (both
+    // code's own), never a DM with no thesis in it and a room told one went.
+    let quotesNone: string | null = null;
+    if (!r.deflect && r.quotes && owner) {
+      const q = quotesSayable(r.quotes, fomoAgeLineOf(r.text), selfNow()?.name ?? "");
+      if (q) {
+        // Counts only: never a quote, a handle or a coin.
+        log(`[tg-groups] theses quoted for the owner's DM (${q.quoted} quoted, ${q.leftOut} left out)`);
+        if (q.quoted > 0) quotesDm = q.text;
+        else quotesNone = [q.text, fomoSayable(r.text)].filter((x): x is string => typeof x === "string" && x !== "").join("\n");
+      }
+    }
+    if (!r.deflect && r.theses && quotesDm === null && quotesNone === null) {
+      const stopWording = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
+      const worded = await wordTheses({
+        model: modelNow(),
+        gate,
+        chatId,
+        material: r.theses,
+        agentName: selfNow()?.name ?? "",
+        env: env(),
+        boxMs: Math.min(THESES_BOX_MS, replyByMs - RESEARCH_SEND_MS - clock()),
+        // Her moves line, when it goes, takes the last slot.
+        maxLines: FOMO_MAX_LINES - (owner && r.moves ? 1 : 0),
+        maxChars: FOMO_MAX_CHARS - (owner && r.moves ? r.moves.room.length + 1 : 0),
+        now: clock(),
+        kept: thesesWordings,
+        // Like routing, a paraphrase only spends the half of the allowance kept for what is nice to have.
+        reserve: { day: Math.max(ROUTE_RESERVE_DAY, Math.ceil(gate.dailyAllowance / 2)), hour: Math.max(ROUTE_RESERVE_HOUR, Math.ceil(gate.hourAllowance / 2)) },
+      }).finally(stopWording);
+      // Counts and kinds only: never a phrase, a coin or a sample.
+      log(`[tg-groups] theses ${worded.why}${worded.dropped ? ` (${worded.dropped} phrase(s) dropped)` : ""}`);
+      if (worded.lines) body = worded.lines.join("\n");
+      if (worded.why === "worded" || worded.why === "dropped" || worded.why === "no-answer") thesesFree = false;
+    }
+    // AN ANSWER THAT BOUGHT NOTHING (every read a kept copy, no paraphrase
+    // call) gives its slot back: the room's six per ten minutes bound what is
+    // spent, and a re-ask or a board cut from the same read spends nothing.
+    if (!r.deflect && r.free === true && thesesFree) refund();
+    // The quotes in her DM; the room hears only that they went ("sent it to
+    // your DMs 🤫"), never a claim that is not true: a DM that did not land
+    // leaves the digest for the room instead.
+    /** Nothing reached the room: the follow-up window this answer opened is closed again. */
+    const unremember = (): void => {
+      if (fomoBefore === undefined) lastFomo.delete(fomoKey);
+      else lastFomo.set(fomoKey, fomoBefore);
+    };
+    // The DM goes only with time left for the room's line after it (deliver's
+    // own deadline); with less, the digest goes to the room instead.
+    const dmByMs = replyByMs - RESEARCH_SEND_MS / 2;
+    if (quotesDm !== null && dmByMs - clock() < RESEARCH_SEND_MS / 2) {
+      log("[tg-groups] theses quotes: too little time left for the owner's DM, the digest in the room");
+      quotesDm = null;
+    }
+    if (quotesDm !== null) {
+      // Re-read before anything leaves: a line she took back, or a newer one of the burst, sends nothing.
+      if ((o.stillWanted && !o.stillWanted()) || fomoNow() === null) {
+        unremember();
+        return "not-wanted";
+      }
+      stageOf(chatId, "research: theses quotes to the owner's DM");
+      if (await dmOwner(esc(quotesDm), undefined, dmByMs)) {
+        log("[tg-groups] theses quotes sent to the owner's DM");
+        // Said through this answer's own send (never the chat queue, which
+        // this may be running on): a reply under it asks about the same coin.
+        const told = await send(quotesDmNotice(chatId));
+        if (told === "sent" && r.coin) rememberFomoCoin(chatId, j.threadId, sentId, r.coin);
+        if (told !== "sent") {
+          log(`[tg-groups] theses quotes: the room's DM notice was not said (${told})`);
+          // The room saw nothing: no follow-up window for an answer it never heard.
+          unremember();
+        }
+        // Answered in her DM, whether or not the room's notice landed.
+        return "sent";
+      }
+      log("[tg-groups] theses quotes: the owner's DM failed, the digest in the room");
+    }
+    // HER MOVES: the commands go to her DM first, and the room hears that they
+    // went only when the DM landed (never a claim that is not true), at most
+    // once per room and kind in MOVES_EVERY_MS.
+    let movesLine: string | undefined;
+    if (!r.quotes && owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(body) !== null) {
+      stageOf(chatId, "research: owner moves");
+      if (await dmOwner(r.moves.dm)) {
+        movesSaid(chatId, r.moves.kind);
+        movesLine = r.moves.room;
+        log("[tg-groups] owner moves sent to the DM");
+      }
+    }
+    const failedRead = r.status === "failed" || r.status === "unavailable" || r.status === "budget-limited";
+    const text = quotesNone ?? fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
+    const said = await send(text);
+    // The coin it was about, by message and topic: "list the last 10" or "what happened to it" under it.
+    if (said === "sent" && !r.deflect && r.coin) rememberFomoCoin(chatId, j.threadId, sentId, r.coin);
+    // A REMEMBERED BOARD IS THE ROWS THE ROOM HEARD: rows the six lines cut
+    // (an age line, her moves line, a row's answer) are never "the last one",
+    // and an answer that never landed (a refused send, the deadline, a shush)
+    // leaves no board at all, and no research answer to follow up.
+    if (r.board && typeof port.heard === "function") {
+      try {
+        await port.heard(chatId, j.threadId, r.board, said === "sent" ? text : "");
+      } catch (e) {
+        fail("research", e);
+      }
+    }
+    if (said !== "sent") unremember();
+    return said;
+  };
+
+  // ── what a line wants, when no rule knew (route.ts) ──
+
+  const routeBreaker = new RouteBreaker(clock);
+  /** MERRYMEN_TG_GROUPS_ROUTER=0 turns it off; it needs a model and something to route to. */
+  const routerOn = (): boolean =>
+    (env().MERRYMEN_TG_GROUPS_ROUTER ?? "").trim() !== "0" && modelNow() !== null && (fomoNow() !== null || deskNow() !== null);
+  const ownerNow = (): TgOwnerPort | null => {
+    try {
+      return d.owner?.() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** Whether a tail can work here (TgOwnerPort.tailsState); absent or throwing: "on". */
+  const tailsStateNow = (): "on" | "switched-off" | "no-live-feed" => {
+    try {
+      const st = ownerNow()?.tailsState?.();
+      return st === "switched-off" || st === "no-live-feed" ? st : "on";
+    } catch {
+      return "on";
+    }
+  };
+  /** The text of the line this one replies to, when Telegram quoted it. */
+  const repliedText = (j: LineJob): string | null => {
+    const t = j.msg.replyTo?.text;
+    return typeof t === "string" && t.trim() ? t.slice(0, 400) : null;
+  };
+  /**
+   * A reply to one of its own lines about Fomo: a research answer, or the
+   * persona asking which board or coin they meant. What "pons" or
+   * "trending" means there is in the line it answers.
+   */
+  const repliesToOwnFomo = (j: LineJob): boolean => {
+    const me = selfNow();
+    const q = j.msg.replyTo;
+    if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return false;
+    // By message, never by its words: a desk read that says "trending up"
+    // keeps its own follow-ups, bound to the coin it read.
+    const at = fomoLines.get(msgKey(j.msg.chatId, q.messageId));
+    if (at === undefined || clock() - at > FOMO_THREAD_MS) return false;
+    if (!reactionOnly(j.line.text, selfNamesOf(me))) return true;
+    // "ok" and "bet" under its own ask or offer are a yes, not a reaction;
+    // under a research answer they stay a reaction.
+    return personaFomoLines.get(msgKey(j.msg.chatId, q.messageId)) === true && consents(j.line.text, selfNamesOf(me));
+  };
+  /**
+   * When this line replies to one of its own lines: the person's line that
+   * one answered (this chat's lines only), so route.ts can tell a name its
+   * own offer invented from one a person wrote first.
+   */
+  const askedBefore = (j: LineJob): string | null => {
+    const me = selfNow();
+    const q = j.msg.replyTo;
+    if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return null;
+    const room = store.room(j.msg.chatId);
+    const own = room?.lines.find((l) => l.own && l.messageId === q.messageId);
+    const asked = own && isMsgId(own.replyTo) ? room!.lines.find((l) => !l.own && l.messageId === own.replyTo) : undefined;
+    return asked && typeof asked.text === "string" && asked.text.trim() ? asked.text.slice(0, 400) : null;
+  };
+  const routeLabel = (r: TgRoute): string => (r.action === "fomo" ? `fomo:${r.request.kind}` : r.action);
+  /** "not-wanted", told apart as act's whyLost does. */
+  const whyGone = (j: LineJob, why: Quiet): Quiet =>
+    why !== "not-wanted" ? why : forgotten(j) ? "forgotten" : j.addressed !== null && burstPassed(j.msg.chatId, j) ? "burst" : "not-wanted";
+
+  /**
+   * Ask what the line wants and run it. "taken": a lane has it (detached, and
+   * it answers or says why not); "persona": the persona answers it, as before.
+   */
+  const routeLine = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent, earlier: { reask?: boolean; reaskOf?: string } = {}): Promise<"taken" | "persona"> => {
+    try {
+      if (!routerOn() || routeBreaker.open()) return "persona";
+      // Routing only ever spends the first half of the day and of this
+      // chat's hour: the rest is kept for the lines that must be written.
+      const reserve = {
+        day: Math.max(ROUTE_RESERVE_DAY, Math.ceil(gate.dailyAllowance / 2)),
+        hour: Math.max(ROUTE_RESERVE_HOUR, Math.ceil(gate.hourAllowance / 2)),
+      };
+      const box = Math.min(ROUTE_TIMEOUT_MS, j.bornAtMs + RESEARCH_REPLY_MS - RESEARCH_SEND_MS - ROUTE_LEAVES_MS - clock());
+      if (box < ROUTE_MIN_BOX_MS) return "persona";
+      const selfNames = selfNamesOf(selfNow());
+      stageOf(chatId, "route");
+      const { route, why } = await readRoute({
+        model: modelNow(),
+        gate,
+        chatId,
+        room: store.room(chatId),
+        trigger: j.line,
+        timeoutMs: box,
+        reserve,
+        ctx: {
+          line: j.line.text,
+          replied: repliedText(j),
+          asked: askedBefore(j),
+          ...(typeof earlier.reaskOf === "string" ? { reaskOf: earlier.reaskOf } : {}),
+          selfNames,
+          fomo: fomoNow() !== null,
+          desk: deskNow() !== null,
+          coins: coinFactsOn(),
+          ...(earlier.reask === true ? { reask: true } : {}),
+        },
+      });
+      routeBreaker.note(why);
+      // Counts and kinds only: never the line, a name or a coin.
+      log(`[tg-groups] route ${route ? routeLabel(route) : why}`);
+      if (!route || route.action === "chat") return "persona";
+      track(runRoute(chatId, j, o, persona, route));
+      return "taken";
+    } catch (e) {
+      fail("route", e);
+      return "persona";
+    }
+  };
+
+  /**
+   * A FOMO TAIL ASKED FOR IN THE ROOM (docs/fomo.md "Tailing a trader";
+   * docs/tg-groups.md rules 1 and 3). Groups never order trades, and who
+   * Merrymen tails is never a room's (a trader's public data is, Milla
+   * 2026-10-07; what Merrymen watches is not), so:
+   *
+   * - the owner's line (j.isOwner: the trusted sender id, never a line sent
+   *   through a chat) goes to her DM as the confirm card, through
+   *   TgOwnerPort.proposeTail with only what code read from it (`ask`; null
+   *   when it named no trader code could read: her DM gets the /tail usage).
+   *   Nothing is created until she presses a button there. The room hears
+   *   only where it went ("sent it to your DMs 🤫", or the dm-first line).
+   * - anyone else's gets the owner-only line, at most once an hour per
+   *   person (commandNotice), and nothing else: no research, no persona.
+   *
+   * Null: handled. A Quiet: nothing was said, and why.
+   */
+  const tailLine = async (chatId: number, j: LineJob, o: SpeakOpts, ask: TailRequest | null): Promise<Quiet | null> => {
+    const extra = { ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}), replyByMs: j.bornAtMs + RESEARCH_REPLY_MS };
+    if (!j.isOwner) {
+      const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, "owner-only", j.threadId, extra);
+      log(`[tg-groups] tail ask from someone else${said ? "" : ", owner-only already said this hour"}`);
+      // Silent by rule (said this hour already): nothing is open, and a re-run could only be silent again.
+      const k = askKey(chatId, j.line.fromId, j.threadId);
+      if (!said && openAsks.get(k)?.job.line.messageId === j.line.messageId) openAsks.delete(k);
+      return null;
+    }
+    const port = ownerNow();
+    if (!port?.proposeTail) {
+      log("[tg-groups] owner tail ask, no DM to send it to");
+      return "skipped";
+    }
+    if (o.stillWanted && !o.stillWanted()) return "not-wanted";
+    stageOf(chatId, "owner tail");
+    const tail: TgTailAsk | null =
+      ask === null
+        ? null
+        : ask.kind === "start"
+          ? { kind: "start", handle: ask.handle, hours: ask.hours, clamped: ask.clamped, take: tailAsksToTake(j.line.text) }
+          : ask.kind === "stop"
+            ? { kind: "stop", handle: ask.handle }
+            : { kind: "stop-which" };
+    const outcome = await port.proposeTail({ tail, fromId: j.line.fromId });
+    // Counts and kinds only: never the trader, the hours or the line.
+    log(`[tg-groups] owner tail ${tail ? tail.kind : "usage"}: ${outcome}`);
+    if (outcome !== "sent" && outcome !== "dm-first") return "skipped";
+    const said = await commandNotice(chatId, j.line.messageId, j.line.fromId, outcome === "sent" ? "dm-sent" : "dm-first", j.threadId, extra);
+    // Silent by rule ("dm-first" said this hour) or the notice was dropped: nothing is open, as for
+    // anyone else's, and a re-run could only be silent again (or propose a second card).
+    const k = askKey(chatId, j.line.fromId, j.threadId);
+    if (!said && openAsks.get(k)?.job.line.messageId === j.line.messageId) openAsks.delete(k);
+    return null;
+  };
+
+  /** One routed line, off the chat queue. Whatever happens, the line is answered or its slot released. */
+  const runRoute = async (chatId: number, j: LineJob, o: SpeakOpts, persona: TgIntent, route: TgRoute): Promise<void> => {
+    const messageId = j.line.messageId;
+    let lost: Quiet = "send-failed";
+    const opts: SpeakOpts = { ...o, miss: (why) => { lost = why; o.miss?.(why); } };
+    const done = (ok: boolean, why?: Quiet): void => {
+      if (ok) return;
+      releaseReply(chatId, messageId);
+      if (j.addressed !== null) quietLine(whyGone(j, why ?? lost), j);
+    };
+    /** The persona's answer, exactly as without the router. */
+    const asBefore = async (): Promise<void> => {
+      const sent = await speak(chatId, persona, opts);
+      if (sent) noteAnswered(sent.chatId, j, false);
+      done(!!sent);
+    };
+    try {
+      switch (route.action) {
+        case "fomo": {
+          const r = await fomoAnswer(chatId, j, opts, route.request);
+          if (r === "not-research") return await asBefore();
+          return done(r === "sent", r === "sent" ? undefined : r);
+        }
+        case "fomo-tail": {
+          // The pick names nobody: code reads the trader and the hours from
+          // the line itself, and her line that named no one gets the usage.
+          const r = await tailLine(chatId, j, opts, parseTailRequest(j.line.text, selfNamesOf(selfNow())));
+          return done(r === null, r ?? undefined);
+        }
+        case "reask": {
+          // A newer line of theirs arrived while this was routed (burst), or
+          // they were forgotten: that line wins, and the old ask stays lost.
+          // Re-running it now would make it their last addressed line again
+          // and drop the newer question as a burst.
+          if (o.stillWanted && !o.stillWanted()) return done(false, "not-wanted");
+          // Their earlier ask, run again as the reply to it (reaskAgain); this
+          // line itself needs no answer of its own.
+          if (!reaskAgain(j)) return await asBefore();
+          releaseReply(chatId, messageId);
+          return;
+        }
+        case "market":
+        case "coin": {
+          if (!deskNow() || (route.action === "coin" && !coinFactsOn())) return await asBefore();
+          const context = route.action === "coin" ? coinContext(j) : null;
+          const ask: TgDeskAsk =
+            route.action === "market"
+              ? { kind: "market" }
+              : context && context.memo?.name && context.memo.name.toLowerCase() === route.name.toLowerCase()
+                ? { kind: "coin", address: context.address }
+                : { kind: "coin", query: route.name };
+          const timed: SpeakOpts = { ...opts, replyByMs: j.bornAtMs + RESEARCH_REPLY_MS, accountAnswer: accountResearchAnswer(j.line, j.seenAtMs) };
+          const deskOpts = ask.kind === "coin" ? { ...timed, stillWanted: () => (!o.stillWanted || o.stillWanted()) && coinFactsOn() } : timed;
+          const note = context && "address" in ask && ask.address === context.address ? deskNoteFor(context.memo) : undefined;
+          const sent = await deskAnswer(chatId, j, ask, deskOpts, note, deskRoom(chatId));
+          return done(!!sent);
+        }
+        default:
+          return await asBefore();
+      }
+    } catch (e) {
+      fail("routed answer", e);
+      done(false);
+    }
   };
 
   /** A desk ask earlier in the reply chain: "do a quick analysis" under "how's the market?". This chat's lines only. */
@@ -2228,15 +3636,27 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (depth === 0 && quote && typeof quote.fromId === "number" && quote.fromId === selfNow()?.id && (!line || line.own)) {
         // Older stored answers contain prose but no subject metadata; the
         // authenticated Telegram photo caption still carries its safe header.
-        const head = (quote.text ?? text).split(/\r?\n/u)[0]?.trim() ?? "";
+        const parts = (quote.text ?? text).split(/\r?\n/u).map((p) => p.trim()).filter((p) => p !== "");
+        const head = parts[0] ?? "";
         if (head === "Robinhood Chain market") return { kind: "market" };
         // Own photo captions start with a code-owned safe subject, unlike
         // project claims further down the caption. Ambiguous ticker lookup
-        // remains an honest miss in the desk.
-        if (/^[\p{L}][\p{L}\p{N}._-]{1,23}$/u.test(head) && coinFactsOn()) return { kind: "coin", query: head };
+        // remains an honest miss in the desk. Only a caption, though: a
+        // title above a read. An older stored answer kept only the read, so
+        // the caption is what Telegram quotes beyond it; a line it remembers
+        // word for word, and a one-line "yo", are never a read (live
+        // 2026-10-07: "i asked a question" under "yo" was searched as the
+        // coin "yo").
+        const names = selfNamesOf(selfNow());
+        const caption = parts.length >= 2 && (!line || parts.join("\n") !== line.text.split(/\r?\n/u).map((p) => p.trim()).filter((p) => p !== "").join("\n"));
+        if (caption && /^[\p{L}][\p{L}\p{N}._-]{1,23}$/u.test(head) && deskNameOk(head, names) && addressedSmallTalk(head, names) === null
+          && greetingOf(head) === null && !reactionOnly(head, names) && coinFactsOn()) {
+          return { kind: "coin", query: head };
+        }
       }
       if (!line?.own) {
-        const intent = deskAskOf(text, selfNamesOf(selfNow()));
+        // A loose opinion ask up the chain was never settled as a coin: it lends no subject.
+        const intent = firmDeskIntentOf(text, j.msg.chatId);
         if (intent?.kind === "market") return { kind: "market" };
         if (intent?.kind === "comparison" && coinFactsOn()) return { kind: "comparison", queries: intent.names };
         if (intent?.kind === "coin" && coinFactsOn()) return { kind: "coin", query: intent.name };
@@ -2265,9 +3685,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    */
   const deskNoteFor = (memo: TgCoinMemo | undefined): string | undefined => publicCoinStatus(memo, clock());
 
-  const deskAskFor = (j: LineJob, context: { address: string; memo?: TgCoinMemo } | null, coinQuestion: boolean): TgDeskAsk | null => {
+  const deskAskFor = (
+    j: LineJob,
+    context: { address: string; memo?: TgCoinMemo } | null,
+    coinQuestion: boolean,
+    intent: DeskIntent | null = deskIntentOf(j.line.text, j.msg.chatId),
+  ): TgDeskAsk | null => {
     if (!d.desk) return null;
-    const intent = deskAskOf(j.line.text, selfNamesOf(selfNow()));
     if (deskQuestionIntent(j.line.text) === "comparison" && (extractCaHits(j.line.text).length > 2 || extractCashtags(j.line.text).length > 2)) return null;
     if (intent?.kind === "comparison") return coinFactsOn() ? { kind: "comparison", queries: intent.names } : null;
     if (intent?.kind === "coin") {
@@ -2293,11 +3717,22 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     // An unresolved explicit reply must not silently borrow a newer coin.
     if (j.line.replyTo !== undefined && discussion) return null;
+    // A complaint from someone with nothing open never borrows the topic's
+    // last read, someone else's (D12): "which question?" (act()).
+    if (j.meta === "complaint" && j.noOpenAsk === true) return null;
     const general = lastDesk.get(deskKey(j.msg.chatId));
-    const prev = lastDesk.get(deskKey(j.msg.chatId, j.threadId)) ?? (general?.migrated ? general : undefined);
+    const remembered = lastDesk.get(deskKey(j.msg.chatId, j.threadId)) ?? (general?.migrated ? general : undefined);
+    // A subject asked by someone forgotten since is not this topic's any more.
+    const prev = remembered && !(remembered.fromId !== undefined && forgottenSince(j.msg.chatId, remembered.fromId, remembered.atMs)) ? remembered : undefined;
     if (prev?.ask.kind === "comparison" && intent?.kind === "discussion" && intent.topic === "setup" && deskQuestionIntent(j.line.text) !== "comparison") return null;
     if (prev && clock() - prev.atMs <= DESK_FOLLOW_MS && (prev.ask.kind === "market" || coinFactsOn())) return !lore || prev.ask.kind === "coin" ? prev.ask : null;
-    if (discussion) return null;
+    // A complaint with no subject anywhere ("i asked a question", "why can't
+    // you answer in the group?") is never a guessed market read: the re-ask,
+    // "which question?" or the persona answers it (onMessage, act()).
+    // Only real complaint wording blocks it: a bare "vibes?" or "how are the vibes" is still the market read.
+    // Never the ordinary words alone ("vibes not great huh?", "vibes just feel off today?" are vibes questions); "just vibes?" is its own phrase.
+    const grievance = complaint && /\b(?:asked you|asked a question|answer|single|entire|just vibes)\b/iu.test(j.line.text);
+    if (discussion || (grievance && intent?.kind !== "analysis")) return null;
     return { kind: "market" };
   };
 
@@ -2417,13 +3852,51 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return sent;
   };
 
-  /** A cosmetic action is detached, capped at one second and never gates useful work. */
-  const deskTyping = (chatId: number, replyByMs: number, threadId?: number): void => {
-    const early = optsNow();
-    const left = replyByMs - clock();
-    if (!early || left <= 0) return;
-    void sendChatAction({ ...early, deadlineAtMs: Date.now() + Math.min(SEC, left) }, chatId, "upload_photo", threadId)
-      .catch((e) => fail("typing", e));
+  /** The pause between two chat actions (TgGroupsDeps.tick): real time when absent, never `sleep`. */
+  const tick = (ms: number): Promise<void> =>
+    d.tick
+      ? d.tick(ms)
+      : new Promise((resolve) => {
+          const t = setTimeout(resolve, ms);
+          t.unref?.();
+        });
+  /**
+   * PROGRESS YOU CAN SEE while a read runs: "typing…" (or "sending a
+   * photo…" for a chart) again every TYPING_EVERY_MS until the returned stop
+   * is called, the deadline passes, the line stops being wanted (a newer
+   * line, a /forgetme), the chat is shushed (unless the owner called it) or
+   * the handler stops. Detached and outside the chat lock: each action is
+   * capped at one second and never gates useful work. Bot API calls, never
+   * a model call.
+   */
+  const keepTyping = (
+    chatId: number,
+    replyByMs: number,
+    threadId: number | undefined,
+    action: "typing" | "upload_photo",
+    o: { stillWanted?: () => boolean; ownerAddressed?: boolean } = {},
+  ): (() => void) => {
+    let done = false;
+    const wanted = (): boolean => {
+      try {
+        return !o.stillWanted || o.stillWanted();
+      } catch {
+        return false;
+      }
+    };
+    void (async () => {
+      while (!done && !stopped) {
+        const left = replyByMs - clock();
+        const opts = optsNow();
+        if (!opts || left <= 0 || !wanted() || !canTalk(chatId) || (!o.ownerAddressed && shushedNow(store.room(chatId), clock()))) return;
+        await sendChatAction({ ...opts, deadlineAtMs: Date.now() + Math.min(SEC, left) }, chatId, action, threadId).catch((e) => fail("typing", e));
+        if (done || stopped) return;
+        await tick(TYPING_EVERY_MS);
+      }
+    })().catch((e) => fail("typing", e));
+    return () => {
+      done = true;
+    };
   };
 
   /** A service miss is stated by code, never answered with invented market banter. */
@@ -2442,6 +3915,52 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.accountAnswer ? { accountAnswer: o.accountAnswer } : {}),
     });
     if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    return sent;
+  };
+
+  /**
+   * RUN AN UNANSWERED ASK AGAIN, once, for the line that says it was missed
+   * (the router's reask): as onMessage's re-ask, the reply to the ask itself.
+   * False when there is nothing to re-run (answered meanwhile, re-run
+   * already, or the person was forgotten).
+   */
+  const reaskAgain = (j: LineJob): boolean => {
+    const open = j.reaskable;
+    if (!open || open.reasked || open.noReask || askStateOf(open) !== "lost" || forgotten(open.job)) return false;
+    const now = clock();
+    const again = againOf(open.job, now, ++ingressOrder);
+    open.reasked = true;
+    open.eyed = false;
+    open.job = again;
+    lostAsks.delete(msgKey(again.msg.chatId, again.line.messageId));
+    lastAddressed.set(`${again.msg.chatId}:${again.line.fromId}`, { messageId: again.line.messageId, atMs: now });
+    // It is their open ask again, so a poke while it runs gets the 👀; unless the line that
+    // asked for it became their open ask itself (it was substantive): a misread reask then
+    // leaves that line open, to be re-run in turn, never dropped for good.
+    const k = askKey(again.msg.chatId, again.line.fromId, again.threadId);
+    const left = openAsks.get(k);
+    if (left?.job.line.messageId !== j.line.messageId) openAsks.set(k, open);
+    else left.rerun = open;
+    log("[tg-groups] an unanswered ask re-asked (routed)");
+    if (open.research) track(processLine(again));
+    else enqueue(again.msg.chatId, () => processLine(again), { force: true });
+    return true;
+  };
+
+  /** "i asked a question" with nothing of theirs open: which one? Code-written, gated as a fixed line. */
+  const whichQuestion = async (chatId: number, j: LineJob, o: SpeakOpts): Promise<{ chatId: number; messageId?: number } | null> => {
+    const v = admitTgLine(WHICH_QUESTION, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn: [] });
+    if (!v.ok) return null;
+    const sent = await deliver({
+      chatId, intent: { kind: "answer", mood: "normal" }, text: v.text,
+      ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+      ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+      bornAtMs: j.bornAtMs,
+      followUp: false, ownerAddressed: o.ownerAddressed === true,
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+      ...(o.miss ? { miss: o.miss } : {}),
+    });
+    if (sent) recordOwn(sent.chatId, sent.messageId, v.text, sent.chatId === chatId ? o.replyTo : undefined);
     return sent;
   };
 
@@ -2467,15 +3986,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const opts = { ...o, replyByMs };
     // Remember the actual subject even on failure: a reply asking for a proper
     // analysis should retry that subject, not turn into unrelated banter.
-    rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder, j.threadId);
+    rememberDesk(chatId, ask, j.seenAtMs, j.ingressOrder, j.threadId, false, j.line.fromId);
     if (!allowed) return deskMiss(chatId, ask, "rate-limit", opts, note);
-    deskTyping(chatId, replyByMs, o.threadId);
-    const composed = await deskCompose(chatId, ask, j.line.text, note, replyByMs);
-    if (!composed.ok) {
-      log(`[tg-groups] desk ${ask.kind} miss (${composed.why})`);
-      return deskMiss(chatId, ask, composed.why, opts, note);
+    const stopTyping = keepTyping(chatId, replyByMs, o.threadId, "upload_photo", o);
+    try {
+      const composed = await deskCompose(chatId, ask, j.line.text, note, replyByMs);
+      if (!composed.ok) {
+        log(`[tg-groups] desk ${ask.kind} miss (${composed.why})`);
+        return await deskMiss(chatId, ask, composed.why, opts, note);
+      }
+      return await deskDeliver(chatId, composed, opts);
+    } finally {
+      stopTyping();
     }
-    return deskDeliver(chatId, composed, opts);
   };
 
   /**
@@ -2511,30 +4034,38 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     };
     const ask: TgDeskAsk = { kind: "coin", address };
     const order = messageIngressOrder.get(msgKey(chatId, poster.messageId));
-    rememberDesk(chatId, ask, seenAt, order, threadId);
+    rememberDesk(chatId, ask, seenAt, order, threadId, false, poster.fromId);
     const note = deskNoteFor(store.coin(chatId, address)) ?? o.note;
     let sent: { chatId: number; messageId?: number } | null;
     if (o.busy) sent = await deskMiss(chatId, ask, "rate-limit", opts, note);
     else if (!deskNow()) sent = await deskMiss(chatId, ask, "unavailable", opts, note);
     else if (!deskRoom(chatId)) sent = await deskMiss(chatId, ask, "rate-limit", opts, note);
     else {
-      deskTyping(chatId, replyByMs, threadId);
-      const composed = await deskCompose(chatId, ask, o.trigger.text, note, replyByMs);
-      sent = composed.ok ? await deskDeliver(chatId, composed, opts) : await deskMiss(chatId, ask, composed.why, opts, note);
+      const stopTyping = keepTyping(chatId, replyByMs, threadId, "upload_photo", opts);
+      try {
+        const composed = await deskCompose(chatId, ask, o.trigger.text, note, replyByMs);
+        sent = composed.ok ? await deskDeliver(chatId, composed, opts) : await deskMiss(chatId, ask, composed.why, opts, note);
+      } finally {
+        stopTyping();
+      }
     }
     // A transport timeout may already have landed. Keep the message's reply
     // reservation; the coin flow's fallback cannot blindly send another answer.
     if (sent && sent.chatId !== chatId && !forgottenSince(chatId, poster.fromId, seenAt) && !forgottenSince(sent.chatId, poster.fromId, seenAt)) {
       // Migration carries the subject, retaining its original receipt order
       // and lifetime; a newer destination ask still wins.
-      rememberDesk(sent.chatId, ask, seenAt, order, undefined, true);
+      rememberDesk(sent.chatId, ask, seenAt, order, undefined, true, poster.fromId);
     }
     return sent !== null;
   };
 
   const requestedFact = async (request: PublicFactRequest, chatId: number): Promise<TgPublicFact> => {
     if (request.kind === "calculation") return request.fact;
-    if (request.kind === "site") return request;
+    // What a room can ask: only what is wired here, read now (never from the line).
+    if (request.kind === "site" && (request.topic === "capabilities" || request.topic === "dm-policy")) {
+      return { kind: "site", topic: request.topic, wired: { fomo: fomoNow() !== null, desk: deskNow() !== null, coins: coinFactsOn() } };
+    }
+    if (request.kind === "site") return { kind: "site", topic: request.topic };
     const data = await readFact(async () => d.facts?.()?.tradesToday() ?? null);
     if (!data) return { kind: "unavailable", topic: "trades" };
     const stored = store.room(chatId);
@@ -2567,7 +4098,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const processLine = async (j: LineJob): Promise<void> => {
     const why = await lineOutcome(j);
     // Only a line said TO it is owed an explanation in the log.
-    if (why !== null && j.addressed !== null) quietLine(why);
+    if (why !== null && j.addressed !== null) quietLine(why, j);
   };
 
   /**
@@ -2651,8 +4182,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
     // DISTRESS BEFORE COINS. "lost everything on 0x… i want to die" is a
     // person in trouble, not a coin to look at: it is never nominated, and it
-    // gets the kind line (pacing), not "hmm is this good?".
-    if (!j.deferred && !isDistress(text)) {
+    // gets the kind line (pacing), not "hmm is this good?". A re-asked line
+    // (onMessage) never comes here: its coin was the flow's the first time,
+    // and a second claim or nomination is never made (rule 1).
+    if (!j.deferred && !j.reasked && !isDistress(text)) {
       // Every CA with the chain its link names: the flow sets aside those in
       // another chain's link before it counts the first two.
       const hits = extractCaHits(text);
@@ -2676,12 +4209,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // find the coin by name; the coin flow's "drop the ca" is for a cashtag
       // dropped in the room, or when there is no desk.
       const deskTicker = j.addressed !== null && !asked && cas.length === 0 && !foreignMint && cashtags.length > 0 && deskNow() !== null && coinFactsOn()
-        && deskAskOf(text, selfNamesOf(selfNow()))?.kind === "coin";
-      const researchIntent = deskAskOf(text, selfNamesOf(selfNow()));
+        && deskIntentOf(text, j.msg.chatId)?.kind === "coin";
+      const researchIntent = deskIntentOf(text, j.msg.chatId);
       const deskResearch = j.addressed !== null && deskNow() !== null && coinFactsOn() && !foreignMint && otherChain.length === 0 && !isInjection(text)
         && (deskQuestionIntent(text) === "comparison" || (cas.length === 1 && researchIntent?.kind === "coin"
           && (deskQuestionIntent(text) !== "overview" || isReadOnlyTradeQuestion(text) || /\b(?:chart|analy[sz]e|analysis|read[- ]only|research)\b/iu.test(text))));
-      if (!rememberedAsk && !deskTicker && !deskResearch && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
+      // AN ADDRESSED RESEARCH QUESTION IS NOT A COIN POST: "what are the theses
+      // on $PONS?" is answered by the research lane (act), never asked for a CA,
+      // and a CA inside such a question is a subject to research, never a
+      // nomination into trading (an information request never starts a trade).
+      const fomoQuestion = j.fomo === true && !isInjection(text);
+      if (!rememberedAsk && !deskTicker && !deskResearch && !fomoQuestion && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,
@@ -2704,13 +4242,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // public desk, or on the legacy coin lane. The next line is read now.
         if (post.owned === "handled") {
           const key = msgKey(chatId, j.line.messageId);
+          // The flow owns it, and a re-run skips the flow: never re-askable, by a poke, a complaint or the router.
+          const ownedAsk = openAsks.get(askKey(chatId, j.line.fromId, j.threadId));
+          if (ownedAsk && ownedAsk.job.line.messageId === j.line.messageId) ownedAsk.noReask = true;
           const how = asked ? "reply to a coin post" : j.addressed !== null ? "to me" : "not to me";
           track(
             post.done.then((end) => {
               const acted = end.acted || landedOn.has(key);
               coinPostLine(how, { ...end, acted }, coinMissed.get(key));
               if (j.addressed === null || acted) return;
-              quietLine(coinMissed.get(key) ?? end.quiet ?? "coin-silent");
+              quietLine(coinMissed.get(key) ?? end.quiet ?? "coin-silent", j);
             }),
           );
           return null;
@@ -2765,12 +4306,22 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // Frustration about an unanswered research question deserves the read,
     // while distress, protected-trait abuse, privacy and injection retain priority.
     if (j.addressed !== null && dec.act === "roast" && !signals.distress && !signals.privateAsk && !signals.injection && signals.insult !== "hateful"
-      && deskAskFor(j, coinContext(j), asksAboutCoin(text, selfNamesOf(selfNow()))) !== null) {
+      && deskAskFor(j, coinContext(j), asksAboutCoin(text, selfNamesOf(selfNow())), firmDeskIntentOf(text, chatId)) !== null) {
+      dec = { act: "answer", mood: "normal" };
+    }
+    // A NEW LINE WHILE AN EARLIER ASK WENT UNANSWERED ("bro??", "you good?",
+    // "you ignored me"): an answer the router may read as "ask it again"
+    // (act(): reask), however small the talk.
+    // A hail keeps its template ("hey 👋", "all good, just lurking 👀") as what the persona says
+    // when the router picks nothing: routed for a reask, never a model-written answer to "yo".
+    let fallback: TgIntent | undefined;
+    if (j.reaskable && j.addressed !== null && ((dec.act === "smalltalk" && dec.what === "hail") || (dec.act === "answer" && dec.mood === "normal")) && !signals.distress && !signals.injection) {
+      if (dec.act === "smalltalk") fallback = { kind: "smalltalk", what: dec.what };
       dec = { act: "answer", mood: "normal" };
     }
     if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return null;
     stageOf(chatId, `act: ${dec.act}`);
-    return act(dec, j);
+    return act(dec, j, fallback);
   };
 
   // ─── The owner's /groups and its buttons ─────────────────────────────────
@@ -3062,22 +4613,138 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // Without getMe's answer nothing can be addressed to it: counted, so
         // "every mention is ignored" shows up as what it is.
         if (!me) stats.noSelf += 1;
+        // A LINE ABOUT ITS OWN SILENCE ("?", "hello??", "i asked a question",
+        // its name alone) while their ask is still being worked on never
+        // decides the burst: that ask stays the line to answer (openAsks).
+        // Small talk and such lines are never an ask of their own.
+        const meta = addressed !== null ? metaLineOf(text, selfNamesOf(me)) : null;
+        const ownOpen = addressed !== null ? openAskOf(chatId, msg.fromId, threadId) : null;
+        // A /forgetme'd ask is nothing open: no 👀 promising it, never re-run,
+        // so their hail, poke or complaint gets its own answer.
+        const open = ownOpen && !forgotten(ownOpen.job) ? ownOpen : null;
+        const openState = open ? askStateOf(open) : null;
+        // An ask the coin flow owns (noReask) is never run again: past the 👀 while it runs, nothing is open.
+        const live = open && !open.noReask ? open : null;
+        const substantive = addressed !== null && meta === null && smallTalkOf(text, selfNamesOf(me), room.title) === null;
         if (addressed !== null) {
           stats.addressed += 1;
-          lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
+          if (!(meta !== null && openState === "running")) lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
           askedIn.set(key, true);
         }
         maybeMemoryPass(chatId);
+        if (meta !== null && open && openState === "running") {
+          // A POKE WHILE ITS ASK IS BEING WORKED ON: a 👀 on it (no model
+          // call, no reply slot), and the answer still lands on the ask.
+          log("[tg-groups] addressed line got 👀 (poke-while-working)");
+          if (!open.eyed) {
+            open.eyed = true;
+            track(reactTo(chatId, messageId, "👀", { ownerAddressed: isOwner, stillWanted: () => !forgottenSince(chatId, msg.fromId, now) }));
+          }
+          return;
+        }
+        // A hail or a "?" after a nudge whose re-run already ran gets its own
+        // answer; only an explicit complaint re-runs that nudge (a misread reask).
+        if (meta !== null && live && openState === "lost" && !live.reasked && (!live.rerun || meta === "complaint")) {
+          const open = live;
+          // NOTHING ANSWERED THEIR ASK: run it again, once, as the reply to
+          // it. A /forgetme since still cancels it (seenAtMs is kept), and it
+          // is never claimed or nominated again (lineOutcome: reasked).
+          const again = againOf(open.job, now, ++ingressOrder);
+          open.reasked = true;
+          open.eyed = false;
+          open.job = again;
+          lostAsks.delete(msgKey(chatId, again.line.messageId));
+          lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId: again.line.messageId, atMs: now });
+          log(`[tg-groups] an unanswered ask re-asked (${meta})`);
+          if (open.research) track(processLine(again));
+          else enqueue(chatId, () => processLine(again), { force: true });
+          return;
+        }
 
-        const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order, ...(threadId !== undefined ? { threadId } : {}) };
+        // An addressed research question, or a short follow-up to this
+        // topic's last research answer (fomoRecent), while a port is wired.
+        // A bare "what's trending" (no platform or venue named) is Fomo's
+        // trending board there, with the desk as its fallback (act()).
+        const fomoHere = addressed !== null && fomoNow() !== null;
+        const named = fomoHere && fomoAskOf(text, selfNamesOf(me)) !== null;
+        const desked = fomoHere && !named ? deskIntentOf(text, chatId) : null;
+        const trendingAsk = desked?.kind === "market" && desked.trending === true;
+        // A market ask naming a venue ("what's trending in the market", "on robinhood chain") stays
+        // with the desk, even right after a Fomo answer (D1): never a Fomo follow-up.
+        const venueMarket = desked?.kind === "market" && desked.trending !== true;
+        // So does a line the desk owns: an analysis, a comparison, or a coin
+        // it names ("what do you think about sol?", "should i buy sol?"),
+        // unless the coin word is a chain in a chain's position ("on base?"),
+        // or the line asks what traders are saying about the coin ("what are
+        // people saying about $PONS now"): that is the coin's theses, never a chart.
+        const deskOwned = desked?.kind === "analysis" || desked?.kind === "comparison"
+          || (desked?.kind === "coin" && chainIn(text) === undefined && !/\b(?:saying|thes[ie]s)\b/iu.test(text));
+        // Right after a research answer, a pushback on it ("there has to be
+        // thesis", "check again") goes back to the research, read again;
+        // under another of its lines it is about that line (pushbackOnFomo).
+        const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && (fomoFollowUpOf(text, selfNamesOf(me)) || pushbackOnFomo(msg, text, threadId))));
+        // WHAT HAPPENED TO A COIN, ASKED AS FACTS ("what happened to it", "why
+        // did auton rug", "show me the data", "did the dev dump?"; Milla,
+        // 2026-10-09). Only about the room's Fomo coin: the one the answer it
+        // replies to was about, or this topic's last one (30 minutes), or a coin
+        // the line names on Fomo or on another chain than Robinhood. Anything
+        // else ("what happened to pons" with no Fomo behind it) stays the
+        // desk's and the router's, as before. Read before the desk takes it.
+        // A HUMAN SAYING THE ROOM'S FOMO COIN RUGGED: the room's collapse permit (WP9).
+        if (!msg.fromIsBot) noteRoomRugged(msg, text, threadId, me);
+        const factsAsk = fomoHere ? fomoFactsOf(text, selfNamesOf(me)) : null;
+        let fomoFacts: TgFomoRequest | null = null;
+        if (factsAsk) {
+          const q = msg.replyTo;
+          const under = me && q && q.fromId === me.id && isMsgId(q.messageId) ? fomoCoinLines.get(msgKey(chatId, q.messageId)) : undefined;
+          const context = (under && now - under.at <= FOMO_THREAD_MS ? under : null) ?? recentFomoCoin(chatId, threadId);
+          const lineChain = chainIn(text);
+          const onFomo = /\bon fomo\b/iu.test(text) || (lineChain !== undefined && lineChain !== "robinhood");
+          // A bare name the room heard as a person ("why did kaleo dump", after kaleo's quote) is a question about
+          // that person, never a coin's facts: only "$KALEO" asks about a coin of that name (review r2).
+          const room0 = store.room(chatId);
+          const asPerson = !!factsAsk.coin && !!room0 && heardPeopleOf(room0).some((n) => n.toLowerCase() === factsAsk.coin!.toLowerCase())
+            && !extractCashtags(text).some((x) => x.toUpperCase() === factsAsk.coin!.toUpperCase());
+          const named = factsAsk.coin;
+          // The remembered coin only when the line names no other chain: "auton on base" is another AUTON.
+          if (asPerson) {
+            // No facts at all: neither the person's namesake coin nor the remembered one.
+          } else if (context && (!named || named === context.symbol.toUpperCase()) && (!lineChain || !context.chain || lineChain === context.chain)) {
+            fomoFacts = { kind: "coin", symbol: context.symbol, ...(context.chain ? { chain: context.chain } : {}), aspect: "facts", ask: factsAsk.ask };
+          } else if (named && onFomo) {
+            fomoFacts = { kind: "coin", symbol: named, ...(lineChain ? { chain: lineChain } : {}), aspect: "facts", ask: factsAsk.ask };
+          }
+        }
+        // A complaint with nothing of theirs open asks which question; one
+        // replying to its answer to their open ask has that ask read again by
+        // the router (act()). A new line while an earlier one went
+        // unanswered may be a nudge in other words: the router may re-run it.
+        const repliesToOwn = !!me && msg.replyTo?.fromId === me.id && isMsgId(msg.replyTo.messageId);
+        const answeredHere = !!open && openState === "answered" && repliesToOwn
+          && store.room(chatId)?.lines.some((l) => l.own && l.messageId === msg.replyTo?.messageId && l.replyTo === open.job.line.messageId) === true;
+        const job: LineJob = {
+          msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order,
+          ...(threadId !== undefined ? { threadId } : {}),
+          ...(fomoAsk ? { fomo: true } : {}),
+          ...(fomoFacts ? { fomoFacts } : {}),
+          ...(trendingAsk ? { trending: true } : {}),
+          ...(meta !== null ? { meta } : {}),
+          ...(meta === "complaint" && !live ? { noOpenAsk: true } : {}),
+          // A /forgetme'd line never reaches the router as their earlier question.
+          ...(meta === "complaint" && answeredHere && live && !forgotten(live.job) ? { reaskOf: live.job.line.text } : {}),
+          // Never a nudge whose routed re-run already ran (live.rerun): her next line is no complaint about it.
+          ...(meta === null && addressed !== null && live && openState === "lost" && !live.reasked && !live.rerun && !forgotten(live.job) ? { reaskable: live } : {}),
+        };
         // A coin line's durable claim and nomination admission must not be
         // lost to a busy chatter queue. Ordinary chatter keeps its queue cap.
         const coin = extractCas(text).length > 0;
         // Public research starts beside a busy chatter queue. Bookkeeping and
         // reply admission still happen synchronously. Nomination admission
         // belongs to the port; financial execution stays on the trading side.
-        const research = !!d.desk && (coin || (addressed !== null && (deskAskOf(text, selfNamesOf(me)) !== null
-          || /\b(?:why|how come|vibes|asked you|asked a question|chart|analysis)\b/iu.test(text))));
+        const research = fomoAsk || fomoFacts !== null || (!!d.desk && (coin || (addressed !== null && (deskIntentOf(text, chatId) !== null
+          || /\b(?:why|how come|vibes|asked you|asked a question|chart|analysis)\b/iu.test(text)))));
+        // Their newest substantive line is their open ask from now on.
+        if (substantive) openAsks.set(askKey(chatId, msg.fromId, threadId), { job, research, reasked: false });
         if (research) track(processLine(job));
         else enqueue(chatId, () => processLine(job), { force: addressed !== null });
       } catch (e) {
@@ -3381,6 +5048,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // dropped whole (store.ts forgetPerson, the code the forget record
         // is applied with too).
         store.forgetPerson(chatId, userId);
+        // Their open ask holds their words (the line, their name, a quote): it goes too, in every topic.
+        // The trailing colon keeps user 12 from matching user 123.
+        openAsks.deleteWhere((k) => k.startsWith(`${chatId}:${userId}:`));
         if (userId === ownerId()) {
           store.update(
             chatId,
@@ -3414,73 +5084,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     },
 
     async commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void> {
-      try {
-        if (!canTalk(chatId)) return;
-        const now = clock();
-        // "sent it to your DMs" and "done, couldn't DM you" each answer one
-        // command that ran for someone entitled to run it: every one is said.
-        // Refusals and "dm me first" at most once per person per hour.
-        if (what !== "dm-sent" && what !== "done-no-dm") {
-          const k = `${what}:${chatId}:${fromId}`;
-          const last = refusedAt.get(k);
-          if (last !== undefined && now - last < REFUSE_EVERY_MS) return;
-          refusedAt.set(k, now);
-        }
-        // These answer a command the sender was entitled to run, so they go
-        // out in a shushed chat like the owner calling it.
-        const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
-        const reply: SpeakOpts = {
-          ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
-          ...(isMsgId(threadId) ? { threadId } : {}),
-          bornAtMs: now,
-          ownerAddressed: entitled,
-        };
-        const fixedPool: readonly string[] | null =
-          what === "owner-only"
-            ? OWNER_ONLY_LINES
-            : what === "link-here"
-              ? LINK_HERE_LINES
-              : what === "dm-first"
-                ? DM_FIRST_LINES
-                : what === "done-no-dm"
-                  ? DONE_NO_DM_LINES
-                  : null;
-        await enqueue(
-          chatId,
-          async () => {
-            if (fixedPool) {
-              // Its own small fixed pool, gated like every template.
-              const pool = fixedPool;
-              const room = store.room(chatId);
-              const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
-              const start = Math.floor(roll() * pool.length);
-              let text: string | null = null;
-              for (let i = 0; i < pool.length && text === null; i++) {
-                const cand = pool[(start + i) % pool.length] ?? "";
-                const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
-                if (v.ok) text = v.text;
-              }
-              if (!text) return;
-              const sent = await deliver({
-                chatId,
-                intent: { kind: "private-read-refuse" },
-                text,
-                ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
-                ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
-                bornAtMs: now,
-                followUp: false,
-                ownerAddressed: entitled,
-              });
-              if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
-              return;
-            }
-            await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply);
-          },
-          { force: true },
-        );
-      } catch (e) {
-        fail("notice", e);
-      }
+      await commandNotice(chatId, messageId, fromId, what, threadId);
     },
 
     async codeLeaked(chatId: number): Promise<void> {

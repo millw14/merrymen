@@ -53,6 +53,11 @@ import { addressTopic, getLogsAdaptive, type RawLog, type ReconcileChain } from 
 // accounting backfill cannot reach different answers about the same transfer.
 import { classifyUsdgMovement, energyReserveTokens, MERRYMEN_TOKEN, type TransferLeg } from "../../packages/core/src/index";
 import type { ReceiptLog } from "./fills";
+// Which logs of a trade's transaction are the owner's own execution (a root
+// operation bundled beside the agent's swap), read off the receipt as the
+// owner record reads it; and whether that receipt's amounts can be read at
+// all, by the rule the owner record refuses a receipt by.
+import { rootExecutionLogs, transferAmountsReadable } from "./owner-operations";
 
 /**
  * Every ERC-20 Transfer in a receipt, as classification legs.
@@ -76,6 +81,23 @@ export function legsFromReceiptLogs(logs: readonly ReceiptLog[]): TransferLeg[] 
     });
   }
   return out;
+}
+
+/**
+ * THE PER-ACCOUNT HALF OF WHAT THE LIVE SCANNER CLASSIFIES WITH: the
+ * account's custody contracts and the chain's energy reserve tokens. The
+ * scanner passes nothing else of its own (no hosted-account, venue or system
+ * list: index.ts scanChainFlows), so a reader that must agree with the
+ * scanner about which USDG leg is capital asks this, and two readers cannot
+ * name different inputs for the same transfer. owner-operations.ts is the
+ * other caller: what it leaves to "the scanner's flow" must be exactly what
+ * the scanner books.
+ */
+export function scannerClassifyContext(o: { custodyAddresses?: readonly string[]; chainId?: number }): {
+  custodyAddresses: readonly string[] | undefined;
+  reserveTokens: readonly string[];
+} {
+  return { custodyAddresses: o.custodyAddresses, reserveTokens: energyReserveTokens(o.chainId ?? MERRYMEN_TOKEN.chainId) };
 }
 
 /** The ERC-20 event. `value` is not indexed, so it is read from `data`. */
@@ -141,6 +163,32 @@ export async function findTransferFlows(opts: {
    * trade rows with transaction hashes.
    */
   tradeTxHashes: Set<string>;
+  /**
+   * THE TRADE ROWS OF ONE OF THOSE TRANSACTIONS, BY OPERATION: the
+   * user-operation hashes the ledger's trade rows for `txHash` carry, or null
+   * when any of them carries none (store.ts tradeOpsInTx).
+   *
+   * A bundle can carry the owner's own root-key operation beside the agent's
+   * trade, and the transaction-wide skip above then hid the owner's deposit or
+   * withdrawal for good: the record of that operation leaves its capital leg
+   * to this scanner (owner-operations.ts), and contributions and the peak were
+   * wrong without it. So in a trade's transaction ONE kind of log is let
+   * through to the receipt classifier: a USDG log the receipt places inside
+   * the execution of a successful ROOT operation of this account
+   * (owner-operations.ts rootExecutionLogs) that no trade row of the
+   * transaction is. Everything else in it — the trade's own execution,
+   * validation, another account's operation, a session key's — stays skipped,
+   * so a trade's own USDG legs are never classified here at all. A
+   * transaction with a trade row that names no operation stays wholly
+   * skipped: that row could be the root operation's. So does one whose
+   * receipt holds a Transfer with an amount that cannot be read
+   * (owner-operations.ts transferAmountsReadable): that leg is refused and
+   * logged, and the pass goes on.
+   *
+   * Asked only for such a log. Absent: every log of a trade's transaction
+   * stays skipped, as before.
+   */
+  tradeOpsInTx?: (txHash: string) => Promise<ReadonlySet<string> | null>;
   /** Other accounts this system controls — a movement between them is internal. */
   knownAccounts?: readonly string[];
   /** Trading venues. A WEAK signal: a venue with no paired leg is ambiguous, never a trade. */
@@ -209,8 +257,12 @@ export async function findTransferFlows(opts: {
     );
   }
 
-  /** A USDG movement that touches this account, before the receipt decides what it IS. */
-  const candidates: (TransferFlow & { from: string; to: string })[] = [];
+  /**
+   * A USDG movement that touches this account, before the receipt decides what
+   * it IS. `inTradeTx`: its transaction is one the ledger holds as a trade, so
+   * it is classified only if the receipt shows it is the owner's own (below).
+   */
+  const candidates: (TransferFlow & { from: string; to: string; inTradeTx: boolean })[] = [];
   const seen = new Set<string>();
   for (const l of raw) {
     const blockNumber = num(l.blockNumber);
@@ -244,8 +296,11 @@ export async function findTransferFlows(opts: {
     if (from === to) continue;
     if (value === 0n) continue;
     // A SECONDARY skip, kept because it is free and sometimes right, but it is
-    // no longer what decides the question. See the classification below.
-    if (tradeTxHashes.has(l.transactionHash.toLowerCase())) continue;
+    // no longer what decides the question. See the classification below. With
+    // `tradeOpsInTx` the owner's own execution in a trade's bundle is kept for
+    // the receipt to decide (see that option); nothing else in it ever is.
+    const inTradeTx = tradeTxHashes.has(l.transactionHash.toLowerCase());
+    if (inTradeTx && !opts.tradeOpsInTx) continue;
 
     const mine = smartAccount.toLowerCase();
     if (to !== mine && from !== mine) continue; // neither leg is ours
@@ -257,6 +312,7 @@ export async function findTransferFlows(opts: {
       logIndex,
       from,
       to,
+      inTradeTx,
     });
   }
 
@@ -283,10 +339,21 @@ export async function findTransferFlows(opts: {
   // within ONE transaction, and that test needs no address list and cannot go
   // stale — see capital-classify.ts.
   const out: TransferFlow[] = [];
+  const receipts = new Map<string, readonly ReceiptLog[]>();
   const legsByTx = new Map<string, TransferLeg[]>();
+  /** Every Transfer of one transaction's receipt, as legs: decoded once. */
+  const legsOf = (k: string): TransferLeg[] => {
+    let legs = legsByTx.get(k);
+    if (!legs) legsByTx.set(k, (legs = legsFromReceiptLogs(receipts.get(k) ?? [])));
+    return legs;
+  };
+  /** For a trade's transaction: which of its logs a root operation of this account executed (owner-operations.ts rootExecutionLogs). */
+  const rootByTx = new Map<string, Map<number, string> | null>();
+  /** Trades' transactions whose receipt holds a Transfer with an amount that cannot be read (owner-operations.ts transferAmountsReadable). */
+  const unreadableAmounts = new Set<string>();
   for (const c of candidates) {
     const k = c.txHash.toLowerCase();
-    if (legsByTx.has(k)) continue;
+    if (receipts.has(k)) continue;
     const receipt = await chain.getReceiptLogs(c.txHash as Hex).catch(() => null);
     if (!receipt) {
       // AN UNREADABLE RECEIPT IS NOT AN ABSENT SECOND LEG. Booking on the one
@@ -298,11 +365,63 @@ export async function findTransferFlows(opts: {
           `unknown — refusing to classify its USDG leg as capital`,
       );
     }
-    legsByTx.set(k, legsFromReceiptLogs(receipt));
+    receipts.set(k, receipt);
+    // A TRADE'S TRANSACTION IS ONLY PLACED HERE: which of its logs the
+    // owner's own execution holds, and whether every Transfer in it carries a
+    // readable amount. Neither decodes an amount, and its amounts are decoded
+    // only for a leg let through below, after that check has passed — so a
+    // trade's receipt can refuse this pass for nothing but being unreadable,
+    // as before when it was never read at all.
+    if (c.inTradeTx) {
+      rootByTx.set(k, rootExecutionLogs(receipt, smartAccount, c.txHash));
+      if (!transferAmountsReadable(receipt)) unreadableAmounts.add(k);
+    } else legsOf(k);
   }
 
+  const context = scannerClassifyContext({ custodyAddresses: opts.custodyAddresses, chainId: opts.chainId });
   for (const c of candidates) {
-    const legs = legsByTx.get(c.txHash.toLowerCase()) ?? [];
+    if (c.inTradeTx) {
+      // THE OWNER'S OWN EXECUTION IN A TRADE'S BUNDLE, AND NOTHING ELSE. A log
+      // the receipt cannot place (no positions), or places anywhere but a
+      // successful root operation of this account, stays skipped as every log
+      // of a trade's transaction always was. So does a root operation the
+      // ledger holds as a trade row of this transaction (a misbooked 'swap'
+      // from before owner records), and every log of a transaction with a row
+      // that names no operation: booking such a leg moves a peak, which is a
+      // reviewed hwm-repair decision, not this scanner's. What is let through
+      // is classified below exactly like any other leg, on the whole
+      // receipt's legs — the classifier and inputs the owner record judged it
+      // by (owner-operations.ts ownerOperationOf), so the scanner books
+      // exactly the legs that record leaves to it.
+      const k = c.txHash.toLowerCase();
+      const op = rootByTx.get(k)?.get(c.logIndex);
+      if (op === undefined) continue;
+      const trades = await opts.tradeOpsInTx!(c.txHash);
+      if (trades === null || trades.has(op)) continue;
+      // AN AMOUNT THAT CANNOT BE READ, ANYWHERE IN THE RECEIPT, REFUSES THIS
+      // TRANSACTION ALONE. Those legs are what the leg is classified on, and
+      // the owner record vouches for no such receipt (ownerOperationOf is
+      // null by the same rule), so it leaves nothing to this scanner: booking
+      // the leg would move a peak on a reading the record refused. The
+      // decoder used to throw here instead (BigInt of '0x'), which refused
+      // every pass, every tick, for a receipt that never changes, so no later
+      // deposit or withdrawal of the account was booked; and an amount it
+      // could read but the record does not (empty data as zero, or more than
+      // a word) was booked from a receipt the record refused. Now the leg is
+      // not booked and the refusal is logged, one line per leg; the operation
+      // stays unrecorded (the reconciler records nothing for it), so
+      // admission names it missing and holds the tenant until it is
+      // reviewed. The cursor moves on past it.
+      if (unreadableAmounts.has(k)) {
+        opts.log?.(
+          `not booked: ${c.txHash}#${c.logIndex} is the owner's own operation ${op} in a trade's transaction, but a Transfer ` +
+            `in that receipt has an amount that cannot be read — this transaction is refused, as the owner record refuses it ` +
+            `(the operation stays unrecorded, so admission names it missing); the rest of the window is booked`,
+        );
+        continue;
+      }
+    }
+    const legs = legsOf(c.txHash.toLowerCase());
     const usdgLeg: TransferLeg = {
       token: usdgToken.toLowerCase(),
       from: c.from,
@@ -321,11 +440,13 @@ export async function findTransferFlows(opts: {
       // pairs with nothing, falls to `no-pair-external`, and a trade is booked
       // as a withdrawal — corrupting the denominator of every P&L figure.
       // See ClassifyInput.custodyAddresses.
-      custodyAddresses: opts.custodyAddresses,
+      custodyAddresses: context.custodyAddresses,
       // The energy reserve on this chain. Its purchase classifies `reserve-out`,
       // which the condition below deliberately does NOT book: the worker is its
-      // one live booker. See the header.
-      reserveTokens: energyReserveTokens(opts.chainId ?? MERRYMEN_TOKEN.chainId),
+      // one live booker. See the header. Both from scannerClassifyContext, the
+      // one place the scanner's inputs are named (an owner operation's record
+      // leaves a leg to "the scanner's flow" on exactly these).
+      reserveTokens: context.reserveTokens,
     });
 
     // EXACTLY capital-in or capital-out. Never widen this to `reserve-out`:

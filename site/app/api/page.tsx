@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
+import { fetchPlans } from "../../lib/developer-gateway";
 import { DeveloperConsole } from "./DeveloperConsole";
 import "./developer.css";
 
-const description = "Create your Merrymen API key, download the browser SDK, and build agent creation and chat into your app.";
+const description = "Create your Merrymen API key, start on the Free plan, download the browser SDK, and build agent creation and chat into your app.";
 const image = {
   url: "/social/merrymen-api-v2.png",
   width: 1733,
@@ -29,4 +30,7 @@ export const metadata: Metadata = {
     images: [image],
   },
 };
-export default function ApiPage() { return <DeveloperConsole />; }
+// The Plans section is rendered here from GET /plans and reused for a minute
+// (PLANS_REVALIDATE_SEC); the static table stands in when the gateway cannot answer.
+export const revalidate = 60;
+export default async function ApiPage() { return <DeveloperConsole initialPlans={await fetchPlans()} />; }

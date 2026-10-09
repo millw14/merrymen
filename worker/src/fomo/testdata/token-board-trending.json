@@ -1,0 +1,55 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "board": "trending",
+  "capturedAt": "2026-10-04T16:00:00Z",
+  "count": 3,
+  "source": "live-fomo",
+  "stale": false,
+  "ageHours": 0,
+  "tokens": [
+    {
+      "rank": 1,
+      "image": null,
+      "token": {
+        "name": "Pons",
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D"
+      },
+      "holders": 1234,
+      "network": "robinhood",
+      "priceUsd": 2.08,
+      "change24h": 4.2,
+      "marketCapUsd": 2080000,
+      "volume24hUsd": 111000
+    },
+    {
+      "rank": 2,
+      "image": null,
+      "token": {
+        "name": "Fu2o",
+        "symbol": "FU2O",
+        "address": "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump"
+      },
+      "holders": 310,
+      "network": "solana",
+      "priceUsd": 0.0026,
+      "change24h": -12.5,
+      "volume24hUsd": 9000
+    },
+    {
+      "rank": 4,
+      "image": null,
+      "token": {
+        "name": "Cache",
+        "symbol": "CACHE",
+        "address": "0x7Fe9950000000000000000000000000000000ca5"
+      },
+      "holders": 77,
+      "network": "robinhood",
+      "priceUsd": 0.0012,
+      "change24h": 0,
+      "marketCapUsd": 1234567,
+      "volume24hUsd": 4000
+    }
+  ]
+}

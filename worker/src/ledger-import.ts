@@ -11,8 +11,8 @@ import { openSecret, sealSecret } from "./store-crypto";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import type { MemorySource } from "./memory-safeguard";
 import type { TenantLease } from "./tenant-lease";
-import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA } from "./ledger-import-schema";
-export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA } from "./ledger-import-schema";
+import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_ADDITIVE_DDL, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
+export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 
 export const LEDGER_IMPORT_PENDING_FILE = "ledger-import.pending.json";
 export const LEDGER_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
@@ -232,7 +232,25 @@ function volumeOkay(volume: LedgerImportVolume, home: string, tenant: string): v
   parentDirectories(home);
   if (String(lstatSync(home, { bigint: true }).dev) !== volume.device) throw refuse();
 }
-function existingBookIdentity(file: string, account: string, chainId: number, volume: LedgerImportVolume): void {
+/**
+ * WHAT THE SPAWN PATH ITSELF PUTS INTO A BOOK BEFORE ITS FIRST WORKER ARMS:
+ * the practice book restored from its checkpoint (paper_book, and the paper
+ * rows of cost_basis), the live cost basis and floors the seeds restore
+ * (seedBasisForChild, completeAttestedSeed) and the day's energy
+ * (seedEnergyForChild). `agents` is the worker's own, written at arm
+ * (store.ts ensureAgent), and nothing else in these tables is written before.
+ */
+const SEEDED_BEFORE_ARM: readonly Table[] = ["paper_book", "cost_basis", "position_floors", "energy_days"];
+
+/**
+ * The book at `file` is this account's, on this volume: "armed" (its agent
+ * row is there), "empty" (no agent row and no row at all), or "seeded" (no
+ * agent row yet, and rows only in SEEDED_BEFORE_ARM). "seeded" is what a
+ * spawn that wrote the seeds and was then refused before its fork leaves, and
+ * a caller accepts it only for a book attestedBeforeArm vouches for; any
+ * other table holding rows with no agent row refuses here.
+ */
+function existingBookIdentity(file: string, account: string, chainId: number, volume: LedgerImportVolume): "armed" | "empty" | "seeded" {
   privateBook(file);
   if (String(lstatSync(file, { bigint: true }).dev) !== volume.device) throw refuse();
   const raw = new DatabaseSync(file, { readOnly: true });
@@ -241,13 +259,68 @@ function existingBookIdentity(file: string, account: string, chainId: number, vo
     // their ownership with bounded-result queries, without exporting/truncating them.
     const agents = raw.prepare("SELECT smart_account,chain_id FROM agents LIMIT 2").all() as Array<{ smart_account: string; chain_id: number }>;
     if (agents.length > 1 || agents.some(a => a.smart_account.toLowerCase() !== account || a.chain_id !== chainId)) throw refuse();
+    let seeded = false;
     for (const table of names) {
       if (table === "discovered_pools") continue;
       const key = table === "agents" ? "smart_account" : "agent_id";
       if (raw.prepare(`SELECT 1 FROM ${table} WHERE LOWER(${key}) <> ? OR ${key} IS NULL LIMIT 1`).get(account)) throw refuse();
-      if (agents.length === 0 && raw.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()) throw refuse();
+      if (agents.length === 0 && raw.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get()) {
+        if (!SEEDED_BEFORE_ARM.includes(table)) throw refuse();
+        seeded = true;
+      }
     }
+    return agents.length ? "armed" : seeded ? "seeded" : "empty";
   } finally { raw.close(); }
+}
+
+/**
+ * AN ATTESTED-GAP BOOK WHOSE FIRST WORKER HAS NOT ARMED, AND ONLY THAT.
+ *
+ * A registered book goes through the ordinary spawn path (ledger-resume.ts
+ * Phase C), which writes its seeds — the restored practice book, the basis,
+ * the floors, the day's energy — before the later gates: the owner's
+ * privacy proof and offset handoff, the source barrier, the grant re-check,
+ * the late refusals and the local process cap. When one of those refused,
+ * no worker armed, so the book held seed rows and no agent row, and every
+ * later pass's existingBookIdentity refused it ("persistent original book is
+ * unconfirmed") for good: six admitted tenants sat there, held, with nothing
+ * left that would ever change.
+ *
+ * Such a book is accepted, unarmed and seeded, only when every link from the
+ * receipt to the operator's approval holds, in this transaction: the receipt
+ * names an identity equal to its generation (registerAttestedGapSource binds
+ * the book to it, and the caller has already proved the book carries it at
+ * the receipt's inode); that generation's attestation is for this tenant,
+ * account and chain; the receipt's bound digest is the one the attestation
+ * recorded, and is hash('attested-gap:' + approval + ':' + evidence) for the
+ * approval that attestation names; and that approval is for this tenant,
+ * account and chain, registered this generation, and is `registered` (its
+ * first worker not yet started) or `applied` (started, perhaps never armed).
+ * A refused or revoked approval, another generation's book, a receipt from
+ * any other registration, or a row in a table the spawn path never seeds,
+ * refuses as before.
+ */
+async function attestedBeforeArm(db: Db, tenant: string, account: string, chainId: number, receipt: Record<string, unknown>, dialect: Dialect): Promise<boolean> {
+  const generation = receipt.generation;
+  if (typeof generation !== "string" || !UUID.test(generation) || receipt.source_identity !== generation) return false;
+  // Asked only where an attested book is possible, and never by an error: a
+  // missing table aborts a Postgres transaction, so its absence is looked up.
+  for (const table of ["ledger_resume_attestations", "ledger_resume_approvals"] as const) {
+    const found = dialect === "postgres"
+      ? (await db.prepare(`SELECT to_regclass('${table}') AS name`).get() as { name?: unknown } | undefined)?.name
+      : (await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as { name?: unknown } | undefined)?.name;
+    if (!found) return false;
+  }
+  const lock = dialect === "postgres" ? " FOR SHARE" : "";
+  const bound = JSON.parse(String(receipt.bindings_json)) as Bindings;
+  const a = await db.prepare(`SELECT approval_id, tenant, smart_account, chain_id, receipt_digest FROM ledger_resume_attestations WHERE generation = ?${lock}`)
+    .get(generation) as Record<string, unknown> | undefined;
+  if (!a || a.tenant !== tenant || a.smart_account !== account || Number(a.chain_id) !== chainId || a.receipt_digest !== bound.mutableDigest) return false;
+  const p = await db.prepare(`SELECT tenant, smart_account, chain_id, evidence_digest, state, generation FROM ledger_resume_approvals WHERE approval_id = ?${lock}`)
+    .get(a.approval_id) as Record<string, unknown> | undefined;
+  return !!p && p.tenant === tenant && p.smart_account === account && Number(p.chain_id) === chainId && p.generation === generation
+    && hash(`attested-gap:${String(a.approval_id)}:${String(p.evidence_digest)}`) === bound.mutableDigest
+    && (p.state === "registered" || p.state === "applied");
 }
 function readSourceIdentity(raw: DatabaseSync, tenant: string, account: string, chainId: number): string {
   try {
@@ -274,6 +347,18 @@ export async function ensureLedgerImportSchema(shared: Db, dialect: Dialect = "p
   void dialect;
   await shared.exec(LEDGER_IMPORT_SCHEMA);
   await shared.exec(LEDGER_IMPORT_GENERATIONS_SCHEMA);
+}
+
+/** The attested-gap tables (ledger-import-schema.ts). Additive; nothing else reads them. */
+export async function ensureLedgerResumeSchema(shared: Db): Promise<void> {
+  await ensureLedgerImportSchema(shared);
+  for (const ddl of LEDGER_RESUME_SCHEMA) await shared.exec(ddl);
+  // A column already there is sqlite's re-run, and expected; anything else
+  // throws, and the registration that asked never writes a row without it.
+  for (const ddl of LEDGER_RESUME_ADDITIVE_DDL) {
+    try { await shared.exec(ddl); }
+    catch (e) { if (!/duplicate column name/i.test(String((e as Error)?.message ?? ""))) throw e; }
+  }
 }
 
 /** Called only by a reviewed operator after the final checkpoint, under stopped-writer/source proof. */
@@ -399,7 +484,7 @@ export async function restoreLedgerImport(o: {
       if (row.source_inode !== String(lstatSync(file, { bigint: true }).ino)) throw refuse();
       verifySourceIdentity(file, tenant, account, o.chainId, row.source_identity);
       if (!pending) {
-        existingBookIdentity(file, account, o.chainId, o.volume);
+        if (existingBookIdentity(file, account, o.chainId, o.volume) === "seeded" && !(await attestedBeforeArm(db, tenant, account, o.chainId, row, dialect))) throw refuse();
         leaseOkay(o.lease, tenant); return "present";
       }
       if (pending.generation !== row.generation || pending.sourceDigest !== row.source_digest || pending.volumeId !== o.volume.id) throw refuse();
@@ -494,21 +579,23 @@ export async function registerLedgerSource(o: {
   await o.shared.tx(async db => {
     leaseOkay(o.lease, tenant);
     const current = await grantBinding(db, tenant, dialect, true);
-    const prior = await db.prepare(`SELECT state,target_volume_id,bindings_json,source_inode,source_identity FROM tenant_ledger_import WHERE tenant = ?${dialect === "postgres" ? " FOR UPDATE" : ""}`).get(tenant) as Record<string, unknown> | undefined;
+    const prior = await db.prepare(`SELECT generation,state,target_volume_id,bindings_json,source_inode,source_identity FROM tenant_ledger_import WHERE tenant = ?${dialect === "postgres" ? " FOR UPDATE" : ""}`).get(tenant) as Record<string, unknown> | undefined;
     if (current.smartAccount !== account || current.chainId !== o.chainId) throw refuse();
     if (prior && prior.state !== "deleted") {
       const original = JSON.parse(String(prior.bindings_json)) as Bindings;
       if (prior.state !== "consumed" || prior.target_volume_id !== o.volume.id || original.grant.smartAccount !== account || original.grant.chainId !== o.chainId) throw refuse();
-      existingBookIdentity(file, account, o.chainId, o.volume);
+      const book = existingBookIdentity(file, account, o.chainId, o.volume);
       if (prior.source_inode !== String(lstatSync(file, { bigint: true }).ino)) throw refuse();
       verifySourceIdentity(file, tenant, account, o.chainId, prior.source_identity);
+      if (book === "seeded" && !(await attestedBeforeArm(db, tenant, account, o.chainId, prior, dialect))) throw refuse();
       return;
     }
     if (prior?.state === "deleted") {
       const original = JSON.parse(String(prior.bindings_json)) as Bindings;
       if (!present(file) || prior.target_volume_id !== o.volume.id || original.grant.smartAccount !== account || original.grant.chainId !== o.chainId
           || original.grant.owner !== current.owner || prior.source_inode !== String(lstatSync(file, { bigint: true }).ino)) throw refuse();
-      existingBookIdentity(file, account, o.chainId, o.volume);
+      // A deleted receipt reattaches only a book its worker armed, or an empty one.
+      if (existingBookIdentity(file, account, o.chainId, o.volume) === "seeded") throw refuse();
       verifySourceIdentity(file, tenant, account, o.chainId, prior.source_identity);
       const raw = new DatabaseSync(file, { readOnly: true });
       try { assertSettled(raw); await assertLedgerSourceContinuity(wrapSqlite(raw), db, tenant); }
@@ -560,6 +647,204 @@ export async function registerLedgerSource(o: {
       .run(tenant, generation, o.volume.id, String(lstatSync(file, { bigint: true }).ino), identity, canonical(bound), Date.now(), Date.now(), current.updatedAt, current.rowVersion);
     await db.prepare("INSERT INTO tenant_ledger_import_generations(generation,tenant,state) VALUES(?,?,'consumed')").run(generation, tenant);
     leaseOkay(o.lease, tenant);
+  });
+}
+
+/**
+ * THE SNAPSHOT TABLES THE FIRST MIRROR PASS OF A NEW BOOK REPLACES per agent
+ * (ledger-mirror.ts: delete-then-insert for positions, and for basis, floors
+ * and the class book whenever no cursor rewound). Their rows as they stand at
+ * admission are archived, row by row, before that can happen.
+ */
+export const ATTESTED_SNAPSHOT_TABLES = ["positions", "cost_basis", "position_floors", "class_positions"] as const;
+
+/** What an attested-gap registration archived and bound. Digests only. */
+export interface AttestedGapReceipt { generation: string; receiptDigest: string; mirrorStateDigest: string; snapshotDigest: string }
+
+/**
+ * BRING THE ATTESTED BOOK AT `file` TO "EMPTY, WITH THIS GENERATION AS ITS
+ * IDENTITY", from wherever an earlier call stopped: just created (0 bytes),
+ * schema half or wholly applied, or finished. Idempotent.
+ *
+ * An identity already present must be this generation's (anything else is
+ * another book: refuse). With none, the file must hold no row in ANY table,
+ * named or not, and no non-zero sequence, before anything is written into it:
+ * the proof that it is the empty book this generation created and nobody
+ * else's. Then the schema (idempotent) and the identity, in one SQLite
+ * transaction, synchronous and journalled so a crash inside it rolls back to
+ * the identity-less state this function starts from.
+ */
+async function finishAttestedBook(file: string, tenant: string, account: string, chainId: number, generation: string): Promise<void> {
+  const raw = new DatabaseSync(file);
+  try {
+    raw.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL");
+    if (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ledger_source_identity'").get()) {
+      if (readSourceIdentity(raw, tenant, account, chainId) !== generation) throw refuse();
+      return;
+    }
+    const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: unknown }>)
+      .map(t => String(t.name));
+    for (const table of tables) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(table)) throw refuse();
+      if ((raw.prepare(`SELECT count(*) AS n FROM "${table}"`).get() as { n: number }).n !== 0) throw refuse();
+    }
+    if (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'").get()) {
+      const stmt = raw.prepare("SELECT seq FROM sqlite_sequence"); stmt.setReadBigInts(true);
+      if (stmt.all().some(row => row.seq !== 0n)) throw refuse();
+    }
+    await applyLedgerSchema(wrapSqlite(raw));
+    raw.exec("BEGIN IMMEDIATE");
+    try { createSourceIdentity(raw, tenant, account, chainId, generation); raw.exec("COMMIT"); }
+    catch (e) { raw.exec("ROLLBACK"); throw e; }
+  } finally { raw.close(); }
+}
+
+/**
+ * A NEW EMPTY BOOK FOR A TENANT WITH HISTORY, UNDER AN OPERATOR'S APPROVAL.
+ *
+ * The narrow variant of registerLedgerSource's new-book branch, and the only
+ * one. That branch refuses whenever Postgres holds a cursor or a financial row
+ * for the account, and rightly: an empty book beside history would be read by
+ * the next mirror pass as a ledger that went backwards. Every tenant from
+ * before 2026-10-04 03:18 has history and no surviving book (homes were
+ * always rebuilt from the mirror; that deploy rebuilt them over nothing), so
+ * that branch refuses all of them, forever.
+ *
+ * This replaces the "no shared financial rows" refusal with an attestation,
+ * and nothing else. In ONE transaction, under the same lease and grant lock:
+ *
+ *  - the approval must be the one ledger-resume.ts archived the home under
+ *    (state `archived`, this generation, this evidence digest), and the
+ *    caller's re-check of the gap preconditions must pass inside it;
+ *  - every mirror_state row for the tenant is copied to mirror_state_archive
+ *    and deleted, so no cursor of the lost book can be read against the new
+ *    one (assertLedgerSourceContinuity has nothing to compare, by design);
+ *  - the four snapshot tables' rows are copied to ledger_snapshot_archive.
+ *    They are NOT changed here; the first mirror pass replaces them with the
+ *    seeded set, as every redeploy did before the incident;
+ *  - the empty book is created O_EXCL, with this generation as its identity,
+ *    and its consumed receipt in tenant_ledger_import is bound to
+ *    hash('attested-gap:' + approval + ':' + evidence). A receipt from an
+ *    earlier generation is superseded (its generation row marked deleted),
+ *    never reused. A staged original import (`available`) refuses: an operator
+ *    put a book there, and this does not override it;
+ *  - the attestation row, with the chain window the caller read for it
+ *    (`chainRead`: its first block and the head it reached, the head read
+ *    immediately before this call; null only for a tenant that needed no
+ *    chain read), and the approval's move to `registered`.
+ *
+ * NO FINANCIAL ROW IS WRITTEN OR CHANGED, and nothing is imported, so nothing
+ * becomes replayable. The accounting epoch, peaks and fees continue from
+ * Postgres through the ordinary anchor (writeBootstrapForChild), as before.
+ *
+ * RE-ENTRY IS KEYED BY GENERATION. A crash after the book was created and
+ * before the commit leaves an empty book whose identity IS this generation;
+ * the next call proves that and continues. A crash between the O_EXCL create
+ * and the identity's commit — Railway's SIGKILL at the end of the drain, an
+ * OOM kill, ENOSPC inside the schema — leaves a 0-byte or schema-only book
+ * with NO identity, and that is this call's own too: it is proved to hold no
+ * row in any table before its schema and this generation are written into
+ * it (finishAttestedBook), exactly as registerLedgerSource finishes its own
+ * interrupted empty book. Without that, every retry refused and the approval
+ * sat `archived` for good. Any other file at the path — a row anywhere, or
+ * another generation's identity — refuses.
+ */
+export async function registerAttestedGapSource(o: {
+  tenant: string; smartAccount: string; chainId: number; owner: string; home: string; volume: LedgerImportVolume;
+  shared: Db; lease: TenantLease; dialect?: Dialect;
+  approvalId: string; evidenceDigest: string; generation: string; archivePath: string | null; gapFromSec: number | null;
+  /** The chain window read for this registration, first block to head (decimal, inclusive), or null where none was needed. */
+  chainRead: { fromBlock: string; head: string } | null;
+  /** The gap preconditions, re-read inside the transaction. Throws to refuse. */
+  recheck: (db: Db) => Promise<void>;
+}): Promise<AttestedGapReceipt> {
+  const tenant = address(o.tenant), account = address(o.smartAccount), owner = address(o.owner), dialect = o.dialect ?? "postgres";
+  if (!UUID.test(o.generation) || !UUID.test(o.approvalId) || !/^[0-9a-f]{64}$/.test(o.evidenceDigest)) throw refuse();
+  const block = /^(0|[1-9][0-9]{0,29})$/;
+  if (o.chainRead && (!block.test(o.chainRead.fromBlock) || !block.test(o.chainRead.head) || BigInt(o.chainRead.head) < BigInt(o.chainRead.fromBlock))) throw refuse();
+  leaseOkay(o.lease, tenant); volumeOkay(o.volume, o.home, tenant);
+  if (readPending(o.home) || present(path.join(o.home, "ledger-source-blocked.json"))) throw refuse();
+  const file = path.join(o.home, "merrymen.db");
+  await ensureLedgerResumeSchema(o.shared);
+  const forUpdate = dialect === "postgres" ? " FOR UPDATE" : "";
+  return o.shared.tx(async db => {
+    leaseOkay(o.lease, tenant);
+    const current = await grantBinding(db, tenant, dialect, true);
+    if (current.smartAccount !== account || current.chainId !== o.chainId || current.owner !== owner) throw refuse();
+    const approval = await db.prepare(`SELECT state, generation, evidence_digest, smart_account, chain_id, owner FROM ledger_resume_approvals WHERE approval_id = ?${forUpdate}`)
+      .get(o.approvalId) as Record<string, unknown> | undefined;
+    if (!approval || approval.state !== "archived" || approval.generation !== o.generation || approval.evidence_digest !== o.evidenceDigest
+        || approval.smart_account !== account || Number(approval.chain_id) !== o.chainId || approval.owner !== owner) throw refuse();
+    await o.recheck(db);
+    const prior = await db.prepare(`SELECT state, generation FROM tenant_ledger_import WHERE tenant = ?${forUpdate}`).get(tenant) as Record<string, unknown> | undefined;
+    if (prior && prior.state === "available") throw refuse();
+    const now = Date.now();
+    // The lost book's cursors: archived exactly, then removed.
+    const marks = await db.prepare("SELECT table_name, last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? ORDER BY table_name").all(tenant) as Array<Record<string, unknown>>;
+    for (const m of marks) {
+      await db.prepare(`INSERT INTO mirror_state_archive (generation, tenant, table_name, last_id, last_stamp, updated_at, archived_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(o.generation, tenant, m.table_name, m.last_id, m.last_stamp ?? null, m.updated_at ?? 0, now);
+    }
+    await db.prepare("DELETE FROM mirror_state WHERE tenant = ?").run(tenant);
+    const mirrorStateDigest = hash(canonical(marks.map(m => [String(m.table_name), String(m.last_id), m.last_stamp === null || m.last_stamp === undefined ? null : String(m.last_stamp), String(m.updated_at ?? 0)])));
+    // The snapshot pre-images, row by row, in a stable order.
+    const snapshot: Record<string, string[]> = {};
+    for (const table of ATTESTED_SNAPSHOT_TABLES) {
+      const rows = (await db.prepare(`SELECT * FROM ${table} WHERE LOWER(agent_id) = ?`).all(account) as Array<Record<string, unknown>>)
+        .map(r => canonical(Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === "bigint" ? String(v) : v])))).sort();
+      snapshot[table] = rows;
+      let seq = 0;
+      for (const row of rows) {
+        await db.prepare(`INSERT INTO ledger_snapshot_archive (generation, tenant, table_name, seq, row_digest, row_json, archived_at_ms)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(o.generation, tenant, table, seq++, hash(row), row, now);
+      }
+    }
+    const snapshotDigest = hash(canonical(snapshot));
+    // The new empty book, or this generation's own from a call that did not
+    // finish. Created O_EXCL; a file already at the path is this call's own
+    // only if it is a private plain file on the volume AND either carries this
+    // generation as its identity, or carries no identity yet and holds
+    // nothing at all (finishAttestedBook proves which).
+    if (present(file)) {
+      privateBook(file);
+      if (String(lstatSync(file, { bigint: true }).dev) !== o.volume.device) throw refuse();
+    } else {
+      const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); fchmodSync(fd, 0o600); closeSync(fd);
+      fsyncDirSync(o.home);
+    }
+    await finishAttestedBook(file, tenant, account, o.chainId, o.generation);
+    chmodSync(file, 0o600); syncFile(file); fsyncDirSync(o.home);
+    const raw = new DatabaseSync(file, { readOnly: true });
+    try {
+      for (const table of names) if ((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n !== 0) throw refuse();
+      const stmt = raw.prepare("SELECT name,seq FROM sqlite_sequence"); stmt.setReadBigInts(true);
+      if (stmt.all().some(row => typeof row.name === "string" && autoincrement.includes(row.name) && row.seq !== 0n)) throw refuse();
+    } finally { raw.close(); }
+    leaseOkay(o.lease, tenant);
+    const receiptDigest = hash(`attested-gap:${o.approvalId}:${o.evidenceDigest}`);
+    const bound = { grant: current, marks: [], mutableDigest: receiptDigest };
+    const inode = String(lstatSync(file, { bigint: true }).ino);
+    if (prior) {
+      const changed = await db.prepare(`UPDATE tenant_ledger_import SET generation=?,target_volume_id=?,state='consumed',sealed=NULL,bytes=0,sha256='',source_digest='',
+        source_inode=?,source_identity=?,bindings_json=?,created_at_ms=?,consumed_at_ms=?,grant_updated_at=?,grant_row_version=? WHERE tenant=? AND generation=?`)
+        .run(o.generation, o.volume.id, inode, o.generation, canonical(bound), now, now, current.updatedAt, current.rowVersion, tenant, prior.generation);
+      if (changed.changes !== 1) throw refuse();
+      await db.prepare("UPDATE tenant_ledger_import_generations SET state = 'deleted' WHERE generation = ? AND tenant = ?").run(prior.generation, tenant);
+    } else {
+      await db.prepare(`INSERT INTO tenant_ledger_import(tenant,generation,target_volume_id,state,sealed,bytes,sha256,source_digest,source_inode,source_identity,bindings_json,created_at_ms,consumed_at_ms,grant_updated_at,grant_row_version)
+        VALUES(?,?,?,'consumed',NULL,0,'','',?,?,?,?,?,?,?)`)
+        .run(tenant, o.generation, o.volume.id, inode, o.generation, canonical(bound), now, now, current.updatedAt, current.rowVersion);
+    }
+    await db.prepare("INSERT INTO tenant_ledger_import_generations(generation,tenant,state) VALUES(?,?,'consumed')").run(o.generation, tenant);
+    await db.prepare(`INSERT INTO ledger_resume_attestations (generation, approval_id, tenant, smart_account, chain_id, owner, evidence_digest, receipt_digest,
+      mirror_state_digest, snapshot_digest, archive_path, gap_from_sec, created_at_ms, chain_from_block, chain_head) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(o.generation, o.approvalId, tenant, account, o.chainId, owner, o.evidenceDigest, receiptDigest, mirrorStateDigest, snapshotDigest, o.archivePath, o.gapFromSec, now,
+        o.chainRead?.fromBlock ?? null, o.chainRead?.head ?? null);
+    const moved = await db.prepare("UPDATE ledger_resume_approvals SET state = 'registered', updated_at_ms = ? WHERE approval_id = ? AND state = 'archived' AND generation = ?")
+      .run(now, o.approvalId, o.generation);
+    if (moved.changes !== 1) throw refuse();
+    leaseOkay(o.lease, tenant);
+    return { generation: o.generation, receiptDigest, mirrorStateDigest, snapshotDigest };
   });
 }
 

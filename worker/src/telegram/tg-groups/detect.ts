@@ -1487,6 +1487,29 @@ const PRIVATE_RES: readonly RegExp[] = [
   /\b(?:your|ur) (?:model|llm|settings|config|telegram id|chat id|user id)\b/u,
 ];
 
+/**
+ * WHO AND WHAT IT FOLLOWS, COPIES OR WATCHES: the owner's research
+ * configuration, as private as its settings ("who do you copy trade?", "who
+ * are you following on fomo?", "what are you watching?"). Only where Fomo
+ * research is on in this process (handler.ts passes `research`): without it
+ * there is no such configuration, and these lines go on as before.
+ */
+const RESEARCH_PRIVATE_RES: readonly RegExp[] = [
+  /\bwho (?:do|did|are|r|will|would|should) (?:you|u|ya) (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b/u,
+  /\b(?:which|what) (?:traders?|wallets?|accounts?|people|whales|degens) (?:do|are|r|did|will) (?:you|u|ya) (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b/u,
+  /\bwhat (?:coins? |tokens? |traders? )?(?:are|r) (?:you|u|ya) (?:watching|tracking|monitoring|following|researching|copying|copy[- ]?trading)\b/u,
+  /\bwhat(?:'s| is|s) on (?:your|ur) (?:watch ?list|radar|list)\b/u,
+  /\b(?:your|ur) (?:watch ?list|follow(?:ing)? list|copy(?:[- ]?trad(?:e|ing))? list|copy[- ]?trades|cohort|tracked traders|followed traders|traders list)\b/u,
+  // "The best trader u r tracking", "who are the traders you're tracking", "is kaleo one of the
+  // traders you're following": the watch list in slang too. Never "which traders should you
+  // follow" (an opinion) nor "the most followed trader" (a public figure).
+  /\btraders? (?:that |who )?(?:you|u|ya)(?:'re| are| r|re)? (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b|\btraders? (?:that |who )?ur (?:copying|following|tracking|tailing|watching|monitoring)\b/u,
+  // The yes/no form about one account: "do you watch @frankdegods on fomo?", "are you
+  // tailing @x?", "do you follow trader x". Not "would you follow…" (an opinion), and
+  // only a handle, "trader X" or "X on fomo": "do you watch the market?" stays chat.
+  /\b(?:do|did|are|r|have|has) (?:you|u|ya)(?: (?:still|already|ever|even|currently|actually))? (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring) (?:@[a-z0-9_]{2,}|trader [a-z0-9_]{2,}|[a-z0-9_]{2,} on fomo\b)/u,
+];
+
 /** Its balance, P&L, portfolio, positions: private when ASKED for ("what's your pnl", "your p&l?"), not when judged ("your trades are trash"). */
 const MONEY_NOUN = new RegExp(String.raw`\b${YOUR} (?:balance|bal|pnl|p&l|p/l|p n l|profits?|losses|gains|returns?|roi|win ?rate|net ?worth|portfolio|holdings|stack|bag size|bags? size|position sizes?|positions?|trade history|trades|performance|bankroll|funds|money)\b`, "u");
 const ASKING = /\?|\b(?:what|whats|what's|how|hows|how's|show|tell|share|post|drop|send|give|reveal|screenshot|ss|let'?s see|lets see|flex)\b/u;
@@ -1498,9 +1521,10 @@ const ASKING = /\?|\b(?:what|whats|what's|how|hows|how's|show|tell|share|post|dr
  * nice try"), never answered. The names of coins it holds are NOT private
  * (the persona knows them), so "what are you holding" is not caught here.
  */
-export function isPrivateAsk(text: string): boolean {
+export function isPrivateAsk(text: string, opts: { research?: boolean } = {}): boolean {
   const t = norm(text);
   if (!t) return false;
+  if (opts.research === true && RESEARCH_PRIVATE_RES.some((re) => re.test(t))) return true;
   return PRIVATE_RES.some((re) => re.test(t)) || (MONEY_NOUN.test(t) && ASKING.test(t));
 }
 
@@ -1644,9 +1668,24 @@ export function lineMood(text: string): ReactionMood | null {
  * name, or a read/discussion with no subject that the handler binds to the
  * coin or question it follows. A discussion needs that context; it cannot
  * silently become a market read. Null: not a desk ask.
+ *
+ * `loose`: the name came only from an opinion ask ("what do you think about
+ * X", "thoughts on X") with nothing saying X is a coin — no $tag, no ticker
+ * capitals, no trading word, not a coin this chat knows. People ask that
+ * about anything ("what do you think about sex"), so the handler settles it
+ * from the conversation before the desk looks X up (understand.ts).
  */
-export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
+export type DeskIntent = { kind: "market"; trending?: true } | { kind: "coin"; name: string; loose?: true } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
   | { kind: "discussion"; topic: "lore" | "explanation" | "setup" };
+
+/** What the conversation already says, for reading a desk ask. */
+export interface DeskAskContext {
+  /**
+   * Coins this chat knows by name: ones it holds, ones posted here, $tags said
+   * here recently, ones the desk already read here. Any case, "$" or not.
+   */
+  knownCoins?: readonly string[];
+}
 
 /** Words that sit where a coin's name would and are not one. */
 const DESK_STOP: ReadonlySet<string> = new Set([
@@ -1674,6 +1713,193 @@ const DESK_STOP: ReadonlySet<string> = new Set([
   "yesterday", "yesterdays", "tomorrow", "week", "weeks", "month", "months", "days", "year", "years", "quarter", "quarters", "earlier", "previous", "prior", "past", "before", "then", "session",
 ]);
 
+/**
+ * A NAME A MODEL CHOSE, CHECKED BY THE DESK'S OWN RULE (route.ts): at least two
+ * characters, not one of the desk's stop words, not this bot, not a number.
+ * The cleaned name, or null.
+ */
+export function deskNameOk(name: unknown, selfNames: readonly string[] = []): string | null {
+  if (typeof name !== "string") return null;
+  const n = norm(name).replace(/^[$@]+/u, "").replace(/[._-]+$/u, "");
+  if (n.length < 2 || DESK_STOP.has(n) || /^\p{N}+$/u.test(n)) return null;
+  const self = new Set(selfNames.map((s) => norm(String(s ?? "")).replace(/^@+/u, "")));
+  return self.has(n) ? null : n;
+}
+
+/** Words it takes, names gone, before a line without a question mark is worth one routing call. */
+const ROUTE_MIN_WORDS = 3;
+/**
+ * A word from what the router can serve: Fomo, traders and their standing,
+ * coins and their boards, the crowd buying or selling, the market. Never what
+ * a line means (the model reads that); only whether it could be one of those
+ * at all, so "how was your weekend" never pays for a routing call.
+ */
+const ROUTE_CUE =
+  /\b(?:fomo|traders?|trading|top|best|winning|winners?|leading|leaders?|leaderboards?|ranks?|ranking|rankings|goat|whales?|smart money|degens?|trending|hot|graduat\w*|launch\w*|coins?|tokens?|tickers?|memes?|memecoins?|markets?|charts?|price|pump\w*|dump\w*|moon\w*|runners?|gems?|alpha|plays?|calls?|thesis|theses|hold|holds|holding|held|holders|bags?|bought|buy\w*|sold|sell\w*|ape[ds]?|aping|offload\w*|loading|loaded|accumulat\w*|exit\w*|profits?|gains?|pnl|p&l|made|making|rekt|wallets?|tail\w*|track\w*|monitor\w*|keep tabs|cooked|legit|rug\w*|entry|send\w*)\b/u;
+
+/**
+ * Asking about something by name, with no cue word: "what's up with pons",
+ * "what are people saying about pons", "anyone know what unipcs is up to",
+ * "why is everyone into pons". The name itself is the model's to read.
+ */
+const ROUTE_ASKS_ABOUT =
+  /\b(?:up with|up to|saying about|said about|heard (?:of|about)|happening with|going on with|been doing|(?:do|d|did) (?:you|u|ya) know|anyone know|(?:everyone|everybody|people|y'?all|they|whales?) (?:is |are |r )?(?:so |all )?into)\b/u;
+
+/**
+ * IS THIS LINE WORTH ONE ROUTING CALL (handler.ts)? A question mark, or three
+ * words once its names and handles are gone, and a word from what the router
+ * serves (ROUTE_CUE) or a $tag: "lol", "ok bro", a lone emoji and banter
+ * ("how was your weekend?") are the persona's without asking anyone.
+ */
+export function routeWorthy(text: unknown, selfNames: readonly string[] = [], knownCoins: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const t = norm(unnamed(text, selfNames));
+  const words = wordsOf(t);
+  if (words.length === 0) return false;
+  if (!/[?？]/u.test(text) && words.length < ROUTE_MIN_WORDS) return false;
+  if (ROUTE_CUE.test(t) || ROUTE_ASKS_ABOUT.test(t) || DESK_TRADING_CUE.test(t) || /(?:^|[^\p{L}\p{N}_])\$[A-Za-z]/u.test(text)) return true;
+  // A coin this chat already knows, named plainly: "what's up with pons lately".
+  return knownCoins.some((c) => {
+    const n = typeof c === "string" ? norm(c).replace(/^\$+/u, "") : "";
+    return n.length >= 2 && new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(n)}(?![\\p{L}\\p{N}])`, "u").test(t);
+  });
+}
+
+/**
+ * PUSHING BACK ON AN ANSWER: "there has to be thesis", "check again", "are
+ * you sure", "that's wrong", "look again", "try again". Read only beside its
+ * own research answer (handler.ts), where it means "read it again", never
+ * "say the same thing".
+ *
+ * THE WHOLE LINE IS THE PUSHBACK, give or take a filler ("bro", "pls",
+ * "hmm") and punctuation. A pushback inside other words is banter: "not
+ * right now", "i bought the wrong one lol", "try again later", "there are
+ * some whales buying", "are you sure we should buy" would otherwise have the
+ * room re-post a research answer (and pay for a new page) or ask which coin
+ * (review on #306). A real correction inside a longer line is the planner's
+ * (intent.ts CORRECTION_STRONG) when the router sends it there.
+ */
+const PB_FILL = String.raw`(?:hey|yo|bro|but|so|ok|okay|hmm+|nah|no|wait|pls|please|man|fam|lol|bruh)`;
+/** What a theses pushback may name: "there has to be thesis on $pons", "there must be some on it". */
+const PB_ABOUT = String.raw`(?: (?:on|for|about) (?:it|this(?: coin| one)?|that(?: coin| one)?|\$?[\p{L}\p{N}]{2,24}))?`;
+const PB_THESES = String.raw`(?: theses| thesis| a thesis)`;
+const PB_CORE =
+  String.raw`(?:(?:are|r) (?:you|u) sure|(?:you|u) sure|(?:check|look|try|search) (?:it |that )?again|re-?check(?: it| that)?|refresh(?: it| that)?|that'?s (?:wrong|not right|not true|cap)` +
+  String.raw`|there (?:has|have|got) to be(?: some| any)?(?:${PB_THESES}${PB_ABOUT})?|there must be(?: some| any)?(?:${PB_THESES}${PB_ABOUT})?|has to be some|must be some` +
+  String.raw`|there(?: are|'s| is) (?:def(?:initely)? |for sure |surely )?(?:some|theses|thesis|a thesis)${PB_ABOUT})`;
+const PUSHBACK = new RegExp(String.raw`^[ ,.!?:;-]*(?:${PB_FILL}[ ,.!?]*)*${PB_CORE}(?:[ ,.!?]+(?:${PB_FILL}|${PB_CORE}))*[ .!?]*$`, "u");
+
+export function pushbackOf(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const t = norm(unnamed(text, selfNames)).replace(/[’‘ʼ]/gu, "'");
+  return t.length <= 120 && PUSHBACK.test(t);
+}
+
+/** Laughter, an ack or an emoji: a reaction, not a question, whatever it replies to. */
+const REACTION_ONLY = /^(?:l+o+l+|lmf?a+o+|ha(?:ha)+h?|he(?:he)+|facts|true|same|fr|ikr|nice|bet|k|ok|okay|word|based|real|wow|damn|crazy|insane)$/u;
+
+/**
+ * A REACTION AND NOTHING ELSE: "lol", "facts", "🔥", "😂😂". Not a short
+ * answer ("pons", "trending", "yes"): a reply to its own Fomo question is
+ * routed however short it is (handler.ts), but a reaction never is.
+ */
+export function reactionOnly(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string") return true;
+  if (/\$[A-Za-z]/u.test(text)) return false;
+  const words = wordsOf(norm(unnamed(text, selfNames)));
+  if (words.length === 0) return true;
+  return words.every((w) => REACTION_ONLY.test(w));
+}
+
+/** Filler that may open a nudge or a complaint: "bro i asked you something", "um hello??". */
+const META_LEAD = String.raw`(?:(?:bro|bruh|yo|hey|hello|um+|uh+|so|ok|okay|well|dude|man|ser|sir|lol|wait|hmm+)[\s,!.?…]+)*`;
+/** Says, in words, that a question of theirs went unanswered. The whole line, nothing else. */
+const META_COMPLAINT = new RegExp(
+  "^" +
+    META_LEAD +
+    String.raw`(?:` +
+    String.raw`i (?:just |already )?(?:asked|said)(?: (?:you|u))?(?: (?:a|the|my) (?:question|q)| (?:something|smth)| a q)?` +
+    String.raw`|(?:you|u) (?:didn'?t|did not|never|don'?t|haven'?t|have not|still haven'?t) (?:answer|answered|reply|replied|respond|responded|say anything)(?: (?:me|my question|the question|it|that))?` +
+    String.raw`|(?:you|u) (?:ignored|skipped|missed) (?:me|my question|the question|it|that)` +
+    String.raw`|(?:answer|reply to|respond to) (?:me|the question|my question|it|that)(?: (?:pls|please|already|bro|man))?` +
+    String.raw`|(?:i'?m )?still waiting(?: (?:on|for) (?:it|that|an answer|you))?` +
+    String.raw`|no answer|any answer|where'?s (?:my|the) answer|where is (?:my|the) answer` +
+    String.raw`)[\s!?.…]*$`,
+  "u",
+);
+/** A nudge with no content: it means something only while an ask of theirs is open. */
+const META_POKE = new RegExp(
+  "^" + META_LEAD + String.raw`(?:\?+|hello+\?*|hel+o+\?+|(?:bro|bruh|yo|hey|dude|man|ser|sir)\?+|(?:are )?(?:you|u) there\?*|done\?+|well\?+|and\?+|so\?+|any ?(?:thing|update)\?*)[\s!?.…]*$`,
+  "u",
+);
+
+/**
+ * A LINE ABOUT ITS OWN SILENCE, read on the line without its names (the fast
+ * path for short, obvious lines only; handler.ts): "complaint" ("i asked a
+ * question", "you didn't answer", "answer me", "still waiting"), "poke"
+ * ("?", "hello??", "you there?", "done?") or "name-only" (its name or
+ * @username and nothing else). Null for anything with content of its own:
+ * "i asked my wife and she said no", "is pons done?", "still waiting for my
+ * pizza". Wider phrasing ("bro??", "you ignored my question earlier") is the
+ * router's to read (route.ts reask), never a longer list here.
+ */
+export function metaLineOf(text: unknown, selfNames: readonly string[] = []): "complaint" | "poke" | "name-only" | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  // Names out, and whatever punctuation they leave in front (",", "@").
+  const t = norm(unnamed(text, selfNames)).replace(/？/gu, "?").replace(/^[^\p{L}\p{N}?]+/u, "").trim();
+  // Nothing left: its name alone is a hail; an emoji with no name is a reaction.
+  if (!/[\p{L}\p{N}?]/u.test(t)) return /[\p{L}\p{N}]/u.test(norm(text)) ? "name-only" : null;
+  if (META_COMPLAINT.test(t)) return "complaint";
+  if (META_POKE.test(t)) return "poke";
+  return null;
+}
+
+/** One word or phrase of yes. */
+const CONSENT_WORD =
+  /^(?:ok|okay|k+|kk|bet|word|sure|yes+|yeah+|yea+|ya+|yah|yep|yup|ye|y|go|go ahead|go for it|do it|do that|send it|send|run it|pull it|pull it up|show me|hit me|pls|plz|please|please do|ofc|of course|absolutely|definitely|for sure|lets go|let's go|lfg|aight|alright|why not|sounds good)$/u;
+const CONSENT_MAX_WORDS = 6;
+
+/**
+ * YES, AND NOTHING ELSE: "do it", "yes pls", "ok", "bet", "send it", "go
+ * ahead". Read only under its own offer or ask-back (handler.ts
+ * repliesToOwnFomo), where "ok" and "bet" are a yes and not a reaction; what
+ * the yes is to is in the line it answers, and the router reads it there.
+ * Never a question ("do it?", "send it?" ask something of their own).
+ */
+export function consents(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string") return false;
+  if (/[?？]/u.test(text)) return false;
+  const words = wordsOf(norm(unnamed(text, selfNames)));
+  if (words.length === 0 || words.length > CONSENT_MAX_WORDS) return false;
+  // Greedy: the longest phrase of yes at each step ("go ahead", "do it", "yes").
+  let i = 0;
+  while (i < words.length) {
+    let took = 0;
+    for (let n = Math.min(3, words.length - i); n >= 1; n--) {
+      if (CONSENT_WORD.test(words.slice(i, i + n).join(" "))) {
+        took = n;
+        break;
+      }
+    }
+    if (!took) return false;
+    i += took;
+  }
+  return true;
+}
+
+/**
+ * ITS OWN LINE OFFERING, rather than asking: "i can pull the fomo board for
+ * robinhood chain coins if you want, just say the word", "want me to pull its
+ * theses". The persona is told to ask, never offer (voice.ts), but a line of
+ * its own that does is still answered by what it offered: a yes under it is
+ * routed like an answer to its question (handler.ts).
+ */
+const OWN_OFFER =
+  /\b(?:if (?:you|u|ya) (?:want|wanna|like)|want me to|wanna see|should i|shall i|say the word|lmk|let me know|i can (?:pull|get|show|grab|check|look up|fetch|dig|run|post|drop|send|find))\b/u;
+export function offerShaped(text: unknown): boolean {
+  return typeof text === "string" && OWN_OFFER.test(norm(text));
+}
+
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
 const DESK_TRADING_CUE =
   /\b(?:entry|entries|chart|charts|ta|buy|buying|sell|selling|ape|aping|bag|coin|token|price|pump|pumping|dump|dumping|send|sending|ca|liq|liquidity|volume|mcap|fdv|holders|bullish|bearish|dip|setup|levels?|support|resistance|breakout|analysis|analy[sz]e|legit|rug|runner|moon|mooning|cooked)\b/u;
@@ -1683,7 +1909,7 @@ const DESK_COIN_STRONG: readonly RegExp[] = [
   new RegExp(String.raw`\b(?:entry|entries|stop|stops|targets?|setup|invalidation|risk|liquidity|volume|rsi|ema|vwap|scalp|scalping|timeframe)\s+(?:on|for|of)\s+${NAME}`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:entry|targets?|stop|invalidation|scalp|scalping|setup)\b`, "u"),
   new RegExp(String.raw`\bwhat if\s+${NAME}\s+(?:breaks?|loses?|reclaims?|holds?)\b`, "u"),
-  new RegExp(String.raw`\b(?:thoughts? on|take on|opinion on|views? on|read on|wdyt (?:about|of|on)|wyt (?:about|of)|what do (?:you|u|ya) (?:think|make) (?:about|of)|analy[sz]e|ta on|chart (?:on|for|of)|analysis (?:on|of|for)|breakdown (?:on|of)|levels (?:on|for))\s+${NAME}`, "u"),
+  new RegExp(String.raw`\b(?:analy[sz]e|ta on|chart (?:on|for|of)|analysis (?:on|of|for)|breakdown (?:on|of)|levels (?:on|for))\s+${NAME}`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:a\s+)?(?:good|decent|nice|solid|bad|safe)\s+(?:entry|buy|play|bag|hold)\b`, "u"),
   new RegExp(String.raw`\bis\s+${NAME}\s+(?:a\s+)?(?:buy|good buy|good entry|bullish|bearish|a hold)\b`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}\s+(?:chart|analysis|levels)\b`, "u"),
@@ -1702,6 +1928,15 @@ const DESK_COIN_WEAK: readonly RegExp[] = [
   new RegExp(String.raw`\bwhat(?:'s|s| is)\s+${NAME}\s+(?:all\s+)?about\b`, "u"),
   new RegExp(String.raw`(?:^|\s)${NAME}(?:'s)?\s+(?:lore|story|origin|narrative|background)\b`, "u"),
 ];
+/**
+ * Asking its opinion: how people ask about a coin AND about anything else
+ * ("what do you think about sex", "thoughts on pizza"). The name is a coin
+ * with a trading word elsewhere in the line, written as a ticker, or known
+ * in this chat; otherwise it is `loose` and the conversation decides.
+ */
+const DESK_COIN_OPINION: readonly RegExp[] = [
+  new RegExp(String.raw`\b(?:thoughts? on|take on|opinion on|views? on|read on|wdyt (?:about|of|on)|wyt (?:about|of)|what do (?:you|u|ya) (?:think|make) (?:about|of))\s+${NAME}`, "u"),
+];
 /** Coin nouns make the named subject explicit; ordinary people's stories do not. */
 const DESK_COIN_STORY = new RegExp(String.raw`\b(?:what(?:'s|s| is)|explain|describe|tell me about)\s+(?:the\s+)?(?:coin|token)\s+${NAME}`, "u");
 /** These asks need a subject from the reply chain or a recent desk read. */
@@ -1717,7 +1952,16 @@ const DESK_MARKET_CUE =
   /\b(?:how|what|whats|update|check|analysis|analy[sz]e|look|looking|doing|vibe|vibes|sentiment|overview|outlook|read|state|today|rn|currently|now|summary|recap|breakdown|thoughts|wdyt|condition|conditions)\b|[?？]/u;
 /** What's moving: these words are about markets in any chat. */
 const DESK_MOVERS =
-  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|trending|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+/**
+ * "What's trending": a market ask too, but where Fomo research is wired a
+ * bare one means Fomo's trending board (handler.ts; live 2026-10-07: "I
+ * said what's trending on fomo"), with the desk's market read as its
+ * fallback. A venue word keeps it on the desk: "what's trending on
+ * robinhood chain", "what's trending in the market".
+ */
+const DESK_TRENDING = /\bwhat(?:'?s|s| is| are)\s+trending\b/u;
+const DESK_VENUE = /\b(?:robinhood|rh|chain|chains|onchain|on-chain|gecko|geckoterminal|dex|dexscreener|market|markets)\b/u;
 /** "what's hot / up / cooking": about markets only beside a trading word ("what's up with the dev" is not). */
 const DESK_MOVERS_WEAK = /\bwhat(?:'?s|s| is| are)\s+(?:hot|cooking|popping|running|green|up)\b/u;
 /** Asks for a chart read in words no other topic uses. */
@@ -1743,12 +1987,18 @@ const DESK_SETUP = /\b(?:scalp|scalping|stops?|stop[- ]?loss|take[- ]?profit|tar
  * and story/rewrite requests are a context-dependent "discussion".
  * The name is a search key and nothing else (rule 1).
  */
-export function deskAskOf(text: string, selfNames: readonly string[] = []): DeskIntent | null {
+export function deskAskOf(text: string, selfNames: readonly string[] = [], ctx: DeskAskContext = {}): DeskIntent | null {
   if (typeof text !== "string" || !text.trim()) return null;
   const raw = unnamed(text, selfNames);
   const t = norm(raw);
   if (!t || COIN_STOP.test(t)) return null;
   const self = new Set(selfNames.map((n) => norm(String(n ?? ""))));
+  const known = new Set(
+    (Array.isArray(ctx?.knownCoins) ? ctx.knownCoins : [])
+      .filter((n): n is string => typeof n === "string")
+      .map((n) => norm(n).replace(/^\$+/u, ""))
+      .filter((n) => n.length >= 2),
+  );
   const ok = (name: string | undefined): string | null => {
     const n = (name ?? "").replace(/[._-]+$/u, "");
     if (n.length < 2 || DESK_STOP.has(n) || self.has(n) || /^\p{N}+$/u.test(n)) return null;
@@ -1790,7 +2040,7 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
   }
   // The EARLIEST name any pattern finds: "check out cashcat, i think good
   // entry?" names cashcat, not the "think" before "good entry".
-  const found: { at: number; name: string }[] = [];
+  const found: { at: number; name: string; loose?: true }[] = [];
   const scan = (re: RegExp) => {
     for (const m of t.matchAll(new RegExp(re.source, "gu"))) {
       const n = ok(m[1]);
@@ -1801,17 +2051,368 @@ export function deskAskOf(text: string, selfNames: readonly string[] = []): Desk
   scan(DESK_COIN_STORY);
   const cue = DESK_TRADING_CUE.test(t);
   // A weakly-asked name counts beside a trading word, or written as a ticker:
-  // "how is CASHCAT looking" is a coin, "how is grandma looking" is not.
+  // "how is CASHCAT looking" is a coin, "how is grandma looking" is not. A
+  // coin this chat already knows is one too: "how is pepe looking" after
+  // $PEPE was the talk of the room.
   const shouted = (name: string) => name.length >= 3 && new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name.toUpperCase())}(?![\\p{L}\\p{N}])`, "u").test(text);
   const weakBefore = found.length;
   DESK_COIN_WEAK.forEach(scan);
-  if (!cue) found.splice(weakBefore, found.length - weakBefore, ...found.slice(weakBefore).filter((f) => shouted(f.name)));
-  if (found.length) return { kind: "coin", name: found.sort((a, b) => a.at - b.at)[0]!.name };
+  if (!cue) found.splice(weakBefore, found.length - weakBefore, ...found.slice(weakBefore).filter((f) => shouted(f.name) || known.has(f.name)));
+  // An opinion ask names a coin only with a trading word BESIDE the name (the
+  // name itself is no cue: "what do you think about sending it"), as a ticker,
+  // or known here. Otherwise it is loose, and never outranks a firm name.
+  const cueBeside = (name: string) =>
+    DESK_TRADING_CUE.test(t.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(name)}(?![\\p{L}\\p{N}])`, "gu"), " "));
+  const opinionBefore = found.length;
+  DESK_COIN_OPINION.forEach(scan);
+  for (const f of found.slice(opinionBefore)) if (!cueBeside(f.name) && !shouted(f.name) && !known.has(f.name)) f.loose = true;
+  if (found.length) {
+    const byAt = found.sort((a, b) => a.at - b.at);
+    const firm = byAt.find((f) => !f.loose);
+    return firm ? { kind: "coin", name: firm.name } : { kind: "coin", name: byAt[0]!.name, loose: true };
+  }
   if (DESK_LORE.test(t)) return { kind: "discussion", topic: "lore" };
   if (DESK_EXPLAIN.test(t) || DESK_EXPLAIN_SHORT.test(t)) return { kind: "discussion", topic: "explanation" };
   const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
-  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
+  if (DESK_TRENDING.test(t) && !DESK_VENUE.test(t) && !DESK_MOVERS.test(t)) return { kind: "market", trending: true };
+  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || DESK_TRENDING.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
   if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };
   if (DESK_SETUP.test(t) && DESK_REQUEST.test(t)) return { kind: "discussion", topic: "setup" };
+  return null;
+}
+
+// ─── Social-trading research asks (docs/fomo.md "Telegram groups") ─────────
+
+/**
+ * "fomo" where it names the platform, never the feeling: "on fomo", "fomo
+ * traders", "fomo's leaderboard", "trending on fomo". "i have fomo", "fomo'd
+ * in", "pure fomo lol" and "fomo into it" are how people feel, and stay chat.
+ */
+const FOMO_PLATFORM =
+  /\b(?:on|from|via|through|using|inside|in the|with|about) (?:the )?fomo\b(?! (?:into|in|buy|buying|bought|mode|lol|af|hard)\b)|\bfomo(?:'s)? (?:app|traders?|users?|people|leaderboards?|feed|data|research|rankings?|ranks|trending|theses|thesis|community|platform|family|accounts?|profiles?|tokens?|coins?|holders?|alerts?|activity|top|whales?|board|boards|flow|degens?)\b|\bfomo\.family\b|\bfomoapi\b|\btop (?:of |on )?(?:the )?fomo\b/u;
+/** A question word near the start, after a few words of preamble: "i'm sorry who's the top trader on fomo". */
+const FOMO_WH_EARLY = /^(?:[\p{L}']+\s+){0,3}(?:who|who's|whos|what|what's|whats|which|how|hows|how's)\b/u;
+/**
+ * The feature itself: what Fomo is, whether it works, what it can do ("what
+ * is fomo?", "is fomo working", "is fomo on?", "fomo help"). Answered by code
+ * (fomo/chat.ts), so a room asking about it is never told "no clue".
+ */
+const FOMO_ITSELF =
+  /^(?:so |ok |yo |hey )?what(?:'s| is|s) (?:the )?fomo(?: app| thing| research)?(?: all about| about)?[?？!. ]*$|\bhow (?:does|do) (?:the )?fomo(?: app| research| thing)? work\b|\b(?:is|does) (?:the )?fomo(?: \S+)? (?:still )?(?:working|work|up|down|ok|okay|alive|connected|live|running|broken|healthy|online|offline)\b|\b(?:is|does) (?:the )?fomo(?: \S+)? (?:still )?(?:not )?(?:on|set|set up|enabled|active|configured|turned on|switched on)[?？!. ]*$|\bfomo (?:status|health|help|commands|features)\b|\bcan (?:you|u|ya) (?:use|access|read|see|search|look at|talk about|help with) (?:the )?fomo[?？!. ]*$|\btell me about (?:the )?fomo[?？!. ]*$|\b(?:is|are|does) (?:the )?fomo (?:crowd |community |people )?(?:saying|say|think|thinking)\b|\bfomo (?:says|thinks)\b/u;
+/** Written cases for and against a coin: the research's own word, singular or plural. */
+const FOMO_THESES = /\btheses\b|\bthesis (?:on|for|about|behind|of)\b/u;
+/** Traders, as a group, buying or selling: "what are the top traders buying", "are traders selling pepe". */
+const FOMO_TRADER_FLOW =
+  /\b(?:top |best |smart |fomo |the |any |which |what )?(?:traders|whales|smart money|degens) (?:are |r |is |been |have been |were )?(?:buying|selling|aping|accumulating|dumping|exiting|loading|into|rotating)\b/u;
+/** Asking for something, without a question mark: "show me…", "check…", "pull up…". */
+const FOMO_REQUEST = /^(?:(?:pls|please|yo|hey|ok|so|can (?:you|u)|could (?:you|u))\s+)*(?:show|tell|check|give|list|pull|find|research|look|dig|get|fetch|what|whats|what's|who|whos|who's|which|how|is|are|any|quote(?= (?:them|these|those|the|their|em)\b))\b/u;
+
+/**
+ * A SHORT LIST ASK with no question mark: "trending on fomo", "robinhood
+ * chain coins on fomo", "top traders on fomo today". The whole line is list
+ * words and the platform, so "top fomo moment lol" and "fomo traders are
+ * wild" stay chat; the planner still decides what, if anything, it plans.
+ */
+const LIST_MOD = String.raw`(?:top|best|hottest|biggest|trending|new|newest|fresh|small|early|graduated|most held|robinhood(?: chain)?|rh|solana|sol|base|eth(?:ereum)?|bsc|bnb)`;
+const LIST_NOUN = String.raw`(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|traders|whales|leaderboard|boards?|theses|ones)`;
+/** A chain before the platform: "trending on base on fomo", "solana ones on fomo". */
+const LIST_CHAIN = String.raw`(?:(?:on|in) (?:the )?(?:robinhood(?: chain)?|base|solana|sol|eth(?:ereum)?|bsc|bnb)\s+)?`;
+const FOMO_LIST_ASK = new RegExp(
+  String.raw`^(?:(?:the|any|some|latest|current)\s+)?(?:(?:${LIST_MOD}\s+){1,3}${LIST_NOUN}?|${LIST_NOUN})\s*${LIST_CHAIN}(?:on|from|in) (?:the )?fomo(?:\s+(?:today|rn|right now|now|this week|lately|atm))?(?:\s+(?:pls|please))?[.!]*$`,
+  "u",
+);
+
+/**
+ * A COIN'S THESES ASKED FOR WITH NO QUESTION MARK, the whole line and nothing
+ * else: "theses on $PONS", "thesis for pons on fomo", "fomo theses on PONS",
+ * the way the room's own Fomo help puts it (fomo/render.ts
+ * FOMO_CAPABILITIES_GROUP). "my thesis on pons is simple", "theses on pons
+ * are mid lol" and "thesis on $PONS: it goes to 10m" say something, and stay chat.
+ */
+const FOMO_THESES_ASK = /^(?:fomo\s+)?(?:theses|thesis) (?:on|for|about) \$?[\p{L}\p{N}][\p{L}\p{N}_.-]{0,30}(?: (?:on|from) (?:the )?fomo)?(?:\s+(?:pls|please))?[.!]*$/u;
+
+export type FomoAsk = { kind: "platform" } | { kind: "theses" } | { kind: "trader-flow" };
+
+/**
+ * IS THIS ADDRESSED LINE A SOCIAL-TRADING RESEARCH ASK? Deliberately
+ * conservative, because the answer costs a lookup: the platform named in a
+ * platform position, the word "theses" (or "thesis on/for/about"), or traders
+ * as a group buying or selling — and in every case a question or a request.
+ * Read on the line without its names and handles. Null: not one, and the line
+ * goes on to the desk and the persona as before.
+ *
+ * This only routes. The research side plans the question itself from the
+ * words (and may still say it is not one), and nothing here names a coin, a
+ * trader or anything a lookup is made with.
+ */
+export function fomoAskOf(text: string, selfNames: readonly string[] = []): FomoAsk | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  // Names out, and whatever punctuation they leave in front ("@", ",").
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
+  if (!t || COIN_STOP.test(t)) return null;
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t) || FOMO_LIST_ASK.test(t) || FOMO_THESES_ASK.test(t);
+  if (!asked) return null;
+  if (FOMO_PLATFORM.test(t) || FOMO_ITSELF.test(t)) return { kind: "platform" };
+  if (FOMO_THESES.test(t)) return { kind: "theses" };
+  if (FOMO_TRADER_FLOW.test(t)) return { kind: "trader-flow" };
+  return null;
+}
+
+/**
+ * A SHORT FOLLOW-UP TO A RESEARCH ANSWER that names no subject of its own:
+ * "what about the sellers?", "and the buyers?", "any theses?", "refresh it",
+ * "this week?", "what about robinhood chain?", "and the top?", "what's the
+ * second one holding?", "what did he make money on?". Read only while this
+ * chat's last answer was research (handler.ts), so on its own it routes
+ * nothing.
+ */
+const FOMO_FOLLOW_UP =
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|summary|summaries|digest|recap|tl;?dr|sum (?:it|them|these|those) up|paraphras\w*|posts|in their words|(?:the )?(?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
+/** "Don't summarise", "no summary", "without paraphrasing": an ask, with no question mark (the theses themselves). */
+const NEGATED_SUMMARY = /\b(?:don'?t|dont|do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u;
+/** "Summarise them", "sum it up", "recap": asked for, with no question mark (the digest, again). */
+const SUMMARY_REQUEST = /^(?:(?:pls|please|ok|okay|so|just|now|can (?:you|u)|could (?:you|u))\s+)*(?:summari[sz]e|sum (?:it|them|these|those|that) up|recap|tl;?dr)\b/u;
+const FOLLOW_UP_MAX_WORDS = 10;
+/**
+ * A ROW OF THE BOARD IT JUST SAID, or the trader it just named: "the second
+ * one", "#3", "number two" on their own; "he", "his" or "that guy" with what
+ * one trader does ("what's he holding", "what did that guy make money on").
+ * The planner resolves them against the board it remembers (fomo/intent.ts
+ * rowRefOf), or asks which row.
+ */
+const FOMO_ROW_REF = /\bthe (?:top|first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th) (?:one|guy|dude)\b|(?:^|\s)#(?:10|[1-9])(?![\p{L}\p{N}])|\bnumber (?:one|two|three|four|five|[1-9])\b/u;
+const FOMO_PERSON = /\b(?:he|he's|hes|him|his|she|she's|her|that guy|this guy|the guy)\b/u;
+/**
+ * What one trader does with money. Never "doing" or "up to" ("what is he
+ * doing lol" is chat), and never "holding up" ("is she holding up ok?"):
+ * "how's the second one doing?" still reads as a row through FOMO_ROW_REF.
+ */
+const FOMO_TRADER_VERB = /\b(?:hold|holds|holding(?! up\b)|holdings|bags?|bought|buy|buying|sold|sell|selling|trades?|trading|traded|made|make|making|money|won|lost)\b/u;
+
+export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}#]+/u, "");
+  if (!t || COIN_STOP.test(t)) return false;
+  if (wordsOf(t).length > FOLLOW_UP_MAX_WORDS) return false;
+  // A trailing "pls" asks too ("quotes pls", "word for word pls", "the last 10 please").
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames) || NEGATED_SUMMARY.test(t) || SUMMARY_REQUEST.test(t) || /\b(?:pls|plz|please)[.!]*$/u.test(t);
+  // A quote ask is a cue only as the planner reads it ("can you list the last 10", never "can you list some good movies").
+  return asked && (FOMO_FOLLOW_UP.test(t) || thesesQuotesOf(text, selfNames) !== null || FOMO_ROW_REF.test(t) || (FOMO_PERSON.test(t) && FOMO_TRADER_VERB.test(t)));
+}
+
+// ── a coin's theses, quoted; a coin's facts; a room saying it rugged ───────
+
+/**
+ * The line as fomo/intent.ts reads its words (its `words`/`canonOf`): names
+ * out, lowercase, edge punctuation and commas gone, "don't" as "do not",
+ * "thesis" as "theses". Only what the quote cue below needs.
+ */
+function quoteCanon(text: string, selfNames: readonly string[]): string {
+  return norm(unnamed(text, selfNames))
+    .replace(/\b(?:don'?t|dont)\b/gu, "do not")
+    .replace(/\b(?:didn'?t|didnt)\b/gu, "did not")
+    .replace(/\b(?:can'?t|cant)\b/gu, "can not")
+    .replace(/\bwhat'?s\b/gu, "what is")
+    .replace(/\b(?:thesis|thesises|thesies|thesi)\b/gu, "theses")
+    .replace(/[,;|"“”()[\]{}<>!?¿¡…*~`]+/gu, " ")
+    .replace(/(?<![\p{L}\p{N}])[.:]+|[.:]+(?![\p{L}\p{N}])/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+/*
+ * THE QUOTE CUE, A COPY OF fomo/intent.ts QUOTES (this directory cannot
+ * import fomo/): keep the two in step; detect.test.ts pins that they agree
+ * on a shared table of lines.
+ */
+const QUOTE_NUM = String.raw`(?:\d{1,3}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)`;
+const QUOTES: readonly RegExp[] = [
+  /\b(?:quote|quotes|quoted|verbatim|word for word|exact words|exactly what|in their (?:own )?words|raw (?:theses|posts|text|texts|words)|actual (?:theses|posts|words|texts?)|full (?:theses|text|texts|posts))\b/u,
+  /\bwhat (?:did|do|does) (?:they|people|traders|folks|the traders|he|she) (?:say|said|write|wrote|post|posted) exactly\b/u,
+  /\b(?:do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u,
+  /\b(?:show|give|post|paste|send|list|drop) (?:me |us )?(?:(?:all (?:of )?)?(?:the|these|those|their) (?:theses|posts|takes|quotes|texts?|tweets|messages|words)\b|(?:them|these|those|em)(?: (?:all|pls|please|now|here|again))*$)/u,
+  new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent) ${QUOTE_NUM}\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)`, "u"),
+  new RegExp(String.raw`(?:^|\b(?:can|could|would|will) (?:you|u) |\b(?:pls|please|just|now|then|and|so|ok|okay|yo) )list(?: (?:them|these|those|em|it|all|out))*(?: (?:the |their )?(?:last|latest|newest|recent|most recent) ${QUOTE_NUM})?(?: (?:theses|posts|takes|quotes))?(?: (?:pls|please|now|here|again|for me))*$`, "u"),
+];
+const QUOTE_OTHER_ASPECT = /\b(?:buy|buys|buyers?|bought|buying|sells?|sellers?|sold|selling|trades?|trading|holders?|holding|holdings|coins?|tokens?)\b/u;
+const QUOTE_THESES_NOUN = /\b(?:theses|quotes|posts|takes)\b/u;
+const QUOTES_MAX = 10;
+const QUOTE_WORDS: Readonly<Record<string, number>> = {
+  two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
+};
+const QUOTE_COUNT = new RegExp(String.raw`\b(?:last|latest|newest|recent|most recent|list|show me|give me) (${QUOTE_NUM})\b(?! ?(?:h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?|months?|m|min|mins|minutes?|years?|yrs?)\b)|\b(${QUOTE_NUM}) (?:of (?:the |their )?)?(?:theses|quotes|posts|takes|of them)\b`, "u");
+
+/**
+ * A COIN'S THESES ASKED FOR THEMSELVES, not the digest ("can you list the
+ * last 10", "show me these thesis, dont summarise", "what did they say
+ * exactly"; Milla, 2026-10-09): how many (at most ten; `asked` keeps the raw
+ * count), or null. Read by code from the line, never a model: a routed theses
+ * request carries quotes only from here (route.ts), and the handler's reply
+ * to a theses answer builds its request from it.
+ */
+export function thesesQuotesOf(text: string, selfNames: readonly string[] = []): { n: number; asked: number } | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  const c = quoteCanon(text, selfNames);
+  if (!c || !QUOTES.some((re) => re.test(c))) return null;
+  if (QUOTE_OTHER_ASPECT.test(c) && !QUOTE_THESES_NOUN.test(c)) return null;
+  const m = QUOTE_COUNT.exec(c);
+  const raw = m ? (m[1] ?? m[2] ?? "") : "";
+  const n = /^\d+$/u.test(raw) ? Number(raw) : QUOTE_WORDS[raw] ?? QUOTES_MAX;
+  const asked = Number.isSafeInteger(n) && n >= 1 ? n : QUOTES_MAX;
+  return { n: Math.min(asked, QUOTES_MAX), asked };
+}
+
+/**
+ * A QUOTE ASK CODE MAY ANSWER WITHOUT THE ROUTER, under one of its theses
+ * answers past the follow-up window (handler.ts): the theses asked for by
+ * name or manner (QUOTES' first four cues: "quote them", "word for word",
+ * "don't summarise", "what did they say exactly", "show me the theses"), or
+ * a whole line that is nothing but a count or a list ask ("show me the last
+ * 5", "can you list the last 10", "list them"). Any other line with a "last
+ * N" in it ("who were the last 3 on the leaderboard?", "what were kaleo's
+ * last 3 trades?") goes to the router as before (review, 2026-10-09).
+ */
+const QUOTE_BY_CODE = new RegExp(
+  String.raw`^(?:(?:can|could|would) (?:you|u) |pls |please |just |now |ok |okay |so |and |then )*(?:(?:list|show|give|post|drop|send)(?: me| us)?(?: all)? )?(?:the |these |those |their )?(?:(?:last|latest|newest|recent|most recent) ${QUOTE_NUM}|them|these|those|em)(?: (?:theses|quotes|posts|takes|ones|of them))?(?: (?:pls|please|now|here|again))*$`,
+  "u",
+);
+export function quoteAskByCode(text: string, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const c = quoteCanon(text, selfNames);
+  return !!c && (QUOTES.slice(0, 4).some((re) => re.test(c)) || QUOTE_BY_CODE.test(c));
+}
+
+/** Words a facts ask's coin slot holds without naming a coin. */
+const FACTS_STOP: ReadonlySet<string> = new Set([
+  "it", "its", "this", "that", "him", "her", "you", "u", "me", "us", "them", "the", "market", "chart", "everything", "everyone", "everybody",
+  "he", "she", "they", "we", "i", "coin", "token", "one", "there", "here", "price", "crypto", "memes", "today", "now",
+]);
+/** A coin as a facts ask names it: a ticker shape, "$" off, never a stop word. */
+function factsCoin(word: string | undefined): string | null {
+  const w = String(word ?? "").replace(/^\$+/u, "").replace(/[^\p{L}\p{N}_-]+$/u, "").replace(/^[^\p{L}\p{N}]+/u, "");
+  if (!w || FACTS_STOP.has(w.toLowerCase())) return null;
+  const up = w.toUpperCase();
+  return /^[A-Z0-9][A-Z0-9_-]{0,19}$/u.test(up) && !/^\d+$/u.test(up) ? up : null;
+}
+/** Words that point at the coin under discussion without naming it: the room's Fomo coin. */
+const FACTS_POINTERS: ReadonlySet<string> = new Set(["it", "its", "it's", "this", "that", "coin", "token", "chart", "price", "one"]);
+/** After "the", "my", "this": the coin's own nouns, never "the trade", "the chat" or "the leaderboard". */
+const FACTS_POINTER_NOUNS: ReadonlySet<string> = new Set(["coin", "token", "chart", "price", "one", "project", "ticker", "memecoin"]);
+/**
+ * WHAT A FACTS ASK'S SLOT HOLDS (review, 2026-10-09): a pointer at the
+ * room's coin ("it", "this", "the coin": `{ coin: null }`), a coin it names
+ * (`{ coin: "PEPE" }`), or null for anything else: a person ("you", "him",
+ * "he"), the room, the market or a day ("everyone", "today"), and "the X"
+ * or "my X" that is no coin ("the trade", "the fomo leaderboard").
+ */
+function factsSlot(slot: string | undefined): { coin: string | null } | null {
+  const words = String(slot ?? "").toLowerCase().replace(/[?？!.,;:]+$/u, "").split(/\s+/u).filter(Boolean);
+  if (words.length === 0) return null;
+  const [first, second] = [words[0]!, words[1]];
+  if (/^(?:the|my|our|your|his|her|their|this|that)$/u.test(first)) {
+    if (second === undefined) return FACTS_POINTERS.has(first) ? { coin: null } : null;
+    return FACTS_POINTER_NOUNS.has(second.replace(/^\$+/u, "")) ? { coin: null } : null;
+  }
+  if (FACTS_POINTERS.has(first)) return { coin: null };
+  const coin = factsCoin(first);
+  return coin ? { coin } : null;
+}
+/** "…on pepe", "…for $BONK", "…of auton": the coin a data or dev ask names at its end. */
+const FACTS_NAMED_AT_END = /\b(?:on|for|of|about) ((?:the |this |that )?\$?[\p{L}\p{N}_-]{2,20})[?？!. ]*$/u;
+/**
+ * "What happened to X", "what went wrong with X": the past, which is facts.
+ * Never "what's happening with X" (the present): that is the coin's activity
+ * on Fomo, the planner's own question (tg-fomo-port.ts requestText).
+ */
+const SLOT = String.raw`((?:the|my|our|your|this|that) \S+|\S+)`;
+const FACTS_WHAT = new RegExp(String.raw`\bwhat (?:happened|has happened|went wrong) (?:to|with) ${SLOT}|\bwhat went wrong (?:for|on) ${SLOT}|\bwhat(?:'s| has) happened (?:to|with) ${SLOT}`, "u");
+const FACTS_WHY = new RegExp(
+  String.raw`\bwhy (?:did|is|has|does|was) ${SLOT} (?:(?:just|get|got|been|go|gone|so|totally|completely)\s+)*(?:rug|rugged|rugging|dump|dumped|dumping|die|died|dying|dead|crash|crashed|crashing|tank|tanked|tanking|fall|fell|falling|drop|dropped|dropping|collapse|collapsed|collapsing|to zero|down|nuke|nuked|bleed|bleeding|bled)\b|\bdid ${SLOT} (?:just )?(?:rug|get rugged|die|crash|collapse|go to zero)\b`,
+  "u",
+);
+const FACTS_DATA = /\b(?:show|give|send|post|pull up) (?:me|us) (?:the )?(?:actual |real |hard )?(?:data|facts|numbers|stats|figures)\b|^(?:the |any |actual |real |just the )?facts(?: pls| please)?\s*[?？]+$|\bwhat are the (?:actual |real )?facts\b|\b(?:actual|real|hard) (?:facts|data|numbers)\b/u;
+const FACTS_DEV = /\bdid (?:the )?(?:dev|devs|team|deployer|creator|creators|insiders?)s? (?:just |really |actually )?(?:dump|dumped|sell|sold|rug|rugged|exit|exited|pull|pulled|cash out|cashed out)\b|\b(?:is|are|was|were) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:still )?(?:holding|selling|dumping)\b|\bhow much (?:does|did) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:hold|have|own)\b/u;
+const FACTS_SHOW = /\b(?:show|give|send|post|pull up) (?:me|us)\b/u;
+/** The market, a major or the world as what "happened": the desk's, never one coin's facts. */
+const FACTS_NOT_A_COIN = /\b(?:to|with|did|is|has|does|was) (?:the |this |that )?(?:market|markets|economy|world|crypto|memes|memecoins|everything|everyone|sol|eth|btc|bitcoin|solana|ethereum|robinhood|base|bsc|bnb|chain)\b/u;
+
+/**
+ * WHAT HAPPENED TO A COIN, ASKED FOR AS FACTS ("what happened to auton",
+ * "why did it rug", "show me the data", "did the dev dump?", "facts?";
+ * Milla, 2026-10-09): which ask, and the coin the line names (uppercased) or
+ * null when it names none ("it", "this"), which the handler resolves from the
+ * Fomo answer it replies to or the room's last Fomo coin. A statement ("the
+ * dev dumped lol") is never one: only a question or a "show me". Nor is a
+ * line about a person, the room or anything but a coin ("what happened to
+ * you last night?", "why did he dump?", "what went wrong with the trade?"),
+ * nor a bare "facts" (slang for "true"); a data or dev ask that names a coin
+ * at its end ("show me the numbers on pepe") is about that coin.
+ */
+export function fomoFactsOf(text: string, selfNames: readonly string[] = []): { ask: "what" | "why" | "data" | "dev"; coin: string | null } | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}$]+/u, "");
+  if (!t || FACTS_NOT_A_COIN.test(t)) return null;
+  const asked = /[?？]/u.test(text) || isQuestionShaped(text, selfNames) || FACTS_SHOW.test(t);
+  if (!asked) return null;
+  const namedAtEnd = (): string | null => factsSlot(FACTS_NAMED_AT_END.exec(t)?.[1])?.coin ?? null;
+  if (FACTS_DEV.test(t)) return { ask: "dev", coin: namedAtEnd() };
+  const why = FACTS_WHY.exec(t);
+  if (why) {
+    const slot = factsSlot(why[1] ?? why[2]);
+    return slot ? { ask: "why", coin: slot.coin } : null;
+  }
+  const what = FACTS_WHAT.exec(t);
+  if (what) {
+    const slot = factsSlot(what[1] ?? what[2] ?? what[3]);
+    return slot ? { ask: "what", coin: slot.coin } : null;
+  }
+  if (FACTS_DATA.test(t)) return { ask: "data", coin: namedAtEnd() };
+  return null;
+}
+
+/** Who a rug is said of when it is a person, never a coin: such a line sets no permit. */
+const RUG_PERSON_WORDS: ReadonlySet<string> = new Set([
+  "dev", "devs", "team", "deployer", "deployers", "creator", "creators", "insider", "insiders", "founder", "founders", "they", "he", "she",
+  "we", "i", "you", "u", "someone", "somebody", "whale", "whales", "kol", "kols", "admin", "admins", "mods", "mod",
+]);
+/** Subjects that point at the coin under discussion without naming it. */
+const RUG_POINTERS: ReadonlySet<string> = new Set(["it", "this", "that", "one", "chart", "coin", "token", "thing", "it's", "this's", "that's"]);
+const RUG_SAID: readonly RegExp[] = [
+  /(?:^|\s)([\p{L}\p{N}$_'-]+)\s+(?:(?:just|totally|fully|def|literally|basically|completely|officially|straight up|already)\s+)*(?:(?:got|has|have|been|has been|just got)\s+)?rugged\b(?!\s*-?\s*pull)/u,
+  /(?:^|\s)([\p{L}\p{N}$_-]+)(?:'s|\s+is|\s+was)\s+(?:(?:a|an|another|such a|full|total|complete|classic|certified|absolute)\s+)+rug\b(?!\s*-?\s*pull)/u,
+];
+const RUG_SAID_BARE = /^(?:(?:lol|lmao|lmfao|rip|yeah|yep|welp|well|damn|oof|man|bro|ngl|ok|so)\s+)*(?:(?:full|total|complete|classic|absolute|certified)\s+rug|rugged)(?:\s+(?:lol|lmao|lmfao|af|asf|hard|fr|ngl|bro|fam|rip))*\s*$/u;
+const RUG_NEGATION = /\b(?:not|never|didn'?t|didnt|hasn'?t|hasnt|isn'?t|isnt|wasn'?t|wasnt|no|ain'?t|aint|won'?t|wont|wouldn'?t|cant|can'?t|if|unless|might|could|maybe|gonna|going to|will)\b/u;
+
+/**
+ * SOMEONE IN THE ROOM SAYS A COIN RUGGED ("auton rugged lol", "it rugged",
+ * "full rug", "this was a rug"): the coin named (uppercased) or null for a
+ * pointer ("it", "this one"). Null for a question ("did it rug?"), a negation
+ * or a maybe ("not a rug", "it didn't rug", "this could rug"), and a person
+ * as the subject ("the dev rugged it", "they rugged"). The handler sets the
+ * room's collapse permit from it only for the room's current Fomo coin, and
+ * checks the room's own names there (WP9).
+ */
+export function roomSaysRugged(text: string, selfNames: readonly string[] = []): { coin: string | null } | null {
+  if (typeof text !== "string" || !text.trim() || /[?？¿]/u.test(text)) return null;
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}$]+/u, "");
+  if (!t || /^(?:did|is|was|has|does|do|will|would|could|can|should|are)\b/u.test(t)) return null;
+  for (const clause of t.split(/[.!,;:—–…\n]+/u).map((c) => c.trim()).filter(Boolean)) {
+    if (!/\brug(?:ged)?\b/u.test(clause)) continue;
+    const at = clause.search(/\brug(?:ged)?\b/u);
+    const before = clause.slice(0, at).split(/\s+/u).filter(Boolean).slice(-4).join(" ");
+    if (RUG_NEGATION.test(before)) return null;
+    if (RUG_SAID_BARE.test(clause)) return { coin: null };
+    for (const re of RUG_SAID) {
+      const m = re.exec(clause);
+      if (!m) continue;
+      const subject = m[1]!.replace(/^\$+/u, "").replace(/'s$/u, "");
+      if (RUG_PERSON_WORDS.has(subject) || /^(?:the|a|an)$/u.test(subject)) return null;
+      if (RUG_POINTERS.has(subject)) return { coin: null };
+      // A word that names no coin ("the market", "everyone", "crypto", "the price") says nothing about one (review, 2026-10-09).
+      const coin = factsCoin(subject);
+      return coin ? { coin } : null;
+    }
+  }
   return null;
 }

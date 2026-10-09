@@ -67,7 +67,7 @@ export function You({
         </div>
         <span className="profile-mode">{recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}</span>
       </div>
-      <RecoveryNotice recovery={recovery}/>
+      <RecoveryNotice recovery={recovery} funds={mine.recoveryFunds}/>
       <section className="account-balance" aria-label="Account balance">
         <span className={recovery ? "account-label recovery-balance-label" : "account-label"}>{recovery ? "Last recorded portfolio balance" : "Portfolio balance"}</span>
         <strong>

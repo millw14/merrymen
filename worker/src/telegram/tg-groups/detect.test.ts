@@ -21,9 +21,15 @@ import {
   addressedSmallTalk,
   asksAboutCoin,
   asksHowItIs,
+  consents,
+  deskAskOf,
+  deskNameOk,
   extractCaHits,
   extractCas,
   extractCashtags,
+  fomoAskOf,
+  fomoFactsOf,
+  fomoFollowUpOf,
   greetingOf,
   hasForeignMint,
   hasOtherChainLink,
@@ -39,9 +45,18 @@ import {
   isShush,
   isTradeTalk,
   lineMood,
+  metaLineOf,
+  offerShaped,
+  pushbackOf,
+  reactionOnly,
+  routeWorthy,
   selfNamesOf,
   type BotSelf,
+  roomSaysRugged,
+  thesesQuotesOf,
+  quoteAskByCode,
 } from "./detect";
+import { quotesAskedIn } from "../../fomo/intent";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -916,4 +931,357 @@ describe("the slur list stays out of plain source", () => {
       assert.deepEqual(found.map((w) => Buffer.from(w).toString("base64")), [], `${file} spells a hashed word in plain text`);
     });
   }
+});
+
+describe("isPrivateAsk: who it follows, copies or watches is the owner's configuration (rule 3)", () => {
+  const yes = [
+    "who do you copy trade?", "who do u copy", "who are you copy trading", "who are you following on fomo?", "who do you follow",
+    "pine who are you tracking", "which traders do you follow?", "what wallets are you copying", "what are you watching?",
+    "what coins are you watching", "what tokens are you tracking rn", "what's on your watchlist", "show me your watch list",
+    "drop your copy trade list", "who's in your cohort?",
+    // The yes/no form about one account.
+    "do you watch @frankdegods on fomo?", "are you following @frankdegods on fomo?", "do you copy trade @frankdegods on fomo?",
+    "do you follow @frankdegods?", "are you tailing @frankdegods on fomo?", "r u still tracking @frankdegods", "do you follow trader frankdegods",
+    "do you watch frankdegods on fomo?",
+    // The watch list in slang (review r3).
+    "best trader u r tracking on fomo, what's he holding?", "best trader ur tracking on fomo what's he holding",
+    "the best trader you're tracking on fomo", "is kaleo one of the traders you're following", "who are the traders you're tracking on fomo",
+    "the traders youre watching", "a trader you follow on fomo",
+  ];
+  const no = [
+    "what are you holding?", "who's watching the game", "anyone watching pepe", "i'm following the chart", "what are fomo traders buying?",
+    "who is buying pons on fomo?", "what's trending on fomo", "copy that", "follow the money",
+    "what is @frankdegods holding on fomo?", "who is trader frankdegods on fomo?", "would you follow @frankdegods?",
+    "do you watch the market?", "are you following the news", "do you track the chart on fomo",
+    "which traders should you follow on fomo", "who's the most followed trader on fomo", "what are traders buying on fomo",
+    "the best trader on fomo, what's he holding?",
+  ];
+  for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t, { research: true }), true));
+  for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t, { research: true }), false));
+  // Without research in this process there is no such configuration: these lines go on as before Fomo.
+  for (const t of ["who do you copy trade?", "what are you watching?", "what's on your watchlist", "who's in your cohort?"]) {
+    it(`no research, not private: ${t}`, () => assert.equal(isPrivateAsk(t), false));
+  }
+});
+
+describe("a chain on its own is a Fomo follow-up, and a list ask may name a chain before the platform (review 2026-10-08)", () => {
+  const names = ["pine", "shogun"];
+  for (const t of ["shogun on base?", "solana ones?", "and on solana?", "what about eth?", "robinhood ones?"]) {
+    it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, names), true));
+  }
+  for (const t of ["shogun lol based", "shogun basically yes"]) {
+    it(`not a follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, names), false));
+  }
+  for (const t of ["shogun trending on base on fomo", "shogun solana ones on fomo", "robinhood ones on fomo"]) {
+    it(`list ask: ${t}`, () => assert.deepEqual(fomoAskOf(t, names), { kind: "platform" }));
+  }
+});
+
+describe("fomoAskOf: an addressed social-trading research ask, conservatively", () => {
+  const names = ["pine", "pinebot"];
+  const yes: Array<[string, string]> = [
+    ["pine what are fomo traders buying?", "platform"],
+    ["what's trending on fomo?", "platform"],
+    ["@pinebot is PONS trending on fomo", "platform"],
+    ["pine show me the fomo leaderboard", "platform"],
+    ["what does fomo's top say about pepe?", "platform"],
+    ["pine what are the theses on pons?", "theses"],
+    ["any theses on $PONS?", "theses"],
+    ["what's the thesis on pepe?", "theses"],
+    ["are the top traders buying pons?", "trader-flow"],
+    ["pine what are whales selling", "trader-flow"],
+    // The feature itself, and the lines a room actually asked on 2026-10-07.
+    ["whats the top trader on fomo today", "platform"],
+    ["who's the top on fomo today", "platform"],
+    ["what can you do with fomo", "platform"],
+    ["pine what do you know about fomo", "platform"],
+    ["is fomo working", "platform"],
+    ["is fomo on?", "platform"],
+    ["is fomo not set?", "platform"],
+    ["what is fomo?", "platform"],
+    ["how does fomo work", "platform"],
+    ["can you use fomo?", "platform"],
+    ["what is fomo saying about pepe?", "platform"],
+    // Missed on 2026-10-07 18:58, before the model ever saw them.
+    ["shogun who's on top fomo today?", "platform"],
+    ["i'm sorry who's the top trader on fomo today", "platform"],
+    // Short list asks with no question mark (2026-10-07: the room typed them like this).
+    ["pine trending on fomo", "platform"],
+    ["robinhood chain coins on fomo", "platform"],
+    ["top robinhood coins on fomo", "platform"],
+    ["@pinebot top traders on fomo today", "platform"],
+    ["solana memecoins on fomo pls", "platform"],
+    ["the leaderboard on fomo", "platform"],
+    // A coin's theses as the room's Fomo help says to ask, with no question mark (review r2).
+    ["pine theses on $PONS", "theses"],
+    ["pine theses on PONS on fomo", "platform"],
+    ["pine fomo theses on $PONS", "platform"],
+    ["pine thesis for $PONS", "theses"],
+    ["@pinebot theses on $PONS", "theses"],
+    ["thesis about pons please", "theses"],
+  ];
+  for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
+  const no = [
+    "i have fomo lol", "pure fomo in on that one", "fomo into it?", "don't fomo", "pine fomo'd so hard", "pine thoughts on pepe?",
+    "how's the market?", "pine i saw it on fomo", "fomo traders are wild", "", "pine don't buy the fomo traders' bags",
+    "is fomo on robinhood", "i bought it with fomo lol",
+    "that's what fomo does lol", "i have fomo who cares", "pure fomo who's buying this", "top fomo moment lol",
+    "the top coins on fomo are trash", "bought the top on fomo lol", "on fomo", "coins on fomo got me rekt lol", "fomo coins",
+    // Saying something about theses, not asking for them (review r2).
+    "my thesis on pons is simple", "theses on pons are mid lol", "thesis on $PONS: it goes to 10m", "theses on pons and pepe are trash",
+  ];
+  for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
+});
+
+describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
+  const yes = ["what about the sellers?", "and the buyers?", "pine refresh it", "this week?", "any theses?", "what changed since?", "what about robinhood chain?", "and the top?", "what's trending now?", "the other boards?"];
+  const no = ["lol", "gm", "pine thoughts on pepe", "what do you think about the weather today in the city where i live right now", "don't look at the sellers"];
+  for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
+  for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
+  // A row of the board it just said, or the trader it just named (fomo/intent.ts resolves them, or asks which).
+  const rows = ["what's the second one holding?", "#3?", "and number two?", "what did the top guy buy", "what's he holding?", "pine what did he make money on", "what is that guy holding", "tell me what his bags are", "how's the second one doing?"];
+  const notRows = ["he's cooked lol", "lol that guy", "the second one is better", "is he single?", "number one fan here", "is she holding up ok?", "what is he doing lol", "what's he up to?"];
+  for (const t of rows) it(`a row or that trader: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
+  for (const t of notRows) it(`not a row ask: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
+});
+
+describe("deskNameOk / routeWorthy (route.ts checks a model's pick with these)", () => {
+  it("a name: two characters or more, not a stop word, not the bot, not a number", () => {
+    assert.equal(deskNameOk("CashCat"), "cashcat");
+    assert.equal(deskNameOk("$pons"), "pons");
+    assert.equal(deskNameOk("market"), null);
+    assert.equal(deskNameOk("it"), null);
+    assert.equal(deskNameOk("x"), null);
+    assert.equal(deskNameOk("420"), null);
+    assert.equal(deskNameOk("Shogun", ["shogun"]), null);
+    assert.equal(deskNameOk("@merrymanme_bot", ["@merrymanme_bot"]), null);
+    assert.equal(deskNameOk(42), null);
+  });
+
+  it("worth one routing call: a question mark or three words, and a word from what the router serves", () => {
+    assert.equal(routeWorthy("do you know unipcs on fomo"), true);
+    assert.equal(routeWorthy("top?"), true);
+    assert.equal(routeWorthy("i'm sorry, who's been winning the most lately"), true);
+    assert.equal(routeWorthy("what are the whales dumping lately"), true);
+    assert.equal(routeWorthy("is $pons any good"), true);
+    assert.equal(routeWorthy("how was your weekend?"), false, "banter never pays for a routing call");
+    assert.equal(routeWorthy("tell me a joke please"), false);
+    assert.equal(routeWorthy("what do you think about life"), false);
+    assert.equal(routeWorthy("anyone know what unipcs is up to"), true);
+    assert.equal(routeWorthy("what are people saying about pons"), true);
+    assert.equal(routeWorthy("why is everyone into pons"), true);
+    assert.equal(routeWorthy("what's up with pons lately", [], ["pons"]), true, "a coin this chat knows");
+    assert.equal(routeWorthy("what's new with pons lately"), false, "an unknown name with no cue");
+    assert.equal(routeWorthy("@shogun_bot ok bro", ["shogun_bot"]), false);
+    assert.equal(routeWorthy("lol"), false);
+    assert.equal(routeWorthy("🔥🔥🔥"), false);
+    assert.equal(routeWorthy(""), false);
+    assert.equal(routeWorthy(null), false);
+  });
+});
+
+describe("reactionOnly", () => {
+  it("laughter, acks and emoji are reactions; a short answer is not", () => {
+    for (const t of ["lol", "LMAO", "hahaha", "facts", "🔥", "😂😂", "lol ok", "@pinebot lol"]) assert.equal(reactionOnly(t, ["pinebot"]), true, t);
+    for (const t of ["pons", "$pons", "trending", "yes", "top traders", "the second one"]) assert.equal(reactionOnly(t), false, t);
+  });
+});
+
+describe("consents and offerShaped: a yes under its own offer (live 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  it("a plain yes, however it is said, names in or out", () => {
+    for (const t of ["do it", "yes", "go", "send it", "pls", "sure", "yep", "yes pls", "ok", "bet", "go ahead", "yes do it", "pull it", "ya", "shogun do it", "@Merrymanme_bot yes please", "ok do it!", "yes.", "k", "yeah go for it"]) {
+      assert.equal(consents(t, self), true, t);
+    }
+  });
+  it("a question, a reaction, a no, or a yes with something of its own is not", () => {
+    for (const t of ["lol", "lol ok", "no", "nah", "do it?", "send it?", "what about pons", "done?", "yes but on solana", "", "ok ok ok ok ok ok ok"]) {
+      assert.equal(consents(t, self), false, t);
+    }
+    assert.equal(consents(undefined), false);
+  });
+  it("its own line offering rather than asking", () => {
+    for (const t of ["i can pull the fomo board for robinhood chain coins if you want, just say the word", "want me to pull its theses", "lmk which coin", "should i check the leaderboard"]) {
+      assert.equal(offerShaped(t), true, t);
+    }
+    for (const t of ["half the traders in here have fomo rn lol", "top traders today, or what's trending?", "i can't say", "which coin?"]) assert.equal(offerShaped(t), false, t);
+    assert.equal(offerShaped(null), false);
+  });
+});
+
+describe("a bare 'what's trending' (decision D1, 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  it("is a market ask marked trending: Fomo's board where Fomo is wired, the desk otherwise", () => {
+    for (const t of ["what's trending", "shogun what's trending", "whats trending today?", "what is trending rn", "@Merrymanme_bot what's trending?"]) {
+      assert.deepEqual(deskAskOf(t, self), { kind: "market", trending: true }, t);
+    }
+  });
+  it("a venue keeps it on the desk; other movers words are the plain market read", () => {
+    for (const t of ["what's trending on robinhood chain", "what's trending in the market", "what's trending on dexscreener", "what's moving", "what's pumping today", "top movers?", "what's trending and what's pumping"]) {
+      assert.deepEqual(deskAskOf(t, self), { kind: "market" }, t);
+    }
+  });
+});
+
+describe("metaLineOf: a line about its own silence (live 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  const rows: Array<[string, "complaint" | "poke" | "name-only"]> = [
+    ["i asked a question", "complaint"], ["I asked a question", "complaint"], ["shogun i asked you a question", "complaint"],
+    ["you didn't answer", "complaint"], ["you didnt answer me", "complaint"], ["u never answered", "complaint"], ["answer me", "complaint"],
+    ["answer the question", "complaint"], ["answer me pls", "complaint"], ["bro i asked you something", "complaint"], ["you ignored me", "complaint"],
+    ["still waiting", "complaint"], ["i'm still waiting on it", "complaint"], ["where's my answer", "complaint"],
+    ["hello??", "poke"], ["hello?", "poke"], ["?", "poke"], ["??", "poke"], ["？", "poke"], ["you there?", "poke"], ["shogun you there?", "poke"],
+    ["done?", "poke"], ["well?", "poke"], ["and?", "poke"], ["shogun?", "poke"], ["bro??", "poke"],
+    ["shogun", "name-only"], ["@Merrymanme_bot", "name-only"],
+  ];
+  for (const [t, want] of rows) it(`${want}: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), want));
+  const no = [
+    "what's trending", "i asked my wife and she said no", "did you answer bob", "answer is 42", "i said gm", "hello everyone", "gm",
+    "what did you trade today?", "i asked chatgpt about pons", "you didn't buy pons?", "is pons done?", "well that was fast", "and pons?",
+    "so what about pons", "thanks shogun", "lol", "still waiting for my pizza", "you ignored my trade idea lmao it pumped", "🔥", "😂😂",
+    "i said what's trending", "why can't you answer in the group?", "", "   ",
+  ];
+  for (const t of no) it(`content of its own: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), null));
+  it("never throws on junk", () => assert.equal(metaLineOf(undefined), null));
+});
+
+describe("pushbackOf (the AUTON incident, 2026-10-08)", () => {
+  it("pushing back on an answer: read it again", () => {
+    for (const t of [
+      "there has to be thesis.", "there must be some", "check again", "pine look again pls", "are you sure?", "u sure", "that's wrong", "that’s not right", "try again", "refresh it", "recheck", "there are definitely theses",
+      "pine, check again", "@pinebot are you sure?", "bro there has to be thesis on $PONS", "hmm are you sure? check again", "lol that's cap",
+    ]) {
+      assert.equal(pushbackOf(t, ["pine"]), true, t);
+    }
+  });
+  it("an ordinary line is not one", () => {
+    for (const t of ["what are people saying about pons", "thanks", "lol", "how's the market", "send it", "has to be the dev", "i'm sure it'll pump"]) {
+      assert.equal(pushbackOf(t), false, t);
+    }
+  });
+  it("a pushback inside other words is banter, never one (review on #306)", () => {
+    for (const t of [
+      "not right now", "i bought the wrong one lol", "wrong chain", "no way i'm selling", "try again later", "there are some whales buying", "refresh my memory, what's pons",
+      "are you sure we should buy", "there must be some mistake", "check again tomorrow", "u sure you're not rugging us", "impossible", "no way", "that one's wrong lol",
+    ]) {
+      assert.equal(pushbackOf(t, ["pine"]), false, t);
+    }
+  });
+});
+
+describe("the theses themselves, a coin's facts, and a room saying it rugged (Milla, 2026-10-09)", () => {
+  const names = ["Shogun", "@shogunbot"];
+  it("the live lines reach the research as follow-ups, and two of them ask for the theses themselves", () => {
+    for (const t of ["can you list the last 10", "show me these thesis, dont summarise", "what are people saying about it on thesis on fomo"]) {
+      assert.equal(fomoFollowUpOf(t, names), true, t);
+    }
+    assert.deepEqual(thesesQuotesOf("can you list the last 10", names), { n: 10, asked: 10 });
+    assert.deepEqual(thesesQuotesOf("show me these thesis, dont summarise", names), { n: 10, asked: 10 });
+    assert.equal(thesesQuotesOf("what are people saying about it on thesis on fomo", names), null, "the digest stays the default");
+  });
+
+  it("the quote cue here agrees with the planner's (fomo/intent.ts), row for row", () => {
+    const rows = [
+      "can you list the last 10", "show me these thesis, dont summarise", "what did they say exactly", "show me the last 5", "list the last 25 theses on $AUTON",
+      "list the last ten", "give me the newest three", "quote them", "word for word pls", "in their own words", "don't summarise it", "no summary, the actual theses",
+      "show me them all", "what are people saying about it", "summarise them", "show me the data", "what happened in the last 10 minutes", "any theses?",
+      "what are the theses on $AUTON", "theses on $AUTON in the last 24h", "list the trending coins", "the last one",
+    ];
+    for (const t of rows) assert.deepEqual(thesesQuotesOf(t, names), quotesAskedIn(t), t);
+  });
+
+  it("a list or a 'last one' about something else is never quotes, nor a follow-up for a list alone (review, 2026-10-09)", () => {
+    for (const t of ["shogun can you list some good movies?", "shogun can you list your favourite coins?", "shogun who was the last one to sell?", "what was the latest one?", "shogun show me the last 5 buys", "can you list the last 10 sellers", "who are the last 5 buyers?", "the last one"]) {
+      assert.equal(thesesQuotesOf(t, names), null, t);
+      assert.deepEqual(thesesQuotesOf(t, names), quotesAskedIn(t.replace(/^shogun /u, "")), t);
+    }
+    assert.equal(fomoFollowUpOf("shogun can you list some good movies?", names), false);
+    assert.equal(fomoFollowUpOf("shogun can you list your favourite coins?", names), false);
+    for (const t of ["can you list the last 10", "pls list", "shogun list them", "show me the last 5"]) {
+      assert.ok(thesesQuotesOf(t, names), t);
+      assert.equal(fomoFollowUpOf(t, names), true, t);
+    }
+  });
+
+  it("an explicit quote ask reaches the research: 'quotes pls', 'no summary, just the posts', 'last 10?', 'quote the theses on …' (review, 2026-10-09)", () => {
+    for (const t of ["quotes pls", "word for word pls", "no summary, just the posts", "the last 10 please", "last 10?"]) assert.equal(fomoFollowUpOf(t, names), true, t);
+    for (const t of ["nice quote", "the posts are mid", "my last 2 trades were trash", "the last one lol", "gm pls"]) assert.equal(fomoFollowUpOf(t, names), false, t);
+    assert.notEqual(fomoAskOf("quote the theses on $AUTON on solana on fomo", names), null);
+    assert.notEqual(fomoAskOf("shogun quote the theses on $AUTON on solana on fomo", names), null);
+    assert.equal(fomoAskOf("quote me on that", names), null);
+  });
+
+  it("quoteAskByCode: an explicit ask or a bare count, never another 'last N' (review, 2026-10-09)", () => {
+    for (const t of ["show me the last 5", "can you list the last 10", "list them", "shogun show me the last 5", "the last 10 please", "show me these thesis, dont summarise", "what did they say exactly", "quote them"]) {
+      assert.equal(quoteAskByCode(t, names), true, t);
+    }
+    for (const t of ["who were the last 3 on the leaderboard?", "what about the last 2 traders", "what were kaleo's last 3 trades?", "what about the last 5 buyers", "list the trending coins", "the last one lol"]) {
+      assert.equal(quoteAskByCode(t, names), false, t);
+    }
+  });
+
+  it("'summarise them' and 'don't summarise' are asked even with no question mark", () => {
+    assert.equal(fomoFollowUpOf("summarise them", names), true);
+    assert.equal(fomoFollowUpOf("dont summarise", names), true);
+    assert.equal(fomoFollowUpOf("lol summaries are mid", names), false);
+    for (const t of ["shogun recap them", "shogun tldr", "shogun sum them up"]) assert.equal(fomoFollowUpOf(t, names), true, t);
+  });
+
+  it("fomoFactsOf: what happened, why, the data, the dev; never a statement or the market", () => {
+    const rows: Array<[string, ReturnType<typeof fomoFactsOf>]> = [
+      ["what happened to auton", { ask: "what", coin: "AUTON" }],
+      ["what happened to $AUTON?", { ask: "what", coin: "AUTON" }],
+      ["shogun what happened to it", { ask: "what", coin: null }],
+      // The present is the coin's activity on Fomo, never its facts.
+      ["what's happening with pons", null],
+      ["what's happening with $AUTON on solana on fomo?", null],
+      ["what went wrong with pons?", { ask: "what", coin: "PONS" }],
+      ["why did it rug", { ask: "why", coin: null }],
+      ["why did auton rug?", { ask: "why", coin: "AUTON" }],
+      ["did auton rug?", { ask: "why", coin: "AUTON" }],
+      ["show me the data", { ask: "data", coin: null }],
+      ["facts?", { ask: "data", coin: null }],
+      ["did the dev dump?", { ask: "dev", coin: null }],
+      ["the dev dumped lol", null],
+      ["auton rugged", null],
+      ["what happened to the market today", null],
+      ["what happened to sol", null],
+      // A person, the room or anything but a coin, and a bare "facts" (review, 2026-10-09).
+      ["shogun what happened to you last night?", null],
+      ["what happened to him?", null],
+      ["what went wrong with the trade?", null],
+      ["what happened to the fomo leaderboard?", null],
+      ["why did he dump?", null],
+      ["facts", null],
+      ["show me the numbers on pepe", { ask: "data", coin: "PEPE" }],
+      ["what are the facts on bonk?", { ask: "data", coin: "BONK" }],
+      ["what happened to the coin?", { ask: "what", coin: null }],
+      ["why did the coin dump?", { ask: "why", coin: null }],
+      ["show me the data on it", { ask: "data", coin: null }],
+    ];
+    for (const [t, want] of rows) assert.deepEqual(fomoFactsOf(t, names), want, t);
+  });
+
+  it("roomSaysRugged: a statement that a coin rugged, never a question, a negation, a maybe or a person", () => {
+    const rows: Array<[string, ReturnType<typeof roomSaysRugged>]> = [
+      ["auton rugged lol", { coin: "AUTON" }],
+      ["auton just got rugged", { coin: "AUTON" }],
+      ["it rugged", { coin: null }],
+      ["full rug lol", { coin: null }],
+      ["this was a rug", { coin: null }],
+      ["did it rug?", null],
+      ["not a rug", null],
+      ["it didn't rug", null],
+      ["this could rug", null],
+      ["the dev rugged it", null],
+      ["they rugged", null],
+      ["rugby is on", null],
+      // A subject that names no coin is no pointer at the room's (review, 2026-10-09).
+      ["the market rugged today", null],
+      ["everyone rugged lol", null],
+      ["crypto rugged", null],
+      ["the price rugged", null],
+    ];
+    for (const [t, want] of rows) assert.deepEqual(roomSaysRugged(t, names), want, t);
+  });
 });

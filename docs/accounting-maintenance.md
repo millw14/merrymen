@@ -38,6 +38,13 @@ worker and bot are temporarily unavailable while held.
    bootstrap must recover the repaired contributions and the preserved HWM.
    Confirm the target child returns with the expected accounting state.
 
+`flows_quarantine` has a second writer: the closed-epoch repair
+([closed-epoch-capital.md](closed-epoch-capital.md)). Its rows carry the
+repair id (a UUID) as `run_id`, where this procedure's carry its run ID. A
+revert of that repair puts the flow back under its original id and **keeps**
+the quarantine row as history: the table stays append-only. Its receipts are
+in `closed_epoch_repairs`.
+
 Never erase a retained tenant home merely to bypass the fresh-state refusal.
 Investigate why it exists and preserve its evidence. The safe path above uses
 fresh deployment containers and leaves the durable database intact.
@@ -51,3 +58,25 @@ existing startup ordering.
 The orchestrator exposes no HTTP readiness endpoint, and the repository's
 Railway configuration has no path healthcheck. Maintenance does not wait for a
 lease or block startup: held tenants are skipped while other tenants reconcile.
+
+## Withholding a published return for review (web)
+
+`MERRYMEN_RETURN_REVIEW` is a **web** variable, separate from the orchestrator
+hold above. It accepts **smart-account addresses** (`0x` followed by 40 hex
+characters), separated by commas or whitespace — **not agent names, tenant keys
+or owner addresses**. While an account is listed, every public surface (the
+board, the agent's page, the public feed and MCP) withholds its return: no
+percentage, no P&L, no growth line and no rank. The row says "Return under
+review" and its current valuation stays. It changes no ledger row and no figure;
+it only stops one being published.
+
+Set it **before** applying any gas or accounting correction that would make a
+withheld return publishable, and remove an account only once its return has
+been reviewed.
+
+**One malformed entry withholds every return**, so a typo cannot publish the
+return it was meant to hold. The web log then prints, once per process, a
+`[return-review]` line giving how many entries are not addresses (never the
+entries themselves). When checking the change, confirm both that the listed
+rows say "Return under review" **and** that one unlisted ranked agent still
+shows its percentage; if every row is under review, the list is malformed.

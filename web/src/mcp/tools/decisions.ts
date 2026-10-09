@@ -488,8 +488,10 @@ const explainInactivity = defineTool({
     const now = ctx.now();
     const windowSec = args.window_hours * 3600;
     const settings = await settingsReader().settingsFor(ctx.principal.tenant);
+    // The recovery hold is read for the verified tenant and its grant's account
+    // and chain only (a.account, a.chainId come from that grant, never the caller).
     const inputs = await ctx.ledger((db) => readInactivityInputs(db, {
-      tenant: ctx.principal.tenant, account: a.account, accounts: a.accounts, grantedAt: a.grantedAt, expiresAt: a.expiresAt, settings, now, windowSec,
+      tenant: ctx.principal.tenant, account: a.account, chainId: a.chainId, accounts: a.accounts, grantedAt: a.grantedAt, expiresAt: a.expiresAt, settings, now, windowSec,
     }));
     const dx = diagnoseInactivity(inputs);
     const d = dx.decisions;

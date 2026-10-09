@@ -578,6 +578,64 @@ describe("buildPrompt", () => {
     assert.match(prompt, /If they ask what you think, give your own take/);
   });
 
+  it("follows the thread: the → line says what it replies to, its own lines whom they answered", () => {
+    // The exchange that went wrong: "are you serious?" under its own coin
+    // reply read as a fresh question, and it answered "yeah i am".
+    const ask = line(7, "mami", "So what do you think about sex");
+    const own = { ...line(99, "Pine Stoat", "there's more than one coin with that name on robinhood chain. drop the CA of the one you mean", true), replyTo: ask.messageId };
+    const trigger = { ...line(7, "mami", "Are you serious ?"), replyTo: own.messageId };
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [ask, own, trigger] }), trigger, senderName: "mami" }))!;
+    assert.match(p.prompt, /\[you\] \(to mami\) there's more than one coin with that name/);
+    assert.match(p.prompt, /→ mami \(replying to your line «there's more than one coin with that name on robinhood chain\. drop the CA of the one you mean»\): Are you serious \?/);
+    assert.match(p.system, /FOLLOW THE THREAD/);
+    assert.match(p.system, /if you misread them, own it in a few words and answer what they actually meant\. Never double down on a misreading\./);
+  });
+
+  it("names whose line the → line replies to, quoted short and fence-safe", () => {
+    const first = line(5, "ann", `wen moon <b>${"x".repeat(300)}</b>`);
+    const trigger = { ...line(6, "bob", "lol same"), replyTo: first.messageId };
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [first, trigger] }), trigger }))!;
+    const note = /→ bob \(replying to ann: «([^»]*)»\): lol same/.exec(p.prompt);
+    assert.ok(note, "the reply is named");
+    assert.ok(note![1]!.length <= 101, "quoted short");
+    assert.ok(!/[<>]/.test(note![1]!), "nothing in the quote can open or close a fence");
+  });
+
+  it("knows Fomo research exists only where it is wired, and asks what a missed question wants instead of denying it", () => {
+    const off = buildPrompt({ kind: "answer", mood: "normal" }, ctx())!;
+    assert.doesNotMatch(off.system, /FOMO/);
+    const on = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ fomo: true }))!;
+    assert.match(on.system, /FOMO: you can look things up on Fomo \(Fomo Family, a social-trading app/);
+    assert.match(on.system, /never say you can't, don't know it or don't track it/);
+    assert.match(on.system, /ask one short question that pins down what they want, like "top traders today, or what's trending\?"/);
+    assert.match(on.system, /Never make up who is on top, what is trending, what anyone holds or what anyone bought\./);
+    assert.ok(!/\p{N}/u.test(on.system), "the persona still holds no digit to repeat");
+    const fomoLine = on.system.split("\n").find((l) => l.startsWith("FOMO:"))!;
+    assert.doesNotMatch(fomoLine, /fomo\.family|@|\$/, "nothing the gate would refuse for the model to echo");
+  });
+
+  it("asks instead of offering, and never claims progress (live 2026-10-07: an offer, 'do it', 'give me a sec', nothing came)", () => {
+    const on = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ fomo: true }))!;
+    assert.match(on.system, /Ask, never offer \("if you want", "just say the word"\)/);
+    assert.match(on.system, /"trending on robinhood chain, or everywhere\?"/);
+    assert.doesNotMatch(on.system, /i can pull its theses/, "the offer-shaped example is gone");
+    for (const p of [on, buildPrompt({ kind: "answer", mood: "normal" }, ctx())!]) {
+      const rule = p.system.split("\n").find((l) => l.startsWith("NOTHING IN PROGRESS:"));
+      assert.ok(rule, "the rule is there with or without Fomo");
+      assert.match(rule!, /never say you are getting, pulling, checking or sending something/);
+      assert.match(rule!, /never promise to do something later/);
+      assert.match(rule!, /say it didn't come through and that asking for it plainly gets it/);
+      assert.ok(!/\p{N}/u.test(p.system), "still no digit to repeat");
+    }
+  });
+
+  it("a line that replies to nothing it can see carries no note", () => {
+    const trigger = { ...line(6, "bob", "lol same"), replyTo: 123_456 };
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [trigger] }), trigger }))!;
+    assert.match(p.prompt, /→ bob: lol same/);
+    assert.doesNotMatch(p.prompt, /replying to/);
+  });
+
   it("without the owner's name it says 'my owner'", () => {
     const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ ownerName: null }))!;
     assert.match(p.system, /say "my owner"/);
@@ -689,6 +747,15 @@ describe("say", () => {
       const cc = c({ trigger });
       const out = await say({ kind: "answer", mood: "normal" }, cc, model, gate);
       assert.ok(out !== null && out !== dodge && inPool({ kind: "answer", mood: "normal" }, out, cc), out ?? "null");
+    }
+  });
+
+  it("fake progress from the model ('give me a sec', 'yeah here we go') is refused, and a template answers instead", async () => {
+    // Live 2026-10-07: nothing was ever being fetched.
+    for (const stall of ["give me a sec", "yeah here we go", "on it 🫡", "i'll let you know when it's in"]) {
+      reply = ok(stall);
+      const out = await say({ kind: "answer", mood: "normal" }, c(), model, gate);
+      assert.ok(out !== null && out !== stall && inPool({ kind: "answer", mood: "normal" }, out), `${stall} → ${out ?? "null"}`);
     }
   });
 
@@ -843,5 +910,92 @@ describe("say", () => {
   it("never throws", async () => {
     assert.equal(await say(null as never, c(), model, gate), null);
     assert.equal(await say({ kind: "answer", mood: "normal" }, null as never, model, gate), null);
+  });
+});
+
+// ── the collapse permit (docs/tg-groups.md "Rugged coins", Milla 2026-10-09) ──
+
+describe("the collapse permit: 'rugged' and one playful brag, only for an answer or an ambient line", () => {
+  const measured = { coin: "AUTON", source: "measured" as const, atMs: T0, brag: true };
+  const said = { coin: "AUTON", source: "room" as const, atMs: T0, brag: true };
+
+  it("the RUGGED block appears only with a permit, and only for an answer or an ambient line", () => {
+    const answer = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ collapse: measured }))!;
+    assert.match(answer.prompt, /RUGGED: «AUTON» is measured as collapsed/);
+    assert.match(answer.prompt, /you may say it rugged or got rugged, and you may add one playful Merrymen brag in fresh words of your own/);
+    assert.match(answer.prompt, /Still never: say any person, dev, team, insider, whale or trader rugged/);
+    assert.match(answer.prompt, /Merrymen's own coin included/);
+    assert.match(answer.prompt, /Don't explain why it fell/);
+    assert.match(buildPrompt({ kind: "ambient", topic: "coin" }, ctx({ collapse: measured }))!.prompt, /RUGGED:/);
+    assert.match(buildPrompt({ kind: "ambient", topic: "banter" }, ctx({ collapse: said }))!.prompt, /RUGGED: people here say «AUTON» rugged; you have not measured it\./);
+    assert.doesNotMatch(buildPrompt({ kind: "answer", mood: "normal" }, ctx())!.prompt, /RUGGED/);
+    for (const intent of [{ kind: "roast", owner: false }, { kind: "kind" }, { kind: "answer", mood: "private-ask" }, { kind: "coin-ack" }, { kind: "coin-passed", notes: [] }, { kind: "faded-again" }] as TgIntent[]) {
+      const p = buildPrompt(intent, ctx({ collapse: measured, coinName: "AUTON" }));
+      assert.ok(!p || !/RUGGED/.test(p.prompt), intent.kind);
+    }
+  });
+
+  it("no digit anywhere in a prompt with a permit, and the system prompt is unchanged byte for byte", () => {
+    const withIt = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ collapse: measured }))!;
+    const without = buildPrompt({ kind: "answer", mood: "normal" }, ctx())!;
+    assert.ok(!/\p{N}/u.test(withIt.prompt), withIt.prompt);
+    assert.equal(withIt.system, without.system);
+    assert.match(withIt.system, /rug, scam/);
+  });
+
+  it("with the brag spent there is no brag sentence", () => {
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ collapse: { ...measured, brag: false } }))!;
+    assert.doesNotMatch(p.prompt, /playful Merrymen brag/);
+    assert.match(p.prompt, /You made a Merrymen joke lately: none this time\./);
+  });
+
+  it("every template entry still passes with no permit (the pool proof's own context)", () => {
+    for (const intent of ALL_INTENTS) for (const e of templatePool(intent, ctx())) assert.ok(admitTgLine(e, gateFor(intent, ctx())).ok, `${intent.kind}: ${e}`);
+  });
+});
+
+describe("say with a collapse permit: the gate gets it for an answer, never for a roast", () => {
+  const realFetch = globalThis.fetch;
+  let home: string;
+  let store: TgGroupsStore;
+  let gate: TgModelGate;
+  let content = "";
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tg-voice-rug-"));
+    store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => T0, debounceMs: 60_000 });
+    store.ensureRoom(CHAT, { title: "frens", kind: "supergroup" });
+    gate = new TgModelGate(store, { perDay: 100, now: () => T0, log: () => {} });
+    globalThis.fetch = (async () => ({ ok: true, json: async () => ({ choices: [{ message: { content } }] }) })) as never;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+  const c = (over: Partial<SpeakCtx> = {}) => ctx({ room: store.room(CHAT)!, ...over });
+  const permit = { coin: "AUTON", source: "measured" as const, atMs: T0, brag: true };
+
+  it("an answer may say it rugged with a brag; a roast may not; no permit, no rug", async () => {
+    content = "rugged cause it wasn't merrymen 😤";
+    assert.equal(await say({ kind: "answer", mood: "normal" }, c({ collapse: permit }), model, gate), "rugged cause it wasn't merrymen 😤");
+    assert.notEqual(await say({ kind: "roast", owner: false }, c({ collapse: permit }), model, gate), "rugged cause it wasn't merrymen 😤");
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c(), model, gate), "rugged cause it wasn't merrymen 😤");
+    content = "the dev rugged it";
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: permit }), model, gate), "the dev rugged it");
+    content = "auton rugged lol";
+    assert.equal(await say({ kind: "ambient", topic: "banter" }, c({ collapse: { ...permit, brag: false } }), model, gate), "auton rugged lol");
+    content = "should've been a merrymen coin";
+    assert.equal(await say({ kind: "ambient", topic: "banter" }, c({ collapse: { ...permit, brag: false } }), model, gate), null, "brag spent: silence for an ambient line");
+  });
+
+  it("the room's other coins reach the gate with the permit: a rug word beside one is never said (review r2)", async () => {
+    content = "auton rugged, pons is cooked";
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: { ...permit, others: ["pons"] } }), model, gate), "auton rugged, pons is cooked");
+    assert.equal(await say({ kind: "answer", mood: "normal" }, c({ collapse: permit }), model, gate), "auton rugged, pons is cooked", "without the room's other coins the gate cannot know pons");
+  });
+
+  it("a coin named like someone being talked to is never the permit's subject", async () => {
+    content = "alice rugged lol";
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: { ...permit, coin: "alice" }, senderName: "alice" }), model, gate), "alice rugged lol");
   });
 });

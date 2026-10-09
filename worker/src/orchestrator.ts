@@ -42,6 +42,8 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
 import { restorePaperCheckpoint, recordPaperRecoveryHealth } from "./paper-checkpoint";
 import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified, readFleetRecoveryHold, readFleetCommandRefusal, readFleetCommandBoundary, withFleetRecoveryLock, type RecoveryCause } from "./fleet-recovery";
+import { AUTONOMY_HOLDS_SQL, AUTONOMY_TRADE_FUNNEL_SQL, FLEET_RAILS_SQL, autonomyLines, fleetRails, foldFunnel, railsLine, type AgentRailRow, type FleetRails } from "./autonomy-funnel";
+import { commitOf, heartbeatClock, heartbeatCounts, lastShutdownOf, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
@@ -54,6 +56,10 @@ import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/co
 
 let historyRepairStarted = false;
 function startHistoryRepair(): void {
+  // Every tenant's shared rows at once, held ones included: only once the
+  // rollout admits the whole fleet (fleet-rollout.ts). Not latched meanwhile,
+  // so the deploy that makes it `all` runs it.
+  if (!rolloutAdmitsWholeFleet()) return;
   if (historyRepairStarted || !process.env.DATABASE_URL) return;
   historyRepairStarted = true;
   void (async () => {
@@ -66,18 +72,24 @@ function startHistoryRepair(): void {
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, type BigIntStats } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
+import {
+  drainBudgetMs, runFleetDrain, shutdownReceiptDir, takePreviousShutdown, writeShutdownReceipt,
+  type DrainHook, type DrainLimits, type FinalPassOutcome,
+} from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
-import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
+import { KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
+import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, durablePauseLifted, readControlsEvidence, type ControlScope } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
-import { acquireTenantLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
+import { acquireTenantLease as acquireStoreLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings, type StoredGrant } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
@@ -109,6 +121,19 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
+import {
+  ADMISSION_LEVEL_ENV,
+  FLEET_ROLLOUT_ENV,
+  childAdmissionLevel,
+  fleetRollout,
+  rolloutAdmitsWholeFleet,
+  rolloutCounts,
+  rolloutHeld,
+  rolloutLine,
+  rolloutStartupLine,
+  rolloutSummary,
+  type RolloutCounts,
+} from "./fleet-rollout";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -119,8 +144,24 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
-import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, invalidateLedgerImportsUnlessListed } from "./ledger-import";
-import { PERSISTENT_HOME_MANIFEST, preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity } from "./persistent-home";
+import { LEDGER_IMPORT_PENDING_FILE, restoreLedgerImport, registerLedgerSource, registerAttestedGapSource, ensureLedgerResumeSchema, invalidateLedgerImportsUnlessListed } from "./ledger-import";
+import {
+  ATTESTED_SEED_FILE, CHAIN_CHECK_FRESH_MS, CHAIN_HELD_NEXT, CHAIN_REFUSAL, GAP_WINDOW_SEC, RESUME_USDG, applyResumeApprovals, archiveTenantHome, chainGapCheck, chainRefusal, completeAttestedSeed,
+  describeChainFacts, homeBookState, knownChainFacts, moveApproval, parseResumeApprovals, parseResumePreview, parseResumeRevokes, planAttestedSeed, previewLine,
+  previewRunDigest, readLastRefusal, readOpenApproval, readPreRegistrationTenants, readRecoveryGeneration, readResumeEvidence, recordPreviewRun, resumeChainFor,
+  normaliseCarriedFile, offsetRestoredLink, resumePreconditions, revokeResumeApprovals, writeAttestedSeedMarker, writeRecoveryGeneration,
+  AUTO_PAPER_HEADROOM, AUTO_PAPER_PER_PASS, AUTO_PAPER_RECORD_ALERT_AFTER, AUTO_PAPER_RETRIES_PER_PASS, AUTO_PAPER_SOURCE, answeredGrantChanges, autoPaperRecordWait,
+  autoPaperRoom, autoPaperVerdict, countOpenApprovals,
+  evidenceHasHistory, grantRowKey, noteGrantAttempt, observeGrantChanges, parseResumeAutoPaper, recordResumeApproval, resumeAutoPaperOn, settleGrantChange,
+  RESUME_APPROVE_ENV, RESUME_AUTO_PAPER_ENV, RESUME_PREVIEW_ENV, RESUME_REVOKE_ENV,
+  type ApprovalRow, type ApprovalState, type GapChain, type GapResult, type MissingChainFact, type OwedGrantChange, type PreviewEntry, type ResumeCheck,
+  type ResumePreviewScope, type ResumeRevoke,
+} from "./ledger-resume";
+import {
+  adoptPopulatedPersistentHome, controlAdoptedPersistentHomeHalt, PERSISTENT_HOME_MANIFEST,
+  preparePersistentHomeForHandover, verifyPersistentHome, type PersistentHomeIdentity,
+} from "./persistent-home";
+import { EX_CONFIG, hostedOrchestratorRefusals } from "./deploy-guard-checks";
 import { scrubHostedGrantCache } from "./hosted-grant-cache";
 import {
   clearHoldNotified,
@@ -128,6 +169,7 @@ import {
   livenessFor,
   publishTelegramRuntime,
   publishTenantChildState,
+  readDurablePause,
   readTenantTelegram,
   readTenantConditionAlerts,
 } from "./telegram-store";
@@ -165,9 +207,27 @@ import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
 import { energyUnrestoredPending, seedEnergyDays } from "./energy-seed";
+import { budgetUnrestored, seedBudget } from "./budget-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
+import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
+import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
+import { writeChildFomoFile } from "./fomo/child-file";
+import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
+import type { FomoClient } from "./fomo/provider";
+import { SYSTEM_TIMERS } from "./fomo/stream";
+import {
+  FOMO_FLEET_LEASE,
+  FOMO_FLEET_PAYER,
+  heldTokensFrom,
+  makeFomoPass,
+  mergeHeldTokens,
+  streamEndpointFor,
+  xpostConsentLookup,
+  type FomoBudgetPort,
+  type FomoPass,
+} from "./orchestrator-fomo";
 
 /** How often to re-read the store for tenants added or killed. */
 const RECONCILE_MS = 15_000;
@@ -267,19 +327,40 @@ function noteSpawnPressure(error: unknown): void {
 }
 
 /**
+ * SPAWNS WAITING FOR A SLOT, woken at once by a drain (drainFleet). Nothing
+ * will be forked once the fleet is being called home, and the drain waits for
+ * `spawning` to empty before it signals anything — a queue of spawns two
+ * seconds apart, or one sitting out a two-minute pressure pause, would spend
+ * the whole drain budget waiting for forks that are then refused anyway.
+ */
+const spawnSlotWaiters = new Set<() => void>();
+
+/**
  * Reserve a process-creation slot before the final lease/kill check. Restarts
  * and the normal roster pass share this clock. If a different child receives
  * EAGAIN while we wait, observe its new cooldown before trying to fork.
+ * Returns early once `stopping` is set; the caller's late check then refuses.
  */
 async function waitForSpawnSlot(): Promise<void> {
   // Existing integration tests substitute fake processes and mock timers.
   // Exercise the real pacing only in its dedicated test.
   if (spawn !== nodeSpawn && !spawnPacingForTest) return;
   for (;;) {
+    if (stopping) return;
     const at = Math.max(Date.now(), nextSpawnAt, spawnPressureUntil);
     nextSpawnAt = at + spawnSpacingMs;
-    if (at > Date.now()) await new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()));
-    if (Date.now() >= spawnPressureUntil) return;
+    if (at > Date.now()) {
+      await new Promise<void>((resolve) => {
+        const wake = () => {
+          clearTimeout(timer);
+          spawnSlotWaiters.delete(wake);
+          resolve();
+        };
+        const timer = setTimeout(wake, at - Date.now());
+        spawnSlotWaiters.add(wake);
+      });
+    }
+    if (stopping || Date.now() >= spawnPressureUntil) return;
   }
 }
 /** Give up restarting a child that keeps dying right after start. */
@@ -361,6 +442,34 @@ function nextRung(child: Child, aliveUntilMs: number): number {
 }
 
 /**
+ * WHY THE OPERATOR HOLDS THIS TENANT, or null: the accounting hold, or a
+ * rollout that does not admit it (fleet-rollout.ts).
+ *
+ * ONE PREDICATE, asked at every gate that starts or keeps a process for a
+ * tenant: the restart timer, spawnChild on the way in and again after its
+ * last await (lateSpawnRefusal), spawnHolder and the hold process it starts,
+ * holdMayLeave, and reconcile's spawn loop and stand-down. The accounting hold
+ * was asked at each of those, by name; a second kind of hold asked at only
+ * some of them would be a door left open at the rest, and nobody reading one
+ * gate could tell which kind it had forgotten.
+ *
+ * Only processes. What else an out-of-scope tenant is spared (the leased part
+ * of its expiry retirement, the paused-source report) is the rollout's alone
+ * and is asked with rolloutHeld: the accounting hold has never stopped those,
+ * and this change does not make it. Neither hold defers its owner's kill, nor
+ * keeps an expired key's copy on the volume.
+ */
+function operatorHold(tenant: string): string | null {
+  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
+  if (rolloutHeld(tenant)) return `${FLEET_ROLLOUT_ENV} does not admit this tenant`;
+  return null;
+}
+
+function operatorHeld(tenant: string): boolean {
+  return operatorHold(tenant) !== null;
+}
+
+/**
  * ONE RESTART POLICY, because there were two and only one of them had a brake.
  *
  * The exit handler backed off and capped. The watchdog — the path a
@@ -372,7 +481,7 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  */
 function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): void {
   if (stopping) return;
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   if (restarts > MAX_RESTARTS) {
     gaveUpUntil.set(tenant, { until: Date.now() + GIVE_UP_COOLOFF_MS, restarts });
     log(
@@ -451,6 +560,17 @@ const CHILD_SECRET_STRIP = [
   // outright, and there is no "but then the fetch fails" pressure to ever
   // remove it. See research/hey.ts.
   "MERRYMEN_HEY_API_KEY",
+  // THE FOMO DATA KEY, under both names an operator might set (the house's and
+  // the provider's own docs'). Same reason as the two above: a child holding it
+  // could leak it into a prompt, a decision row or a log line. A hosted child
+  // still answers Fomo questions — it asks THIS process over the IPC channel
+  // (fomo/broker.ts), and this process stamps the tenant from which child
+  // asked, so the child never needs the key and never chooses whose budget or
+  // permissions apply. settings.ts resolves `fomoApiKey` from env as a
+  // fallback, which is exactly why leaving either name in a child's
+  // environment would hand the house key to every tenant.
+  "MERRYMEN_FOMO_API_KEY",
+  "FOMO_API_KEY",
   // Privy authenticates PEOPLE at the web edge. A worker child acts for an
   // agent that is already authorized by a signed grant; it has no login to
   // verify and no reason to hold the key that would verify one.
@@ -515,6 +635,15 @@ const CHILD_SECRET_STRIP = [
    */
   "MERRYMEN_X_CLIENT_SECRET",
   "MERRYMEN_XPOST_LLM_KEY",
+  /**
+   * THE OPS TOKEN, which opens the fleet heartbeat to an operator's check
+   * (web/src/app/api/ops/heartbeat). It belongs on the web and nowhere else;
+   * stripped here in case an environment shared between services ever hands
+   * it to this one. A child has no use for it, and one holding it could put
+   * it in a prompt, a decision row or a log line — the published-key reason
+   * above.
+   */
+  "MERRYMEN_OPS_TOKEN",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
@@ -544,6 +673,29 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
+  // WHICH TENANT THIS CHILD IS, lowercased. Not a secret and not authority:
+  // the child uses it only to refuse a fomo.json written for someone else
+  // (fomo/child-file.ts readChildFomoFile). Nothing on this side reads it
+  // back — the IPC broker stamps the tenant this process spawned the child
+  // for (attachFomoBroker), never one the child names.
+  env.MERRYMEN_TENANT = tenant.toLowerCase();
+  /**
+   * THE ROLLOUT, REDUCED TO THIS TENANT'S OWN LEVEL (fleet-rollout.ts).
+   *
+   * The level is for the worker's admission gate (worker-admission.ts), which
+   * reads it once at boot: `observe` refuses every intent, `exits-only` every
+   * entry, `trade` nothing, and a hosted child without it reads as `observe`.
+   * The rollout accepts exactly the levels that gate obeys
+   * (WORKER_ENFORCED_LEVELS). Always set, and always set here,
+   * overwriting anything the orchestrator's own env carried under that name:
+   * a child must never take its level from an operator's fleet-wide
+   * variable. The rollout itself is stripped, for the reason
+   * MERRYMEN_HOLDER_ADDRESS is: it names other tenants, which is an answer to
+   * a question about somebody else, and a child that read it might one day
+   * mistake another tenant's level for its own.
+   */
+  delete env[FLEET_ROLLOUT_ENV];
+  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant);
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
@@ -626,6 +778,14 @@ export function staleThresholdSec(tickSeconds: number): number {
 
 const children = new Map<string, Child>();
 
+/**
+ * Test seam (setPhantomProcessesForTest): processes this supervisor counts as
+ * running beside its own, so a test can stand the fleet at the process cap
+ * without forking 48 fakes. Zero outside tests; it only ever adds, so every
+ * cap it meets refuses sooner, never later.
+ */
+let phantomProcessesForTest = 0;
+
 /** Count processes still alive, including ones that have been told to exit. */
 function localChildProcessCount(): number {
   const processes = new Set<ChildProcess>();
@@ -635,10 +795,13 @@ function localChildProcessCount(): number {
     if (held.leaving) processes.add(held.leaving);
   }
   for (const exiting of exitingChildren.values()) for (const proc of exiting) processes.add(proc);
-  return processes.size;
+  return processes.size + phantomProcessesForTest;
 }
 export function localChildProcessCountForTest(): number {
   return localChildProcessCount();
+}
+export function setPhantomProcessesForTest(n: number): void {
+  phantomProcessesForTest = Math.max(0, Math.floor(n));
 }
 
 /**
@@ -706,6 +869,19 @@ let spawn: (command: string, args: readonly string[], options: SpawnOptions) => 
 /** Test seam: start children with `fn` instead of node's `spawn`. */
 export function setSpawnForTest(fn: typeof spawn): void {
   spawn = fn;
+}
+
+/**
+ * What takes a tenant's advisory lease: tenant-lease.ts's, unless a test has
+ * swapped in one that records who was asked for. The no-op lease a test runs
+ * on is taken and released without trace, so "a tenant the rollout does not
+ * admit is never leased" could not be shown without this.
+ */
+let acquireTenantLease: (tenant: `0x${string}`) => Promise<TenantLease | null> = acquireStoreLease;
+
+/** Test seam: take leases through `fn`; null puts tenant-lease.ts's back. */
+export function setLeaseAcquireForTest(fn: typeof acquireTenantLease | null): void {
+  acquireTenantLease = fn ?? acquireStoreLease;
 }
 
 /** Test seam: run the production spawn gate with short, real waits. */
@@ -898,6 +1074,12 @@ export function isRetiringExpiredForTest(tenant: string): boolean {
 }
 let lastRosterLog: { active: number; expired: number; at: number } | null = null;
 let lastCapacityLog: { deferred: number; at: number } | null = null;
+/** The last reconcile's count of the roster per rollout level, for the heartbeat (fleetHealth); null when it could not read the roster. */
+let lastRolloutCounts: RolloutCounts | null = null;
+/** Test seam: what the heartbeat's rollout line would count, as the last reconcile left it. */
+export function rolloutCountsForTest(): RolloutCounts | null {
+  return lastRolloutCounts;
+}
 /** Includes children already removed by the watchdog or another stand-down. */
 const exitingChildren = new Map<string, Set<ChildProcess>>();
 
@@ -1156,13 +1338,44 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
  *
  * NEVER `linkedChats`. It is the list the parent promotes into the stored
  * allowlist, and restoring it would put back every chat the owner has since
- * removed on the dashboard. Nor the offset: the date rule in service.ts is
- * what keeps a replayed backlog from running.
+ * removed on the dashboard. Nor a saved offset: the date rule in service.ts
+ * is what keeps a replayed backlog from running.
+ *
+ * BUT `offset: 0`, WRITTEN OUT. Not a restored offset: 0 is what every reader
+ * already takes a missing one to be (telegram/state.ts loadTelegramState, and
+ * the hold process through it), so the child asks from no saved offset
+ * exactly as it did, `blind` (service.ts staleSummaryText), with the date
+ * rule holding the backlog back. What it changes is the one strict reader.
+ * The offset handoff (recovery-reply-handoff.ts) refuses a telegram.json with
+ * no offset (HANDOFF_OFFSET), rightly: it cannot raise a high-water mark that
+ * is not there. This used to write none, so an ordinary tenant whose file
+ * was lost, and whose bot the recovery listener had answered meanwhile (a
+ * recovery_reply_offsets row for it), had its link restored here and then
+ * refused by the handoff on every pass: no worker (and for a held tenant no
+ * hold process), for as long as the row stood. With the offset written, the
+ * handoff raises it to the listener's mark as it does for any file, and the
+ * child starts past what the listener already answered. The handoff still
+ * refuses a missing offset from anyone else.
+ *
+ * A FILE A BUILD BEFORE THIS ONE RESTORED HAS NONE, AND THIS NEVER PUTS IT
+ * RIGHT: writeTelegramForChild writes only into a home with no telegram.json,
+ * and child homes outlive a deploy on the fleet volume (persistent-home.ts).
+ * So the spawn path gives that file its offset just before the handoff reads
+ * it, in every home, registered or not (offsetEarlierRestoredLink,
+ * ledger-resume.ts offsetRestoredLink: that exact shape, at 0600, and the
+ * offset alone), after a registered book's home is put right its own way
+ * (normaliseRegisteredHome). One restored at the umask, before #198, is not
+ * put right in an ordinary home: the handoff still refuses it by its mode
+ * (HANDOFF_MODE), and what becomes of it is an operator's decision.
+ *
+ * Only on a file that has something else in it: with nothing to restore this
+ * is still null, and no file is written (writeTelegramForChild), which the
+ * handoff reads as offset 0 already.
  */
 export function restoredTelegramFile(
   tg: { linkCode: string | null; linkedAt: number | null; ownerId?: number | null; firedAlerts?: Record<string, number> } | null,
   ownerId: number | null,
-): { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } | null {
+): { offset: 0; linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } | null {
   const out: { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } = {};
   if (tg?.linkCode) out.linkCode = tg.linkCode;
   if (ownerId) {
@@ -1173,7 +1386,7 @@ export function restoredTelegramFile(
       if (Object.keys(firedAlerts).length) out.firedAlerts = firedAlerts;
     }
   }
-  return Object.keys(out).length > 0 ? out : null;
+  return Object.keys(out).length > 0 ? { offset: 0, ...out } : null;
 }
 
 async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childState: string): Promise<void> {
@@ -2146,27 +2359,58 @@ async function writeSettingsForChild(
  * BEFORE spawn, with the grant and the anchor, and for the same reason — the
  * child reads its book while arming, and a basis that landed a moment later
  * would be read as absent.
+ *
+ * AND THE FLOORS. `position_floors` shares the basis's lifecycle and dies with
+ * it, so each restored position's graded stop is put back here too
+ * (basis-seed.ts seedPositionFloors) — beside a cost this seed wrote and
+ * nowhere else, written under `smartAccount` exactly as the grant spells it,
+ * because that is the spelling the child reads its floors back by.
+ *
+ * ASKED AGAIN AT THE WRITE, not only at the top of spawnChild. The restores
+ * ahead of this await for seconds, and both seeds write the child's original
+ * book. A replica that lost the tenant meanwhile, or a hold or source barrier
+ * that landed, refuses the write here as the late refusal would refuse the
+ * spawn: the question spawnChild's recovery-reply writers ask, with the
+ * persistent-home check originalSourceRefused adds before financial writes.
  */
+/**
+ * Test seam: the shared ledger the basis and floor seeds read, for a test that
+ * has no DATABASE_URL (orchestrator-ledger-resume.integration.test.ts runs the
+ * real seeds against its sqlite stand-in). Null in production.
+ */
+let basisSeedSharedForTest: Db | null = null;
+export function setBasisSeedSharedForTest(db: Db | null): void { basisSeedSharedForTest = db; }
+
 async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
   const url = process.env.DATABASE_URL;
-  if (!url) return; // self-hosted: the child's own sqlite is the only copy
+  if (!url && !basisSeedSharedForTest) return; // self-hosted: the child's own sqlite is the only copy
+  const sharedSeedDb = async (): Promise<Db> => basisSeedSharedForTest ?? await makePgDb(url!);
   const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
   const handle = {db:wrapSqlite(raw),close:()=>raw.close()};
+  // The lease spawnChild checked before preparing. Lost or replaced since,
+  // lateSpawnRefusal says so; a barrier on the original book, originalSourceRefused.
+  const lease = leases.get(tenant);
+  const writeRefusal = (): string | null =>
+    !lease ? "it holds no lease"
+      : lateSpawnRefusal(tenant, lease) ?? (originalSourceRefused(tenant) ? "its original book is behind a source barrier" : null);
+  // The positions whose cost actually went back in below: the only ones a
+  // floor may follow (see seedPositionFloors).
+  const restored: { mode: string; symbol: string }[] = [];
   try {
     const { planBasisSeed, basisSeedLine } = await import("./basis-seed");
-    const shared = await makePgDb(url);
+    const shared = await sharedSeedDb();
     const have = (await handle.db
       .prepare("SELECT COUNT(*) AS n FROM cost_basis WHERE mode = 'live'")
       .get()) as { n: number } | undefined;
     const rows = (await shared
-      .prepare("SELECT mode, symbol, qty_raw, cost_usdg FROM cost_basis WHERE lower(agent_id) = lower($1) AND mode = 'live'")
+      .prepare("SELECT mode, symbol, qty_raw, cost_usdg FROM cost_basis WHERE lower(agent_id) = lower(?) AND mode = 'live'")
       .all(smartAccount)) as unknown as Record<string, unknown>[];
     // WHAT THE BOOK STILL SAYS IS HELD. The shared cost_basis copy goes stale
     // in one way — the mirror skips its DELETE while the child reads rebuilt —
     // so without this the seed would restore the cost of a position already
     // sold. See planBasisSeed.
     const heldRows = (await shared
-      .prepare("SELECT symbol FROM positions WHERE lower(agent_id) = lower($1) AND raw_balance <> '0'")
+      .prepare("SELECT symbol FROM positions WHERE lower(agent_id) = lower(?) AND raw_balance <> '0'")
       .all(smartAccount)) as unknown as Record<string, unknown>[];
     const plan = planBasisSeed({
       childRowCount: Number(have?.n ?? 0),
@@ -2178,20 +2422,44 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
         costUsdg: String(r.cost_usdg ?? "0"),
       })),
     });
-    log(basisSeedLine(tenant, plan));
-    for (const r of plan.rows) {
-      await handle.db
-        .prepare(
-          `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
-           VALUES (?, ?, ?, ?, ?, unixepoch())
-           ON CONFLICT(agent_id, mode, symbol) DO NOTHING`,
-        )
-        .run(smartAccount, r.mode, r.symbol, r.qtyRaw, r.costUsdg);
+    const refused = plan.rows.length > 0 ? writeRefusal() : null;
+    if (refused !== null) {
+      log(`basis seed: ${tenant} — nothing written: ${refused}`);
+    } else {
+      log(basisSeedLine(tenant, plan));
+      for (const r of plan.rows) {
+        const wrote = await handle.db
+          .prepare(
+            `INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg, updated_at)
+             VALUES (?, ?, ?, ?, ?, unixepoch())
+             ON CONFLICT(agent_id, mode, symbol) DO NOTHING`,
+          )
+          .run(smartAccount, r.mode, r.symbol, r.qtyRaw, r.costUsdg);
+        if (wrote.changes > 0) restored.push({ mode: r.mode, symbol: r.symbol });
+      }
     }
   } catch (e) {
     // Loud, because a silent failure here is a book that sells with no cost and
     // reports no P&L — the exact defect this exists to close.
     log(`basis seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  }
+  // AND EACH RESTORED POSITION'S GRADED FLOOR, which the same redeploy wiped
+  // beside the cost. Its own try, so a floor seed that fails cannot be read as
+  // the basis seed failing — but BEHIND the basis in what it may write: only
+  // the positions in `restored` get a floor back, because a floor with no basis
+  // beside it is one nothing ever removes. A basis seed that failed or wrote
+  // nothing restores no floor, and the owner's own number applies. See
+  // seedPositionFloors.
+  try {
+    const { seedPositionFloors, floorSeedLine } = await import("./basis-seed");
+    const plan = await seedPositionFloors({
+      child: handle.db, shared: await sharedSeedDb(), account: smartAccount, restored, mayWrite: writeRefusal,
+    });
+    log(floorSeedLine(tenant, plan));
+  } catch (e) {
+    // Loud for the same reason: the child arms anyway, on the owner's single
+    // number in place of each position's graded stop, and nothing else says so.
+    log(`floor seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     handle.close();
   }
@@ -2284,6 +2552,128 @@ async function retryEnergySeed(tenant: `0x${string}`): Promise<void> {
   const child = children.get(tenant);
   if (!child || !process.env.DATABASE_URL || !energyUnrestoredPending(childHome(tenant))) return;
   await seedEnergyForChild(tenant, child.smartAccount, "retry");
+}
+
+/**
+ * GIVE A REBUILT CHILD BACK ITS TRAILING DAY OF SPENDING BEFORE IT ARMS.
+ *
+ * The daily spend, ops and Telegram transfer caps are judged against the
+ * child's own ledger, and a child whose sqlite is new would judge them against
+ * an empty day while the day it already spent sits in the shared ledger. The
+ * arm's in-flight reconciler re-records only part of that day, and records a
+ * transfer as a swap. budget-seed.ts carries the whole day down, one row per
+ * operation, and store.ts adds it to every cap reader. BEFORE spawn, beside
+ * the energy seed and for the same reason — the child reads its caps on its
+ * first tick. This opens the two databases; seedBudget decides.
+ *
+ * FAIL CLOSED, AND STILL ARMED. The marker goes into the child's home before
+ * anything is read, and comes out only after every row is in, so a seed that
+ * fails — or dies half way — leaves a child that arms with no headroom for a
+ * new entry while its exits and stops run. retryBudgetSeed tries again
+ * every reconcile pass. False only when there is no marker AND no seed: the
+ * one state in which this child would arm on an empty day, so spawnChild does
+ * not start it and the next pass tries the whole spawn again.
+ *
+ * `when` is "retry" for a running child: it writes beside the live agent, so
+ * it waits only briefly for the child's write lock, and a failure leaves the
+ * marker as it is — unless the day is UNKNOWN, which marks it (seedBudget).
+ *
+ * [alert] WHEN AN OPERATOR IS NEEDED, not only when the worker is kept off:
+ * an unknown day (a hashless live row, or a pending op nothing in the fleet
+ * will settle — budget-seed.ts) stays held until someone acts, and any hold
+ * that outlasts BUDGET_HOLD_ALERT_SEC has stopped looking like a blip. Each
+ * once per failure, not once per fifteen-second pass.
+ */
+const budgetSeedFailing = new Map<string, { why: string; sinceSec: number; alerted: boolean }>();
+/** When each running child's seed should be looked at again for the pending ops only it charges (BudgetSeedResult `recheckAt`). */
+const budgetSeedRecheckAt = new Map<string, number>();
+const BUDGET_HOLD_ALERT_SEC = 10 * 60;
+async function seedBudgetForChild(tenant: `0x${string}`, smartAccount: string, when: "spawn" | "retry" = "spawn"): Promise<boolean> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return true; // self-hosted: the child's own sqlite is the only copy, and it is never wiped
+  const home = childHome(tenant);
+  const opened: DatabaseSync[] = [];
+  const nowSec = Math.floor(Date.now() / 1000);
+  try {
+    const r = await seedBudget({
+      home,
+      agent: smartAccount,
+      cashToken: String(CASH.USDG),
+      nowSec,
+      when,
+      local: () => {
+        const raw = new DatabaseSync(path.join(home, "merrymen.db"));
+        opened.push(raw);
+        raw.exec("PRAGMA busy_timeout = 250");
+        return wrapSqlite(raw);
+      },
+      shared: () => makePgDb(url),
+    });
+    if (r.ok) {
+      const was = budgetSeedFailing.delete(tenant);
+      if (r.recheckAt === null) budgetSeedRecheckAt.delete(tenant);
+      else budgetSeedRecheckAt.set(tenant, r.recheckAt);
+      if (r.restored || was) {
+        log(
+          `budget seed: ${tenant} — ${r.restored} operation(s) of the trailing day restored${was ? " on retry; new entries have headroom again" : ""}` +
+            (r.recheckAt === null ? "" : `; pending op(s) only the seed charges, looked at again ${new Date(r.recheckAt * 1000).toISOString()}`),
+        );
+      }
+      return true;
+    }
+    const prev = budgetSeedFailing.get(tenant);
+    const sinceSec = prev?.sinceSec ?? nowSec;
+    const longHold = r.marked && nowSec - sinceSec >= BUDGET_HOLD_ALERT_SEC;
+    const alert = r.unknown || (!r.marked && when === "spawn") || longHold;
+    // Once per distinct failure, not once per fifteen-second pass — and once
+    // more the first time the same failure becomes an operator's problem.
+    if (when === "spawn" || prev?.why !== r.why || (alert && !prev?.alerted)) {
+      log(
+        `${alert ? "[alert] " : ""}budget seed: ${tenant} FAILED — ${r.why} ` +
+          (!r.marked && when === "spawn"
+            ? "(and NO marker: not starting a worker that would read an empty day)"
+            : r.unknown
+              ? "(its trailing day is UNKNOWN and no pass will clear it alone — an operator's call, budget-seed.ts says what lifts it: no headroom for a new entry meanwhile; exits, stops and the owner's sales run; looked at again every pass)"
+              : r.marked
+                ? when === "retry"
+                  ? `(still unrestored${longHold ? ` after ${Math.round((nowSec - sinceSec) / 60)} min` : ""}; tried again next pass)`
+                  : "(the child arms with its trailing day UNRESTORED: no headroom for a new entry until a later pass restores it; exits, stops and the owner's sales run)"
+                : "(its last seed stands, still charging what it charged; tried again next pass)"),
+      );
+    }
+    budgetSeedFailing.set(tenant, { why: r.why, sinceSec, alerted: (prev?.alerted ?? false) || alert });
+    return r.marked;
+  } finally {
+    for (const raw of opened) {
+      try {
+        raw.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/**
+ * A RUNNING CHILD WHOSE TRAILING DAY IS STILL MISSING, tried again.
+ *
+ * Only while its home holds the marker (budget-seed.ts), so a healthy fleet
+ * pays one missing-file read per child per pass. On success the child's next
+ * refresh reads the seeded day and its entries have headroom again.
+ *
+ * AND A CHILD WHOSE SEED CHARGES A PENDING OP ONLY THE SEED KNOWS OF, once that
+ * op reaches the age past which nothing in the fleet will settle it
+ * (`recheckAt`). Looked at again, it has either settled — the mirror carried a
+ * landing the reconciler re-recorded, or this child now holds it — or it has
+ * not, and the day is unknown: held, with an [alert], instead of a charge
+ * that would otherwise sit there silently until the next spawn and beyond.
+ */
+async function retryBudgetSeed(tenant: `0x${string}`): Promise<void> {
+  const child = children.get(tenant);
+  if (!child || !process.env.DATABASE_URL) return;
+  const due = (budgetSeedRecheckAt.get(tenant) ?? Number.POSITIVE_INFINITY) <= Date.now() / 1000;
+  if (!due && !budgetUnrestored(childHome(tenant))) return;
+  await seedBudgetForChild(tenant, child.smartAccount, "retry");
 }
 
 /**
@@ -2580,8 +2970,23 @@ async function preparePersistentLedgerForChild(tenant: `0x${string}`, grant: Sto
   }
 }
 
-async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home = childHome(tenant), stillOwned?: () => boolean) {
+/**
+ * NO NEW COPY ONCE THE DRAIN HAS SETTLED (fleet-drain.ts, step 3), except the
+ * drain's own final pass (`drainPass`). Every copy started before then is
+ * waited for with its lease still held; one started after it — by a reconcile
+ * pass or a spawn that was already under way when the signal came — could
+ * still be between its marker and its ownership check when the leases go,
+ * which leaves the marker and blocks the tenant at the next start. Refused
+ * here, before the marker, it leaves nothing; the next owner's spawn copies
+ * the same rows (finalMirrorBeforeAnchor).
+ */
+let copiesClosed = false;
+/** The drain's final pass has applied the shared ledger schema once (retiredWorkerPass). */
+let drainLedgerSchemaReady = false;
+
+async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home = childHome(tenant), stillOwned?: () => boolean, drainPass = false) {
   return mirrorSerially(tenant, async () => {
+    if (copiesClosed && !drainPass) throw new Error("The fleet is being called home; no new ledger copy starts before the next owner's.");
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror no longer owns the current worker and lease.");
     if (ledgerSourceBlocked(home)) throw new Error("Ledger source is blocked; preserve the home and recover its accounting before rearming.");
     // Check the original witnesses BEFORE mirrorTenant can advance any cursor.
@@ -2771,7 +3176,8 @@ export async function writeBootstrapForChild(
  */
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
-  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
+  const held = operatorHold(tenant);
+  if (held) return held;
   if (haltRequested()) return "FLEET_HALT is present";
   if (retiringExpired.has(tenant)) return "the expired grant's previous process is still retiring";
   if (leaseLossDraining.has(tenant)) return "the previous child is still exiting after lease loss";
@@ -2782,17 +3188,925 @@ function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | n
   return null;
 }
 
+/**
+ * WHAT KIND OF ERROR IT WAS, WITHOUT WHAT IT SAID: its class, and its code (a
+ * Node errno or a SQLSTATE) when it has the shape of one.
+ *
+ * The spawn path's catches below keep an error's text out of the log, because
+ * it can carry a connection string or a private value. Keeping out everything
+ * left an [alert] with nothing in it to diagnose: a bug that threw a TypeError
+ * in a seed for every tenant read exactly as a missing driver or a full disk
+ * did. A class name and a code are neither, and each is let through only when
+ * it looks like one — a word, or capitals, digits and underscores — so a
+ * library that puts something else there says nothing more than "Error".
+ */
+function errorKind(e: unknown): string {
+  const name = e instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(e.name) ? e.name : typeof e;
+  const code = (e as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? `${name} ${code}` : name;
+}
+
+/**
+ * ONCE PER CAUSE, NOT ONCE PER PASS. What each tenant's last held-not-crashed
+ * alert said, and when.
+ *
+ * A refusal the spawn path now holds a tenant on can stand for days — an
+ * offset row naming another account does not clear itself — and each fifteen-
+ * second pass meets it again: 5,760 identical [alert] lines a day a tenant,
+ * which buries the one line that is new. So the same line is said once, and
+ * again each hour it still stands, so it is never only in a log that has
+ * rotated away; a different line is said at once. Forgotten when the tenant's
+ * worker or hold process starts, so the same refusal coming back is new again.
+ */
+const TENANT_ALERT_RESAY_MS = 60 * 60_000;
+const tenantAlertSaid = new Map<string, { line: string; at: number }>();
+function sayTenantAlert(tenant: string, line: string): void {
+  const said = tenantAlertSaid.get(tenant), now = Date.now();
+  if (said?.line === line && now - said.at < TENANT_ALERT_RESAY_MS) return;
+  tenantAlertSaid.set(tenant, { line, at: now });
+  log(line);
+}
+
+/**
+ * ATTESTED-GAP ADMISSION, PHASES A AND B (ledger-resume.ts says what and why).
+ *
+ * Asked by spawnChild for every tenant, after the persistent-home proof and
+ * the expiry check, under the tenant's lease and before its key or any book
+ * is written. With no open approval — every tenant the operator has not
+ * approved, and every tenant once its new book is registered — it answers
+ * `proceed` and changes nothing: the ordinary path, with its continuity gate,
+ * decides as it always has.
+ *
+ * With one: re-derive the evidence and refuse on any change; check every
+ * precondition; read the chain in the background where the account has ever
+ * been live, or where an earlier chain refusal of it is still unanswered
+ * (ledger-resume.ts ResumeCheck.chainHeld: whatever its paper reading says,
+ * so an operator's approval never admits it on the book the chain showed
+ * incomplete) — the tenant waits, held, for the answer — and again from that
+ * read's head immediately before the registration; drain a continuous old
+ * book's tail through the existing guarded mirror; archive the home; and
+ * register the empty book in one transaction. Every step re-checks the lease
+ * first, and every failure leaves the tenant held at the step it reached, to
+ * resume on the next pass. A refusal of the evidence or a precondition ends
+ * the approval (`refused`): the operator previews again and approves what is
+ * true now.
+ */
+type ResumeVerdict = { go: false } | { go: true; registered: string | null; /** The registered book's generation, beside `registered`. */ generation?: string };
+/** Why an automatic approval ends where an operator's would read the chain or start exits-only. */
+const AUTO_PAPER_NOT_SAFE = "an automatic (auto-paper) approval admits only a paper tenant that could not arm live and holds no positions, " +
+  "and this one now could arm live or holds positions: preview it again and approve it by hand";
+const resumeChecks = new Map<string, { key: string; at: number; result: GapResult | "running" }>();
+/** Whether this process has brought the resume tables up to date (resumeAdmission says why it asks). */
+let resumeApprovalSchemaReady = false;
+const RESUME_CHAIN_RETRY_MS = 60_000;
+let resumeChainForTest: ((chainId: number) => GapChain | null) | null = null;
+const resumeCheckPromises = new Set<Promise<void>>();
+/** Test seams: the chain the gap check reads, and a way to wait for the checks a pass started. */
+export function setResumeChainForTest(fn: ((chainId: number) => GapChain | null) | null): void { resumeChainForTest = fn; resumeChecks.clear(); }
+export async function resumeChecksSettledForTest(): Promise<void> { await Promise.all([...resumeCheckPromises]); }
+
+/**
+ * The window a clean chain read covered: its first block and the head it
+ * reached, both inclusive, and the chain's time of that first block
+ * (GapResult.fromSec), which a refusal on the re-read records as where the
+ * admission's read began.
+ */
+type ChainWindow = { fromBlock: string; head: string; fromSec?: number };
+
+/**
+ * The chain read for one approval: the window a clean read covered (fresh
+ * enough to rely on), what it found that Postgres lacks, or held while it runs
+ * or after it could not. A clean answer is not the whole of it in Phase B:
+ * resumeChainTail reads on from its head immediately before the registration,
+ * and spends it.
+ *
+ * `missing` carries the facts, so the refusal can name each one (chainRefusal)
+ * and the next preview can show it (readLastRefusal); and where that read
+ * began (`fromSec`), which the refusal records, so every later read of the
+ * tenant starts no later (ledger-resume.ts resumeGapWindow).
+ */
+type ChainMissing = { missing: readonly MissingChainFact[]; fromSec?: number };
+async function resumeChainGate(tenant: string, approval: ApprovalRow, check: ResumeCheck, shared: Db, custody: readonly string[]): Promise<ChainWindow | ChainMissing | "held"> {
+  const now = Date.now();
+  const had = resumeChecks.get(tenant);
+  if (had && had.key === approval.approvalId) {
+    if (had.result === "running") return "held";
+    if (had.result.status === "missing") return { missing: had.result.found, fromSec: had.result.fromSec };
+    if (had.result.status === "clean" && now - had.at < CHAIN_CHECK_FRESH_MS) return { fromBlock: had.result.fromBlock, head: had.result.head, fromSec: had.result.fromSec };
+    if (had.result.status === "unavailable" && now - had.at < RESUME_CHAIN_RETRY_MS) return "held";
+  }
+  const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
+  if (!chain) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume admission needs a chain read and this orchestrator has no RPC for chain ${approval.chainId} — held`);
+    return "held";
+  }
+  // The owner records this tenant's mirror stamped, on its chain: each answers
+  // its operation only once re-derived from the receipt over the grant's
+  // custody (ledger-resume.ts ownerAnswersFor).
+  const known = await knownChainFacts(shared, approval.smartAccount, { tenant, chainId: approval.chainId });
+  resumeChecks.set(tenant, { key: approval.approvalId, at: now, result: "running" });
+  log(`${tenant}: resume admission — reading the chain for ${approval.smartAccount} since ${new Date(check.gapFromSec * 1000).toISOString()}` +
+    `${check.chainHeld ? " (held on a chain refusal: from no later than that refused read began)" : ""}; the tenant stays held until it answers`);
+  const p = chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, sinceSec: check.gapFromSec, known,
+    ownerContext: { custody, chainId: approval.chainId }, log })
+    .then((result) => {
+      resumeChecks.set(tenant, { key: approval.approvalId, at: Date.now(), result });
+      // A MISSING ANSWER NAMES WHAT IT FOUND: each operation by its
+      // userOpHash, transaction and block, each USDG transfer by its
+      // transaction, log, block, direction and amount. Public chain data only,
+      // and every hash in full so it can be looked up as printed.
+      log(`${tenant}: resume chain check ${result.status}${result.status === "clean" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${result.fromBlock}, all in Postgres`
+        : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) on chain that Postgres lacks, ` +
+          `blocks ${result.fromBlock}..${result.head}: ${describeChainFacts(result.found)}` : ` — ${result.why}; tried again`}`);
+    })
+    // Never a rejection loose in the supervisor: an answer nobody could record
+    // is no answer, and the next pass asks again.
+    .catch(() => { resumeChecks.set(tenant, { key: approval.approvalId, at: Date.now(), result: { status: "unavailable", why: "the chain read could not be recorded" } }); })
+    .finally(() => { resumeCheckPromises.delete(p); });
+  resumeCheckPromises.add(p);
+  return "held";
+}
+
+/**
+ * THE CHAIN AGAIN, IMMEDIATELY BEFORE THE REGISTRATION: from the head a clean
+ * read of the window reached (`fromBlock`, inclusive) to the head now.
+ *
+ * A clean read was accepted for CHAIN_CHECK_FRESH_MS, and across a failed
+ * registration and its retry, so an operation or a USDG transfer that landed
+ * after its head was in no window anyone read; and if controls, the seed or
+ * an outage then held the first worker past its own reconciler's reach, the
+ * new book never learned of it. Read here, it refuses like any other activity
+ * Postgres lacks, and the head this answers with is the head the attestation
+ * records (ledger_resume_attestations.chain_head).
+ *
+ * Awaited, not backgrounded, so nothing can land between this read and the
+ * registration but the registration's own few statements; it covers at most
+ * the clean read's freshness window, and RESUME_TAIL_READ_MS bounds how long
+ * a slow endpoint holds the supervisor. Anything but clean holds or refuses.
+ */
+const RESUME_TAIL_READ_MS = 45_000;
+async function resumeChainTail(tenant: string, approval: ApprovalRow, fromBlock: bigint, shared: Db, custody: readonly string[]): Promise<GapResult> {
+  const chain = (resumeChainForTest ?? resumeChainFor)(approval.chainId);
+  if (!chain) return { status: "unavailable", why: `no RPC for chain ${approval.chainId}` };
+  const known = await knownChainFacts(shared, approval.smartAccount, { tenant, chainId: approval.chainId });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<GapResult>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "unavailable", why: "the re-read did not finish in time" }), RESUME_TAIL_READ_MS);
+    timer.unref?.();
+  });
+  try {
+    const result = await Promise.race([chainGapCheck({ chain, account: approval.smartAccount, usdg: RESUME_USDG, fromBlock, known,
+      ownerContext: { custody, chainId: approval.chainId }, log }), late]);
+    log(`${tenant}: resume chain re-read before registration ${result.status}${result.status === "clean" ? ` — blocks ${result.fromBlock}..${result.head}, nothing Postgres lacks`
+      : result.status === "missing" ? ` — ${result.ops} operation(s) and ${result.transfers} transfer(s) since block ${fromBlock} that Postgres lacks: ` +
+        describeChainFacts(result.found) : ` — ${result.why}`}`);
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A continuous old book's tail, copied into Postgres before the home is
+ * archived. False holds the tenant this pass.
+ *
+ * RUN FIRST IN PHASE A, BEFORE THE EVIDENCE IS COMPARED AND BEFORE THE CHAIN
+ * IS READ. The drain changes exactly what the evidence binds (counts, maxima,
+ * the cursors), so draining after the comparison meant a drain cut short by a
+ * lost lease had already moved rows that the next pass's digest then refused
+ * on; and an unmirrored live operation in the tail was not yet in Postgres
+ * when the chain read looked for it, so the chain check refused it as missing
+ * before the drain could copy it. Draining first, the comparison sees the
+ * tail in Postgres: a tail that arrived since the preview refuses the
+ * approval once ("preview again"), and the next preview, approval and drain
+ * (now a no-op) agree. A book that is not continuous is never drained: its
+ * archive keeps it whole.
+ */
+async function drainContinuousBook(tenant: `0x${string}`, lease: TenantLease, shared: Db): Promise<boolean> {
+  const home = childHome(tenant);
+  if (!existsSync(path.join(home, "merrymen.db")) || ledgerSourceBlocked(home)) return true; // nothing continuous to drain: archived as it is
+  const handle = openChildLedger(home);
+  if (!handle) return true;
+  try {
+    try { await mirrorSerially(tenant, () => assertLedgerSourceContinuity(handle.db, shared, tenant)); }
+    catch { return true; } // a rebuilt source is not drained; the archive keeps it
+    for (let pass = 0; pass < 100; pass++) {
+      const r = await mirrorGuardedLedger(tenant, handle.db, shared, home, () => leases.get(tenant) === lease && lease.healthy());
+      if (r.failed && Object.keys(r.failed).length) return false;
+      if (!r.hasMore) return true;
+    }
+    return false;
+  } catch { return false; }
+  finally { handle.close(); }
+}
+
+/**
+ * DOES THE OWNER'S STORED SETTINGS ASK FOR THE LIVE RAIL? The worker picks
+ * its rail at arm from these settings (and the cash it measures), not from
+ * the last heartbeat's mode, so a tenant whose owner turned live trading on
+ * during the hold is read on chain and starts exits-only (ledger-resume.ts
+ * resumePreconditions).
+ *
+ * Null when the settings cannot be read, and nobody guesses from that: the
+ * preview refuses the tenant ("settings could not be read"), and an admission
+ * holds it for the pass. Guessing "live" would have bound a different chain
+ * verdict into the evidence than a later clean read, and one transient store
+ * error would then have refused the operator's approval outright.
+ *
+ * TRUE, WITHOUT READING, WHILE LIVE-TRADING CONSENT IS STOOD DOWN
+ * (MERRYMEN_LIVE_INTENT_STAND_DOWN=1, liveConsentEnforced). The worker then
+ * treats every owner as consenting (exec-mode.ts `consented`: a funded
+ * account goes live with liveTradingEnabled false), so the setting proves
+ * nothing about the rail it will arm on, and a deposit made during the gap is
+ * in no Postgres table the paper verdict reads. Every tenant is chain:required
+ * then — read on chain before an operator's approval admits it, and never
+ * approved by the automatic lane (autoPaperVerdict) — as held-reset.ts and
+ * the practice-reset path already treat a stood-down consent. Not a guess
+ * that varies by read: the same answer in the preview, Phase A and Phase B
+ * for as long as the variable is set, so an approval previewed under it
+ * matches its own digest, and one previewed without it is refused for
+ * changed evidence and previewed again.
+ */
+async function resumeLiveIntent(tenant: `0x${string}`): Promise<boolean | null> {
+  if (!liveConsentEnforced()) return true;
+  try { return (await getSettingsStore().get(tenant))?.liveTradingEnabled === true; }
+  catch { return null; }
+}
+
+async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant: StoredGrant | null): Promise<ResumeVerdict> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return { go: true, registered: null };
+  let shared: Db;
+  let approval: ApprovalRow | null;
+  try {
+    shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    approval = await readOpenApproval(shared, tenant);
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume approvals unreadable (${errorKind(e)}) — retaining its home without starting a worker`);
+    return { go: false };
+  }
+  if (!approval) return { go: true, registered: null };
+  // THE COLUMN A CHAIN REFUSAL WRITES (chain_read_from_sec), on a table an
+  // earlier build created: an approval recorded before this build's deploy
+  // is acted on by a process that may never have previewed or approved
+  // anything, and so never ensured the schema. Once per process.
+  if (!resumeApprovalSchemaReady) {
+    try { await ensureLedgerResumeSchema(shared); resumeApprovalSchemaReady = true; }
+    catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: resume approval tables could not be brought up to date (${errorKind(e)}) — retaining its home without starting a worker`);
+      return { go: false };
+    }
+  }
+  /** `chainReadFromSec`: on a chain refusal, where the refused read began (GapResult.fromSec); every later read of the tenant starts no later. */
+  const refused = async (from: ApprovalState, why: string, chainReadFromSec?: number): Promise<ResumeVerdict> => {
+    await moveApproval(shared, approval!.approvalId, from, "refused", { reason: why, ...(chainReadFromSec === undefined ? {} : { chainReadFromSec }) });
+    resumeChecks.delete(tenant);
+    // A chain refusal is answered by booking what the chain showed, never by
+    // approving again: the tenant is read on chain until an admission answers
+    // it (ledger-resume.ts ResumeCheck.chainHeld), and refused again meanwhile.
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — ${why}. The tenant stays held; ` +
+      (why.startsWith(CHAIN_REFUSAL) ? "take it out of MERRYMEN_FLEET_ROLLOUT and book what the chain shows (docs/chain-gap-booking.md), then preview again " +
+        "and approve the digest that preview prints"
+        : "preview again and approve what is true now"));
+    return { go: false };
+  };
+  if (approval.state === "registered") {
+    // A REGISTERED APPROVAL WHOSE GRANT IS NOW SOMEONE ELSE'S. The book was
+    // registered for the approved account; if, before its first worker, the
+    // stored grant moved to another account, chain or owner (a recorded
+    // /kill removed the grant and the owner signed a NEW account), the
+    // approval can never apply: the ordinary path refuses the new account
+    // against the registered book. Left open it also blocked every new
+    // approval for the tenant (one open per tenant) with no way out but SQL.
+    // So it ends here, `refused`, and the tenant is previewed again for the
+    // account it has now. The registered book and its archive stay as they
+    // are. With no grant at all it stays open: the owner re-signing the same
+    // account continues exactly where this left off.
+    if (grant && (grant.smartAccount.toLowerCase() !== approval.smartAccount || grant.chainId !== approval.chainId || grant.owner.toLowerCase() !== approval.owner)) {
+      await moveApproval(shared, approval.approvalId, "registered", "refused", { reason: "the stored grant names a different account, chain or owner than the registered book" });
+      sayTenantAlert(tenant, `[alert] ${tenant}: resume approval REFUSED — the stored grant names a different account, chain or owner than the registered book. ` +
+        "Its new account is refused by the continuity gate as before; preview again and approve what is true now");
+      return { go: true, registered: null };
+    }
+    return { go: true, registered: approval.approvalId, ...(approval.generation ? { generation: approval.generation } : {}) };
+  }
+  const held = (line: string): ResumeVerdict => { sayTenantAlert(tenant, `${tenant}: resume admission — ${line}`); return { go: false }; };
+  const home = childHome(tenant);
+  // No hold process can exist for it here: spawnChild refused a held tenant
+  // before asking, and only spawnChild starts one.
+  const owned = () => !stopping && leases.get(tenant) === lease && lease.healthy() && !children.has(tenant);
+  let volume: PersistentHomeIdentity | null;
+  try { volume = persistentFleetHome(); } catch { return held("persistent storage is unconfirmed; held"); }
+  if (!volume) return held("needs the verified persistent volume, and this orchestrator has none; held");
+  if (!grant) return held("no stored grant; held");
+  if (grant.smartAccount.toLowerCase() !== approval.smartAccount || grant.chainId !== approval.chainId || grant.owner.toLowerCase() !== approval.owner) {
+    if (approval.state === "approved" || approval.state === "archived") return refused(approval.state, "the stored grant names a different account, chain or owner than the approval");
+    return held("the stored grant changed while the home was being archived; held");
+  }
+  if (blockedLedgerHomes.has(home)) return held("this supervisor could not persist a source barrier for the home; restart it and preview again");
+  const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
+  try {
+    const liveIntent = await resumeLiveIntent(tenant);
+    if (liveIntent === null) return held("the owner's settings could not be read, so whether it could arm live is unknown; held");
+    if (approval.state === "approved") {
+      // THE TAIL FIRST (drainContinuousBook says why), then the evidence.
+      if (!owned()) return { go: false };
+      if (!(await drainContinuousBook(tenant, lease, shared))) return held("the old book's tail could not be drained into Postgres yet; held");
+      if (!owned()) return { go: false };
+      const nowSec = Math.floor(Date.now() / 1000);
+      const controls = await readControlsEvidence(shared, scope, Date.now());
+      const { digest, check } = await readResumeEvidence(shared, { tenant, grant, home, nowSec, controls, liveIntent });
+      // AN OUTAGE IS NOT CHANGED EVIDENCE. A controls read, an anchor or a
+      // risk period that could not be read moves the digest (ResumeCheck.
+      // unreadable says how), and refusing on that ended the approval for
+      // good: one evidence is approved once, and the same evidence read
+      // cleanly again could never be approved by anyone. Held instead, as
+      // unreadable settings are above; the next pass reads it all again.
+      if (check.unreadable.length) return held(`${check.unreadable.join("; ")} — a read that failed, not a change; held, and read again next pass`);
+      if (digest !== approval.evidenceDigest) {
+        return refused("approved", "the evidence changed since the preview (if the old book had an unmirrored tail, it is in Postgres now and the next preview shows it)");
+      }
+      if (check.refusals.length) return refused("approved", check.refusals.join("; "));
+      // AN AUTOMATIC APPROVAL IS ONLY EVER THE SAFE CASE (ledger-resume.ts
+      // autoPaperVerdict) and never reads the chain to get there. The digest
+      // binds both facts, so here they cannot differ from the preview; asked
+      // anyway, where the archive starts, so the rule stands on its own.
+      if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions)) return refused("approved", AUTO_PAPER_NOT_SAFE);
+      if (check.chainRequired) {
+        const gate = await resumeChainGate(tenant, approval, check, shared, custodyAddressesOf(grant));
+        if (gate === "held") return { go: false };
+        if ("missing" in gate) return refused("approved", chainRefusal(gate.missing), gate.fromSec);
+      }
+      if (!owned()) return { go: false };
+      const generation = randomUUID();
+      if (!(await moveApproval(shared, approval.approvalId, "approved", "archiving", { generation }))) return held("the approval changed under it; held");
+      approval = { ...approval, state: "archiving", generation };
+    }
+    if (approval.state === "archiving") {
+      const archived = archiveTenantHome({ home, archiveRoot: path.join(volume.homeRoot, "archive", tenant), generation: approval.generation!, mayWrite: owned });
+      if (!(await moveApproval(shared, approval.approvalId, "archiving", "archived", { archivePath: archived.archivePath }))) return held("the approval changed under it; held");
+      log(`${tenant}: resume admission — ${archived.archivePath ? `home archived to ${path.relative(volume.homeRoot, archived.archivePath)} (keys scrubbed)` : "no home on the volume: nothing to archive"}` +
+        `; carried ${archived.carried.length ? archived.carried.join(", ") : "nothing"}` +
+        `${archived.normalised.length ? ` (normalised ${archived.normalised.join(", ")})` : ""}` +
+        `${archived.left.length ? `; left in the archive, not the home's own or held with its link record: ${archived.left.join(", ")}` : ""}`);
+      approval = { ...approval, state: "archived", archivePath: archived.archivePath };
+    }
+    // PHASE B. The preconditions again, now; the chain read again, whole, if
+    // stale (or spent by an attempt that did not register), and on from its
+    // head immediately before the registration; then the one transaction,
+    // which re-reads the race-prone ones inside.
+    //
+    // THE OWNER'S LIVE INTENT IS READ AGAIN HERE, not carried from the top of
+    // this call. In the usual flow Phase A, the archive and Phase B run in one
+    // call, so the value read before Phase A was the one Phase B judged by,
+    // and an owner who turned live trading on while the home was archived was
+    // never seen: an automatic approval went on to the registration and a
+    // worker at `trade`, and an operator's skipped the chain read it now
+    // needs. Read now, the only window left is the registration's own few
+    // statements. Unreadable holds, as above.
+    const liveNow = await resumeLiveIntent(tenant);
+    if (liveNow === null) return held("the owner's settings could not be read, so whether it could arm live is unknown; held");
+    const nowSec = Math.floor(Date.now() / 1000);
+    const controls = await readControlsEvidence(shared, scope, Date.now());
+    const check = await resumePreconditions(shared, { tenant, account: approval.smartAccount, grantAccount: grant.smartAccount, nowSec, controls,
+      homePendingImport: existsSync(path.join(home, LEDGER_IMPORT_PENDING_FILE)), liveIntent: liveNow });
+    // An outage here holds too (Phase A says why): the home is archived
+    // already, and an approval refused for a read that failed would leave it
+    // waiting on a fresh preview and approval for nothing.
+    if (check.unreadable.length) return held(`${check.unreadable.join("; ")} — a read that failed, not a refusal; held, and read again next pass`);
+    if (check.refusals.length) return refused("archived", check.refusals.join("; "));
+    // AND AGAIN HERE, where it is not redundant: Phase B does not compare the
+    // digest, and an owner who turned live trading on, or a position that
+    // appeared, after the preview — during the archive included, now that
+    // the intent is read again above — makes an operator's approval read the
+    // chain. An automatic one never does; it ends, and the operator approves
+    // by hand. Its evidence must have said chain:not-required, too.
+    if (approval.source === AUTO_PAPER_SOURCE && (check.chainRequired || check.holdsPositions || approval.evidence.checks.chain !== "not-required")) {
+      return refused("archived", AUTO_PAPER_NOT_SAFE);
+    }
+    let chainRead: ChainWindow | null = null;
+    if (check.chainRequired) {
+      const gate = await resumeChainGate(tenant, approval, check, shared, custodyAddressesOf(grant));
+      if (gate === "held") return { go: false };
+      if ("missing" in gate) return refused("archived", chainRefusal(gate.missing), gate.fromSec);
+      chainRead = gate;
+    }
+    const counted = async (db: Db) => {
+      const a = approval!.smartAccount;
+      const row = (await db.prepare(`SELECT (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ?) AS trades, (SELECT COUNT(*) FROM flows WHERE LOWER(agent_id) = ?) AS flows,
+        (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ? AND status IN ('submitted', 'sent', 'pending')) AS unresolved,
+        (SELECT COUNT(*) FROM trades WHERE LOWER(agent_id) = ? AND status NOT IN ('paper', 'rejected', 'submitted', 'sent', 'pending') AND COALESCE(budget_settled_at, created_at) > ?) AS settled`)
+        .get(a, a, a, a, Math.floor(Date.now() / 1000) - GAP_WINDOW_SEC)) as Record<string, unknown>;
+      return { trades: Number(row.trades), flows: Number(row.flows), unresolved: Number(row.unresolved), settled: Number(row.settled) };
+    };
+    const before = await counted(shared);
+    if (chainRead) {
+      // THE CLEAN READ IS SPENT HERE, by this attempt, whatever it comes to:
+      // a registration that fails, or a re-read that cannot finish, leaves the
+      // next attempt to read the whole window again from its start, never to
+      // stand on this one (resumeChainTail says why).
+      const first = chainRead;
+      resumeChecks.delete(tenant);
+      const tail = await resumeChainTail(tenant, approval, BigInt(first.head), shared, custodyAddressesOf(grant));
+      // The admission's read began where the whole read did: that is what the refusal records.
+      if (tail.status === "missing") return refused("archived", chainRefusal(tail.found, true), first.fromSec);
+      if (tail.status !== "clean") return held(`the chain could not be read again before registration (${tail.why}); held, and read whole on the next pass`);
+      chainRead = { fromBlock: first.fromBlock, head: tail.head, ...(first.fromSec === undefined ? {} : { fromSec: first.fromSec }) };
+    }
+    if (!owned()) return { go: false };
+    const receipt = await registerAttestedGapSource({
+      tenant, smartAccount: approval.smartAccount, chainId: approval.chainId, owner: approval.owner, home, volume, shared, lease,
+      dialect: retirementMemoryStoreForTest?.dialect ?? "postgres",
+      approvalId: approval.approvalId, evidenceDigest: approval.evidenceDigest, generation: approval.generation!,
+      archivePath: approval.archivePath, gapFromSec: check.gapFromSec, chainRead,
+      recheck: async (db) => {
+        const now = await counted(db);
+        if (now.unresolved || now.settled || now.trades !== before.trades || now.flows !== before.flows) throw new Error("The gap changed during registration.");
+      },
+    });
+    writeRecoveryGeneration(home, { generation: receipt.generation, approvalId: approval.approvalId, evidenceDigest: approval.evidenceDigest,
+      gapFromSec: check.lastMirrorAt, registeredAtSec: Math.floor(Date.now() / 1000) });
+    log(`${tenant}: resume admission — new book registered as generation ${receipt.generation} (receipt ${receipt.receiptDigest.slice(0, 12)}…` +
+      `${chainRead ? `; chain read through block ${chainRead.head}` : ""}); the lost book's cursors and snapshot rows are archived; the ordinary spawn path takes it from here`);
+    resumeChecks.delete(tenant);
+    return { go: true, registered: approval.approvalId, generation: receipt.generation };
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: resume admission deferred (${errorKind(e)}) — the tenant stays held and the step resumes on the next pass`);
+    return { go: false };
+  }
+}
+
+/**
+ * AN ATTESTED BOOK'S FIRST WORKER ARMS ONLY ON ITS FULL SEED.
+ *
+ * Asked by spawnChild after the ordinary seeds, for a tenant whose approval is
+ * `registered` (its new book has not had a worker yet). Registration removed
+ * the lost book's cursors, and with them the mirror's rebuilt-book guard, so
+ * the first mirror pass will publish this book's cost basis and floors as
+ * Postgres's own (ledger-resume.ts planAttestedSeed says why that made a
+ * best-effort seed unsafe). Here every row the seeds should have restored is
+ * put in and proved present, in one transaction on the book, before anything
+ * can arm; then ATTESTED_SEED_FILE records that it was, and from then on the
+ * book is its worker's own and this is never asked again.
+ *
+ * False holds the tenant this pass (no worker; its lease, home and Postgres
+ * rows as they were), and the next pass completes what is missing. Postgres
+ * is only read here: until a worker has run there is no mirror pass, so the
+ * snapshot rows it reads are the pre-images registration archived.
+ */
+async function attestedSeedReady(tenant: `0x${string}`, smartAccount: string): Promise<boolean> {
+  const home = childHome(tenant);
+  if (existsSync(path.join(home, ATTESTED_SEED_FILE))) return true;
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return true; // no shared ledger: no registration either
+  const lease = leases.get(tenant);
+  const writeRefusal = (): string | null =>
+    !lease ? "it holds no lease"
+      : lateSpawnRefusal(tenant, lease) ?? (originalSourceRefused(tenant) ? "its original book is behind a source barrier" : null);
+  const book = path.join(home, "merrymen.db");
+  if (!existsSync(book)) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: its attested book is missing before its first worker — held`);
+    return false;
+  }
+  let raw: DatabaseSync | null = null;
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    const plan = await planAttestedSeed(shared, smartAccount);
+    raw = new DatabaseSync(book);
+    const done = await completeAttestedSeed({ book: wrapSqlite(raw), account: smartAccount, plan, mayWrite: writeRefusal });
+    if (!done.ok) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: the attested book's seed is not complete (${done.why}) — held; ` +
+        "no worker arms on a book whose first mirror pass would publish it without its cost basis");
+      return false;
+    }
+    writeAttestedSeedMarker(home, { generation: readRecoveryGeneration(home)?.generation ?? null, basis: done.basis, floors: done.floors, atSec: Math.floor(Date.now() / 1000) });
+    log(`${tenant}: attested book seeded — ${done.basis} live cost basis row(s) and ${done.floors} floor(s) proved in the book before its first worker`);
+    return true;
+  } catch (e) {
+    sayTenantAlert(tenant, `[alert] ${tenant}: the attested book's seed could not be proved (${errorKind(e)}) — held; ` +
+      "no worker arms on a book whose first mirror pass would publish it without its cost basis");
+    return false;
+  } finally {
+    raw?.close();
+  }
+}
+
+/**
+ * A REGISTERED BOOK'S HOME, MADE WHAT THE OFFSET HANDOFF READS FROM US, just
+ * before the handoff reads it.
+ *
+ * The carry is normalised as it is staged (ledger-resume.ts
+ * normaliseCarriedFile says what and why), but tenants admitted by the build
+ * before that were carried as they were: registered, seeded, and refused by
+ * the handoff on the restored link with no offset, with nothing that would
+ * ever change the file. This puts them right on the next pass, on exactly
+ * the carry's terms: telegram.json alone, only as our own writers left it
+ * (this user's, one name, nobody else can write it), and an offset added
+ * only to the restored link exactly. And a home that carried no telegram.json
+ * got the same restored link from writeTelegramForChild on its first spawn,
+ * which the handoff refused the same way wherever the listener holds an
+ * offset for the bot; it is made the same. writeTelegramForChild writes
+ * `offset: 0` itself now (restoredTelegramFile), which this leaves as it is;
+ * a file a build before that restored is what is left for this to put right.
+ * (Outside a registered book's home, offsetEarlierRestoredLink gives that
+ * file its offset, and only its offset: never a mode, which is this
+ * function's alone, where nobody else can have been.)
+ *
+ * The file a build before this one carried was a copy, so whether its source
+ * had another owner or a second name is gone with it; that copy has been
+ * the handoff's to judge on its mode and contents since that build, and this
+ * asks the narrower mode and shape of it, never less.
+ *
+ * ONLY WHERE THIS PROCESS IS THE ONLY WRITER THERE HAS BEEN since the archive:
+ * the approval is `registered` (resumeAdmission said so this pass), the home's
+ * recovery generation is that book's, and the book holds no agent row, so no
+ * worker has armed in it. A worker that ran without arming writes only the
+ * shape the handoff reads, which this leaves as it is. And only with the
+ * handoff's own writer proof (`mayWrite`: the lease, no late refusal, no
+ * source barrier), asked before anything and again before each write.
+ * Anywhere else nothing is touched, and the handoff reads what is there as it
+ * always has.
+ */
+function normaliseRegisteredHome(tenant: `0x${string}`, generation: string, mayWrite: () => boolean): void {
+  const home = childHome(tenant);
+  if (!mayWrite() || readRecoveryGeneration(home)?.generation !== generation) return;
+  let book: DatabaseSync | null = null;
+  try {
+    book = new DatabaseSync(path.join(home, "merrymen.db"), { readOnly: true });
+    if (book.prepare("SELECT 1 FROM agents LIMIT 1").get()) return;
+  } catch { return; } finally { book?.close(); }
+  const changed = normaliseCarriedFile(path.join(home, "telegram.json"), mayWrite);
+  if (changed.length) log(`${tenant}: resume admission — the new home's telegram.json normalised for the offset handoff (${changed.join(", ")})`);
+}
+
+/**
+ * ANY HOME'S RESTORED LINK FROM AN EARLIER BUILD, GIVEN ITS OFFSET just before
+ * the offset handoff reads it, under the handoff's own writer proof.
+ *
+ * restoredTelegramFile writes `offset: 0` now, but only into a home with no
+ * telegram.json: one an earlier build restored with no offset is still there
+ * on the fleet volume after the deploy, and the handoff refused it
+ * (HANDOFF_OFFSET) on every pass, holding an ordinary tenant whose bot the
+ * recovery listener had answered without a worker (or, held, a hold process)
+ * for as long as the listener's row stood. normaliseRegisteredHome puts a
+ * registered book's home right; this puts every home's restored link right,
+ * the offset and nothing else, on the terms ledger-resume.ts
+ * offsetRestoredLink sets out. Any other file is left for the handoff to
+ * judge as it always has.
+ *
+ * Only where the handoff runs (a hosted fleet, the bot switched on), and so
+ * only on a file it is about to read.
+ */
+function offsetEarlierRestoredLink(tenant: `0x${string}`, mayWrite: () => boolean): void {
+  const changed = offsetRestoredLink(childHome(tenant), mayWrite);
+  if (changed.length) log(`${tenant}: telegram.json as an earlier build restored it, given the offset its restore writes now, for the offset handoff (${changed.join(", ")})`);
+}
+
+/** The approval's last step: its first worker has started. */
+async function markResumeApplied(tenant: string, approvalId: string): Promise<void> {
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    if (await moveApproval(shared, approvalId, "registered", "applied")) log(`${tenant}: resume admission applied — its first worker has started`);
+  } catch (e) {
+    log(`${tenant}: resume approval not yet marked applied (${errorKind(e)}) — its next spawn marks it`);
+  }
+}
+
+/** Tenants whose approval has not reached its new book: their blocked homes go to spawnChild for archiving. Read once per pass. */
+let resumePendingTenants: Set<string> = new Set();
+async function refreshResumePending(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) { resumePendingTenants = new Set(); return; }
+  try {
+    resumePendingTenants = await readPreRegistrationTenants(retirementMemoryStoreForTest?.shared ?? await makePgDb(url!));
+  } catch {
+    // Unreadable: no blocked home is admitted this pass. The fence stands.
+    resumePendingTenants = new Set();
+  }
+}
+
+/**
+ * MERRYMEN_RESUME_AUTO_PAPER, ONE RECONCILE PASS OF IT (ledger-resume.ts says
+ * what the safe case is and why it is the only one).
+ *
+ * Asked by reconcile with the roster's grant rows and the unexpired set,
+ * before the pass reads which blocked homes it admits. In order:
+ *
+ *  1. The watch: which grant rows changed since they were last seen
+ *     (observeGrantChanges, durable). The first pass with the variable on
+ *     only records the roster as it stands, and admits nobody. A change an
+ *     earlier attempt already approved without settling it (an insert that
+ *     committed before its connection dropped, or a settle that failed after
+ *     one: answeredGrantChanges, durable) is settled on that approval first,
+ *     whatever Phase A has made of it, and never previewed or approved again.
+ *  2. Each change still owed, in the watch's order (never tried, then the
+ *     least recently tried, then the longest owed), waits — owed, untouched
+ *     — while its grant is expired or the operator holds the tenant (the
+ *     accounting hold, or a rollout that does not admit it: under an
+ *     explicit list it must be named). A tenant something already runs for
+ *     (a worker, a spawn, a restart, a hold process) is not the gate's, and
+ *     its change is settled with nothing previewed.
+ *  3. THE CAP, before anything is read: no automatic admission while the
+ *     processes running and the approvals open would leave fewer than
+ *     AUTO_PAPER_HEADROOM of the MAX_LOCAL_CHILD_PROCESSES slots free. The
+ *     rest stay owed, and one alert says how many wait.
+ *  4. At most AUTO_PAPER_PER_PASS answers a pass: a fresh preview of that one
+ *     tenant (previewEntryFor, the operator's own reading); its verdict
+ *     (autoPaperVerdict, which approves nobody while live-trading consent is
+ *     stood down); for a tenant the gate holds, the preview recorded as a
+ *     run and printed as one; and, in the safe case only, the approval,
+ *     source `auto-paper`, through the operator's own insert
+ *     (recordResumeApproval). Anything else is said with the line an
+ *     operator approves it by, if it passed. A preview that cannot be read
+ *     is no answer: it stays owed, goes behind the others, and spends one of
+ *     AUTO_PAPER_RETRIES_PER_PASS rather than an answer. Nor is an approval
+ *     the store could not take for an outage (recordResumeApproval
+ *     `transient`): it stays owed, goes behind the others, and sits out a
+ *     growing number of its turns (autoPaperRecordWait) before it is
+ *     previewed and inserted again — an [alert] from
+ *     AUTO_PAPER_RECORD_ALERT_AFTER failures in a row.
+ *  5. The change settled, for the key that was owed, with the run (if one
+ *     was recorded) and what it came to.
+ *
+ * Every step fails closed: a watch or store that cannot be read approves
+ * nothing this pass, and a tenant whose turn fails stays owed for the next.
+ * Nothing here takes a lease, touches a home or writes a financial row; the
+ * approval goes on to resumeAdmission, under the lease, like any other.
+ */
+let autoPaperSchemaReady = false;
+/** The last "waiting for a process slot" count said, so the alert is said once per change rather than every pass. */
+let autoPaperCapSaid: number | null = null;
+/**
+ * Owed changes whose approval the store could not take for an outage, by
+ * tenant: for which grant row, how many times in a row, and how many more of
+ * its turns it sits out. Kept in memory: a restart asks again at once, which
+ * costs one preview. Forgotten once that change is no longer owed.
+ */
+const autoPaperRecordRetry = new Map<string, { key: string; failures: number; wait: number }>();
+async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; key: string }>, unexpired: ReadonlySet<string>): Promise<void> {
+  if (!resumeAutoPaperOn(process.env)) return;
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return;
+  let shared: Db;
+  let owed: OwedGrantChange[];
+  let onRecord: Map<string, { key: string; state: string; run: string }>;
+  try {
+    shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    if (!autoPaperSchemaReady) {
+      await ensureLedgerResumeSchema(shared);
+      // What the preview's `startsPaused` reads, as runResumeAdmissionControls
+      // creates it: additive DDL the arm and every mirror pass run anyway.
+      await shared.exec(CONTROL_RECEIPTS_SCHEMA);
+      await ensureTelegramSchema(shared);
+      autoPaperSchemaReady = true;
+    }
+    const seen = await observeGrantChanges(shared, roster, Date.now());
+    if (seen.baselined !== null) {
+      log(`resume auto-paper: on — ${seen.baselined} grant row(s) recorded as they stand, none of them a re-sign; from now on a tenant whose grant row changes ` +
+        `is previewed automatically, and a re-signed paper tenant in the safe case is approved by this process (docs/fleet-resume.md)`);
+      return;
+    }
+    owed = seen.owed;
+    onRecord = owed.length ? await answeredGrantChanges(shared) : new Map();
+  } catch (e) {
+    log(`[alert] resume auto-paper: the re-sign watch could not be read or recorded (${errorKind(e)}) — nothing previewed or approved this pass`);
+    return;
+  }
+  const settle = async (change: OwedGrantChange, outcome: string, run: string | null): Promise<boolean> => {
+    if (await settleGrantChange(shared, change, { outcome, run }, Date.now())) return true;
+    log(`resume auto-paper: ${change.tenant} — its grant row changed again meanwhile; still owed a preview`);
+    return false;
+  };
+  // A back-off belongs to the change it was for: one settled, or moved on by a
+  // newer re-sign, is forgotten, and a new change starts with none.
+  const owedKey = new Map(owed.map((c) => [c.tenant, c.key]));
+  for (const [t, r] of autoPaperRecordRetry) if (owedKey.get(t) !== r.key) autoPaperRecordRetry.delete(t);
+  const ready: OwedGrantChange[] = [];
+  for (const change of owed) {
+    const t = change.tenant;
+    // ANSWERED ALREADY, though the attempt that answered it never settled it:
+    // an automatic approval of it is on record since the change was seen
+    // (answeredGrantChanges says how). That approval is its answer, whatever
+    // Phase A has made of it since — refused included — so it is settled on
+    // it, needing no turn, and never previewed or approved again.
+    const done = onRecord.get(t);
+    if (done && done.key === change.key) {
+      try {
+        if (await settle(change, `auto-approved: recorded by an earlier attempt that did not settle it (now ${done.state})`, done.run)) {
+          log(`resume auto-paper: ${t} — an earlier attempt's automatic approval of it is on record (now ${done.state}), though that attempt never settled it: ` +
+            "its re-sign is settled on it, and not previewed or approved again");
+        }
+      } catch (e) { sayTenantAlert(t, `[alert] ${t}: resume auto-paper could not settle its re-sign (${errorKind(e)}) — still owed`); }
+      continue;
+    }
+    // Owed, untouched, until its turn: an expired grant is answered by the
+    // re-sign that comes next, a held tenant by the rollout that admits it.
+    if (!unexpired.has(t) || operatorHeld(t)) continue;
+    if (children.has(t) || spawning.has(t) || holders.has(t) || restartPending.has(t) || exitingChildren.has(t) || retiringExpired.has(t)) {
+      try { await settle(change, "not-held: a worker, spawn, restart or hold process runs for it", null); }
+      catch (e) { sayTenantAlert(t, `[alert] ${t}: resume auto-paper could not settle its re-sign (${errorKind(e)}) — still owed`); }
+      continue;
+    }
+    // Owed, untouched, for the turns it sits out after an approval the store
+    // could not take (below): those turns go to the changes behind it.
+    const retry = autoPaperRecordRetry.get(t);
+    if (retry && retry.wait > 0) { retry.wait -= 1; continue; }
+    ready.push(change);
+  }
+  if (!ready.length) { autoPaperCapSaid = null; return; }
+  let room: number;
+  try { room = autoPaperRoom({ running: localChildProcessCount(), open: await countOpenApprovals(shared), cap: MAX_LOCAL_CHILD_PROCESSES }); }
+  catch (e) {
+    log(`[alert] resume auto-paper: open approvals could not be counted (${errorKind(e)}) — nothing previewed or approved this pass`);
+    return;
+  }
+  if (room <= 0) {
+    if (autoPaperCapSaid !== ready.length) {
+      log(`[alert] resume auto-paper: ${ready.length} re-signed tenant(s) wait for a process slot — workers, holds and open approvals leave fewer than ` +
+        `${AUTO_PAPER_HEADROOM} of the ${MAX_LOCAL_CHILD_PROCESSES} free; each is previewed and approved once one frees (never raise the cap to fit)`);
+    }
+    autoPaperCapSaid = ready.length;
+    return;
+  }
+  autoPaperCapSaid = null;
+  // TURNS. `ready` is in the watch's order: never tried first, then the least
+  // recently tried, then the longest owed (observeGrantChanges). A pass
+  // answers at most AUTO_PAPER_PER_PASS (within the room), and spends at most
+  // AUTO_PAPER_RETRIES_PER_PASS more previews on changes that cannot be read:
+  // a preview that fails uses a retry, never an answer, so tenants whose
+  // reads never succeed cannot take the turns of the ones behind them, and a
+  // store failing for everyone costs a pass a bounded few reads.
+  const answers = Math.min(AUTO_PAPER_PER_PASS, room);
+  let answered = 0, failed = 0;
+  const stillOwed = async (change: OwedGrantChange, line: string): Promise<void> => {
+    failed += 1;
+    sayTenantAlert(change.tenant, line);
+    // Behind every change not tried since. A write that fails here loses only
+    // that place in the queue; the change is owed either way.
+    try { await noteGrantAttempt(shared, change, Date.now()); } catch { /* still owed */ }
+  };
+  const recordRun = async (entry: PreviewEntry, at: number): Promise<string> => {
+    const run = await recordPreviewRun(shared, [entry], at);
+    log(`[resume-preview] run ${run}: automatic, for ${entry.tenant}, whose grant row changed (${RESUME_AUTO_PAPER_ENV}) — ` +
+      `${entry.pass ? "it passes every Postgres precondition" : "it does not pass"}`);
+    log(previewLine(entry));
+    return run;
+  };
+  for (const change of ready) {
+    if (stopping) return;
+    if (answered >= answers || answered + failed >= answers + AUTO_PAPER_RETRIES_PER_PASS) break;
+    const tenant = change.tenant as `0x${string}`;
+    try {
+      const at = Date.now();
+      const { entry, unreadable } = await previewEntryFor(shared, tenant, Math.floor(at / 1000));
+      // AN OUTAGE IS NOT AN ANSWER. A read that threw, settings that could not
+      // be read, or a refusal a failed read caused (controls, the anchor, the
+      // risk period) would settle the re-sign as "previewed, not approved" for
+      // good; it stays owed, and a later pass reads it again.
+      if (unreadable) {
+        await stillOwed(change, `[alert] ${tenant}: resume auto-paper could not read it (${entry.refusals.join("; ")}) — its re-sign is still owed a preview, tried again on a later pass`);
+        continue;
+      }
+      // The verdict before any run is recorded: a tenant the gate does not
+      // hold (above all a brand-new signup) records no run, so automatic runs
+      // are only ever the held tenants' and do not crowd the operator's own
+      // previews out of the runs an approval is looked up in.
+      const verdict = await autoPaperVerdict(shared, entry, { consentEnforced: liveConsentEnforced() });
+      if (verdict.kind === "not-held") {
+        // A BOOK ON THE VOLUME, UNBLOCKED, WITH HISTORY BEHIND IT is the
+        // ordinary path's, which admits it if the book proves continuous —
+        // but the gate may refuse it instead (it writes no barrier when it
+        // does, so the book still reads `present`), and then it is held like
+        // any other. The operator is told how to approve it then. Not with
+        // this preview's digest: the ordinary path's own attempt this pass
+        // changes what the evidence binds (it arms the owner's controls into
+        // the home before the gate answers), so that digest would only be
+        // refused as changed evidence. A preview taken after the gate has
+        // answered is the one to approve.
+        const present = entry.book === "present" && entry.evidence !== null && evidenceHasHistory(entry.evidence);
+        log(`resume auto-paper: ${tenant} re-signed; the continuity gate does not hold it (${verdict.why}) — nothing approved` +
+          (present ? `. If the gate refuses its book instead (its own [alert] names the book as unconfirmed or unreadable), preview it again ` +
+            `(${RESUME_PREVIEW_ENV}=${tenant}) and approve the digest that preview prints` : ""));
+        await settle(change, `not-held: ${verdict.why}`, null);
+        answered += 1;
+        continue;
+      }
+      const run = await recordRun(entry, at);
+      answered += 1;
+      if (verdict.kind === "manual") {
+        // HELD ON A CHAIN REFUSAL NO ADMISSION HAS ANSWERED: never offered an
+        // approval as a way to trade. One reads the chain again (the tenant is
+        // chain:required) and is refused while Postgres lacks what the chain
+        // showed; the line says what is done instead (CHAIN_HELD_NEXT).
+        log(`resume auto-paper: ${tenant} re-signed and previewed in run ${run.slice(0, 12)}…, and is not approved automatically — ${verdict.why.join("; ")}` +
+          (verdict.chainHeld ? `. Held on a chain refusal: ${CHAIN_HELD_NEXT}`
+            : entry.pass && entry.digest ? `. If it should trade, approve it by hand: ${RESUME_APPROVE_ENV}=${tenant}:${entry.digest}` : ""));
+        await settle(change, `previewed: ${verdict.why.join("; ")}`, run);
+        continue;
+      }
+      // THE SAFE CASE. The operator's own insert, with this process as the
+      // approver: the same uniqueness, the same one-open-per-tenant, and from
+      // here the same Phase A that re-derives the evidence and refuses on any
+      // change. The level is the rollout's, as for every spawn.
+      const recorded = await recordResumeApproval(shared, { entry, run, at, nowMs: Date.now(), source: AUTO_PAPER_SOURCE }, log);
+      if (!recorded.recorded && recorded.transient) {
+        // AN OUTAGE IS NOT AN ANSWER HERE EITHER. The insert failed because
+        // the store could not be reached or gave the statement up, which says
+        // nothing about the tenant: settled now, no approval would exist and
+        // nothing would ask again until its owner happened to sign once more.
+        // It stays owed, goes behind every change not tried since, and sits
+        // out a growing number of its turns; then a fresh preview and the
+        // insert again. An insert that did commit before its connection
+        // dropped left an approval that goes on to Phase A like any other,
+        // and the change is settled on it at the start of a later pass
+        // (answeredGrantChanges), before any turn, whatever Phase A made of
+        // it: previewed again after Phase A refused it, the tenant would be
+        // approved a second time with no new re-sign.
+        const had = autoPaperRecordRetry.get(tenant);
+        const failures = had?.key === change.key ? had.failures + 1 : 1, wait = autoPaperRecordWait(failures);
+        autoPaperRecordRetry.set(tenant, { key: change.key, failures, wait });
+        try { await noteGrantAttempt(shared, change, Date.now()); } catch { /* still owed */ }
+        const next = wait ? `previewed and tried again after it sits out ${wait} more of its turn(s)` : "previewed and tried again on the next pass";
+        if (failures >= AUTO_PAPER_RECORD_ALERT_AFTER) {
+          sayTenantAlert(tenant, `[alert] ${tenant}: resume auto-paper could not record its approval ${AUTO_PAPER_RECORD_ALERT_AFTER} or more times in a row — ` +
+            `${recorded.why}: an outage, not a refusal — its re-sign is still owed, tried again with back-off`);
+        } else log(`resume auto-paper: ${tenant} could not record its approval — ${recorded.why}: an outage, not a refusal — its re-sign is still owed, ${next}`);
+        continue;
+      }
+      if (!recorded.recorded) {
+        log(`resume auto-paper: ${tenant} not approved automatically — ${recorded.why}`);
+        await settle(change, `not-recorded: ${recorded.why}`, run);
+        continue;
+      }
+      log(`resume auto-paper: ${tenant} self-approved (a re-signed paper tenant that could not arm live and holds nothing; evidence ` +
+        `${entry.digest!.slice(0, 12)}…) — its admission starts this pass, at ${childAdmissionLevel(tenant)}, the level ${FLEET_ROLLOUT_ENV} gives it`);
+      await settle(change, "auto-approved", run);
+    } catch (e) {
+      // Anything that threw on the way (a verdict read that failed — schema
+      // drift included — or a write the store refused) leaves the change owed.
+      await stillOwed(change, `[alert] ${tenant}: resume auto-paper deferred (${errorKind(e)}) — its re-sign is still owed a preview, tried again on a later pass`);
+    }
+  }
+}
+
+/**
+ * APPLY THE OWNER'S RECORDED /pause AND /kill FOR ONE TENANT, under its lease,
+ * before its key is written (recovery-reply-arm.ts says what, from where, and
+ * why exactly once). True: nothing recorded stops this spawn. False: the
+ * tenant is held this pass — a malformed journal, a /kill still inside its
+ * /confirm window, a recorded kill not yet carried out, or one that has just
+ * removed the stored grant — and the next pass asks again.
+ *
+ * A RECORDED KILL IS CARRIED OUT THE WAY A CHILD'S IS. A kill request is left
+ * in the home and honourKill runs at once, so the stored grant is removed
+ * only if it was stored at or before the confirmed kill (honourKillRequest
+ * reads the store's own updated_at), and a grant signed after it is kept and
+ * paused (recovery-reply-arm.ts, decision 7). The request names no grant
+ * identity, only the journal row it came from, so when it is superseded it
+ * latches nothing: the owner's newer grant still arms once they say /resume.
+ *
+ * Self-hosted and any orchestrator without a shared database: nothing was
+ * recorded anywhere this could read, and the spawn goes on as before.
+ */
+async function armControlsForChild(tenant: `0x${string}`, grant: StoredGrant, lease: TenantLease): Promise<boolean> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return true;
+  const owned = () => !stopping && leases.get(tenant) === lease && lease.healthy() && !children.has(tenant);
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    const home = childHome(tenant);
+    const outcome = await armOwnerControls({
+      scope: { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId },
+      home, shared, mayWrite: owned, log,
+      forwardKill: async (killedAtSec, tag) => {
+        if (!owned()) return "failed";
+        mkdirSync(home, { recursive: true, mode: 0o700 });
+        writeKillRequest(home, { smartAccount: grant.smartAccount, serialized: `recorded-kill:${tag}` }, killedAtSec);
+        return (await honourKill(tenant, Math.floor(Date.now() / 1000))).outcome;
+      },
+    });
+    if (outcome.ok) return true;
+    sayTenantAlert(tenant, `${outcome.hold === "malformed" ? "[alert] " : ""}${tenant}: held by its owner's recorded controls (${outcome.hold}: ${outcome.why}) — not spawning`);
+    return false;
+  } catch (e) {
+    // By its class alone: an outage's code names the connection it failed on.
+    const kind = e instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(e.name) ? e.name : "Error";
+    sayTenantAlert(tenant, `[alert] ${tenant}: owner controls could not be applied (${kind}) — retaining its home without starting a worker`);
+    return false;
+  }
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   if (retiringExpired.has(tenant)) return;
   if (removedLedgerPending.has(tenant)) return;
   // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
   // Checking `children` is not enough: this function awaits a dozen times
   // before the child exists, and a second caller arriving in that window saw
   // nothing running. See `spawning`. The finally releases it whichever way
-  // this function leaves — every refusal below returns, and a throw is as
-  // final as a return.
+  // this function leaves — every refusal below returns, and a throw is caught
+  // and said at the bottom, as final as a return.
   if (spawning.has(tenant)) {
     log(`${tenant}: already being spawned — not starting a second`);
     return;
@@ -2851,6 +4165,18 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       log(`${tenant}: signed grant expired — source status checked without writing a key or starting a worker`);
       return;
     }
+    // A TENANT WITH HISTORY AND NO SURVIVING BOOK, under an operator's
+    // approval (ledger-resume.ts): its home archived and a new empty book
+    // registered BEFORE anything below can write a key or open a book. With
+    // no open approval this changes nothing and the ordinary gates decide.
+    const resume = await resumeAdmission(tenant, lease, storedGrant);
+    if (!resume.go) return;
+    // THE OWNER'S RECORDED STOPS, BEFORE THE KEY. A /pause or a confirmed
+    // /kill recorded while this tenant was held is applied here, once
+    // (recovery-reply-arm.ts): a kill is carried out against the store before
+    // grant.json could be written, and a pause is in the home before the
+    // worker's first tick reads it. A hold here is this tenant's alone.
+    if (storedGrant && !(await armControlsForChild(tenant, storedGrant, lease))) return;
     const grantForChild = await writeGrantForChild(tenant);
     if (!grantForChild) {
       log(`${tenant}: no usable signed grant in the store — not spawning`);
@@ -2920,7 +4246,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       // which is what returning here used to do, for days: HOLD the tenant
       // instead. Trading stays off, a hold process answers the bot, the
       // restore is tried again on a backoff, and the owner is told once.
-      await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour);
+      await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour, resume.registered ? resume.generation : undefined);
       return;
     } else {
       // Not a practice book (live, or the flag unset): nothing to restart
@@ -2930,28 +4256,71 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
     // out of the child's sqlite. Same placement and same reason as the anchor.
     await seedBasisForChild(tenant, smartAccount);
+    // AN ATTESTED BOOK'S FIRST WORKER, though, only on the whole seed: its
+    // first mirror pass publishes the book's basis and floors as Postgres's.
+    if (resume.registered && !(await attestedSeedReady(tenant, smartAccount))) return;
     // AND TODAY'S ENERGY — the counters, the notice stamp and the last good
     // balance reading the redeploy just emptied. Same placement, same reason.
     await seedEnergyForChild(tenant, smartAccount);
+    // AND THE TRAILING DAY'S SPEND, OPS AND TRANSFERS, which the caps are
+    // judged against. A failed seed still arms, held at no headroom; only a
+    // seed that could neither run nor leave its marker keeps the worker off.
+    if (!(await seedBudgetForChild(tenant, smartAccount))) return;
     // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
     // child is already polling would be read from a file the child has by then
     // replaced with a fresh, unlinked default.
+    //
+    // A REFUSAL HERE HOLDS THIS TENANT, NOT THE FLEET. The privacy proof and the
+    // offset handoff refuse by throwing, and so do their reads when Postgres
+    // will not answer — the pool itself (makePgDb) opens lazily and rejects
+    // only when it cannot be built at all, such as a driver that will not
+    // load. Uncaught, that rejected through reconcile() and out of the main
+    // loop, and nothing handles an unhandled rejection: one tenant's refusal
+    // exited the whole supervisor, every other tenant's worker, hold and reply
+    // with it, and again on every restart while its state stood. Caught, it is
+    // what any other refusal here is: no worker, the lease and home kept, and
+    // the next pass asks again. Said by its kind and not its text, which can
+    // carry a connection string or a private value (errorKind), and once per
+    // cause rather than every pass (sayTenantAlert).
     if (process.env.DATABASE_URL) {
-      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-      const dek = retirementMemoryStoreForTest?.dek ?? tgGroupsDek();
-      if (!dek || !await recoveryReplyPrivacyAllowsFork({
-        tenant, home: childHome(tenant), shared, dek,
-        mayRead: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-      })) return;
+      try {
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+        const dek = retirementMemoryStoreForTest?.dek ?? tgGroupsDek();
+        if (!dek || !await recoveryReplyPrivacyAllowsFork({
+          tenant, home: childHome(tenant), shared, dek,
+          mayRead: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
+        })) return;
+      } catch (e) {
+        sayTenantAlert(tenant, `[alert] ${tenant}: recovery privacy proof unavailable or refused (${errorKind(e)}) — retaining its home without starting a worker`);
+        return;
+      }
     }
-    await writeTelegramForChild(tenant);
+    // The shared database is the same test seam the gates around this read
+    // through; in production it is unset, and this reads Postgres as before.
+    await writeTelegramForChild(tenant, retirementMemoryStoreForTest?.shared);
+    /** The handoff's writer proof, for the handoff and for what puts its file right just before it. */
+    const handoffWriter = () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant));
+    // A REGISTERED BOOK'S HOME, before the handoff reads it, under the
+    // handoff's own writer proof (normaliseRegisteredHome).
+    if (resume.registered && resume.generation) normaliseRegisteredHome(tenant, resume.generation, handoffWriter);
     if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
-      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-      await handoffRecoveryReplyOffset({
-        tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
-        home: childHome(tenant), shared,
-        mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-      });
+      try {
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+        // AND ANY HOME'S RESTORED LINK AN EARLIER BUILD WROTE WITH NO OFFSET,
+        // registered or not, just before the handoff reads it
+        // (offsetEarlierRestoredLink). Never throws.
+        offsetEarlierRestoredLink(tenant, handoffWriter);
+        await handoffRecoveryReplyOffset({
+          tenant, smartAccount: grantForChild.grant.smartAccount, chainId: grantForChild.grant.chainId, token: settings.telegramBotToken,
+          home: childHome(tenant), shared,
+          mayWrite: handoffWriter,
+        });
+      } catch (e) {
+        // The handoff is what puts the child's poll at or past what the
+        // recovery listener already answered. Without it, nothing polls the bot.
+        sayTenantAlert(tenant, `[alert] ${tenant}: recovery reply offset not handed over (${errorKind(e)}) — retaining its home without starting a worker`);
+        return;
+      }
     }
     // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
     // restoreTgGroupsForChild.
@@ -3006,7 +4375,20 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
         process.execPath,
         [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
         // Groups held off when the restore above could not put them back.
-        { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
+        //
+        // AN IPC CHANNEL, for one thing only: the child's Fomo questions
+        // (fomo/broker.ts). A child holds neither the provider key nor the
+        // shared database, so it asks this process, which answers AS THE TENANT
+        // IT SPAWNED THIS CHILD FOR — the channel itself is the identity, and
+        // nothing the child sends can name another tenant. stdin stays closed
+        // and stdout/stderr stay piped to the log exactly as before. With the
+        // Fomo pass off there is nobody to answer, and no channel: the child
+        // then says "unavailable" at once instead of waiting out a timeout.
+        {
+          cwd: ROOT,
+          env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }),
+          stdio: fomoBootNow().off ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "ipc"],
+        },
       );
     } catch (error) {
       noteSpawnPressure(error);
@@ -3016,6 +4398,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     }
     const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
     children.set(tenant, child);
+    // An attested-gap admission's last step: its first worker is running.
+    if (resume.registered) void markResumeApplied(tenant, resume.registered);
     let stopped = false;
     const childStopped = (reason: string, restartReason: string, stoodDownReason: string): void => {
       // A failed spawn emits `error`, and some ChildProcess implementations
@@ -3045,6 +4429,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       childStopped(`worker spawn failed (${spawnErrorCode(error)}): ${error.message}`, `spawn ${spawnErrorCode(error)}`, `failed to spawn (${spawnErrorCode(error)})`);
     });
     proc.on("exit", (code, signal) => childStopped(`exited (${code})`, `exit ${code}`, `exited with ${code ?? signal}`));
+    // Answer its Fomo questions on that channel, until it exits. Before the
+    // runtime is built the pass attaches it later (startFomoPass).
+    attachFomoBroker(tenant, proc);
     const tag = `[${tenant.slice(0, 8)}]`;
     const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
       stream?.on("data", (c: Buffer) =>
@@ -3057,6 +4444,18 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     pipe(proc.stderr, process.stderr);
 
     log(`${tenant} spawn requested (pid ${proc.pid ?? "pending"}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+    tenantAlertSaid.delete(tenant);
+  } catch (e) {
+    // AND ANY OTHER THROW IN PREPARATION, the same way as the recovery gates
+    // above: this tenant is held, not the fleet. reconcile() awaits this, and
+    // so does handHoldBack; the restart timer starts it with `void`, where a
+    // rejection is unhandled outright. Either way it exited the supervisor.
+    // What can throw here runs before spawn(), whose own throw is caught
+    // there, so no worker started: the lease and home are kept, and the next
+    // pass prepares it again. Said by its kind (errorKind) and not its text,
+    // which can carry a private value: a bug that throws for every tenant is
+    // still told from a disk or a driver that does.
+    sayTenantAlert(tenant, `[alert] ${tenant}: worker preparation failed (${errorKind(e)}) — retaining its home without starting a worker; the next pass tries again`);
   } finally {
     spawning.delete(tenant);
   }
@@ -3272,6 +4671,13 @@ function holderBotReady(settings: MerrymenSettings | null): boolean {
  * reconcile's early retry later in this pass does not run the restore and the
  * reset again for it; and if the answer could not be had just then, the first
  * retry comes at the quick pace rather than after the backoff.
+ *
+ * `registered` is the generation of a registered attested book this home
+ * holds, when spawnChild has one: its telegram.json is normalised for the
+ * handoff here too, as spawnChild's is (normaliseRegisteredHome). And, held
+ * or not, registered or not, a restored link an earlier build wrote with no
+ * offset is given its offset just before the handoff, as spawnChild's is
+ * (offsetEarlierRestoredLink).
  */
 async function spawnHolder(
   tenant: `0x${string}`,
@@ -3280,21 +4686,39 @@ async function spawnHolder(
   settings: MerrymenSettings | null,
   lease: TenantLease,
   honour: HeldHonour | null,
+  registered?: string,
 ): Promise<void> {
-  if (accountingTenantHeld(tenant)) return;
+  if (operatorHeld(tenant)) return;
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
-  await writeTelegramForChild(tenant);
+  // Through the same test seam as spawnChild's; unset in production.
+  await writeTelegramForChild(tenant, retirementMemoryStoreForTest?.shared);
+  /** The handoff's writer proof, as spawnChild's is. */
+  const handoffWriter = () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant));
+  if (registered) normaliseRegisteredHome(tenant, registered, handoffWriter);
   if (process.env.DATABASE_URL && settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string") {
-    const grant = await getGrantStore().get(tenant);
-    if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
-    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
-    await handoffRecoveryReplyOffset({
-      tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
-      home: childHome(tenant), shared,
-      mayWrite: () => lease.healthy() && lateSpawnRefusal(tenant, lease) === null && !ledgerSourceBlocked(childHome(tenant)),
-    });
+    // Refused as spawnChild's handoff is (see there), and for the same reason:
+    // a throw here rejected through reconcile() and took the supervisor down.
+    // Returned before `holders`, as the refusals beside it are: recorded as held
+    // with no process, a later refresh would start one with no handoff at all.
+    // So no hold process and no worker; the next pass prepares the hold again.
+    try {
+      const grant = await getGrantStore().get(tenant);
+      if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
+      const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
+      // An earlier build's restored link, given its offset just before the
+      // handoff reads it, as spawnChild's is (offsetEarlierRestoredLink).
+      offsetEarlierRestoredLink(tenant, handoffWriter);
+      await handoffRecoveryReplyOffset({
+        tenant, smartAccount, chainId: grant.chainId, token: settings.telegramBotToken,
+        home: childHome(tenant), shared,
+        mayWrite: handoffWriter,
+      });
+    } catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: recovery reply offset not handed over (${errorKind(e)}) — trading stays held, with no hold process to answer its bot`);
+      return;
+    }
   }
   // THE LAST AWAIT IS ABOVE THIS LINE: asked again for the same reasons as
   // spawnChild's, and one more. A tenant already held is not held twice.
@@ -3322,6 +4746,7 @@ async function spawnHolder(
   // reset that could not be decided is asked about again soon.
   scheduleHoldRetry(held, honour?.transient ? UNCLASSIFIED_BLOCK : restoreBlockClass(reason));
   holders.set(tenant, held);
+  tenantAlertSaid.delete(tenant);
   noteHold(tenant, reason, cls, resettable);
   if (!holderBotReady(settings)) {
     log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${Math.round((held.nextRetryAt - Date.now()) / 1000)}s`);
@@ -3545,7 +4970,7 @@ function scheduleHoldRetry(held: Holder, cls: string): void {
  * refuse, which would leave the bot unanswered until the next pass.
  */
 function holdMayLeave(tenant: `0x${string}`): boolean {
-  if (accountingTenantHeld(tenant)) return false;
+  if (operatorHeld(tenant)) return false;
   const lease = leases.get(tenant);
   return !stopping && !haltRequested() && !retiringExpired.has(tenant) && !!lease && lease.healthy() && !killRequested(childHome(tenant));
 }
@@ -3900,8 +5325,20 @@ function envTickSeconds(): number {
  * the handler returned on an entry that was not its own, it still scheduled a
  * restart here, and that restart was refused only because `releaseLease`
  * happened to win the race against the handler's 1s timer.
+ *
+ * `hardAfterMs` null is the drain's (drainFleet): SIGTERM and no SIGKILL of
+ * its own; the drain sends SIGKILL itself to whatever is still running when
+ * its wait ends. What the drain needs is one clock for every process it
+ * waits on, room for a worker to drain itself (index.ts, on SIGTERM: nothing
+ * new starts, the trade already out gets at most DRAIN_INTENT_CHAIN_MS, the
+ * ledger is closed) and room for one that is stuck or ignores the signal.
+ * Anywhere else the three seconds stand and cut that drain short: an intent
+ * in hand then rests on its pre-broadcast 'submitted' row and the in-flight
+ * reconcile at the next arm, as after any crash. The process is still
+ * tracked in `exitingChildren` until its exit is seen, which is what the
+ * drain waits on.
  */
-function killChild(tenant: string): void {
+function killChild(tenant: string, hardAfterMs: number | null = 3_000): void {
   const child = children.get(tenant);
   if (!child) return;
   trackExitingChild(tenant, child.proc);
@@ -3912,13 +5349,14 @@ function killChild(tenant: string): void {
     log(`${tenant}: child SIGTERM failed — ${error instanceof Error ? error.message : String(error)}; retrying SIGKILL`);
     try { child.proc.kill("SIGKILL"); } catch { /* retried below */ }
   }
+  if (hardAfterMs === null) return;
   setTimeout(() => {
     try {
       child.proc.kill("SIGKILL");
     } catch {
       /* already gone */
     }
-  }, 3_000);
+  }, hardAfterMs);
 }
 
 let retirementMirrorForTest: ((tenant: string) => Promise<boolean>) | null = null;
@@ -3932,6 +5370,7 @@ export function setRetirementMirrorForTest(fn: ((tenant: string) => Promise<bool
 /** Real sealed-memory retirement tests use SQLite without reaching production. */
 export function setRetirementMemoryStoreForTest(store: typeof retirementMemoryStoreForTest): void {
   retirementMemoryStoreForTest = store;
+  resumeApprovalSchemaReady = false;
 }
 
 /** Save the writer's final groups, or only its forget journal when its groups are held. */
@@ -3979,55 +5418,77 @@ async function mirrorRetiredMemory(
 
 /** A stopped worker's ledger and memory must be durable before its expiry barrier can leave. */
 async function mirrorRetiredWorker(tenant: string, lease: TenantLease, mirrorLedger: boolean, held: boolean): Promise<boolean> {
-  if (retirementMirrorForTest && mirrorLedger) return retirementMirrorForTest(tenant);
+  return (await retiredWorkerPass(tenant, lease, mirrorLedger, held)) === "saved";
+}
+
+/**
+ * ONE PASS OF mirrorRetiredWorker, saying why it did not save: "more" when the
+ * ledger has another source batch to copy (the memory is saved only after the
+ * last), "retained" when its barrier stays. Retirement asks again on the next
+ * reconcile pass; the drain's final pass asks again at once, while its budget
+ * allows (drainFinalPass), and is the only caller with `drainPass`.
+ */
+async function retiredWorkerPass(
+  tenant: string, lease: TenantLease, mirrorLedger: boolean, held: boolean, drainPass = false,
+): Promise<"saved" | "more" | "retained"> {
+  if (retirementMirrorForTest && mirrorLedger) return (await retirementMirrorForTest(tenant)) ? "saved" : "retained";
   const file = path.join(childHome(tenant), "merrymen.db");
   const url = process.env.DATABASE_URL;
   // A file-only deployment keeps this home as its ledger. There is no shared
   // destination to copy to, and expiry never deletes the home.
-  if (!url && !retirementMemoryStoreForTest) return true;
+  if (!url && !retirementMemoryStoreForTest) return "saved";
   const handle = mirrorLedger && existsSync(file) ? openChildLedger(childHome(tenant)) : null;
   let shared: Db | null = null;
   const dek = retirementMemoryStoreForTest ? retirementMemoryStoreForTest.dek : tgGroupsDek();
   const dialect = retirementMemoryStoreForTest?.dialect ?? "postgres";
+  // Whose final pass the log lines name: the drain's runs for every worker.
+  const whose = drainPass ? "drained worker's" : "expired worker's";
   try {
     shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
-    if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+    if (leases.get(tenant) !== lease || !lease.healthy()) return "retained";
     if (ledgerSourceBlocked(childHome(tenant)) || (mirrorLedger && !handle)) {
       if (mirrorLedger && !existsSync(file)) blockMissingLedgerSource(tenant);
       // Missing financial SQLite can also mean missing chat_turns. Keep the
       // protected DM snapshot and honour only authenticated forget journals.
       await mirrorRetiredMemory(tenant, lease, shared, dek, dialect, true);
       log(`[alert] ${tenant}: final trading source unconfirmed — memory snapshots retained; keeping its lease and home`);
-      return false;
+      return "retained";
     }
     if (handle) {
-      await applyLedgerSchema(shared);
-      await shared.exec(translateSchema(MIRROR_STATE_DDL));
-      try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
-      if (leases.get(tenant) !== lease || !lease.healthy()) return false;
+      // ONCE PER DRAIN, not once per home: the shared schema is the same for
+      // every tenant, and applying it is a few dozen statements, each a round
+      // trip to Postgres — over a fleet of homes, seconds of a budget the
+      // final pass is short of. Retirement still applies it every time.
+      if (!drainPass || !drainLedgerSchemaReady) {
+        await applyLedgerSchema(shared);
+        await shared.exec(translateSchema(MIRROR_STATE_DDL));
+        try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
+        if (drainPass) drainLedgerSchemaReady = true;
+      }
+      if (leases.get(tenant) !== lease || !lease.healthy()) return "retained";
       const r = await mirrorGuardedLedger(tenant, handle.db, shared, childHome(tenant),
-        () => leases.get(tenant) === lease && lease.healthy());
+        () => leases.get(tenant) === lease && lease.healthy(), drainPass);
       if (r.failed) {
-        log(`[alert] ${tenant}: expired worker's final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
-        return false;
+        log(`[alert] ${tenant}: ${whose} final mirror stalled — ${Object.entries(r.failed).map(([table, why]) => `${table}: ${why}`).join(" | ")}; retaining its lease and home`);
+        return "retained";
       }
       if (r.hasMore) {
-        log(`${tenant}: expired worker's final mirror has another source batch; retaining its lease for the next pass`);
-        return false;
+        log(`${tenant}: ${whose} final mirror has another source batch; retaining its lease for the next pass`);
+        return "more";
       }
       const counts = mirrorCountsLine(tenant, r);
-      if (counts) log(`${counts} (expired worker's final pass)`);
+      if (counts) log(`${counts} (${whose} final pass)`);
     }
     const saved = await mirrorRetiredMemory(tenant, lease, shared, dek, dialect, held);
     if (!saved) log(`[alert] ${tenant}: stopped worker's final memory save incomplete; retaining its lease and home`);
-    return saved;
+    return saved ? "saved" : "retained";
   } catch (error) {
     if (shared && leases.get(tenant) === lease && lease.healthy()) {
       try { await mirrorRetiredMemory(tenant, lease, shared, dek, dialect, true); }
       catch { /* source and privacy retry barriers remain retained */ }
     }
-    log(`[alert] ${tenant}: expired worker's final mirror failed — ${error instanceof Error ? error.message : String(error)}; retaining its lease and home`);
-    return false;
+    log(`[alert] ${tenant}: ${whose} final mirror failed — ${error instanceof Error ? error.message : String(error)}; retaining its lease and home`);
+    return "retained";
   } finally {
     handle?.close();
   }
@@ -4060,6 +5521,13 @@ async function retireExpiredGrants(
     // Cold inactive tenants have no process or lease, but can still retain an
     // obsolete signing-key copy on the mounted volume.
     await scrubInactiveGrantForChild(lc, nowSec);
+    // OUT OF THE ROLLOUT (fleet-rollout.ts): that scrub, and nothing more. It
+    // only takes authority away, needs no lease or process, and leaves the
+    // book and everything else in the home alone; an expired key's copy
+    // should not sit on the volume, and in its backups, for as long as the
+    // tenant is held. What follows stops a process, mirrors its book under the
+    // lease and then lets the lease go: that waits for the pass that admits it.
+    if (rolloutHeld(lc)) continue;
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.
@@ -4213,6 +5681,14 @@ function childHomeTenants(): `0x${string}`[] {
  * Every child home holding a pending request, whether or not its child is
  * running. Read from the disk rather than the children map, so a kill left
  * by a child that has since crashed is not missed.
+ *
+ * WHATEVER THE ROLLOUT SAYS (fleet-rollout.ts). A kill only takes authority
+ * away, and it is the owner's: a tenant the operator has not admitted is
+ * still one its owner may revoke, as a DELETE /api/grants already does under
+ * any scope. Waiting for admission would leave a revoked grant stored, and
+ * unconfirmed, for as long as the tenant is held, behind a request that lives
+ * only in a home a redeploy may discard (kill-request.ts). The removed-agent
+ * sweep that follows keeps the original book, as it does for any revoke.
  */
 function pendingKillTenants(): `0x${string}`[] {
   return childHomeTenants().filter((n) => killRequested(childHome(n)));
@@ -4234,6 +5710,294 @@ export async function honourPendingKills(): Promise<void> {
   }
 }
 
+/**
+ * THE beforeChildren HOOKS: what the drain runs once `stopping` is set and
+ * before any child is signalled (fleet-drain.ts, step 2). For work beside the
+ * children that has to stop before they do — a pass still feeding them, or a
+ * sidecar answering the bots they are about to hand back. Each runs once, all
+ * of them started together, so a hook that hangs never keeps another from
+ * running; one that throws is said and the drain goes on without it; together
+ * they have DRAIN_LIMITS.hooksMs.
+ */
+const drainBeforeChildren: DrainHook[] = [];
+export function onDrainBeforeChildren(name: string, run: DrainHook["run"]): void {
+  drainBeforeChildren.push({ name, run });
+}
+
+/** What the drain wrote down about one home before it signalled anything (fleet-drain.ts, step 1). */
+interface DrainHome {
+  tenant: string;
+  /** The lease it ran under. Any other by the final pass, or none, speaks for nobody here. */
+  lease: TenantLease | null;
+  /** A worker ran in it: its ledger is a source the final pass copies. */
+  wasChild: boolean;
+  /** A hold process ran in it: its ledger is never copied, and its memory is forget-only. */
+  wasHolder: boolean;
+}
+
+/**
+ * EVERY HOME WITH A PROCESS IN IT, read before any is signalled: the maps
+ * empty as processes exit, and the final pass needs what each home WAS. A
+ * stood-down hold is not one of them: its grant is gone or its lease was
+ * lost, and the mirror does not speak for it either (mirrorLedgers). Nor is
+ * an expired grant still retiring: reconcile carries its final pass, and a
+ * restart arms nothing for it.
+ */
+function drainHomes(): DrainHome[] {
+  const homes: DrainHome[] = [];
+  for (const tenant of children.keys()) homes.push({ tenant, lease: leases.get(tenant) ?? null, wasChild: true, wasHolder: false });
+  for (const [tenant, held] of holders) {
+    if (held.stoodDown) continue;
+    homes.push({ tenant, lease: leases.get(tenant) ?? null, wasChild: false, wasHolder: true });
+  }
+  return homes;
+}
+
+/**
+ * SIGTERM to every child and hold process, or SIGKILL to what is still
+ * running; how many were signalled.
+ *
+ * A child goes through killChild with no SIGKILL timer: its exit is still
+ * tracked (exitingChildren), and the drain decides when SIGKILL is due. A hold
+ * process another path already told to stop (`leaving`) has its own SIGKILL
+ * due within seconds, and holds nothing but a bot: it is finished now, as the
+ * stop always did.
+ */
+function signalFleetForDrain(signal: "SIGTERM" | "SIGKILL"): number {
+  let signalled = 0;
+  if (signal === "SIGTERM") {
+    for (const tenant of [...children.keys()]) {
+      killChild(tenant, null);
+      signalled += 1;
+    }
+  } else {
+    for (const procs of exitingChildren.values()) {
+      for (const proc of procs) {
+        signalled += 1;
+        try { proc.kill("SIGKILL"); } catch { /* gone after all */ }
+      }
+    }
+  }
+  for (const held of holders.values()) {
+    if (held.proc) {
+      signalled += 1;
+      try {
+        held.proc.kill(signal);
+      } catch (error) {
+        log(`${held.tenant}: hold ${signal} failed — ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (held.leaving) {
+      signalled += 1;
+      killLeaving(held);
+    }
+  }
+  return signalled;
+}
+
+/** No child or hold process is running, whether it was stopped by the drain or before it. */
+function fleetProcessesGone(): boolean {
+  return children.size === 0 && exitingChildren.size === 0 && ![...holders.values()].some((held) => held.proc || held.leaving);
+}
+
+/**
+ * A SPAWN ALREADY STUCK, by flagStuckSpawn's own rule: flagged, or preparing
+ * for SPAWN_STUCK_MS. No wait the drain can afford ends one — a Postgres lock
+ * wait or a half-open socket under its final mirror, its restore or its seeds
+ * carries no timeout — and a redeploy is the documented remedy, so waiting
+ * for it cost exactly that redeploy its whole settle cap and late settle, and
+ * the final pass that time. Left out of drainSettled with the copy it is
+ * making (its tenant's mirrorTails), and counted on its own in the receipt.
+ * Its lease is not given up under it (drainReleasableLeases): it drops with
+ * the exit that ends the spawn, as after a crash.
+ */
+function spawnStuck(tenant: string): boolean {
+  const prep = spawning.get(tenant);
+  return !!prep && (prep.flagged || Date.now() - prep.since >= SPAWN_STUCK_MS);
+}
+
+/**
+ * NOTHING IN FLIGHT THAT A WAIT COULD SEE FINISH (fleet-drain.ts, steps 3 and
+ * after the final pass): a copy started, a spawn preparing (its own final
+ * mirror among its awaits), the mirror's tenant in hand, or an order ferry
+ * crossing a home — except a spawn already stuck, and its copy (spawnStuck).
+ */
+function drainSettled(): boolean {
+  return [...mirrorTails.keys()].every(spawnStuck) && [...spawning.keys()].every(spawnStuck)
+    && mirrorLoopsInHand === 0 && !ferrying;
+}
+
+/**
+ * THE LEASES THE DRAIN GIVES UP BY HAND (fleet-drain.ts, step 8): every one,
+ * unless something of this process's may still be writing under it.
+ *
+ * A copy (mirrorTails) or a spawn (spawning) still running once the late
+ * settle has run out — a hung statement, a spawn stuck before the stop —
+ * keeps its tenant's lease until the exit, which ends it in the same moment:
+ * writer dead, then lock free. Released first, another replica, or the next
+ * deployment overlapping this one, could take the tenant and mirror it while
+ * this copy still commits batches above the watermark both of them read: the
+ * double copy mirrorSerially exists to prevent, `flows` counted twice. A
+ * mirror pass with a tenant in hand, or an order ferry, does not say which
+ * tenant it holds, so while either runs no lease is given up by hand at all.
+ *
+ * What is kept costs the next owner only the moments the server takes to see
+ * this process's connections close, which drops the locks anyway.
+ */
+function drainReleasableLeases(): string[] {
+  if (mirrorLoopsInHand > 0 || ferrying) return [];
+  return [...leases.keys()].filter((tenant) => !mirrorTails.has(tenant) && !spawning.has(tenant));
+}
+
+/**
+ * THE DRAIN'S FINAL PASS OVER ONE HOME (fleet-drain.ts, step 6): the last
+ * copy of what its process left, now that nothing writes it. Through the
+ * retirement pass, which already knows how to do this safely, as
+ * retiredWorkerPass(tenant, lease, mirrorLedger, held):
+ *
+ * - the ledger only for a worker's home, and never a held book's: a hold
+ *   process's book is empty or unrestored, and copied, it would overwrite the
+ *   checkpoint, positions and cost basis the shared ledger still holds (see
+ *   `holders`); restore-blocked.json marks such a home even when the worker
+ *   came after it;
+ * - memory published only where the home's files are authoritative and the
+ *   tenant still has its grant. A hold process's files are not its memory, so
+ *   it gets forget-only handling, as reconcile gives it: its owner's forgets
+ *   reach the stored rows and nothing stale is sealed over them. So does a
+ *   home whose grant is gone or whose Telegram kill is pending — step 5 may
+ *   have just deleted that tenant's stored memory, and a publish here would
+ *   put it back.
+ *
+ * And nothing at all — "skipped" — where the copy is not this process's to
+ * make: a lease lost or replaced since step 1, a process still running after
+ * SIGKILL, or a copy of its own still in flight that the drain could only
+ * queue behind. The next owner's spawn copies what is left
+ * (finalMirrorBeforeAnchor), as after any crash.
+ *
+ * Nor under FLEET_HALT. An operator who creates it has frozen the shared
+ * ledger — for accounting work by hand, say — and every other halt path
+ * honours that: honourFleetHalt stands the fleet down and lets its leases go
+ * with no final mirror, and the main loop mirrors nothing while the file is
+ * there. A redeploy that lands before the halt's first pass has stood a child
+ * down is no reason to write ledger batches and memory rows under it. Asked
+ * per home, so a halt made during the drain stops the rest.
+ */
+async function drainFinalPass(home: DrainHome): Promise<FinalPassOutcome> {
+  const { tenant, lease } = home;
+  if (haltRequested()) {
+    log(`${tenant}: FLEET_HALT is present — no final pass; its home is left for the next owner's spawn once the halt is lifted`);
+    return "skipped";
+  }
+  if (!lease || leases.get(tenant) !== lease || !lease.healthy()) {
+    log(`${tenant}: lease gone before the drain's final pass — its home is left for the next owner's spawn to copy`);
+    return "skipped";
+  }
+  const held = holders.get(tenant);
+  if (children.has(tenant) || exitingChildren.has(tenant) || held?.proc || held?.leaving) {
+    log(`[alert] ${tenant}: its process is still running after SIGKILL — no final pass over a home it may still write`);
+    return "skipped";
+  }
+  if (mirrorTails.has(tenant)) {
+    log(`[alert] ${tenant}: an earlier copy is still running — no final pass queued behind it; its own barrier decides the next start`);
+    return "skipped";
+  }
+  const dir = childHome(tenant);
+  const restoreBlocked = readRestoreBlocked(dir) !== null;
+  let authorityGone: boolean;
+  try {
+    authorityGone = !(await getGrantStore().get(tenant as `0x${string}`)) || killRequested(dir);
+  } catch {
+    // Unconfirmed is not present: never publish on it.
+    authorityGone = true;
+  }
+  return retiredWorkerPass(tenant, lease, home.wasChild && !restoreBlocked, home.wasHolder || restoreBlocked || authorityGone, true);
+}
+
+/** The drain under way, if any: every signal after the first gets this one back. */
+let draining: Promise<void> | null = null;
+
+/**
+ * CALL THE FLEET HOME: the orchestrator's half of fleet-drain.ts, which has
+ * the order, the budget and the reasons. Once per process, whatever signals
+ * follow.
+ */
+function drainFleet(
+  signal: string,
+  opts: { budgetMs?: number; limits?: Partial<DrainLimits>; exit?: (code: number) => void } = {},
+): Promise<void> {
+  if (draining) {
+    log(`${signal} again — the fleet is already being called home`);
+    return draining;
+  }
+  const budget = opts.budgetMs === undefined ? drainBudgetMs() : { ms: opts.budgetMs, alerts: [] };
+  for (const line of budget.alerts) log(`[alert] ${line}`);
+  draining = runFleetDrain<DrainHome>({
+    signal,
+    budgetMs: budget.ms,
+    limits: opts.limits,
+    log,
+    stop: () => {
+      stopping = true;
+      for (const wake of [...spawnSlotWaiters]) wake();
+      return drainHomes();
+    },
+    beforeChildren: drainBeforeChildren,
+    settled: drainSettled,
+    stuckSpawns: () => [...spawning.keys()].filter(spawnStuck).length,
+    closeCopies: () => {
+      copiesClosed = true;
+    },
+    signalFleet: signalFleetForDrain,
+    fleetGone: fleetProcessesGone,
+    honourPendingKills,
+    finalPass: drainFinalPass,
+    writeReceipt: (receipt) => writeShutdownReceipt(shutdownReceiptDir(merrymenHome()), receipt),
+    // Last, and all at once: a restarting replica takes the tenants over now
+    // rather than when our dropped connections time out server-side — every
+    // lease nothing may still be writing under (drainReleasableLeases).
+    releaseLeases: async () => {
+      const free = drainReleasableLeases();
+      const kept = leases.size - free.length;
+      if (kept) log(`[alert] ${kept} lease(s) left to drop with this process: a copy, a spawn or a mirror pass may still be writing under them`);
+      await Promise.allSettled(free.map((tenant) => releaseLease(tenant)));
+    },
+    exit: opts.exit ?? ((code) => process.exit(code)),
+  });
+  return draining;
+}
+
+/**
+ * Test seam: the drain a signal starts, with the test's budget, caps and an
+ * `exit` in place of process.exit. A second call while one is under way gets
+ * it back, as a second signal does.
+ */
+export function drainFleetForTest(
+  signal = "SIGTERM",
+  opts: { budgetMs?: number; limits?: Partial<DrainLimits>; exit?: (code: number) => void } = {},
+): Promise<void> {
+  return drainFleet(signal, opts);
+}
+
+/** Test seam: forget a finished drain, so the next test in the file starts with a fleet that is not stopping. */
+export function resetDrainForTest(): void {
+  stopping = false;
+  copiesClosed = false;
+  drainLedgerSchemaReady = false;
+  draining = null;
+}
+
+/**
+ * Test seam: a spawn claimed `ageMs` ago that has not finished preparing, as
+ * reconcile and the drain find one; null forgets it. Only the claim — nothing
+ * is spawned, so a test can show what the drain does around a stuck spawn
+ * without a hung database under one.
+ */
+export function setSpawningForTest(tenant: `0x${string}`, ageMs: number | null): void {
+  const lc = tenant.toLowerCase();
+  if (ageMs === null) spawning.delete(lc);
+  else spawning.set(lc, { since: Date.now() - ageMs, flagged: false });
+}
+
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
 export async function reconcile(): Promise<void> {
   if (stopping) return;
@@ -4245,6 +6009,8 @@ export async function reconcile(): Promise<void> {
   const store = getGrantStore();
   let tenants: `0x${string}`[];
   let expiresAtByTenant: Map<string, number | null>;
+  /** Each grant row as the re-sign watch tells one signature from the next (ledger-resume.ts grantRowKey). */
+  let grantKeys: Array<{ tenant: string; key: string }>;
   // Before the listing is asked for: the group-memory sweep below judges only
   // rows written before this, never one a newer grant's child has published.
   const listedAtMs = Date.now();
@@ -4257,8 +6023,10 @@ export async function reconcile(): Promise<void> {
         })));
     tenants = roster.map((entry) => entry.tenant);
     expiresAtByTenant = new Map(roster.map((entry) => [entry.tenant.toLowerCase(), entry.expiresAt]));
+    grantKeys = roster.map((entry) => ({ tenant: entry.tenant.toLowerCase(), key: grantRowKey(entry) }));
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
+    lastRolloutCounts = null; // the heartbeat says so, rather than repeat an older pass's figures
     return;
   }
   // A TELEGRAM KILL, CARRIED OUT HERE. It must happen before `wanted` is built.
@@ -4268,6 +6036,9 @@ export async function reconcile(): Promise<void> {
   // order ferry usually got there first (honourPendingKills). Then this
   // finds the grant already absent, which is also `revoked`.
   // See kill-request.ts.
+  //
+  // For a tenant the rollout does not admit too, as under FLEET_HALT: a kill
+  // only takes authority away (see pendingKillTenants).
   const nowSec = Math.floor(Date.now() / 1000);
   const kept: `0x${string}`[] = [];
   for (const tenant of tenants) {
@@ -4281,20 +6052,52 @@ export async function reconcile(): Promise<void> {
   // home. A fresh held deployment starts no process for these tenants. Also
   // stand down a local incarnation if a hold is introduced during a test or
   // by an in-process operator; its retained state will refuse repair commit.
-  for (const tenant of accountingHolds) {
+  //
+  // The same for every operator hold (operatorHold), so a tenant out of the
+  // rollout is stood down as an accounting-held one is: asked of every tenant
+  // with something local to stand down, not only the named ones.
+  //
+  // Except a tenant no longer wanted, which the rollout always "holds" (it
+  // names nobody removed): that is the kill switch's, below, as it is with no
+  // rollout at all. Stood down here first, the kill switch would skip it, and
+  // with it its "grant removed" line, its groups and its hold alerts. The
+  // accounting hold's own names are stood down here as they always were.
+  const standing = new Set([...accountingHolds, ...children.keys(), ...holders.keys(), ...restartPending.keys()]);
+  for (const tenant of standing) {
+    if (!wanted.has(tenant) && !accountingHolds.has(tenant)) continue;
+    if (!operatorHeld(tenant)) continue;
     cancelRestart(tenant);
     killChild(tenant);
     standDownHolder(tenant);
   }
+  // OUT OF THE ROLLOUT, LEFT AS THE INCIDENT LEFT IT: of expiry retirement,
+  // only the scrub of an expired signing-key copy (retireExpiredGrants), and
+  // no paused-source report (which takes a lease to look). The rest runs,
+  // unchanged, on the pass that admits it. The accounting hold has never
+  // skipped either.
   await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
-  await reportPausedFleetSources(tenants);
+  await reportPausedFleetSources(tenants.filter((tenant) => !rolloutHeld(tenant)));
   // A delete/re-grant cannot outrun the stopped source's unfinished final
   // copy. Retry under precisely the retained lease before permitting a fork.
   for (const [tenant, lease] of removedLedgerPending) {
     if (localMemoryWriterPresent(tenant) || leases.get(tenant) !== lease || !lease.healthy()) continue;
     const url = process.env.DATABASE_URL;
     if (!url && !retirementMemoryStoreForTest) continue;
-    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    // A pool that cannot be built — makePgDb opens lazily, so this is a driver
+    // that will not load, not a Postgres that will not answer — rejected
+    // straight out of reconcile() and took the supervisor with it (see
+    // spawnChild's recovery gates). A Postgres that will not answer is met by
+    // the copy's own reads, and the copy never throws
+    // (finalMirrorBeforeAnchor): it answers false and stays pending. Either
+    // way it stays pending under the same lease, which is what holds it, and
+    // is tried again next pass.
+    let shared: Db;
+    try {
+      shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    } catch (e) {
+      sayTenantAlert(tenant, `[alert] ${tenant}: removed agent's final copy deferred — shared database pool cannot be built (${errorKind(e)}); retaining its lease and original book`);
+      continue;
+    }
     if (await finalMirrorBeforeAnchor(tenant, shared, childHome(tenant), lease)) removedLedgerPending.delete(tenant);
   }
   // A stored but expired key is still wanted for revocation, home and Telegram
@@ -4306,6 +6109,10 @@ export async function reconcile(): Promise<void> {
     return typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec;
   });
   const eligible = new Set(eligibleToSpawn.map((tenant) => tenant.toLowerCase()));
+  // The heartbeat's count of the whole roster (fleetHealth): admitted per
+  // level, held by either operator hold, or expired. After the retirement
+  // above, whose re-read of a re-signed key this roster's expiries include.
+  lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible });
   const expiredCount = tenants.length - eligibleToSpawn.length;
   if (!lastRosterLog || lastRosterLog.active !== eligibleToSpawn.length || lastRosterLog.expired !== expiredCount || Date.now() - lastRosterLog.at > 5 * 60_000) {
     log(`grant roster: ${eligibleToSpawn.length} unexpired, ${expiredCount} expired or unreadable; only unexpired keys may consume worker processes`);
@@ -4324,9 +6131,19 @@ export async function reconcile(): Promise<void> {
   // crash restart); if another replica holds it, skip this tenant and try again
   // next reconcile.
   let capacityDeferred = 0;
+  // A RE-SIGNED TENANT THE CONTINUITY GATE HOLDS, previewed and — in the one
+  // safe case — approved by this process itself (MERRYMEN_RESUME_AUTO_PAPER;
+  // off, this returns at once). Before the pending set is read, so a tenant
+  // approved here is archived and admitted by the spawn loop of this pass,
+  // on the evidence its preview read moments ago. Removed tenants are not
+  // watched: a kill above has taken them out of `wanted`.
+  await autoAdmitResignedPaper(grantKeys.filter((g) => wanted.has(g.tenant)), eligible);
+  await refreshResumePending();
   for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if (accountingHolds.has(lc)) continue;
+    // First, before a lease is so much as asked for: nothing below this line
+    // is for a tenant the operator holds, the lease attempt included.
+    if (operatorHeld(lc)) continue;
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
@@ -4346,7 +6163,12 @@ export async function reconcile(): Promise<void> {
     // lease before spawnChild has a chance to see its tenant-local fence.
     // The importer, under this tenant's lease, is allowed to finish its own
     // pending generation. A source-loss/mirror barrier still refuses here.
-    if (ledgerSourceBlocked(childHome(lc), false)) continue;
+    //
+    // EXCEPT A HOME AN OPERATOR HAS APPROVED FOR ATTESTED-GAP ADMISSION and
+    // whose new book is not registered yet (ledger-resume.ts): spawnChild
+    // archives exactly that home, whole, under this lease, before anything
+    // else can touch it. The fence still refuses every other blocked home.
+    if (ledgerSourceBlocked(childHome(lc), false) && !resumePendingTenants.has(lc)) continue;
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *
@@ -4409,7 +6231,12 @@ export async function reconcile(): Promise<void> {
   // nothing, and the press is still owed its early look on the next pass.
   const asked = await heldResetsAsked([...holders.values()].filter((h) => eligible.has(h.tenant) && !retiringExpired.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
-    if (accountingHolds.has(held.tenant)) { pressLeaving(held); continue; }
+    // DEFENCE IN DEPTH, and no test can tell it from the accounting-hold check
+    // it replaced: everything below that could restore or hand over (retryHold,
+    // handHoldBack) asks holdMayLeave first, which refuses an operator-held
+    // tenant on its own, even one the scope stopped admitting during the await
+    // above. Kept so a held tenant is passed over before any of that is tried.
+    if (operatorHeld(held.tenant)) { pressLeaving(held); continue; }
     // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, by a handover or a
     // stand-down: killed again, once a pass, and nothing else done for its
     // tenant, stood down or not, until its exit is seen.
@@ -4526,6 +6353,9 @@ export async function reconcile(): Promise<void> {
     // AND ITS ENERGY HISTORY, if the seed before it armed could not put it
     // back: until then its store reads those days as unreadable.
     await retryEnergySeed(tenant as `0x${string}`);
+    // AND ITS TRAILING DAY OF SPENDING, on the same terms: until then its new
+    // entries have no headroom.
+    await retryBudgetSeed(tenant as `0x${string}`);
   }
   // HELD TENANTS THE GATE NO LONGER HOLDS, handed back to trading. After the
   // children's refresh and not inside the holders' loop, so the worker each
@@ -5233,139 +7063,165 @@ export async function ferryForChild(
  *
  * Cheap and best-effort: one grouped count against a table the mirror has just
  * written, and a failure here must never take the fleet loop down.
+ *
+ * READ ONCE, PRINTED AND PUBLISHED. What a pass reads is a FleetSnapshot
+ * (collectFleetSnapshot); the log lines are made from it (fleetHealthLines),
+ * and so is the heartbeat row (startFleetHeartbeat), so the two can never
+ * disagree about what the fleet looked like.
  */
-export const AUTONOMY_TRADE_FUNNEL_SQL = `SELECT status, COALESCE(reject_rule, '') AS rule, COUNT(*) AS n
-  FROM trades WHERE created_at >= ? GROUP BY status, rule`;
+export async function collectFleetSnapshot(
+  shared: Pick<Db, "prepare">,
+  opts: {
+    nowSec: number;
+    /** When this replica started each running worker, by lowercased smart account. */
+    spawnedAt: ReadonlyMap<string, number>;
+    /** Also fold the last six hours (the heartbeat's longer window). */
+    longWindow?: boolean;
+  },
+): Promise<FleetSnapshot> {
+  // Throws to the caller: without the agents count there is no snapshot, and
+  // a health read that fails is not a fleet that is down.
+  const rows = (await shared
+    .prepare("SELECT status, COUNT(*) AS n FROM agents GROUP BY status")
+    .all()) as { status: string; n: number | string }[];
+  const byStatus: Record<string, number> = {};
+  for (const r of rows) byStatus[String(r.status)] = Number(r.n);
+  const total = Object.values(byStatus).reduce((a, b) => a + b, 0);
+  const broken = byStatus.error ?? 0;
+
+  // ── AND HOW MANY ARE ACTUALLY TRADING FOR REAL ──────────────────────
+  //
+  // `status` says whether an agent could start; `mode` says what it is doing.
+  // A fleet can be 32-of-32 armed and simulating every fill, which is exactly
+  // what a tester found by hand and reported as "I can't see an option to
+  // switch to real trading". Counted here so nobody has to find that out one
+  // agent at a time.
+  //
+  // AND ONLY WHAT THE WORKER RUNNING NOW HAS SAID. The mirror keeps a row's
+  // last mode and beat across a respawn, so `GROUP BY mode` counted the
+  // previous process's word — and an expired agent's, for good — as today's.
+  // railOf (autonomy-funnel.ts) counts a row only once it was written since
+  // this replica spawned its worker.
+  //
+  // Null means the read failed, which is not zero: the funnel below uses it
+  // to tell an IDLE fleet from an unreadable one.
+  let rails: FleetRails | null = null;
+  const modes = new Map<string, string | null>();
+  try {
+    const agents = (await shared.prepare(FLEET_RAILS_SQL).all()) as AgentRailRow[];
+    rails = fleetRails(agents, opts.spawnedAt);
+    for (const a of agents) {
+      const key = String(a.smart_account ?? "").toLowerCase();
+      if (!modes.has(key)) modes.set(key, a.mode === null || a.mode === undefined ? null : String(a.mode));
+    }
+  } catch {
+    // The column may predate this deploy on a database mid-migration. A
+    // missing breakdown is not a fleet that is down.
+  }
+  const modeOf = (agentId: string) => modes.get(agentId.toLowerCase()) ?? null;
+
+  // ── IS AUTONOMY STILL HEALTHY? FROM THE LEDGER ──────────────────────
+  //
+  // Everything below was previously answerable only by reading raw container
+  // logs, which is how a fleet that had not landed a single autonomous fill
+  // in weeks went unnoticed. The funnel is the shape that matters: a hundred
+  // proposals and zero fills is a completely different fault from zero
+  // proposals, and a count of "trades" tells you neither.
+  //
+  // ONE HOUR, because the question is "is it working NOW". A lifetime total
+  // keeps reading healthy for days after execution breaks — the canary's six
+  // fills would mask a fleet that stopped this morning. The heartbeat adds six
+  // hours beside it, for a check that runs every few minutes and keeps no
+  // state of its own.
+  //
+  // Read-only, bounded, and wrapped like the block above: a missing column on
+  // a database mid-migration is not a fleet that is down, and this must never
+  // be the thing that stops a mirror pass.
+  let funnel: FleetSnapshot["funnel"] = null;
+  let holds: FleetSnapshot["holds"] = null;
+  try {
+    const since = opts.nowSec - 3600;
+    const t = (await shared.prepare(AUTONOMY_TRADE_FUNNEL_SQL).all(since)) as {
+      agent_id: string; status: string; rule: string; n: number | string;
+    }[];
+    const h = (await shared.prepare(AUTONOMY_HOLDS_SQL).all(since)) as { kind: string; n: number | string }[];
+    funnel = foldFunnel(t, modeOf);
+    holds = h.map((r) => ({ kind: String(r.kind), n: r.n }));
+  } catch {
+    // `hold_kind` predates this deploy on a database mid-migration, and the
+    // funnel is a report rather than a guarantee.
+  }
+  let funnel6h: FleetSnapshot["funnel6h"] = null;
+  if (opts.longWindow) {
+    try {
+      const t = (await shared.prepare(AUTONOMY_TRADE_FUNNEL_SQL).all(opts.nowSec - 6 * 3600)) as {
+        agent_id: string; status: string; rule: string; n: number | string;
+      }[];
+      funnel6h = foldFunnel(t, modeOf);
+    } catch {
+      /* the hour above still stands on its own */
+    }
+  }
+  return { at: opts.nowSec, byStatus, total, broken, rails, funnel, holds, funnel6h };
+}
+
+/**
+ * THE LINES ONE SNAPSHOT PRINTS. The prefixes are what operators grep —
+ * `fleet: `, `fleet| rails — `, `autonomy| 1h — `, `autonomy| 1h refusals — `
+ * — and they are unchanged; the per-rail lines are new beside them.
+ */
+export function fleetHealthLines(s: FleetSnapshot): string[] {
+  const parts = Object.entries(s.byStatus).map(([k, v]) => `${k} ${v}`).join(", ");
+  // The word BROKEN is in the line only when it is true, so grepping for it
+  // is a working alert with no extra infrastructure.
+  const lines = [`fleet: ${s.total} agent(s) — ${parts}${s.broken > 0 ? ` — BROKEN ${s.broken}` : ""}`];
+  const rails = s.rails ? railsLine(s.rails) : null;
+  if (rails) lines.push(rails);
+  if (s.funnel && s.holds) lines.push(...autonomyLines(s.rails ? s.rails.live : null, s.funnel, s.holds));
+  return lines;
+}
+
+/** When this replica started each worker it runs, keyed the way `agents` is: by smart account. */
+function spawnedAtByAgent(): Map<string, number> {
+  const spawned = new Map<string, number>();
+  for (const child of children.values()) spawned.set(child.smartAccount.toLowerCase(), child.startedAt);
+  return spawned;
+}
 
 async function fleetHealth(): Promise<void> {
+  // WHO THE ROLLOUT ADMITS, AT WHAT LEVEL, every pass and before anything that
+  // can fail: a deploy whose scope is not the one its operator meant (a typo
+  // that leaves a named tenant held, a cohort still at `none`) is exactly what
+  // this line exists to make visible, and it reads no table.
+  log(rolloutLine(lastRolloutCounts));
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
     const shared = await makePgDb(url);
-    const rows = (await shared
-      .prepare("SELECT status, COUNT(*) AS n FROM agents GROUP BY status")
-      .all()) as { status: string; n: number | string }[];
-    const by = new Map(rows.map((r) => [r.status, Number(r.n)]));
-    const total = [...by.values()].reduce((a, b) => a + b, 0);
-    const broken = by.get("error") ?? 0;
-    const parts = [...by.entries()].map(([k, v]) => `${k} ${v}`).join(", ");
-    // The word BROKEN is in the line only when it is true, so grepping for it
-    // is a working alert with no extra infrastructure.
-    log(`fleet: ${total} agent(s) — ${parts}${broken > 0 ? ` — BROKEN ${broken}` : ""}`);
+    const snapshot = await collectFleetSnapshot(shared, {
+      nowSec: Math.floor(Date.now() / 1000),
+      spawnedAt: spawnedAtByAgent(),
+    });
+    for (const line of fleetHealthLines(snapshot)) log(line);
 
     // ── AND WHICH ONES, AND WHY ─────────────────────────────────────────
     //
-    // The line above is the alert this function was written to be, and on its
-    // own it is the same shape as the incident it was written about: it said
-    // BROKEN 12 for hours and named nobody, so finding out which twelve meant
-    // reading container logs by hand — exactly what the header promises this
-    // replaced. A count tells an operator that something is wrong; only the
-    // names tell them whether it is their canary or twelve strangers, and only
-    // the reason tells them whether to act.
+    // The `fleet:` line is the alert this function was written to be, and on
+    // its own it is the same shape as the incident it was written about: it
+    // said BROKEN 12 for hours and named nobody, so finding out which twelve
+    // meant reading container logs by hand — exactly what the header promises
+    // this replaced. A count tells an operator that something is wrong; only
+    // the names tell them whether it is their canary or twelve strangers, and
+    // only the reason tells them whether to act.
     //
     // Bounded, read-only and best-effort, like the count. Twelve rows and one
     // event each is nothing beside the mirror's own writes, and the cap means a
     // fleet that is wholly broken reports a readable summary rather than
     // several hundred lines that push everything else out of the log window.
-    // ── AND HOW MANY ARE ACTUALLY TRADING FOR REAL ──────────────────────
     //
-    // `status` says whether an agent could start; `mode` says what it is doing.
-    // A fleet can be 32-of-32 armed and simulating every fill, which is exactly
-    // what a tester found by hand and reported as "I can't see an option to
-    // switch to real trading". Counted here so nobody has to find that out one
-    // agent at a time.
-    // Carried out of the block below so the funnel can tell an IDLE fleet from
-    // an unreadable one. Null means the read failed, which is not zero.
-    let liveAgents: number | null = null;
-    try {
-      const modes = (await shared
-        .prepare("SELECT COALESCE(mode, 'unknown') AS mode, COUNT(*) AS n FROM agents GROUP BY mode")
-        .all()) as { mode: string; n: number | string }[];
-      if (modes.length) {
-        const line = modes.map((m) => `${m.mode} ${Number(m.n)}`).join(", ");
-        log(`fleet| rails — ${line}`);
-      }
-      liveAgents = modes
-        .filter((m) => String(m.mode) === "live")
-        .reduce((s, m) => s + Number(m.n), 0);
-    } catch {
-      // The column may predate this deploy on a database mid-migration. A
-      // missing breakdown is not a fleet that is down.
-    }
-
-    // ── IS AUTONOMY STILL HEALTHY? ONE LINE, FROM THE LEDGER ────────────
-    //
-    // Everything below was previously answerable only by reading raw container
-    // logs, which is how a fleet that had not landed a single autonomous fill
-    // in weeks went unnoticed. The funnel is the shape that matters: a hundred
-    // proposals and zero fills is a completely different fault from zero
-    // proposals, and a count of "trades" tells you neither.
-    //
-    // ONE HOUR, because the question is "is it working NOW". A lifetime total
-    // keeps reading healthy for days after execution breaks — the canary's six
-    // fills would mask a fleet that stopped this morning.
-    //
-    // Read-only, bounded, and wrapped like the block above: a missing column on
-    // a database mid-migration is not a fleet that is down, and this must never
-    // be the thing that stops a mirror pass.
-    try {
-      const since = Math.floor(Date.now() / 1000) - 3600;
-      const t = (await shared
-        .prepare(AUTONOMY_TRADE_FUNNEL_SQL)
-        .all(since)) as { status: string; rule: string; n: number | string }[];
-      const h = (await shared
-        .prepare(
-          `SELECT COALESCE(hold_kind, 'unreported') AS kind, COUNT(*) AS n
-             FROM decisions WHERE at >= ? AND action = 'hold' GROUP BY kind`,
-        )
-        .all(since)) as { kind: string; n: number | string }[];
-
-      const n = (f: (r: { status: string; rule: string }) => boolean) =>
-        t.filter(f).reduce((s, r) => s + Number(r.n), 0);
-      const proposals = t.reduce((s, r) => s + Number(r.n), 0);
-      const rejected = n((r) => r.status === "rejected");
-      const landed = n((r) => r.status === "landed");
-      const failed = n((r) => r.status === "reverted");
-      const submitted = n((r) => r.status === "submitted") + landed + failed;
-      const tooWide = n((r) => r.rule === "grant-too-wide");
-
-      // SILENT ONLY WHEN NOBODY IS LIVE — because silence means two things and
-      // this is a health metric.
-      //
-      // It used to be silent on any idle hour. But "no agent is trading for
-      // real" and "every agent is live and proposed nothing for an hour" are
-      // opposite facts, and the second is the one worth waking up for: it is
-      // precisely the state that went unnoticed for weeks. Rendered identically
-      // as an absent line, an operator reads the alarming case as the boring
-      // one — the same empty-versus-unavailable mistake this codebase refuses
-      // everywhere it prints a number.
-      //
-      // `liveAgents === null` is a FAILED READ and stays silent, because
-      // claiming "0 live" off a query that did not answer would be the same
-      // error pointing the other way.
-      if (proposals > 0 || h.length > 0 || (liveAgents !== null && liveAgents > 0)) {
-        log(
-          `autonomy| 1h — ${liveAgents ?? "?"} live · proposals ${proposals} · ` +
-            `policy-passed ${proposals - rejected} · ` +
-            `userops ${submitted} · LANDED ${landed} · failed ${failed} · ` +
-            `grant-too-wide ${tooWide} · holds ${autonomyHolds(h)}`,
-        );
-        // The refusals, largest first, so a new one announces itself rather
-        // than hiding inside a total. Bounded — a fleet refusing in twenty ways
-        // should report the five that matter, not push the log window out.
-        const why = t
-          .filter((r) => r.status === "rejected" && r.rule)
-          .sort((a, b) => Number(b.n) - Number(a.n))
-          .slice(0, 5)
-          .map((r) => `${r.rule} ${Number(r.n)}`)
-          .join(" · ");
-        if (why) log(`autonomy| 1h refusals — ${why}`);
-      }
-    } catch {
-      // `hold_kind` predates this deploy on a database mid-migration, and the
-      // funnel is a report rather than a guarantee.
-    }
-
+    // HERE AND NOT IN THE SNAPSHOT: it names accounts, and the snapshot is
+    // also what the heartbeat publishes.
+    const broken = snapshot.broken;
     if (broken > 0) {
       const worst = (await shared
         .prepare(
@@ -5396,34 +7252,78 @@ async function fleetHealth(): Promise<void> {
   }
 }
 
-/** The kinds the autonomy line names, in the order it names them. */
-const HOLD_BUCKETS: readonly (readonly [kind: string, label: string])[] = [
-  ["MODEL_HOLD", "model"],
-  ["GATE_FORCED_HOLD", "gate-forced"],
-  ["STALE_MARK_HOLD", "stale-mark"],
-  ["unreported", "unreported"],
-];
+// ── THE HEARTBEAT ROW ───────────────────────────────────────────────────────
+//
+// fleet-heartbeat.ts. The snapshot above, published once a minute as this
+// role's row, so an outside check can tell a live fleet from a dead or wedged
+// one without anybody reading this log. Started, never awaited, like the room:
+// a slow database is a missed beat, never a late reconcile or a late watchdog.
+//
+// IN BOTH BRANCHES OF THE LOOP, halted or not. A halted fleet is the state an
+// operator most needs to see confirmed from outside, and the one in which the
+// log says least.
+//
+// AND ONLY IN THE LOOP: report-only (MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1)
+// returns into runRecoveryReportOnly before it, so that entry writes no row.
+// Left that way on purpose — it is the incident's minimal entry — and said in
+// fleet-heartbeat.ts, so a check does not page on the silence it causes.
+
+/** This process: when it started, and how the one before it ended (read at boot). */
+let heartbeatBoot: { startedAt: number; lastShutdown: LastShutdown | null } | null = null;
+let fleetHeartbeatDbForTest: Db | null = null;
+export function setFleetHeartbeatDbForTest(db: Db | null): void {
+  fleetHeartbeatDbForTest = db;
+}
 
 /**
- * THE HOLDS CLAUSE OF THE AUTONOMY LINE, and every hold the query read is in it.
- *
- * It named three kinds and summed only those. When the writer started stamping
- * a hold on a stale price as STALE_MARK_HOLD — which had counted as a model
- * hold until then — those holds fell out of the line entirely, and a fleet
- * holding on dead feeds read as a fleet holding less. So the named buckets are
- * always printed (a kind the query found none of is a measured zero), and any
- * kind this list does not know is printed under its own name rather than
- * dropped. A new kind at the writer then shows up here the first hour it
- * happens, instead of being noticed as a gap in a total.
+ * The minute's clock and the in-flight latch (heartbeatClock, where a test
+ * drives them). The orchestrator is the one writer that creates the table.
  */
-export function autonomyHolds(rows: readonly { kind: string; n: number | string }[]): string {
-  const count = (k: string) => rows.filter((r) => r.kind === k).reduce((s, r) => s + Number(r.n), 0);
-  const named = new Set(HOLD_BUCKETS.map(([k]) => k));
-  const unknown = [...new Set(rows.map((r) => r.kind).filter((k) => !named.has(k)))].sort();
-  return [
-    ...HOLD_BUCKETS.map(([k, label]) => `${count(k)} ${label}`),
-    ...unknown.map((k) => `${count(k)} ${k}`),
-  ].join(", ");
+const fleetHeartbeat = heartbeatClock({ beat: writeOrchestratorHeartbeat, mayCreate: true, log: (line) => log(line) });
+
+function startFleetHeartbeat(): void {
+  if (stopping || (!process.env.DATABASE_URL && !fleetHeartbeatDbForTest)) return;
+  void fleetHeartbeat.tick();
+}
+
+/** One beat. Throws to the clock, which says so once; a fleet it cannot read is still a beat. */
+async function writeOrchestratorHeartbeat(create: boolean): Promise<boolean> {
+  const boot = (heartbeatBoot ??= { startedAt: Math.floor(Date.now() / 1000), lastShutdown: null });
+  const shared = fleetHeartbeatDbForTest ?? await makePgDb(process.env.DATABASE_URL!);
+  const nowSec = Math.floor(Date.now() / 1000);
+  let counts: HeartbeatCounts | null = null;
+  try {
+    const snapshot = await collectFleetSnapshot(shared, { nowSec, spawnedAt: spawnedAtByAgent(), longWindow: true });
+    counts = heartbeatCounts(snapshot, { children: children.size, holders: holders.size });
+  } catch {
+    // A beat with no counts is still a beat: the process is alive, and
+    // whether it can read the fleet is a separate question the null answers.
+  }
+  return writeFleetHeartbeat(
+    shared,
+    {
+      role: "orchestrator",
+      commit: commitOf(process.env),
+      startedAt: boot.startedAt,
+      beatAt: nowSec,
+      halted: haltRequested(),
+      // WHO THE ROLLOUT ADMITS, AT WHAT LEVEL: the scope's name and the last
+      // reconcile's counts, as the `fleet| rollout` line says them
+      // (fleet-rollout.ts) — counts only, never the tenants it names. Before
+      // the first reconcile has counted (a fleet halted since boot never
+      // does), the scope with no levels, so a check can still expect `none`
+      // to run nobody.
+      rollout: rolloutSummary(lastRolloutCounts),
+      counts,
+      lastShutdown: boot.lastShutdown,
+    },
+    { create },
+  );
+}
+
+/** One beat as the clock would write it, without waiting out the minute. */
+export function writeOrchestratorHeartbeatForTest(create = true): Promise<boolean> {
+  return writeOrchestratorHeartbeat(create);
 }
 
 /**
@@ -7268,6 +9168,11 @@ const HOLDER_BACKFILL_LEASE = "0xholder-claims-backfill" as const;
 
 async function runHolderClaimsBackfill(): Promise<void> {
   if (holderClaimsBackfilled || Date.now() < holderBackfillRetryAt) return;
+  // It claims wallets for every tenant at once, held ones included: only once
+  // the rollout admits the whole fleet (fleet-rollout.ts). An admitted child
+  // meanwhile reads its login wallet, which can only cost it a perk it owns,
+  // never grant it one it does not (see MERRYMEN_HOLDER_ADDRESS).
+  if (!rolloutAdmitsWholeFleet()) return;
   let lease: TenantLease | null;
   try {
     lease = await acquireTenantLease(HOLDER_BACKFILL_LEASE);
@@ -7952,6 +9857,13 @@ let fleetNewsDesk: NewsDesk | null = null;
  */
 const tenantCoinAddresses = new Map<string, string[]>();
 /**
+ * Coin contracts each tenant HOLDS, and nothing it merely considers. Refreshed
+ * on the mirror, for the Fomo pass. A tenant is present here only once its
+ * ledger has been read, which is what lets a publication draft say "I hold no
+ * position in it" as a fact rather than as the absence of a reading.
+ */
+const tenantHeldCoins = new Map<string, string[]>();
+/**
  * The agent's own candidate window, restated because it cannot be imported.
  *
  * `CLASS_WINDOW_SEC` and `CLASS_LIMIT` are index.ts's, and `CLASS_LIMIT` is a
@@ -8115,6 +10027,31 @@ async function coinAddressesFor(db: Db): Promise<string[]> {
     "address",
   );
   return addressesOf([...held, ...classHeld, ...candidates]).filter((a) => !notCoins.has(a));
+}
+
+/**
+ * The coin contracts this tenant holds: the first two of coinAddressesFor's
+ * three sources, without the discovery candidates. Same filters. Never throws,
+ * and NULL WHEN EITHER READ FAILED: an unread book is not an empty one, and the
+ * pass says "I hold no position in it" only on a book it actually read.
+ */
+async function heldCoinAddressesFor(db: Db): Promise<string[] | null> {
+  const notCoins = new Set<string>([
+    ...STOCK_TOKENS.map((t) => t.address.toLowerCase()),
+    ...Object.values(CASH).map((a) => String(a).toLowerCase()),
+  ]);
+  const pull = async (sql: string): Promise<string[] | null> => {
+    try {
+      const rows = (await db.prepare(sql).all()) as Record<string, unknown>[];
+      return rows.map((r) => String(r.token ?? ""));
+    } catch {
+      return null;
+    }
+  };
+  const held = await pull("SELECT token FROM positions WHERE value_usdg > 0 ORDER BY value_usdg DESC");
+  const classHeld = await pull("SELECT token FROM class_positions ORDER BY first_seen DESC LIMIT 50");
+  if (held === null || classHeld === null) return null;
+  return addressesOf([...held, ...classHeld]).filter((a) => !notCoins.has(a));
 }
 
 /**
@@ -8325,6 +10262,21 @@ let liveMirrorStoreForTest: { shared: Db; dek: Buffer | null; dialect: "postgres
 export function setLiveMirrorStoreForTest(store: typeof liveMirrorStoreForTest): void { liveMirrorStoreForTest = store; }
 export function mirrorLedgersForTest(): Promise<void> { return mirrorLedgers(); }
 
+/**
+ * THE MIRROR'S TENANT LOOPS STILL RUNNING, which the drain waits for
+ * (fleet-drain.ts, step 3). Once `stopping` is set they stop at the next
+ * tenant — but the tenant in hand finishes: its copy, and then its memory
+ * publishes, which read the child's files while the child is alive. Left
+ * running into the drain's final pass, that older read could be written after
+ * the final pass's newer one: stale memory stored, and a forget made in the
+ * child's last seconds undone until the next publish.
+ *
+ * Counted around the loops alone, which hold no `return`. Not in a finally:
+ * nothing in them throws by design, and a throw there would end
+ * runOrchestrator's loop, and this process, with it.
+ */
+let mirrorLoopsInHand = 0;
+
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   // Held tenants count: their Telegram is published below, and a fleet whose
@@ -8391,7 +10343,11 @@ async function mirrorLedgers(): Promise<void> {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
+  mirrorLoopsInHand += 1;
   for (const tenant of [...children.keys()]) {
+    // CALLED HOME: no further tenant. The drain settles the one in hand and
+    // gives every home its final pass once its child has exited.
+    if (stopping) break;
     const worker = children.get(tenant);
     if (!worker) continue;
     let sourceConfirmed = false;
@@ -8437,6 +10393,14 @@ async function mirrorLedgers(): Promise<void> {
         // a Trencher's universe is discovered inside the child and lives in this
         // sqlite, which nothing outside this loop opens.
         tenantCoinAddresses.set(tenant.toLowerCase(), await coinAddressesFor(handle.db));
+        // HELD ONLY, for the Fomo pass: a coin a tenant owns is a reason to watch
+        // its traders at position-protection priority, and a candidate is not.
+        // Not read at all while the pass is off (fomoSetup).
+        if (!fomoBootNow().off) {
+          const heldCoins = await heldCoinAddressesFor(handle.db);
+          if (heldCoins) tenantHeldCoins.set(tenant.toLowerCase(), heldCoins);
+          else tenantHeldCoins.delete(tenant.toLowerCase());
+        }
         // A FAILED TABLE IS LOUDER THAN A QUIET ONE.
         //
         // This used to print only when n > 0, which made a stalled table and an
@@ -8541,6 +10505,8 @@ async function mirrorLedgers(): Promise<void> {
   // and cost basis the shared ledger still holds. Under the same lease rule as
   // the loop above: only the replica holding the tenant speaks for it.
   for (const [tenant, held] of [...holders]) {
+    // Called home, as above: the drain's final pass handles its forgets.
+    if (stopping) break;
     const lease = leases.get(tenant.toLowerCase());
     if (!lease || !lease.healthy()) continue;
     // Stood down, and counted only until its process has gone: its grant is
@@ -8568,6 +10534,7 @@ async function mirrorLedgers(): Promise<void> {
       await forgetStoredPersonalMemory({ tenant, home: childHome(tenant), shared, dek: personalMemoryDekThisPass, log });
     }
   }
+  mirrorLoopsInHand -= 1;
 
   // What the fleet has been thinking about, for the news desk to prioritise.
   // Read here because the shared handle is already open and because this table
@@ -8853,6 +10820,296 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
   }
 }
 
+// ── FOMO RESEARCH ───────────────────────────────────────────────────────────
+//
+// docs/fomo.md. The pass lives in orchestrator-fomo.ts and the subsystem in
+// worker/src/fomo/; this is the latch, the runtime, the roster, the IPC broker
+// and the log. Built like X's: NOT AWAITED (a slow provider is a late research
+// file, never a late reconcile or watchdog), only for tenants whose lease this
+// replica holds healthily, silenced by FLEET_HALT because it starts inside the
+// not-halted branch, and stopped outright by the halt (honourFleetHalt). It
+// writes only fomo_* rows and children's fomo.json, which no trading path
+// trusts beyond its own guards (fomo/boundary.test.ts).
+
+/** What this file uses of fomo/runtime.ts, stated here so a change there fails the typecheck, not the boot. */
+interface FomoRuntimeHandle {
+  db: Db;
+  service: FomoService & { heldTokensSnapshot?(now?: number): Map<string, string[]> };
+  client: FomoClient | null;
+  /**
+   * The budget fleet reads are charged to: the shared pool and its class
+   * shares, without one owner's hourly and daily caps (runtime.ts). Owners'
+   * own reads go through the service's owner budget; nothing here uses it.
+   */
+  backgroundBudget: FomoBudget | null;
+  runJobs(now: number): Promise<unknown>;
+}
+
+interface FomoBoot {
+  off: boolean;
+  lines: string[];
+  apiKey: string | null;
+  planCredits: number | undefined;
+  /** The operator's cap overrides (fomo/budget.ts fomoBudgetFrom), read exactly as the web process reads them. */
+  budget: Partial<FomoBudgetConfig>;
+}
+
+let fomoBoot: FomoBoot | null = null;
+let fomoRuntime: FomoRuntimeHandle | null = null;
+let fomoRuntimeRetryAt = 0;
+let fomoPass: FomoPass | null = null;
+let fomoInFlight = false;
+let fomoLastFailure: { text: string; at: number } | null = null;
+/** One broker per live child process, released when that process exits. */
+const fomoBrokers = new Map<ChildProcess, () => void>();
+
+/**
+ * Whether this replica still speaks for the tenant's running child: a child
+ * here, its lease held healthily, its ledger source not blocked. The same rule
+ * the mirror and the roster use, asked at the moment of acting rather than at
+ * the start of a pass. A tenant held for recovery has no entry in `children`
+ * (its child is stopped before a hold process stands in), and like every pass
+ * this one never reads the hold map (restore-hold.test.ts).
+ */
+function fomoStillOurs(tenant: string): boolean {
+  const key = tenant.toLowerCase();
+  const running = [...children.keys()].find((t) => t.toLowerCase() === key);
+  if (!running) return false;
+  const lease = leases.get(key);
+  if (!lease || !lease.healthy()) return false;
+  return !ledgerSourceBlocked(childHome(running));
+}
+
+/**
+ * The Fomo switches, read once. THE KEY IS READ HERE AND NOWHERE ELSE in the
+ * worker (fomo/boundary.test.ts): the house's name first, then the provider's
+ * own docs' name, a blank value being no key. It is handed to the runtime and
+ * the stream URL builder as an argument and is stripped from every child
+ * (CHILD_SECRET_STRIP).
+ *
+ * OPT-IN: OFF UNLESS MERRYMEN_FOMO_ENABLED IS EXACTLY "1". Off, this process
+ * does nothing Fomo at all: no Postgres pool and no fomo_* DDL (fomoRuntimeNow
+ * is reached only through startFomoPass), no IPC channel on any child
+ * (spawnChild), no fomo.json written, no held-coin read on the mirror. So
+ * landing this code changes nothing in a deployment until its operator turns
+ * it on, and a child without the channel charges nothing to the scout budget
+ * for Fomo (fomo-child.ts explorationScoutUse6).
+ */
+export function fomoSetup(env: Record<string, string | undefined> = process.env): FomoBoot {
+  if (env.MERRYMEN_FOMO_ENABLED !== "1") {
+    // The value is echoed only when it is one of the words an operator means
+    // as a switch: anything else (a key pasted into the wrong variable, say)
+    // is described by its length, never written to the log.
+    const raw = env.MERRYMEN_FOMO_ENABLED;
+    const said = raw === undefined ? "" : raw.trim();
+    const why = said === ""
+      ? "opt-in; set MERRYMEN_FOMO_ENABLED=1 to run the research pass"
+      : /^(?:0|1|true|false|yes|no|on|off)$/i.test(said)
+        ? `MERRYMEN_FOMO_ENABLED is ${JSON.stringify(said)}, and only "1" turns it on`
+        : `MERRYMEN_FOMO_ENABLED is set to a ${raw!.length}-character value that is not "1", so it is off`;
+    return { off: true, lines: [`fomo: off — ${why}`], apiKey: null, planCredits: undefined, budget: {} };
+  }
+  if (!env.DATABASE_URL) {
+    return { off: true, lines: ["fomo: off — no DATABASE_URL; the shared research store lives there"], apiKey: null, planCredits: undefined, budget: {} };
+  }
+  const apiKey = env.MERRYMEN_FOMO_API_KEY?.trim() || env.FOMO_API_KEY?.trim() || null;
+  const planCredits = fomoPlanFrom(env);
+  const lines = apiKey
+    ? [`fomo: on — one shared stream per fleet under a lease, child research files every minute${planCredits ? `, plan ${planCredits} credits/month` : ""}`]
+    : ["fomo: on without a provider key — lookups answer not-configured; child files and the IPC broker still run"];
+  if (env.MERRYMEN_FOMO_PLAN_CREDITS !== undefined && env.MERRYMEN_FOMO_PLAN_CREDITS.trim() !== "" && planCredits === undefined) {
+    lines.push("fomo: MERRYMEN_FOMO_PLAN_CREDITS is not a positive number; the runtime's own default applies");
+  }
+  // The caps the web process must agree on (it shares the fomo_meta counters): one line per bad value, then the limits in force.
+  const caps = fomoBudgetFrom(env);
+  lines.push(...caps.problems, describeBudget(budgetConfigFor(planCredits ?? FREE_PLAN_CREDITS_PER_MONTH, caps.budget)));
+  return { off: false, lines, apiKey, planCredits, budget: caps.budget };
+}
+
+/** The switches, decided and said once, on first use: the first spawn or the first pass, whichever comes first. */
+function fomoBootNow(): FomoBoot {
+  if (!fomoBoot) {
+    fomoBoot = fomoSetup();
+    for (const line of fomoBoot.lines) log(line);
+  }
+  return fomoBoot;
+}
+
+/** A tenant's Fomo permissions from its sealed settings, with the catalogue's defaults for an owner who never set them. */
+async function fomoAccessFor(tenant: string): Promise<FomoAccess> {
+  const s = await getSettingsStore().get(tenant.toLowerCase() as `0x${string}`);
+  return {
+    dataAccess: s?.fomoDataAccess ?? true,
+    monitoring: s?.fomoMonitoringEnabled ?? false,
+    follow: s?.fomoFollowEnabled ?? false,
+  };
+}
+
+/**
+ * The runtime's credit budget as the pass charges it, payer stamped here:
+ * fleet reads (stream recovery, the cohort's boards and enrichment) belong to
+ * no tenant. Charged to the BACKGROUND budget so one owner's caps never
+ * throttle them, under their own payer so the research queue's cap
+ * (fomo/service.ts BACKGROUND_RESEARCH_CAP) leaves them room.
+ */
+function fomoBudgetPort(budget: FomoBudget | null, payer: string): FomoBudgetPort | undefined {
+  if (!budget) return undefined;
+  return {
+    async charge(req) {
+      const g = await budget.tryCharge({ ...req, tenant: payer, surface: "background" });
+      return g.ok ? g : null;
+    },
+  };
+}
+
+/**
+ * Build the runtime once: the shared Postgres, the key, the trusted access
+ * reader. LOADED ON FIRST USE, so a deployment with the pass switched off —
+ * and every test that imports this file — never loads the Fomo service. A
+ * failed build is retried in five minutes, not every pass.
+ */
+async function fomoRuntimeNow(boot: FomoBoot): Promise<FomoRuntimeHandle | null> {
+  if (fomoRuntime) return fomoRuntime;
+  if (Date.now() < fomoRuntimeRetryAt) return null;
+  try {
+    const db = await makePgDb(process.env.DATABASE_URL!);
+    const { createFomoRuntime } = await import("./fomo/runtime");
+    // The operator's tail switch: off, the service refuses to store a tail as well as the pass carrying none.
+    const rt = await createFomoRuntime({ db, dialect: "postgres", apiKey: boot.apiKey, access: fomoAccessFor, log, planCreditsPerMonth: boot.planCredits, budget: boot.budget, tailsEnabled: fomoTailsOn() });
+    fomoRuntime = {
+      db,
+      service: rt.service,
+      client: rt.client,
+      backgroundBudget: rt.backgroundBudget,
+      // One deep job per leader pass, under the pass's own jobs latch, on the
+      // live clock: a job runs for minutes and stamps its finish when it ends.
+      runJobs: () => rt.runJobs(undefined, 1),
+    };
+    // Children spawned before the runtime existed get their broker now.
+    for (const [tenant, child] of children) attachFomoBroker(tenant, child.proc);
+    return fomoRuntime;
+  } catch (e) {
+    fomoRuntimeRetryAt = Date.now() + 5 * 60_000;
+    noteFomoFailure(`runtime unavailable, trying again in 5 min — ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+/**
+ * Serve one child's Fomo requests on its IPC channel, stamped with the tenant
+ * THIS PROCESS spawned it for. Idempotent per process; a no-op until the
+ * runtime exists, and for a process without a connected channel.
+ */
+function attachFomoBroker(tenant: string, proc: ChildProcess): void {
+  const rt = fomoRuntime;
+  if (!rt || fomoBrokers.has(proc) || proc.connected !== true) return;
+  try {
+    const release = serveBrokerRequests(childProcessBrokerPort(proc), tenant.toLowerCase(), rt.service, { log });
+    fomoBrokers.set(proc, release);
+    proc.once("exit", () => {
+      fomoBrokers.delete(proc);
+      release();
+    });
+  } catch (e) {
+    noteFomoFailure(`broker not attached — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function noteFomoFailure(text: string): void {
+  const now = Date.now();
+  // Never a tenant, never a URL with its key: the same scrub the pass uses for its own lines.
+  const clean = text.replace(/0x[0-9a-fA-F]{40}/g, "0x…").replace(/([?&](?:key|apikey|api_key)=)[^&\s]*/gi, "$1***").slice(0, 300);
+  if (!fomoLastFailure || fomoLastFailure.text !== clean || now - fomoLastFailure.at > 20 * 60_000) {
+    fomoLastFailure = { text: clean, at: now };
+    log(`fomo: ${clean}`);
+  }
+}
+
+/** Stop the stream and give up the fleet lease (FLEET_HALT, shutdown). The next pass after a halt builds a new one. */
+function stopFomoPass(): void {
+  fomoPass?.stop();
+  fomoPass = null;
+}
+// THE DRAIN STOPS IT TOO, before any child is signalled (fleet-drain.ts step
+// 2), as the one-second stop() it replaced did: a stream still feeding the
+// children goes first, and its fleet lease with it, so another replica can
+// lead at once. Synchronous, so it never spends the hooks' allowance; a pass
+// still being built sees `stopping` and never starts (runFomoPass).
+onDrainBeforeChildren("fomo stream", stopFomoPass);
+
+function startFomoPass(): void {
+  if (fomoInFlight || stopping) return;
+  const boot = fomoBootNow();
+  if (boot.off) return;
+  fomoInFlight = true;
+  void runFomoPass(boot).finally(() => {
+    fomoInFlight = false;
+  });
+}
+
+async function runFomoPass(boot: FomoBoot): Promise<void> {
+  try {
+    const rt = await fomoRuntimeNow(boot);
+    if (!rt || stopping) return;
+    for (const [tenant, child] of children) attachFomoBroker(tenant, child.proc);
+    fomoPass ??= makeFomoPass({
+      db: rt.db,
+      dialect: "postgres",
+      service: rt.service,
+      client: rt.client,
+      streamEndpoint: streamEndpointFor(boot.apiKey),
+      createSocket: (url) => new WebSocket(url),
+      clock: { now: () => Date.now() },
+      timers: SYSTEM_TIMERS,
+      random: Math.random,
+      lease: {
+        async acquire() {
+          const held = await acquireTenantLease(FOMO_FLEET_LEASE);
+          return held ? { release: () => held.release(), healthy: () => held.healthy() } : null;
+        },
+      },
+      access: fomoAccessFor,
+      // The mirror's holdings for the tenants still here, plus what children
+      // reported over IPC since. A tenant whose child left this replica is not
+      // ours to protect from here.
+      heldTokens: () => {
+        const here = new Set([...children.keys()].map((t) => t.toLowerCase()));
+        const mirrored = new Map([...tenantHeldCoins].filter(([t]) => here.has(t)));
+        return mergeHeldTokens(heldTokensFrom(mirrored), rt.service.heldTokensSnapshot?.());
+      },
+      // Read, and read from a child still running here: a reading left behind
+      // by a child that moved or stood down is not this tenant's book now.
+      holdingsKnown: (tenant) => tenantHeldCoins.has(tenant.toLowerCase()) && fomoStillOurs(tenant),
+      // Checked right before each fomo.json is written: the roster was read
+      // when the pass started, and a tenant may since have moved or been held.
+      stillOurs: fomoStillOurs,
+      childHome,
+      writeChildFile: writeChildFomoFile,
+      xConsent: xpostConsentLookup(rt.db),
+      runJobs: rt.runJobs,
+      budget: fomoBudgetPort(rt.backgroundBudget, FOMO_FLEET_PAYER),
+      log,
+      // The operator's tail switch (docs/fomo.md "Tailing a trader"): =0 stops
+      // tail routing and the tails block in child files; the service (above)
+      // refuses new tails, and the children read the same switch for their
+      // notices (contract.ts fomoTailsOn).
+      knobs: { tailsEnabled: fomoTailsOn() },
+    });
+    // THE SAME ROSTER AS THE ROOM'S AND X'S: only who this replica speaks for.
+    const roster: RosterMember[] = [];
+    for (const [tenant, child] of children) {
+      const key = tenant.toLowerCase();
+      const held = leases.get(key);
+      if (!held || !held.healthy()) continue;
+      roster.push({ tenant: key, agentId: child.smartAccount.toLowerCase() });
+    }
+    // Started, not awaited: the pass has its own latch and its own failure lines.
+    fomoPass.start(roster, Date.now());
+  } catch (e) {
+    noteFomoFailure(`pass failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /** SIGKILL-and-restart any child whose heartbeat has gone stale past the threshold. */
 export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
   if (stopping) return;
@@ -9009,6 +11266,9 @@ function haltRequested(): boolean {
  * loop, as a pass would, and alerted once (pressLeaving).
  */
 export async function honourFleetHalt(): Promise<void> {
+  // The shared Fomo stream and its fleet lease go first: a halted replica
+  // leads nothing, and another replica may take the lease over.
+  stopFomoPass();
   // A lease kept for a hold process that has not exited (below) is waited
   // for, like its process, and not a reason to say all this again.
   const kept = (t: string) => !!holders.get(t)?.leaving || retiringExpired.has(t);
@@ -9238,16 +11498,282 @@ async function runRecoveryReportOnly(): Promise<void> {
   if (!tests) process.exit(0);
 }
 
+/**
+ * THE RESUME PREVIEW (MERRYMEN_RESUME_PREVIEW): one line per tenant, and one
+ * run digest over them all, printed at boot whatever the halt and the rollout
+ * say, so an operator reads it from the deploy log before approving anything.
+ *
+ * READ-ONLY toward every tenant: no lease, no home write, no book opened, no
+ * financial row. Its one write is the run itself (ledger_resume_preview_runs,
+ * insert-once by digest), which is what a batch approval binds to.
+ *
+ * Each line says whether the tenant passed every precondition Postgres can
+ * answer, every reason it did not, whether its account needs a chain read at
+ * admission (anything that could arm live), the level the plan starts it at
+ * (decision 6: paper → trade once the canary has; live → exits-only), whether
+ * it holds positions, whether a pause is on record that it will start under,
+ * when its grant expires, the home's book as the ordinary path would meet it,
+ * and its evidence digest, which is what `0x<tenant>:<digest>` approves.
+ *
+ * THE LINES THE OPERATOR NEEDS COME FIRST, AND AGAIN LAST. The run digest,
+ * the batch approval and the rollout fragment are what step 4 of the runbook
+ * copies, and a burst of ~130 lines at boot is exactly what Railway's log store
+ * has dropped the tail of before (the identity audit, below: "the first run
+ * lost eleven of twelve"). So the digest is computed before anything is
+ * printed, the summary is printed, the per-tenant lines follow paced, and the
+ * summary is printed again. The run row itself is the fallback that cannot
+ * be dropped: Railway → Postgres → Data → ledger_resume_preview_runs, newest
+ * created_at_ms, column `run`.
+ */
+const PREVIEW_LINE_GAP_MS = 25;
+async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<void> {
+  const roster = (await getGrantStore().listTenants()).map((t) => t.toLowerCase());
+  const tenants = scope.scope === "all" ? roster : [...scope.tenants];
+  const nowSec = Math.floor(Date.now() / 1000);
+  const entries: PreviewEntry[] = [];
+  for (const tenant of [...new Set(tenants)].sort()) entries.push((await previewEntryFor(shared, tenant, nowSec)).entry);
+  const run = await recordPreviewRun(shared, entries, Date.now());
+  if (previewRunDigest(entries) !== run) throw new Error("preview run digest drifted");
+  const passed = entries.filter((e) => e.pass);
+  // Passing, and held on a chain refusal no admission has answered: they read
+  // chain:required, so an approval reads the chain again, and while Postgres
+  // still lacks what it showed it refuses them again. The batch approval is
+  // never offered as their way to trade; what is, is said beside it.
+  const chainHeld = passed.filter((e) => e.chainHeld === true);
+  const summary = (): void => {
+    log(`[resume-preview] run ${run}: ${passed.length} of ${entries.length} tenant(s) pass every Postgres precondition` +
+      (passed.some((e) => e.chain === "required") ? "; those marked chain:required are read on chain at admission and refused if it shows anything Postgres lacks" : ""));
+    if (!passed.length) return;
+    log(`[resume-preview] approve every passing tenant of this run with ${RESUME_APPROVE_ENV}=run:${run}` +
+      (chainHeld.length ? ` — for the ${chainHeld.length} held on a chain refusal (chainHeld, below) that is a chain read, not a way to trade` : ""));
+    if (chainHeld.length) {
+      log(`[resume-preview] ${chainHeld.length} passing tenant(s) held on a chain refusal no admission has answered: ` +
+        `${chainHeld.map((e) => e.tenant).join(",")} — for each, ${CHAIN_HELD_NEXT}`);
+    }
+    log(`[resume-preview] rollout for them at the plan's starting levels: ${passed.map((e) => `${e.tenant}:${e.suggestedLevel}`).join(",")}`);
+    // THE PROCESS CAP. A rollout naming more tenants than fit runs the first
+    // ones in roster order and defers the rest with "[alert] … local process
+    // cap reached" until a slot frees; never raise the cap to fit (it guards
+    // the container's PID and thread limit). Live tenants that hold positions
+    // first, then paper in batches (docs/fleet-resume.md).
+    if (passed.length > MAX_LOCAL_CHILD_PROCESSES - 8) {
+      log(`[resume-preview] ${passed.length} passing tenant(s), and this orchestrator runs at most ${MAX_LOCAL_CHILD_PROCESSES} workers and holds at once: ` +
+        `admit them in batches of at most ${MAX_LOCAL_CHILD_PROCESSES - 8}, live tenants holding positions (exits-only) first`);
+    }
+  };
+  summary();
+  for (const entry of entries) {
+    log(previewLine(entry));
+    await new Promise((r) => setTimeout(r, PREVIEW_LINE_GAP_MS));
+  }
+  summary();
+}
+
+/**
+ * ONE TENANT'S PREVIEW LINE, as the operator's preview (runResumePreview) and
+ * the automatic one for a re-signed tenant (autoAdmitResignedPaper) both
+ * print and record it: one reading, so what the orchestrator approves by
+ * itself is exactly what an operator would have been shown. Read-only, and
+ * never throws: a tenant that cannot be read is a line that does not pass.
+ *
+ * `unreadable` says the line failed for a reason that may pass on its own (a
+ * read that threw, owner settings that could not be read, or a refusal that
+ * a failed read caused: ledger-resume.ts ResumeCheck.unreadable), as opposed
+ * to a fact about the tenant: the automatic lane asks again on a later pass
+ * rather than answer a re-sign with an outage.
+ */
+async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Promise<{ entry: PreviewEntry; unreadable: boolean }> {
+  const blank: PreviewEntry = { tenant, account: null, chainId: null, owner: null, digest: null, pass: false, refusals: [], chain: null,
+    suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null,
+    holdsPositions: null, startsPaused: null, grantExpiresAt: null, book: null, evidence: null };
+  try {
+    const grant = await getGrantStore().get(tenant as `0x${string}`);
+    if (!grant) return { entry: { ...blank, refusals: ["no stored grant"] }, unreadable: false };
+    const scopeOf = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
+    const controls = await readControlsEvidence(shared, scopeOf, Date.now());
+    const liveIntent = await resumeLiveIntent(tenant as `0x${string}`);
+    const { evidence, digest, check } = await readResumeEvidence(shared, { tenant, grant, home: childHome(tenant), nowSec, controls, liveIntent: liveIntent ?? true });
+    const refusals = [...check.refusals];
+    if (liveIntent === null) refusals.push("the owner's settings could not be read, so whether it could arm live is unknown: preview again");
+    if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= nowSec) refusals.push("the signed grant has expired: the owner must re-sign");
+    if (accountingTenantHeld(tenant, process.env)) refusals.push("named in MERRYMEN_ACCOUNTING_HOLD_TENANTS");
+    // WHY THE LAST APPROVAL WAS REFUSED, beside the verdict. The chain check
+    // is no Postgres precondition, so this preview can pass a tenant whose
+    // last admission the chain refused — and the refusal names what it found.
+    // Information only: an unreadable one is said as unread, never a refusal,
+    // and never `unreadable` below. (What a chain refusal does to the verdict
+    // is the check's own `chainHeld`: chain:required until an admission
+    // answers it, whatever refusal came after it.)
+    let lastRefusal: PreviewEntry["lastRefusal"] = null;
+    try { lastRefusal = await readLastRefusal(shared, tenant); }
+    catch (e) { lastRefusal = { evidence: "", reason: `the last approval could not be read (${errorKind(e)})`, atMs: 0 }; }
+    return {
+      entry: {
+        tenant, account: evidence.account, chainId: evidence.chainId, owner: evidence.owner, digest, pass: refusals.length === 0, refusals,
+        chain: check.chainRequired ? "required" : "not-required", suggestedLevel: check.suggestedLevel, anchor: check.anchor,
+        riskPeriod: check.riskPeriod, home: evidence.home.exists ? "present" : "absent", lastMirrorAt: check.lastMirrorAt,
+        holdsPositions: check.holdsPositions, startsPaused: await previewStartsPaused(shared, scopeOf, evidence.home.markers ?? [], controls),
+        grantExpiresAt: Number.isFinite(grant.expiresAt) ? grant.expiresAt : null, book: homeBookState(evidence.home), evidence, lastRefusal,
+        chainHeld: check.chainHeld,
+      },
+      // Settings that could not be read, and every refusal a failed read
+      // caused (ResumeCheck.unreadable: owner controls whose read did not
+      // complete, an anchor that could not be derived, a risk period whose
+      // read threw). Each of those would have settled a re-sign as "did not
+      // pass" on one bad read, and the lane would never have asked again.
+      unreadable: liveIntent === null || check.unreadable.length > 0,
+    };
+  } catch (e) {
+    return { entry: { ...blank, refusals: [`could not be read (${errorKind(e)})`] }, unreadable: true };
+  }
+}
+
+/**
+ * WILL THIS TENANT'S WORKER START PAUSED? For the operator's choice of level
+ * and an owner's question, not for any gate: the arm (recovery-reply-arm.ts)
+ * decides, this only reads what it will read. True when a pause is on record
+ * the arm would leave or put in the home — the home's own `paused` file, a
+ * journalled /pause or confirmed /kill with no receipt yet (a kill may also
+ * remove the grant), a pre-incident pause event with no receipt restored into
+ * a home never armed, or a durable pause stamp over a home never armed that
+ * the owner's mirrored /resume has not since lifted (durablePauseLifted).
+ */
+async function previewStartsPaused(shared: Db, scope: ControlScope, markers: readonly string[],
+  controls: Awaited<ReturnType<typeof readControlsEvidence>>): Promise<boolean | null> {
+  const tenant = scope.tenant;
+  if (markers.includes("paused")) return true;
+  if (!controls.readable || !controls.fold) return null;
+  let receipts = new Set<string>();
+  try {
+    receipts = new Set(((await shared.prepare("SELECT bot_id, update_id FROM recovery_reply_control_receipts WHERE tenant = ?").all(tenant.toLowerCase())) as
+      Array<Record<string, unknown>>).map((r) => `${String(r.bot_id)}:${String(Number(r.update_id))}`));
+  } catch (e) {
+    if (!/no such table|does not exist|42P01/.test(`${(e as { code?: unknown }).code ?? ""} ${(e as Error).message}`)) return null;
+  }
+  if (controls.fold.pauses.some((p) => !receipts.has(`${p.botId}:${p.updateId}`))) return true;
+  if (controls.fold.confirmedKills.some((k) => !receipts.has(`${k.botId}:${k.requestUpdateId}`))) return true;
+  const neverArmed = !markers.includes(CONTROLS_ARMED_FILE);
+  if (neverArmed && controls.legacy && !receipts.has(`${LEGACY_EVENTS_BOT}:${controls.legacy.eventId}`)) return true;
+  try {
+    const durable = neverArmed ? await readDurablePause(shared, tenant) : null;
+    if (durable !== null && !(await durablePauseLifted(shared, scope, durable))) return true;
+  } catch { return null; }
+  return false;
+}
+
+/**
+ * THE OPERATOR'S RESUME CONTROLS, at boot (docs/fleet-resume.md): the preview,
+ * then revocations, then approvals, so a deploy that revokes and re-approves a
+ * tenant ends with the new approval. Standing rollout controls, not one-shots:
+ * each is idempotent, and left set it changes nothing on the next boot — a
+ * revoke names the evidence it withdraws, so it never matches the approval
+ * that replaced it.
+ * Without a shared database there is nothing to preview or approve.
+ */
+async function runResumeAdmissionControls(c: { preview: ResumePreviewScope | null; approvals: ReturnType<typeof parseResumeApprovals>; revokes: ResumeRevoke[] }): Promise<void> {
+  if (!c.preview && !c.approvals.length && !c.revokes.length) return;
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) { log("resume controls are set, but there is no shared database to read or record them in — ignored"); return; }
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    await ensureLedgerResumeSchema(shared);
+    if (c.preview) {
+      // What the preview's `startsPaused` reads (the receipts and
+      // tenant_telegram.paused_at) exists before any arm has created it: the
+      // same additive DDL the arm and every mirror pass run, so a halted boot
+      // reports what is on record rather than "unknown".
+      await shared.exec(CONTROL_RECEIPTS_SCHEMA);
+      await ensureTelegramSchema(shared);
+      await runResumePreview(shared, c.preview);
+    }
+    await revokeResumeApprovals(shared, c.revokes, Date.now(), log);
+    await applyResumeApprovals(shared, c.approvals, Date.now(), log);
+  } catch (e) {
+    log(`[alert] resume controls could not run (${errorKind(e)}) — nothing was approved or revoked by this boot`);
+  }
+}
+export function runResumeAdmissionControlsForTest(env: NodeJS.ProcessEnv): Promise<void> {
+  return runResumeAdmissionControls({ preview: parseResumePreview(env[RESUME_PREVIEW_ENV]), approvals: parseResumeApprovals(env[RESUME_APPROVE_ENV]), revokes: parseResumeRevokes(env[RESUME_REVOKE_ENV]) });
+}
+
+/**
+ * ON RAILWAY, THE FLEET STARTS ONLY WHERE AND AS THE DEPLOY GUARD SAYS IT MAY.
+ *
+ * preparePersistentHomeForHandover() below proves the mount, the provider
+ * volume and the manifest — but only when MERRYMEN_PERSISTENT_HOME_REQUIRED=1
+ * asks it to. Unset or 0 it returns null, and the orchestrator would carry on
+ * in whatever MERRYMEN_HOME names: on Railway, possibly the container's own
+ * disk, which the next deploy throws away with every child book, cached grant
+ * and pending kill in it. Beside that opt-in, the deploy guard's other start
+ * checks for this role: the one service MERRYMEN_FLEET_SERVICE_ID names (a
+ * second fleet would race the first for every tenant), this image, and no
+ * one-shot repair variable left set before the rollout reads `all`.
+ *
+ * container-start.sh runs the same checks before it execs this file, but a
+ * Start Command set on the service, or a hand-run `node … orchestrator.ts`,
+ * never passes through the script. So a Railway-hosted orchestrator that
+ * fails any of them exits 78 (EX_CONFIG), naming each reason, before either
+ * entry path, the report-only one included, has read or written anything.
+ * Off Railway it stands aside: there is no Railway service or volume to be
+ * wrong about, and local runs and the test suite start the supervisor there.
+ */
+function assertHostedFleetStart(): void {
+  const refusals = hostedOrchestratorRefusals(process.env);
+  if (refusals.length === 0) return;
+  for (const refusal of refusals) log(`refusing to start — ${refusal}`);
+  process.exit(EX_CONFIG);
+}
+
 export async function runOrchestrator(): Promise<void> {
   if (!isHostedMode()) {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
     process.exit(1);
   }
+  assertHostedFleetStart();
   // Validate operator intent before either entry path can initialize anything.
   const accountingHolds = accountingHoldTenants(process.env);
+  // THE ROLLOUT TOO, and for both paths: a malformed value, or an unset one on
+  // Railway, refuses here, before the halt, the volume or a lease is touched.
+  const rollout = fleetRollout(process.env);
+  // AND THE RESUME ADMISSION VARIABLES (ledger-resume.ts), on the same rule:
+  // malformed refuses boot, never a guess at which tenants were meant.
+  const resumeControls = {
+    preview: parseResumePreview(process.env[RESUME_PREVIEW_ENV]),
+    approvals: parseResumeApprovals(process.env[RESUME_APPROVE_ENV]),
+    revokes: parseResumeRevokes(process.env[RESUME_REVOKE_ENV]),
+  };
+  // And the automatic lane for re-signed paper tenants: `1` or unset, and
+  // anything else refuses here. Read again every pass, failing closed.
+  const resumeAutoPaper = parseResumeAutoPaper(process.env[RESUME_AUTO_PAPER_ENV]);
   const reportMode = process.env.MERRYMEN_FLEET_RECOVERY_REPORT_ONLY;
   if (reportMode !== undefined && reportMode !== "1") throw reportRefused();
+  // NAMED TENANTS AND THE FAILURE-ONLY REPORTER ARE TWO ANSWERS TO ONE
+  // QUESTION. A list says "start these"; the reporter starts nothing and leases
+  // every tenant in turn, so the deploy would do the opposite of what half its
+  // variables say. Refused rather than resolved either way: whichever one the
+  // operator meant, the other is a mistake they should see before it runs.
+  if (reportMode === "1" && rollout.scope === "list") {
+    throw new Error(`${FLEET_ROLLOUT_ENV} names tenants to start, and MERRYMEN_FLEET_RECOVERY_REPORT_ONLY=1 starts none; refusing both`);
+  }
   if (reportMode === "1") { await runRecoveryReportOnly(); return; }
+  // THE POPULATED INCIDENT VOLUME, AND ITS REVIEWED RELEASE AND RE-HALT
+  // (docs/fleet-resume.md). Each does nothing unless its own variable is set,
+  // and each also needs the pinned hash of the volume's original halt.
+  // Adoption swaps that hand-made halt for this volume's canonical one without
+  // FLEET_HALT ever being absent; the release lifts only that canonical halt,
+  // once per halt generation and only into the rollout scope read above; the
+  // re-halt puts it back for a rollback to listener-only mode. Here, before
+  // the preparation below re-proves the result, and so before any lease,
+  // child, holder or writer. The pin stays set for release and re-halt, so
+  // only the start that wrote the manifest says it adopted anything.
+  const adopted = adoptPopulatedPersistentHome();
+  if (adopted) {
+    log(`persistent home ${adopted.adoptedNow ? "adopted under its original halt" : "previously adopted"}; handover ${adopted.handoverState}`);
+  }
+  const haltControl = controlAdoptedPersistentHomeHalt();
+  if (haltControl) {
+    log(`${haltControl.action === "withheld" ? "[alert] " : ""}persistent home halt ${haltControl.action} — ${haltControl.detail}`);
+  }
   // A new mounted home first writes its own durable halt. No child, holder,
   // accounting repair or ordinary writer may precede this preparation.
   const persistent = preparePersistentHomeForHandover();
@@ -9255,8 +11781,38 @@ export async function runOrchestrator(): Promise<void> {
   // Validate the complete operator list before any diagnosis, mutation or
   // child starts. A malformed entry must never silently drop from a hold.
   if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
+  log(rolloutStartupLine(rollout));
+  log(resumeAutoPaper
+    ? `resume auto-paper: ${RESUME_AUTO_PAPER_ENV}=1 — a tenant whose grant row changes is previewed automatically, and a re-signed one the continuity gate holds that is paper, ` +
+      `could not arm live and holds nothing is approved by this process (at most ${AUTO_PAPER_PER_PASS} a pass, within the process cap) and admitted at its rollout level` +
+      // Said at boot, not only per tenant: with consent stood down the lane
+      // previews and approves nobody, and the operator should know why.
+      (liveConsentEnforced() ? "" : `. Live-trading consent is stood down (MERRYMEN_LIVE_INTENT_STAND_DOWN=1), so every tenant reads as able to arm live: ` +
+        "while it is set, every re-signer is previewed and left to the operator, none approved by this process")
+    : `resume auto-paper: off — a re-signed tenant with history waits for an operator's preview and approval, as before`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
+  // Fomo's switches, decided and said ONCE AT BOOT: under FLEET_HALT nothing
+  // spawns and no pass runs, and the operator should still read whether it
+  // is on (docs/fomo.md). Reads the environment and logs; nothing else.
+  fomoBootNow();
+  // HOW THE LAST ORCHESTRATOR STOPPED, from the receipt its drain wrote
+  // (fleet-drain.ts): said once, and moved aside so that a crash of this run
+  // is never read as the clean stop of the last.
+  const previousShutdown = takePreviousShutdown(shutdownReceiptDir(merrymenHome()));
+  log(previousShutdown.line);
+  // HOW THE LAST PROCESS ENDED, read before this one can leave a receipt of
+  // its own; every heartbeat carries it (fleet-heartbeat.ts). Taken from the
+  // read above, not the file: that read is the one read, and has moved the
+  // receipt aside. No receipt (clean null) is null here, as it is there;
+  // the receipt's own names, `clean` and `finishedAt`, carry it.
+  heartbeatBoot = {
+    startedAt: Math.floor(Date.now() / 1000),
+    lastShutdown: lastShutdownOf({ clean: previousShutdown.clean, finishedAt: previousShutdown.at }),
+  };
+  // THE RESUME PREVIEW AND APPROVALS, halted or not, before any pass can
+  // spawn: the preview reads homes no child has touched yet this boot.
+  await runResumeAdmissionControls(resumeControls);
   await runAccountingDiagnosisIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror
@@ -9264,31 +11820,17 @@ export async function runOrchestrator(): Promise<void> {
   // this very deploy just cleared. It runs from the loop instead — see
   // COHORT_VET_AFTER_PASSES.
 
-  const stop = () => {
-    stopping = true;
-    log("stopping — calling the whole fleet home");
-    for (const child of children.values()) child.proc.kill("SIGTERM");
-    for (const held of holders.values()) held.proc?.kill("SIGTERM");
-    // And any a handover or stand-down is still waiting on.
-    for (const held of holders.values()) killLeaving(held);
-    // Release every advisory lease so a restarting replica can take over at once
-    // rather than waiting for our dropped connections to time out server-side.
-    // Best-effort and unawaited — we exit in a second regardless.
-    const release = () => {
-      for (const tenant of [...leases.keys()]) void releaseLease(tenant);
-    };
-    // A TELEGRAM KILL STILL WAITING IN A HOME goes to the store before the
-    // leases do, so the replica taking over never arms that grant. The home
-    // does not survive this container (kill-request.ts). Bounded, and it
-    // changes nothing when no kill is pending. It only helps if Railway gives
-    // the old deployment draining time. The default is none.
-    if (pendingKillTenants().length === 0) {
-      release();
-      setTimeout(() => process.exit(0), 1_000);
-      return;
-    }
-    void Promise.race([honourPendingKills(), new Promise((r) => setTimeout(r, 3_000))]).finally(release);
-    setTimeout(() => process.exit(0), 4_000);
+  // THE DRAIN, for SIGTERM (the platform's stop) and SIGINT (a hand at the
+  // terminal) alike: stop starting things, let every copy in flight finish
+  // under its lease, stop the children and wait for them, carry out pending
+  // Telegram kills, give each home its final pass, write the receipt, and
+  // release the leases last. Once, however many signals come. It used to
+  // release every lease at once and exit a second later, which left a copy in
+  // flight blocked behind its own recovery marker. See fleet-drain.ts. The
+  // Fomo stream and its fleet lease are a beforeChildren hook of the drain
+  // (registered beside stopFomoPass), so they still go before any child does.
+  const stop = (signal: NodeJS.Signals) => {
+    void drainFleet(signal);
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -9310,6 +11852,10 @@ export async function runOrchestrator(): Promise<void> {
   // The main loop: honour a fleet-halt, else reconcile + watchdog every tick.
   for (;;) {
     if (stopping) return;
+    // THE HEARTBEAT, halted or not, and first: a pass that wedges is then a
+    // beat that stops, which is what an outside check can see. Started, never
+    // awaited — see startFleetHeartbeat.
+    startFleetHeartbeat();
     if (haltRequested()) {
       await honourFleetHalt();
     } else {
@@ -9343,6 +11889,12 @@ export async function runOrchestrator(): Promise<void> {
       // Beside the watchdog, and nothing like it: this one only speaks.
       telegramLiveness();
       await mirrorLedgers();
+      // CALLED HOME DURING THIS PASS: nothing after the mirror is started.
+      // The drain can now run for most of a minute rather than a second, and
+      // what follows includes a shared-ledger writer that holds no lease
+      // (startHistoryRepair), owner messages on the first pass, and background
+      // jobs — none of them waited for, all of them cut off by the exit.
+      if (stopping) return;
       startHistoryRepair();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this
@@ -9360,10 +11912,17 @@ export async function runOrchestrator(): Promise<void> {
       // POSTING ON X, the same way and for the same reasons: after the mirror,
       // silenced by FLEET_HALT, never awaited. See startXPostPass.
       startXPostPass();
+      // FOMO RESEARCH, the same way again: after the mirror (which is what
+      // says which coins each tenant holds), silenced by FLEET_HALT, never
+      // awaited. See startFomoPass.
+      startFomoPass();
       // THE MCP SERVER'S BACKGROUND WORK (backtest jobs, alerts, retention).
       // Started, never awaited, like the room: nothing here is on the trading
-      // path, and each pass has its own budget and in-flight guard.
-      (mcpBackground ??= makeMcpBackground({ shared: () => makePgDb(process.env.DATABASE_URL!), log, rpcUrl: process.env.MERRYMEN_RPC_MAINNET }))();
+      // path, and each pass has its own budget and in-flight guard. Its jobs,
+      // alerts and retention run for every owner at once, held ones included,
+      // and send through their bots: only once the rollout admits the whole
+      // fleet (fleet-rollout.ts).
+      if (rolloutAdmitsWholeFleet()) (mcpBackground ??= makeMcpBackground({ shared: () => makePgDb(process.env.DATABASE_URL!), log, rpcUrl: process.env.MERRYMEN_RPC_MAINNET }))();
       // AFTER THE MIRROR HAS SETTLED, NOT AT STARTUP, and once.
       //
       // The mirror REPLACES positions per agent, so between a child restarting

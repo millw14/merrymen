@@ -260,6 +260,13 @@ describe("a rename from chat survives the next tick", () => {
       "telegramGroupsEnabled",
       "telegramGroupCoinsEnabled",
       "telegramGroupsChattiness",
+      // Fomo research (docs/fomo.md): dashboard-only, DASHBOARD_ONLY.fomo.
+      // fomoFollowEnabled can lead to real money; the other two decide what
+      // the house reads and routes for this owner.
+      "fomoDataAccess",
+      "fomoMonitoringEnabled",
+      "fomoFollowEnabled",
+      "fomoApiKey",
       "bundlerApiKey",
       "groqApiKey",
       "llmApiKey",

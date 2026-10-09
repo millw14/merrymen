@@ -173,6 +173,23 @@ export type Why =
    */
   | { code: "breaker-tripped"; limitBps: number }
   /**
+   * NOTHING BOUGHT, AND IT IS THE SIGNATURE — every leg that was left to buy
+   * is a coin the signed key cannot sell back, so the wall refuses the buy.
+   *
+   * Before the snapshot carried the entry gates (entry-gates.ts), this was a
+   * refusal a tick per leg: the strategy proposed the leg, checkPolicy said
+   * `no-exit`, and nothing ever changed until the owner re-signed. Now the leg
+   * is skipped and, when no other leg could have bought, this says so once.
+   *
+   * COUNTS ONLY, so it publishes by the same rule as every other reason here:
+   * how many legs, and how many of them the key does not cover — counted over
+   * the whole basket (entry-gates.ts lockedLegs), so the sentence is a fact
+   * about the basket and holds still while the feeds open and shut. The
+   * legs it does not name were stale, paused, or not wanted this tick, and
+   * the sentence makes no claim about which.
+   */
+  | { code: "legs-locked"; legs: number; locked: number }
+  /**
    * A LEG THAT RAN FAR ENOUGH AHEAD OF WHAT IT COST TO BE WORTH REALISING.
    *
    * The default strategy could only ever buy — every intent it emitted had cash
@@ -444,6 +461,20 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
         `in the signed key, so the breaker refuses buys until it recovers. ` +
         (audience === "owner" ? `A wider limit needs a re-sign at /grant. ` : ``) +
         `Selling is never blocked by this`
+      );
+    case "legs-locked":
+      // NO "selling is never blocked" CLAUSE, unlike its siblings. Those are
+      // caps that exempt an exit; this is the key itself, and a key that cannot
+      // approve a coin for a sale cannot sell what it already holds of it.
+      return (
+        `nothing bought — the signed key can't sell back ` +
+        (w.locked >= w.legs
+          ? w.legs === 1
+            ? `the only leg`
+            : `any of the ${w.legs} legs`
+          : `${w.locked} of the ${w.legs} legs`) +
+        `, so the wall would refuse ${w.locked === 1 ? "a buy of it" : "a buy of them"} and none is proposed` +
+        (audience === "owner" ? `. Re-sign at /grant to cover ${w.locked === 1 ? "it" : "them"}` : ``)
       );
     case "under-one-buy":
       return (

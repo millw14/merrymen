@@ -1,0 +1,15 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "plan": "starter",
+  "expiresAt": "2026-11-04T00:00:00Z",
+  "credits": {
+    "monthly": 2500000,
+    "usedThisMonth": 125000,
+    "prepaid": 0,
+    "remaining": 2375000
+  },
+  "streams": {
+    "appFeed": true,
+    "onChain": false
+  }
+}

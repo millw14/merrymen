@@ -59,7 +59,7 @@ const PASS_LINE_CHARS = 240;
 // ── making text safe to put in a prompt ────────────────────────────────────
 
 /** Invisible and direction-changing characters: a quote with none of them reads as it looks. */
-const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180e\u2800\u3164\uffa0\ufe00-\ufe0f]/gu;
+export const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180e\u2800\u3164\uffa0\ufe00-\ufe0f]/gu;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 

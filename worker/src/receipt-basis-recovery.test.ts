@@ -62,6 +62,29 @@ it("deduplicates transfers within a transaction and refuses unknown ordering", a
   delete f.logs[0]!.blockNumber;
   assert.equal(await recoverReceiptBasis(f.opts), null);
 });
+/**
+ * WHAT THE OWNER IS TOLD ABOUT A TOKEN THEIR OWN KEY BOUGHT (owner-operations.ts
+ * ownerOperationsNotice) RESTS ON THIS: the recovery replays a token's Transfer
+ * history receipt by receipt, and never asks who signed. A purchase the owner's
+ * root key made, paying USDG in the same receipt, gets its cost back from that
+ * receipt like any other; only an arrival with no USDG paid has none. Whether
+ * a root-key receipt should be refused here instead is a separate decision
+ * (docs/owner-operations.md); this pins today's behaviour so the notice cannot
+ * drift from it.
+ */
+it("a purchase the owner's own key signed, paid in USDG in the same receipt, is recovered like any other", async () => {
+  const f = fixture([{ qty: 10n, cash: 100n }], 10n);
+  const EP = "0x0000000071727de22e5e9d8baf0edac6f37da032";
+  const UOE = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f" as Hex;
+  const BEFORE = "0xbb47ee3e183a558b1a2ff0874b079f3fc5478b7454eacf2bfc5af2ff5878f972" as Hex;
+  const word = (n: bigint) => n.toString(16).padStart(64, "0");
+  const ROOT_NONCE = (0x845adb2c711129d4f3966735ed98a9f09fc4ce57n << 64n) | 9n;
+  for (const [tx, legs] of f.receipts) {
+    f.receipts.set(tx, [{ address: EP, topics: [BEFORE], data: "0x" }, ...legs,
+      { address: EP, topics: [UOE, `0x${"77".repeat(32)}` as Hex, addressTopic(account), addressTopic(`0x${"0".repeat(40)}`)], data: `0x${word(ROOT_NONCE)}${word(1n)}${word(1n)}${word(1n)}` }]);
+  }
+  assert.deepEqual((await recoverReceiptBasis(f.opts))?.basis, { qtyRaw: 10n, costUsdg: 100n });
+});
 it("a hanging recovery cannot consume the next trading decision's deadline", async () => {
   const f = fixture([{ qty: 10n, cash: 100n }], 10n);
   f.opts.chain.getLogs = () => new Promise(() => {});

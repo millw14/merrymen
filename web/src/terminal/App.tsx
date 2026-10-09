@@ -22,7 +22,8 @@ import {
   useSyncExternalStore,
 } from "react";
 import { autonomyOf } from "@merrymen/core";
-import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
+import { pausedRecovery, recoveryAutonomy, recoveryFunds } from "./recovery-view";
+import { workerSilentSince } from "./worker-stale";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
 import { chatTape } from "./chat-thread";
@@ -70,6 +71,8 @@ import {
 } from "./account-read";
 import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
 import { LoadFailure } from "./LoadFailure";
+import { ServiceNotice } from "./ServiceNotice";
+import "./service-notice.css";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
 import { useLiveNews, useSoundPref } from "./live-news";
@@ -378,7 +381,7 @@ export function App() {
       // that published none stays unpublished rather than guessed.
       // The rest past `glance` is the profile's own: the chart's timestamps and
       // whether they reach the whole period, TOP TRADES, and the stats line.
-      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,performance:p.performance === undefined ? undefined : performanceFromWire(p.performance),unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:thesisOfHow(p.how),glance:{...glanceOfHow(p.how),legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined},
+      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,performance:p.performance === undefined ? undefined : performanceFromWire(p.performance),unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,paperFills:p.paperFills,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:thesisOfHow(p.how),glance:{...glanceOfHow(p.how),legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined},
         growthPoints:p.growth,growthComplete:p.growthComplete,topTrades:p.topTrades,topTradesRead:p.topTradesRead,tradeCount:p.tradeCount,tradeCountFloor:p.tradeCountFloor,avgHoldSec:p.avgHoldSec,joinedAt:p.joinedAt,gasless:p.gasless});
     }).catch(e=>{if(alive)setProfileError(e.message);});
     void refresh();
@@ -415,6 +418,25 @@ export function App() {
    * figure that must not be trusted to say whether money exists.
    */
   const recovery = pausedRecovery(account?.status.recovery);
+  /**
+   * IS THE BLOCKER OLDER THAN THE SIGNATURE?
+   *
+   * Both halves come from this one response: `grantedAt` from the grant store
+   * the POST wrote synchronously, `workerAliveAt` from the mirrored `agents`
+   * row that also carries `liveBlocker` — so the comparison is between two
+   * facts that arrived together, not a race between sources.
+   *
+   * Both must be present. A missing timestamp is not a fresh signature, and
+   * defaulting either way would turn "we don't know" into a claim.
+   *
+   * NAMED, because the desk needs the fact itself and not the verdict's word
+   * for it. It used to be handed `autonomy.state === "checking"`, which stopped
+   * meaning this once a silent worker could answer NOT RUNNING instead.
+   */
+  const blockerPredatesGrant =
+    account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
+      ? account.status.grant.grantedAt > account.status.workerAliveAt
+      : false;
   const autonomy = recoveryAutonomy(autonomyOf({
     mode: account?.status.mode ?? null,
     liveBlocker: account?.status.liveBlocker ?? null,
@@ -426,24 +448,24 @@ export function App() {
     // the one value `autonomyOf` answers with "Add funds" — to a funded owner,
     // whenever the node was slow. See realCashOf.
     realCashUsd: realCashOf(account),
+    blockerPredatesGrant,
     /**
-     * IS THE BLOCKER OLDER THAN THE SIGNATURE?
-     *
-     * Both halves come from this one response: `grantedAt` from the grant store
-     * the POST wrote synchronously, `workerAliveAt` from the mirrored `agents`
-     * row that also carries `liveBlocker` — so the comparison is between two
-     * facts that arrived together, not a race between sources.
-     *
-     * Both must be present. A missing timestamp is not a fresh signature, and
-     * defaulting either way would turn "we don't know" into a claim.
+     * HAS THE WORKER STOPPED? The SERVER's answer (`workerStale` on the same
+     * response), read back as the beat it went quiet at — never this browser's
+     * clock against a server timestamp. An older server sends no answer, and
+     * the agent is described as it describes itself. See worker-stale.ts.
      */
-    blockerPredatesGrant:
-      account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
-        ? account.status.grant.grantedAt > account.status.workerAliveAt
-        : false,
+    workerSilentSince: workerSilentSince(account?.status),
+    // Whole days left on the key, counted up; `autonomyOf` keeps the window.
+    expiresSoonDays:
+      account?.status.grant?.expiresAt !== undefined
+        ? Math.ceil((account.status.grant.expiresAt * 1000 - Date.now()) / 86_400_000)
+        : null,
   }), recovery);
+  // `recoveryFunds` from the same `account` as `recovery`, so the notice never
+  // pairs one tenant's hold with another read's account or cash.
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
-    ...(recovery ? { chg24: null } : {})} : null;
+    ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
    *
@@ -506,6 +528,10 @@ export function App() {
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
         {banner && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={clockShell.retryFailing}/>}
+        {/* THE OPERATOR'S FLEET-WIDE NOTICE, on every screen and to every
+            visitor, signed in or not. It takes no props on purpose: it reads
+            nothing of the account, and nothing here reads it. */}
+        <ServiceNotice />
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -580,7 +606,7 @@ export function App() {
             onResign={() => {window.location.href=resignHref;}}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
-            staleBlocker={autonomy.state === "checking"}
+            staleBlocker={blockerPredatesGrant}
             energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}
@@ -814,7 +840,7 @@ export function App() {
             }}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
-            staleBlocker={autonomy.state === "checking"}
+            staleBlocker={blockerPredatesGrant}
             energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}

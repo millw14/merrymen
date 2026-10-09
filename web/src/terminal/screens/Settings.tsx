@@ -136,11 +136,20 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
    * they are yours to set.
    */
   const [hosted, setHosted] = useState<boolean | null>(null);
+  // Whether this deployment runs Fomo research at all (hosted Fomo is opt-in):
+  // the Fomo section is shown only once the answer is yes.
+  const [fomoOn, setFomoOn] = useState<boolean | null>(null);
   useEffect(() => {
     fetch("/api/auth/session")
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setHosted(!!d?.hosted))
-      .catch(() => setHosted(false));
+      .then((d) => {
+        setHosted(!!d?.hosted);
+        setFomoOn(d?.fomo === true);
+      })
+      .catch(() => {
+        setHosted(false);
+        setFomoOn(false);
+      });
   }, []);
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [tgEnabled, setTgEnabled] = useState<boolean | null>(null);
@@ -163,6 +172,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   /** Which kinds of thing the agent may BUY. Null = untouched this session. */
   const [assetMode, setAssetMode] = useState<"all" | "stocks" | "crypto" | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
+  /** Fomo research: three separate permissions (docs/fomo.md). Null = untouched. */
+  const [fomoData, setFomoData] = useState<boolean | null>(null);
+  const [fomoMonitoring, setFomoMonitoring] = useState<boolean | null>(null);
+  const [fomoFollow, setFomoFollow] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [trencherFast, setTrencherFast] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
@@ -523,6 +536,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     if (liveTrading !== null) body.liveTradingEnabled = liveTrading;
     if (assetMode !== null) body.assetMode = assetMode;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
+    // Guarded like the rest: fomoDataAccess defaults ON, so an unguarded send
+    // would write the form's value for every owner who saved anything at all.
+    if (fomoData !== null) body.fomoDataAccess = fomoData;
+    if (fomoMonitoring !== null) body.fomoMonitoringEnabled = fomoMonitoring;
+    if (fomoFollow !== null) body.fomoFollowEnabled = fomoFollow;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (trencherFast !== null) body.trencherFastEnabled = trencherFast;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
@@ -588,6 +606,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setVirtualsEnabled(null);
       setScoutEnabled(null);
       setDiscoveryEnabled(null);
+      setFomoData(null);
+      setFomoMonitoring(null);
+      setFomoFollow(null);
       setAllowlist(null);
       setPcEnabled(null);
       setCaps(null);
@@ -641,7 +662,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const hasUnsavedChanges = Object.keys(draft).length > 0 || [
     symbols, tokens, tgEnabled, tgControl, tgTransfer, tgNotify, tgGroups,
     tgGroupCoins, tgChattiness, virtualsEnabled, deskEnabled, scoutEnabled,
-    classSnipe, liveTrading, assetMode, discoveryEnabled, trencherLive,
+    classSnipe, liveTrading, assetMode, discoveryEnabled, fomoData, fomoMonitoring, fomoFollow, trencherLive,
     trencherFast, officialCoins, allowlist, pcEnabled, caps, shellList,
     appList, agentEnabled, agentAutoShell,
   ].some(value => value !== null);
@@ -703,6 +724,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const liveTradingVal = liveTrading ?? view.values.liveTradingEnabled ?? d.liveTradingEnabled;
   const assetModeVal = assetMode ?? view.values.assetMode ?? d.assetMode;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
+  // `?? true` for the same reason as officialCoinsEnabled: reading defaults ON,
+  // so an owner who never saved it has no stored value and must not see "off".
+  const fomoDataVal = fomoData ?? view.values.fomoDataAccess ?? d.fomoDataAccess ?? true;
+  const fomoMonitoringVal = fomoMonitoring ?? view.values.fomoMonitoringEnabled ?? d.fomoMonitoringEnabled ?? false;
+  const fomoFollowVal = fomoFollow ?? view.values.fomoFollowEnabled ?? d.fomoFollowEnabled ?? false;
+  // COHORT MONITORING AND RESEARCH-LED FOLLOWING ARE HOSTED ONLY. Both are
+  // produced by the hosted orchestrator's fleet pass (the stream, the cohort,
+  // the child's fomo.json), which a self-hosted install never runs: there the
+  // two switches would store a value and change nothing while this page said
+  // "researches what the watched traders do". So, on a RESOLVED self-hosted
+  // answer only, they show off, cannot be changed, and say why. Untouched,
+  // their save guards send nothing, so a stored value is left as it was.
+  const fomoFleetOnly = hosted === false;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
   // this is the one setting whose default is ON, so an owner who has never saved
@@ -772,6 +806,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           owner={view.owner}
           symbols={[...view.knownSymbols, ...(view.values.customTokens ?? []).map((tk) => tk.symbol.toUpperCase())]}
           hosted={view.owner !== null}
+          fomo={fomoOn}
           onApplied={() => setLoadAttempt((x) => x + 1)}
         />
       </div>
@@ -1497,6 +1532,75 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               </>
             )}
           </div>
+
+          {/* ── FOMO RESEARCH ───────────────────────────────────────────────
+              Three permissions, deliberately not one switch (docs/fomo.md):
+              reading, being sent research, and letting research suggest
+              entries. The last sits beside scout mode because the scout budget
+              above is the allocation it spends inside — there is no second,
+              hidden allowance. */}
+          {fomoOn === true && (<>
+          <div className="mm-subtle mono">fomo research · traders, coins and theses</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
+            Data comes from FOMO API (fomoapi.io), an independent service that is not affiliated with fomo.family. Lookups only read; nothing here buys or posts on its own.
+          </p>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.fomoDataAccess")}</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={fomoDataVal}
+                  onChange={(e) => setFomoData(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {fomoDataVal ? "looks traders and coins up when you ask" : "off — Fomo questions are refused"}
+                </span>
+              </span>
+            </label>
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.fomoMonitoring")}</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={fomoFleetOnly ? false : fomoMonitoringVal}
+                  disabled={fomoFleetOnly}
+                  onChange={(e) => setFomoMonitoring(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {fomoFleetOnly
+                    ? "hosted only — not available on this install"
+                    : fomoMonitoringVal
+                      ? "researches what the watched traders do"
+                      : "off — research only when asked"}
+                </span>
+              </span>
+            </label>
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.fomoFollow")}</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={fomoFleetOnly ? false : fomoFollowVal}
+                  disabled={fomoFleetOnly}
+                  onChange={(e) => setFomoFollow(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {fomoFleetOnly
+                    ? "hosted only — not available on this install"
+                    : fomoFollowVal
+                      ? "may suggest coins to the memecoin review"
+                      : "off — research never leads to a trade"}
+                </span>
+              </span>
+              <span className="mm-hint">{t("settings.hint.fomoFollow")}</span>
+            </label>
+          </div>
+          {fomoFleetOnly && <p className="mm-hint">{t("settings.hint.fomoHostedOnly")}</p>}
+          </>)}
 
           {/* ── THE CLASS ROUTE ────────────────────────────────────────────
               Four settings that had a type, a PUT-allowlist entry and a worker
