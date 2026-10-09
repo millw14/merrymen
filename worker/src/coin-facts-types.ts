@@ -68,13 +68,14 @@ export const COLLAPSE_DRAWDOWN_PCT = 90;
  * DID IT COLLAPSE, AS MEASURED (the collapse permit's measured source,
  * docs/tg-groups.md "Rugged coins"): a credible main pool (the reader returns
  * facts only with one), a high worth saying (its FDV at least
- * COLLAPSE_HIGH_FDV_USD, or a highest close with the liquidity reported when
- * the supply is unknown), and either at least COLLAPSE_DRAWDOWN_PCT below
+ * COLLAPSE_HIGH_FDV_USD; a high whose worth is unknown, because the supply
+ * is not listed or the coin is only its main pool's quote token, is no
+ * collapse: review r2), and either at least COLLAPSE_DRAWDOWN_PCT below
  * that close or down that much in 24h. Milla said "80 to 90%": 90 is the safe end.
  */
 export function collapseOf(f: CoinFacts | null | undefined): boolean {
   if (!f || !f.high || !(f.high.closeUsd > 0)) return false;
-  const worth = f.high.fdvUsd !== null ? f.high.fdvUsd >= COLLAPSE_HIGH_FDV_USD : f.liquidityUsd !== null;
+  const worth = f.high.fdvUsd !== null && f.high.fdvUsd >= COLLAPSE_HIGH_FDV_USD;
   if (!worth) return false;
   const fell = (f.drawdownPct !== null && f.drawdownPct >= COLLAPSE_DRAWDOWN_PCT) || (f.change24hPct !== null && f.change24hPct <= -COLLAPSE_DRAWDOWN_PCT);
   return fell;

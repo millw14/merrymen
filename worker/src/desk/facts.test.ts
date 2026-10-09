@@ -181,6 +181,10 @@ describe("collapseOf: measured, worth saying, and nearly all gone", () => {
   it("dust that went to less dust is no collapse", () => {
     assert.equal(collapseOf(f({ drawdownPct: 99, high: { closeUsd: 2, fdvUsd: 40_000, atMs: NOW } })), false);
     assert.equal(collapseOf(f({ drawdownPct: 99, high: { closeUsd: 2, fdvUsd: null, atMs: NOW }, liquidityUsd: null })), false);
+    // A high whose worth is unknown (no supply listed, or the coin is only its pool's quote token) is no collapse,
+    // whatever the main pool's liquidity (review r2).
+    assert.equal(collapseOf(f({ drawdownPct: 99, fdvNowUsd: null, high: { closeUsd: 0.000002, fdvUsd: null, atMs: NOW }, liquidityUsd: 1_200, change24hPct: null })), false);
+    assert.equal(collapseOf(f({ drawdownPct: 99, high: { closeUsd: 2, fdvUsd: null, atMs: NOW }, liquidityUsd: 5_000_000 })), false);
     assert.equal(collapseOf(f({ drawdownPct: 99, high: null })), false);
     assert.equal(collapseOf(null), false);
   });

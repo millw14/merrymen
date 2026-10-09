@@ -597,7 +597,9 @@ that coin, so another coin than the room's is left to the desk and the router.
   dust, is never the coin's price). **The high** is the highest hourly close
   on it, never a wick; when the closes do not reach the pool's creation the
   line says "in the last N days". **Collapse** = at least 90% below that
-  close (worth at least $100k) or down 90% in 24h.
+  close (worth at least $100k) or down 90% in 24h; a high whose worth is
+  unknown (no supply listed, or the coin only its pool's quote token) is no
+  collapse.
 * **The lines** (research lines, at most six, no address, no "wallet", no
   "rug", "scam" or "dumped", "fell" never "crashed"): the source and time
   first ("AUTON on Solana, from GeckoTerminal at 01:15 UTC:"), then FDV now
