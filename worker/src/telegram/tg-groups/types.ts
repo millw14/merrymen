@@ -547,6 +547,9 @@ export interface TgThesesQuotes {
   total: number | null;
 }
 
+/** What a single-coin answer was about: its theses (the digest), its theses quoted, its activity, a research dive, or its facts. */
+export type TgFomoCoinAspect = "theses" | "quotes" | "activity" | "research" | "facts";
+
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;
@@ -558,7 +561,7 @@ export interface TgFomoAnswer {
    * handler remembers it by message, so "what happened to it" under the
    * answer knows the coin.
    */
-  coin?: { symbol: string; chain?: TgFomoChain };
+  coin?: { symbol: string; chain?: TgFomoChain; aspect: TgFomoCoinAspect };
   /**
    * A facts answer's measurement: whether the coin collapsed (desk/facts.ts
    * collapseOf) and when that was read. The handler sets or clears the

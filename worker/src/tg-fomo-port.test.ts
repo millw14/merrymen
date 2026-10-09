@@ -2384,7 +2384,7 @@ describe("a coin's theses, quoted: the newest up to ten, each checked, never rep
     // The digest stays the fallback, and no paraphrase material is handed over: no model call for a quote ask.
     assert.match(a.text, /^What traders on Fomo are saying about AUTON on Solana/);
     assert.equal(a.theses, undefined);
-    assert.deepEqual(a.coin, { symbol: "AUTON", chain: "solana" });
+    assert.deepEqual(a.coin, { symbol: "AUTON", chain: "solana", aspect: "quotes" });
   });
 
   it("past the newest ten: a cut at three sentences, and every lure, target and accusation of the probes left out", async () => {

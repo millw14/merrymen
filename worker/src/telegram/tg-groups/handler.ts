@@ -96,6 +96,7 @@ import {
   reactionOnly,
   routeWorthy,
   selfNamesOf,
+  thesesQuotesOf,
   type BotSelf,
   type DeskIntent,
   type SmallTalk,
@@ -103,6 +104,7 @@ import {
 import { admitThought, deskCaption, deskMissLine, deskQuestionEvidence, deskQuestionIntent, thinkWithModel } from "./desk";
 import { admitTgLine } from "./gate";
 import { publicCoinReason, publicCoinStatus, publicFactRequest, type PublicFactRequest } from "./facts";
+import { quotesSayable } from "./quotes";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
 import {
   describeTgGroupsModel,
@@ -133,6 +135,7 @@ import type {
   TgDeskAsk,
   TgDeskPort,
   TgDeskThought,
+  TgFomoAnswer,
   TgFomoPort,
   TgFomoRequest,
   TgGroupFactsPort,
@@ -777,6 +780,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     fomoLines.set(msgKey(chatId, messageId), clock());
     if (persona) personaFomoLines.set(msgKey(chatId, messageId), true);
   };
+  /**
+   * THE ONE COIN EACH OF ITS SINGLE-COIN FOMO ANSWERS WAS ABOUT, by message
+   * (TgFomoAnswer.coin: a plain symbol and chain, never an address): "list the
+   * last 10" or "what happened to it" under the answer knows the coin.
+   */
+  type FomoCoin = NonNullable<TgFomoAnswer["coin"]> & { at: number };
+  const fomoCoinLines = new Lru<string, FomoCoin>(LRU_MAX);
   /** When each recent message reached this process, for the staleness of a coin line about it. */
   const received = new Lru<string, number>(LRU_MAX);
   const messageIngressOrder = new Lru<string, number>(LRU_MAX);
@@ -1902,6 +1912,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     askedIn.deleteWhere((k) => k.startsWith(prefix));
     for (const key of lastDesk.keys()) if (key.startsWith(prefix)) lastDesk.delete(key);
     for (const key of lastFomo.keys()) if (key.startsWith(prefix)) lastFomo.delete(key);
+    // The coin its Fomo answers were about, by message and by topic.
+    fomoCoinLines.deleteWhere((k) => k.startsWith(prefix));
+    for (const key of lastFomoCoin.keys()) if (key.startsWith(prefix)) lastFomoCoin.delete(key);
     // The research side's subject memory for this room too ("it" no longer
     // points at the coin the room was discussing). Detached; never throws.
     const fomo = fomoNow();
@@ -2433,6 +2446,22 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         routedOnce = true;
         if ((await routeLine(chatId, j, replyOpts, persona, { reaskOf: j.reaskOf })) === "taken") return null;
       }
+      // A QUOTE ASK UNDER ONE OF ITS THESES ANSWERS ("show me the last 5",
+      // past the fifteen-minute follow-up window): the theses of the coin that
+      // answer was about, asked as a request code builds from the line's own
+      // words (detect.ts thesesQuotesOf), never routed by a model.
+      if (fomoThread && !routedOnce) {
+        const under = repliedFomoCoin(j);
+        const quotes = under && (under.aspect === "theses" || under.aspect === "quotes") ? thesesQuotesOf(j.line.text, selfNamesOf(selfNow())) : null;
+        if (under && quotes) {
+          const r = await fomoAnswer(chatId, j, replyOpts, { kind: "coin", symbol: under.symbol, ...(under.chain ? { chain: under.chain } : {}), aspect: "theses", quotes: quotes.n });
+          if (r === "sent") return null;
+          if (r !== "not-research") {
+            releaseReply(chatId, messageId);
+            return r;
+          }
+        }
+      }
       if (fomoThread && !routedOnce) {
         routedOnce = true;
         if ((await routeLine(chatId, j, replyOpts, persona)) === "taken") return null;
@@ -2706,6 +2735,29 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (lastFomo.size > 256 && !lastFomo.has(key)) lastFomo.delete(lastFomo.keys().next().value!);
     lastFomo.set(key, clock());
   };
+  /** The coin each topic's last single-coin Fomo answer was about, for half an hour. */
+  const lastFomoCoin = new Map<string, FomoCoin>();
+  const FOMO_COIN_MS = 30 * MIN;
+  const rememberFomoCoin = (chatId: number, threadId: number | undefined, messageId: number | undefined, coin: NonNullable<TgFomoAnswer["coin"]>): void => {
+    const c: FomoCoin = { symbol: coin.symbol, ...(coin.chain ? { chain: coin.chain } : {}), aspect: coin.aspect, at: clock() };
+    if (isMsgId(messageId)) fomoCoinLines.set(msgKey(chatId, messageId), c);
+    const key = deskKey(chatId, threadId);
+    if (lastFomoCoin.size > 256 && !lastFomoCoin.has(key)) lastFomoCoin.delete(lastFomoCoin.keys().next().value!);
+    lastFomoCoin.set(key, c);
+  };
+  /** The coin of the Fomo answer this line replies to, while that answer's thread is live. */
+  const repliedFomoCoin = (j: LineJob): FomoCoin | null => {
+    const me = selfNow();
+    const q = j.msg.replyTo;
+    if (!me || !q || q.fromId !== me.id || !isMsgId(q.messageId)) return null;
+    const c = fomoCoinLines.get(msgKey(j.msg.chatId, q.messageId));
+    return c && clock() - c.at <= FOMO_THREAD_MS ? c : null;
+  };
+  /** This topic's last Fomo coin, inside half an hour. */
+  const recentFomoCoin = (chatId: number, threadId?: number): FomoCoin | null => {
+    const c = lastFomoCoin.get(deskKey(chatId, threadId));
+    return c && clock() - c.at <= FOMO_COIN_MS ? c : null;
+  };
   /**
    * A PUSHBACK ON ITS OWN RESEARCH ANSWER ("there has to be thesis", "check
    * again"): in reply to one of its research lines, or, replying to nothing,
@@ -2733,6 +2785,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const FOMO_MAX_CHARS = 700;
   /** The copy's age (fomo/render.ts freshnessLine), as a room hears it. */
   const FOMO_AGE_LINE = /^(?:From a copy fetched |Data age: |The provider's own copy is from |Fomo's own copy is from )/;
+  /** The copy's age line of a research answer, if it has one. */
+  const fomoAgeLineOf = (text: string): string | null => text.split("\n").map((l) => l.trim()).find((l) => FOMO_AGE_LINE.test(l)) ?? null;
   /** A board's row ("12. PONS on robinhood, market cap $2.1M", "2. kaleo +$151.4k"). */
   const FOMO_BOARD_ROW = /^\d+\. /;
   /** Whom a trader row names, or which coin a coin row names. */
@@ -2886,6 +2940,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (!port) return "not-research";
     const replyByMs = j.bornAtMs + RESEARCH_REPLY_MS;
     let lost: Quiet = "send-failed";
+    /** Where the answer landed in this chat, for the coin it was about. */
+    let sentId: number | undefined;
     const send = async (text: string): Promise<"sent" | Quiet> => {
       const sent = await deliver({
         chatId,
@@ -2909,6 +2965,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (!sent) return lost;
       recordOwn(sent.chatId, sent.messageId, text.slice(0, 400), sent.chatId === chatId ? o.replyTo : undefined, undefined, sent.chatId === chatId ? o.threadId : undefined);
       markFomoLine(sent.chatId, sent.messageId);
+      sentId = sent.chatId === chatId ? sent.messageId : undefined;
       log("[tg-groups] said research");
       return "sent";
     };
@@ -2975,7 +3032,20 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     let body = r.text;
     // Whether the paraphrase made (or may have made) a model call: such an answer keeps its slot.
     let thesesFree = true;
-    if (!r.deflect && r.theses) {
+    // A COIN'S THESES QUOTED, on an explicit ask (Milla, 2026-10-09; quotes.ts):
+    // each quote gated again as a stranger's words, dropped and counted, never
+    // repaired; no paraphrase call. With none sayable, the honest line and the
+    // digest. Its own caps (13 lines, 2,400 characters), not the six lines.
+    let quoted: string | null = null;
+    if (!r.deflect && r.quotes) {
+      const q = quotesSayable(r.quotes, fomoAgeLineOf(r.text), selfNow()?.name ?? "");
+      if (q) {
+        // Counts only: never a quote, a handle or a coin.
+        log(`[tg-groups] theses quoted (${q.quoted} quoted, ${q.leftOut} left out)`);
+        quoted = q.quoted > 0 ? q.text : [q.text, fomoSayable(r.text)].filter((x): x is string => typeof x === "string" && x !== "").join("\n");
+      }
+    }
+    if (!r.deflect && r.theses && quoted === null) {
       const stopWording = keepTyping(chatId, replyByMs, o.threadId, "typing", o);
       const worded = await wordTheses({
         model: modelNow(),
@@ -3006,7 +3076,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // went only when the DM landed (never a claim that is not true), at most
     // once per room and kind in MOVES_EVERY_MS.
     let movesLine: string | undefined;
-    if (owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(body) !== null) {
+    if (quoted === null && owner && !r.deflect && r.moves && movesDue(chatId, r.moves.kind) && fomoSayable(body) !== null) {
       stageOf(chatId, "research: owner moves");
       if (await dmOwner(r.moves.dm)) {
         movesSaid(chatId, r.moves.kind);
@@ -3015,8 +3085,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     }
     const failedRead = r.status === "failed" || r.status === "unavailable" || r.status === "budget-limited";
-    const text = fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
+    const text = quoted ?? fomoSayable(body, movesLine) ?? (body !== r.text ? fomoSayable(r.text, movesLine) : null) ?? (failedRead ? FOMO_UNREACHED : r.status === "empty" ? FOMO_NOTHING : FOMO_UNSAYABLE);
     const said = await send(text);
+    // The coin it was about, by message and topic: "list the last 10" or "what happened to it" under it.
+    if (said === "sent" && !r.deflect && r.coin) rememberFomoCoin(chatId, j.threadId, sentId, r.coin);
     // A REMEMBERED BOARD IS THE ROWS THE ROOM HEARD: rows the six lines cut
     // (an age line, her moves line, a row's answer) are never "the last one",
     // and an answer that never landed (a refused send, the deadline, a shush)

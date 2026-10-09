@@ -652,3 +652,33 @@ describe("their earlier question, when they say it was missed (route.ts reask, r
     assert.equal(parseRoute({ action: "fomo_coin", coin: "frog" }, ctx), null, "never a name nobody wrote");
   });
 });
+
+describe("a coin's theses quoted, on its chain, and its facts: read from the line, never the model (2026-10-09)", () => {
+  it("a theses pick carries quotes only when the line asks for the theses themselves", () => {
+    const ctx = ctxOf("can you list the last 10", { replied: "What traders on Fomo are saying about AUTON on Solana (25 recent theses from 13 traders):" });
+    assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "AUTON", aspect: "theses" }, ctx), { action: "fomo", request: { kind: "coin", symbol: "AUTON", aspect: "theses", quotes: 10 } });
+    assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "AUTON", aspect: "theses" }, ctxOf("show me the last 5 on $AUTON")), { action: "fomo", request: { kind: "coin", symbol: "AUTON", aspect: "theses", quotes: 5 } });
+  });
+
+  it("a model's own count or quotes field is ignored: 'what are people saying' is the digest", () => {
+    const r = parseRoute({ action: "fomo_coin", coin: "AUTON", aspect: "theses", quotes: 10, count: 10 }, ctxOf("what are people saying about $AUTON"));
+    assert.deepEqual(r, { action: "fomo", request: { kind: "coin", symbol: "AUTON", aspect: "theses" } });
+  });
+
+  it("a coin's chain comes from the line's own words, never the model's pick alone", () => {
+    assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "AUTON", aspect: "theses", chain: "solana" }, ctxOf("what are people saying about $AUTON on solana")), {
+      action: "fomo",
+      request: { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "theses" },
+    });
+    assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "AUTON", aspect: "theses", chain: "solana" }, ctxOf("what are people saying about $AUTON")), {
+      action: "fomo",
+      request: { kind: "coin", symbol: "AUTON", aspect: "theses" },
+    });
+  });
+
+  it("a facts pick is asked as facts, with the line's own kind of question", () => {
+    assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "AUTON", aspect: "facts" }, ctxOf("yo why did auton rug?")), { action: "fomo", request: { kind: "coin", symbol: "AUTON", aspect: "facts", ask: "why" } });
+    assert.deepEqual(parseRoute({ action: "fomo_coin", coin: "AUTON", aspect: "facts" }, ctxOf("auton numbers, how bad is it")), { action: "fomo", request: { kind: "coin", symbol: "AUTON", aspect: "facts", ask: "what" } });
+    assert.ok((ROUTE_SPEC.schema as { properties: { aspect: { enum: string[] } } }).properties.aspect.enum.includes("facts"));
+  });
+});

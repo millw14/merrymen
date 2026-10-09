@@ -630,7 +630,7 @@ export function thesesQuotes(r: AnswerFomoResult, now: number): TgThesesQuotes |
 }
 
 /** The one coin a single-coin answer is about (TgFomoAnswer.coin): a plain symbol and its chain, never an address. */
-export function answerCoin(r: AnswerFomoResult): TgFomoAnswer["coin"] | null {
+export function answerCoin(r: AnswerFomoResult, thesesAsked = false): TgFomoAnswer["coin"] | null {
   if (!r.handled) return null;
   const env = firstAnswered(r);
   if (!env) return null;
@@ -653,7 +653,8 @@ export function answerCoin(r: AnswerFomoResult): TgFomoAnswer["coin"] | null {
   const c = token ? coinOf(token, label) : null;
   if (!c) return null;
   const chain = tgChainOf(token?.chain.slug);
-  return { symbol: c.symbol, ...(chain ? { chain } : {}) };
+  const aspect = env.tool === "fomo_get_token_theses" ? (thesesAsked ? "quotes" : "theses") : env.tool === "fomo_get_token_activity" ? "activity" : "research";
+  return { symbol: c.symbol, ...(chain ? { chain } : {}), aspect };
 }
 
 /** "tg-group:<chatId>:<threadId|0>": per room and forum topic, from the trusted update. */
@@ -889,7 +890,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           if (theses) said.theses = theses;
         }
         // The one coin a single-coin answer is about, by its plain name (never an address).
-        const coin = answerCoin(r);
+        const coin = answerCoin(r, quotes !== null);
         if (coin) said.coin = coin;
         // NOTHING BOUGHT FROM THE PROVIDER: nothing looked up at all (a
         // clarification, the capabilities line, "is fomo working?"), or every
