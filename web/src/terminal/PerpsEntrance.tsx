@@ -1,32 +1,50 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, type CSSProperties } from "react";
-import { LogoMark } from "./LogoMark";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FrozenModeScene } from "./mode-transition-snapshot";
+import { playNanites, type NaniteHandle } from "./nanite-suit";
 
-export const MODE_RIFT_DURATION = { dramatic: 2200, quick: 850 } as const;
+/** The nominal nanite-suit timelines; this host's timer, not the engine, ends the overlay. */
+export const MODE_SUIT_DURATION = { dramatic: 2600, quick: 950 } as const;
 
-// These vertices also define the source clip in perps-entrance.css. Keeping
-// the electric edge on the clip makes this a reveal of the real destination.
-const FRACTURE = "M1000 0 870 120 910 130 690 310 750 320 540 490 590 500 370 670 430 680 210 860 260 870 0 1000";
+type Point = { x: number; y: number };
 
-/** A frozen outgoing screen peels away to reveal the live destination. */
-export function PerpsEntrance({ onDone, scene = null, direction = "perps", dramatic = true, ready = true }: {
+/**
+ * Where the armour pours from: the press that asked for the switch; else the
+ * destination button in the frozen copy of the toggle; else the top centre.
+ */
+export function suitOrigin(origin: Point | null | undefined, frozen: HTMLElement | null): Point {
+  if (origin && Number.isFinite(origin.x) && Number.isFinite(origin.y)) return { x: origin.x, y: origin.y };
+  for (const button of frozen?.querySelectorAll<HTMLElement>('.trading-mode-toggle button:not([aria-pressed="true"])') ?? []) {
+    const rect = button.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }
+  return { x: window.innerWidth / 2, y: 0 };
+}
+
+/** Nanite armour covers the frozen outgoing screen, then flips away to reveal the live destination. */
+export function PerpsEntrance({ onDone, scene = null, direction = "perps", dramatic = true, ready = true, origin = null }: {
   onDone: () => void;
   scene?: FrozenModeScene | null;
   direction?: "perps" | "spot";
   dramatic?: boolean;
   ready?: boolean;
+  origin?: Point | null;
 }) {
   const skip = useRef<HTMLButtonElement>(null);
   const sceneHost = useRef<HTMLDivElement>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const suit = useRef<NaniteHandle | null>(null);
   const finished = useRef(false);
   const release = useRef<(() => void) | null>(null);
+  const [covered, setCovered] = useState(false);
   const dismiss = useCallback(() => {
     if (finished.current) return;
     finished.current = true;
+    suit.current?.cancel();
+    suit.current = null;
     release.current?.();
     onDone();
   }, [onDone]);
-  const duration = dramatic ? MODE_RIFT_DURATION.dramatic : MODE_RIFT_DURATION.quick;
+  const duration = dramatic ? MODE_SUIT_DURATION.dramatic : MODE_SUIT_DURATION.quick;
 
   useLayoutEffect(() => {
     const host = sceneHost.current;
@@ -71,46 +89,39 @@ export function PerpsEntrance({ onDone, scene = null, direction = "perps", drama
     return () => { release.current?.(); release.current = null; };
   }, [direction, dismiss]);
 
+  // The single authority for completion: the engine is never given onDone.
   useEffect(() => {
     if (!ready || finished.current) return;
     const timer = globalThis.setTimeout(dismiss, duration);
     return () => globalThis.clearTimeout(timer);
   }, [ready, duration, dismiss]);
 
+  const originX = origin?.x;
+  const originY = origin?.y;
+  useEffect(() => {
+    const node = canvas.current;
+    if (!ready || finished.current || !node) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const from = suitOrigin(originX === undefined || originY === undefined ? null : { x: originX, y: originY }, scene?.element ?? null);
+    const handle = playNanites({
+      canvas: node, origin: from, direction, dramatic, duration,
+      seed: Math.floor(Math.random() * 0x7fffffff),
+      // Fully opaque armour: the frozen copy can go, so the reveal uncovers the live app.
+      onCovered: () => setCovered(true),
+    });
+    suit.current = handle;
+    return () => {
+      handle.cancel();
+      if (suit.current === handle) suit.current = null;
+    };
+  }, [ready, direction, dramatic, duration, originX, originY, scene]);
+
   return <div
-    className={`perps-entrance is-${direction}${dramatic ? " is-dramatic" : " is-quick"}${ready ? " is-ready" : ""}${scene ? " has-scene" : ""}`}
-    style={{ "--rift-duration": `${duration}ms` } as CSSProperties}
+    className={`perps-entrance is-${direction}${dramatic ? " is-dramatic" : " is-quick"}${ready ? " is-ready" : ""}${scene ? " has-scene" : ""}${covered ? " is-covered" : ""}`}
     role="dialog" aria-modal="true" aria-label={direction === "perps" ? "Entering Tactical Radar" : "Returning to Spot"}
   >
-    <div className="perps-rift-stage" aria-hidden="true">
-      <div className="perps-rift-scene"><div className="perps-rift-scene-content" ref={sceneHost} /></div>
-      <div className="perps-rift-edge">
-        <svg className="perps-rift-electric" viewBox="0 0 1000 1000" preserveAspectRatio="none" fill="none">
-          <path className="perps-rift-halo" d={FRACTURE} />
-          <path className="perps-rift-aura" d={FRACTURE} />
-          <path className="perps-rift-wire" d={FRACTURE} />
-          <path className="perps-rift-core" d={FRACTURE} />
-          <g className="perps-rift-circuits">
-            <path d="M889 99h132l48-33h87M850 181h104l35 28h149M754 274h68l41-33h86M600 444h98l30 26h89M497 579h96l47-31h101M365 707h97l32 26h133M236 845h114l49-36h105M107 947h141l25 23h94" />
-            <path d="m876 118 48-30h59m-275 230 44-28h77M540 504l58-35h30M399 690l57-36h29M213 878l47-31h66" />
-            <path d="m1005 90 13-9 13 9-13 9zm-152 168 13-9 13 9-13 9zM721 490l13-9 13 9-13 9zM547 755l13-9 13 9-13 9zM341 890l13-9 13 9-13 9z" />
-          </g>
-          <g className="perps-rift-debris">
-            <path d="M935 129h31v9h-31zM870 241h18v5h-18zM758 376h43v5h-43zM711 510h16v10h-16zM555 629h34v6h-34zM461 745h21v9h-21zM355 891h42v4h-42z" />
-            <path d="M1059 174h46M903 365h30M849 448h51M720 644h39M568 797h54M413 977h27" />
-          </g>
-          <g className="perps-rift-nodes"><circle cx="884" cy="144" r="4" /><circle cx="721" cy="321" r="4" /><circle cx="565" cy="496" r="4" /><circle cx="399" cy="677" r="4" /><circle cx="232" cy="865" r="4" /></g>
-        </svg>
-      </div>
-    </div>
-    <div className="perps-rift-seal" aria-hidden="true">
-      <div className="perps-rift-insignia"><span /><LogoMark size={58} /><span /></div>
-      <div className="perps-rift-wordmark">MERRYMEN<span>{direction === "perps" ? "02 / PERPETUALS" : "01 / SPOT"}</span></div>
-      <strong>{direction === "perps" ? <>TACTICAL<span>RADAR</span></> : <>BACK TO<span>THE CAMP</span></>}</strong>
-      <div className="perps-rift-meter"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div>
-      <small>{direction === "perps" ? "SAME CREW. NEW TERRITORY." : "SAME CREW. HOME GROUND."}</small>
-    </div>
-    <div className="perps-rift-caption" aria-hidden="true"><span>{direction === "perps" ? "SPOT" : "PERPS"}</span><i /><b>{direction === "perps" ? "PERPS" : "SPOT"}</b></div>
+    <div className="perps-suit-scene" aria-hidden="true"><div className="perps-suit-scene-content" ref={sceneHost} /></div>
+    <canvas ref={canvas} className="perps-suit-canvas" aria-hidden="true" />
     <button ref={skip} type="button" className="perps-entrance-skip" onClick={dismiss}>Skip intro <span aria-hidden="true">↗</span></button>
   </div>;
 }

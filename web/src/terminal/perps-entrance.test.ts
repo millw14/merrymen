@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement, useRef } from "react";
-import { PerpsEntrance } from "./PerpsEntrance";
+import { MODE_SUIT_DURATION, PerpsEntrance, suitOrigin } from "./PerpsEntrance";
+import { naniteTimeline } from "./nanite-suit";
 import { perpsEntranceOwner, usePerpsEntrance } from "./use-perps-entrance";
 import { deferred, json, testDom } from "./test-dom";
 
@@ -18,7 +19,13 @@ describe("once-per-owner, reversible mode transition", () => {
       createElement("button", { onClick: () => void controller.enter(() => navigations++) }, "Perps"),
       createElement("button", { onClick: () => controller.leave(() => navigations++) }, "Spot"));
   }
-  beforeEach(() => { ui = testDom(); navigations = 0; });
+  beforeEach(() => {
+    ui = testDom();
+    navigations = 0;
+    // jsdom has no 2D canvas; say so quietly. The nanite engine then runs on
+    // timers alone, which is exactly what these tests observe.
+    Object.defineProperty(ui.dom.window.HTMLCanvasElement.prototype, "getContext", { configurable: true, value: () => null });
+  });
   afterEach(async () => { await ui.close(); globalThis.fetch = realFetch; });
   it("uses a stable tenant identity, not the agent or wallet grant", () => {
     assert.equal(perpsEntranceOwner(null), null);
@@ -207,7 +214,7 @@ describe("once-per-owner, reversible mode transition", () => {
     assert.equal(controller!.ready, false);
     await ui.render(createElement(Harness, { owner: "local", pathname: "/perps" }));
     assert.equal(controller!.ready, true);
-    await act(async () => context.mock.timers.tick(2199));
+    await act(async () => context.mock.timers.tick(2599));
     assert.equal(controller!.transition!.scene, scene, "the old 7s deadline no longer owns successful playback");
     await act(async () => controller!.finish());
     assert.equal(controller!.transition, null);
@@ -232,7 +239,7 @@ describe("once-per-owner, reversible mode transition", () => {
     await act(async () => context.mock.timers.tick(5000));
     assert.equal(finished, 0, "route loading does not consume the reveal duration");
     await ui.render(createElement(PerpsEntrance, { onDone, dramatic: true, ready: true }));
-    await act(async () => context.mock.timers.tick(2199));
+    await act(async () => context.mock.timers.tick(2599));
     assert.equal(finished, 0);
     await act(async () => context.mock.timers.tick(1));
     assert.equal(finished, 1);
@@ -242,7 +249,7 @@ describe("once-per-owner, reversible mode transition", () => {
     let finished = 0;
     await ui.render(createElement(PerpsEntrance, { onDone: () => finished++, direction: "spot", dramatic: false }));
     assert.equal(ui.container.querySelector('[role="dialog"]')?.getAttribute("aria-label"), "Returning to Spot");
-    await act(async () => context.mock.timers.tick(849));
+    await act(async () => context.mock.timers.tick(949));
     assert.equal(finished, 0);
     await act(async () => context.mock.timers.tick(1));
     assert.equal(finished, 1);
@@ -268,7 +275,7 @@ describe("once-per-owner, reversible mode transition", () => {
     const tab = new ui.dom.window.KeyboardEvent("keydown", { key: "Tab", cancelable: true });
     ui.dom.window.dispatchEvent(tab);
     assert.equal(tab.defaultPrevented, false);
-    await act(async () => context.mock.timers.tick(850));
+    await act(async () => context.mock.timers.tick(950));
     assert.equal(finished, 1, "skip and timer completion cannot both dismiss the same transition");
     await ui.render(content);
     assert.equal(frozen.isConnected, false);
@@ -320,5 +327,108 @@ describe("once-per-owner, reversible mode transition", () => {
     assert.equal(skipped, 1);
     await ui.render(createElement("div", {}, content));
     assert.equal(document.activeElement?.tagName, "H1");
+  });
+
+  const TOGGLE = '<div class="trading-mode-toggle"><button aria-pressed="true">Spot</button><button aria-pressed="false">Perps</button></div>';
+  const frozenScene = (html = TOGGLE) => {
+    const element = document.createElement("div");
+    element.innerHTML = html;
+    return { element, restoreScroll: () => {}, dispose: () => element.remove() };
+  };
+  const rect = (left: number, top: number, width: number, height: number) => () =>
+    ({ x: left, y: top, left, top, width, height, right: left + width, bottom: top + height, toJSON: () => ({}) });
+
+  it("keeps the host timer in step with the engine's own timeline", () => {
+    assert.equal(MODE_SUIT_DURATION.dramatic, naniteTimeline(true).nominal);
+    assert.equal(MODE_SUIT_DURATION.quick, naniteTimeline(false).nominal);
+  });
+  for (const [dramatic, coveredAt, duration] of [[false, 430, 950], [true, 1180, 2600]] as const) {
+    it(`hides the frozen screen only once the ${dramatic ? "dramatic" : "quick"} armour covers it, then ends once on the host timer`, async context => {
+      context.mock.timers.enable({ apis: ["setTimeout"] });
+      let finished = 0;
+      const scene = frozenScene();
+      await ui.render(createElement(PerpsEntrance, { onDone: () => finished++, scene, dramatic }));
+      const root = ui.container.querySelector(".perps-entrance")!;
+      assert.ok(root.querySelector(".perps-suit-scene-content")?.contains(scene.element));
+      assert.equal(root.querySelector("canvas.perps-suit-canvas")?.getAttribute("aria-hidden"), "true");
+      await act(async () => context.mock.timers.tick(coveredAt - 1));
+      assert.equal(root.classList.contains("is-covered"), false, "the outgoing screen stays until the armour is opaque");
+      await act(async () => context.mock.timers.tick(1));
+      assert.equal(root.classList.contains("is-covered"), true);
+      assert.equal(scene.element.isConnected, true, "covering only hides the copy; its owner still disposes it");
+      await act(async () => context.mock.timers.tick(duration - coveredAt - 1));
+      assert.equal(finished, 0);
+      await act(async () => context.mock.timers.tick(1));
+      assert.equal(finished, 1);
+      await act(async () => context.mock.timers.tick(10_000));
+      assert.equal(finished, 1, "the engine never completes the overlay a second time");
+    });
+  }
+  it("does not start the armour while the destination is still loading", async context => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    let finished = 0;
+    const onDone = () => finished++;
+    const scene = frozenScene();
+    await ui.render(createElement(PerpsEntrance, { onDone, scene, dramatic: false, ready: false }));
+    await act(async () => context.mock.timers.tick(5000));
+    const root = ui.container.querySelector(".perps-entrance")!;
+    assert.equal(root.classList.contains("is-covered"), false);
+    assert.equal(finished, 0);
+    await ui.render(createElement(PerpsEntrance, { onDone, scene, dramatic: false, ready: true }));
+    await act(async () => context.mock.timers.tick(430));
+    assert.equal(root.classList.contains("is-covered"), true);
+  });
+  it("cancels the armour when the overlay unmounts or is skipped mid-play", async context => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    // Count live delayed timers: once none is pending, nothing can call back into an
+    // unmounted overlay. (jsdom's own zero-delay selection tasks are not ours.)
+    const mockedSet = globalThis.setTimeout;
+    const mockedClear = globalThis.clearTimeout;
+    const pending = new Set<unknown>();
+    globalThis.setTimeout = ((callback: () => void, ms?: number) => {
+      const id = mockedSet(() => { pending.delete(id); callback(); }, ms);
+      if (ms) pending.add(id);
+      return id;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => { pending.delete(id); mockedClear(id); }) as unknown as typeof clearTimeout;
+    const errors: unknown[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    try {
+      let finished = 0;
+      await ui.render(createElement(PerpsEntrance, { onDone: () => finished++, scene: frozenScene(), dramatic: false }));
+      assert.equal(pending.size, 3, "the host timer plus the armour's cover and end instants");
+      await act(async () => context.mock.timers.tick(200));
+      await ui.render(null);
+      assert.equal(pending.size, 0, "unmounting cancels the armour as well as the host timer");
+      await act(async () => context.mock.timers.tick(5000));
+      assert.equal(finished, 0);
+
+      await ui.render(createElement(PerpsEntrance, { onDone: () => finished++, scene: frozenScene(), dramatic: true }));
+      await act(async () => context.mock.timers.tick(1179));
+      await act(async () => ui.dom.window.dispatchEvent(new ui.dom.window.KeyboardEvent("keydown", { key: "Escape" })));
+      assert.equal(finished, 1);
+      assert.equal(pending.size, 1, "skipping stops the armour; only the spent host timer remains");
+      await act(async () => context.mock.timers.tick(5000));
+      assert.equal(ui.container.querySelector(".perps-entrance")?.classList.contains("is-covered"), false, "a skipped armour never reports cover");
+      assert.equal(finished, 1);
+      assert.deepEqual(errors, []);
+    } finally {
+      globalThis.setTimeout = mockedSet;
+      globalThis.clearTimeout = mockedClear;
+      console.error = realError;
+    }
+  });
+  it("pours the armour from the press, else the destination in the frozen toggle, else the top centre", () => {
+    assert.deepEqual(suitOrigin({ x: 12, y: 34 }, null), { x: 12, y: 34 });
+    // A hidden phone toggle measures zero; the visible desktop toggle wins.
+    const scene = frozenScene(TOGGLE + TOGGLE);
+    ui.container.append(scene.element);
+    const destinations = scene.element.querySelectorAll<HTMLElement>('button[aria-pressed="false"]');
+    destinations[1].getBoundingClientRect = rect(100, 10, 80, 30);
+    scene.element.querySelector<HTMLElement>('button[aria-pressed="true"]')!.getBoundingClientRect = rect(0, 0, 80, 30);
+    assert.deepEqual(suitOrigin(null, scene.element), { x: 140, y: 25 });
+    assert.deepEqual(suitOrigin({ x: Number.NaN, y: 4 }, scene.element), { x: 140, y: 25 }, "a non-finite press is ignored");
+    assert.deepEqual(suitOrigin(null, null), { x: ui.dom.window.innerWidth / 2, y: 0 });
   });
 });
