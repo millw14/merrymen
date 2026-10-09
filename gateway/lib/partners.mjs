@@ -32,7 +32,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, mkdir, open, readFile, rm, stat } from "node:fs/promises";
+import { appendFile, link, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 /** Where the Railway volume is mounted. Same variable lib/signups.mjs uses. */
@@ -238,6 +238,30 @@ const LOCK_POLL_MS = 25;
 const LOCK_STALE_MS = 10_000;
 
 /**
+ * Remove `lock` only if it is still the file `mine` describes (same inode), so
+ * no process ever deletes a lock another one has just taken. The path is moved
+ * aside under a unique name first (rename is atomic), checked, and put back
+ * (link fails rather than replace one that appeared meanwhile) when it turned
+ * out to be someone else's. Removing by path alone let a writer that judged a
+ * lock stale, or whose own lock was broken while it stalled, delete the NEXT
+ * owner's lock and append alongside it.
+ */
+async function removeIfSame(lock, mine) {
+  const claim = `${lock}.claim-${randomBytes(6).toString("hex")}`;
+  try { await rename(lock, claim); } catch (err) { if (err.code === "ENOENT") return false; throw err; }
+  let same = false;
+  try { const st = await stat(claim); same = st.ino === mine.ino && st.dev === mine.dev; } catch (err) { if (err.code !== "ENOENT") throw err; }
+  if (!same) {
+    try { await link(claim, lock); } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      console.error(`[partners] ${path.basename(lock)} was replaced while being restored; its previous holder no longer holds it`);
+    }
+  }
+  await rm(claim, { force: true });
+  return same;
+}
+
+/**
  * Run `fn` (a repairTail() and the append after it) holding `<file>.lock`,
  * so no OTHER PROCESS repairs or appends to `file` meanwhile. The gateway and
  * the operator CLIs (partners-cli, billing-cli) write the same files. Without
@@ -246,11 +270,13 @@ const LOCK_STALE_MS = 10_000;
  * tail and truncate it; the truncate waits for the write to finish, then
  * removes a complete, acknowledged record.
  *
- * The lock is a file created exclusively ("wx") and removed after. One left
- * by a writer that died is broken once LOCK_STALE_MS old. The wait is bounded
- * by a count of attempts, then FileBusy, with nothing written.
+ * The lock is a file created exclusively ("wx") and removed after, each time
+ * only if it is still the same file (removeIfSame). One left by a writer that
+ * died is broken once LOCK_STALE_MS old: the one that was judged stale, never a
+ * successor taken in between. The wait is bounded by a count of attempts, then
+ * FileBusy, with nothing written. `hooks` exists for tests to interleave writers.
  */
-export async function withAppendLock(file, fn, { waitMs = 5_000 } = {}) {
+export async function withAppendLock(file, fn, { waitMs = 5_000, hooks = {} } = {}) {
   const lock = `${file}.lock`;
   await mkdir(path.dirname(file), { recursive: true });
   const attempts = Math.max(1, Math.ceil(waitMs / LOCK_POLL_MS));
@@ -260,21 +286,26 @@ export async function withAppendLock(file, fn, { waitMs = 5_000 } = {}) {
       fh = await open(lock, "wx");
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
-      let age = null;
-      try { age = Date.now() - (await stat(lock)).mtimeMs; } catch (e) { if (e.code !== "ENOENT") throw e; }
-      if (age !== null && age > LOCK_STALE_MS) {
-        console.error(`[partners] ${path.basename(lock)} is ${Math.round(age / 1000)} s old: a writer died holding it; removing it`);
-        await rm(lock, { force: true });
-      } else if (age !== null) {
+      let seen = null;
+      try { seen = await stat(lock); } catch (e) { if (e.code !== "ENOENT") throw e; }
+      const age = seen && Date.now() - seen.mtimeMs;
+      if (seen && age > LOCK_STALE_MS) {
+        await hooks.staleSeen?.();
+        if (await removeIfSame(lock, seen)) {
+          console.error(`[partners] ${path.basename(lock)} was ${Math.round(age / 1000)} s old: a writer died holding it; removed it`);
+        }
+      } else if (seen) {
         await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
       }
       continue;
     }
-    await fh.close();
+    let mine;
+    try { mine = await fh.stat(); } finally { await fh.close(); }
     try {
       return await fn();
     } finally {
-      await rm(lock, { force: true });
+      await hooks.beforeRelease?.();
+      await removeIfSame(lock, mine);
     }
   }
   throw new FileBusy(`${path.basename(file)} is locked by another writer`);

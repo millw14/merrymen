@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -13,7 +13,7 @@ const dir = await mkdtemp(path.join(tmpdir(), "merrymen-partners-"));
 process.env.MERRYMEN_DATA_DIR = dir;
 delete process.env.MERRYMEN_PARTNER_KEYS;
 
-const { createPartners, hashSecret, loadRegistry, makeKey, parseKey, repairTail, writeRecord, SCOPES, DEFAULT_SCOPES } =
+const { createPartners, FileBusy, hashSecret, loadRegistry, makeKey, parseKey, repairTail, withAppendLock, writeRecord, SCOPES, DEFAULT_SCOPES } =
   await import("./partners.mjs");
 
 const SECRET = "x".repeat(40);
@@ -221,4 +221,47 @@ test("repairTail keeps a file that ends cleanly, and empties one with no complet
   assert.equal(await repairTail(none), 70_000);
   assert.equal(await readFile(none, "utf8"), "");
   assert.equal(await repairTail(path.join(dir, "missing.jsonl")), 0);
+});
+
+// Two writers, one stale lock. Each test plays the OTHER writer inside a hook,
+// at the exact moment Codex's review described, so the interleaving is not left
+// to chance.
+const lockOf = (file) => `${file}.lock`;
+const staleLock = async (file) => {
+  await writeFile(lockOf(file), "dead");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockOf(file), old, old);
+};
+
+test("a writer that judged a lock stale never deletes the successor that took it first", async () => {
+  const file = path.join(dir, "race-stale.jsonl");
+  await staleLock(file);
+  let ran = false;
+  await assert.rejects(withAppendLock(file, async () => { ran = true; }, { waitMs: 200, hooks: {
+    // Between this writer's look and its removal, the other writer breaks the
+    // stale lock itself and takes a fresh one.
+    staleSeen: async () => { await rm(lockOf(file)); await writeFile(lockOf(file), "successor"); },
+  } }), FileBusy);
+  assert.equal(ran, false, "it never ran alongside the successor");
+  assert.equal(await readFile(lockOf(file), "utf8"), "successor", "the successor's lock is intact");
+  assert.deepEqual((await readdir(dir)).filter((n) => n.startsWith("race-stale.jsonl.lock.claim")), [], "no claim left behind");
+});
+
+test("a holder whose lock was broken while it stalled releases nothing but its own", async () => {
+  const file = path.join(dir, "race-release.jsonl");
+  await withAppendLock(file, async () => {}, { hooks: {
+    // It stalled past LOCK_STALE_MS: another writer broke its lock and took one.
+    beforeRelease: async () => { await rm(lockOf(file)); await writeFile(lockOf(file), "successor"); },
+  } });
+  assert.equal(await readFile(lockOf(file), "utf8"), "successor", "the successor's lock survives the slow holder's release");
+});
+
+test("a stale lock is still broken, and an ordinary append leaves no lock or claim behind", async () => {
+  const file = path.join(dir, "race-plain.jsonl");
+  await staleLock(file);
+  let ran = 0;
+  await withAppendLock(file, async () => { ran++; });
+  await withAppendLock(file, async () => { ran++; });
+  assert.equal(ran, 2);
+  assert.deepEqual((await readdir(dir)).filter((n) => n.startsWith("race-plain.jsonl.lock")), []);
 });
