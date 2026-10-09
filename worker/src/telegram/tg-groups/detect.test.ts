@@ -54,6 +54,7 @@ import {
   type BotSelf,
   roomSaysRugged,
   thesesQuotesOf,
+  quoteAskByCode,
 } from "./detect";
 import { quotesAskedIn } from "../../fomo/intent";
 
@@ -1208,6 +1209,15 @@ describe("the theses themselves, a coin's facts, and a room saying it rugged (Mi
     assert.notEqual(fomoAskOf("quote the theses on $AUTON on solana on fomo", names), null);
     assert.notEqual(fomoAskOf("shogun quote the theses on $AUTON on solana on fomo", names), null);
     assert.equal(fomoAskOf("quote me on that", names), null);
+  });
+
+  it("quoteAskByCode: an explicit ask or a bare count, never another 'last N' (review, 2026-10-09)", () => {
+    for (const t of ["show me the last 5", "can you list the last 10", "list them", "shogun show me the last 5", "the last 10 please", "show me these thesis, dont summarise", "what did they say exactly", "quote them"]) {
+      assert.equal(quoteAskByCode(t, names), true, t);
+    }
+    for (const t of ["who were the last 3 on the leaderboard?", "what about the last 2 traders", "what were kaleo's last 3 trades?", "what about the last 5 buyers", "list the trending coins", "the last one lol"]) {
+      assert.equal(quoteAskByCode(t, names), false, t);
+    }
   });
 
   it("'summarise them' and 'don't summarise' are asked even with no question mark", () => {

@@ -2262,6 +2262,26 @@ export function thesesQuotesOf(text: string, selfNames: readonly string[] = []):
   return { n: Math.min(asked, QUOTES_MAX), asked };
 }
 
+/**
+ * A QUOTE ASK CODE MAY ANSWER WITHOUT THE ROUTER, under one of its theses
+ * answers past the follow-up window (handler.ts): the theses asked for by
+ * name or manner (QUOTES' first four cues: "quote them", "word for word",
+ * "don't summarise", "what did they say exactly", "show me the theses"), or
+ * a whole line that is nothing but a count or a list ask ("show me the last
+ * 5", "can you list the last 10", "list them"). Any other line with a "last
+ * N" in it ("who were the last 3 on the leaderboard?", "what were kaleo's
+ * last 3 trades?") goes to the router as before (review, 2026-10-09).
+ */
+const QUOTE_BY_CODE = new RegExp(
+  String.raw`^(?:(?:can|could|would) (?:you|u) |pls |please |just |now |ok |okay |so |and |then )*(?:(?:list|show|give|post|drop|send)(?: me| us)?(?: all)? )?(?:the |these |those |their )?(?:(?:last|latest|newest|recent|most recent) ${QUOTE_NUM}|them|these|those|em)(?: (?:theses|quotes|posts|takes|ones|of them))?(?: (?:pls|please|now|here|again))*$`,
+  "u",
+);
+export function quoteAskByCode(text: string, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const c = quoteCanon(text, selfNames);
+  return !!c && (QUOTES.slice(0, 4).some((re) => re.test(c)) || QUOTE_BY_CODE.test(c));
+}
+
 /** Words a facts ask's coin slot holds without naming a coin. */
 const FACTS_STOP: ReadonlySet<string> = new Set([
   "it", "its", "this", "that", "him", "her", "you", "u", "me", "us", "them", "the", "market", "chart", "everything", "everyone", "everybody",

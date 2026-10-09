@@ -2763,6 +2763,29 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
       r.restore();
     }
   });
+  it("past the follow-up window, under the quotes, only an explicit ask or a bare count is quoted by code; anything else is routed (review, 2026-10-09)", async () => {
+    const r = await shogunRoom();
+    try {
+      await r.say("shogun what's happening with $AUTON on solana on fomo?");
+      await r.say("what are people saying about it on thesis on fomo", { under: r.lastOwn(), advanceMs: 30_000 });
+      await r.say("can you list the last 10", { under: r.lastOwn(), advanceMs: 30_000 });
+      const quoted = r.lastOwn();
+      assert.match(quoted.text, /^The newest 10 theses on AUTON/u, quoted.text);
+      let first = true;
+      for (const line of ["who were the last 3 on the leaderboard?", "what about the last 2 traders", "what were kaleo's last 3 trades?", "what about the last 5 buyers", "list the trending coins"]) {
+        const out = (await r.say(line, { under: quoted, advanceMs: first ? 20 * 60_000 : 30_000 })).join("\n");
+        first = false;
+        assert.doesNotMatch(out, /The newest \d+ theses/u, `${line} -> ${out}`);
+        assert.ok(!r.logs.slice(-3).some((l) => /theses quoted/u.test(l)), line);
+      }
+      for (const [line, n] of [["show me the last 5", 5], ["can you list the last 10", 10]] as const) {
+        const out = (await r.say(line, { under: quoted, advanceMs: 30_000 })).join("\n");
+        assert.equal(out.split("\n")[0], `The newest ${n} theses on AUTON on Solana, in their words (not facts):`, `${line} -> ${out}`);
+      }
+    } finally {
+      r.restore();
+    }
+  });
 });
 
 // ─── Quotes a room never hears (review of the quotes, 2026-10-09) ─────────

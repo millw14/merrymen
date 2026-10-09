@@ -99,6 +99,7 @@ import {
   roomSaysRugged,
   selfNamesOf,
   thesesQuotesOf,
+  quoteAskByCode,
   type BotSelf,
   type DeskIntent,
   type SmallTalk,
@@ -2499,7 +2500,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // words (detect.ts thesesQuotesOf), never routed by a model.
       if (fomoThread && !routedOnce) {
         const under = repliedFomoCoin(j);
-        const quotes = under && (under.aspect === "theses" || under.aspect === "quotes") ? thesesQuotesOf(j.line.text, selfNamesOf(selfNow())) : null;
+        // Only an explicit ask, or a line that is nothing but a count or a list ask: anything else is the router's.
+        const quotes = under && (under.aspect === "theses" || under.aspect === "quotes") && quoteAskByCode(j.line.text, selfNamesOf(selfNow())) ? thesesQuotesOf(j.line.text, selfNamesOf(selfNow())) : null;
         if (under && quotes) {
           const r = await fomoAnswer(chatId, j, replyOpts, { kind: "coin", symbol: under.symbol, ...(under.chain ? { chain: under.chain } : {}), aspect: "theses", quotes: quotes.n });
           if (r === "sent") return null;
