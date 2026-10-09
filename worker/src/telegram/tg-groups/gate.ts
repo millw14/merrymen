@@ -53,8 +53,10 @@ import {
   INJECTION_SHAPED,
   LURE,
   MERRY_BRAG,
+  ENGLISH_WORDS,
   MERRY_SHILL,
   NON_LATIN,
+  NOT_ENGLISH,
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
@@ -1700,6 +1702,32 @@ const QUOTE_LEET: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": 
 const leetOf = (t: string, one: "i" | "l"): string =>
   t.replace(/(?<=\p{L})[013457$@]+|[013457$@]+(?=\p{L})/gu, (run) => [...run].map((c) => (c === "1" ? one : (QUOTE_LEET[c] ?? c))).join(""));
 const quoteReads = (r: Readings): string[] => uniq([...r.low, ...r.low.map((t) => leetOf(t, "i")), ...r.low.map((t) => leetOf(t, "l"))]);
+/** The quoted words of a quote line ("• kaleo, 3 min ago: “…”"), without the author and age code framed it with. */
+const quoteBody = (t: string): string => {
+  const i = t.indexOf("“");
+  return i >= 0 ? t.slice(i + 1).replace(/”\s*$/u, "") : t;
+};
+/**
+ * A QUOTE IN NO ENGLISH AT ALL (review r2): five words or more, and not one
+ * of them, in any common ending ("holders", "rugged", "pumping"), a BIP-39
+ * word or one of ENGLISH_WORDS. NOT_ENGLISH (a clause) reads the function
+ * words of the common Latin-script languages; this is for the rest ("kupuj
+ * auton teraz, pojdzie na 100x"). Read on the quoted words only, never the
+ * author and age code framed them with, and only when every reading agrees.
+ */
+let englishWords: ReadonlySet<string> | null = null;
+function noEnglishWord(body: string): boolean {
+  const known = (englishWords ??= new Set([...BIP39_ENGLISH.join(" ").split(" "), ...ENGLISH_WORDS]));
+  const words = body.toLowerCase().replace(APOSTROPHES, "'").split(/[^\p{L}\p{N}']+/u).filter((w) => /\p{L}/u.test(w));
+  if (words.length < 5) return false;
+  const stems = (w: string): string[] => [w, w.replace(/'s$/u, ""), w.replace(/s$/u, ""), w.replace(/es$/u, ""), w.replace(/ed$/u, ""), w.replace(/d$/u, ""), w.replace(/ing$/u, ""), w.replace(/ing$/u, "e"), w.replace(/ly$/u, ""), w.replace(/ie[sd]$/u, "y")];
+  return !words.some((w) => stems(w).some((x) => known.has(x)));
+}
+/** Whether a quote's text is in no English at all, as the gate's quote kind reads it (the port's quoteOf leaves it out too). */
+export function quoteNotEnglish(text: string): boolean {
+  const r = readingsOf(typeof text === "string" ? text : "");
+  return r.low.length > 0 && r.low.every((t) => noEnglishWord(quoteBody(t)));
+}
 /** A quote's lowercased readings with its digits read as letters, for a caller with clauses of its own (the port's quoteOf). */
 export function tgQuoteLeetReadings(text: string): string[] {
   return quoteReads(readingsOf(typeof text === "string" ? text : ""));
@@ -1716,6 +1744,7 @@ const QUOTE_CLAUSES: ReadonlyArray<[readonly RegExp[], (r: Readings) => readonly
   [[U(SPELLED_DOMAIN), SPELLED_LINK], quoteReads, "link"],
   [[U(ABOUT_MERRYMEN)], (r) => r.low, "meta"],
   [[NON_LATIN], (r) => r.cased, "script"],
+  [[NOT_ENGLISH], (r) => r.low, "script"],
   [[U(SECOND_PERSON)], (r) => r.low, "at-the-reader"],
   [[QUOTE_TARGET], (r) => r.low, "advice"],
   [[U(OUT_ACCUSE), RUG_CONTEXT_ACCUSE, PERSON_HARM], quoteReads, "accuse"],
@@ -1780,6 +1809,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (kind === "quote") {
     const quoteRefusal = QUOTE_CLAUSES.find(([res, readings]) => res.some((re) => some(readings(r), re)));
     if (quoteRefusal) return refuse(quoteRefusal[2]);
+    if (r.low.every((t) => noEnglishWord(quoteBody(t)))) return refuse("script");
   }
 
   // The worst first: hate, harm, threats, sex — then looks.

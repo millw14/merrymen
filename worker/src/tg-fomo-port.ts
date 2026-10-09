@@ -57,7 +57,7 @@ import { chainLabel, FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROU
 import { collapseOf, type CoinFacts, type CoinFactsReader, type FactsNetwork } from "./coin-facts-types";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, ResolvedSubject, TokenIdentity, TokenLabel } from "./fomo/types";
-import { admitTgLine, tgLineReadings, tgQuoteLeetReadings } from "./telegram/tg-groups/gate";
+import { admitTgLine, quoteNotEnglish, tgLineReadings, tgQuoteLeetReadings } from "./telegram/tg-groups/gate";
 import {
   ABOUT_MERRYMEN,
   AT_THE_READER,
@@ -66,6 +66,7 @@ import {
   INJECTION_SHAPED,
   LURE,
   NON_LATIN,
+  NOT_ENGLISH,
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
@@ -601,7 +602,9 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   if (QUOTE_FRAME.test(s)) return null;
   // Digits read as letters too ("cla1m", "appr0ve"): the gate's quote kind reads the same.
   const reads = [s, ...tgLineReadings(s), ...tgQuoteLeetReadings(s)];
-  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, CONTACT_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, PERSON_HARM, SEND_FOR, QUOTE_TARGET, SECOND_PERSON, ...QUOTE_HARM].some((re) => reads.some((t) => re.test(t)))) return null;
+  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, CONTACT_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, PERSON_HARM, SEND_FOR, QUOTE_TARGET, SECOND_PERSON, NOT_ENGLISH, ...QUOTE_HARM].some((re) => reads.some((t) => re.test(t)))) return null;
+  // Quotes are English, as the paraphrase is: every clause reads English (review r2).
+  if (quoteNotEnglish(s)) return null;
   const handle = typeof v.author?.handle === "string" ? v.author.handle.replace(/^@+/, "").trim() : "";
   const who = quoteHandleOk(handle) ? handle : "a trader";
   const posted = typeof v.postedAt === "number" && Number.isFinite(v.postedAt) ? v.postedAt : null;

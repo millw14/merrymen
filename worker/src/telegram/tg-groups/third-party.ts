@@ -385,6 +385,38 @@ export const CONTACT_LURE = U(
 );
 
 /**
+ * A QUOTE IN ANOTHER LANGUAGE, for quotes only (review r2): every clause here
+ * is English, so a buy call, a threat, an address or an accusation in
+ * Spanish, Portuguese, French, German, Italian, Indonesian, Dutch or Turkish
+ * passed them all. Quotes are English, as the paraphrase is: a row with a
+ * function word of another language that is not also an English word
+ * ("para", "ahora", "agora", "vai", "est", "und", "ist", "che", "ini",
+ * "yang", "al", "el"), or a row of five words or more with no common English
+ * word at all (ENGLISH_WORDS), is left out and counted. "Die", "con", "um", "dan", "les",
+ * "la" and "a" are English words too, and are never read as another
+ * language's.
+ */
+export const NOT_ENGLISH = U(
+  new RegExp(
+    String.raw`\b(?:el|los|las|una|unos|que|qué|del|por|para|ahora|agora|antes|cuando|voy|vamos|muy|pero|como|esta|está|este|estos|uma|não|nao|vai|você|voce|mas|muito|também|une|des|du|est|est-ce|il|ils|elle|avec|pas|sont|c'est|nous|vous|très|tres|rue|ist|und|der|das|ein|eine|nicht|ich|wir|sehr|auch|che|sono|della|molto|perché|anche|questo|è|é|yang|nya|ini|itu|sekarang|tidak|sudah|akan|dengan|untuk|dari|jalan|rumah|al|het|een|niet|zijn|bir|ve|bu|çok|için)\b`,
+    "i",
+  ),
+);
+/**
+ * Words a row in English nearly always has one of, beside the BIP-39 list
+ * the gate holds (gate.ts quoteNotEnglish): function words and the trenches'
+ * own ("gm", "wagmi", "mcap", "dyor"). A row of five words or more with none
+ * of them, in any common ending, is in another language.
+ */
+export const ENGLISH_WORDS: readonly string[] = (
+  "the is are was were and of to it this that in on for with not but i im i'm we they he she will be has have had just still so my its it's " +
+  "a an at by from up down out all no yes if or as can got get been do did dont don't what who why how when there their our us me you your " +
+  "lol lmao gm ngl tbh imo dyor nfa lfg rn fr yolo rugged rug holders holder dev devs chart team coin token bullish bearish dead good bad now " +
+  "mcap volume pump dump moon ath dip bag ape degen wagmi ngmi frens fren ser anon alpha narrative meta agent ai launch listing cex dex " +
+  "liquidity lp whale supply wallet mint burn roadmap utility community vibe jeet sol eth btc base onchain defi nft memecoin meme trenches gem"
+).split(" ");
+
+/**
  * A VIOLENT OR SEXUAL CRIME, ABUSE, BRIBERY, EXTORTION, A POLICE CASE OR A
  * HEALTH STATUS LAID ON A PERSON, for quotes only (review r2): "kaleo beats
  * his wife", "molested a kid", "a known murderer", "a serial killer", "a

@@ -17,6 +17,7 @@ import {
   MERRY_BRAG,
   MERRY_SHILL,
   NON_LATIN,
+  NOT_ENGLISH,
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
@@ -33,7 +34,7 @@ import {
   SPENT_BRAG,
   U,
 } from "./third-party";
-import { U as gateU } from "./gate";
+import { quoteNotEnglish, U as gateU } from "./gate";
 
 const hits = (re: RegExp, rows: readonly string[]): void => {
   for (const r of rows) assert.ok(re.test(r.toLowerCase()), `${re.source.slice(0, 40)}… should match: ${r}`);
@@ -271,6 +272,23 @@ describe("the new clauses", () => {
       "hxxps autonhub xyz",
     ]);
     misses(SPELLED_LINK, ["launched on pumpfun, graduated fast", "pump fun graduates are cooked", "auton/sol pair is thin", "50/50 on this one", "24/7 volume", "safety net is gone", "net flows positive", "x is buzzing about it", "polka dot pattern on the logo", "tg/x both quiet", "the dot com bubble", "rides the polkadot narrative", "dot-com era pricing", "the io narrative"]);
+  });
+
+  it("NOT_ENGLISH and the gate's quoteNotEnglish: a quote in another language (review r2)", () => {
+    for (const r of [
+      "compre auton agora, vai para 100x",
+      "le dev est un voleur, il habite au 12 rue de la paix",
+      "compra auton ahora antes de que suba a 50 millones",
+      "voy a matar al dev cuando lo encuentre",
+      "manden dm al admin para el reembolso",
+      "der dev ist ein dieb, er wohnt in der hauptstraße 5",
+      "il dev è un ladro, abita in via roma 12",
+      "o dev é um ladrão, mora na rua das flores 12",
+      "dev ini penipu, rumahnya di jalan sudirman 5",
+      "kupuj auton teraz, pojdzie na 100x",
+      "mua auton ngay di, se len 100x",
+    ]) assert.ok(NOT_ENGLISH.test(r) || quoteNotEnglish(r), r);
+    for (const r of ["rugged, holders got wrecked", "dead coin now, volume gone", "chart looks bad", "wagmi frens", "Great Team Strong Community Clear Roadmap Real Product Undervalued", "die hard holders only", "con: thin liquidity"]) assert.ok(!NOT_ENGLISH.test(r.toLowerCase()) && !quoteNotEnglish(r), r);
   });
 
   it("PRIVATE_THIRD: more doxxing shapes, a name after 'the dev is', family, school, a multi-word street, a passport (review r2)", () => {

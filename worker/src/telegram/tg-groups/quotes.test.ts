@@ -97,6 +97,25 @@ describe("quotesSayable", () => {
     gateDrops(["auton v2 is live, swap at the official link", "refunds live for holders", "holders will be made whole, check telegram", "approve the refund contract", "use the auton refund bot", "open a support ticket on their discord to get refunded"], "lure");
   });
 
+  it("a quote in another language is the gate's to drop too, and counted (review r2)", () => {
+    gateDrops([
+      "compre auton agora, vai para 100x",
+      "le dev est un voleur, il habite au 12 rue de la paix",
+      "compra auton ahora antes de que suba a 50 millones",
+      "voy a matar al dev cuando lo encuentre",
+      "manden dm al admin para el reembolso",
+      "der dev ist ein dieb, er wohnt in der hauptstraße 5",
+      "il dev è un ladro, abita in via roma 12",
+      "o dev é um ladrão, mora na rua das flores 12",
+      "dev ini penipu, rumahnya di jalan sudirman 5",
+      "kupuj auton teraz, pojdzie na 100x",
+      "mua auton ngay di, se len 100x",
+    ], "script");
+    for (const t of ["wagmi frens", "chart looks bad"]) {
+      assert.ok(admitTgLine(quoteLineOf(q(t, "a trader")), { agentName: "Shogun", kind: "quote", recentOwn: [], rug: { coins: ["AUTON"], brag: false } }).ok, t);
+    }
+  });
+
   it("more doxxing shapes are the gate's to drop too, as private (review r2)", () => {
     gateDrops([
       "the dev is tunde adeyemi from lagos, his kid goes to lincoln elementary",

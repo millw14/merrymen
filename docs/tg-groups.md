@@ -114,7 +114,7 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    accusations against people, a third party's private details (a real
    name or "his name is…", where someone lives or works, a home address, a
    phone, an email, a whatsapp or a profile, a dox), scam or honeypot, price
-   targets and
+   targets, a row in another language (quotes are English only) and
    lines at the reader dropped, never repaired), with how many were left out
    and "their words, not facts". The default is still the digest. A trader's
    own theses are never quoted.
@@ -1934,9 +1934,13 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
   own token devs route is not wired yet (follow-up F10), nor a DexScreener
   fallback for other chains (F11).
 * Quotes are cut at about 160 characters or three sentences, and dropped
-  rows are counted, never replaced by older ones. Lures in another Latin-script
-  language rest on the send and call-to-action clauses (and the room hears
-  "their words, not facts"); another script is never quoted.
+  rows are counted, never replaced by older ones. Quotes are English only,
+  as the paraphrase is: every clause reads English, so a row in another
+  language (a function word of Spanish, Portuguese, French, German,
+  Italian, Indonesian, Dutch or Turkish that is not also English, or five
+  words or more with no common English word) is left out and counted, and
+  another script is never quoted. A short row in another language with
+  none of those words can still be quoted, under "their words, not facts".
 * The owner's first name for tagging is taken from what it has seen in that
   chat; before the owner speaks there, it says "my owner", and the tag in the
   owner ask (a link to the owner's account) reads "boss".

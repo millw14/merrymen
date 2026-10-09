@@ -2984,6 +2984,23 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
   });
 
+  it("a quote in another language is left out and counted: buy calls, threats, addresses and accusations every clause reads in English (review r2)", () => {
+    leftOut([
+      "compre auton agora, vai para 100x",
+      "le dev est un voleur, il habite au 12 rue de la paix",
+      "compra auton ahora antes de que suba a 50 millones",
+      "voy a matar al dev cuando lo encuentre",
+      "manden dm al admin para el reembolso",
+      "der dev ist ein dieb, er wohnt in der hauptstraße 5",
+      "il dev è un ladro, abita in via roma 12",
+      "o dev é um ladrão, mora na rua das flores 12",
+      "dev ini penipu, rumahnya di jalan sudirman 5",
+      "kupuj auton teraz, pojdzie na 100x",
+      "mua auton ngay di, se len 100x",
+    ]);
+    quoted(["rugged, holders got wrecked", "dead coin now, volume gone", "chart looks bad", "die hard holders only", "lfg wagmi ser frens, cooking"]);
+  });
+
   it("a doxxing thesis in more shapes is never quoted: a name after 'the dev is', family, school, a street, a passport (review r2)", () => {
     leftOut([
       "the dev is tunde adeyemi from lagos, his kid goes to lincoln elementary",

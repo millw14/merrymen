@@ -609,7 +609,7 @@ describe("address", () => {
   passes([
     ["quote", "• kaleo, 3 min ago: “ai16z and ElizaOS agents, DeFAI on zkEVM is the meta”"],
     ["quote", "• kaleo, 3 min ago: “x402 payments, ERC20 and BEP20, Web3 on zkSync”"],
-    ["quote", "• kaleo, 3 min ago: “Web3 meets DePIN, a16z backed, L2 native”"],
+    ["quote", "• kaleo, 3 min ago: “Web3 meets DePIN, a16z backed, L2 native, still early”"],
     ["quote", "• kaleo, 3 min ago: “36k mcap, 24h vol 12k, 48h 25k, 2x on the 3rd day”"],
   ]);
 });
