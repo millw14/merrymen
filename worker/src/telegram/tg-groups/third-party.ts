@@ -20,7 +20,7 @@
  * NEW, FOR QUOTES AND THE RUG PERMIT: SEND_FOR, CTA_PLACEHOLDER, QUOTE_TARGET,
  * RUG_CONTEXT_ACCUSE, MERRY_SHILL and MERRY_BRAG, each compiled through U;
  * and, read only on the quote path (the port's quoteOf and the gate's
- * `quote` kind), POST_RUG_LURE.
+ * `quote` kind), POST_RUG_LURE and SPELLED_LINK.
  *
  * No imports: this file is the leaf every one of them shares.
  */
@@ -237,6 +237,26 @@ export const POST_RUG_LURE = U(
       String.raw`|check\s+(?:out\s+)?(?:the\s+|their\s+|its\s+|his\s+)?(?:x|twitter|telegram|tg|discord|site|website|pinned|pin|bio|channel)|read\s+(?:the\s+)?pinned|links?\s+in\s+(?:the\s+|their\s+)?bio` +
       String.raw`|(?:open|create|submit|raise)\s+(?:a\s+)?(?:support\s+)?ticket|support\s+ticket|(?:vip|alpha|paid|private)\s+(?:group|chat|channel|calls?)` +
       String.raw`|(?:send|sent|sending|transfer\w*|deposit\w*|give)\s+(?:\S+\s+){0,2}?\d[\d.,]*[^.!?\n]{0,40}\b(?:get|got|gets|receive\w*|return\w*|sends?|take)\s+\S*\d)\b`,
+    "i",
+  ),
+);
+
+/**
+ * A LINK SPELLED OUT WITHOUT "DOT", for quotes only (SPELLED_DOMAIN, which
+ * the sample and the paraphrase read, is unchanged): a "slash" path
+ * ("discord gg slash autonrefund"), another word for the dot ("point",
+ * "punto", "dott") or a comma before a top-level domain ("autonrefund,com"),
+ * a link host with its dot gone ("bit ly", "tme", "x com", "vercel app"),
+ * and "visit <name> com". Each can be rebuilt into a working link, and a
+ * quote never carries one (review, 2026-10-09).
+ */
+const LINK_TLD = String.raw`(?:com|net|org|io|xyz|gg|ly|app|fun|vip|site|info|cc|tv)`;
+export const SPELLED_LINK = U(
+  new RegExp(
+    String.raw`\bslash\s+[\p{L}\p{N}_]` +
+      String.raw`|[\p{L}\p{N}_-](?:\s+(?:point|punto|dott|d0t|dawt)\s+|,)${LINK_TLD}\b` +
+      String.raw`|\b(?:discord\s+gg|bit\s+ly|linktr\s+ee|t\s+me|tme|(?:vercel|netlify)\s+app|(?:x|twitter)\s+com)\b` +
+      String.raw`|\bvisit\s+[\p{L}\p{N}_-]+\s+${LINK_TLD}\b`,
     "i",
   ),
 );

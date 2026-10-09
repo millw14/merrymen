@@ -104,4 +104,8 @@ describe("quotesSayable", () => {
   it("a send with many words before what comes back is the gate's to drop too", () => {
     gateDrops(["send any amount of sol to the dev and it comes back doubled", "send any amount to the dev wallet and it comes back doubled", "s3nd 1 sol to get 2 back"], "lure");
   });
+
+  it("a link spelled out without 'dot' is the gate's to drop too", () => {
+    gateDrops(["discord gg slash autonrefund", "autonrefund point com", "autonrefund,com is live", "visit autonrefund com", "autonrefund on vercel app"], "link");
+  });
 });

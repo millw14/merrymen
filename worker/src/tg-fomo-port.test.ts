@@ -2870,4 +2870,21 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
       "new ca 39ahtL8ynzE4amH26J29C93PA-5172V3ft9UuUcqQS8fz",
     ]);
   });
+
+  it("a link spelled out without 'dot' is never quoted", () => {
+    leftOut([
+      "discord gg slash autonrefund",
+      "bit ly slash auton",
+      "tme slash autonrefund",
+      "x com slash autonrefund",
+      "linktr ee slash auton",
+      "autonrefund point com",
+      "autonrefund punto com",
+      "autonrefund dott xyz",
+      "autonrefund,com is live",
+      "visit autonrefund com",
+      "autonrefund on vercel app",
+    ]);
+    quoted(["the price is the point, come on", "slashed fees on the dex, nice", "lol, come back later", "let me know when it moves"]);
+  });
 });

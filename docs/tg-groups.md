@@ -104,8 +104,11 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    (list, show, the last N, don't summarise, their exact words, quotes:
    Milla, 2026-10-09). Then the room hears up to 10 of the newest, each at
    most ~160 characters, cleaned (links, addresses, handles, $tags and markup
-   out), each line gated as `quote` (lures, drainer prompts, sends, calls to
-   action, accusations against people, scam or honeypot, price targets and
+   out; a row a link or an address was taken out of is left out whole), each
+   line gated as `quote` (lures, drainer prompts, refund, v2 and
+   support-ticket lures, sends, calls to action, links spelled out without a
+   dot ("bit ly slash", "autonrefund point com"), addresses split into chunks,
+   accusations against people, scam or honeypot, price targets and
    lines at the reader dropped, never repaired), with how many were left out
    and "their words, not facts". The default is still the digest. A trader's
    own theses are never quoted.

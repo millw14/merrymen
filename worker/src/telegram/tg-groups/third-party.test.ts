@@ -25,6 +25,7 @@ import {
   SECOND_PERSON,
   SEND_FOR,
   SPELLED_DOMAIN,
+  SPELLED_LINK,
   U,
 } from "./third-party";
 import { U as gateU } from "./gate";
@@ -210,5 +211,22 @@ describe("the new clauses", () => {
       "i sent 1 sol and got 2 back, its real",
     ]);
     misses(POST_RUG_LURE, [...HARMLESS, "rugged, holders got wrecked", "holders still bagholding, no recovery in sight", "dead coin now, volume gone", "it got listed on a cex", "chart is cooked"]);
+  });
+
+  it("SPELLED_LINK: a link spelled out without 'dot' (review, 2026-10-09)", () => {
+    hits(SPELLED_LINK, [
+      "discord gg slash autonrefund",
+      "bit ly slash auton",
+      "tme slash autonrefund",
+      "x com slash autonrefund",
+      "linktr ee slash auton",
+      "autonrefund point com",
+      "autonrefund punto com",
+      "autonrefund dott xyz",
+      "autonrefund,com is live",
+      "visit autonrefund com",
+      "autonrefund on vercel app",
+    ]);
+    misses(SPELLED_LINK, [...HARMLESS, ...["the price is the point, come on", "slashed fees on the dex, nice", "lol, come back later", "let me know when it moves"], "the dot com bubble", "rides the polkadot narrative"]);
   });
 });
