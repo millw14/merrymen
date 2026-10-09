@@ -150,9 +150,21 @@ describe("AUTON, measured (live probe 2026-10-09 01:15 UTC)", () => {
   });
 
   it("a read that outlives its time is unavailable, and the parsers never throw on junk", async () => {
-    const slow: FactsFetch = () => new Promise(() => {});
-    const r = await createCoinFactsReader({ fetchJson: slow, now: () => NOW })({ network: "solana", address: MINT, chatId: 8, timeoutMs: 30, withInfo: false });
-    assert.deepEqual(r, { ok: false, why: "unavailable" });
+    // Answers only long after the reader gave up. Its timer, unlike the
+    // reader's own (unref'd, so a hung read never holds a shutdown), keeps
+    // this test's process alive until the reader's 30 ms are up: with nothing
+    // else pending, CI's runner exited first ("Promise resolution is still
+    // pending but the event loop has already resolved").
+    let late: ReturnType<typeof setTimeout> | undefined;
+    const slow: FactsFetch = () => new Promise((resolve) => {
+      late = setTimeout(() => resolve({ ok: false, failure: "late" }), 5_000);
+    });
+    try {
+      const r = await createCoinFactsReader({ fetchJson: slow, now: () => NOW })({ network: "solana", address: MINT, chatId: 8, timeoutMs: 30, withInfo: false });
+      assert.deepEqual(r, { ok: false, why: "unavailable" });
+    } finally {
+      clearTimeout(late);
+    }
     for (const junk of [null, undefined, 42, "x", [], { data: null }, { data: [null, 1, "x", { id: 5 }, { attributes: { address: {} } }] }]) {
       assert.deepEqual(parseFactsPools(junk, "solana", MINT), []);
       assert.equal(parseFactsInfo(junk, "solana", MINT), null);
