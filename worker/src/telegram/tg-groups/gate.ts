@@ -58,6 +58,7 @@ import {
   OUT_HANDOUT,
   OUT_LURE,
   POST_RUG_LURE,
+  PRIVATE_THIRD,
   QUOTE_TARGET,
   RUG_CONTEXT_ACCUSE,
   SECOND_PERSON,
@@ -1627,6 +1628,7 @@ const QUOTE_CLAUSES: ReadonlyArray<[readonly RegExp[], (r: Readings) => readonly
   [[U(SECOND_PERSON)], (r) => r.low, "at-the-reader"],
   [[QUOTE_TARGET], (r) => r.low, "advice"],
   [[U(OUT_ACCUSE), RUG_CONTEXT_ACCUSE], (r) => r.low, "accuse"],
+  [[PRIVATE_THIRD], (r) => r.low, "private"],
 ];
 
 // ── the gate ────────────────────────────────────────────────────────────────

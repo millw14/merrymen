@@ -20,6 +20,7 @@ import {
   OUT_HANDOUT,
   OUT_LURE,
   POST_RUG_LURE,
+  PRIVATE_THIRD,
   QUOTE_TARGET,
   RUG_CONTEXT_ACCUSE,
   SECOND_PERSON,
@@ -228,5 +229,17 @@ describe("the new clauses", () => {
       "autonrefund on vercel app",
     ]);
     misses(SPELLED_LINK, [...HARMLESS, ...["the price is the point, come on", "slashed fees on the dex, nice", "lol, come back later", "let me know when it moves"], "the dot com bubble", "rides the polkadot narrative"]);
+  });
+
+  it("PRIVATE_THIRD: a person's name, home, work or contact (review, 2026-10-09)", () => {
+    hits(PRIVATE_THIRD, [
+      "the dev's real name is john smith from ohio",
+      "dev lives at 12 main street",
+      "dev lives in austin texas, works at a bank",
+      "the dev's home address is 42 elm road springfield",
+      "found the dev on linkedin, his name is john smith",
+      "dev's email is john at gmail",
+    ]);
+    misses(PRIVATE_THIRD, [...HARMLESS, ...["liquidity lives on raydium", "the chart lives at support", "full send on the chart, holders strong"]]);
   });
 });

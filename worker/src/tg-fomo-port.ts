@@ -69,6 +69,7 @@ import {
   OUT_HANDOUT,
   OUT_LURE,
   POST_RUG_LURE,
+  PRIVATE_THIRD,
   QUOTE_TARGET,
   RUG_CONTEXT_ACCUSE,
   SECOND_PERSON,
@@ -590,7 +591,7 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   }
   if (!/[\p{L}\p{N}]/u.test(s) || contentFree(s)) return null;
   const reads = [s, ...tgLineReadings(s)];
-  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, SPELLED_LINK, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, SEND_FOR, QUOTE_TARGET, SECOND_PERSON].some((re) => reads.some((t) => re.test(t)))) return null;
+  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, SEND_FOR, QUOTE_TARGET, SECOND_PERSON].some((re) => reads.some((t) => re.test(t)))) return null;
   const handle = typeof v.author?.handle === "string" ? v.author.handle.replace(/^@+/, "").trim() : "";
   const who = handle && sayableTraderHandle(handle) ? handle : "a trader";
   const posted = typeof v.postedAt === "number" && Number.isFinite(v.postedAt) ? v.postedAt : null;

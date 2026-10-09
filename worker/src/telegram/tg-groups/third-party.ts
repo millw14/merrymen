@@ -20,7 +20,7 @@
  * NEW, FOR QUOTES AND THE RUG PERMIT: SEND_FOR, CTA_PLACEHOLDER, QUOTE_TARGET,
  * RUG_CONTEXT_ACCUSE, MERRY_SHILL and MERRY_BRAG, each compiled through U;
  * and, read only on the quote path (the port's quoteOf and the gate's
- * `quote` kind), POST_RUG_LURE and SPELLED_LINK.
+ * `quote` kind), POST_RUG_LURE, SPELLED_LINK and PRIVATE_THIRD.
  *
  * No imports: this file is the leaf every one of them shares.
  */
@@ -257,6 +257,27 @@ export const SPELLED_LINK = U(
       String.raw`|[\p{L}\p{N}_-](?:\s+(?:point|punto|dott|d0t|dawt)\s+|,)${LINK_TLD}\b` +
       String.raw`|\b(?:discord\s+gg|bit\s+ly|linktr\s+ee|t\s+me|tme|(?:vercel|netlify)\s+app|(?:x|twitter)\s+com)\b` +
       String.raw`|\bvisit\s+[\p{L}\p{N}_-]+\s+${LINK_TLD}\b`,
+    "i",
+  ),
+);
+
+/**
+ * A PERSON'S PRIVATE DETAILS, for quotes only: a real, full, legal or last
+ * name, where someone lives or works ("the dev lives at…", "he's based in…",
+ * "works at a bank"), a home or street address, a house number on a street,
+ * a phone, an email or a profile ("his insta is…", "on linkedin"). After a
+ * rug, doxxing the dev is the likeliest post, and private data never passes
+ * (rule 3). "Liquidity lives on raydium" stays: only a person lives
+ * somewhere (review, 2026-10-09).
+ */
+const PRIVATE_SUBJECT = String.raw`(?:dev|devs|he|she|they|team|founder|ceo|owner|creator|guy|kid|dude)`;
+export const PRIVATE_THIRD = U(
+  new RegExp(
+    String.raw`\b(?:real|full|legal|irl|last)\s*-?\s*names?\b|\bsurnames?\b` +
+      String.raw`|\b${PRIVATE_SUBJECT}\b[^.!?\n]{0,20}?\b(?:(?:lives?|living|based)\s+(?:in|at|near)|works?\s+at)\b` +
+      String.raw`|\b(?:home|house|street|mailing|postal)\s+address(?:es)?\b` +
+      String.raw`|\b\d+\s+\p{L}+\s+(?:street|st|road|rd|avenue|ave|lane|ln|blvd|drive|dr)\b` +
+      String.raw`|\b(?:phone|email|e-mail|ig|insta|instagram|linkedin|facebook)(?:\s*:|\s+is\b)|\bon\s+linkedin\b`,
     "i",
   ),
 );

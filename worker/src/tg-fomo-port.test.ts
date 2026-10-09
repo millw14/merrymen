@@ -2887,4 +2887,16 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     ]);
     quoted(["the price is the point, come on", "slashed fees on the dex, nice", "lol, come back later", "let me know when it moves"]);
   });
+
+  it("a person's private details (a real name, a home, a contact) are never quoted", () => {
+    leftOut([
+      "the dev's real name is john smith from ohio",
+      "dev lives at 12 main street",
+      "dev lives in austin texas, works at a bank",
+      "the dev's home address is 42 elm road springfield",
+      "found the dev on linkedin, his name is john smith",
+      "dev's email is john at gmail",
+    ]);
+    quoted(["liquidity lives on raydium", "the chart lives at support", "full send on the chart, holders strong"]);
+  });
 });

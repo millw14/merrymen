@@ -108,4 +108,9 @@ describe("quotesSayable", () => {
   it("a link spelled out without 'dot' is the gate's to drop too", () => {
     gateDrops(["discord gg slash autonrefund", "autonrefund point com", "autonrefund,com is live", "visit autonrefund com", "autonrefund on vercel app"], "link");
   });
+
+  it("a person's private details are the gate's to drop too, while 'liquidity lives on raydium' passes", () => {
+    gateDrops(["the dev's real name is john smith from ohio", "dev lives at 12 main street", "the dev's home address is 42 elm road springfield"], "private");
+    assert.ok(admitTgLine(quoteLineOf(q("liquidity lives on raydium")), { agentName: "Shogun", kind: "quote", recentOwn: [], rug: { coins: ["AUTON"], brag: false } }).ok);
+  });
 });
