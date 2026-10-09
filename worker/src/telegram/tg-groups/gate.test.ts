@@ -591,6 +591,27 @@ describe("address", () => {
     ["research", "Traders on it: CryptoKaleo, FrankDeGods, AnsemTheGreat and MoonBoyTrader"],
     ["quote", "• a trader, 3 min ago: “Great Team Strong Community Clear Roadmap Real Product Undervalued”", { rug: { coins: ["AUTON"], brag: false } }],
   ]);
+  // A quote's address however it is split: by 2, 3 or 4, word-shaped pieces,
+  // any separator, a word between the halves, or half of it alone (review r2).
+  refuses("address", [
+    ["quote", "• kaleo, 3 min ago: “dev wallet DezX AZ8z 7Pnr nRJj z3wX BoRg ixCa 6xjn B7Ya B1pP B263”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet EPj FWd d5A ufq SSq eM2 qN1 xzy bap C8G 4wE GGk Zwy TDt 1v”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet JUP yiw rYJ Fsk UPi Ha7 hke R8V UtA eFo SYb Ked ZNs DvC N”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet De zX AZ 8z 7P nr nR Jj z3 wX Bo Rg ix Ca 6x jn B7 Ya B1 pP B2 63”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet DezXAZ8z7PnrnRJjz3wXBo and RgixCa6xjnB7YaB1pPB263”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet DezXAZ8z7PnrnRJjz3wXBo;RgixCa6xjnB7YaB1pPB263”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet (DezXAZ8z7PnrnRJjz3wXBo) (RgixCa6xjnB7YaB1pPB263)”"],
+    ["quote", "• kaleo, 3 min ago: “dev wallet DezXAZ8z7PnrnRJjz3wXBo 🔥 RgixCa6xjnB7YaB1pPB263”"],
+    ["quote", "• kaleo, 3 min ago: “real ca is DezXAZ8z7PnrnRJjz3wXBo and RgixCa6xjnB7YaB1pPB263”"],
+    ["quote", "• kaleo, 3 min ago: “starts DezXAZ8z7PnrnRJjz3wXBo”"],
+    ["quote", "• kaleo, 3 min ago: “ends RgixCa6xjnB7YaB1pPB263”"],
+  ]);
+  passes([
+    ["quote", "• kaleo, 3 min ago: “ai16z and ElizaOS agents, DeFAI on zkEVM is the meta”"],
+    ["quote", "• kaleo, 3 min ago: “x402 payments, ERC20 and BEP20, Web3 on zkSync”"],
+    ["quote", "• kaleo, 3 min ago: “Web3 meets DePIN, a16z backed, L2 native”"],
+    ["quote", "• kaleo, 3 min ago: “36k mcap, 24h vol 12k, 48h 25k, 2x on the 3rd day”"],
+  ]);
 });
 
 describe("link", () => {

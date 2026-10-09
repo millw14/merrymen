@@ -17,7 +17,7 @@
  *
  * Pure: no I/O, no clock, no model.
  */
-import { admitTgLine } from "./gate";
+import { admitTgLine, quoteEncodedPieces, QUOTES_ENCODED_MAX } from "./gate";
 import type { TgThesesQuotes } from "./types";
 
 /** The most quotes a room hears, the most lines the answer runs to, and its length (Telegram allows 4,096). */
@@ -79,6 +79,11 @@ export function quotesSayable(m: TgThesesQuotes, ageLine: string | null, agentNa
   let leftOut = Math.max(0, n - Math.min(m.quotes.length, QUOTES_MAX));
   const admitted: string[] = [];
   const self = selfReadingOf(agentName);
+  // What could be pieces of an address, the distinct ones added up over the
+  // quotes said: an address split into thirds over three quotes is never
+  // said whole (gate.ts QUOTE_ENCODED_MAX holds each quote; this, the answer).
+  const pieces = new Set<string>();
+  const piecesLength = (): number => [...pieces].reduce((n, p) => n + p.length, 0);
   for (const q0 of m.quotes.slice(0, QUOTES_MAX)) {
     const q = self && self.inHandle(String(q0?.who ?? "")) ? { ...q0, who: "a trader" } : q0;
     if (self && self.inText(String(q?.text ?? ""))) {
@@ -86,8 +91,11 @@ export function quotesSayable(m: TgThesesQuotes, ageLine: string | null, agentNa
       continue;
     }
     const v = admitTgLine(quoteLineOf(q), { agentName, kind: "quote", recentOwn: [], rug: { coins: [coin], brag: false } });
-    if (v.ok && !v.text.includes("\n")) admitted.push(v.text);
-    else leftOut += 1;
+    const mine = v.ok ? quoteEncodedPieces(v.text).filter((p) => !pieces.has(p)) : [];
+    if (v.ok && !v.text.includes("\n") && piecesLength() + mine.reduce((n, p) => n + p.length, 0) < QUOTES_ENCODED_MAX) {
+      admitted.push(v.text);
+      for (const p of mine) pieces.add(p);
+    } else leftOut += 1;
   }
   const tailOf = (out: number, total: boolean): string =>
     `${QUOTES_TAIL}${out > 0 ? `; ${out} of these ${n} left out` : ""}${total && typeof m.total === "number" && m.total > n ? `; Fomo lists ${m.total.toLocaleString("en-US")}` : ""}.`;

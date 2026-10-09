@@ -453,6 +453,20 @@ export function tgLineReadings(text: string): string[] {
   return readingsOf(typeof text === "string" ? text : "").low;
 }
 
+/**
+ * The tokens of a line that could be pieces of an address, on its likeliest
+ * reading (QUOTE_ENCODED_MAX): quotes.ts adds up the distinct ones over the
+ * quotes it says, so the same "Web3" in five quotes counts once.
+ */
+export function quoteEncodedPieces(text: string): string[] {
+  let best: string[] = [];
+  for (const t of readingsOf(typeof text === "string" ? text : "").cased) {
+    const p = encodedPiecesOf(t);
+    if (p.join("").length > best.join("").length) best = p;
+  }
+  return best;
+}
+
 // ── model talk ──────────────────────────────────────────────────────────────
 
 /** The model's "nothing to say": the word alone, or PASS in capitals opening the line. */
@@ -725,6 +739,32 @@ function hasChunkedRun(t: string): boolean {
   }
   return false;
 }
+
+/**
+ * AN ADDRESS SPREAD OVER A QUOTE, for the `quote` kind only (review r2,
+ * 2026-10-09): every token of the row that could be a piece of a base58
+ * address is counted, however the pieces are split (by 2, 3 or 4, as words,
+ * or with ";", "~", "+", an emoji or "and" between them), and a row with 16
+ * such characters or more is refused. 16, not 26: an address split in half
+ * over two quotes is two rows of 22, and each is refused (quotes.ts also adds
+ * them up over the quotes it says). A token counts when it is two characters
+ * or more, in the base58 alphabet only (no 0, O, I or l), not shaped like a
+ * word ("Strong", "GeckoTerminal", "AI", "gm") or a figure ("36k", "24h",
+ * "3rd"), and mixes a digit and a letter or both cases: "zkEVM", "ai16z" and
+ * "Web3" count, and a row of such jargon stays under 16.
+ */
+const PLAIN_TOKEN = /^[A-Z]?[a-z]+(?:[A-Z][a-z]+)*$|^[A-Z]+$|^[a-z]+$|^\d+$/;
+const FIGURE_TOKEN = /^\d+(?:k|m|b|bn|x|h|d|w|mo|y|min|s|st|nd|rd|th|am|pm)$/i;
+const NOT_BASE58 = /[^1-9A-HJ-NP-Za-km-z]/;
+function encodedPiecesOf(t: string): string[] {
+  return t.split(/[^A-Za-z0-9]+/).filter((tok) =>
+    tok.length >= 2 && !NOT_BASE58.test(tok) && !PLAIN_TOKEN.test(tok) && !FIGURE_TOKEN.test(tok) &&
+    ((/[0-9]/.test(tok) && /[A-Za-z]/.test(tok)) || (/[a-z]/.test(tok) && /[A-Z]/.test(tok))));
+}
+const encodedCharsOf = (t: string): number => encodedPiecesOf(t).reduce((n, p) => n + p.length, 0);
+/** The most of what could be an address's characters one quote line may hold, and all the quotes of one answer together. */
+export const QUOTE_ENCODED_MAX = 16;
+export const QUOTES_ENCODED_MAX = 26;
 
 /**
  * Anything a reader could follow out of the chat: any scheme (hxxp too),
@@ -1707,6 +1747,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (r.cased.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t)) || r.joined.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t))) {
     return refuse("address");
   }
+  if (kind === "quote" && Math.max(0, ...r.cased.map(encodedCharsOf)) >= QUOTE_ENCODED_MAX) return refuse("address");
   if (r.cased.some((t) => LINK_SHAPES.some((re) => re.test(t))) || r.joined.some((t) => LINK_SHAPES.some((re) => re.test(t)))) return refuse("link");
   if (some(r.cased, HANDLE)) return refuse("handle");
   // A line about a coin says no cashtag at all; any other says only a

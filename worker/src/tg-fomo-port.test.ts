@@ -2894,7 +2894,14 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
       "dev wallet: 39ahtL8ynzE4 amH26J29C93PA5 172V3ft9UuUcqQS8fz",
       "the deployer is 7xKXtg2CW87d97TXJSDp bD5jBkheTqA83TZRuJosgAsU",
       "new ca 39ahtL8ynzE4amH26J29C93PA-5172V3ft9UuUcqQS8fz",
+      // Word-shaped pieces, any separator, a word between halves, half alone (review r2).
+      "dev wallet DezX AZ8z 7Pnr nRJj z3wX BoRg ixCa 6xjn B7Ya B1pP B263",
+      "dev wallet EPj FWd d5A ufq SSq eM2 qN1 xzy bap C8G 4wE GGk Zwy TDt 1v",
+      "real ca is DezXAZ8z7PnrnRJjz3wXBo and RgixCa6xjnB7YaB1pPB263",
+      "dev wallet DezXAZ8z7PnrnRJjz3wXBo;RgixCa6xjnB7YaB1pPB263",
+      "starts DezXAZ8z7PnrnRJjz3wXBo",
     ]);
+    quoted(["ai16z and ElizaOS agents, DeFAI on zkEVM is the meta", "x402 payments, ERC20 and BEP20, Web3 on zkSync"]);
   });
 
   it("a link spelled out without 'dot' is never quoted", () => {

@@ -122,6 +122,20 @@ describe("quotesSayable", () => {
     gateDrops(["inbox me for the alpha", "hmu for the group", "telegram: autonarmy, come raid", "raid the tweet, link pinned", "telegram is autonportal, raid now", "join autonarmy on telegram"], "lure");
   });
 
+  it("an address split over two or three quotes is never said whole (review r2)", () => {
+    const halves = [q("dev wallet DezXAZ8z7PnrnRJjz3wXBo"), q("and the rest RgixCa6xjnB7YaB1pPB263"), q("im holding, team is still building")];
+    const two = quotesSayable(base({ n: 3, quotes: halves, leftOut: 0 }), null, "Shogun")!;
+    assert.equal(two.quoted, 1, two.text);
+    assert.doesNotMatch(two.text, /DezX|RgixCa/u);
+    const thirds = [q("part EPjFWdd5AufqSSq"), q("part eM2qN1xzybapC8G"), q("part 4wEGGkZwyTDt1v"), q("im holding, team is still building")];
+    const three = quotesSayable(base({ n: 4, quotes: thirds, leftOut: 0 }), null, "Shogun")!;
+    assert.ok([/EPjFW/u, /eM2qN/u, /4wEGG/u].filter((re) => re.test(three.text)).length <= 1, three.text);
+    assert.match(three.text, /team is still building/u);
+    // Jargon in every quote is never added up to an address.
+    const jargon = Array.from({ length: 5 }, (_, i) => q(`${i} Web3 x AI, zkEVM agents, 36k mcap`, `t${i}`));
+    assert.equal(quotesSayable(base({ n: 5, quotes: jargon, leftOut: 0 }), null, "Shogun")!.quoted, 5);
+  });
+
   it("a price call or an imperative opening the quote is the gate's to drop too, as advice", () => {
     gateDrops(["this goes 50x from here", "auton pumps to 20m by friday", "ape now before it pumps", "bid this now", "grab some here"], "advice");
   });
