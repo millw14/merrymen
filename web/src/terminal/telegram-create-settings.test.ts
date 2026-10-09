@@ -23,6 +23,8 @@ let loseConfirmation: boolean;
 let telegramReads: string[];
 let telegramReply: () => Response;
 let hosted: boolean;
+let missingIntent: boolean;
+let fomo: boolean;
 const setup = () => ({ id: ID, status: phase, expiresAt: Date.now() + 60_000, botUsername: phase === "confirm" || phase === "connected" ? "merrymen_testbot" : null, botId: phase === "confirm" || phase === "connected" ? "1234567" : null });
 
 before(async () => {
@@ -65,10 +67,12 @@ beforeEach(() => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
   server = fixture(); writes = []; phase = "waiting_telegram"; refreshedOwner = OWNER; loseConfirmation = false; telegramReads = [];
   hosted = true;
+  missingIntent = false;
+  fomo = false;
   telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: "link-proof" });
   globalThis.fetch = async (input, init) => {
     const url = String(input), method = init?.method ?? "GET";
-    if (url === "/api/auth/session") return json({ hosted, address: OWNER });
+    if (url === "/api/auth/session") return json({ hosted, address: OWNER, fomo });
     if (url === "/api/settings" && method === "GET") return json({ ...server, owner: phase === "connected" ? refreshedOwner : server.owner });
     if (url === "/api/settings" && method === "PUT") { writes.push(JSON.parse(String(init?.body))); return json({ ok: true }); }
     if (url === "/api/telegram") return json({});
@@ -77,6 +81,7 @@ beforeEach(() => {
     if (url.startsWith("/api/telegram/create?") && method === "GET") {
       const params = new URL(url, "https://app.example.test").searchParams;
       assert.equal(params.get("owner"), OWNER);
+      if (params.has("intent") && missingIntent) return json({ error: "setup_not_found" }, 404);
       return json({ available: true, ...(params.has("intent") ? { intent: setup() } : {}) });
     }
     if (url === "/api/telegram/create" && method === "POST") {
@@ -84,6 +89,7 @@ beforeEach(() => {
       assert.equal(body.owner, OWNER);
       if (body.action === "begin") { phase = "confirm"; return json({ intent: { ...setup(), status: "waiting_telegram", botUsername: null, botId: null }, telegramUrl: "https://t.me/MerrymenManagerBot?start=nonce" }); }
       if (body.action === "confirm") {
+        if (missingIntent) return json({ error: "setup_not_found" }, 404);
         phase = "connected";
         server = { ...server, telegramBotToken: { set: true, hint: "masked" }, values: { ...server.values, telegramEnabled: true } };
         if (loseConfirmation) throw new Error("connection lost after commit");
@@ -167,6 +173,62 @@ describe("managed Telegram creation through Settings", () => {
     assert.equal(writes.length, 1);
     assert.equal("telegramBotToken" in writes[0], false);
     assert.equal(writes[0].agentName, "Robin Hood");
+  });
+
+  it("reconciles a missing intent after lost confirmation before discarding an obsolete token draft", async () => {
+    await prepare(); loseConfirmation = true;
+    await ui.click("Connect this bot"); await drain();
+    missingIntent = true; refreshedOwner = OTHER;
+    await ui.click("Try again"); await drain();
+    await ui.click("Save settings"); assert.equal(writes.length, 0);
+    assert.equal(token().value, "123456:obsolete-manual-token");
+    assert.equal(localStorage.getItem(`merrymen.telegram.create.v1:${OWNER}`), ID);
+    refreshedOwner = OWNER;
+    await ui.click("Try again"); await drain();
+    assert.equal(localStorage.getItem(`merrymen.telegram.create.v1:${OWNER}`), null);
+    assert.equal(token().value, "");
+    assert.equal(token().disabled, false);
+    assert.equal(agentName().value, "Robin Hood");
+    assert.ok(ui.container.querySelector('a[href="https://t.me/merrymen_testbot?start=link-proof"]'));
+    await ui.click("Save settings");
+    assert.deepEqual(writes[0], { owner: OWNER, agentName: "Robin Hood", telegramGroupsEnabled: false, telegramAllowlist: [999] });
+    assert.equal("telegramBotToken" in writes[0], false);
+    assert.equal("telegramEnabled" in writes[0], false);
+  });
+
+  it("keeps the verified existing bot's launch link after a persisted missing intent is reconciled", async () => {
+    localStorage.setItem(`merrymen.telegram.create.v1:${OWNER}`, ID);
+    missingIntent = true;
+    server = { ...server, telegramBotToken: { set: true, hint: "masked" }, values: { ...server.values, telegramEnabled: true } };
+    await mount(); await drain();
+    assert.equal(localStorage.getItem(`merrymen.telegram.create.v1:${OWNER}`), null);
+    assert.ok(ui.container.querySelector('a[href="https://t.me/merrymen_testbot?start=link-proof"]'));
+    assert.equal([...ui.container.querySelectorAll("button")].find(button => button.textContent === "Save settings")?.disabled, false);
+    assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), false);
+  });
+
+  it("lets an unconnected missing candidate start over without discarding manual edits", async () => {
+    await prepare();
+    missingIntent = true;
+    await ui.click("Connect this bot"); await drain();
+    await ui.click("Try again"); await drain();
+    assert.equal(localStorage.getItem(`merrymen.telegram.create.v1:${OWNER}`), null);
+    assert.equal(token().value, "123456:obsolete-manual-token");
+    assert.equal(agentName().value, "Robin Hood");
+    assert.equal([...ui.container.querySelectorAll("button")].find(button => button.textContent === "Save settings")?.disabled, false);
+    assert.ok([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"));
+  });
+
+  it("preserves current-main Fomo research drafts when a bot is connected", async () => {
+    fomo = true;
+    await prepare();
+    const checkbox = (label: string) => [...ui.container.querySelectorAll(".mm-label")].find(node => node.textContent === label)!.closest("label")!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => { checkbox("answer Fomo questions").click(); checkbox("watch the Fomo trader cohort").click(); });
+    await ui.click("Connect this bot"); await drain();
+    assert.equal(checkbox("answer Fomo questions").checked, false);
+    assert.equal(checkbox("watch the Fomo trader cohort").checked, true);
+    await ui.click("Save settings");
+    assert.deepEqual(writes[0], { owner: OWNER, agentName: "Robin Hood", fomoDataAccess: false, fomoMonitoringEnabled: true, telegramGroupsEnabled: false, telegramAllowlist: [999] });
   });
 
   it("releases Save after readback while waiting briefly for the matching bot's launch link", async () => {

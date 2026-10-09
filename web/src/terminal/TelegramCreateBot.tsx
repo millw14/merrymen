@@ -17,6 +17,7 @@ interface Props {
   disabled?: boolean;
   onActiveChange?: (active: boolean) => void;
   onConnected: (owner: string, signal: AbortSignal, botUsername: string) => Promise<void> | void;
+  onIntentMissing: (owner: string, signal: AbortSignal, botUsername: string | null) => Promise<void> | void;
 }
 interface View {
   owner: string;
@@ -28,12 +29,13 @@ interface View {
   error: string | null;
   refreshed: boolean;
   confirmationAttempted: boolean;
+  needsReconciliation: boolean;
 }
 const POLL_MS = 3000;
 const MAX_PENDING_MS = 15 * 60_000;
-const ID = /^[A-Za-z0-9_-]{8,128}$/;
+const ID = /^[A-Za-z0-9_-]{16,64}$/;
 const storageKey = (owner: string) => `merrymen.telegram.create.v1:${owner}`;
-const initial = (owner: string): View => ({ owner, available: null, intent: null, telegramUrl: null, loading: true, busy: false, error: null, refreshed: false, confirmationAttempted: false });
+const initial = (owner: string): View => ({ owner, available: null, intent: null, telegramUrl: null, loading: true, busy: false, error: null, refreshed: false, confirmationAttempted: false, needsReconciliation: false });
 const pending = (intent: TelegramCreateIntent | null) => !!intent && ["waiting_telegram", "waiting_bot", "confirm"].includes(intent.status);
 
 function intentFrom(value: unknown): TelegramCreateIntent {
@@ -63,7 +65,7 @@ function failure(error: unknown): string {
   return "Couldn't check Telegram setup. Try again.";
 }
 
-export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = false, onActiveChange, onConnected }: Props) {
+export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = false, onActiveChange, onConnected, onIntentMissing }: Props) {
   const owner = /^0x[0-9a-f]{40}$/i.test(suppliedOwner ?? "") ? suppliedOwner!.toLowerCase() : "";
   const [view, setView] = useState<View>(() => initial(owner));
   const [attempt, setAttempt] = useState(0);
@@ -72,14 +74,14 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   ownerRef.current = owner;
   const viewRef = useRef(view);
   viewRef.current = view;
-  const callbacks = useRef({ onActiveChange, onConnected });
-  callbacks.current = { onActiveChange, onConnected };
+  const callbacks = useRef({ onActiveChange, onConnected, onIntentMissing });
+  callbacks.current = { onActiveChange, onConnected, onIntentMissing };
   const controllers = useRef(new Set<AbortController>());
   const popups = useRef(new Set<Window>());
   const priorOwner = useRef(owner);
   const deadline = useRef<{ id: string; at: number } | null>(null);
   const current = view.owner === owner ? view : initial(owner);
-  const active = current.busy || pending(current.intent) || (current.confirmationAttempted && !current.refreshed) || (current.intent?.status === "connected" && !current.refreshed);
+  const active = current.loading || current.busy || current.needsReconciliation || pending(current.intent) || (current.confirmationAttempted && !current.refreshed) || (current.intent?.status === "connected" && !current.refreshed);
 
   function controller() { const ctl = new AbortController(); controllers.current.add(ctl); return ctl; }
   function valid(ctl: AbortController, scope: string) { return !ctl.signal.aborted && ownerRef.current === scope; }
@@ -94,13 +96,28 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   async function read(scope: string, id: string | null, ctl: AbortController) {
     const params = new URLSearchParams({ owner: scope });
     if (id) params.set("intent", id);
-    const data = await requestJson<{ available: unknown; intent?: unknown }>(`/api/telegram/create?${params}`, { signal: ctl.signal });
+    let data: { available: unknown; intent?: unknown };
+    let reconciledMissing = false;
+    try { data = await requestJson<typeof data>(`/api/telegram/create?${params}`, { signal: ctl.signal }); }
+    catch (error) {
+      if (!valid(ctl, scope) || !id || !(error instanceof RequestError) || error.status !== 404) throw error;
+      // The row can expire after a successful confirmation. Re-read Settings
+      // before forgetting it so an old manual token cannot overwrite that bot.
+      patch(scope, { needsReconciliation: true, busy: true });
+      await callbacks.current.onIntentMissing(scope, ctl.signal, viewRef.current.owner === scope ? viewRef.current.intent?.botUsername ?? null : null);
+      if (!valid(ctl, scope)) return;
+      params.delete("intent");
+      data = await requestJson<typeof data>(`/api/telegram/create?${params}`, { signal: ctl.signal });
+      id = null;
+      reconciledMissing = true;
+    }
     if (!valid(ctl, scope)) return;
     if (typeof data.available !== "boolean") throw new Error("Invalid availability");
     const intent = data.intent ? intentFrom(data.intent) : null;
     if (id && (!intent || intent.id !== id)) throw new Error("Setup changed");
+    if (reconciledMissing) { remember(scope, null); deadline.current = null; }
     if (intent) remember(scope, intent.id);
-    patch(scope, { available: data.available, intent, loading: false, error: null });
+    patch(scope, { available: data.available, intent, loading: false, needsReconciliation: false, error: null, ...(reconciledMissing ? { busy: false, telegramUrl: null, confirmationAttempted: false } : {}) });
   }
 
   useEffect(() => {
@@ -109,10 +126,11 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
     setView({ ...old, owner, loading: true, error: null });
     if (!owner) { setView({ ...initial(owner), loading: false }); return; }
     let id = old.intent?.id ?? null;
-    try { const saved = localStorage.getItem(storageKey(owner)); if (!id && saved && ID.test(saved)) id = saved; } catch { /* No stored intent. */ }
+    try { const saved = localStorage.getItem(storageKey(owner)); if (!id && saved) { if (ID.test(saved)) id = saved; else remember(owner, null); } } catch { /* No stored intent. */ }
     if (hasBot && !id) { setView({ ...initial(owner), loading: false }); return; }
+    if (id) { patch(owner, { needsReconciliation: true }); callbacks.current.onActiveChange?.(true); }
     const ctl = controller();
-    void read(owner, id, ctl).catch(error => { if (valid(ctl, owner)) patch(owner, { loading: false, error: failure(error), ...(error instanceof RequestError && [401, 403, 503].includes(error.status) ? { available: false } : {}) }); }).finally(() => controllers.current.delete(ctl));
+    void read(owner, id, ctl).catch(error => { if (valid(ctl, owner)) patch(owner, { loading: false, busy: false, error: failure(error), ...(error instanceof RequestError && [401, 403, 503].includes(error.status) ? { available: false } : {}) }); }).finally(() => controllers.current.delete(ctl));
     return () => { for (const active of controllers.current) active.abort(); controllers.current.clear(); for (const popup of popups.current) popup.close(); popups.current.clear(); };
   }, [owner, attempt]);
 
@@ -123,19 +141,19 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
 
   const intent = current.intent;
   useEffect(() => {
-    if (!intent || !pending(intent) || !owner) return;
+    if (!intent || !pending(intent) || !owner || current.loading) return;
     const ctl = controller();
     let timer: ReturnType<typeof setTimeout>;
     const expire = setTimeout(() => { if (!valid(ctl, owner)) return; ctl.abort(); patch(owner, { intent: { ...intent, status: "expired" }, error: null, busy: false }); }, Math.max(0, until(intent) - Date.now()));
     if (intent.status !== "confirm" && !current.error) {
       const poll = async () => {
         try { await read(owner, intent.id, ctl); if (valid(ctl, owner)) timer = setTimeout(poll, POLL_MS); }
-        catch (error) { if (valid(ctl, owner)) patch(owner, { error: failure(error) }); }
+        catch (error) { if (valid(ctl, owner)) patch(owner, { busy: false, error: failure(error) }); }
       };
       timer = setTimeout(poll, POLL_MS);
     }
     return () => { ctl.abort(); controllers.current.delete(ctl); clearTimeout(timer); clearTimeout(expire); };
-  }, [owner, intent?.id, intent?.status, intent?.expiresAt, current.error]);
+  }, [owner, intent?.id, intent?.status, intent?.expiresAt, current.error, current.loading]);
 
   useEffect(() => {
     if (!intent || intent.status !== "connected" || current.refreshed || !owner) return;
@@ -150,7 +168,7 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   }, [owner, intent?.id, intent?.status, refreshAttempt]);
 
   async function begin() {
-    if (!owner || disabled || current.busy || current.confirmationAttempted || current.available !== true || hasBot) return;
+    if (!owner || disabled || current.busy || current.needsReconciliation || current.confirmationAttempted || current.available !== true || hasBot) return;
     // Open during the click's user activation, before the request awaits. A
     // blocked popup still gets the ordinary validated Open Telegram link.
     let popup: Window | null = null;
@@ -200,13 +218,13 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   }
 
   if (!owner) return <p className="mm-hint">Sign in to create a Telegram bot.</p>;
-  if (hasBot && !intent) return null;
+  if (hasBot && !intent && !current.needsReconciliation) return null;
   const ended = intent && ["expired", "cancelled", "error"].includes(intent.status);
   return <div className="mm-field" aria-label="Create Telegram bot" aria-busy={current.loading || current.busy}>
     {current.loading ? <p className="mm-hint" role="status">Checking Telegram setup…</p> : null}
     {current.error ? <p className="mm-danger" role="alert">{current.error}</p> : null}
     {!current.loading && current.available === false && !intent ? <p className="mm-hint">Bot creation isn&apos;t available right now. You can connect an existing bot below.</p> : null}
-    {!current.loading && current.available === true && (!intent || ended) && !current.confirmationAttempted && !hasBot ? <>
+    {!current.loading && current.available === true && (!intent || ended) && !current.needsReconciliation && !current.confirmationAttempted && !hasBot ? <>
       {ended ? <p className="mm-hint" role="status">{intent.status === "expired" ? "This Telegram setup expired. Start again when you're ready." : "This Telegram setup didn't finish. You can start again."}</p> : null}
       <p className="mm-hint">Create your bot in Telegram, then confirm its username here. No bot token to copy.</p>
       <button type="button" className="mm-btn primary" disabled={disabled || current.busy} onClick={() => void begin()}>{current.busy ? "Preparing Telegram…" : "Create Telegram bot"}</button>
@@ -222,7 +240,7 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
       <button type="button" className="mm-btn" disabled={disabled || current.busy} onClick={() => void cancel()}>Cancel setup</button>
     </> : null}
     {intent?.status === "connected" ? <p className="mm-hint" role="status">{current.refreshed ? <>Bot connected as <strong>@{intent.botUsername}</strong>. Open your bot below to finish linking Telegram.</> : "Bot connected. Refreshing Settings…"}</p> : null}
-    {ended && current.confirmationAttempted ? <>
+    {ended && (current.confirmationAttempted || current.needsReconciliation) ? <>
       <p className="mm-hint" role="status">The connection hasn&apos;t been checked yet. Check setup or cancel before saving other settings.</p>
       <button type="button" className="mm-btn" disabled={disabled || current.busy} onClick={() => setAttempt(n => n + 1)}>Check setup</button>
       <button type="button" className="mm-btn" disabled={disabled || current.busy} onClick={() => void cancel()}>Cancel setup</button>

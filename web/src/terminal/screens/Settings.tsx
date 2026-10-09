@@ -256,6 +256,31 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       .then((s) => s && setTg(s))
       .catch(() => {});
 
+  async function refreshTelegramCreation(owner: string, signal: AbortSignal, botUsername: string | null, requireConnected: boolean) {
+    const sameOwner = () => settingsOwner.current?.toLowerCase() === owner;
+    if (!sameOwner() || signal.aborted) throw new Error("Settings owner changed");
+    const [freshSettings, freshTelegram] = await Promise.all([
+      requestJson<SettingsView>("/api/settings", { signal }),
+      requestJson<TelegramStatus>(`/api/telegram?owner=${encodeURIComponent(owner)}`, { signal }),
+    ]);
+    if (signal.aborted || !sameOwner() || freshSettings.owner?.toLowerCase() !== owner) throw new Error("Settings owner changed");
+    if (requireConnected && (!freshSettings.telegramBotToken.set || freshSettings.values.telegramEnabled !== true)) throw new Error("Telegram settings not confirmed");
+    if (freshSettings.telegramBotToken.set && botUsername && freshTelegram.botUsername && freshTelegram.botUsername !== botUsername) throw new Error("Telegram bot changed");
+    const verifiedBot = freshSettings.telegramBotToken.set ? botUsername ?? (/^[A-Za-z0-9_]{2,29}bot$/i.test(freshTelegram.botUsername ?? "") ? freshTelegram.botUsername : null) : null;
+    setView(freshSettings);
+    setTg(verifiedBot && freshTelegram.botUsername === verifiedBot && !freshTelegram.botElsewhere ? freshTelegram : { ...freshTelegram, linkCode: null });
+    setTelegramLaunch(verifiedBot && freshSettings.values.telegramEnabled === true ? { owner, botUsername: verifiedBot } : null);
+    setTelegramLaunchNote(null);
+    if (freshSettings.telegramBotToken.set) {
+      // Preserve every unrelated edit, including the newer research controls.
+      // A committed bot must not be overwritten by an older manual token draft.
+      setDraft(({ telegramBotToken: _oldToken, ...rest }) => rest);
+      setTgEnabled(null); setTgTest(null);
+      setBotClaimed(null); setBotMoved(false);
+    }
+    if (requireConnected) onSaved?.();
+  }
+
   useEffect(() => {
     if (!telegramLaunch) return;
     const { owner, botUsername } = telegramLaunch;
@@ -1695,31 +1720,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             hasBot={view.telegramBotToken.set}
             disabled={status === "saving…"}
             onActiveChange={active => { telegramCreateActive.current = active; setTelegramCreating(active); }}
-            onConnected={async (owner, signal, botUsername) => {
-              const sameOwner = () => settingsOwner.current?.toLowerCase() === owner;
-              if (!sameOwner() || signal.aborted) throw new Error("Settings owner changed");
-              const [settingsResponse, telegramResponse] = await Promise.all([
-                fetch("/api/settings", { cache: "no-store", signal }),
-                fetch(`/api/telegram?owner=${encodeURIComponent(owner)}`, { cache: "no-store", signal }),
-              ]);
-              if (!settingsResponse.ok || !telegramResponse.ok) throw new Error("Settings refresh unavailable");
-              const [freshSettings, freshTelegram] = await Promise.all([
-                settingsResponse.json() as Promise<SettingsView>,
-                telegramResponse.json() as Promise<TelegramStatus>,
-              ]);
-              if (signal.aborted || !sameOwner() || freshSettings.owner?.toLowerCase() !== owner) throw new Error("Settings owner changed");
-              if (!freshSettings.telegramBotToken.set || freshSettings.values.telegramEnabled !== true) throw new Error("Telegram settings not confirmed");
-              if (freshTelegram.botUsername && freshTelegram.botUsername !== botUsername) throw new Error("Telegram bot changed");
-              setView(freshSettings);
-              setTg(freshTelegram.botUsername === botUsername && !freshTelegram.botElsewhere ? freshTelegram : { ...freshTelegram, linkCode: null });
-              setTelegramLaunch({ owner, botUsername });
-              // The managed connection is already saved. Keep unrelated edits,
-              // but never let an earlier manual bot draft overwrite it later.
-              setDraft(({ telegramBotToken: _oldToken, ...rest }) => rest);
-              setTgEnabled(null); setTgTest(null);
-              setBotClaimed(null); setBotMoved(false);
-              onSaved?.();
-            }}
+            onConnected={(owner, signal, botUsername) => refreshTelegramCreation(owner, signal, botUsername, true)}
+            onIntentMissing={(owner, signal, botUsername) => refreshTelegramCreation(owner, signal, botUsername, false)}
           /> : null}
           {telegramLaunchNote && telegramLaunchNote.owner === view.owner?.toLowerCase() ? <p className="mm-hint" role="status">{telegramLaunchNote.text}</p> : null}
           {/* THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT.

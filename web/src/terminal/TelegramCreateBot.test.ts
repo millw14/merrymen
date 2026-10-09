@@ -6,7 +6,7 @@ import { deferred, json, testDom } from "./test-dom";
 
 const OWNER = `0x${"1".repeat(40)}`;
 const OTHER = `0x${"2".repeat(40)}`;
-const ID = "setup-12345678";
+const ID = "setup-1234567890";
 const storageKey = (owner: string) => `merrymen.telegram.create.v1:${owner}`;
 const originalFetch = globalThis.fetch;
 type Call = { url: string; init?: RequestInit };
@@ -16,6 +16,8 @@ let respond: (call: Call) => Promise<Response>;
 let refreshed: { owner: string; signal: AbortSignal }[];
 let active: boolean[];
 let refresh: () => Promise<void>;
+let reconcile: () => Promise<void>;
+let reconciled: { owner: string; signal: AbortSignal }[];
 let hasBot: boolean;
 let opened: number;
 let popup: Window | null;
@@ -26,13 +28,14 @@ const post = (call: Call) => JSON.parse(String(call.init?.body)) as Record<strin
 const posts = () => calls.filter(call => call.init?.method === "POST");
 const drain = () => act(async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); });
 async function advance(ms: number) { await act(async () => mock.timers.tick(ms)); await drain(); }
-const render = (owner: string | null = OWNER) => ui.render(React.createElement(TelegramCreateBot, { owner, hasBot, onActiveChange: value => active.push(value), onConnected: async (scope, signal) => { refreshed.push({ owner: scope, signal }); await refresh(); } }));
+const render = (owner: string | null = OWNER) => ui.render(React.createElement(TelegramCreateBot, { owner, hasBot, onActiveChange: value => active.push(value), onConnected: async (scope, signal) => { refreshed.push({ owner: scope, signal }); await refresh(); }, onIntentMissing: async (scope, signal) => { reconciled.push({ owner: scope, signal }); await reconcile(); } }));
 
 beforeEach(() => {
   ui = testDom();
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
   calls = [];
   refreshed = [];
+  reconciled = [];
   active = [];
   hasBot = false;
   opened = closed = 0;
@@ -40,6 +43,7 @@ beforeEach(() => {
   popup = null;
   ui.dom.window.open = () => { opened++; return popup; };
   refresh = async () => {};
+  reconcile = async () => {};
   respond = async call => {
     if (call.init?.method === "POST") {
       if (post(call).action === "begin") return json({ intent: intent(), telegramUrl: "https://t.me/MerrymenManagerBot?start=server_nonce" });
@@ -95,7 +99,7 @@ describe("Telegram bot creation through the actual client component", () => {
     for (const botUsername of ["3_Testbot", "_Testbot"]) {
       localStorage.setItem(storageKey(OWNER), ID);
       respond = async () => json({ available: true, intent: intent("confirm", { botUsername }) });
-      await ui.remount(React.createElement(TelegramCreateBot, { owner: OWNER, hasBot: false, onConnected: async () => {} }));
+      await ui.remount(React.createElement(TelegramCreateBot, { owner: OWNER, hasBot: false, onConnected: async () => {}, onIntentMissing: async () => {} }));
       assert.match(ui.container.textContent ?? "", new RegExp(`@${botUsername}`));
       assert.ok([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Connect this bot"));
     }
@@ -128,6 +132,89 @@ describe("Telegram bot creation through the actual client component", () => {
     assert.equal(params.get("intent"), ID);
     assert.match(ui.container.textContent ?? "", /@merrymen_testbot/);
     assert.equal(posts().length, 0);
+  });
+
+  it("forgets a missing persisted intent after reconciliation and rechecks availability without it", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async call => new URL(call.url, "https://app.example.test").searchParams.has("intent") ? json({ error: "not found" }, 404) : json({ available: true });
+    await render(); await drain();
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0].owner, OWNER);
+    assert.deepEqual(calls.map(call => new URL(call.url, "https://app.example.test").searchParams.get("intent")), [ID, null]);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.equal(active.at(-1), false);
+    assert.ok([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"));
+  });
+
+  it("clears malformed persisted IDs and checks availability without sending them", async () => {
+    for (const saved of ["setup-short", "a".repeat(65), "invalid?stored-value"]) {
+      localStorage.setItem(storageKey(OWNER), saved);
+      await ui.remount(React.createElement(TelegramCreateBot, { owner: OWNER, hasBot: false, onConnected: async () => {}, onIntentMissing: async () => { assert.fail("malformed IDs must not reach reconciliation"); } }));
+      assert.equal(new URL(calls.at(-1)!.url, "https://app.example.test").searchParams.has("intent"), false);
+      assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+      assert.ok([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"));
+    }
+  });
+
+  it("retains the missing intent and Save hold until Settings reconciliation succeeds", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async call => new URL(call.url, "https://app.example.test").searchParams.has("intent") ? json({ error: "not found" }, 404) : json({ available: true });
+    reconcile = async () => { throw new Error("Settings unavailable"); };
+    await render(); await drain();
+    assert.equal(active.at(-1), true);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    assert.equal(calls.length, 1, "availability cannot bypass an unverified Settings state");
+    assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), false);
+    reconcile = async () => {};
+    await ui.click("Try again"); await drain();
+    assert.equal(reconciled.length, 2);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.equal(active.at(-1), false);
+    assert.deepEqual(calls.map(call => new URL(call.url, "https://app.example.test").searchParams.get("intent")), [ID, ID, null]);
+  });
+
+  it("holds Save while restoring an intent and handles a missing row during pending polling", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    const restored = deferred<Response>();
+    respond = async () => restored.promise;
+    await render();
+    assert.equal(active.at(-1), true, "a persisted request is unverified until its first owner-bound read completes");
+    restored.resolve(json({ available: true, intent: intent() })); await drain();
+    const readback = deferred<void>();
+    reconcile = () => readback.promise;
+    respond = async call => new URL(call.url, "https://app.example.test").searchParams.has("intent") ? json({ error: "not found" }, 404) : json({ available: true });
+    await advance(3000);
+    assert.equal(reconciled.length, 1);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    assert.equal(active.at(-1), true);
+    readback.resolve(); await drain();
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.equal(active.at(-1), false);
+    const count = calls.length;
+    await advance(30_000);
+    assert.equal(calls.length, count, "the missing request's old poll loop is stopped");
+  });
+
+  it("offers reconciliation retry when local expiry interrupts a missing-row readback", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("waiting_bot", { expiresAt: Date.now() + 6000 }) });
+    await render();
+    const readback = deferred<void>();
+    reconcile = () => readback.promise;
+    respond = async call => new URL(call.url, "https://app.example.test").searchParams.has("intent") ? json({ error: "not found" }, 404) : json({ available: true });
+    await advance(3000);
+    assert.equal(reconciled.length, 1);
+    await advance(3000);
+    assert.equal(reconciled[0].signal.aborted, true);
+    assert.equal(active.at(-1), true);
+    assert.ok([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Check setup"));
+    assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), false);
+    reconcile = async () => {};
+    await ui.click("Check setup"); await drain();
+    assert.equal(active.at(-1), false);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    readback.resolve(); await drain();
+    assert.equal(active.at(-1), false, "the expired readback cannot overwrite the reconciled state");
   });
 
   it("aborts old-owner requests and ignores a late response after the wallet changes", async () => {
@@ -200,7 +287,7 @@ describe("Telegram bot creation through the actual client component", () => {
     assert.equal(ui.container.querySelector("input"), null);
     assert.equal(ui.container.querySelector("button"), null);
     respond = async () => json({ error: "sensitive diagnostic should not render" }, 403);
-    await ui.remount(React.createElement(TelegramCreateBot, { owner: OWNER, hasBot: false, onConnected: async () => {} }));
+    await ui.remount(React.createElement(TelegramCreateBot, { owner: OWNER, hasBot: false, onConnected: async () => {}, onIntentMissing: async () => {} }));
     assert.match(ui.container.textContent ?? "", /signed-in account changed/);
     assert.doesNotMatch(ui.container.textContent ?? "", /sensitive diagnostic/);
   });
