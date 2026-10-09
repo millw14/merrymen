@@ -73,6 +73,10 @@ deletes a bot created in Telegram; its owner retains it there.
 Local tests use synthetic tokens and disposable SQLite/Postgres databases. Real
 Telegram creation, manager capability and webhook delivery need the operator
 pilot above; mocked API tests are not evidence of a production connection.
+The required CI Postgres job runs the managed-bot suite alongside the partner
+store suite against its disposable database, including the exact SQL migration.
+Hosted activation is read at the API boundary; browser code obtains availability
+from the authenticated endpoint.
 
 Official contracts: [Managed Bots](https://core.telegram.org/bots/features#managed-bots),
 [request keyboard](https://core.telegram.org/bots/api#keyboardbuttonrequestmanagedbot),

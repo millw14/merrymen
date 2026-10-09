@@ -4,7 +4,7 @@ import { SAVE_BUSY, withSettingsSaveLock } from "./telegram-claims";
 import { botIdOf } from "../../../worker/src/telegram/state";
 import { makePgDb, withAdvisoryLock, type Db } from "../../../worker/src/db";
 import { ManagedTelegramStore, ManagedTelegramError, MANAGED_MESSAGE_FRESHNESS_MS } from "./telegram-managed-store";
-import { boundedJson, managedBotIdentity, TelegramManager, TelegramManagerError, telegramManagerConfig, validWebhookSecret, type TelegramManagerConfig } from "./telegram-manager";
+import { boundedJson, managedBotIdentity, TelegramManager, TelegramManagerError, validWebhookSecret, type TelegramManagerConfig } from "./telegram-manager";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 const unavailable = () => json({ available: false, error: "Bot creation is not available right now. You can still connect an existing bot." }, 503);
@@ -28,8 +28,8 @@ interface Dependencies {
   manager(config: TelegramManagerConfig): TelegramManager;
   saveLock: typeof withSettingsSaveLock;
 }
-const defaults: Dependencies = {
-  config: telegramManagerConfig, auth: tenantOf,
+const defaults: Omit<Dependencies, "config"> = {
+  auth: tenantOf,
   db: () => makePgDb(process.env.DATABASE_URL!),
   manager: config => new TelegramManager(config), saveLock: withSettingsSaveLock,
 };
@@ -50,7 +50,7 @@ function failure(error: unknown): Response {
   return json({ error: "Couldn't complete bot setup just now. Please try again." }, 503);
 }
 /** No secret-bearing errors or unscoped intent lookups leave these handlers. */
-export function createTelegramHandlers(overrides: Partial<Dependencies> = {}) {
+export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> & Partial<Omit<Dependencies, "config">>) {
   const deps = { ...defaults, ...overrides };
   return {
     async GET(req: Request): Promise<Response> {
