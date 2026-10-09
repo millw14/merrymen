@@ -35,7 +35,7 @@ function row(publicBook: boolean, equityUsdg: number | null = 1000.25, pnlUsdg: 
       valuation: "current", gasOps: { sponsored: 3, priced: 0, unpriced: 0, unrecorded: 0 }, underReview: false },
   };
 }
-const board = (agents: LeaderRow[]): LeaderboardRead => ({ source: "sqlite", retired: 0, agents });
+const board = (agents: LeaderRow[]): LeaderboardRead => ({ source: "sqlite", retired: 0, retiredAgents: [], agents });
 
 /** Small shared-cache model honoring the response's actual Cache-Control. */
 function cdn(origin: () => Promise<Response>) {

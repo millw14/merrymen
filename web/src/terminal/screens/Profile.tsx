@@ -196,7 +196,7 @@ export function Profile({
               title={performance.title}
               className={`public-return ${performance.state !== null || displayPnl == null || displayPnl === 0 ? "" : displayPnl < 0 ? "down" : "up"}${performance.state !== null ? " performance-state" : ""}`}
             >
-              {performance.state ?? pctBps(displayPnl)}
+              {performance.state ?? `${performance.estimated && displayPnl != null ? "≈ " : ""}${pctBps(displayPnl)}`}
             </strong>
             {performance.pnl !== null && <small className="profile-pnl">{performance.pnl} P&L</small>}
             {performance.note !== null && <small className="performance-note">{performance.note}</small>}
@@ -228,7 +228,7 @@ export function Profile({
             figure, or the lack of one nothing more specific accounts for. */}
         {displayPnl == null && performance.state === null && <p className="public-empty">{performance.book === "paper" ? "Paper return is unavailable until the recorded balance, holdings and fills can be reconciled." : agent.performance ? "Return unavailable." : agent.unrankedWhy ? unrankedLabel(agent.unrankedWhy) : "Return unavailable."}</p>}
         {performance.book === "paper" && displayPnl != null && performance.state === null && <p className="public-empty">Change in paper equity since the first recorded valuation of the paper book in this accounting period. Switching between paper and live does not reset that baseline.</p>}
-        {performance.gasIncomplete && <p className="public-empty">Gas accounting is incomplete; exact P&L is unavailable.</p>}
+        {performance.gasIncomplete && <p className="public-empty">{performance.estimated ? "Approximate: some gas costs are not on record yet, so the exact return may be slightly lower." : "Some gas costs are not on record yet."}</p>}
         {/* This summary includes the whole epoch, which can extend beyond a
             held return's measured cutoff. Dollars still require publication. */}
         {performance.book !== "paper" && displayPnl != null && agent.gas && (agent.gasless === true

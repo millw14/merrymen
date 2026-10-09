@@ -36,6 +36,7 @@ export function Home({
   hasAgent,
   read,
   retired = null,
+  retiredAgents = [],
 }: {
   tokens: LiveToken[];
   agents: LiveAgent[];
@@ -67,6 +68,7 @@ export function Home({
   read: import("../live").ReadState;
   /** Accounts the board folded into a count. See Board. */
   retired?: number | null;
+  retiredAgents?: import("../live").RetiredAgent[];
 }) {
   // A count we do not have sorts last and filters out — it is not a zero, but
   // it is also not evidence that anybody bought anything, so an unread row does
@@ -205,6 +207,7 @@ export function Home({
         preview
         read={read}
         retired={retired}
+        retiredAgents={retiredAgents}
         agents={agents}
         theses={theses}
         mine={mine}
