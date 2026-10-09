@@ -2927,4 +2927,9 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     leftOut(["kaleo dumped his whole bag on retail", "kaleo dumped his bags on us", "whales dumped their bags on holders"]);
     quoted(["still not sold on it", "sold some on the way up, still holding"]);
   });
+
+  it("a price call with no forward verb, or an imperative opening the quote, is never quoted", () => {
+    leftOut(["this goes 50x from here", "auton pumps to 20m by friday", "ape now before it pumps", "bid this now", "grab some here"]);
+    quoted(["goes to zero from here", "it ran to 8m then dumped", "down from 8m to 36k in a week"]);
+  });
 });

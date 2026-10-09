@@ -149,6 +149,11 @@ describe("the new clauses", () => {
     misses(QUOTE_TARGET, [...HARMLESS, "took profits at 5m, still holding a moonbag", "2h ago it was flat"]);
   });
 
+  it("QUOTE_TARGET: a move in the present tense beside a figure (review, 2026-10-09)", () => {
+    hits(QUOTE_TARGET, ["this goes 50x from here", "auton pumps to 20m by friday", "it runs to 100m", "this sends to 1b"]);
+    misses(QUOTE_TARGET, ["goes to zero from here", "it ran to 8m then dumped", "down from 8m to 36k in a week"]);
+  });
+
   it("RUG_CONTEXT_ACCUSE: dumping on people, someone pulling the liquidity, theft", () => {
     hits(RUG_CONTEXT_ACCUSE, [
       "rugged, whales dumped on holders",

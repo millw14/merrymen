@@ -178,10 +178,12 @@ export const CTA_PLACEHOLDER = U(new RegExp(String.raw`\b${CTA_VERB}\b(?:[\s,:;-
  * "will hit", "going to", "easy", "next", "target", "could reach", "to the
  * moon") within six words of a figure, a multiplier or a market cap with a
  * number ("undervalued at 2m mcap, should be 50m", "next 100x", "easy 10x from
- * here", "50m target"). A quote may say what happened ("down from 8m to 36k in
- * a week"); a promise of what will is advice in a room, whoever wrote it.
+ * here", "50m target"), or a move in the present tense ("this goes 50x from
+ * here", "auton pumps to 20m by friday"; review, 2026-10-09). A quote may say
+ * what happened ("down from 8m to 36k in a week"); a promise of what will is
+ * advice in a room, whoever wrote it.
  */
-const FWD = String.raw`(?:should\s+be|should\s+hit|will\s+(?:hit|be|go|reach|do|run|see|make)|going\s+to|gonna\s+(?:hit|be|go|reach|run|do)|easy|easily|next(?:\s+stop)?|targets?|could\s+(?:hit|reach|go|be|do)|can\s+(?:hit|reach|do)|heading\s+(?:to|for)|on\s+(?:its|the)\s+way\s+to|to\s+the\s+moon|minimum|at\s+least|potential)`;
+const FWD = String.raw`(?:should\s+be|should\s+hit|will\s+(?:hit|be|go|reach|do|run|see|make)|going\s+to|gonna\s+(?:hit|be|go|reach|run|do)|easy|easily|next(?:\s+stop)?|targets?|could\s+(?:hit|reach|go|be|do)|can\s+(?:hit|reach|do)|heading\s+(?:to|for)|on\s+(?:its|the)\s+way\s+to|to\s+the\s+moon|minimum|at\s+least|potential|go(?:es)?|going|runs?|pumps?|sends?|prints?|flips?|rips?)`;
 const FIG = String.raw`(?:[$＄]\s*\d|\d[\d.,]*\s*(?:k|m|mm|b|bn|mil|mill|million|billion|x|%)(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])x\s?\d|\b(?:million|billion|mil|bil|bn|hundred\s*x|thousand\s*x)\b|\b(?:mcap|market\s*cap|mc|fdv)\b[^.!?]{0,14}\d|\d[^.!?]{0,14}\b(?:mcap|market\s*cap|mc|fdv)\b)`;
 export const QUOTE_TARGET = U(new RegExp(String.raw`\b${FWD}\b(?:[^\p{L}\p{N}]+[\p{L}\p{N}'$]+){0,6}?[^\p{L}\p{N}]*${FIG}|${FIG}(?:[^\p{L}\p{N}]+[\p{L}\p{N}'$]+){0,6}?[^\p{L}\p{N}]+${FWD}\b`, "i"));
 

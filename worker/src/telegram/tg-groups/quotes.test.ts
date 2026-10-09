@@ -121,4 +121,8 @@ describe("quotesSayable", () => {
   it("contact lures and channel pointers are the gate's to drop too", () => {
     gateDrops(["inbox me for the alpha", "hmu for the group", "telegram: autonarmy, come raid", "raid the tweet, link pinned", "telegram is autonportal, raid now", "join autonarmy on telegram"], "lure");
   });
+
+  it("a price call or an imperative opening the quote is the gate's to drop too, as advice", () => {
+    gateDrops(["this goes 50x from here", "auton pumps to 20m by friday", "ape now before it pumps", "bid this now", "grab some here"], "advice");
+  });
 });

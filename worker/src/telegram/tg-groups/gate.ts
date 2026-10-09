@@ -1085,8 +1085,9 @@ const ADVICE: readonly RegExp[] = [
     String.raw`${IN_THEIR_PLACE}[^.!?\n]{0,40}?\b${TRADE_ACT}\b|\b${TRADE_ACT}\b[^.!?\n]{0,40}?${IN_THEIR_PLACE}`,
   ),
   /\b(?:you'?d|youd|ud|u'?d|you would|u would|y'?all would|you guys would) be (?:dumb|crazy|stupid|silly|nuts|mad|insane|foolish|a fool|an idiot|a clown) not to\b/,
-  // "better get in", "lol y'all better grab some": the imperative, opening a clause.
-  /(?:^|[.!?,;:—–]\s*)(?:(?:lol|lmao|ngl|tbh|ok|okay|so|yeah|yo|well|bro|ser|fam|anon|guys|frens)[\s,]+)*(?:(?:y'?all|you|u|ya)\s*(?:'d\s+|had\s+)?)?better\s+(?:get in|grab|buy|ape|load|sell|dump|jump in|hop in|hop on)\b/,
+  // "better get in", "lol y'all better grab some": the imperative, opening a
+  // clause, or opening a quote ("“ape now before it pumps”", review 2026-10-09).
+  /(?:^|[.!?,;:—–“‘«„"']\s*)(?:(?:lol|lmao|ngl|tbh|ok|okay|so|yeah|yo|well|bro|ser|fam|anon|guys|frens)[\s,]+)*(?:(?:y'?all|you|u|ya)\s*(?:'d\s+|had\s+)?)?better\s+(?:get in|grab|buy|ape|load|sell|dump|jump in|hop in|hop on)\b/,
   // "y'all sleeping on this": the room is missing out. "i'm sleeping on it" is deciding tomorrow.
   /(?<!\b(?:i'?m|im|i am|i was|i'?ll be|i'?d be|still)\s)\bsleeping on (?:this|it|these|that|those)\b/,
   /\bgo buy\b|\bbuy (?:it |this |that )?(?:now|asap|rn|immediately|before)\b|\bget in (?:now|early|before|while|asap|rn)\b/,
@@ -1096,7 +1097,7 @@ const ADVICE: readonly RegExp[] = [
   /\bto the moon\b|\b(?:gonna|going to|will|about to|bout to) (?:moon|explode|skyrocket|go parabolic|pump|rip|fly)\b|\bnext (?:big thing|moonshot|gem|pepe|doge)\b/,
   /\b(?:everyone|everybody|y'?all|you all|you guys|guys|frens|fam|chat|anons?|ser)\b[^.!?\n]{0,40}\b(?:buy|grab|ape|aping|load up|get in|sell|dump)\b/,
   /\b(?:buy|grab|ape into|load up on|get in on|sell|dump)\b[^.!?\n]{0,40}\b(?:now|rn|asap|while (?:it|you|u)|before it)\b/,
-  /(?:^|[.!?,;:—–]\s*)(?:just\s+|pls\s+|please\s+|go\s+)?(?:buy|grab|ape|sell|dump|load up on|get in on|long|short|bid)\s+(?:it|this|that|these|those|some|now|rn|asap|the dip|more|here|in)\b/,
+  /(?:^|[.!?,;:—–“‘«„"']\s*)(?:just\s+|pls\s+|please\s+|go\s+)?(?:buy|grab|ape|sell|dump|load up on|get in on|long|short|bid)\s+(?:it|this|that|these|those|some|now|rn|asap|the dip|more|here|in)\b/,
   /\bcome ape\b|\bape (?:in )?with (?:me|us)\b/,
 ].map(U);
 /**
