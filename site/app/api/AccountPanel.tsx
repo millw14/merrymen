@@ -170,7 +170,7 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
     {due !== null && treasury !== null && <PaymentPanel wallet={address} amount={due} treasury={treasury} renewBy={renewalBy(view)} reversed={reversed} busy={busy} run={run} waiting={waiting}
       confirmPayable={confirmPayable} onSent={hash => follow(hash, true)} onPasted={hash => follow(hash, false)} />}
     {due !== null && on && treasury === null && <p className="dev-billing-note">Payments are not open yet, so nothing can be paid here. Nothing is lost: your selection waits.</p>}
-    {watches.length > 0 && <div className="dev-pay-watches">{watches.map(w => <PaymentWatch key={w.hash} watch={w} spread={spread} minAgeSec={plans.confirmations?.min_age_sec}
+    {watches.length > 0 && <div className="dev-pay-watches">{watches.map(w => <PaymentWatch key={w.hash} wallet={address} watch={w} spread={spread} minAgeSec={plans.confirmations?.min_age_sec}
       onWaiting={onWaiting} onEnd={onEnd}
       onRetry={() => { rememberPayment(address, w.hash); change(ws => ws.map(x => x.hash === w.hash ? checking(x.hash, x.round + 1) : x)); }}
       onForget={() => { forgetPayment(address, w.hash); change(ws => ws.filter(x => x.hash !== w.hash)); }}
@@ -360,8 +360,8 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, run, 
  * `checking` and stops at its first final answer, after POLL_MAX_CHECKS
  * checks or ten minutes, or when this leaves the page.
  */
-function PaymentWatch({ watch, spread, minAgeSec, onWaiting, onEnd, onRetry, onForget, onDismiss }: {
-  watch: Watch; spread: { current: number }; minAgeSec: number | undefined;
+function PaymentWatch({ wallet, watch, spread, minAgeSec, onWaiting, onEnd, onRetry, onForget, onDismiss }: {
+  wallet: string; watch: Watch; spread: { current: number }; minAgeSec: number | undefined;
   onWaiting: (hash: string, message: string) => void; onEnd: (hash: string, end: Exclude<WatchEnd, { kind: "cancelled" }>) => void;
   onRetry: () => void; onForget: () => void; onDismiss: () => void;
 }) {
@@ -374,7 +374,9 @@ function PaymentWatch({ watch, spread, minAgeSec, onWaiting, onEnd, onRetry, onF
     let cancelled = false, timer: ReturnType<typeof setTimeout> | undefined;
     const hash = watch.hash;
     watchPayment(hash, {
-      check: h => requestRaw("payments", { tx_hash: h }),
+      // Named, so a check that arrives under another wallet's session (a sign-in in another tab) is refused as
+      // such, and the hash kept, rather than checked as that wallet's and refused as "not from your wallet".
+      check: h => requestRaw("payments", { tx_hash: h, wallet }),
       wait: ms => new Promise(resolve => { timer = setTimeout(resolve, ms * spread.current); }),
       cancelled: () => cancelled,
       onWaiting: outcome => handlers.current.onWaiting(hash, waitingMessage(outcome, handlers.current.minAgeSec)),

@@ -298,6 +298,31 @@ test('a hash is forgotten only on a final answer; a stall, a refused check, a si
   await out.unmount();
 });
 
+test('a payment checked after another tab signed in with a second wallet keeps its hash', async () => {
+  // Another tab signs in with OTHER_WALLET, which has an account: the shared cookie is now its session.
+  let otherSession = false;
+  routes['POST payments'] = body => !otherSession ? pending
+    // The gateway as it answers then: a page that names its wallet is told the session changed; one that does not is checked as OTHER_WALLET.
+    : body?.wallet === undefined ? { status: 422, body: { error: { code: 'payment_not_found', reason: 'wrong_sender', message: `This transfer was not sent from your signed-in wallet ${OTHER_WALLET}.` } } }
+      : String(body.wallet).toLowerCase() !== OTHER_WALLET ? { status: 409, body: { error: { code: 'session_wallet_changed', message: 'This browser is now signed in with another wallet, so this payment was not checked.' } } }
+        : pending;
+  const page = await mount();
+  await click(payButton(page.container));
+  assert.deepEqual(saved(), [HASH_A]);
+  assert.equal(calls.find(c => c.action === 'payments')?.body?.wallet, WALLET, 'each check names the wallet it is for');
+  otherSession = true;
+  await fastForward(() => checksOf(HASH_A) >= 2);
+  await settle(2);
+  assert.deepEqual(saved(), [HASH_A], 'not refused for good: the hash stays');
+  assert.match(statusOf(page.container, HASH_A), /signed in with another wallet/);
+  assert.match(statusOf(page.container, HASH_A), new RegExp(`saved for ${short(WALLET).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.equal(canPay(page.container), false, 'and Pay stays held back');
+  const before = calls.length;
+  await fastForward(() => false, 5);
+  assert.equal(calls.length, before, 'checking stops under the other session');
+  await page.unmount();
+});
+
 test('a stalled payment holds back Pay until it is checked again or forgotten, and forgetting asks first', async () => {
   routes['POST payments'] = () => ({ status: 404, body: { error: { code: 'not_found', message: 'Not found' } } });
   save(HASH_C);

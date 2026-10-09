@@ -352,6 +352,20 @@ test("the price list needs the portal but no session; account, plan and payment 
   assert.equal((await f.call("/payments", { tx_hash: "0x123" }, session)).json.error.code, "invalid_tx_hash");
   assert.equal((await f.call("/payments", { tx_hash: hash }, session)).json.error.code, "payments_unavailable");
 });
+test("a payment check sent for another wallet than the session's is refused, and reads nothing", async () => {
+  // Another tab of this browser signed in with a second wallet: the cookie is
+  // shared, so the first tab's checks now arrive under the second's session.
+  const f = await fixture({ mode: "observe" }), { session } = await f.onboard();
+  const hash = `0x${"ab".repeat(32)}`;
+  const moved = await f.call("/payments", { tx_hash: hash, wallet: `0x${"22".repeat(20)}` }, session);
+  assert.equal(moved.status, 409);
+  assert.equal(moved.json.error.code, "session_wallet_changed");
+  assert.match(moved.json.error.message, /signed in with another wallet/);
+  assert.equal((await f.call("/payments", { tx_hash: hash, wallet: 42 }, session)).json.error.code, "session_wallet_changed");
+  // The session's own wallet, in any case, or no wallet at all (an older page): checked as before.
+  assert.equal((await f.call("/payments", { tx_hash: hash, wallet: f.wallet.address }, session)).json.error.code, "payments_unavailable");
+  assert.equal((await f.call("/payments", { tx_hash: hash }, session)).json.error.code, "payments_unavailable");
+});
 test("payment checks are limited to 30 a minute per wallet", async () => {
   const f = await fixture({ mode: "observe" }), { session } = await f.onboard();
   const hash = `0x${"ab".repeat(32)}`;

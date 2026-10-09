@@ -165,6 +165,14 @@ export function createDeveloperApi({ portalSecret, gatewaySecret, partners, part
     }
     if (method === "POST" && path === "/plan") return billing.choosePlan(user.address, { tier: body.tier, confirm: body.confirm });
     if (method === "POST" && path === "/payments") {
+      // The console names the wallet it is checking for. Every tab of a browser
+      // shares one session cookie, so a tab signed in as one wallet can be
+      // checking a payment under another's session after a sign-in elsewhere.
+      // Checked as that wallet, its transfer is "not from your wallet", which
+      // the page would take as final and forget. Said apart, it keeps the hash.
+      if (body.wallet !== undefined && (typeof body.wallet !== "string" || body.wallet.toLowerCase() !== user.address)) {
+        return error(409, "session_wallet_changed", "This browser is now signed in with another wallet, so this payment was not checked. Sign in with the wallet that sent it to check it.");
+      }
       // The console polls a pending payment every 6 s with back-off; each check
       // is up to four chain reads, so a client that does not back off stops here.
       if (!await store.rateHit(`dev:pay:${user.address}`, 30, 60)) return error(429, "rate_limited", "Too many payment checks. Try again in a minute.");

@@ -416,10 +416,14 @@ test('a refused check ends at once as stalled, keeping the transfer\'s chance, a
   for (const answer of [{ status: 404, data: { error: { code: 'not_found', message: 'Not found' } } }, { status: 401, data: { error: { code: 'unauthorized_portal', message: 'Unauthorized portal' } } }]) {
     const s = scripted([pendingAnswer('not_found_yet'), answer, pendingAnswer()]);
     const end = await s.run;
-    assert.deepEqual(end, { kind: 'stalled', stage: 'not_found_yet', message: answer.data.error.message }); assert.equal(s.checks(), 2);
+    assert.deepEqual(end, { kind: 'stalled', stage: 'not_found_yet', message: answer.data.error.message, code: answer.data.error.code }); assert.equal(s.checks(), 2);
     const said = endMessage(end as Parameters<typeof endMessage>[0], WALLET);
     assert.match(said, /could not be checked just now \((Not found|Unauthorized portal)\)\. It is saved here: check again later/); assert.doesNotMatch(said, /not credited|cannot be credited/i);
   }
+  // Another tab signed in with another wallet: the check was refused as such, and the hash stays this wallet's.
+  const moved = await scripted([{ status: 409, data: { error: { code: 'session_wallet_changed', message: 'This browser is now signed in with another wallet, so this payment was not checked.' } } }]).run;
+  assert.equal(moved.kind, 'stalled');
+  assert.match(endMessage(moved as Parameters<typeof endMessage>[0], WALLET), /signed in with another wallet, so this payment was not checked\. It stays saved for 0x1111…1111: sign in with that wallet again/);
   const paused = scripted([{ status: 503, data: { error: { code: 'payments_unavailable', message: 'Payments are temporarily unavailable.' } } }, { status: 503, data: { error: { code: 'billing_off' } } }, { status: 200, data: account({ due_raw: null }) }]);
   assert.equal((await paused.run).kind, 'credited');
   assert.deepEqual(paused.waiting, Array(2).fill('Payments are paused on our side just now. This payment is saved; checking again shortly…'));

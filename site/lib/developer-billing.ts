@@ -467,8 +467,8 @@ export function paymentOutcome(status: number, input: unknown): PaymentOutcome {
   return { kind: "unchecked", code, message: message || "The payment check was refused." };
 }
 
-/** `message` on a stalled end: the check itself was refused (see `unchecked`), not slow. */
-export type WatchEnd = Extract<PaymentOutcome, { kind: "credited" | "failed" | "signed_out" }> | { kind: "stalled"; stage: string; message?: string } | { kind: "cancelled" };
+/** `message` (and `code`) on a stalled end: the check itself was refused (see `unchecked`), not slow. */
+export type WatchEnd = Extract<PaymentOutcome, { kind: "credited" | "failed" | "signed_out" }> | { kind: "stalled"; stage: string; message?: string; code?: string } | { kind: "cancelled" };
 /**
  * Submit `hash` until the gateway credits or refuses it. Re-submitting is how
  * the gateway is asked again (it credits a transaction once, then answers
@@ -487,7 +487,7 @@ export async function watchPayment(hash: string, { check, wait, now = Date.now, 
     const { status, data } = await check(hash).catch(() => ({ status: 0, data: null }));
     if (cancelled()) return { kind: "cancelled" };
     const outcome = paymentOutcome(status, data);
-    if (outcome.kind === "unchecked") return { kind: "stalled", stage, message: outcome.message };
+    if (outcome.kind === "unchecked") return { kind: "stalled", stage, message: outcome.message, code: outcome.code };
     if (outcome.kind !== "pending" && outcome.kind !== "retry") return outcome;
     if (outcome.kind === "pending") stage = outcome.stage;
     // Counted as well as timed: the count alone ends a loop whose clock never moves.
@@ -521,6 +521,8 @@ const REASON_HINT: Record<string, (wallet: string) => string> = {
 export function endMessage(end: Exclude<WatchEnd, { kind: "signed_out" | "cancelled" }>, wallet: string): string {
   if (end.kind === "credited") return end.already ? "This payment was already credited." : "Payment credited.";
   if (end.kind === "stalled") {
+    // Another tab of this browser signed in with another wallet: the gateway checked nothing, and this hash is kept for this one.
+    if (end.code === "session_wallet_changed") return `This browser is now signed in with another wallet, so this payment was not checked. It stays saved for ${short(wallet)}: sign in with that wallet again to check it.`;
     if (end.message) return `This payment could not be checked just now (${end.message.replace(/[.\s]+$/, "")}). It is saved here: check again later. Nothing is lost while you wait.`;
     return end.stage === "not_found_yet"
       ? "We can't find this transaction on Robinhood Chain. If you sped it up or cancelled it in your wallet, paste the new hash below."
