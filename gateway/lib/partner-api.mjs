@@ -47,7 +47,7 @@ export const PARTNER_PREFIX = "/partner/v1";
  * @param partners  from createPartners() in partners.mjs
  * @param store     the shared rate-limit store (same one the holder routes use)
  */
-export function createPartnerApi({ partners, store, forward, tunables = {}, version = "2026-09-18" }) {
+export function createPartnerApi({ partners, store, forward, tunables = {}, version = "2026-10-08" }) {
   const T = { ...PARTNER_TUNABLES, ...tunables };
 
   /**
@@ -151,8 +151,9 @@ export function createPartnerApi({ partners, store, forward, tunables = {}, vers
         if (g.fail) return g.fail;
         if (!forward) return partnerError(503, "upstream_unavailable", "Agent runtime is not configured", g.rid);
         try {
-          const result = await forward({ key: g.key, method, path: route, body });
-          if (result.json?.error) result.json.error.request_id = g.rid;
+          // The request_id goes along so the bridge's log line matches the partner's report.
+          const result = await forward({ key: g.key, method, path: route, body, requestId: g.rid });
+          if (result.json?.error && typeof result.json.error === "object") result.json.error.request_id = g.rid;
           return result;
         } catch {
           return partnerError(503, "upstream_unavailable", "Agent runtime is temporarily unavailable", g.rid);

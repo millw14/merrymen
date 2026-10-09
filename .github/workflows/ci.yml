@@ -123,11 +123,55 @@ jobs:
 
       - name: Test
         # The same file set as `npm test` (package.json), one shard of it.
-        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs"
+        # site/app tests resolve `next` from the root install; the site has no
+        # CI job of its own, so they run here or nowhere.
+        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs" "site/app/**/*.test.ts"
+
+  app-postgres:
+    name: app · partner store on Postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Production's partner store is Postgres, and its locks, slot limits, list
+    # ordering and reconnect SQL exist only on that dialect. The app-test shards
+    # have no database, so they skip this suite; this job is the one that runs it.
+    services:
+      postgres:
+        # By digest, like the actions above: a moved tag is a supply-chain rewrite.
+        image: postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # pg is deliberately not in package.json; the Dockerfile adds it the same way.
+      - name: Install
+        run: npm ci && npm install --no-save --ignore-scripts pg@8
+        env:
+          MERRYMEN_SKIP_BUILD: "1"
+
+      - name: Test
+        # The suite skips itself without a database URL, and a skipped suite is
+        # green: this job fails unless it actually ran.
+        run: |
+          set -o pipefail
+          npx tsx --test --test-reporter=spec web/src/lib/partner-store.postgres.test.ts | tee "$RUNNER_TEMP/postgres.out"
+          grep -q '^ℹ skipped 0$' "$RUNNER_TEMP/postgres.out"
+          grep -q '^ℹ pass [1-9]' "$RUNNER_TEMP/postgres.out"
+        env:
+          MERRYMEN_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
 
   app:
     name: app
-    needs: [app-typecheck, app-build, app-test]
+    needs: [app-typecheck, app-build, app-test, app-postgres]
     # Runs even when a part failed, so the required check reports a failure
     # rather than being skipped (a skipped required check never passes).
     if: always()
@@ -136,10 +180,11 @@ jobs:
     steps:
       - name: Every part passed
         run: |
-          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}"
+          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}"
           test "${{ needs.app-typecheck.result }}" = success
           test "${{ needs.app-build.result }}" = success
           test "${{ needs.app-test.result }}" = success
+          test "${{ needs.app-postgres.result }}" = success
 
   contracts:
     name: contracts

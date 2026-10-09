@@ -3,8 +3,8 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { recoverMessageAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
-  accountsMatch, carriesOwnerKey, STOCK_TOKENS,
-  type Derivation, type MerrymenSettings, type StoredGrant,
+  accountsMatch, carriesOwnerKey, GRANT_ENERGY, GRANT_PONS_CLASS, GRANT_SCOPED_SPENDERS, officialCoinTokens, PONS_CLASS_VAULT_FACTORY,
+  STOCK_TOKENS, TRADEABLE_V2, usableExtraTokens, type Derivation, type MerrymenSettings, type StoredGrant,
 } from "@merrymen/core";
 import { checkCanonicalWall } from "./canonical-wall";
 import {
@@ -14,7 +14,7 @@ import {
 import type { GrantStore } from "../../../worker/src/grant-store";
 import type { SettingsStore } from "../../../worker/src/settings-store";
 import type { IdentityStore } from "../../../worker/src/identity-store";
-import { getPartnerStore, type PartnerConnection, type PartnerStore } from "./partner-store";
+import { activatedBy, getPartnerStore, PartnerStoreError, type PartnerConnection, type PartnerStore } from "./partner-store";
 import { onlyFields, PartnerError, requirePartnerScope, type PartnerPrincipal } from "./partner-bridge";
 import { AGENT_NAME_RE, AGENT_NAME_RULE, normalizeAgentName } from "./agent-name-rule";
 
@@ -26,7 +26,33 @@ const ZERO = "0x0000000000000000000000000000000000000000";
 const CHAINS = new Set([4663, 46630]);
 const SYMBOLS = new Set(STOCK_TOKENS.map(t => t.symbol));
 const CONSENT_SCOPES = new Set(["read:agents", "chat:agents"]);
+/**
+ * WHAT A PARTNER'S PAGE MAY SEAL: exactly what the SDK's prepareMerryman mints
+ * from owner, caps and chain alone. A partner grant is built by a third party's
+ * code, and the owner approves a permission whose addresses they cannot read.
+ * The canonical wall only proves the permission matches the grant's OWN declared
+ * routes, and the worker trades through whatever adapter the grant sealed
+ * (grantV4Adapter/grantPonsAdapter), so an accepted `ponsAdapterAddress` would
+ * route this owner's trades through a contract the partner chose. Adapter routes
+ * stay a first-party choice: the owner's own dashboard can still seal them.
+ *
+ * The class vault is the one sealed address the SDK mints by default, from the
+ * platform's own factory. It is accepted only from THAT factory, and only as the
+ * vault the factory answers for this account (checked on chain at activation):
+ * the wall would otherwise pin, and custody deposit into, a "vault" the partner
+ * named beside the real factory's address.
+ */
+const PARTNER_FEATURES = new Set([TRADEABLE_V2, GRANT_ENERGY, GRANT_SCOPED_SPENDERS, GRANT_PONS_CLASS]);
+const PARTNER_SEALED_ROUTES = ["v4AdapterAddress", "ponsAdapterAddress"] as const;
 const fail = (status: number, code: string, message: string): never => { throw new PartnerError(status, code, message); };
+
+export interface PartnerActivation {
+  connection: PartnerConnection;
+  smartAccount: Address;
+  chainId: number;
+  /** True when this answered a retry of an activation that had already completed; nothing was written. */
+  replayed: boolean;
+}
 
 export interface PartnerEnrollmentDependencies {
   store: PartnerStore;
@@ -36,6 +62,8 @@ export interface PartnerEnrollmentDependencies {
   now: () => number;
   secret: () => string;
   derive: (owner: Address, chainId: number) => Promise<Derivation>;
+  /** The vault the class factory answers for this account (`vaultFor`), read from the chain. */
+  classVault: (factory: Address, smartAccount: Address, chainId: number) => Promise<Address>;
   recover: (args: { message: string; signature: Hex }) => Promise<Address>;
 }
 
@@ -130,6 +158,25 @@ function validGrant(input: unknown, now: number): StoredGrant {
     return fail(400, "invalid_grant", "The grant expiry must match its signed duration and remain in the future");
   }
   if (typeof body.serialized !== "string" || body.serialized.length < 20 || body.serialized.length > 240_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(body.serialized)) return fail(400, "invalid_grant", "Invalid serialized permission or permission too large for embedded activation");
+  // Before the wall, which would accept these when the permission matches them.
+  const unsupported = "Partner enrollment seals only the platform's own routes and listed coins; prepare the grant with prepareMerryman's owner, caps and chainId";
+  if (PARTNER_SEALED_ROUTES.some(field => body[field] !== undefined)) return fail(422, "unsupported_permission", unsupported);
+  if (body.grantFeatures !== undefined && (!Array.isArray(body.grantFeatures) || body.grantFeatures.some(f => !PARTNER_FEATURES.has(f)))) {
+    return fail(422, "unsupported_permission", unsupported);
+  }
+  if (body.ponsClassVaultAddress !== undefined || body.ponsClassVaultFactoryAddress !== undefined) {
+    const platform = PONS_CLASS_VAULT_FACTORY[Number(body.chainId)];
+    if (!platform || typeof body.ponsClassVaultFactoryAddress !== "string" || body.ponsClassVaultFactoryAddress.toLowerCase() !== platform.toLowerCase() ||
+        typeof body.ponsClassVaultAddress !== "string" || !ADDRESS.test(body.ponsClassVaultAddress)) {
+      return fail(422, "unsupported_permission", unsupported);
+    }
+  }
+  if (body.grantTokens !== undefined) {
+    const listed = new Set(usableExtraTokens(officialCoinTokens(Number(body.chainId))).map(t => t.address.toLowerCase()));
+    if (!Array.isArray(body.grantTokens) || body.grantTokens.some(a => typeof a !== "string" || !listed.has(a.toLowerCase()))) {
+      return fail(422, "unsupported_permission", unsupported);
+    }
+  }
   // The serialized permission and the wall it installs: decoded, checked for
   // owner-key material, and rebuilt from this grant's own caps, times, tokens
   // and sealed addresses, then compared byte for byte. Shared with hosted
@@ -152,6 +199,10 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
   const settings = async () => overrides.settings ?? (await import("../../../worker/src/settings-store")).getSettingsStore();
   const identities = async () => overrides.identities ?? (await import("../../../worker/src/identity-store")).getIdentityStore();
   const derive = overrides.derive ?? (async (owner, chain) => (await import("./derive-account")).deriveKernelAccountAddress(owner, chain));
+  const classVault = overrides.classVault ?? (async (factory: Address, account: Address, chain: number) => {
+    const [{ createPublicClient }, { chainForId, resolveClassVault }, { webChainRead }] = await Promise.all([import("viem"), import("@merrymen/core"), import("./chain-read")]);
+    return resolveClassVault(createPublicClient({ chain: chainForId(chain), transport: webChainRead() }), factory, account);
+  });
 
   return {
     async challenge(principal: PartnerPrincipal, connection: PartnerConnection, input: unknown) {
@@ -194,11 +245,35 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
       catch { return fail(503, "derivation_unavailable", "The account derivation could not be verified; retry when the chain is available"); }
       if (!derived.ok) return fail(503, "derivation_unavailable", derived.why);
       if (!accountsMatch(derived, grant.smartAccount).ok) return fail(403, "account_mismatch", "The agent wallet does not derive from this owner");
-      // Consume outside the long enrollment transaction: a later write failure
-      // must not roll back single-use authorization and reopen a signed token.
-      if (!await store().consumeNonce(`enrollment:${claim.nonce}`, Math.ceil(claim.expires_at / 1000))) return fail(409, "challenge_used", "This enrollment authorization has already been used");
-
-      return store().withEnrollmentLock(grant.owner, async () => {
+      // validGrant already pinned the factory to the platform's; this pins the
+      // vault to the one that factory gives this account. Before the nonce, so
+      // an unreadable chain leaves the signature usable for a retry.
+      if (grant.ponsClassVaultAddress) {
+        let vault: Address;
+        try { vault = await classVault(grant.ponsClassVaultFactoryAddress as Address, grant.smartAccount, grant.chainId); }
+        catch { return fail(503, "class_vault_unavailable", "The class vault could not be confirmed on chain; retry when the chain is available"); }
+        if (vault.toLowerCase() !== grant.ponsClassVaultAddress.toLowerCase()) return fail(422, "unsupported_permission", "The sealed class vault is not the platform factory's vault for this account");
+      }
+      // Wait for this owner's enrollment lock BEFORE spending the signature. It
+      // was spent first, so a concurrent activation lost it to enrollment_busy
+      // and the owner had to sign again; now contention leaves the nonce unused
+      // and the same authorization can simply be retried. The lock pins a
+      // connection, not a transaction, so the nonce below commits on its own:
+      // a later write failure still cannot roll it back and reopen the token.
+      return store().withEnrollmentLock(grant.owner, async (): Promise<PartnerActivation> => {
+        const proof = { nonce: claim.nonce, grantHash: claim.grant_hash };
+        if (!await store().consumeNonce(`enrollment:${claim.nonce}`, Math.ceil(claim.expires_at / 1000))) {
+          // The retry of an activation that COMPLETED, its response lost (a
+          // timeout, a failed status read): answer with the connection as it is
+          // now. Only this exact signed grant matches the recorded proof, and
+          // nothing is applied again: no grant, settings or live trading.
+          const current = await store().byId(principal.app_id, connection.id);
+          if (current?.status === "linked" && current.tenant === grant.owner && activatedBy(current, proof) &&
+              canonicalJson(connectionContext(principal, current)) === canonicalJson(claim.scopes)) {
+            return { connection: current, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: true };
+          }
+          return fail(409, "challenge_used", "This enrollment authorization has already been used");
+        }
         const current = await store().byId(principal.app_id, connection.id);
         if (!current) return fail(404, "not_found", "No such agent");
         const currentScopes = connectionContext(principal, current);
@@ -216,18 +291,33 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
           ...previous, agentName: claim.settings.name, strategy: claim.settings.strategy,
           basketSymbols: claim.settings.basket_symbols, paperTradingEnabled: true, liveTradingEnabled: false,
         };
+        let bound: PartnerConnection;
         try {
           // Keep the old permission in paper mode until the replacement has
           // been durably installed and the partner's consent has been bound.
           await settingsStore.put(grant.owner, safe);
           await (await identities()).ensure(grant.owner, grant.smartAccount);
           await grantStore.put(grant.owner, grant);
-          const bound = await store().bindAuthorized(current.id, principal.app_id, grant.owner, claim.scopes);
+          bound = await store().bindAuthorized(current.id, principal.app_id, grant.owner, claim.scopes);
           if (claim.settings.live_trading_enabled) await settingsStore.put(grant.owner, { ...safe, liveTradingEnabled: true });
-          return { connection: bound, smartAccount: grant.smartAccount, chainId: grant.chainId };
         } catch (error) {
           if (error instanceof PartnerError || (error && typeof error === "object" && "status" in error && "code" in error)) throw error;
           return fail(503, "enrollment_storage_failed", "Enrollment could not be fully saved. Request a fresh challenge and retry; inspect agent status before continuing");
+        }
+        // Last: only an activation that finished every step may later be
+        // answered as a lost response instead of challenge_used. Every effect
+        // is durable by now, so failing to record that proof is no failure of
+        // the activation: answering it enrollment_storage_failed told the
+        // partner a completed one (live trading perhaps on) had failed. The
+        // only loss is the old answer, challenge_used, to a lost-response retry.
+        try {
+          const recorded = await store().recordActivation(bound.id, principal.app_id, grant.owner, proof);
+          return { connection: recorded, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: false };
+        } catch (error) {
+          // Revoked or re-owned meanwhile: that is an answer, not a storage failure.
+          if (error instanceof PartnerStoreError) throw error;
+          console.error("[partner-enrollment] activation completed; its retry proof was not recorded", error instanceof Error ? error.name : "unknown");
+          return { connection: bound, smartAccount: grant.smartAccount, chainId: grant.chainId, replayed: false };
         }
       });
     },

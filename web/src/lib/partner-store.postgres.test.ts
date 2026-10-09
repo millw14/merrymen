@@ -6,8 +6,16 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { getActionSelector } from "@zerodev/sdk";
+import { buildWallPolicies, derivationOf, type StoredGrant } from "@merrymen/core";
 import { makePgDb } from "../../../worker/src/db";
-import { SqlPartnerStore, PartnerStoreError, PARTNER_HISTORY_EXCHANGES } from "./partner-store";
+import { partnerGrantDigest } from "../../../packages/core/src/partner-enrollment";
+import { SqlPartnerStore, PartnerStoreError, PARTNER_HISTORY_EXCHANGES, PARTNER_LOCK_HOLDERS, type PartnerConnection } from "./partner-store";
+import { createPartnerEnrollmentService, type PartnerEnrollmentDependencies } from "./partner-enrollment";
+import { createPartnerService } from "./partner-service";
+import type { PartnerPrincipal } from "./partner-bridge";
+import type { PartnerRuntime } from "./partner-runtime";
 
 const url = process.env.MERRYMEN_TEST_POSTGRES_URL;
 const A = `0x${"aa".repeat(20)}` as const;
@@ -17,6 +25,45 @@ const secret = () => "isolated-postgres-test-secret-at-least-32-chars";
 function barrier() {
   let resolve!: () => void;
   return { promise: new Promise<void>(r => { resolve = r; }), release: () => resolve() };
+}
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const ACCOUNT = "0x1111111111111111111111111111111111111111" as const;
+const encode = (value: unknown) => Buffer.from(JSON.stringify(value, (_key, v) => typeof v === "bigint" ? v.toString() : v)).toString("base64");
+
+/** A real owner-signed embedded activation (as partner-enrollment.test.ts builds one) over the given store. */
+function enrollment(store: SqlPartnerStore, overrides: Partial<PartnerEnrollmentDependencies> = {}) {
+  const owner = privateKeyToAccount(generatePrivateKey());
+  const sessionKey = generatePrivateKey();
+  const seconds = Math.floor(Date.now() / 1000);
+  const caps = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 };
+  const wall = buildWallPolicies({ caps, smartAccount: ACCOUNT, now: seconds });
+  const grant: StoredGrant = {
+    owner: owner.address, smartAccount: ACCOUNT, sessionKeyAddress: privateKeyToAccount(sessionKey).address,
+    demoSessionPrivateKey: sessionKey, caps, grantedAt: seconds, expiresAt: wall.expiresAt, chainId: 4663, grantFeatures: ["tradeable-v2"],
+    serialized: encode({
+      privateKey: sessionKey, accountParams: { accountAddress: ACCOUNT, initCode: "0x1234" },
+      permissionParams: { policies: wall.policies.map(policy => ({ policyParams: policy.policyParams })) },
+      enableSignature: `0x${"12".repeat(65)}`, action: { selector: getActionSelector("0.7"), address: "0x0000000000000000000000000000000000000000" },
+      validityData: { validAfter: 0, validUntil: 0 }, isPreInstalled: false,
+    }),
+  };
+  const events: string[] = [];
+  const grants = new Map<string, StoredGrant>();
+  const service = createPartnerEnrollmentService({
+    store, secret: secret, now: Date.now, derive: async () => derivationOf(ACCOUNT),
+    grants: { get: async t => grants.get(t) ?? null, tenantForAccount: async () => null, put: async (t, g) => { events.push("grant"); grants.set(t, g); } },
+    settings: { get: async () => null, put: async () => { events.push("settings"); } },
+    identities: { ensure: async (tenant, account) => ({ tenant, slug: "0000000000000001", accounts: [account], createdAt: seconds, updatedAt: seconds }) },
+    ...overrides,
+  });
+  const settings = { name: "Robin", strategy: "steady-basket" as const, basket_symbols: ["QQQ"], live_trading_enabled: false };
+  const sign = async (principal: PartnerPrincipal, connection: PartnerConnection) => {
+    const challenge = await service.challenge(principal, connection, {
+      owner: grant.owner, smart_account: grant.smartAccount, chain_id: grant.chainId, grant_hash: partnerGrantDigest(grant), settings,
+    });
+    return { grant, challenge_token: challenge.challenge_token, signature: await owner.signMessage({ message: challenge.message }) };
+  };
+  return { service, owner: owner.address.toLowerCase() as `0x${string}`, events, sign };
 }
 
 test("PostgreSQL partner store: real transactions and independent-replica locks", { skip: !url, timeout: 60_000 }, async t => {
@@ -47,6 +94,76 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       assert.equal(await second.byId("different-app", results[0].connection.id), null);
     });
 
+    await t.test("concurrent reconnects after a disconnect mint one fresh authorization; the revoked row stays revoked", async () => {
+      const original = await first.create(create("reconnect"));
+      await first.bind(original.token!, A, SCOPES);
+      await first.appendExchange(original.connection.id, { requestId: "old-turn", message: "private", reply: "history" });
+      assert.equal(await second.revoke("reconnect", original.connection.id), true);
+      const results = await Promise.all(Array.from({ length: 12 }, (_, i) => (i % 2 ? first : second).create(create("reconnect"))));
+      assert.equal(results.filter(r => r.created).length, 1);
+      assert.equal(new Set(results.map(r => r.connection.id)).size, 1);
+      assert.equal(new Set(results.map(r => r.token)).size, 1);
+      const fresh = results[0].connection;
+      assert.notEqual(fresh.id, original.connection.id);
+      assert.equal(fresh.status, "pending");
+      assert.deepEqual(await second.readMessages(fresh.id), []);
+      assert.equal((await second.byId("reconnect", original.connection.id))?.status, "revoked");
+      await assert.rejects(first.bindAuthorized(original.connection.id, "reconnect", A, SCOPES),
+        (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_revoked");
+      // The existing UNIQUE (partner_id, external_user_id) is untouched: the retired
+      // row only gave up its slot, and its record still names the real user.
+      const rows = await databases[0].prepare("SELECT id, external_user_id, status, record_json FROM partner_connections WHERE partner_id = ? ORDER BY id").all("reconnect") as Array<{ id: string; external_user_id: string; status: string; record_json: string }>;
+      const retired = rows.find(r => r.id === original.connection.id)!;
+      assert.equal(retired.external_user_id, `\u001fretired:${original.connection.id}`);
+      assert.equal(JSON.parse(retired.record_json).externalUserId, "user-1");
+      assert.equal(rows.find(r => r.id === fresh.id)!.external_user_id, "user-1");
+      // The same wallet can consent again through the new connection only.
+      assert.equal((await second.bind(results[0].token!, A, SCOPES)).id, fresh.id);
+      assert.equal((await first.byTenant("reconnect", A))?.id, fresh.id);
+    });
+
+    await t.test("list orders newest first, then id, reading createdAt from the stored record, one row per user", async () => {
+      let now = 1_800_000_000;
+      const clocked = new SqlPartnerStore(async () => databases[0], "postgres", () => now, secret);
+      const made: string[] = [];
+      for (let n = 0; n < 6; n++) {
+        made.push((await clocked.create(create("ordered", `user-${n}`))).connection.id);
+        now += 1;
+      }
+      const twins = [(await clocked.create(create("ordered", "twin-a"))).connection.id, (await clocked.create(create("ordered", "twin-b"))).connection.id].sort().reverse();
+      assert.deepEqual((await second.list("ordered")).map(c => c.id), [...twins, ...[...made].reverse()]);
+      // 100 older rows, all disconnected, then a reconnect: it still shows, and only once.
+      now += 1;
+      for (let n = 0; n < 100; n++) await clocked.revoke("ordered", (await clocked.create(create("ordered", `gone-${n}`))).connection.id);
+      now += 1;
+      const reconnected = (await clocked.create(create("ordered", "gone-0"))).connection;
+      const page = await second.list("ordered");
+      assert.equal(page.length, 100);
+      assert.equal(page[0].id, reconnected.id);
+      assert.equal(page.filter(c => c.externalUserId === "gone-0").length, 1);
+      assert.equal((await second.byId("ordered", page.find(c => c.externalUserId === "gone-1")!.id))?.status, "revoked");
+    });
+
+    await t.test("a stored row holding a lone surrogate escape cannot break its app's list", async () => {
+      // Written before text had to be well-formed: the escape is valid JSON text
+      // to JSON.parse, but Postgres json refuses it, and the list used to cast
+      // every row's record to jsonb to sort it.
+      let now = 1_800_000_100;
+      const clocked = new SqlPartnerStore(async () => databases[0], "postgres", () => now, secret);
+      const older = (await clocked.create(create("lone-surrogate", "user-1"))).connection;
+      now += 1;
+      const legacy = (await clocked.create(create("lone-surrogate", "user-2"))).connection;
+      const record = JSON.stringify({ ...legacy, name: JSON.parse('"Robin \\ud800"') });
+      assert.match(record, /\\ud800/);
+      await databases[0].prepare("UPDATE partner_connections SET record_json = ? WHERE id = ?").run(record, legacy.id);
+      await assert.rejects(databases[0].prepare("SELECT (record_json::jsonb ->> 'createdAt') AS at FROM partner_connections WHERE id = ?").get(legacy.id), /json/i);
+      const listed = await second.list("lone-surrogate");
+      assert.deepEqual(listed.map(c => c.id).sort(), [older.id, legacy.id].sort());
+      assert.equal(listed.find(c => c.id === legacy.id)!.name.isWellFormed(), false, "the row reads back as it was stored");
+      await assert.rejects(clocked.create(create("lone-surrogate", `user-${JSON.parse('"\\udc00"')}`)),
+        (e: unknown) => e instanceof PartnerStoreError && e.code === "invalid_input");
+    });
+
     await t.test("one-time consent and unique owner binding hold under concurrent transactions", async () => {
       const pending = await first.create(create("bind-race"));
       const results = await Promise.allSettled([
@@ -68,10 +185,11 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
       assert.equal(results.filter(Boolean).length, 1);
     });
 
-    await t.test("conversation lock rejects another replica and nested appends use its pinned transaction", async () => {
+    await t.test("another replica waits for a held conversation, then sees the reply it saved", async () => {
       const pending = await first.create(create("conversation-lock"));
       await first.bind(pending.token!, A, SCOPES);
       const entered = barrier(), release = barrier();
+      const order: string[] = [];
       const holder = first.withConversationLock(pending.connection.id, async () => {
         entered.release();
         await release.promise;
@@ -79,35 +197,157 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
         return first.appendExchange(pending.connection.id, { requestId: "request-one", message: "hello", reply: "hello back" });
       });
       await entered.promise;
-      try {
-        await assert.rejects(second.withConversationLock(pending.connection.id, async () => "should not run"),
-          (e: unknown) => e instanceof PartnerStoreError && e.code === "conversation_busy");
-      } finally { release.release(); }
-      assert.equal((await holder).created, true);
-      assert.equal((await second.getExchange(pending.connection.id, "request-one"))?.reply, "hello back");
-      await second.withConversationLock(pending.connection.id, async () => {
-        const retry = await second.appendExchange(pending.connection.id, { requestId: "request-one", message: "hello", reply: "new answer discarded" });
-        assert.equal(retry.created, false);
-        assert.equal(retry.exchange.reply, "hello back");
+      const waiter = second.withConversationLock(pending.connection.id, async () => {
+        order.push("waiter runs");
+        return second.appendExchange(pending.connection.id, { requestId: "request-one", message: "hello", reply: "new answer discarded" });
       });
+      await delay(300);
+      order.push("holder releases");
+      release.release();
+      assert.equal((await holder).created, true);
+      const retry = await waiter;
+      assert.deepEqual(order, ["holder releases", "waiter runs"], "the second replica waited instead of failing");
+      assert.equal(retry.created, false);
+      assert.equal(retry.exchange.reply, "hello back");
       assert.equal((await first.readMessages(pending.connection.id)).length, 2);
     });
 
-    await t.test("failed conversation work rolls back writes and releases the advisory lock", async () => {
-      const pending = await first.create(create("rollback"));
+    await t.test("past its bound a waiter answers busy with a retry hint, having run nothing", async () => {
+      const pending = await first.create(create("conversation-busy"));
+      const impatient = new SqlPartnerStore(async () => databases[1], "postgres", undefined, secret, { conversation: 150, enrollment: 150 });
+      for (const kind of ["conversation", "enrollment"] as const) {
+        const entered = barrier(), release = barrier();
+        const take = (store: SqlPartnerStore, fn: () => Promise<unknown>) =>
+          kind === "conversation" ? store.withConversationLock(pending.connection.id, fn) : store.withEnrollmentLock(A, fn);
+        const holder = take(first, async () => { entered.release(); await release.promise; });
+        await entered.promise;
+        let ran = false;
+        try {
+          await assert.rejects(take(impatient, async () => { ran = true; }),
+            (e: unknown) => e instanceof PartnerStoreError && e.status === 409 && e.code === `${kind}_busy` && e.retryAfter! > 0);
+        } finally { release.release(); }
+        await holder;
+        assert.equal(ran, false);
+        await take(impatient, async () => { ran = true; });
+        assert.equal(ran, true, "the lock is free again once its holder is done");
+      }
+    });
+
+    await t.test("writes under a lock commit on their own; a failed holder releases the lock", async () => {
+      // The lock pins a connection, not a transaction: nothing stays open
+      // through a model call, and a nonce spent under the enrollment lock is
+      // not rolled back by a failure after it. Chat's only write is its last.
+      const pending = await first.create(create("own-commits"));
       await first.bind(pending.token!, A, SCOPES);
       await assert.rejects(first.withConversationLock(pending.connection.id, async () => {
-        await first.appendExchange(pending.connection.id, { requestId: "rollback-me", message: "hello", reply: "not committed" });
-        throw new Error("deliberate test rollback");
-      }), /deliberate test rollback/);
-      assert.equal(await second.getExchange(pending.connection.id, "rollback-me"), null);
+        await first.appendExchange(pending.connection.id, { requestId: "saved-first", message: "hello", reply: "committed" });
+        assert.equal((await second.getExchange(pending.connection.id, "saved-first"))?.reply, "committed", "visible to another replica while the lock is held");
+        throw new Error("deliberate failure after the write");
+      }), /deliberate failure/);
+      assert.equal((await second.getExchange(pending.connection.id, "saved-first"))?.reply, "committed");
+      const nonce = `enrollment:${randomBytes(24).toString("hex")}`;
+      await assert.rejects(first.withEnrollmentLock(A, async () => {
+        assert.equal(await first.consumeNonce(nonce, Math.floor(Date.now() / 1000) + 60), true);
+        throw new Error("deliberate enrollment failure");
+      }), /deliberate enrollment failure/);
+      assert.equal(await second.consumeNonce(nonce, Math.floor(Date.now() / 1000) + 60), false, "a spent nonce stays spent");
       await second.withConversationLock(pending.connection.id, async () => {
-        await second.appendExchange(pending.connection.id, { requestId: "after-rollback", message: "hello", reply: "committed" });
+        await second.appendExchange(pending.connection.id, { requestId: "after-failure", message: "hello", reply: "committed" });
       });
     });
 
-    await t.test("enrollment locks serialize wallet ownership across apps and preserve one transaction", async () => {
+    await t.test("more lock requests than pool connections finish, though each holder also draws on the pool", async () => {
+      // pg pools ten connections, and a holder pins one for its whole turn. Its
+      // own store calls reuse that one, but the ledger reads it makes inside
+      // (grants and feed routes, chat facts) draw from the same memoized pool.
+      // Ten holders each waiting for an eleventh would hang the replica for ever.
+      const ids = await Promise.all(Array.from({ length: 12 }, async (_, i) => {
+        const pending = await first.create(create("pool", `user-${i}`));
+        await first.bind(pending.token!, `0x${(i + 1).toString(16).padStart(40, "0")}`, SCOPES);
+        return pending.connection.id;
+      }));
+      let inside = 0, most = 0;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const results = await Promise.race([Promise.all(ids.map(id => first.withConversationLock(id, async () => {
+        most = Math.max(most, ++inside);
+        try {
+          await delay(200); // every admitted holder has pinned its connection before any asks for another
+          assert.equal((await databases[0].prepare("SELECT 1 AS one").get() as { one: number }).one, 1, "a ledger read, on the pool");
+          assert.equal((await first.byId("pool", id))?.status, "linked");
+          return (await first.appendExchange(id, { requestId: "pool-turn", message: "hello", reply: "hi" })).created;
+        } finally { inside--; }
+      }))), new Promise<"deadlocked">(resolve => { timer = setTimeout(() => resolve("deadlocked"), 15_000); })]).finally(() => clearTimeout(timer));
+      assert.notEqual(results, "deadlocked", "lock holders waited on each other for a pool connection");
+      assert.ok((results as boolean[]).every(Boolean));
+      assert.ok(most <= PARTNER_LOCK_HOLDERS.conversation, `${most} holders at once`);
+    });
+
+    await t.test("requests queued behind one conversation take no holder slot from the others", async () => {
+      const [busy, other] = await Promise.all(["user-1", "user-2"].map(async (user, i) => {
+        const pending = await first.create(create("slots", user));
+        await first.bind(pending.token!, i ? B : A, SCOPES);
+        return pending.connection.id;
+      }));
+      const entered = barrier(), release = barrier();
+      const holder = first.withConversationLock(busy, async () => { entered.release(); await release.promise; });
+      await entered.promise;
+      // More transport retries of the held conversation than there are slots.
+      const retries = Array.from({ length: PARTNER_LOCK_HOLDERS.conversation + 1 }, () => first.withConversationLock(busy, async () => "retry"));
+      await delay(100);
+      try {
+        assert.equal(await Promise.race([first.withConversationLock(other, async () => "other"), delay(2000).then(() => "starved")]), "other");
+      } finally { release.release(); }
+      await holder;
+      assert.deepEqual(await Promise.all(retries), Array(PARTNER_LOCK_HOLDERS.conversation + 1).fill("retry"));
+    });
+
+    await t.test("chats holding every conversation slot do not hold up an activation", async () => {
+      // One chat more than its kind's slots, which is five: every slot of the old
+      // single shared pool, so this fails if the kinds ever share slots again.
+      const ids = await Promise.all(Array.from({ length: PARTNER_LOCK_HOLDERS.conversation + 1 }, async (_, i) => {
+        const pending = await first.create(create("busy-chats", `user-${i}`));
+        await first.bind(pending.token!, `0x${(i + 0x100).toString(16).padStart(40, "0")}`, SCOPES);
+        return pending.connection.id;
+      }));
+      const full = barrier(), release = barrier();
+      let entered = 0;
+      const chats = ids.map(id => first.withConversationLock(id, async () => {
+        if (++entered === PARTNER_LOCK_HOLDERS.conversation) full.release();
+        await release.promise;
+      }));
+      await full.promise;
+      await delay(100); // the last chat has asked for a slot too
+      try {
+        assert.equal(entered, PARTNER_LOCK_HOLDERS.conversation, "chats beyond their kind's slots wait");
+        // Every conversation slot is taken by a turn that will not end on its own.
+        assert.equal(await Promise.race([first.withEnrollmentLock(A, async () => "enrolled"), delay(2000).then(() => "starved")]), "enrolled");
+      } finally { release.release(); }
+      await Promise.all(chats);
+    });
+
+    await t.test("a lock's wait bound covers checking a connection out of a saturated pool", async () => {
+      const pending = await first.create(create("saturated"));
+      await first.bind(pending.token!, A, SCOPES);
+      const impatient = new SqlPartnerStore(async () => databases[1], "postgres", undefined, secret, { conversation: 300, enrollment: 300 });
+      assert.equal((await impatient.byId("saturated", pending.connection.id))?.status, "linked");
+      // Other work holds every connection of this replica's pool for two seconds.
+      const sleepers = Promise.all(Array.from({ length: 10 }, () => databases[1].prepare("SELECT pg_sleep(2)").get()));
+      await delay(200);
+      let ran = false;
+      const started = Date.now();
+      await assert.rejects(impatient.withConversationLock(pending.connection.id, async () => { ran = true; }),
+        (e: unknown) => e instanceof PartnerStoreError && e.code === "conversation_busy" && e.retryAfter! > 0);
+      assert.ok(Date.now() - started < 1500, `answered busy at its bound, not once a connection came free (${Date.now() - started}ms)`);
+      await sleepers;
+      await delay(100);
+      assert.equal(ran, false, "the abandoned attempt let go without running anything once it got a connection");
+      assert.equal(await impatient.withConversationLock(pending.connection.id, async () => "free again"), "free again");
+      assert.equal(ran, false);
+    });
+
+    await t.test("enrollment locks serialize wallet ownership across replicas", async () => {
       const pending = await first.create(create("enrollment"));
+      const other = await second.create(create("enrollment", "user-2"));
       const entered = barrier(), release = barrier();
       const holder = first.withEnrollmentLock(A, async () => {
         entered.release();
@@ -115,14 +355,77 @@ test("PostgreSQL partner store: real transactions and independent-replica locks"
         return first.bindAuthorized(pending.connection.id, "enrollment", A, SCOPES);
       });
       await entered.promise;
-      try {
-        await assert.rejects(second.withEnrollmentLock(A, async () => "should not run"),
-          (e: unknown) => e instanceof PartnerStoreError && e.code === "enrollment_busy");
-      } finally { release.release(); }
-      assert.equal((await holder).tenant, A);
-      await second.withEnrollmentLock(A, async () => {
-        assert.equal((await second.byTenant("enrollment", A))?.id, pending.connection.id);
+      const waiter = second.withEnrollmentLock(A, async () => {
+        // The lock exists so this read sees the owner the first activation bound.
+        const owner = await second.byTenant("enrollment", A);
+        return owner ? `already linked to ${owner.id}` : (await second.bindAuthorized(other.connection.id, "enrollment", A, SCOPES)).id;
       });
+      await delay(300);
+      release.release();
+      assert.equal((await holder).tenant, A);
+      assert.equal(await waiter, `already linked to ${pending.connection.id}`);
+    });
+
+    const appPrincipal = (app_id: string): PartnerPrincipal => ({ app_id, key_id: "abcdefghjkmn", name: "Test app", scopes: ["read:agents", "write:agents", "chat:agents"] });
+
+    await t.test("a chat retry sent to another replica mid-generation waits and returns the saved reply", async () => {
+      const pending = await first.create(create("chat-retry"));
+      await first.bind(pending.token!, A, SCOPES);
+      let started!: () => void, finish!: () => void;
+      const generating = new Promise<void>(resolve => { started = resolve; });
+      const finished = new Promise<void>(resolve => { finish = resolve; });
+      let generated = 0;
+      const runtime = { status: "running" } as PartnerRuntime;
+      const [one, two] = [first, second].map(store => createPartnerService({ store, readRuntime: async () => runtime,
+        reply: async () => { generated++; started(); await finished; return { reply: "The one answer.", generation: "model" as const, runtime }; } }));
+      const path = `/agents/${pending.connection.id}/messages`, body = JSON.stringify({ message: "status?", request_id: "request_retry_1" });
+      const original = one.dispatch(appPrincipal("chat-retry"), "POST", path, body);
+      await generating;
+      const retry = two.dispatch(appPrincipal("chat-retry"), "POST", path, body);
+      await delay(300);
+      finish();
+      const [answered, retried] = await Promise.all([original, retry]);
+      assert.equal(answered.status, 200);
+      assert.deepEqual(retried, answered, "the retry waited and answered with the first request's saved reply");
+      assert.equal(generated, 1);
+    });
+
+    await t.test("an activation contended across replicas never spends the owner's signature", async () => {
+      const principal = appPrincipal("enroll-race");
+      const impatient = new SqlPartnerStore(async () => databases[1], "postgres", undefined, secret, { conversation: 150, enrollment: 150 });
+      const pending = await first.create(create(principal.app_id));
+      const e = enrollment(impatient);
+      const activation = await e.sign(principal, pending.connection);
+      const entered = barrier(), release = barrier();
+      // Another activation for the same owner, still running on the other replica past the wait.
+      const holder = first.withEnrollmentLock(e.owner, async () => { entered.release(); await release.promise; });
+      await entered.promise;
+      try {
+        await assert.rejects(e.service.activate(principal, pending.connection, activation),
+          (error: unknown) => error instanceof PartnerStoreError && error.code === "enrollment_busy" && error.retryAfter! > 0);
+      } finally { release.release(); }
+      await holder;
+      assert.deepEqual(e.events, []);
+      const done = await e.service.activate(principal, pending.connection, activation);
+      assert.equal(done.connection.tenant, e.owner);
+      assert.equal((await first.byTenant(principal.app_id, e.owner))?.id, pending.connection.id);
+      // A lost response: the same authorization is answered from the recorded proof, writing nothing.
+      const applied = [...e.events];
+      const again = await e.service.activate(principal, pending.connection, activation);
+      assert.equal(again.replayed, true);
+      assert.deepEqual(again.connection, done.connection);
+      assert.deepEqual(e.events, applied);
+    });
+
+    await t.test("a failure after the nonce is spent under the lock does not reopen the signed token", async () => {
+      const principal = appPrincipal("enroll-failure");
+      const pending = await first.create(create(principal.app_id));
+      const e = enrollment(second, { identities: { ensure: async () => { throw new Error("private storage failure"); } } });
+      const activation = await e.sign(principal, pending.connection);
+      const code = (expected: string) => (error: unknown) => (error as { code?: string }).code === expected;
+      await assert.rejects(e.service.activate(principal, pending.connection, activation), code("enrollment_storage_failed"));
+      await assert.rejects(e.service.activate(principal, pending.connection, activation), code("challenge_used"));
+      assert.equal((await first.byId(principal.app_id, pending.connection.id))?.status, "pending");
     });
 
     await t.test("revocation during generation prevents the conversation from being committed", async () => {

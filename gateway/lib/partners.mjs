@@ -109,6 +109,19 @@ function sameHash(a, b) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/**
+ * A key's display name as the bridge signs it: at most 64 UTF-16 units, never
+ * ending in half a surrogate pair, and well-formed. The hosted runtime refuses
+ * text that is not, so a 63-character name plus an emoji, cut here, left its
+ * key unable to create a single connection.
+ */
+function displayName(name, keyId) {
+  // Control characters are refused there too; a CLI --name is written as given.
+  let cut = name.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64);
+  if (/[\ud800-\udbff]$/.test(cut)) cut = cut.slice(0, -1);
+  return cut.toWellFormed().trim() || keyId;
+}
+
 /** One registry record, normalised. Unknown scopes are dropped, not honoured. */
 function normalize(rec) {
   if (!rec || typeof rec !== "object") return null;
@@ -120,7 +133,7 @@ function normalize(rec) {
     // Stable across key rotation. Old registry rows retain their original id.
     appId: typeof rec.appId === "string" && /^[a-zA-Z0-9_-]{12,64}$/.test(rec.appId) ? rec.appId : keyId,
     owner: typeof rec.owner === "string" && /^0x[0-9a-fA-F]{40}$/.test(rec.owner) ? rec.owner.toLowerCase() : null,
-    name: typeof rec.name === "string" ? rec.name.slice(0, 64) : keyId,
+    name: typeof rec.name === "string" ? displayName(rec.name, keyId) : keyId,
     hash: typeof rec.hash === "string" ? rec.hash : "",
     scopes,
     rpm: Number.isFinite(rec.rpm) && rec.rpm > 0 ? Math.floor(rec.rpm) : null,

@@ -68,8 +68,11 @@ domain verified with a valid certificate. The alternate
 
 The partner API is at **`https://ai.merrymen.dev/partner/v1`**. It uses separate
 server-only partner keys and supports agent authorization, status and chat; see
-[the integration guide](PARTNER-API.md). The browser SDK is served by hosted web
-at `https://app.merrymen.dev/sdk/merrymen-browser.js` after this revision is deployed.
+[the integration guide](PARTNER-API.md). Developers issue those keys themselves
+at `https://merrymen.dev/api`, which reaches this gateway's `/developer/v1`
+routes; operators can still issue keys with `partners-cli.mjs`. The browser SDK
+is served by hosted web at `https://app.merrymen.dev/sdk/merrymen-browser.js`
+after this revision is deployed.
 
 DNS is managed in Vercel, while the application and certificate are served by
 Railway. The domain uses the existing gateway service, target port 8080:
@@ -144,17 +147,24 @@ monorepo and build the dashboard image into this service.
 Then set the variables in the Railway dashboard (**not** in the repo):
 `MERRYMEN_GATEWAY_UPSTREAM_KEY`, `MERRYMEN_GATEWAY_SECRET` (32+ random bytes),
 `MERRYMEN_GATEWAY_RPC`, `MERRYMEN_GATEWAY_BITQUERY_KEY`, and
-`MERRYMEN_GATEWAY_DOMAIN` set to the host you actually serve on. Point
-`ai.merrymen.dev` at the Railway service.
+`MERRYMEN_GATEWAY_DOMAIN` set to the host you actually serve on. The partner API
+and developer portal also need `MERRYMEN_PARTNER_BRIDGE_SECRET` and
+`MERRYMEN_DEVELOPER_PORTAL_SECRET`, each shared with one other service; the
+gateway logs at boot when either is unset or under 32 bytes, and
+`docs/hosted-deploy.md` §5c has the table. Point `ai.merrymen.dev` at the
+Railway service.
 
 A single process needs no Redis — the in-memory store is correct and atomic for
 one instance. **If you scale past one replica, set `KV_REST_API_URL`/`TOKEN`**,
 or nonce single-use and rate limits become per-instance and stop meaning what
-they say.
+they say. One cost of memory: developer portal sessions are bound to the
+process, so every restart or deploy signs developers out (signing in again
+takes one wallet signature). With KV, sessions and their logouts survive.
 
 A `Dockerfile` (universal) and `render.yaml` (Render Blueprint) are included for a
 connect-the-repo deploy. In-memory state is fine here (one process); set
-`KV_REST_API_URL`/`KV_REST_API_TOKEN` only if you run multiple instances.
+`KV_REST_API_URL`/`KV_REST_API_TOKEN` if you run multiple instances, or to keep
+developer portal sessions across deploys.
 
 ### B) Vercel serverless (optional holder gateway runtime)
 
@@ -184,6 +194,10 @@ functions in `api/`.
 - `POST /claim` — `{address, signature, nonce}` → `{token, expiresInDays}` after nonce + signature + balance checks.
 - `POST /v1/chat/completions` — OpenAI-compatible; `Authorization: Bearer <token>`. This is what merrymen calls.
 - `GET /healthz` — liveness.
+- `/partner/v1/*` — the partner API ([PARTNER-API.md](PARTNER-API.md)); `GET /partner/v1/health` is the gateway's own liveness and never calls hosted web.
+- `/developer/v1/*` — key management for the merrymen.dev portal, callable only with the portal's secret.
+
+The last two run only in `server.mjs`.
 
 ## The holder experience
 
@@ -197,7 +211,7 @@ You are paying for holders' inference. Protect yourself:
 - Keep `MERRYMEN_GATEWAY_MIN_TOKENS` meaningful, and `RATE_PER_MIN` / `MAX_COMPLETION_TOKENS` conservative (defaults in `lib/core.mjs`).
 - Groq's **free tier is per-key rate-limited** — a shared free key will throttle fast under many holders. Use a paid plan, or expect holders to queue.
 - State (nonces, rate limits, balance cache) lives in `lib/store.mjs`: in-memory for a single process, or a shared KV (Upstash/Vercel KV) when `KV_REST_API_URL`/`KV_REST_API_TOKEN` are set. On serverless the KV is **required** (isolates don't share memory), so rate limits and single-use nonces hold across invocations.
-- Rotating `MERRYMEN_GATEWAY_SECRET` invalidates every issued token (your kill-switch).
+- Rotating `MERRYMEN_GATEWAY_SECRET` invalidates every issued token (your kill-switch). It also invalidates every partner key, whose stored hash it peppers, and signs every developer out of the portal.
 
 ## Honesty note
 
