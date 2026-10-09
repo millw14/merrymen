@@ -91,10 +91,15 @@ const ZERO = "0x0000000000000000000000000000000000000000";
  * listed here in the SAME change that lets a signer mint it: a signer shipped
  * ahead of this list would have every new hosted grant refused.
  *
- * GRANT_PERP_LIGHTER likewise, in the same change that lets the dashboard
- * mint it: 4663 only, when the wall still fits (`perpFits`), from the one value
- * that set `wallOpts.perpLighter`, beside a `perp` block naming the sealed key.
- * The phone signers only ever carry it forward from a previous grant.
+ * GRANT_PERP_LIGHTER is listed in the same change that lets a signer mint it
+ * (4663 only, when the wall still fits per `perpFits`, from the one value that
+ * set `wallOpts.perpLighter`, beside a `perp` block naming the sealed key), so
+ * a grant carrying it is rebuilt and compared byte for byte, not refused by
+ * name. The phone signers only ever carry it forward from a previous grant.
+ * No surface offers the opt-in yet, and until the custody intake lands POST
+ * /api/grants refuses every perps grant (marker, `perp` block or
+ * `perpRecovery`) before this check runs. This check does NOT read
+ * `perpRecovery`, so whatever replaces that refusal must validate it.
  */
 export const CANONICAL_GRANT_FEATURES: readonly string[] = [
   TRADEABLE_V2,

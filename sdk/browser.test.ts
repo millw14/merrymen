@@ -230,6 +230,7 @@ describe("prepareMerryman", () => {
     ["perp", { apiPublicKey: `0x${"1a".repeat(40)}` }],
     ["previousGrant", { smartAccount: ACCOUNT }],
     ["perpDrop", true],
+    ["localGrants", { current: { smartAccount: ACCOUNT } }],
     ["venueFlat", true],
     ["recovery", { v: 1 }],
   ];

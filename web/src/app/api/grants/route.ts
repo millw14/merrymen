@@ -159,6 +159,17 @@ export async function POST(req: Request) {
     );
   }
 
+  // A FEATURE LIST THAT IS NOT A LIST is refused by name before anything reads
+  // it. The perps refusal below asks `.includes`, which a number or an object
+  // does not have (a 500) and a string answers by substring; neither is a
+  // grant a signer mints.
+  if (
+    grant.grantFeatures != null &&
+    (!Array.isArray(grant.grantFeatures) || grant.grantFeatures.some((f) => typeof f !== "string"))
+  ) {
+    return NextResponse.json({ error: "grant features must be a list of names" }, { status: 400 });
+  }
+
   // PERPETUALS ARE NOT TAKEN BY THIS SERVER YET (perps slice 1). The signers can
   // carry a Lighter key and the canonical wall can rebuild one, but nothing here
   // can mint, seal, hold or stand down a key, so a grant naming one is refused

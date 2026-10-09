@@ -1561,9 +1561,9 @@ export function buildWallPolicies(args: {
  * nothing. A grant missing any of them rebuilds WITHOUT perps, which is the
  * narrower wall; server-side that fails the byte comparison against a
  * signature that carried them, which is the refusal a half-formed perp grant
- * deserves. Both fields are optional so a caller that passes neither (today's
- * hosted check, which also refuses the marker outright) rebuilds exactly the
- * wall it always did. The sealed private key never enters this object.
+ * deserves. Both fields are optional so a caller that passes neither rebuilds
+ * exactly the wall it always did; the hosted canonical check passes both. The
+ * sealed private key never enters this object.
  */
 export function grantWallOptions(grant: {
   grantTokens?: readonly string[];

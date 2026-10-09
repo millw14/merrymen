@@ -198,8 +198,8 @@ describe("a rebuilt wall is the same wall", () => {
       assert.equal("perpLighter" in opts, false, `${why}: the options object keeps exactly the keys it always had`);
       assert.deepEqual(shapeOf({ ...opts }), bare, why);
     }
-    // And callers that pass neither chain nor block — today's hosted check —
-    // get exactly the object they always got.
+    // And callers that pass neither chain nor block get exactly the object
+    // they always got.
     assert.deepEqual(Object.keys(grantWallOptions({ grantFeatures: [GRANT_ENERGY] })).sort(), [
       "allowRialto",
       "allowUniswapV4",

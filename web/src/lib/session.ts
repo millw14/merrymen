@@ -341,9 +341,11 @@ function perpOf(g: Record<string, unknown>, from: "server" | "local"): PriorPerp
  *
  *   the SERVER'S projection (GET /api/grants, `publicGrantView`) — the grant
  *   the worker actually runs, so when it names THIS account it wins. Its "no
- *   perps" is trustworthy because the server refuses (409) any grant that
- *   would drop a key from a venue account that is not flat; its "perps" is the
- *   key the worker registered.
+ *   perps" is trustworthy because the server refuses any grant that would drop
+ *   a key from a venue account that is not flat (once the custody intake
+ *   lands, a 409; until then POST /api/grants refuses every perps grant with
+ *   403, so no server grant carries one); its "perps" is the key the worker
+ *   registered.
  *
  *   the BROWSER'S copies — the armed one first, then the archive for this
  *   account. Used when the server's answer is unknown (not passed, fetch
@@ -394,7 +396,8 @@ export function priorPerpFor(
  *   - A previous grant with perps CARRIES FORWARD by default, same key.
  *   - Dropping it needs `drop` AND `venueFlat === true` — the caller's word
  *     that every account under this L1 address is provably flat (the UI reads
- *     GET /api/perps/flat; the server re-checks and answers 409 anyway).
+ *     GET /api/perps/flat; once the custody intake lands the server re-checks
+ *     and answers 409 anyway).
  *     Anything else — false, null, absent — is "not provably flat": refused.
  *   - A new opt-in is taken as given, after the key is shape-checked.
  *   - Off chain 4663 there is no Lighter; perps requested or carried there are
@@ -1234,7 +1237,9 @@ async function mintGrant(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
     ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
     false, minimumValidationNonce,
-    { ...perpIn, localGrants: localGrantsSnapshot() },
+    // A snapshot the caller already took (a renewal hands the SAME one to its
+    // preflight) wins; otherwise this mint reads storage itself.
+    { ...perpIn, localGrants: perpIn.localGrants ?? localGrantsSnapshot() },
   );
   if (!grant) throw new Error("Grant preparation returned no signed permission.");
 
@@ -1460,9 +1465,10 @@ export function listSavedWallets(): SavedWallet[] {
  * Silent on failure like its neighbours — an unreadable store must not stop
  * somebody signing — and that is safe here only because it is not the last
  * line: the server's projection (when the page passes it) outranks this copy,
- * and hosted POST /api/grants refuses (409) a grant that would drop a key from
- * a venue account that is not flat. The objects returned carry keys; nothing
- * but the public fields is ever read from them.
+ * and POST /api/grants refuses a grant that would drop a key from a venue
+ * account that is not flat (a 409 once the custody intake lands; until then it
+ * refuses every perps grant with 403). The objects returned carry keys;
+ * nothing but the public fields is ever read from them.
  */
 export function localGrantsSnapshot(): LocalGrants {
   const parse = (raw: string | null): unknown => {
@@ -1680,11 +1686,21 @@ export interface MintOptions {
    * with `venueFlat: true` — the caller's reading (GET /api/perps/flat) that
    * every Lighter account under this L1 address is empty. Anything less is a
    * refusal: a registered key stays valid at the venue whatever the grant says.
-   * The server re-checks and answers 409 regardless.
+   * Once the custody intake lands the server re-checks and answers 409
+   * regardless; until then it refuses every perps grant.
    */
   perpDrop?: boolean;
   /** `true` only when the venue read provably flat; false, null or absent is "not provably flat". */
   venueFlat?: boolean | null;
+  /**
+   * This browser's own previous grants (`localGrantsSnapshot()`), as DATA. A
+   * RENEWAL takes ONE snapshot and passes it, with `previousGrant`, in the
+   * options its preflight and its mint both get. The preflight is storage-free,
+   * so without it the preflight sees no local copy while the mint reads one,
+   * and a carried key that no longer fits would be refused only AFTER the old
+   * permission was revoked. Absent, a mint snapshots storage itself.
+   */
+  localGrants?: LocalGrants;
 }
 
 /** What the preparation core takes about perpetuals; built from MintOptions by `perpInput`. */
@@ -1692,7 +1708,7 @@ export interface PerpSigningInput {
   recovery?: PerpRecoveryReference;
   perp?: PerpSealRequest | null;
   previousGrant?: unknown;
-  /** The browser's own copies — filled in by `mintGrant`, never by a caller of the embedded path. */
+  /** The browser's own copies: the caller's snapshot (`MintOptions.localGrants`), else `mintGrant` takes one. */
   localGrants?: LocalGrants;
   perpDrop?: boolean;
   venueFlat?: boolean | null;
@@ -1703,7 +1719,10 @@ export interface PerpSigningInput {
  * new entry point cannot thread three of the four and forget the drop guard.
  */
 function perpInput(o: Omit<MintOptions, "hostedAs">): PerpSigningInput {
-  return { perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant, perpDrop: o.perpDrop, venueFlat: o.venueFlat };
+  return {
+    perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant,
+    perpDrop: o.perpDrop, venueFlat: o.venueFlat, localGrants: o.localGrants,
+  };
 }
 
 /**
@@ -1728,7 +1747,8 @@ export async function preflightAgentGrant(owner: LocalAccount, o: MintOptions): 
     // THE SAME PERPS DECISION THE MINT WILL MAKE, before anything is revoked:
     // a carried Lighter key that no longer fits must refuse here, not after.
     // Storage-free like the rest of the preflight, so the caller passes the
-    // server's projection as `previousGrant` to BOTH this and the mint.
+    // server's projection (`previousGrant`) and one `localGrantsSnapshot()`
+    // (`localGrants`) to BOTH this and the mint.
     perpInput(o),
   );
 }

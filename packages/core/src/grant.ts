@@ -480,7 +480,11 @@ export interface StoredGrant {
    *
    * AND EVEN THE SEALED BLOB NEVER LEAVES IN A RESPONSE. `publicGrantView`
    * below is how a grant becomes JSON for anybody, and it copies
-   * `route`, `apiKeyIndex` and `apiPublicKey` — never `apiKeySealed`.
+   * `route`, `apiKeyIndex` and `apiPublicKey` — never `apiKeySealed`. GET
+   * /api/grants still strips a denylist today; that is safe only because POST
+   * /api/grants refuses every perps grant, so no stored grant carries this
+   * block. Switch every grant read to `publicGrantView` in the same change
+   * that lets one be stored.
    */
   perp?: PerpGrant;
   /**

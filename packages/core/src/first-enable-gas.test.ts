@@ -229,6 +229,10 @@ describe("perps cost what the wall says they cost, and are sealed only when they
     trencherVaultAddress: "0x" + "d".repeat(40),
     trencherFactoryAddress: "0x" + "e".repeat(40),
   };
+  // The shape every signer seals today (WallOptions.scopedSpenders). The
+  // unscoped walls above and below are the legacy shape: what a grant signed
+  // before the marker still rebuilds as, so they stay pinned too.
+  const SCOPED = { scopedSpenders: true };
   const tokens = (n: number) => Array.from({ length: n }, (_, i) => token(i));
   const fits = (chainId: number, deploying: boolean, opts: Record<string, unknown>) =>
     perpFits(CAPS, ME, chainId, deploying, opts as never);
@@ -240,6 +244,14 @@ describe("perps cost what the wall says they cost, and are sealed only when they
         2_816,
         `n=${n}: a per-token cost would mean the proxy joined the extras' approves`,
       );
+      // The same on the scoped wall: scoping filters who may pull a stock or a
+      // coin, and the proxy was never on those lists, so it has nothing to
+      // take away and nothing to add.
+      assert.equal(
+        withTokens(n, { ...SCOPED, perpLighter: PERP }).stubBytes - withTokens(n, SCOPED).stubBytes,
+        2_816,
+        `n=${n}, scoped: the proxy must sit on the USDG approve alone on this shape too`,
+      );
     }
     assert.equal(withTokens(0, { perpLighter: PERP }).permissions, 21, "the default 18, plus three");
   });
@@ -247,7 +259,7 @@ describe("perps cost what the wall says they cost, and are sealed only when they
   it("the size does not depend on WHICH key — so sizing before keygen is exact", () => {
     assert.deepEqual(withTokens(3, { perpLighter: PERP }), withTokens(3, { perpLighter: { ...PERP, apiPublicKey: PK2 } }));
     for (const deploying of [true, false]) {
-      for (const base of [{}, CLASS, { ...CLASS, ...TRENCHER }]) {
+      for (const base of [{}, CLASS, { ...CLASS, ...TRENCHER }, { ...CLASS, ...SCOPED }, { ...CLASS, ...TRENCHER, ...SCOPED }]) {
         for (const n of [0, 1, 2, 5]) {
           const opts = { ...base, extraTokens: tokens(n) };
           assert.equal(fits(4663, deploying, opts), fits(4663, deploying, { ...opts, perpLighter: PERP }), `n=${n}`);
@@ -263,23 +275,54 @@ describe("perps cost what the wall says they cost, and are sealed only when they
     assert.equal(fits(1, false, {}), false);
   });
 
-  it("ONLY WHEN IT FITS — and a class+Trencher wall has no room for it at all", () => {
-    // Measured, and worth knowing before anyone promises perps to a wall this
-    // wide: the class vault and Trencher together leave no room even with an
-    // empty basket, deploying or not. That is an owner-facing refusal for the
-    // signers to word, not something to relax here.
+  it("ONLY WHEN IT FITS — and on the legacy unscoped shape a class+Trencher wall has no room for it at all", () => {
+    // Measured on the UNSCOPED wall only, where every vault sits in the ONE_OF
+    // of every stock and coin approve: there the class vault and Trencher
+    // together leave no room even with an empty basket, deploying or not. No
+    // signer seals that shape any more (they all set scopedSpenders), so this
+    // is not a promise about the walls owners sign today. The scoped figures
+    // are pinned in the next test.
     assert.equal(fits(4663, true, { ...CLASS, ...TRENCHER }), false);
     assert.equal(fits(4663, false, { ...CLASS, ...TRENCHER }), false);
-    // The class vault alone leaves room for perps with no tokens; a renewal,
-    // which pays no CREATE2, has room for one.
+    // Unscoped, the class vault alone leaves room for perps with no tokens; a
+    // renewal, which pays no CREATE2, has room for one.
     assert.equal(fits(4663, true, { ...CLASS }), true);
     assert.equal(fits(4663, true, { ...CLASS, extraTokens: tokens(1) }), false);
     assert.equal(fits(4663, false, { ...CLASS, extraTokens: tokens(1) }), true);
   });
 
+  it("ON THE SCOPED WALL EVERY SIGNER SEALS — class+Trencher has room with an empty basket, the class vault for two coins", () => {
+    // Scoping takes the three USDG-only vaults off every stock and coin
+    // approve, and that is the room perps need. Measured, not derived:
+    //   - class + Trencher with no coins predicts 13,824,076 bounded on a
+    //     first install, 25,924 under the 13,850,000 wall maximum
+    //     (FIRST_ENABLE_WALL_MAX_BOUNDED). So it fits, and one coin does not,
+    //     deploying or not. An owner with Trencher who wants perps can hold no
+    //     custom coin; that refusal is the signers' to word.
+    assert.equal(fits(4663, true, { ...CLASS, ...TRENCHER, ...SCOPED }), true);
+    assert.equal(fits(4663, true, { ...CLASS, ...TRENCHER, ...SCOPED, extraTokens: tokens(1) }), false);
+    assert.equal(fits(4663, false, { ...CLASS, ...TRENCHER, ...SCOPED }), true);
+    assert.equal(fits(4663, false, { ...CLASS, ...TRENCHER, ...SCOPED, extraTokens: tokens(1) }), false);
+    //   - the class vault alone (the hosted default) carries perps with two
+    //     coins on a first install and refuses a third; a renewal, which pays
+    //     no CREATE2, carries three and refuses a fourth.
+    assert.equal(fits(4663, true, { ...CLASS, ...SCOPED, extraTokens: tokens(2) }), true);
+    assert.equal(fits(4663, true, { ...CLASS, ...SCOPED, extraTokens: tokens(3) }), false);
+    assert.equal(fits(4663, false, { ...CLASS, ...SCOPED, extraTokens: tokens(3) }), true);
+    assert.equal(fits(4663, false, { ...CLASS, ...SCOPED, extraTokens: tokens(4) }), false);
+  });
+
   it("IS the signing policy, three permissions wider — never a second arithmetic", () => {
     for (const deploying of [true, false]) {
-      for (const base of [{}, CLASS, { ...CLASS, ...TRENCHER }, { energyBuy: true }]) {
+      for (const base of [
+        {},
+        CLASS,
+        { ...CLASS, ...TRENCHER },
+        { energyBuy: true },
+        { ...CLASS, ...SCOPED },
+        { ...CLASS, ...TRENCHER, ...SCOPED },
+        { ...CLASS, ...SCOPED, energyBuy: true },
+      ]) {
         for (const n of [0, 1, 2, 3, 4, 5, 6, 7, 9]) {
           const opts = { ...base, extraTokens: tokens(n) };
           assert.equal(
@@ -300,10 +343,11 @@ describe("perps cost what the wall says they cost, and are sealed only when they
   it("perps and the energy buy together: perps are asked first, energy over the wall that carries them", () => {
     // The droppable capability gives way. A wall with room for perps but not
     // both keeps perps and loses energy — never the other way round.
-    const opts = { ...CLASS };
-    assert.equal(fits(4663, true, opts), true);
-    assert.equal(energyBuyFits(CAPS, ME, 4663, true, { ...opts, perpLighter: PERP } as never), false);
-    assert.equal(energyBuyFits(CAPS, ME, 4663, true, opts as never), true, "energy alone would have fitted");
+    for (const [shape, opts] of Object.entries({ unscoped: { ...CLASS }, scoped: { ...CLASS, ...SCOPED } })) {
+      assert.equal(fits(4663, true, opts), true, shape);
+      assert.equal(energyBuyFits(CAPS, ME, 4663, true, { ...opts, perpLighter: PERP } as never), false, shape);
+      assert.equal(energyBuyFits(CAPS, ME, 4663, true, opts as never), true, `${shape}: energy alone would have fitted`);
+    }
   });
 });
 

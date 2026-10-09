@@ -221,6 +221,33 @@ describe("the renewal preflight decides perps exactly as the mint will", () => {
     ), { currentNonce: 8 });
     assert.equal(signer.calls(), 0);
   });
+  it("given ONE browser snapshot, the preflight and the mint reach the same verdict", async () => {
+    // The renewal case the preflight exists for: the server answers that it
+    // holds no grant (a kill, a wiped row) while this browser still holds the
+    // armed grant that carries a Lighter key. The preflight is storage-free, so
+    // the snapshot rides in the options BOTH calls get. Before it did, the
+    // preflight passed and the mint refused, after the old permission had
+    // already been revoked.
+    const { preflightAgentGrant, restoreAgentWallet, PerpSigningRefusal } = await import("./session");
+    const shared = { ...options, previousGrant: null, localGrants: { current: carried }, extraTokens: coins(5) };
+    const signer = ownerThatMustNotSign();
+    const refused = (e: unknown) => e instanceof PerpSigningRefusal && e.code === "perp-does-not-fit";
+    await withStubChain(ACCOUNT, () => assert.rejects(preflightAgentGrant(signer.owner, shared), refused), { currentNonce: 8 });
+    assert.equal(signer.calls(), 0);
+    // The mint decides from the snapshot it is handed: this browser's store is
+    // EMPTY, so a mint that read storage instead would carry no key and could
+    // not refuse for it.
+    const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, get() {
+      return { getItem: () => null, setItem: () => {}, removeItem: () => {}, key: () => null, length: 0 };
+    } });
+    try {
+      await withStubChain(ACCOUNT, () => assert.rejects(restoreAgentWallet(ownerKey, shared), refused), { currentNonce: 8 });
+    } finally {
+      if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+      else Reflect.deleteProperty(globalThis, "localStorage");
+    }
+  });
   it("and one that fits passes the preflight", async () => {
     const { preflightAgentGrant } = await import("./session");
     const signer = ownerThatMustNotSign();
