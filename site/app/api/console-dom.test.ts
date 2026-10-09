@@ -490,6 +490,36 @@ test('just after a payment starts a plan, the next period is not offered as a pa
   await page.unmount();
 });
 
+test('a reversed payment is offered to be checked again before any new payment is asked for', async () => {
+  // Crumbs ran out after its payment was reversed: credit is -100,000, and renewing it asks 200,000.
+  const reversed = accountJson({
+    credit_raw: (-DUE).toString(), credit_tokens: '-100000', due_raw: (2n * DUE).toString(), due_tokens: '200000', due_for: 'renewal',
+    history: [
+      { type: 'reversal', at: '2026-10-08T00:20:00.000Z', amount_tokens: '100000', tx_hash: HASH_C, reason: 'receipt_missing' },
+      { type: 'charge', at: '2026-10-08T00:00:01.000Z', amount_tokens: '100000', tier: 'crumbs', reason: 'activate' },
+      { type: 'payment', at: '2026-10-08T00:00:00.000Z', amount_tokens: '100000', tx_hash: HASH_C },
+    ],
+  });
+  routes['GET account'] = () => ({ status: 200, body: reversed });
+  const page = await mount();
+  assert.match(text(page.container), /If that transfer still shows in your wallet's activity, check it again/);
+  assert.match(text(page.container), /200,000 MERRYMEN includes a reversed payment\. Check that transaction again first/);
+  assert.equal(page.container.querySelectorAll('.dev-history button').length, 1, 'the reversal in History has the action too');
+  await click(buttonFor(page.container, /^Check this transaction again$/));
+  assert.deepEqual(submitted(), [HASH_C]); assert.deepEqual(saved(), [HASH_C]);
+  assert.equal(canPay(page.container), false, 'while it is checked, no new payment is offered');
+  await drain(page.container, [HASH_C]);
+  await page.unmount();
+
+  // Credited again since: nothing left to check.
+  routes['GET account'] = () => ({ status: 200, body: { ...reversed, credit_raw: '0', credit_tokens: '0', due_raw: null, due_tokens: null,
+    history: [{ type: 'payment', at: '2026-10-08T00:40:00.000Z', amount_tokens: '100000', tx_hash: HASH_C }, ...reversed.history] } });
+  localStorage.clear(); calls = [];
+  const again = await mount();
+  assert.equal(buttonFor(again.container, /Check this transaction again/) === undefined, true);
+  await again.unmount();
+});
+
 test('Review change only previews; only Confirm sends confirm:true', async () => {
   routes['GET account'] = () => ({ status: 200, body: accountJson({ plan: { id: 'free', name: 'Free', starts_at: null, ends_at: null, selected: 'free', renews_on_next_request: false }, due_raw: null, due_tokens: null }) });
   routes['POST plan'] = body => body?.confirm === true

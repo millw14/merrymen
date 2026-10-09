@@ -529,6 +529,22 @@ export function endMessage(end: Exclude<WatchEnd, { kind: "signed_out" | "cancel
   return end.message || (end.reason ? REASON_HINT[end.reason]?.(wallet) : "") || "This transaction cannot be credited.";
 }
 
+/**
+ * Transfers the gateway reversed and has not credited again since, newest
+ * first. A reorg that MOVED a transfer leaves a real payment, credited again
+ * once its hash is submitted again; a check from a node that was out of step
+ * can be one too. Either way the hash is the remedy, not a second payment.
+ */
+export function reversedToCheck(history: HistoryItem[]): string[] {
+  const out: string[] = [];
+  for (const h of history) {
+    if (h.type !== "reversal" || !h.tx_hash || out.includes(h.tx_hash)) continue;
+    const since = Date.parse(h.at);
+    if (!history.some(x => x.type === "payment" && x.tx_hash === h.tx_hash && Date.parse(x.at) > since)) out.push(h.tx_hash);
+  }
+  return out;
+}
+
 /** One line of account history, in words. Never "refund": nothing goes back on chain. */
 export function historyLabel(item: HistoryItem, plans: Plan[]): string {
   const tier = plans.find(p => p.id === item.tier)?.name ?? item.tier ?? "Plan";

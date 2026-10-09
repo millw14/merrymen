@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EXPLORER } from "../../lib/chain";
 import {
-  TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount, renewalBy,
+  TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount, renewalBy, reversedToCheck,
   normalizePreview, payWithWallet, paymentsReady, previewSentence, priceLabel, short, stillDue, stillPayable, switchToRobinhood, txHash, waitingMessage, walletError, watchPayment,
   type AccountView, type Eip1193, type PayCheck, type PlanPreview, type PlansView, type WatchEnd,
 } from "../../lib/developer-billing";
@@ -158,14 +158,16 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
   const due = amountToSend(view.due_raw), treasury = paymentsReady(plans) ? plans.treasury : null;
   const open = watches.filter(unanswered);
   const waiting: Waiting = open.length === 0 ? null : { count: open.length, checking: open.some(w => w.phase === "checking") };
+  // A reversed transfer may be final in another block: its hash is checked again before anything new is paid.
+  const reversed = BigInt(view.credit_raw) < 0n && reversedToCheck(view.history).length > 0;
   return <div className="dev-billing">
-    <AccountSummary view={view} plans={plans} keys={keys} />
+    <AccountSummary view={view} plans={plans} keys={keys} busy={busy} onRecheck={hash => run("recheck", async () => follow(hash, false))} />
     {plans.source === "fallback"
       // The account answered but the plans did not: whether billing is on is unknown here, so neither "coming soon" nor a plan list.
       ? <p className="dev-billing-note">Plan details could not be loaded just now. Reload the page to choose a plan or pay; nothing is lost meanwhile.</p>
       : on ? <PlanChooser view={view} plans={plans} busy={busy} run={run} onAccount={onAccount} reload={reload} />
         : <p className="dev-billing-note">Paid plans are coming soon. Your account is ready, and every key you create belongs to it.</p>}
-    {due !== null && treasury !== null && <PaymentPanel wallet={address} amount={due} treasury={treasury} renewBy={renewalBy(view)} busy={busy} run={run} waiting={waiting}
+    {due !== null && treasury !== null && <PaymentPanel wallet={address} amount={due} treasury={treasury} renewBy={renewalBy(view)} reversed={reversed} busy={busy} run={run} waiting={waiting}
       confirmPayable={confirmPayable} onSent={hash => follow(hash, true)} onPasted={hash => follow(hash, false)} />}
     {due !== null && on && treasury === null && <p className="dev-billing-note">Payments are not open yet, so nothing can be paid here. Nothing is lost: your selection waits.</p>}
     {watches.length > 0 && <div className="dev-pay-watches">{watches.map(w => <PaymentWatch key={w.hash} watch={w} spread={spread} minAgeSec={plans.confirmations?.min_age_sec}
@@ -178,8 +180,10 @@ export function AccountPanel({ address, plans, state, keys, busy, run, defaultNa
 
 /* ── What the account has ─────────────────────────────────────────────────── */
 
-export function AccountSummary({ view, plans, keys }: { view: AccountView; plans: PlansView; keys: Key[] }) {
+export function AccountSummary({ view, plans, keys, busy = "", onRecheck }: { view: AccountView; plans: PlansView; keys: Key[]; busy?: string; onRecheck?: (hash: string) => void }) {
   const { plan, usage } = view, credit = BigInt(view.credit_raw), renewBy = renewalBy(view);
+  const toCheck = onRecheck ? reversedToCheck(view.history) : [];
+  const recheck = (hash: string, words: string) => <button type="button" className="dev-textlink" disabled={!!busy} onClick={() => onRecheck?.(hash)}>{words}</button>;
   const selected = plans.plans.find(p => p.id === plan.selected);
   const due = view.due_raw ? `${formatTokens(view.due_raw, { decimals: 0, round: "up" })} MERRYMEN` : "";
   const pct = usage && usage.limit > 0 ? Math.min(100, Math.round(usage.used / usage.limit * 100)) : 0;
@@ -192,7 +196,8 @@ export function AccountSummary({ view, plans, keys }: { view: AccountView; plans
     </div>
     <div className="dev-account-credit">
       <span>CREDIT</span><strong>{formatTokens(credit, { decimals: 2 })} <small>MERRYMEN</small></strong>
-      {credit < 0n ? <small className="dev-warn">A reversed payment left a shortfall. Paid plans do not start or renew until it is covered.</small>
+      {credit < 0n ? <><small className="dev-warn">A reversed payment left a shortfall. {toCheck.length > 0 ? "If that transfer still shows in your wallet's activity, check it again: once it is final in its new block, it is credited again. " : ""}Paid plans do not start or renew until the shortfall is covered.</small>
+        {toCheck.map(h => <small key={h} className="dev-recheck"><code>{short(h)}</code> {recheck(h, "Check this transaction again")}</small>)}</>
         : !due ? <small>Nothing due</small>
           // The next period's price, owed only when this one ends: not "due" today.
           : renewBy ? <small>To renew on {formatDate(renewBy)}: {due}</small> : <small>Due: {due}</small>}
@@ -207,7 +212,8 @@ export function AccountSummary({ view, plans, keys }: { view: AccountView; plans
       const amount = BigInt(h.amount_raw), magnitude = amount < 0n ? -amount : amount;
       const sign = h.type === "payment" ? "+" : h.type === "adjustment" ? (amount < 0n ? "−" : "+") : magnitude === 0n ? "" : "−";
       return <li key={`${h.at}-${i}`}><time dateTime={h.at}>{formatDateTime(h.at)}</time><span>{historyLabel(h, plans.plans)}</span><code>{sign}{formatTokens(magnitude, { decimals: 2 })}</code>
-        {h.tx_hash && <a href={`${EXPLORER}/tx/${h.tx_hash}`} target="_blank" rel="noreferrer" aria-label="View transaction on Blockscout">tx ↗</a>}</li>;
+        {h.tx_hash && <a href={`${EXPLORER}/tx/${h.tx_hash}`} target="_blank" rel="noreferrer" aria-label="View transaction on Blockscout">tx ↗</a>}
+        {h.type === "reversal" && h.tx_hash && toCheck.includes(h.tx_hash) && recheck(h.tx_hash, "Check again")}</li>;
     })}</ul></details>}
   </div>;
 }
@@ -265,8 +271,8 @@ export function WalletPay({ check, amount, busy, balance, onConnect, onSwitch, o
 /** Unanswered payments, if any: then the panel offers no new payment, only a way to add a hash. */
 type Waiting = { count: number; checking: boolean } | null;
 
-function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, confirmPayable, onSent, onPasted }: {
-  wallet: string; amount: bigint; treasury: string; renewBy: string | null; busy: string; run: Run; waiting: Waiting;
+function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, run, waiting, confirmPayable, onSent, onPasted }: {
+  wallet: string; amount: bigint; treasury: string; renewBy: string | null; reversed: boolean; busy: string; run: Run; waiting: Waiting;
   confirmPayable: (treasury: string) => Promise<void>; onSent: (hash: string) => void; onPasted: (hash: string) => void;
 }) {
   const [check, setCheck] = useState<PayCheck | null>(null);
@@ -307,13 +313,14 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, c
       : `${waiting.count === 1 ? "Your payment is" : `${waiting.count} payments are`} not credited yet. Check ${waiting.count === 1 ? "it" : "them"} again below, or forget ${waiting.count === 1 ? "it" : "them"}, before paying again: paying now sends a second payment.`}</p>
     {paste}
   </section>;
+  const shortfall = reversed && <p className="dev-warn">{tokens} MERRYMEN includes a reversed payment. Check that transaction again first (under Credit above): if it is final in another block, it is credited again. Paying now sends a new payment, and payments are not returned.</p>;
   const later = <p className="dev-billing-note">Your plan runs until {renewBy && formatDate(renewBy)} either way, and nothing is owed before then. Credit you send now is used to renew it when this period ends.</p>;
   // A renewal is not owed until the period ends, and right after a payment starts a plan the gateway already reports the
   // next period's price: drawn as a payment, it is a second one of the same size under the first one's receipt. Paying
   // ahead stays possible, as a step of its own.
   if (renewBy && aheadFor !== renewBy) return <section className="dev-pay" aria-labelledby="dev-pay-title">
     <h3 id="dev-pay-title">Renewal on {formatDate(renewBy)}: {tokens} MERRYMEN</h3>
-    {later}
+    {later}{shortfall}
     <div className="dev-pay-wallet"><button className="dev-secondary" disabled={!!busy} onClick={() => setAheadFor(renewBy)}>Pay ahead for the next period</button></div>
     {paste}
   </section>;
@@ -322,6 +329,7 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, busy, run, waiting, c
       ? <><h3 id="dev-pay-title">Renew for the next period: {tokens} MERRYMEN</h3>
         {later}<div className="dev-pay-wallet"><button className="dev-textlink" disabled={!!busy} onClick={() => setAheadFor(null)}>Not now</button></div></>
       : <h3 id="dev-pay-title">Pay {tokens} MERRYMEN</h3>}
+    {shortfall}
     <dl className="dev-pay-details">
       <div><dt>Amount</dt><dd><code>{tokens} MERRYMEN</code><button type="button" aria-label="Copy amount" onClick={() => copy("amount", (amount / 10n ** 18n).toString())}>{copied === "amount" ? "Copied ✓" : "Copy"}</button></dd></div>
       <div><dt>To (Merrymen payments wallet)</dt><dd><code>{treasury}</code><button type="button" aria-label="Copy Merrymen payments wallet address" onClick={() => copy("treasury", treasury)}>{copied === "treasury" ? "Copied ✓" : "Copy"}</button><a href={`${EXPLORER}/address/${treasury}`} target="_blank" rel="noreferrer">Blockscout ↗</a></dd></div>
