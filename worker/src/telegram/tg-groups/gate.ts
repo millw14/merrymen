@@ -368,6 +368,8 @@ const LOOKALIKE: Readonly<Record<string, string>> = {
   α: "a", β: "b", ε: "e", η: "n", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", τ: "t", υ: "u", χ: "x", ω: "w", γ: "y",
   ᴀ: "a", ʙ: "b", ᴄ: "c", ᴅ: "d", ᴇ: "e", ғ: "f", ɢ: "g", ʜ: "h", ɪ: "i", ᴊ: "j", ᴋ: "k", ʟ: "l", ᴍ: "m",
   ɴ: "n", ᴏ: "o", ᴘ: "p", ǫ: "q", ʀ: "r", ꜱ: "s", ᴛ: "t", ᴜ: "u", ᴠ: "v", ᴡ: "w", ʏ: "y", ᴢ: "z",
+  // Latin letters with no decomposition that are drawn like plain ones (review r2): "honeypøt", "scɑm", "kiłł", "ɡrifter".
+  ɑ: "a", ɡ: "g", ø: "o", ɔ: "o", ł: "l", đ: "d", ħ: "h", ɛ: "e", ɩ: "i", ʋ: "v",
 };
 
 function foldOf(lower: string): string {
@@ -1349,6 +1351,8 @@ const SEXUAL_IDIOM = U(/\btit for tat\b/g);
 const SELFHARM: readonly RegExp[] = [
   /\bk[\s.*_-]*y[\s.*_-]*s\b/,
   /\bkill (?:yo)?ur ?self\b|\bkill (?:your|ur) ?selves\b|\bkill yourselves\b/,
+  // Wished on others too (review r2): "holders should kill themselves", "he should kill himself".
+  /\bkill (?:him|her|them|their|my|our) ?sel(?:f|ves)\b/,
   /\bgo die\b|\bdie in a (?:fire|hole|ditch)\b|\b(?:you|u) should (?:just )?die\b/,
   /\bunalive (?:yo)?ur ?self\b|\bunalive (?:your|ur) ?self\b|\bend (?:your|ur) (?:life|self)\b|\bend yourself\b/,
   /\b(?:hang|neck|off|delete|shoot|drown) (?:yo)?urself\b|\bslit (?:your|ur) wrists?\b/,
@@ -1812,13 +1816,16 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
     if (r.low.every((t) => noEnglishWord(quoteBody(t)))) return refuse("script");
   }
 
-  // The worst first: hate, harm, threats, sex — then looks.
+  // The worst first: hate, harm, threats, sex — then looks. A stranger's
+  // quote is read with its digits as letters too ("d1ck", "p0rn", "s3x",
+  // "h0neypot"; review r2): the persona's own lines keep the readings they had.
+  const vocab = kind === "quote" ? quoteReads(r) : r.low;
   if (hasSlur(tidied) || r.low.some(traitAttack)) return refuse("hateful");
   if ((kind === null || TEASE_KINDS.has(kind)) && some(r.low, GO_BACK_TO)) return refuse("hateful");
-  if (r.low.some((t) => SELFHARM.some((re) => re.test(t)))) return refuse("selfharm");
-  if (r.low.some((t) => THREAT.some((re) => re.test(t.replace(THREAT_IDIOM, " "))))) return refuse("threat");
-  if (r.low.some((t) => SEXUAL.test(t.replace(SEXUAL_IDIOM, " ")))) return refuse("sexual");
-  if (some(r.low, PROFANITY)) return refuse("profanity");
+  if (vocab.some((t) => SELFHARM.some((re) => re.test(t)))) return refuse("selfharm");
+  if (vocab.some((t) => THREAT.some((re) => re.test(t.replace(THREAT_IDIOM, " "))))) return refuse("threat");
+  if (vocab.some((t) => SEXUAL.test(t.replace(SEXUAL_IDIOM, " ")))) return refuse("sexual");
+  if (some(vocab, PROFANITY)) return refuse("profanity");
   if ((kind === null || TEASE_KINDS.has(kind)) && r.low.some((t) => APPEARANCE.some((re) => re.test(t.replace(APPEARANCE_IDIOM, " "))))) {
     return refuse("appearance");
   }
@@ -1840,7 +1847,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if ((kind === null || FIGURE_KINDS.has(kind)) && r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
   if ((kind === null || CLAIM_KINDS.has(kind)) && r.low.some((t) => TRADE_CLAIM.some((re) => re.test(t)))) return refuse("claim");
   if ((kind === null || PROGRESS_KINDS.has(kind)) && r.low.some((t) => PROGRESS.some((re) => re.test(t.replace(PROGRESS_IDIOM, " "))))) return refuse("progress");
-  if (r.low.some((t) => ACCUSE_HARD.some((re) => re.test(t)))) return refuse("accuse");
+  if (vocab.some((t) => ACCUSE_HARD.some((re) => re.test(t)))) return refuse("accuse");
   if (r.low.some((t) => RUG_WORD.test(rug ? rugMasked(t, rug.mask) : t))) return refuse("accuse");
   if (rug && some(r.low, RUG_CONTEXT_ACCUSE)) return refuse("accuse");
   // A rug word the permit lifted, beside a person (a dev, a whale, someone

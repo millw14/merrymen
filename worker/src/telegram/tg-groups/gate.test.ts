@@ -738,6 +738,23 @@ describe("hateful: slurs by hash, with stand-in words", () => {
     }
   }
 
+  it("Latin letters drawn like plain ones fold to them: ø, ɔ, ł, ɑ, ɡ (review r2)", () => {
+    withStandIn("blorfo", () => {
+      for (const t of ["blorfo", "blørfo", "blɔrfo", "błorfo", "blorfø"]) assert.equal(reason(t, { kind: "banter" }), "hateful", t);
+      for (const t of ["blørfo", "błorfo"]) assert.equal(reason(`• kaleo, 3 min ago: “${t}”`, { kind: "quote" }), "hateful", t);
+    });
+    for (const [t, why] of [["auton is a honeypøt, avoid", "accuse"], ["this coin is a scɑm", "accuse"], ["the dev is a ɡrifter", "accuse"], ["ɑirdrop for holders is live now", "lure"]] as const) {
+      assert.equal(reason(`• kaleo, 3 min ago: “${t}”`, { kind: "quote" }), why, t);
+    }
+  });
+
+  it("a quote is read with digits as letters for sex, profanity, harm and a scam said as fact (review r2)", () => {
+    for (const [t, why] of [["the dev sucks d1ck for pumps", "sexual"], ["the dev posts p0rn", "sexual"], ["dev sells s3x pics", "sexual"], ["auton is a h0neypot", "accuse"], ["total sc4m", "accuse"]] as const) {
+      assert.equal(reason(`• kaleo, 3 min ago: “${t}”`, { kind: "quote" }), why, t);
+    }
+    assert.equal(reason("• kaleo, 3 min ago: “10x incoming, 3x already, 5m mcap, 4h chart”", { kind: "quote" }), "ok");
+  });
+
   const caught = [
     "bramblewort",
     "lol bramblewort",
@@ -890,6 +907,9 @@ describe("hateful: protected traits beside an insult", () => {
 
 describe("selfharm", () => {
   refuses("selfharm", [
+    // Wished on others, in any kind (review r2).
+    ["banter", "holders should kill themselves"],
+    ["answer", "he should kill himself lol"],
     ["roast", "kys"],
     ["roast", "KYS lol"],
     ["roast", "k y s"],

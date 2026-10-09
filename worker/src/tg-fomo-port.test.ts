@@ -2984,6 +2984,28 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
   });
 
+  it("plain letters only: a lookalike Latin letter or a digit written for a letter leaves the quote out (review r2)", () => {
+    leftOut([
+      "auton is a honeypøt, avoid",
+      "this coin is a scɑm, the dev is a rɑpist",
+      "holders should kiłł themselves",
+      "the dev sucks d1ck for pumps",
+      "ɑirdrop for holders is live now",
+      "the dev's reɑl nɑme is john smith",
+      "the dev is a ɡrifter",
+      "this gøes 50x from here",
+      "the dev posts p0rn",
+      "dev sells s3x pics",
+      "dev leaked nud3s",
+      "dev is a c0ck",
+      "h0neypot, cant sell",
+      // No clause knows these words; the spelling alone leaves them out.
+      "team is still buıldıng",
+      "team is still bu1ld1ng, sølid",
+    ]);
+    quoted(["down from 8m to 36k in a week", "café vibes, 24h volume up", "a16z backed, ai16z agents, still early", "x402 payments on web3, still building"]);
+  });
+
   it("a quote in another language is left out and counted: buy calls, threats, addresses and accusations every clause reads in English (review r2)", () => {
     leftOut([
       "compre auton agora, vai para 100x",

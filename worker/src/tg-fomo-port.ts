@@ -582,6 +582,16 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   // "@ name") is a handle or a disguised word: left out, never repaired, so
   // the gate's handle clause is never blinded by an @ turned into a space.
   if (/[@＠﹫]/u.test(s)) return null;
+  // PLAIN LETTERS ONLY (review r2), the paraphrase's plain-ASCII rule for
+  // quotes: with accents taken off, a letter outside a-z ("honeypøt", "scɑm",
+  // "kiłł", "ɡrifter") or a digit written for a letter inside a word
+  // ("d1ck", "p0rn", "cla1m", "appr0ve"; never "a16z", "web3", "24h" or the
+  // coin's own symbol) leaves the quote out, never repaired: no clause has
+  // to know every word such a spelling hides.
+  const plain = s.normalize("NFKD").replace(/\p{M}/gu, "");
+  if (/(?=\p{L})[^a-zA-Z]/u.test(plain)) return null;
+  const own = coin.toLowerCase();
+  if (plain.split(/[^\p{L}\p{N}]+/u).some((w) => w.toLowerCase() !== own && /(?<=\p{L})[013457](?=\p{L})/u.test(w))) return null;
   s = s
     // The signs that are markup, never words: a hashtag's #, bold and strike marks.
     .replace(/[#＃]+/gu, " ")
