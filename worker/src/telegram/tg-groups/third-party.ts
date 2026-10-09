@@ -194,15 +194,16 @@ export const QUOTE_TARGET = U(new RegExp(String.raw`\b${FWD}\b(?:[^\p{L}\p{N}]+[
  * everyone", "sold on us", "kaleo dumped his whole bag on retail": up to
  * four words before the "on"), someone pulling, draining or taking the liquidity
  * or the funds ("dev pulled the liquidity", "they drained the pool"), and
- * theft ("stole", "ran off with the money", "exited with the funds") are
- * refused wherever the permit applies, and in every quote.
+ * theft ("stole", "ran off with the money", "exited with the funds", "took
+ * everything", a wallet "emptied") are refused wherever the permit applies,
+ * and in every quote.
  */
 const PEOPLE = String.raw`(?:us|everyone|everybody|holders|bagholders|buyers|followers|community|people|retail|you|y'all|ya'll|the\s+(?:community|holders|buyers|bagholders|followers))`;
 export const RUG_CONTEXT_ACCUSE = U(
   new RegExp(
     String.raw`\b(?:dump(?:ed|ing|s)?|sold|selling|sells)\s+(?:[\p{L}\p{N}'%.]+\s+){0,4}?on\s+(?:(?:the|their|his|her|its|all|all\s+the)\s+)?${PEOPLE}\b` +
       String.raw`|\b[\p{L}\p{N}_']+\s+(?:(?:just|has|have|had|then|already|literally|basically|totally)\s+)*(?:pulled|pulls|pulling|drained|drains|draining|removed|removes|yanked|yanks|took|takes|rugged)\s+(?:out\s+)?(?:all\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|our\s+|his\s+|her\s+)?(?:liquidity|lp|pool|funds)\b` +
-      String.raw`|\b(?:stole|stolen|steal(?:s|ing)?|thief|thieves|ran\s+(?:off\s+|away\s+)?with\s+(?:the|our|your|their|all|everyone'?s)\s+(?:money|funds|liquidity|lp|bag|bags)|exit(?:ed)?\s+with)\b`,
+      String.raw`|\b(?:stole|stolen|steal(?:s|ing)?|thief|thieves|ran\s+(?:off\s+|away\s+)?with\s+(?:the|our|your|their|all|everyone'?s)\s+(?:money|funds|liquidity|lp|bag|bags)|exit(?:ed)?\s+with|took\s+(?:everything|it\s+all)|emptied)\b`,
     "i",
   ),
 );
@@ -309,3 +310,15 @@ export const CONTACT_LURE = U(
     "i",
   ),
 );
+
+/**
+ * A PERSON BESIDE A RUG WORD THE PERMIT LIFTED: the permit says "rugged" of
+ * a coin and of no one, so a line that also names the dev, the team, an
+ * insider, a whale or a KOL, thanks someone for it, or says someone took,
+ * emptied, cashed out, bailed, knew or shilled ("it rugged, the dev took
+ * everything", "auton rugged, thanks kaleo", "rugged. dev = scum") puts the
+ * rug on a person, and is refused (gate.ts; review, 2026-10-09). "This is
+ * gonna rug, top holders own way too much" stays: holders are no one in
+ * particular.
+ */
+export const PERSON_BESIDE_RUG = U(/\b(?:devs?|team|insiders?|creators?|founders?|kols?|whales?|admins?|mods?|thanks|thx)\b|\b(?:took|emptied|cashed|bailed|knew|shill\w*)\b/i);

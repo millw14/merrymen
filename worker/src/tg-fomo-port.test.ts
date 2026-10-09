@@ -2932,4 +2932,9 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     leftOut(["this goes 50x from here", "auton pumps to 20m by friday", "ape now before it pumps", "bid this now", "grab some here"]);
     quoted(["goes to zero from here", "it ran to 8m then dumped", "down from 8m to 36k in a week"]);
   });
+
+  it("a rug blamed on a named trader or the dev is never quoted", () => {
+    leftOut(["it rugged cause kaleo shilled it", "auton rugged, thanks kaleo", "this one rugged, kaleo knew", "it rugged, the dev took everything", "it rugged, dev's wallet emptied", "it rugged, the kols exited", "auton rugged, thanks to the dev", "rugged. dev = scum"]);
+    quoted(["this is gonna rug, top holders own way too much", "rugged, holders got wrecked", "feels like a slow rug, volume is dying"]);
+  });
 });

@@ -488,7 +488,9 @@ to someone in distress goes out shushed or not.
   The gate (`TgGateCtx.rug`) then lifts only "rugged" or "rug" said of no
   one, "it", "this one", "the chart" or the coin; everything else stays
   refused: a person who rugged, dumped, sold on anyone, stole, pulled the
-  liquidity or ran; scam, honeypot or fraud; "rugpull", "rugging", "soft
+  liquidity or ran; a lifted rug word beside a person (the dev, the team, an
+  insider, a whale, a KOL, anyone the room knows by name, "thanks kaleo",
+  someone who "took everything", "knew" or "shilled it"); scam, honeypot or fraud; "rugpull", "rugging", "soft
   rug", "rugged us", "rugged by the dev"; Merrymen as a play ("buy merrymen
   instead", "merrymen coins never rug", "stick to merrymen"); any figure
   beside it. A brag waits while one is among its last eight lines or went

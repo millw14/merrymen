@@ -58,6 +58,7 @@ import {
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
+  PERSON_BESIDE_RUG,
   POST_RUG_LURE,
   PRIVATE_THIRD,
   QUOTE_TARGET,
@@ -1722,6 +1723,11 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (r.low.some((t) => ACCUSE_HARD.some((re) => re.test(t)))) return refuse("accuse");
   if (r.low.some((t) => RUG_WORD.test(rug ? rugMasked(t, rug.mask) : t))) return refuse("accuse");
   if (rug && some(r.low, RUG_CONTEXT_ACCUSE)) return refuse("accuse");
+  // A rug word the permit lifted, beside a person (a dev, a whale, someone
+  // thanked, anyone in the room or the agent itself): the rug laid at their door.
+  if (rug && r.low.some((t) => RUG_WORD.test(t)) && (some(r.low, PERSON_BESIDE_RUG) || (strip !== null && r.low.some((t) => t !== t.replace(strip, " "))))) {
+    return refuse("accuse");
+  }
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
   if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");

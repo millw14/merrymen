@@ -1888,4 +1888,16 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
   it("the desk's read never takes a permit", () => {
     assert.equal(admitDeskText("auton rugged from the top", { agentName: "Pine", brief: "" }).ok, false);
   });
+  // A rug word the permit lifted, beside a person: the rug laid at their door (review, 2026-10-09).
+  const BLAMED = ["auton rugged, thanks to the dev", "it rugged, the dev took everything", "rugged. dev = scum", "auton rugged, thanks kaleo", "this one rugged, kaleo knew", "it rugged cause kaleo shilled it", "it rugged, dev's wallet emptied", "it rugged, the kols exited"];
+  for (const t of BLAMED) {
+    it(`banter refuses a rug beside a person as accuse: ${JSON.stringify(t)}`, () => assert.equal(v(t, "banter"), "accuse"));
+    it(`quote refuses a rug beside a person as accuse: ${JSON.stringify(t)}`, () =>
+      assert.equal(reason(`• a trader, 3 min ago: “${t}”`, { kind: "quote", agentName: "Shogun", names: [], rug: { coins: ["AUTON"], brag: false } }), "accuse"));
+  }
+  it("a rug beside someone the room knows by name is accuse, in banter and in a quote", () => {
+    assert.equal(v("auton rugged cause milla shilled it", "banter"), "accuse");
+    assert.equal(reason("• a trader, 3 min ago: “auton rugged, milla was in it”", { kind: "quote", agentName: "Shogun", names: ["Milla"], rug: { coins: ["AUTON"], brag: false } }), "accuse");
+    assert.equal(reason("• a trader, 3 min ago: “this is gonna rug, top holders own way too much”", { kind: "quote", agentName: "Shogun", names: ["Milla"], rug: { coins: ["AUTON"], brag: false } }), "ok");
+  });
 });
