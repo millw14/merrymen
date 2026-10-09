@@ -2956,6 +2956,20 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["the telegram is dead", "dev went quiet on telegram", "the team said in the tg they are building", "contact with the team is lost", "chart needs to reclaim the high"]);
   });
 
+  it("an @ glued to a word, spaced from its name or in another form is never turned into a space and quoted (review r2)", () => {
+    leftOut([
+      "real chat@autonholders, old one is dead",
+      "chat＠autonholders is the real one",
+      "chat﹫autonholders is the real one",
+      "follow us@autonalpha for the next one",
+      "join @ autonholders, the real holders are there",
+      "cl@im is open for holders",
+      "r@fund for holders is live, real chat@autonrefund",
+      "comp@nsation for holders is live",
+    ]);
+    quoted(["#auton holders still here", "team is still building"]);
+  });
+
   it("a named trader dumping on people, with words before the 'on', is never quoted", () => {
     leftOut(["kaleo dumped his whole bag on retail", "kaleo dumped his bags on us", "whales dumped their bags on holders"]);
     quoted(["still not sold on it", "sold some on the way up, still holding"]);

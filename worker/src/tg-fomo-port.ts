@@ -575,9 +575,13 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   if (/\[(?:link|address)\]/iu.test(raw)) return null;
   let s = thesesSample(raw);
   if (!s) return null;
+  // An @ the redactor left (glued to a word: "chat@autonholders", "cl@im",
+  // "@ name") is a handle or a disguised word: left out, never repaired, so
+  // the gate's handle clause is never blinded by an @ turned into a space.
+  if (/[@＠﹫]/u.test(s)) return null;
   s = s
-    // The signs that are markup, never words: a hashtag's #, a stray @, bold and strike marks.
-    .replace(/[#＃@＠]+/gu, " ")
+    // The signs that are markup, never words: a hashtag's #, bold and strike marks.
+    .replace(/[#＃]+/gu, " ")
     .replace(/\*+|_{2,}|~{2,}/gu, " ")
     .replace(/["“”«»„]/gu, "'")
     .replace(/\s+/gu, " ")
