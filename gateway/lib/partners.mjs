@@ -32,7 +32,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, link, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rm, stat, utimes } from "node:fs/promises";
 import path from "node:path";
 
 /** Where the Railway volume is mounted. Same variable lib/signups.mjs uses. */
@@ -237,28 +237,51 @@ const LOCK_POLL_MS = 25;
 /** A lock this old belongs to a writer that died mid-append: one ≤ 4 KiB append and its flush never take this long. */
 const LOCK_STALE_MS = 10_000;
 
+/** A held lock's mtime is refreshed this often, so a live holder never looks stale. */
+const LOCK_REFRESH_MS = 2_000;
+/** A `.break` file this old belongs to a breaker that died in the middle of breaking. */
+const BREAK_STALE_MS = 60_000;
+
+/** The token written into a lock, or null when there is no lock. */
+async function lockToken(lock) {
+  try { return (await readFile(lock, "utf8")).trim(); } catch (err) { if (err.code === "ENOENT") return null; throw err; }
+}
+
 /**
- * Remove `lock` only if it is still the file `mine` describes (same inode), so
- * no process ever deletes a lock another one has just taken. The path is moved
- * aside under a unique name first (rename is atomic), checked, and put back
- * (link fails rather than replace one that appeared meanwhile) when it turned
- * out to be someone else's. Removing by path alone let a writer that judged a
- * lock stale, or whose own lock was broken while it stalled, delete the NEXT
- * owner's lock and append alongside it.
+ * Break `lock` if it is stale, one breaker at a time. Breakers serialize on an
+ * exclusive `<lock>.break` file and judge the lock's age only while holding it,
+ * so the lock they remove is the one they judged: no other breaker can replace
+ * it in between, and its owner is gone (a live owner keeps its mtime fresh).
+ * Removing by path after judging it OUTSIDE such a section let one writer
+ * delete the lock a second writer had just broken and re-taken. Nothing here
+ * compares inode numbers, which Linux reuses for the next file created.
  */
-async function removeIfSame(lock, mine) {
-  const claim = `${lock}.claim-${randomBytes(6).toString("hex")}`;
-  try { await rename(lock, claim); } catch (err) { if (err.code === "ENOENT") return false; throw err; }
-  let same = false;
-  try { const st = await stat(claim); same = st.ino === mine.ino && st.dev === mine.dev; } catch (err) { if (err.code !== "ENOENT") throw err; }
-  if (!same) {
-    try { await link(claim, lock); } catch (err) {
-      if (err.code !== "EEXIST") throw err;
-      console.error(`[partners] ${path.basename(lock)} was replaced while being restored; its previous holder no longer holds it`);
-    }
+async function breakIfStale(lock, staleMs, hooks) {
+  const breaker = `${lock}.break`;
+  let bh;
+  try {
+    bh = await open(breaker, "wx");
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    try {
+      const st = await stat(breaker);
+      if (Date.now() - st.mtimeMs > BREAK_STALE_MS) await rm(breaker, { force: true });
+    } catch (e) { if (e.code !== "ENOENT") throw e; }
+    return false;
   }
-  await rm(claim, { force: true });
-  return same;
+  await bh.close();
+  try {
+    await hooks.breaking?.();
+    let st;
+    try { st = await stat(lock); } catch (err) { if (err.code === "ENOENT") return false; throw err; }
+    const age = Date.now() - st.mtimeMs;
+    if (age <= staleMs) return false;
+    await rm(lock, { force: true });
+    console.error(`[partners] ${path.basename(lock)} was ${Math.round(age / 1000)} s old: a writer died holding it; removed it`);
+    return true;
+  } finally {
+    await rm(breaker, { force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -270,13 +293,16 @@ async function removeIfSame(lock, mine) {
  * tail and truncate it; the truncate waits for the write to finish, then
  * removes a complete, acknowledged record.
  *
- * The lock is a file created exclusively ("wx") and removed after, each time
- * only if it is still the same file (removeIfSame). One left by a writer that
- * died is broken once LOCK_STALE_MS old: the one that was judged stale, never a
- * successor taken in between. The wait is bounded by a count of attempts, then
- * FileBusy, with nothing written. `hooks` exists for tests to interleave writers.
+ * The lock is a file created exclusively ("wx") holding a random token. While
+ * `fn` runs its mtime is refreshed, so only a lock whose writer died goes
+ * stale, and stale locks are broken one breaker at a time (breakIfStale). On
+ * release it is removed only if it still holds this writer's token. A failed
+ * release is logged, never thrown: `fn`'s write already landed, and a lock left
+ * behind simply goes stale. The wait is bounded by a count of attempts, then
+ * FileBusy, with nothing written. `staleMs`, `refreshMs` and `hooks` exist for
+ * tests to interleave writers.
  */
-export async function withAppendLock(file, fn, { waitMs = 5_000, hooks = {} } = {}) {
+export async function withAppendLock(file, fn, { waitMs = 5_000, staleMs = LOCK_STALE_MS, refreshMs = LOCK_REFRESH_MS, hooks = {} } = {}) {
   const lock = `${file}.lock`;
   await mkdir(path.dirname(file), { recursive: true });
   const attempts = Math.max(1, Math.ceil(waitMs / LOCK_POLL_MS));
@@ -288,24 +314,29 @@ export async function withAppendLock(file, fn, { waitMs = 5_000, hooks = {} } = 
       if (err.code !== "EEXIST") throw err;
       let seen = null;
       try { seen = await stat(lock); } catch (e) { if (e.code !== "ENOENT") throw e; }
-      const age = seen && Date.now() - seen.mtimeMs;
-      if (seen && age > LOCK_STALE_MS) {
+      // Broken: try again at once. Held, or another writer is breaking it: wait a
+      // poll, so a busy breaker does not use up every attempt in a few milliseconds.
+      let broken = false;
+      if (seen && Date.now() - seen.mtimeMs > staleMs) {
         await hooks.staleSeen?.();
-        if (await removeIfSame(lock, seen)) {
-          console.error(`[partners] ${path.basename(lock)} was ${Math.round(age / 1000)} s old: a writer died holding it; removed it`);
-        }
-      } else if (seen) {
-        await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+        broken = await breakIfStale(lock, staleMs, hooks);
       }
+      if (seen && !broken) await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
       continue;
     }
-    let mine;
-    try { mine = await fh.stat(); } finally { await fh.close(); }
+    const token = randomBytes(16).toString("hex");
+    try { await fh.writeFile(`${token}\n`); } finally { await fh.close(); }
+    const refresh = setInterval(() => { const t = new Date(); utimes(lock, t, t).catch(() => {}); }, refreshMs);
     try {
       return await fn();
     } finally {
-      await hooks.beforeRelease?.();
-      await removeIfSame(lock, mine);
+      clearInterval(refresh);
+      try {
+        await hooks.beforeRelease?.();
+        if ((await lockToken(lock)) === token) await rm(lock, { force: true });
+      } catch (err) {
+        console.error(`[partners] could not release ${path.basename(lock)} (${err?.code ?? err?.name ?? "error"}); it goes stale in ${Math.round(staleMs / 1000)} s`);
+      }
     }
   }
   throw new FileBusy(`${path.basename(file)} is locked by another writer`);
