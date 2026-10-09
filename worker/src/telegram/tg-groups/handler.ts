@@ -2932,11 +2932,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       if (otherCoinThan(low)) continue;
       if (heldNames.some((h) => typeof h === "string" && h.trim().toLowerCase() === low)) continue;
       if (room.coins.some((c) => c.verdict === "bought" && !c.exitSaid && typeof c.name === "string" && c.name.trim().toLowerCase() === low)) continue;
-      // The permit is for the coin measured on its chain: a line naming another chain is about another coin of that ticker.
-      if (p.chain && lineChain && lineChain !== p.chain) continue;
+      // The permit is for the coin measured on its chain. The chain this line's coin is on: the one it names, else
+      // the same-ticker Fomo answer it replies under, else (replying to nothing) the topic's last same-ticker Fomo
+      // coin. Another chain is another coin of that ticker: a Base AUTON's collapse never lands on a reply under
+      // the Solana AUTON's answer (review r2).
       const sameChain = (c: FomoCoin | undefined): boolean => !p.chain || !c?.chain || c.chain === p.chain;
-      const named = wordIn(low);
       const repliedTo = isMsgId(trigger.replyTo) ? fomoCoinLines.get(msgKey(chatId, trigger.replyTo)) : undefined;
+      const liveUnder = repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= FOMO_THREAD_MS ? repliedTo : undefined;
+      const recent = recentFomoCoin(chatId, threadId);
+      const aboutChain = lineChain ?? liveUnder?.chain ?? (!repliedTo && recent && recent.symbol.toLowerCase() === low ? recent.chain : undefined);
+      if (p.chain && aboutChain && aboutChain !== p.chain) continue;
+      const named = wordIn(low);
       const under = !!repliedTo && repliedTo.symbol.toLowerCase() === low && sameChain(repliedTo) && t - repliedTo.at <= FOMO_THREAD_MS;
       const last = lastFomoCoin.get(deskKey(chatId, threadId));
       // A pointer at the coin ("it", "this one", "rip"), never an interjection: "lol" or "damn" may be about anything.
