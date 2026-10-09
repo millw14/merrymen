@@ -76,3 +76,8 @@ export * from "./chat-math";
 // read by code from the owner's words (her DM and her addressed group line).
 // Parsing starts nothing: only her press on the confirm card in her DM does.
 export * from "./tail-request";
+// PERPETUALS ON LIGHTER — the frozen venue route, the market table, the API-key
+// shape the wall seals, and the integer arithmetic every perp risk check is made
+// of. docs/perps.md is the contract.
+export * from "./perps";
+export * from "./perps-styles";

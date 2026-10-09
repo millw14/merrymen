@@ -29,6 +29,17 @@
  * any other disagreement. The one thing the rebuild cannot see is the CHAIN, so
  * that is refused explicitly: the route exists only on Robinhood Chain mainnet.
  *
+ * PERPETUALS HAVE A MARKER AND A SEALED KEY. GRANT_PERP_LIGHTER
+ * ("perp-lighter-v1") names the frozen LIGHTER_ROUTE_V1 the way GRANT_ENERGY
+ * names its route, but the wall also pins ONE API public key into
+ * `changePubKey`, so the marker alone is not the permission: the grant's `perp`
+ * block carries the key, and the rebuild takes both (through `grantWallOptions`
+ * → `grantPerp`, the reader the worker trusts). A block whose key is not
+ * canonical, whose index is not the route's, that appears without the marker
+ * (or the marker without it), or that sits on any chain but mainnet is refused
+ * by name first; a wall that pins a different key than the block names fails
+ * the byte comparison like any other disagreement.
+ *
  * WHAT THE CANONICAL WALL NEVER CARRIES, whatever the grant declares: a USDG
  * `transfer` (no signer registers a withdrawal address), the Rialto target and
  * the v4 Permit2/UniversalRouter pair (both hard-off in every signer). Their
@@ -55,6 +66,9 @@ import {
   GRANT_ENERGY,
   GRANT_SCOPED_SPENDERS,
   ENERGY_ROUTE_V1,
+  GRANT_PERP_LIGHTER,
+  LIGHTER_ROUTE_V1,
+  validatePerpPubKey,
   TRADEABLE_V2,
   isEnergyReserveToken,
   type StoredGrant,
@@ -76,6 +90,11 @@ const ZERO = "0x0000000000000000000000000000000000000000";
  * (`energyBuyFits`), from the same boolean that built the permission. It is
  * listed here in the SAME change that lets a signer mint it: a signer shipped
  * ahead of this list would have every new hosted grant refused.
+ *
+ * GRANT_PERP_LIGHTER likewise, in the same change that lets the dashboard
+ * mint it: 4663 only, when the wall still fits (`perpFits`), from the one value
+ * that set `wallOpts.perpLighter`, beside a `perp` block naming the sealed key.
+ * The phone signers only ever carry it forward from a previous grant.
  */
 export const CANONICAL_GRANT_FEATURES: readonly string[] = [
   TRADEABLE_V2,
@@ -88,7 +107,11 @@ export const CANONICAL_GRANT_FEATURES: readonly string[] = [
   // from it, so the comparison below checks the wall that was actually signed.
   // Listed in the same change that lets both signers mint it.
   GRANT_SCOPED_SPENDERS,
+  GRANT_PERP_LIGHTER,
 ];
+
+/** The perp block's fields — PUBLIC key, index, route, and at most the hosted sealed blob. */
+const PERP_FIELDS = ["route", "apiKeyIndex", "apiPublicKey", "apiKeySealed"] as const;
 
 /** A sealed address field, and the marker that must travel with it. */
 const SEALED: readonly (readonly [keyof StoredGrant, string])[] = [
@@ -313,6 +336,57 @@ function verify(grant: Record<string, unknown>): void {
     refuse(400, "invalid_grant", "The energy buy exists only on Robinhood Chain mainnet");
   }
 
+  // ── PERPETUALS: THE MARKER, THE CHAIN AND THE SEALED KEY, BY NAME ──────────
+  //
+  // Checked BEFORE the rebuild, for the reason the energy gate above is: the
+  // rebuild reads the block through `grantPerp`, which answers "no perps" for
+  // any malformed block — so a grant with a marker and a broken block would
+  // rebuild WITHOUT perps and fail as "does not implement the limits", telling
+  // nobody which field was wrong. And one thing the byte comparison could never
+  // catch at all: a block riding WITHOUT its marker rebuilds the same narrow
+  // wall and would pass, storing a sealed key the worker then ignores beside a
+  // wall with no key in it. Metadata the wall does not back is refused, in
+  // both directions.
+  const perpMarked = (features as string[]).includes(GRANT_PERP_LIGHTER);
+  if (perpMarked !== (grant.perp !== undefined)) {
+    refuse(400, "invalid_grant", "Perpetuals metadata does not match its feature marker");
+  }
+  if (grant.perp !== undefined) {
+    // The Lighter proxy is a mainnet deployment and there is no Lighter on the
+    // test network: elsewhere a CALL to it succeeds with empty returndata and a
+    // deposit would "land" having posted nothing. No signer seals it there
+    // (perpFits / decidePerpSeal) and the worker would not honour it (grantPerp).
+    if (grant.chainId !== LIGHTER_ROUTE_V1.chainId) {
+      refuse(400, "invalid_grant", "Perpetuals exist only on Robinhood Chain mainnet");
+    }
+    const perp = object(grant.perp, "perpetuals permission");
+    // AN ALLOWLIST of four fields, so a plaintext private key riding beside the
+    // public one (`apiPrivateKey`, or anything else) is refused, not stored.
+    onlyFields(perp, PERP_FIELDS);
+    if (perp.route !== GRANT_PERP_LIGHTER) refuse(400, "invalid_grant", "The perpetuals permission names an unknown route");
+    // THE ROUTE'S INDEX, EXACTLY. The wall pins it EQUAL; any other index is
+    // either a key registered on top of the owner's own Robinhood Wallet
+    // session ({0,1,2,3,157}) or a grant the worker refuses to arm.
+    if (perp.apiKeyIndex !== LIGHTER_ROUTE_V1.apiKeyIndex) {
+      refuse(400, "invalid_grant", `The perpetuals key must sit at Lighter key index ${LIGHTER_ROUTE_V1.apiKeyIndex}`);
+    }
+    // CANONICAL, AND SPELLED CANONICALLY (0x + 80 lowercase hex, every limb a
+    // field element): the signers write it that way, and a key the contract
+    // would reject is a wall whose registration can never land. Never echoed.
+    if (typeof perp.apiPublicKey !== "string" || validatePerpPubKey(perp.apiPublicKey) !== perp.apiPublicKey) {
+      refuse(400, "invalid_grant", "The perpetuals key is not a canonical Lighter API public key");
+    }
+    // Opaque to this check — the route joins it to its private key under the
+    // AAD it was sealed with — but never a present-and-empty or non-string
+    // value, which `grantPerp` reads as a corrupted grant.
+    if (
+      perp.apiKeySealed !== undefined &&
+      (typeof perp.apiKeySealed !== "string" || perp.apiKeySealed === "" || perp.apiKeySealed.length > 4096)
+    ) {
+      refuse(400, "invalid_grant", "The sealed perpetuals key cannot be read");
+    }
+  }
+
   // A hash signed by the owner authenticates the submitted bytes; it does not
   // prove those bytes implement the limits advertised beside them. Rebuild the
   // canonical wall and compare encoded policies, including recipient pins and
@@ -322,7 +396,15 @@ function verify(grant: Record<string, unknown>): void {
       caps: caps as unknown as StoredGrant["caps"],
       smartAccount,
       now: grant.grantedAt as number,
-      ...grantWallOptions({ grantTokens: tokens as string[] | undefined, grantFeatures: features as string[] }),
+      // The chain and the perp block ride along so `grantWallOptions` rebuilds
+      // the perps permissions around THE KEY THE GRANT NAMES: a wall sealed
+      // over any other key differs in changePubKey's w4/w5 and fails below.
+      ...grantWallOptions({
+        grantTokens: tokens as string[] | undefined,
+        grantFeatures: features as string[],
+        chainId: typeof grant.chainId === "number" ? grant.chainId : undefined,
+        perp: grant.perp,
+      }),
       // Already implied by the marker allowlist above, and stated anyway: the
       // canonical wall has neither, so a rebuild must never be talked into
       // either by a marker a future edit forgot to refuse.

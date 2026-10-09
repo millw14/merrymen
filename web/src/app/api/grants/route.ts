@@ -23,6 +23,7 @@ import {
   type Derivation,
   type EnergyStatus,
   type StoredGrant,
+  GRANT_PERP_LIGHTER,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { checkCanonicalWall } from "@/lib/canonical-wall";
@@ -155,6 +156,28 @@ export async function POST(req: Request) {
         duplicates,
       },
       { status: 400 },
+    );
+  }
+
+  // PERPETUALS ARE NOT TAKEN BY THIS SERVER YET (perps slice 1). The signers can
+  // carry a Lighter key and the canonical wall can rebuild one, but nothing here
+  // can mint, seal, hold or stand down a key, so a grant naming one is refused
+  // exactly as a perps-off server refuses a new opt-in. Every mode, before
+  // anything is read or stored. Replaced by perp-custody's acceptIncomingPerp
+  // when keygen lands.
+  if (
+    grant.grantFeatures?.includes(GRANT_PERP_LIGHTER) ||
+    grant.perp !== undefined ||
+    grant.perpRecovery !== undefined
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "perpetuals are not offered for this agent on this server yet, so no new Lighter key can be made or sealed. Sign again without perpetuals.",
+        code: "perp-not-offered",
+        ownerFacing: true,
+      },
+      { status: 403 },
     );
   }
 

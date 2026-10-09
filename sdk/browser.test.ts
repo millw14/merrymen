@@ -226,6 +226,12 @@ describe("prepareMerryman", () => {
     ["expectAccount", ACCOUNT],
     ["minimumValidationNonce", 2],
     ["hostedAs", ACCOUNT],
+    // Perpetuals: a partner enrollment can never seal, carry or drop a Lighter key.
+    ["perp", { apiPublicKey: `0x${"1a".repeat(40)}` }],
+    ["previousGrant", { smartAccount: ACCOUNT }],
+    ["perpDrop", true],
+    ["venueFlat", true],
+    ["recovery", { v: 1 }],
   ];
 
   it("refuses every signer option it does not offer, before any chain read or signature", async () => {

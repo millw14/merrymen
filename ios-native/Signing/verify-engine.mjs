@@ -134,5 +134,32 @@ try {
   assert.equal(result.handoff.ok, true); assert.deepEqual(result.caps, caps);
   assert.equal(posted.chainId, 4663); assert.ok(posted.serialized); assert.ok(signatures >= 2);
   if (trencher) assert.equal(posted.trencherFactoryAddress, '0x32a2a19a9a0ff54ffcaeb40955fd710e77cbbbf7');
+  if (!trencher && !legacy) {
+    // PERPETUALS ARE CARRIED FORWARD, NEVER DROPPED (docs/perps.md rules 3, 5).
+    // Perps are only ever enabled on the dashboard, so this device's own stored
+    // grants never carry them: the ONLY source the phone has is the server's
+    // PUBLIC projection (GET /api/grants → grant, publicGrantView), which
+    // GrantScreen.prepareReview hands over as `previousGrant` — exactly as it is
+    // passed here. It has no sealed blob (GET never returns one); the hosted
+    // server re-attaches it by equal public key. A re-sign must carry the marker
+    // and the PUBLIC key into the wall and the grant — a phone re-sign that lost
+    // them would strand a live Lighter account (or be refused 409 until it is flat).
+    const perpKey = '0x' + '1a'.repeat(40);
+    const local = JSON.parse(storage.get('merrymen.grant.v1'));
+    assert.ok(!local.grantFeatures.includes('perp-lighter-v1') && local.perp === undefined, 'this device never held perps: the projection is the only source');
+    const projection = {
+      smartAccount: result.smartAccount, owner: local.owner, sessionKeyAddress: local.sessionKeyAddress, caps: local.caps,
+      grantedAt: local.grantedAt, expiresAt: local.expiresAt, chainId: 4663,
+      grantFeatures: [...local.grantFeatures, 'perp-lighter-v1'],
+      perp: { route: 'perp-lighter-v1', apiKeyIndex: 16, apiPublicKey: perpKey },
+    };
+    complete = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+    context.__runWallet(4, 'create', JSON.stringify({ owner: owner.address, tenant: owner.address, did: 'did:privy:ios-test', caps, extraTokens: [], autonomousTrencher: false, expectAccount: result.smartAccount, previousGrant: projection }));
+    const again = await complete;
+    assert.equal(again.handoff.ok, true);
+    assert.ok(posted.grantFeatures.includes('perp-lighter-v1'), 'a re-sign must carry the perps marker forward from the server projection');
+    assert.deepEqual(posted.perp, { route: 'perp-lighter-v1', apiKeyIndex: 16, apiPublicKey: perpKey }, 'the public key alone; the server re-attaches its sealed blob');
+    assert.ok(!JSON.stringify(posted).includes('apiPrivateKey'), 'no Lighter private key ever reaches a grant');
+  }
   console.log(`Native runtime prepared and verified a ${legacy ? 'legacy restoration' : trencher ? 'Trencher' : 'standard'} test grant: ${signatures} owner signatures, ${Object.keys(fixtures).length} read-only RPC fixtures, zero real writes.`);
 } finally { for (const timer of timers.values()) clearTimeout(timer); }

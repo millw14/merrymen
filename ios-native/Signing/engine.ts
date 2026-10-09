@@ -37,11 +37,37 @@ export async function recoverIdentity(input: { message: string; signature: Hex }
   return { address: await recoverMessageAddress({ message: input.message, signature: input.signature }) };
 }
 
+// PERPETUALS ARE CARRIED FORWARD HERE, NEVER OFFERED OR DROPPED (docs/perps.md
+// rules 3 and 5). A Lighter key the worker registered stays valid at the venue
+// whatever a later grant says, so a phone re-sign that lost the block would
+// strand a live venue account without its key. The shared signer does the
+// carrying: `create` goes through mintGrant, which reads this engine's own
+// stored grants; `restore` goes through prepareAgentGrant, which reads no
+// storage, so the previous grant is handed to it below. `previousGrant` is the
+// host's copy of the server's PUBLIC projection (GET /api/grants → grant) when
+// it has one — the host already reads it for `expectAccount` — and it outranks
+// the stored copy when it names the same account. There is no perps opt-in and
+// no drop on this path (no keygen, no flat-venue check): turning perps on or
+// off is the dashboard's.
+function storedGrantFor(account: Address | undefined): unknown {
+  if (!account) return undefined;
+  const read = (key: string): unknown => { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : undefined; } catch { return undefined; } };
+  const current = read('merrymen.grant.v1') as { smartAccount?: unknown } | undefined;
+  if (typeof current?.smartAccount === 'string' && current.smartAccount.toLowerCase() === account.toLowerCase()) return current;
+  return read(`merrymen.grant.archive.${account.toLowerCase()}`);
+}
+function projectionFor(previousGrant: unknown, account: Address | undefined): unknown {
+  const g = previousGrant as { smartAccount?: unknown } | null | undefined;
+  return account && typeof g?.smartAccount === 'string' && g.smartAccount.toLowerCase() === account.toLowerCase() ? g : undefined;
+}
+
 export async function create(input: {
   owner: Address; tenant: Address; did: string;
   caps: MintOptions["caps"]; expectAccount?: Address;
   extraTokens: unknown[]; v4AdapterAddress?: Address; ponsAdapterAddress?: Address;
   ponsClassVaultFactory?: Address; autonomousTrencher?: boolean; priorTrencherFactory?: Address;
+  /** The server's public projection of the current grant, when the host has it. Carry-forward only. */
+  previousGrant?: unknown;
 }) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(input.owner) || input.owner.toLowerCase() !== input.tenant.toLowerCase()) {
     throw new Error("The embedded wallet does not own this account.");
@@ -60,6 +86,8 @@ export async function create(input: {
     v4AdapterAddress: input.v4AdapterAddress, ponsAdapterAddress: pons,
     ponsClassVaultFactory: input.ponsClassVaultFactory,
     trencherFactory: input.autonomousTrencher ? TRENCHER_FACTORY as Address : undefined,
+    // Carry-forward only: mintGrant also reads this engine's stored grants.
+    previousGrant: input.previousGrant,
   });
   return { smartAccount: result.grant.smartAccount, caps: result.grant.caps, handoff: result.handoff };
 }
@@ -86,6 +114,10 @@ export async function restore(input: Parameters<typeof create>[0]) {
     extraTokens: input.extraTokens.filter(isValidCustomToken), v4AdapterAddress: input.v4AdapterAddress,
     ponsAdapterAddress: pons, ponsClassVaultFactory: input.ponsClassVaultFactory,
     trencherFactory: input.autonomousTrencher ? TRENCHER_FACTORY as Address : undefined,
+    // prepareAgentGrant reads no storage, so the previous grant for THIS account
+    // is handed over: the host's server projection if it names it, else this
+    // engine's own stored copy. Omitting it would sign without the perps block.
+    previousGrant: projectionFor(input.previousGrant, input.expectAccount) ?? storedGrantFor(input.expectAccount),
   });
   const response = await fetch('/api/auth/challenge', { cache: 'no-store' });
   if (!response.ok) throw new Error('The account-link challenge could not be read.');

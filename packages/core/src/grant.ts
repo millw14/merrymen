@@ -9,6 +9,9 @@ import {
 } from "./tokens";
 // energy.ts imports only a TYPE from this file, so this is no runtime cycle.
 import { isEnergyReserveToken } from "./energy";
+// perps.ts imports only perps-styles.ts, which imports nothing (its grant reader
+// takes a structural type for exactly this reason), so neither is this.
+import { GRANT_PERP_LIGHTER, validatePerpPubKey, type PerpGrant, type PerpRecoveryReference } from "./perps";
 
 /**
  * grantFeatures marker meaning "this signature carries the WIDE tradable set".
@@ -389,6 +392,8 @@ export function bindingMessage(args: BindingClaim): string {
 }
 
 export interface StoredGrant {
+  /** Explicit owner recovery reference, independently verified before incident clearing. */
+  perpRecovery?: PerpRecoveryReference;
   smartAccount: `0x${string}`;
   owner: `0x${string}`;
   sessionKeyAddress: `0x${string}`;
@@ -458,6 +463,27 @@ export interface StoredGrant {
   trencherVaultAddress?: string;
   trencherFactoryAddress?: string;
   /**
+   * The Lighter API key this signature's `changePubKey` permission was sealed
+   * against — `{ route, apiKeyIndex, apiPublicKey, apiKeySealed? }`, read only
+   * through `grantPerp` (perps.ts), which requires the GRANT_PERP_LIGHTER
+   * marker, chain 4663, the route's key index and a canonical key alongside it.
+   *
+   * THE PUBLIC KEY, AND AT MOST A SEALED BLOB OF THE PRIVATE ONE. There is no
+   * field in this type a plaintext private key fits in, and that is the
+   * design, not an omission: signers only ever see the public key (keygen
+   * returns it), self-hosted keeps the private key in its own 0600 file beside
+   * the home, and hosted carries it only as `apiKeySealed` — AES-256-GCM under
+   * a key the child never holds, bound to tenant|smartAccount|pubkey|keyIndex.
+   * An API key can hand every dollar at the venue to a counterparty and the
+   * wall cannot bound it (docs/perps.md rule 4), so it is custody exactly as
+   * the session key is.
+   *
+   * AND EVEN THE SEALED BLOB NEVER LEAVES IN A RESPONSE. `publicGrantView`
+   * below is how a grant becomes JSON for anybody, and it copies
+   * `route`, `apiKeyIndex` and `apiPublicKey` — never `apiKeySealed`.
+   */
+  perp?: PerpGrant;
+  /**
    * HOSTED ONLY — the two signatures that bind this account to a tenant.
    *
    * The account's owner key is generated in the browser, so `owner` can never
@@ -519,6 +545,137 @@ export interface StoredGrant {
    * funding. Absent when an external wallet (MetaMask) was the owner.
    */
   demoOwnerPrivateKey?: `0x${string}`;
+}
+
+/**
+ * What of a grant may be shown to anybody — a browser tab, the iOS app, a
+ * partner, a log line. Addresses, caps, times, markers and PUBLIC keys; no
+ * secret of any kind, sealed or not.
+ */
+export interface PublicGrantView {
+  smartAccount?: `0x${string}`;
+  owner?: `0x${string}`;
+  sessionKeyAddress?: `0x${string}`;
+  caps?: GrantCaps;
+  grantedAt?: number;
+  expiresAt?: number;
+  chainId?: number;
+  grantFeatures?: string[];
+  grantTokens?: string[];
+  v4AdapterAddress?: string;
+  ponsAdapterAddress?: string;
+  ponsClassVaultAddress?: string;
+  ponsClassVaultFactoryAddress?: string;
+  trencherVaultAddress?: string;
+  trencherFactoryAddress?: string;
+  /** The security model only. The nonce, the DID and both signatures stay home. */
+  binding?: { version?: BindingVersion };
+  /** The key's PUBLIC half and where it sits. Never `apiKeySealed`. */
+  perp?: { route: typeof GRANT_PERP_LIGHTER; apiKeyIndex: number; apiPublicKey: `0x${string}` };
+}
+
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+/** A feature marker's shape: a short word. A 64- or 80-hex run is not one. */
+const MARKER_RE = /^[A-Za-z][A-Za-z0-9-]{0,39}$/;
+const CAP_FIELDS = ["perTradeUsdg", "dailyUsdg", "expiryDays", "maxDrawdownPct", "maxOpsPerDay"] as const;
+const SEALED_ADDRESS_FIELDS = [
+  "v4AdapterAddress",
+  "ponsAdapterAddress",
+  "ponsClassVaultAddress",
+  "ponsClassVaultFactoryAddress",
+  "trencherVaultAddress",
+  "trencherFactoryAddress",
+] as const;
+
+/**
+ * THE ONLY WAY A GRANT BECOMES A RESPONSE. Built from an ALLOWLIST.
+ *
+ * GET /api/grants used to strip secrets with a DENYLIST of top-level keys —
+ * `serialized`, `demoSessionPrivateKey`, `demoOwnerPrivateKey` — and spread
+ * everything else out. That is safe exactly until somebody adds a field, and
+ * perps add one: a nested `perp` block whose sealed private key would have
+ * gone to every browser tab and into the iOS app's on-disk URL cache, past a
+ * type (`Omit<StoredGrant, …top-level keys>`) that cannot see inside it. A
+ * denylist fails OPEN on the next field; an allowlist fails closed — a field
+ * nobody listed here is simply not shown, and the worst outcome is a screen
+ * missing a value.
+ *
+ * So every field below is named, and COPIED BY TYPE AND SHAPE rather than by
+ * reference: addresses must look like addresses, times and chain ids must be
+ * finite numbers, markers must be short words, caps are rebuilt field by field,
+ * the binding keeps only its version, and the perp block keeps only its route,
+ * index and canonical PUBLIC key. A value of the wrong shape is dropped rather
+ * than passed through, because a wrong-shaped value in a known field is how a
+ * key ends up somewhere it should not (a session private key written into
+ * `sessionKeyAddress` by a buggy signer is 64 hex, not 40, and does not get
+ * out). The one secret this cannot catch by shape is an API PRIVATE key
+ * written into `apiPublicKey` — both halves are 80 hex — which is why the
+ * signers never see the private half at all (docs/perps.md rule 5).
+ *
+ * Untyped input on purpose: grants arrive from JSON files, Postgres and
+ * device storage, and the allowlist must hold on whatever is actually there.
+ */
+export function publicGrantView(grant: unknown): PublicGrantView {
+  const g = (typeof grant === "object" && grant !== null ? grant : {}) as Record<string, unknown>;
+  const out: PublicGrantView = {};
+  const address = (v: unknown): `0x${string}` | undefined =>
+    typeof v === "string" && ADDRESS_RE.test(v) ? (v as `0x${string}`) : undefined;
+  const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+  const smartAccount = address(g.smartAccount);
+  if (smartAccount) out.smartAccount = smartAccount;
+  const owner = address(g.owner);
+  if (owner) out.owner = owner;
+  const sessionKeyAddress = address(g.sessionKeyAddress);
+  if (sessionKeyAddress) out.sessionKeyAddress = sessionKeyAddress;
+
+  if (typeof g.caps === "object" && g.caps !== null) {
+    const src = g.caps as Record<string, unknown>;
+    const caps: Partial<GrantCaps> = {};
+    for (const k of CAP_FIELDS) {
+      const v = finite(src[k]);
+      if (v !== undefined) caps[k] = v;
+    }
+    out.caps = caps as GrantCaps;
+  }
+
+  const grantedAt = finite(g.grantedAt);
+  if (grantedAt !== undefined) out.grantedAt = grantedAt;
+  const expiresAt = finite(g.expiresAt);
+  if (expiresAt !== undefined) out.expiresAt = expiresAt;
+  const chainId = finite(g.chainId);
+  if (chainId !== undefined) out.chainId = chainId;
+
+  if (Array.isArray(g.grantFeatures)) {
+    out.grantFeatures = g.grantFeatures.filter((f): f is string => typeof f === "string" && MARKER_RE.test(f));
+  }
+  if (Array.isArray(g.grantTokens)) {
+    out.grantTokens = g.grantTokens.filter((a): a is string => typeof a === "string" && ADDRESS_RE.test(a));
+  }
+  for (const k of SEALED_ADDRESS_FIELDS) {
+    const a = address(g[k]);
+    if (a) out[k] = a;
+  }
+
+  // THE BINDING'S VERSION AND NOTHING ELSE. The nonce and the Privy DID are
+  // not secrets, but they are not needed by any screen either, and the two
+  // signatures are proof material; an allowlist does not ship what nobody asked
+  // for. An unrecognised version is dropped rather than echoed.
+  if (typeof g.binding === "object" && g.binding !== null) {
+    const v = (g.binding as Record<string, unknown>).version;
+    out.binding = isBindingVersion(v) ? { version: v } : {};
+  }
+
+  // The PUBLIC half of the venue key, so a phone can carry it forward on a
+  // re-sign without ever holding the private one. `apiKeySealed` is never read.
+  if (typeof g.perp === "object" && g.perp !== null) {
+    const p = g.perp as Record<string, unknown>;
+    const apiPublicKey = typeof p.apiPublicKey === "string" ? validatePerpPubKey(p.apiPublicKey) : null;
+    if (p.route === GRANT_PERP_LIGHTER && typeof p.apiKeyIndex === "number" && Number.isInteger(p.apiKeyIndex) && apiPublicKey) {
+      out.perp = { route: GRANT_PERP_LIGHTER, apiKeyIndex: p.apiKeyIndex, apiPublicKey };
+    }
+  }
+  return out;
 }
 
 /**

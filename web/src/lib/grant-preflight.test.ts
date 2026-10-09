@@ -202,3 +202,30 @@ describe("read-only grant renewal preflight", () => {
     assert.equal(signer.calls(), 0);
   });
 });
+
+describe("the renewal preflight decides perps exactly as the mint will", () => {
+  const KEY = `0x${"1a".repeat(40)}` as `0x${string}`;
+  const carried = {
+    smartAccount: ACCOUNT, chainId: 4663, grantFeatures: ["tradeable-v2", "perp-lighter-v1"],
+    perp: { route: "perp-lighter-v1", apiKeyIndex: 16, apiPublicKey: KEY },
+  };
+  const coins = (n: number) => Array.from({ length: n }, (_, i) => ({
+    symbol: `C${i}`, address: `0x${(0xc0e000 + i).toString(16).padStart(40, "0")}` as `0x${string}`, decimals: 18,
+  }));
+  it("a carried Lighter key that no longer fits refuses BEFORE revocation, with no signature and no storage", async () => {
+    const { preflightAgentGrant, PerpSigningRefusal } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    await withStubChain(ACCOUNT, () => assert.rejects(
+      preflightAgentGrant(signer.owner, { ...options, previousGrant: carried, extraTokens: coins(5) }),
+      (e: unknown) => e instanceof PerpSigningRefusal && e.code === "perp-does-not-fit",
+    ), { currentNonce: 8 });
+    assert.equal(signer.calls(), 0);
+  });
+  it("and one that fits passes the preflight", async () => {
+    const { preflightAgentGrant } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    const result = await withStubChain(ACCOUNT, () => preflightAgentGrant(signer.owner, { ...options, previousGrant: carried }), { currentNonce: 8 });
+    assert.equal(result, undefined);
+    assert.equal(signer.calls(), 0);
+  });
+});
