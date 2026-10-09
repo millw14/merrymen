@@ -633,6 +633,13 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
  * ("autonrecovery", "dm_autonhelp"). Such an author is "a trader".
  */
 const IMPERSONATES = /\b(?:support|help\s*desk|admins?|mods?|moderators?|official|team|devs?|bot|refunds?|recovery|merrym[ae]n|fomo|telegram)\b|(?<=[\p{L}\p{N}])(?:recovery|support|help(?:desk)?|rescue)\b/iu;
+/** A handle read as one lowercase word, digits as the letters they stand for ("F0m0_Admin" is "fomoadmin"). */
+const HANDLE_LEET: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t" };
+const foldedHandle = (handle: string): string =>
+  handle.normalize("NFKC").toLowerCase().replace(/[013457]/g, (d) => HANDLE_LEET[d] ?? d).replace(/[^\p{L}]+/gu, "");
+/** What a handle read as one word may never hold anywhere in it: staff, Merrymen, Fomo, a lure, a crime, harm. */
+const IMPERSONATES_FOLDED =
+  /fomo|merrym[ae]n|telegram|support|admin|official|staff|helpdesk|customer(?:care|service)|refund|recover|verified|moderator|airdrop|giveaway|kill(?:your|ur|the|them|him|her)|kys|hangthe|rapist|scam|^buy|^sell|sendsol|sendeth|doubleyour/u;
 /** The lines code says around the quotes; a thesis that echoes one is dressing as the answer itself. */
 const QUOTE_FRAME = /\bfrom a copy fetched\b|\btheir words,? not facts\b|\bthe newest \d+ theses\b|\b\d+ of these \d+ left out\b/i;
 
@@ -652,6 +659,11 @@ function quoteHandleOk(handle: string): boolean {
     .replace(/(\p{L})(\p{N})|(\p{N})(\p{L})/gu, "$1$3 $2$4")
     .trim();
   if (IMPERSONATES.test(spaced)) return false;
+  // Read as one word too, digits as letters (review r2): "fomoadmin",
+  // "merrymenofficial", "telegramsupport", "f0m0admin", "killyourself" never
+  // split at a case or an underscore. Short words (dev, bot, mod, team) stay
+  // with the word-edged test above: as substrings they hide in real names.
+  if (IMPERSONATES_FOLDED.test(foldedHandle(handle))) return false;
   return admitTgLine(quoteLine({ who: spaced, age: "", text: "x" }), { agentName: "", kind: "quote", recentOwn: [] }).ok;
 }
 

@@ -33,8 +33,10 @@ export function quoteLineOf(q: { who: string; age: string; text: string }): stri
   return `• ${q.who}${q.age ? `, ${q.age}` : ""}: “${q.text}”`;
 }
 
-/** Letters and digits only, lowercased: "Shogun_Bot" and "shogunbot" read alike. */
-const compact = (x: string): string => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+/** Digits a handle writes for letters ("sh0gun", "5hogun"; review r2). */
+const LEET_HANDLE: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t" };
+/** Letters and digits only, lowercased, digits read as letters: "Shogun_Bot", "shogunbot" and "Sh0gun_bot" read alike. */
+const compact = (x: string): string => x.toLowerCase().replace(/[013457]/g, (d) => LEET_HANDLE[d] ?? d).replace(/[^\p{L}\p{N}]+/gu, "");
 
 /**
  * The agent's own name as a quote may not carry it: inside an author's
