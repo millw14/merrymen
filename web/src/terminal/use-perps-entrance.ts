@@ -7,6 +7,8 @@ export function perpsEntranceOwner(session: { hosted: boolean; address: string |
   return session.hosted ? session.address?.toLowerCase() ?? null : "local";
 }
 
+type Point = { x: number; y: number };
+
 type ModeTransition = {
   owner: string | null;
   direction: "spot" | "perps";
@@ -14,7 +16,12 @@ type ModeTransition = {
   fromPath: string;
   targetPath: string;
   scene: FrozenModeScene;
+  /** Where the switch was asked for, in viewport pixels; the armour pours from here. */
+  origin: Point | null;
 };
+
+/** A press older than this did not ask for the switch. */
+const PRESS_WINDOW_MS = 1500;
 
 /** Freeze only the outgoing pixels' DOM; the destination remains the one live app. */
 export function usePerpsEntrance(owner: string | null, pathname: string, source: RefObject<HTMLDivElement | null>) {
@@ -24,6 +31,7 @@ export function usePerpsEntrance(owner: string | null, pathname: string, source:
   const active = useRef<ModeTransition | null>(null);
   const deadline = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(true);
+  const lastPress = useRef<{ x: number; y: number; at: number } | null>(null);
   const [pending, setPending] = useState(false);
   const [transition, setTransition] = useState<ModeTransition | null>(null);
 
@@ -64,6 +72,24 @@ export function usePerpsEntrance(owner: string | null, pathname: string, source:
     }
   }, [pathname, cancelPending, finish]);
   useEffect(() => {
+    // Capture phase: a toggle that stops propagation still tells us where it was pressed.
+    const press = (event: PointerEvent) => { lastPress.current = { x: event.clientX, y: event.clientY, at: performance.now() }; };
+    window.addEventListener("pointerdown", press, true);
+    return () => window.removeEventListener("pointerdown", press, true);
+  }, []);
+  /** Read at the moment of the request, before any claim is awaited. */
+  const switchOrigin = useCallback((): Point | null => {
+    const recent = lastPress.current;
+    if (recent && performance.now() - recent.at < PRESS_WINDOW_MS && Number.isFinite(recent.x) && Number.isFinite(recent.y)) return { x: recent.x, y: recent.y };
+    // A keyboard switch: pour from the focused toggle button.
+    const focused = document.activeElement;
+    if (focused?.closest(".trading-mode-toggle")) {
+      const box = focused.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    }
+    return null;
+  }, []);
+  useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
@@ -73,7 +99,7 @@ export function usePerpsEntrance(owner: string | null, pathname: string, source:
     };
   }, [releaseScene]);
 
-  const switchMode = useCallback((direction: "spot" | "perps", dramatic: boolean, navigate: () => void) => {
+  const switchMode = useCallback((direction: "spot" | "perps", dramatic: boolean, origin: Point | null, navigate: () => void) => {
     if (active.current) return;
     if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches && source.current) {
       try {
@@ -81,6 +107,7 @@ export function usePerpsEntrance(owner: string | null, pathname: string, source:
           owner, direction, dramatic, fromPath: currentPath.current,
           targetPath: direction === "perps" ? "/perps" : "/",
           scene: freezeModeScene(source.current),
+          origin,
         };
         active.current = next;
         setTransition(next);
@@ -96,7 +123,8 @@ export function usePerpsEntrance(owner: string | null, pathname: string, source:
 
   const enter = useCallback(async (navigate: () => void) => {
     if (request.current || active.current) return;
-    if (!owner) { switchMode("perps", false, navigate); return; }
+    const origin = switchOrigin();
+    if (!owner) { switchMode("perps", false, origin, navigate); return; }
     const controller = new AbortController();
     request.current = controller;
     setPending(true);
@@ -114,13 +142,14 @@ export function usePerpsEntrance(owner: string | null, pathname: string, source:
     if (!mounted.current || currentOwner.current !== owner || request.current !== controller) return;
     request.current = null;
     setPending(false);
-    switchMode("perps", dramatic, navigate);
-  }, [owner, switchMode]);
+    switchMode("perps", dramatic, origin, navigate);
+  }, [owner, switchMode, switchOrigin]);
 
   const leave = useCallback((navigate: () => void) => {
+    const origin = switchOrigin();
     cancelPending();
-    switchMode("spot", false, navigate);
-  }, [cancelPending, switchMode]);
+    switchMode("spot", false, origin, navigate);
+  }, [cancelPending, switchMode, switchOrigin]);
 
   const visible = transition?.owner === owner ? transition : null;
   return {

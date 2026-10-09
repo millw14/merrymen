@@ -900,6 +900,7 @@ export function App() {
       direction={entrance.transition.direction}
       dramatic={entrance.transition.dramatic}
       ready={entrance.ready}
+      origin={entrance.transition.origin}
     />}</div></WiredProvider>
   );
 }

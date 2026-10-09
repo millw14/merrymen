@@ -16,8 +16,9 @@ describe("once-per-owner, reversible mode transition", () => {
     controller = usePerpsEntrance(owner, pathname, source);
     return createElement("div", { ref: source },
       createElement("h1", {}, pathname === "/perps" ? "Tactical Radar" : "Merrymen feed"),
-      createElement("button", { onClick: () => void controller.enter(() => navigations++) }, "Perps"),
-      createElement("button", { onClick: () => controller.leave(() => navigations++) }, "Spot"));
+      createElement("div", { className: "trading-mode-toggle" },
+        createElement("button", { onClick: () => void controller.enter(() => navigations++) }, "Perps"),
+        createElement("button", { onClick: () => controller.leave(() => navigations++) }, "Spot")));
   }
   beforeEach(() => {
     ui = testDom();
@@ -430,5 +431,55 @@ describe("once-per-owner, reversible mode transition", () => {
     assert.deepEqual(suitOrigin(null, scene.element), { x: 140, y: 25 });
     assert.deepEqual(suitOrigin({ x: Number.NaN, y: 4 }, scene.element), { x: 140, y: 25 }, "a non-finite press is ignored");
     assert.deepEqual(suitOrigin(null, null), { x: ui.dom.window.innerWidth / 2, y: 0 });
+  });
+
+  const press = (x: number, y: number) => act(async () => {
+    ui.container.querySelector("button")!.dispatchEvent(new ui.dom.window.PointerEvent("pointerdown", { clientX: x, clientY: y, bubbles: true }));
+  });
+  it("remembers where a recent press asked for the switch, in both directions", async () => {
+    globalThis.fetch = async () => json({ owner: "local", play: false });
+    await ui.render(createElement(Harness, { owner: "local" }));
+    await press(120, 40);
+    await ui.click("Perps");
+    assert.deepEqual(controller!.transition?.origin, { x: 120, y: 40 });
+    await act(async () => controller!.finish());
+    await ui.render(createElement(Harness, { owner: "local", pathname: "/perps" }));
+    await press(300, 20);
+    await ui.click("Spot");
+    assert.equal(controller!.transition?.direction, "spot");
+    assert.deepEqual(controller!.transition?.origin, { x: 300, y: 20 });
+  });
+  it("ignores a stale press", async context => {
+    let now = 10_000;
+    context.mock.method(performance, "now", () => now);
+    await ui.render(createElement(Harness, { owner: null }));
+    await press(50, 60);
+    now += 1500;
+    await ui.click("Perps");
+    assert.ok(controller!.transition, "the switch itself still happens");
+    assert.equal(controller!.transition.origin, null, "a press 1.5 s old did not ask for this switch");
+  });
+  it("takes the origin when the switch is asked for, not after the intro claim returns", async context => {
+    let now = 20_000;
+    context.mock.method(performance, "now", () => now);
+    const claim = deferred<Response>();
+    globalThis.fetch = async () => claim.promise;
+    await ui.render(createElement(Harness, { owner: "local" }));
+    await press(70, 15);
+    now += 100;
+    await ui.click("Perps");
+    assert.equal(controller!.pending, true);
+    now += 5000;
+    await act(async () => claim.resolve(json({ owner: "local", play: true })));
+    assert.equal(controller!.transition?.dramatic, true);
+    assert.deepEqual(controller!.transition?.origin, { x: 70, y: 15 });
+  });
+  it("pours from the focused toggle button for a keyboard switch", async () => {
+    await ui.render(createElement(Harness, { owner: null }));
+    const perps = Array.from(ui.container.querySelectorAll("button")).find(button => button.textContent === "Perps")!;
+    perps.getBoundingClientRect = rect(100, 10, 80, 30);
+    perps.focus();
+    await ui.click("Perps");
+    assert.deepEqual(controller!.transition?.origin, { x: 140, y: 25 });
   });
 });
