@@ -105,7 +105,9 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    Milla, 2026-10-09). Then the room hears up to 10 of the newest, each at
    most ~160 characters, cleaned (links, addresses, handles, $tags and markup
    out; a row a link or an address was taken out of is left out whole), each
-   line gated as `quote` (lures, drainer prompts, refund, v2 and
+   line gated as `quote` (lures, drainer prompts in any words: a seed
+   phrase or "the 12 words", a private key, a wallet to connect, sync or
+   rectify, a dapp, sells to unlock, wallets to post, a form; refund, v2 and
    support-ticket lures, someone to message or a channel named without its @,
    sends, calls to action, links spelled out without a
    dot ("bit ly slash", "autonrefund point com"), addresses split into chunks,

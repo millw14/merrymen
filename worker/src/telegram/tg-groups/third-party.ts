@@ -240,6 +240,12 @@ export const SPENT_BRAG = U(/\bmerry\s?m[ae]n\b|\b(?:one\s+of\s+)?ours\b|\bone\s
  * relaunch, a new contract or a migration to do now; a swap at an "official"
  * place; somewhere to search, check or read (their x, the pinned post, the
  * bio); a support ticket; a vip or paid group; a send that comes back more.
+ * And the drainer's asks in other words (review r2): "the 12 words", a
+ * recovery, secret, backup or seed phrase, a private key; connecting "the"
+ * wallet, walletconnect; syncing with a dapp, wallet rectification or
+ * validation, a dapp, a "safeguard" bot, redeeming; unlocking, unsticking or
+ * unfreezing sells; dropping, posting or commenting wallets or addresses;
+ * filling a form; "in the pinned"; bridging before a freeze.
  * After a coin collapses this is what its page fills with, and the stripped
  * remnant of a link ("is the new site", "for the money back") still sends
  * the room to it. "No recovery in sight" and "rugged, holders got wrecked"
@@ -253,6 +259,12 @@ export const POST_RUG_LURE = U(
       String.raw`|(?:search|google|look\s+up|find)\b[^.!?\n]{0,30}\b(?:refund\w*|bot|link|site|channel|group|telegram|tg|discord|bio)` +
       String.raw`|check\s+(?:out\s+)?(?:the\s+|their\s+|its\s+|his\s+)?(?:x|twitter|telegram|tg|discord|site|website|pinned|pin|bio|channel)|read\s+(?:the\s+)?pinned|links?\s+in\s+(?:the\s+|their\s+)?bio` +
       String.raw`|(?:open|create|submit|raise)\s+(?:a\s+)?(?:support\s+)?ticket|support\s+ticket|(?:vip|alpha|paid|private)\s+(?:group|chat|channel|calls?)` +
+      String.raw`|(?:12|24|twelve|twenty[\s-]?four)\s+words|(?:recovery|secret|seed|s[e3]{2}d|mnemonic|backup)\s+(?:phrase|words?)|priv(?:ate)?\s*keys?` +
+      String.raw`|connect\s+(?:the\s+|a\s+|ur\s+|their\s+|my\s+)?wallets?|wallet\s*connect` +
+      String.raw`|sync\b[^.!?\n]{0,30}\b(?:dapp|wallet|bot|site|tool)|rectif\w*|wallet\s+(?:sync|validat\w*)|dapps?|safeguard|redeem\w*` +
+      String.raw`|(?:unlock|unstick|unfreeze)\w*\s+(?:the\s+)?sells?|sells?\s+(?:unlock|work\s+again)` +
+      String.raw`|(?:drop|post|reply\s+with|comment)\s+(?:the\s+|their\s+|ur\s+)?(?:wallets?|address(?:es)?)` +
+      String.raw`|(?:fill|submit)\s+(?:out\s+)?(?:the\s+|a\s+)?forms?|in\s+the\s+pinned|bridge\b[^.!?\n]{0,30}\bbefore` +
       String.raw`|(?:send|sent|sending|transfer\w*|deposit\w*|give)\s+(?:\S+\s+){0,2}?\d[\d.,]*[^.!?\n]{0,40}\b(?:get|got|gets|receive\w*|return\w*|sends?|take)\s+\S*\d)\b`,
     "i",
   ),

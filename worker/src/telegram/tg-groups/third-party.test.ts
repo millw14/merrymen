@@ -243,6 +243,29 @@ describe("the new clauses", () => {
     misses(POST_RUG_LURE, [...HARMLESS, "rugged, holders got wrecked", "holders still bagholding, no recovery in sight", "dead coin now, volume gone", "it got listed on a cex", "chart is cooked"]);
   });
 
+  it("POST_RUG_LURE: the drainer's asks in other words (review r2)", () => {
+    hits(POST_RUG_LURE, [
+      "enter the 12 words on the site to unlock sells",
+      "import the recovery phrase into the bot to fix sells",
+      "paste the priv key into the bot to fix sells",
+      "secret phrase into the tool and sells work again",
+      "s33d phrase into the bot to fix sells",
+      "connect the wallet on autonhub and sells unlock",
+      "walletconnect to the site and sells unlock",
+      "sync with the dapp and sells work again",
+      "wallet rectification fixed my stuck tokens",
+      "tap verify on the safeguard bot to unlock sells",
+      "use the dapp to unstick sells",
+      "redeem the old tokens for new ones",
+      "drop wallets below, holders covered",
+      "reply with wallet to get covered",
+      "comment the address for the list",
+      "fill the form in the pinned to get covered",
+      "bridge to base before they freeze it",
+    ]);
+    misses(POST_RUG_LURE, ["holders still bagholding, no recovery in sight", "connected community, still building", "in a few words: dead coin", "sells are heavy"]);
+  });
+
   it("SPELLED_LINK: a link spelled out without 'dot' (review, 2026-10-09)", () => {
     hits(SPELLED_LINK, [
       "discord gg slash autonrefund",

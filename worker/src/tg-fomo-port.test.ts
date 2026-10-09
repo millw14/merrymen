@@ -2956,6 +2956,29 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["the telegram is dead", "dev went quiet on telegram", "the team said in the tg they are building", "contact with the team is lost", "chart needs to reclaim the high"]);
   });
 
+  it("a drainer's ask in other words: the 12 words, a private key, the wallet connected, a dapp, sells unlocked, a form (review r2)", () => {
+    leftOut([
+      "enter the 12 words on the site to unlock sells",
+      "import the recovery phrase into the bot to fix sells",
+      "paste the priv key into the bot to fix sells",
+      "secret phrase into the tool and sells work again",
+      "s33d phrase into the bot to fix sells",
+      "connect the wallet on autonhub and sells unlock",
+      "walletconnect to the site and sells unlock",
+      "sync with the dapp and sells work again",
+      "wallet rectification fixed my stuck tokens",
+      "tap verify on the safeguard bot to unlock sells",
+      "use the dapp to unstick sells",
+      "redeem the old tokens for new ones",
+      "drop wallets below, holders covered",
+      "reply with wallet to get covered",
+      "comment the address for the list",
+      "fill the form in the pinned to get covered",
+      "bridge to base before they freeze it",
+    ]);
+    quoted(["holders still bagholding, no recovery in sight", "connected community, still building", "in a few words: dead coin", "sells are heavy"]);
+  });
+
   it("an @ glued to a word, spaced from its name or in another form is never turned into a space and quoted (review r2)", () => {
     leftOut([
       "real chat@autonholders, old one is dead",
