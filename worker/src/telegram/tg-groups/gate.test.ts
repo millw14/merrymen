@@ -1975,6 +1975,11 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
       it(`${kind} admits a collapse the coin did: ${JSON.stringify(t)}`, () => assert.equal(v(t, kind), "ok"));
     }
   }
+  it("a quote that lays the rug on someone in any verb is accuse; the coin, its chart and holders are no one (review r2)", () => {
+    const q = (t: string): string => reason(`• a trader, 3 min ago: “${t}”`, { kind: "quote", agentName: "Shogun", names: [], rug: { coins: ["AUTON"], brag: false } });
+    for (const t of ["auton rugged, kaleo was behind it", "auton rugged, frankdegods orchestrated it", "auton rugged, frankdegods set it up", "auton rugged, kaleo planned the whole thing", "auton rugged, kaleo cheated everyone", "auton rugged, kaleo profited off holders", "auton rugged, kaleo should be locked up", "it rugged, hope kaleo burns", "auton rugged, kaleo was in it"]) assert.equal(q(t), "accuse", t);
+    for (const t of ["this is gonna rug, top holders own way too much", "rugged, holders got wrecked", "feels like a slow rug, volume is dying", "auton dumped hard, rugged", "it ran then rugged lol", "auton rugged lol", "auton? yeah it rugged", "rugged, liquidity vanished"]) assert.equal(q(t), "ok", t);
+  });
   it("a rug beside someone the room knows by name is accuse, in banter and in a quote", () => {
     assert.equal(v("auton rugged cause milla shilled it", "banter"), "accuse");
     assert.equal(reason("• a trader, 3 min ago: “auton rugged, milla was in it”", { kind: "quote", agentName: "Shogun", names: ["Milla"], rug: { coins: ["AUTON"], brag: false } }), "accuse");

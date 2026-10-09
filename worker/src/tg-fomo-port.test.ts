@@ -3186,6 +3186,11 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["rugged, holders got wrecked"]);
   });
 
+  it("a rug blamed on a named trader in any verb is never quoted (review r2)", () => {
+    leftOut(["auton rugged, kaleo was behind it", "auton rugged, frankdegods orchestrated it", "auton rugged, frankdegods set it up", "auton rugged, kaleo planned the whole thing", "auton rugged, kaleo cheated everyone", "auton rugged, kaleo profited off holders", "auton rugged, kaleo should be locked up", "it rugged, hope kaleo burns", "auton rugged, kaleo was in it"]);
+    quoted(["this is gonna rug, top holders own way too much", "rugged, holders got wrecked", "feels like a slow rug, volume is dying", "auton dumped hard, rugged", "it ran then rugged lol", "auton rugged lol", "auton? yeah it rugged", "rugged, liquidity vanished"]);
+  });
+
   it("a rug a named trader did (ran, dumped, sold the top, a crook) is never quoted", () => {
     leftOut(["auton rugged, kaleo ran", "auton rugged, kaleo took the money", "it rugged cuz kaleo is a crook", "auton rugged, kaleo dumped", "it rugged and frankdegods sold the top"]);
     quoted(["auton dumped hard, rugged", "it ran then rugged lol"]);

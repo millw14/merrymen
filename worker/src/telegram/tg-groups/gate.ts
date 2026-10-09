@@ -1273,6 +1273,30 @@ function collapseDoneBy(t: string, doers: ReadonlySet<string>): boolean {
 }
 const OUT_ACCUSE_U = U(OUT_ACCUSE);
 
+/**
+ * A RUG BLAMED ON SOMEONE IN A QUOTE, in any verb (review r2): "auton rugged,
+ * kaleo was behind it", "kaleo orchestrated it", "kaleo planned the whole
+ * thing", "it rugged, hope kaleo burns". The gate cannot know a stranger's
+ * quote's names, so beside a lifted rug word every other clause must open
+ * (after fillers and one article) with what may have collapsed (the
+ * permit's doers: the coin, a pointer, its chart, price or liquidity), a
+ * collective of holders, or the author; a clause with no subject ("then
+ * dumped") is no one's. "Rugged, holders got wrecked" and "this is gonna
+ * rug, top holders own way too much" stay. For the quote kind only.
+ */
+const RUG_COLLECTIVE = ["holders", "holder", "top", "supply", "wallets", "we", "my", "our", "feels", "felt", "looks", "seems", "another", "chart's", "it's", "down", "up", "gonna", "rip", "dumped", "dumping", "ran", "then"];
+const RUG_CLAUSE_SPLIT = /[.!?,;:—–…“”"«»()]+|\s(?:and|but|so|cause|cuz|coz|because|bc|since|then|hope|wish)\s+/u;
+const RUG_CLAUSE_LEAD = new RegExp(`^${RUG_LEAD}(?:(?:the|a|an)\\s+)?`, "u");
+function rugBlamesSomeone(body: string, doers: ReadonlySet<string>): boolean {
+  for (const raw of body.split(RUG_CLAUSE_SPLIT)) {
+    const c = raw.trim().replace(RUG_CLAUSE_LEAD, "");
+    if (!c || RUG_WORD.test(c)) continue;
+    const first = (c.split(/\s+/u)[0] ?? "").replace(/^\$+/u, "");
+    if (first && !doers.has(first) && !RUG_COLLECTIVE.includes(first)) return true;
+  }
+  return false;
+}
+
 /** A reading with every lifted rug word taken out: what RUG_WORD then reads. */
 function rugMasked(t: string, mask: RegExp): string {
   return t.replace(mask, (m) => m.replace(/(?:rugged|rug)$/u, " "));
@@ -1859,6 +1883,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   // a collapse someone did beside a lifted rug word ("auton rugged, kaleo ran").
   if (rug && some(r.low, OUT_ACCUSE_U)) return refuse("accuse");
   if (rug && r.low.some((t) => RUG_WORD.test(t)) && r.low.some((t) => collapseDoneBy(t, rug.doers))) return refuse("accuse");
+  if (rug && kind === "quote" && r.low.some((t) => RUG_WORD.test(t) && rugBlamesSomeone(quoteBody(t), rug.doers))) return refuse("accuse");
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
   if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");
