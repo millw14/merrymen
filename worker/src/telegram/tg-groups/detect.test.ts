@@ -1266,6 +1266,11 @@ describe("the theses themselves, a coin's facts, and a room saying it rugged (Mi
       ["the dev rugged it", null],
       ["they rugged", null],
       ["rugby is on", null],
+      // A subject that names no coin is no pointer at the room's (review, 2026-10-09).
+      ["the market rugged today", null],
+      ["everyone rugged lol", null],
+      ["crypto rugged", null],
+      ["the price rugged", null],
     ];
     for (const [t, want] of rows) assert.deepEqual(roomSaysRugged(t, names), want, t);
   });

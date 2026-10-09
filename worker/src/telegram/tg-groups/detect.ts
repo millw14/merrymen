@@ -2389,7 +2389,9 @@ export function roomSaysRugged(text: string, selfNames: readonly string[] = []):
       const subject = m[1]!.replace(/^\$+/u, "").replace(/'s$/u, "");
       if (RUG_PERSON_WORDS.has(subject) || /^(?:the|a|an)$/u.test(subject)) return null;
       if (RUG_POINTERS.has(subject)) return { coin: null };
-      return { coin: factsCoin(subject) };
+      // A word that names no coin ("the market", "everyone", "crypto", "the price") says nothing about one (review, 2026-10-09).
+      const coin = factsCoin(subject);
+      return coin ? { coin } : null;
     }
   }
   return null;

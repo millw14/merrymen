@@ -2063,7 +2063,7 @@ describe("rug banter: only with a collapse permit, never at a person, never a br
     fomo!.answer = answers(true);
     make();
     await said(msg("pine what are people saying about $AUTON on fomo?"));
-    for (const line of ["did it rug?", "not a rug", "pepe rugged"]) {
+    for (const line of ["did it rug?", "not a rug", "pepe rugged", "the market rugged today", "everyone rugged lol", "crypto rugged"]) {
       clock += 10 * SEC;
       await said(msg(line, { fromId: ANN + 1, fromFirstName: "Bob" }));
     }
