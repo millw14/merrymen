@@ -1202,6 +1202,14 @@ describe("the theses themselves, a coin's facts, and a room saying it rugged (Mi
     }
   });
 
+  it("an explicit quote ask reaches the research: 'quotes pls', 'no summary, just the posts', 'last 10?', 'quote the theses on …' (review, 2026-10-09)", () => {
+    for (const t of ["quotes pls", "word for word pls", "no summary, just the posts", "the last 10 please", "last 10?"]) assert.equal(fomoFollowUpOf(t, names), true, t);
+    for (const t of ["nice quote", "the posts are mid", "my last 2 trades were trash", "the last one lol", "gm pls"]) assert.equal(fomoFollowUpOf(t, names), false, t);
+    assert.notEqual(fomoAskOf("quote the theses on $AUTON on solana on fomo", names), null);
+    assert.notEqual(fomoAskOf("shogun quote the theses on $AUTON on solana on fomo", names), null);
+    assert.equal(fomoAskOf("quote me on that", names), null);
+  });
+
   it("'summarise them' and 'don't summarise' are asked even with no question mark", () => {
     assert.equal(fomoFollowUpOf("summarise them", names), true);
     assert.equal(fomoFollowUpOf("dont summarise", names), true);

@@ -2105,7 +2105,7 @@ const FOMO_THESES = /\btheses\b|\bthesis (?:on|for|about|behind|of)\b/u;
 const FOMO_TRADER_FLOW =
   /\b(?:top |best |smart |fomo |the |any |which |what )?(?:traders|whales|smart money|degens) (?:are |r |is |been |have been |were )?(?:buying|selling|aping|accumulating|dumping|exiting|loading|into|rotating)\b/u;
 /** Asking for something, without a question mark: "show me…", "check…", "pull up…". */
-const FOMO_REQUEST = /^(?:(?:pls|please|yo|hey|ok|so|can (?:you|u)|could (?:you|u))\s+)*(?:show|tell|check|give|list|pull|find|research|look|dig|get|fetch|what|whats|what's|who|whos|who's|which|how|is|are|any)\b/u;
+const FOMO_REQUEST = /^(?:(?:pls|please|yo|hey|ok|so|can (?:you|u)|could (?:you|u))\s+)*(?:show|tell|check|give|list|pull|find|research|look|dig|get|fetch|what|whats|what's|who|whos|who's|which|how|is|are|any|quote(?= (?:them|these|those|the|their|em)\b))\b/u;
 
 /**
  * A SHORT LIST ASK with no question mark: "trending on fomo", "robinhood
@@ -2167,7 +2167,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
  * nothing.
  */
 const FOMO_FOLLOW_UP =
-  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|recap|tl;?dr|sum (?:it|them|these|those) up|paraphras\w*|in their words|the (?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|summary|summaries|digest|recap|tl;?dr|sum (?:it|them|these|those) up|paraphras\w*|posts|in their words|(?:the )?(?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
 /** "Don't summarise", "no summary", "without paraphrasing": an ask, with no question mark (the theses themselves). */
 const NEGATED_SUMMARY = /\b(?:don'?t|dont|do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u;
 /** "Summarise them", "sum it up", "recap": asked for, with no question mark (the digest, again). */
@@ -2194,7 +2194,8 @@ export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []):
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}#]+/u, "");
   if (!t || COIN_STOP.test(t)) return false;
   if (wordsOf(t).length > FOLLOW_UP_MAX_WORDS) return false;
-  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames) || NEGATED_SUMMARY.test(t) || SUMMARY_REQUEST.test(t);
+  // A trailing "pls" asks too ("quotes pls", "word for word pls", "the last 10 please").
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames) || NEGATED_SUMMARY.test(t) || SUMMARY_REQUEST.test(t) || /\b(?:pls|plz|please)[.!]*$/u.test(t);
   // A quote ask is a cue only as the planner reads it ("can you list the last 10", never "can you list some good movies").
   return asked && (FOMO_FOLLOW_UP.test(t) || thesesQuotesOf(text, selfNames) !== null || FOMO_ROW_REF.test(t) || (FOMO_PERSON.test(t) && FOMO_TRADER_VERB.test(t)));
 }
