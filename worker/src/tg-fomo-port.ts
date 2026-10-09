@@ -53,9 +53,10 @@ import { agoText, redactExecutables } from "./fomo/dossier";
 import { chainFromUserText, isRobinhoodToken } from "./fomo/identity";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { deserialize, rememberedSubjects, serialize, type SubjectMemory } from "./fomo/subject-memory";
-import { chainLabel, FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
+import { chainLabel, FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_FOMO_UNREACHED, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupRefusalLine, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
+import { collapseOf, type CoinFacts, type CoinFactsReader, type FactsNetwork } from "./coin-facts-types";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
-import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
+import type { FomoEnvelope, ResolvedSubject, TokenIdentity, TokenLabel } from "./fomo/types";
 import { admitTgLine, tgLineReadings } from "./telegram/tg-groups/gate";
 import {
   ABOUT_MERRYMEN,
@@ -109,6 +110,12 @@ export interface TgFomoPortOptions {
    * live feed). False: the owner's moves offer no `/tail`. Absent: true.
    */
   tailsAvailable?: () => boolean;
+  /**
+   * A coin's measured market facts (desk/facts.ts, index.ts wires it with its
+   * per-chat and per-agent bounds). Absent: a facts request is not answered
+   * here (null), and the handler's line goes on as before.
+   */
+  facts?: CoinFactsReader;
 }
 
 // ─── A model's checked choice, as the planner's own question ───────────────
@@ -657,6 +664,89 @@ export function answerCoin(r: AnswerFomoResult, thesesAsked = false): TgFomoAnsw
   return { symbol: c.symbol, ...(chain ? { chain } : {}), aspect };
 }
 
+// ─── A coin's facts, measured (Milla, 2026-10-09) ───────────────────────────
+
+/** What a facts question asked: what happened, why it fell, the data, the dev. */
+export type FactsAsk = "what" | "why" | "data" | "dev";
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const two = (n: number): string => String(n).padStart(2, "0");
+const hhmm = (ms: number): string => { const d = new Date(ms); return `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`; };
+const dayOf = (ms: number): string => { const d = new Date(ms); return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`; };
+const HOUR_WORDS = ["", "one hour", "two hours", "three hours"];
+const trimZeros = (s: string): string => (s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s);
+/** Money in short form, as a room hears published figures: "$36k", "$5.75M". */
+function usdShort(n: number): string {
+  if (n >= 1e9) return `$${trimZeros((n / 1e9).toFixed(n < 1e10 ? 2 : 1))}B`;
+  if (n >= 1e6) return `$${trimZeros((n / 1e6).toFixed(n < 1e7 ? 2 : 1))}M`;
+  if (n >= 1e3) return `$${trimZeros((n / 1e3).toFixed(n < 1e4 ? 1 : 0))}k`;
+  return `$${Math.round(n)}`;
+}
+/** A coin's price, three significant digits. */
+function priceShort(n: number): string {
+  return `$${n >= 1 ? trimZeros(n.toFixed(2)) : Number(n.toPrecision(3)).toString()}`;
+}
+const pct1 = (n: number): string => `${trimZeros(n.toFixed(1))}%`;
+const FACTS_CHAINS: Readonly<Record<FactsNetwork, string>> = { robinhood: "Robinhood Chain", solana: "Solana", base: "Base", ethereum: "Ethereum", bsc: "BSC" };
+
+/**
+ * A COIN'S FACTS AS A ROOM HEARS THEM, written by code from what was measured
+ * (desk/facts.ts): the source and the time first, then only figures that were
+ * read, each a short published figure (the gate's research kind), and what
+ * could not be read. Never a reason, a person, an address or the word "rug";
+ * "fell" and "drop", never "crashed"; "buyers and sellers", never
+ * "transactions". At most five lines.
+ */
+export function coinFactsLines(f: CoinFacts, sym: string, ask: FactsAsk, now: number): string[] {
+  const out = [`${sym} on ${FACTS_CHAINS[f.network] ?? "its chain"}, from GeckoTerminal at ${hhmm(f.observedAt)} UTC:`];
+  // How far back the closes reach: the pool's whole life, or the last N days.
+  const whole = f.barsFromMs !== null && f.poolCreatedAtMs !== null && f.barsFromMs <= f.poolCreatedAtMs + 3_600_000;
+  const days = f.barsFromMs !== null ? Math.max(1, Math.round((now - f.barsFromMs) / 86_400_000)) : null;
+  const closeWhere = whole || days === null ? "its highest hourly close on its main pool" : `its highest hourly close on its main pool in the last ${days} days`;
+  const below = f.drawdownPct !== null ? (f.drawdownPct < 0.05 ? "it is at that high now" : `it is ${pct1(f.drawdownPct)} below that`) : null;
+  if (f.high && f.fdvNowUsd !== null && f.high.fdvUsd !== null) {
+    out.push(`About ${usdShort(f.fdvNowUsd)} now (fully diluted); ${closeWhere} was about ${usdShort(f.high.fdvUsd)}, ${dayOf(f.high.atMs)} at ${hhmm(f.high.atMs)} UTC${below ? `, so ${below}` : ""}.`);
+  } else if (f.high) {
+    out.push(`About ${priceShort(f.priceUsd)} a coin now; ${closeWhere} was about ${priceShort(f.high.closeUsd)}, ${dayOf(f.high.atMs)} at ${hhmm(f.high.atMs)} UTC${below ? `, so ${below}` : ""}.`);
+  } else {
+    const change = f.change24hPct !== null ? `; ${f.change24hPct < 0 ? `down ${pct1(-f.change24hPct)}` : `up ${pct1(f.change24hPct)}`} in the last 24h on its main pool` : "";
+    out.push(`About ${f.fdvNowUsd !== null ? `${usdShort(f.fdvNowUsd)} now (fully diluted)` : `${priceShort(f.priceUsd)} a coin now`}${change}; its hourly closes could not be read.`);
+  }
+  if (ask === "dev") {
+    out.push(f.creatorHoldingPct !== null
+      ? `GeckoTerminal lists its creator as holding about ${pct1(f.creatorHoldingPct)} of supply now (it doesn't say when that was last updated).`
+      : "GeckoTerminal lists no holding for its creator.");
+  }
+  if (f.steepest && ask !== "dev") {
+    out.push(`The biggest drop: about ${Math.round(f.steepest.pct)}% in ${HOUR_WORDS[f.steepest.hours] ?? `${f.steepest.hours} hours`} from ${hhmm(f.steepest.fromMs)} UTC on ${dayOf(f.steepest.fromMs)}.`);
+  }
+  const flow = f.sellers24h !== null && f.buyers24h !== null ? `in the last 24h, ${f.sellers24h.toLocaleString("en-US")} sellers and ${f.buyers24h.toLocaleString("en-US")} buyers` : null;
+  if (f.liquidityUsd !== null || flow) {
+    out.push(`${f.liquidityUsd !== null ? `Main pool liquidity about ${usdShort(f.liquidityUsd)}` : "On its main pool"}${flow ? `; ${flow}` : ""}.`);
+  }
+  if (ask === "data" && f.holders) {
+    const top = f.holders.top10Pct !== null ? `; the top 10 hold ${pct1(f.holders.top10Pct)}` : "";
+    const at = f.holders.updatedAtMs !== null ? ` (GeckoTerminal's count from ${dayOf(f.holders.updatedAtMs)}, ${hhmm(f.holders.updatedAtMs)} UTC)` : " (GeckoTerminal's count)";
+    out.push(`Holders ${f.holders.count.toLocaleString("en-US")}${top}${at}.`);
+  }
+  out.push(
+    ask === "why"
+      ? "The data shows when and how far it fell, not why; I can't see who sold or whether liquidity was pulled."
+      : ask === "dev"
+        ? "I can't see the creator's past sales, only what GeckoTerminal lists now."
+        : "I can't see who sold, why it fell, or whether liquidity was pulled.",
+  );
+  return out;
+}
+
+/** The lines a facts read that could not answer says: plainly, never a guess. */
+export const FACTS_BUSY = "I've looked up enough market data in here for now; ask again in a few minutes.";
+export const factsUnreadLine = (sym: string): string => `Couldn't read the market data for ${sym} just now, try again in a bit.`;
+export const factsNotFoundLine = (sym: string, where: string): string => `I couldn't find a market for ${sym}${where ? ` on ${where}` : ""} to measure.`;
+export const factsWhichLine = (sym: string): string => `Which ${sym} do you mean? Fomo lists it on more than one chain; say the chain.`;
+export const factsUnknownLine = (sym: string): string => `I couldn't find ${sym} on Fomo.`;
+export const factsUnsupportedLine = (sym: string): string => `I can't measure ${sym} on that chain.`;
+
 /** "tg-group:<chatId>:<threadId|0>": per room and forum topic, from the trusted update. */
 export function tgGroupConversationKey(chatId: number, threadId?: number): string {
   const topic = typeof threadId === "number" && Number.isSafeInteger(threadId) && threadId > 0 ? threadId : 0;
@@ -809,10 +899,92 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
     }
   };
 
+  /**
+   * A COIN'S FACTS (Milla, 2026-10-09: "when asked for actual facts she should
+   * be able to look"). The coin is resolved from this room's memory first (no
+   * credit), else once through Fomo's own resolver (one charge to the room's
+   * cap, like any lookup); several chains ask which, none says so. Then the
+   * public index is read (opts.facts: GeckoTerminal, bounded per chat and per
+   * agent) and said as measured lines, with whether it collapsed for the
+   * handler's collapse permit. Null when no reader is wired.
+   */
+  const factsAnswer = async (q: Parameters<TgFomoPort["ask"]>[0], req: Extract<TgFomoRequest, { kind: "coin" }>): Promise<TgFomoAnswer | null> => {
+    const reader = opts.facts;
+    if (!reader) return null;
+    const sym = String(req.symbol ?? "").replace(/^\$+/, "").toUpperCase();
+    if (!TICKER.test(sym)) return null;
+    const ask: FactsAsk = req.ask === "why" || req.ask === "data" || req.ask === "dev" ? req.ask : "what";
+    const t = now();
+    const timeoutMs = typeof q.timeoutMs === "number" && Number.isFinite(q.timeoutMs) ? Math.max(1, Math.min(q.timeoutMs, 30_000)) : 25_000;
+    const until = t + timeoutMs;
+    const say = (text: string, extra: Partial<TgFomoAnswer> = {}): TgFomoAnswer => ({ text, deflect: false, status: "ok", ...extra });
+    const key = tgGroupConversationKey(q.chatId, q.threadId);
+    const b = brokerNow();
+    // 1. The room's remembered coin: same symbol (and chain when one was named), with its address.
+    let token: TokenIdentity | null = null;
+    let charged = false;
+    if (b) {
+      const bounded = boundedBroker(b, Math.min(2_000, timeoutMs));
+      try {
+        const m = deserialize(await bounded.broker.memory.get(key));
+        const toks = rememberedSubjects(m, "token", t).filter((x): x is Extract<typeof x, { kind: "token" }> =>
+          x.kind === "token" && typeof x.address === "string" && typeof x.chain === "string" && (x.symbol ?? "").replace(/^\$+/, "").toUpperCase() === sym && (!req.chain || tgChainOf(x.chain) === req.chain));
+        if (toks.length === 1) {
+          const remembered = chainFromUserText(toks[0]!.chain!);
+          if (remembered) token = { chain: remembered, address: toks[0]!.address!, key: "" };
+        }
+      } finally {
+        bounded.done();
+      }
+    }
+    // 2. Else Fomo's resolver, once.
+    if (!token) {
+      if (!b) return say(TG_FOMO_UNAVAILABLE, { status: "unavailable", free: true });
+      const bounded = boundedBroker(b, Math.max(1, Math.min(8_000, until - now())));
+      let env: FomoEnvelope | null = null;
+      try {
+        env = await bounded.broker.call("fomo_resolve_subject", { query: `$${sym}`, kind: "token", ...(req.chain ? { chain: CHAIN_WORDS[req.chain] } : {}) }, {
+          surface: "telegram-group",
+          audience: "group",
+          conversationKey: key,
+          priority: "interactive",
+          groupId: String(q.chatId),
+        });
+      } catch {
+        env = null;
+      } finally {
+        bounded.done();
+      }
+      charged = !!env && !(env.usage?.providerCalls === 0);
+      if (!env || env.status === "failed" || env.status === "unavailable" || env.status === "not-authorized") return say(GROUP_FOMO_UNREACHED, { status: env?.status === "unavailable" ? "unavailable" : "failed" });
+      if (env.status === "budget-limited") return say(groupRefusalLine(env.reason, now(), env.retryAt ?? null), { status: "budget-limited" });
+      if (env.status === "needs-clarification") return say(factsWhichLine(sym), charged ? {} : { free: true });
+      const subj = env.subject as ResolvedSubject | null;
+      if (env.status === "not-found" || !subj || subj.kind !== "token") return say(factsUnknownLine(sym), charged ? {} : { free: true });
+      token = subj.token;
+    }
+    // 3. The public index.
+    const network = tgChainOf(token.chain.slug);
+    const where = chainLabel(token.chain.slug);
+    const coin = { symbol: sym, ...(network ? { chain: network } : {}), aspect: "facts" as const };
+    const free = charged ? {} : { free: true };
+    if (!network) return say(factsUnsupportedLine(sym), { ...free, coin });
+    const read = await reader({ network, address: token.address, chatId: q.chatId, timeoutMs: Math.max(1, Math.min(10_000, until - now() - 500)), withInfo: ask === "dev" || ask === "data" });
+    log(`[tg-fomo] coin facts ${read.ok ? "read" : read.why}${charged ? " (resolved by Fomo)" : ""}`);
+    if (!read.ok) {
+      const line = read.why === "busy" ? FACTS_BUSY : read.why === "not-found" ? factsNotFoundLine(sym, where) : read.why === "unsupported" ? factsUnsupportedLine(sym) : factsUnreadLine(sym);
+      return say(line, { ...free, coin });
+    }
+    const lines = coinFactsLines(read.facts, sym, ask, now());
+    return say(lines.join("\n"), { ...free, coin, collapse: { coin: sym, collapsed: collapseOf(read.facts), atMs: read.facts.observedAt } });
+  };
+
   return {
     async ask(q): Promise<TgFomoAnswer | null> {
       try {
         if (!q || !isUsableChatId(q.chatId)) return null;
+        // WHAT HAPPENED TO A COIN, as measured market facts: never the Fomo planner.
+        if (q.request?.kind === "coin" && q.request.aspect === "facts") return await factsAnswer(q, q.request);
         let text = q.request ? requestText(q.request) : typeof q.text === "string" ? q.text : null;
         if (!text || !text.trim()) return null;
         /** The words as asked (a line, or the request's fixed question): what looseCoin and looseTrader read. */

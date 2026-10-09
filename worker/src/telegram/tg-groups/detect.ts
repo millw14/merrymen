@@ -2276,7 +2276,7 @@ const FACTS_DATA = /\b(?:show|give|send|post|pull up) (?:me|us) (?:the )?(?:actu
 const FACTS_DEV = /\bdid (?:the )?(?:dev|devs|team|deployer|creator|creators|insiders?)s? (?:just |really |actually )?(?:dump|dumped|sell|sold|rug|rugged|exit|exited|pull|pulled|cash out|cashed out)\b|\b(?:is|are|was|were) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:still )?(?:holding|selling|dumping)\b|\bhow much (?:does|did) (?:the )?(?:dev|devs|team|deployer|creator)s? (?:hold|have|own)\b/u;
 const FACTS_SHOW = /\b(?:show|give|send|post|pull up) (?:me|us)\b/u;
 /** The market, a major or the world as what "happened": the desk's, never one coin's facts. */
-const FACTS_NOT_A_COIN = /\b(?:to|with|did|is|has|does|was|for|on) (?:the |this |that )?(?:market|markets|economy|world|crypto|memes|memecoins|everything|everyone|sol|eth|btc|bitcoin|solana|ethereum|robinhood|base|bsc|bnb|chain)\b/u;
+const FACTS_NOT_A_COIN = /\b(?:to|with|did|is|has|does|was) (?:the |this |that )?(?:market|markets|economy|world|crypto|memes|memecoins|everything|everyone|sol|eth|btc|bitcoin|solana|ethereum|robinhood|base|bsc|bnb|chain)\b/u;
 
 /**
  * WHAT HAPPENED TO A COIN, ASKED FOR AS FACTS ("what happened to auton",

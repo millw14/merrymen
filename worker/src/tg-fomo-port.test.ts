@@ -64,9 +64,13 @@ import {
   TG_FOMO_DEFLECTION,
   TG_FOMO_NOT_PERMISSION,
   TG_FOMO_UNAVAILABLE,
+  coinFactsLines,
   thesesQuotes,
   thesesSample,
 } from "./tg-fomo-port";
+import { createCoinFactsReader, FactsLimiter, type FactsFetch } from "./desk/facts";
+import { resetDeskReadsForTest } from "./desk/gecko";
+import type { CoinFactsReader } from "./coin-facts-types";
 import type { AnswerFomoResult } from "./fomo/chat";
 
 type Rec = Record<string, unknown>;
@@ -2436,5 +2440,129 @@ describe("a coin's theses, quoted: the newest up to ten, each checked, never rep
     assert.equal(thesesQuotes(r([env({ token, label: { symbol: "AUTON" }, trader: null, theses: [] })]), AUTON_NOW), null, "an empty read keeps its own line");
     assert.equal(thesesQuotes(r([env({ token, label: { symbol: "AUTON" }, trader: null, theses: [view] }), env({ token, label: { symbol: "B" }, trader: null, theses: [view] })]), AUTON_NOW), null, "a compound answer");
     assert.equal(thesesQuotes({ ...r([env({ token, label: { symbol: "AUTON" }, trader: null, theses: [view] })]), plan: { intent: "token-theses" } } as unknown as AnswerFomoResult, AUTON_NOW), null, "no quote ask, no quotes");
+  });
+});
+
+// ─── A coin's facts, measured (Milla, 2026-10-09) ──────────────────────────
+
+const deskFixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`./desk/testdata/${name}.json`, import.meta.url), "utf8"));
+/** GeckoTerminal as it answered for AUTON on 2026-10-09 ~01:15 UTC (desk/testdata), every route asked recorded. */
+function autonIndex(): { fetch: FactsFetch; routes: string[] } {
+  const routes: string[] = [];
+  const fetch: FactsFetch = async (route) => {
+    routes.push(route);
+    if (route.includes(`/tokens/${AUTON_MINT}/pools`)) return { ok: true, body: deskFixture("auton-pools"), observedAt: AUTON_NOW };
+    if (route.includes("/ohlcv/hour")) return { ok: true, body: deskFixture("auton-ohlcv-hour"), observedAt: AUTON_NOW };
+    if (route.includes(`/tokens/${AUTON_MINT}/info`)) return { ok: true, body: deskFixture("auton-info"), observedAt: AUTON_NOW };
+    return { ok: false, failure: "http-404" };
+  };
+  return { fetch, routes };
+}
+const PINNED_WHAT = [
+  "AUTON on Solana, from GeckoTerminal at 01:15 UTC:",
+  "About $36k now (fully diluted); its highest hourly close on its main pool was about $5.75M, Oct 7 at 04:00 UTC, so it is 99.4% below that.",
+  "The biggest drop: about 95% in three hours from 13:00 UTC on Oct 8.",
+  "Main pool liquidity about $16k; in the last 24h, 1,576 sellers and 1,157 buyers.",
+  "I can't see who sold, why it fell, or whether liquidity was pulled.",
+];
+
+describe("a coin's facts: measured, with their source and time, and what could not be read (WP8)", () => {
+  beforeEach(() => resetDeskReadsForTest());
+
+  it("the pinned lines for each kind of question, every one a research line the room may hear", async () => {
+    const idx = autonIndex();
+    const r = await createCoinFactsReader({ fetchJson: idx.fetch, now: () => AUTON_NOW })({ network: "solana", address: AUTON_MINT, chatId: GROUP, timeoutMs: 10_000, withInfo: true });
+    assert.ok(r.ok);
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    assert.deepEqual(coinFactsLines(r.facts, "AUTON", "what", AUTON_NOW), PINNED_WHAT);
+    assert.deepEqual(coinFactsLines(r.facts, "AUTON", "why", AUTON_NOW), [...PINNED_WHAT.slice(0, 4), "The data shows when and how far it fell, not why; I can't see who sold or whether liquidity was pulled."]);
+    assert.deepEqual(coinFactsLines(r.facts, "AUTON", "dev", AUTON_NOW), [
+      ...PINNED_WHAT.slice(0, 2),
+      "GeckoTerminal lists its creator as holding about 4.8% of supply now (it doesn't say when that was last updated).",
+      PINNED_WHAT[3],
+      "I can't see the creator's past sales, only what GeckoTerminal lists now.",
+    ]);
+    assert.deepEqual(coinFactsLines(r.facts, "AUTON", "data", AUTON_NOW), [...PINNED_WHAT.slice(0, 4), "Holders 5,683; the top 10 hold 34.1% (GeckoTerminal's count from Oct 8, 14:48 UTC).", PINNED_WHAT[4]]);
+    for (const ask of ["what", "why", "dev", "data"] as const) {
+      for (const l of coinFactsLines(r.facts, "AUTON", ask, AUTON_NOW)) {
+        assert.ok(admitTgLine(l, research).ok, `${ask}: ${l}`);
+        assert.doesNotMatch(l, new RegExp(`${AUTON_MINT}|CreatorAddress|wallet|\\brug|scam|honeypot|dump|crash`, "i"), l);
+      }
+    }
+    // Bars that do not reach the pool's creation say how far back they look.
+    const short = coinFactsLines({ ...r.facts, barsFromMs: AUTON_NOW - 7 * 86_400_000, poolCreatedAtMs: AUTON_NOW - 30 * 86_400_000 }, "AUTON", "what", AUTON_NOW);
+    assert.match(short[1]!, /its highest hourly close on its main pool in the last 7 days was about/);
+    // A figure not read is left out, never guessed.
+    const bare = coinFactsLines({ ...r.facts, high: null, steepest: null, drawdownPct: null, sellers24h: null, buyers24h: null }, "AUTON", "what", AUTON_NOW);
+    assert.deepEqual(bare.slice(1, 3), ["About $36k now (fully diluted); down 98.5% in the last 24h on its main pool; its hourly closes could not be read.", "Main pool liquidity about $16k."]);
+  });
+
+  it("the coin from the room's memory: no Fomo call at all, and the measured collapse comes back", async () => {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const idx = autonIndex();
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: createCoinFactsReader({ fetchJson: idx.fetch, now: () => s.clock.now }) });
+    await port.ask({ text: "what are the theses on $AUTON on solana on fomo?", chatId: GROUP });
+    const calls = s.calls.length;
+    const provider = s.provider.length;
+    const a = await port.ask({ text: "what happened to it", request: { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" }, chatId: GROUP });
+    assert.deepEqual(a!.text.split("\n"), PINNED_WHAT);
+    assert.equal(s.calls.length, calls, "no Fomo tool call: the room's memory held the coin");
+    assert.equal(s.provider.length, provider);
+    assert.equal(a!.free, true);
+    assert.deepEqual(a!.coin, { symbol: "AUTON", chain: "solana", aspect: "facts" });
+    assert.deepEqual(a!.collapse, { coin: "AUTON", collapsed: true, atMs: AUTON_NOW });
+    assert.ok(idx.routes.every((r) => r.includes(AUTON_MINT) || r.includes("FiYyzx")), "the remembered mint, verbatim");
+  });
+
+  it("with nothing remembered, Fomo's resolver places the coin once, charged to the room", async () => {
+    const s = await setup({ tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const port = createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: createCoinFactsReader({ fetchJson: autonIndex().fetch, now: () => s.clock.now }) });
+    const a = await port.ask({ text: "why did auton rug on solana?", request: { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "why" }, chatId: GROUP });
+    assert.deepEqual(s.calls.map((c) => c.tool), ["fomo_resolve_subject"]);
+    assert.equal(s.calls[0]!.opts.groupId, String(GROUP), "a group charge, keyed on the room");
+    assert.equal(s.calls[0]!.opts.audience, "group");
+    assert.deepEqual(s.calls[0]!.args, { query: "$AUTON", kind: "token", chain: "solana" });
+    assert.match(a!.text.split("\n").slice(-1)[0]!, /^The data shows when and how far it fell, not why/);
+    assert.notEqual(a!.free, true, "the resolver read from the provider");
+  });
+
+  it("busy, unread, not found, unknown and not wired: each said plainly", async () => {
+    const s = await setup({ theses: () => fixture("theses-auton"), tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const busy: CoinFactsReader = async () => ({ ok: false, why: "busy" });
+    const down: CoinFactsReader = async () => ({ ok: false, why: "unavailable" });
+    const none: CoinFactsReader = async () => ({ ok: false, why: "not-found" });
+    const req = { kind: "coin" as const, symbol: "AUTON", chain: "solana" as const, aspect: "facts" as const, ask: "what" as const };
+    const ask = (reader?: CoinFactsReader) => createTgFomoPort(() => s.broker, { now: () => s.clock.now, ...(reader ? { facts: reader } : {}) }).ask({ text: "x", request: req, chatId: GROUP });
+    assert.equal((await ask(busy))!.text, "I've looked up enough market data in here for now; ask again in a few minutes.");
+    assert.equal((await ask(down))!.text, "Couldn't read the market data for AUTON just now, try again in a bit.");
+    assert.equal((await ask(none))!.text, "I couldn't find a market for AUTON on Solana to measure.");
+    assert.equal(await ask(), null, "no reader wired: not answered here");
+    const unknown = await createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: busy }).ask({ text: "x", request: { ...req, symbol: "NOPE", chain: undefined }, chatId: GROUP - 7 });
+    assert.match(unknown!.text, /^I couldn't find NOPE on Fomo\.$|^Which NOPE do you mean\?/);
+    for (const t of ["I've looked up enough market data in here for now; ask again in a few minutes.", "Couldn't read the market data for AUTON just now, try again in a bit.", "I couldn't find a market for AUTON on Solana to measure.", "I couldn't find NOPE on Fomo.", "Which AUTON do you mean? Fomo lists it on more than one chain; say the chain."]) {
+      assert.ok(admitTgLine(t, { agentName: "Pine", kind: "research", recentOwn: [] }).ok, t);
+    }
+  });
+
+  it("a coin 40% below its high is measured, and is no collapse", async () => {
+    const hour = deskFixture("auton-ohlcv-hour") as { data: { attributes: { ohlcv_list: number[][] } } };
+    // Every close floored at 60% of the highest one: a fall, not a collapse.
+    const top = Math.max(...hour.data.attributes.ohlcv_list.map((r) => r[4]!));
+    const gentle = { ...hour, data: { attributes: { ohlcv_list: hour.data.attributes.ohlcv_list.map(([t, o, h, l, c, v]) => {
+      const f = (x: number) => Math.max(x, top * 0.6);
+      return [t, f(o!), Math.max(f(h!), f(o!), f(c!)), Math.min(f(l!), f(o!), f(c!)), f(c!), v];
+    }) } } };
+    const pools = deskFixture("auton-pools") as { data: Array<{ id: string; attributes: Record<string, unknown> }> };
+    const pricey = { data: pools.data.map((p) => p.id.endsWith("FiYyzxapRvkbUhF5ZD3mJigWwqBGhtVLH49MDSgCLHdB") ? { ...p, attributes: { ...p.attributes, base_token_price_usd: String(top * 0.6), fdv_usd: String(top * 0.6 * 997_462_970), price_change_percentage: { h24: "-5" } } } : p) };
+    const fetch: FactsFetch = async (route) => route.includes("/ohlcv/") ? { ok: true, body: gentle, observedAt: AUTON_NOW } : route.includes("/pools?") ? { ok: true, body: pricey, observedAt: AUTON_NOW } : { ok: false, failure: "http-404" };
+    const s = await setup({ tokensSearch: AUTON_SEARCH });
+    s.clock.now = AUTON_NOW;
+    const a = await createTgFomoPort(() => s.broker, { now: () => s.clock.now, facts: createCoinFactsReader({ fetchJson: fetch, now: () => AUTON_NOW, limiter: new FactsLimiter({ now: () => AUTON_NOW }) }) })
+      .ask({ text: "x", request: { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" }, chatId: GROUP });
+    assert.match(a!.text, /so it is 40% below that\./, a!.text);
+    assert.deepEqual(a!.collapse, { coin: "AUTON", collapsed: false, atMs: AUTON_NOW });
   });
 });

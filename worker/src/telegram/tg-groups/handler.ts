@@ -77,6 +77,7 @@ import {
   extractCas,
   extractCashtags,
   fomoAskOf,
+  fomoFactsOf,
   fomoFollowUpOf,
   greetingOf,
   hasForeignMint,
@@ -609,6 +610,13 @@ interface LineJob {
    * line runs off the chat queue, so act() may wait on the research inline.
    */
   fomo?: boolean;
+  /**
+   * WHAT HAPPENED TO A COIN, asked of the room's Fomo coin (detect.ts
+   * fomoFactsOf, the coin from the line, the answer it replies to or the
+   * topic's last Fomo coin): the request code built, answered as measured
+   * facts before the desk and the router (tg-fomo-port.ts factsAnswer).
+   */
+  fomoFacts?: TgFomoRequest;
   /**
    * A bare "what's trending" (no platform or venue named) where research is
    * wired: Fomo's trending board, asked for as that request, with the desk's
@@ -2382,6 +2390,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // refusal, unavailable, failed) it goes on to the desk's market read
       // below, inside the same deadline (decision D1, 2026-10-07).
       let trendingFellBack = false;
+      // WHAT HAPPENED TO THE ROOM'S FOMO COIN, as measured facts, before the desk and the router.
+      if (j.fomoFacts && !tailAsk && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
+        const r = await fomoAnswer(chatId, j, replyOpts, j.fomoFacts);
+        if (r === "sent") return null;
+        if (r !== "not-research") {
+          releaseReply(chatId, messageId);
+          return r;
+        }
+      }
       if (j.fomo === true && !tailAsk && !request && dec.mood !== "private-ask" && !isInjection(j.line.text) && j.addressed !== null) {
         // Every chain, unless the line names one ("what's trending on solana"):
         // then that chain's slice of the board (Milla, 2026-10-07).
@@ -4406,6 +4423,28 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // thesis", "check again") goes back to the research, read again;
         // under another of its lines it is about that line (pushbackOnFomo).
         const fomoAsk = fomoHere && (named || trendingAsk || (!venueMarket && !deskOwned && fomoRecent(chatId, threadId) && (fomoFollowUpOf(text, selfNamesOf(me)) || pushbackOnFomo(msg, text, threadId))));
+        // WHAT HAPPENED TO A COIN, ASKED AS FACTS ("what happened to it", "why
+        // did auton rug", "show me the data", "did the dev dump?"; Milla,
+        // 2026-10-09). Only about the room's Fomo coin: the one the answer it
+        // replies to was about, or this topic's last one (30 minutes), or a coin
+        // the line names on Fomo or on another chain than Robinhood. Anything
+        // else ("what happened to pons" with no Fomo behind it) stays the
+        // desk's and the router's, as before. Read before the desk takes it.
+        const factsAsk = fomoHere ? fomoFactsOf(text, selfNamesOf(me)) : null;
+        let fomoFacts: TgFomoRequest | null = null;
+        if (factsAsk) {
+          const q = msg.replyTo;
+          const under = me && q && q.fromId === me.id && isMsgId(q.messageId) ? fomoCoinLines.get(msgKey(chatId, q.messageId)) : undefined;
+          const context = (under && now - under.at <= FOMO_THREAD_MS ? under : null) ?? recentFomoCoin(chatId, threadId);
+          const lineChain = chainIn(text);
+          const onFomo = /\bon fomo\b/iu.test(text) || (lineChain !== undefined && lineChain !== "robinhood");
+          const named = factsAsk.coin;
+          if (context && (!named || named === context.symbol.toUpperCase())) {
+            fomoFacts = { kind: "coin", symbol: context.symbol, ...(context.chain ? { chain: context.chain } : {}), aspect: "facts", ask: factsAsk.ask };
+          } else if (named && onFomo) {
+            fomoFacts = { kind: "coin", symbol: named, ...(lineChain ? { chain: lineChain } : {}), aspect: "facts", ask: factsAsk.ask };
+          }
+        }
         // A complaint with nothing of theirs open asks which question; one
         // replying to its answer to their open ask has that ask read again by
         // the router (act()). A new line while an earlier one went
@@ -4417,6 +4456,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ingressOrder: order,
           ...(threadId !== undefined ? { threadId } : {}),
           ...(fomoAsk ? { fomo: true } : {}),
+          ...(fomoFacts ? { fomoFacts } : {}),
           ...(trendingAsk ? { trending: true } : {}),
           ...(meta !== null ? { meta } : {}),
           ...(meta === "complaint" && !live ? { noOpenAsk: true } : {}),
@@ -4431,7 +4471,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // Public research starts beside a busy chatter queue. Bookkeeping and
         // reply admission still happen synchronously. Nomination admission
         // belongs to the port; financial execution stays on the trading side.
-        const research = fomoAsk || (!!d.desk && (coin || (addressed !== null && (deskIntentOf(text, chatId) !== null
+        const research = fomoAsk || fomoFacts !== null || (!!d.desk && (coin || (addressed !== null && (deskIntentOf(text, chatId) !== null
           || /\b(?:why|how come|vibes|asked you|asked a question|chart|analysis)\b/iu.test(text)))));
         // Their newest substantive line is their open ask from now on.
         if (substantive) openAsks.set(askKey(chatId, msg.fromId, threadId), { job, research, reasked: false });

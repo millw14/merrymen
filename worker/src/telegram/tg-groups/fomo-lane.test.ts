@@ -1868,3 +1868,80 @@ describe("a reused copy keeps its age line in the room, whatever fills the line 
     assert.deepEqual(tg.texts(CHAT)[0]!.split("\n"), [answer[0]!, answer[1]!, answer[3]!, answer[4]!, answer[5]!, AGE]);
   });
 });
+
+describe("a coin's facts, asked of the room's Fomo coin (WP8, Milla 2026-10-09)", () => {
+  const theses = (): TgFomoAnswer => ({
+    text: "What traders on Fomo are saying about AUTON on Solana (25 recent theses from 13 traders):\nAgainst it: fears it could collapse.\nTheir claims, not facts; newest 25 of 4,199.",
+    deflect: false,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "theses" },
+  });
+  const facts = (): TgFomoAnswer => ({
+    text: "AUTON on Solana, from GeckoTerminal at 01:15 UTC:\nI can't see who sold, why it fell, or whether liquidity was pulled.",
+    deflect: false,
+    free: true,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "facts" },
+    collapse: { coin: "AUTON", collapsed: true, atMs: T0 },
+  });
+
+  it("'what happened to pons' with no Fomo behind it is never a facts ask; 'what happened to $PONS' stays the desk's", async () => {
+    make();
+    await said(msg("pine what happened to pons?"));
+    assert.ok(!fomo!.asks.some((a) => a.request?.kind === "coin" && a.request.aspect === "facts"), JSON.stringify(fomo!.asks));
+    clock += MIN;
+    await said(msg("pine what happened to $PONS?"));
+    assert.ok(!fomo!.asks.some((a) => a.request?.kind === "coin" && a.request.aspect === "facts"), JSON.stringify(fomo!.asks));
+    assert.equal(desk!.asks.length, 1, "the desk read it, as before");
+  });
+
+  it("'what happened to it' under a Fomo coin answer is that coin's facts, asked by code", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    const answerId = 5_000;
+    clock += 30 * SEC;
+    await said(msg("pine what happened to it", { replyTo: { messageId: answerId, fromId: BOT.id, fromIsBot: true, text: tg.texts(CHAT)[0]! } }));
+    const last = fomo!.asks[fomo!.asks.length - 1]!;
+    assert.deepEqual(last.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+    assert.match(tg.texts(CHAT).slice(-1)[0]!, /^AUTON on Solana, from GeckoTerminal at 01:15 UTC:/);
+    assert.equal(desk!.asks.length, 0, "never the desk's chart");
+  });
+
+  it("the topic's last Fomo coin answers 'why did it rug?' and 'did the dev dump?' without a reply, for half an hour", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += 2 * MIN;
+    await said(msg("pine why did it rug?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "why" });
+    clock += 2 * MIN;
+    await said(msg("pine did the dev dump?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "dev" });
+    // Another coin named, with no Fomo context of its own: not this lane.
+    clock += MIN;
+    const before = fomo!.asks.length;
+    await said(msg("pine what happened to pons?"));
+    assert.ok(fomo!.asks.slice(before).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")));
+    // Past half an hour, "it" is no coin.
+    clock += 31 * MIN;
+    const later = fomo!.asks.length;
+    await said(msg("pine why did it rug?"));
+    assert.ok(fomo!.asks.slice(later).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")));
+  });
+
+  it("a coin named on Fomo or on another chain is asked as facts with nothing before it", async () => {
+    fomo!.answer = facts;
+    make();
+    await said(msg("pine what happened to $AUTON on solana?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+  });
+
+  it("a facts answer that bought nothing gives the room's research slot back", async () => {
+    fomo!.answer = facts;
+    make();
+    for (let i = 0; i < 8; i++) {
+      clock += 10 * SEC;
+      await said(msg(`pine what happened to $AUTON on solana? ${"?".repeat(i + 1)}`));
+    }
+    assert.ok(!tg.texts(CHAT).some((t) => /enough research lookups/.test(t)), tg.texts(CHAT).join("\n---\n"));
+  });
+});
