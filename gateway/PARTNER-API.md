@@ -512,8 +512,8 @@ What is credited:
 - Every such transfer in one transaction adds up to one payment, which must be
   at least 1 MERRYMEN. A transaction is credited once, however its hash is
   written.
-- Payments are not refunded or paid back. Credit stays on the account and is
-  used for later charges.
+- Payments are not refunded automatically: the gateway never sends tokens.
+  Credit stays on the account and is used for later charges.
 
 When a transfer is not credited, the console says why:
 
@@ -524,15 +524,21 @@ When a transfer is not credited, the console says why:
 | `payment_failed` (422) | The transaction failed on chain, so nothing was sent. |
 | `payment_too_small` (422) | Less than 1 MERRYMEN in all. |
 | `payment_unsupported` (422) | More than 256 matching transfers in one transaction. Send one transfer. |
-| `chain_unavailable`, `payments_unavailable`, `billing_unavailable` (503) | The chain could not be read, payments are closed for now, or billing could not record the payment just now. Check again later. |
+| `chain_unavailable`, `payments_unavailable`, `billing_unavailable`, `billing_off` (503) | The chain could not be read, payments are closed for now, billing could not record the payment just now, or paid plans are switched off. Check again later. |
+
+The table lists answers about the transfer itself. The portal can also answer
+404 `account_missing`, 400 `invalid_tx_hash`, 429 `rate_limited` (30 checks a
+minute per wallet) and 409 `session_wallet_changed` (the browser signed in with
+another wallet since the payment started; sign in with the paying wallet).
 
 If a chain reorganization undoes a credited transfer (the gateway checks each
 payment again for 30 minutes after crediting it, and acts only when two checks
 five minutes apart agree), its amount is taken off the credit and the history
 shows the reversal. The running period goes on, and nothing new is charged
 while credit is below zero. If the transfer lands again in a later block,
-submit its hash again: the console's history offers **Check this transaction
-again** on the reversal. Do that before sending a new payment; once the
+submit its hash again: the console's history offers **Check again** on the
+reversal (and, while credit is below zero, **Check this transaction again**
+under Credit). Do that before sending a new payment; once the
 transfer is final again, it is credited again.
 
 ### Periods, renewals and plan changes
@@ -576,7 +582,8 @@ transfer is final again, it is credited again.
   an unknown route.
 - Not counted: `GET /partner/v1` (discovery), `GET /partner/v1/health` and
   `GET /partner/v1/meta`; requests refused before counting (401, 403
-  `forbidden_scope`, 429 `rate_limited`, 413); and a 402 `quota_exhausted`.
+  `forbidden_scope`, 429 `rate_limited`, and 413 for a body over 32 KiB, or
+  256 KiB on `/activate`); and a 402 `quota_exhausted`.
   `/meta` still counts toward the per-minute rate.
 - Given back when the platform failed: any 5xx, any `upstream_*` code, 409
   `conversation_busy` or `enrollment_busy`, and a request cut off because the

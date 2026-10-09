@@ -274,7 +274,9 @@ directory inside one) unless `MERRYMEN_DATA_DIR_PERSISTENT=1`, and writable
 (boot writes a probe file); otherwise billing is off and boot says why. So
 `MERRYMEN_DATA_DIR=/data` copied onto a service whose volume is detached, or
 onto a host with no disk, leaves billing off rather than writing a ledger the
-next deploy wipes. Back the file up with the volume.
+next deploy wipes; account creation is refused too (503 `billing_unavailable`)
+while billing was asked for and the storage refused it. Back the file up with
+the volume.
 
 Run billing on **one instance only**: never replicas, and never a host without
 a persistent disk. Two processes on one ledger keep two indexes and would each
@@ -290,7 +292,7 @@ billing writes stop until restart.
 | `billing.jsonl` | The ledger: one JSON record a line (`account`, `select`, `payment`, `charge`, `reversal`, `adjustment`, `config`), each flushed by the append that wrote it and at most 4 KiB. Replayed once at boot. Replay enforces the money rules itself: a transfer is credited once per (chain, transaction, sender), and a repeated record or charge id is ignored. A charge records the cost, quota and rate it was charged at, so editing `lib/billing-plans.mjs` never changes a period already paid for. A torn last line is cut before the next append. |
 | `usage.json` | Request counts per usage window. Written whole and renamed into place, at most every 10 s and at shutdown, so a crash loses at most about 10 s of counts, in the developer's favour. Windows that ended more than 30 days ago are dropped. If it is unreadable, counts start empty and boot says so. |
 | `partners.jsonl` | The key registry, as before. Its torn tail is now cut before each append too. |
-| `billing.jsonl.lock`, `partners.jsonl.lock` | Held for each repair-and-append, by the gateway and by both CLIs, so one never cuts a line the other is still writing. A lock older than 10 s (a writer that died mid-append) is removed. An append that cannot take the lock within 5 s is refused with nothing written: the developer API answers 503 `billing_unavailable`, the CLI says to run the command again. |
+| `billing.jsonl.lock`, `partners.jsonl.lock` | Held for each repair-and-append, by the gateway and by both CLIs, so one never cuts a line the other is still writing. A lock older than 10 s (a writer that died mid-append) is removed. An append that cannot take the lock within 5 s is refused with nothing written: the developer API answers 503 `billing_unavailable` for `billing.jsonl` and 503 `unavailable` for `partners.jsonl` (key create or revoke), and the CLI says to run the command again. |
 
 When the ledger cannot be trusted, billing **writes** stop (503
 `billing_unavailable`) while reads and metering carry on from the records
@@ -306,8 +308,8 @@ before the problem:
 
 Billing time is this host's clock, or the ledger's newest record when that is
 at most 5 minutes ahead (a clock step back does not reopen ended periods). A
-record further ahead logs `[billing] CLOCK: …` and does not move billing time:
-check the host's clock.
+record further ahead logs `[billing] CLOCK: …` and billing time is held at
+most 5 minutes ahead of the clock: check the host's clock.
 
 ### Payments: the treasury and the RPC
 
@@ -320,7 +322,8 @@ check the host's clock.
   record to the ledger and logs `[billing] PAYMENTS CONFIG RECORDED: …`. If the
   ledger cannot take it at boot (say a lock left by the old process, killed
   mid-append), boot logs `could not record the payments config` and the record
-  is written within 10 s, and in any case before the next ledger record. The
+  is written within 10 s; until it is, every other ledger write is refused
+  (503 `billing_unavailable`), so nothing lands under an unrecorded treasury. The
   console reads the treasury again before each wallet payment, but someone who
   copied the old address by hand is not protected: keep it in the previous
   list for a while. A transfer to an address no longer accepted can be

@@ -787,7 +787,7 @@ on merrymen.dev/api. Today both pages conflict with paid plans:
 | --- | --- | --- |
 | gateway | `MERRYMEN_DATA_DIR` | `/data`, set **as a service variable**, on the service's volume. Left to the default, billing stays off. |
 | gateway | `MERRYMEN_BILLING` | `off` (unset), then `observe`, then `enforce`, as in the steps below. Any other value is off. |
-| gateway | `MERRYMEN_PAYMENTS_TREASURY` | A new address used for API billing and nothing else: any $MERRYMEN transfer to it from a wallet with a developer account can be credited to that account. A multisig or cold wallet is fine; the gateway never needs its key. Only after the release gate above. |
+| gateway | `MERRYMEN_PAYMENTS_TREASURY` | A new address used for API billing and nothing else: any $MERRYMEN transfer to it, at or after the start block, from a wallet that has, or later creates, a developer account can be credited to that account. A multisig or cold wallet is fine; the gateway never needs its key. Only after the release gate above. |
 | gateway | `MERRYMEN_PAYMENTS_START_BLOCK` | Required with the treasury (without it the treasury is ignored and `enforce` runs as `observe`). Robinhood Chain's current block when the treasury is first set; earlier transfers are never credited. Leave it unchanged when rotating. |
 | gateway | `MERRYMEN_PAYMENTS_PREVIOUS_TREASURIES` | Optional, comma-separated: old treasuries still accepted after a rotation. |
 | gateway | `MERRYMEN_PAYMENTS_RPC` | Optional; defaults to `MERRYMEN_GATEWAY_RPC`. Must answer chain 4663 (checked at boot, before each credit and before each reconciliation), or payments are unavailable. Trusted to report receipts. |
@@ -808,8 +808,8 @@ flow it has today.
 
 1. **Deploy with billing off** (`MERRYMEN_BILLING` unset). Boot logs
    `[gateway] partner billing: off, nothing is metered`. Partners see no
-   change (the per-IP limit stays 240 a minute; observe and enforce raise it
-   to 600). Developers can
+   change beyond a new `billing: null` field in `/meta` (the per-IP limit
+   stays 240 a minute; observe and enforce raise it to 600). Developers can
    already create accounts, and the console asks for one before a new key.
    Confirm `MERRYMEN_DATA_DIR=/data` is a service variable and set
    `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.
@@ -825,7 +825,8 @@ flow it has today.
    expected without a treasury. Every portal-key request is now counted and
    carries the quota headers, `/meta` shows `billing`, and new keys need an
    account (the console offers to create one). Nothing is refused for quota and
-   no key's rate goes down: observe changes no rate limit. Keep it on for a
+   no rate limit goes down (the per-IP limit rises to 600, and a paid plan can
+   raise a key's rate). Keep it on for a
    while; a full 30-day window shows every Free window turning over. Watch
    `node billing-cli.mjs list` and `show <wallet>` (usage by key) on the
    gateway (`railway ssh`), and the `[billing]` log lines. Wallets that have
