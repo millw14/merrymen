@@ -80,12 +80,15 @@
  *   choosePlan(owner, {tier, confirm})  POST /plan: preview unless confirm === true
  *   submitPayment(owner, txHash)        POST /payments
  * Account view: {account:{id, name, wallet, created_at}, plan:{id, name, starts_at,
- *   ends_at, selected, renews_on_next_request}, credit_raw, credit_tokens, due_raw,
+ *   ends_at, selected, renews_on_next_request, renews_into (the tier that waiting
+ *   charge is for, or null)}, credit_raw, credit_tokens, due_raw,
  *   due_tokens, due_for ("activation"|"upgrade"|"renewal"|null), usage:{used, limit,
  *   resets_at, by_key:[{key_id, used}]}, history:[newest first, at most 50]}.
  * Preview: {preview:true, tier, effect ("activate_now"|"upgrade_now"|"at_renewal"|
  *   "waiting_for_payment"|"cancel_renewal"), charge_now_raw, charge_now_tokens,
- *   due_raw, due_tokens, starts_at, ends_at}.
+ *   charge_now_tier (a tier other than `tier` that the charge renews, or null),
+ *   due_raw, due_tokens, starts_at, ends_at, period_requests (the request quota
+ *   of the period the change applies to: an upgrade's is the time-left share)}.
  * Payment: 200 {already, payment?:{tx_hash, amount_raw, amount_tokens,
  *   block_number}, ...account view}; 202 {code:"payment_pending", stage:
  *   "not_found_yet"|"confirming", tx_hash, confirmations?, needed?, ready_in_sec?}.
@@ -1084,11 +1087,15 @@ export async function createBilling({
     const active = activePeriod(acct, now);
     const due = mode === "off" ? null : dueFor(acct, now, plans);
     const u = usageOf(acct.owner, now);
+    // The tier the charge waiting for the next metered request is for: the
+    // view is pure, so a lapsed period with credit to renew reads as Free
+    // until then, and the console must not say Free is what renews.
+    const waiting = needsSettle(acct.owner) ? decide(acct, now, plans) : null;
     return {
       account: { id: acct.account_id, name: acct.name, wallet: acct.owner, created_at: iso(acct.created_at) },
       plan: { id: active ? active.tier : "free", name: active ? nameOf(active.tier) : plans.free.name,
         starts_at: active ? iso(active.starts_at) : null, ends_at: active ? iso(active.ends_at) : null,
-        selected: acct.selected, renews_on_next_request: needsSettle(acct.owner) },
+        selected: acct.selected, renews_on_next_request: waiting !== null, renews_into: waiting ? waiting.plan.id : null },
       credit_raw: acct.credit.toString(), credit_tokens: formatTokens(acct.credit),
       due_raw: due ? due.raw.toString() : null, due_tokens: due ? ceilTokens(due.raw) : null, due_for: due?.why ?? null,
       usage: { used: u.used, limit: u.plan.requests, resets_at: iso(u.plan.end), by_key: u.byKey },
@@ -1102,12 +1109,19 @@ export async function createBilling({
     const { sim, actions } = simulate(acct, now, plans, tier);
     const chargeNow = actions.reduce((sum, a) => sum + a.price, 0n);
     const mine = actions.find((a) => a.plan.id === tier);
-    let effect, starts = null, ends = null, due = null;
+    // A charge confirming makes for another tier than the one chosen: a lapsed
+    // period renewing the tier it ended on (decide()'s fallback) while the
+    // choice waits for a payment. The developer must be told what it buys.
+    const other = actions.find((a) => a.plan.id !== tier);
+    // The request quota the change gives the period it applies to: a tier's
+    // whole quota for a new period, the time-left share for an upgrade (now,
+    // or as of now once paid: it falls as the period runs, as the price does).
+    let effect, starts = null, ends = null, due = null, requests = plan.requests;
     if (plan.price_raw === 0n) {
       effect = active ? "cancel_renewal" : "activate_now";
       starts = active ? active.ends_at : now;
     } else if (mine?.reason === "upgrade") {
-      effect = "upgrade_now"; starts = now; ends = mine.period.ends_at;
+      effect = "upgrade_now"; starts = now; ends = mine.period.ends_at; requests = mine.requests;
     } else if (mine) {
       effect = "activate_now"; starts = now; ends = now + PERIOD_MS;
     } else if (active && (active.tier === tier || plan.price_raw <= active.tier_price)) {
@@ -1116,10 +1130,15 @@ export async function createBilling({
     } else {
       effect = "waiting_for_payment";
       due = dueFor(sim, now, plans);
+      const running = activePeriod(sim, now);
+      if (running && plan.price_raw > running.tier_price) {
+        requests = upgradeRequests(plan.requests, running.tier_requests, running.requests, running.ends_at, now);
+      }
     }
     return { preview: true, tier, effect, charge_now_raw: chargeNow.toString(), charge_now_tokens: formatTokens(chargeNow),
+      charge_now_tier: other ? other.plan.id : null,
       due_raw: due ? due.raw.toString() : null, due_tokens: due ? ceilTokens(due.raw) : null,
-      starts_at: starts === null ? null : iso(starts), ends_at: ends === null ? null : iso(ends) };
+      starts_at: starts === null ? null : iso(starts), ends_at: ends === null ? null : iso(ends), period_requests: requests };
   }
 
   // ── payments ──

@@ -545,7 +545,8 @@ test("credit before any selection waits; selecting a plan previews, then activat
   const before = await f.raw();
   const preview = await f.plan("crumbs", false);
   assert.deepEqual(preview.json, { preview: true, tier: "crumbs", effect: "activate_now", charge_now_raw: T(100_000).toString(),
-    charge_now_tokens: "100000", due_raw: null, due_tokens: null, starts_at: new Date(START).toISOString(), ends_at: new Date(START + P).toISOString() });
+    charge_now_tokens: "100000", charge_now_tier: null, due_raw: null, due_tokens: null, starts_at: new Date(START).toISOString(),
+    ends_at: new Date(START + P).toISOString(), period_requests: 50_000 });
   assert.equal(await f.raw(), before, "a preview appends nothing");
   const view = (await f.plan("crumbs")).json;
   assert.equal(view.plan.id, "crumbs");
@@ -704,6 +705,46 @@ test("selecting Free cancels the renewal: the running period ends and its credit
   assert.equal(f.view().plan.id, "free");
   assert.equal(f.view().credit_raw, T(100_000).toString());
   assert.equal(f.view().due_raw, null);
+});
+
+test("a preview names a fallback renewal it would charge, and the request quota the change gives", async () => {
+  // Crumbs paid with 250k, renewal cancelled (Free), period over, 150k of credit left.
+  const f = await fixture();
+  await f.account();
+  await f.grant(250_000);
+  await f.plan("crumbs");
+  await f.plan("free");
+  f.advance(P);
+  await f.billing.settle(OWNER);
+  assert.deepEqual([f.view().plan.id, f.view().credit_tokens], ["free", "150000"]);
+  // Feast cannot be afforded, so confirming it renews the tier that ended: that 100k must be named.
+  const feast = (await f.plan("feast", false)).json;
+  assert.deepEqual([feast.effect, feast.charge_now_tokens, feast.charge_now_tier, feast.due_tokens], ["waiting_for_payment", "100000", "crumbs", "850000"]);
+  assert.equal(feast.period_requests, 1_000_000, "paid now, the renewed period moves to Feast for all of its 30 days");
+  // A plan credit covers names nothing else.
+  const crumbs = (await f.plan("crumbs", false)).json;
+  assert.deepEqual([crumbs.effect, crumbs.charge_now_tier, crumbs.period_requests], ["activate_now", null, 50_000]);
+  // Mid-period, an upgrade's quota is the time-left share, now or once paid.
+  await f.plan("crumbs");
+  await f.grant(200_000); // 250k: Loaf's half period (150k) is covered, Feast's (450k) is not
+  f.advance(P / 2);
+  const now = (await f.plan("loaf", false)).json;
+  assert.deepEqual([now.effect, now.charge_now_tier, now.period_requests], ["upgrade_now", null, 150_000]);
+  const later = (await f.plan("feast", false)).json;
+  assert.deepEqual([later.effect, later.period_requests], ["waiting_for_payment", 50_000 + 475_000]);
+  const back = (await f.plan("free", false)).json;
+  assert.deepEqual([back.effect, back.period_requests], ["cancel_renewal", 1_000]);
+});
+
+test("the account view names the plan a waiting charge is for", async () => {
+  const f = await fixture();
+  await f.account();
+  await f.grant(800_000);
+  await f.plan("loaf");
+  assert.equal(f.view().plan.renews_into, null, "nothing waits while the period runs");
+  f.advance(P);
+  const view = f.view();
+  assert.deepEqual([view.plan.id, view.plan.renews_on_next_request, view.plan.renews_into], ["free", true, "loaf"]);
 });
 
 test("a cheaper tier waits for the renewal", async () => {
