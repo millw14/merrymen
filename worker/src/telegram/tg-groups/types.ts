@@ -252,7 +252,17 @@ export type TgPublicFact =
   | { kind: "coin"; look: CoinLook; nowMs: number; reviewed?: { verdict: "bought" | "passed" | "skipped"; paper?: boolean; notes?: string[] } }
   | { kind: "trades"; data: TgPublicTradesToday; why: boolean; symbol?: string; side?: "buy" | "sell" }
   | { kind: "calculation"; input: ChatMathInput }
-  | { kind: "site"; topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" | "onboarding" | "funding" | "withdrawals" | "modes" | "v4" | "readiness" | "drawdown" | "privacy" }
+  | {
+      kind: "site";
+      topic: "overview" | "pnl" | "trades" | "attempts" | "wallet" | "groups" | "limits" | "onboarding" | "funding" | "withdrawals" | "modes" | "v4" | "readiness" | "drawdown" | "privacy" | "capabilities" | "dm-policy";
+      /**
+       * "capabilities" and "dm-policy" only: what is wired in this process,
+       * set by the handler (never from the line), so the list names only
+       * what a room can really ask for, and the DM policy promises nothing
+       * that is not wired here.
+       */
+      wired?: { fomo: boolean; desk: boolean; coins: boolean };
+    }
   | { kind: "unavailable"; topic: "coin" | "trades" | "calculation" };
 
 /** See CoinLook.source. */
@@ -409,8 +419,13 @@ export interface TgDeskThinkRequest {
  *
  *   null              not a research question, or research is unavailable
  *                     here: the line goes on to the desk and the persona
- *   deflect: true     a question about a trader or the owner's own research
- *                     state, which a group never hears; `text` says so
+ *   deflect: true     a question about the owner's own research state, who
+ *                     Merrymen watches, or a trader's own theses, which a
+ *                     group never hears; `text` says so
+ *
+ * One named trader's public Fomo data (who they are, what they hold, what
+ * they traded, what they made or lost money on) IS answered in a room, for
+ * anyone (Milla, 2026-10-07), and never says whether Merrymen watches them.
  */
 /**
  * A research question a model chose for an addressed group line (route.ts),
@@ -419,15 +434,20 @@ export interface TgDeskThinkRequest {
  * ticker code found in the line itself.
  */
 export type TgFomoRequest =
-  | { kind: "leaderboard"; window?: "24h" | "7d" | "30d" | "all" }
-  | { kind: "board"; board: "trending" | "graduated" | "most-held" }
+  | { kind: "leaderboard"; window?: "24h" | "7d" | "30d" | "all"; row?: TgBoardRow }
+  | { kind: "board"; board: "trending" | "graduated" | "most-held"; chain?: TgFomoChain }
   | { kind: "coin"; symbol: string; aspect: "theses" | "buyers" | "sellers" | "activity" | "research" }
-  | { kind: "crowd"; side: "buy" | "sell"; window?: "24h" | "7d" | "30d" }
-  | { kind: "small-coins" }
+  | { kind: "crowd"; side: "buy" | "sell"; window?: "24h" | "7d" | "30d"; chain?: TgFomoChain }
+  | { kind: "small-coins"; chain?: TgFomoChain }
   | { kind: "about" }
   | { kind: "status" }
-  /** One trader: never answered in a room (the owner's goes to her DM, handler.ts). */
-  | { kind: "trader" };
+  /**
+   * One Fomo trader by the handle the line itself wrote (route.ts
+   * groundedTrader), and what about them; answered in the room. The window,
+   * and a trades ask's side ("what did X sell"), are read from the line's
+   * words, never a model's.
+   */
+  | { kind: "trader"; handle: string; about: TgTraderAbout; window?: "24h" | "7d" | "30d" | "all"; side?: "buy" | "sell" };
 
 /**
  * WHAT THE OWNER CAN DO WITH AN ANSWER she asked for in a group: the
@@ -443,21 +463,90 @@ export interface TgFomoMoves {
   dm: string;
 }
 
-/** What the owner asked about one trader: who they are, what they hold, what they traded. */
-export type TgTraderAbout = "profile" | "holdings" | "trades";
+/**
+ * What was asked about one trader: who they are, what they hold, what they
+ * traded, or what they made or lost money on (provider-reported).
+ */
+export type TgTraderAbout = "profile" | "holdings" | "trades" | "earnings";
+
+/**
+ * A CHAIN A FOMO LIST MAY BE NARROWED TO, as tg-groups names it: one closed
+ * list, because this directory cannot import fomo/. The port writes it into
+ * the planner's own words (tg-fomo-port.ts requestText), and the router takes
+ * one only when the asker's own words name it (route.ts groundedChain).
+ */
+export type TgFomoChain = "robinhood" | "solana" | "base" | "ethereum" | "bsc";
+
+/**
+ * One row of the trader leaderboard asked about ("who's the top trader on
+ * fomo today and what did he make money on"): its rank on the board, and
+ * what about that trader. Read by code from the line, never from a model.
+ */
+export interface TgBoardRow {
+  /** 1 to 10: the rows a trader board read carries by default. */
+  rank: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+  about: TgTraderAbout;
+  /** A trades ask's side, read from the line's words (route.ts rowIn); none: both sides. */
+  side?: "buy" | "sell";
+}
+
+/**
+ * A COIN'S THESES, AS MATERIAL FOR THE GROUP MODEL'S PARAPHRASE (theses.ts,
+ * plan WP9 P2; tg-fomo-port.ts builds it). Plain data, because tg-groups
+ * never imports fomo/: the code-written digest's opening and closing lines,
+ * the whole digest as the fallback, and at most twelve cleaned samples, one
+ * per family, each at most 160 characters with links, addresses, handles and
+ * $tags taken out and injection-shaped rows dropped. The samples reach the
+ * model only inside a fence; nothing from them is ever sent as written.
+ */
+export interface TgThesesMaterial {
+  /**
+   * The coin, the copy it was read from and a digest of the samples: a
+   * window or a limit cut from the same copy is other theses, so another key.
+   */
+  key: string;
+  /** The coin's display name, the one run of digits a phrase may hold. */
+  coin: string;
+  /** The digest's lines up to its header, and from its closing line on (limits included). */
+  head: string[];
+  tail: string[];
+  /** The code-written digest, said when the paraphrase cannot be. */
+  fallback: string;
+  samples: string[];
+}
 
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;
+  /** A coin's theses, for the group model to put in its own words (theses.ts); `text` is the code digest. */
+  theses?: TgThesesMaterial;
   /** Only when the owner asked (`owner` on the ask): her next moves. */
   moves?: TgFomoMoves;
   /**
-   * Only when the owner asked about one trader by name and the room was
-   * deflected: the handle as the planner read it, for her DM (handler.ts).
+   * It bought nothing from the provider: a deflection made before anything
+   * was looked up, or an answer whose every read was a kept copy (or refused
+   * before any call). It spends none of the room's research answers, unless
+   * the handler then made a paraphrase call for it (handler.ts fomoAnswer):
+   * only answers that read from the provider, or called the model, count
+   * toward the room's six per ten minutes.
    */
-  trader?: { handle: string; about: TgTraderAbout };
-  /** A deflection made before anything was looked up: it spends none of the room's research answers. */
   free?: boolean;
+  /**
+   * How the lookups behind it went, from the research's own envelopes:
+   * "ok" (something real was read, or nothing needed reading), "empty",
+   * "budget-limited" (a research budget refused it), "unavailable" or
+   * "failed". A refusal's text is an ordinary answer otherwise, and a
+   * caller with a fallback (handler.ts: a bare "what's trending" falls back
+   * to the desk) could not tell it apart.
+   */
+  status?: "ok" | "empty" | "budget-limited" | "unavailable" | "failed";
+  /**
+   * A trader board the port remembered for this room's "the second one" and
+   * "the last one": when it was answered, and the ranks `text` shows as board
+   * rows ("2. frankdegods …"). The handler may cut rows to fit the room's
+   * lines; it then says which were heard (TgFomoPort.heard).
+   */
+  board?: { at: number; ranks: number[] };
 }
 
 export interface TgFomoPort {
@@ -473,6 +562,13 @@ export interface TgFomoPort {
     request?: TgFomoRequest;
     /** The asker is the owner (trusted sender id, never through a chat): her moves come back too. */
     owner?: boolean;
+    /**
+     * The asker pushed back on the last research answer ("there has to be
+     * theses", "check again"): read again rather than serve a held "nothing
+     * here" (fomo/chat.ts retryEmpty). Never a forced refresh: a copy with
+     * something in it keeps its window, the room's two hours included.
+     */
+    fresh?: boolean;
     chatId: number;
     threadId?: number;
     timeoutMs?: number;
@@ -480,33 +576,27 @@ export interface TgFomoPort {
   }): Promise<TgFomoAnswer | null>;
   /** The owner's chat-wide forget: drop this chat's research subject memory. Never throws. */
   forget?(chatId: number): Promise<void>;
+  /**
+   * WHAT THE ROOM HEARD of a remembered board (`board` from ask): rows the
+   * answer showed but `sent` no longer carries (the handler cut them for the
+   * room's six lines) leave the room's memory, so "the last one" is the last
+   * row it saw, never one it did not. Never throws.
+   */
+  heard?(chatId: number, threadId: number | undefined, board: { at: number; ranks: number[] }, sent: string): Promise<void>;
 }
 
 /** How a handoff to the owner's DM went. "gone": her line stopped being wanted first, and nothing was sent. */
 export type TgOwnerOutcome = "sent" | "dm-first" | "busy" | "unavailable" | "gone";
 
 /**
- * THE OWNER'S OWN ASKS, ANSWERED IN HER DM (service.ts builds it). A group
- * never hears one: a trader is private research (rule 3), so the room gets
- * "sent it to your DMs" once her DM has it. Only the owner's own line, by the
- * trusted sender id, reaches here, and service.ts checks that id again.
+ * THE OWNER'S OWN ASKS THAT GO TO HER DM (service.ts builds it): a tail, the
+ * one thing a room line can start that changes what Merrymen does, is carded
+ * there. The room hears only where it went. Only the owner's own line, by the
+ * trusted sender id, reaches here, and service.ts checks that id again. (One
+ * trader's public data is answered in the room itself, for her as for anyone:
+ * Milla, 2026-10-07.)
  */
 export interface TgOwnerPort {
-  /**
-   * Read-only research on one Fomo trader, asked as a fixed question code
-   * writes and answered in her DM. Never changes anything. Never throws.
-   */
-  research(q: {
-    handle: string;
-    fromId: number;
-    about?: TgTraderAbout;
-    /**
-     * Whether her line is still wanted (a newer line of the burst, or a
-     * forget, says no): checked before the lookup and again right before the
-     * DM is sent, so a superseded or forgotten ask sends and writes nothing.
-     */
-    stillWanted?: () => boolean;
-  }): Promise<TgOwnerOutcome>;
   /**
    * HER TAIL, ASKED FOR IN THE ROOM (docs/fomo.md "Tailing a trader"): the
    * same confirm card her DM gives /tail, sent to her DM, where nothing is

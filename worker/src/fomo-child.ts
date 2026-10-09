@@ -78,6 +78,7 @@ import { executionAvailabilityOf, isRobinhoodToken, keyOf, robinhoodChain } from
 import { TRADER_FLOW_LENS } from "./fomo/lens";
 import { dossierStrength, objectionStrengthened, reviewHeldPosition, thesisStrengthened, type DossierStrength, type HeldReview } from "./fomo/lifecycle";
 import { openLocalFomoDb } from "./fomo/local-db";
+import type { FomoBudgetConfig } from "./fomo/budget";
 import { createFomoRuntime } from "./fomo/runtime";
 import { AUTONOMOUS_ENTRY_CAP_6, ExplorationReservations, entryCeiling, microUsdgFloor, type EntryCeiling, type ReservationSnapshot } from "./fomo/sizing";
 import { ensureFomoSchema, sweepJobs } from "./fomo/store";
@@ -263,6 +264,13 @@ export async function selfHostedFomoBroker(o: {
   home?: string;
   /** Run the local deep-research queue this often (index.ts passes FOMO_CHILD.selfHostedJobsEveryMs). Absent: never. */
   jobsEveryMs?: number;
+  /**
+   * The plan and the cap overrides, read from the environment exactly as the
+   * web process reads them (fomo/budget.ts fomoPlanFrom, fomoBudgetFrom):
+   * both open the same fomo.sqlite counters, so they must agree.
+   */
+  planCreditsPerMonth?: number;
+  budget?: Partial<FomoBudgetConfig>;
   /** Tests only. */
   db?: Db;
   fetchImpl?: typeof fetch;
@@ -280,6 +288,8 @@ export async function selfHostedFomoBroker(o: {
     apiKey: o.apiKey,
     // One install, one tenant. Anything else asking is nobody.
     access: async (tenant) => (tenant === SELF_HOSTED_TENANT ? o.access() : none),
+    ...(o.planCreditsPerMonth !== undefined ? { planCreditsPerMonth: o.planCreditsPerMonth } : {}),
+    ...(o.budget ? { budget: o.budget } : {}),
     log: o.log,
     fetchImpl: o.fetchImpl,
     now: o.now,

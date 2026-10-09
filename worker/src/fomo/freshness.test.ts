@@ -6,6 +6,7 @@ import {
   DEFAULT_FAILURE_BACKOFF_MS,
   FORCE_REFRESH_MIN_RETRY_MS,
   FRESHNESS_POLICY,
+  GROUP_REUSE_MS,
   SingleFlight,
   buildFreshness,
   decideRead,
@@ -219,6 +220,35 @@ describe("decideRead", () => {
     const old = entry({ retrievedAt: NOW - 2 * M });
     assert.equal(decide({ cls: "activity", entry: old }).action, "fetch");
     assert.equal(decide({ cls: "rankings", entry: old }).action, "serve-cache");
+  });
+});
+
+describe("a group's longer reuse window (D7)", () => {
+  it("holds theses two hours, the trader board an hour, coin boards fifteen minutes, and nothing else", () => {
+    assert.deepEqual({ ...GROUP_REUSE_MS }, { theses: 2 * H, rankings: 1 * H, boards: 15 * M });
+  });
+
+  it("a copy inside the reuse window is fresh for prefer-fresh, past the class window", () => {
+    const at = (age: number) => entry({ retrievedAt: NOW - age, lastAttemptAt: NOW - age });
+    assert.equal(decide({ cls: "theses", entry: at(31 * M) }).action, "fetch", "without reuse, a 31-minute copy is expired");
+    const reused = decide({ cls: "theses", entry: at(31 * M), reuseMs: GROUP_REUSE_MS.theses });
+    assert.deepEqual([reused.action, reused.reason, reused.servedFrom], ["serve-cache", "fresh", "cache"]);
+    assert.equal(decide({ cls: "theses", entry: at(2 * H + S), reuseMs: GROUP_REUSE_MS.theses }).action, "fetch");
+    assert.equal(decide({ cls: "boards", entry: at(14 * M), reuseMs: GROUP_REUSE_MS.boards }).action, "serve-cache");
+    assert.equal(decide({ cls: "boards", entry: at(16 * M), reuseMs: GROUP_REUSE_MS.boards }).action, "fetch");
+  });
+
+  it("never past the class's longest shown age, never under force-refresh, and not for a bad value", () => {
+    const at = (age: number) => entry({ retrievedAt: NOW - age, lastAttemptAt: NOW - age });
+    // token-stats are shown at most two hours old: a day's reuse is two hours.
+    assert.equal(decide({ cls: "token-stats", entry: at(2 * H - S), reuseMs: 24 * H }).action, "serve-cache");
+    assert.equal(decide({ cls: "token-stats", entry: at(2 * H + S), reuseMs: 24 * H }).action, "fetch");
+    assert.equal(decide({ cls: "theses", entry: at(10 * M), mode: "force-refresh", reuseMs: GROUP_REUSE_MS.theses }).action, "fetch");
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+      assert.equal(decide({ cls: "theses", entry: at(31 * M), reuseMs: bad }).action, "fetch", String(bad));
+    }
+    // A reuse window shorter than the class's own never shortens it.
+    assert.equal(decide({ cls: "theses", entry: at(20 * M), reuseMs: M }).action, "serve-cache");
   });
 });
 

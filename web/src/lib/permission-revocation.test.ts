@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { encodeCallDataEpV07 } from "@zerodev/sdk";
-import { createPublicClient, custom, encodeFunctionData, type Hex } from "viem";
-import { invalidatePermissions, KERNEL_REVOCATION_ABI, nextRevocationNonce, readConfirmedRevocationCutoff, type PendingRevocation, type RevocationIO, type RevocationReceipt } from "./permission-revocation";
+import { createPublicClient, custom, encodeFunctionData, RpcRequestError, type Hex } from "viem";
+import { getUserOperationError } from "viem/account-abstraction";
+import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import { invalidatePermissions, isRevocationFeeShortfall, KERNEL_REVOCATION_ABI, nextRevocationNonce, readConfirmedRevocationCutoff, revocationFeeMessage, type PendingRevocation, type RevocationIO, type RevocationReceipt } from "./permission-revocation";
 import { isPermissionRevocationShape, permissionRevocationNonce } from "./recovery-shape";
 import { sdkRevocationCall } from "./permission-revocation-fixture";
 
@@ -254,5 +256,35 @@ describe("revocation relay scope", () => {
       `0x095ea7b3${"0".repeat(63)}2`,
       encodeFunctionData({ abi: KERNEL_REVOCATION_ABI, functionName: "currentNonce" }),
     ]) assert.equal(isPermissionRevocationShape(bad as Hex, ACCOUNT), false, bad);
+  });
+});
+
+describe("a revocation the account cannot pay for", () => {
+  const relayed = (message: string) => new RpcRequestError({ body: {}, error: { code: -32500, message }, url: "https://app.merrymen.dev/api/bundler/4663" });
+  it("recognises the bundler's AA21 however viem wraps it", () => {
+    // The estimation failure an owner saw: viem's own wrapping of the relay reply.
+    const estimated = getUserOperationError(relayed("AA21 didn't pay prefund"), {
+      callData: `0x1f1b92e3${"0".repeat(63)}2`, callGasLimit: 0n,
+      factory: "0xd703aaE79538628d27099B8c4f621bE4CCd142d5", factoryData: "0xc5265d5d",
+    } as never);
+    assert.equal(isRevocationFeeShortfall(estimated), true);
+    // The raw send path skips viem's classifier and surfaces the RPC error itself.
+    assert.equal(isRevocationFeeShortfall(relayed("AA21 didn't pay prefund")), true);
+    assert.equal(isRevocationFeeShortfall(new Error("relay failed", { cause: new Error("insufficient funds for gas * price + value") })), true);
+  });
+  it("does not read a fee shortfall into other failures or hex that spells aa21", () => {
+    for (const error of [
+      relayed("AA23 reverted"),
+      new Error("receipt unconfirmed; retry the pending operation"),
+      new Error(`reverted on-chain: 0x08c379a0 (0x${"0".repeat(20)}aa21${"0".repeat(40)})`),
+      new Error("factory: 0x00000000000000000000000000000000000AA21f"),
+      "AA21 didn't pay prefund",
+      undefined,
+    ]) assert.equal(isRevocationFeeShortfall(error), false, String(error));
+  });
+  it("names the account, the network and the coin to send, without the raw operation", () => {
+    const empty = revocationFeeMessage(ACCOUNT, robinhoodChain, true);
+    assert.equal(empty, `Revoking earlier permissions needs ETH for the network fee on Robinhood Chain (4663), and account ${ACCOUNT} has none. Send ETH to that address on Robinhood Chain (4663), then try again.`);
+    assert.match(revocationFeeMessage(ACCOUNT, robinhoodTestnet, false), /does not have enough\. Send testnet ETH to that address on Robinhood Chain Testnet \(46630\)/);
   });
 });

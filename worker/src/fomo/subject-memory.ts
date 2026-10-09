@@ -28,7 +28,8 @@
  * WAS about Fomo, which is what lets it ask rather than ignore the message.
  *
  * WHAT IS NEVER IN HERE: a tenant, a credential, provider text, a thesis, a
- * price or any money figure. Symbols and handles are display labels, are
+ * price or any money figure (a remembered trader board holds ranks, user ids
+ * and public handles only). Symbols and handles are display labels, are
  * sanitised and length-capped, and are never read back as instructions. The
  * serialised form is validated strictly on the way in, because it comes back
  * from a store that another process (or a bug) may have written.
@@ -120,7 +121,39 @@ export interface SubjectMemory {
   updatedAt: number;
   /** User turns planned in this conversation. */
   turn: number;
+  /**
+   * THE TRADER BOARD THIS CONVERSATION WAS LAST SHOWN, so "the second one",
+   * "#3" and "that guy" mean its rows (intent.ts rowRefOf). Only Fomo's
+   * public board, never one cut to Merrymen's watched traders. Absent when
+   * none; dropped by any question that is not about the board or one trader.
+   */
+  board?: BoardMemory;
 }
+
+/** What a question about one row asked last, so a bare "and #2?" asks the same of that row. */
+export type BoardRowAbout = "earnings" | "trades" | "holdings" | "profile";
+
+export interface BoardMemory {
+  /** The board's window. */
+  window: PlanWindow | null;
+  /** Asked in the singular ("who's the best trader"): a bare "he" is its 1st row. */
+  singular: boolean;
+  /** What the last question about one of its rows asked; null before any. */
+  about: BoardRowAbout | null;
+  /** When it was answered: older than MEMORY_TTL_MS, it is no one's "the second one". */
+  at: number;
+  /** Its rows by rank, at most MAX_BOARD_ROWS: the provider's user id and public handle. */
+  rows: BoardRow[];
+}
+
+export interface BoardRow {
+  rank: number;
+  userId: string;
+  handle: string | null;
+}
+
+/** The most board rows remembered (the owner sees ten; a room four). */
+export const MAX_BOARD_ROWS = 10;
 
 /** Older than this, memory names a topic but never fills in a subject. */
 export const MEMORY_TTL_MS = 30 * 60_000;
@@ -155,6 +188,25 @@ export function isMemoryUsable(memory: SubjectMemory | null | undefined, now: nu
   if (!memory) return false;
   const age = now - memory.updatedAt;
   return age >= -FUTURE_SKEW_MS && age <= MEMORY_TTL_MS;
+}
+
+/** The trader board "the second one" may refer to: fresh, in a usable memory, or null. */
+export function rememberedBoard(memory: SubjectMemory | null | undefined, now: number): BoardMemory | null {
+  if (!isMemoryUsable(memory, now) || !memory.board) return null;
+  const age = now - memory.board.at;
+  return age >= -FUTURE_SKEW_MS && age <= MEMORY_TTL_MS && memory.board.rows.length > 0 ? memory.board : null;
+}
+
+/** Intents that keep the board: the board itself, and one trader (a row of it, or another). */
+const BOARD_INTENTS: ReadonlySet<FomoIntent> = new Set(["rankings-traders", "trader-holdings", "trader-activity", "trader-context"]);
+
+/** What a one-trader plan asked, in board-row words; null for anything else. */
+function rowAboutOf(plan: FomoQuestionPlan): BoardRowAbout | null {
+  if (plan.rowAsk) return plan.rowAsk.about;
+  if (plan.intent === "trader-holdings") return "holdings";
+  if (plan.intent === "trader-activity") return plan.earnings === true ? "earnings" : "trades";
+  if (plan.intent === "trader-context") return "profile";
+  return null;
 }
 
 /**
@@ -289,6 +341,11 @@ export function applyPlan(
 
   const tokensBefore = tokenSignature(base.subjects);
   const tokensAfter = tokenSignature(subjects);
+  // The board stays only while the conversation is about it or one trader;
+  // a new board replaces it once that board has answered (applyResult).
+  const board = usable && base.board && BOARD_INTENTS.has(plan.intent) && plan.intent !== "rankings-traders"
+    ? { ...base.board, rows: base.board.rows.map((r) => ({ ...r })), about: rowAboutOf(plan) ?? base.board.about }
+    : null;
   const next: SubjectMemory = {
     version: 1,
     subjects,
@@ -300,6 +357,7 @@ export function applyPlan(
     lastRequestId: base.lastRequestId,
     updatedAt: now,
     turn: base.turn + 1,
+    ...(board ? { board } : {}),
   };
   const resolved = plan.clarification ? [] : mergeResolved(explicit, usable ? memory : null, plan.usesMemory, plan.intent, now);
   return { memory: next, resolved };
@@ -347,6 +405,8 @@ export interface LookupSummary {
   /** The dossier revision the answer used; null or absent keeps the remembered one for the same coin. */
   dossierRevision?: { dossierId: string; revision: number } | null;
   requestId: string;
+  /** A public trader board that answered (fomo/chat.ts): its rows become "the second one". */
+  board?: BoardMemory | null;
 }
 
 /**
@@ -379,14 +439,44 @@ export function applyResult(memory: SubjectMemory | null, summary: LookupSummary
 
   const given = validRevision(summary.dossierRevision);
   const sameTokens = tokenSignature(base.subjects) === tokenSignature(subjects);
+  const board = summary.board ? validBoard(summary.board) : null;
   return {
     ...base,
     subjects,
     dossierRevision: given ?? (sameTokens ? base.dossierRevision : null),
     lastRequestId: typeof summary.requestId === "string" && OPAQUE_ID.test(summary.requestId) ? summary.requestId : base.lastRequestId,
     updatedAt: now,
+    ...(board ? { board } : {}),
   };
 }
+
+/**
+ * A board as this module would store it, or null: rows with a valid rank
+ * (1..MAX_BOARD_ROWS, each once), a provider user id and a handle that is one
+ * (else none), at most MAX_BOARD_ROWS of them. Read back from a store, a
+ * tampered row is dropped, never trusted.
+ */
+function validBoard(b: unknown): BoardMemory | null {
+  if (!isPlainObject(b) || !onlyKeys(b, ["window", "singular", "about", "at", "rows"])) return null;
+  const window = b.window === null ? null : (PLAN_WINDOWS as readonly unknown[]).includes(b.window) ? (b.window as PlanWindow) : undefined;
+  if (window === undefined || typeof b.singular !== "boolean") return null;
+  const about = b.about === null || b.about === undefined ? null : ROW_ABOUTS.includes(b.about as BoardRowAbout) ? (b.about as BoardRowAbout) : undefined;
+  if (about === undefined) return null;
+  if (typeof b.at !== "number" || !Number.isSafeInteger(b.at) || b.at < 0) return null;
+  if (!Array.isArray(b.rows)) return null;
+  const rows: BoardRow[] = [];
+  for (const r of b.rows.slice(0, MAX_BOARD_ROWS * 2)) {
+    if (!isPlainObject(r) || !onlyKeys(r, ["rank", "userId", "handle"])) continue;
+    if (typeof r.rank !== "number" || !Number.isSafeInteger(r.rank) || r.rank < 1 || r.rank > MAX_BOARD_ROWS || rows.some((x) => x.rank === r.rank)) continue;
+    if (typeof r.userId !== "string" || !USER_ID.test(r.userId)) continue;
+    const handle = typeof r.handle === "string" && HANDLE.test(r.handle.replace(/^@/, "")) ? r.handle.replace(/^@/, "") : null;
+    rows.push({ rank: r.rank, userId: r.userId, handle });
+    if (rows.length >= MAX_BOARD_ROWS) break;
+  }
+  return rows.length ? { window, singular: b.singular, about, at: b.at, rows } : null;
+}
+
+const ROW_ABOUTS: readonly BoardRowAbout[] = ["earnings", "trades", "holdings", "profile"];
 
 function storedFromResolved(s: Extract<ResolvedSubject, { kind: "token" }>): StoredSubject | null {
   // Only a key this codebase would write is kept; anything else is not an identity.
@@ -461,7 +551,7 @@ export function deserialize(json: unknown): SubjectMemory | null {
     }
   }
   if (!isPlainObject(raw)) return null;
-  if (!onlyKeys(raw, ["version", "subjects", "window", "side", "lastIntent", "dossierRevision", "lastRequestId", "updatedAt", "turn"])) return null;
+  if (!onlyKeys(raw, ["version", "subjects", "window", "side", "lastIntent", "dossierRevision", "lastRequestId", "updatedAt", "turn", "board"])) return null;
   if (raw.version !== 1) return null;
   if (!Array.isArray(raw.subjects) || raw.subjects.length > MAX_STORED_SUBJECTS) return null;
   const subjects: StoredSubject[] = [];
@@ -484,7 +574,9 @@ export function deserialize(json: unknown): SubjectMemory | null {
   if (lastRequestId === undefined) return null;
   if (typeof raw.updatedAt !== "number" || !Number.isSafeInteger(raw.updatedAt) || raw.updatedAt < 0) return null;
   if (typeof raw.turn !== "number" || !Number.isSafeInteger(raw.turn) || raw.turn < 0) return null;
-  return { version: 1, subjects, window, side, lastIntent, dossierRevision, lastRequestId, updatedAt: raw.updatedAt, turn: raw.turn };
+  // A board that is not one this module would write is dropped; the rest of the memory stands.
+  const board = raw.board === undefined ? null : validBoard(raw.board);
+  return { version: 1, subjects, window, side, lastIntent, dossierRevision, lastRequestId, updatedAt: raw.updatedAt, turn: raw.turn, ...(board ? { board } : {}) };
 }
 
 function validStored(s: unknown): StoredSubject | null {

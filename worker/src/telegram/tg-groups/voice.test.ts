@@ -614,6 +614,21 @@ describe("buildPrompt", () => {
     assert.doesNotMatch(fomoLine, /fomo\.family|@|\$/, "nothing the gate would refuse for the model to echo");
   });
 
+  it("asks instead of offering, and never claims progress (live 2026-10-07: an offer, 'do it', 'give me a sec', nothing came)", () => {
+    const on = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ fomo: true }))!;
+    assert.match(on.system, /Ask, never offer \("if you want", "just say the word"\)/);
+    assert.match(on.system, /"trending on robinhood chain, or everywhere\?"/);
+    assert.doesNotMatch(on.system, /i can pull its theses/, "the offer-shaped example is gone");
+    for (const p of [on, buildPrompt({ kind: "answer", mood: "normal" }, ctx())!]) {
+      const rule = p.system.split("\n").find((l) => l.startsWith("NOTHING IN PROGRESS:"));
+      assert.ok(rule, "the rule is there with or without Fomo");
+      assert.match(rule!, /never say you are getting, pulling, checking or sending something/);
+      assert.match(rule!, /never promise to do something later/);
+      assert.match(rule!, /say it didn't come through and that asking for it plainly gets it/);
+      assert.ok(!/\p{N}/u.test(p.system), "still no digit to repeat");
+    }
+  });
+
   it("a line that replies to nothing it can see carries no note", () => {
     const trigger = { ...line(6, "bob", "lol same"), replyTo: 123_456 };
     const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ room: room({ lines: [trigger] }), trigger }))!;
@@ -732,6 +747,15 @@ describe("say", () => {
       const cc = c({ trigger });
       const out = await say({ kind: "answer", mood: "normal" }, cc, model, gate);
       assert.ok(out !== null && out !== dodge && inPool({ kind: "answer", mood: "normal" }, out, cc), out ?? "null");
+    }
+  });
+
+  it("fake progress from the model ('give me a sec', 'yeah here we go') is refused, and a template answers instead", async () => {
+    // Live 2026-10-07: nothing was ever being fetched.
+    for (const stall of ["give me a sec", "yeah here we go", "on it 🫡", "i'll let you know when it's in"]) {
+      reply = ok(stall);
+      const out = await say({ kind: "answer", mood: "normal" }, c(), model, gate);
+      assert.ok(out !== null && out !== stall && inPool({ kind: "answer", mood: "normal" }, out), `${stall} → ${out ?? "null"}`);
     }
   });
 

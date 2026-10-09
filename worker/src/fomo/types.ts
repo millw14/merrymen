@@ -579,6 +579,14 @@ export interface FomoEnvelope<T = unknown> {
   reason: string | null;
   /** One plain sentence safe to show. Never a secret, never a raw provider body. */
   message: string | null;
+  /**
+   * A budget refusal only: when it can be asked again (budget.ts
+   * refusalResetAt), stamped by the service on the clock the refusing charge
+   * used, so a room asked at 14:59:59 and refused by hour 15's counter hears
+   * 16:00, never 15:00. Null or absent: the renderer works it out from the
+   * reason (older orchestrators, broker failure envelopes).
+   */
+  retryAt?: number | null;
 }
 
 // ── Trusted call context ─────────────────────────────────────────────────
@@ -611,6 +619,12 @@ export interface FomoCallContext {
    * own timeout. Absent ⇒ the service's default invoke deadline.
    */
   budgetMs?: number;
+  /**
+   * The asker pushed back on the last answer (contract.ts
+   * BrokerCallOptions.retryEmpty): a held "nothing here" is read again; a
+   * copy with something in it keeps its window.
+   */
+  retryEmpty?: boolean;
 }
 
 /**

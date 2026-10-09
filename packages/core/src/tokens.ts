@@ -93,8 +93,13 @@ export interface PriceQuote {
    * a curve quote passed neither because a curve has no oracle to diverge
    * from. It is good enough to value something already held; it is not good
    * enough to authorise a new buy, and the scout ceiling still applies to it.
+   * "sampled" = a Uniswap v3 pool too new to keep an oracle of its own, priced
+   * at the worker's own time-weighted series of its spot (worker/src/venues/
+   * spot-sampler.ts). A ready series passed a depth floor and a spot-vs-average
+   * band like a pool quote, over minutes rather than fifteen; it may authorise
+   * a fast Trencher vault entry and no other buy. See `sampled` below.
    */
-  source: "chainlink" | "pool" | "broker" | "curve" | "v4";
+  source: "chainlink" | "pool" | "broker" | "curve" | "v4" | "sampled";
   /** For pool prices: route + depth, so a human can judge the number. */
   detail?: string;
   /**
@@ -117,6 +122,12 @@ export interface PriceQuote {
    * have been round-tripped through a sentence.
    */
   liquidityUsdg?: bigint;
+  /**
+   * On a "sampled" quote only: how much series stands behind it. `ready` is
+   * the only thing a buy may be authorised by — an unready series still values
+   * a holding, the way a v4 mark does, and never opens one.
+   */
+  sampled?: { readings: number; spanSec: number; ready: boolean };
 }
 
 /** Reject anything that isn't a plausible ERC-20 entry before it can reach a
@@ -276,6 +287,9 @@ export function priceSourceTag(source: string): string {
       // has no oracle behind it; showing it as a pool price would overstate
       // what is known about it.
       return "curve px";
+    case "sampled":
+      // Not "pool px" either: the average is ours, not the pool's oracle.
+      return "sampled px";
     default:
       return "";
   }
@@ -298,6 +312,8 @@ export function priceSourceNote(source: string): string {
       return "broker px = the venue's own last-trade print, not a Chainlink feed.";
     case "curve":
       return "curve px = read straight off a bonding curve. There is no oracle behind it and no divergence check — the reserves are the entire market, so one trade can move it a long way.";
+    case "sampled":
+      return "sampled px = a new Uniswap pool with no price history of its own, averaged from our own readings over the last few minutes. It passed the depth check, but it's a thinner claim than a pool's own time-averaged price.";
     default:
       return "";
   }

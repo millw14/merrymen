@@ -1500,6 +1500,14 @@ const RESEARCH_PRIVATE_RES: readonly RegExp[] = [
   /\bwhat (?:coins? |tokens? |traders? )?(?:are|r) (?:you|u|ya) (?:watching|tracking|monitoring|following|researching|copying|copy[- ]?trading)\b/u,
   /\bwhat(?:'s| is|s) on (?:your|ur) (?:watch ?list|radar|list)\b/u,
   /\b(?:your|ur) (?:watch ?list|follow(?:ing)? list|copy(?:[- ]?trad(?:e|ing))? list|copy[- ]?trades|cohort|tracked traders|followed traders|traders list)\b/u,
+  // "The best trader u r tracking", "who are the traders you're tracking", "is kaleo one of the
+  // traders you're following": the watch list in slang too. Never "which traders should you
+  // follow" (an opinion) nor "the most followed trader" (a public figure).
+  /\btraders? (?:that |who )?(?:you|u|ya)(?:'re| are| r|re)? (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring)\b|\btraders? (?:that |who )?ur (?:copying|following|tracking|tailing|watching|monitoring)\b/u,
+  // The yes/no form about one account: "do you watch @frankdegods on fomo?", "are you
+  // tailing @x?", "do you follow trader x". Not "would you follow…" (an opinion), and
+  // only a handle, "trader X" or "X on fomo": "do you watch the market?" stays chat.
+  /\b(?:do|did|are|r|have|has) (?:you|u|ya)(?: (?:still|already|ever|even|currently|actually))? (?:copy|copying|copy[- ]?trad(?:e|ing)|mirror|mirroring|follow|following|track|tracking|tail|tailing|watch|watching|monitor|monitoring) (?:@[a-z0-9_]{2,}|trader [a-z0-9_]{2,}|[a-z0-9_]{2,} on fomo\b)/u,
 ];
 
 /** Its balance, P&L, portfolio, positions: private when ASKED for ("what's your pnl", "your p&l?"), not when judged ("your trades are trash"). */
@@ -1667,7 +1675,7 @@ export function lineMood(text: string): ReactionMood | null {
  * about anything ("what do you think about sex"), so the handler settles it
  * from the conversation before the desk looks X up (understand.ts).
  */
-export type DeskIntent = { kind: "market" } | { kind: "coin"; name: string; loose?: true } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
+export type DeskIntent = { kind: "market"; trending?: true } | { kind: "coin"; name: string; loose?: true } | { kind: "comparison"; names: [string, string] } | { kind: "analysis" }
   | { kind: "discussion"; topic: "lore" | "explanation" | "setup" };
 
 /** What the conversation already says, for reading a desk ask. */
@@ -1757,6 +1765,36 @@ export function routeWorthy(text: unknown, selfNames: readonly string[] = [], kn
   });
 }
 
+/**
+ * PUSHING BACK ON AN ANSWER: "there has to be thesis", "check again", "are
+ * you sure", "that's wrong", "look again", "try again". Read only beside its
+ * own research answer (handler.ts), where it means "read it again", never
+ * "say the same thing".
+ *
+ * THE WHOLE LINE IS THE PUSHBACK, give or take a filler ("bro", "pls",
+ * "hmm") and punctuation. A pushback inside other words is banter: "not
+ * right now", "i bought the wrong one lol", "try again later", "there are
+ * some whales buying", "are you sure we should buy" would otherwise have the
+ * room re-post a research answer (and pay for a new page) or ask which coin
+ * (review on #306). A real correction inside a longer line is the planner's
+ * (intent.ts CORRECTION_STRONG) when the router sends it there.
+ */
+const PB_FILL = String.raw`(?:hey|yo|bro|but|so|ok|okay|hmm+|nah|no|wait|pls|please|man|fam|lol|bruh)`;
+/** What a theses pushback may name: "there has to be thesis on $pons", "there must be some on it". */
+const PB_ABOUT = String.raw`(?: (?:on|for|about) (?:it|this(?: coin| one)?|that(?: coin| one)?|\$?[\p{L}\p{N}]{2,24}))?`;
+const PB_THESES = String.raw`(?: theses| thesis| a thesis)`;
+const PB_CORE =
+  String.raw`(?:(?:are|r) (?:you|u) sure|(?:you|u) sure|(?:check|look|try|search) (?:it |that )?again|re-?check(?: it| that)?|refresh(?: it| that)?|that'?s (?:wrong|not right|not true|cap)` +
+  String.raw`|there (?:has|have|got) to be(?: some| any)?(?:${PB_THESES}${PB_ABOUT})?|there must be(?: some| any)?(?:${PB_THESES}${PB_ABOUT})?|has to be some|must be some` +
+  String.raw`|there(?: are|'s| is) (?:def(?:initely)? |for sure |surely )?(?:some|theses|thesis|a thesis)${PB_ABOUT})`;
+const PUSHBACK = new RegExp(String.raw`^[ ,.!?:;-]*(?:${PB_FILL}[ ,.!?]*)*${PB_CORE}(?:[ ,.!?]+(?:${PB_FILL}|${PB_CORE}))*[ .!?]*$`, "u");
+
+export function pushbackOf(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const t = norm(unnamed(text, selfNames)).replace(/[’‘ʼ]/gu, "'");
+  return t.length <= 120 && PUSHBACK.test(t);
+}
+
 /** Laughter, an ack or an emoji: a reaction, not a question, whatever it replies to. */
 const REACTION_ONLY = /^(?:l+o+l+|lmf?a+o+|ha(?:ha)+h?|he(?:he)+|facts|true|same|fr|ikr|nice|bet|k|ok|okay|word|based|real|wow|damn|crazy|insane)$/u;
 
@@ -1771,6 +1809,95 @@ export function reactionOnly(text: unknown, selfNames: readonly string[] = []): 
   const words = wordsOf(norm(unnamed(text, selfNames)));
   if (words.length === 0) return true;
   return words.every((w) => REACTION_ONLY.test(w));
+}
+
+/** Filler that may open a nudge or a complaint: "bro i asked you something", "um hello??". */
+const META_LEAD = String.raw`(?:(?:bro|bruh|yo|hey|hello|um+|uh+|so|ok|okay|well|dude|man|ser|sir|lol|wait|hmm+)[\s,!.?…]+)*`;
+/** Says, in words, that a question of theirs went unanswered. The whole line, nothing else. */
+const META_COMPLAINT = new RegExp(
+  "^" +
+    META_LEAD +
+    String.raw`(?:` +
+    String.raw`i (?:just |already )?(?:asked|said)(?: (?:you|u))?(?: (?:a|the|my) (?:question|q)| (?:something|smth)| a q)?` +
+    String.raw`|(?:you|u) (?:didn'?t|did not|never|don'?t|haven'?t|have not|still haven'?t) (?:answer|answered|reply|replied|respond|responded|say anything)(?: (?:me|my question|the question|it|that))?` +
+    String.raw`|(?:you|u) (?:ignored|skipped|missed) (?:me|my question|the question|it|that)` +
+    String.raw`|(?:answer|reply to|respond to) (?:me|the question|my question|it|that)(?: (?:pls|please|already|bro|man))?` +
+    String.raw`|(?:i'?m )?still waiting(?: (?:on|for) (?:it|that|an answer|you))?` +
+    String.raw`|no answer|any answer|where'?s (?:my|the) answer|where is (?:my|the) answer` +
+    String.raw`)[\s!?.…]*$`,
+  "u",
+);
+/** A nudge with no content: it means something only while an ask of theirs is open. */
+const META_POKE = new RegExp(
+  "^" + META_LEAD + String.raw`(?:\?+|hello+\?*|hel+o+\?+|(?:bro|bruh|yo|hey|dude|man|ser|sir)\?+|(?:are )?(?:you|u) there\?*|done\?+|well\?+|and\?+|so\?+|any ?(?:thing|update)\?*)[\s!?.…]*$`,
+  "u",
+);
+
+/**
+ * A LINE ABOUT ITS OWN SILENCE, read on the line without its names (the fast
+ * path for short, obvious lines only; handler.ts): "complaint" ("i asked a
+ * question", "you didn't answer", "answer me", "still waiting"), "poke"
+ * ("?", "hello??", "you there?", "done?") or "name-only" (its name or
+ * @username and nothing else). Null for anything with content of its own:
+ * "i asked my wife and she said no", "is pons done?", "still waiting for my
+ * pizza". Wider phrasing ("bro??", "you ignored my question earlier") is the
+ * router's to read (route.ts reask), never a longer list here.
+ */
+export function metaLineOf(text: unknown, selfNames: readonly string[] = []): "complaint" | "poke" | "name-only" | null {
+  if (typeof text !== "string" || !text.trim()) return null;
+  // Names out, and whatever punctuation they leave in front (",", "@").
+  const t = norm(unnamed(text, selfNames)).replace(/？/gu, "?").replace(/^[^\p{L}\p{N}?]+/u, "").trim();
+  // Nothing left: its name alone is a hail; an emoji with no name is a reaction.
+  if (!/[\p{L}\p{N}?]/u.test(t)) return /[\p{L}\p{N}]/u.test(norm(text)) ? "name-only" : null;
+  if (META_COMPLAINT.test(t)) return "complaint";
+  if (META_POKE.test(t)) return "poke";
+  return null;
+}
+
+/** One word or phrase of yes. */
+const CONSENT_WORD =
+  /^(?:ok|okay|k+|kk|bet|word|sure|yes+|yeah+|yea+|ya+|yah|yep|yup|ye|y|go|go ahead|go for it|do it|do that|send it|send|run it|pull it|pull it up|show me|hit me|pls|plz|please|please do|ofc|of course|absolutely|definitely|for sure|lets go|let's go|lfg|aight|alright|why not|sounds good)$/u;
+const CONSENT_MAX_WORDS = 6;
+
+/**
+ * YES, AND NOTHING ELSE: "do it", "yes pls", "ok", "bet", "send it", "go
+ * ahead". Read only under its own offer or ask-back (handler.ts
+ * repliesToOwnFomo), where "ok" and "bet" are a yes and not a reaction; what
+ * the yes is to is in the line it answers, and the router reads it there.
+ * Never a question ("do it?", "send it?" ask something of their own).
+ */
+export function consents(text: unknown, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string") return false;
+  if (/[?？]/u.test(text)) return false;
+  const words = wordsOf(norm(unnamed(text, selfNames)));
+  if (words.length === 0 || words.length > CONSENT_MAX_WORDS) return false;
+  // Greedy: the longest phrase of yes at each step ("go ahead", "do it", "yes").
+  let i = 0;
+  while (i < words.length) {
+    let took = 0;
+    for (let n = Math.min(3, words.length - i); n >= 1; n--) {
+      if (CONSENT_WORD.test(words.slice(i, i + n).join(" "))) {
+        took = n;
+        break;
+      }
+    }
+    if (!took) return false;
+    i += took;
+  }
+  return true;
+}
+
+/**
+ * ITS OWN LINE OFFERING, rather than asking: "i can pull the fomo board for
+ * robinhood chain coins if you want, just say the word", "want me to pull its
+ * theses". The persona is told to ask, never offer (voice.ts), but a line of
+ * its own that does is still answered by what it offered: a yes under it is
+ * routed like an answer to its question (handler.ts).
+ */
+const OWN_OFFER =
+  /\b(?:if (?:you|u|ya) (?:want|wanna|like)|want me to|wanna see|should i|shall i|say the word|lmk|let me know|i can (?:pull|get|show|grab|check|look up|fetch|dig|run|post|drop|send|find))\b/u;
+export function offerShaped(text: unknown): boolean {
+  return typeof text === "string" && OWN_OFFER.test(norm(text));
 }
 
 /** A trading word anywhere in the line: what turns "check out bob" from a person into a coin. */
@@ -1825,7 +1952,16 @@ const DESK_MARKET_CUE =
   /\b(?:how|what|whats|update|check|analysis|analy[sz]e|look|looking|doing|vibe|vibes|sentiment|overview|outlook|read|state|today|rn|currently|now|summary|recap|breakdown|thoughts|wdyt|condition|conditions)\b|[?？]/u;
 /** What's moving: these words are about markets in any chat. */
 const DESK_MOVERS =
-  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|trending|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+  /\bwhat(?:'?s|s| is| are)\s+(?:moving|pumping|ripping|bleeding|dumping|mooning|sending)\b|\b(?:top|biggest)\s+(?:movers|gainers|losers)\b|\bany\s+(?:plays|setups|movers|runners)\b/u;
+/**
+ * "What's trending": a market ask too, but where Fomo research is wired a
+ * bare one means Fomo's trending board (handler.ts; live 2026-10-07: "I
+ * said what's trending on fomo"), with the desk's market read as its
+ * fallback. A venue word keeps it on the desk: "what's trending on
+ * robinhood chain", "what's trending in the market".
+ */
+const DESK_TRENDING = /\bwhat(?:'?s|s| is| are)\s+trending\b/u;
+const DESK_VENUE = /\b(?:robinhood|rh|chain|chains|onchain|on-chain|gecko|geckoterminal|dex|dexscreener|market|markets)\b/u;
 /** "what's hot / up / cooking": about markets only beside a trading word ("what's up with the dev" is not). */
 const DESK_MOVERS_WEAK = /\bwhat(?:'?s|s| is| are)\s+(?:hot|cooking|popping|running|green|up)\b/u;
 /** Asks for a chart read in words no other topic uses. */
@@ -1938,7 +2074,8 @@ export function deskAskOf(text: string, selfNames: readonly string[] = [], ctx: 
   if (DESK_LORE.test(t)) return { kind: "discussion", topic: "lore" };
   if (DESK_EXPLAIN.test(t) || DESK_EXPLAIN_SHORT.test(t)) return { kind: "discussion", topic: "explanation" };
   const context = DESK_CONTEXT.test(t) || DESK_MARKET_WORD.test(t);
-  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
+  if (DESK_TRENDING.test(t) && !DESK_VENUE.test(t) && !DESK_MOVERS.test(t)) return { kind: "market", trending: true };
+  if ((DESK_MARKET_WORD.test(t) && DESK_MARKET_CUE.test(t)) || DESK_MOVERS.test(t) || DESK_TRENDING.test(t) || (DESK_MOVERS_WEAK.test(t) && context)) return { kind: "market" };
   if ((DESK_ANALYSIS.test(t) || (DESK_ANALYSIS_WEAK.test(t) && context)) && DESK_REQUEST.test(t)) return { kind: "analysis" };
   if (DESK_SETUP.test(t) && DESK_REQUEST.test(t)) return { kind: "discussion", topic: "setup" };
   return null;
@@ -1970,6 +2107,30 @@ const FOMO_TRADER_FLOW =
 /** Asking for something, without a question mark: "show me…", "check…", "pull up…". */
 const FOMO_REQUEST = /^(?:(?:pls|please|yo|hey|ok|so|can (?:you|u)|could (?:you|u))\s+)*(?:show|tell|check|give|list|pull|find|research|look|dig|get|fetch|what|whats|what's|who|whos|who's|which|how|is|are|any)\b/u;
 
+/**
+ * A SHORT LIST ASK with no question mark: "trending on fomo", "robinhood
+ * chain coins on fomo", "top traders on fomo today". The whole line is list
+ * words and the platform, so "top fomo moment lol" and "fomo traders are
+ * wild" stay chat; the planner still decides what, if anything, it plans.
+ */
+const LIST_MOD = String.raw`(?:top|best|hottest|biggest|trending|new|newest|fresh|small|early|graduated|most held|robinhood(?: chain)?|rh|solana|sol|base|eth(?:ereum)?|bsc|bnb)`;
+const LIST_NOUN = String.raw`(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|traders|whales|leaderboard|boards?|theses|ones)`;
+/** A chain before the platform: "trending on base on fomo", "solana ones on fomo". */
+const LIST_CHAIN = String.raw`(?:(?:on|in) (?:the )?(?:robinhood(?: chain)?|base|solana|sol|eth(?:ereum)?|bsc|bnb)\s+)?`;
+const FOMO_LIST_ASK = new RegExp(
+  String.raw`^(?:(?:the|any|some|latest|current)\s+)?(?:(?:${LIST_MOD}\s+){1,3}${LIST_NOUN}?|${LIST_NOUN})\s*${LIST_CHAIN}(?:on|from|in) (?:the )?fomo(?:\s+(?:today|rn|right now|now|this week|lately|atm))?(?:\s+(?:pls|please))?[.!]*$`,
+  "u",
+);
+
+/**
+ * A COIN'S THESES ASKED FOR WITH NO QUESTION MARK, the whole line and nothing
+ * else: "theses on $PONS", "thesis for pons on fomo", "fomo theses on PONS",
+ * the way the room's own Fomo help puts it (fomo/render.ts
+ * FOMO_CAPABILITIES_GROUP). "my thesis on pons is simple", "theses on pons
+ * are mid lol" and "thesis on $PONS: it goes to 10m" say something, and stay chat.
+ */
+const FOMO_THESES_ASK = /^(?:fomo\s+)?(?:theses|thesis) (?:on|for|about) \$?[\p{L}\p{N}][\p{L}\p{N}_.-]{0,30}(?: (?:on|from) (?:the )?fomo)?(?:\s+(?:pls|please))?[.!]*$/u;
+
 export type FomoAsk = { kind: "platform" } | { kind: "theses" } | { kind: "trader-flow" };
 
 /**
@@ -1989,7 +2150,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
   // Names out, and whatever punctuation they leave in front ("@", ",").
   const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
   if (!t || COIN_STOP.test(t)) return null;
-  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t);
+  const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || isQuestionShaped(text, selfNames) || FOMO_WH_EARLY.test(t) || FOMO_LIST_ASK.test(t) || FOMO_THESES_ASK.test(t);
   if (!asked) return null;
   if (FOMO_PLATFORM.test(t) || FOMO_ITSELF.test(t)) return { kind: "platform" };
   if (FOMO_THESES.test(t)) return { kind: "theses" };
@@ -2000,18 +2161,35 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
 /**
  * A SHORT FOLLOW-UP TO A RESEARCH ANSWER that names no subject of its own:
  * "what about the sellers?", "and the buyers?", "any theses?", "refresh it",
- * "this week?". Read only while this chat's last answer was research
- * (handler.ts), so on its own it routes nothing.
+ * "this week?", "what about robinhood chain?", "and the top?", "what's the
+ * second one holding?", "what did he make money on?". Read only while this
+ * chat's last answer was research (handler.ts), so on its own it routes
+ * nothing.
  */
 const FOMO_FOLLOW_UP =
-  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying)\b/u;
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb)\b/u;
 const FOLLOW_UP_MAX_WORDS = 10;
+/**
+ * A ROW OF THE BOARD IT JUST SAID, or the trader it just named: "the second
+ * one", "#3", "number two" on their own; "he", "his" or "that guy" with what
+ * one trader does ("what's he holding", "what did that guy make money on").
+ * The planner resolves them against the board it remembers (fomo/intent.ts
+ * rowRefOf), or asks which row.
+ */
+const FOMO_ROW_REF = /\bthe (?:top|first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th) (?:one|guy|dude)\b|(?:^|\s)#(?:10|[1-9])(?![\p{L}\p{N}])|\bnumber (?:one|two|three|four|five|[1-9])\b/u;
+const FOMO_PERSON = /\b(?:he|he's|hes|him|his|she|she's|her|that guy|this guy|the guy)\b/u;
+/**
+ * What one trader does with money. Never "doing" or "up to" ("what is he
+ * doing lol" is chat), and never "holding up" ("is she holding up ok?"):
+ * "how's the second one doing?" still reads as a row through FOMO_ROW_REF.
+ */
+const FOMO_TRADER_VERB = /\b(?:hold|holds|holding(?! up\b)|holdings|bags?|bought|buy|buying|sold|sell|selling|trades?|trading|traded|made|make|making|money|won|lost)\b/u;
 
 export function fomoFollowUpOf(text: string, selfNames: readonly string[] = []): boolean {
   if (typeof text !== "string" || !text.trim()) return false;
-  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}]+/u, "");
+  const t = norm(unnamed(text, selfNames)).replace(/^[^\p{L}\p{N}#]+/u, "");
   if (!t || COIN_STOP.test(t)) return false;
   if (wordsOf(t).length > FOLLOW_UP_MAX_WORDS) return false;
   const asked = /[?？]/u.test(text) || FOMO_REQUEST.test(t) || /^(?:and|what about|how about|now|also|refresh|update|recheck|re-check)\b/u.test(t) || isQuestionShaped(text, selfNames);
-  return asked && FOMO_FOLLOW_UP.test(t);
+  return asked && (FOMO_FOLLOW_UP.test(t) || FOMO_ROW_REF.test(t) || (FOMO_PERSON.test(t) && FOMO_TRADER_VERB.test(t)));
 }

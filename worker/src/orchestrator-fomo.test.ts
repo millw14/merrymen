@@ -1753,6 +1753,14 @@ describe("the orchestrator's wiring", () => {
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
 
+  it("hands the operator's research caps to the runtime, as a self-hosted worker does to its own", () => {
+    assert.match(SRC, /createFomoRuntime\(\{[^}]*planCreditsPerMonth: boot\.planCredits, budget: boot\.budget/);
+    const index = readFileSync(path.join(HERE, "index.ts"), "utf8");
+    const call = index.slice(index.indexOf("selfHostedFomoBroker({"), index.indexOf("selfHostedFomoBroker({") + 1_200);
+    assert.match(call, /planCreditsPerMonth: fomoPlanFrom\(process\.env\)/);
+    assert.match(call, /fomoBudgetFrom\(process\.env\)/);
+  });
+
   it("spawns workers with an IPC channel and serves the broker on it, released on exit", () => {
     const spawnChild = SRC.slice(SRC.indexOf("async function spawnChild("), SRC.indexOf("export type PaperRestore"));
     assert.ok(spawnChild.length > 0, "spawnChild found");
@@ -1834,6 +1842,16 @@ describe("the orchestrator's wiring", () => {
     assert.deepEqual([keyless.off, keyless.apiKey], [false, null], "opted in without a key still runs: files and the broker answer honestly");
     assert.match(keyless.lines.join(" "), /without a provider key/);
     assert.equal(fomoSetup({ ...ON, MERRYMEN_FOMO_PLAN_CREDITS: "lots" }).planCredits, undefined);
+    // The research caps (D9): unset, the defaults and no override; set, passed to the runtime and said once at boot.
+    assert.deepEqual(keyless.budget, {});
+    assert.match(keyless.lines.join("\n"), /fomo: research budget \d+ credits\/day shared; per owner \d+\/h and \d+\/day; per group 2500\/h/);
+    const capped = fomoSetup({ ...ON, MERRYMEN_FOMO_PLAN_CREDITS: "37500000", MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "6500", MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "13000", MERRYMEN_FOMO_TENANT_DAILY_CREDITS: "26000" });
+    assert.deepEqual(capped.budget, { groupHourlyCredits: 6_500, tenantHourlyCredits: 13_000, tenantDailyCredits: 26_000 });
+    assert.match(capped.lines.join("\n"), /per owner 13000\/h and 26000\/day; per group 6500\/h/);
+    const badCap = fomoSetup({ ...ON, MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: KEY });
+    assert.deepEqual(badCap.budget, {});
+    assert.ok(badCap.lines.includes("fomo: MERRYMEN_FOMO_GROUP_HOURLY_CREDITS is not a whole number of credits; its default applies"));
+    assert.ok(!badCap.lines.join(" ").includes(KEY.slice(0, 6)), "a key pasted into a cap is never logged");
     assert.ok(!JSON.stringify([on.lines, keyless.lines]).includes(KEY), "a boot line carries the key");
     // A key pasted into the switch is never written to the log.
     const pasted = fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_ENABLED: KEY });

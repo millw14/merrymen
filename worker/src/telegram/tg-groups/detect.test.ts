@@ -21,6 +21,8 @@ import {
   addressedSmallTalk,
   asksAboutCoin,
   asksHowItIs,
+  consents,
+  deskAskOf,
   deskNameOk,
   extractCaHits,
   extractCas,
@@ -42,6 +44,9 @@ import {
   isShush,
   isTradeTalk,
   lineMood,
+  metaLineOf,
+  offerShaped,
+  pushbackOf,
   reactionOnly,
   routeWorthy,
   selfNamesOf,
@@ -929,16 +934,41 @@ describe("isPrivateAsk: who it follows, copies or watches is the owner's configu
     "pine who are you tracking", "which traders do you follow?", "what wallets are you copying", "what are you watching?",
     "what coins are you watching", "what tokens are you tracking rn", "what's on your watchlist", "show me your watch list",
     "drop your copy trade list", "who's in your cohort?",
+    // The yes/no form about one account.
+    "do you watch @frankdegods on fomo?", "are you following @frankdegods on fomo?", "do you copy trade @frankdegods on fomo?",
+    "do you follow @frankdegods?", "are you tailing @frankdegods on fomo?", "r u still tracking @frankdegods", "do you follow trader frankdegods",
+    "do you watch frankdegods on fomo?",
+    // The watch list in slang (review r3).
+    "best trader u r tracking on fomo, what's he holding?", "best trader ur tracking on fomo what's he holding",
+    "the best trader you're tracking on fomo", "is kaleo one of the traders you're following", "who are the traders you're tracking on fomo",
+    "the traders youre watching", "a trader you follow on fomo",
   ];
   const no = [
     "what are you holding?", "who's watching the game", "anyone watching pepe", "i'm following the chart", "what are fomo traders buying?",
     "who is buying pons on fomo?", "what's trending on fomo", "copy that", "follow the money",
+    "what is @frankdegods holding on fomo?", "who is trader frankdegods on fomo?", "would you follow @frankdegods?",
+    "do you watch the market?", "are you following the news", "do you track the chart on fomo",
+    "which traders should you follow on fomo", "who's the most followed trader on fomo", "what are traders buying on fomo",
+    "the best trader on fomo, what's he holding?",
   ];
   for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t, { research: true }), true));
   for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t, { research: true }), false));
   // Without research in this process there is no such configuration: these lines go on as before Fomo.
   for (const t of ["who do you copy trade?", "what are you watching?", "what's on your watchlist", "who's in your cohort?"]) {
     it(`no research, not private: ${t}`, () => assert.equal(isPrivateAsk(t), false));
+  }
+});
+
+describe("a chain on its own is a Fomo follow-up, and a list ask may name a chain before the platform (review 2026-10-08)", () => {
+  const names = ["pine", "shogun"];
+  for (const t of ["shogun on base?", "solana ones?", "and on solana?", "what about eth?", "robinhood ones?"]) {
+    it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, names), true));
+  }
+  for (const t of ["shogun lol based", "shogun basically yes"]) {
+    it(`not a follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, names), false));
+  }
+  for (const t of ["shogun trending on base on fomo", "shogun solana ones on fomo", "robinhood ones on fomo"]) {
+    it(`list ask: ${t}`, () => assert.deepEqual(fomoAskOf(t, names), { kind: "platform" }));
   }
 });
 
@@ -970,6 +1000,20 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     // Missed on 2026-10-07 18:58, before the model ever saw them.
     ["shogun who's on top fomo today?", "platform"],
     ["i'm sorry who's the top trader on fomo today", "platform"],
+    // Short list asks with no question mark (2026-10-07: the room typed them like this).
+    ["pine trending on fomo", "platform"],
+    ["robinhood chain coins on fomo", "platform"],
+    ["top robinhood coins on fomo", "platform"],
+    ["@pinebot top traders on fomo today", "platform"],
+    ["solana memecoins on fomo pls", "platform"],
+    ["the leaderboard on fomo", "platform"],
+    // A coin's theses as the room's Fomo help says to ask, with no question mark (review r2).
+    ["pine theses on $PONS", "theses"],
+    ["pine theses on PONS on fomo", "platform"],
+    ["pine fomo theses on $PONS", "platform"],
+    ["pine thesis for $PONS", "theses"],
+    ["@pinebot theses on $PONS", "theses"],
+    ["thesis about pons please", "theses"],
   ];
   for (const [t, kind] of yes) it(`research ask (${kind}): ${t}`, () => assert.equal(fomoAskOf(t, names)?.kind, kind));
   const no = [
@@ -977,15 +1021,23 @@ describe("fomoAskOf: an addressed social-trading research ask, conservatively", 
     "how's the market?", "pine i saw it on fomo", "fomo traders are wild", "", "pine don't buy the fomo traders' bags",
     "is fomo on robinhood", "i bought it with fomo lol",
     "that's what fomo does lol", "i have fomo who cares", "pure fomo who's buying this", "top fomo moment lol",
+    "the top coins on fomo are trash", "bought the top on fomo lol", "on fomo", "coins on fomo got me rekt lol", "fomo coins",
+    // Saying something about theses, not asking for them (review r2).
+    "my thesis on pons is simple", "theses on pons are mid lol", "thesis on $PONS: it goes to 10m", "theses on pons and pepe are trash",
   ];
   for (const t of no) it(`not a research ask: ${JSON.stringify(t)}`, () => assert.equal(fomoAskOf(t, names), null));
 });
 
 describe("fomoFollowUpOf: a short follow-up to a research answer", () => {
-  const yes = ["what about the sellers?", "and the buyers?", "pine refresh it", "this week?", "any theses?", "what changed since?"];
+  const yes = ["what about the sellers?", "and the buyers?", "pine refresh it", "this week?", "any theses?", "what changed since?", "what about robinhood chain?", "and the top?", "what's trending now?", "the other boards?"];
   const no = ["lol", "gm", "pine thoughts on pepe", "what do you think about the weather today in the city where i live right now", "don't look at the sellers"];
   for (const t of yes) it(`follow-up: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
   for (const t of no) it(`not a follow-up: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
+  // A row of the board it just said, or the trader it just named (fomo/intent.ts resolves them, or asks which).
+  const rows = ["what's the second one holding?", "#3?", "and number two?", "what did the top guy buy", "what's he holding?", "pine what did he make money on", "what is that guy holding", "tell me what his bags are", "how's the second one doing?"];
+  const notRows = ["he's cooked lol", "lol that guy", "the second one is better", "is he single?", "number one fan here", "is she holding up ok?", "what is he doing lol", "what's he up to?"];
+  for (const t of rows) it(`a row or that trader: ${t}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), true));
+  for (const t of notRows) it(`not a row ask: ${JSON.stringify(t)}`, () => assert.equal(fomoFollowUpOf(t, ["pine"]), false));
 });
 
 describe("deskNameOk / routeWorthy (route.ts checks a model's pick with these)", () => {
@@ -1027,5 +1079,87 @@ describe("reactionOnly", () => {
   it("laughter, acks and emoji are reactions; a short answer is not", () => {
     for (const t of ["lol", "LMAO", "hahaha", "facts", "🔥", "😂😂", "lol ok", "@pinebot lol"]) assert.equal(reactionOnly(t, ["pinebot"]), true, t);
     for (const t of ["pons", "$pons", "trending", "yes", "top traders", "the second one"]) assert.equal(reactionOnly(t), false, t);
+  });
+});
+
+describe("consents and offerShaped: a yes under its own offer (live 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  it("a plain yes, however it is said, names in or out", () => {
+    for (const t of ["do it", "yes", "go", "send it", "pls", "sure", "yep", "yes pls", "ok", "bet", "go ahead", "yes do it", "pull it", "ya", "shogun do it", "@Merrymanme_bot yes please", "ok do it!", "yes.", "k", "yeah go for it"]) {
+      assert.equal(consents(t, self), true, t);
+    }
+  });
+  it("a question, a reaction, a no, or a yes with something of its own is not", () => {
+    for (const t of ["lol", "lol ok", "no", "nah", "do it?", "send it?", "what about pons", "done?", "yes but on solana", "", "ok ok ok ok ok ok ok"]) {
+      assert.equal(consents(t, self), false, t);
+    }
+    assert.equal(consents(undefined), false);
+  });
+  it("its own line offering rather than asking", () => {
+    for (const t of ["i can pull the fomo board for robinhood chain coins if you want, just say the word", "want me to pull its theses", "lmk which coin", "should i check the leaderboard"]) {
+      assert.equal(offerShaped(t), true, t);
+    }
+    for (const t of ["half the traders in here have fomo rn lol", "top traders today, or what's trending?", "i can't say", "which coin?"]) assert.equal(offerShaped(t), false, t);
+    assert.equal(offerShaped(null), false);
+  });
+});
+
+describe("a bare 'what's trending' (decision D1, 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  it("is a market ask marked trending: Fomo's board where Fomo is wired, the desk otherwise", () => {
+    for (const t of ["what's trending", "shogun what's trending", "whats trending today?", "what is trending rn", "@Merrymanme_bot what's trending?"]) {
+      assert.deepEqual(deskAskOf(t, self), { kind: "market", trending: true }, t);
+    }
+  });
+  it("a venue keeps it on the desk; other movers words are the plain market read", () => {
+    for (const t of ["what's trending on robinhood chain", "what's trending in the market", "what's trending on dexscreener", "what's moving", "what's pumping today", "top movers?", "what's trending and what's pumping"]) {
+      assert.deepEqual(deskAskOf(t, self), { kind: "market" }, t);
+    }
+  });
+});
+
+describe("metaLineOf: a line about its own silence (live 2026-10-07)", () => {
+  const self = ["shogun", "merrymanme_bot"];
+  const rows: Array<[string, "complaint" | "poke" | "name-only"]> = [
+    ["i asked a question", "complaint"], ["I asked a question", "complaint"], ["shogun i asked you a question", "complaint"],
+    ["you didn't answer", "complaint"], ["you didnt answer me", "complaint"], ["u never answered", "complaint"], ["answer me", "complaint"],
+    ["answer the question", "complaint"], ["answer me pls", "complaint"], ["bro i asked you something", "complaint"], ["you ignored me", "complaint"],
+    ["still waiting", "complaint"], ["i'm still waiting on it", "complaint"], ["where's my answer", "complaint"],
+    ["hello??", "poke"], ["hello?", "poke"], ["?", "poke"], ["??", "poke"], ["？", "poke"], ["you there?", "poke"], ["shogun you there?", "poke"],
+    ["done?", "poke"], ["well?", "poke"], ["and?", "poke"], ["shogun?", "poke"], ["bro??", "poke"],
+    ["shogun", "name-only"], ["@Merrymanme_bot", "name-only"],
+  ];
+  for (const [t, want] of rows) it(`${want}: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), want));
+  const no = [
+    "what's trending", "i asked my wife and she said no", "did you answer bob", "answer is 42", "i said gm", "hello everyone", "gm",
+    "what did you trade today?", "i asked chatgpt about pons", "you didn't buy pons?", "is pons done?", "well that was fast", "and pons?",
+    "so what about pons", "thanks shogun", "lol", "still waiting for my pizza", "you ignored my trade idea lmao it pumped", "🔥", "😂😂",
+    "i said what's trending", "why can't you answer in the group?", "", "   ",
+  ];
+  for (const t of no) it(`content of its own: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), null));
+  it("never throws on junk", () => assert.equal(metaLineOf(undefined), null));
+});
+
+describe("pushbackOf (the AUTON incident, 2026-10-08)", () => {
+  it("pushing back on an answer: read it again", () => {
+    for (const t of [
+      "there has to be thesis.", "there must be some", "check again", "pine look again pls", "are you sure?", "u sure", "that's wrong", "that’s not right", "try again", "refresh it", "recheck", "there are definitely theses",
+      "pine, check again", "@pinebot are you sure?", "bro there has to be thesis on $PONS", "hmm are you sure? check again", "lol that's cap",
+    ]) {
+      assert.equal(pushbackOf(t, ["pine"]), true, t);
+    }
+  });
+  it("an ordinary line is not one", () => {
+    for (const t of ["what are people saying about pons", "thanks", "lol", "how's the market", "send it", "has to be the dev", "i'm sure it'll pump"]) {
+      assert.equal(pushbackOf(t), false, t);
+    }
+  });
+  it("a pushback inside other words is banter, never one (review on #306)", () => {
+    for (const t of [
+      "not right now", "i bought the wrong one lol", "wrong chain", "no way i'm selling", "try again later", "there are some whales buying", "refresh my memory, what's pons",
+      "are you sure we should buy", "there must be some mistake", "check again tomorrow", "u sure you're not rugging us", "impossible", "no way", "that one's wrong lol",
+    ]) {
+      assert.equal(pushbackOf(t, ["pine"]), false, t);
+    }
   });
 });

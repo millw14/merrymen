@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import {
-  FilePartnerStore, getPartnerStore, ONBOARDING_TTL_SECONDS, PARTNER_HISTORY_EXCHANGES,
-  PartnerStoreError, type PartnerCreate,
+  activatedBy, FilePartnerStore, fitPartnerReply, getPartnerStore, ONBOARDING_TTL_SECONDS, PARTNER_HISTORY_EXCHANGES,
+  partnerText, PartnerStoreError, type PartnerCreate,
 } from "./partner-store";
 
 const A = "0x00000000000000000000000000000000000000a1" as const;
@@ -65,6 +65,49 @@ test("partner namespace isolates external ids, lookup, list, and revocation", as
   assert.equal((await store.byToken(first.token!))?.status, "pending");
 });
 
+test("list returns the newest connections first, then by id, one row per user, before its limit", async () => {
+  const { store, advance } = fixture();
+  const made: string[] = [];
+  for (let n = 0; n < 8; n++) {
+    made.push((await store.create(input(`user-${n}`))).connection.id);
+    advance(1);
+  }
+  // Same-second connections fall back to id order, never to insertion luck.
+  const twins = [(await store.create(input("twin-a"))).connection.id, (await store.create(input("twin-b"))).connection.id].sort().reverse();
+  assert.deepEqual((await store.list("partner-a")).map(c => c.id), [...twins, ...made.reverse()]);
+  advance(1);
+  for (let n = 0; n < 100; n++) {
+    const { connection } = await store.create(input(`later-${n}`));
+    await store.revoke("partner-a", connection.id);
+  }
+  // A full page of older rows, every one disconnected: a new or reconnected user still shows, once.
+  advance(1);
+  const reconnected = (await store.create(input("later-0"))).connection;
+  const page = await store.list("partner-a");
+  assert.equal(page.length, 100);
+  assert.equal(page[0].id, reconnected.id);
+  assert.equal(page.filter(c => c.externalUserId === "later-0").length, 1, "the retired connection is not listed beside its replacement");
+  assert.equal(page.filter(c => c.status === "revoked").length, 99);
+  assert.ok(!page.some(c => made.includes(c.id) || twins.includes(c.id)), "the oldest rows are the ones past the limit");
+});
+
+test("text that is not well-formed is refused, and a model reply carrying a lone surrogate is repaired", async () => {
+  const { store } = fixture();
+  const lone = JSON.parse('"Robin \\ud800"') as string;
+  assert.equal(lone.isWellFormed(), false);
+  for (const bad of [{ name: lone }, { externalUserId: `user-${JSON.parse('"\\udc00"')}` }, { partnerName: lone }]) {
+    await assert.rejects(store.create({ ...input("user-bad"), ...bad }), (e: unknown) => e instanceof PartnerStoreError && e.status === 400 && e.code === "invalid_input");
+  }
+  assert.deepEqual(await store.list("partner-a"), []);
+  assert.equal(partnerText(lone, 64), false);
+  assert.equal(partnerText("Robin 😀", 64), true, "a surrogate PAIR is ordinary text");
+  const pending = await store.create(input());
+  await store.bind(pending.token!, A, ["chat:agent"]);
+  await assert.rejects(store.appendExchange(pending.connection.id, { requestId: "lone", message: lone, reply: "ok" }), /invalid message/);
+  assert.equal(fitPartnerReply(`Reply ${lone} done 😀`), "Reply Robin \ufffd done 😀");
+  assert.equal((await store.appendExchange(pending.connection.id, { requestId: "fitted", message: "hi", reply: fitPartnerReply(lone) })).exchange.reply, "Robin \ufffd");
+});
+
 test("token binding is single-use even with concurrent different tenants", async () => {
   const { store } = fixture();
   const created = await store.create(input());
@@ -120,7 +163,9 @@ test("consent cannot escalate scopes and only the actual owner can revoke", asyn
   assert.equal((await store.byId("partner-a", pending.connection.id))?.status, "linked");
   assert.equal(await store.revokeByTenant(pending.connection.id, A), true);
   assert.equal((await store.byId("partner-a", pending.connection.id))?.status, "revoked");
-  assert.equal((await store.create(input())).token, null, "a create retry does not silently undo revocation");
+  const reopened = await store.create(input());
+  assert.notEqual(reopened.connection.id, pending.connection.id, "a create after revocation never reopens the revoked connection");
+  assert.equal((await store.byId("partner-a", pending.connection.id))?.status, "revoked");
   await assert.rejects(store.appendExchange(pending.connection.id, { requestId: "r1", message: "hello", reply: "hello" }), /not active/);
 });
 
@@ -136,6 +181,68 @@ test("embedded proof binding scopes the connection to its partner and is idempot
   await assert.rejects(store.bindAuthorized(pending.connection.id, "partner-a", B, ["chat:agent"]), /different owner/);
   await assert.rejects(store.bindAuthorized(pending.connection.id, "partner-a", A, ["read:agent", "chat:agent"]), /different owner or consent/);
   assert.equal(await store.byToken(pending.token!), null);
+});
+
+test("a disconnected user reconnects through a fresh authorization; the revoked connection stays revoked", async () => {
+  const { store, advance } = fixture();
+  const original = await store.create(input());
+  await store.bind(original.token!, A, ["chat:agent"]);
+  await store.appendExchange(original.connection.id, { requestId: "old-turn", message: "private question", reply: "private answer" });
+  await store.revoke("partner-a", original.connection.id);
+  advance(1);
+  const fresh = await store.create(input());
+  assert.equal(fresh.created, true);
+  assert.notEqual(fresh.connection.id, original.connection.id);
+  assert.equal(fresh.connection.status, "pending");
+  assert.equal(fresh.connection.tenant, null, "no owner binding carries over");
+  assert.ok(fresh.token && fresh.token !== original.token);
+  assert.deepEqual(await store.readMessages(fresh.connection.id), [], "no history carries over");
+  assert.equal(await store.getExchange(fresh.connection.id, "old-turn"), null);
+  // The old id keeps answering as revoked, with its own record, and can never be used again.
+  const old = await store.byId("partner-a", original.connection.id);
+  assert.equal(old?.status, "revoked");
+  assert.equal(old?.externalUserId, "user-1");
+  assert.equal(await store.byToken(original.token!), null);
+  await assert.rejects(store.bindAuthorized(original.connection.id, "partner-a", A, ["chat:agent"]), (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_revoked");
+  await assert.rejects(store.appendExchange(original.connection.id, { requestId: "late", message: "hello", reply: "hello" }), /not active/);
+  assert.equal(await store.revoke("partner-a", original.connection.id), true, "disconnecting the old id again is still a no-op success");
+  assert.equal((await store.byId("partner-a", original.connection.id))?.status, "revoked");
+  // Repeating the create returns the same pending authorization, as for any other pending one.
+  const repeat = await store.create(input());
+  assert.equal(repeat.created, false);
+  assert.equal(repeat.connection.id, fresh.connection.id);
+  assert.equal(repeat.token, fresh.token);
+  // Fresh consent is required, and the same wallet may give it: the revoked link no longer holds it.
+  assert.equal(await store.byTenant("partner-a", A), null);
+  assert.equal((await store.bind(fresh.token!, A, ["chat:agent"])).status, "linked");
+  assert.equal((await store.byTenant("partner-a", A))?.id, fresh.connection.id);
+  // Listed once, as its current connection: the retired one answers only by its own id.
+  assert.deepEqual((await store.list("partner-a")).map(c => [c.id, c.status]), [[fresh.connection.id, "linked"]]);
+  // And again: every disconnect can be followed by another fresh authorization.
+  await store.revoke("partner-a", fresh.connection.id);
+  advance(1);
+  const third = await store.create(input());
+  assert.equal(third.created, true);
+  assert.equal(new Set([original.connection.id, fresh.connection.id, third.connection.id]).size, 3);
+  assert.equal((await store.byId("partner-a", fresh.connection.id))?.status, "revoked");
+});
+
+test("an activation proof is recorded only on a connection linked to that owner, and names one exact authorization", async () => {
+  const { store } = fixture();
+  const pending = await store.create(input());
+  const proof = { nonce: "a".repeat(48), grantHash: `0x${"1".repeat(64)}` };
+  const changed = (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_changed";
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-a", A, proof), changed, "not while pending");
+  await store.bindAuthorized(pending.connection.id, "partner-a", A, ["chat:agent"]);
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-a", B, proof), changed, "not for another owner");
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-b", A, proof), changed, "not across apps");
+  const recorded = await store.recordActivation(pending.connection.id, "partner-a", A, proof);
+  assert.ok(activatedBy(recorded, proof));
+  assert.ok(!activatedBy(recorded, { ...proof, nonce: "b".repeat(48) }));
+  assert.ok(!activatedBy(recorded, { ...proof, grantHash: `0x${"2".repeat(64)}` }));
+  assert.ok(!JSON.stringify(recorded).includes(proof.nonce), "only a hash of the nonce is kept");
+  await store.revoke("partner-a", pending.connection.id);
+  await assert.rejects(store.recordActivation(pending.connection.id, "partner-a", A, proof), changed, "never on a revoked connection");
 });
 
 test("embedded binding cannot bypass per-partner wallet uniqueness or revive revocation", async () => {

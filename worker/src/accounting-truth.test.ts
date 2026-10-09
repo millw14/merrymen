@@ -524,7 +524,7 @@ describe("P5 — no path converts uncertainty into a P&L figure", () => {
     // not to the accrual call.
     const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(src, /const feeBpsThisTick = accounting\.contributionsKnown \? effFeeBps : 0;/);
-    assert.match(src, /accrueAboveHwm\(equityUsdg, highWaterMarkUsdg, feeBpsThisTick\)/);
+    assert.match(src, /accrueAboveHwm\(peakEquityUsdg, highWaterMarkUsdg, feeBpsThisTick\)/);
   });
 
   it("the old inference is gone from the hosted path", () => {

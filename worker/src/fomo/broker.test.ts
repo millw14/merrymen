@@ -330,6 +330,21 @@ describe("createDirectBroker", () => {
     assert.equal(svc.invocations[1]!.ctx.priority, "position-protection");
   });
 
+  it("carries a pushback's retryEmpty to the service, never as a freshness, and refuses one that is not a boolean (review on #306)", async () => {
+    const svc = new FakeService();
+    const broker = createDirectBroker(svc, "self", { now: () => NOW });
+    const G: BrokerCallOptions = { surface: "telegram-group", audience: "group", conversationKey: "tg:g:7", priority: "interactive", groupId: "-1001" };
+    await broker.call("fomo_get_token_theses", { token: A }, { ...G, retryEmpty: true });
+    await broker.call("fomo_get_token_theses", { token: A }, G);
+    assert.equal(svc.invocations[0]!.ctx.retryEmpty, true);
+    assert.deepEqual(svc.invocations[0]!.args, { token: A }, "the tool's freshness is never touched");
+    assert.ok(!("retryEmpty" in svc.invocations[1]!.ctx));
+    assert.equal((await broker.call("fomo_get_token_theses", { token: A }, { ...G, retryEmpty: "yes" } as unknown as BrokerCallOptions)).reason, "invalid-request");
+    assert.equal(svc.invocations.length, 2);
+    const p = parseBrokerRequest({ fomo: 1, id: "r1", op: "call", tool: "fomo_get_token_theses", args: {}, opts: { ...G, retryEmpty: true } });
+    assert.ok(p.ok && p.request.op === "call" && p.request.opts.retryEmpty === true && p.extras.length === 0);
+  });
+
   it("enforces the timeout with an abort, answering a failed 'timeout' envelope", async () => {
     const svc = new FakeService();
     let seen: AbortSignal | undefined;
@@ -520,6 +535,10 @@ describe("IPC broker round trip", () => {
     const sent = pair.wire.fromChild.find((m) => m.op === "call")!;
     assert.ok(!("tenant" in sent), "the child never sends a tenant");
     assert.equal((sent.opts as Record<string, unknown>).timeoutMs, BROKER_LIMITS.childTimeoutMs);
+    // A pushback's retryEmpty crosses the wire to the service (review on #306).
+    await broker.call("fomo_get_token_theses", { token: A }, { ...DM, retryEmpty: true });
+    assert.equal(svc.invocations[1]!.ctx.retryEmpty, true);
+    assert.ok(!("retryEmpty" in svc.invocations[0]!.ctx));
 
     await broker.memory.set("tg:dm:1", '{"version":1}');
     assert.equal(svc.memory.get(`${ORCH_TENANT}|tg:dm:1`), '{"version":1}');

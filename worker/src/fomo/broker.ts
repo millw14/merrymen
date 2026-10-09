@@ -173,7 +173,7 @@ const OPS: Record<BrokerRequest["op"], readonly string[]> = {
   configured: [],
 };
 
-const CALL_OPTION_FIELDS: ReadonlySet<string> = new Set(["surface", "audience", "conversationKey", "priority", "groupId", "timeoutMs"]);
+const CALL_OPTION_FIELDS: ReadonlySet<string> = new Set(["surface", "audience", "conversationKey", "priority", "groupId", "timeoutMs", "retryEmpty"]);
 
 /** Reasons that mean "not reachable or not set up" rather than "tried and failed". */
 const UNAVAILABLE_REASONS: ReadonlySet<string> = new Set(["broker-unavailable", "not-configured", "no-key", "provider-unavailable"]);
@@ -327,7 +327,7 @@ export function envelopeOf(v: unknown, tool?: FomoToolName): FomoEnvelope | null
   if (!(d === null || d === undefined || (isRecord(d) && typeof d.dossierId === "string" && Number.isSafeInteger(d.revision)))) return null;
   if (!(v.reason === null || v.reason === undefined || typeof v.reason === "string")) return null;
   if (!(v.message === null || v.message === undefined || typeof v.message === "string")) return null;
-  return {
+  const out: FomoEnvelope = {
     ...(v as unknown as FomoEnvelope),
     subject: (v.subject ?? null) as FomoEnvelope["subject"],
     data: v.data === undefined ? null : v.data,
@@ -335,6 +335,9 @@ export function envelopeOf(v: unknown, tool?: FomoToolName): FomoEnvelope | null
     reason: (v.reason ?? null) as string | null,
     message: (v.message ?? null) as string | null,
   };
+  // A reset time is a finite instant or nothing: anything else is dropped, and the renderer works it out.
+  if (!(typeof v.retryAt === "number" && Number.isFinite(v.retryAt)) && v.retryAt !== null) delete out.retryAt;
+  return out;
 }
 
 const TRIM_NOTE = "The full result was too large to pass along here; ask a narrower question to see the rest.";
@@ -421,10 +424,13 @@ function parseCallOptions(v: unknown, surfaces: ReadonlySet<FomoSurface> | null)
     if (typeof v.timeoutMs !== "number" || !Number.isFinite(v.timeoutMs) || v.timeoutMs <= 0) return { ok: false, reason: "invalid-request" };
     timeoutMs = Math.min(Math.trunc(v.timeoutMs) || 1, BROKER_LIMITS.maxTimeoutMs);
   }
+  // A pushback's "read a held 'nothing here' again" (BrokerCallOptions.retryEmpty): a flag, never a forced refresh.
+  if (v.retryEmpty !== undefined && v.retryEmpty !== null && typeof v.retryEmpty !== "boolean") return { ok: false, reason: "invalid-request" };
   const priority: RetrievalPriority = v.priority === "position-protection" && v.surface !== "background" ? "interactive" : v.priority;
   const extras = Object.keys(v).filter((k) => !CALL_OPTION_FIELDS.has(k) && k !== "signal");
   const opts: WireCallOptions = { surface: v.surface, audience: v.audience, conversationKey, priority, groupId };
   if (timeoutMs !== undefined) opts.timeoutMs = timeoutMs;
+  if (v.retryEmpty === true) opts.retryEmpty = true;
   return { ok: true, opts, extras };
 }
 
@@ -703,6 +709,7 @@ export function createDirectBroker(service: FomoService, tenant: string, opts: D
             groupId: o.groupId ?? null,
             signal,
             budgetMs: timeout,
+            ...(o.retryEmpty === true ? { retryEmpty: true } : {}),
           };
           return service.invoke(ctx, tool, args);
         },
@@ -1194,6 +1201,7 @@ export function serveBrokerRequests(port: BrokerPort, tenant: string, service: F
           groupId: o.groupId ?? null,
           signal,
           budgetMs: timeoutOf(o.timeoutMs, maxCallMs, maxCallMs),
+          ...(o.retryEmpty === true ? { retryEmpty: true } : {}),
         };
         return service.invoke(ctx, tool, args);
       },

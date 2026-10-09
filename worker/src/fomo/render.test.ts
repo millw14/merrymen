@@ -3,7 +3,12 @@
  * attribution — and in a group, coin-level aggregates with no identities.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+
+import { admitTgLine } from "../telegram/tg-groups/gate";
+import { readThesisForDigest } from "./digest";
+import { resolveFamilies } from "./dossier";
 
 import { robinhoodChain, tokenIdentity } from "./identity";
 import type { FomoQuestionPlan } from "./intent";
@@ -13,14 +18,15 @@ import {
   FOMO_ATTRIBUTION,
   FOMO_CHAT_RULES,
   GROUP_DM_DEFLECTION,
+  groupRefusalLine,
   groupScrub,
   NOT_PERMISSION_LINE,
   refForModel,
   renderAnswer,
   renderEnvelope,
 } from "./render";
-import type { RankingsData, ResearchCoinData, ResearchStatusData, TokenActivityData, TokenThesesData, TraderContextData } from "./tools";
-import type { FomoEnvelope, FomoToolName, ResolvedSubject, ResultStatus, TokenIdentity } from "./types";
+import type { RankingsData, ResearchCoinData, ResearchStatusData, TokenActivityData, TokenThesesData, TraderActivityData, TraderContextData } from "./tools";
+import type { FomoEnvelope, FomoToolName, ResolvedSubject, ResultStatus, Thesis, TokenIdentity } from "./types";
 
 const NOW = Date.UTC(2026, 9, 4, 16, 5);
 const PONS = "0x39dbed3a00000000000000000000000000000c0d";
@@ -97,25 +103,142 @@ describe("renderEnvelope", () => {
 
   it("in a group: coin-level aggregates only — no handles, addresses, links, cashtags or quotes", () => {
     const text = renderEnvelope(env("fomo_get_token_theses", "ok", theses(INJECTION)), G);
-    assert.ok(text.startsWith("PONS on robinhood: 3 theses"));
+    // What they argue in fixed words, never their words or counts (plan WP9, D6).
+    assert.ok(text.startsWith("What traders on Fomo are saying about PONS on Robinhood Chain (1 recent thesis from 1 trader):"), text);
+    assert.doesNotMatch(text, /ignore|instructions|evidence famil|Merrymen's reading|supporting|opposing|neutral/);
     assert.ok(!/frankdegods|0x[0-9a-f]{6}|https?:|\$PONS|their words/.test(text), text);
     // The attribution is the owner's; a group has had its post about the source (Milla, 2026-10-07).
     assert.ok(!text.includes(FOMO_ATTRIBUTION));
     assert.ok(renderEnvelope(env("fomo_get_token_theses", "ok", theses(INJECTION)), O).endsWith(FOMO_ATTRIBUTION));
   });
 
-  it("deflects a trader question in a group to a direct message", () => {
+  it("gives a group one trader's holdings by their public handle, never whether Merrymen watches them or their P&L (Milla, 2026-10-07)", () => {
     const ctx: TraderContextData = {
       trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
       formerHandle: false,
       focus: "context",
-      holdings: null,
-      cohort: null,
-      profile: null,
+      holdings: {
+        rows: [{ token: T, symbol: "PONS", chain: "robinhood", amount: 1, priceUsd: 1, valueUsd: 3_120, change24hPct: null, robinhood: true }],
+        rowsTotal: 1, truncated: false, totalValueUsdFloor: 3_120, complete: true, dropped: 0, byChain: [],
+      },
+      cohort: { member: true, followable: true, version: 3, size: 120 },
+      profile: { source: "cohort-evidence", asOf: NOW - 3_600_000, mayBeOlder: true, pnlUsd: { "24h": 12_000 }, volumeUsd: null, trades: null, accountAgeDays: null, averageHoldTimeSeconds: null },
     };
-    const e = env("fomo_get_trader_context", "ok", ctx, { subject: { kind: "trader", trader: ctx.trader } });
-    assert.equal(renderEnvelope(e, G), GROUP_DM_DEFLECTION);
-    assert.match(renderEnvelope(e, O), /frankdegods on Fomo/);
+    const notes = ["P&L for 7d was left out: the followed-cohort record it came from is older than that window.", "Holdings are a snapshot valued at current prices: a change in value can be price, not buying."];
+    const e = env("fomo_get_trader_context", "ok", ctx, { subject: { kind: "trader", trader: ctx.trader }, coverage: { ...env("fomo_get_trader_context", "ok", ctx).coverage, notes } });
+    const group = renderEnvelope(e, G);
+    assert.notEqual(group, GROUP_DM_DEFLECTION);
+    assert.deepEqual(group.split("\n"), [
+      "frankdegods on Fomo holds 1 coin worth $3.1k (provider-reported snapshot, valued at current prices).",
+      "Largest held by frankdegods: PONS on robinhood $3.1k.",
+      "Holdings are a snapshot valued at current prices: a change in value can be price, not buying.",
+    ]);
+    assert.doesNotMatch(group, /cohort|watched|follow|P&L|12,000|\$12k|6dcf7c78/i);
+    // The owner keeps all of it.
+    const owner = renderEnvelope(e, O);
+    assert.match(owner, /frankdegods on Fomo holds 1 coin worth \$3,120/);
+    assert.match(owner, /In Merrymen's watched-trader cohort: yes/);
+    assert.match(owner, /realised P&L/);
+    // A trader's own theses are still a direct message's.
+    const own = env("fomo_get_token_theses", "ok", { ...theses(), trader: ctx.trader }, { subject: { kind: "trader", trader: ctx.trader } });
+    assert.equal(renderEnvelope(own, G), GROUP_DM_DEFLECTION);
+  });
+
+  it("gives a group one trader's trades in short money, with no position P&L wording and no provider plumbing", () => {
+    const act: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "7d", side: null, sources: ["positions", "feed"],
+      positions: [
+        { tradeId: "t1", token: T, label: { symbol: "PONS", name: null }, status: "open", costBasisUsd: 3_000, realizedPnlUsd: 0, unrealizedPnlUsd: 120.5, boughtAmount: 1, soldAmount: 0, transferredInAmount: 0, transferredOutAmount: 0, openedAt: NOW - 3_600_000, closedAt: null, source: "captured" },
+      ],
+      fills: [],
+      events: [
+        { evidenceId: "fomo:event/e1", kind: "buy", trader: { userId: FRANK, handle: "frankdegods" }, token: T, label: { symbol: "PONS", name: null }, fillUsd: 1_234_567, positionValueUsd: 40_000, positionRealizedPnlUsdCumulative: 12, at: NOW - 120_000, verification: "provider-verified", source: "rest-lookup", inCohort: true },
+      ],
+      counts: { buys: 1, sells: 0, transfers: 0, other: 0 },
+    };
+    const e = env("fomo_get_trader_activity", "ok", act, { subject: { kind: "trader", trader: act.trader } });
+    assert.deepEqual(renderEnvelope(e, G).split("\n"), [
+      "frankdegods in the last 7d: 1 buy and 0 sells in the feed.",
+      "• frankdegods bought PONS on robinhood 2m ago, fill $1.2M (matched on chain)",
+      "Positions of frankdegods (provider-reported): PONS open (cost $3k, $0 realised, +$121 not yet realised).",
+    ]);
+    assert.match(renderEnvelope(e, O), /frankdegods on Fomo in the last 7d: 1 buy/);
+  });
+
+  it("a sells question counts only sells, and a buys question only buys: never '0 buys' when they bought (review r3)", () => {
+    const base: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "24h", side: "sell", sources: ["positions", "feed"],
+      positions: [
+        { tradeId: "t1", token: T, label: { symbol: "PONS", name: null }, status: "open", costBasisUsd: 3_000, realizedPnlUsd: 0, unrealizedPnlUsd: 0, boughtAmount: 1, soldAmount: 0, transferredInAmount: 0, transferredOutAmount: 0, openedAt: NOW - 3_600_000, closedAt: null, source: "captured" },
+      ],
+      fills: [],
+      // The feed was read for sells alone: the buy they made is filtered out before counting.
+      events: [],
+      counts: { buys: 0, sells: 0, transfers: 0, other: 0 },
+    };
+    const sells = env("fomo_get_trader_activity", "ok", base, { subject: { kind: "trader", trader: base.trader } });
+    const g = renderEnvelope(sells, G);
+    assert.match(g, /^frankdegods in the last 24h: 0 sells in the feed\.$/m);
+    assert.doesNotMatch(g, /buys?\b/);
+    assert.match(renderEnvelope(sells, O), /frankdegods on Fomo in the last 24h: 0 sells in the feed\./);
+    assert.doesNotMatch(renderEnvelope(sells, O), /0 buys/);
+    const buys = env("fomo_get_trader_activity", "ok", { ...base, side: "buy", counts: { buys: 1, sells: 0, transfers: 0, other: 0 } }, { subject: { kind: "trader", trader: base.trader } });
+    assert.match(renderEnvelope(buys, G), /^frankdegods in the last 24h: 1 buy in the feed\.$/m);
+    assert.doesNotMatch(renderEnvelope(buys, G), /sells?\b/);
+    // No side asked: both counts, as before.
+    const both = env("fomo_get_trader_activity", "ok", { ...base, side: null, counts: { buys: 1, sells: 0, transfers: 0, other: 0 } }, { subject: { kind: "trader", trader: base.trader } });
+    assert.match(renderEnvelope(both, G), /^frankdegods in the last 24h: 1 buy and 0 sells in the feed\.$/m);
+  });
+
+  it("what one trader made or lost money on: realised to date, highest first, a received-only position never a win", () => {
+    const pos = (symbol: string, realized: number | null, o: Partial<TraderActivityData["positions"][number]> = {}): TraderActivityData["positions"][number] => ({
+      tradeId: symbol, token: T, label: { symbol, name: null }, status: "closed", costBasisUsd: 1_000, realizedPnlUsd: realized, unrealizedPnlUsd: 0,
+      boughtAmount: 1, soldAmount: 1, transferredInAmount: 0, transferredOutAmount: 0, openedAt: NOW - 3_600_000, closedAt: NOW - 60_000, source: "feed", ...o,
+    });
+    const act: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "24h", side: null, sources: ["positions", "feed"],
+      positions: [pos("SMALL", 900), pos("GIFT", 50_000, { boughtAmount: 0, transferredInAmount: 10 }), pos("BIG", 4_200), pos("NULL", null), pos("DOWN", -300), pos("WORSE", -1_000), pos("EVEN", 0)],
+      fills: [], events: [], counts: { buys: 0, sells: 0, transfers: 0, other: 0 },
+    };
+    const e = env("fomo_get_trader_activity", "ok", act, { subject: { kind: "trader", trader: act.trader } });
+    const earnings = { intent: "trader-activity", earnings: true } as unknown as FomoQuestionPlan;
+    assert.equal(
+      renderAnswer([e], earnings, G),
+      "frankdegods on trades opened or closed in the last 24h (provider-reported, realised to date): made the most on BIG +$4.2k, SMALL +$900; lost the most on WORSE -$1k, DOWN -$300.",
+    );
+    assert.match(renderAnswer([e], earnings, O), /^frankdegods on Fomo on trades opened or closed in the last 24h \(provider-reported, realised to date\): made the most on \$BIG \+\$4,200, \$SMALL \+\$900; lost the most on \$WORSE -\$1,000, \$DOWN -\$300\.\n/);
+    const flat = env("fomo_get_trader_activity", "ok", { ...act, positions: [pos("EVEN", 0), pos("GIFT", 50_000, { boughtAmount: 0, transferredInAmount: 10 })] }, { subject: { kind: "trader", trader: act.trader } });
+    assert.equal(renderAnswer([flat], earnings, G), "frankdegods: nothing realised either way on trades opened or closed in the last 24h (provider-reported).");
+  });
+
+  it("what one trader made: positions not read (refused or failed) is said, never 'nothing realised'", () => {
+    const act: TraderActivityData = {
+      trader: { userId: FRANK, handle: "frankdegods", displayName: null, verified: null },
+      token: null, window: "24h", side: null, sources: ["feed"],
+      positions: [], fills: [], events: [], counts: { buys: 1, sells: 0, transfers: 0, other: 0 },
+    };
+    const unread = (window: TraderActivityData["window"]) =>
+      env("fomo_get_trader_activity", "partial", { ...act, window }, { subject: { kind: "trader", trader: act.trader }, coverage: { requested: {}, achieved: {}, pagesRequested: 2, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: null, capped: false, missing: ["positions"], notes: [] } });
+    const earnings = { intent: "trader-activity", earnings: true } as unknown as FomoQuestionPlan;
+    for (const [window, scope] of [["24h", "opened or closed in the last 24h"], ["all", "on record"]] as const) {
+      const g = renderAnswer([unread(window)], earnings, G);
+      assert.ok(g.split("\n").includes(`frankdegods: what they made or lost on trades ${scope} could not be read just now.`), g);
+      assert.doesNotMatch(g, /nothing realised/);
+      for (const l of g.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
+      assert.doesNotMatch(renderAnswer([unread(window)], earnings, O), /nothing realised/);
+    }
+    // The same under a board row's earnings ask ("who's the best trader on fomo today and what did he make money on").
+    const row = (rank: number, handle: string, pnlUsd: number) => ({ rank, trader: { userId: FRANK, handle, displayName: null, verified: null }, pnlUsd, volumeUsd: null, trades: null, inCohort: false });
+    const board = env("fomo_get_rankings", "ok", { board: "traders", window: "24h", basis: "x", tokens: [], traders: [row(1, "frankdegods", 151_383)] } as RankingsData, { subject: { kind: "market" } });
+    const rowAsk = { intent: "rankings-traders", rowAsk: { rank: 1, about: "earnings" } } as unknown as FomoQuestionPlan;
+    const g = renderAnswer([board, unread("24h")], rowAsk, G);
+    assert.match(g, /^1\. frankdegods \+\$151\.4k$/m);
+    assert.match(g, /^frankdegods: what they made or lost on trades opened or closed in the last 24h could not be read just now\.$/m);
+    assert.doesNotMatch(g, /nothing realised/);
+    for (const l of g.split("\n").filter(Boolean)) assert.ok(admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok, l);
   });
 
   it("gives a group Fomo's public leaderboard: handles and short P&L, a few rows, never who Merrymen follows", () => {
@@ -230,6 +353,49 @@ describe("renderEnvelope", () => {
     const group = renderEnvelope(env("fomo_research_coin", "ok", d), G);
     assert.ok(!/frankdegods|their words|https?:/.test(group));
     assert.match(group, /1 author was seen acting against their written view/);
+  });
+
+  it("a room hears no watched-trader figure in a coin read, a lead or a research answer; the owner keeps them (review r3)", () => {
+    const act: TokenActivityData = {
+      token: T, label: { symbol: "PONS", name: null }, window: "24h", side: null, cohortOnly: false, events: [
+        { evidenceId: "fomo:event/e1", kind: "buy", trader: { userId: FRANK, handle: "frankdegods" }, token: T, label: { symbol: "PONS", name: null }, fillUsd: 5_000, positionValueUsd: 5_000, positionRealizedPnlUsdCumulative: null, at: NOW - 60_000, verification: "provider-reported", source: "rest-lookup", inCohort: true },
+      ],
+      distinctBuyers: 1, distinctSellers: 0,
+      cohort: { buyers: [{ userId: FRANK, handle: "frankdegods", latestAction: "buy", at: NOW - 60_000 }], sellers: [], version: 1, size: 1 },
+      breadth: null, stats: null, localEvents: 0, restEvents: 1,
+    };
+    const a = env("fomo_get_token_activity", "ok", act);
+    assert.doesNotMatch(renderEnvelope(a, G), /watched|cohort|follow/i);
+    assert.match(renderEnvelope(a, O), /Watched traders: latest action buy/);
+    assert.doesNotMatch(renderEnvelope(env("fomo_get_token_activity", "ok", { ...act, token: null, label: null, cohortOnly: true } as TokenActivityData), G), /Watched traders/);
+    const lead = {
+      token: T, label: { symbol: "PONS", name: null }, marketCapUsd: 2_000_000, marketCapKnown: true,
+      signals: { cohortBuyers: 1, distinctBuyers: 1, latestBuyAt: NOW - 3_600_000, firstSeenInWindow: true, newThesis: false, boards: ["trending"] },
+      score: 6, executionAvailability: "unsupported-venue" as const, routeNote: null, evidence: [],
+    };
+    const opp = env("fomo_find_opportunities", "ok", { window: "24h", ranking: "early-signal", rows: [lead], filteredByMarketCap: 0 });
+    assert.doesNotMatch(renderEnvelope(opp, G), /watched|cohort/i);
+    assert.match(renderEnvelope(opp, O), /1 watched trader bought/);
+    const d: ResearchCoinData = {
+      token: T, label: { symbol: "PONS", name: null }, dossierId: "dsr_x", revision: 4, builtAt: NOW, focus: null,
+      strongestSupport: { claimKey: "action:momentum:supporting", stance: "supporting", summary: "Observed buying over 24h: 3 distinct traders bought and 0 sold, 1 of the buyers from the watched-trader cohort. Only positions above about $3,000 are visible.", support: "observed-action", familyCount: 3, authorCount: 3, quoted: null },
+      strongestOpposition: null,
+      claims: [], flow: { window: "24h", distinctBuyers: 3, distinctSellers: 0, cohortBuyers: 1, cohortSellers: 0, repeatAddsBySameTrader: 0, notes: [] },
+      wordsVsActions: [],
+      unknowns: ["Few theses."], changeConditions: ["Cohort sellers outnumber cohort buyers over 24h.", "A credible objection appears from more than one independent source."],
+      coverage: { uniqueTheses: 4, uniqueAuthors: 3, windowRequested: "24h", oldestSourceAt: null, newestSourceAt: null, providerTotal: 4, pagesRequested: 1, pagesReturned: 1, duplicatesRemoved: 0, sourceCaps: [], missingSections: [], limitations: [] },
+      changes: { comparable: true, noChange: false, changes: ["Cohort buyers: 0 → 1."], reason: null, sinceRevision: 3 } as never,
+      job: null, executionAvailability: "unsupported-venue",
+    };
+    const group = renderEnvelope(env("fomo_research_coin", "ok", d), G);
+    assert.doesNotMatch(group, /watched|cohort/i, group);
+    assert.match(group, /strongest case for: Observed buying over 24h: 3 distinct traders bought and 0 sold\. Only positions/);
+    assert.match(group, /What would change this view: A credible objection appears/);
+    assert.doesNotMatch(group, /Since revision 3/, "only a watched-trader change: nothing a room may hear changed");
+    const owner = renderEnvelope(env("fomo_research_coin", "ok", d), O);
+    assert.match(owner, /1 of the buyers from the watched-trader cohort/);
+    assert.match(owner, /watched traders 1 buying \/ 0 selling/);
+    assert.match(owner, /Since revision 3: Cohort buyers: 0 → 1\./);
   });
 
   it("fits maxChars at a line boundary and keeps the attribution", () => {
@@ -402,5 +568,298 @@ describe("the watched-trader cohort, in words", () => {
     const built = renderEnvelope(env("fomo_get_token_activity", "empty", { ...act, cohort: { buyers: [], sellers: [], version: 3, size: 120 } }), O);
     assert.match(built, /No watched trader appears in this scope/);
     assert.ok(!/followed/i.test(text + built), "the cohort is watched, not followed: following is a separate setting");
+  });
+});
+
+describe("a board says what its chain filter did, and where Robinhood Chain stands (Milla, 2026-10-07)", () => {
+  const SOL = { namespace: "solana" as const, networkId: 1_399_811_149, slug: "solana" };
+  const solToken = (i: number): TokenIdentity => ({ chain: SOL, address: `So1${i}`, key: `solana:1399811149:So1${i}` });
+  const row = (rank: number, symbol: string, token: TokenIdentity | null, cap = 874_600) => ({
+    rank, token, label: { symbol, name: symbol }, holders: null, priceUsd: null, change24hPct: null, marketCapUsd: cap, volume24hUsd: null, executionAvailability: "unknown" as never,
+  });
+  const CACHE = tokenIdentity(robinhoodChain(), "0x7fe9950000000000000000000000000000000ca5")!;
+  const board = (over: Partial<RankingsData>): FomoEnvelope<RankingsData> =>
+    env("fomo_get_rankings", "ok", { board: "trending-tokens", window: null, basis: "x", traders: [], tokens: [], ...over } as RankingsData, { subject: { kind: "market" } });
+  /** The incident: Solana on top, PONS 12th and CACHE 31st of 100. */
+  const incident = board({
+    tokens: ["ETAC", "CATE", "STONK", "AnyPS5", "MOO", "BAA", "CAW", "WOOF", "HOOT", "PURR"].map((s, i) => row(i + 1, s, solToken(i + 1))),
+    boardRows: 100, matched: 100, unplaced: 0,
+    robinhood: { rows: 2, top: [row(12, "PONS", T, 2_080_000), row(31, "CACHE", CACHE)] },
+  });
+
+  it("every chain, no Robinhood Chain row shown: three rows and that chain's best placed rows, by rank in words", () => {
+    const g = renderEnvelope(incident, G).split("\n");
+    assert.deepEqual(g, [
+      "Trending on Fomo (board position is popularity, not quality):",
+      "1. ETAC on solana, market cap $874.6k",
+      "2. CATE on solana, market cap $874.6k",
+      "3. STONK on solana, market cap $874.6k",
+      "On Robinhood Chain, the chain I trade: PONS (12th), CACHE (31st).",
+    ]);
+    // The owner sees ten rows and the same line, with her cashtags.
+    const o = renderEnvelope(incident, O);
+    assert.match(o, /\n10\. \$PURR on solana/);
+    assert.match(o, /\nOn Robinhood Chain, the chain I trade: \$PONS \(12th\), \$CACHE \(31st\)\./);
+  });
+
+  it("no line when a Robinhood Chain row is already shown; 'none of the top N' when the board has none", () => {
+    const shown = board({ tokens: [row(1, "PONS", T), row(2, "ETAC", solToken(2))], boardRows: 3, matched: 3, unplaced: 0, robinhood: { rows: 2, top: [row(1, "PONS", T)] } });
+    const g = renderEnvelope(shown, G);
+    assert.doesNotMatch(g, /chain I trade/);
+    assert.equal(g.split("\n").length, 3);
+    const none = board({ tokens: [row(1, "ETAC", solToken(1))], boardRows: 30, matched: 30, unplaced: 0, robinhood: { rows: 0, top: [] } });
+    assert.match(renderEnvelope(none, G), /\nNone of the top 30 trending coins are on Robinhood Chain, the chain I trade\.$/);
+  });
+
+  it("an unfiltered board's 'none on Robinhood Chain' says how many rows could not be placed on a chain (review r2)", () => {
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    const two = board({ tokens: [row(1, "ETAC", solToken(1))], boardRows: 97, matched: 97, unplaced: 2, robinhood: { rows: 0, top: [] } });
+    const line = renderEnvelope(two, G).split("\n").pop()!;
+    assert.equal(line, "None of the top 97 trending coins are on Robinhood Chain, the chain I trade (2 rows could not be placed on a chain).");
+    assert.ok(admitTgLine(line, research).ok, line);
+    const one = board({ tokens: [row(1, "ETAC", solToken(1))], boardRows: 99, matched: 99, unplaced: 1, robinhood: { rows: 0, top: [] } });
+    const single = renderEnvelope(one, G).split("\n").pop()!;
+    assert.match(single, /the chain I trade \(1 row could not be placed on a chain\)\.$/);
+    assert.ok(admitTgLine(single, research).ok, single);
+    // The owner's answer says the same.
+    assert.match(renderEnvelope(two, O), /\nNone of the top 97 trending coins are on Robinhood Chain, the chain I trade \(2 rows could not be placed on a chain\)\./);
+  });
+
+  it("one chain asked: its rows under an honest header, or none of the top N on it, or an empty board", () => {
+    const hood = board({ chain: "robinhood", tokens: [row(12, "PONS", T, 2_080_000), row(31, "CACHE", CACHE)], boardRows: 100, matched: 2, unplaced: 0 });
+    assert.deepEqual(renderEnvelope(hood, G).split("\n"), [
+      "Trending on Fomo, Robinhood Chain only (2 of the top 100):",
+      "12. PONS on robinhood, market cap $2.1M",
+      "31. CACHE on robinhood, market cap $874.6k",
+    ]);
+    const none = board({ chain: "robinhood", tokens: [], boardRows: 30, matched: 0, unplaced: 2 });
+    assert.equal(renderEnvelope({ ...none, status: "empty" }, G), "None of the top 30 trending coins on Fomo are on Robinhood Chain right now (2 rows could not be placed on a chain).");
+    const eth = board({ board: "graduated-tokens", chain: "eth", tokens: [], boardRows: 12, matched: 0, unplaced: 0 });
+    assert.equal(renderEnvelope({ ...eth, status: "empty" }, G), "None of the top 12 newly graduated coins on Fomo are on Ethereum right now.");
+    const empty = board({ chain: "robinhood", tokens: [], boardRows: 0, matched: 0, unplaced: 0 });
+    assert.equal(renderEnvelope({ ...empty, status: "empty" }, G), "The trending board came back empty.");
+    // An answer without the counts (built before they existed) still reads as a sentence.
+    const bare = board({ chain: "robinhood", tokens: [row(1, "PONS", T)] });
+    assert.match(renderEnvelope(bare, G), /^Trending on Fomo, Robinhood Chain only:\n1\. PONS on robinhood/);
+    assert.equal(renderEnvelope({ ...board({ chain: "solana", tokens: [] }), status: "empty" }, G), "None of the trending coins on Fomo are on Solana right now.");
+  });
+
+  it("the trader board with a chain asked says it covers every chain, and still fits a room", () => {
+    const lb = env("fomo_get_rankings", "ok", {
+      board: "traders", window: "24h", basis: "x", tokens: [], chain: "robinhood",
+      traders: [1, 2, 3, 4].map((rank) => ({ rank, trader: { userId: FRANK, handle: `t${rank}`, displayName: null, verified: null }, pnlUsd: 1_000 * rank, volumeUsd: null, trades: null, inCohort: null })),
+    } as RankingsData, { subject: { kind: "market" } });
+    const g = renderEnvelope(lb, G).split("\n");
+    assert.equal(g[g.length - 1], "Fomo's trader board covers every chain; it can't be narrowed to one.");
+    assert.equal(g.length, 5, "a header, three rows and the note");
+    assert.match(renderEnvelope(lb, O), /\nFomo's trader board covers every chain; it can't be narrowed to one\./);
+  });
+
+  it("the whole feed's crowd names its top coins as counts", () => {
+    const act: TokenActivityData = {
+      token: null, label: null, window: "24h", side: "buy", cohortOnly: false, events: [], distinctBuyers: 6, distinctSellers: 1,
+      cohort: null, breadth: null, stats: null, localEvents: 0, restEvents: 0,
+      topTokens: [{ token: T, label: { symbol: "PONS", name: null }, buyers: 5, sellers: 1 }, { token: solToken(1), label: { symbol: "ROO", name: null }, buyers: 1, sellers: 0 }],
+    };
+    const g = renderEnvelope(env("fomo_get_token_activity", "ok", act, { subject: { kind: "market" } }), G);
+    assert.match(g, /\nMost bought in the newest Fomo trades read: PONS on robinhood \(5 buyers\), ROO on solana \(1 buyer\)\./);
+    const sold = renderEnvelope(env("fomo_get_token_activity", "ok", { ...act, side: "sell", topTokens: [{ ...act.topTokens![0]!, sellers: 2 }] }, { subject: { kind: "market" } }), G);
+    assert.match(sold, /\nMost sold in the newest Fomo trades read: PONS on robinhood \(2 sellers\)\./);
+  });
+});
+
+describe("a room's refusal promises the reset the service stamped (review r2)", () => {
+  it("the later of the stamped reset and the render's own; a cap no read fits never a time", () => {
+    const at = Date.UTC(2026, 9, 7, 14, 59, 59, 995);
+    const sixteen = Date.UTC(2026, 9, 7, 16, 0, 0);
+    assert.equal(groupRefusalLine("budget-group-hourly", at, sixteen), "fomo lookups for this room are used up for now, try again after 16:00 UTC.");
+    assert.equal(groupRefusalLine("budget-group-hourly", at), "fomo lookups for this room are used up for now, try again after 15:00 UTC.", "no stamp: as before");
+    assert.equal(groupRefusalLine("budget-group-hourly", at, Date.UTC(2026, 9, 7, 14, 0, 0)), "fomo lookups for this room are used up for now, try again after 15:00 UTC.", "a stamp behind the render's clock never promises a time already past");
+    assert.equal(groupRefusalLine("budget-group-hourly", at, Number.NaN), "fomo lookups for this room are used up for now, try again after 15:00 UTC.");
+    assert.doesNotMatch(groupRefusalLine("budget-below-one-read", at, sixteen), /try again/);
+    const env0 = env("fomo_get_rankings", "budget-limited", null, { reason: "budget-group-hourly", retryAt: sixteen });
+    const line = groupScrub(renderEnvelope(env0, { ...G, now: at }));
+    assert.equal(line, "fomo lookups for this room are used up for now, try again after 16:00 UTC.");
+    assert.ok(admitTgLine(line, { agentName: "Shogun", kind: "research", recentOwn: [] }).ok);
+  });
+});
+
+describe("a copy's age, in a room, is always in words the gate admits (review r2)", () => {
+  it("an old provider copy and a failed refresh are said, never dropped", () => {
+    const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+    const fresh = (o: Partial<FomoEnvelope["freshness"]>) => env("fomo_get_token_theses", "ok", theses(), { freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: NOW, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW, lastRefreshOutcome: "ok", cacheAgeMs: 0, servedFrom: "live", ...o } });
+    const cases: Array<[FomoEnvelope, RegExp]> = [
+      [fresh({ providerAsOf: NOW - 12 * 60_000 }), /^Fomo's own copy is from 12m ago\.$/m],
+      [fresh({ servedFrom: "stale-cache", cacheAgeMs: 2 * 3_600_000, lastRefreshOutcome: "failed" }), /^Data age: 2h \(it could not be refreshed\)\.$/m],
+      [fresh({ servedFrom: "stale-cache", cacheAgeMs: 2 * 3_600_000, lastRefreshOutcome: "skipped-budget" }), /^Data age: 2h \(the refresh was skipped to stay within the research budget\)\.$/m],
+    ];
+    for (const [e, want] of cases) {
+      const text = groupScrub(renderEnvelope(e, G));
+      assert.match(text, want, text);
+      const age = text.split("\n").find((l) => /^(?:Fomo's own copy|Data age)/.test(l))!;
+      assert.ok(admitTgLine(age, research).ok, age);
+      // The owner keeps her wording.
+      assert.doesNotMatch(renderEnvelope(e, O), /Fomo's own copy|it could not be refreshed/);
+    }
+  });
+});
+
+describe("a coin with no theses, in a room (review r2)", () => {
+  const research = { agentName: "Shogun", kind: "research" as const, recentOwn: [] };
+  const none: TokenThesesData = { ...theses(), theses: [], stance: { supporting: 0, opposing: 0, neutral: 0 }, families: 0, uniqueAuthors: 0 };
+  const cases: Array<[string, FomoEnvelope<TokenThesesData>]> = [
+    // Genuinely none: the provider counts none either (an empty page under a count is "didn't return just now").
+    ["live", env("fomo_get_token_theses", "empty", none, { coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] } })],
+    ["a windowed read", env("fomo_get_token_theses", "empty", none, { coverage: { requested: { window: "24h" }, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] } })],
+    ["a cached copy", env("fomo_get_token_theses", "empty", none, { coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 0, capped: false, missing: [], notes: [] }, freshness: { policy: "theses", mode: "prefer-fresh", retrievedAt: NOW - 180_000, providerAsOf: null, sourceEventAt: { oldest: null, newest: null }, lastRefreshAttemptAt: NOW - 180_000, lastRefreshOutcome: "ok", cacheAgeMs: 180_000, servedFrom: "cache" } })],
+  ];
+  for (const [name, e] of cases) {
+    it(`${name}: 'That is Fomo's record', every line admitted as research`, () => {
+      const text = groupScrub(renderAnswer([e], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, G));
+      const lines = text.split("\n");
+      assert.match(lines[0]!, /^No theses were returned for PONS on robinhood( in that window)?\. That is Fomo's record, not proof nobody has a view\.$/, text);
+      for (const l of lines) assert.ok(admitTgLine(l, research).ok, `${name}: ${l}`);
+      // The owner keeps her wording.
+      assert.match(renderEnvelope(e, O), /That is the provider's record/);
+    });
+  }
+
+  it("an empty read the provider marks not available, or one under a count it still holds, is never 'no theses' (the AUTON incident, 2026-10-08)", () => {
+    const cov = (providerTotal: number | null) => ({ coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal, capped: false, missing: [], notes: [] } });
+    const unavailable = env("fomo_get_token_theses", "empty", { ...none, available: false, pageRows: 0 }, cov(null));
+    const counted = env("fomo_get_token_theses", "empty", { ...none, pageRows: 0 }, cov(4190));
+    for (const [e, want] of [
+      [unavailable, /^Fomo didn't return the theses on PONS on robinhood just now\.$/],
+      [counted, /^Fomo didn't return the theses on PONS on robinhood just now \(it lists 4,190\)\.$/],
+    ] as const) {
+      const text = groupScrub(renderAnswer([e], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, G));
+      assert.match(text.split("\n")[0]!, want, text);
+      assert.doesNotMatch(text, /No theses were returned/);
+      // A room is never promised a retry its allowance may refuse (review on #306).
+      assert.doesNotMatch(text, /ask me again|in a minute/i, text);
+      for (const l of text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
+      // The owner is told when, in step with how long the empty copy is held (two minutes, review on #306).
+      assert.match(renderEnvelope(e, O), /The provider didn't return the theses on .* just now.*\. Ask me again in a couple of minutes\./);
+      assert.doesNotMatch(renderEnvelope(e, O), /in a minute/);
+    }
+    // A windowed read whose page had theses, none in the window, is still "none in that window", whatever the all-time count.
+    const windowed = env("fomo_get_token_theses", "empty", { ...none, pageRows: 25 }, { coverage: { ...cov(4190).coverage, requested: { window: "24h" } } });
+    assert.match(renderEnvelope(windowed, G), /No theses were returned for PONS on robinhood in that window/);
+  });
+
+  it("a windowed ask on a page the provider answered empty under a count is 'didn't return', never 'none in that window' (review on #306)", () => {
+    const e = env("fomo_get_token_theses", "empty", { ...none, pageRows: 0 }, { coverage: { requested: { window: "24h" }, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal: 4190, capped: true, missing: [], notes: [] } });
+    const text = groupScrub(renderAnswer([e], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, G));
+    assert.match(text.split("\n")[0]!, /^Fomo didn't return the theses on PONS on robinhood just now\./, text);
+    assert.doesNotMatch(text, /No theses were returned|in that window/, text);
+    assert.doesNotMatch(text, /it lists/, "an all-time count is not the window's");
+    for (const l of text.split("\n")) assert.ok(admitTgLine(l, research).ok, l);
+    assert.match(renderEnvelope(e, O), /^The provider didn't return the theses on /);
+  });
+
+  it("only the provider's own empty page is 'didn't return': rows filtered off here, or a trader's read under a count, are 'none' as before (review on #306)", () => {
+    const cov = (providerTotal: number | null, notes: string[] = []) => ({ coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 0, duplicatesRemoved: 0, providerTotal, capped: true, missing: [], notes } });
+    // Robinhood is fetched without a network: the provider answered 25 rows, all for the same address on another chain.
+    const offChain = env("fomo_get_token_theses", "empty", { ...none, pageRows: 25, chainFilterHonoured: false }, cov(4190, ["25 thesis row(s) were about a coin on another chain and were removed."]));
+    for (const o of [G, O]) {
+      const text = o === G ? groupScrub(renderAnswer([offChain], { intent: "token-theses", clarification: null } as unknown as FomoQuestionPlan, o)) : renderEnvelope(offChain, o);
+      assert.match(text.split("\n")[0]!, /^No theses were returned for \$?PONS on robinhood\b/, text);
+      assert.doesNotMatch(text, /didn't return|it lists/, text);
+    }
+    // A trader's theses on one coin: that route's total is the coin's, not the trader's.
+    const kaleo = { userId: FRANK, handle: "frankdegods", displayName: null, verified: null };
+    const traderToken = env("fomo_get_token_theses", "empty", { ...none, trader: kaleo, pageRows: 0 }, cov(312));
+    const owner = renderEnvelope(traderToken, O);
+    assert.match(owner, /^No theses were returned for /, owner);
+    assert.doesNotMatch(owner, /it lists|312/, owner);
+    // ...but a trader's page the provider marks not available is still never "none".
+    const notReady = renderEnvelope(env("fomo_get_token_theses", "empty", { ...none, trader: kaleo, pageRows: 0, available: false }, cov(312)), O);
+    assert.match(notReady, /^The provider didn't return the theses on /, notReady);
+    assert.doesNotMatch(notReady, /it lists/, notReady);
+  });
+});
+
+describe("a coin's theses in a room: what they argue, not counts (plan WP9 P1, D6)", () => {
+  interface Row { id: string; text: string; likes: number; isDev: boolean; userId: string; handle: string; ts: string }
+  const rich = (JSON.parse(readFileSync(new URL("./testdata/theses-token-rich.json", import.meta.url), "utf8")) as { theses: Row[]; totalAvailable: number });
+  /** The data service.ts builds from those rows (thesisViews). */
+  function richData(rows: Row[]): TokenThesesData {
+    const fam = resolveFamilies(rows.map((r) => ({ id: r.id, text: r.text, familyKey: `id:${r.id}` }) as unknown as Thesis));
+    const theses = rows.map((r) => ({
+      evidenceId: `fomo:thesis/${r.id}`,
+      author: { userId: r.userId, handle: r.handle },
+      token: T,
+      postedAt: Date.parse(r.ts),
+      stance: "neutral" as const,
+      excerpt: r.text,
+      likes: r.likes,
+      isDev: r.isDev,
+      family: fam.get(r.id) ?? r.id,
+      ...readThesisForDigest(r.text),
+    }));
+    return { token: T, label: { symbol: "PONS", name: null }, trader: null, theses, stance: { supporting: 5, opposing: 4, neutral: rows.length - 9 }, families: 23, uniqueAuthors: 20, chainFilterHonoured: true };
+  }
+  const RICH = env("fomo_get_token_theses", "capped", richData(rich.theses), { coverage: { requested: {}, achieved: {}, pagesRequested: 1, pagesReturned: 1, itemsReturned: 25, duplicatesRemoved: 0, providerTotal: rich.totalAvailable, capped: true, missing: [], notes: [] } });
+  const FORBIDDEN = /evidence famil|Merrymen's reading|supporting|opposing|neutral|their words|IGNORE|pons-claim|ponsarmy|t\.me|\$PONS|@|0x[0-9a-fA-F]{6}|https?:|10m|200k|50m|40%/i;
+
+  it("the rich fixture: for, against, what it is about, how much was read; every line through the gate as research", () => {
+    const text = renderEnvelope(RICH, G);
+    const lines = text.split("\n");
+    assert.equal(lines[0], "What traders on Fomo are saying about PONS on Robinhood Chain (25 recent theses from 20 traders):");
+    assert.match(lines[1]!, /^For it: it's still early, a strong community/);
+    assert.match(lines[2]!, /^Against it: .*fears it could collapse/);
+    assert.match(lines[3]!, /^Most of it is about /);
+    assert.equal(lines[lines.length - 1], "Their claims, not facts; newest 25 of 41; the dev's own posts left out.");
+    assert.ok(lines.length <= 5, "room for the copy's age under the room's six-line cap");
+    assert.doesNotMatch(text, FORBIDDEN);
+    assert.doesNotMatch(text, /More records exist/, "said once, as 'newest 25 of 41'");
+    for (const l of lines) {
+      const v = admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] });
+      assert.ok(v.ok, `${l}: ${v.ok ? "" : v.reason}`);
+    }
+  });
+
+  it("no six-word run of any thesis reaches the room", () => {
+    const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+    const said = words(renderEnvelope(RICH, G)).join(" ");
+    for (const r of rich.theses) {
+      const w = words(r.text);
+      for (let i = 0; i + 6 <= w.length; i++) assert.ok(!said.includes(w.slice(i, i + 6).join(" ")), w.slice(i, i + 6).join(" "));
+    }
+  });
+
+  it("all hype and no cue says so, instead of '0 supporting, 0 opposing, 25 neutral'", () => {
+    const hype = rich.theses.slice(0, 2);
+    const text = renderEnvelope(env("fomo_get_token_theses", "ok", richData(hype)), G);
+    assert.match(text, /\nMostly hype, with no case for or against that I can pick out\.\n/);
+    assert.doesNotMatch(text, FORBIDDEN);
+  });
+
+  it("every shape the room's digest can take passes the gate as research", () => {
+    const row = (text: string, i: number): Row => ({ id: `th-s${i}`, text, likes: i, isDev: false, userId: `u${i}`, handle: `h${i}`, ts: "2026-10-04T15:00:00Z" });
+    const sets: string[][] = [
+      ["lfg", "to the moon fr"],
+      ["update coming next week, cant wait for it"],
+      ["roadmap drops friday, team is building", "launch next week they say"],
+      ["dev sold a chunk, careful this could rug", "overvalued for its liquidity"],
+      ["still early, strong community, chart breaking out", "listing soon, robinhood app could list it"],
+      ["still early, strong community", "could rug, dev sold", "roadmap and a launch coming, holders adding"],
+    ];
+    for (const texts of sets) {
+      const rows = texts.map(row);
+      const data = { ...richData(rows), stance: { supporting: 0, opposing: 0, neutral: rows.length } };
+      const text = renderEnvelope(env("fomo_get_token_theses", "ok", data), G);
+      for (const l of text.split("\n")) {
+        const v = admitTgLine(l, { agentName: "Shogun", kind: "research", recentOwn: [] });
+        assert.ok(v.ok, `${l}: ${v.ok ? "" : v.reason}`);
+      }
+    }
+  });
+
+  it("the owner keeps the counts and her excerpts, with 'no clear lean' for what matched no cue", () => {
+    const text = renderEnvelope(env("fomo_get_token_theses", "ok", theses()), O);
+    assert.match(text, /Merrymen's reading: 1 supporting, 1 opposing, 1 no clear lean\./);
+    assert.doesNotMatch(text, /neutral/);
+    assert.match(text, /\(supporting, /);
   });
 });

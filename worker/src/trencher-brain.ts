@@ -6,8 +6,20 @@ import { fetchGeckoPoolsResult, readTokenPoolsResult } from "./venues/geckotermi
 import { NOMINATE } from "./trencher-nominate";
 import { EARLY_PAGES_MAX, EARLY_VENUE, earlyScreenReason, type EarlyScreen } from "./early-candidates";
 import { CASH, instrumentClassOf } from "../../packages/core/src/index";
+import { TRENCHER_FAST } from "./strategies/trencher";
+
+/** The fast Trencher's entry, in whole USD, as the Brain is told it. */
+const ENTRY_USD = Number(TRENCHER_FAST.perEntryUsdg) / 1e6;
 
 export const TRENCH_VOLUME_MIN = 100_000;
+/**
+ * A coin may clear the volume screen on its LAST HOUR instead — $25k an hour is
+ * a $600k day's pace. A coin a few hours old has not had a day to reach the 24h
+ * floor, and that is exactly the coin a trencher is for. Only the volume rule
+ * reads this; the buyer, two-sided-flow and live-tape rules are unchanged, and
+ * the depth floor and entry checks still run after the screen.
+ */
+export const TRENCH_H1_VOLUME_MIN = 25_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
 /** Tape pages kept for nominated coins, at most — the nomination book's own queue bound. */
 export const NOMINATED_PAGES_MAX = NOMINATE.queueMax;
@@ -259,7 +271,9 @@ export class TrenchTapeReader {
     const failures: string[] = [];
     await Promise.all([
       ...[1, 2, 3].flatMap(page =>
-        (["trending_pools", "pools"] as const).map(async feed => {
+        // NEW POOLS TOO: the list a coin is on before it trends. Page one only,
+        // shared fleet-wide by the feed cache like every other page.
+        ([...(["trending_pools", "pools"] as const), ...(page === 1 ? (["new_pools"] as const) : [])]).map(async feed => {
           const key = `${feed}:${page}`;
           try {
             const r = await this.fetchPage(feed, { page });
@@ -286,15 +300,17 @@ export function trenchBrainSignals(p: GeckoPool, observedAtMs: number, depthUsd:
     technical: JSON.stringify({ ...common, windows, volume24hUsd: p.volume24hUsd, change1hPct: p.change1hPct, change24hPct: p.change24hPct }),
     social: JSON.stringify({ ...common, evidenceType: "Observed trading activity, not social-media sentiment or independent opinions", windows, distinctBuyers24h: p.buyers24h, buys24h: p.buys24h, sells24h: p.sells24h }),
     liquidity: JSON.stringify({ ...common, indexedReserveUsd: p.reserveUsd, onchainRouteDepthUsd: depth, fdvUsd: p.fdvUsd,
-      maxEntryUsd: 5, maxEntryAsPercentOfRouteDepth: depth !== null && depth > 0 ? 500 / depth : null,
+      maxEntryUsd: ENTRY_USD, maxEntryAsPercentOfRouteDepth: depth !== null && depth > 0 ? ENTRY_USD * 100 / depth : null,
       interpretation: "Reserve and route depth are USD, not token quantities. Entry/depth is a scale comparison, not a slippage quote. Null means unknown, not zero. FDV is valuation, not available liquidity." }),
   };
 }
 
-/** Six bounded requests per refresh; a failed page cannot erase healthy pages. */
+/** Seven bounded requests per refresh; a failed page cannot erase healthy pages. */
 export async function fetchTrenchTape(fetchPage = fetchGeckoPoolsResult): Promise<GeckoPool[]> {
-  const results = await Promise.allSettled([1, 2, 3].flatMap(page =>
-    (["trending_pools", "pools"] as const).map(feed => fetchPage(feed, { page }))));
+  const results = await Promise.allSettled([
+    ...[1, 2, 3].flatMap(page => (["trending_pools", "pools"] as const).map(feed => fetchPage(feed, { page }))),
+    fetchPage("new_pools", { page: 1 }),
+  ]);
   const healthy = results.flatMap(r => r.status === "fulfilled" && !r.value.failed ? [r.value] : []);
   if (!healthy.length) throw new Error("All Trencher discovery pages failed");
   return highVolumePools(healthy.flatMap(r => r.pools), true);
@@ -318,7 +334,7 @@ export function trenchScreenReason(p: GeckoPool): TrenchScreen | null {
   if ([CASH.USDG, CASH.WETH].some(a => a.toLowerCase() === p.tokenAddress.toLowerCase())) return "quote-asset";
   if (instrumentClassOf(p.tokenAddress) !== "memecoin") return "not-memecoin";
   if (!Number.isFinite(p.volume24hUsd)) return "volume-unknown";
-  if ((p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN) return "volume-below-min";
+  if ((p.volume24hUsd ?? 0) < TRENCH_VOLUME_MIN && (p.buckets.h1?.volumeUsd ?? 0) < TRENCH_H1_VOLUME_MIN) return "volume-below-min";
   if ((p.buyers24h ?? 0) < 20) return "buyers-below-min";
   if ((p.buys24h ?? 0) <= 0) return "no-buys-24h";
   if ((p.sells24h ?? 0) <= 0) return "no-sells-24h";
@@ -326,7 +342,34 @@ export function trenchScreenReason(p: GeckoPool): TrenchScreen | null {
   return null;
 }
 
-/** Volume ranks opportunities; on-chain depth and wallet policy still gate trades. */
+/**
+ * HOW HOT A POOL IS RIGHT NOW: its last hour's volume, weighted up to double by
+ * how far its price moved in that hour, either way.
+ *
+ * This replaced 24h volume as the ranking, because 24h volume ranks a coin by
+ * yesterday. The fast Trencher holds for minutes, and the busiest-by-day list
+ * put the same established coins at the top of every pass, so it reviewed —
+ * and bought — the same four all day. A coin that is busy and moving now ranks
+ * first. Direction is the Brain's call, so a fall heats a coin as much as a
+ * rise. Ranking only: nothing here admits a coin the screen refused.
+ *
+ * A pool that reports no hourly figure is ranked off its daily one spread
+ * evenly, never off zero: unknown is not quiet.
+ */
+export function trenchHeat(p: GeckoPool): number {
+  const h1 = p.buckets.h1;
+  const volume = typeof h1?.volumeUsd === "number" && Number.isFinite(h1.volumeUsd) ? h1.volumeUsd
+    : typeof p.volume24hUsd === "number" && Number.isFinite(p.volume24hUsd) ? p.volume24hUsd / 24 : 0;
+  const move = h1?.changePct ?? p.change1hPct;
+  const moved = typeof move === "number" && Number.isFinite(move) ? Math.min(Math.abs(move), 100) / 100 : 0;
+  return volume * (1 + moved);
+}
+
+/**
+ * The screened tape, hottest first (trenchHeat). Within one token the pool kept
+ * is still its busiest by day — the main market, not the jumpiest. On-chain
+ * depth and wallet policy still gate trades.
+ */
 export function highVolumePools(pools: readonly GeckoPool[], perPool = false): GeckoPool[] {
   const byToken = new Map<string, GeckoPool>();
   for (const p of pools) {
@@ -336,13 +379,13 @@ export function highVolumePools(pools: readonly GeckoPool[], perPool = false): G
       : p.tokenAddress.toLowerCase();
     if ((byToken.get(key)?.volume24hUsd ?? -1) < p.volume24hUsd!) byToken.set(key, p);
   }
-  return [...byToken.values()].sort((a, b) => b.volume24hUsd! - a.volume24hUsd!);
+  return [...byToken.values()].sort((a, b) => trenchHeat(b) - trenchHeat(a) || b.volume24hUsd! - a.volume24hUsd!);
 }
 
 export type TrenchBrainOrder = { side: "buy" | "sell"; usdgAmount: number; decisionId: string };
 
 export function trenchBrainPersona(symbol: string, held: boolean): string {
-  return "Trencher: short-horizon memecoin trading. Evaluate real volume, two-sided flow, liquidity, costs and reversal risk. Maximum new entry is 5 USDG, also bounded by the owner's limits. " +
+  return `Trencher: short-horizon memecoin trading. Evaluate real volume, two-sided flow, liquidity, costs and reversal risk. Maximum new entry is ${ENTRY_USD} USDG, also bounded by the owner's limits. ` +
     "The entry cap is a sizing ceiling, not evidence of poor liquidity or absent edge. Assess expected percentage return and dollar costs separately: a small entry can still have positive or negative net edge. Do not reject solely because the cap is small; do not invent an expected return to justify entry. " +
     "Judge the current short-window setup using the measured 5-minute and 1-hour price and flow data, with 6-hour and 24-hour data as context. A negative daily return alone is neither a veto nor a buy signal. An external news catalyst or technical crossover is not mandatory, especially when no such data was supplied. Explain which observed evidence supports the decision and what remains unknown. " +
     "Hold if evidence or net edge is insufficient. Never invent activity or prices. " +
@@ -539,7 +582,7 @@ export class TrenchBrainReview {
    * picked again: a second review would supersede the order it is waiting
    * on. What a review then decides, and what may be bought, is unchanged.
    */
-  candidate<T extends { token: string; volume24hUsd?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>): T | undefined {
+  candidate<T extends { token: string; volume24hUsd?: number; heat?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>): T | undefined {
     const current = new Set(eligible.map(c => c.token.toLowerCase()));
     for (const key of this.reviewed.keys()) if (!current.has(key)) this.reviewed.delete(key);
     const wanted = new Set([...(priority ?? [])].map(a => a.toLowerCase()));
@@ -575,7 +618,9 @@ export class TrenchBrainReview {
       }
     }
     const seq = (c: T) => this.reviewed.get(c.token.toLowerCase()) ?? 0;
-    const busy = (c: T) => (typeof c.volume24hUsd === "number" && Number.isFinite(c.volume24hUsd) ? c.volume24hUsd : -1);
+    // Hottest now first (trenchHeat), where the candidate carries it; else its day.
+    const busy = (c: T) => (typeof c.heat === "number" && Number.isFinite(c.heat) ? c.heat
+      : typeof c.volume24hUsd === "number" && Number.isFinite(c.volume24hUsd) ? c.volume24hUsd : -1);
     // Reviewed longer ago than one full pass — or never.
     const floor = this.reviewSequence - eligible.length;
     // Never reviewed counts as due whatever the floor says: on a fresh pass

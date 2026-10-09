@@ -48,7 +48,7 @@
 import { createHash } from "node:crypto";
 import type { Db } from "../db";
 import { sanitizeText } from "../research/news";
-import { utcDay, type ChargeRequest, type ChargeResult, type FomoBudget } from "./budget";
+import { refusalResetAt, utcClockText, utcDay, type ChargeRequest, type ChargeResult, type FomoBudget } from "./budget";
 import { CAPABILITY_FOR_ROUTE, capabilityFromCall, DOCUMENTED_CAPABILITIES, mergeCapabilities, mergeCapability } from "./capabilities";
 import type { BrokerReport, FomoAccess, FomoService, FomoServiceHealth } from "./contract";
 import {
@@ -66,9 +66,10 @@ import {
   THESIS_PAGE_SIZE,
   type DossierClaimDetail,
 } from "./dossier";
+import { readThesisForDigest } from "./digest";
 import { chronologicalOrder, dedupeEvents } from "./events";
 import { changeSummary, earlyDiscovery, participationBreadth } from "./features";
-import { SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
+import { GROUP_REUSE_MS, SingleFlight, buildFreshness, decideRead, policyFor, type CacheEntryState } from "./freshness";
 import { chainFromUserText, executionAvailabilityOf, isRobinhoodToken, ROBINHOOD_NETWORK_ID, tokenFromKey, tokenIdentity } from "./identity";
 import {
   MIN_ATTEMPT_MS,
@@ -99,11 +100,13 @@ import {
   type ActivityEventView,
   type ClaimView,
   type CohortActor,
+  type CrowdCoin,
   type FillView,
   type HoldingView,
   type OpportunitiesData,
   type OpportunityRow,
   type PositionView,
+  type RankingTokenRow,
   type RankingsData,
   type ResearchCoinData,
   type ResearchStatusData,
@@ -305,7 +308,7 @@ export interface BackgroundResearchCap {
 export const BACKGROUND_RESEARCH_CAP: Readonly<BackgroundResearchCap> = Object.freeze({ poolShare: 0.8 });
 
 /** What a read is charged through: a budget, or a budget behind the research cap. */
-type BudgetLike = Pick<FomoBudget, "tryCharge">;
+type BudgetLike = Pick<FomoBudget, "tryCharge"> & Partial<Pick<FomoBudget, "wouldRefuse">>;
 
 function capFraction(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : fallback;
@@ -719,7 +722,19 @@ interface ReadSpec<T> {
   call(c: FomoClient): Promise<ProviderResult<T>>;
   revive(payload: unknown): T | null;
   notFoundIsSubject?: boolean;
+  /**
+   * A held copy that says "nothing here" (an empty thesis page). Such a copy
+   * is reused only briefly (EMPTY_HOLD_MS) and never when the asker pushed
+   * back (ChargeContext.retryEmpty): the provider answers a page as empty or
+   * "not available" while it is still gathering a coin's theses, and an
+   * empty copy kept for a room's two-hour reuse told a room a coin with
+   * 4,190 theses had none (the AUTON incident, 2026-10-08).
+   */
+  empty?(data: T): boolean;
 }
+
+/** How long a held copy that says "nothing here" may be reused (ReadSpec.empty). */
+const EMPTY_HOLD_MS = 2 * 60_000;
 
 /** Who pays, at what priority, with what clock; plus an optional allowance (a research job's). */
 interface ChargeContext {
@@ -734,6 +749,18 @@ interface ChargeContext {
   cap: { limit: number; spent: number } | null;
   /** Which budget pays; the tenant budget unless this is background shared research. */
   budget?: BudgetLike;
+  /**
+   * A Telegram group's "now" or "latest" (decision D8): read as an ordinary
+   * prefer-fresh question, in the class's own window, never with the group's
+   * longer reuse window and never as a paid forced refresh.
+   */
+  noReuse?: boolean;
+  /**
+   * The asker pushed back on an answer ("check again", "there has to be
+   * theses"): a held copy that says "nothing here" (ReadSpec.empty) is read
+   * again rather than served. A copy with something in it keeps its window.
+   */
+  retryEmpty?: boolean;
 }
 
 function localSection<T>(name: string, data: T, retrievedAt: number | null, servedFrom: Freshness["servedFrom"] = "cache"): Section<T> {
@@ -845,7 +872,35 @@ function tailHandle(raw: string | null | undefined): string | null {
   return /^[A-Za-z0-9_]{1,30}$/.test(h) ? h : null;
 }
 
-function defaultMessage(status: ResultStatus, reason: string | null): string | null {
+/**
+ * A budget refusal for the owner: which allowance ran out and when it
+ * resets (refusalResetAt). A room never hears this one: its render says
+ * only that the room's lookups are used up and when to try again, whichever
+ * cap it was (render.ts, decision D10).
+ */
+function budgetMessage(reason: string | null, now: number): string {
+  const at = refusalResetAt(reason, now);
+  const when = at !== null ? `; it resets at ${utcClockText(at)} UTC` : "";
+  switch (reason) {
+    case "budget-group-hourly":
+      return `Fomo research is rationed right now: this group's hourly research allowance is used up${when}.`;
+    case "budget-tenant-hourly":
+      return `Fomo research is rationed right now: your hourly Fomo research allowance is used up${when}.`;
+    case "budget-tenant-daily":
+      return `Fomo research is rationed right now: your daily Fomo research allowance is used up${when}.`;
+    case "budget-shared-daily":
+    case "budget-class-reserve":
+      return `Fomo research is rationed right now: the shared daily research pool is used up${when}.`;
+    case "budget-below-one-read":
+      return "Fomo research is rationed right now: a configured research cap is below what one read costs.";
+    case "job-allowance":
+      return "Fomo research is rationed right now: this research job's credit allowance is spent.";
+    default:
+      return "Fomo research is rationed right now: the retrieval budget refused this read.";
+  }
+}
+
+function defaultMessage(status: ResultStatus, reason: string | null, now: number): string | null {
   switch (status) {
     case "not-authorized":
       return reason === "owner-only"
@@ -856,7 +911,7 @@ function defaultMessage(status: ResultStatus, reason: string | null): string | n
     case "failed":
       return reason === "invalid-args" ? "That request could not be read as a Fomo lookup." : "The Fomo lookup failed; nothing is shown rather than a guess.";
     case "budget-limited":
-      return "Fomo research is rationed right now: the retrieval budget refused this read.";
+      return budgetMessage(reason, now);
     case "stale":
       return "Only an older copy is available; it is shown with its age.";
     case "partial":
@@ -1155,17 +1210,35 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
    *   decideRead → (serve cache | budget.tryCharge → SingleFlight → settle/refund
    *   → cachePut/cacheMarkAttempt) → a Section saying honestly what was served.
    */
-  async function read<T>(cc: ChargeContext, spec: ReadSpec<T>, mode: FreshnessMode): Promise<Section<T>> {
+  /**
+   * What a read would do before anything is charged: its cache key, the
+   * mode and reuse window a room reads with, the held copy, and freshness's
+   * first decision (serve the copy, serve it stale, or fetch).
+   */
+  async function firstLook<T>(cc: ChargeContext, spec: ReadSpec<T>, asked: FreshnessMode) {
     const key = cacheKeyOf(spec.route, spec.params);
     const now = cc.now;
-    const pages = Math.max(1, spec.pages ?? 1);
+    // A ROOM NEVER FORCES A PAID REFRESH (D8), and otherwise reuses the slow
+    // classes' copies longer (D7, GROUP_REUSE_MS); the answer carries the
+    // copy's age either way. Every other surface reads as it asked.
+    const room = cc.surface === "telegram-group";
+    const mode: FreshnessMode = room && asked === "force-refresh" ? "prefer-fresh" : asked;
+    const reuseMs = room && asked !== "force-refresh" && cc.noReuse !== true ? GROUP_REUSE_MS[spec.cls] : undefined;
     let entry: store.CacheEntry | null = null;
     try {
       entry = await store.cacheGet(db, key);
     } catch (e) {
       log(`fomo: cache read failed: ${errText(e)}`);
     }
-    const heldData = entry && entry.retrievedAtMs !== null ? spec.revive(entry.payload) : null;
+    let heldData = entry && entry.retrievedAtMs !== null ? spec.revive(entry.payload) : null;
+    // A held "nothing here" is a short-lived answer for a read someone will
+    // hear: past EMPTY_HOLD_MS, or when the asker pushed back, it is read
+    // again (ReadSpec.empty). Each read decides for itself, so the shared
+    // research queue (background) keeps the class's own window on the same
+    // copy and never re-buys an empty page every two minutes (review on #306).
+    if (heldData !== null && cc.surface !== "background" && spec.empty?.(heldData) === true && entry && entry.retrievedAtMs !== null && (cc.retryEmpty === true || now - entry.retrievedAtMs >= EMPTY_HOLD_MS)) {
+      heldData = null;
+    }
     const heldMeta = entry && isObj(entry.meta) ? entry.meta : null;
     const heldSnap = heldData !== null && heldMeta ? snapshotOf(heldMeta.source, heldMeta.stale, heldMeta.ageSeconds) : null;
     const state: CacheEntryState | null = entry
@@ -1176,6 +1249,60 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           lastAttemptOutcome: entry.lastAttemptOutcome,
         }
       : null;
+    const first = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: true, ...(reuseMs !== undefined ? { reuseMs } : {}) });
+    return { key, mode, reuseMs, heldData, heldSnap, state, first };
+  }
+
+  /**
+   * THE WHOLE PLANNED COST BEFORE THE FIRST PAID READ (review r2, plan F1):
+   * a tool that pays a cheap identity read (a search) and then the read it
+   * exists for (a thesis page, a trader's holdings) asks the budget, taking
+   * nothing, whether both fit (FomoBudget.wouldRefuse). If not, nothing is
+   * charged and the answer is the refusal the whole read would have met, so
+   * a room is never charged for a search and then refused the page, nor told
+   * "try again after 15:00" by the search and refused at 15:00 by the page.
+   * Only when the first read would really go to the provider: a kept copy
+   * costs nothing, and each later read is then charged on its own as before.
+   * `later`: the credits of the reads the answer cannot do without.
+   *
+   * "use-held" (review r3): the whole cost would be refused, but the search
+   * holds a copy fit to show. The caller reads it as that copy (cached-ok),
+   * charging nothing, and the read it exists for decides for itself: a copy
+   * still kept (a room's thesis page, two hours) is served for nothing, and
+   * one that is not meets its own charge, refused with its own reset and
+   * nothing taken. Never charged a search and then refused the page, and
+   * never refused a page the room already holds. A refused search falls back
+   * to the same copy (read()), so no older identity is trusted than before.
+   */
+  async function plannedFits(cc: ChargeContext, firstSpec: ReadSpec<unknown>, asked: FreshnessMode, later: number): Promise<Fail | "use-held" | null> {
+    const b = cc.budget ?? budget;
+    if (!client || typeof b.wouldRefuse !== "function" || !(later > 0)) return null;
+    if (cc.cap) return null;
+    const look = await firstLook(cc, firstSpec, asked);
+    if (look.first.action !== "fetch") return null;
+    const total = expectedCredits(firstSpec.route, Math.max(1, firstSpec.pages ?? 1)) + later;
+    let refusal: string | null = null;
+    try {
+      refusal = await b.wouldRefuse({ priority: cc.priority, tenant: cc.tenant, surface: cc.surface, groupId: cc.groupId, credits: total, now: cc.now });
+    } catch (e) {
+      log(`fomo: budget pre-check failed: ${errText(e)}`);
+      return null;
+    }
+    // A cap the whole cost can never fit, though each read can (a room's 1,400 an hour: a 250
+    // search, then a 1,250 page): the reads go one by one as before, so the search is kept and
+    // the page fits the next hour. Only a refusal a later hour or day lifts is said up front.
+    if (refusal === null || refusal === "below-one-read") return null;
+    if (look.heldData !== null && look.first.onFailure === "serve-stale") return "use-held";
+    const reason = `budget-${refusal}`;
+    noteBudgetRefusal(reason, cc, cc.now);
+    usage?.recordRefusal({ now: cc.now, bucket: CAPABILITY_FOR_ROUTE[firstSpec.route] });
+    return { ok: false, status: "budget-limited", reason, message: null, candidates: [] };
+  }
+
+  async function read<T>(cc: ChargeContext, spec: ReadSpec<T>, asked: FreshnessMode): Promise<Section<T>> {
+    const now = cc.now;
+    const pages = Math.max(1, spec.pages ?? 1);
+    const { key, mode, reuseMs, heldData, heldSnap, state, first } = await firstLook(cc, spec, asked);
     const base = (over: Partial<Section<T>>): Section<T> => ({
       name: spec.name,
       route: spec.route,
@@ -1207,7 +1334,6 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         providerSnapshot: heldSnap,
       });
 
-    const first = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: true });
     if (first.action === "serve-cache" && heldData !== null) {
       usage?.recordCacheHit({ now, bucket: CAPABILITY_FOR_ROUTE[spec.route] });
       return base({
@@ -1244,7 +1370,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const refused = async (reason: string): Promise<Section<T>> => {
       noteBudgetRefusal(reason, cc, now);
       usage?.recordRefusal({ now, bucket: CAPABILITY_FOR_ROUTE[spec.route] });
-      const second = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: false });
+      const second = decideRead({ entry: state, cls: spec.cls, mode, now, budgetAvailable: false, ...(reuseMs !== undefined ? { reuseMs } : {}) });
       return second.action === "serve-stale" && heldData !== null
         ? heldCopy("stale", reason, "skipped-budget")
         : base({ status: "budget-limited", reason, lastOutcome: "skipped-budget" });
@@ -1398,6 +1524,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         cls: "theses",
         call: (c) => c.thesesByToken(t.address, { network, ...(pages > 1 ? { pages } : {}) }),
         revive: R.theses,
+        empty: (d) => d.rows.length === 0,
       };
     },
     thesesByUser: (userId: string, limit: number): ReadSpec<ThesesPage> => ({
@@ -1407,6 +1534,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       cls: "theses",
       call: (c) => c.thesesByUser(userId, { limit }),
       revive: R.theses,
+      // A trader's empty page is as short-lived as a coin's (review on #306).
+      empty: (d) => d.rows.length === 0,
     }),
     thesesByUserToken: (userId: string, t: TokenIdentity, limit: number): ReadSpec<ThesesPage> => ({
       name: "theses",
@@ -1415,6 +1544,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       cls: "theses",
       call: (c) => c.thesesByUserToken(userId, t.address, { limit }),
       revive: R.theses,
+      empty: (d) => d.rows.length === 0,
     }),
     tokenStats: (t: TokenIdentity): ReadSpec<TokenStats> => {
       const networkId = isRobinhoodToken(t) ? ROBINHOOD_NETWORK_ID : undefined;
@@ -1467,7 +1597,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     return { symbol: null, name: null };
   }
 
-  async function resolveToken(cc: ChargeContext, a: Answer, ref: TokenRef, chainSlug: string | null, mode: FreshnessMode): Promise<TokenResolution> {
+  /** `later`: the credits of the reads the answer needs after this one (plannedFits); 0 or absent, no pre-check. */
+  async function resolveToken(cc: ChargeContext, a: Answer, ref: TokenRef, chainSlug: string | null, mode: FreshnessMode, later = 0): Promise<TokenResolution> {
     const chain = chainSlug ? chainFromUserText(chainSlug) : null;
     if (ref.kind === "address" && chain) {
       const t = tokenIdentity(chain, ref.value);
@@ -1479,7 +1610,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     // An address with no chain, or a ticker: ask the provider where it lives.
     // Search answers are identity data and cached for an hour, shared by every caller.
     // Resolution is identity, not the answer's retrieval: it is metered but not counted as a page of the answer.
-    const s = a.add({ ...(await read(cc, specs.tokensSearch(ref.value), mode === "force-refresh" ? "prefer-fresh" : mode)), pages: 0, identity: true });
+    let searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
+    const planned = await plannedFits(cc, specs.tokensSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
+    if (planned === "use-held") searchMode = "cached-ok";
+    else if (planned) return planned;
+    const s = a.add({ ...(await read(cc, specs.tokensSearch(ref.value), searchMode)), pages: 0, identity: true });
     if (!s.data) return sectionFail(s);
     const rows = s.data.rows;
     const matches =
@@ -1516,7 +1651,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     return { ok: false, status: "not-found", reason: "symbol-not-found", message: `No coin with the ticker ${ref.value} was found on Fomo.`, candidates: [] };
   }
 
-  async function resolveTrader(cc: ChargeContext, a: Answer, ref: TraderRef, mode: FreshnessMode): Promise<TraderResolution> {
+  /** `later`: the credits of the reads the answer needs after this one (plannedFits); 0 or absent, no pre-check. */
+  async function resolveTrader(cc: ChargeContext, a: Answer, ref: TraderRef, mode: FreshnessMode, later = 0): Promise<TraderResolution> {
     if (ref.kind === "user-id") {
       // The id is the identity. Our own record is free; a 2,500-credit profile read is not spent to learn a handle.
       const local = await store.traderById(db, ref.value).catch(() => null);
@@ -1534,7 +1670,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       };
     }
     // Search (250 credits) rather than the profile route (2,500): only the user id is needed.
-    const s = a.add({ ...(await read(cc, specs.traderSearch(ref.value), mode === "force-refresh" ? "prefer-fresh" : mode)), pages: 0, identity: true });
+    let searchMode: FreshnessMode = mode === "force-refresh" ? "prefer-fresh" : mode;
+    const planned = await plannedFits(cc, specs.traderSearch(ref.value) as ReadSpec<unknown>, searchMode, later);
+    if (planned === "use-held") searchMode = "cached-ok";
+    else if (planned) return planned;
+    const s = a.add({ ...(await read(cc, specs.traderSearch(ref.value), searchMode)), pages: 0, identity: true });
     if (!s.data) return sectionFail(s);
     const want = ref.value.toLowerCase();
     const hits = s.data.rows.filter((r): r is Extract<typeof r, { kind: "trader" }> => r.kind === "trader" && (r.trader.handle ?? "").toLowerCase() === want);
@@ -1664,7 +1804,9 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       },
       dossierRevision: o.dossierRevision ?? null,
       reason: status === "ok" ? null : reason,
-      message: o.message !== undefined ? o.message : defaultMessage(status, reason),
+      message: o.message !== undefined ? o.message : defaultMessage(status, reason, ic.now),
+      // When a refusal can be asked again, on the clock its charge used (ic.now is cc.now).
+      ...(status === "budget-limited" ? { retryAt: refusalResetAt(reason, ic.now) } : {}),
     };
   }
 
@@ -1808,7 +1950,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const a = new Answer();
     const focus = args.focus === "holdings" ? "holdings" : "context";
     a.requested = { trader: args.trader.kind, focus, window: args.window, depth: args.depth };
-    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness);
+    // The holdings read is what the answer is: planned with the search (plannedFits).
+    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness, expectedCredits("balances"));
     if (!r.ok) return fromFail(ic, a, "holdings", args.freshness, r);
     const userId = r.trader.userId;
     const bal = a.add(await read(ic.cc, specs.balances(userId), args.freshness));
@@ -1903,11 +2046,13 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
   async function toolTraderActivity(ic: Inv, args: ToolArgs["fomo_get_trader_activity"]): Promise<FomoEnvelope<TraderActivityData>> {
     const a = new Answer();
     a.requested = { window: args.window, side: args.side, token: args.token ? args.token.kind : null, chain: args.chain, limit: args.limit };
-    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness);
+    // An answer needs positions or the feed (either one is an answer), and the named coin when there is one.
+    const needed = Math.min(expectedCredits("positions"), expectedCredits("alerts")) + (args.token && args.token.kind === "symbol" ? expectedCredits("tokensSearch") : 0);
+    const r = await resolveTrader(ic.cc, a, args.trader, args.freshness, needed);
     if (!r.ok) return fromFail(ic, a, "activity", args.freshness, r);
     let token: TokenIdentity | null = null;
     if (args.token) {
-      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness);
+      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness, Math.min(expectedCredits("positions"), expectedCredits("alerts")));
       if (!t.ok) return fromFail(ic, a, "activity", args.freshness, t);
       token = t.token;
     }
@@ -2029,6 +2174,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         likes: t.likes,
         isDev: t.isDev,
         family: fam.get(t.id) ?? t.familyKey,
+        // A group's digest (digest.ts) reads the whole text, not the cut excerpt.
+        ...readThesisForDigest(t.text),
       };
     });
     return { views, stance, families: new Set(views.map((v) => v.family)).size, authors: new Set(rows.map((t) => t.author.userId)).size };
@@ -2050,7 +2197,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     let page = first.data;
     let section = first;
     const total = page.totalAvailable;
-    const capped = page.rows.length >= THESIS_PAGE_SIZE || (total !== null && total > page.rows.length);
+    // An EMPTY first page is never "capped": it tells nothing about pages 2-3, and the provider's
+    // `pages` reads 1..N again, so a page that came back empty under a count would buy a 3-page
+    // read that comes back empty too (review on #306).
+    const capped = page.rows.length > 0 && (page.rows.length >= THESIS_PAGE_SIZE || (total !== null && total > page.rows.length));
     const firstStances = page.rows.map((x) => readThesisText(x.text).stance);
     const plan = planThesisFetch(
       await previousDossier(t),
@@ -2084,7 +2234,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     let label: TokenLabel | null = null;
     let trader: TraderIdentity | null = null;
     if (args.token) {
-      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness);
+      // The coin's first thesis page is what a coin's answer is: planned with the search (plannedFits).
+      const t = await resolveToken(ic.cc, a, args.token, args.chain, args.freshness, args.trader ? 0 : expectedCredits("thesesByToken", 1));
       if (!t.ok) return fromFail(ic, a, "theses", args.freshness, t);
       token = t.token;
       label = t.label;
@@ -2160,11 +2311,15 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     a.achieved = { theses: rows.length, shown: shown.length, families: tv.families, authors: tv.authors, chainFilterHonoured: honoured };
     a.note("Theses are their authors' claims, not verified facts; stance is Merrymen's reading of the text.");
     const subject: ResolvedSubject | null = token ? { kind: "token", token, label: label ?? { symbol: null, name: null } } : trader ? { kind: "trader", trader } : null;
+    // An empty page is logged by its shape only (never the coin): the provider's
+    // own "available" flag and count tell a coin with no theses from a read
+    // that came back empty while the provider still holds some.
+    if (rows.length === 0 && page) log(`fomo: theses page empty (available ${page.available ?? "?"}, provider total ${page.totalAvailable ?? "?"}, source ${page.source ?? "?"}, served from ${section.servedFrom})`);
     return finish(ic, a, {
       cls: "theses",
       mode: args.freshness,
       subject,
-      data: { token, label, trader, theses: shownViews, stance: tv.stance, families: tv.families, uniqueAuthors: tv.authors, chainFilterHonoured: honoured },
+      data: { token, label, trader, theses: shownViews, stance: tv.stance, families: tv.families, uniqueAuthors: tv.authors, chainFilterHonoured: honoured, available: page?.available ?? null, pageRows: page ? page.rows.length : null },
       rows: rows.length,
       essential: [section],
     });
@@ -2283,7 +2438,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
           if (feed.data.chainFilterHonoured === false) a.note("The provider ignored the chain filter; rows on other chains were removed.");
         }
         essential.push(feed);
-        a.note("Whole-feed reads cover the latest page of the feed only.");
+        // Said only when the page provably stops inside the window, in words a room keeps ("left out", "floor").
+        if (feed.data && feedPageCutShort(feed.data, since)) a.note("The feed's newest page does not reach back over the whole window; older trades are left out, so these counts are a floor.");
       }
     }
     const merged = dedupeEvents([...local, ...rest]);
@@ -2321,6 +2477,29 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       const b = participationBreadth(inScope, winMs ?? 365 * DAY, ic.now).find((x) => x.tokenKey === t.key);
       if (b) breadth = { distinctBuyers: b.distinctBuyers, buyEvents: b.buyEvents, repeatAdds: b.repeatAdds, reading: b.reading, notes: b.notes };
     }
+    // THE WHOLE FEED'S TOP COINS, from the page already read: distinct
+    // wallets per coin (by sellers for a sell question), at most three.
+    // Counts only; who they were never leaves here through it.
+    let topTokens: CrowdCoin[] | undefined;
+    if (!token && !args.cohortOnly) {
+      const per = new Map<string, { token: TokenIdentity; label: TokenLabel; buyers: Set<string>; sellers: Set<string> }>();
+      for (const e of inScope) {
+        if (!e.token || (e.kind !== "buy" && e.kind !== "sell")) continue;
+        let c = per.get(e.token.key);
+        if (!c) {
+          c = { token: e.token, label: cleanLabel(e.tokenLabel), buyers: new Set(), sellers: new Set() };
+          per.set(e.token.key, c);
+        }
+        if (!c.label.symbol && e.tokenLabel?.symbol) c.label = cleanLabel(e.tokenLabel);
+        (e.kind === "buy" ? c.buyers : c.sellers).add(e.trader.userId);
+      }
+      const by = args.side === "sell" ? "sellers" : "buyers";
+      topTokens = [...per.values()]
+        .map((c) => ({ token: c.token, label: c.label, buyers: c.buyers.size, sellers: c.sellers.size }))
+        .filter((c) => c[by] > 0 && !!c.label.symbol)
+        .sort((x, y) => y[by] - x[by] || (by === "buyers" ? y.sellers - x.sellers : y.buyers - x.buyers) || (x.label.symbol ?? "").localeCompare(y.label.symbol ?? ""))
+        .slice(0, 3);
+    }
     if (matching.length > args.limit) a.capped = true;
     const shown = matching.slice(0, args.limit).map((e) => eventView(e, restKeys.has(e.eventKey) && !local.some((l) => l.eventKey === e.eventKey) ? "rest-lookup" : "stream-record", cohort.ids));
     for (const e of shown) {
@@ -2350,6 +2529,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         stats: s ? { holders: s.holders, top10HoldersPercent: s.top10HoldersPercent, window24h: s.windows["24h"] ?? null, window1h: s.windows["1h"] ?? null } : null,
         localEvents: local.length,
         restEvents: rest.length,
+        ...(topTokens ? { topTokens } : {}),
       },
       rows: matching.length,
       essential,
@@ -2387,7 +2567,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         cls: "rankings",
         mode: args.freshness,
         subject: { kind: "market" },
-        data: { board: args.board, window: args.window, basis: "provider-reported P&L, not skill", traders, tokens: [] },
+        // A chain asked of the trader board narrows nothing (it covers every chain): kept so the answer says so.
+        data: { board: args.board, window: args.window, basis: "provider-reported P&L, not skill", traders, tokens: [], ...(args.chain ? { chain: args.chain } : {}) },
         rows: traders.length,
         essential: [lb],
       });
@@ -2395,9 +2576,10 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const board = args.board === "trending-tokens" ? "trending" : args.board === "graduated-tokens" ? "graduated" : "most-held";
     const tb = a.add(await read(ic.cc, specs.tokenBoard(board), args.freshness));
     const chain = args.chain ? chainFromUserText(args.chain) : null;
-    const rows = (tb.data?.rows ?? []).filter((r) => chainMatches(chain, r.token));
+    const all = tb.data?.rows ?? [];
+    const rows = all.filter((r) => chainMatches(chain, r.token));
     if (tb.data) a.ref("board", board, tb.retrievedAt);
-    const tokens = rows.slice(0, args.limit).map((r) => ({
+    const view = (r: (typeof all)[number]): RankingTokenRow => ({
       rank: r.rank,
       token: r.token,
       label: cleanLabel(r.label),
@@ -2407,15 +2589,24 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       marketCapUsd: r.marketCapUsd,
       volume24hUsd: r.volume24hUsd,
       executionAvailability: availabilityOf(r.token),
-    }));
+    });
+    const tokens = rows.slice(0, args.limit).map(view);
     if (tokens.some((t) => t.marketCapUsd === null)) a.note("A blank market cap is unknown, not zero.");
     a.note("Board position reflects popularity on Fomo, not quality.");
     a.achieved = { rows: tokens.length, chain: args.chain };
+    // WHAT THE CHAIN FILTER DID, from the read already made (one board read
+    // serves every chain; nothing is sent upstream): how many rows the board
+    // had, how many matched, how many could not be placed. With no chain
+    // asked, the board's Robinhood Chain rows too, so a cross-chain board can
+    // still say where the chain Merrymen trades stands on it.
+    const counts = tb.data ? { boardRows: all.length, matched: rows.length, unplaced: tb.data.dropped } : {};
+    const hood = all.filter((r) => isRobinhoodToken(r.token));
+    const robinhood = tb.data && !chain ? { robinhood: { rows: hood.length, top: hood.slice(0, 3).map(view) } } : {};
     return finish(ic, a, {
       cls: "boards",
       mode: args.freshness,
       subject: { kind: "market" },
-      data: { board: args.board, window: null, basis: "provider token board", traders: [], tokens },
+      data: { board: args.board, window: null, basis: "provider token board", traders: [], tokens, ...(args.chain ? { chain: args.chain } : {}), ...counts, ...robinhood },
       rows: tokens.length,
       essential: [tb],
     });
@@ -2427,7 +2618,12 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     const winMs = windowMsOf(args.window) ?? 30 * DAY;
     const since = ic.now - winMs;
     const chain = args.chain ? chainFromUserText(args.chain) : null;
-    const cohort = await cohortSnapshot(ic.now);
+    // A ROOM'S LEADS NEVER COME FROM THE WATCH LIST (decision 1, 2026-10-07): its local record is
+    // the watched traders' own trades, so a lead's buyers, latest buy and order would say what they
+    // bought, and a room's one-trader answers would then say who they are. A room ranks the boards alone.
+    const cohort: CohortSnap = ic.audience === "owner"
+      ? await cohortSnapshot(ic.now)
+      : { ids: new Set(), byId: new Map(), version: null, createdAt: null, size: null, target: 0, shortfallReason: null };
     const graduated = a.add(await read(ic.cc, specs.tokenBoard("graduated"), args.freshness));
     const trending = a.add(await read(ic.cc, specs.tokenBoard("trending"), args.freshness));
     // Local cohort record (free): first purchases and breadth over the window. "First seen" needs a BASELINE
@@ -2500,9 +2696,11 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       const firstSeenInWindow: boolean | null = !early.has(c.token.key) ? false : baselineKnown ? true : null;
       // EARLY-SIGNAL EVIDENCE, NOT SIZE: market cap, volume, holders and board rank are never scored.
       const recent = c.latestBuyAt !== null && ic.now - c.latestBuyAt <= 6 * HOUR ? 1 : 0;
+      // A room's order never weighs who Merrymen watches: a watched buyer counts as any other buyer there.
+      const watched = ic.audience === "owner" ? c.cohortBuyers.size : 0;
       const score =
-        3 * c.cohortBuyers.size +
-        1 * Math.max(0, c.buyers.size - c.cohortBuyers.size) * 0.5 +
+        3 * watched +
+        1 * Math.max(0, c.buyers.size - watched) * 0.5 +
         2 * (firstSeenInWindow === true ? 1 : 0) +
         1 * (c.newThesis ? 1 : 0) +
         1 * (c.boards.has("graduated") ? 1 : 0) +
@@ -2515,7 +2713,7 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         marketCapUsd: c.cap,
         marketCapKnown: c.cap !== null,
         signals: {
-          cohortBuyers: c.cohortBuyers.size,
+          cohortBuyers: watched,
           distinctBuyers: breadth.get(c.token.key)?.distinctBuyers ?? c.buyers.size,
           latestBuyAt: c.latestBuyAt,
           firstSeenInWindow,
@@ -2595,6 +2793,17 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       return { dossier: previous, changed: false, status, reason: th.section.reason, checked: false, usage: usageNow(), notes };
     }
     const page = th.section.data;
+    /*
+     * A PAGE THE PROVIDER ANSWERED EMPTY WHILE IT HOLDS THESES (marked not
+     * available, or under a count above zero) is no thesis evidence, never
+     * "0 theses": the previous revision stands, and nothing is built from it
+     * or stored as a baseline for later "changes since" (the AUTON incident,
+     * 2026-10-08; review on #306). The feed and stats are not read for it.
+     */
+    if (th.rows.length === 0 && (page.available === false || (page.totalAvailable ?? 0) > 0)) {
+      say("The provider didn't return the theses just now.");
+      return { dossier: previous, changed: false, status: previous ? "stale" : "partial", reason: "theses-not-ready", checked: false, usage: usageNow(), notes };
+    }
     /*
      * A NARROWER READ IS NOT EVIDENCE THAT A CLAIM DISAPPEARED. The revision is
      * shared by every owner, the lens and the follow review, and the research
@@ -2787,6 +2996,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
     }
     const r = await refreshCore(ic.cc, a, token, t.label, { depth, mode: args.freshness });
     if (!r.dossier) {
+      // A thesis page the provider answered empty while holding theses: the theses were not read (render.ts bodyResearch).
+      if (r.reason === "theses-not-ready" && !a.missing.includes("theses")) a.missing.push("theses");
       return finish<ResearchCoinData>(ic, a, {
         cls: "theses",
         mode: args.freshness,
@@ -3375,6 +3586,18 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
       return env;
     }
     ic.access = access;
+    // A pushback ("there has to be theses", "check again"): a held "nothing
+    // here" is read again, and nothing else changes. Never a forced refresh,
+    // so a copy with something in it keeps its window, a room's included (D8).
+    if (ctx?.retryEmpty === true) ic.cc.retryEmpty = true;
+    // A room's "now" is an ordinary read (D8): the answer says what it served, and how old it is.
+    const asked = v.args as { freshness?: unknown };
+    if (surface === "telegram-group" && asked && asked.freshness === "force-refresh") {
+      asked.freshness = "prefer-fresh";
+      ic.cc.noReuse = true;
+      // ...and a room's explicit "now" or "recheck" never gets a held "nothing here" again.
+      ic.cc.retryEmpty = true;
+    }
     let env: FomoEnvelope;
     try {
       env = await dispatch(ic, tool, v.args);

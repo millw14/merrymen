@@ -53,7 +53,7 @@
     "pack:release": "node sdk/build.mjs && node cli/prepublish.mjs && node cli/pack-runtime.mjs",
     "dev:web": "cd web && next dev -p 3100 -H 127.0.0.1",
     "dev:worker": "tsx worker/src/index.ts",
-    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\" \"sdk/*.test.ts\" \"cli/*.test.mjs\"",
+    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\" \"sdk/*.test.ts\" \"cli/*.test.mjs\" \"site/app/**/*.test.ts\"",
     "test:contracts": "cd contracts && npm test",
     "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web && tsc --noEmit -p browser && tsc --noEmit -p sdk",
     "prepack": "node cli/publish-guard.mjs"
@@ -70,6 +70,7 @@
     "@zerodev/permissions": "^5.6.3",
     "@zerodev/sdk": "^5.5.10",
     "@zerodev/webauthn-key": "^5.5.0",
+    "esbuild": "0.28.1",
     "lightweight-charts": "^5.2.1",
     "lucide-react": "^1.41.0",
     "next": "^15.5.27",

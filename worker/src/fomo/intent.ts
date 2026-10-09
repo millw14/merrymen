@@ -59,8 +59,10 @@ import {
   isMemoryUsable,
   mergeResolved,
   PLAN_WINDOWS,
+  rememberedBoard,
   rememberedSubjects,
   sameSubject,
+  type BoardMemory,
   type FomoIntent,
   type PlanSide,
   type PlanWindow,
@@ -96,6 +98,35 @@ export interface FomoQuestionPlan {
   /** One focused question; when set, `toolCalls` is empty. */
   clarification: string | null;
   toolCalls: FomoToolCall[];
+  /**
+   * ONE ROW OF THE TRADER LEADERBOARD, asked about in the same breath as the
+   * board ("who's the best trader on fomo today and what did he make money
+   * on"): the plan is the leaderboard, and this says which row and what about
+   * it. Set only with intent "rankings-traders"; absent otherwise. The row's
+   * trader comes from the provider's board, never from the text.
+   */
+  rowAsk?: FomoRowAsk;
+  /**
+   * "What did trader X make money on": their trades, read for what they made
+   * or lost money on (provider-reported). Set only with "trader-activity".
+   */
+  earnings?: true;
+  /**
+   * The trader board asked for in the singular ("who's the best trader on
+   * fomo"): a bare "he" after it is its 1st row. Only with "rankings-traders".
+   */
+  singular?: true;
+}
+
+export type FomoRowRank = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+
+/** Which row of the trader leaderboard, and what about that trader. */
+export interface FomoRowAsk {
+  /** 1 to 10: the rows a trader board read carries by default. */
+  rank: FomoRowRank;
+  about: "earnings" | "trades" | "holdings" | "profile";
+  /** A trades ask's side ("what did the best trader sell"), read like a named trader's. */
+  side?: "buy" | "sell";
 }
 
 export interface FomoQuestionContext {
@@ -321,7 +352,11 @@ const FOMO_PLATFORM: readonly RegExp[] = [
   /\b(?:is|are|does) (?:the )?fomo (?:crowd |community |people )?(?:saying|say|think|thinking)\b|\bfomo (?:says|thinks)\b/,
 ];
 
-const COHORT = /\bour (?:\d{1,4} )?(?:traders|cohort|trader list|watched traders|tracked traders)\b|\btraders (?:that |who )?(?:we|you) (?:watch|monitor|track|follow|are watching|are tracking|are monitoring)\b|\b(?:watched|tracked|monitored) traders\b|\bcohort\b/;
+// The singular too ("the top trader we watch", "the best tracked trader"): who
+// Merrymen watches, never the public board's #1. Not "followed": "the most
+// followed trader" is a public question.
+// "u r", "ur" and "youre" too ("the best trader u r tracking"): never a trader called "ur".
+const COHORT = /\bour (?:\d{1,4} )?(?:traders|cohort|trader list|watched traders|tracked traders)\b|\btraders? (?:that |who )?(?:we|you|u|ya)(?: are| r|re)? (?:watch|watching|monitor|monitoring|track|tracking|follow|following)\b|\btraders? (?:that |who )?ur (?:watching|monitoring|tracking|following)\b|\b(?:watched|tracked|monitored) traders?\b|\bcohort\b/;
 const TRADERS_WORD = /\btraders?\b/;
 
 const HEALTH: readonly RegExp[] = [
@@ -421,6 +456,176 @@ const GLOBAL_FLOW = /\bwhat (?:are|have|did|is) (?:the )?(?:top |best |smart |ou
  * "who's the top coin" is not.
  */
 const RANK_TRADERS = /\b(?:top|best|leading|biggest|most profitable|highest earning|winning|hottest|smartest|top performing|best performing|strongest|richest) (?:\d{1,3} )?(?:fomo )?(?:traders|trader|performers|wallets|earners|winners|accounts)\b|\b(?:trader|traders) (?:leaderboard|rankings?|board)\b|\bleaderboard\b|\brank(?:ed|ing|ings)? (?:of )?(?:the )?traders\b|\bwho (?:is|are) (?:the )?(?:top|best|leading) (?:\d{1,3} )?(?:traders?|performers?)\b|\bwho (?:is|are) (?:the )?(?:top|best|leading|number one|#1|no 1|winning|on top|killing it|up the most|printing)(?! (?:\d{1,3} )?(?:fomo )?(?:coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)/;
+/**
+ * "Who made the most" is the leaderboard, but only when nothing follows
+ * "the most" but Fomo, a time or the board: "who made the most on PONS" asks
+ * about one coin, which the all-coins trader board says nothing about.
+ */
+const EARNERS_NOT_ON_SUBJECT = String.raw`(?! (?:money |profits? |gains |bread |bank )?(?:on|from|off|with|in) (?!(?:the )?fomo\b|today\b|tonight\b|this (?:week|month|year)\b|(?:the )?(?:last|past) \S+|(?:the )?(?:board|leaderboard)\b))`;
+const RANK_EARNERS = new RegExp(String.raw`\bwho (?:has |is )?(?:made|makes|making|won|wins|winning|printed|prints|printing|earned|earns|earning) the most\b${EARNERS_NOT_ON_SUBJECT}`);
+
+/**
+ * ONE ROW OF THE TRADER BOARD, by rank, in the singular: "the best trader",
+ * "the #1 trader", "the second best trader", or "who is the top" / "who's
+ * #1" / "who made the most". "First" alone is not here: "the first trader to
+ * buy it" asks who was earliest, not who ranks first. Group 1 is the rank.
+ */
+const ROW_ORDINAL = String.raw`(?:second|2nd|third|3rd|fourth|4th|fifth|5th|sixth|6th|seventh|7th|eighth|8th|ninth|9th|tenth|10th)`;
+const ROW_NUMBER = String.raw`(?:#(?:10|[2-9])|number (?:two|three|four|five|six|seven|eight|nine|ten|10|[2-9])|no (?:10|[2-9]))`;
+/**
+ * Never a rank word right after another ordinal or number: "the 11th best
+ * trader" or "the twentieth top trader" is no row this board reads, and never
+ * its 1st row (rule 5).
+ */
+const NOT_AFTER_ORDINAL = String.raw`(?<!(?:\d+(?:st|nd|rd|th)?|\bfirst|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|\w+teenth|\w+ieth|#\d+)[ -])`;
+const ROW_RANK = new RegExp(String.raw`\b(?:the )?${NOT_AFTER_ORDINAL}(top|best|#1|number one|no 1|leading|winning|most profitable|highest earning|${ROW_ORDINAL} (?:best|top|place|ranked)|${ROW_NUMBER}) (?:fomo )?(?:trader|performer|wallet|earner|account)\b(?!s)`);
+const ROW_WHO = new RegExp(String.raw`\bwho (?:is|was) (?:the )?${NOT_AFTER_ORDINAL}(top|best|#1|number one|no 1|leading|winning|on top|${ROW_ORDINAL} (?:best|top|place)|${ROW_NUMBER})(?! (?:\d{1,3} )?(?:fomo )?(?:traders|coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?)\b)(?=\s|$)|\bwho (?:has |is )?(made|makes|won|printed|earned) the most\b${EARNERS_NOT_ON_SUBJECT}`);
+/** "The best trader after X", "behind", "below", "outside the top 3": not that row, and never row 1 (X himself). */
+const ROW_RELATIVE = /^\s*(?:after|behind|below|beneath|under|outside|beyond|besides|other than|except|apart from|but not)\b/;
+/** A rank this board does not read ("the 11th best trader", "the twentieth top trader"): a row asked for, but none of its ten. */
+const ROW_PAST_BOARD = /\b(?:\d+(?:st|nd|rd|th)|eleventh|twelfth|\w+teenth|\w+ieth|#\d{2,}) (?:best|top|place|ranked|most profitable|highest earning|leading) (?:fomo )?(?:trader|performer|wallet|earner|account)\b(?!s)/;
+/**
+ * What they made or lost money on: "what did he make money on", "made a
+ * profit on", "what did he win on". Never "how much" (that is the board's
+ * own figure), never "take profit" (a sell), and never the owner's book
+ * (OWN_LEDGER runs first).
+ */
+const EARNINGS = /\b(?:make|makes|made|making|earn|earns|earned|earning) (?:\S+ ){0,2}?(?:money|bank|bread|profits?|gains)\b|\b(?:win|wins|won|winning|lose|loses|lost|losing) (?:\S+ ){0,2}?money\b|\b(?:profited|printed|printing|cashed in|cashing in) (?:on|from|off)\b|\bwhat (?:did|has|have|does|do) (?:he|she|they|it|\S+) (?:make|made|earn|earned|win|won|lose|lost|print|printed)(?: \S+){0,3}? (?:on|from|off|with)\b|\b(?:winning|winners|losing|losers) (?:trades|positions|plays|coins)\b/;
+const ROW_HOLDINGS = /\b(?:holding|holds|hold|holdings|bags?|portfolio|positions?|sitting on|own|owns)\b/;
+const ROW_TRADES = /\b(?:buy|buys|buying|bought|sell|sells|selling|sold|trades|trading|traded|aped|aping|dumped|dumping|moves|activity|been up to)\b/;
+const ROW_PROFILE = /\b(?:tell me (?:more )?about (?:him|her|them)|who is (?:he|she)|how (?:is|has) (?:he|she) (?:been )?(?:doing|performing)|(?:his|her) (?:profile|stats|track record|win ?rate|followers|record))\b/;
+
+/**
+ * A question about one trader's P&L or how they are doing ("what's @X's pnl",
+ * "how much did @X make this week", "how is @X doing"). In a room it is
+ * answered from what they made or lost on their trades (chat.ts), never from
+ * a profile P&L that may come from Merrymen's watched-trader record.
+ */
+const TRADER_PNL = /\b(?:pnl|p&l|p\/l|profit and loss|performance|performing)\b|\bhow (?:is|has|did|was) (?:\S+ ){1,2}?(?:been )?(?:doing|done|performing|performed)\b|\bhow much (?:did|has|have|does|do|is|was) (?:\S+ ){1,2}?(?:made|make|making|earned|earn|earning|won|win|lost|lose|up|down)\b/;
+
+export function traderPnlAsk(text: unknown): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  return TRADER_PNL.test(words(text).map((w) => w.canon).join(" "));
+}
+
+/** The rank a ROW_RANK / ROW_WHO rank word names: "second best" 2, "#7" 7, "number ten" 10, "best" or "top" 1; null past 10. */
+function rowRank(word: string): FomoRowRank | null {
+  const w = word.replace(/^(?:#|number |no )/, "").split(" ")[0] ?? "";
+  const n = Object.hasOwn(ROW_NUMBERS, w) ? ROW_NUMBERS[w]! : /^\d+$/.test(w) ? Number(w) : 1;
+  return Number.isSafeInteger(n) && n >= 1 && n <= 10 ? (n as FomoRowRank) : null;
+}
+
+/**
+ * THE SINGULAR RANK PHRASE in a line ("the best trader", "who's #3", "the
+ * 5th best trader"), with its rank: never one right after another ordinal,
+ * nor one followed by "after X" / "behind X" (rule 5: no row, rather than
+ * the wrong one).
+ */
+/** A singular row asked for that rankPhraseOf refuses (past the 10th, or "after X"): its "he" is that unread row, never anyone remembered. */
+function rankRefusedIn(c: string): boolean {
+  if (ROW_PAST_BOARD.test(c)) return true;
+  const m = ROW_RANK.exec(c) ?? ROW_WHO.exec(c);
+  return !!m && rankPhraseOf(c) === null;
+}
+
+function rankPhraseOf(c: string): { m: RegExpExecArray; rank: FomoRowRank } | null {
+  const m = ROW_RANK.exec(c) ?? ROW_WHO.exec(c);
+  if (!m) return null;
+  if (ROW_RELATIVE.test(c.slice(m.index + m[0].length))) return null;
+  const rank = rowRank(m[1] ?? m[2] ?? "");
+  return rank === null ? null : { m, rank };
+}
+
+/**
+ * The leaderboard's row a question is about, with what about it, or null.
+ * Only for a singular rank phrase plus a one-trader question in the rest of
+ * the message ("...and what did he make money on"), with no trader or coin
+ * named and no crowd ("top trader and what are people buying" is two asks).
+ */
+function rowAskOf(c: string, ex: Extracted): FomoRowAsk | null {
+  if (ex.traders.length > 0 || ex.tokens.length > 0) return null;
+  const phrase = rankPhraseOf(c);
+  if (!phrase) return null;
+  const { m, rank } = phrase;
+  const rest = `${c.slice(0, m.index)} ${c.slice(m.index + m[0].length)}`;
+  if (CROWD.test(rest)) return null;
+  const about: FomoRowAsk["about"] | null = EARNINGS.test(rest)
+    ? "earnings"
+    : ROW_HOLDINGS.test(rest)
+      ? "holdings"
+      : ROW_TRADES.test(rest)
+        ? "trades"
+        : ROW_PROFILE.test(rest)
+          ? "profile"
+          : null;
+  if (!about) return null;
+  const side = about === "trades" ? sideOf(rest) : null;
+  return { rank, about, ...(side === "buy" || side === "sell" ? { side } : {}) };
+}
+/**
+ * A ROW OF THE BOARD THE CONVERSATION WAS JUST SHOWN: "the second one", "the
+ * 3rd guy", "the top one", "the last one", "#2", "number two". Read only
+ * while a trader board is remembered (subject-memory.ts rememberedBoard) and
+ * never in a question that asks for a board ("who's #1 on fomo").
+ */
+const ROW_REF = /\bthe (top|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last|1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th) (?:one|guy|dude|person|on the (?:board|list))\b|(?:^|\s)#(10|[1-9])(?![\p{L}\p{N}])|\bnumber (one|two|three|four|five|six|seven|eight|nine|ten|10|[1-9])\b/u;
+const ROW_NUMBERS: Readonly<Record<string, number>> = {
+  top: 1, first: 1, one: 1, "1st": 1, second: 2, two: 2, "2nd": 2, third: 3, three: 3, "3rd": 3, fourth: 4, four: 4, "4th": 4,
+  fifth: 5, five: 5, "5th": 5, sixth: 6, six: 6, "6th": 6, seventh: 7, seven: 7, "7th": 7, eighth: 8, eight: 8, "8th": 8,
+  ninth: 9, nine: 9, "9th": 9, tenth: 10, ten: 10, "10th": 10,
+};
+/** Words around a bare row reference ("and what about the second one?"): nothing asked of its own. */
+const ROW_REF_FILLER = new Set("and what is about how the then now ok okay so also too again pls please yo hey him her he she his guy one".split(" "));
+
+/**
+ * The rank a row reference names on `board` (the last row for "the last one"),
+ * and whether it asks nothing else; the agent's own names ("shogun and #1?")
+ * ask nothing.
+ */
+function rowRefOf(c: string, board: BoardMemory, self: SelfRef): { rank: number; bare: boolean } | null {
+  const m = ROW_REF.exec(c);
+  if (!m) return null;
+  // A coin noun right after it ("the number one coin", "#1 trending coin", "the top one trending") is a coin's rank.
+  if (ROW_REF_COIN_AFTER.test(c.slice(m.index + m[0].length))) return null;
+  const word = m[1] ?? m[2] ?? m[3] ?? "";
+  const rank = word === "last" ? Math.max(...board.rows.map((r) => r.rank)) : ROW_NUMBERS[word] ?? Number(word);
+  if (!Number.isSafeInteger(rank) || rank < 1) return null;
+  const restLine = `${c.slice(0, m.index)} ${c.slice(m.index + m[0].length)}`;
+  const rest = restLine.split(" ").filter((w) => w && !ROW_REF_FILLER.has(w) && !self.words.has(w));
+  if (rest.length === 0) return { rank, bare: true };
+  // Anything more must ask something of one trader: never a coin or board question ("what's #1
+  // trending"), never a line that only says a number ("number one priority is safety", "i'm number one").
+  if (RANK_TOKENS.test(c)) return null;
+  let asked = rest.join(" ");
+  for (const [, re] of WINDOW_RULES) asked = asked.replace(new RegExp(re.source, "g"), " ");
+  asked = asked.replace(/\s+/g, " ").trim();
+  const traderAsk = !asked || EARNINGS.test(restLine) || ROW_HOLDINGS.test(restLine) || ROW_TRADES.test(restLine) || ROW_PROFILE.test(restLine)
+    || /\b(?:tell me|profile|stats|record|doing|performing|who)\b/.test(restLine);
+  return traderAsk ? { rank, bare: false } : null;
+}
+/** A coin noun right after a row reference: that is a coin's rank, never a row of the trader board. */
+const ROW_REF_COIN_AFTER = /^\s*(?:(?:trending|hot|hottest|popular|top|new|graduated) )?(?:coins?|tokens?|memecoins?|memes?|tickers?|cas?|plays?|picks?|trending)\b/;
+
+/** "Which one on the board: the 1st, 2nd or 3rd?", for the rows it has. */
+function askRow(board: BoardMemory): string {
+  const ranks = board.rows.map((r) => r.rank).sort((a, b) => a - b).slice(0, 3).map((r) => ordinalOf(r));
+  const list = ranks.length <= 1 ? `the ${ranks[0] ?? "1st"}` : `the ${ranks.slice(0, -1).join(", ")} or ${ranks[ranks.length - 1]}`;
+  return `Which one on the board: ${list}?`;
+}
+
+function ordinalOf(n: number): string {
+  const tens = n % 100;
+  return `${n}${tens >= 11 && tens <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th")}`;
+}
+
+/** A bare row reference asks of that row what the last one asked (BoardMemory.about). */
+function detectedFromAbout(about: BoardMemory["about"]): Detected {
+  if (about === "earnings") return { intent: "trader-activity", inherent: true, earnings: true };
+  if (about === "trades") return { intent: "trader-activity", inherent: true };
+  if (about === "holdings") return { intent: "trader-holdings", inherent: true };
+  return { intent: "trader-context", inherent: true };
+}
+
 const RANK_TOKENS = /\btrending\b|\b(?:top|hot|hottest|popular|most popular|most held|graduated|newly graduated|most bought|most traded|biggest) (?:\d{1,3} )?(?:fomo )?(?:coins|tokens|memecoins|memes|tickers)\b|\bmost[- ]held\b|\bgraduat(?:ed|ing|ions?)\b/;
 
 const SMALL_COINS = /\b(?:smaller|small|low ?cap|lower ?cap|micro ?cap|microcap|lowcap|tiny|early|earlier|new|newer|under the radar|overlooked|hidden|emerging|undiscovered|lesser known|up and coming) (?:\S+ ){0,2}?(?:coins|tokens|caps|gems|plays|names|projects|memecoins|memes|tickers)\b/;
@@ -507,7 +712,9 @@ const NOT_HANDLES = new Set(
     "their its named called account profile rankings ranking leaderboard list cohort activity trades trading traded theses " +
     "here there also still really actually apparently lately again then so if when mentioned above below earlier before after " +
     "follow following watch watching track tracking stats pnl performance wallet wallets positions portfolio aped aping " +
-    "thinks think thought likes liked into about been being doing up out over more most top best leading big biggest").split(" "),
+    "thinks think thought likes liked into about been being doing up out over more most top best leading big biggest " +
+    // "the trader ur tracking", "trader u r watching": the watch list, never a trader called "ur".
+    "u ur ya youre yall r").split(" "),
 );
 
 /** "X's bags": the nouns that make X a trader. */
@@ -571,6 +778,24 @@ function isAllCaps(ws: readonly Word[]): boolean {
   return alpha.filter((w) => w.bare === w.bare.toUpperCase()).length / alpha.length >= 0.6;
 }
 
+/**
+ * Nouns that make the chain word right before them a chain ("robinhood
+ * coins", "hood tokens", "base memes", "only robinhood ones"), not a coin.
+ * Never after "my", "our" or "your": "my robinhood coins are down" is the
+ * owner's own book.
+ */
+const CHAIN_LIST_NOUN: ReadonlySet<string> = new Set(["coins", "tokens", "memecoins", "memes", "tickers", "plays", "gems", "launches", "ones"]);
+/** A list of coins asked for by a chain alone: "what about robinhood coins on fomo". */
+const CHAIN_LIST = /\b(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|ones)\b/;
+
+/**
+ * A cue, in the few words before a chain word, that the line leaves that chain
+ * out ("besides solana", "other than robinhood coins", "but not on robinhood",
+ * "isn't on sol"): a list can be cut to one chain or left on all of them, never
+ * cut to the one it excludes. "over" only as "over solana", never "over on it".
+ */
+const CHAIN_EXCLUSION_CUE = /\b(?:not|without|besides|except|excluding|other than|outside|apart from|instead of|sick of|tired of|done with|over(?! (?:on|in|at|there|here)\b))\b/;
+
 function chainSlug(word: string): string | null {
   const c = chainFromUserText(word);
   return c?.slug ?? null;
@@ -608,9 +833,17 @@ function extract(ws: readonly Word[], self: SelfRef): Extracted {
     // "Theses on SOL" asks about the coin; "on sol", "on solana", "on SOL chain" name the chain.
     const shoutedTicker = /^[A-Z0-9]{2,6}$/.test(w.bare) && !NOT_TICKERS.has(w.bare) && !shouting;
     if (shoutedTicker && next !== "chain" && next !== "network") continue;
+    // A chain the line leaves out is neither a chain hint nor a coin.
+    if (CHAIN_EXCLUSION_CUE.test(ws.slice(Math.max(0, i - 4), i).map((x) => x.canon).join(" "))) {
+      consumed.add(i);
+      if (next === "chain" || next === "network") consumed.add(i + 1);
+      continue;
+    }
     const positioned = prev === "on" || prev === "via" || prev === "from" || prev === "across"
       || (prev === "the" && (prev2 === "on" || prev2 === "via" || prev2 === "from"))
       || next === "chain" || next === "network"
+      // "robinhood coins", "the hood tokens": a chain naming a list of coins.
+      || (next !== undefined && CHAIN_LIST_NOUN.has(next) && !/^(?:my|our|your)$/.test(prev ?? "") && !/^(?:my|our|your)$/.test(prev2 ?? ""))
       || ((prev === "or" || prev === "and" || prev === "vs" || prev === "versus") && chains.length > 0);
     if (!positioned) continue;
     consumed.add(i);
@@ -838,6 +1071,8 @@ interface Detected {
   /** Fomo-specific on its own (no platform mention or live conversation needed). */
   inherent: boolean;
   board?: RankingBoard;
+  /** A trader's trades, asked for what they made or lost money on (FomoQuestionPlan.earnings). */
+  earnings?: true;
 }
 
 const any = (rules: readonly RegExp[], c: string) => rules.some((r) => r.test(c));
@@ -882,12 +1117,14 @@ interface Signals {
   memoryToken: boolean;
   /** About many people or a board (crowdQuestion): never the remembered trader by default. */
   crowd: boolean;
+  /** Distinct chains named in a chain position (Extracted.chains). */
+  chainCount: number;
 }
 
 /** "What are people holding?", "who is the top trader?", "which wallets sold?": a crowd or a board, not one trader. */
 function crowdQuestion(c: string): boolean {
   return CROWD.test(c) || COHORT.test(c) || SELLERS.test(c) || BUYERS.test(c) || HOLDERS.test(c) || GLOBAL_FLOW.test(c)
-    || RANK_TRADERS.test(c) || RANK_TOKENS.test(c);
+    || RANK_TRADERS.test(c) || RANK_EARNERS.test(c) || RANK_TOKENS.test(c);
 }
 
 function detectIntent(s: Signals): Detected | null {
@@ -916,6 +1153,8 @@ function detectIntent(s: Signals): Detected | null {
     // friend): those need a Fomo mention or a live Fomo conversation.
     const inherent = s.traderNamed || /\b(?:this|that) trader\b/.test(c);
     if (theses || saying) return { intent: "token-theses", inherent };
+    // "What did trader X make money on": their trades, read for what they made or lost on.
+    if (EARNINGS.test(c)) return { intent: "trader-activity", inherent, earnings: true };
     if (HOLDINGS.test(c)) return { intent: "trader-holdings", inherent };
     if (BUY_WORDS.test(c) || SELL_WORDS.test(c)) return { intent: "trader-activity", inherent };
     if (TRADER_CONTEXT.test(c)) return { intent: "trader-context", inherent };
@@ -934,13 +1173,20 @@ function detectIntent(s: Signals): Detected | null {
   if (sellers) return { intent: "token-sellers", inherent: tradersWord };
   if (buyers) return { intent: "token-buyers", inherent: tradersWord };
   if (HOLDERS.test(c)) return { intent: "token-activity", inherent: tradersWord };
-  if (RANK_TRADERS.test(c)) return { intent: "rankings-traders", inherent: tradersWord };
+  if (RANK_TRADERS.test(c) || (RANK_EARNERS.test(c) && s.tokenCount === 0)) return { intent: "rankings-traders", inherent: tradersWord };
   if (RANK_TOKENS.test(c)) {
     return { intent: "rankings-tokens", inherent: false, board: boardOf(c) };
   }
   const small = SMALL_COINS.test(c);
   if ((small && (ATTENTION.test(c) || tradersWord)) || OPPORTUNITIES.test(c) || (small && s.fomo)) {
     return { intent: "opportunities", inherent: small && (ATTENTION.test(c) || tradersWord) };
+  }
+  // ONE CHAIN'S COINS and nothing else asked ("what about robinhood coins on
+  // fomo", "top hood coins", "only robinhood ones"): that chain's slice of a
+  // token board, trending unless another board is named. Not inherent: it
+  // still needs Fomo named or a live Fomo conversation.
+  if (s.chainCount === 1 && s.tokenCount === 0 && !s.traderSubject && CHAIN_LIST.test(c)) {
+    return { intent: "rankings-tokens", inherent: false, board: boardOf(c) };
   }
   if (ANALYSIS.test(c) || RESEARCH_VERB.test(c)) return { intent: "research-coin", inherent: false };
   if (TOKEN_ACTIVITY.test(c)) return { intent: "token-activity", inherent: tradersWord };
@@ -1022,7 +1268,40 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   // "they" with a trader remembered; it is that trader only in a trader-shaped question (THEY_TRADER).
   const theyPronoun = memTraders.length > 0 && THEY_DEIXIS.test(deixisText);
   const theyTrader = theyPronoun && !tokenDeixis && ex.tokens.length === 0 && !crowd && !/\bwho\b/.test(c) && THEY_TRADER.test(c);
-  const traderDeixis = TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis || theyTrader;
+  // "Who's the best trader on fomo today and what did he make money on": one
+  // row of the board. Its "he" is that row, never a remembered trader and
+  // never a trader to ask "which one?" about.
+  const rowAsk = rowAskOf(c, ex);
+  // "Who's the 11th best trader … what's he holding", "the best trader after X … what's he
+  // holding": a row no read here places. Its "he" is never a remembered trader (rule 5).
+  const rowUnread = !rowAsk && ex.traders.length === 0 && ex.tokens.length === 0 && rankRefusedIn(c);
+  let traderDeixis = !rowAsk && !rowUnread && (TRADER_DEIXIS.test(c) || ex.traderPossessiveDeixis || theyTrader);
+  // A ROW OF THE BOARD THIS CONVERSATION WAS JUST SHOWN ("what's the second
+  // one holding", "#3?", or "he" after "who's the best trader"): that row's
+  // trader, by the user id the provider's board gave, as if named here. A
+  // "he" after a board of several, with no trader to point at, asks which.
+  // Never in a coin or board question ("what's the number one coin", "#1 on the trending board").
+  const shown = !rowAsk && ex.traders.length === 0 && ex.tokens.length === 0 && !RANK_TRADERS.test(c) && !RANK_EARNERS.test(c) && !RANK_TOKENS.test(c)
+    ? rememberedBoard(memory, ctx.now)
+    : null;
+  let rowRef: { rank: number; bare: boolean } | null = null;
+  let askWhichRow: string | null = null;
+  if (shown) {
+    rowRef = rowRefOf(c, shown, self);
+    // "He" right after a board (no row of it asked about yet) is someone on
+    // it, whoever was remembered before; after a row was, it is that trader.
+    const boardJustShown = memory?.lastIntent === "rankings-traders" && shown.about === null;
+    const pointing = !rowRef && traderDeixis && (memTraders.length === 0 || boardJustShown);
+    const rank = rowRef?.rank ?? (pointing && shown.singular ? 1 : null);
+    const row = rank === null ? undefined : shown.rows.find((r) => r.rank === rank);
+    if (row) {
+      ex.traders.push({ kind: "trader", userId: row.userId, ...(row.handle ? { handle: row.handle } : {}) });
+      traderDeixis = false;
+    } else if (rowRef || pointing) {
+      askWhichRow = askRow(shown);
+      rowRef = null;
+    }
+  }
   // Position management on the owner's own holding stays with the ledger and
   // the answer loop unless the message itself is about Fomo or a third party
   // ("did he take profit?"). A watch ("should we keep an eye on it?") is not
@@ -1039,19 +1318,26 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
   const infoOnly = INFO_ONLY.test(c);
   const short = c.split(" ").length <= FOLLOW_UP_MAX_WORDS;
 
-  const detected = detectIntent({
-    c,
-    fomo,
-    cohort,
-    traderSubject: ex.traders.length > 0,
-    traderNamed: ex.traderNamed,
-    traderDeixis,
-    tokenDeixis,
-    tokenCount: ex.tokens.length,
-    memoryTrader: memTraders.length > 0,
-    memoryToken: memTokens.length > 0,
-    crowd,
-  });
+  const detected: Detected | null = rowAsk
+    ? { intent: "rankings-traders", inherent: TRADERS_WORD.test(c) }
+    : askWhichRow
+      ? { intent: "trader-context", inherent: true }
+      : rowRef?.bare && shown
+        ? detectedFromAbout(shown.about)
+        : detectIntent({
+      c,
+      fomo,
+      cohort,
+      traderSubject: ex.traders.length > 0,
+      traderNamed: ex.traderNamed,
+      traderDeixis,
+      tokenDeixis,
+      tokenCount: ex.tokens.length,
+      memoryTrader: memTraders.length > 0,
+      memoryToken: memTokens.length > 0,
+      crowd,
+      chainCount: ex.chains.length,
+    });
   // A continuation: nothing left once subjects, time, chain and filler are
   // removed, and something substantive was said ("and this week?", "refresh it").
   const pureFollowUp = short && residue(ws, ex.consumed).length === 0
@@ -1122,8 +1408,18 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     cohortScope: cohort,
     clarification,
     toolCalls: clarification ? [] : toolCalls,
+    ...(rowAsk && intent === "rankings-traders" ? { rowAsk: { ...rowAsk } } : {}),
+    ...(detected?.earnings && intent === "trader-activity" ? { earnings: true as const } : {}),
+    // Only the 1st row: after "who's the 5th best trader", a bare "he" asks which row, never row 1.
+    ...(intent === "rankings-traders" && (rowAsk ? rowAsk.rank === 1 : rankPhraseOf(c)?.rank === 1) ? { singular: true as const } : {}),
   });
   const ask = (question: string) => plan(question, []);
+  if (askWhichRow) return ask(askWhichRow);
+  // A row's trades are asked over the board's own window, unless this line names one.
+  if (rowRef && shown?.window && window === null && intent === "trader-activity") {
+    window = shown.window;
+    usesMemory.push("window");
+  }
 
   // A WATCH IS A WRITE, so it never infers its subject. It takes an explicit
   // coin, or an explicit reference to the remembered one ("watch this coin",
@@ -1270,6 +1566,7 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     sinceRevision,
     depth: DEEP.test(c) ? "deep" : QUICK.test(c) ? "quick" : "standard",
     chain: ex.chains.length === 1 ? ex.chains[0]! : null,
+    earnings: detected?.earnings === true && intent === "trader-activity",
   });
   if (!calls) return ask(TRADER_INTENTS.has(intent) ? ASK_TRADER : ASK_TOKEN);
   return plan(null, calls);
@@ -1293,8 +1590,20 @@ const ASK_RANK_WINDOW = "Trader rankings cover 24h, 7d, 30d or all time. Which w
 const ASK_WATCH = "Which coin should I watch? Send its ticker or contract address.";
 const ASK_UNWATCH = "Which coin should I stop watching? Send its ticker or contract address.";
 
+/**
+ * Which coin board a line asks for. Launches and recency ("new launches on
+ * robinhood", "newest coins on base", "latest launches") are the newly
+ * graduated board, unless the line also says trending, hot or popular: the
+ * trending board answered "new launches on fomo on robinhood chain?" with
+ * the chain's popular coins, a different question (review r4). A recency
+ * word counts only before a list noun: "and the latest?" is a re-ask.
+ */
+const LAUNCH_WORDS = /\blaunch(?:es|ed)?\b|\b(?:newest|newly|latest|fresh|freshest)\s+(?:\S+\s+){0,2}?(?:coins|tokens|memecoins|memes|tickers|plays|gems|launches|listings|ones)\b/;
 function boardOf(c: string): RankingBoard {
-  return /\bgraduat/.test(c) ? "graduated-tokens" : /\bmost[- ]held\b/.test(c) ? "most-held-tokens" : "trending-tokens";
+  if (/\bgraduat/.test(c)) return "graduated-tokens";
+  if (/\bmost[- ]held\b/.test(c)) return "most-held-tokens";
+  if (LAUNCH_WORDS.test(c) && !/\b(?:trending|hot|hottest|popular)\b/.test(c)) return "graduated-tokens";
+  return "trending-tokens";
 }
 
 /** Intents whose answer is a list of trades, where a side filter means something. */
@@ -1347,6 +1656,8 @@ interface CallOptions {
   sinceRevision: number | null;
   depth: (typeof RESEARCH_DEPTHS)[number];
   chain: string | null;
+  /** What they made or lost money on: their positions are ranked, so as many as one read keeps (MAX_LIMIT). */
+  earnings: boolean;
 }
 
 function tokenRef(q: SubjectQuery | undefined): Record<string, unknown> | null {
@@ -1389,7 +1700,7 @@ function buildCalls(intent: FomoIntent, resolved: readonly SubjectQuery[], o: Ca
     case "trader-context":
       return trader ? [call("fomo_get_trader_context", { trader, ...win, ...fresh })] : null;
     case "trader-activity":
-      return trader ? [call("fomo_get_trader_activity", { trader, ...(token ?? {}), ...sideArg, ...win, ...lim, ...fresh })] : null;
+      return trader ? [call("fomo_get_trader_activity", { trader, ...(token ?? {}), ...sideArg, ...win, ...(o.earnings && !o.limit ? { limit: MAX_LIMIT } : lim), ...fresh })] : null;
     case "token-theses":
       if (!token && !trader) return null;
       return [call("fomo_get_token_theses", { ...(token ?? {}), ...(trader ? { trader } : {}), ...win, ...lim, ...fresh })];
@@ -1402,7 +1713,8 @@ function buildCalls(intent: FomoIntent, resolved: readonly SubjectQuery[], o: Ca
     case "words-vs-actions":
       return token ? [call("fomo_research_coin", { ...token, focus: "words-vs-actions", ...win, ...fresh })] : null;
     case "rankings-traders":
-      return [call("fomo_get_rankings", { board: "traders", ...win, ...lim, ...cohortArg, ...fresh })];
+      // A chain narrows nothing on the trader board; it is passed so the answer says so (render.ts).
+      return [call("fomo_get_rankings", { board: "traders", ...win, ...chainOnly, ...lim, ...cohortArg, ...fresh })];
     case "rankings-tokens":
       return [call("fomo_get_rankings", { board: o.board ?? "trending-tokens", ...chainOnly, ...lim, ...fresh })];
     case "opportunities":

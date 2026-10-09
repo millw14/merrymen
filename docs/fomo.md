@@ -111,7 +111,7 @@ disposes. Execution is the existing intent → policy → executor path.
 | Rendering and chat | none shared | `worker/src/fomo/render.ts` (answer-first text, model evidence block, runtime rules) and `chat.ts` (the one pipeline every chat surface calls) |
 | Key custody and processes | vendor keys orchestrator-only (`CHILD_SECRET_STRIP`) | Key held by the orchestrator, the web process and the self-hosted worker. Stripped from hosted children under both names. Hosted children ask the orchestrator over a new IPC channel (`fomo/broker.ts`), and the orchestrator stamps the tenant from which child asked. |
 | App chat | `web/src/app/api/chat/route.ts`, `web/src/lib/agent-chat.ts` | `web/src/lib/fomo-chat.ts` and `fomo-runtime.ts`. Factual questions are answered by code from tool results; analytical ones get a fenced evidence block and runtime rules. |
-| Telegram | `telegram/service.ts`, `answer.ts`, `chat-tools.ts`, `tg-groups/*` | DM: the planner runs first, and read tools are registered in the model loop. Groups: `TgFomoPort` (`worker/src/tg-fomo-port.ts`) returns coin-level aggregates and Fomo's public leaderboard, and deflects questions about one trader to DMs. |
+| Telegram | `telegram/service.ts`, `answer.ts`, `chat-tools.ts`, `tg-groups/*` | DM: the planner runs first, and read tools are registered in the model loop. Groups: `TgFomoPort` (`worker/src/tg-fomo-port.ts`) returns coin-level aggregates, Fomo's public leaderboard and one named trader's public data, and deflects the owner's own research state and who Merrymen watches to DMs. |
 | MCP | `web/src/mcp/tools/*` | `web/src/mcp/tools/fomo.ts` |
 | Fleet ingestion | orchestrator passes | `worker/src/orchestrator-fomo.ts`: one singleton-lease leader runs the alerts stream, cohort refresh, research queue, jobs, publication drafts and retention. Every replica writes `fomo.json` for its own children (`fomo/child-file.ts`). |
 | Discovery funnel | `trencher-brain.ts` `TRENCH_VOLUME_MIN = 100_000`, `trencher-discovery.ts` `DISCOVERY_SLICE = 20` | `worker/src/early-candidates.ts`: an early path ahead of both, with every execution guard kept. `worker/src/decision-funnel.ts` instruments every stage. |
@@ -169,6 +169,39 @@ most 30 days. "Should we follow this?" is analysis, not permission.
 
   "refresh", "latest", "check now" and "right now" force an upstream attempt. Identical
   concurrent refreshes share one in-flight call and never substitute an older result.
+  **A copy that says "nothing here" is short-lived** (the AUTON incident, 2026-10-08:
+  the provider answered one coin's thesis page empty, `available: false`, while it held
+  4,190 theses, and a room was told "no theses" three times from that copy): an empty
+  thesis page is reused for at most 2 min on any surface a person hears (`service.ts
+  EMPTY_HOLD_MS`, `ReadSpec.empty`; the shared research queue keeps the class's own
+  window on the same copy, and an empty first page is never expanded to a multi-page
+  read), and never when the asker pushed back ("there has to be thesis",
+  "check again"). A pushback is carried as its own flag (`BrokerCallOptions.retryEmpty`
+  to `ChargeContext.retryEmpty`), never as a forced refresh: a copy with something in it
+  keeps its window, a room's two hours included (D8). A page the provider itself answers
+  empty (`pageRows: 0`) while marking it not available, or under a count it still holds
+  for the coin, is said as "Fomo didn't return the
+  theses on X just now (it lists N).", never "no theses". The owner is also told when to
+  ask again ("Ask me again in a couple of minutes.", how long the empty copy is held); a
+  room never is, since its allowance (a page is 1,250 of its 2,500 credits
+  an hour) may refuse the retry and "used up" would follow the promise. Rows
+  Merrymen filtered off (another chain's) are "none" as before, and a trader's read never
+  quotes the coin's count. Research on such a page ("research $AUTON on fomo") builds and
+  stores no revision from it: the previous revision stands, labelled as stored, or the
+  answer is "Fomo didn't return the theses on X just now, so no research was built from
+  it.", never "0 theses ... none on record" (`service.ts refreshCore`, reason
+  `theses-not-ready`). An empty page is logged by its shape only (available, count,
+  source, served from).
+  **A Telegram group reads differently** (decisions D7 and D8, 2026-10-07;
+  `freshness.ts GROUP_REUSE_MS`, `service.ts read`): a room reuses a copy longer, theses
+  for 2 h, the trader board for 1 h and coin boards for 15 min (the other classes keep
+  their own windows, and no class past its "oldest copy served"), always labelled with its
+  age ("From a copy fetched 41 min ago."): the age line keeps a slot of its own in the
+  room's six lines, taken from the board's lowest row (never the row an answer is about,
+  a row's answer or the Robinhood Chain line), and an answer whose only sayable line is
+  its age is not said; and a room's "now" or "latest" is never a paid
+  forced refresh: it is an ordinary read in the class's own window, without the group's
+  longer one. The owner's DM, the app and MCP read as above.
 - **Envelopes:** every result carries a request id, resolved subject, requested versus
   achieved scope, status, evidence refs, five separate clocks (`retrievedAt`,
   `providerAsOf`, `sourceEventAt`, `lastRefreshAttemptAt`, `cacheAgeMs`), coverage, usage
@@ -179,6 +212,21 @@ most 30 days. "Should we follow this?" is analysis, not permission.
   via FOMO API (independent; not affiliated with fomo.family)"), then material freshness
   and coverage limits. Provider-reported, independently verified and Merrymen
   interpretation are labelled differently. No Fomo permalink is ever invented.
+- **Chains and rows (planner, `fomo/intent.ts`):** a chain word right before a list noun
+  ("robinhood coins", "hood tokens", "base memes", "only robinhood ones") asks for that
+  chain's slice of a token board, trending unless another board is named; it needs Fomo
+  named or a live Fomo conversation, and never follows "my", "our" or "your" ("my
+  robinhood coins are down" is the owner's book). A shouted ticker stays a coin ("SOL
+  coins on fomo?"). One row of the trader leaderboard asked in the same breath as the
+  board ("who's the best trader on fomo today and what did he make money on", "what is
+  the second best trader on fomo holding") plans the leaderboard with `rowAsk` (rank 1-10,
+  and earnings, holdings, trades or profile): its "he" is that row, never a "which
+  trader?" question, and "the first trader to buy it" is not a rank. A rank past the
+  tenth ("the 11th best trader") or relative to someone ("the best trader after X") plans
+  the board alone, never row 1, and its "he" is never a remembered trader. Only a 1st-row
+  board is `singular`: after "the 5th best trader", a bare "he" asks which row. "Who made the most on
+  fomo today" is the leaderboard. "What did trader X make money on" plans their trades
+  with `earnings` (never "take profit", a sell, and never the owner's own book).
 - **Follow-ups:** the resolved coin, chain, trader, window and dossier revision carry
   across turns per conversation, for 30 minutes. A correction replaces the subject before
   the next lookup. A same-ticker coin on another chain triggers one focused clarification;
@@ -663,8 +711,8 @@ DM or a group, is told "Only my owner can set up a tail." and nothing is called.
   trader."
 - **Backlog.** A `/tail` that waited out an outage is held, like an order; a late
   `/untail` runs, since it only stops something.
-- **Asked in a group.** Groups never order trades and never hear a trader or a tail
-  (docs/tg-groups.md rules 1 and 3). Her addressed line is read by code the same way,
+- **Asked in a group.** Groups never order trades and never hear a tail
+  (docs/tg-groups.md rules 1 and 3; a trader's public data they may hear). Her addressed line is read by code the same way,
   where the research lane is wired, and only what code read (trader, hours, clamp,
   take, or a stop) goes to her DM through `TgOwnerPort.proposeTail`, which checks her
   id and the allowlist again, proves her DM with a typing action, and runs the `/tail`
@@ -740,7 +788,31 @@ Free 250k, Starter 2.5M, Builder 12.5M, Growth 37.5M, Scale 112.5M.
 
 The shared daily pool is `plan × (1 − 20%) / 31`, split 25% position protection, 45%
 interactive and 30% discovery. Discovery is shed first. Per-owner hourly and daily caps,
-per-group caps and model-call caps apply. Nothing upgrades a plan, tops up credits or
+per-group caps and model-call caps apply: by default 6,000 credits an hour and 20,000 a day
+per owner, and 2,500 an hour per group, each held under the shared pool; an operator may
+set them (Operations below). Every group charge also counts against the owner's hourly
+share, so a group's cap alone does not move the wall. A refused read is said with when it
+resets: the owner hears which allowance ran out ("your hourly Fomo research allowance is
+used up; it resets at 15:00 UTC"), a room hears one wording for every cap, "fomo lookups
+for this room are used up for now, try again after 15:00 UTC." (hourly caps reset at the
+next clock hour, daily ones at 00:00 UTC; `budget.ts refusalResetAt`, stamped on the
+envelope as `retryAt` by the service on the clock the refusing charge used, so an ask begun
+at 14:59:59 and refused by hour 15's counter hears 16:00), never a credit or
+an amount. The hourly counters are taken first, so a room past its hour never raises the
+fleet's daily pools, even briefly; which cap a refusal names is then read from the counters
+without taking anything (`AllowancePort.peek`), so a spent hour promises the next hour only
+when no daily cap or pool would refuse as well. A tool that pays a search and then the read
+it exists for (a coin's thesis page, a trader's holdings, positions or feed) first asks the
+budget, taking nothing, whether both fit (`FomoBudget.wouldRefuse`, `service.ts
+plannedFits`): if not, nothing is charged, no search is paid for a page that cannot fit, and
+the reset promised is the one the whole read would meet, never an hour at which the second
+read would refuse again. When the search still holds a copy fit to show, that copy is used
+instead, for nothing, and the read it exists for decides on its own: a room's thesis page it
+still holds (two hours) is served for nothing rather than refused for a search it need not
+pay, and one it does not hold meets its own charge and reset. A cap below
+what one read costs (a group cap of 0 included) never resets on a clock: the owner hears
+that a configured cap is below one read, a room hears "Fomo research isn't available here
+right now.", never a time. Nothing upgrades a plan, tops up credits or
 switches provider. On the Free plan (about 6,450 credits/day) the fleet gets roughly one
 cohort refresh, a few holdings lookups and about one thesis page a day: enough to verify,
 not to operate. **Builder** (about 322k/day) is the realistic minimum for a fleet;
@@ -752,7 +824,11 @@ answers use one call on the existing house model.
 | Variable | Process | Meaning |
 |---|---|---|
 | `MERRYMEN_FOMO_API_KEY` (alias `FOMO_API_KEY`) | web, orchestrator; self-hosted worker or settings `fomoApiKey` | provider key, stripped from hosted children |
-| `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget |
+| `MERRYMEN_FOMO_PLAN_CREDITS` | web and orchestrator, same value | monthly credits; sizes the shared budget. A self-hosted worker reads it too, so its budget matches the install's web |
+| `MERRYMEN_FOMO_GROUP_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per Telegram group per clock hour. Default 2,500. `0` turns group research off (a room hears "Fomo research isn't available here right now."); a nonzero cap below 1,250 (one coin's thesis page, the dearest read a room needs: a room never reads the 2,500-credit profile route) can never answer a thesis ask, while trader and board asks still answer (250 per read), and the boot log says so. A cap below 2,500 or 3,750 only drops the optional wider thesis read; the room keeps page one. An owner cap whose own share (three quarters) falls below 2,500 (her deep trader read) is said at boot too |
+| `MERRYMEN_FOMO_TENANT_HOURLY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per clock hour, the owner's groups included. Default 6,000 |
+| `MERRYMEN_FOMO_TENANT_DAILY_CREDITS` | web and orchestrator, same value; redeploy both | credits per owner per UTC day. Default 20,000. The three caps are whole numbers only (`budget.ts fomoBudgetFrom`, the one reader for orchestrator, web and a self-hosted worker); a bad value is logged by name, never echoed, and its default applies; each cap is held under the shared pool, and the boot line states the limits in force. Research-credit caps only, never a trading limit. Keep a group's cap at most three quarters of the owner's hourly one |
+| `MERRYMEN_TG_THESES_MODEL=1` | worker children | turns ON the group model's paraphrase of a coin's theses (off by default, Milla 2026-10-08); unset, rooms hear the code-written digest only |
 | `MERRYMEN_FOMO_ENABLED=1` | web and orchestrator, same value | **hosted Fomo is opt-in: off unless exactly `1`.** Off, the orchestrator opens no Fomo pool, runs no `fomo_*` DDL, writes no `fomo.json` and spawns children without IPC; a hosted child is Fomo-on only with both the channel and this value, and off it runs no Fomo code (no Telegram research lane or classifier entries, nothing charged to the scout budget). The web builds no runtime, its chat answers as before, Settings shows no Fomo section and MCP lists no Fomo tool. Self-hosted: on unless `0` (worker and web alike); a self-hosted install never owes the scout budget anything for Fomo |
 | `MERRYMEN_FOMO_FOLLOW_LIVE` | worker children | allowlist of agents whose follow nominations may execute live (default nobody) |
 | `MERRYMEN_TG_GROUPS_FOMO=0` | worker children | turns off the Telegram group research lane |
@@ -765,22 +841,126 @@ Surface limits:
   per model answer, because the poll loop is serial. The model loop never starts deep
   research; that comes only from the planner on explicit owner wording.
 - **Telegram groups:** 6 research answers per chat and 30 per agent per 10 minutes.
+  Only answers that read from the provider (or call the group model for a thesis
+  paraphrase) count: an answer that looked nothing up (a "which coin?" clarification,
+  the capabilities line, "is fomo working?"), an answer whose every read was a kept
+  copy, a deflection made before any lookup, or a refusal made before any call gives its slot back
+  (`TgFomoAnswer.free`), so a re-ask, or a board cut to a chain from the same read, does
+  not use up the room's answers. A failed read keeps its slot.
+  An addressed line reaches the research when it names the platform in a question or a
+  request, or as a short list ask with no question mark ("trending on fomo", "robinhood
+  chain coins on fomo", "top traders on fomo today": list words and the platform, nothing
+  else, so "top fomo moment lol" stays chat); the planner still decides. A question about
+  one coin the planner could not place ("who's selling pons on fomo?", "research pons on
+  fomo": no `$tag`, no UPPERCASE ticker) is not answered about the whole feed or with
+  "which coin?": the port leaves it to the router (`tg-fomo-port.ts looseCoin`), whose one
+  call names the coin from the line's own words. So is a line that names another trader
+  than the one the room's memory holds ("how is ansem doing on fomo today" right after
+  frankdegods, or "who's the worst trader" after one trader's answer), when nothing in it
+  points at the remembered one ("his", "this trader") and it is no bare follow-up ("and this
+  week?"): the planner would answer it about the remembered trader, so one member's
+  earlier question would decide whose book another member hears (`looseTrader`).
   Answers are coin-level, with no addresses, links or @handles, plus Fomo's public
   leaderboard (Milla's call, 2026-10-07): its handles and their provider-reported money
-  made on closed trades, never who Merrymen follows. One trader's holdings, trades or
-  profile, and the owner's own research state, stay in a DM. Lines pass the group gate as
+  made on closed trades, never who Merrymen follows. Milla, 2026-10-07: a named trader's
+  public Fomo data may be answered in a group, for anyone who asks, the owner included:
+  who they are, what they hold (count, value, the largest three), what they traded in
+  the window (buys and sells, fills and positions), and what they made or lost money on
+  (below). By public handle without the `@`, money in short form, and never whether
+  Merrymen watches or follows them: the room's render leaves out the watched-cohort line,
+  any note about that record, and the profile P&L figures (they are read from that record
+  when it has one, so whether a room saw them would say who it watches). Nor does a
+  room's coin answer carry a figure read from the watch list, since with these one-trader
+  answers it would tie a trader to it: no "Watched traders: N with a latest buy" under
+  who is buying a coin, no "N watched traders bought" on a lead, no "watched traders N
+  buying" or watched-cohort clause, condition or change in a coin's research, and a
+  room's leads (`fomo_find_opportunities`) are ranked from the boards alone, never the
+  watched traders' own record. A read cut to the watched traders (`cohort_only`, any
+  tool: "what are watched traders buying") is the watch list, and is deflected. A trader's own
+  theses, the owner's own research state and the watch list stay in a DM. Every line about
+  one trader names them on the line itself ("Largest held by X: …", "• X bought …",
+  "Positions of X …"), and a handle the group gate would refuse (an id run such as
+  "user84729374", a link such as "john.eth") is said as "an unnamed trader" everywhere, the
+  board row included: the port asks the gate before anything is rendered
+  (`tg-fomo-port.ts sayableTraderHandle`), so a dropped name never leaves a trader's lines
+  reading as the trader above's (rule 5). Lines pass the group gate as
   `research` (every clause but money), with money in short form ($151.4k) and four rows a
-  board. "What can you do with fomo" and "is fomo working?" are answered by code with no
-  lookup: a fixed list, and whether research is on here. Group answers carry no
+  board. Boards cover every chain by default (Milla, 2026-10-07); asked for one ("robinhood
+  coins", "on base", "solana ones") the board is cut to that chain from the same read, at
+  no extra cost, under an honest header: "Trending on Fomo, Robinhood Chain only (2 of the
+  top 100):" with each row's board rank, "None of the top 30 trending coins on Fomo are on
+  Robinhood Chain right now." (with how many rows could not be placed on a chain), or "The
+  trending board came back empty." An unfiltered board whose shown rows hold no Robinhood
+  Chain coin shows three rows and ends "On Robinhood Chain, the chain I trade: PONS (12th),
+  CACHE (31st)." (positions in words: the gate reads "#12" as a handle), or "None of the
+  top 100 trending coins are on Robinhood Chain, the chain I trade." (again with how many
+  rows could not be placed on a chain, which may be that chain's). The owner's DM answer gets the same
+  line under its ten rows. Launches and recency ("new launches on robinhood chain",
+  "newest coins on base", "latest launches") are the newly graduated board, on a chain
+  or not, unless the line also says trending, hot or popular. Fomo's trader board has no chain filter: asked for one, the
+  board says "Fomo's trader board covers every chain; it can't be narrowed to one." The
+  crowd ("what are fomo traders buying?") also names the feed page's top three coins by
+  distinct buyers (sellers, for selling), as counts, never who. "What can you do with fomo" and "is fomo working?" are answered by code with no
+  lookup: a fixed list, and whether research is on here. **What people are saying about
+  a coin** (its theses) is never quoted and never counted in a room: no stance counts and
+  no "evidence families" (decision D6; "25 neutral" only ever meant no cue matched). The
+  code digest (`fomo/digest.ts`) says what they argue: one thesis per family, the coin's
+  dev's own posts left out, content-free rows ("lfg") dropped, the lexicon's cues that are
+  not negated in fixed phrases ("For it: it's still early, a strong community.", "Against
+  it: fears it could collapse, worries about the dev's wallet."), what most of it is about,
+  what holders wait on (never an airdrop), and "Their claims, not facts; newest 25 of 41."
+  Milla, 2026-10-07 (D5): the group model may also put them in its own words
+  (`tg-groups/theses.ts`): it reads at most twelve cleaned samples, fenced as data, and
+  every phrase it writes is checked by code (no digit outside the coin's name, no number
+  word, $tag, handle, link or quotation mark, no five-word run of any thesis, no crime
+  or misconduct laid at anyone's door such as theft, robbery, looting, a siphoned or
+  drained treasury, swindling, fraud, a faked audit, an arrest, a stolen or pulled pool,
+  walking off with the money, wash trading, manipulation, lying or dumping on followers, no
+  capitalised name of a person or account, the phrase's first word included when it does
+  what a person does ("Ansem is backing it"; a name in lowercase is not caught by code and
+  rests on the prompt alone), no account to follow, no trade advice in its voice) and by the
+  gate as an `answer` line, dropped and never repaired; the digest is said whenever that
+  cannot be. One call per coin, copy and theses read (a window cut from the same copy is
+  other theses and gets its own wording), from the half of the room's model allowance kept
+  for what is nice to have, kept 30 minutes; off unless `MERRYMEN_TG_THESES_MODEL=1`.
+  The owner's own thesis answers keep the counts, with "no clear lean" for "neutral", and
+  her quoted excerpts. A read that failed, could not be reached or was refused is said
+  plainly in the room ("couldn't reach fomo just now, try again in a bit.", or the room's
+  budget line above), never as "ask me in a direct message", which would make a failure
+  sound private; a coin with no theses is "No theses were returned for QUIET on
+  robinhood. That is Fomo's record, not proof nobody has a view.", and an empty read none
+  of whose lines a room may hear is "nothing on fomo for that one right now.". Group answers carry no
   attribution line and no skill caveat (Milla, 2026-10-07: the room has had a post about
   the source); owner answers keep both. When the owner asks in a group, her moves for the
   rows (the DM questions to ask next, and `/buy SYM` only for a Robinhood Chain coin her
-  `/buy` resolves) go to her DM, and the room hears only that they went. A line no rule
+  `/buy` resolves; Robinhood Chain coins first, the board's best placed ones when none is
+  shown) go to her DM, and the room hears only that they went. A line no rule
   reads is routed by the group model to a closed menu (docs/tg-groups.md); a Fomo pick
-  runs as a fixed question through the same planner. The owner's ask about one trader by
-  name (routed, or planned and deflected in the room) is answered read-only in her DM
-  (`AnswerFomoInput.readOnly`) as one of three fixed questions (profile, holdings, this
-  week's trades), at most six per 10 minutes.
+  runs as a fixed question through the same planner. A bare "what's trending" said to it
+  (no platform or venue named) is asked as the trending board, with the desk's market
+  read as the fallback when the answer's `status` (`TgFomoAnswer.status`, from the
+  envelopes) is a budget refusal, unavailable or failed, or the read takes past 12 s
+  (docs/tg-groups.md "Market analysis"). A routed trader pick is asked as one of four
+  fixed questions (profile, holdings, trades, earnings, over the window the line names,
+  else this week) and answered in the room; the owner's trader asks no longer go to her
+  DM. **What one trader made or lost money on** ("what did trader X make money on",
+  `FomoQuestionPlan.earnings`): their positions opened or closed in the window, read with
+  the largest page one read keeps (50), ranked by the provider's realised P&L to date,
+  highest first, unknown left out, the top three winners and two losers in one line; a
+  position only received by transfer is never a win; never the leaderboard's per-coin
+  figures, which have no window. **One row of the board** ("who's the best trader on
+  fomo today and what did he make money on", `FomoQuestionPlan.rowAsk`): the board, then
+  that row's trader by the user id the provider's board gave (`fomo/chat.ts rowCall`,
+  never a name from the text) over the board's window, for every audience; a group's
+  board shows a row fewer so the row's answer fits, and a row the board does not have is
+  said. **Rows after a board** ("the second one", "#3", "number two", "the top guy"; DM,
+  app and groups alike): the conversation's subject memory keeps the public trader board
+  it was last shown (`SubjectMemory.board`: ranks, user ids and public handles, at most
+  ten rows, never a board cut to the watched cohort, validated on read and dropped if
+  tampered), for the memory's 30 minutes while the questions stay on the board or one
+  trader. The planner resolves a row reference to that row's user id; a bare one asks
+  what the last row question asked; "he" after a board asked in the singular is its 1st
+  row, and after a board of several it asks which row.
 - **App chat:** at most 4 lookups per question. Analysis answers count against a
   per-owner model allowance of 40 calls and 160k tokens a day. When it is spent, the
   factual answer is sent with a note.
@@ -826,6 +1006,24 @@ every open Trencher position's cost instead, which errs toward refusing. So:
    the probe's cached answer is dropped on the first decide that fails while carrying the
    lens. A Brain rollback stops the lens after at most one failed review.
 
+## Decided (Milla, 2026-10-07: groups after the live test)
+
+- **One trader in a room.** A named trader's public Fomo data may be answered in a group,
+  for anyone who asks, the owner included: profile, holdings, recent trades, and what they
+  made or lost money on (provider-reported). Still never in a room: who Merrymen follows or
+  watches, the owner's own research state or watch list, a trader's own theses, anything
+  from her DM.
+- **Chains.** Boards cover every chain by default and are cut to one on request ("robinhood
+  coins", "on base", "solana ones"); an unfiltered board in a room ends with where Robinhood
+  Chain stands, honestly when none of the top rows are on it.
+- **Budget.** The default caps stay as they are. The three cap variables (Operations) are
+  read identically by the orchestrator and the web process; rooms reuse copies longer, a
+  room's "now" never forces a paid refresh, and a refusal says when to try again.
+- **Theses.** A room hears a code digest of what they argue, and the group model's
+  paraphrase of cleaned, fenced thesis texts, never a verbatim quote; the paraphrase is
+  off unless `MERRYMEN_TG_THESES_MODEL=1` (Milla, 2026-10-08). Group answers carry no stance
+  counts and no "evidence families".
+
 ## Decisions needed from Milla
 
 1. **Terms.** The provider licenses use "within your own applications and internal
@@ -838,7 +1036,10 @@ every open Trencher position's cost instead, which errs toward refusing. So:
    three-caveat Brain gate rule: left unchanged here. The diagnosis above says which ones
    look like accidental permanent holds.
 4. **Plan.** Credits for the fleet (Builder or higher recommended) and the
-   `MERRYMEN_FOMO_PLAN_CREDITS` value.
+   `MERRYMEN_FOMO_PLAN_CREDITS` value. Whether to raise the group and owner caps
+   (`MERRYMEN_FOMO_GROUP_HOURLY_CREDITS`, `MERRYMEN_FOMO_TENANT_HOURLY_CREDITS`,
+   `MERRYMEN_FOMO_TENANT_DAILY_CREDITS`, on web and orchestrator alike) is a later call; the
+   defaults stand until then (2026-10-07).
 5. **Stage E canary.** Name the agent, its scout budget and the live allowlist entry.
 6. **Verification asks.** Coins with cohort buying may be verified on chain beyond the
    top-20 slice, so that a follow nomination has a verified route. They are kept out of the

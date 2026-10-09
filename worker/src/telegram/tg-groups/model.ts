@@ -222,8 +222,9 @@ const DEFAULT_MAX_IN_FLIGHT = 2;
 const MAX_WAITING = 6;
 const RATE_LIMIT_PAUSE_MS = 10 * MIN;
 /**
- * HOW LONG A CALL THAT OUTLIVED ITS TIME BOX KEEPS ITS SLOT. llmText takes no
- * signal, so a timed-out call is still running at the provider; holding its
+ * HOW LONG A CALL THAT OUTLIVED ITS TIME BOX KEEPS ITS SLOT. This passes llmText
+ * no signal (it now takes an optional one), so a timed-out call is still
+ * running at the provider; holding its
  * slot keeps "at most two at once" true of what the provider sees. But a call
  * that never settles must not hold a slot forever, so after this grace it is
  * written off and the slot freed.

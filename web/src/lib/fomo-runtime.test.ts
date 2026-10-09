@@ -21,6 +21,7 @@ import {
   FOMO_MODEL_BUDGET,
   FOMO_NOT_ENABLED,
   FomoNotEnabledError,
+  fomoBudgetOverrides,
   fomoPlanCredits,
   fomoRuntime,
   fomoTenantFor,
@@ -110,6 +111,35 @@ describe("the key, the plan and the switch", () => {
       assert.equal(fomoPlanCredits(env), fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_ENABLED: "1", ...env }).planCredits, `plan ${JSON.stringify(raw)}`);
     }
     assert.equal(fomoPlanCredits({ MERRYMEN_FOMO_PLAN_CREDITS: "1000000" }), 1_000_000);
+  });
+
+  it("reads the research caps exactly as the orchestrator does; unset, the defaults", async () => {
+    const orchestrator = "../../../worker/src/orchestrator";
+    const { fomoSetup } = (await import(orchestrator)) as { fomoSetup(env: Record<string, string | undefined>): { budget: Record<string, number> } };
+    const names = ["MERRYMEN_FOMO_GROUP_HOURLY_CREDITS", "MERRYMEN_FOMO_TENANT_HOURLY_CREDITS", "MERRYMEN_FOMO_TENANT_DAILY_CREDITS"];
+    for (const raw of [undefined, "", "6500", " 13000 ", "0", "6,500", "1e4", "-1", "lots"]) {
+      for (const name of names) {
+        const env = raw === undefined ? {} : { [name]: raw };
+        const seen: string[] = [];
+        assert.deepEqual(fomoBudgetOverrides(env, (l) => seen.push(l)), fomoSetup({ DATABASE_URL: "postgres://x", MERRYMEN_FOMO_ENABLED: "1", ...env }).budget, `${name}=${JSON.stringify(raw)}`);
+        const bad = raw !== undefined && raw.trim() !== "" && !/^\d+$/.test(raw.trim());
+        assert.equal(seen.length, bad ? 1 : 0, `${name}=${JSON.stringify(raw)}`);
+        if (bad) assert.ok(seen[0]!.includes(name) && !seen[0]!.includes(raw!), "a bad value is named, never echoed");
+      }
+    }
+    assert.deepEqual(fomoBudgetOverrides({}), {});
+    assert.deepEqual(fomoBudgetOverrides({ MERRYMEN_FOMO_GROUP_HOURLY_CREDITS: "6500", MERRYMEN_FOMO_TENANT_HOURLY_CREDITS: "13000", MERRYMEN_FOMO_TENANT_DAILY_CREDITS: "26000" }), {
+      groupHourlyCredits: 6_500,
+      tenantHourlyCredits: 13_000,
+      tenantDailyCredits: 26_000,
+    });
+  });
+
+  it("a built runtime holds the overrides, under the shared pool", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const rt = await createWebFomoRuntime({ hosted: false, db: wrapSqlite(raw), dialect: "sqlite", apiKey: null, planCreditsPerMonth: 37_500_000, budget: { groupHourlyCredits: 6_500 } });
+    assert.equal(rt.budget.config.groupHourlyCredits, 6_500);
+    assert.equal(rt.budget.config.tenantHourlyCredits, 6_000, "an unset cap keeps its default");
   });
 });
 

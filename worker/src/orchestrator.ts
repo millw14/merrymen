@@ -212,7 +212,7 @@ import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommand
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
 import { childProcessBrokerPort, serveBrokerRequests } from "./fomo/broker";
-import type { FomoBudget } from "./fomo/budget";
+import { budgetConfigFor, describeBudget, fomoBudgetFrom, fomoPlanFrom, FREE_PLAN_CREDITS_PER_MONTH, type FomoBudget, type FomoBudgetConfig } from "./fomo/budget";
 import { writeChildFomoFile } from "./fomo/child-file";
 import { fomoTailsOn, type FomoAccess, type FomoService } from "./fomo/contract";
 import type { FomoClient } from "./fomo/provider";
@@ -10850,6 +10850,8 @@ interface FomoBoot {
   lines: string[];
   apiKey: string | null;
   planCredits: number | undefined;
+  /** The operator's cap overrides (fomo/budget.ts fomoBudgetFrom), read exactly as the web process reads them. */
+  budget: Partial<FomoBudgetConfig>;
 }
 
 let fomoBoot: FomoBoot | null = null;
@@ -10905,21 +10907,23 @@ export function fomoSetup(env: Record<string, string | undefined> = process.env)
       : /^(?:0|1|true|false|yes|no|on|off)$/i.test(said)
         ? `MERRYMEN_FOMO_ENABLED is ${JSON.stringify(said)}, and only "1" turns it on`
         : `MERRYMEN_FOMO_ENABLED is set to a ${raw!.length}-character value that is not "1", so it is off`;
-    return { off: true, lines: [`fomo: off — ${why}`], apiKey: null, planCredits: undefined };
+    return { off: true, lines: [`fomo: off — ${why}`], apiKey: null, planCredits: undefined, budget: {} };
   }
   if (!env.DATABASE_URL) {
-    return { off: true, lines: ["fomo: off — no DATABASE_URL; the shared research store lives there"], apiKey: null, planCredits: undefined };
+    return { off: true, lines: ["fomo: off — no DATABASE_URL; the shared research store lives there"], apiKey: null, planCredits: undefined, budget: {} };
   }
   const apiKey = env.MERRYMEN_FOMO_API_KEY?.trim() || env.FOMO_API_KEY?.trim() || null;
-  const plan = Number(env.MERRYMEN_FOMO_PLAN_CREDITS);
-  const planCredits = Number.isFinite(plan) && plan > 0 ? plan : undefined;
+  const planCredits = fomoPlanFrom(env);
   const lines = apiKey
     ? [`fomo: on — one shared stream per fleet under a lease, child research files every minute${planCredits ? `, plan ${planCredits} credits/month` : ""}`]
     : ["fomo: on without a provider key — lookups answer not-configured; child files and the IPC broker still run"];
   if (env.MERRYMEN_FOMO_PLAN_CREDITS !== undefined && env.MERRYMEN_FOMO_PLAN_CREDITS.trim() !== "" && planCredits === undefined) {
     lines.push("fomo: MERRYMEN_FOMO_PLAN_CREDITS is not a positive number; the runtime's own default applies");
   }
-  return { off: false, lines, apiKey, planCredits };
+  // The caps the web process must agree on (it shares the fomo_meta counters): one line per bad value, then the limits in force.
+  const caps = fomoBudgetFrom(env);
+  lines.push(...caps.problems, describeBudget(budgetConfigFor(planCredits ?? FREE_PLAN_CREDITS_PER_MONTH, caps.budget)));
+  return { off: false, lines, apiKey, planCredits, budget: caps.budget };
 }
 
 /** The switches, decided and said once, on first use: the first spawn or the first pass, whichever comes first. */
@@ -10971,7 +10975,7 @@ async function fomoRuntimeNow(boot: FomoBoot): Promise<FomoRuntimeHandle | null>
     const db = await makePgDb(process.env.DATABASE_URL!);
     const { createFomoRuntime } = await import("./fomo/runtime");
     // The operator's tail switch: off, the service refuses to store a tail as well as the pass carrying none.
-    const rt = await createFomoRuntime({ db, dialect: "postgres", apiKey: boot.apiKey, access: fomoAccessFor, log, planCreditsPerMonth: boot.planCredits, tailsEnabled: fomoTailsOn() });
+    const rt = await createFomoRuntime({ db, dialect: "postgres", apiKey: boot.apiKey, access: fomoAccessFor, log, planCreditsPerMonth: boot.planCredits, budget: boot.budget, tailsEnabled: fomoTailsOn() });
     fomoRuntime = {
       db,
       service: rt.service,
