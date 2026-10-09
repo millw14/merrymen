@@ -28,6 +28,11 @@
   transform: translateX(100%);
   background: #d2f653;
   box-shadow: 0 2px 0 #0006;
+  /* Into Perps the plate lands with a small spring (about 3% past, inside the
+     inset) and a lime flash as it locks; back to Spot keeps the calm curve. */
+  transition-timing-function: cubic-bezier(.34, 1.32, .64, 1), ease, ease;
+  transition-duration: 520ms, 320ms, 320ms;
+  animation: mode-glide-lock 720ms ease-out;
 }
 .terminal-host .trading-mode-toggle button {
   display: inline-flex;
@@ -43,11 +48,45 @@
   text-transform: uppercase;
   letter-spacing: .04em;
   cursor: pointer;
+  position: relative;
   transition: color 250ms ease, transform 250ms ease;
 }
 .terminal-host .trading-mode-toggle button.is-active { color: #071617; }
 .terminal-host .trading-mode-toggle button:hover { transform: translateY(-1px); }
+.terminal-host .trading-mode-toggle button:active { transform: scale(.96); transition-duration: 250ms, 70ms; }
 .terminal-host .trading-mode-toggle button:focus-visible { outline: 2px solid #d2f653; outline-offset: -2px; }
+/* While the intro claim is in flight the Perps button charges like a suit
+   powering up: nano-weave stripes, a bright sweep and a pulsing ring. */
+.terminal-host .trading-mode-toggle button[aria-busy="true"] {
+  color: #d2f653;
+  cursor: progress;
+  animation: mode-charge-ring 900ms ease-in-out infinite;
+}
+.terminal-host .trading-mode-toggle button[aria-busy="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    linear-gradient(100deg, transparent 30%, #fcffe766 48%, #d2f65380 52%, transparent 70%) no-repeat,
+    repeating-linear-gradient(90deg, #d2f65326 0 2px, transparent 2px 6px);
+  background-size: 250% 100%, auto;
+  animation: mode-charge-shimmer 900ms linear infinite;
+}
+@keyframes mode-charge-shimmer {
+  from { background-position: 150% 0, 0 0; }
+  to { background-position: -50% 0, 12px 0; }
+}
+@keyframes mode-charge-ring {
+  0%, 100% { box-shadow: 0 0 0 1px #d2f65340, 0 0 5px #d2f65320; }
+  50% { box-shadow: 0 0 0 1px #d2f653b3, 0 0 14px #d2f65366; }
+}
+@keyframes mode-glide-lock {
+  0%, 35% { box-shadow: 0 2px 0 #0006, 0 0 0 0 #d2f65300; filter: none; }
+  55% { box-shadow: 0 2px 0 #0006, 0 0 14px 2px #d2f653b3; filter: brightness(1.18); }
+  100% { box-shadow: 0 2px 0 #0006, 0 0 0 0 #d2f65300; filter: none; }
+}
 .terminal-host .trading-mode-toggle.is-compact { width: 164px; }
 .terminal-host .trading-mode-toggle.is-compact button { min-height: 31px; font-size: 11px; }
 .terminal-host .desktop-mode-controls {
@@ -83,6 +122,11 @@
   .terminal-host .home-mode-row > span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
+  /* Selectors match the animated rules' specificity so this block wins. */
   .terminal-host .trading-mode-toggle .trading-mode-glide,
-  .terminal-host .trading-mode-toggle button { transition: none; }
+  .terminal-host .trading-mode-toggle .trading-mode-glide[data-mode="perps"],
+  .terminal-host .trading-mode-toggle button,
+  .terminal-host .trading-mode-toggle button[aria-busy="true"],
+  .terminal-host .trading-mode-toggle button[aria-busy="true"]::before { transition: none; animation: none; }
+  .terminal-host .trading-mode-toggle button:active { transform: none; }
 }
