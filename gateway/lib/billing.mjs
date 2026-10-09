@@ -766,9 +766,17 @@ function chargeFor(acct, act, now) {
 
 class ChainError extends Error {}
 
+/**
+ * A bounded wait someone is awaiting keeps its timer REFERENCED (cleared as soon
+ * as the race ends). Unref'd, it was the only thing left to wait on whenever the
+ * other side hung on a plain promise, and Node ends a loop with nothing
+ * referenced: the await was abandoned instead of timing out. The gateway's
+ * listening socket hid that; Node 22's test runner, with a held write, did not.
+ * Only the periodic timers (see `handles`) are unref'd.
+ */
 function withTimeout(promise, ms) {
   let timer;
-  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new ChainError("timeout")), ms); timer.unref?.(); });
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new ChainError("timeout")), ms); });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
@@ -1422,7 +1430,7 @@ export async function createBilling({
       if (!owner || !needsSettle(owner)) return true;
       let timer;
       const done = settle(owner).then(() => true, () => true);
-      const waited = new Promise((resolve) => { timer = setTimeout(() => resolve(false), settleWaitMs); timer.unref?.(); });
+      const waited = new Promise((resolve) => { timer = setTimeout(() => resolve(false), settleWaitMs); }); // referenced: see withTimeout
       const settled = await Promise.race([done, waited]);
       clearTimeout(timer);
       return settled;
@@ -1498,7 +1506,7 @@ export async function createBilling({
     async close() {
       for (const h of handles) clearInterval(h);
       let timer;
-      await Promise.race([ledger.enqueue(() => {}), new Promise((resolve) => { timer = setTimeout(resolve, CLOSE_DRAIN_MS); timer.unref?.(); })]);
+      await Promise.race([ledger.enqueue(() => {}), new Promise((resolve) => { timer = setTimeout(resolve, CLOSE_DRAIN_MS); })]); // referenced: see withTimeout
       clearTimeout(timer);
       await flush();
     },

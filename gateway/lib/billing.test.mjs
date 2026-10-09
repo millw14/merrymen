@@ -6,6 +6,7 @@
  * `node --test lib/billing.test.mjs`
  */
 import { test, after } from "node:test";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -963,6 +964,37 @@ test("a metered request waits at most the settle budget, then is served on the s
   await f.billing.settle(OWNER);
   assert.equal(f.billing.planFor(OWNER).id, "crumbs");
   assert.equal((await f.charges()).length, 1);
+});
+
+test("a held settle still times out when nothing else keeps the process alive", async () => {
+  // The test above passed on Node 26 and was cancelled on Node 22 in CI: the
+  // settle wait was an unref'd timer, the held write a plain promise, and Node 22's
+  // runner ended the loop with nothing referenced, abandoning the await. Run the
+  // same wait in a bare process, where an abandoned top-level await exits 13.
+  const dir = await tempDir();
+  const probe = path.join(dir, "probe.mjs");
+  await writeFile(probe, `
+    import { appendFile } from "node:fs/promises";
+    import { createBilling, openLedger } from ${JSON.stringify(new URL("./billing.mjs", import.meta.url).href)};
+    const dir = process.argv[2], owner = "0x" + "a1".repeat(20);
+    let hold = null;
+    const writeLine = async (file, l) => { if (l.includes('"type":"charge"') && hold) await hold; return appendFile(file, l, { flush: true }); };
+    const b = await createBilling({ dataDir: dir, dataDirPersistent: true, mode: "observe", timers: false, settleWaitMs: 30,
+      writeLine, log: () => {}, keyRegistry: async () => new Map() });
+    await b.createAccount(owner, "Acme");
+    await b.choosePlan(owner, { tier: "crumbs", confirm: true });
+    const ledger = await openLedger({ dataDir: dir, log: () => {} });
+    await ledger.enqueue(() => ledger.append({ type: "adjustment", account_id: ledger.state.byOwner.get(owner).account_id,
+      amount_raw: (100000n * 10n ** 18n).toString(), note: "probe", operator: true }));
+    await b.tail();
+    hold = new Promise(() => {}); // the activation charge's write never finishes
+    console.log("prepare=" + (await b.prepare(owner)));
+    process.exit(0);
+  `);
+  const data = await tempDir();
+  const r = spawnSync(process.execPath, [probe, data], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(r.status, 0, `exit ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /prepare=false/, "served on the state before the settle, after the wait");
 });
 
 test("reads never append: views, previews, meta and the settle check leave the ledger byte-identical", async () => {
