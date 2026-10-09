@@ -2711,6 +2711,9 @@ describe("the AUTON quotes, facts and rug banter (live 2026-10-09)", () => {
       const six = (await r.say("summarise them", { under: r.lastOwn(), advanceMs: 20_000 })).join("\n");
       assert.match(six, /^What traders on Fomo are saying about AUTON on Solana/, six);
       assert.doesNotMatch(six, /The newest/);
+      // 6c. "shogun summarise them", replying to nothing, is the digest again too.
+      const sixC = (await r.say("shogun summarise them", { advanceMs: 20_000 })).join("\n");
+      assert.match(sixC, /^What traders on Fomo are saying about AUTON on Solana/, sixC);
 
       // 7. Twenty minutes on, past the follow-up window, under the quotes: "show me the last 5", asked by code, memory first.
       const searches = r.s.provider.filter((p) => p === "/v2/tokens/search").length;

@@ -1047,6 +1047,17 @@ describe("the theses themselves, on an explicit ask (Milla, 2026-10-09)", () => 
     for (const text of ["can you list the last 10", "pls list", "list them", "show me the last 5", "list the last 25 theses on $AUTON"]) assert.ok(plan(text)?.quotes, text);
   });
 
+  it("'shogun summarise them' with the agent's name in front or behind is the digest again (review, 2026-10-09)", () => {
+    const named = (text: string) => classifyFomoQuestion(text, { memory: auton("token-theses"), now: NOW, selfNames: ["Shogun", "@shogunbot"] });
+    for (const text of ["shogun summarise them", "shogun summarize it", "summarise them shogun", "shogun recap them"]) {
+      const p = named(text);
+      assert.equal(p?.intent, "token-theses", text);
+      assert.equal(p?.quotes, undefined, text);
+      assert.deepEqual(p?.toolCalls, [{ tool: "fomo_get_token_theses", args: { token: AUTON_MINT, chain: "solana" } }], text);
+    }
+    assert.equal(named("shogun summarise the market"), null, "the cue is still the whole line");
+  });
+
   it("'show me the data' and a time window are never quotes", () => {
     assert.notEqual(plan("show me the data")?.intent, "token-theses");
     assert.equal(plan("show me the data")?.quotes, undefined);

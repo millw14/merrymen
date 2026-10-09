@@ -469,7 +469,24 @@ const QUOTE_OTHER_ASPECT = /\b(?:buy|buys|buyers?|bought|buying|sells?|sellers?|
 const QUOTE_THESES_NOUN = /\b(?:theses|quotes|posts|takes)\b/;
 /** "Summarise them", "sum it up", "recap", the whole line: the digest again, after a coin's theses. */
 const SUMMARY_ASK = /^(?:(?:can|could|would|will) you |pls |please |just |ok |okay |so |now |then |and )*(?:summari[sz]e|sum (?:them|it|these|those|that) up|recap|tldr|tl dr)(?: (?:them|it|these|those|that|the theses|em|all|again|for me|pls|please))*$/;
-/** The most theses a room hears quoted, whatever was asked. */
+
+/**
+ * The summary cue, with the agent's own name before or after it ("shogun
+ * summarise them", "summarise them shogun"): the cue is the whole line, so a
+ * name beside it can never be content (withoutSelf takes a leading name only
+ * after a pause or a greeting, and a group line nearly always opens with it).
+ */
+function summaryAskIn(ws: readonly Word[], self: SelfRef): boolean {
+  if (SUMMARY_ASK.test(ws.map((w) => w.canon).join(" "))) return true;
+  for (const n of self.names) {
+    const k = n.length;
+    if (ws.length <= k) continue;
+    const named = (from: number): boolean => n.every((x, i) => ws[from + i]!.bare.toLowerCase().replace(/[^\p{L}\p{N}_-]+/gu, "") === x);
+    if (named(0) && SUMMARY_ASK.test(ws.slice(k).map((w) => w.canon).join(" "))) return true;
+    if (named(ws.length - k) && SUMMARY_ASK.test(ws.slice(0, ws.length - k).map((w) => w.canon).join(" "))) return true;
+  }
+  return false;
+}/** The most theses a room hears quoted, whatever was asked. */
 export const QUOTES_MAX = 10;
 const QUOTE_WORDS: Readonly<Record<string, number>> = {
   two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, fifty: 50,
@@ -1419,7 +1436,7 @@ export function classifyFomoQuestion(text: string, ctx: FomoQuestionContext): Fo
     const context = detected.inherent || fomo || cohort || (usable && history) || (history && short && explicitCount === 0);
     if (!context) return null;
     intent = detected.intent;
-  } else if ((quoteAsk || SUMMARY_ASK.test(c)) && usable && memory!.lastIntent === "token-theses" && memTokens.length === 1 && explicitCount === 0 && !traderDeixis) {
+  } else if ((quoteAsk || summaryAskIn(ws, self)) && usable && memory!.lastIntent === "token-theses" && memTokens.length === 1 && explicitCount === 0 && !traderDeixis) {
     // A BARE QUOTE ASK ("can you list the last 10", "what did they say
     // exactly") right after a coin's theses: those theses, from memory. Only
     // after a theses answer about one coin: under a board, a trader or a

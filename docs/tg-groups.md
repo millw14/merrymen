@@ -1821,7 +1821,7 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "fetch the thesis for merrymen on fomo" past the room's research allowance (live 23:05) | "fomo lookups for this room are used up for now, try again after 00:00 UTC." The same words for the room's cap and the owner's; never a credit, never "ask me in a direct message" |
 | Live 2026-10-09: "can you list the last 10" under AUTON's digest | "The newest 10 theses on AUTON on Solana, in their words (not facts):", then up to ten "• kaleo, 5 min ago: “im holding, team is still building”" lines, newest first, each gated as a `quote`, then "Their words, not facts; 5 of these 10 left out; Fomo lists 4,199." From the room's kept copy: no provider read, no model call, the slot given back |
 | Live 2026-10-09: "show me these thesis, dont summarise" a minute later | The same quotes, with "From a copy fetched a minute ago." (never "just now" for a copy over a minute old) |
-| "summarise them" after the quotes / "list the last 10" after a board | The digest again / never quotes |
+| "summarise them" (or "shogun summarise them", "shogun recap them", replying to nothing) after the quotes / "list the last 10" after a board | The digest again / never quotes |
 | "show me the last 5" under the quotes, twenty minutes on | Five of the newest, asked by code from the line (never a model), about the coin the room's memory holds, from the kept copy |
 | "what are kaleo's theses, list them" | "That one is for a direct message, not the group.": a trader's own theses are never quoted |
 | Live 2026-10-09: AUTON's activity on an empty feed | "No matching activity was returned for AUTON on solana in the last 24h." (never "activity were") |

@@ -2167,7 +2167,7 @@ export function fomoAskOf(text: string, selfNames: readonly string[] = []): Fomo
  * nothing.
  */
 const FOMO_FOLLOW_UP =
-  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|paraphras\w*|in their words|the (?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
+  /\b(?:sellers|buyers|holders|theses|thesis|flow|activity|refresh|latest|updated?|again|this week|last week|today|24 ?h|7 ?d|30 ?d|this month|changed|change|since|research|deep ?dive|contradict\w*|said|saying|trending|boards?|top|robinhood|chain|solana|sol|base|eth|ethereum|bsc|bnb|quotes?|quoted|verbatim|word for word|exactly|summar(?:is|iz)\w*|recap|tl;?dr|sum (?:it|them|these|those) up|paraphras\w*|in their words|the (?:last|latest|newest|recent) (?:\d{1,2}|ten|five))\b/u;
 /** "Don't summarise", "no summary", "without paraphrasing": an ask, with no question mark (the theses themselves). */
 const NEGATED_SUMMARY = /\b(?:don'?t|dont|do not|no need to|without|stop|no|not|never|instead of)\s+(?:a\s+|the\s+)?(?:summar(?:is|iz)\w*|summary|summaries|paraphras\w*|digest|tldr)\b/u;
 /** "Summarise them", "sum it up", "recap": asked for, with no question mark (the digest, again). */

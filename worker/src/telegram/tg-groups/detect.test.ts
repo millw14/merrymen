@@ -1206,6 +1206,7 @@ describe("the theses themselves, a coin's facts, and a room saying it rugged (Mi
     assert.equal(fomoFollowUpOf("summarise them", names), true);
     assert.equal(fomoFollowUpOf("dont summarise", names), true);
     assert.equal(fomoFollowUpOf("lol summaries are mid", names), false);
+    for (const t of ["shogun recap them", "shogun tldr", "shogun sum them up"]) assert.equal(fomoFollowUpOf(t, names), true, t);
   });
 
   it("fomoFactsOf: what happened, why, the data, the dev; never a statement or the market", () => {
