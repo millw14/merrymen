@@ -24,7 +24,7 @@
  * charge, refused while a period the developer paid for is running. Both need
  * the developer to have created an account in the portal.
  * `reconcile` reads the chain and writes nothing; the gateway itself reverses
- * a payment that a reorg undid, every five minutes.
+ * a payment that a reorg undid, once two of its five-minute checks agree.
  */
 
 import { createBilling, createPaymentsClient, openLedger, parseBillingConfig } from "./lib/billing.mjs";
@@ -155,7 +155,7 @@ async function reconcile(argv) {
   const findings = await billing.reconcile({ dryRun: true, all });
   if (!findings.length) return console.log(`[billing] every ${all ? "" : "recent "}payment still stands on chain.`);
   for (const f of findings) console.log(`  WOULD REVERSE  ${f.tx_hash}  ${f.owner}  ${formatTokens(f.amount_raw)} MERRYMEN  (${f.why})`);
-  console.log("[billing] dry run: nothing written. The gateway reverses these itself within five minutes of a payment.");
+  console.log("[billing] dry run: nothing written. This is one reading of the chain; the gateway reverses a payment itself only when two of its own checks, five minutes apart, find the same.");
 }
 
 const argv = process.argv.slice(2);

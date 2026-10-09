@@ -322,11 +322,19 @@ check the host's clock.
   lies can give away API usage, never move anyone's tokens. Its URL is never
   logged and its error text is never relayed. Developer sign-in never uses it.
 - **Reconciliation.** Every 5 minutes, payments credited in the last 30
-  minutes are read again. One whose receipt is gone (once the node has
-  reached its block), now reverts, sits in a different block or moved a
-  different amount gets a `reversal`, logged `[billing] PAYMENT REVERSED: …`.
-  Its amount leaves the credit, possibly below zero; the running plan goes
-  on, and nothing is charged until the shortfall is covered.
+  minutes are read again. One whose receipt is gone while the block that held
+  it has been replaced, that sits in a different block (one the RPC confirms
+  on its own), that now reverts or that moved a different amount is suspect,
+  logged `[billing] … looks <why>: checking it again before reversing`. Only
+  when the next run, five minutes on, finds the same does it get a
+  `reversal`, logged `[billing] PAYMENT REVERSED: …`; a suspect is checked
+  again even past its half hour. A read where the RPC disagrees with itself
+  (no receipt but the same block, or a receipt whose block reads back with
+  another hash: a lagging receipt index, or a load balancer's other node)
+  decides nothing. A reversed amount leaves the credit, possibly below zero;
+  the running plan goes on, and nothing is charged until the shortfall is
+  covered. A transfer that lands again in a later block is credited again
+  when its hash is submitted again: the console offers that on the reversal.
 
 ### What the log says
 

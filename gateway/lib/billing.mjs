@@ -1167,10 +1167,28 @@ export async function createBilling({
     });
   }
 
+  /** The block at height `n`, or null when the node answering has not reached it. */
+  async function blockAt(n) {
+    try { return await read(publicClient.getBlock({ blockNumber: BigInt(n) })); } catch (err) {
+      if (err?.name === "BlockNotFoundError") return null;
+      throw err;
+    }
+  }
+
   /**
-   * Why a credited payment no longer stands, or null. Absence counts only when
-   * the RPC has reached the payment's block, so a lagging node cannot reverse a
-   * real payment; any read error leaves it for the next run.
+   * Why a credited payment no longer stands, or null. A reversal takes a real
+   * payment's credit away, and each read here may reach a different node (a
+   * load-balanced RPC: one whose receipt index lags, one on another fork). So
+   * nothing counts until the chain agrees with itself:
+   *   - a missing receipt counts only when the block that held the payment is
+   *     no longer that block. The same block still there means the receipt
+   *     index is behind, not that the transfer is gone; a node that has not
+   *     reached that height says nothing either;
+   *   - a receipt counts only when the block at its height, read on its own,
+   *     has the hash the receipt names. Then a different block than the credited
+   *     one means the transfer moved (a reorg), and the same block is checked
+   *     for its outcome and amount.
+   * Anything else, and any read error, leaves it for the next run.
    */
   async function recheck(p) {
     let receipt = null;
@@ -1178,23 +1196,32 @@ export async function createBilling({
       if (err?.name !== "TransactionReceiptNotFoundError") throw err;
     }
     if (!receipt) {
-      const latest = await read(publicClient.getBlockNumber());
-      return latest >= BigInt(p.block_number) ? "receipt_missing" : null;
+      const block = await blockAt(p.block_number);
+      return block && lower(block.hash) !== p.block_hash ? "receipt_missing" : null;
     }
-    if (receipt.status !== "success") return "reverted";
+    const block = await blockAt(receipt.blockNumber);
+    if (!block || lower(block.hash) !== lower(receipt.blockHash)) return null;
     if (lower(receipt.blockHash) !== p.block_hash) return "block_changed";
-    const block = await read(publicClient.getBlock({ blockNumber: receipt.blockNumber }));
-    if (lower(block.hash) !== p.block_hash) return "block_changed";
+    if (receipt.status !== "success") return "reverted";
     const m = matchTransfers(receipt.logs, { owner: p.owner, recipients: new Set([...recipients, p.recipient]) });
     return m.reason || m.amount !== p.amount ? "amount_changed" : null;
   }
 
+  /**
+   * Payments the last run found no longer standing, by id. A reversal is
+   * written only when the next run (five minutes on) finds the same, so one
+   * bad answer cannot take a real payment's credit away: the developer would
+   * be asked to pay it again. A suspect is checked again even past its half
+   * hour. In memory: a restart starts the count again.
+   */
+  const suspects = new Map();
   let reconciling = null;
   /**
    * Re-verify payments credited in the last 30 minutes (all of them with
-   * `all`). One that a reorg dropped or changed gets a reversal: its amount
-   * leaves the credit, possibly below zero, and nothing more is charged until
-   * it is paid. The plan already running is left alone.
+   * `all`). One that a reorg dropped or changed, on two runs in a row, gets a
+   * reversal: its amount leaves the credit, possibly below zero, and nothing
+   * more is charged until it is paid. The plan already running is left alone.
+   * A dry run reads and reports (`reversed: false`), and remembers nothing.
    */
   async function reconcile({ all = false, dryRun = false } = {}) {
     if (!publicClient || (mode === "off" && !dryRun)) return [];
@@ -1208,19 +1235,35 @@ export async function createBilling({
       const since = ledger.now() - RECONCILE_WINDOW_MS;
       const findings = [];
       for (const p of [...ledger.state.payments.values()]) {
-        if (p.reversed || (!all && p.at < since)) continue;
+        if (p.reversed) { suspects.delete(p.id); continue; }
+        if (!all && p.at < since && !suspects.has(p.id)) continue;
         let why;
         try { why = await recheck(p); } catch (err) { log(`[billing] reconcile could not re-read ${p.tx_hash} (${errName(err)})`); continue; }
-        if (!why) continue;
-        findings.push({ payment_id: p.id, owner: p.owner, tx_hash: p.tx_hash, amount_raw: p.amount.toString(), why });
+        if (!why) {
+          if (!dryRun && suspects.delete(p.id)) log(`[billing] ${p.tx_hash} from ${p.owner} stands on chain again: not reversed`);
+          continue;
+        }
+        const finding = { payment_id: p.id, owner: p.owner, tx_hash: p.tx_hash, amount_raw: p.amount.toString(), why, reversed: false };
+        findings.push(finding);
         if (dryRun) continue;
-        await ledger.enqueue(async () => {
+        if (!suspects.has(p.id)) {
+          suspects.set(p.id, why);
+          log(`[billing] ${p.tx_hash} from ${p.owner} (${formatTokens(p.amount)} MERRYMEN) looks ${why}: checking it again before reversing`);
+          continue;
+        }
+        suspects.delete(p.id);
+        finding.reversed = await ledger.enqueue(async () => {
           const cur = ledger.state.payments.get(p.id);
-          if (!cur || cur.reversed) return;
+          if (!cur || cur.reversed) return false;
           try {
             await ledger.append({ type: "reversal", account_id: cur.account_id, payment_id: cur.id, amount_raw: cur.amount.toString(), why });
-            log(`[billing] PAYMENT REVERSED: ${cur.tx_hash} from ${cur.owner}, ${formatTokens(cur.amount)} MERRYMEN (${why})`);
-          } catch (err) { log(`[billing] could not record the reversal of ${cur.tx_hash} (${errName(err)})`); }
+            log(`[billing] PAYMENT REVERSED: ${cur.tx_hash} from ${cur.owner}, ${formatTokens(cur.amount)} MERRYMEN (${why}). If it lands again in a later block, the developer submits its hash again.`);
+            return true;
+          } catch (err) {
+            // Not written: it is checked again from the start next run.
+            log(`[billing] could not record the reversal of ${cur.tx_hash} (${errName(err)})`);
+            return false;
+          }
         });
       }
       return findings;

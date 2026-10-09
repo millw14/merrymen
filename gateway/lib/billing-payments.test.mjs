@@ -362,8 +362,10 @@ test("a reorg that moves a credited transfer reverses it; credit goes negative a
   // Within the half hour, the sequencer re-includes the transaction elsewhere.
   f.chain.move(hash, 1_010);
   f.clock.t += 60_000;
+  assert.deepEqual((await f.billing.reconcile()).map((x) => [x.tx_hash, x.why, x.reversed]), [[hash, "block_changed", false]]);
+  f.clock.t += 5 * 60_000;
   const findings = await f.billing.reconcile();
-  assert.deepEqual(findings.map((x) => [x.tx_hash, x.why]), [[hash, "block_changed"]]);
+  assert.deepEqual(findings.map((x) => [x.tx_hash, x.why, x.reversed]), [[hash, "block_changed", true]], "the next run agrees");
   const reversal = (await f.records()).filter((r) => r.type === "reversal");
   assert.equal(reversal.length, 1);
   assert.equal(reversal[0].amount_raw, T(100_000).toString());
@@ -418,7 +420,9 @@ test("reconciliation reverses a dropped transfer, but not on a lagging node, an 
   assert.equal((await f.records()).filter((r) => r.type === "reversal").length, 0, "a dry run writes nothing");
   f.clock.t += 31 * 60_000;
   assert.deepEqual(await f.billing.reconcile(), [], "older than half an hour: not re-checked");
-  assert.deepEqual((await f.billing.reconcile({ all: true })).map((x) => x.why), ["receipt_missing"]);
+  assert.deepEqual((await f.billing.reconcile({ all: true })).map((x) => [x.why, x.reversed]), [["receipt_missing", false]]);
+  assert.equal(f.view().credit_raw, T(100_000).toString(), "not on one run");
+  assert.deepEqual((await f.billing.reconcile({ all: true })).map((x) => [x.why, x.reversed]), [["receipt_missing", true]]);
   assert.equal(f.view().credit_raw, "0");
 });
 
@@ -433,9 +437,68 @@ test("reconciliation reverses a transfer whose receipt now reverts or pays a dif
   // Same block, rewritten history: one now reverts, the other moved less.
   receipts.mine({ hash: a, status: "0x0", blockNumber: 1_000, logs: [] });
   receipts.mine({ hash: b, blockNumber: 1_000, logs: [transferLog({ from: OWNER, to: TREASURY, value: T(150_000) })] });
+  assert.equal((await f.billing.reconcile()).length, 2);
+  assert.equal(f.view().credit_raw, T(300_000).toString(), "nothing is reversed on one run");
   const found = await f.billing.reconcile();
-  assert.deepEqual(found.map((x) => x.why).sort(), ["amount_changed", "reverted"]);
+  assert.deepEqual(found.map((x) => [x.why, x.reversed]).sort(), [["amount_changed", true], ["reverted", true]]);
   assert.equal(f.view().credit_raw, "0");
+});
+
+test("one inconsistent RPC read never reverses a real payment: the chain must agree with itself, twice", async () => {
+  const f = await fixture();
+  await f.billing.choosePlan(OWNER, { tier: "crumbs", confirm: true });
+  const hash = f.pay();
+  f.settleChain();
+  assert.equal((await f.submit(hash)).json.plan.id, "crumbs");
+  const reversals = async () => (await f.records()).filter((r) => r.type === "reversal").length;
+
+  // A receipt index that lags (a load-balanced RPC's other backend): no
+  // receipt, but the block that holds the payment is still the same block.
+  f.chain.hide(hash);
+  assert.deepEqual(await f.billing.reconcile(), []);
+  assert.deepEqual(await f.billing.reconcile(), []);
+  f.chain.unhide(hash);
+
+  // The receipt still names the credited block, but one read of that block
+  // answers another hash: the RPC disagrees with itself.
+  f.chain.pin(hash);
+  const credited = f.chain.block(1_000);
+  f.chain.reorgBlock(1_000);
+  assert.deepEqual(await f.billing.reconcile(), []);
+  f.chain.block(1_000).hash = credited.hash;
+
+  // The receipt names another block, which, read on its own, has another hash.
+  f.chain.mine({ hash, blockNumber: 1_010, logs: [transferLog({ from: OWNER, to: TREASURY, value: T(100_000) })] });
+  f.chain.pin(hash);
+  f.chain.reorgBlock(1_010);
+  assert.deepEqual(await f.billing.reconcile(), []);
+  assert.equal(await reversals(), 0);
+  assert.equal(f.view().credit_raw, "0");
+
+  // A real drop is reversed only once a second run, five minutes on, agrees;
+  // one that comes back in between is not reversed at all.
+  f.chain.mine({ hash, blockNumber: 1_000, logs: [transferLog({ from: OWNER, to: TREASURY, value: T(100_000) })] });
+  f.chain.block(1_000).hash = credited.hash;
+  f.chain.drop(hash);
+  let found = await f.billing.reconcile();
+  assert.deepEqual(found.map((x) => [x.why, x.reversed]), [["receipt_missing", false]]);
+  assert.equal(await reversals(), 0, "one run is not enough");
+  assert.match(f.logs.join("\n"), /checking it again before reversing/);
+  f.chain.mine({ hash, blockNumber: 1_000, logs: [transferLog({ from: OWNER, to: TREASURY, value: T(100_000) })] });
+  f.chain.block(1_000).hash = credited.hash;
+  f.clock.t += 5 * 60_000;
+  assert.deepEqual(await f.billing.reconcile(), [], "it stands again");
+  assert.equal(await reversals(), 0);
+
+  // Found near the end of its half hour, it is still checked a second time after it.
+  f.chain.drop(hash);
+  f.clock.t += 22 * 60_000;
+  assert.deepEqual((await f.billing.reconcile()).map((x) => x.reversed), [false]);
+  f.clock.t += 6 * 60_000;
+  found = await f.billing.reconcile();
+  assert.deepEqual(found.map((x) => [x.tx_hash, x.why, x.reversed]), [[hash, "receipt_missing", true]]);
+  assert.equal(await reversals(), 1);
+  assert.equal(f.view().credit_tokens, "-100000");
 });
 
 test("matchTransfers reads addresses from the topics, not the receipt's sender", () => {

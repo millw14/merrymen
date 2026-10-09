@@ -24,6 +24,7 @@ export function transferLog({ from, to, value, address = "0xA15CD06DD305269A0F48
 export async function startFakeChain({ chainId = TOKEN.chainId, head = 5_000, time = Math.floor(Date.now() / 1000) } = {}) {
   const blocks = new Map(); // number -> { hash, timestamp }
   const receipts = new Map(); // lowercased tx hash -> receipt (without block fields)
+  const hidden = new Set(); // lowercased tx hashes whose receipt this node does not return
   let seq = 1;
   const chain = {
     chainId,
@@ -65,6 +66,12 @@ export async function startFakeChain({ chainId = TOKEN.chainId, head = 5_000, ti
     alias(asked, actual) { receipts.set(asked.toLowerCase(), receipts.get(actual.toLowerCase())); },
     /** The receipt keeps reporting the block hash it has now, whatever later happens at that height. */
     pin(hash) { const r = receipts.get(hash.toLowerCase()); r.pinnedBlockHash = chain.block(r.blockNumber).hash; },
+    /**
+     * A node whose receipt index lags (or a load balancer's other backend):
+     * no receipt for `hash`, while its block stays exactly as it was.
+     */
+    hide(hash) { hidden.add(hash.toLowerCase()); },
+    unhide(hash) { hidden.delete(hash.toLowerCase()); },
   };
 
   function receiptJson(r) {
@@ -89,7 +96,7 @@ export async function startFakeChain({ chainId = TOKEN.chainId, head = 5_000, ti
         gasUsed: "0x0", miner: `0x${"00".repeat(20)}`, extraData: "0x", nonce: "0x0000000000000000", transactions: [], uncles: [] };
     }
     if (method === "eth_getTransactionReceipt") {
-      const r = receipts.get(String(params[0]).toLowerCase());
+      const r = hidden.has(String(params[0]).toLowerCase()) ? null : receipts.get(String(params[0]).toLowerCase());
       return r ? receiptJson(r) : null;
     }
     throw Object.assign(new Error(`method ${method} not faked`), { code: -32601 });

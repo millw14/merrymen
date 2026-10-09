@@ -525,10 +525,13 @@ When a transfer is not credited, the console says why:
 | `chain_unavailable`, `payments_unavailable`, `billing_unavailable` (503) | The chain could not be read, payments are closed for now, or billing could not record the payment just now. Check again later. |
 
 If a chain reorganization undoes a credited transfer (the gateway checks each
-payment again for 30 minutes after crediting it), its amount is taken off the
-credit and the history shows the reversal. The running period goes on, and
-nothing new is charged while credit is below zero. If the transfer lands again
-in a later block, submit its hash again.
+payment again for 30 minutes after crediting it, and acts only when two checks
+five minutes apart agree), its amount is taken off the credit and the history
+shows the reversal. The running period goes on, and nothing new is charged
+while credit is below zero. If the transfer lands again in a later block,
+submit its hash again: the console's history offers **Check this transaction
+again** on the reversal. Do that before sending a new payment; once the
+transfer is final again, it is credited again.
 
 ### Periods, renewals and plan changes
 
