@@ -242,4 +242,9 @@ describe("the new clauses", () => {
     ]);
     misses(PRIVATE_THIRD, [...HARMLESS, ...["liquidity lives on raydium", "the chart lives at support", "full send on the chart, holders strong"]]);
   });
+
+  it("PRIVATE_THIRD: a name told, a first name, a whatsapp or a profile, a dox, a house on a close (review, 2026-10-09)", () => {
+    hits(PRIVATE_THIRD, ["the dev's real name is john smith, lives at 12 baker street london", "the dev lives in lagos and his name is tunde", "his name is tunde, from lagos", "the dev's first name is tunde", "dev's whatsapp is out there", "found his facebook, same guy", "the deployer hangs out at 4 park close", "doxxed the dev"]);
+    misses(PRIVATE_THIRD, ["the number one ai coin on sol", "big wallets are holding", "liquidity lives on raydium"]);
+  });
 });

@@ -109,8 +109,9 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    support-ticket lures, sends, calls to action, links spelled out without a
    dot ("bit ly slash", "autonrefund point com"), addresses split into chunks,
    accusations against people, a third party's private details (a real
-   name, where someone lives or works, a home address, a phone, an email or
-   a profile), scam or honeypot, price targets and
+   name or "his name is…", where someone lives or works, a home address, a
+   phone, an email, a whatsapp or a profile, a dox), scam or honeypot, price
+   targets and
    lines at the reader dropped, never repaired), with how many were left out
    and "their words, not facts". The default is still the digest. A trader's
    own theses are never quoted.

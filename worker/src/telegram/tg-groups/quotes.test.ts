@@ -113,4 +113,8 @@ describe("quotesSayable", () => {
     gateDrops(["the dev's real name is john smith from ohio", "dev lives at 12 main street", "the dev's home address is 42 elm road springfield"], "private");
     assert.ok(admitTgLine(quoteLineOf(q("liquidity lives on raydium")), { agentName: "Shogun", kind: "quote", recentOwn: [], rug: { coins: ["AUTON"], brag: false } }).ok);
   });
+
+  it("a doxxing thesis is the gate's to drop too, with reason 'private'", () => {
+    gateDrops(["the dev's real name is john smith, lives at 12 baker street london", "the dev lives in lagos and his name is tunde", "his name is tunde, from lagos", "dev's whatsapp is out there", "the deployer hangs out at 4 park close"], "private");
+  });
 });

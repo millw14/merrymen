@@ -2899,4 +2899,9 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     ]);
     quoted(["liquidity lives on raydium", "the chart lives at support", "full send on the chart, holders strong"]);
   });
+
+  it("a doxxing thesis is never quoted, however the name, the town or the contact is put", () => {
+    leftOut(["the dev's real name is john smith, lives at 12 baker street london", "the dev lives in lagos and his name is tunde", "his name is tunde, from lagos", "the dev's first name is tunde", "dev's whatsapp is out there", "found his facebook, same guy", "the deployer hangs out at 4 park close"]);
+    quoted(["the number one ai coin on sol", "big wallets are holding"]);
+  });
 });

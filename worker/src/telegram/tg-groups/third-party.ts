@@ -265,19 +265,20 @@ export const SPELLED_LINK = U(
  * A PERSON'S PRIVATE DETAILS, for quotes only: a real, full, legal or last
  * name, where someone lives or works ("the dev lives at…", "he's based in…",
  * "works at a bank"), a home or street address, a house number on a street,
- * a phone, an email or a profile ("his insta is…", "on linkedin"). After a
- * rug, doxxing the dev is the likeliest post, and private data never passes
- * (rule 3). "Liquidity lives on raydium" stays: only a person lives
- * somewhere (review, 2026-10-09).
+ * a phone, an email, a whatsapp or a profile ("his insta is…", "on
+ * linkedin"), "his name is…", a dox. After a rug, doxxing the dev is the
+ * likeliest post, and private data never passes (rule 3). "Liquidity lives
+ * on raydium" stays: only a person lives somewhere, and a bare "number"
+ * ("the number one coin") is never one (review, 2026-10-09).
  */
 const PRIVATE_SUBJECT = String.raw`(?:dev|devs|he|she|they|team|founder|ceo|owner|creator|guy|kid|dude)`;
 export const PRIVATE_THIRD = U(
   new RegExp(
-    String.raw`\b(?:real|full|legal|irl|last)\s*-?\s*names?\b|\bsurnames?\b` +
+    String.raw`\b(?:real|full|legal|irl|first|last)\s*-?\s*names?\b|\bsurnames?\b|\b(?:his|her|their)\s+name\s+is\b` +
       String.raw`|\b${PRIVATE_SUBJECT}\b[^.!?\n]{0,20}?\b(?:(?:lives?|living|based)\s+(?:in|at|near)|works?\s+at)\b` +
-      String.raw`|\b(?:home|house|street|mailing|postal)\s+address(?:es)?\b` +
-      String.raw`|\b\d+\s+\p{L}+\s+(?:street|st|road|rd|avenue|ave|lane|ln|blvd|drive|dr)\b` +
-      String.raw`|\b(?:phone|email|e-mail|ig|insta|instagram|linkedin|facebook)(?:\s*:|\s+is\b)|\bon\s+linkedin\b`,
+      String.raw`|\b(?:home|house|street|mailing|postal)\s+address(?:es)?\b|\bdox+\w*` +
+      String.raw`|\b\d+\s+\p{L}+\s+(?:street|st|road|rd|avenue|ave|lane|ln|blvd|boulevard|drive|dr|close|court|way)\b` +
+      String.raw`|\b(?:phone|whatsapp|e-?mail|insta(?:gram)?|linkedin|facebook)\b|\big(?:\s*:|\s+is\b)|\birl\b`,
     "i",
   ),
 );
