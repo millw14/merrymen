@@ -334,6 +334,22 @@ test('a preview that renews another plan from credit says so before anything is 
   assert.equal(previewSentence({ ...preview, charge_now_raw: '0', charge_now_tier: null }, feast, 'Free'), 'Feast starts as soon as 850,000 MERRYMEN arrives. Confirm, then pay below.');
 });
 
+test('an upgrade preview gives the quota the period gets, not the plan card\'s 30-day figure', () => {
+  // Crumbs to Loaf halfway through: 50,000 + (250,000 − 50,000) / 2.
+  const loaf = FALLBACK_PLANS.plans[2];
+  const now = normalizePreview({ effect: 'upgrade_now', charge_now_raw: (150_000n * UNIT).toString(), due_raw: null,
+    starts_at: '2027-01-30T08:00:00.000Z', ends_at: '2027-02-14T08:00:00.000Z', period_requests: 150_000 })!;
+  assert.equal(now.period_requests, 150_000);
+  assert.equal(previewSentence(now, loaf, 'Crumbs'), 'You move to Loaf now for the rest of this period until 14 Feb 2027. 150,000 MERRYMEN comes out of your credit, and the requests you have used so far carry over. '
+    + 'An upgrade adds requests only for the time left: this period\'s quota becomes 150,000 requests, and Loaf\'s full 250,000 starts with the next period.');
+  const later = normalizePreview({ effect: 'waiting_for_payment', charge_now_raw: '0', due_raw: (150_000n * UNIT).toString(), starts_at: null, ends_at: null, period_requests: 150_000 })!;
+  assert.equal(previewSentence(later, loaf, 'Crumbs'), 'Loaf starts as soon as 150,000 MERRYMEN arrives. '
+    + 'An upgrade adds requests only for the time left: this period\'s quota becomes at most 150,000 requests, and Loaf\'s full 250,000 starts with the next period. Confirm, then pay below.');
+  // A whole period, or a gateway that does not say: nothing about quota.
+  for (const period_requests of [250_000, null]) assert.doesNotMatch(previewSentence({ ...later, period_requests }, loaf, 'Free'), /quota/);
+  assert.equal(normalizePreview({ effect: 'upgrade_now', period_requests: -1 })!.period_requests, null);
+});
+
 test('a plan preview says what confirming does, in whole tokens', () => {
   const loaf = FALLBACK_PLANS.plans[2];
   const p = (body: Record<string, unknown>) => normalizePreview({ charge_now_raw: '0', due_raw: null, starts_at: null, ends_at: '2026-11-07T12:00:00.000Z', ...body })!;

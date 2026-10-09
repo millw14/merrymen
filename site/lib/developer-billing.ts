@@ -223,6 +223,12 @@ export interface PlanPreview {
   /** A tier other than the chosen one that the charge now renews (a lapsed period's), or null. */
   charge_now_tier: string | null;
   due_raw: string | null; starts_at: string | null; ends_at: string | null;
+  /**
+   * The request quota of the period the change applies to. An upgrade's is
+   * the time-left share of the new plan's, below the plan card's 30-day
+   * figure; for one still to be paid, as of now (it falls as the period runs).
+   */
+  period_requests: number | null;
 }
 export function normalizePreview(input: unknown): PlanPreview | null {
   const body = record(input), effect = body?.effect;
@@ -230,7 +236,7 @@ export function normalizePreview(input: unknown): PlanPreview | null {
   const due = raw(body.due_raw) ?? (typeof body.due_tokens === "string" ? tokensToRaw(body.due_tokens)?.toString() ?? null : null);
   const tier = typeof body.charge_now_tier === "string" && /^[a-z0-9_-]{1,32}$/.test(body.charge_now_tier) ? body.charge_now_tier : null;
   return { effect: effect as PreviewEffect, charge_now_raw: raw(body.charge_now_raw) ?? "0", charge_now_tier: tier,
-    due_raw: due !== null && BigInt(due) > 0n ? due : null, starts_at: iso(body.starts_at), ends_at: iso(body.ends_at) };
+    due_raw: due !== null && BigInt(due) > 0n ? due : null, starts_at: iso(body.starts_at), ends_at: iso(body.ends_at), period_requests: count(body.period_requests) };
 }
 
 /** What previewSentence may also know about the account and the page. */
@@ -248,19 +254,23 @@ export interface PreviewContext {
 export function previewSentence(preview: PlanPreview, plan: Plan, current: string, selected?: string, context: PreviewContext = {}): string {
   const until = preview.ends_at ? ` until ${formatDate(preview.ends_at)}` : "";
   const charge = BigInt(preview.charge_now_raw) > 0n ? `${formatTokens(preview.charge_now_raw)} MERRYMEN comes out of your credit` : "";
+  // The plan card says 30 days of the new plan; an upgrade buys the share of it that is left of this period.
+  const share = (atMost: string) => preview.period_requests !== null && preview.period_requests < plan.requests
+    ? ` An upgrade adds requests only for the time left: this period's quota becomes ${atMost}${group(preview.period_requests)} requests, and ${plan.name}'s full ${group(plan.requests)} starts with the next period.` : "";
   switch (preview.effect) {
     case "activate_now":
       // Free "activates" with nothing running: the account stays where it is, and only the unpaid selection goes.
       if (plan.price_raw === "0") return `Your account stays on ${plan.name}${selected && selected !== plan.name ? ` and the pending ${selected} selection is dropped` : ""}. Nothing is charged.`;
       return `${plan.name} starts now${until ? ` and runs${until}` : ""}. ${charge ? `${charge}.` : "Nothing is charged."}`;
-    case "upgrade_now": return `You move to ${plan.name} now for the rest of this period${until}. ${charge || "Nothing is charged"}, and the requests you have used so far carry over.`;
+    case "upgrade_now": return `You move to ${plan.name} now for the rest of this period${until}. ${charge || "Nothing is charged"}, and the requests you have used so far carry over.${share("")}`;
     case "at_renewal": return `${plan.name} takes over when ${current} ends${preview.starts_at ? ` on ${formatDate(preview.starts_at)}` : ""}. Nothing is charged now.`;
     case "cancel_renewal": return `${current} runs to the end of its period${preview.starts_at ? ` (${formatDate(preview.starts_at)})` : ""}, then your account moves to ${plan.name}. Nothing is charged.`;
     case "waiting_for_payment": {
       // The chosen plan cannot be paid from credit, but a lapsed period's plan can: confirming renews that one now.
       const renewed = preview.charge_now_tier ? context.plans?.find(p => p.id === preview.charge_now_tier)?.name ?? preview.charge_now_tier : null;
       const renews = charge ? `${formatTokens(preview.charge_now_raw)} MERRYMEN of your credit renews ${renewed ? `${renewed} now, the plan your last period was on` : "your last paid plan now"}. ` : "";
-      return `${renews}${plan.name} starts as soon as ${preview.due_raw ? `${formatTokens(preview.due_raw, { round: "up", decimals: 0 })} MERRYMEN arrives` : "your payment arrives"}. Confirm, then pay below.`;
+      // Paid later, an upgrade covers less of the period, so its quota is "at most" what it would be now.
+      return `${renews}${plan.name} starts as soon as ${preview.due_raw ? `${formatTokens(preview.due_raw, { round: "up", decimals: 0 })} MERRYMEN arrives` : "your payment arrives"}.${share("at most ")} Confirm, then pay below.`;
     }
   }
 }

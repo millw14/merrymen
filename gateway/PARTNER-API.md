@@ -480,7 +480,9 @@ paid for keeps the requests and rate it started with until it ends.
    until their wallet creates an account.
 3. Choose a plan. Before you confirm, the console shows what confirming will
    do: start the plan now, upgrade the running period now, change plan at the
-   next renewal, cancel renewal, or wait for a payment.
+   next renewal, cancel renewal, or wait for a payment. It names every amount
+   taken from credit and what it buys, and for an upgrade the request quota
+   the rest of the period gets (see **Upgrade** below).
 4. Send $MERRYMEN (token `0xa15cd06dd305269a0f48bebeb30aa3588fba7b32`) on
    Robinhood Chain (chain `4663`) from your signed-in wallet to the Merrymen
    payments wallet the console shows. The console shows what is due rounded up

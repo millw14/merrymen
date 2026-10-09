@@ -42,7 +42,10 @@ export function keyLimits(plans: PlansView, account: AccountState): string {
   const id = account.kind === "ready" ? account.view.plan.id : "free", plan = plans.plans.find(p => p.id === id);
   const requests = account.kind === "ready" && account.view.usage ? account.view.usage.limit : plan?.requests;
   if (!plan || requests === undefined) return "Up to 5 active keys · your plan's limits are shared by all your keys · Create, read and chat scopes";
-  return `Up to 5 active keys · ${plan.name}: ${plan.rpm} requests/minute and ${group(requests)} requests per ${plans.period_days} days, shared by all your keys · Create, read and chat scopes`;
+  // A period's own quota (an upgrade's time-left share, a long comp) is this period's, not a 30-day figure.
+  const quota = requests === plan.requests ? `${group(requests)} requests per ${plans.period_days} days`
+    : `${group(requests)} requests this period (then ${group(plan.requests)} per ${plans.period_days} days)`;
+  return `Up to 5 active keys · ${plan.name}: ${plan.rpm} requests/minute and ${quota}, shared by all your keys · Create, read and chat scopes`;
 }
 /** "200 OK · …" for the key test, with this period's usage when /meta reports it. */
 export function testSummary(result: { name?: unknown; rate_per_min?: unknown; billing?: unknown }): string {

@@ -132,6 +132,10 @@ test('the key footnote states the limit that applies: per key with billing off, 
   assert.match(keyLimits(live(), { kind: 'missing' }), /Free: 30 requests\/minute and 1,000 requests per 30 days, shared by all your keys/);
   const crumbs = view({ plan: { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-01T00:00:00.000Z', ends_at: '2026-10-31T00:00:00.000Z', selected: 'crumbs' }, usage: { used: 1, limit: 50_000, by_key: [] } });
   assert.match(keyLimits(live(), { kind: 'ready', view: crumbs }), /Crumbs: 60 requests\/minute and 50,000 requests per 30 days/);
+  // Upgraded to Loaf halfway: the period has the time-left share, not Loaf's 30-day figure.
+  const upgraded = view({ plan: { id: 'loaf', name: 'Loaf', starts_at: '2026-10-01T00:00:00.000Z', ends_at: '2026-10-31T00:00:00.000Z', selected: 'loaf', renews_on_next_request: false },
+    usage: { used: 20_000, limit: 150_000, resets_at: '2026-10-31T00:00:00.000Z', by_key: [] } });
+  assert.match(keyLimits(live(), { kind: 'ready', view: upgraded }), /Loaf: 120 requests\/minute and 150,000 requests this period \(then 250,000 per 30 days\), shared by all your keys/);
   assert.equal(testSummary({ name: 'Prism', rate_per_min: 60, billing: { requests_used: 1200, requests_limit: 50_000 } }), '200 OK · Prism · 60 requests/minute · 1,200 of 50,000 requests used');
   assert.equal(testSummary({ name: 'Prism', rate_per_min: 30, billing: null }), '200 OK · Prism · 30 requests/minute');
 });
