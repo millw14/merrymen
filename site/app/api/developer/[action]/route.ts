@@ -1,31 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
+import { developerGateway as gateway } from "../../../../lib/developer-gateway";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// A payment check reads the chain (up to 10 s a read) before it answers.
+export const maxDuration = 60;
 const COOKIE = "mm_developer";
 const UNAVAILABLE = "Developer sign-in is temporarily unavailable. Please try again shortly.";
 const fail = (message: string, status: number) => NextResponse.json({ error: { message } }, { status, headers: { "Cache-Control": "no-store" } });
 const clientIp = (req: NextRequest) => req.headers.get("x-vercel-forwarded-for")?.split(",")[0] || req.headers.get("x-forwarded-for")?.split(",")[0] || "unknown";
 /**
- * Where the portal credential goes, or null to fail closed.
+ * What the console may ask the gateway for, by method. Anything else is a 404
+ * here, before the portal secret is attached to it.
  *
- * MERRYMEN_DEVELOPER_GATEWAY_ORIGIN points a preview or local site at another
- * gateway. The secret travels with every request, so the override must be a
- * bare https origin (plain http only on localhost), and a malformed one is
- * refused rather than ignored. The secret needs 32+ bytes, as the gateway
- * already requires: a shorter one could only ever be refused there.
+ * `plans` is public (the Plans section reads it signed out) and is sent
+ * without the session cookie: what everyone may read needs nobody's session.
  */
-function gateway(): { origin: string; secret: string } | null {
-  const secret = process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET;
-  if (!secret || Buffer.byteLength(secret) < 32) { console.error("[developer] MERRYMEN_DEVELOPER_PORTAL_SECRET is unset or under 32 bytes"); return null; }
-  try {
-    const url = new URL(process.env.MERRYMEN_DEVELOPER_GATEWAY_ORIGIN || "https://ai.merrymen.dev");
-    const local = url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname);
-    if ((url.protocol === "https:" || local) && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash) return { origin: url.origin, secret };
-  } catch { /* Reported below. */ }
-  console.error("[developer] MERRYMEN_DEVELOPER_GATEWAY_ORIGIN must be an https origin, or http on localhost");
-  return null;
-}
+const ROUTES: Record<string, readonly string[]> = {
+  GET: ["keys", "plans", "account"],
+  POST: ["challenge", "verify", "keys", "revoke", "test", "account", "plan", "payments"],
+};
+const PUBLIC = new Set(["plans"]);
 async function handle(req: NextRequest, context: { params: Promise<{ action: string }> }) {
   const { action } = await context.params;
   if (action === "sdk" && req.method === "GET") {
@@ -51,7 +46,7 @@ async function handle(req: NextRequest, context: { params: Promise<{ action: str
     response.cookies.set(COOKIE, "", { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/api/developer", maxAge: 0 });
     return response;
   }
-  if (!(req.method === "GET" && action === "keys") && !(req.method === "POST" && ["challenge", "verify", "keys", "revoke", "test"].includes(action))) return fail("Not found", 404);
+  if (!Object.hasOwn(ROUTES, req.method) || !ROUTES[req.method].includes(action)) return fail("Not found", 404);
   const target = gateway();
   if (!target) return fail(UNAVAILABLE, 503);
   try {
@@ -64,8 +59,8 @@ async function handle(req: NextRequest, context: { params: Promise<{ action: str
     }
     const upstream = await fetch(`${target.origin}/developer/v1/${action}`, {
       method: req.method, headers: { "content-type": "application/json", authorization: `Bearer ${target.secret}`,
-        "x-developer-session": req.cookies.get(COOKIE)?.value || "", "x-developer-ip": clientIp(req) },
-      ...(raw !== undefined ? { body: raw } : {}), cache: "no-store", redirect: "error", signal: AbortSignal.timeout(20_000),
+        "x-developer-session": PUBLIC.has(action) ? "" : req.cookies.get(COOKIE)?.value || "", "x-developer-ip": clientIp(req) },
+      ...(raw !== undefined ? { body: raw } : {}), cache: "no-store", redirect: "error", signal: AbortSignal.timeout(action === "payments" ? 45_000 : 20_000),
     });
     const data = await upstream.json();
     const session = data.session; delete data.session;

@@ -28,12 +28,14 @@ separate: it prepares and signs permissions locally, then calls your backend.
 Holder `mmk_` keys for `/v1/chat/completions` cannot authorize partner requests.
 
 Visit [Merrymen Developers](https://merrymen.dev/api), sign in with a wallet,
+create your developer account (the portal asks for one before your first key),
 and create a key for your application. Copy the key immediately: it is shown
 only once. The portal includes an SDK download, integration tutorial, and a
-real authenticated key test. Each developer can have five active keys at
-30 requests per minute each, and may request at most ten new keys an hour.
-Replacement keys retain the app identity; update your backend before revoking
-the previous key.
+real authenticated key test. Each developer can have five active keys and may
+request at most ten new keys an hour. How many requests those keys may make, a
+minute and per 30 days, depends on whether partner billing is on and on your
+account's plan: see [Plans and billing](#plans-and-billing). Replacement keys
+retain the app identity; update your backend before revoking the previous key.
 
 Sign-in is a free message signature from a standard wallet (an EOA). The
 signature is checked on the gateway itself, with no chain lookup, so
@@ -45,7 +47,8 @@ end a session early: sign in again. Your keys are unaffected either way.
 
 Operators can also issue keys with the gateway CLI (see
 [Operator configuration](#operator-configuration-and-key-rotation)). Such a key
-may carry different scopes or a different quota; `/meta` reports what it has.
+may carry different scopes or a different rate; `/meta` reports what it has.
+It belongs to no developer account and is never counted against a plan.
 
 Self-service keys include these scopes:
 
@@ -67,10 +70,14 @@ curl https://ai.merrymen.dev/partner/v1/meta \
   -H "Authorization: Bearer $MERRYMEN_PARTNER_KEY"
 ```
 
-The response contains `key_id`, `app_id`, `name`, `scopes`, `rate_per_min` and
-`api_version`. The current contract version is `2026-10-08`; what changed from
-`2026-09-18` is listed under [Contract changes](#contract-changes). Use your trusted
-application configuration for `app_id`; do not accept it from a browser request.
+The response contains `key_id`, `app_id`, `name`, `scopes`, `rate_per_min`,
+`api_version` and `billing`. `rate_per_min` is the per-minute rate this key
+gets now. `billing` is your plan and usage while partner billing is on, and
+`null` otherwise (see [Plans and billing](#plans-and-billing)). The current
+contract version is `2026-10-08`; what changed from `2026-09-18`, and the plans
+and billing added since under the same version string, are listed under
+[Contract changes](#contract-changes). Use your trusted application
+configuration for `app_id`; do not accept it from a browser request.
 
 ## Setup entirely inside your app
 
@@ -431,6 +438,244 @@ owner signs in, completes the normal grant/backup flow and explicitly approves
 app access. Your backend polls `GET /agents/{id}`. There is no arbitrary return
 URL or automatic redirect; the user returns to your application themselves.
 
+## Plans and billing
+
+Requests made with a key from the developer portal count against its
+developer account's plan. Merrymen switches this on in stages, and `/meta`
+says which one is running (`billing.mode`, or `billing: null` while it is off):
+
+| Partner billing | What your keys see |
+| --- | --- |
+| `off` | Nothing is counted or refused for quota, there are no quota headers, and `/meta` reports `billing: null`. Each key keeps its own per-minute rate. |
+| `observe` | Every request is counted, and answers carry the quota headers with `x-merrymen-quota-enforced: false`, but no request is refused for quota. Each key keeps its own per-minute rate, raised to its plan's when that is higher. |
+| `enforce` | A request past the plan's quota is refused with 402 `quota_exhausted`, and all of an account's keys share one per-minute rate: the plan's. |
+
+Treat `observe` as a dry run: if `x-merrymen-quota-remaining` reaches `0`
+there, the same requests would be refused under `enforce`. Keys an operator
+issued with the gateway CLI belong to no account and are never counted.
+
+### Plans
+
+| Plan | Cost per 30 days | Requests per 30 days | Requests a minute, per account |
+| --- | --- | --- | --- |
+| Free | nothing | 1,000 | 30 |
+| Crumbs | 100,000 MERRYMEN | 50,000 | 60 |
+| Loaf | 400,000 MERRYMEN | 250,000 | 120 |
+| Feast | 1,000,000 MERRYMEN | 1,000,000 | 300 |
+
+The live table is at [merrymen.dev/api#plans](https://merrymen.dev/api#plans).
+It can change, and a change applies from your next charge: a period already
+paid for keeps the requests and rate it started with until it ends.
+
+### Paying for a plan
+
+1. Sign in at [merrymen.dev/api](https://merrymen.dev/api) with a standard
+   wallet (an EOA). Only payments sent **from that wallet** are credited to its
+   account.
+2. Create your developer account: a name of 1–48 characters, one account per
+   wallet. Creating it is free and sends no transaction. The portal asks for
+   it before it creates a new key (and while billing is on, the gateway
+   refuses a new key without one). Keys made without an account, such as
+   those from before accounts existed, keep working, and count against Free
+   until their wallet creates an account.
+3. Choose a plan. Before you confirm, the console shows what confirming will
+   do: start the plan now, upgrade the running period now, change plan at the
+   next renewal, cancel renewal, or wait for a payment. It names every amount
+   taken from credit and what it buys, and for an upgrade the request quota
+   the rest of the period gets (see **Upgrade** below).
+4. Send $MERRYMEN (token `0xa15cd06dd305269a0f48bebeb30aa3588fba7b32`) on
+   Robinhood Chain (chain `4663`) from your signed-in wallet to the Merrymen
+   payments wallet the console shows. The console shows what is due rounded up
+   to a whole token; anything sent over that stays on the account as credit.
+   **Pay with wallet** sends the transfer for you when your browser wallet is
+   on the signed-in address and on Robinhood Chain. Otherwise send it from your
+   wallet app and paste the transaction hash under **Already sent?**.
+5. The gateway reads the transfer from the chain and credits it once it is
+   both deep enough and old enough: by default 64 blocks and two minutes, so
+   expect about two minutes. The console shows it as confirming until then. As
+   soon as the account's credit covers the plan, the plan starts and runs for
+   30 days.
+
+The gateway credits a transfer only when its hash is submitted. The console
+submits it and keeps checking, but there is no lookup by wallet: keep the hash
+of any payment until it shows as credited.
+
+What is credited:
+
+- $MERRYMEN transfers on Robinhood Chain, from the signed-in wallet, to the
+  payments wallet (or to an address it replaced recently), in blocks after
+  payments opened. A transfer from any other wallet, an exchange, a smart
+  account or a swap is not credited to this account, even if it reached the
+  payments wallet; a transfer from another wallet of yours can only be credited
+  to that wallet's own account, by signing in with it and submitting the hash
+  there.
+- Every such transfer in one transaction adds up to one payment, which must be
+  at least 1 MERRYMEN. A transaction is credited once, however its hash is
+  written.
+- Payments are not refunded automatically: the gateway never sends tokens.
+  Credit stays on the account and is used for later charges.
+
+When a transfer is not credited, the console says why:
+
+| Code | Meaning |
+| --- | --- |
+| `payment_pending` (202) | `stage: "not_found_yet"`: not on Robinhood Chain yet. `stage: "confirming"`: found, with `confirmations`, `needed` and `ready_in_sec`. The console keeps checking. |
+| `payment_not_found` (422) | `reason` is `wrong_token` (no $MERRYMEN transfer in it), `wrong_sender` (not sent from the signed-in wallet), `wrong_recipient` (not sent to the payments wallet) or `before_start_block` (sent before payments opened). |
+| `payment_failed` (422) | The transaction failed on chain, so nothing was sent. |
+| `payment_too_small` (422) | Less than 1 MERRYMEN in all. |
+| `payment_unsupported` (422) | More than 256 matching transfers in one transaction. Send one transfer. |
+| `chain_unavailable`, `payments_unavailable`, `billing_unavailable`, `billing_off` (503) | The chain could not be read, payments are closed for now, billing could not record the payment just now, or paid plans are switched off. Check again later. |
+
+The table lists answers about the transfer itself. The portal can also answer
+404 `account_missing`, 400 `invalid_tx_hash`, 429 `rate_limited` (30 checks a
+minute per wallet) and 409 `session_wallet_changed` (the browser signed in with
+another wallet since the payment started; sign in with the paying wallet).
+
+If a chain reorganization undoes a credited transfer (the gateway checks each
+payment again for 30 minutes after crediting it, and acts only when two checks
+five minutes apart agree), its amount is taken off the credit and the history
+shows the reversal. The running period goes on, and nothing new is charged
+while credit is below zero. If the transfer lands again in a later block,
+submit its hash again: the console's history offers **Check again** on the
+reversal (and, while credit is below zero, **Check this transaction again**
+under Credit). Do that before sending a new payment; once the
+transfer is final again, it is credited again.
+
+### Periods, renewals and plan changes
+
+- **A paid period** lasts 30 days from its charge, and its requests are
+  counted for that period.
+- **Renewal.** When a period ends, the account renews at its next counted
+  request, payment or plan change, starting from that moment: time with no
+  requests is never charged. It renews the plan you selected if credit covers
+  it; if not, the plan that just ended, if you paid for it and credit covers
+  it; otherwise the account is on Free, keeps its credit, and the console
+  shows what is due. A period Merrymen gave at no charge renews only into the
+  plan you selected. `renews_on_next_request: true` (in `/meta` and the
+  console) means a charge is waiting for your next counted request.
+- **Paying ahead.** Right after a plan starts, the console shows the next
+  period's cost, less any credit left over, as due for renewal ("Pay ahead for
+  the next period").
+  Nothing is owed before the period ends; credit sent early is used at
+  renewal.
+- **Upgrade.** Choosing a plan that costs more while a period runs charges,
+  at once, the difference in cost for the time left, rounded down, and adds
+  the difference in requests for the same time left, rounded down. The period
+  keeps its end date and the requests already used; the new plan's per-minute
+  rate applies at once. For example, on Crumbs with 2 days left, moving to
+  Feast costs 60,000 MERRYMEN and raises that period's quota from 50,000 to
+  113,333 requests. Each upgrade costs the difference from the plan the period
+  was last moved to: Crumbs at the start, Loaf with 20 days left and Feast with
+  10 days left cost 100,000 + 200,000 + 200,000 MERRYMEN, and the next period
+  on Feast costs 1,000,000. Without enough credit an upgrade waits for a
+  payment; the amount due only falls as the period runs.
+- **Downgrade.** A plan that costs less takes effect at the next renewal. The
+  running period is unchanged.
+- **Free.** Choosing Free cancels renewal: the running period lasts to its
+  end, then the account is on Free. Credit stays on the account.
+
+### What is counted
+
+- Every request a portal key makes under `/partner/v1` counts one request
+  against its account once it is past the key, scope and rate checks,
+  whatever the answer: a 4xx caused by the request itself counts, and so does
+  an unknown route.
+- Not counted: `GET /partner/v1` (discovery), `GET /partner/v1/health` and
+  `GET /partner/v1/meta`; requests refused before counting (401, 403
+  `forbidden_scope`, 429 `rate_limited`, and 413 for a body over 32 KiB, or
+  256 KiB on `/activate`); and a 402 `quota_exhausted`.
+  `/meta` still counts toward the per-minute rate.
+- Given back when the platform failed: any 5xx, any `upstream_*` code, 409
+  `conversation_busy` or `enrollment_busy`, and a request cut off because the
+  gateway was restarting. Retrying these costs no quota.
+- A request is counted when it starts, so concurrent requests cannot go past
+  the limit.
+- The quota belongs to the wallet's account and is shared by all its keys. On a paid
+  plan the window is the period. On Free, windows are 30 days long and start
+  at the earlier of the wallet's first API key (revoked keys included) and its
+  account's creation, so revoking keys or creating the account later does not
+  start a fresh window.
+- Under enforcement a counted request is recorded before it is answered, so a
+  gateway crash never forgets a request you were served. If the count cannot
+  be recorded within 2 seconds, the gateway answers 503 `billing_unavailable`
+  (the unit is given back; resend) rather than serving it.
+
+Every counted answer, and `/meta`, carries these headers:
+
+| Header | Value |
+| --- | --- |
+| `x-merrymen-quota-limit` | Requests in the current window |
+| `x-merrymen-quota-remaining` | Requests left; never below `0` |
+| `x-merrymen-quota-reset` | When the window ends, in Unix seconds |
+| `x-merrymen-quota-enforced` | `true` when a spent quota is refused (`enforce`), `false` under `observe` |
+
+They are absent while billing is off, for operator keys, on discovery and
+`/health`, and on refusals made before counting (401, 403, 429, 413). An answer
+whose request was given back still carries them, with that request returned
+to `remaining`.
+
+A spent quota under `enforce` is HTTP 402, with `Retry-After` (seconds until
+the window ends), the quota headers and:
+
+```json
+{
+  "error": {
+    "code": "quota_exhausted",
+    "message": "This account has used its 1000 requests on Free until 2026-11-08T09:00:00.000Z. Choose a larger plan at https://merrymen.dev/api#plans.",
+    "request_id": "req_0123456789ab",
+    "plan": "free",
+    "limit": 1000,
+    "used": 1000,
+    "resets_at": "2026-11-08T09:00:00.000Z",
+    "upgrade_url": "https://merrymen.dev/api#plans"
+  }
+}
+```
+
+Read the fields, not the message. A 402 is not counted, the same request is
+refused again until `resets_at` unless the plan changes, and the gateway does
+not log it. On the largest plan (Feast) there is no larger plan to move to,
+and a running period is not renewed early: the quota comes back at
+`resets_at`, and the message says so. `upgrade_url` is still present there,
+as on every 402.
+
+`/meta` reports the plan in `billing`:
+
+```json
+"billing": {
+  "mode": "enforce",
+  "enforced": true,
+  "plan": "crumbs",
+  "requests_limit": 50000,
+  "requests_used": 1234,
+  "resets_at": "2026-11-08T09:00:00.000Z",
+  "plan_ends_at": "2026-11-08T09:00:00.000Z",
+  "renews_on_next_request": false
+}
+```
+
+`billing` is `null` while billing is off and for operator keys.
+`plan_ends_at` is `null` on Free. `/meta` never makes a charge: while
+`renews_on_next_request` is `true`, `plan` still names the plan as it stands,
+and `rate_per_min` already gives the rate the next request will get.
+
+### Per-minute rates
+
+- **Billing off:** each key has its own rate: 30 a minute for portal keys.
+  Operator keys keep their own rate in every mode (120 unless set otherwise).
+- **Observe:** each portal key keeps its own bucket, at its own rate or its
+  account's plan rate, whichever is higher.
+- **Enforce:** one bucket per account, at its plan's rate, shared by all its
+  keys. On Free that is 30 a minute for all of a developer's keys together.
+  The 429 message then reads `… requests/minute for this account`.
+- When a renewal or a newly paid plan is waiting, the rate is that of the plan
+  the next request will be served on.
+- Each caller IP may also make 240 requests a minute while billing is off,
+  and 600 under `observe` and `enforce`, where every plan's rate fits under
+  it.
+- `rate_per_min`, in `/meta` and in the portal's key list, is the rate a key
+  gets now.
+
 ## Errors and retries
 
 Errors use one envelope:
@@ -441,14 +686,16 @@ Errors use one envelope:
 
 Preserve `request_id` when reporting failures. For a request the hosted runtime
 refused or could not answer, the gateway logs a line with this ID. Refusals the
-gateway makes itself (key, scope, rate limit, body size, unknown route) are not
-logged; report those with their code and time. Missing, unrecognized-format
-and holder credentials return 404; a correctly formatted partner key with an
-unknown ID or incorrect secret returns 401. Revoked keys return 401
+gateway makes itself (key, scope, rate limit, spent quota, body size, unknown
+route) are not logged; report those with their code and time. Missing,
+unrecognized-format and holder credentials return 404; a correctly formatted
+partner key with an unknown ID or incorrect secret returns 401. Revoked keys return 401
 `key_revoked`, and missing scopes return 403 `forbidden_scope`. Other expected
 cases include invalid input (400/422), unavailable authorization or conflicting
-identities (403/409), rate limits (429), and an unavailable hosted runtime or
-storage (503). Check the code rather than matching prose.
+identities (403/409), rate limits (429), a spent plan quota (402
+`quota_exhausted`, see [Plans and billing](#plans-and-billing)), and an
+unavailable hosted runtime or storage (503). Check the code rather than
+matching prose.
 
 A body over 32 KiB (256 KiB for `/activate`) is refused with HTTP 413
 `bad_request`, which carries a `request_id` like any other error. Past 4 MiB
@@ -461,6 +708,7 @@ The codes that call for a retry, and how:
 | Code | Status | What to do |
 | --- | --- | --- |
 | `rate_limited` | 429 | Back off with jitter. |
+| `quota_exhausted` | 402 | Your account's plan quota is spent. The same request is refused until `error.resets_at` (`Retry-After` gives the seconds), unless the plan changes; a larger plan, if there is one, is at `error.upgrade_url` (on Feast, the largest, wait for `resets_at`). |
 | `upstream_unavailable` | 503 | No complete answer from the hosted runtime (unreachable, timed out, or misconfigured). Back off and retry; writes are safe to resend as described above. |
 | `upstream_invalid_response` | 503 | The runtime answered, but not with its JSON envelope (a proxy or error page). Back off as for `upstream_unavailable`, and report the `request_id` if it persists. |
 | `runtime_unavailable` | 503 | The worker's state could not be read. Retry later. |
@@ -468,18 +716,43 @@ The codes that call for a retry, and how:
 | `class_vault_unavailable`, `derivation_unavailable` | 503 | A chain read failed before the authorization was spent. Resend the same activation within the challenge's five minutes. |
 | `enrollment_storage_failed` | 503 | Inspect the connection, then start a fresh challenge. |
 
-Each key's quota is `rate_per_min` from `/meta`: 30 for self-service keys, and
-120 unless set otherwise for operator-issued ones. Each caller IP also has 240
-per minute. Poll with a modest interval. Do not retry a wallet authorization
-except as described under [activation](#3-challenge-and-activation-endpoints),
-change the body under a message request ID, or treat `/health` as worker
-health.
+Each key's per-minute rate is `rate_per_min` from `/meta`. While partner
+billing is off that is 30 for self-service keys; with billing on it follows the
+account's plan ([Per-minute rates](#per-minute-rates)). Operator-issued keys
+have 120 unless set otherwise. Each caller IP also has 240 per minute (600
+while billing is on). Poll
+with a modest interval. Do not retry a wallet authorization except as
+described under [activation](#3-challenge-and-activation-endpoints), change
+the body under a message request ID, or treat `/health` as worker health.
 
 `GET /partner/v1` discovers the surface and `GET /partner/v1/health` checks gateway
-liveness without authentication. `GET /healthz` is also process liveness. Neither
-proves a valid grant, a running worker, configured chat or a reachable bridge.
+liveness without authentication; neither is counted against a plan. `GET /healthz`
+is also process liveness. None of them proves a valid grant, a running worker,
+configured chat or a reachable bridge.
 
 ## Contract changes
+
+Plans and billing, added after `2026-10-08` without a new version string
+(`/meta` still reports `api_version: "2026-10-08"`). None of this applies
+until Merrymen turns partner billing on; `/meta`'s `billing` says when it
+has:
+
+- Requests made with portal keys are counted against the developer account's
+  plan ([Plans and billing](#plans-and-billing)). Counted answers carry
+  `x-merrymen-quota-limit`, `-remaining`, `-reset` and `-enforced`, and `/meta`
+  carries them too.
+- `/meta` has a new `billing` object (`null` while billing is off and for
+  operator keys), and its `rate_per_min` is the rate the key actually gets.
+- Under `enforce`, a spent quota is HTTP 402 `quota_exhausted` with `plan`,
+  `limit`, `used`, `resets_at` and `upgrade_url` in the error and a
+  `Retry-After` header, and a portal key's per-minute rate is its account's
+  plan rate, shared by all the account's keys (a 429 then says
+  `for this account`).
+- Requests the platform failed (5xx, `upstream_*`, `conversation_busy`,
+  `enrollment_busy`) are not counted, so retrying them costs no quota.
+- New portal keys need a developer account while billing is on.
+- The per-caller-IP limit is 600 requests a minute, up from 240, while
+  billing is on; with billing off it stays 240.
 
 `2026-10-08`, from `2026-09-18`:
 
@@ -519,9 +792,10 @@ The site reaches the gateway's `/developer/v1` routes with
 which keys it may see, create or revoke. Portal and CLI keys live in the same
 registry on the gateway's volume.
 
-The key CLI remains for operator-issued keys: other scopes, a custom quota
+The key CLI remains for operator-issued keys: other scopes, a custom rate
 (`--rpm`), or a key no developer wallet owns. Such a key does not appear in the
-portal and is rotated and revoked with the CLI. Run it on the gateway's
+portal, is never counted against a plan, and is rotated and revoked with the
+CLI. Run it on the gateway's
 configured registry/volume with `MERRYMEN_GATEWAY_SECRET` available. Keys are
 printed once. Pass `--scopes` explicitly: without it the CLI issues
 `read:agents,read:theses,read:market`, which cannot create agents or chat. Use
@@ -560,6 +834,12 @@ needs an LLM credential for conversational replies beyond the factual fallback.
 See [hosted deployment](../docs/hosted-deploy.md#5c-partner-agent-api), which
 also covers the developer portal's settings and what the gateway logs when the
 bridge fails.
+
+Partner billing (plans, payment checks and metering) is configured on the
+gateway alone and is off by default. Its settings, the files it keeps on the
+volume, the operator CLI (`billing-cli.mjs`) and the steps for turning it on
+are in [the gateway README](README.md#partner-billing) and
+[hosted deployment](../docs/hosted-deploy.md#5d-partner-api-billing).
 
 This version does not provide public market/thesis resources, arbitrary trade
 execution, agent deletion, funding transfers or a partner-wide view of other

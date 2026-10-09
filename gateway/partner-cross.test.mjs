@@ -183,13 +183,19 @@ test("a refusal the server answers before the partner API still carries a reques
       child.stdout.on("data", (chunk) => { out += chunk; if (out.includes("listening")) resolve(); });
       child.on("exit", (code) => reject(new Error(`gateway exited ${code}: ${out}${errors}`)));
     });
-    for (const size of [256 * 1024 + 1, 1024 * 1024]) {
-      const r = await fetch(`http://127.0.0.1:${port}/partner/v1/agents`, { method: "POST", body: "x".repeat(size), headers: { authorization: "Bearer mmp_x" } });
-      assert.equal(r.status, 413, `${size} bytes`);
+    // Past the gateway's read cap, and past the runtime's own 32 KiB limit, which
+    // is refused here too, before the key is checked or anything is metered.
+    for (const [path, size] of [["/agents", 256 * 1024 + 1], ["/agents", 1024 * 1024], ["/agents/pa_0123456789abcdef/messages", 40 * 1024]]) {
+      const r = await fetch(`http://127.0.0.1:${port}/partner/v1${path}`, { method: "POST", body: "x".repeat(size), headers: { authorization: "Bearer mmp_x" } });
+      assert.equal(r.status, 413, `${size} bytes to ${path}`);
       const { error } = await r.json();
       assert.equal(error.code, "bad_request");
       assert.match(error.request_id, /^req_[0-9a-f]{12}$/);
     }
+    // An activation carries a grant and may be up to 256 KiB: 40 KiB reaches the
+    // key check (an unparsable key is a 404), not a size refusal.
+    const grant = await fetch(`http://127.0.0.1:${port}/partner/v1/agents/pa_0123456789abcdef/activate`, { method: "POST", body: "x".repeat(40 * 1024), headers: { authorization: "Bearer mmp_x" } });
+    assert.equal(grant.status, 404);
     // Started without a bridge secret, it says so at boot rather than at a partner's first 503.
     assert.match(errors, /MERRYMEN_PARTNER_BRIDGE_SECRET is unset/);
   } finally { child.kill(); }
