@@ -484,7 +484,9 @@ to someone in distress goes out shushed or not.
   sets nothing; a measurement that finds no collapse clears both kinds and
   keeps the room's word from setting one for 12 hours. The permit applies
   only to an answer or an ambient line that names the coin, replies under its
-  Fomo answer, or is a short pointer ("it", "rip") within ten minutes of it.
+  Fomo answer, or is a short pointer ("it", "this one", "rip"; never "lol"
+  or "damn") within ten minutes of it, and never to a line that names
+  another coin (a cashtag, an address, or a coin the room knows by name).
   The gate (`TgGateCtx.rug`) then lifts only "rugged" or "rug" said of no
   one, "it", "this one", "the chart" or the coin; everything else stays
   refused: a person who rugged, dumped, sold on anyone, stole, pulled the

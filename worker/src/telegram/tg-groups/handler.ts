@@ -2864,7 +2864,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   /**
    * THE PERMIT FOR THE LINE BEING ANSWERED, or null: only when the line names
    * the coin, replies under that coin's Fomo answer, or is a short pointer
-   * ("it", "this one", "rip") within ten minutes of it. Never for a coin it
+   * ("it", "this one", "rip"; never "lol" or "damn") within ten minutes of
+   * it, and never when the line names another coin. Never for a coin it
    * holds or bought and has not exited (how it did is private, rule 3), never
    * a coin named like someone in the room. `brag` is false while a brag is
    * among its last eight lines or went out in the last twenty minutes.
@@ -2875,17 +2876,32 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const t = clock();
     const text = trigger.text.normalize("NFKC").toLowerCase();
     const people = new Set([room.ownerName ?? "", ...room.people.map((x) => x.name)].map((n) => n.trim().toLowerCase()).filter(Boolean));
+    // ANOTHER COIN IN THE LINE ("pine $pons is pumping", "auton and pons lol"):
+    // a cashtag, a contract address, or a coin the room knows by name (its
+    // coin posts, its other permits, the topic's last Fomo coin). The permit
+    // is never handed to a line that may be about that coin (review, 2026-10-09).
+    const tags = extractCashtags(trigger.text).map((x) => x.toLowerCase());
+    const anyCa = extractCaHits(trigger.text).length > 0 || hasForeignMint(trigger.text);
+    const known = new Set<string>([
+      ...room.coins.map((c) => (typeof c.name === "string" ? c.name.trim().toLowerCase() : "")),
+      ...[...m.keys()],
+      recentFomoCoin(chatId, threadId)?.symbol.toLowerCase() ?? "",
+    ].filter((x) => x.length >= 2));
+    const wordIn = (w: string): boolean => new RegExp(`(?<![\\p{L}\\p{N}_])\\$?${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`, "u").test(text);
+    const otherCoinThan = (low: string): boolean => anyCa || tags.some((x) => x !== low) || [...known].some((k) => k !== low && wordIn(k));
     for (const p of m.values()) {
       if (p.untilMs <= t || p.source === "clear") continue;
       const low = p.coin.toLowerCase();
       if (people.has(low) || PERSON_COIN.test(low)) continue;
+      if (otherCoinThan(low)) continue;
       if (heldNames.some((h) => typeof h === "string" && h.trim().toLowerCase() === low)) continue;
       if (room.coins.some((c) => c.verdict === "bought" && !c.exitSaid && typeof c.name === "string" && c.name.trim().toLowerCase() === low)) continue;
-      const named = new RegExp(`(?<![\\p{L}\\p{N}_])\\$?${low.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`, "u").test(text);
+      const named = wordIn(low);
       const repliedTo = isMsgId(trigger.replyTo) ? fomoCoinLines.get(msgKey(chatId, trigger.replyTo)) : undefined;
       const under = !!repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= FOMO_THREAD_MS;
       const last = lastFomoCoin.get(deskKey(chatId, threadId));
-      const pointer = text.split(/\s+/u).filter(Boolean).length <= 6 && /\b(?:it|this|that|this one|that one|rip|oof|f|lmao|lol|damn|bruh|wow|yikes)\b/u.test(text)
+      // A pointer at the coin ("it", "this one", "rip"), never an interjection: "lol" or "damn" may be about anything.
+      const pointer = text.split(/\s+/u).filter(Boolean).length <= 6 && /\b(?:it|this|that|this one|that one|rip)\b/u.test(text)
         && ((!!repliedTo && repliedTo.symbol.toLowerCase() === low && t - repliedTo.at <= 10 * MIN) || (!!last && last.symbol.toLowerCase() === low && t - last.at <= 10 * MIN));
       if (!named && !under && !pointer) continue;
       const own = room.lines.filter((l) => l.own === true).slice(-8);

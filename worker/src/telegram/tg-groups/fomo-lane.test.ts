@@ -2040,6 +2040,44 @@ describe("rug banter: only with a collapse permit, never at a person, never a br
     assert.equal(last(), "auton? should've been one of ours 😤");
   });
 
+  it("a line about another coin never gets the permit: 'lol' is no pointer, and another coin named sets none (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    for (const [line, model] of [
+      ["pine pons is pumping lol", "pons? rugged lol"],
+      ["pine pons is pumping lol", "lol it rugged tho"],
+      ["pine damn pons", "pons? rugged lol"],
+      ["pine auton and $pons lol", "pons? rugged lol"],
+    ] as const) {
+      clock += MIN;
+      content = model;
+      await said(msg(line));
+      assert.notEqual(last(), model, line);
+    }
+    // A pointer at the coin itself still has its permit.
+    clock += MIN;
+    content = "yeah it rugged, sadly";
+    await said(msg("pine this one huh"));
+    assert.equal(last(), "yeah it rugged, sadly");
+    // Once the room knows PONS (its own Fomo answer), a line naming both coins gets neither permit.
+    fomo!.answer = (q) => (/pons/iu.test(q.text) ? { ...theses(), text: theses().text.replace(/AUTON/gu, "PONS"), coin: { symbol: "PONS", chain: "solana", aspect: "theses" } } : answers(true)(q));
+    clock += MIN;
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    clock += MIN;
+    content = "yep, that one rugged too";
+    await said(msg("pine auton and pons huh"));
+    assert.notEqual(last(), "yep, that one rugged too");
+    clock += MIN;
+    content = "auton? rugged for real";
+    await said(msg("pine auton for real"));
+    assert.equal(last(), "auton? rugged for real", "the coin alone keeps its permit");
+  });
+
   it("a coin it holds gets no permit: 'rugged' is refused even after a measured collapse", async () => {
     withModel();
     fomo!.answer = answers(true);
