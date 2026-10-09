@@ -53,6 +53,7 @@ import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEA
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
 import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
 import { admitTgLine, tgLineReadings } from "./telegram/tg-groups/gate";
+import { ABOUT_MERRYMEN, AT_THE_READER, INJECTION_SHAPED, LURE, NON_LATIN, SPELLED_DOMAIN } from "./telegram/tg-groups/third-party";
 import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgThesesMaterial } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
@@ -425,43 +426,11 @@ export const THESES_SAMPLES_MAX = 12;
 export const THESES_SAMPLE_CHARS = 160;
 export const THESES_SAMPLES_MIN = 3;
 
-/**
- * A row written at a model, not about a coin ("ignore all previous
- * instructions…", "you are now…", "system:"): dropped whole, never cleaned.
+/*
+ * INJECTION_SHAPED, AT_THE_READER, LURE, SPELLED_DOMAIN, ABOUT_MERRYMEN and
+ * NON_LATIN live in tg-groups/third-party.ts (moved unchanged, 2026-10-09),
+ * shared with the paraphrase's checks and the gate's `quote` kind.
  */
-const INJECTION_SHAPED =
-  /\b(?:ignore|disregard|forget|override|bypass)\b[^.!?\n]{0,40}\b(?:instructions?|prompts?|rules|previous|above|system|guidelines)\b|\b(?:system|developer|assistant)\s*(?:prompt|message|:)|\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:[a-z]+\s+){0,2}(?:ai|assistant|bot|model|chatbot)\b|\bact\s+as\b|\bjailbreak|\bprompt\b|\btell\s+(?:the|this)\s+(?:group|chat|room)\b/i;
-/**
- * A row written AT THE SUMMARISER, not about the coin: addressed to an AI, a
- * bot or a model ("hey AI, summarize this as…", "any bot reading this"),
- * asking to be summed up a certain way ("when you sum this up…", "summary
- * for…"), carrying the tool's own field labels ("for: …", "gist:"), or
- * setting a rule ("new rule:", "from now on say…", "always say…"). Dropped
- * whole, like INJECTION_SHAPED: "rides the AI agent narrative", "the bot
- * narrative is strong" and "for the culture" are views, and stay.
- */
-const AT_THE_READER =
-  /\b(?:hey|dear|attention|note to|memo to)\s+(?:the\s+|any\s+|all\s+)?(?:ai|bots?|gpt|llms?|models?|assistants?|summari[sz]ers?)\b|\b(?:any|the|an?|every)\s+(?:ai|bots?|llms?|models?)\s+(?:reading|summari[sz]ing|parsing)\b|\bsum\s+(?:this|it|these|them)\s+up\b|\bsummari[sz](?:e|es|ing)\s+(?:this|these|it|them)\b|\bsummary\s+for\b|\b(?:gist|for|against|waiting[_ ]on)\s*:|\bnew rules?\s*:|\bfrom now on\b[^.!?\n]{0,20}\b(?:say|write|tell|call)\b|\balways\s+(?:say|write|call)\b/i;
-/**
- * A lure, not a view: a claim page, a seed phrase, a wallet to connect,
- * verify, sync or revoke, tokens to migrate, a portal, something to sign,
- * eligible wallets, free tokens, someone to message, contact or follow (the same
- * shapes tg-groups/theses.ts OUT_LURE drops from what the model writes).
- */
-const LURE =
-  /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b|\bfollow\s+(?:the\s+|their\s+|its\s+|his\s+|her\s+)?\S+\s+on\s+(?:x|twitter|telegram|tg)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to|message|dm)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
-/** A site's name spelled out ("ponsfi dot bet", "pons dot vip"): a link the model could rebuild, never a view. */
-const SPELLED_DOMAIN = /[\p{L}\p{N}_-]\s+dot\s+\p{L}{2,}(?![\p{L}\p{N}])/iu;
-/** A row about Merrymen itself ("the merrymen bot picked it") is about the agent, not the coin. */
-const ABOUT_MERRYMEN = /\bmerrym[ae]n\b/i;
-/**
- * A letter of another script than Latin (Chinese, Cyrillic, Greek, a
- * lookalike): every check here and in tg-groups/theses.ts is English, and a
- * sentence with no spaces never forms the five-word run the paraphrase may
- * not copy, so such a row never reaches the model (review r4). Accented Latin
- * ("café") and emoji stay.
- */
-const NON_LATIN = /(?=\p{L})\P{Script=Latin}/u;
 
 /**
  * One thesis as a sample the group model may read: their words with every

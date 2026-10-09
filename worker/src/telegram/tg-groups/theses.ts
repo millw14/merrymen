@@ -46,6 +46,7 @@
  * with no call. Logs carry counts only.
  */
 import { admitTgLine, tgLineReadings } from "./gate";
+import { OUT_ACCUSE, OUT_HANDOUT, OUT_LURE, SECOND_PERSON } from "./third-party";
 import { callChoice, type TgChoiceSpec, type TgModel, type TgModelGate, type TgModelReserve } from "./model";
 import type { TgThesesMaterial } from "./types";
 
@@ -179,43 +180,6 @@ const ABOUT_ITSELF = /\b(?:instructions?|prompts?|system|assistant|ignore|disreg
 const SELF_REF =
   /\b(?:i|i'm|im|i've|i'd|we|we're|we've|we'd|our|ours|my|me|merrymen|merryman)\b|\b(?:this|the) desk\b|\bthis (?:group|chat|room)\b|\b(?:group|chat|room|channel)(?:'s)?\s+(?:owners?|admins?|bots?|agents?|mods?)\b|\b(?:owners?|admins?|bots?|agents?|mods?|desk)\s+(?:here|(?:of|in)\s+(?:the|this|your)\s+(?:group|chat|room|channel))\b/i;
 /**
- * A lure, not a view, said back to a room: an airdrop, a presale, free tokens,
- * a wallet to connect, verify, sync or revoke, tokens to migrate, a portal,
- * something to sign, eligible wallets, someone to message or contact. The
- * prompt asks for none; code makes sure (docs/tg-groups.md rule 3,
- * fomo/digest.ts never says an airdrop). The bare "verified", "allocation",
- * "migration" and "contact" stay ("the contract is verified", "worries about
- * the team allocation").
- */
-const OUT_LURE =
-  /\b(?:air\s*-?\s*drops?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|(?:dm|message)\s+(?:me|us|the\s+(?:dev|devs|admin|admins|team|mods?)))\b|\bfollow\s+(?:the\s+|their\s+|its\s+|his\s+|her\s+)?\S+\s+on\s+(?:x|twitter|telegram|tg)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
-/**
- * A phrase that speaks to the room ("verify your wallet or lose your
- * allocation", "you're still early"): a summary of other people's claims
- * never needs to address anyone, and a lure always does.
- */
-const SECOND_PERSON = /\b(?:you|your|yours|you're|youre|you've|you'll|y'all|ya'll|ur)\b|\bu\b(?!\.s\b)/i;
-/**
- * A CRIME LAID AT SOMEONE'S DOOR, said back to a room: theft, robbery,
- * looting, siphoning or draining the treasury, swindling, defrauding, a
- * grifter, fleecing, deceit, ripping off, faking (an audit) or botting (the
- * volume), an arrest, an indictment or jail, "is a con", a stolen or
- * pulled pool, walking off with the money, laundering, wash trading or
- * manipulation, lying, a cash grab, dumping on followers, a criminal, a
- * predator. Never the bare "lies" or "lying" ("the value lies in…", "lying
- * low"), "rob" inside a word ("a robust community"), the bare "loot" or "con"
- * ("one con is the thin liquidity"). Theses are claims about
- * identifiable people (a coin's dev, its team), and worries stay worries
- * (THESES_SYSTEM): the gate's accusation clause knows rug, scam, honeypot,
- * ponzi, fraud and a dev dumping, not these. Kept here, not in the shared
- * gate, so research and desk lines that pass today still pass. "Worries the
- * dev could pull liquidity", "liquidity is locked" and "the community took
- * over" are worries and facts, and stay; a rare false drop ("a theft-proof
- * vault") costs one phrase.
- */
-const OUT_ACCUSE =
-  /\b(?:st(?:eal|eals|ealing|ole|olen)|theft|thie(?:f|ves|ving)|crook(?:s|ed)?|launder\w*|criminals?|crimes?|con\s+(?:artists?|man|men)|convicted|felons?|pedo\w*|paedo\w*|predators?|embezzl\w*|(?:ran|walked|made|went|got)\s+(?:off|away)\s+with|(?:disappeared|vanished|fled)\s+with|(?:pulled|drained|removed|took|yanked)\s+(?:all\s+|out\s+)?(?:of\s+)?(?:the\s+|their\s+|its\s+|everyone'?s\s+)?(?:liquidity|lp|pool)|rob(?:s|bed|bing|bery|beries)?|loot(?:ed|ing)|siphon(?:s|ed|ing)?|swindl\w*|defraud\w*|grift\w*|fleec(?:e|ed|es|ing)|deceiv\w*|ripp(?:ed|ing)\s+(?:\w+\s+)?off|rip-?offs?|drain(?:s|ed|ing)?\s+(?:the\s+|their\s+|its\s+)?(?:treasury|funds|wallets?|holders)|arrest\w*|indict\w*|jail(?:ed)?|fak(?:ed|ing)\s+(?!out\b)|bott(?:ed|ing)\s+(?:the\s+)?volume|(?:is|was)\s+a\s+(?:total\s+|complete\s+|known\s+)?con\b|manipulat\w*|wash[\s-]?trad\w*|insider\s+trading|cash[\s-]?grab|lied|liars?|(?:dump(?:ed|ing|s)?|sold|selling)\s+on\s+(?:his|her|their|the)\s+(?:followers|holders|community|buyers|fans))\b/i;
-/**
  * TRADE ADVICE IN THE AGENT'S VOICE: a trade verb opening the phrase or one
  * of its clauses ("get some before the listing", "still early, join in",
  * "hold through the unlock", "never sell before the listing", "go long",
@@ -240,16 +204,11 @@ const OUT_ADVICE = new RegExp(
  */
 const WAIT_CLAIM =
   /\bclaim(?:s|able|ing)?\b|\bsnapshots?\b|\bgive\s*-?\s*aways?\b|\bdistribut\w*|\brewards?\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
-/**
- * The airdrop story without the word, in ANY slot (OUT_LURE has the word):
- * "holders get a giveaway soon", "rewards for holders", "the holder
- * snapshot", "the team gives away tokens", a handout, a free mint, a holder
- * bonus. A coin's "giveaway meme" stays, and so does the bare
- * "distribution" ("worries about the token distribution" is supply
- * concentration); a claim stays a waiting-on-only drop (WAIT_CLAIM).
+/*
+ * OUT_LURE, SECOND_PERSON, OUT_ACCUSE and OUT_HANDOUT live in third-party.ts
+ * (moved unchanged, 2026-10-09): the quotes a room may hear on an explicit ask
+ * (tg-fomo-port.ts thesesQuotes, the gate's `quote` kind) read the same clauses.
  */
-const OUT_HANDOUT =
-  /\bsnapshots?\b|\bgive\s*-?\s*aways?\b(?!\s+memes?\b)|\b(?:giv(?:e|es|ing|en)|gave)\s+(?:\w+\s+){0,3}?away\b(?!\s+memes?\b)|\bhand(?:s|ed|ing)?\s*-?\s*outs?\b|\bfree\s+mints?\b|\bholder\s+bonus(?:es)?\b|\bstimmy\b|\brewards?\b|\breward\s+distribution\b|\bdistribut\w*\s+(?:to|among|for)\s+holders\b|\bsend(?:s|ing)?\s+(?:out\s+)?tokens?\b|\btokens?\s+(?:sent|drop(?:s|ped)?)\b|\bdrops?\s+to\s+holders\b/i;
 const WAITING_LABEL = "Waiting on: ";
 /**
  * Anything but plain printable ASCII, a curly apostrophe or a dash: the

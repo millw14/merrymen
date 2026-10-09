@@ -45,6 +45,7 @@ import { containsSecret } from "../agent";
 import { stripThinkingBlock } from "../interpreter";
 import { REPEAT_LIMIT, similarity } from "../../social-post";
 import { fnv1a } from "../../memory/tokens";
+import { U } from "./third-party";
 
 /**
  * What a line is for. It decides which clauses beyond the common ones apply:
@@ -106,16 +107,11 @@ const RAW_CEILING = TG_LINE_MAX * 16;
 const refuse = (reason: string): TgVerdict => ({ ok: false, reason });
 
 /**
- * A WORD BOUNDARY THAT KNOWS WHAT A LETTER IS. JavaScript's \b is ASCII-only
- * even under the u flag, so beside an accented letter it sees a boundary that
- * is not there: "slïppage" held a stop-loss "sl" and "tpé" a take-profit
- * "tp". Every word-list clause is compiled through U, which puts this in
- * place of each \b and adds the u flag.
+ * A WORD BOUNDARY THAT KNOWS WHAT A LETTER IS (third-party.ts U, moved there
+ * so that leaf imports nothing from here): every word-list clause is compiled
+ * through U, which puts a Unicode-aware edge in place of each \b.
  */
-const WORD_EDGE = "(?:(?<=[\\p{L}\\p{N}_])(?![\\p{L}\\p{N}_])|(?<![\\p{L}\\p{N}_])(?=[\\p{L}\\p{N}_]))";
-function U(re: RegExp): RegExp {
-  return new RegExp(re.source.replace(/\\b/g, WORD_EDGE), re.flags.includes("u") ? re.flags : `${re.flags}u`);
-}
+export { U };
 
 const KINDS: ReadonlySet<string> = new Set(["banter", "answer", "roast", "kind", "coin", "buy", "fade", "fixed", "research"]);
 /** Lines about a coin: not one digit or number word, in any sense. */
