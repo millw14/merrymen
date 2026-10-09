@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { EXPLORER } from "../../lib/chain";
 import {
   TOKEN, amountToSend, balanceOfCalldata, checkWallet, endMessage, formatDate, formatDateTime, formatTokens, group, historyLabel, normalizeAccount, renewalBy, reversedToCheck,
@@ -248,7 +248,20 @@ function PlanChooser({ view, plans, busy, run, onAccount, reload }: { view: Acco
   const [choice, setChoice] = useState(view.plan.selected);
   const [preview, setPreview] = useState<{ tier: string; preview: PlanPreview } | null>(null);
   const plan = plans.plans.find(p => p.id === choice);
-  return <div className="dev-plan-choice">
+  // The button that opens the preview is replaced by it, and the preview by the button: each swap would drop keyboard
+  // focus to the page, and the sentence the developer is agreeing to would never be read out. Focus follows instead.
+  const box = useRef<HTMLDivElement>(null), region = useRef<HTMLDivElement>(null), review = useRef<HTMLButtonElement>(null);
+  const returning = useRef(false);
+  const sentence = useId();
+  useEffect(() => {
+    if (preview) { region.current?.focus(); return; }
+    if (!returning.current) return;
+    returning.current = false;
+    // Back to "Review change", or, when a confirmed choice has disabled it, to the chooser itself.
+    (review.current && !review.current.disabled ? review.current : box.current)?.focus();
+  }, [preview]);
+  const close = () => { returning.current = true; setPreview(null); };
+  return <div className="dev-plan-choice" ref={box} tabIndex={-1}>
     <fieldset disabled={!!busy}><legend>Choose a plan</legend>
       {!paymentsReady(plans) && <p className="dev-billing-note">Payments are not open yet. You can choose a plan now: a paid plan starts once it is paid, or from credit you already have.</p>}
       <div className="dev-plan-options">{plans.plans.map(p => <label key={p.id} className={choice === p.id ? "chosen" : ""}>
@@ -256,19 +269,19 @@ function PlanChooser({ view, plans, busy, run, onAccount, reload }: { view: Acco
         <strong>{p.name}</strong><span>{priceLabel(p)}</span><small>{group(p.requests)} requests · {p.rpm}/min{p.id === view.plan.id ? " · current" : p.id === view.plan.selected ? " · selected" : ""}</small>
       </label>)}</div>
     </fieldset>
-    {!preview ? <button className="dev-secondary" disabled={!!busy || !plan || choice === view.plan.selected} onClick={() => run("plan-preview", async () => {
+    {!preview ? <button ref={review} className="dev-secondary" disabled={!!busy || !plan || choice === view.plan.selected} onClick={() => run("plan-preview", async () => {
       const answer = normalizePreview(await request("plan", { tier: choice }));
       if (!answer) throw new Error("This plan change could not be previewed. Try again shortly.");
       setPreview({ tier: choice, preview: answer });
     })}>{busy === "plan-preview" ? "Checking…" : "Review change"}</button>
-      : plan && <div className="dev-plan-preview" role="region" aria-label="Plan change preview">
-        <p>{previewSentence(preview.preview, plan, view.plan.name, plans.plans.find(p => p.id === view.plan.selected)?.name,
+      : plan && <div ref={region} tabIndex={-1} className="dev-plan-preview" role="region" aria-label="Plan change preview" aria-describedby={sentence}>
+        <p id={sentence}>{previewSentence(preview.preview, plan, view.plan.name, plans.plans.find(p => p.id === view.plan.selected)?.name,
           { plans: plans.plans, currentId: view.plan.id, credit_raw: view.credit_raw, paymentsOpen: paymentsReady(plans) })}</p>
         <div><button className="dev-primary" disabled={!!busy} onClick={() => run("plan-confirm", async () => {
           const next = normalizeAccount(await request("plan", { tier: preview.tier, confirm: true }));
-          setPreview(null);
+          close();
           if (next) onAccount(next); else await reload();
-        })}>{busy === "plan-confirm" ? "Confirming…" : `Confirm ${plan.name}`}</button><button className="dev-textlink" disabled={!!busy} onClick={() => setPreview(null)}>Cancel</button></div>
+        })}>{busy === "plan-confirm" ? "Confirming…" : `Confirm ${plan.name}`}</button><button className="dev-textlink" disabled={!!busy} onClick={close}>Cancel</button></div>
       </div>}
   </div>;
 }
@@ -333,6 +346,11 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, step,
     provider?.on?.("accountsChanged", changed); provider?.on?.("chainChanged", changed);
     return () => { provider?.removeListener?.("accountsChanged", changed); provider?.removeListener?.("chainChanged", changed); };
   }, [recheck]);
+  // "Pay ahead" and "Not now" replace the panel's contents, the button pressed with them: focus moves to the new
+  // heading rather than dropping to the page.
+  const heading = useRef<HTMLHeadingElement>(null), swapped = useRef(false);
+  useEffect(() => { if (swapped.current) { swapped.current = false; heading.current?.focus(); } }, [aheadFor]);
+  const swap = (to: string | null) => { swapped.current = true; setAheadFor(to); };
   const copy = async (what: string, text: string) => { try { await navigator.clipboard.writeText(text); setCopied(what); setTimeout(() => setCopied(""), 1500); } catch { /* Selectable inline. */ } };
   const tokens = formatTokens(amount, { decimals: 0 });
   const paste = <form className="dev-pay-paste" onSubmit={e => { e.preventDefault(); const hash = txHash(pasted); if (hash) void step("paste", async () => { onPasted(hash); setPasted(""); }); }}>
@@ -362,16 +380,16 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, step,
   // next period's price: drawn as a payment, it is a second one of the same size under the first one's receipt. Paying
   // ahead stays possible, as a step of its own.
   if (renewBy && aheadFor !== renewBy) return <section className="dev-pay" aria-labelledby="dev-pay-title">
-    <h3 id="dev-pay-title">Renewal on {formatDate(renewBy)}: {tokens} MERRYMEN</h3>
+    <h3 id="dev-pay-title" ref={heading} tabIndex={-1}>Renewal on {formatDate(renewBy)}: {tokens} MERRYMEN</h3>
     {later}{shortfall}
-    <div className="dev-pay-wallet"><button className="dev-secondary" disabled={!!busy} onClick={() => setAheadFor(renewBy)}>Pay ahead for the next period</button></div>
+    <div className="dev-pay-wallet"><button className="dev-secondary" disabled={!!busy} onClick={() => swap(renewBy)}>Pay ahead for the next period</button></div>
     {refused}{paste}
   </section>;
   return <section className="dev-pay" aria-labelledby="dev-pay-title">
     {renewBy
-      ? <><h3 id="dev-pay-title">Renew for the next period: {tokens} MERRYMEN</h3>
-        {later}<div className="dev-pay-wallet"><button className="dev-textlink" disabled={!!busy} onClick={() => setAheadFor(null)}>Not now</button></div></>
-      : <h3 id="dev-pay-title">Pay {tokens} MERRYMEN</h3>}
+      ? <><h3 id="dev-pay-title" ref={heading} tabIndex={-1}>Renew for the next period: {tokens} MERRYMEN</h3>
+        {later}<div className="dev-pay-wallet"><button className="dev-textlink" disabled={!!busy} onClick={() => swap(null)}>Not now</button></div></>
+      : <h3 id="dev-pay-title" ref={heading} tabIndex={-1}>Pay {tokens} MERRYMEN</h3>}
     {shortfall}
     <dl className="dev-pay-details">
       <div><dt>Amount</dt><dd><code>{tokens} MERRYMEN</code><button type="button" aria-label="Copy amount" onClick={() => copy("amount", (amount / 10n ** 18n).toString())}>{copied === "amount" ? "Copied ✓" : "Copy"}</button></dd></div>
@@ -380,6 +398,7 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, step,
       <div><dt>Network</dt><dd>Robinhood Chain (chain ID 4663) <small>(the transfer also needs a little ETH there for the network fee)</small></dd></div>
       <div><dt>From</dt><dd><code>{wallet}</code> <small>(the wallet you signed in with)</small></dd></div>
     </dl>
+    <p className="sr-only" role="status" aria-live="polite">{copied === "amount" ? "Amount copied" : copied === "treasury" ? "Payments wallet address copied" : ""}</p>
     <p className="dev-warn">Send only from {short(wallet)}. A transfer from any other wallet, an exchange, a smart account or a swap cannot be credited to this account, and payments are not returned.</p>
     <WalletPay check={check} amount={amount} busy={busy} balance={balance}
       onConnect={() => step("connect-pay", async () => { const provider = ethereum(); if (provider) { try { await provider.request({ method: "eth_requestAccounts" }); } catch (e) { throw new Error(walletError(e)); } } await recheck(); })}

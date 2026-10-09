@@ -68,7 +68,7 @@ test('the payment panel asks for the amount due rounded up, from the signed-in w
   assert.match(page, /Already sent\? Paste the transaction hash\./);
   assert.match(page, /Paying moves MERRYMEN out of your wallet\. Merry Circle tiers and hosted energy follow the balance you hold\./);
   // Named for assistive technology: the panel is a region with its heading, and each Copy says what it copies.
-  assert.match(page, /<section class="dev-pay" aria-labelledby="dev-pay-title"><h3 id="dev-pay-title">Pay 40,000 MERRYMEN<\/h3>/);
+  assert.match(page, /<section class="dev-pay" aria-labelledby="dev-pay-title"><h3 id="dev-pay-title"[^>]*>Pay 40,000 MERRYMEN<\/h3>/);
   assert.match(page, /aria-label="Copy amount"/); assert.match(page, /aria-label="Copy Merrymen payments wallet address"/);
   // The usage meter, per-key use and history.
   assert.match(page, /120 of 1,000 requests/); assert.match(page, /Prism backend/); assert.match(page, /aria-valuenow="120"/);
@@ -129,7 +129,7 @@ test('no payment panel without a live treasury, and nothing at all to pay when b
   // Activation is due now, as is a renewal once the plan has lapsed to Free.
   for (const due_for of ['activation', 'renewal', undefined]) {
     const now = panel({ kind: 'ready', view: view({ credit_raw: '0', due_raw: (100_000n * UNIT).toString(), due_for }) });
-    assert.match(now, /Due: 100,000 MERRYMEN/, String(due_for)); assert.match(now, /<h3 id="dev-pay-title">Pay 100,000 MERRYMEN<\/h3>/, String(due_for));
+    assert.match(now, /Due: 100,000 MERRYMEN/, String(due_for)); assert.match(now, /<h3 id="dev-pay-title"[^>]*>Pay 100,000 MERRYMEN<\/h3>/, String(due_for));
   }
   // Nothing due, nothing to pay.
   assert.doesNotMatch(panel({ kind: 'ready', view: view({ due_raw: null }) }), /Pay |Paste the transaction hash/);

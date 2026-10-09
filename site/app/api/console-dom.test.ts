@@ -597,6 +597,45 @@ test('Review change only previews; only Confirm sends confirm:true', async () =>
   await page.unmount();
 });
 
+test('keyboard focus follows the plan preview and the pay-ahead swap, and a copy is announced', async () => {
+  routes['GET account'] = () => ({ status: 200, body: accountJson({ plan: { id: 'free', name: 'Free', starts_at: null, ends_at: null, selected: 'free', renews_on_next_request: false }, due_raw: null, due_tokens: null }) });
+  routes['POST plan'] = body => body?.confirm === true
+    ? { status: 200, body: accountJson() }
+    : { status: 200, body: { preview: true, tier: body?.tier, effect: 'waiting_for_payment', charge_now_raw: '0', due_raw: DUE.toString(), due_tokens: '100000', starts_at: null, ends_at: null } };
+  const page = await mount();
+  const focused = () => { const a = document.activeElement; return a ? `${a.tagName.toLowerCase()}${a.className ? `.${a.className}` : ''}:${text(a).slice(0, 40)}` : 'none'; };
+  const press = async (button: HTMLButtonElement | undefined) => { assert.ok(button !== undefined, 'no such button'); button.focus(); await click(button); };
+  await click([...page.container.querySelectorAll('input[type="radio"]')].find(r => (r as HTMLInputElement).value === 'crumbs'));
+  await press(buttonFor(page.container, /^Review change$/));
+  assert.match(focused(), /^div\.dev-plan-preview:/, 'the preview takes focus, so the sentence agreed to is read');
+  const region = page.container.querySelector('.dev-plan-preview');
+  const described = region?.getAttribute('aria-describedby');
+  assert.equal(!!described && /Crumbs starts as soon as 100,000 MERRYMEN arrives/.test(text(document.getElementById(described)!)), true);
+  await press(buttonFor(page.container, /^Cancel$/));
+  assert.match(focused(), /^button\.dev-secondary:Review change/, 'Cancel gives focus back to Review change');
+  await press(buttonFor(page.container, /^Review change$/));
+  await press(buttonFor(page.container, /^Confirm Crumbs$/));
+  assert.doesNotMatch(focused(), /^body/, 'Confirm does not drop focus to the page');
+  await page.unmount();
+
+  // The renewal folded behind "Pay ahead": the swap moves focus to the panel's heading, both ways.
+  routes['GET account'] = () => ({ status: 200, body: accountJson({ plan: RUNNING, due_for: 'renewal' }) });
+  const panel = await mount();
+  await press(buttonFor(panel.container, /^Pay ahead for the next period$/));
+  assert.match(focused(), /^h3:Renew for the next pe/);
+  await press(buttonFor(panel.container, /^Not now$/));
+  assert.match(focused(), /^h3:Renewal on 7 Nov 2026/);
+  // A copy says so to a screen reader, not only by changing the button's text.
+  await press(buttonFor(panel.container, /^Pay ahead for the next period$/));
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
+  await press([...panel.container.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === 'Copy amount') as HTMLButtonElement);
+  const status = [...panel.container.querySelectorAll('.dev-pay [role="status"]')].map(text).join('|');
+  assert.match(status, /Amount copied/);
+  await fastForward(() => held.length === 0, 3);
+  assert.doesNotMatch([...panel.container.querySelectorAll('.dev-pay [role="status"]')].map(text).join('|'), /copied/, 'and clears with the button');
+  await panel.unmount();
+});
+
 test('key creation waits for an account, and a 409 account_required closes it too', async () => {
   routes['GET account'] = () => ({ status: 404, body: { error: { code: 'account_missing', message: 'Create your developer account first.' } } });
   const missing = await mount();
