@@ -4584,7 +4584,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const lineChain = chainIn(text);
           const onFomo = /\bon fomo\b/iu.test(text) || (lineChain !== undefined && lineChain !== "robinhood");
           const named = factsAsk.coin;
-          if (context && (!named || named === context.symbol.toUpperCase())) {
+          // The remembered coin only when the line names no other chain: "auton on base" is another AUTON.
+          if (context && (!named || named === context.symbol.toUpperCase()) && (!lineChain || !context.chain || lineChain === context.chain)) {
             fomoFacts = { kind: "coin", symbol: context.symbol, ...(context.chain ? { chain: context.chain } : {}), aspect: "facts", ask: factsAsk.ask };
           } else if (named && onFomo) {
             fomoFacts = { kind: "coin", symbol: named, ...(lineChain ? { chain: lineChain } : {}), aspect: "facts", ask: factsAsk.ask };

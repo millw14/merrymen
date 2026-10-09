@@ -1955,6 +1955,18 @@ describe("a coin's facts, asked of the room's Fomo coin (WP8, Milla 2026-10-09)"
     assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
   });
 
+  it("'what happened to auton on base?' after the Solana AUTON is asked about Base, never answered with the Solana coin (review, 2026-10-09)", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to auton on base?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "base", aspect: "facts", ask: "what" });
+    clock += MIN;
+    await said(msg("pine what happened to auton on solana?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+  });
+
   it("a facts answer that bought nothing gives the room's research slot back", async () => {
     fomo!.answer = facts;
     make();
