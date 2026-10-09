@@ -813,6 +813,12 @@ flow it has today.
    already create accounts, and the console asks for one before a new key.
    Confirm `MERRYMEN_DATA_DIR=/data` is a service variable and set
    `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.
+   **Deploy the site (Vercel) before step 2.** The gateway deploys on its own,
+   and once billing is on it refuses a new key without an account (409
+   `account_required`); a merrymen.dev build from before accounts cannot
+   create one, so its developers could not mint keys. Check that, signed in,
+   `GET https://merrymen.dev/api/developer/account` answers 404
+   `account_missing` (or the account), not a bare `Not found`.
 2. **Observe** (`MERRYMEN_BILLING=observe`, no treasury yet). Boot logs, on
    stderr, `[gateway] partner billing: observe, metered, no quota refused, each
    key at its own rate or its plan's if higher; payments UNAVAILABLE`, which is

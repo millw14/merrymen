@@ -250,8 +250,12 @@ What each mode does, and what it falls back to:
 - **observe**: accounts, plans, payments and metering all work, and partners
   get the quota headers and `/meta`'s `billing`, but no quota is refused, and
   each key keeps its own per-minute bucket at its own rate or its plan's,
-  whichever is higher. New keys need an account (409 `account_required`).
-  Without a treasury, payments answer 503 `payments_unavailable`.
+  whichever is higher. New keys need an account (409 `account_required`), so
+  turn observe on only once the merrymen.dev build that creates accounts is
+  live: `GET https://merrymen.dev/api/developer/account`, signed in, must
+  answer 404 `account_missing` (or the account), not a bare `Not found`. An
+  older site has no way to create one, and its developers could not mint a
+  key. Without a treasury, payments answer 503 `payments_unavailable`.
 - **enforce**: a spent quota answers 402 `quota_exhausted`, and an account's
   keys share one per-minute bucket at its plan's rate (Free: 30 a minute for
   all of a developer's keys together). Without a treasury and start block it
