@@ -30,7 +30,7 @@ async function fixture({ minConfirmations = 3, minAgeSec = 60, chainId = TOKEN.c
   cleanup.push(rpc.close, () => rm(dir, { recursive: true, force: true }));
   const clock = { t: START };
   const logs = [];
-  const boot = (extra = {}) => createBilling({ dataDir: dir, mode: "observe", treasury: TREASURY, previousTreasuries: [OLD_TREASURY],
+  const boot = (extra = {}) => createBilling({ dataDir: dir, dataDirPersistent: true, mode: "observe", treasury: TREASURY, previousTreasuries: [OLD_TREASURY],
     // The transport times out with the read, as in production, so an
     // abandoned request does not linger for viem to dedupe the next one onto.
     startBlock, minConfirmations, minAgeSec, readTimeoutMs, publicClient: createPaymentsClient(rpc.url, { timeoutMs: readTimeoutMs }), now: () => clock.t,

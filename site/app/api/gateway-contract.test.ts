@@ -50,7 +50,7 @@ test('the console reads the gateway\'s billing answers as a developer must see t
     try { return await loadAccount(); } finally { globalThis.fetch = oldFetch; }
   };
   const read = (answer: Answer) => paymentOutcome(answer.status, answer.json);
-  const options = { previousTreasuries: [], startBlock: 100, minConfirmations: 3, minAgeSec: 60, now: () => clock.t, log: (l: string) => logs.push(l), timers: false, keyRegistry: async () => new Map() };
+  const options = { dataDirPersistent: true, previousTreasuries: [], startBlock: 100, minConfirmations: 3, minAgeSec: 60, now: () => clock.t, log: (l: string) => logs.push(l), timers: false, keyRegistry: async () => new Map() };
   const billing = await createBilling({ ...options, dataDir: dirs[0], mode: 'observe', treasury: TREASURY, publicClient: createPaymentsClient(rpc.url, { timeoutMs: 5_000 }) });
   const off = await createBilling({ ...options, dataDir: dirs[1], mode: 'off', treasury: TREASURY, publicClient: null });
   try {

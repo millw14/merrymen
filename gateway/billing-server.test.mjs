@@ -17,7 +17,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -69,7 +69,8 @@ async function startGateway(env) {
   const port = await freePort();
   const child = spawn(process.execPath, ["--max-old-space-size=256", fileURLToPath(new URL("./server.mjs", import.meta.url))], { stdio: ["ignore", "pipe", "pipe"],
     env: { PATH: process.env.PATH, PORT: String(port), MERRYMEN_GATEWAY_UPSTREAM_KEY: "unused", MERRYMEN_GATEWAY_SECRET: SECRET,
-      MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9", ...env } });
+      // A temp directory stands in for the volume: on a CI runner it is on the root disk.
+      MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9", MERRYMEN_DATA_DIR_PERSISTENT: "1", ...env } });
   children.add(child);
   let out = "", err = "";
   const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
@@ -392,7 +393,9 @@ test("every degraded billing mode is said at boot", async () => {
     [{ MERRYMEN_DATA_DIR: dir, MERRYMEN_BILLING: "enforce", MERRYMEN_PAYMENTS_TREASURY: TREASURY }, { err: /needs MERRYMEN_PAYMENTS_START_BLOCK[\s\S]*partner billing: observe/ }],
     [{ MERRYMEN_DATA_DIR: dir, MERRYMEN_BILLING: "enforce", MERRYMEN_PAYMENTS_TREASURY: TREASURY, MERRYMEN_PAYMENTS_START_BLOCK: "1", MERRYMEN_PAYMENTS_RPC: wrongChain.url },
       { err: /PAYMENTS UNAVAILABLE: the payments RPC answers chain 1[\s\S]*partner billing: enforce, quotas enforced; payments UNAVAILABLE/ }],
-    [{ MERRYMEN_DATA_DIR: path.join(blocker, "data"), MERRYMEN_BILLING: "observe" }, { err: /is not writable.*billing is off[\s\S]*partner billing: off/ }],
+    [{ MERRYMEN_DATA_DIR: path.join(blocker, "data"), MERRYMEN_BILLING: "observe" }, { err: /cannot be read \(ENOTDIR\).*billing is off[\s\S]*partner billing: off/ }],
+    // MERRYMEN_DATA_DIR=/data copied onto a service whose volume is not attached: nothing is created there.
+    [{ MERRYMEN_DATA_DIR: path.join(dir, "no-volume"), MERRYMEN_BILLING: "observe" }, { err: /no-volume does not exist .*billing is off[\s\S]*partner billing: off/ }],
   ];
   for (const [env, want] of cases) {
     const gw = await startGateway(env);
@@ -400,4 +403,5 @@ test("every degraded billing mode is said at boot", async () => {
     if (want.err) assert.match(gw.stderr(), want.err, JSON.stringify(env));
     await gw.stop();
   }
+  await assert.rejects(stat(path.join(dir, "no-volume")), { code: "ENOENT" }, "a missing data directory is never created at boot");
 });

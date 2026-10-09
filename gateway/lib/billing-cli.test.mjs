@@ -26,7 +26,7 @@ after(() => Promise.all(cleanup.map((fn) => fn())));
 async function setup(env = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "merrymen-billing-cli-"));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
-  const billing = await createBilling({ dataDir: dir, mode: "observe", timers: false, log: () => {}, keyRegistry: async () => new Map(), ...env.billing });
+  const billing = await createBilling({ dataDir: dir, dataDirPersistent: true, mode: "observe", timers: false, log: () => {}, keyRegistry: async () => new Map(), ...env.billing });
   const run = async (...args) => {
     try {
       const { stdout, stderr } = await promisify(execFile)(process.execPath, [CLI, ...args],

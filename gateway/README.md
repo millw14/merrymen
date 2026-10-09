@@ -228,7 +228,8 @@ moves to us). §5d lists every conflict.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MERRYMEN_BILLING` | `off` | `off`, `observe` or `enforce`. Any other value is off, and is logged. |
-| `MERRYMEN_DATA_DIR` | `/data` | Billing (observe or enforce) needs it **set explicitly** to a persistent, writable volume. Left to the default, billing is off. |
+| `MERRYMEN_DATA_DIR` | `/data` | Billing (observe or enforce) needs it **set explicitly** to a persistent, writable volume that is already there. Left to the default, missing, or on the container's own disk, billing is off. |
+| `MERRYMEN_DATA_DIR_PERSISTENT` | unset | `1` lets billing use a `MERRYMEN_DATA_DIR` on the same disk as `/` (a VM whose own disk survives a redeploy, or local development). Never set it on a container host: there that disk is wiped on every deploy. |
 | `MERRYMEN_PAYMENTS_TREASURY` | unset | The address payments go to. A **new address used for API billing and nothing else**: any $MERRYMEN transfer to it from a wallet that has, or later creates, a developer account, at or after the start block, can be credited to that account. The gateway never needs its key, so a multisig or cold wallet is fine. Not the zero address or the token contract (either is ignored, and logged). Unset: payments answer 503 `payments_unavailable` and `GET /developer/v1/plans` shows `treasury: null`. |
 | `MERRYMEN_PAYMENTS_START_BLOCK` | unset | Required with a treasury; without it (or with something that is not a block number) the treasury is ignored. Transfers in earlier blocks are never credited, so nothing that reached the address before payments opened can be claimed. Use the chain's current block when you first set the treasury. |
 | `MERRYMEN_PAYMENTS_PREVIOUS_TREASURIES` | empty | Comma-separated addresses still accepted as recipients after a rotation. Unusable entries are ignored (logged); duplicates and the current treasury are dropped; the list is ignored without a treasury. Each payment records the address it matched. |
@@ -262,8 +263,13 @@ What each mode does, and what it falls back to:
 `billing.jsonl` is the only record of who paid. On a disk a deploy wipes (the
 default `/data` with no volume, `render.yaml`'s service), every transfer ever
 credited could be credited again. So observe and enforce need
-`MERRYMEN_DATA_DIR` set explicitly and writable (boot writes a probe file);
-otherwise billing is off and boot says why. Back the file up with the volume.
+`MERRYMEN_DATA_DIR` set explicitly, to a directory that already exists (billing
+never creates it), on another filesystem than `/` (a mounted volume, or a
+directory inside one) unless `MERRYMEN_DATA_DIR_PERSISTENT=1`, and writable
+(boot writes a probe file); otherwise billing is off and boot says why. So
+`MERRYMEN_DATA_DIR=/data` copied onto a service whose volume is detached, or
+onto a host with no disk, leaves billing off rather than writing a ledger the
+next deploy wipes. Back the file up with the volume.
 
 Run billing on **one instance only**: never replicas, and never a host without
 a persistent disk. Two processes on one ledger keep two indexes and would each

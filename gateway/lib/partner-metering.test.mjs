@@ -45,7 +45,7 @@ async function fixture({ mode = "enforce", plans = SMALL, keys = [key("k1")], fo
   const clock = { t: START };
   const logs = [];
   const registry = new Map(keys.map((k) => [k.keyId, k]));
-  const boot = () => createBilling({ dataDir: dir, mode, plans, now: () => clock.t, log: (l) => logs.push(l), timers: false, keyRegistry: async () => registry });
+  const boot = () => createBilling({ dataDir: dir, dataDirPersistent: true, mode, plans, now: () => clock.t, log: (l) => logs.push(l), timers: false, keyRegistry: async () => registry });
   const f = { dir, clock, logs, store: countingStore(), forwards: [], file: path.join(dir, "billing.jsonl") };
   f.forward = forward;
   const partners = { verify: async (raw) => { const k = registry.get(raw.replace(/^tok_/, "")); return k ? { ok: true, key: { ...k } } : { ok: false, status: 401, code: "unauthorized" }; },

@@ -26,7 +26,7 @@ const gatewaySecret = "gateway-test-secret-with-at-least-32-bytes";
 async function billingFor({ mode = "off", now = Date.now, ...extra } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "merrymen-developer-billing-"));
   dirs.push(dataDir);
-  return { dataDir, billing: await createBilling({ dataDir, mode, now, log: () => {}, timers: false, ...extra }) };
+  return { dataDir, billing: await createBilling({ dataDir, dataDirPersistent: true, mode, now, log: () => {}, timers: false, ...extra }) };
 }
 async function fixture({ store = createStore(), mode, billingOptions = {}, ...options } = {}) {
   let time = Date.now();

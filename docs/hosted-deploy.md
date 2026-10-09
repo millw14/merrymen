@@ -622,8 +622,11 @@ the append-only ledger of developer accounts, payments and charges, and
 `/data/usage.json`, the partner request counts. The ledger is the only record
 of who paid: lose it and every transfer ever credited can be credited again.
 Billing stays off unless `MERRYMEN_DATA_DIR` is set as a service variable (the
-`/data` default alone does not count), and it must never run on a second
-replica or on a host without a persistent disk.
+`/data` default alone does not count) to a directory that exists on a mounted
+volume: with the volume detached, `/data` is missing or on the container's own
+disk, and billing stays off and says so at boot rather than keep a ledger the
+next deploy wipes. It must never run on a second replica or on a host without
+a persistent disk.
 
 Fallback if a repo build is ever wrong: `railway service source disconnect
 --service merrymen-gateway`, then `cd gateway && railway up`. Rollback through

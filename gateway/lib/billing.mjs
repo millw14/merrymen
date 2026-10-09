@@ -118,7 +118,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createPublicClient, defineChain, http } from "viem";
 import { FileBusy, loadRegistry, repairTail, withAppendLock } from "./partners.mjs";
@@ -189,6 +189,9 @@ export function parseBillingConfig(env = process.env) {
 
   const dataDirExplicit = String(env.MERRYMEN_DATA_DIR ?? "").trim() !== "";
   const dataDir = dataDirExplicit ? env.MERRYMEN_DATA_DIR.trim() : "/data";
+  // The data directory must be a mounted volume (createBilling checks), unless
+  // the operator says the disk under it survives a redeploy on its own.
+  const dataDirPersistent = String(env.MERRYMEN_DATA_DIR_PERSISTENT ?? "").trim() === "1";
 
   const address = (raw, name) => {
     const v = String(raw ?? "").trim().toLowerCase();
@@ -237,7 +240,7 @@ export function parseBillingConfig(env = process.env) {
     mode = "observe";
   }
   if (mode === "observe" && !treasury) notes.push("no payments treasury: plans, accounts and metering work; payments answer 503 payments_unavailable");
-  return { requested, mode, dataDir, dataDirExplicit, treasury, previousTreasuries: treasury ? previous : [], startBlock,
+  return { requested, mode, dataDir, dataDirExplicit, dataDirPersistent, treasury, previousTreasuries: treasury ? previous : [], startBlock,
     minConfirmations, minAgeSec, rpc, notes };
 }
 
@@ -252,10 +255,34 @@ export function createPaymentsClient(url, { timeoutMs = READ_TIMEOUT_MS } = {}) 
   return createPublicClient({ chain, transport: http(url, { timeout: timeoutMs, retryCount: 0 }), cacheTime: 0 });
 }
 
+/**
+ * Why `dir` cannot hold the ledger, or null. Part of the DURABILITY GATE.
+ *
+ * It must already exist: billing never creates it. A directory made at boot
+ * is on whatever disk the process happens to have, which is exactly the case
+ * the gate is for: MERRYMEN_DATA_DIR=/data copied from the docs onto a service
+ * whose volume is detached, cloned without one, or a host with no disk. And it
+ * must sit on another filesystem than `/` (a mounted volume, or a directory
+ * inside one), unless the operator says that disk itself survives a redeploy
+ * (MERRYMEN_DATA_DIR_PERSISTENT=1: a VM's own disk, local development).
+ */
+export async function dataDirProblem(dir, { persistent = false, statFn = stat } = {}) {
+  let st;
+  try { st = await statFn(dir); } catch (err) {
+    return err?.code === "ENOENT" ? "does not exist (billing never creates it: mount the persistent volume there)" : `cannot be read (${errName(err)})`;
+  }
+  if (!st.isDirectory()) return "is not a directory";
+  if (persistent) return null;
+  let root;
+  try { root = await statFn(path.parse(path.resolve(dir)).root); } catch (err) { return `cannot be compared with / (${errName(err)})`; }
+  return st.dev === root.dev
+    ? "is on the container's own disk, not a mounted volume (set MERRYMEN_DATA_DIR_PERSISTENT=1 only if that disk survives a redeploy)"
+    : null;
+}
+
 async function probeWritable(dir) {
   const probe = path.join(dir, `.billing-probe-${hex(6)}`);
   try {
-    await mkdir(dir, { recursive: true });
     await writeFile(probe, "ok", { flush: true });
     await rm(probe, { force: true });
     return null;
@@ -811,6 +838,7 @@ export async function createBilling({
   minConfirmations = 64, minAgeSec = 120, publicClient = null,
   now: clock = Date.now, log = console.error, plans = PLANS, keyRegistry = loadRegistry,
   timers = true, writeLine, readTimeoutMs = READ_TIMEOUT_MS, settleWaitMs = SETTLE_WAIT_MS, readOnly = false, lockWaitMs = 5_000,
+  dataDirPersistent = false,
 } = {}) {
   validatePlans(plans);
   if (!dataDir) throw new Error("createBilling: dataDir is required");
@@ -819,8 +847,10 @@ export async function createBilling({
   // no config line, no timers. It writes only through openLedger.
   if (readOnly) timers = false;
   if (mode !== "off" && !readOnly) {
-    const why = await probeWritable(dataDir);
-    if (why) { log(`[billing] ${dataDir} is not writable (${why}): billing is off`); mode = "off"; }
+    const problem = await dataDirProblem(dataDir, { persistent: dataDirPersistent });
+    const unwritable = problem ? null : await probeWritable(dataDir);
+    const why = problem ?? (unwritable && `is not writable (${unwritable})`);
+    if (why) { log(`[billing] ${dataDir} ${why}: billing is off`); mode = "off"; }
   }
   const ledger = await openLedger({ dataDir, now: clock, log, lockWaitMs, ...(writeLine ? { writeLine } : {}) });
   if (ledger.blocked() === "unreadable" && mode !== "off") { log("[billing] the ledger cannot be read: billing is off"); mode = "off"; }
@@ -883,7 +913,8 @@ export async function createBilling({
       windows[k] = { end: w.end, total: w.total, keys: Object.fromEntries(w.keys) };
     }
     const tmp = `${usageFile}.tmp`;
-    await mkdir(dataDir, { recursive: true });
+    // No mkdir: the directory was there at boot (the durability gate), and one
+    // gone since is a volume gone, which a write on the container's disk hides.
     await writeFile(tmp, JSON.stringify({ v: 1, windows }), { encoding: "utf8", flush: true });
     await rename(tmp, usageFile);
   }

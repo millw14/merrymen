@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createBilling, isPlatformFailure, openLedger, parseBillingConfig, quotaHeaders, replayLedger, upgradeRaw } from "./billing.mjs";
+import { createBilling, dataDirProblem, isPlatformFailure, openLedger, parseBillingConfig, quotaHeaders, replayLedger, upgradeRaw } from "./billing.mjs";
 import { ONE_TOKEN, PERIOD_MS, PLANS } from "./billing-plans.mjs";
 
 const P = PERIOD_MS;
@@ -34,7 +34,7 @@ async function fixture({ mode = "observe", plans, keys = [], dir, ...rest } = {}
   const clock = { t: START };
   const logs = [];
   const registry = new Map(keys.map((k) => [k.keyId, k]));
-  const boot = (extra = {}) => createBilling({ dataDir: dir, mode, now: () => clock.t, log: (l) => logs.push(l), timers: false,
+  const boot = (extra = {}) => createBilling({ dataDir: dir, dataDirPersistent: true, mode, now: () => clock.t, log: (l) => logs.push(l), timers: false,
     keyRegistry: async () => registry, ...(plans ? { plans } : {}), ...rest, ...extra });
   const f = { dir, clock, logs, registry, file: path.join(dir, "billing.jsonl"), billing: await boot() };
   f.restart = async (extra) => { f.billing = await boot(extra); return f.billing; };
@@ -118,13 +118,55 @@ test("confirmation depth and age default to 64 blocks and 120 s; the payments RP
   assert.equal(bad.notes.length, 2);
 });
 
-test("a data directory that cannot be written turns billing off at boot", async () => {
+test("a data directory that cannot be used turns billing off at boot", async () => {
   const dir = await tempDir();
   await writeFile(path.join(dir, "not-a-dir"), "x");
   const logs = [];
-  const b = await createBilling({ dataDir: path.join(dir, "not-a-dir", "sub"), mode: "observe", timers: false, log: (l) => logs.push(l), keyRegistry: async () => new Map() });
+  const b = await createBilling({ dataDir: path.join(dir, "not-a-dir", "sub"), mode: "observe", dataDirPersistent: true, timers: false, log: (l) => logs.push(l), keyRegistry: async () => new Map() });
   assert.equal(b.mode, "off");
-  assert.match(logs.join("\n"), /is not writable .*billing is off/);
+  assert.match(logs.join("\n"), /cannot be read \(ENOTDIR\).*billing is off/);
+  const ro = await tempDir();
+  await chmod(ro, 0o500);
+  try {
+    const r = await createBilling({ dataDir: ro, mode: "observe", dataDirPersistent: true, timers: false, log: (l) => logs.push(l), keyRegistry: async () => new Map() });
+    if (process.getuid?.() !== 0) { assert.equal(r.mode, "off"); assert.match(logs.join("\n"), /is not writable \(EACCES\).*billing is off/); }
+  } finally { await chmod(ro, 0o700); }
+});
+
+test("billing never creates its data directory: a missing one turns billing off and stays missing", async () => {
+  // MERRYMEN_DATA_DIR=/data with no volume attached: a directory billing made
+  // itself would sit on the container's disk, and the next deploy would wipe
+  // the ledger and make every past transfer creditable again.
+  const missing = path.join(await tempDir(), "data");
+  const logs = [];
+  const b = await createBilling({ dataDir: missing, mode: "enforce", dataDirPersistent: true, treasury: TREASURY, startBlock: 1, timers: false,
+    log: (l) => logs.push(l), keyRegistry: async () => new Map() });
+  assert.equal(b.mode, "off");
+  assert.match(logs.join("\n"), /data does not exist .*billing is off/);
+  await assert.rejects(stat(missing), { code: "ENOENT" }, "the check created nothing");
+});
+
+test("billing needs its data directory on a mounted volume, unless the operator says the disk itself persists", async () => {
+  const at = (devs) => async (p) => {
+    if (!Object.hasOwn(devs, p)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    return { dev: devs[p].dev, isDirectory: () => devs[p].dir !== false };
+  };
+  assert.match(await dataDirProblem("/data", { statFn: at({ "/data": { dev: 1 }, "/": { dev: 1 } }) }), /on the container's own disk/);
+  assert.equal(await dataDirProblem("/data", { statFn: at({ "/data": { dev: 7 }, "/": { dev: 1 } }) }), null, "a volume mounted there");
+  assert.equal(await dataDirProblem("/data/gateway", { statFn: at({ "/data/gateway": { dev: 7 }, "/": { dev: 1 } }) }), null, "a directory inside a volume");
+  assert.equal(await dataDirProblem("/data", { persistent: true, statFn: at({ "/data": { dev: 1 }, "/": { dev: 1 } }) }), null, "MERRYMEN_DATA_DIR_PERSISTENT=1");
+  assert.match(await dataDirProblem("/data", { persistent: true, statFn: at({ "/": { dev: 1 } }) }), /does not exist/);
+  assert.match(await dataDirProblem("/data", { statFn: at({ "/data": { dev: 7, dir: false }, "/": { dev: 1 } }) }), /is not a directory/);
+  assert.equal(parseBillingConfig({ MERRYMEN_DATA_DIR_PERSISTENT: " 1 " }).dataDirPersistent, true);
+  assert.equal(parseBillingConfig({ MERRYMEN_DATA_DIR_PERSISTENT: "yes" }).dataDirPersistent, false);
+  assert.equal(parseBillingConfig({}).dataDirPersistent, false);
+  // createBilling makes the same check on the real disk, without the override.
+  const dir = await tempDir();
+  const own = (await stat(dir)).dev === (await stat(path.parse(dir).root)).dev;
+  const logs = [];
+  const b = await createBilling({ dataDir: dir, mode: "observe", timers: false, log: (l) => logs.push(l), keyRegistry: async () => new Map() });
+  assert.equal(b.mode, own ? "off" : "observe", logs.join("\n"));
+  if (own) assert.match(logs.join("\n"), /on the container's own disk.*billing is off/);
 });
 
 test("each change to where payments go leaves a config line in the ledger, and an unchanged boot leaves none", async () => {

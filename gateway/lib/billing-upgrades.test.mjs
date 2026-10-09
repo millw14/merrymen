@@ -30,7 +30,7 @@ test("a second upgrade in one period is priced against the tier the first one bo
   const dir = await mkdtemp(path.join(tmpdir(), "merrymen-upgrades-"));
   dirs.push(dir);
   const clock = { t: START };
-  const boot = () => createBilling({ dataDir: dir, mode: "enforce", now: () => clock.t, log: () => {}, timers: false, keyRegistry: async () => new Map() });
+  const boot = () => createBilling({ dataDir: dir, dataDirPersistent: true, mode: "enforce", now: () => clock.t, log: () => {}, timers: false, keyRegistry: async () => new Map() });
   let billing = await boot();
   assert.equal((await billing.createAccount(OWNER, "Acme")).status, 201);
   // Credit as the operator CLI grants it, picked up by the gateway's tail.
