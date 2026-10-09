@@ -59,6 +59,7 @@ import {
   OUT_HANDOUT,
   OUT_LURE,
   PERSON_BESIDE_RUG,
+  PERSON_HARM,
   POST_RUG_LURE,
   PRIVATE_THIRD,
   QUOTE_HARM,
@@ -1717,7 +1718,7 @@ const QUOTE_CLAUSES: ReadonlyArray<[readonly RegExp[], (r: Readings) => readonly
   [[NON_LATIN], (r) => r.cased, "script"],
   [[U(SECOND_PERSON)], (r) => r.low, "at-the-reader"],
   [[QUOTE_TARGET], (r) => r.low, "advice"],
-  [[U(OUT_ACCUSE), RUG_CONTEXT_ACCUSE], quoteReads, "accuse"],
+  [[U(OUT_ACCUSE), RUG_CONTEXT_ACCUSE, PERSON_HARM], quoteReads, "accuse"],
   [[PRIVATE_THIRD], quoteReads, "private"],
   [QUOTE_HARM, (r) => r.low, "threat"],
 ];

@@ -367,6 +367,32 @@ export const CONTACT_LURE = U(
 );
 
 /**
+ * A VIOLENT OR SEXUAL CRIME, ABUSE, BRIBERY, EXTORTION, A POLICE CASE OR A
+ * HEALTH STATUS LAID ON A PERSON, for quotes only (review r2): "kaleo beats
+ * his wife", "molested a kid", "a known murderer", "a serial killer", "a
+ * groomer", "abuses kids", "was bribed", "extorted the dev", "blackmailed
+ * the team", "cheated everyone", "did time", "under investigation by the
+ * fbi", "wanted by the sec", "charged with", "has hiv", "a pervert". Each is
+ * a claim about an identifiable person the bot would repeat. OUT_ACCUSE,
+ * which the paraphrase and the permit read, is unchanged. "The next eth
+ * killer", "bots abuse the bonding curve", "cheat code chart", "on-chain
+ * investigation shows clean wallets", "beats the market" and "aids in price
+ * discovery" stay.
+ */
+export const PERSON_HARM = U(
+  new RegExp(
+    String.raw`\b(?:murder(?:s|ed|er|ers|ing|ous)?|serial\s+killers?|(?:a|known|real|cold[\s-]?blooded|convicted)\s+killers?|kill(?:s|ed)\s+(?:a|his|her|their|someone|somebody|people|man|woman|girl|boy|kid)\b` +
+      String.raw`|rap(?:e|ed|es|ing|ist|ists)|molest\w*|(?:sexual(?:ly)?\s+)?assault\w*|groom(?:er|ers)|groom(?:ed|ing)\s+(?:a\s+)?(?:kids?|minors?|girls?|boys?|children|teens?)|kidd(?:ie|y)\s+fiddl\w*|nonce|pervert\w*|pervs?` +
+      String.raw`|abus(?:e|es|ed|er|ers|ing)\s+(?:his|her|their|a|kids?|children|women|girls?|boys?|minors?|wife|wives|people)` +
+      String.raw`|(?:beat|beats|beating|hits|hit)\s+(?:his|her|their)\s+(?:wife|wives|girlfriend|gf|husband|kids?|children|partner|mom|dad)` +
+      String.raw`|brib(?:e|es|ed|ery|ing)|extort\w*|blackmail\w*|cheat(?:s|ed|ing)?\s+(?:on\s+)?(?:everyone|everybody|us|holders|people|investors|his|her|their)|cheaters?` +
+      String.raw`|did\s+(?:hard\s+)?time|(?:in|to|from|out\s+of)\s+prison|(?:under|facing)\s+(?:\w+\s+)?investigation|investigated\s+(?:by|for)|wanted\s+(?:by|for)\s+(?:the\s+)?(?:police|fbi|sec|interpol|cops|feds|doj|murder|fraud)|charged\s+with|sued\s+(?:by|for)` +
+      String.raw`|(?:has|got|caught|carries|with)\s+(?:hiv|aids|herpes|an?\s+stds?|stds|syphilis|chlamydia)|hiv)\b`,
+    "i",
+  ),
+);
+
+/**
  * HARM WISHED ON OR THREATENED AGAINST SOMEONE ELSE, for quotes only (review
  * r2): the common THREAT and SELFHARM clauses read the second person, which
  * the persona would say, and a stranger's quote speaks of third persons: a

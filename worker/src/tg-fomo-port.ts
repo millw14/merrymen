@@ -69,6 +69,7 @@ import {
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
+  PERSON_HARM,
   POST_RUG_LURE,
   PRIVATE_THIRD,
   QUOTE_HARM,
@@ -600,7 +601,7 @@ function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: 
   if (QUOTE_FRAME.test(s)) return null;
   // Digits read as letters too ("cla1m", "appr0ve"): the gate's quote kind reads the same.
   const reads = [s, ...tgLineReadings(s), ...tgQuoteLeetReadings(s)];
-  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, CONTACT_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, SEND_FOR, QUOTE_TARGET, SECOND_PERSON, ...QUOTE_HARM].some((re) => reads.some((t) => re.test(t)))) return null;
+  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, CONTACT_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, PERSON_HARM, SEND_FOR, QUOTE_TARGET, SECOND_PERSON, ...QUOTE_HARM].some((re) => reads.some((t) => re.test(t)))) return null;
   const handle = typeof v.author?.handle === "string" ? v.author.handle.replace(/^@+/, "").trim() : "";
   const who = quoteHandleOk(handle) ? handle : "a trader";
   const posted = typeof v.postedAt === "number" && Number.isFinite(v.postedAt) ? v.postedAt : null;

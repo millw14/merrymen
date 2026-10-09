@@ -97,6 +97,26 @@ describe("quotesSayable", () => {
     gateDrops(["auton v2 is live, swap at the official link", "refunds live for holders", "holders will be made whole, check telegram", "approve the refund contract", "use the auton refund bot", "open a support ticket on their discord to get refunded"], "lure");
   });
 
+  it("a crime, abuse, a police case or a health status laid on a named trader is the gate's to drop too, as accuse (review r2)", () => {
+    gateDrops([
+      "kaleo beats his wife and molested a kid",
+      "kaleo is a known murderer",
+      "kaleo is a serial killer",
+      "kaleo is a known groomer",
+      "kaleo is a kiddie fiddler",
+      "kaleo abuses kids",
+      "kaleo was bribed to shill this",
+      "kaleo extorted the dev",
+      "kaleo blackmailed the team",
+      "kaleo cheated everyone",
+      "the dev did time for assault",
+      "the dev is under investigation by the fbi",
+      "the dev is wanted by the sec",
+      "kaleo has hiv",
+      "the dev is a pervert",
+    ], "accuse");
+  });
+
   it("a relaunch or handout reworded is the gate's to drop too, and counted (review r2)", () => {
     gateDrops(["auton version two launching, old holders covered", "auton v 2 is coming", "auton 2.0 launching friday", "re launch on pump tomorrow", "holders are covered, team confirmed", "free drop for everyone holding", "bonus tokens coming soon", "holders get new ones free", "tokens for old holders next week"], "lure");
   });

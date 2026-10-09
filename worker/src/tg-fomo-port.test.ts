@@ -2984,6 +2984,27 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     quoted(["launched on pumpfun, graduated fast", "auton/sol pair is thin", "safety net is gone", "net flows positive"]);
   });
 
+  it("a violent or sexual crime, abuse, bribery, a police case or a health status laid on a person is never quoted (review r2)", () => {
+    leftOut([
+      "kaleo beats his wife and molested a kid",
+      "kaleo is a known murderer",
+      "kaleo is a serial killer",
+      "kaleo is a known groomer",
+      "kaleo is a kiddie fiddler",
+      "kaleo abuses kids",
+      "kaleo was bribed to shill this",
+      "kaleo extorted the dev",
+      "kaleo blackmailed the team",
+      "kaleo cheated everyone",
+      "the dev did time for assault",
+      "the dev is under investigation by the fbi",
+      "the dev is wanted by the sec",
+      "kaleo has hiv",
+      "the dev is a pervert",
+    ]);
+    quoted(["the next eth killer", "bots abuse the bonding curve", "on-chain investigation shows clean wallets", "aids in price discovery"]);
+  });
+
   it("third-person threats, wishes of death, swatting, self-harm and rape language are never quoted (review r2)", () => {
     leftOut([
       "the dev should be shot, hope he dies",

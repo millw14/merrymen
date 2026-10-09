@@ -20,6 +20,7 @@ import {
   OUT_ACCUSE,
   OUT_HANDOUT,
   OUT_LURE,
+  PERSON_HARM,
   POST_RUG_LURE,
   PRIVATE_THIRD,
   QUOTE_HARM,
@@ -270,6 +271,27 @@ describe("the new clauses", () => {
       "hxxps autonhub xyz",
     ]);
     misses(SPELLED_LINK, ["launched on pumpfun, graduated fast", "pump fun graduates are cooked", "auton/sol pair is thin", "50/50 on this one", "24/7 volume", "safety net is gone", "net flows positive", "x is buzzing about it", "polka dot pattern on the logo", "tg/x both quiet", "the dot com bubble", "rides the polkadot narrative", "dot-com era pricing", "the io narrative"]);
+  });
+
+  it("PERSON_HARM: a violent or sexual crime, abuse, bribery, a police case or a health status laid on a person (review r2)", () => {
+    hits(PERSON_HARM, [
+      "kaleo beats his wife and molested a kid",
+      "kaleo is a known murderer",
+      "kaleo is a serial killer",
+      "kaleo is a known groomer",
+      "kaleo is a kiddie fiddler",
+      "kaleo abuses kids",
+      "kaleo was bribed to shill this",
+      "kaleo extorted the dev",
+      "kaleo blackmailed the team",
+      "kaleo cheated everyone",
+      "the dev did time for assault",
+      "the dev is under investigation by the fbi",
+      "the dev is wanted by the sec",
+      "kaleo has hiv",
+      "the dev is a pervert",
+    ]);
+    misses(PERSON_HARM, ["the next eth killer", "liquidity locked up for a year", "bots abuse the bonding curve", "cheat code chart", "on-chain investigation shows clean wallets", "beats the market every week", "aids in price discovery"]);
   });
 
   it("QUOTE_HARM: harm wished on or threatened against someone else (review r2)", () => {
