@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -116,10 +118,10 @@ fun WelcomeScreen(nav: NavHostController) {
   ) {
     StarfieldGlow(Modifier.fillMaxSize())
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
       Constellation(Modifier.fillMaxWidth().height(392.dp))
 
-      Spacer(Modifier.weight(1f))
+      Spacer(Modifier.height(16.dp))
 
       Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
         Text(
@@ -182,11 +184,12 @@ fun WelcomeScreen(nav: NavHostController) {
         Spacer(Modifier.height(16.dp))
 
         Text(
-          "By continuing, you agree to our Terms and Privacy Policy.",
+          "By continuing, you agree to our Terms of Use. Read how we handle your data in our Privacy Policy.",
           style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp, textAlign = TextAlign.Center),
           color = MerryColors.faint,
           modifier = Modifier.fillMaxWidth(),
         )
+        PolicyLinks()
         Spacer(Modifier.height(20.dp))
       }
     }

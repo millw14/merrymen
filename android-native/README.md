@@ -2,32 +2,21 @@
 
 Jetpack Compose, Material 3, Kotlin 2.2. A native client for the merrymen API.
 
-> **It builds.** `assembleDebug` produces an 18 MB debug APK.
->
-> An earlier version of this file said the machine had no toolchain and that
-> nothing here had been compiled. That was wrong: Android Studio’s bundled JDK
-> (`jbr`, OpenJDK 25) and a full SDK were both installed, just not on `PATH`.
-> The version matrix guessed at the time — AGP 8.7.3 with Kotlin 2.0.21 — could
-> not have worked on Gradle 9.3.1 or JDK 25; it is now AGP 8.13.1 with Kotlin
-> 2.2.20 and `compileSdk` 35.
->
-> This file also had the OkHttp guidance **backwards**. It said 4.x uses
-> methods rather than properties; that describes 3.x. In 4.x those became
-> `val`s and the method forms are `DeprecationLevel.ERROR`, so `response.code()`
-> is a compile error, not a warning. Eight call sites had to move to property
-> form.
+The hosted Android app is here, not in the older Expo project at `mobile/`.
+Google Play packaging, signing and device checks are in [RELEASING.md](RELEASING.md).
 
 ## Building and testing
 
-The JDK and SDK are Android Studio’s own, and neither is on `PATH`, so set
-both first. `local.properties` is gitignored and not needed when
+Use JDK 17 and an Android SDK with platform 36 and build-tools 35.0.0.
+Set the paths for your own machine. `local.properties` is gitignored and not needed when
 `ANDROID_HOME` is set, which also means a fresh worktree builds without
 copying one in.
 
 ```bash
-# Git Bash, from android-native/
-export JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"
-export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+# macOS with Homebrew Java and the standard Android Studio SDK location:
+export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+# From android-native/; both locations must actually exist.
 ./gradlew --no-daemon --max-workers=2 assembleDebug testDebugUnitTest
 # point it somewhere else at build time:
 ./gradlew --no-daemon --max-workers=2 assembleDebug -Pmerrymen.origin=http://10.0.2.2:3100
@@ -37,8 +26,8 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
 daemons building in parallel worktrees ran it out of memory once. It costs
 about a minute a build.
 
-`minSdk 26`, `targetSdk 35`, `compileSdk 35`, version 0.2.0 (the user-agent
-says `merrymen-android/0.2.0`).
+`minSdk 26`, `targetSdk 36`, `compileSdk 36`, version 0.3.0 (code 3). The
+user-agent derives its version from `BuildConfig.VERSION_NAME`.
 
 **Tests are JVM unit tests** under `app/src/test/`, run by
 `testDebugUnitTest`. They drive the real `MerrymenApi` against a
@@ -49,8 +38,8 @@ has no route, so a new capture has to be decoded somewhere. The wiring that
 decides whose state is held — sign-out, a wallet switch, a Server change, the
 retired password at start — runs against the real `Repository` and cookie jar
 with `MemoryStore` and `MemoryCookies` (also in `TestKit.kt`) standing in for
-DataStore and the WebView's `CookieManager`. CI does not build this app yet,
-so run them before you push.
+DataStore and the WebView's `CookieManager`. The Android GitHub workflow runs
+the tests, release lint, debug assembly and release guards for Android changes.
 
 **Adding an endpoint** does not touch `MerrymenApi.kt`: write it as an
 extension in your own `net/<Area>Wire.kt` over the shared plumbing,
@@ -235,16 +224,17 @@ the watchlist, sharing and the holders table are all here now. What is not:
 - **No agent creation and no signing.** Anything that ends in a signature — the
   grant, a re-sign, a withdrawal — is a WebView handoff to the web app's own
   screen, on purpose: that is where the owner key lives.
-- The app is **verified running** on an API 35 emulator against production; see
-  "Running it on an emulator" below.
+- Version 0.2.0 was verified on an API 35 emulator against production. The
+  API 36 release still needs the device checks in [RELEASING.md](RELEASING.md).
 - **No X-handle proof flow.** The app renders a proven handle as a link and an
   unproven one as plain text, but the proof itself (post a nonce, verify it) is
   web-only.
 
 ## Running it on an emulator
 
-It runs. This section exists because an earlier session concluded it did not,
-and that conclusion was wrong in a way worth writing down.
+These are the recorded emulator instructions for version 0.2.0. An API 35
+device remains useful for compatibility testing; also test API 36 before the
+current release.
 
 ### The one thing that will waste your afternoon
 
@@ -302,8 +292,9 @@ hw.gpu.mode=swiftshader_indirect
 hw.keyboard=yes
 ```
 
-API 35 `google_apis` matches the app exactly (`compileSdk`/`targetSdk` 35,
-`minSdk` 26) and is rootable, unlike the `google_apis_playstore` images.
+The API 35 `google_apis` image is rootable, unlike the
+`google_apis_playstore` images. Use an API 36 image for the current target's
+behavior changes.
 
 ### Boot, install, drive
 

@@ -3,8 +3,6 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Post-31 job scheduling for the background refresh worker. -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Custom Tabs handoff needs to know a browser exists (Android 11+ package
          visibility). Without this, resolveActivity returns null and the signing

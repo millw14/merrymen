@@ -249,7 +249,13 @@ val COMMANDS: Map<String, CommandSpec> = listOf(
       "through my brain and be saved in this conversation, and that key is the money."
   },
   CommandSpec("resign", Via.NAVIGATE, to = "/grant#resign", weighty = true, title = "Re-sign") {
-    "Take you to re-sign my trading permission — free, one signature, nothing moves on-chain."
+    "Take you to review renewal of my trading permission. Revoking the old permission requires network fees before you sign the replacement."
+  },
+  // The native app does not duplicate core's settings proposal parser. Open
+  // the authenticated web panel, where the owner can describe the change,
+  // review its exact effect and approve it. Do not promise a prefilled diff.
+  CommandSpec("change-settings", Via.NAVIGATE, to = "/settings#proposal", weighty = true, title = "Review settings") {
+    "Open Settings, where you can describe the change and approve it."
   },
 ).associateBy { it.id }
 

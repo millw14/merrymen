@@ -95,6 +95,10 @@ class CommandsMirrorTest {
     assertEquals("Refuse a fill worse than 1% off the quote.", COMMANDS.getValue("set-slippage").say(mapOf("slippageBps" to "100")))
     assertEquals("Trade this basket from now on: TSLA, NVDA. Anything not on that list I stop buying.",
       COMMANDS.getValue("set-basket").say(mapOf("basketSymbols" to "TSLA,NVDA")))
+    assertEquals(
+      "Take you to review renewal of my trading permission. Revoking the old permission requires network fees before you sign the replacement.",
+      COMMANDS.getValue("resign").say(emptyMap()),
+    )
   }
 
   @Test fun theModeCommandsWriteTheModeAndTheModelCannotChooseIt() {
