@@ -7,10 +7,12 @@ for build, signing and device validation.
 
 ## Console status
 
-The inspected Play account is a Personal account. Merrymen had no existing
-app entry. The Create app form was prepared with Merrymen, English (US),
-`dev.merrymen.app`, App, and Free. No policy/export declaration was accepted
-and no app was created. Confirm the live Console state before resuming.
+The Play account is a Personal account. On 2026-10-10, the Merrymen app entry
+was created (`4972707436414086495`), with package `dev.merrymen.app`, English
+(US), App, and Free. Internal Testing draft release `0.3.0` exists at
+track `4701451895307323530`, release `1`. Console reported one AAB uploaded
+and confirmed the draft changes were saved. Release validation and tester
+email selection remain unfinished; no Play install link exists yet.
 
 Google's [Play Console requirements](https://support.google.com/googleplay/android-developer/answer/10788890)
 require financial-services developers to register as an Organization. The
@@ -45,8 +47,9 @@ RC number or a D-U-N-S number. See [CAC's registration steps](https://www.cac.go
    builds succeeded and the APK certificate matches the upload key. The APK
    installed on an API 36 emulator. Interactive device validation is still
    pending: this host's computer-use surface did not expose the emulator window.
-   Complete final certificate/commit/hash recording, an off-device key backup,
-   and actual device checks before uploading.
+   Certificate, source commit and artifact hashes are recorded in the local
+   release folder's `README.txt` and `SHA256SUMS.txt`. An off-device key backup
+   and actual device checks remain outstanding.
 2. **Privacy:** verify the published policy describes the current hosted
    service and Android/WebView behavior. The inspected published policy is
    older than the repository and contains stale claims about memory being
