@@ -808,7 +808,8 @@ flow it has today.
 
 1. **Deploy with billing off** (`MERRYMEN_BILLING` unset). Boot logs
    `[gateway] partner billing: off, nothing is metered`. Partners see no
-   change except a per-IP limit of 600 a minute (was 240). Developers can
+   change (the per-IP limit stays 240 a minute; observe and enforce raise it
+   to 600). Developers can
    already create accounts, and the console asks for one before a new key.
    Confirm `MERRYMEN_DATA_DIR=/data` is a service variable and set
    `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.

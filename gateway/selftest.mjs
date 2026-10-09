@@ -296,7 +296,7 @@ console.log("[gateway] selftest OK — /v1/models lists the brand; the upstream 
 // reach. Two tables in two files; this is where an edit to either meets the
 // other, at image build.
 for (const plan of Object.values(PLANS)) {
-  assert.ok(plan.rpm <= PARTNER_TUNABLES.IP_RATE_PER_MIN,
-    `${plan.id} sells ${plan.rpm}/min, over the partner per-IP limit of ${PARTNER_TUNABLES.IP_RATE_PER_MIN}/min`);
+  assert.ok(plan.rpm <= PARTNER_TUNABLES.IP_RATE_PER_MIN_METERED, // the limit while billing meters accounts
+    `${plan.id} sells ${plan.rpm}/min, over the partner per-IP limit (billing on) of ${PARTNER_TUNABLES.IP_RATE_PER_MIN_METERED}/min`);
 }
 console.log("[gateway] selftest OK — every partner plan's rate fits under the per-IP limit");

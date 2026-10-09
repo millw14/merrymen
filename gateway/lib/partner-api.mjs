@@ -31,11 +31,19 @@ export const PARTNER_TUNABLES = {
    */
   RATE_PER_MIN: 120,
   /**
-   * Per-IP, per-minute. Protects the PROCESS, not the bill: plans bound
-   * accounts. Above every plan's rate (Feast is 300), so a partner's one
-   * backend can use what its account paid for; selftest.mjs pins that.
+   * Per-IP, per-minute. Protects the PROCESS, not the bill. With billing off
+   * (or no billing service) it is what it was before billing: no plan bounds
+   * an account then, so a higher one would only let one address put more load
+   * on the process that also serves the holder routes.
    */
-  IP_RATE_PER_MIN: 600,
+  IP_RATE_PER_MIN: 240,
+  /**
+   * Per-IP, per-minute while billing meters accounts (observe or enforce):
+   * plans bound accounts, and this sits above every plan's rate (Feast is
+   * 300), so a partner's one backend can use what its account paid for;
+   * selftest.mjs pins that.
+   */
+  IP_RATE_PER_MIN_METERED: 600,
 };
 
 /** Short, non-secret, and logged next to the keyId so a report locates a request. */
@@ -139,7 +147,8 @@ export function createPartnerApi({ partners, store, forward, billing = null, tun
     if (!(await store.rateHit(bucket, rpm, 60))) {
       return { fail: partnerError(429, "rate_limited", `${rpm} requests/minute for this ${per}`, rid) };
     }
-    if (ip && !(await store.rateHit(`pip:${ip}`, T.IP_RATE_PER_MIN, 60))) {
+    const ipRate = billing && billing.mode !== "off" ? T.IP_RATE_PER_MIN_METERED : T.IP_RATE_PER_MIN;
+    if (ip && !(await store.rateHit(`pip:${ip}`, ipRate, 60))) {
       return { fail: partnerError(429, "rate_limited", "too many requests from this address", rid) };
     }
 

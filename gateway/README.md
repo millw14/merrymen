@@ -256,7 +256,8 @@ What each mode does, and what it falls back to:
   keys share one per-minute bucket at its plan's rate (Free: 30 a minute for
   all of a developer's keys together). Without a treasury and start block it
   runs as observe, and boot says so.
-- The partner per-IP limit is 600 a minute in every mode (it was 240).
+- The partner per-IP limit is 600 a minute under observe and enforce, above
+  every plan's rate; with billing off it stays 240, as before billing.
 
 ### One instance, on a persistent disk
 

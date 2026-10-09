@@ -190,7 +190,11 @@ test("observe refuses nothing billing off would answer: each key keeps its own b
     assert.equal((await off.call("/agents", { keyId })).status, 200, `off, request ${i + 1}`);
     assert.equal((await observe.call("/agents", { keyId })).status, 200, `observe, request ${i + 1}`);
   }
-  assert.deepEqual(observe.store.hits, off.store.hits, "the same buckets at the same limits");
+  const perKey = (hits) => hits.filter((h) => !h.key.startsWith("pip:"));
+  assert.deepEqual(perKey(observe.store.hits), perKey(off.store.hits), "the same key buckets at the same limits");
+  // The per-IP limit only rises: 240 with billing off, as before billing, and 600 once plans bound accounts.
+  assert.deepEqual([...new Set(off.store.hits.filter((h) => h.key.startsWith("pip:")).map((h) => h.limit))], [240]);
+  assert.deepEqual([...new Set(observe.store.hits.filter((h) => h.key.startsWith("pip:")).map((h) => h.limit))], [600]);
   const limited = await observe.call("/agents", { keyId: "k1" });
   assert.deepEqual([limited.status, limited.json.error.message], [429, "30 requests/minute for this key"]);
   assert.equal(observe.used(), 60, "every answered request is metered");
@@ -202,6 +206,22 @@ test("observe refuses nothing billing off would answer: each key keeps its own b
   assert.equal(observe.api.ratePerMin(key("k2")), 120);
   assert.deepEqual(observe.store.hits.at(-1), { key: "pip:203.0.113.9", limit: 600 });
   assert.deepEqual(observe.store.hits.at(-2), { key: "p:k1", limit: 120 });
+});
+
+test("with billing off, or no billing at all, one address keeps the per-IP limit from before billing: 240 a minute", async () => {
+  // Off must be exactly the gateway from before billing. No plan bounds an
+  // account then, so a higher per-IP limit would only let one address put more
+  // load on the process that also serves the holder routes.
+  const keys = Array.from({ length: 9 }, (_, i) => key(`k${i}`));
+  for (const f of [await fixture({ mode: "off", plans: PLANS, keys }), await fixture({ billing: false, keys })]) {
+    let ok = 0, refused = 0;
+    for (let i = 0; i < 270; i++) {
+      const r = await f.call("/agents", { keyId: `k${i % 9}` });
+      if (r.status === 200) ok += 1;
+      else if (r.status === 429 && r.json.error.message === "too many requests from this address") refused += 1;
+    }
+    assert.deepEqual([ok, refused], [240, 30]);
+  }
 });
 
 test("a Feast account's 300 a minute is reachable from one backend: the per-IP limit is 600", async () => {

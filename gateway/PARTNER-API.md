@@ -656,8 +656,9 @@ and `rate_per_min` already gives the rate the next request will get.
   The 429 message then reads `… requests/minute for this account`.
 - When a renewal or a newly paid plan is waiting, the rate is that of the plan
   the next request will be served on.
-- Each caller IP may also make 600 requests a minute, in every mode; every
-  plan's rate fits under it.
+- Each caller IP may also make 240 requests a minute while billing is off,
+  and 600 under `observe` and `enforce`, where every plan's rate fits under
+  it.
 - `rate_per_min`, in `/meta` and in the portal's key list, is the rate a key
   gets now.
 
@@ -704,7 +705,8 @@ The codes that call for a retry, and how:
 Each key's per-minute rate is `rate_per_min` from `/meta`. While partner
 billing is off that is 30 for self-service keys; with billing on it follows the
 account's plan ([Per-minute rates](#per-minute-rates)). Operator-issued keys
-have 120 unless set otherwise. Each caller IP also has 600 per minute. Poll
+have 120 unless set otherwise. Each caller IP also has 240 per minute (600
+while billing is on). Poll
 with a modest interval. Do not retry a wallet authorization except as
 described under [activation](#3-challenge-and-activation-endpoints), change
 the body under a message request ID, or treat `/health` as worker health.
@@ -717,9 +719,9 @@ configured chat or a reachable bridge.
 ## Contract changes
 
 Plans and billing, added after `2026-10-08` without a new version string
-(`/meta` still reports `api_version: "2026-10-08"`). Apart from the per-IP
-limit, none of this applies until Merrymen turns partner billing on; `/meta`'s
-`billing` says when it has:
+(`/meta` still reports `api_version: "2026-10-08"`). None of this applies
+until Merrymen turns partner billing on; `/meta`'s `billing` says when it
+has:
 
 - Requests made with portal keys are counted against the developer account's
   plan ([Plans and billing](#plans-and-billing)). Counted answers carry
@@ -735,8 +737,8 @@ limit, none of this applies until Merrymen turns partner billing on; `/meta`'s
 - Requests the platform failed (5xx, `upstream_*`, `conversation_busy`,
   `enrollment_busy`) are not counted, so retrying them costs no quota.
 - New portal keys need a developer account while billing is on.
-- The per-caller-IP limit is 600 requests a minute, up from 240, in every
-  mode.
+- The per-caller-IP limit is 600 requests a minute, up from 240, while
+  billing is on; with billing off it stays 240.
 
 `2026-10-08`, from `2026-09-18`:
 
