@@ -556,7 +556,9 @@ function stripReasoningFromContent(content: string, reasoning?: string): string 
 
 export async function llmText(
   creds: LlmCreds,
-  opts: { system: string; prompt: string; maxTokens?: number },
+  // `signal` bounds a caller that holds something scarce for the call's length
+  // (the partner chat holds its conversation lock); omitted, nothing changes.
+  opts: { system: string; prompt: string; maxTokens?: number; signal?: AbortSignal },
 ): Promise<string> {
   if (creds.transport === "anthropic") {
     const client = new Anthropic({ apiKey: creds.apiKey });
@@ -566,7 +568,7 @@ export async function llmText(
       ...anthropicThinking(capabilities),
       system: opts.system,
       messages: [{ role: "user", content: opts.prompt }],
-    }));
+    }, { signal: opts.signal }));
     const t = res.content.find((b) => b.type === "text");
     return t && t.type === "text" ? t.text.trim() : "";
   }
@@ -582,6 +584,7 @@ export async function llmText(
       method: "POST",
       headers: openaiHeaders(creds),
       body: JSON.stringify({ ...base, ...hint }),
+      signal: opts.signal,
     });
 
   let r = await send(quietReasoning(creds));

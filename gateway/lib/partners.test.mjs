@@ -124,6 +124,18 @@ test("stable app identity survives key rotation and legacy keys retain their ide
   assert.deepEqual((await partners.verify(original.key)).key.scopes, ["read:agents", "write:agents", "chat:agents"]);
 });
 
+test("a key's name is signed as well-formed text, never half an emoji or a control character", async () => {
+  const cut = await issue({ name: `${"a".repeat(63)}\u{1F600}` }); // 65 UTF-16 units; 64 would split the pair
+  const odd = await issue({ name: "Bad\u0007 \ud800name" });
+  const blank = await issue({ name: "\u0001\u0002" });
+  const partners = createPartners({ secret: SECRET });
+  const named = (await partners.verify(cut.key)).key.name;
+  assert.equal(named, "a".repeat(63));
+  assert.ok(named.isWellFormed());
+  assert.equal((await partners.verify(odd.key)).key.name, "Bad \ufffdname");
+  assert.equal((await partners.verify(blank.key)).key.name, blank.keyId);
+});
+
 test("the file overrides the env, so a revocation on the volume always wins", async () => {
   const { key, keyId, secret } = makeKey();
   process.env.MERRYMEN_PARTNER_KEYS = JSON.stringify([

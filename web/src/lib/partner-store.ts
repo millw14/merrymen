@@ -14,11 +14,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isHostedMode } from "@merrymen/core";
 import { merrymenHome } from "@merrymen/home";
-import { makePgDb, wrapSqlite, type Db } from "../../../worker/src/db";
+import { LockBusyError, makePgDb, withAdvisoryLock, wrapSqlite, type Db } from "../../../worker/src/db";
 
 export type PartnerAddress = `0x${string}`;
 export class PartnerStoreError extends Error {
-  constructor(public status: number, public code: string, message: string) {
+  /** retryAfter: seconds after which the same request may simply be sent again. */
+  constructor(public status: number, public code: string, message: string, public retryAfter?: number) {
     super(message);
     this.name = "PartnerStoreError";
   }
@@ -36,7 +37,11 @@ export interface PartnerConnection {
   expiresAt: number;
   createdAt: number;
   updatedAt: number;
+  /** The owner-signed embedded activation that last completed on this connection. */
+  activation?: { nonceHash: string; grantHash: string; at: number };
 }
+/** What identifies one signed embedded activation: its challenge nonce and the exact grant it authorized. */
+export interface PartnerActivationProof { nonce: string; grantHash: string }
 export interface PartnerCreate {
   partnerId: string;
   partnerName: string;
@@ -66,6 +71,8 @@ export interface PartnerStore {
   bind(raw: string, tenant: PartnerAddress, consentedScopes: string[]): Promise<PartnerConnection>;
   /** Internal only: caller has verified a fresh grant ownership proof. */
   bindAuthorized(id: string, partnerId: string, tenant: PartnerAddress, consentedScopes: string[]): Promise<PartnerConnection>;
+  /** Internal only: after a verified activation has COMPLETED on a connection linked to this tenant. */
+  recordActivation(id: string, partnerId: string, tenant: PartnerAddress, proof: PartnerActivationProof): Promise<PartnerConnection>;
   revokeByTenant(id: string, tenant: PartnerAddress): Promise<boolean>;
   revoke(partnerId: string, id: string): Promise<boolean>;
   list(partnerId: string): Promise<PartnerConnection[]>;
@@ -73,12 +80,48 @@ export interface PartnerStore {
   readMessages(connectionId: string): Promise<PartnerMessage[]>;
   getExchange(connectionId: string, requestId: string): Promise<PartnerExchange | null>;
   appendExchange(connectionId: string, exchange: Omit<PartnerExchange, "createdAt">): Promise<{ created: boolean; exchange: PartnerExchange }>;
+  /**
+   * One holder at a time, across replicas. A caller waits (bounded, holding no
+   * connection) and then gets <kind>_busy with retryAfter. Store calls inside
+   * run on the lock's connection, and each write commits on its own: there is
+   * no enclosing transaction to roll back.
+   */
   withConversationLock<T>(connectionId: string, fn: () => Promise<T>): Promise<T>;
   withEnrollmentLock<T>(tenant: PartnerAddress, fn: () => Promise<T>): Promise<T>;
 }
 
 export const ONBOARDING_TTL_SECONDS = 30 * 60;
 export const PARTNER_HISTORY_EXCHANGES = 40;
+type LockKind = "conversation" | "enrollment";
+/**
+ * How long a request waits for another holding its lock: a transport retry of a
+ * chat still being generated, or two activations for one owner. The wait holds
+ * no pooled connection, and both bounds sit well inside the gateway's 45-second
+ * upstream timeout. Past it the answer is <kind>_busy with a retry hint. The
+ * bound covers the whole wait: the queue, a holder slot, and checking the
+ * lock's connection out of the pool.
+ */
+export const PARTNER_LOCK_WAIT_MS: Readonly<Record<LockKind, number>> = { conversation: 20_000, enrollment: 10_000 };
+const LOCK_CLASS: Readonly<Record<LockKind, number>> = { conversation: 1_297_692_083, enrollment: 1_297_692_084 };
+/**
+ * Partner locks held at once per Postgres pool, in this process, by kind; more
+ * wait their turn, bounded and holding no lock. A holder pins one pooled
+ * connection for its turn (a whole model call), and the ledger reads it makes
+ * inside (the grants and feed routes and chat facts, through withReadDb) draw
+ * more from the same memoized DATABASE_URL pool: pg's default ten, which
+ * openPgDb leaves as is. Ten holders each waiting for an eleventh connection
+ * hung every database user on the replica, so six at most, and four
+ * connections stay free for those reads and everything else.
+ *
+ * SEPARATE BY KIND. One shared five let slow chats, from any app, take every
+ * slot for as long as their model calls ran, and every activation behind them
+ * answered enrollment_busy. Chats share four, each bounded by the runtime's
+ * model deadline (partner-runtime.ts). An activation's turn is a few short
+ * writes on stores with their own connections; it gets two, so one whose write
+ * hangs does not stop every other owner's.
+ */
+export const PARTNER_LOCK_HOLDERS: Readonly<Record<LockKind, number>> = { conversation: 4, enrollment: 2 };
+const BUSY_RETRY_AFTER_SECONDS = 2;
 const NONCE_RETENTION_SECONDS = 10 * 60;
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -96,12 +139,55 @@ export function onboardingToken(connection: Pick<PartnerConnection, "id" | "expi
   return `mmon_${payload}.${createHmac("sha256", secret).update(`partner-onboarding:${payload}`).digest("base64url")}`;
 }
 
+export const PARTNER_MESSAGE_MAX = 2000;
+export const PARTNER_REPLY_MAX = 16_000;
+export const PARTNER_COMMAND_MAX = 8000;
+/** Multiline text keeps tabs and line breaks; every other C0 control is refused. */
+const LINE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
+const LINE_CONTROLS = new RegExp(LINE_CONTROL.source, "g");
+const CONTROL = /[\u0000-\u001f]/;
+// String#isWellFormed/#toWellFormed are ES2024, and the worker project, which
+// compiles this file too, targets an older lib. Same rule, spelled out.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+export const wellFormed = (value: string): boolean => !LONE_SURROGATE.test(value);
+export const toWellFormed = (value: string): string => value.replace(new RegExp(LONE_SURROGATE.source, "g"), "\ufffd");
+
+/**
+ * The store's text rule, exported so a caller can refuse before paying for work
+ * the store would then reject. Well-formed too: a lone surrogate is not text,
+ * JSON.stringify writes it as an escape that Postgres refuses in any json value,
+ * and a stored one broke every list of its app.
+ */
+export function partnerText(value: unknown, max: number, multiline = false): value is string {
+  return typeof value === "string" && !!value.trim() && value.length <= max && wellFormed(value) && !(multiline ? LINE_CONTROL : CONTROL).test(value);
+}
 function textField(value: string, max: number, label: string, multiline = false): string {
-  const controls = multiline ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/ : /[\u0000-\u001f]/;
-  if (typeof value !== "string" || !value.trim() || value.length > max || controls.test(value)) {
-    throw new PartnerStoreError(400, "invalid_input", `invalid ${label}`);
-  }
+  if (!partnerText(value, max, multiline)) throw new PartnerStoreError(400, "invalid_input", `invalid ${label}`);
   return value;
+}
+
+/**
+ * A model reply made storable instead of refused: the model's output is not the
+ * partner's input, so it must never come back as the partner's 400. Disallowed
+ * controls are dropped (tabs and line breaks kept) and an over-long reply is cut
+ * on a character boundary, marked with an ellipsis. A lone surrogate becomes
+ * U+FFFD. "" when nothing is left.
+ */
+export function fitPartnerReply(reply: string): string {
+  const clean = toWellFormed(String(reply ?? "")).replace(LINE_CONTROLS, "").trim();
+  if (clean.length <= PARTNER_REPLY_MAX) return clean;
+  let end = PARTNER_REPLY_MAX - 1;
+  // Never keep half of a surrogate pair: the stored JSON would carry a lone one.
+  if (/[\ud800-\udbff]/.test(clean[end - 1])) end--;
+  return `${clean.slice(0, end).trimEnd()}…`;
+}
+/** True when exactly this signed activation is the one recorded as completed on the connection. */
+export function activatedBy(connection: PartnerConnection, proof: PartnerActivationProof): boolean {
+  return !!connection.activation && connection.activation.nonceHash === hash(`enrollment:${proof.nonce}`) && connection.activation.grantHash === proof.grantHash;
+}
+/** A proposal the store would refuse as too large; the reply is kept without it. */
+export function partnerCommandFits(command: unknown): boolean {
+  return JSON.stringify(command ?? null).length <= PARTNER_COMMAND_MAX;
 }
 function scopeList(scopes: string[]): string[] {
   if (!Array.isArray(scopes) || !scopes.length || scopes.length > 32 || scopes.some(s => typeof s !== "string" || !/^[a-z][a-z0-9:_-]{0,63}$/.test(s))) {
@@ -144,6 +230,42 @@ CREATE TABLE IF NOT EXISTS partner_exchanges (
 CREATE INDEX IF NOT EXISTS partner_exchanges_history ON partner_exchanges (connection_id, ordinal);
 `;
 
+/** Partner locks per Db in this process: each lock's queue tail, and per kind the holder slots taken and awaited. */
+interface Slots { held: number; waiting: Array<() => void> }
+interface LockGate { tails: Map<string, Promise<void>>; slots: Record<LockKind, Slots> }
+const gates = new WeakMap<Db, LockGate>();
+function gateOf(db: Db): LockGate {
+  let gate = gates.get(db);
+  if (!gate) gates.set(db, gate = { tails: new Map(), slots: { conversation: { held: 0, waiting: [] }, enrollment: { held: 0, waiting: [] } } });
+  return gate;
+}
+/** True once `p` settles, either way, false if `deadline` passes first. */
+async function settlesBy(p: Promise<unknown>, deadline: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([p.then(() => true, () => true), new Promise<boolean>(r => { timer = setTimeout(() => r(false), Math.max(0, deadline - Date.now())); })]);
+  } finally { clearTimeout(timer); }
+}
+/** A holder slot by `deadline`, or false. A released slot passes straight to the next waiter. */
+async function takeSlot(gate: Slots, limit: number, deadline: number): Promise<boolean> {
+  if (gate.held < limit) { gate.held++; return true; }
+  let grant!: () => void;
+  const granted = new Promise<void>(r => { grant = r; });
+  gate.waiting.push(grant);
+  if (await settlesBy(granted, deadline)) return true;
+  const at = gate.waiting.indexOf(grant);
+  if (at < 0) return true; // handed over just as the wait ran out: it is ours to release
+  gate.waiting.splice(at, 1);
+  return false;
+}
+function releaseSlot(gate: Slots): void {
+  const next = gate.waiting.shift();
+  if (next) next(); else gate.held--;
+}
+
+/** The external_user_id column of a revoked connection that has been reconnected; its record keeps the real one. */
+const RETIRED = "\u001fretired:";
+const retiredSlot = (id: string) => `${RETIRED}${id}`;
 type JsonRow = { record_json: string };
 type ExchangeRow = { exchange_json: string };
 const connectionOf = (row: unknown): PartnerConnection | null => row ? JSON.parse((row as JsonRow).record_json) as PartnerConnection : null;
@@ -152,13 +274,14 @@ const exchangeOf = (row: unknown): PartnerExchange | null => row ? JSON.parse((r
 /** Shared database implementation; the SQLite backend tests the production SQL. */
 export class SqlPartnerStore implements PartnerStore {
   private ready: Promise<Db> | null = null;
-  private transactionContext = new AsyncLocalStorage<Db>();
-  private conversations = new Map<string, Promise<void>>();
+  /** The connection a partner lock pinned (transaction: false), or the transaction running on it. */
+  private context = new AsyncLocalStorage<{ db: Db; transaction: boolean }>();
   constructor(
     private connect: () => Promise<Db>,
     private dialect: "postgres" | "sqlite" = "postgres",
     private clock: () => number = nowSeconds,
     private secret: () => string = bridgeSecret,
+    private waits: Readonly<Record<LockKind, number>> = PARTNER_LOCK_WAIT_MS,
   ) {}
 
   private database(): Promise<Db> {
@@ -174,10 +297,13 @@ export class SqlPartnerStore implements PartnerStore {
     return this.ready;
   }
   private async transaction<T>(fn: (db: Db) => Promise<T>): Promise<T> {
-    const active = this.transactionContext.getStore();
-    return active ? fn(active) : (await this.database()).tx(fn);
+    const active = this.context.getStore();
+    if (active?.transaction) return fn(active.db);
+    // Under a partner lock the transaction runs on the lock's own connection.
+    const db = active?.db ?? await this.database();
+    return db.tx(tx => this.context.run({ db: tx, transaction: true }, () => fn(tx)));
   }
-  private async reader(): Promise<Db> { return this.transactionContext.getStore() ?? this.database(); }
+  private async reader(): Promise<Db> { return this.context.getStore()?.db ?? this.database(); }
   private lockSuffix(): string { return this.dialect === "postgres" ? " FOR UPDATE" : ""; }
   private async save(db: Db, c: PartnerConnection): Promise<void> {
     await db.prepare(`UPDATE partner_connections SET tenant = ?, status = ?, token_hash = ?, expires_at = ?, record_json = ? WHERE id = ?`)
@@ -202,6 +328,18 @@ export class SqlPartnerStore implements PartnerStore {
         await db.prepare("SELECT pg_advisory_xact_lock(?, ?)").get(1_297_692_082, key);
       }
       let c = connectionOf(await db.prepare(`SELECT record_json FROM partner_connections WHERE partner_id = ? AND external_user_id = ?${this.lockSuffix()}`).get(checked.partnerId, checked.externalUserId));
+      if (c?.status === "revoked") {
+        // A disconnected user may connect again, but never through the revoked
+        // connection: returning it made a disconnect permanent. Its id keeps
+        // answering disconnected, and its history, owner binding and consent
+        // stay with it. The fresh authorization gets a NEW id, so nothing keyed
+        // by the old one can be read or reused, and needs full owner consent and
+        // activation again. The old row gives up its (app, user) slot in the
+        // existing UNIQUE constraint (no migration) for a value no real external
+        // id can collide with: textField refuses control characters.
+        await db.prepare("UPDATE partner_connections SET external_user_id = ? WHERE id = ?").run(retiredSlot(c.id), c.id);
+        c = null;
+      }
       const created = !c;
       const now = this.clock();
       if (!c) {
@@ -265,6 +403,18 @@ export class SqlPartnerStore implements PartnerStore {
       return this.link(db, c, owner, scopes);
     });
   }
+  async recordActivation(id: string, partnerId: string, tenant: PartnerAddress, proof: PartnerActivationProof): Promise<PartnerConnection> {
+    const owner = address(tenant);
+    if (typeof proof?.nonce !== "string" || typeof proof.grantHash !== "string") throw new PartnerStoreError(400, "invalid_input", "invalid activation proof");
+    return this.transaction(async db => {
+      const c = await this.scoped(partnerId, id, db, true);
+      // Never on a revoked or re-owned connection: a recorded proof answers retries.
+      if (!c || c.status !== "linked" || c.tenant !== owner) throw new PartnerStoreError(409, "connection_changed", "the agent connection changed during activation");
+      const next: PartnerConnection = { ...c, activation: { nonceHash: hash(`enrollment:${proof.nonce}`), grantHash: proof.grantHash, at: this.clock() }, updatedAt: this.clock() };
+      await this.save(db, next);
+      return next;
+    });
+  }
   private async revokeWhere(id: string, field: "partner_id" | "tenant", value: string): Promise<boolean> {
     return this.transaction(async db => {
       const c = connectionOf(await db.prepare(`SELECT record_json FROM partner_connections WHERE id = ? AND ${field} = ?${this.lockSuffix()}`).get(id, value));
@@ -276,7 +426,21 @@ export class SqlPartnerStore implements PartnerStore {
   async revokeByTenant(id: string, tenant: PartnerAddress) { return this.revokeWhere(id, "tenant", address(tenant)); }
   async revoke(partnerId: string, id: string) { return this.revokeWhere(id, "partner_id", partnerId); }
   async list(partnerId: string) {
-    return (await (await this.reader()).prepare("SELECT record_json FROM partner_connections WHERE partner_id = ? ORDER BY id LIMIT 100").all(partnerId)).map(row => connectionOf(row)!);
+    // Newest first, then id, one row per external user. Ordering by the random
+    // ids alone made WHICH 100 a large app saw arbitrary, and oldest first hid
+    // every new connection once an app had 100 older rows, which each
+    // reconnect adds to. A retired row (revoked, and since replaced for its
+    // user) is history: its id still answers disconnected on its own, but
+    // listed it showed the same user twice.
+    //
+    // createdAt lives only in record_json, read there with no schema change. On
+    // Postgres it is matched as text, not cast to json: rows stored before text
+    // had to be well-formed may hold a lone surrogate escape, which json
+    // refuses, and one such row failed the whole list. Only the top-level key
+    // can match: inside a JSON string every quote is escaped.
+    const createdAt = this.dialect === "postgres" ? `substring(record_json from '"createdAt":([0-9]+)')::bigint` : "json_extract(record_json, '$.createdAt')";
+    return (await (await this.reader()).prepare(`SELECT record_json FROM partner_connections WHERE partner_id = ? AND external_user_id <> (? || id)
+      ORDER BY ${createdAt} DESC NULLS LAST, id DESC LIMIT 100`).all(partnerId, RETIRED)).map(row => connectionOf(row)!);
   }
   async consumeNonce(nonce: string, expiresAt: number): Promise<boolean> {
     const now = this.clock();
@@ -301,9 +465,9 @@ export class SqlPartnerStore implements PartnerStore {
   }
   async appendExchange(connectionId: string, input: Omit<PartnerExchange, "createdAt">) {
     textField(input.requestId, 128, "request id");
-    textField(input.message, 2000, "message", true);
-    textField(input.reply, 16000, "reply", true);
-    if (JSON.stringify(input.command ?? null).length > 8000) throw new PartnerStoreError(400, "invalid_command", "command is too large");
+    textField(input.message, PARTNER_MESSAGE_MAX, "message", true);
+    textField(input.reply, PARTNER_REPLY_MAX, "reply", true);
+    if (!partnerCommandFits(input.command)) throw new PartnerStoreError(400, "invalid_command", "command is too large");
     return this.transaction(async db => {
       const c = connectionOf(await db.prepare(`SELECT record_json FROM partner_connections WHERE id = ?${this.lockSuffix()}`).get(connectionId));
       if (!c || c.status !== "linked") throw new PartnerStoreError(409, "connection_inactive", "agent connection is not active");
@@ -330,40 +494,78 @@ export class SqlPartnerStore implements PartnerStore {
   async withEnrollmentLock<T>(tenant: PartnerAddress, fn: () => Promise<T>): Promise<T> {
     return this.withLock("enrollment", address(tenant), fn);
   }
-  private async withLock<T>(kind: "conversation" | "enrollment", id: string, fn: () => Promise<T>): Promise<T> {
-    if (this.transactionContext.getStore()) throw new Error("nested partner locks are not supported");
-    if (this.dialect === "postgres") {
-      return (await this.database()).tx(async db => {
-        const key = createHash("sha256").update(id).digest().readInt32BE();
-        const result = await db.prepare("SELECT pg_try_advisory_xact_lock(?, ?) AS acquired").get(kind === "conversation" ? 1_297_692_083 : 1_297_692_084, key) as { acquired: boolean };
-        if (!result.acquired) throw new PartnerStoreError(409, `${kind}_busy`, `another ${kind} request is in progress for this agent`);
-        // All nested reads/writes share this pinned connection. Otherwise ten
-        // concurrent chats could hold every pool slot while waiting for one.
-        return this.transactionContext.run(db, fn);
-      });
-    }
-    const lockId = `${kind}:${id}`;
-    const previous = this.conversations.get(lockId) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>(resolve => { release = resolve; });
-    const queued = previous.then(() => current);
-    this.conversations.set(lockId, queued);
-    await previous;
-    try { return await fn(); }
-    finally {
-      release();
-      if (this.conversations.get(lockId) === queued) this.conversations.delete(lockId);
+  /**
+   * WAIT YOUR TURN, BOUNDED, WITHOUT HOLDING A CONNECTION WHILE YOU WAIT.
+   *
+   * The Postgres lock used to be TRIED once inside a transaction, so any overlap
+   * failed at once: a chat retry got conversation_busy instead of the reply the
+   * first request was about to save, and a second activation for an owner got
+   * enrollment_busy after its single-use signature had been spent. Waiting
+   * inside a transaction would hold a pooled connection per waiter instead.
+   *
+   * In order, all within one deadline: queue behind this process's earlier
+   * caller for the same lock; take one of PARTNER_LOCK_HOLDERS slots for its
+   * kind (so a retry queued in THIS process behind its own conversation holds
+   * none; one polling a lock held by another replica does hold one while it
+   * polls, which is why hosted web runs one replica); then withAdvisoryLock,
+   * which retries a session lock across replicas, holding a connection only
+   * while it holds the lock. Its checkout from a saturated pool has no deadline
+   * of its own, so it is raced against this one: an attempt still waiting at
+   * the deadline is answered busy, and lets go at once if it ever gets in.
+   *
+   * Every nested partner-store read and write runs on the pinned connection,
+   * and each write commits as its own short transaction: nothing holds a
+   * transaction open through a model call, and a nonce consumed under the lock
+   * stays consumed whatever fails after it. SQLite takes the same queue; it
+   * has no pool to protect, so no slots.
+   */
+  private async withLock<T>(kind: LockKind, id: string, fn: () => Promise<T>): Promise<T> {
+    if (this.context.getStore()) throw new Error("nested partner locks are not supported");
+    const deadline = Date.now() + this.waits[kind];
+    const key = createHash("sha256").update(id).digest().readInt32BE();
+    const db = await this.database();
+    const gate = gateOf(db), name = `${kind}:${key}`;
+    const ahead = gate.tails.get(name) ?? Promise.resolve();
+    let leave!: () => void;
+    const left = new Promise<void>(r => { leave = r; });
+    // The next caller's turn: once the one ahead is done AND this one has left.
+    const tail = ahead.then(() => left);
+    gate.tails.set(name, tail);
+    // Cast, not annotated: the lock callback moves it on, out of the compiler's sight.
+    let slot = false, state = "waiting" as "waiting" | "entered" | "abandoned";
+    try {
+      if (!await settlesBy(ahead, deadline)) throw new LockBusyError();
+      if (!(slot = await takeSlot(gate.slots[kind], this.dialect === "postgres" ? PARTNER_LOCK_HOLDERS[kind] : Infinity, deadline))) throw new LockBusyError();
+      const attempt = withAdvisoryLock(db, LOCK_CLASS[kind], key, locked => {
+        if (state === "abandoned") throw new LockBusyError();
+        state = "entered";
+        return this.context.run({ db: locked, transaction: false }, fn);
+      }, Math.max(0, deadline - Date.now()));
+      if (!await settlesBy(attempt, deadline) && state === "waiting") {
+        state = "abandoned";
+        throw new LockBusyError();
+      }
+      return await attempt;
+    } catch (error) {
+      if (state !== "entered" && error instanceof LockBusyError) {
+        throw new PartnerStoreError(409, `${kind}_busy`, `another ${kind} request is still in progress for this agent; retry shortly`, BUSY_RETRY_AFTER_SECONDS);
+      }
+      throw error;
+    } finally {
+      if (slot) releaseSlot(gate.slots[kind]);
+      leave();
+      if (gate.tails.get(name) === tail) gate.tails.delete(name);
     }
   }
 }
 
 export class FilePartnerStore extends SqlPartnerStore {
   private raw: DatabaseSync;
-  constructor(home: string, clock: () => number = nowSeconds, secret: () => string = bridgeSecret) {
+  constructor(home: string, clock: () => number = nowSeconds, secret: () => string = bridgeSecret, waits: Readonly<Record<LockKind, number>> = PARTNER_LOCK_WAIT_MS) {
     mkdirSync(home, { recursive: true });
     const raw = new DatabaseSync(join(home, "partner-connections.sqlite"));
     raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    super(async () => wrapSqlite(raw), "sqlite", clock, secret);
+    super(async () => wrapSqlite(raw), "sqlite", clock, secret, waits);
     this.raw = raw;
   }
   close(): void { this.raw.close(); }
