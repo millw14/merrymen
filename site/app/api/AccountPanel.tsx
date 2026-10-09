@@ -188,11 +188,16 @@ export function AccountSummary({ view, plans, keys, busy = "", onRecheck }: { vi
   const due = view.due_raw ? `${formatTokens(view.due_raw, { decimals: 0, round: "up" })} MERRYMEN` : "";
   const pct = usage && usage.limit > 0 ? Math.min(100, Math.round(usage.used / usage.limit * 100)) : 0;
   const keyName = (id: string) => keys.find(k => k.key_id === id)?.name ?? id;
+  // A lapsed period whose renewal credit already covers: it reads as Free until the next metered request makes the
+  // charge. "No payment · renews…" there reads as Free renewing, and a developer may pay for the plan again.
+  const waits = plan.renews_on_next_request && plan.id === "free";
+  const starting = waits ? plans.plans.find(p => p.id === plan.renews_into) ?? null : null;
   return <div className="dev-account-summary">
     <div className="dev-account-plan">
       <span>PLAN</span><strong>{plan.name}</strong>
-      <small>{plan.id === "free" ? "No payment" : plan.ends_at ? `Until ${formatDate(plan.ends_at)}` : ""}{plan.renews_on_next_request ? " · renews on your next API request" : ""}</small>
-      {selected && plan.selected !== plan.id && <small>Next: {selected.name}{view.due_raw ? `${renewBy ? ` from ${formatDate(renewBy)},` : ""} once it is paid` : plan.ends_at ? ` from ${formatDate(plan.ends_at)}` : ""}</small>}
+      <small>{waits ? `${starting?.name ?? "A paid plan"} starts on your next API request, paid from your credit`
+        : `${plan.id === "free" ? "No payment" : plan.ends_at ? `Until ${formatDate(plan.ends_at)}` : ""}${plan.renews_on_next_request ? " · renews on your next API request" : ""}`}</small>
+      {selected && plan.selected !== plan.id && !(starting && starting.id === plan.selected) && <small>Next: {selected.name}{view.due_raw ? `${renewBy ? ` from ${formatDate(renewBy)},` : ""} once it is paid` : plan.ends_at ? ` from ${formatDate(plan.ends_at)}` : ""}</small>}
     </div>
     <div className="dev-account-credit">
       <span>CREDIT</span><strong>{formatTokens(credit, { decimals: 2 })} <small>MERRYMEN</small></strong>
@@ -203,7 +208,7 @@ export function AccountSummary({ view, plans, keys, busy = "", onRecheck }: { vi
           : renewBy ? <small>To renew on {formatDate(renewBy)}: {due}</small> : <small>Due: {due}</small>}
     </div>
     {usage && plans.billing.mode !== "off" && <div className="dev-usage">
-      <div className="dev-usage-head"><span>USAGE</span><span>{group(usage.used)} of {group(usage.limit)} requests{usage.resets_at ? ` · resets ${formatDate(usage.resets_at)}` : ""}</span></div>
+      <div className="dev-usage-head"><span>USAGE</span><span>{group(usage.used)} of {group(usage.limit)} requests{waits ? " until your next request" : usage.resets_at ? ` · resets ${formatDate(usage.resets_at)}` : ""}</span></div>
       <div className="dev-meter" role="progressbar" aria-label="Requests used this period" aria-valuemin={0} aria-valuemax={usage.limit} aria-valuenow={Math.min(usage.used, usage.limit)}><i style={{ width: `${pct}%` }} /></div>
       {!plans.billing.enforced && <small>Counted, not yet enforced: requests past the limit still go through.</small>}
       {usage.by_key.length > 0 && <ul className="dev-usage-keys" aria-label="Requests by key">{usage.by_key.map(k => <li key={k.key_id}><span>{keyName(k.key_id)}</span><code>{group(k.used)}</code></li>)}</ul>}
@@ -316,7 +321,7 @@ function PaymentPanel({ wallet, amount, treasury, renewBy, reversed, busy, run, 
     {paste}
   </section>;
   const shortfall = reversed && <p className="dev-warn">{tokens} MERRYMEN includes a reversed payment. Check that transaction again first (under Credit above): if it is final in another block, it is credited again. Paying now sends a new payment, and payments are not returned.</p>;
-  const later = <p className="dev-billing-note">Your plan runs until {renewBy && formatDate(renewBy)} either way, and nothing is owed before then. Credit you send now is used to renew it when this period ends.</p>;
+  const later = <p className="dev-billing-note">Your plan runs until {renewBy && formatDate(renewBy)} either way, and nothing is owed before then. Credit you send now renews it on your first API request after this period ends.</p>;
   // A renewal is not owed until the period ends, and right after a payment starts a plan the gateway already reports the
   // next period's price: drawn as a payment, it is a second one of the same size under the first one's receipt. Paying
   // ahead stays possible, as a step of its own.

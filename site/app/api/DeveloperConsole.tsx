@@ -39,19 +39,26 @@ export function keyLimits(plans: PlansView, account: AccountState): string {
   if (plans.source === "fallback" && account.kind === "ready") return "Up to 5 active keys · Create, read and chat scopes · Plan limits could not be loaded just now";
   if (plans.billing.mode === "off") return "Up to 5 active keys · 30 requests/minute per key · Create, read and chat scopes";
   // With billing on, a wallet's keys share one plan; before an account exists, that plan is Free.
-  const id = account.kind === "ready" ? account.view.plan.id : "free", plan = plans.plans.find(p => p.id === id);
-  const requests = account.kind === "ready" && account.view.usage ? account.view.usage.limit : plan?.requests;
+  const view = account.kind === "ready" ? account.view : null;
+  // A lapsed period that credit renews on the next request: its keys are served on that plan from then, not Free's.
+  const next = view && view.plan.id === "free" && view.plan.renews_on_next_request ? plans.plans.find(p => p.id === view.plan.renews_into) : undefined;
+  const id = next?.id ?? view?.plan.id ?? "free", plan = plans.plans.find(p => p.id === id);
+  const requests = next ? next.requests : view?.usage ? view.usage.limit : plan?.requests;
   if (!plan || requests === undefined) return "Up to 5 active keys · your plan's limits are shared by all your keys · Create, read and chat scopes";
+  const name = next ? `${plan.name} from your next API request` : plan.name;
   // A period's own quota (an upgrade's time-left share, a long comp) is this period's, not a 30-day figure.
   const quota = requests === plan.requests ? `${group(requests)} requests per ${plans.period_days} days`
     : `${group(requests)} requests this period (then ${group(plan.requests)} per ${plans.period_days} days)`;
   // Observe gives each key its own per-minute bucket and refuses no quota; only enforce shares one bucket per account.
-  if (!plans.billing.enforced) return `Up to 5 active keys · ${plan.name}: ${plan.rpm} requests/minute per key, and ${quota} counted for all your keys together, not yet enforced · Create, read and chat scopes`;
-  return `Up to 5 active keys · ${plan.name}: ${plan.rpm} requests/minute and ${quota}, shared by all your keys · Create, read and chat scopes`;
+  if (!plans.billing.enforced) return `Up to 5 active keys · ${name}: ${plan.rpm} requests/minute per key, and ${quota} counted for all your keys together, not yet enforced · Create, read and chat scopes`;
+  return `Up to 5 active keys · ${name}: ${plan.rpm} requests/minute and ${quota}, shared by all your keys · Create, read and chat scopes`;
 }
 /** "200 OK · …" for the key test, with this period's usage when /meta reports it. */
 export function testSummary(result: { name?: unknown; rate_per_min?: unknown; billing?: unknown }): string {
-  const billing = result.billing as { requests_used?: unknown; requests_limit?: unknown } | null | undefined;
+  const billing = result.billing as { requests_used?: unknown; requests_limit?: unknown; renews_on_next_request?: unknown } | null | undefined;
+  // /meta's rate is already the plan the next request is served on, its counts the plan as it stands (Free, until then):
+  // side by side they contradict each other, so the renewal is said instead.
+  if (billing?.renews_on_next_request === true) return `200 OK · ${result.name} · ${result.rate_per_min} requests/minute · your next metered request renews your plan from credit`;
   const usage = billing && typeof billing.requests_used === "number" && typeof billing.requests_limit === "number" ? ` · ${group(billing.requests_used)} of ${group(billing.requests_limit)} requests used` : "";
   return `200 OK · ${result.name} · ${result.rate_per_min} requests/minute${usage}`;
 }

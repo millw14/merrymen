@@ -80,6 +80,28 @@ test('the payment panel asks for the amount due rounded up, from the signed-in w
   assert.doesNotMatch(page, BANNED);
 });
 
+test('a lapsed period with credit says the paid plan starts on the next request, not that Free renews', () => {
+  // Loaf ended and 400,000 of credit waits to renew it; reads are pure, so the gateway reports Free until the next metered request.
+  const waiting = { id: 'free', name: 'Free', starts_at: null, ends_at: null, selected: 'loaf', renews_on_next_request: true, renews_into: 'loaf' };
+  const lapsed = view({ plan: waiting, credit_raw: (400_000n * UNIT).toString(), due_raw: null, usage: { used: 0, limit: 1000, resets_at: '2026-11-15T00:00:00.000Z', by_key: [] } });
+  assert.equal(lapsed.plan.renews_into, 'loaf');
+  const page = panel({ kind: 'ready', view: lapsed });
+  assert.match(page, /Loaf starts on your next API request, paid from your credit/);
+  assert.doesNotMatch(page, /No payment · renews on your next API request/);
+  assert.match(page, /0 of 1,000 requests until your next request/);
+  assert.match(keyLimits(live(), { kind: 'ready', view: lapsed }), /Loaf from your next API request: 120 requests\/minute and 250,000 requests per 30 days, shared by all your keys/);
+  // A gateway that does not name the plan: still not "Free renews".
+  const unnamed = panel({ kind: 'ready', view: view({ plan: { ...waiting, renews_into: undefined }, due_raw: null }) });
+  assert.match(unnamed, /A paid plan starts on your next API request, paid from your credit/);
+  // The key test: /meta's rate is already the next plan's; its counts are the plan as it stands.
+  assert.equal(testSummary({ name: 'Prism', rate_per_min: 120, billing: { requests_used: 0, requests_limit: 1000, renews_on_next_request: true } }),
+    '200 OK · Prism · 120 requests/minute · your next metered request renews your plan from credit');
+  // Paying ahead renews at the first request after the period, not at the period's end.
+  const running = { id: 'crumbs', name: 'Crumbs', starts_at: '2026-10-01T00:00:00.000Z', ends_at: '2026-10-31T00:00:00.000Z', selected: 'crumbs', renews_on_next_request: false };
+  const renewal = panel({ kind: 'ready', view: view({ plan: running, credit_raw: '0', due_raw: (100_000n * UNIT).toString(), due_for: 'renewal' }) });
+  assert.match(renewal, /Credit you send now renews it on your first API request after this period ends\./);
+});
+
 test('no payment panel without a live treasury, and nothing at all to pay when billing is off', () => {
   for (const plans of [FALLBACK_PLANS, live('observe', { treasury: null })]) {
     const page = panel({ kind: 'ready', view: view() }, plans);

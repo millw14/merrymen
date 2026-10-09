@@ -128,7 +128,12 @@ export function stillPayable(answer: unknown, treasury: string): Freshness {
 export interface HistoryItem { type: "payment" | "charge" | "reversal" | "adjustment"; at: string; amount_raw: string; tier: string | null; tx_hash: string | null; reason: string | null }
 export interface AccountView {
   account: { id: string; name: string; wallet: string; created_at: string | null };
-  plan: { id: string; name: string; starts_at: string | null; ends_at: string | null; selected: string; renews_on_next_request: boolean };
+  /**
+   * `renews_into`: the plan a charge waiting for the next metered request is
+   * for (a lapsed period's renewal paid from credit), or null. Reads never
+   * charge, so until that request the plan reads as Free.
+   */
+  plan: { id: string; name: string; starts_at: string | null; ends_at: string | null; selected: string; renews_on_next_request: boolean; renews_into: string | null };
   /** Base units; negative while a reversed payment leaves a shortfall. */
   credit_raw: string;
   /** Base units still to send for what is selected, or null when nothing is due. */
@@ -166,7 +171,8 @@ export function normalizeAccount(input: unknown): AccountView | null {
   return {
     account: { id: account.id, name: label(account.name) || "Developer account", wallet: account.wallet.toLowerCase(), created_at: iso(account.created_at) },
     plan: { id: plan.id, name: label(plan.name, 32) || plan.id, starts_at: iso(plan.starts_at), ends_at: iso(plan.ends_at),
-      selected: typeof plan.selected === "string" ? plan.selected : plan.id, renews_on_next_request: plan.renews_on_next_request === true },
+      selected: typeof plan.selected === "string" ? plan.selected : plan.id, renews_on_next_request: plan.renews_on_next_request === true,
+      renews_into: plan.renews_on_next_request === true && typeof plan.renews_into === "string" && /^[a-z0-9_-]{1,32}$/.test(plan.renews_into) ? plan.renews_into : null },
     credit_raw: credit, due_raw: dueRaw !== null && BigInt(dueRaw) > 0n ? dueRaw : null,
     due_for: dueRaw !== null && BigInt(dueRaw) > 0n && ["activation", "upgrade", "renewal"].includes(body.due_for as string) ? body.due_for as AccountView["due_for"] : null,
     usage: used !== null && limit !== null ? { used, limit, resets_at: iso(usage?.resets_at), by_key: byKey(usage?.by_key) } : null,
