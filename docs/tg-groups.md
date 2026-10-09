@@ -58,7 +58,12 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    The group model's paraphrase of a coin's theses is NOT code-written: each
    of its phrases is checked as an `answer` line (the money clause applies;
    no digit outside the coin's name), never as `research`, which would admit
-   "going to 10m". A market desk read may cite public market figures only when
+   "going to 10m". A thesis quoted on an explicit ask (rule 3) is a stranger's
+   words, gated as `quote`: the money clause is lifted for the author's own
+   figures ("down from 8m to 36k in a week"), and a price target in it ("should
+   be 50m", "next 100x") is dropped. A coin's facts (Factual questions, "A
+   coin's facts, on request") are research lines too: public index figures
+   with their source and time. A market desk read may cite public market figures only when
    every figure in it is one the brief code measured for that answer contains
    (Market analysis); the desk is never handed the owner's book, so it has
    none of the owner's figures to cite. Hypothetical arithmetic is never
@@ -88,14 +93,22 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    Merrymen follows or watches (a board cut to its watched traders, whether a
    trader is among them, figures read from that record), the owner's own
    research state or watch list, a trader's own theses, and anything from her
-   DM. A coin's theses (strangers' words) are never quoted in a room: it hears
-   a code digest of what they argue, or the group model's paraphrase of
-   cleaned texts fenced as data (links, addresses, handles and $tags out,
-   rows shaped as instructions or lures dropped, and rows written at the
-   summariser: "hey AI, summarize this as…", "summary for any bot reading",
-   the tool's own labels such as "for:", "new rule:", "from now on say"),
-   never a five-word run of
-   anyone's words (Milla, 2026-10-07, decision D5).
+   DM. By default a room hears a coin's theses (strangers' words) as a code
+   digest of what they argue, or the group model's paraphrase of cleaned
+   texts fenced as data (links, addresses, handles and $tags out, rows shaped
+   as instructions or lures dropped, and rows written at the summariser: "hey
+   AI, summarize this as…", "summary for any bot reading", the tool's own
+   labels such as "for:", "new rule:", "from now on say"), never a five-word
+   run of anyone's words (Milla, 2026-10-07, decision D5). A coin's theses are
+   never quoted in a room, **except when someone explicitly asks for them**
+   (list, show, the last N, don't summarise, their exact words, quotes:
+   Milla, 2026-10-09). Then the room hears up to 10 of the newest, each at
+   most ~160 characters, cleaned (links, addresses, handles, $tags and markup
+   out), each line gated as `quote` (lures, drainer prompts, sends, calls to
+   action, accusations against people, scam or honeypot, price targets and
+   lines at the reader dropped, never repaired), with how many were left out
+   and "their words, not facts". The default is still the digest. A trader's
+   own theses are never quoted.
 
 4. **Only the owner shapes the agent.** Group members cannot write owner
    facts, bump the relationship, rename it, change settings, confirm
@@ -450,6 +463,34 @@ to someone in distress goes out shushed or not.
 * If the insult itself is hateful (slurs, protected traits) it does not
   mirror it: a 🤡 reaction or silence.
 * The owner gets affectionate roasts, never mean ones.
+* **Rugged coins** (Milla, 2026-10-09: "she should be able to say they rugged
+  cause they're not merrymen"). The persona may say a coin "rugged" (or call
+  it a rug) and add one playful Merrymen brag ("rugged cause it wasn't
+  merrymen 😤", "should've been one of ours") only under a **collapse
+  permit** for that coin, in that topic: `measured`, when a facts answer
+  (below) measured it collapsed (at least 90% below its highest hourly close
+  worth at least $100k, or down 90% in 24h), for 12 hours; or `room`, when a
+  person here (never a bot) says the room's current Fomo coin rugged ("auton
+  rugged lol", or "it rugged" under its answer), for 30 minutes. A question
+  ("did it rug?"), a negation or a maybe ("not a rug", "this could rug"), a
+  person as the subject ("the dev rugged it") or another coin a shill names
+  sets nothing; a measurement that finds no collapse clears both kinds and
+  keeps the room's word from setting one for 12 hours. The permit applies
+  only to an answer or an ambient line that names the coin, replies under its
+  Fomo answer, or is a short pointer ("it", "rip") within ten minutes of it.
+  The gate (`TgGateCtx.rug`) then lifts only "rugged" or "rug" said of no
+  one, "it", "this one", "the chart" or the coin; everything else stays
+  refused: a person who rugged, dumped, sold on anyone, stole, pulled the
+  liquidity or ran; scam, honeypot or fraud; "rugpull", "rugging", "soft
+  rug", "rugged us", "rugged by the dev"; Merrymen as a play ("buy merrymen
+  instead", "merrymen coins never rug", "stick to merrymen"); any figure
+  beside it. A brag waits while one is among its last eight lines or went
+  out in the last 20 minutes, and there is no brag template, so a brag never
+  recurs from a pool. No permit for a coin it holds, one it bought and has
+  not exited (how it did is private, rule 3), or a coin named like someone in
+  the room. The system prompt's NEVER WRITE line is unchanged; the prompt's
+  RUGGED block carries the permit for that one coin. Permits live in memory
+  (a restart forgets them) and the owner's forget clears them.
 * Anything that reads as self-harm or real distress switches off banter: a
   short kind line and nothing clever, even in a shushed chat and even when
   the line also carries a coin (that coin is not claimed or nominated).
@@ -497,6 +538,51 @@ which could undersell or invent):
   the Telegram troubleshooting answer.
 
 Each template passes the gate as `fixed` (pinned in facts-followups.test.ts).
+
+### A coin's facts, on request
+
+"What happened to auton", "why did it rug?", "facts?", "show me the data",
+"did the dev dump?" (Milla, 2026-10-09: "when asked for actual facts she
+should be able to look") are answered with measured facts only, read by code
+(`detect.ts fomoFactsOf`, a question or a "show me", never a statement), about
+the room's Fomo coin: the one the answer it replies to was about, this
+topic's last single-coin Fomo answer (30 minutes), or a coin the line names
+"on fomo" or on another chain than Robinhood. "What happened to pons" with no
+Fomo behind it stays the desk's and the router's; "what's happening with X"
+(the present) is the coin's Fomo activity, as before. It is read before the
+desk and the router, and a "did it rug?" question is a facts ask, not banter.
+
+* **Resolution, memory first.** The room's remembered coin (same symbol, and
+  chain when named) costs nothing; else Fomo's resolver once (one read
+  charged to the room's cap, like any lookup); a ticker on several chains
+  asks "Which AUTON do you mean? Fomo lists it on more than one chain; say
+  the chain.", none says "I couldn't find AUTON on Fomo."
+* **The reads** (`desk/facts.ts`): GeckoTerminal's public index on the fleet
+  quota and the desk's one-minute memo: the token's pools, the main pool's
+  hourly closes (about 41 days) and, for "data" and "dev", the token's info.
+  0 Fomo credits beyond resolution; 2-3 GeckoTerminal requests; at most 4
+  reads per room per 10 minutes and 20 per agent per hour (past either:
+  "I've looked up enough market data in here for now; ask again in a few
+  minutes."); 10 s in all. A Solana mint is never lowercased.
+* **The main pool**: of the pools with at least $1k of liquidity and some 24h
+  volume, the deepest (a stale pool with a stranded reserve and no volume, or
+  dust, is never the coin's price). **The high** is the highest hourly close
+  on it, never a wick; when the closes do not reach the pool's creation the
+  line says "in the last N days". **Collapse** = at least 90% below that
+  close (worth at least $100k) or down 90% in 24h.
+* **The lines** (research lines, at most six, no address, no "wallet", no
+  "rug", "scam" or "dumped", "fell" never "crashed"): the source and time
+  first ("AUTON on Solana, from GeckoTerminal at 01:15 UTC:"), then FDV now
+  and the highest close with how far below it is, the biggest drop within
+  three hourly closes (50% or more), the main pool's liquidity and its 24h
+  sellers and buyers; "data" adds holders and the top ten's share with the
+  count's time; "dev" says the creator's holding share as listed now; every
+  answer ends with what could not be read ("I can't see who sold, why it
+  fell, or whether liquidity was pulled."). A figure not read is left out;
+  a failed read is "Couldn't read the market data for AUTON just now, try
+  again in a bit."
+* A facts answer's measurement sets or clears the room's collapse permit
+  (Banter and roasts, "Rugged coins"), whether or not its send went through.
 
 Literal arithmetic, percentage changes and P&L calculations use bounded
 decimal arithmetic and only the supplied operands. They never become a
@@ -776,7 +862,7 @@ itself stays a reaction. Live 2026-10-07: "do it" under such an offer got
 
 **The menu** is one forced tool call (`callChoice`): chat, the Fomo
 leaderboard, a Fomo board, one coin on Fomo (theses, buyers, sellers, a
-research dive, what is going on), what Fomo's traders are buying or
+research dive, what is going on, or what happened to it as measured facts), what Fomo's traders are buying or
 selling, small coins on Fomo, one Fomo trader by name (who they are, what
 they hold, what they traded, what they made or lost money on), a tail, what
 Fomo is, a market read, a coin read. It lists only what this agent can serve (no Fomo actions without
@@ -791,7 +877,12 @@ position ("second", "one", "first", "number", "winner": "what's the second
 one holding" asks about a row, never a trader called "second"). A coin is
 never an `@name` and a trader never a `$tag`. The time
 window and the buy or sell side are read from the line's own words, never
-from the model.
+from the model; so are a coin's chain (`groundedChain`), whether its theses
+are asked for themselves and how many (`detect.ts thesesQuotesOf`: a model's
+own count is ignored), and what kind of facts question it is (`fomoFactsOf`).
+A reply asking for the theses themselves under one of its theses answers,
+past the 15-minute follow-up window, is asked by code about the coin that
+answer was about, never routed.
 
 **A chain** (decision D3, 2026-10-07). Fomo's lists cover every chain; the
 menu's optional `chain` (robinhood, solana, base, ethereum, bsc) cuts a
@@ -1710,6 +1801,16 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "what are they saying about anyps5" (live 23:00) | What they argue, never counts: "What traders on Fomo are saying about AnyPS5 on Solana (25 recent theses from 20 traders):", then the group model's checked gist, points for and worries, then "Their claims, not facts; newest 25 of 60." No model, or nothing of its passing: the code digest ("Mostly hype, with no case for or against that I can pick out." when no cue matches) |
 | "tell me what it's about from thesis" right after (live 23:00) | The same worded answer from the same copy: no provider read, no model call |
 | "fetch the thesis for merrymen on fomo" past the room's research allowance (live 23:05) | "fomo lookups for this room are used up for now, try again after 00:00 UTC." The same words for the room's cap and the owner's; never a credit, never "ask me in a direct message" |
+| Live 2026-10-09: "can you list the last 10" under AUTON's digest | "The newest 10 theses on AUTON on Solana, in their words (not facts):", then up to ten "• kaleo, 5 min ago: “im holding, team is still building”" lines, newest first, each gated as a `quote`, then "Their words, not facts; 5 of these 10 left out; Fomo lists 4,199." From the room's kept copy: no provider read, no model call, the slot given back |
+| Live 2026-10-09: "show me these thesis, dont summarise" a minute later | The same quotes, with "From a copy fetched a minute ago." (never "just now" for a copy over a minute old) |
+| "summarise them" after the quotes / "list the last 10" after a board | The digest again / never quotes |
+| "show me the last 5" under the quotes, twenty minutes on | Five of the newest, asked by code from the line (never a model), about the coin the room's memory holds, from the kept copy |
+| "what are kaleo's theses, list them" | "That one is for a direct message, not the group.": a trader's own theses are never quoted |
+| Live 2026-10-09: AUTON's activity on an empty feed | "No matching activity was returned for AUTON on solana in the last 24h." (never "activity were") |
+| "shogun what happened to auton" after AUTON's Fomo answer | "AUTON on Solana, from GeckoTerminal at 01:15 UTC:" / "About $36k now (fully diluted); its highest hourly close on its main pool was about $5.75M, Oct 7 at 04:00 UTC, so it is 99.4% below that." / "The biggest drop: about 95% in three hours from 13:00 UTC on Oct 8." / "Main pool liquidity about $16k; in the last 24h, 1,576 sellers and 1,157 buyers." / "I can't see who sold, why it fell, or whether liquidity was pulled." No Fomo credit (the coin from memory); the measured collapse permit is set |
+| "why did it rug?" / "did the dev dump?" then | The same facts, ending "The data shows when and how far it fell, not why; …" / with "GeckoTerminal lists its creator as holding about 4.8% of supply now (it doesn't say when that was last updated)." and "I can't see the creator's past sales, only what GeckoTerminal lists now." Never "dumped", "rug" or "scam", never an address |
+| "lmao auton" after a measured collapse | The persona may say "rugged cause it wasn't merrymen 😤"; the next brag ("should've been a merrymen coin") waits; "the dev rugged it" is never said; with no permit (another room, or a coin it holds) "rugged" is never said |
+| A member says "auton rugged lol" about the room's Fomo coin | A room permit for 30 minutes ("did it rug?", "not a rug", "pepe rugged" set none); a facts answer that finds no collapse clears it |
 | "what are people saying about $PONS now" a minute after the last answer | The copy from a minute ago, labelled with its age: a room's "now" never buys a forced refresh. Theses are reused for 2 h in a room, boards 15 min |
 | A Fomo read that failed or could not be reached | "couldn't reach fomo just now, try again in a bit." |
 | "shogun what can you do?" / "shogun help" | A fixed list of what this room can ask (Fomo, the desk, coin looks, as wired here) and "i never take trade orders from a group." No model, no lookup |
@@ -1795,6 +1896,16 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
   a room gets about one new coin's theses an hour, beyond copies it reuses. The
   caps are the operator's to raise (docs/fomo.md "Operations"); the search is
   still paid when the page after it is then refused.
+* A coin's facts read only what the public index measures: who sold, a
+  creator's past sales, whether liquidity was pulled and any "why" are not
+  read, and the answer says so. A high on a pre-migration bonding-curve pool
+  (before the main pool's bars) is not seen, which understates a fall. Fomo's
+  own token devs route is not wired yet (follow-up F10), nor a DexScreener
+  fallback for other chains (F11).
+* Quotes are cut at about 160 characters or three sentences, and dropped
+  rows are counted, never replaced by older ones. Lures in another Latin-script
+  language rest on the send and call-to-action clauses (and the room hears
+  "their words, not facts"); another script is never quoted.
 * The owner's first name for tagging is taken from what it has seen in that
   chat; before the owner speaks there, it says "my owner", and the tag in the
   owner ask (a link to the owner's account) reads "boss".

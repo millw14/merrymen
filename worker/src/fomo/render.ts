@@ -22,7 +22,10 @@
  * what they traded and what they made or lost money on, provider-reported;
  * Milla, 2026-10-07), never as @mentions and never who Merrymen follows or
  * watches. A coin's theses are a digest of what they argue (digest.ts),
- * never quoted and never counted. The owner's own research state is
+ * never counted, and never quoted by this renderer: a room that asks for the
+ * theses themselves hears them quoted by tg-fomo-port.ts thesesQuotes and
+ * tg-groups/quotes.ts, gated line by line (Milla, 2026-10-09). The owner's
+ * own research state is
  * deflected to a direct message. A final scrub runs over the whole group
  * text as a second line of defence.
  *
