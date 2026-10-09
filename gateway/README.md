@@ -312,7 +312,10 @@ check the host's clock.
   block alone: it applies to every accepted address, and raising it would make
   transfers already sent to the old address uncreditable. Each boot where the
   treasury, the previous list or the start block changed appends a `config`
-  record to the ledger and logs `[billing] PAYMENTS CONFIG RECORDED: …`. The
+  record to the ledger and logs `[billing] PAYMENTS CONFIG RECORDED: …`. If the
+  ledger cannot take it at boot (say a lock left by the old process, killed
+  mid-append), boot logs `could not record the payments config` and the record
+  is written within 10 s, and in any case before the next ledger record. The
   console reads the treasury again before each wallet payment, but someone who
   copied the old address by hand is not protected: keep it in the previous
   list for a while. A transfer to an address no longer accepted can be

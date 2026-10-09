@@ -186,6 +186,35 @@ test("each change to where payments go leaves a config line in the ledger, and a
   assert.equal(await off.raw(), "", "billing off writes nothing at boot");
 });
 
+test("a config line a dead writer's lock kept out at boot is written later, by the tail or before a payment", async () => {
+  const f = await fixture({ treasury: TREASURY, startBlock: 100, previousTreasuries: [] });
+  const configs = async () => (await f.records()).filter((r) => r.type === "config").map((c) => c.treasury);
+  const moved = `0x${"7f".repeat(20)}`;
+  // The old process was killed mid-append, holding billing.jsonl.lock, and the
+  // deploy that replaced it also moved the treasury.
+  await writeFile(`${f.file}.lock`, "");
+  await f.restart({ treasury: moved, lockWaitMs: 50 });
+  assert.deepEqual(await configs(), [TREASURY]);
+  assert.match(f.logs.join("\n"), /could not record the payments config/);
+  await f.billing.tail();
+  assert.deepEqual(await configs(), [TREASURY], "still locked: still waiting");
+  await rm(`${f.file}.lock`);
+  await f.billing.tail();
+  assert.deepEqual(await configs(), [TREASURY, moved], "written once the lock is gone");
+  assert.match(f.logs.join("\n"), /PAYMENTS CONFIG RECORDED: treasury 0x7f/);
+  await f.billing.tail();
+  assert.deepEqual(await configs(), [TREASURY, moved], "and only once");
+
+  // The same wait, ended by the next write the ledger takes rather than the tail.
+  const back = `0x${"7d".repeat(20)}`;
+  await writeFile(`${f.file}.lock`, "");
+  await f.restart({ treasury: back, lockWaitMs: 50 });
+  await rm(`${f.file}.lock`);
+  await f.account();
+  assert.deepEqual((await f.records()).filter((r) => r.type === "config" || r.type === "account").map((r) => r.treasury ?? r.type),
+    [TREASURY, moved, back, "account"], "recorded before the next record");
+});
+
 // ── accounts ─────────────────────────────────────────────────────────────────
 
 test("one account per wallet, named by the app-name rule, kept across restarts", async () => {

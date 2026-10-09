@@ -111,7 +111,8 @@
  *   billing.meta(owner, keyCreatedAt) -> {billing|null, rate_per_min|null, headers} for /meta
  *   quotaHeaders(...) and isPlatformFailure(...) are exported.
  *
- * Operations: tail() picks up the CLI's lines (every 10 s on its own, and
+ * Operations: tail() picks up the CLI's lines and writes a config line boot
+ * could not (every 10 s on its own, and
  * settle() does the same before it charges),
  * reconcile({all, dryRun}) re-verifies recent payments (every 5 min), flush()
  * writes usage.json, close() stops the timers, drains the queue and flushes.
@@ -871,20 +872,41 @@ export async function createBilling({
 
   // An audit line whenever where money goes changes: a swapped treasury must
   // leave a trace in the ledger it is paid into, not only in a deploy log.
-  if (mode !== "off" && !readOnly) {
-    await ledger.enqueue(async () => {
-      const cur = { treasury, previous: [...previous].sort(), start_block: Number.isSafeInteger(startBlock) ? startBlock : null };
-      const last = ledger.state.config;
-      if (last && last.treasury === cur.treasury && last.start_block === cur.start_block
-        && JSON.stringify([...last.previous].sort()) === JSON.stringify(cur.previous)) return;
-      try {
-        await ledger.append({ type: "config", ...cur });
-        log(`[billing] PAYMENTS CONFIG RECORDED: treasury ${cur.treasury ?? "none"}, previous [${cur.previous.join(", ")}], start block ${cur.start_block ?? "none"}`);
-      } catch (err) {
-        log(`[billing] could not record the payments config (${errName(err)})`);
-      }
-    });
+  // Written at boot; when it cannot be (a lock left by a writer killed
+  // mid-append, younger than its 10 s staleness, is the likely case on a
+  // redeploy), it stays pending: the 10 s tail tries again, and so does every
+  // record this process writes, first, so no payment lands under a treasury
+  // the ledger does not name.
+  const configNow = { treasury, previous: [...previous].sort(), start_block: Number.isSafeInteger(startBlock) ? startBlock : null };
+  let configPending = mode !== "off" && !readOnly;
+  let configWarned = false;
+  /** Inside the queue. Never throws: a failure leaves it pending. */
+  async function recordConfigLocked() {
+    if (!configPending) return;
+    const last = ledger.state.config;
+    if (last && last.treasury === configNow.treasury && last.start_block === configNow.start_block
+      && JSON.stringify([...last.previous].sort()) === JSON.stringify(configNow.previous)) { configPending = false; return; }
+    try {
+      await ledger.append({ type: "config", ...configNow });
+      configPending = false;
+      log(`[billing] PAYMENTS CONFIG RECORDED: treasury ${configNow.treasury ?? "none"}, previous [${configNow.previous.join(", ")}], start block ${configNow.start_block ?? "none"}`);
+    } catch (err) {
+      if (!configWarned) log(`[billing] could not record the payments config (${errName(err)}): trying again every 10 s and before the next ledger write`);
+      configWarned = true;
+    }
   }
+  /** Every record createBilling writes goes through here (inside the queue): a pending config line first. */
+  async function append(fields, opts) {
+    await recordConfigLocked();
+    return ledger.append(fields, opts);
+  }
+  /** The CLI's new lines, then a pending config line. */
+  async function tail() {
+    const r = await ledger.tail();
+    if (configPending) await ledger.enqueue(recordConfigLocked);
+    return r;
+  }
+  if (configPending) await ledger.enqueue(recordConfigLocked);
 
   // ── usage counters ──
   const usageFile = path.join(dataDir, USAGE_FILE);
@@ -1021,7 +1043,7 @@ export async function createBilling({
         }
         break;
       }
-      await ledger.append(chargeFor(acct, act, now), { at: now });
+      await append(chargeFor(acct, act, now), { at: now });
       n += 1;
       log(`[billing] ${owner} ${act.reason} ${act.plan.id}: ${formatTokens(act.price)} MERRYMEN of credit used`);
     }
@@ -1188,7 +1210,7 @@ export async function createBilling({
           await settleLocked(owner);
           return { status: 200, json: { already: true, ...accountJson(account(owner)) } };
         }
-        await ledger.append({ ...rec, account_id: acct.account_id });
+        await append({ ...rec, account_id: acct.account_id });
         log(`[billing] ${owner} paid ${formatTokens(rec.amount_raw)} MERRYMEN in ${rec.tx_hash}`);
         await settleLocked(owner);
       } catch (err) { return unavailable(err); }
@@ -1287,7 +1309,7 @@ export async function createBilling({
           const cur = ledger.state.payments.get(p.id);
           if (!cur || cur.reversed) return false;
           try {
-            await ledger.append({ type: "reversal", account_id: cur.account_id, payment_id: cur.id, amount_raw: cur.amount.toString(), why });
+            await append({ type: "reversal", account_id: cur.account_id, payment_id: cur.id, amount_raw: cur.amount.toString(), why });
             log(`[billing] PAYMENT REVERSED: ${cur.tx_hash} from ${cur.owner}, ${formatTokens(cur.amount)} MERRYMEN (${why}). If it lands again in a later block, the developer submits its hash again.`);
             return true;
           } catch (err) {
@@ -1306,7 +1328,7 @@ export async function createBilling({
   // ── timers ──
   const handles = [];
   if (timers && mode !== "off") {
-    handles.push(setInterval(() => { ledger.tail().catch((err) => log(`[billing] tail failed (${errName(err)})`)); refreshAnchors(); }, TAIL_MS));
+    handles.push(setInterval(() => { tail().catch((err) => log(`[billing] tail failed (${errName(err)})`)); refreshAnchors(); }, TAIL_MS));
     handles.push(setInterval(() => { flush(); }, USAGE_FLUSH_MS));
     if (paymentsReady) handles.push(setInterval(() => { reconcile().catch((err) => log(`[billing] reconcile failed (${errName(err)})`)); }, RECONCILE_MS));
     for (const h of handles) h.unref?.();
@@ -1341,7 +1363,7 @@ export async function createBilling({
       if (!validName(name)) return fail(400, "invalid_name", "Account name must contain 1–48 characters");
       return ledger.enqueue(async () => {
         if (account(owner)) return fail(409, "account_exists", "This wallet already has a developer account.");
-        try { await ledger.append({ type: "account", account_id: `acct_${hex(12)}`, owner, name: name.trim() }); } catch (err) { return unavailable(err); }
+        try { await append({ type: "account", account_id: `acct_${hex(12)}`, owner, name: name.trim() }); } catch (err) { return unavailable(err); }
         return { status: 201, json: accountJson(account(owner)) };
       });
     },
@@ -1355,7 +1377,7 @@ export async function createBilling({
         if (!(await ledger.writable())) return unavailable(new BillingUnavailable(ledger.blocked()));
         const acct = account(owner);
         try {
-          if (acct.selected !== tier) await ledger.append({ type: "select", account_id: acct.account_id, tier });
+          if (acct.selected !== tier) await append({ type: "select", account_id: acct.account_id, tier });
           await settleLocked(owner);
         } catch (err) { return unavailable(err); }
         return { status: 200, json: accountJson(account(owner)) };
@@ -1436,7 +1458,7 @@ export async function createBilling({
       };
     },
 
-    tail: () => ledger.tail(),
+    tail,
     reconcile,
     flush,
     /** Stop the timers, let queued billing writes finish (5 s at most), then save usage. */
