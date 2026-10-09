@@ -489,8 +489,12 @@ to someone in distress goes out shushed or not.
   one, "it", "this one", "the chart" or the coin; everything else stays
   refused: a person who rugged, dumped, sold on anyone, stole, pulled the
   liquidity or ran; a lifted rug word beside a person (the dev, the team, an
-  insider, a whale, a KOL, anyone the room knows by name, "thanks kaleo",
-  someone who "took everything", "knew" or "shilled it"); scam, honeypot or fraud; "rugpull", "rugging", "soft
+  insider, a whale, a KOL, they, he, she or someone, anyone the room knows
+  by name, "thanks kaleo", someone who "took everything", "knew" or
+  "shilled it"); anyone but the coin itself who dumped, sold, ran, bailed,
+  jeeted, vanished or took the money beside it ("auton rugged, kaleo ran";
+  "auton dumped hard, rugged" stays); a crime laid at anyone's door ("the
+  dev is a crook"); scam, honeypot or fraud; "rugpull", "rugging", "soft
   rug", "rugged us", "rugged by the dev"; Merrymen as a play ("buy merrymen
   instead", "merrymen coins never rug", "stick to merrymen"); any figure
   beside it. A brag waits while one is among its last eight lines or went

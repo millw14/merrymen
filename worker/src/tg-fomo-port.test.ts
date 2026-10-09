@@ -2942,4 +2942,9 @@ describe("quotes a room never hears (review, 2026-10-09)", () => {
     leftOut(["rugged cause the deployer pulled out", "rugged, he pulled out", "the deployer? full rug", "rugged cause someone pulled out"]);
     quoted(["rugged, holders got wrecked"]);
   });
+
+  it("a rug a named trader did (ran, dumped, sold the top, a crook) is never quoted", () => {
+    leftOut(["auton rugged, kaleo ran", "auton rugged, kaleo took the money", "it rugged cuz kaleo is a crook", "auton rugged, kaleo dumped", "it rugged and frankdegods sold the top"]);
+    quoted(["auton dumped hard, rugged", "it ran then rugged lol"]);
+  });
 });

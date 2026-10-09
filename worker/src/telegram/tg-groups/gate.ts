@@ -1175,7 +1175,7 @@ const RUG_PERSON = /^(?:dev|devs|deployer|deployers|team|insider|insiders|creato
  * off), never one that is a person's name in `names`, the agent's own name,
  * or a word for a person.
  */
-function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, names: readonly string[]): { mask: RegExp; brag: boolean } | null {
+function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, names: readonly string[]): { mask: RegExp; brag: boolean; doers: ReadonlySet<string> } | null {
   if (kind === null || !RUG_KINDS.has(kind)) return null;
   const rug = ctx?.rug;
   if (!rug || typeof rug !== "object") return null;
@@ -1195,8 +1195,36 @@ function rugPermitOf(ctx: TgGateCtx, kind: string | null, agentName: string, nam
     `${RUG_CLAUSE}${RUG_LEAD}(?:(?:${subjects.join("|")})${RUG_LINK}\\s+)?${quote ? RUG_PRE_QUOTE : RUG_PRE}${quote ? RUG_ADJ_QUOTE : RUG_ADJ}(?:rugged|rug)${RUG_NOT_AFTER}`,
     "gu",
   );
-  return { mask, brag: rug.brag === true };
+  return { mask, brag: rug.brag === true, doers: new Set([...RUG_DOERS, ...[...coins].filter((c) => !/\s/u.test(c))]) };
 }
+
+/**
+ * WHO DID THE COLLAPSE, beside a lifted rug word: a subject that dumped,
+ * sold, ran, bailed, jeeted, exited, vanished, ghosted, pulled out, cashed
+ * out or took the money ("auton rugged, kaleo ran", "rugged, dev jeeted
+ * everything"). Only the coin, a pointer at it, its price, chart or
+ * liquidity, the author ("i") or a joining word may be that subject: "auton
+ * dumped hard, rugged" and "it ran then rugged lol" stay, and a trader the
+ * gate cannot know by name is refused (review, 2026-10-09).
+ */
+const RUG_DOER = U(
+  /\b([\p{L}\p{N}_'$]+)\s+(?:(?:just|already|then|literally|basically|totally|has|have|had|prob|probably|def)\s+)*(?:dumped|dumping|dumps|ran|bailed|jeeted|jeeting|jeets|exited|vanished|disappeared|ghosted|cashed\s+out|pulled\s+out|sold|selling|took\s+(?:the|our|all|everyone'?s|their|his|her)\s+(?:money|bags?|funds|liquidity|lp))\b/gi,
+);
+/** What may have dumped or run beside a lifted rug word, beside the permit's own coins. */
+const RUG_DOERS: readonly string[] = [
+  "it", "its", "this", "that", "one", "chart", "coin", "token", "price", "mcap", "mc", "volume", "liquidity", "lp", "pool", "market", "i",
+  "then", "and", "so", "but", "just", "already", "also", "still", "literally", "basically", "totally", "has", "have", "had", "got", "was", "is",
+  "lol", "lmao", "hard", "fully", "finally", "rugged", "rug",
+];
+/** A lifted rug word beside a collapse someone did (RUG_DOER) whose subject is not one of the permit's doers. */
+function collapseDoneBy(t: string, doers: ReadonlySet<string>): boolean {
+  for (const m of t.matchAll(RUG_DOER)) {
+    const who = (m[1] ?? "").replace(/^\$+/u, "").replace(/'s$/u, "");
+    if (!doers.has(who)) return true;
+  }
+  return false;
+}
+const OUT_ACCUSE_U = U(OUT_ACCUSE);
 
 /** A reading with every lifted rug word taken out: what RUG_WORD then reads. */
 function rugMasked(t: string, mask: RegExp): string {
@@ -1728,6 +1756,10 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (rug && r.low.some((t) => RUG_WORD.test(t)) && (some(r.low, PERSON_BESIDE_RUG) || (strip !== null && r.low.some((t) => t !== t.replace(strip, " "))))) {
     return refuse("accuse");
   }
+  // Under a permit, a crime laid at anyone's door ("the dev is a crook"), and
+  // a collapse someone did beside a lifted rug word ("auton rugged, kaleo ran").
+  if (rug && some(r.low, OUT_ACCUSE_U)) return refuse("accuse");
+  if (rug && r.low.some((t) => RUG_WORD.test(t)) && r.low.some((t) => collapseDoneBy(t, rug.doers))) return refuse("accuse");
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");
   if (r.low.some((t) => HUMAN.some((re) => re.test(t)))) return refuse("human");

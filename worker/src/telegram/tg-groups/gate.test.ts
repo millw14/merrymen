@@ -1901,6 +1901,15 @@ describe("rug permit on persona kinds: 'rugged', said of a collapsed coin, with 
     it(`quote refuses a rug landing on a person as accuse: ${JSON.stringify(t)}`, () =>
       assert.equal(reason(`• a trader, 3 min ago: “${t}”`, { kind: "quote", agentName: "Shogun", names: [], rug: { coins: ["AUTON"], brag: false } }), "accuse"));
   }
+  // A named trader or the dev running, taking the money or being a crook, under the permit (review, 2026-10-09).
+  for (const kind of ["answer", "banter", "coin"] as const) {
+    for (const t of ["auton rugged, kaleo ran", "auton rugged, kaleo took the money", "it rugged cuz the dev is a crook", "it rugged cuz kaleo is a crook", "rugged, dev jeeted everything", "auton rugged, kaleo dumped", "auton rugged, whales dumped", "auton rugged, the team took the money", "it rugged and frankdegods sold the top"]) {
+      it(`${kind} refuses a collapse someone did as accuse: ${JSON.stringify(t)}`, () => assert.equal(v(t, kind), "accuse"));
+    }
+    for (const t of ["auton dumped hard, rugged", "it ran then rugged lol", "rugged, then dumped", "rugged, liquidity vanished"]) {
+      it(`${kind} admits a collapse the coin did: ${JSON.stringify(t)}`, () => assert.equal(v(t, kind), "ok"));
+    }
+  }
   it("a rug beside someone the room knows by name is accuse, in banter and in a quote", () => {
     assert.equal(v("auton rugged cause milla shilled it", "banter"), "accuse");
     assert.equal(reason("• a trader, 3 min ago: “auton rugged, milla was in it”", { kind: "quote", agentName: "Shogun", names: ["Milla"], rug: { coins: ["AUTON"], brag: false } }), "accuse");
