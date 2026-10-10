@@ -70,7 +70,7 @@ describe("the market lists' prices", () => {
         onTab: noop,
         reads: { market: "ok", board: "ok", theses: "ok", discoveries: "ok", mine: "ok" },
       } as never);
-    const cells = () => prices(t.container, ".desktop-market-row > span:last-child > strong");
+    const cells = () => prices(t.container, ".desktop-market-row > strong");
     try {
       await t.render(rail(350, 120));
       assert.deepEqual(cells().map((c) => c.trend), [null, null], "nothing moved on the first draw");

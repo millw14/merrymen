@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import Link from "next/link";
+import Link from "@/terminal/Link";
 import type { MarketData } from "@/lib/market";
 import { compactUsd, count, subCentUsd, usdFixed } from "@/lib/format";
-import { MovingFigure } from "@/terminal/ui";
+import { Coin, MovingFigure } from "@/terminal/ui";
 
 /**
  * THE TAPE ALONG THE BOTTOM.
@@ -14,9 +14,18 @@ import { MovingFigure } from "@/terminal/ui";
  * agents; with it, it reads as somewhere trading happens — which is the honest
  * framing, because it is.
  *
- * No marquee — it SCROLLS if it overflows, because a moving strip of prices is
- * unreadable and this one is meant to be read. A price that changes flips in
+ * By default it SCROLLS if it overflows, because a moving strip of prices is
+ * hard to read and this one is meant to be read. A price that changes flips in
  * place (MovingFigure), which says it moved without making it move past you.
+ *
+ * `loop` makes it run instead — the terminal's tape asked for it. The run is
+ * built to cost nothing and to stay readable: the rows are drawn twice inside
+ * one track that a CSS transform slides by exactly half its width, so the
+ * compositor does the work and no JavaScript ticks; the track element never
+ * changes identity across re-renders, so a price update does not restart it;
+ * it pauses while the pointer or keyboard focus is on it; and under
+ * `prefers-reduced-motion` the second copy is dropped and the strip goes back
+ * to scrolling by hand (desktop.css).
  *
  * TWO FEEDERS, ONE STRIP. `TickerStrip` draws whatever rows it is handed. The
  * terminal hands it the market it already reads every thirty seconds (see
@@ -44,6 +53,8 @@ export interface TickerItem {
   key: string;
   href: string;
   symbol: string;
+  /** The token's logo, or "" to draw its initials instead (Coin). */
+  logo?: string;
   priceUsd: number | null;
   volume24hUsd: number | null;
   /** Only ever true when the chain said so. */
@@ -56,15 +67,56 @@ export function TickerStrip({
   items,
   wall = null,
   className,
+  loop = false,
   children,
 }: {
   items: readonly TickerItem[];
   wall?: { turned: number; through: number } | null;
   className?: string;
+  /** Run the rows along the strip in a loop instead of letting it scroll. */
+  loop?: boolean;
   /** Controls that belong on the tape — the terminal's sound toggle. */
   children?: ReactNode;
 }) {
   if (!items.length && !wall) return null;
+  const rows = (copy: boolean) => (
+    // The second copy exists for the loop's seam alone: it is the same links
+    // again, so assistive tech is told to skip it and it cannot take focus.
+    <div className="mm-ticker-run" aria-hidden={copy || undefined}>
+      {items.map((t) => (
+        <Link key={t.key} href={t.href} className="mm-tick" tabIndex={copy ? -1 : undefined}>
+          {t.logo !== undefined && <Coin symbol={t.symbol} logo={t.logo} />}
+          <span className="k">{t.symbol}</span>
+          <b className="mono">
+            <MovingFigure value={t.priceUsd} text={money(t.priceUsd)} />
+          </b>
+          {t.volume24hUsd !== null && <span className="mono dim">{compact(t.volume24hUsd)}</span>}
+          {t.halted ? (
+            <span className="mono halted">halted</span>
+          ) : t.stale ? (
+            <span className="mono stale" title="This feed has not updated in over an hour">
+              stale
+            </span>
+          ) : null}
+        </Link>
+      ))}
+    </div>
+  );
+  if (loop) {
+    // Four seconds a row keeps the pace the same however many rows there are.
+    const seconds = Math.max(20, items.length * 4);
+    return (
+      <aside className={className ? `mm-ticker mm-ticker-loop ${className}` : "mm-ticker mm-ticker-loop"} aria-label="Market">
+        <div className="mm-ticker-scroll">
+          <div className="mm-ticker-track" style={{ "--tape-seconds": `${seconds}s` } as React.CSSProperties}>
+            {rows(false)}
+            {rows(true)}
+          </div>
+        </div>
+        {children}
+      </aside>
+    );
+  }
   return (
     <aside className={className ? `mm-ticker ${className}` : "mm-ticker"} aria-label="Market">
       <div className="mm-ticker-scroll">
@@ -81,33 +133,13 @@ export function TickerStrip({
           </Link>
         )}
 
-        {items.map((t) => (
-          // PREFETCH IS BACK ON, and the reason it was off has gone.
-          //
-          // It was disabled because fourteen of these sit in the viewport on
-          // every page and /t/[token] is force-dynamic, so the default would
-          // have warmed fourteen full server renders. That is only true
-          // without a loading boundary: with one, the router prefetches the
-          // route up to its loading.tsx and no further — a static skeleton,
-          // not a ledger read. So the click is instant and costs nothing.
-          <Link key={t.key} href={t.href} className="mm-tick">
-            <span className="k">{t.symbol}</span>
-            <b className="mono">
-              <MovingFigure value={t.priceUsd} text={money(t.priceUsd)} />
-            </b>
-            {t.volume24hUsd !== null && <span className="mono dim">{compact(t.volume24hUsd)}</span>}
-            {/* A stale feed is said, not hidden. A price nobody has updated in
-                an hour is not a current price, and a tape that implies it is
-                is worse than one that admits it. */}
-            {t.halted ? (
-              <span className="mono halted">halted</span>
-            ) : t.stale ? (
-              <span className="mono stale" title="This feed has not updated in over an hour">
-                stale
-              </span>
-            ) : null}
-          </Link>
-        ))}
+        {/* PREFETCH IS ON for these links, and the reason it was off has
+            gone: /t/[token] has a loading boundary, so the router prefetches
+            the static skeleton and no further. A stale feed is said, not
+            hidden: a price nobody has updated in an hour is not a current
+            price, and a tape that implies it is is worse than one that admits
+            it. */}
+        {rows(false)}
       </div>
       {children}
     </aside>

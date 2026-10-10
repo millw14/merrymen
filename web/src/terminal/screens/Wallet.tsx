@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import Link from "../Link";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { assertRevocationFunded, revokeFromBrowser } from "@/lib/revoke-client";

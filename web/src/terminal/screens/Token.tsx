@@ -1,5 +1,5 @@
 import { TokenActivity } from "../TokenActivity";
-import { ChartArea, RotateCcw, ArrowDown } from "lucide-react";
+import { ChartArea, RotateCcw, ArrowDown, BadgeCheck } from "lucide-react";
 import { DitherChart } from "../DitherChart";
 import { Boundary } from "../Boundary";
 import { useEffect, useMemo, useState } from "react";
@@ -151,7 +151,7 @@ export function Token({
           <div>
             <h1>
               {token.symbol}
-              {token.kind !== "memecoin" && <i className="verified" aria-label="Registered tokenized asset" />}
+              {token.kind !== "memecoin" && <i className="verified" aria-label="Registered tokenized asset"><BadgeCheck size={13} strokeWidth={2} aria-hidden /></i>}
             </h1>
             <p className="token-sub">
               <span>{token.name}</span>
@@ -204,11 +204,13 @@ export function Token({
       <div className="token-market-strip">
         <div>
           <span>
+            {/* The desktop-only strip keeps the price label compact; the
+                source and measurement remain in the figure's tooltip. */}
             {token.priceUsd == null
-              ? "Chart close"
+              ? "Close"
               : token.priceSource === "robinhood"
-                ? "Quote midpoint"
-                : "Token price"}
+                ? "Quote"
+                : "Price"}
           </span>
           <strong title={quoteTitle(token)}>
             {/* The desktop's copy of the price above, which is hidden there.
@@ -219,7 +221,7 @@ export function Token({
           </strong>
         </div>
         <div>
-          <span>{span} change</span>
+          <span>{span}</span>
           {/* The TEXT of the change gets the third colour. `down` above is a
               boolean the chart needs; a percentage nobody measured is neither
               up nor down, and printing "—" in green is the bug live.ts documents
@@ -227,7 +229,7 @@ export function Token({
           <strong className={deltaClass(winPct)}>{pctPts(winPct)}</strong>
         </div>
         <div>
-          <span>{span} high</span>
+          <span>High</span>
           <strong>
             {coinPrice(
               bars.length ? Math.max(...bars.map((b) => b.high)) : null,
@@ -235,7 +237,7 @@ export function Token({
           </strong>
         </div>
         <div>
-          <span>{span} low</span>
+          <span>Low</span>
           <strong>
             {coinPrice(
               bars.length ? Math.min(...bars.map((b) => b.low)) : null,

@@ -60,7 +60,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import Link from "./Link";
 import { useT } from "@/lib/i18n";
 import { shortDateTime } from "@/lib/format";
 import { heldNotice, telegramRow, trencherRow, type AgentDown, type TelegramRow, type TrencherRow } from "./agent-status";

@@ -9,6 +9,7 @@ import "@/terminal/polish.css";
 import "@/terminal/root.css";
 import "@/terminal/groupchat.css";
 import "@/terminal/performance-states.css";
+import "@/terminal/desktop.css";
 import { RegisterSW } from "@/components/RegisterSW";
 import { localeBootScript } from "@/lib/locale";
 import { headers } from "next/headers";
