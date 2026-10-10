@@ -59,6 +59,32 @@ export const tapeFor = (moves: LiveMine["moves"]) =>
       outcomeText: m.outcomeText,
     }));
 
+/**
+ * HAS ANY HEARTBEAT OF THIS AGENT EVER REACHED US, from one /api/grants answer.
+ *
+ * Three answers, and only one of them is "never":
+ *   - a heartbeat time → true;
+ *   - an explicit null → false: the route read both heartbeat sources and
+ *     found no beat (route.ts sends null for "never heard from");
+ *   - absent, or anything that is not a number → null, unknown. An older
+ *     server, or a status the browser assembled itself, never said — and
+ *     reading that as "never started" would have the chat tell an owner whose
+ *     agent may be trading that it has not begun.
+ *
+ * A null the route marks `heartbeatUnread` is also unknown: neither source
+ * could be read, so it cannot mean "never".
+ *
+ * `!= null` used to do this and folded the third answer into the second.
+ */
+export function workerHeardFromOf(
+  status: { workerAliveAt?: unknown; heartbeatUnread?: unknown } | null | undefined,
+): boolean | null {
+  if (!status || !("workerAliveAt" in status)) return null;
+  const at = status.workerAliveAt;
+  if (at === null) return status.heartbeatUnread === true ? null : false;
+  return typeof at === "number" && Number.isFinite(at) && at > 0 ? true : null;
+}
+
 /** /api/settings as the screen reads it: the owner's values over the defaults. */
 export interface ChatSettings {
   values?: Record<string, unknown> | null;
@@ -108,6 +134,21 @@ export function chatStateOf(args: {
     paperTradingEnabled: recovery ? null : recorded.paperTradingEnabled,
     liveTradingEnabled: recovery ? null : recorded.liveTradingEnabled,
     workerStatus: recovery ? "Trading paused for recovery" : mine.statusLabel ?? "Unknown",
+    /**
+     * HAS THIS AGENT EVER STARTED — the fact `stopped` cannot carry. IDLE is
+     * what a never-spawned agent shows, and also what a beating worker shows
+     * before its first pass or with nothing to trade; a tester's new agent,
+     * handed only `stopped: true`, told him the flag was "just a record".
+     * Whether any heartbeat ever reached us (App.tsx, workerHeardFromOf on
+     * `workerAliveAt`) tells the two apart. Null is a screen or a server that
+     * never said, and the prompt then claims neither way.
+     *
+     * `workerReason` is the desk's own sentence for why it is not trading, so
+     * the chat names the cause the screen names and invents none. Both give
+     * way to a hold, like everything above.
+     */
+    workerHeardFrom: recovery || typeof mine.workerHeardFrom !== "boolean" ? null : mine.workerHeardFrom,
+    workerReason: recovery || typeof mine.autonomy?.reason !== "string" ? null : mine.autonomy.reason.slice(0, 400) || null,
     liveBlocker: recovery ? null : liveBlocker ?? null,
     positions: recovery ? null : chatPositionsOf(mine),
     cashUsd: recovery ? null : recorded.cashUsd,

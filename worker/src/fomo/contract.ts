@@ -67,6 +67,13 @@ export interface BrokerCallOptions {
   groupId?: string | null;
   /** Upper bound for the whole call, including IPC. */
   timeoutMs?: number;
+  /**
+   * The asker pushed back on the last answer ("there has to be theses",
+   * "check again"): a held copy that says "nothing here" is read again rather
+   * than served. Never a forced refresh: a copy with something in it keeps
+   * its window, a room's longer one included (decision D8).
+   */
+  retryEmpty?: boolean;
   signal?: AbortSignal;
 }
 

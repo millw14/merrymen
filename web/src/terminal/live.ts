@@ -297,6 +297,22 @@ export interface LiveMine {
    * book. Computed once in App.tsx from /api/grants, never re-derived.
    */
   autonomy: import("@merrymen/core").Autonomy;
+  /**
+   * Has any heartbeat of this agent's worker ever reached us — `workerAliveAt`
+   * on the same /api/grants answer, set once in App.tsx (workerHeardFromOf).
+   * False only when that answer said null; absent or null where nobody read
+   * it, or the server never said, and the chat then claims neither way
+   * (chat-payload.ts).
+   */
+  workerHeardFrom?: boolean | null;
+  /**
+   * Why nothing will mint a Telegram link code right now (an expired key, a
+   * stopped or never-started worker), from the same /api/grants answer, set
+   * once in App.tsx (agentDownOf). "recovery" under a recovery hold, which
+   * runs no worker and links no new chat. Null when running or not known not
+   * to be.
+   */
+  agentDown?: import("./agent-status").AgentDown | null;
   /** Owner-only, proven recovery hold. Saved records are not current trading authority. */
   recovery?: FleetRecoveryView | null;
   /**
@@ -320,7 +336,7 @@ export interface LiveMine {
    * than its receipt, may still be in `costUsd` — false only when the ledger
    * said so, and null when that could not be read. See positionsOf.
    */
-  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
+  positions?: {symbol:string;token?:string|null;displaySymbol?:string|null;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
   /**
    * Where /api/feed read the name: "settings", "ledger", or "fallback" when it
@@ -365,6 +381,8 @@ export interface LiveState {
    * only when it is a number — see read-leaderboard.ts.
    */
   retired: number | null;
+  /** The folded accounts with their final returns (read-leaderboard RetiredRow). */
+  retiredAgents: RetiredAgent[];
   /**
    * WHETHER EACH READ ACTUALLY HAPPENED — carried beside the data, not instead
    * of it.
@@ -531,6 +549,7 @@ export function seedLive(): LiveState {
     mine: null,
     feedTenant: undefined,
     retired: null,
+    retiredAgents: [],
     // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
     // draw before the first fetch returns; every empty array beside it is an
     // absence of a request, and a screen that reads them as an absence of
@@ -636,7 +655,38 @@ export const LIVE_READ_URLS: Record<LiveReadKey, string> = {
 };
 
 type MarketBody = { tokens: MarketTok[]; source?: string };
-type BoardBody = { agents: BoardRow[]; source?: string; retired?: unknown };
+type BoardBody = { agents: BoardRow[]; source?: string; retired?: unknown; retiredAgents?: unknown };
+
+/** A folded account and its frozen final return, as the board lists it. */
+export interface RetiredAgent {
+  slug: string | null;
+  name: string;
+  book: "live" | "paper" | null;
+  pnlBps: number | null;
+  pnlUsdg: number | null;
+  estimated: boolean;
+  trades: number;
+  lastValuedAt: number | null;
+}
+
+function retiredAgentsOf(raw: unknown): RetiredAgent[] {
+  if (!Array.isArray(raw)) return [];
+  const num = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : null);
+  return raw.flatMap((r): RetiredAgent[] => {
+    if (!r || typeof r !== "object") return [];
+    const o = r as Record<string, unknown>;
+    return [{
+      slug: typeof o.slug === "string" && o.slug ? o.slug : null,
+      name: typeof o.name === "string" && o.name ? o.name : "Agent",
+      book: o.book === "live" || o.book === "paper" ? o.book : null,
+      pnlBps: num(o.pnlBps),
+      pnlUsdg: num(o.pnlUsdg),
+      estimated: o.estimated === true,
+      trades: Math.max(0, Math.floor(num(o.trades) ?? 0)),
+      lastValuedAt: num(o.lastValuedAt),
+    }];
+  });
+}
 type ThesesBody = { theses: Thesis[]; source?: string };
 
 interface Bodies {
@@ -979,6 +1029,7 @@ export function liveOf(s: LiveSources): LiveState {
     // count did not reach a screen, and folded agents left the board without
     // a word. A number only when the server sent one.
     retired: typeof board?.retired === "number" && Number.isFinite(board.retired) ? board.retired : null,
+    retiredAgents: retiredAgentsOf(board?.retiredAgents),
     // WHETHER EACH READ HAPPENED, carried alongside what it returned. A body
     // that arrived with `source: "none"` counts as unreadable even though the
     // request succeeded: that shape IS the reader telling us it could not open
@@ -1183,6 +1234,8 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
       const costUsd = c === null || !Number.isFinite(c) || c <= 0 ? null : c;
       return {
         symbol:p.symbol,
+        token:p.token,
+        displaySymbol:p.display_symbol,
         valueUsd:p.value_usdg,
         stale:!!p.price_stale,
         costUsd,
@@ -1532,5 +1585,5 @@ interface Feed {
     tx_hash?: string | null;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
+  positions?: {symbol:string; token?:string|null; display_symbol?:string|null; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
 }

@@ -1,0 +1,548 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import { after, before, describe, it } from "node:test";
+import { translateSchema, wrapSqlite, type Db } from "../../../worker/src/db";
+import { TELEGRAM_BOT_CLAIMS_DDL } from "../../../worker/src/telegram-claims";
+import { TELEGRAM_STATE_DDL, TELEGRAM_LIVENESS_DDL } from "../../../worker/src/telegram-store";
+import { openSecret, sealSecret } from "../../../worker/src/store-crypto";
+import {
+  ensureManagedTelegramSchema,
+  MANAGED_INTENT_TTL_MS,
+  ManagedTelegramError,
+  ManagedTelegramStore,
+  TELEGRAM_MANAGED_DDL,
+} from "./telegram-managed-store";
+
+const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const MANAGER = "9000";
+const OTHER_MANAGER = "9001";
+const USER = 1234567;
+const BOT = "1001";
+const TOKEN = `${BOT}:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw`;
+const NOW = 1_800_000_000_000;
+const DATE = NOW / 1000;
+const DEK = Buffer.alloc(32, 73);
+
+let originalDek: string | undefined;
+before(() => {
+  originalDek = process.env.MERRYMEN_STORE_DEK;
+  process.env.MERRYMEN_STORE_DEK = DEK.toString("base64");
+});
+after(() => {
+  if (originalDek === undefined) delete process.env.MERRYMEN_STORE_DEK;
+  else process.env.MERRYMEN_STORE_DEK = originalDek;
+});
+
+async function fixture(settings?: Record<string, unknown>, o: { managed?: boolean; claims?: boolean } = {}) {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  await db.exec("CREATE TABLE tenant_settings (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL, updated_at INTEGER NOT NULL)");
+  if (o.managed !== false) await db.exec(TELEGRAM_MANAGED_DDL);
+  if (o.claims !== false) await db.exec(TELEGRAM_BOT_CLAIMS_DDL);
+  await db.exec(TELEGRAM_STATE_DDL);
+  for (const ddl of TELEGRAM_LIVENESS_DDL) await db.exec(ddl);
+  if (settings) await seedSettings(db, A, settings);
+  return { db, raw, store: new ManagedTelegramStore(db) };
+}
+
+async function seedSettings(db: Db, tenant: string, settings: Record<string, unknown>) {
+  await db.prepare(`INSERT INTO tenant_settings VALUES (?, ?, ?) ON CONFLICT(tenant) DO UPDATE SET sealed=excluded.sealed, updated_at=excluded.updated_at`)
+    .run(tenant, sealSecret(JSON.stringify(settings), DEK), 123);
+}
+async function settingsOf(db: Db, tenant = A) {
+  const row = await db.prepare("SELECT sealed FROM tenant_settings WHERE tenant=?").get(tenant) as { sealed: string } | undefined;
+  return row ? JSON.parse(openSecret(row.sealed, DEK)) as Record<string, unknown> : null;
+}
+const scoped = (id: string, over: { tenant?: string; managerBotId?: string; now?: number } = {}) =>
+  ({ tenant: A, intentId: id, managerBotId: MANAGER, now: NOW, ...over });
+async function ready(store: ManagedTelegramStore, over: { tenant?: string; managerBotId?: string; telegramUserId?: number; startId?: number; botId?: string; now?: number } = {}) {
+  const tenant = over.tenant ?? A, managerBotId = over.managerBotId ?? MANAGER;
+  const user = over.telegramUserId ?? USER, startId = over.startId ?? 10, now = over.now ?? NOW;
+  const began = await store.begin({ tenant, managerBotId, now });
+  assert.equal((await store.bind({ managerBotId, updateId: startId, challenge: began.challenge, telegramUserId: user, messageDate: Math.floor(now / 1000), now })).outcome, "bound");
+  assert.equal((await store.candidate({ kind: "managed_bot_created", managerBotId, updateId: startId + 1, telegramUserId: user,
+    botId: over.botId ?? BOT, username: "personal_test_bot", messageDate: Math.floor(now / 1000), now })).outcome, "candidate");
+  return began.intent;
+}
+const errorCode = (code: string) => (e: unknown) => e instanceof ManagedTelegramError && e.code === code;
+const tableNames = async (db: Db) => (await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all())
+  .map((r) => (r as { name: string }).name);
+/** The same database, counting the managed DDL it is asked to run, and failing the first runs with `failures`. */
+function counting(inner: Db, failures: unknown[] = []) {
+  const seen = { ddl: 0 };
+  const wrap = (db: Db): Db => ({
+    prepare: (sql) => db.prepare(sql),
+    exec: async (sql) => {
+      if (sql.includes("telegram_managed_intents")) {
+        seen.ddl++;
+        const failure = failures.shift();
+        if (failure) throw failure;
+      }
+      return db.exec(sql);
+    },
+    tx: (fn) => db.tx((tx) => fn(wrap(tx))),
+  });
+  return { db: wrap(inner), seen };
+}
+const sqlError = (code: string) => Object.assign(new Error(`synthetic ${code}`), { code });
+
+describe("managed bot intent authority", () => {
+  it("stores only the hash of a random, tenant-bound, thirty-minute /start challenge", async () => {
+    const { db, store } = await fixture();
+    const first = await store.begin({ tenant: A.toUpperCase().replace("0X", "0x"), managerBotId: MANAGER, now: NOW });
+    assert.match(first.challenge, /^mm_[A-Za-z0-9_-]{43}$/);
+    assert.equal(MANAGED_INTENT_TTL_MS, 30 * 60_000);
+    assert.equal(first.intent.expiresAt, NOW + MANAGED_INTENT_TTL_MS);
+    assert.deepEqual(Object.keys(first.intent).sort(), ["botId", "botUsername", "expiresAt", "id", "status"]);
+    const rows = await db.prepare("SELECT * FROM telegram_managed_intents").all();
+    assert.equal((rows[0] as { challenge_hash: string }).challenge_hash, createHash("sha256").update(first.challenge).digest("hex"));
+    assert.ok(!JSON.stringify(rows).includes(first.challenge));
+    assert.equal(await store.get(scoped(first.intent.id, { tenant: B })), null);
+    assert.equal(await store.get(scoped(first.intent.id, { managerBotId: OTHER_MANAGER })), null);
+    assert.equal(await store.cancel(scoped(first.intent.id, { tenant: B })), null);
+    const replacement = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    assert.notEqual(first.challenge, replacement.challenge);
+    assert.equal((await store.get(scoped(first.intent.id)))?.status, "cancelled");
+    assert.equal((await store.bind({ managerBotId: MANAGER, updateId: 1, telegramUserId: USER, challenge: first.challenge, now: NOW })).outcome, "ignored");
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM telegram_managed_intents WHERE status='waiting_telegram'").get() as { n: number }).n, 1);
+  });
+
+  it("creates its own tables at first use, once per database, with nobody applying a migration", async () => {
+    const { db: raw } = await fixture(undefined, { managed: false, claims: false });
+    const { db, seen } = counting(raw);
+    assert.ok(!(await tableNames(raw)).includes("telegram_managed_intents"));
+    const store = new ManagedTelegramStore(db);
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    for (const table of ["telegram_managed_intents", "telegram_managed_users", "telegram_managed_updates", "telegram_bot_claims"]) {
+      assert.ok((await tableNames(raw)).includes(table), `${table} is made at first use`);
+    }
+    await new ManagedTelegramStore(db).get(scoped(began.intent.id));
+    await store.cancel(scoped(began.intent.id));
+    assert.equal(seen.ddl, 1, "once per database, not once per store or per call");
+    assert.equal(await settingsOf(raw), null, "making the tables writes no settings");
+  });
+
+  it("is idempotent over tables that already exist, and keeps their rows", async () => {
+    const { db, store } = await fixture();
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    await db.exec(TELEGRAM_MANAGED_DDL);
+    await ensureManagedTelegramSchema(db);
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "waiting_telegram");
+  });
+
+  it("concurrent first uses share one creation", async () => {
+    const { db: raw } = await fixture(undefined, { managed: false });
+    const { db, seen } = counting(raw);
+    const results = await Promise.all([A, B].map((tenant) => new ManagedTelegramStore(db).begin({ tenant, managerBotId: MANAGER, now: NOW })));
+    assert.equal(results.length, 2);
+    assert.equal(seen.ddl, 1);
+  });
+
+  it("answers another creator's catalog race by running again, and forgets any other failure so the next use retries", async () => {
+    for (const code of ["23505", "42P07", "42710"]) {
+      const { db: raw } = await fixture(undefined, { managed: false });
+      const { db, seen } = counting(raw, [sqlError(code)]);
+      await new ManagedTelegramStore(db).begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+      assert.equal(seen.ddl, 2, `${code} means the tables now exist: one more run finds them`);
+    }
+    const { db: raw } = await fixture(undefined, { managed: false });
+    const { db, seen } = counting(raw, [sqlError("XX000")]);
+    await assert.rejects(new ManagedTelegramStore(db).begin({ tenant: A, managerBotId: MANAGER, now: NOW }), /synthetic XX000/);
+    assert.ok(!(await tableNames(raw)).includes("telegram_managed_intents"));
+    await new ManagedTelegramStore(db).begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    assert.equal(seen.ddl, 2);
+    assert.ok((await tableNames(raw)).includes("telegram_managed_intents"));
+  });
+
+  it("is, on Postgres, the documented SQL: every INTEGER becomes the BIGINT the millisecond clocks need", () => {
+    const normal = (sql: string) => sql.replace(/--[^\n]*\n/g, "").replace(/\b(?:BEGIN|COMMIT);/g, "").replace(/\s+/g, " ").trim();
+    const documented = readFileSync(new URL("../../../docs/migrations/2026-10-05-telegram-managed.sql", import.meta.url), "utf8");
+    assert.equal(normal(translateSchema(TELEGRAM_MANAGED_DDL)), normal(documented));
+    assert.doesNotMatch(translateSchema(TELEGRAM_MANAGED_DDL), /\bINTEGER\b/);
+  });
+
+  it("refuses an existing token before allocating another bot intent", async () => {
+    const before = { telegramBotToken: TOKEN, telegramEnabled: false, telegramAllowlist: [77], customRisk: "unchanged" };
+    const { db, store } = await fixture(before);
+    await assert.rejects(store.begin({ tenant: A, managerBotId: MANAGER, now: NOW }), errorCode("bot_already_configured"));
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_managed_intents").all(), []);
+    assert.deepEqual(await settingsOf(db), before);
+  });
+
+  it("does not continue if hosted encryption is unavailable or the saved blob is unreadable", async () => {
+    const { db, store } = await fixture();
+    delete process.env.MERRYMEN_STORE_DEK;
+    try { await assert.rejects(store.begin({ tenant: A, managerBotId: MANAGER, now: NOW }), /cannot store secrets in the clear/); }
+    finally { process.env.MERRYMEN_STORE_DEK = DEK.toString("base64"); }
+    await db.prepare("INSERT INTO tenant_settings VALUES (?, ?, 0)").run(A, "not-a-sealed-settings-value");
+    await assert.rejects(store.begin({ tenant: A, managerBotId: MANAGER, now: NOW }), errorCode("settings_unreadable"));
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_managed_intents").all(), []);
+  });
+
+  it("binds one verified private Telegram user once, durably replays the exact update, and rejects a changed replay", async () => {
+    const { db, store } = await fixture();
+    const { intent, challenge } = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const start = { managerBotId: MANAGER, updateId: 5, telegramUserId: USER, challenge, messageDate: DATE, now: NOW };
+    assert.equal((await store.bind(start)).outcome, "bound");
+    assert.equal((await new ManagedTelegramStore(db).bind(start)).outcome, "already_bound");
+    await assert.rejects(store.bind({ ...start, telegramUserId: USER + 1 }), errorCode("update_conflict"));
+    assert.equal((await store.bind({ ...start, updateId: 6, telegramUserId: USER + 1 })).outcome, "ignored");
+    assert.equal((await store.get(scoped(intent.id)))?.status, "waiting_bot");
+    assert.ok(!JSON.stringify(await store.get(scoped(intent.id))).includes(String(USER)), "public status never reveals private user ID");
+    assert.ok(!JSON.stringify(await db.prepare("SELECT * FROM telegram_managed_updates").all()).includes(challenge));
+    await assert.rejects(store.bind({ ...start, updateId: 7, telegramUserId: -100 }), errorCode("invalid_telegram_id"));
+  });
+
+  it("one user cannot bind two tenants, including concurrent requests and different managers; cancellation releases the lease", async () => {
+    const { store } = await fixture();
+    const a = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const b = await store.begin({ tenant: B, managerBotId: OTHER_MANAGER, now: NOW });
+    const [aa, bb] = await Promise.all([
+      store.bind({ managerBotId: MANAGER, updateId: 10, telegramUserId: USER, challenge: a.challenge, now: NOW }),
+      store.bind({ managerBotId: OTHER_MANAGER, updateId: 10, telegramUserId: USER, challenge: b.challenge, now: NOW }),
+    ]);
+    assert.deepEqual([aa.outcome, bb.outcome].sort(), ["bound", "ignored"]);
+    assert.equal(aa.outcome, "bound");
+    assert.equal((await store.cancel(scoped(a.intent.id)))?.status, "cancelled");
+    assert.equal((await store.bind({ managerBotId: OTHER_MANAGER, updateId: 11, telegramUserId: USER, challenge: b.challenge, now: NOW })).outcome, "bound");
+  });
+
+  it("two Telegram senders competing for one challenge grant only the first user", async () => {
+    const { db, store } = await fixture();
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const results = await Promise.all([USER, USER + 1].map((user, index) => store.bind({ managerBotId: MANAGER, updateId: 10 + index,
+      telegramUserId: user, challenge: began.challenge, now: NOW })));
+    assert.deepEqual(results.map((r) => r.outcome), ["bound", "ignored"]);
+    assert.deepEqual((await db.prepare("SELECT telegram_user_id FROM telegram_managed_users").all()).map((r) => (r as { telegram_user_id: string }).telegram_user_id), [String(USER)]);
+  });
+
+  it("accepts creation service messages only, after the bind's date and update ID; the first candidate is immutable", async () => {
+    const { store } = await fixture();
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    await store.bind({ managerBotId: MANAGER, updateId: 20, telegramUserId: USER, challenge: began.challenge, messageDate: DATE, now: NOW });
+    const creation = { kind: "managed_bot_created" as const, managerBotId: MANAGER, telegramUserId: USER, botId: BOT,
+      username: "personal_test_bot", messageDate: DATE, now: NOW };
+    assert.equal((await store.candidate({ ...creation, updateId: 19 })).outcome, "ignored");
+    assert.equal((await store.candidate({ ...creation, updateId: 21, messageDate: DATE - 1 })).outcome, "ignored");
+    // Nothing underway for that user, or under that manager: unmatched, never a candidate.
+    assert.equal((await store.candidate({ ...creation, updateId: 22, telegramUserId: USER + 1 })).outcome, "unmatched");
+    assert.equal((await store.candidate({ ...creation, updateId: 23, managerBotId: OTHER_MANAGER })).outcome, "unmatched");
+    assert.equal((await store.candidate({ ...creation, updateId: 24, kind: "managed_bot" as "managed_bot_created" })).outcome, "ignored");
+    assert.deepEqual(await store.candidate({ ...creation, updateId: 25 }), { outcome: "candidate", intentId: began.intent.id });
+    assert.equal((await store.candidate({ ...creation, updateId: 25 })).outcome, "already_candidate");
+    assert.equal((await store.candidate({ ...creation, updateId: 26, botId: "1002", username: "second_test_bot" })).outcome, "ignored");
+    assert.deepEqual(await store.get(scoped(began.intent.id)), { id: began.intent.id, status: "confirm", expiresAt: NOW + MANAGED_INTENT_TTL_MS, botId: BOT, botUsername: "personal_test_bot" });
+  });
+
+  it("expires at thirty minutes, never accepts stale creation, and frees a user's expired pending lease", async () => {
+    const { db, store } = await fixture();
+    const intent = await ready(store);
+    assert.equal((await store.get(scoped(intent.id, { now: NOW + 29 * 60_000 })))?.status, "confirm", "still open at twenty-nine minutes");
+    const late = NOW + MANAGED_INTENT_TTL_MS;
+    assert.equal((await store.get(scoped(intent.id, { now: late })))?.status, "expired");
+    await assert.rejects(store.complete({ ...scoped(intent.id, { now: late }), botId: BOT, token: TOKEN, confirmedBotId: BOT }), errorCode("intent_expired"));
+    assert.equal(await settingsOf(db), null);
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+    const b = await store.begin({ tenant: B, managerBotId: MANAGER, now: late });
+    assert.equal((await store.bind({ managerBotId: MANAGER, updateId: 30, telegramUserId: USER, challenge: b.challenge, now: late })).outcome, "bound");
+    await assert.rejects(store.candidate({ kind: "managed_bot_created", managerBotId: MANAGER, updateId: 31, telegramUserId: USER, botId: BOT,
+      username: "personal_test_bot", messageDate: DATE, now: late }), errorCode("stale_message"));
+  });
+
+  it("never assigns the manager itself to a tenant bot or poller, even if a candidate row is corrupted", async () => {
+    const { db, store } = await fixture();
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    await store.bind({ managerBotId: MANAGER, updateId: 10, telegramUserId: USER, challenge: began.challenge, now: NOW });
+    await assert.rejects(store.candidate({ kind: "managed_bot_created", managerBotId: MANAGER, updateId: 11, telegramUserId: USER,
+      botId: MANAGER, username: "manager_test_bot", messageDate: DATE, now: NOW }), errorCode("manager_bot_reserved"));
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "waiting_bot");
+    await db.prepare("UPDATE telegram_managed_intents SET status='confirm', bot_id=?, bot_username='manager_test_bot' WHERE id=?")
+      .run(MANAGER, began.intent.id);
+    await assert.rejects(store.complete({ ...scoped(began.intent.id), botId: MANAGER,
+      token: `${MANAGER}:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw`, confirmedBotId: MANAGER }), errorCode("manager_bot_reserved"));
+    assert.equal(await settingsOf(db), null);
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+  });
+});
+
+describe("intent-correlated iPhone/iPad creation", () => {
+  async function waiting() {
+    const f = await fixture();
+    const began = await f.store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const start = { managerBotId: MANAGER, updateId: 20, telegramUserId: USER, challenge: began.challenge, messageDate: DATE, now: NOW };
+    const bound = await f.store.bind(start);
+    assert.equal(bound.outcome, "bound");
+    const update = { kind: "managed_bot_updated" as const, managerBotId: MANAGER, updateId: 21, telegramUserId: USER,
+      botId: BOT, username: bound.suggestedUsername, now: NOW };
+    return { ...f, began, start, bound, update };
+  }
+
+  it("keeps a domain-separated 64-bit suggestion across retries and restarts, but changes it for a replacement intent", async () => {
+    const { db, store, began, start, bound } = await waiting();
+    assert.match(bound.suggestedUsername, /^merrymen_[0-9a-f]{16}_bot$/);
+    assert.ok(bound.suggestedUsername.length <= 32);
+    const digest = createHash("sha256").update(began.challenge).digest("hex");
+    assert.ok(!bound.suggestedUsername.includes(digest.slice(0, 16)), "public suggestion is not a prefix of the challenge hash");
+    assert.deepEqual(await new ManagedTelegramStore(db).bind(start), { ...bound, outcome: "already_bound" });
+    assert.deepEqual(await store.bind({ ...start, updateId: 22 }), { ...bound, outcome: "already_bound" });
+    assert.deepEqual(await store.bind({ ...start, updateId: 23, telegramUserId: USER + 1 }), { outcome: "ignored" });
+    const replacement = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const second = await store.bind({ ...start, updateId: 24, challenge: replacement.challenge });
+    assert.notEqual(second.outcome, "ignored");
+    if (second.outcome !== "ignored") assert.notEqual(second.suggestedUsername, bound.suggestedUsername);
+    assert.deepEqual(await store.bind(start), { outcome: "ignored" }, "cancelled old setup gets no creation offer");
+    assert.equal(await settingsOf(db), null);
+  });
+
+  it("proposes a matching generic event without a message date, case insensitively, without saving credentials", async () => {
+    const { db, store, began, update } = await waiting();
+    const event = { ...update, username: update.username.toUpperCase() };
+    assert.deepEqual(await store.candidate(event), { outcome: "candidate", intentId: began.intent.id });
+    assert.deepEqual(await new ManagedTelegramStore(db).candidate(event), { outcome: "already_candidate" });
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "confirm");
+    assert.equal((await store.get(scoped(began.intent.id)))?.botUsername, event.username);
+    assert.equal(await settingsOf(db), null);
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+    await assert.rejects(store.candidate({ ...event, botId: "1002" }), errorCode("update_conflict"));
+  });
+
+  it("ignores generic events from a wrong user, manager, username, or older update without unmatched notices", async () => {
+    const { store, began, update } = await waiting();
+    const cases = [
+      { ...update, updateId: 19 },
+      { ...update, updateId: 22, telegramUserId: USER + 1 },
+      { ...update, updateId: 23, managerBotId: OTHER_MANAGER },
+      { ...update, updateId: 24, username: "unrelated_test_bot" },
+    ];
+    for (const event of cases) {
+      assert.deepEqual(await store.candidate(event), { outcome: "ignored" });
+      assert.deepEqual(await store.candidate(event), { outcome: "ignored" }, "an ignored update stays ignored on replay");
+    }
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "waiting_bot");
+    assert.equal((await store.candidate({ ...update, updateId: 25 })).outcome, "candidate");
+  });
+
+  it("ignores generic events after expiry, cancellation, or before any setup", async () => {
+    for (const ended of ["expired", "cancelled"] as const) {
+      const { store, began, start, update } = await waiting();
+      if (ended === "cancelled") await store.cancel(scoped(began.intent.id));
+      const now = ended === "expired" ? NOW + MANAGED_INTENT_TTL_MS : NOW;
+      assert.deepEqual(await store.candidate({ ...update, now }), { outcome: "ignored" }, ended);
+      assert.deepEqual(await store.bind({ ...start, messageDate: Math.floor(now / 1000), updateId: 30, now }), { outcome: "ignored" });
+      assert.equal((await store.get(scoped(began.intent.id, { now })))?.status, ended);
+    }
+    const { store } = await fixture();
+    assert.deepEqual(await store.candidate({ kind: "managed_bot_updated", managerBotId: MANAGER, updateId: 1,
+      telegramUserId: USER, botId: BOT, username: "merrymen_0123456789abcdef_bot", now: NOW }), { outcome: "ignored" });
+  });
+
+  it("does not offer another creation or replace a candidate after confirmation is pending or complete", async () => {
+    const { db, store, began, start, update } = await waiting();
+    await store.candidate(update);
+    for (const status of ["confirm", "connected"] as const) {
+      if (status === "connected") await store.complete({ ...scoped(began.intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT });
+      assert.deepEqual(await store.bind(start), { outcome: "ignored" }, `${status}: exact start redelivery`);
+      assert.deepEqual(await store.bind({ ...start, updateId: status === "confirm" ? 30 : 40 }), { outcome: "ignored" });
+      assert.deepEqual(await store.candidate({ ...update, updateId: status === "confirm" ? 31 : 41, botId: "1002" }), { outcome: "ignored" });
+      assert.equal((await store.get(scoped(began.intent.id)))?.status, status);
+      assert.equal((await store.get(scoped(began.intent.id)))?.botId, BOT);
+    }
+    assert.deepEqual(await store.candidate(update), { outcome: "ignored" }, "completed candidate cannot be replayed");
+    assert.equal((await settingsOf(db))?.telegramBotToken, TOKEN);
+  });
+
+  it("does not accept a previous intent's suggested bot into a replacement setup", async () => {
+    const { store, began, start, update } = await waiting();
+    await store.cancel(scoped(began.intent.id));
+    const replacement = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const rebound = await store.bind({ ...start, updateId: 30, challenge: replacement.challenge });
+    assert.notEqual(rebound.outcome, "ignored");
+    assert.deepEqual(await store.candidate({ ...update, updateId: 31 }), { outcome: "ignored" });
+    assert.equal((await store.get(scoped(replacement.intent.id)))?.status, "waiting_bot");
+  });
+
+  it("silences delayed native delivery of an already connected generic candidate while reporting an unrelated second bot", async () => {
+    const { store, began, update } = await waiting();
+    await store.candidate(update);
+    await store.complete({ ...scoped(began.intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT });
+    const native = { ...update, kind: "managed_bot_created" as const, updateId: 30, messageDate: DATE };
+    assert.deepEqual(await store.candidate(native), { outcome: "ignored" });
+    assert.deepEqual(await store.candidate(native), { outcome: "ignored" });
+    assert.deepEqual(await store.candidate({ ...native, updateId: 31, botId: "1002", username: "second_test_bot" }), { outcome: "unmatched" });
+    assert.deepEqual(await store.candidate({ ...native, updateId: 32, telegramUserId: USER + 1 }), { outcome: "unmatched" }, "suppression is scoped to the bound user");
+    assert.deepEqual(await store.candidate({ ...native, updateId: 33, managerBotId: OTHER_MANAGER }), { outcome: "unmatched" }, "suppression is scoped to the manager");
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "connected");
+  });
+
+  it("still accepts a native creation with a user-chosen username", async () => {
+    const { store, began, update } = await waiting();
+    assert.deepEqual(await store.candidate({ ...update, kind: "managed_bot_created", username: "chosen_by_owner_bot", messageDate: DATE }),
+      { outcome: "candidate", intentId: began.intent.id });
+  });
+});
+
+describe("atomic managed bot confirmation", () => {
+  it("preserves the latest complete settings and existing mirror; changes no owner, allowlist, risk or pause authority", async () => {
+    const { db, store } = await fixture({ telegramAllowlist: [], strategy: "before" });
+    const intent = await ready(store);
+    const latest = { telegramAllowlist: [-222, 555], telegramEnabled: false, telegramCommands: false, strategy: "latest", paused: true,
+      dailyUsdg: "12", signedDailyLimit: "unaltered", futureSetting: { nested: [true, null, "safe"] }, telegramMaxActionUsdg: "0" };
+    await seedSettings(db, A, latest);
+    await db.prepare(`INSERT INTO tenant_telegram (tenant, link_code, owner_id, linked_at, updated_at, bot_id, child_state)
+      VALUES (?, 'ORIGINAL', 555, 123, 456, NULL, 'held:unchanged')`).run(A);
+    const mirror = await db.prepare("SELECT * FROM tenant_telegram").all();
+    const result = await store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT });
+    assert.equal(result.status, "connected");
+    assert.deepEqual(await settingsOf(db), { ...latest, telegramEnabled: true, telegramBotToken: TOKEN });
+    assert.deepEqual(await db.prepare("SELECT * FROM tenant_telegram").all(), mirror);
+    assert.deepEqual((await db.prepare("SELECT bot_id, tenant FROM telegram_bot_claims").all()).map((r) => ({ ...r as object })), [{ bot_id: BOT, tenant: A }]);
+    const publicJson = JSON.stringify(result);
+    assert.ok(!publicJson.includes(TOKEN) && !publicJson.includes(String(USER)) && !publicJson.includes("signedDailyLimit"));
+    const sealed = (await db.prepare("SELECT sealed FROM tenant_settings WHERE tenant=?").get(A) as { sealed: string }).sealed;
+    assert.ok(!sealed.includes(TOKEN) && !sealed.includes("futureSetting"));
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_managed_users").all(), []);
+    const saved = await db.prepare("SELECT * FROM tenant_settings").all();
+    assert.equal((await store.complete({ ...scoped(intent.id, { now: NOW + 2 * MANAGED_INTENT_TTL_MS }), botId: BOT })).status, "connected");
+    assert.deepEqual(await db.prepare("SELECT * FROM tenant_settings").all(), saved, "completion replay does not re-seal/re-save or need a token");
+  });
+
+  it("requires tenant/manager/candidate match and a live token confirmed for exactly that bot", async () => {
+    const { db, store } = await fixture();
+    const intent = await ready(store);
+    const ask = { ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT };
+    await assert.rejects(store.complete({ ...ask, tenant: B }), errorCode("intent_not_found"));
+    await assert.rejects(store.complete({ ...ask, managerBotId: OTHER_MANAGER }), errorCode("intent_not_found"));
+    await assert.rejects(store.complete({ ...ask, botId: "1002" }), errorCode("candidate_mismatch"));
+    await assert.rejects(store.complete({ ...ask, confirmedBotId: null }), errorCode("bot_unconfirmed"));
+    await assert.rejects(store.complete({ ...ask, token: TOKEN.replace("1001:", "1002:") }), errorCode("bot_unconfirmed"));
+    await assert.rejects(store.complete({ ...ask, token: `${BOT}:x/../../getChat` }), errorCode("bot_unconfirmed"));
+    assert.equal(await settingsOf(db), null);
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+    assert.equal((await store.get(scoped(intent.id)))?.status, "confirm");
+  });
+
+  it("never replaces a token saved while creation was underway", async () => {
+    const { db, store } = await fixture();
+    const intent = await ready(store);
+    const existing = { telegramBotToken: "1002:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw", telegramEnabled: false, telegramAllowlist: [100] };
+    await seedSettings(db, A, existing);
+    await assert.rejects(store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT }), errorCode("bot_already_configured"));
+    assert.deepEqual(await settingsOf(db), existing);
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+  });
+
+  it("never moves a claimed bot and preserves its holder without exposing it", async () => {
+    const { db, store } = await fixture();
+    const intent = await ready(store);
+    await db.prepare("INSERT INTO telegram_bot_claims VALUES (?, ?, 123)").run(BOT, B);
+    await assert.rejects(store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT }), errorCode("bot_claimed"));
+    assert.deepEqual({ ...await db.prepare("SELECT * FROM telegram_bot_claims").get() as object }, { bot_id: BOT, tenant: B, claimed_at: 123 });
+    assert.equal(await settingsOf(db), null);
+    assert.equal((await store.get(scoped(intent.id)))?.status, "confirm");
+  });
+
+  it("rolls back claim, encrypted save, completion and user lease on a late database failure", async () => {
+    const before = { telegramAllowlist: [888], signedDailyLimit: "unchanged", paused: true };
+    const { db, store } = await fixture(before);
+    const intent = await ready(store);
+    await db.exec(`CREATE TRIGGER refuse_complete BEFORE UPDATE OF status ON telegram_managed_intents
+      WHEN NEW.status='connected' BEGIN SELECT RAISE(ABORT, 'test late completion failure'); END;`);
+    await assert.rejects(store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT }), /test late completion failure/);
+    assert.deepEqual(await settingsOf(db), before);
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+    assert.equal((await store.get(scoped(intent.id)))?.status, "confirm");
+    assert.equal((await db.prepare("SELECT intent_id FROM telegram_managed_users").get() as { intent_id: string }).intent_id, intent.id);
+  });
+
+  it("makes the bot-claims table a confirmation needs, on a database where nothing else has yet", async () => {
+    const { db, store } = await fixture(undefined, { claims: false });
+    const intent = await ready(store);
+    assert.equal((await store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT })).status, "connected");
+    assert.equal((await settingsOf(db))?.telegramBotToken, TOKEN);
+    assert.deepEqual((await db.prepare("SELECT bot_id, tenant FROM telegram_bot_claims").all()).map((r) => ({ ...r as object })), [{ bot_id: BOT, tenant: A }]);
+  });
+
+  it("serializes competing confirmation attempts with a single final saved bot", async () => {
+    const { db, store } = await fixture();
+    const intent = await ready(store);
+    const ask = { ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT };
+    const both = await Promise.all([store.complete(ask), new ManagedTelegramStore(db).complete(ask)]);
+    assert.deepEqual(both.map((r) => r.status), ["connected", "connected"]);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM telegram_bot_claims").get() as { n: number }).n, 1);
+    assert.equal((await settingsOf(db))?.telegramBotToken, TOKEN);
+  });
+});
+
+describe("a creation with no setup underway, and the manager's buttons", () => {
+  const creation = (over: { updateId: number; botId?: string; username?: string; messageDate?: number; now?: number }) => ({ kind: "managed_bot_created" as const,
+    managerBotId: MANAGER, telegramUserId: USER, botId: BOT, username: "personal_test_bot", messageDate: DATE, now: NOW, ...over });
+
+  it("calls a fresh creation unmatched once its setup has expired, records it, and stays silent on the redelivery", async () => {
+    const { db, store } = await fixture();
+    // The 03:09 setup whose bot came at 03:24 is inside the window now; one that comes after it is still refused.
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    await store.bind({ managerBotId: MANAGER, updateId: 10, telegramUserId: USER, challenge: began.challenge, messageDate: DATE, now: NOW });
+    const late = NOW + MANAGED_INTENT_TTL_MS + 60_000;
+    const update = creation({ updateId: 11, messageDate: late / 1000, now: late });
+    assert.deepEqual(await store.candidate(update), { outcome: "unmatched" });
+    assert.deepEqual(await store.candidate(update), { outcome: "ignored" }, "a redelivery is not a second creation");
+    assert.deepEqual({ ...await db.prepare("SELECT outcome, intent_id FROM telegram_managed_updates WHERE update_id = 11").get() as object }, { outcome: "unmatched", intent_id: null });
+    assert.equal((await store.get(scoped(began.intent.id, { now: late })))?.status, "expired");
+    assert.equal((await store.get(scoped(began.intent.id, { now: late })))?.botId, null, "nothing was proposed to the expired setup");
+  });
+
+  it("calls a creation unmatched for a user who never began, or whose setup was cancelled or already connected", async () => {
+    const { store } = await fixture();
+    assert.equal((await store.candidate(creation({ updateId: 1 }))).outcome, "unmatched", "never began");
+    const cancelled = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    await store.bind({ managerBotId: MANAGER, updateId: 2, telegramUserId: USER, challenge: cancelled.challenge, messageDate: DATE, now: NOW });
+    await store.cancel(scoped(cancelled.intent.id));
+    assert.equal((await store.candidate(creation({ updateId: 3 }))).outcome, "unmatched", "cancelled");
+    const connected = await ready(store, { startId: 4 });
+    await store.complete({ ...scoped(connected.id), botId: BOT, token: TOKEN, confirmedBotId: BOT });
+    assert.equal((await store.candidate(creation({ updateId: 6, botId: "1002", username: "second_test_bot" }))).outcome, "unmatched", "connected");
+    // A second bot for a setup that already has its candidate is not unmatched: that setup is underway, and keeps its first bot.
+    const { store: other } = await fixture();
+    await ready(other);
+    assert.equal((await other.candidate(creation({ updateId: 12, botId: "1002", username: "second_test_bot" }))).outcome, "ignored");
+  });
+
+  it("finds a setup for a button only through the Telegram user its /start bound, and never says whose tenant to anyone else", async () => {
+    const { store } = await fixture();
+    const intent = await ready(store);
+    const press = { intentId: intent.id, managerBotId: MANAGER, telegramUserId: USER, now: NOW };
+    assert.deepEqual(await store.forTelegramUser(press), { tenant: A, intent: { id: intent.id, status: "confirm", expiresAt: NOW + MANAGED_INTENT_TTL_MS, botId: BOT, botUsername: "personal_test_bot" } });
+    assert.equal(await store.forTelegramUser({ ...press, telegramUserId: USER + 1 }), null, "another Telegram user");
+    assert.equal(await store.forTelegramUser({ ...press, managerBotId: OTHER_MANAGER }), null, "another manager");
+    assert.equal(await store.forTelegramUser({ ...press, intentId: "00000000-0000-4000-8000-000000000000" }), null, "another intent");
+    assert.equal(await store.forTelegramUser({ ...press, intentId: "x' OR '1'='1" }), null);
+    assert.equal(await store.cancelForTelegramUser({ ...press, telegramUserId: USER + 1 }), null);
+    assert.equal((await store.get(scoped(intent.id)))?.status, "confirm", "a stranger's cancel changes nothing");
+    assert.equal(await store.boundTelegramUser(scoped(intent.id)), USER);
+    assert.equal(await store.boundTelegramUser(scoped(intent.id, { tenant: B })), null);
+    // An unbound setup has nobody to tell, and no Telegram user can find it.
+    const fresh = await store.begin({ tenant: B, managerBotId: MANAGER, now: NOW });
+    assert.equal(await store.boundTelegramUser(scoped(fresh.intent.id, { tenant: B })), null);
+    assert.equal(await store.forTelegramUser({ ...press, intentId: fresh.intent.id }), null);
+  });
+
+  it("cancels from Telegram as the web does: frees the user's lease, never undoes a connection, and repeats safely", async () => {
+    const { db, store } = await fixture();
+    const intent = await ready(store);
+    const press = { intentId: intent.id, managerBotId: MANAGER, telegramUserId: USER, now: NOW };
+    assert.equal((await store.cancelForTelegramUser(press))?.status, "cancelled");
+    assert.equal((await store.cancelForTelegramUser(press))?.status, "cancelled", "a second tap");
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_managed_users").all(), []);
+    await assert.rejects(store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT }), errorCode("intent_expired"));
+    const next = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    assert.equal((await store.bind({ managerBotId: MANAGER, updateId: 30, telegramUserId: USER, challenge: next.challenge, messageDate: DATE, now: NOW })).outcome, "bound", "the user can begin again");
+
+    const { store: other } = await fixture();
+    const connected = await ready(other);
+    await other.complete({ ...scoped(connected.id), botId: BOT, token: TOKEN, confirmedBotId: BOT });
+    assert.equal((await other.cancelForTelegramUser({ ...press, intentId: connected.id }))?.status, "connected");
+  });
+});

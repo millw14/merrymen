@@ -22,7 +22,10 @@
  * what they traded and what they made or lost money on, provider-reported;
  * Milla, 2026-10-07), never as @mentions and never who Merrymen follows or
  * watches. A coin's theses are a digest of what they argue (digest.ts),
- * never quoted and never counted. The owner's own research state is
+ * never counted, and never quoted by this renderer: a room that asks for the
+ * theses themselves hears them quoted by tg-fomo-port.ts thesesQuotes and
+ * tg-groups/quotes.ts, gated line by line (Milla, 2026-10-09). The owner's
+ * own research state is
  * deflected to a direct message. A final scrub runs over the whole group
  * text as a second line of defence.
  *
@@ -367,7 +370,11 @@ function freshnessLine(env: FomoEnvelope, now: number): string | null {
             : "it could not be refreshed";
     return `Data age: ${age} (${why}).`;
   }
-  if (f.servedFrom === "cache" && finite(f.cacheAgeMs) && f.cacheAgeMs > 60_000) return `From a copy fetched ${agoText(f.cacheAgeMs)}.`;
+  if (f.servedFrom === "cache" && finite(f.cacheAgeMs) && f.cacheAgeMs > 60_000) {
+    // A copy over a minute old is never "just now" (agoText says that under
+    // 90 s, which thesis ages keep): live 2026-10-09, a 63 s copy was.
+    return `From a copy fetched ${f.cacheAgeMs < 90_000 ? "a minute ago" : agoText(f.cacheAgeMs)}.`;
+  }
   if (finite(f.providerAsOf) && now - f.providerAsOf > 10 * 60_000) return `The provider's own copy is from ${ago(now, f.providerAsOf)}.`;
   return null;
 }
@@ -715,6 +722,28 @@ function bodyTheses(env: FomoEnvelope<TokenThesesData>, audience: Audience, now:
   const subject = d.token ? coin(d.token, d.label, audience) : d.trader ? trader(d.trader) : "this subject";
   const total = d.stance.supporting + d.stance.opposing + d.stance.neutral;
   if (total === 0) {
+    // AN EMPTY READ IS NOT "NONE" WHEN THE PROVIDER SAYS OTHERWISE: its own
+    // page came back empty while it marked it not available, or still counts
+    // theses on the coin (the AUTON incident, 2026-10-08: a room was told a
+    // coin with 4,190 theses had none). Only the provider's page itself
+    // (pageRows): rows filtered off here (another chain's) are "none", said as
+    // before, and only a coin's own read quotes its count; a trader's route
+    // total is not per trader and coin (review on #306). A windowed ask on
+    // such a page is the same: the window filtered nothing, the provider
+    // returned nothing; it is just never given the all-time figure.
+    const windowed = !!env.coverage.requested.window;
+    const held = !d.trader && finite(env.coverage.providerTotal) && env.coverage.providerTotal > 0 ? env.coverage.providerTotal : null;
+    if (d.pageRows === 0 && (d.available === false || held !== null)) {
+      const count = held !== null && !windowed ? ` (it lists ${held.toLocaleString("en-US")})` : "";
+      // A ROOM IS NEVER PROMISED A RETRY: this renderer cannot see the room's
+      // allowance, and a new page is 1,250 credits of its 2,500 an hour, so
+      // "ask me again" would be followed by "used up" (review on #306). The
+      // owner's matches how long the empty copy is held (service.ts
+      // EMPTY_HOLD_MS, 2 min): asked again in a minute, she would get it back.
+      const retry = audience === "group" ? "" : " Ask me again in a couple of minutes.";
+      const line = `The provider didn't return the theses on ${subject} just now${count}.${retry}`;
+      return [audience === "group" ? roomNote(line) : line];
+    }
     const line = `No theses were returned for ${subject}${env.coverage.requested.window ? ` in that window` : ""}. That is the provider's record, not proof nobody has a view.`;
     // A room hears "Fomo's record": the gate reads "the provider" as plumbing, and with it refused a coin with no theses heard "ask me in a direct message".
     return [audience === "group" ? roomNote(line) : line];
@@ -739,7 +768,9 @@ function bodyTokenActivity(env: FomoEnvelope<TokenActivityData>, audience: Audie
   const scope = d.window === "all" ? "on record" : `in the last ${d.window}`;
   const out: string[] = [];
   if (d.events.length === 0) {
-    out.push(`No matching ${d.side === "buy" ? "buys" : d.side === "sell" ? "sells" : "activity"} were returned for ${subject} ${scope}. That is not the same as nobody trading: the feed only shows positions above roughly $3,000.`);
+    // "activity was", "buys were" (live 2026-10-09: "No matching activity were returned").
+    const what = d.side === "buy" ? "buys were" : d.side === "sell" ? "sells were" : "activity was";
+    out.push(`No matching ${what} returned for ${subject} ${scope}. That is not the same as nobody trading: the feed only shows positions above roughly $3,000.`);
   } else {
     const b = d.distinctBuyers;
     const s = d.distinctSellers;
@@ -781,7 +812,7 @@ function windowWords(w: string | null | undefined): string {
 }
 
 /** A chain as people say it: "Robinhood Chain", "Solana", "Ethereum". */
-function chainLabel(slug: string | null | undefined): string {
+export function chainLabel(slug: string | null | undefined): string {
   const s = typeof slug === "string" ? chainFromUserText(slug)?.slug ?? slug : "";
   const named: Record<string, string> = { robinhood: "Robinhood Chain", solana: "Solana", base: "Base", eth: "Ethereum", bsc: "BSC", arc: "Arc", hyperliquid: "Hyperliquid" };
   return named[s] ?? (/^[a-z][a-z0-9-]{0,23}$/.test(s) ? s : "that chain");
@@ -893,7 +924,16 @@ const ABOUT_COHORT = /\bcohort\b|\bwatched[- ]traders?\b/i;
 
 function bodyResearch(env: FomoEnvelope<ResearchCoinData>, audience: Audience, now: number): string[] {
   const d = env.data;
-  if (!d) return [];
+  if (!d) {
+    // The provider answered the coin's thesis page empty while it holds
+    // theses: no research was built from it, and "0 theses" is never said
+    // (service.ts refreshCore, review on #306).
+    if (env.reason === "theses-not-ready" && env.subject?.kind === "token") {
+      const line = `The provider didn't return the theses on ${coin(env.subject.token, env.subject.label, audience)} just now, so no research was built from it.`;
+      return [audience === "group" ? roomNote(line) : line];
+    }
+    return [];
+  }
   const name = coin(d.token, d.label, audience);
   const c = d.coverage;
   const out: string[] = [];

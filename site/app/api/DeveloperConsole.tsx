@@ -1,6 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { FALLBACK_PLANS, group, normalizePlans, type PlansView } from "../../lib/developer-billing";
+import { AccountPanel, loadAccount, type AccountState } from "./AccountPanel";
+import { request } from "./developer-client";
+import { PlansSection } from "./PlansSection";
 
 const BASE = "https://ai.merrymen.dev/partner/v1";
 const SDK = "https://app.merrymen.dev/sdk/merrymen-browser.js";
@@ -8,13 +12,12 @@ type Key = { key_id: string; app_id: string; name: string; status: string; scope
 type Wallet = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
 type Challenge = { challenge: string; message: string };
 
-async function request(action: string, body?: unknown) {
-  const response = await fetch(`/api/developer/${action}`, { method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
-    ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
-  const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error?.message || "Something went wrong. Please try again."), { status: response.status });
-  return data;
-}
+/**
+ * The gateway no longer accepts this session: signed out elsewhere, expired, or
+ * a gateway restart (sessions on its memory store end with the process). The
+ * page must offer sign-in again, not an error under a "Connected" badge.
+ */
+export const sessionEnded = (e: unknown) => (e as { code?: unknown } | null)?.code === "signed_out";
 function Code({ text, label = "Copy code" }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -30,7 +33,49 @@ const endpoints = [
   ["DELETE", "/agents/{id}/connection", "Disconnect your app", "write:agents"],
 ];
 
-export function DeveloperConsole() {
+/** The key form's footnote: the rate limit that actually applies to these keys. */
+export function keyLimits(plans: PlansView, account: AccountState): string {
+  // An account answered but the plans did not: billing may be on, so the per-key rate of the static table is not known to hold.
+  if (plans.source === "fallback" && account.kind === "ready") return "Up to 5 active keys · Create, read and chat scopes · Plan limits could not be loaded just now";
+  if (plans.billing.mode === "off") return "Up to 5 active keys · 30 requests/minute per key · Create, read and chat scopes";
+  // With billing on, a wallet's keys share one plan; before an account exists, that plan is Free.
+  const view = account.kind === "ready" ? account.view : null;
+  // A lapsed period that credit renews on the next request: its keys are served on that plan from then, not Free's.
+  const next = view && view.plan.id === "free" && view.plan.renews_on_next_request ? plans.plans.find(p => p.id === view.plan.renews_into) : undefined;
+  const id = next?.id ?? view?.plan.id ?? "free", plan = plans.plans.find(p => p.id === id);
+  const requests = next ? next.requests : view?.usage ? view.usage.limit : plan?.requests;
+  if (!plan || requests === undefined) return "Up to 5 active keys · your plan's limits are shared by all your keys · Create, read and chat scopes";
+  const name = next ? `${plan.name} from your next API request` : plan.name;
+  // A period's own quota (an upgrade's time-left share, a long comp) is this period's, not a 30-day figure.
+  const quota = requests === plan.requests ? `${group(requests)} requests per ${plans.period_days} days`
+    : `${group(requests)} requests this period (then ${group(plan.requests)} per ${plans.period_days} days)`;
+  // Observe gives each key its own per-minute bucket and refuses no quota; only enforce shares one bucket per account.
+  if (!plans.billing.enforced) return `Up to 5 active keys · ${name}: ${plan.rpm} requests/minute per key, and ${quota} counted for all your keys together, not yet enforced · Create, read and chat scopes`;
+  return `Up to 5 active keys · ${name}: ${plan.rpm} requests/minute and ${quota}, shared by all your keys · Create, read and chat scopes`;
+}
+/** "200 OK · …" for the key test, with this period's usage when /meta reports it. */
+export function testSummary(result: { name?: unknown; rate_per_min?: unknown; billing?: unknown }): string {
+  const billing = result.billing as { requests_used?: unknown; requests_limit?: unknown; renews_on_next_request?: unknown } | null | undefined;
+  // /meta's rate is already the plan the next request is served on, its counts the plan as it stands (Free, until then):
+  // side by side they contradict each other, so the renewal is said instead.
+  if (billing?.renews_on_next_request === true) return `200 OK · ${result.name} · ${result.rate_per_min} requests/minute · your next metered request renews your plan from credit`;
+  const usage = billing && typeof billing.requests_used === "number" && typeof billing.requests_limit === "number" ? ` · ${group(billing.requests_used)} of ${group(billing.requests_limit)} requests used` : "";
+  return `200 OK · ${result.name} · ${result.rate_per_min} requests/minute${usage}`;
+}
+
+/**
+ * New key (or replacement) form. With billing, keys belong to an account, so
+ * until the wallet has one the form is disabled and says where to start;
+ * existing keys are listed and keep working either way.
+ */
+export function KeyForm({ name, setName, rotateApp, busy, needsAccount, onSubmit, onCancelRotate }: {
+  name: string; setName: (v: string) => void; rotateApp: string; busy: string; needsAccount: boolean; onSubmit: (e: React.FormEvent) => void; onCancelRotate: () => void;
+}) {
+  return <><form className="dev-create-form" onSubmit={onSubmit}><label>{rotateApp ? "New key for this app" : "Application name"}<input required maxLength={48} placeholder="e.g. Prism Finance" value={name} disabled={needsAccount} aria-describedby={needsAccount ? "dev-needs-account" : undefined} onChange={e => setName(e.target.value)} /></label><button className="dev-primary" disabled={!!busy || !name.trim() || needsAccount}>{busy === "create" ? "Creating…" : rotateApp ? "Create replacement ↗" : "Create API key ↗"}</button>{rotateApp && <button type="button" className="dev-textlink" onClick={onCancelRotate}>Cancel replacement</button>}</form>
+    {needsAccount && <p className="dev-small dev-needs-account" id="dev-needs-account">Create your developer account above to create keys. Keys you already have keep working.</p>}</>;
+}
+
+export function DeveloperConsole({ initialPlans = FALLBACK_PLANS }: { initialPlans?: PlansView }) {
   const [address, setAddress] = useState("");
   const [keys, setKeys] = useState<Key[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,11 +93,32 @@ export function DeveloperConsole() {
   const [signature, setSignature] = useState("");
   const [tutorial, setTutorial] = useState("quickstart");
   const [example, setExample] = useState("Node.js");
+  const [plans, setPlans] = useState(initialPlans);
+  const [account, setAccount] = useState<AccountState>({ kind: "loading" });
   async function refresh() {
     const data = await request("keys"); setAddress(data.address); setKeys(data.keys);
+    setAccount(await loadAccount());
   }
-  useEffect(() => { let active = true; request("keys").then(data => { if (active) { setAddress(data.address); setKeys(data.keys); } }).catch(e => { if (active && e.status !== 401) setError(e.message); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, []);
-  async function run(task: string, fn: () => Promise<void>) { setBusy(task); setError(""); try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : "Please try again."); } finally { setBusy(""); } }
+  useEffect(() => {
+    let active = true;
+    // Fresh plans for the payment panel; the server-rendered ones stay if this fails.
+    request("plans").then(data => { const live = normalizePlans(data); if (active && live) setPlans(live); }).catch(() => {});
+    request("keys").then(async data => {
+      if (!active) return;
+      setAddress(data.address); setKeys(data.keys);
+      const state = await loadAccount();
+      if (active) setAccount(state);
+    }).catch(e => { if (!active) return; if (sessionEnded(e)) forget(); else if (e.status !== 401) setError(e.message); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+  function forget() { setAddress(""); setKeys([]); setFresh(null); setRevokeId(""); setRotateApp(""); setTestResult(""); setAccount({ kind: "loading" }); }
+  async function run(task: string, fn: () => Promise<void>) {
+    setBusy(task); setError("");
+    try { await fn(); } catch (e) {
+      if (sessionEnded(e)) { forget(); setError("Your session ended. Connect your wallet again to continue."); }
+      else setError(e instanceof Error ? e.message : "Please try again.");
+    } finally { setBusy(""); }
+  }
   async function connect() {
     await run("connect", async () => {
       const provider = (window as Window & { ethereum?: Wallet }).ethereum;
@@ -67,8 +133,11 @@ export function DeveloperConsole() {
   }
   async function createKey(event: React.FormEvent) {
     event.preventDefault();
-    await run("create", async () => { const data = await request("keys", { name, ...(rotateApp ? { app_id: rotateApp } : {}) }); setFresh(data); setShowKey(false); setCopiedKey(false); setTestResult(""); setName(""); setRotateApp(""); await refresh(); });
+    await run("create", async () => {
+      const data = await request("keys", { name, ...(rotateApp ? { app_id: rotateApp } : {}) }).catch(e => { if (e.code === "account_required") setAccount({ kind: "missing" }); throw e; });
+      setFresh(data); setShowKey(false); setCopiedKey(false); setTestResult(""); setName(""); setRotateApp(""); await refresh(); });
   }
+  const needsAccount = account.kind === "missing";
   const selectedApp = fresh?.app_id || keys.find(k => k.status === "active")?.app_id || "YOUR_APP_ID";
   const backend = `// Your backend only. Never put this key in browser code.\nconst API = "${BASE}";\n\nasync function merrymen(path, body) {\n  const response = await fetch(API + path, {\n    method: body === undefined ? "GET" : "POST",\n    headers: {\n      Authorization: \`Bearer \${process.env.MERRYMEN_API_KEY}\`,\n      "Content-Type": "application/json",\n    },\n    ...(body === undefined ? {} : { body: JSON.stringify(body) }),\n  });\n  const data = await response.json();\n  if (!response.ok) throw new Error(data.error?.message || "API error");\n  return data;\n}\n\n// Get this ID from YOUR authenticated session.\nconst agent = await merrymen("/agents", {\n  external_user_id: currentUser.id,\n  name: "Robin",\n});`;
   const curl = `curl "${BASE}/meta" \\\n  -H "Authorization: Bearer $MERRYMEN_API_KEY"\n\n# Create a connection from your backend\ncurl "${BASE}/agents" \\\n  -H "Authorization: Bearer $MERRYMEN_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"external_user_id":"usr_123","name":"Robin"}'`;
@@ -81,28 +150,31 @@ export function DeveloperConsole() {
       <div className="dev-terminal" aria-label="Example API request and response"><div className="dev-terminal-head"><span><b /> <b /> <b /></span><span>your-app / server.ts</span><small>REST API</small></div><pre><span className="dev-muted">// Your interface. Their agent.</span>{"\n"}<span className="dev-purple">const</span>{" agent = "}<span className="dev-purple">await</span>{" merrymen("}{"\n  "}<span className="dev-lime">"/agents"</span>{", {"}{"\n    external_user_id: "}<span className="dev-lime">"usr_123"</span>{","}{"\n    name: "}<span className="dev-lime">"Robin"</span>{"\n  });"}</pre><div className="dev-terminal-response"><span className="dev-badge">202 ACCEPTED · EXAMPLE</span><pre>{'{\n  "id": "pa_…",\n  "status": "pending_authorization"\n}'}</pre><p>The owner signs. Merrymen runs the worker.</p></div></div>
     </section>
     <div className="dev-workspace">
-      <aside className="dev-sidebar"><p>BUILD WITH MERRYMEN</p><a href="#api-keys">01 <span>API keys</span> ↗</a><a href="#quickstart">02 <span>Quickstart</span></a><a href="#reference">03 <span>API reference</span></a><a href="#essentials">04 <span>Good to know</span></a><div className="dev-sidebar-note"><span>BASE URL</span><code>ai.merrymen.dev<br />/partner/v1</code><a href={`${BASE}/health`} target="_blank" rel="noreferrer">Check API health ↗</a></div></aside>
+      <aside className="dev-sidebar"><p>BUILD WITH MERRYMEN</p><a href="#api-keys">01 <span>API keys</span> ↗</a><a href="#plans">02 <span>Plans</span></a><a href="#quickstart">03 <span>Quickstart</span></a><a href="#reference">04 <span>API reference</span></a><a href="#essentials">05 <span>Good to know</span></a><div className="dev-sidebar-note"><span>BASE URL</span><code>ai.merrymen.dev<br />/partner/v1</code><a href={`${BASE}/health`} target="_blank" rel="noreferrer">Check API health ↗</a></div></aside>
       <div className="dev-content">
         <section id="api-keys" className="dev-section"><div className="dev-section-heading"><div><p className="dev-eyebrow">01 / YOUR WORKSPACE</p><h2>Keys to your next idea.</h2></div><span className="dev-pill">SERVER-SIDE ONLY</span></div><p className="dev-description">Give each app its own key. User wallets stay in their control.</p>
-          {loading ? <div className="dev-account-box" role="status">Loading your developer account…</div> : !address ? <div className="dev-account-box"><div className="dev-lock" aria-hidden>⌘</div><div><h3>Your wallet is your developer account.</h3><p>Sign a message to create and manage API keys. No payment, transaction, or token balance required.</p></div><button className="dev-primary" disabled={!!busy} onClick={connect}>{busy === "connect" ? "Check your wallet…" : "Connect wallet ↗"}</button>
+          {loading ? <div className="dev-account-box" role="status">Loading your developer account…</div> : !address ? <div className="dev-account-box"><div className="dev-lock" aria-hidden>⌘</div><div><h3>Your wallet signs you in.</h3><p>Sign a message to manage your developer account and API keys. Signing in sends no transaction and needs no token balance. The Free plan needs no payment; paid plans are paid in $MERRYMEN from this wallet.</p></div><button className="dev-primary" disabled={!!busy} onClick={connect}>{busy === "connect" ? "Check your wallet…" : "Connect wallet ↗"}</button>
             <details className="dev-manual"><summary>Use a wallet signature instead</summary><p>For wallets without a browser connection: request the message, sign it using your wallet’s personal-message signing tool, and paste the signature. Never paste a private key.</p><form onSubmit={e => { e.preventDefault(); void run("challenge", async () => { setChallenge(await request("challenge", { address: manualAddress })); setSignature(""); }); }}><label>Wallet address<input required value={manualAddress} onChange={e => setManualAddress(e.target.value)} placeholder="0x…" pattern="0x[a-fA-F0-9]{40}" /></label><button className="dev-secondary" disabled={!!busy}>Get sign-in message</button></form>{challenge && <><Code text={challenge.message} label="Copy sign-in message" /><form onSubmit={e => { e.preventDefault(); void run("verify", async () => { await request("verify", { challenge: challenge.challenge, signature }); setSignature(""); setChallenge(null); await refresh(); }); }}><label>Wallet signature<input required type="password" autoComplete="off" value={signature} onChange={e => setSignature(e.target.value)} placeholder="0x…" /></label><button className="dev-primary" disabled={!!busy}>Verify signature</button></form></>}</details>
-          </div> : <div className="dev-key-workspace"><div className="dev-account-bar"><span><i /> Connected <code>{address.slice(0, 6)}…{address.slice(-4)}</code></span><button onClick={() => run("logout", async () => { await request("logout", {}); setAddress(""); setKeys([]); setFresh(null); setRevokeId(""); setRotateApp(""); setTestResult(""); })} disabled={!!busy}>Sign out</button></div>
-            <form className="dev-create-form" onSubmit={createKey}><label>{rotateApp ? "New key for this app" : "Application name"}<input required maxLength={48} placeholder="e.g. Prism Finance" value={name} onChange={e => setName(e.target.value)} /></label><button className="dev-primary" disabled={!!busy || !name.trim()}>{busy === "create" ? "Creating…" : rotateApp ? "Create replacement ↗" : "Create API key ↗"}</button>{rotateApp && <button type="button" className="dev-textlink" onClick={() => { setRotateApp(""); setName(""); }}>Cancel replacement</button>}</form>
-            <p className="dev-small">Up to 5 active keys · 30 requests/minute per key · Create, read and chat scopes</p>
-            {fresh && <div className="dev-new-key"><div className="dev-key-title"><strong>Your key is ready.</strong><span>SHOWN ONCE</span></div><p>Copy it into your backend’s secret storage now. We cannot show it again after you leave.</p><div className="dev-secret-row"><input aria-label="New API key" type={showKey ? "text" : "password"} readOnly value={fresh.key} autoComplete="off" spellCheck={false} /><button aria-label={showKey ? "Hide API key" : "Reveal API key"} onClick={() => setShowKey(!showKey)}>{showKey ? "Hide" : "Reveal"}</button><button onClick={() => run("copy", async () => { await navigator.clipboard.writeText(fresh.key); setCopiedKey(true); })}>{copiedKey ? "Copied ✓" : "Copy key"}</button></div><p className="dev-app-id">App ID <code>{fresh.app_id}</code></p><div className="dev-key-test"><button className="dev-secondary" disabled={!!busy} onClick={() => run("test", async () => { setTestResult(""); const result = await request("test", { key: fresh.key }); setTestResult(`200 OK · ${result.name} · ${result.rate_per_min} requests/minute`); })}>{busy === "test" ? "Testing…" : "Test this key ↗"}</button><span role="status">{testResult || "Makes a real authenticated /meta request."}</span></div></div>}
+          </div> : <div className="dev-key-workspace"><div className="dev-account-bar"><span><i /> Connected <code>{address.slice(0, 6)}…{address.slice(-4)}</code></span><button onClick={() => run("logout", async () => { await request("logout", {}); forget(); })} disabled={!!busy}>Sign out</button></div>
+            <AccountPanel key={address} address={address} plans={plans} state={account} keys={keys} busy={busy} run={run} defaultName={keys.find(k => k.status === "active")?.name || `Developer ${address.slice(0, 6)}…${address.slice(-4)}`}
+              onAccount={view => setAccount({ kind: "ready", view })} onPlans={setPlans} reload={async () => setAccount(await loadAccount())} onSignedOut={() => { forget(); setError("Your session ended. Connect your wallet again to continue."); }} />
+            <KeyForm name={name} setName={setName} rotateApp={rotateApp} busy={busy} needsAccount={needsAccount} onSubmit={createKey} onCancelRotate={() => { setRotateApp(""); setName(""); }} />
+            <p className="dev-small">{keyLimits(plans, account)}</p>
+            {fresh && <div className="dev-new-key"><div className="dev-key-title"><strong>Your key is ready.</strong><span>SHOWN ONCE</span></div><p>Copy it into your backend’s secret storage now. We cannot show it again after you leave.</p><div className="dev-secret-row"><input aria-label="New API key" type={showKey ? "text" : "password"} readOnly value={fresh.key} autoComplete="off" spellCheck={false} /><button aria-label={showKey ? "Hide API key" : "Reveal API key"} onClick={() => setShowKey(!showKey)}>{showKey ? "Hide" : "Reveal"}</button><button onClick={() => run("copy", async () => { await navigator.clipboard.writeText(fresh.key); setCopiedKey(true); })}>{copiedKey ? "Copied ✓" : "Copy key"}</button></div><p className="dev-app-id">App ID <code>{fresh.app_id}</code></p><div className="dev-key-test"><button className="dev-secondary" disabled={!!busy} onClick={() => run("test", async () => { setTestResult(""); const result = await request("test", { key: fresh.key }); setTestResult(testSummary(result)); })}>{busy === "test" ? "Testing…" : "Test this key ↗"}</button><span role="status">{testResult || "Makes a real authenticated /meta request."}</span></div></div>}
             <div className="dev-keys-list">{keys.length === 0 ? <p className="dev-empty">No keys yet. Your first app starts above.</p> : keys.map(key => <div className="dev-key-row" key={key.key_id}><div><strong>{key.name}</strong><code>{key.prefix}••••••••</code><small>App: {key.app_id}</small></div><span className={`dev-key-status ${key.status}`}>{key.status}</span>{key.status === "active" && <div className="dev-key-controls">{revokeId === key.key_id ? <><span>Revoke this key?</span><button className="dev-danger" disabled={!!busy} onClick={() => run("revoke", async () => { await request("revoke", { key_id: key.key_id }); if (fresh?.key_id === key.key_id) { setFresh(null); setTestResult(""); } setRevokeId(""); await refresh(); })}>Yes, revoke</button><button onClick={() => setRevokeId("")}>Cancel</button></> : <><button disabled={!!busy} onClick={() => { setRotateApp(key.app_id); setName(key.name); }}>Replace</button><button disabled={!!busy} onClick={() => setRevokeId(key.key_id)}>Revoke</button></>}</div>}</div>)}</div>
           </div>}
           {error && <p className="dev-error" role="alert">{error}</p>}
         </section>
-        <section id="quickstart" className="dev-section"><p className="dev-eyebrow">02 / FROM ZERO TO FIRST CONVERSATION</p><h2>A few calls. A whole Merryman.</h2><p className="dev-description">Your backend holds the key. Your user signs the permissions. We run the agent.</p><div className="dev-tabs" role="tablist" aria-label="Integration tutorial">{[["quickstart", "1. Connect"], ["authorize", "2. Authorize"], ["chat", "3. Chat"]].map(([id, title]) => <button role="tab" aria-selected={tutorial === id} aria-controls={`tutorial-${id}`} id={`tab-${id}`} key={id} onClick={() => setTutorial(id)}>{title}</button>)}</div>
+        <PlansSection plans={plans} />
+        <section id="quickstart" className="dev-section"><p className="dev-eyebrow">03 / FROM ZERO TO FIRST CONVERSATION</p><h2>A few calls. A whole Merryman.</h2><p className="dev-description">Your backend holds the key. Your user signs the permissions. We run the agent.</p><div className="dev-tabs" role="tablist" aria-label="Integration tutorial">{[["quickstart", "1. Connect"], ["authorize", "2. Authorize"], ["chat", "3. Chat"]].map(([id, title]) => <button role="tab" aria-selected={tutorial === id} aria-controls={`tutorial-${id}`} id={`tab-${id}`} key={id} onClick={() => setTutorial(id)}>{title}</button>)}</div>
           <div className="dev-tutorial" role="tabpanel" id={`tutorial-${tutorial}`} aria-labelledby={`tab-${tutorial}`}>
             {tutorial === "quickstart" && <><h3>Create your first connection</h3><p>Save your key as <code>MERRYMEN_API_KEY</code> on your server. Create a connection for a user who is signed in to your app. A <code>pending_authorization</code> response means they still need to approve wallet permissions.</p><div className="dev-language" aria-label="Code language">{["Node.js", "cURL"].map(item => <button aria-pressed={example === item} onClick={() => setExample(item)} key={item}>{item}</button>)}</div><Code text={example === "Node.js" ? backend : curl} /></>}
             {tutorial === "authorize" && <><h3>Keep wallet setup inside your app</h3><p>Use the <a href="/api/developer/sdk">browser SDK ↓</a> with your wallet provider’s viem-compatible signer. Show the limits and request user consent. This example starts with paper trading.</p><Code text={browser} /><div className="dev-callout"><strong>Wire up your own backend adapter</strong><p><code>backend.challenge(id, body)</code> → <code>POST /agents/{"{id}"}/challenge</code><br /><code>backend.activate(id, body)</code> → <code>POST /agents/{"{id}"}/activate</code></p><p>Both add your server-side API key and check that the connection belongs to the signed-in user. Keep the returned session grant private. Never request or transmit an owner private key.</p></div></>}
             {tutorial === "chat" && <><h3>Give your agent a conversation</h3><p>After activation, poll status until the worker reports a heartbeat. Send messages from your backend and render <code>answer.reply</code> in your chat UI. Reuse the same request ID when retrying a message.</p><Code text={chat} /><div className="dev-callout"><strong>Show real status</strong><p><code>starting</code> means the grant is saved; <code>running</code> means the worker has a recent heartbeat. Paper mode uses simulated funds. Live trading needs explicit permission, funding, and no reported blockers.</p></div></>}
           </div>
         </section>
-        <section id="reference" className="dev-section"><p className="dev-eyebrow">03 / THE SURFACE AREA</p><h2>Small API. Plenty of possibility.</h2><div className="dev-base"><span>BASE URL</span><code>{BASE}</code></div><div className="dev-endpoints">{endpoints.map(([method, path, description, scope]) => <details key={method + path}><summary><span className={`dev-method ${method.toLowerCase()}`}>{method}</span><code>{path}</code><span className="dev-endpoint-description">{description}</span><b>+</b></summary><p>{description}. Requires <code>{scope}</code> and your backend’s <code>Authorization: Bearer &lt;key&gt;</code> header.</p></details>)}</div><a className="dev-textlink" href="https://github.com/millw14/merrymen/blob/codex/embedded-partner-api/gateway/PARTNER-API.md" target="_blank" rel="noreferrer">Read the full request & response reference ↗</a></section>
-        <section id="essentials" className="dev-section"><p className="dev-eyebrow">04 / BEFORE YOU SHIP</p><h2>Built for a clear boundary.</h2><div className="dev-essentials"><article><span>01</span><h3>Keys belong on the server.</h3><p>Never embed your partner key in browser code, mobile bundles, or a public repository. The browser SDK only prepares wallet permissions.</p></article><article><span>02</span><h3>Ownership comes first.</h3><p>Derive user IDs from your own authenticated sessions. Every agent needs its owner’s signature before your app can use its private context.</p></article><article><span>03</span><h3>A reply is not a trade.</h3><p>Chat proposals are not executed automatically. Agent workers follow their signed permissions and configured strategy. No provider available? Chat says so.</p></article><article><span>04</span><h3>Rotate without losing users.</h3><p>Replace a key to keep the same app ID. Update your backend, then revoke the old key. Disconnecting an app does not stop the underlying agent.</p></article></div></section>
+        <section id="reference" className="dev-section"><p className="dev-eyebrow">04 / THE SURFACE AREA</p><h2>Small API. Plenty of possibility.</h2><div className="dev-base"><span>BASE URL</span><code>{BASE}</code></div><div className="dev-endpoints">{endpoints.map(([method, path, description, scope]) => <details key={method + path}><summary><span className={`dev-method ${method.toLowerCase()}`}>{method}</span><code>{path}</code><span className="dev-endpoint-description">{description}</span><b>+</b></summary><p>{description}. Requires <code>{scope}</code> and your backend’s <code>Authorization: Bearer &lt;key&gt;</code> header.</p></details>)}</div><a className="dev-textlink" href="https://github.com/millw14/merrymen/blob/main/gateway/PARTNER-API.md" target="_blank" rel="noreferrer">Read the full request & response reference ↗</a></section>
+        <section id="essentials" className="dev-section"><p className="dev-eyebrow">05 / BEFORE YOU SHIP</p><h2>Built for a clear boundary.</h2><div className="dev-essentials"><article><span>01</span><h3>Keys belong on the server.</h3><p>Never embed your partner key in browser code, mobile bundles, or a public repository. The browser SDK only prepares wallet permissions.</p></article><article><span>02</span><h3>Ownership comes first.</h3><p>Derive user IDs from your own authenticated sessions. Every agent needs its owner’s signature before your app can use its private context.</p></article><article><span>03</span><h3>A reply is not a trade.</h3><p>Chat proposals are not executed automatically. Agent workers follow their signed permissions and configured strategy. No provider available? Chat says so.</p></article><article><span>04</span><h3>Rotate without losing users.</h3><p>Replace a key to keep the same app ID. Update your backend, then revoke the old key. Disconnecting an app does not stop the underlying agent.</p></article></div></section>
       </div>
     </div>
     <section className="dev-bottom"><span>LET THEM BRING THEIR MERRYMAN.</span><h2>Your next feature<br />has a mind of its own.</h2><a className="dev-primary" href="#api-keys">Start building ↗</a></section>

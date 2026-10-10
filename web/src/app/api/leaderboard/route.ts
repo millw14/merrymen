@@ -35,7 +35,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const r = await readLeaderboard();
-  const publishedBook = r.agents.some((agent) => agent.performance?.publicBook === true);
+  const publishedBook = r.agents.some((agent) => agent.performance?.publicBook === true)
+    || r.retiredAgents.some((agent) => agent.pnlUsdg !== null);
   return NextResponse.json(r, {
     headers: { "Cache-Control": publishedBook ? "no-store" : "public, s-maxage=60, stale-while-revalidate=120" },
   });

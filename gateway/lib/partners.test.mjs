@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -13,7 +13,7 @@ const dir = await mkdtemp(path.join(tmpdir(), "merrymen-partners-"));
 process.env.MERRYMEN_DATA_DIR = dir;
 delete process.env.MERRYMEN_PARTNER_KEYS;
 
-const { createPartners, hashSecret, loadRegistry, makeKey, parseKey, writeRecord, SCOPES, DEFAULT_SCOPES } =
+const { createPartners, FileBusy, hashSecret, loadRegistry, makeKey, parseKey, repairTail, withAppendLock, writeRecord, SCOPES, DEFAULT_SCOPES } =
   await import("./partners.mjs");
 
 const SECRET = "x".repeat(40);
@@ -124,6 +124,18 @@ test("stable app identity survives key rotation and legacy keys retain their ide
   assert.deepEqual((await partners.verify(original.key)).key.scopes, ["read:agents", "write:agents", "chat:agents"]);
 });
 
+test("a key's name is signed as well-formed text, never half an emoji or a control character", async () => {
+  const cut = await issue({ name: `${"a".repeat(63)}\u{1F600}` }); // 65 UTF-16 units; 64 would split the pair
+  const odd = await issue({ name: "Bad\u0007 \ud800name" });
+  const blank = await issue({ name: "\u0001\u0002" });
+  const partners = createPartners({ secret: SECRET });
+  const named = (await partners.verify(cut.key)).key.name;
+  assert.equal(named, "a".repeat(63));
+  assert.ok(named.isWellFormed());
+  assert.equal((await partners.verify(odd.key)).key.name, "Bad \ufffdname");
+  assert.equal((await partners.verify(blank.key)).key.name, blank.keyId);
+});
+
 test("the file overrides the env, so a revocation on the volume always wins", async () => {
   const { key, keyId, secret } = makeKey();
   process.env.MERRYMEN_PARTNER_KEYS = JSON.stringify([
@@ -151,4 +163,142 @@ test("parseKey splits only well-formed keys", () => {
   const { key, keyId, secret } = makeKey();
   assert.deepEqual(parseKey(` ${key} `), { keyId, secret });
   assert.equal(parseKey("mmp_UPPERCASEID_xxxxxxxxxxxxxxxx"), null);
+});
+
+test("verify names the key's owner and creation time, so a request can be metered to its wallet", async () => {
+  const { key, keyId, secret } = makeKey();
+  const owner = `0x${"Ab".repeat(20)}`;
+  await writeRecord({ keyId, name: "owned", owner, hash: hashSecret(SECRET, secret), scopes: ["read:agents"],
+    status: "active", created_at: "2026-10-01T12:00:00.000Z" });
+  const v = await createPartners({ secret: SECRET }).verify(key);
+  assert.equal(v.key.owner, owner.toLowerCase());
+  assert.equal(v.key.created_at, "2026-10-01T12:00:00.000Z");
+  // An operator key belongs to no wallet: null, which billing never meters.
+  const operator = await issue({ name: "operator" });
+  assert.equal((await createPartners({ secret: SECRET }).verify(operator.key)).key.owner, null);
+});
+
+test("a torn final line is cut before the next append, so a revocation after it is not lost", async () => {
+  const { key, keyId } = await issue({ name: "torn" });
+  const rec = (await loadRegistry()).get(keyId);
+  // A write that died part-way: the first half of a record and no newline.
+  await appendFile(FILE, '{"keyId":"half-writ');
+  await writeRecord({ ...rec, status: "revoked" });
+  const raw = await readFile(FILE, "utf8");
+  assert.ok(raw.endsWith("\n") && !raw.includes("half-writ"), "the fragment must be removed, not glued to");
+  const v = await createPartners({ secret: SECRET }).verify(key);
+  assert.equal(v.ok, false, "the revocation written after a torn line must take effect");
+  assert.equal(v.code, "key_revoked");
+});
+
+test("a registry line another process is still writing is never cut: writeRecord waits for its lock", async () => {
+  const { key, keyId } = await issue({ name: "locked" });
+  const rec = (await loadRegistry()).get(keyId);
+  const lock = `${FILE}.lock`;
+  await writeFile(lock, "", { flag: "wx" }); // partners-cli is mid-append
+  const other = makeKey();
+  const line = `${JSON.stringify({ keyId: other.keyId, name: "cli", hash: hashSecret(SECRET, other.secret), scopes: ["read:agents"], status: "active" })}\n`;
+  await appendFile(FILE, line.slice(0, 30));
+  const revoking = writeRecord({ ...rec, status: "revoked" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.ok((await readFile(FILE, "utf8")).endsWith(line.slice(0, 30)), "the CLI's line is not cut while it is written");
+  await appendFile(FILE, line.slice(30));
+  await rm(lock);
+  await revoking;
+  assert.equal((await createPartners({ secret: SECRET }).verify(other.key)).ok, true, "the CLI's key survived");
+  assert.equal((await createPartners({ secret: SECRET }).verify(key)).code, "key_revoked", "and the revocation landed after it");
+});
+
+test("repairTail keeps a file that ends cleanly, and empties one with no complete line", async () => {
+  const clean = path.join(dir, "clean.jsonl"), torn = path.join(dir, "torn.jsonl"), none = path.join(dir, "none.jsonl");
+  await writeFile(clean, '{"a":1}\n{"b":2}\n');
+  await writeFile(torn, '{"a":1}\n{"b":');
+  await writeFile(none, "x".repeat(70_000)); // longer than one read chunk, and no newline anywhere
+  assert.equal(await repairTail(clean), 0);
+  assert.equal(await readFile(clean, "utf8"), '{"a":1}\n{"b":2}\n');
+  assert.equal(await repairTail(torn), 5);
+  assert.equal(await readFile(torn, "utf8"), '{"a":1}\n');
+  assert.equal(await repairTail(none), 70_000);
+  assert.equal(await readFile(none, "utf8"), "");
+  assert.equal(await repairTail(path.join(dir, "missing.jsonl")), 0);
+});
+
+// Writers racing on one lock. Each test plays the OTHER writer inside a hook,
+// at the exact moment a race needs, so the interleaving is not left to chance.
+// None of this depends on inode numbers, which Linux reuses for the next file
+// created (an inode check passed on macOS and would not have on ext4).
+const lockOf = (file) => `${file}.lock`;
+const staleLock = async (file) => {
+  await writeFile(lockOf(file), "dead");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockOf(file), old, old);
+};
+const leftovers = async (prefix) => (await readdir(dir)).filter((n) => n.startsWith(prefix) && n !== prefix);
+
+test("a writer that judged a lock stale never deletes the successor that took it first", async () => {
+  const file = path.join(dir, "race-stale.jsonl");
+  await staleLock(file);
+  let ran = false;
+  await assert.rejects(withAppendLock(file, async () => { ran = true; }, { waitMs: 200, hooks: {
+    // Between this writer's look and its break, another writer breaks the stale
+    // lock itself and takes a fresh one.
+    staleSeen: async () => { await rm(lockOf(file)); await writeFile(lockOf(file), "successor"); },
+  } }), FileBusy);
+  assert.equal(ran, false, "it never ran alongside the successor");
+  assert.equal(await readFile(lockOf(file), "utf8"), "successor", "the successor's lock is intact");
+  assert.deepEqual(await leftovers("race-stale.jsonl.lock"), [], "no breaker file left behind");
+});
+
+test("a holder whose lock was broken while it stalled releases nothing but its own", async () => {
+  const file = path.join(dir, "race-release.jsonl");
+  await withAppendLock(file, async () => {}, { hooks: {
+    beforeRelease: async () => { await rm(lockOf(file)); await writeFile(lockOf(file), "successor"); },
+  } });
+  assert.equal(await readFile(lockOf(file), "utf8"), "successor", "the successor's lock survives the slow holder's release");
+});
+
+test("two writers breaking the same stale lock break it once and never run together", async () => {
+  const file = path.join(dir, "race-breakers.jsonl");
+  await staleLock(file);
+  let inside = 0, most = 0, ran = 0, letGo;
+  const paused = new Promise((r) => { letGo = r; });
+  const body = async () => { most = Math.max(most, ++inside); await new Promise((r) => setTimeout(r, 20)); inside--; ran++; };
+  // The first breaker stops inside its break; the second arrives meanwhile.
+  const first = withAppendLock(file, body, { hooks: { breaking: () => paused } });
+  await new Promise((r) => setTimeout(r, 30));
+  const second = withAppendLock(file, body, { waitMs: 2_000 });
+  await new Promise((r) => setTimeout(r, 60));
+  letGo();
+  await Promise.all([first, second]);
+  assert.equal(ran, 2); assert.equal(most, 1, "never two inside at once");
+  assert.deepEqual(await leftovers("race-breakers.jsonl"), []);
+});
+
+test("a live holder slower than the stale limit is never judged stale: its lock stays fresh", async () => {
+  const file = path.join(dir, "race-slow.jsonl");
+  let inside = 0, most = 0;
+  const body = (ms) => async () => { most = Math.max(most, ++inside); await new Promise((r) => setTimeout(r, ms)); inside--; };
+  const opts = { staleMs: 150, refreshMs: 40, waitMs: 3_000 };
+  const slow = withAppendLock(file, body(500), opts);
+  await new Promise((r) => setTimeout(r, 20));
+  await Promise.all([slow, withAppendLock(file, body(10), opts)]);
+  assert.equal(most, 1, "the waiter did not break a lock whose holder was alive");
+});
+
+test("a release that fails does not turn a write that landed into an error", async () => {
+  const file = path.join(dir, "race-release-error.jsonl");
+  const result = await withAppendLock(file, async () => "written", { hooks: {
+    beforeRelease: async () => { throw Object.assign(new Error("read-only file system"), { code: "EROFS" }); },
+  } });
+  assert.equal(result, "written");
+});
+
+test("a stale lock is still broken, and an ordinary append leaves no lock or breaker behind", async () => {
+  const file = path.join(dir, "race-plain.jsonl");
+  await staleLock(file);
+  let ran = 0;
+  await withAppendLock(file, async () => { ran++; });
+  await withAppendLock(file, async () => { ran++; });
+  assert.equal(ran, 2);
+  assert.deepEqual((await readdir(dir)).filter((n) => n.startsWith("race-plain.jsonl.lock")), []);
 });

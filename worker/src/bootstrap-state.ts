@@ -186,6 +186,8 @@ export type BootstrapAccounting =
       anchoredContributionsUsdg?: MicroUsdgString;
       /** How many flows this epoch are not evidenced. Zero is the only value that proves anything. */
       unanchoredFlowCount?: number;
+      /** Untouched epoch-one live book; explicit paper history stays separate. Permits receipts, never inference. */
+      initialCapitalEligible?: boolean;
       /**
        * Why an epoch-opening carry was NOT accepted as evidence, when one was
        * present and failed to reconcile against the prior epoch's closing mark.
@@ -305,6 +307,11 @@ function validAccounting(a: unknown): BootstrapAccounting | null {
   if (o.anchoredContributionsUsdg !== undefined && !isMicro(o.anchoredContributionsUsdg)) return null;
   if (o.unanchoredFlowCount !== undefined && !Number.isInteger(o.unanchoredFlowCount)) return null;
   if (o.carryNote !== undefined && typeof o.carryNote !== "string") return null;
+  if (o.initialCapitalEligible !== undefined && typeof o.initialCapitalEligible !== "boolean") return null;
+  if (o.initialCapitalEligible === true && (o.accountingEpoch !== 1 || BigInt(o.highWaterMarkUsdg) !== 0n
+    || o.highWaterWithdrawnUsdg !== "0" || BigInt(o.netContributionsUsdg) !== 0n
+    || o.anchoredContributionsUsdg !== "0" || o.unanchoredFlowCount !== 0
+    || (o.lastObservedCashUsdg !== "0" && o.lastObservedCashUsdg !== null))) return null;
 
   return {
     kind: "established",
@@ -317,6 +324,7 @@ function validAccounting(a: unknown): BootstrapAccounting | null {
       ? {}
       : { anchoredContributionsUsdg: o.anchoredContributionsUsdg as MicroUsdgString }),
     ...(o.unanchoredFlowCount === undefined ? {} : { unanchoredFlowCount: o.unanchoredFlowCount as number }),
+    ...(o.initialCapitalEligible === undefined ? {} : { initialCapitalEligible: o.initialCapitalEligible as boolean }),
     ...(o.carryNote === undefined ? {} : { carryNote: o.carryNote as string }),
     lastObservedCashUsdg: (o.lastObservedCashUsdg as MicroUsdgString | null) ?? null,
     accountingEpoch: o.accountingEpoch,

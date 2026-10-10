@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
+import { CASH } from "../../../packages/core/src/index";
 import { PROVENANCE_ROWS, costFromQuote, readDeskPositions, type BasisFill } from "./desk-positions";
 import { mineOf } from "../terminal/live";
 import { chatPositionsOf, positionsOf } from "../terminal/account";
@@ -93,6 +94,57 @@ async function ledger(withTrades = true) {
 }
 
 describe("the owner's positions, as /api/feed reads them", () => {
+  it("adds a saved display label without changing the ledger key, costs, floors or provenance", async () => {
+    const { raw, db } = await ledger();
+    const token = "0x7eebda046d451bc7a7d12491eff72a861aa8136e";
+    const symbol = "TA861AA8136E";
+    try {
+      raw.prepare("INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .run("0xA", symbol, token.toUpperCase(), "10", "1", 1.2, 0, "pool", 12, 100);
+      raw.prepare("INSERT INTO cost_basis VALUES (?,?,?,?,?,?)").run("0xA", "live", symbol, "10", "10000000", 100);
+      raw.prepare("INSERT INTO cost_basis VALUES (?,?,?,?,?,?)").run("0xA", "paper", symbol, "10", "99000000", 100);
+      raw.prepare("INSERT INTO position_floors VALUES (?,?,?,?,?,?,?)").run("0xA", "live", symbol, 800, "first", "protected", 100);
+      raw.prepare(`INSERT INTO trades (agent_id, kind, status, buy_token, sell_token, user_op_hash, fill_side, fill_qty_raw, basis_source, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run("0xA", "swap", "landed", token, CASH.USDG, "0xoriginal", "buy", "10", "quote", 100);
+      const before = (await readDeskPositions(db, "0xA", "live")).find(p => p.symbol === symbol)!;
+      assert.equal(before.display_symbol, null, "old fill schema still returns the holding");
+      raw.exec("ALTER TABLE trades ADD COLUMN fill_symbol TEXT");
+      raw.prepare("UPDATE trades SET fill_symbol = ? WHERE user_op_hash = ?").run("SWARM", "0xoriginal");
+      const saved = JSON.stringify(raw.prepare("SELECT * FROM positions ORDER BY symbol").all());
+      raw.exec("PRAGMA query_only = ON");
+      const after = (await readDeskPositions(db, "0xA", "live")).find(p => p.symbol === symbol)!;
+      assert.deepEqual(after, { ...before, display_symbol: "SWARM" });
+      assert.equal(after.symbol, symbol);
+      assert.equal(after.token, token);
+      assert.equal(after.cost_usdg, 10);
+      assert.equal(after.cost_from_quote, true);
+      assert.equal(after.stop_floor_bps, 800);
+      assert.equal(after.stop_floor_why, "protected");
+      const mine = mineOf({ agent: { name: "Captain", strategy: "trencher", slug: null }, positions: [after] }, [])!;
+      const [position] = positionsOf(mine as never);
+      assert.equal(position!.symbol, symbol, "display metadata never replaces the ledger key");
+      assert.equal(position!.token, token);
+      assert.equal(position!.displaySymbol, "SWARM");
+      assert.equal(position!.detail, "$12.00 · cost unconfirmed");
+      assert.equal(position!.pnl, null, "a nicer label never vouches for quote-booked cost");
+      assert.equal(mine.positions![0]!.costUsd, 10);
+      assert.equal(mine.positions![0]!.floorBps, 800);
+      assert.equal(JSON.stringify(raw.prepare("SELECT * FROM positions ORDER BY symbol").all()), saved);
+    } finally { raw.close(); }
+  });
+
+  it("still reads the legacy positions schema without address, cost or price-source columns", async () => {
+    const raw = new DatabaseSync(":memory:");
+    try {
+      raw.exec(`CREATE TABLE positions(agent_id TEXT, symbol TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, value_usdg REAL);
+        INSERT INTO positions VALUES ('0xA','NVDA','10','1',1.2,0,12);
+        PRAGMA query_only = ON;`);
+      assert.deepEqual(await readDeskPositions(wrapSqlite(raw), "0xA", "live"), [{
+        symbol: "NVDA", raw_balance: "10", ui_multiplier: "1", price_usd: 1.2, price_stale: 0, value_usdg: 12, price_source: "chainlink",
+      }]);
+    } finally { raw.close(); }
+  });
+
   it("say, per holding, whether a quote-booked fill may be in its cost", async () => {
     const { raw, db } = await ledger();
     try {
@@ -104,7 +156,8 @@ describe("the owner's positions, as /api/feed reads them", () => {
       assert.equal(by.get("REOPEN")!.cost_from_quote, false, "the quote-booked position closed before this one opened");
       assert.equal(by.get("NOBASIS")!.cost_usdg, null);
       assert.equal(by.get("NOBASIS")!.cost_from_quote, null, "no cost, nothing to vouch for");
-      assert.ok(!("token" in by.get("CASHCAT")!), "the address is read to replay the fills, not sent");
+      assert.equal(by.get("CASHCAT")!.token, null, "an incomplete fixture address is not a token identity");
+      assert.equal(by.get("CASHCAT")!.display_symbol, null, "missing fill metadata never invents a ticker");
     } finally {
       raw.close();
     }

@@ -18,7 +18,12 @@
  * owner's own research state, or who Merrymen watches, before anything is
  * spent; the renderer gives a group coin-level aggregates (no wallets,
  * addresses, links, cashtags or quoted third-party text, money in short
- * form) and scrubs the result. Traders a group hears named are Fomo's public
+ * form) and scrubs the result. A coin's theses asked for themselves ("list
+ * the last 10", "don't summarise"; Milla, 2026-10-09) are built for the
+ * owner's ask only and go to HER DM, never the room: up to ten of the newest,
+ * each cleaned, cut short, checked here and gated as a `quote` by the
+ * handler, dropped and never repaired (thesesQuotes). Anyone else's such ask
+ * gets the digest. Never a trader's own theses. Traders a group hears named are Fomo's public
  * ones: the leaderboard's handles and their P&L, and ONE NAMED TRADER'S
  * PUBLIC DATA, for anyone who asks, the owner included (who they are, what
  * they hold, what they traded, what they made or lost money on,
@@ -45,15 +50,39 @@ import { createHash } from "node:crypto";
 import type { FomoBroker } from "./fomo/contract";
 import { answerFomoQuestion, type AnswerFomoResult } from "./fomo/chat";
 import { contentFree } from "./fomo/digest";
-import { redactExecutables } from "./fomo/dossier";
+import { agoText, redactExecutables } from "./fomo/dossier";
 import { chainFromUserText, isRobinhoodToken } from "./fomo/identity";
 import { classifyFomoQuestion, type FomoQuestionPlan } from "./fomo/intent";
 import { deserialize, rememberedSubjects, serialize, type SubjectMemory } from "./fomo/subject-memory";
-import { FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
+import { chainLabel, FOMO_ATTRIBUTION, FOMO_GROUP_OFF, GROUP_DM_DEFLECTION, GROUP_FOMO_UNREACHED, GROUP_THESES_HEAD, GROUP_THESES_TAIL, groupRefusalLine, groupScrub, NOT_PERMISSION_LINE } from "./fomo/render";
+import { collapseOf, type CoinFacts, type CoinFactsReader, type FactsNetwork } from "./coin-facts-types";
 import type { OpportunitiesData, RankingsData, ResearchCoinData, ThesisView, TokenActivityData, TokenThesesData } from "./fomo/tools";
-import type { FomoEnvelope, TokenIdentity, TokenLabel } from "./fomo/types";
-import { admitTgLine, tgLineReadings } from "./telegram/tg-groups/gate";
-import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgThesesMaterial } from "./telegram/tg-groups/types";
+import type { FomoEnvelope, ResolvedSubject, TokenIdentity, TokenLabel } from "./fomo/types";
+import { admitTgLine, quoteNotEnglish, tgLineReadings, tgQuoteLeetReadings } from "./telegram/tg-groups/gate";
+import {
+  ABOUT_MERRYMEN,
+  AT_THE_READER,
+  CONTACT_LURE,
+  CTA_PLACEHOLDER,
+  INJECTION_SHAPED,
+  LURE,
+  NON_LATIN,
+  NOT_ENGLISH,
+  OUT_ACCUSE,
+  OUT_HANDOUT,
+  OUT_LURE,
+  PERSON_HARM,
+  POST_RUG_LURE,
+  PRIVATE_THIRD,
+  QUOTE_HARM,
+  QUOTE_TARGET,
+  RUG_CONTEXT_ACCUSE,
+  SECOND_PERSON,
+  SEND_FOR,
+  SPELLED_DOMAIN,
+  SPELLED_LINK,
+} from "./telegram/tg-groups/third-party";
+import type { TgFomoAnswer, TgFomoChain, TgFomoMoves, TgFomoPort, TgFomoRequest, TgThesesMaterial, TgThesesQuotes } from "./telegram/tg-groups/types";
 
 /** The most a group answer may run to, before the handler's own line gate. */
 export const TG_FOMO_MAX_CHARS = 600;
@@ -89,6 +118,12 @@ export interface TgFomoPortOptions {
    * live feed). False: the owner's moves offer no `/tail`. Absent: true.
    */
   tailsAvailable?: () => boolean;
+  /**
+   * A coin's measured market facts (desk/facts.ts, index.ts wires it with its
+   * per-chat and per-agent bounds). Absent: a facts request is not answered
+   * here (null), and the handler's line goes on as before.
+   */
+  facts?: CoinFactsReader;
 }
 
 // ─── A model's checked choice, as the planner's own question ───────────────
@@ -144,17 +179,24 @@ export function requestText(r: TgFomoRequest): string | null {
     case "coin": {
       const s = String(r.symbol ?? "").replace(/^\$+/, "").toUpperCase();
       if (!TICKER.test(s)) return null;
+      const on = onChain(r.chain);
       switch (r.aspect) {
-        case "theses":
-          return `what are the theses on $${s} on fomo?`;
+        case "theses": {
+          // The theses themselves, when the line asked for them (detect.ts thesesQuotesOf; never a model).
+          const n = quoteCount(r.quotes);
+          return n ? `quote the newest ${n} theses on $${s}${on} on fomo` : `what are the theses on $${s}${on} on fomo?`;
+        }
         case "buyers":
-          return `who's buying $${s} on fomo?`;
+          return `who's buying $${s}${on} on fomo?`;
         case "sellers":
-          return `who's selling $${s} on fomo?`;
+          return `who's selling $${s}${on} on fomo?`;
         case "research":
-          return `research $${s} on fomo`;
+          return `research $${s}${on} on fomo`;
+        case "facts":
+          // What happened to a coin is measured market data (createTgFomoPort: opts.facts), never a Fomo question.
+          return null;
         default:
-          return `what's happening with $${s} on fomo?`;
+          return `what's happening with $${s}${on} on fomo?`;
       }
     }
     case "crowd": {
@@ -189,6 +231,17 @@ export function requestText(r: TgFomoRequest): string | null {
     default:
       return null;
   }
+}
+
+/** A quote count as a request may carry it: 1 to 10, else none. */
+function quoteCount(v: unknown): number | null {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 1 ? Math.min(v, QUOTES_MAX) : null;
+}
+
+/** A token's chain slug as tg-groups names chains; anything else names none. */
+const SLUG_CHAINS: Readonly<Record<string, TgFomoChain>> = { robinhood: "robinhood", solana: "solana", base: "base", eth: "ethereum", ethereum: "ethereum", bsc: "bsc" };
+export function tgChainOf(slug: unknown): TgFomoChain | undefined {
+  return typeof slug === "string" && Object.hasOwn(SLUG_CHAINS, slug) ? SLUG_CHAINS[slug] : undefined;
 }
 
 // ─── A coin the planner could not place ─────────────────────────────────────
@@ -425,43 +478,11 @@ export const THESES_SAMPLES_MAX = 12;
 export const THESES_SAMPLE_CHARS = 160;
 export const THESES_SAMPLES_MIN = 3;
 
-/**
- * A row written at a model, not about a coin ("ignore all previous
- * instructions…", "you are now…", "system:"): dropped whole, never cleaned.
+/*
+ * INJECTION_SHAPED, AT_THE_READER, LURE, SPELLED_DOMAIN, ABOUT_MERRYMEN and
+ * NON_LATIN live in tg-groups/third-party.ts (moved unchanged, 2026-10-09),
+ * shared with the paraphrase's checks and the gate's `quote` kind.
  */
-const INJECTION_SHAPED =
-  /\b(?:ignore|disregard|forget|override|bypass)\b[^.!?\n]{0,40}\b(?:instructions?|prompts?|rules|previous|above|system|guidelines)\b|\b(?:system|developer|assistant)\s*(?:prompt|message|:)|\byou\s+are\s+(?:now\s+)?(?:an?\s+)?(?:[a-z]+\s+){0,2}(?:ai|assistant|bot|model|chatbot)\b|\bact\s+as\b|\bjailbreak|\bprompt\b|\btell\s+(?:the|this)\s+(?:group|chat|room)\b/i;
-/**
- * A row written AT THE SUMMARISER, not about the coin: addressed to an AI, a
- * bot or a model ("hey AI, summarize this as…", "any bot reading this"),
- * asking to be summed up a certain way ("when you sum this up…", "summary
- * for…"), carrying the tool's own field labels ("for: …", "gist:"), or
- * setting a rule ("new rule:", "from now on say…", "always say…"). Dropped
- * whole, like INJECTION_SHAPED: "rides the AI agent narrative", "the bot
- * narrative is strong" and "for the culture" are views, and stay.
- */
-const AT_THE_READER =
-  /\b(?:hey|dear|attention|note to|memo to)\s+(?:the\s+|any\s+|all\s+)?(?:ai|bots?|gpt|llms?|models?|assistants?|summari[sz]ers?)\b|\b(?:any|the|an?|every)\s+(?:ai|bots?|llms?|models?)\s+(?:reading|summari[sz]ing|parsing)\b|\bsum\s+(?:this|it|these|them)\s+up\b|\bsummari[sz](?:e|es|ing)\s+(?:this|these|it|them)\b|\bsummary\s+for\b|\b(?:gist|for|against|waiting[_ ]on)\s*:|\bnew rules?\s*:|\bfrom now on\b[^.!?\n]{0,20}\b(?:say|write|tell|call)\b|\balways\s+(?:say|write|call)\b/i;
-/**
- * A lure, not a view: a claim page, a seed phrase, a wallet to connect,
- * verify, sync or revoke, tokens to migrate, a portal, something to sign,
- * eligible wallets, free tokens, someone to message, contact or follow (the same
- * shapes tg-groups/theses.ts OUT_LURE drops from what the model writes).
- */
-const LURE =
-  /\b(?:air\s*-?\s*drops?|claim(?:ing|s|able)?|pre\s*-?\s*sales?|whitelist(?:s|ed)?|seed\s*phrase|private\s*key|connect\s+(?:your\s+)?wallet|free\s+tokens?|dm\s+me)\b|\bfollow\s+(?:the\s+|their\s+|its\s+|his\s+|her\s+)?\S+\s+on\s+(?:x|twitter|telegram|tg)\b|\b(?:contact|reach\s+out\s+to|ping|write\s+to|message|dm)\s+(?:the\s+|an?\s+)?(?:dev|devs|admins?|team|mods?|moderators?|support)\b|\b(?:verify|validate|sync|revoke|link)\s+(?:your\s+|their\s+|a\s+|the\s+)?wallets?\b|\bmigrate\s+(?:your\s+|their\s+|the\s+)?tokens?\b|\bmigration\s+(?:portal|site|page|link)\b|\bportal\b|\bsign\s+(?:the\s+|an?\s+)?(?:approval|transaction|message|permit)\b|\beligible\s+wallets?\b|\ballocations?\s+(?:for|to)\s+(?:eligible|holders|wallets)\b/i;
-/** A site's name spelled out ("ponsfi dot bet", "pons dot vip"): a link the model could rebuild, never a view. */
-const SPELLED_DOMAIN = /[\p{L}\p{N}_-]\s+dot\s+\p{L}{2,}(?![\p{L}\p{N}])/iu;
-/** A row about Merrymen itself ("the merrymen bot picked it") is about the agent, not the coin. */
-const ABOUT_MERRYMEN = /\bmerrym[ae]n\b/i;
-/**
- * A letter of another script than Latin (Chinese, Cyrillic, Greek, a
- * lookalike): every check here and in tg-groups/theses.ts is English, and a
- * sentence with no spaces never forms the five-word run the paraphrase may
- * not copy, so such a row never reaches the model (review r4). Accented Latin
- * ("café") and emoji stay.
- */
-const NON_LATIN = /(?=\p{L})\P{Script=Latin}/u;
 
 /**
  * One thesis as a sample the group model may read: their words with every
@@ -532,6 +553,282 @@ export function thesesMaterial(r: AnswerFomoResult, text: string): TgThesesMater
   const read = createHash("sha256").update(samples.join("\n")).digest("hex").slice(0, 16);
   return { key: `${d.token.key}@${Math.trunc(at)}#${read}`, coin, head: lines.slice(0, h + 1), tail: lines.slice(t), fallback: text, samples };
 }
+
+// ─── A coin's theses, quoted (Milla, 2026-10-09) ───────────────────────────
+
+/** The most theses one quote answer holds (said to the owner's DM), and how long each may run. */
+export const QUOTES_MAX = 10;
+export const QUOTE_CHARS = 160;
+const QUOTE_SENTENCES = 3;
+
+/**
+ * One thesis as a quote the owner's DM may get, or null: LEFT OUT, never
+ * repaired. Held to what a room may hear, so a DM she forwards carries no
+ * lure either.
+ * The coin's dev's own posts, a call to action beside a link taken out, any
+ * row a link or an address was taken out of, and anything the sample cleaner drops (links, addresses, handles and $tags out;
+ * injection shapes, rows at the reader, lures, Merrymen, spelled domains and
+ * other scripts dropped) never become one. What is left is cut (three
+ * sentences, QUOTE_CHARS: a length cut, judged as cut), checked against the
+ * third-party clauses, framed with a sayable handle or "a trader" and its age,
+ * and judged by the group gate as the `quote` kind, as the handler will.
+ */
+function quoteOf(v: ThesisView, coin: string, now: number): { who: string; age: string; text: string } | null {
+  if (!v || v.isDev === true || typeof v.excerpt !== "string") return null;
+  const raw = v.excerpt.normalize("NFKC");
+  if ([raw, ...tgLineReadings(raw)].some((t) => CTA_PLACEHOLDER.test(t))) return null;
+  // A link or an address taken out leaves a remnant that still points at it ("[link] is the new site").
+  if (/\[(?:link|address)\]/iu.test(raw)) return null;
+  let s = thesesSample(raw);
+  if (!s) return null;
+  // An @ the redactor left (glued to a word: "chat@autonholders", "cl@im",
+  // "@ name") is a handle or a disguised word: left out, never repaired, so
+  // the gate's handle clause is never blinded by an @ turned into a space.
+  if (/[@＠﹫]/u.test(s)) return null;
+  // PLAIN LETTERS ONLY (review r2), the paraphrase's plain-ASCII rule for
+  // quotes: with accents taken off, a letter outside a-z ("honeypøt", "scɑm",
+  // "kiłł", "ɡrifter") or a digit written for a letter inside a word
+  // ("d1ck", "p0rn", "cla1m", "appr0ve"; never "a16z", "web3", "24h" or the
+  // coin's own symbol) leaves the quote out, never repaired: no clause has
+  // to know every word such a spelling hides.
+  const plain = s.normalize("NFKD").replace(/\p{M}/gu, "");
+  if (/(?=\p{L})[^a-zA-Z]/u.test(plain)) return null;
+  const own = coin.toLowerCase();
+  if (plain.split(/[^\p{L}\p{N}]+/u).some((w) => w.toLowerCase() !== own && /(?<=\p{L})[013457](?=\p{L})/u.test(w))) return null;
+  s = s
+    // The signs that are markup, never words: a hashtag's #, bold and strike marks.
+    .replace(/[#＃]+/gu, " ")
+    .replace(/\*+|_{2,}|~{2,}/gu, " ")
+    .replace(/["“”«»„]/gu, "'")
+    .replace(/\s+/gu, " ")
+    .replace(/\s+([,.;:!?…])/gu, "$1")
+    .trim();
+  // Three sentences at most, then QUOTE_CHARS at a word boundary.
+  const sentences = s.split(/(?<=[.!?…])\s+/u);
+  if (sentences.length > QUOTE_SENTENCES) s = sentences.slice(0, QUOTE_SENTENCES).join(" ");
+  if (Array.from(s).length > QUOTE_CHARS) {
+    const cut = Array.from(s).slice(0, QUOTE_CHARS - 1).join("");
+    s = `${cut.replace(/\s+\S*$/u, "").replace(/[\s,;:.…-]+$/u, "")}…`;
+  }
+  if (!/[\p{L}\p{N}]/u.test(s) || contentFree(s)) return null;
+  // A quote dressed as the room answer's own frame ("From a copy fetched just now.", "their words, not facts").
+  if (QUOTE_FRAME.test(s)) return null;
+  // Digits read as letters too ("cla1m", "appr0ve"): the gate's quote kind reads the same.
+  const reads = [s, ...tgLineReadings(s), ...tgQuoteLeetReadings(s)];
+  if ([OUT_HANDOUT, OUT_LURE, POST_RUG_LURE, CONTACT_LURE, SPELLED_LINK, PRIVATE_THIRD, OUT_ACCUSE, RUG_CONTEXT_ACCUSE, PERSON_HARM, SEND_FOR, QUOTE_TARGET, SECOND_PERSON, NOT_ENGLISH, ...QUOTE_HARM].some((re) => reads.some((t) => re.test(t)))) return null;
+  // Quotes are English, as the paraphrase is: every clause reads English (review r2).
+  if (quoteNotEnglish(s)) return null;
+  const handle = typeof v.author?.handle === "string" ? v.author.handle.replace(/^@+/, "").trim() : "";
+  const who = quoteHandleOk(handle) ? handle : "a trader";
+  const posted = typeof v.postedAt === "number" && Number.isFinite(v.postedAt) ? v.postedAt : null;
+  // "12m ago" reads as twelve million to the money clause elsewhere: minutes in words.
+  const age = posted === null ? "" : agoText(Math.max(0, now - posted)).replace(/^(\d+)m ago$/u, "$1 min ago");
+  const line = quoteLine({ who, age, text: s });
+  const v2 = admitTgLine(line, { agentName: "", kind: "quote", recentOwn: [], rug: { coins: coin ? [coin] : [], brag: false } });
+  return v2.ok ? { who, age, text: s } : null;
+}
+
+/**
+ * Words a quote's author handle may never wear, read with its joins spaced
+ * out ("fomo_support", "MerrymenOfficial", "refund_bot"): support, a help
+ * desk, an admin or mod, "official", a team, a dev, a bot, a refund or
+ * recovery, Merrymen, Fomo, Telegram; or a helper's word fused to a name
+ * ("autonrecovery", "dm_autonhelp"). Such an author is "a trader".
+ */
+const IMPERSONATES = /\b(?:support|help\s*desk|admins?|mods?|moderators?|official|team|devs?|bot|refunds?|recovery|merrym[ae]n|fomo|telegram)\b|(?<=[\p{L}\p{N}])(?:recovery|support|help(?:desk)?|rescue)\b/iu;
+/** A handle read as one lowercase word, digits as the letters they stand for ("F0m0_Admin" is "fomoadmin"). */
+const HANDLE_LEET: Readonly<Record<string, string>> = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t" };
+const foldedHandle = (handle: string): string =>
+  handle.normalize("NFKC").toLowerCase().replace(/[013457]/g, (d) => HANDLE_LEET[d] ?? d).replace(/[^\p{L}]+/gu, "");
+/** What a handle read as one word may never hold anywhere in it: staff, Merrymen, Fomo, a lure, a crime, harm. */
+const IMPERSONATES_FOLDED =
+  /fomo|merrym[ae]n|telegram|support|admin|official|staff|helpdesk|customer(?:care|service)|refund|recover|verified|moderator|airdrop|giveaway|kill(?:your|ur|the|them|him|her)|kys|hangthe|rapist|scam|^buy|^sell|sendsol|sendeth|doubleyour/u;
+/** The lines code says around the quotes, or the agent of the room cited ("the agent in this group said…"; review r2): a thesis that echoes one is dressing as the answer itself. */
+const QUOTE_FRAME = /\bfrom a copy fetched\b|\btheir words,? not facts\b|\bthe newest \d+ theses\b|\b\d+ of these \d+ left out\b|\bthe\s+(?:agent|bot|ai)\s+(?:in|of)\s+(?:this|the)\s+(?:group|chat|room)\b/i;
+
+/**
+ * WHETHER A QUOTE'S AUTHOR MAY BE NAMED: a handle the room may hear
+ * (sayableTraderHandle) that, with its underscores, dots, dashes, case and
+ * digit joins spaced out ("airdrop_bot" is "airdrop bot", "AirdropBot" is
+ * "Airdrop Bot", "send_1_sol" is "send 1 sol"), impersonates no one and
+ * passes the gate as a quote's author: never a lure, a slur or a threat
+ * wearing a handle (review, 2026-10-09).
+ */
+function quoteHandleOk(handle: string): boolean {
+  if (!handle || !sayableTraderHandle(handle)) return false;
+  const spaced = handle
+    .replace(/[_.\-]+/gu, " ")
+    .replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2")
+    .replace(/(\p{L})(\p{N})|(\p{N})(\p{L})/gu, "$1$3 $2$4")
+    .trim();
+  if (IMPERSONATES.test(spaced)) return false;
+  // Read as one word too, digits as letters (review r2): "fomoadmin",
+  // "merrymenofficial", "telegramsupport", "f0m0admin", "killyourself" never
+  // split at a case or an underscore. Short words (dev, bot, mod, team) stay
+  // with the word-edged test above: as substrings they hide in real names.
+  if (IMPERSONATES_FOLDED.test(foldedHandle(handle))) return false;
+  return admitTgLine(quoteLine({ who: spaced, age: "", text: "x" }), { agentName: "", kind: "quote", recentOwn: [] }).ok;
+}
+
+/** "• kaleo, 2h ago: “…”": how one quote is said (tg-groups/quotes.ts says the same). */
+export function quoteLine(q: { who: string; age: string; text: string }): string {
+  return `• ${q.who}${q.age ? `, ${q.age}` : ""}: “${q.text}”`;
+}
+
+/**
+ * A COIN'S THESES, QUOTED, for the owner's ask in a group (FomoQuestionPlan
+ * .quotes; said to her DM, never the room): the newest up to ten of one coin's theses read, newest first,
+ * each through quoteOf, with how many were left out. Null unless the answer
+ * is exactly one coin's theses read (never a trader's, never a compound
+ * answer) with rows in it: an empty read keeps its own honest line. The
+ * dropped rows are counted, never replaced by older ones.
+ */
+export function thesesQuotes(r: AnswerFomoResult, now: number): TgThesesQuotes | null {
+  if (!r.handled || r.envelopes.length !== 1) return null;
+  const want = quoteCount(r.plan.quotes);
+  if (!want) return null;
+  const env = r.envelopes[0]!;
+  if (env.tool !== "fomo_get_token_theses" || !["ok", "partial", "capped", "stale"].includes(env.status)) return null;
+  const d = env.data as TokenThesesData | null;
+  if (!d || !d.token || d.trader || !Array.isArray(d.theses) || d.theses.length === 0) return null;
+  const coin = String(d.label?.symbol ?? "").replace(/^\$+/, "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 20);
+  const rows = d.theses.filter((v): v is ThesisView => !!v && typeof v === "object").sort((a, b) => postedOf(b) - postedOf(a));
+  const n = Math.min(want, rows.length);
+  const quotes: TgThesesQuotes["quotes"] = [];
+  const seen = new Set<string>();
+  for (const v of rows.slice(0, n)) {
+    const q = quoteOf(v, coin, now);
+    if (!q) continue;
+    const key = q.text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    quotes.push(q);
+  }
+  const total = typeof env.coverage.providerTotal === "number" && Number.isFinite(env.coverage.providerTotal) ? env.coverage.providerTotal : null;
+  const asked = typeof r.plan.quotesAsked === "number" && r.plan.quotesAsked > want ? r.plan.quotesAsked : want;
+  return { coin: coin || "this coin", where: chainLabel(d.token.chain.slug), asked, n, quotes, leftOut: n - quotes.length, total: total !== null && total > n ? total : null };
+}
+
+/** The one coin a single-coin answer is about (TgFomoAnswer.coin): a plain symbol and its chain, never an address. */
+export function answerCoin(r: AnswerFomoResult, thesesAsked = false): TgFomoAnswer["coin"] | null {
+  if (!r.handled) return null;
+  const env = firstAnswered(r);
+  if (!env) return null;
+  let token: TokenIdentity | null = null;
+  let label: TokenLabel | null = null;
+  if (env.tool === "fomo_get_token_theses") {
+    const d = env.data as TokenThesesData;
+    if (d.trader) return null;
+    token = d.token;
+    label = d.label;
+  } else if (env.tool === "fomo_get_token_activity") {
+    const d = env.data as TokenActivityData;
+    token = d.token;
+    label = d.label;
+  } else if (env.tool === "fomo_research_coin") {
+    const d = env.data as ResearchCoinData;
+    token = d.token;
+    label = d.label;
+  }
+  const c = token ? coinOf(token, label) : null;
+  if (!c) return null;
+  const chain = tgChainOf(token?.chain.slug);
+  const aspect = env.tool === "fomo_get_token_theses" ? (thesesAsked ? "quotes" : "theses") : env.tool === "fomo_get_token_activity" ? "activity" : "research";
+  return { symbol: c.symbol, ...(chain ? { chain } : {}), aspect };
+}
+
+// ─── A coin's facts, measured (Milla, 2026-10-09) ───────────────────────────
+
+/** What a facts question asked: what happened, why it fell, the data, the dev. */
+export type FactsAsk = "what" | "why" | "data" | "dev";
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const two = (n: number): string => String(n).padStart(2, "0");
+const hhmm = (ms: number): string => { const d = new Date(ms); return `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`; };
+const dayOf = (ms: number): string => { const d = new Date(ms); return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`; };
+const HOUR_WORDS = ["", "one hour", "two hours", "three hours"];
+const trimZeros = (s: string): string => (s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s);
+/** Money in short form, as a room hears published figures: "$36k", "$5.75M". */
+function usdShort(n: number): string {
+  if (n >= 1e9) return `$${trimZeros((n / 1e9).toFixed(n < 1e10 ? 2 : 1))}B`;
+  if (n >= 1e6) return `$${trimZeros((n / 1e6).toFixed(n < 1e7 ? 2 : 1))}M`;
+  if (n >= 1e3) return `$${trimZeros((n / 1e3).toFixed(n < 1e4 ? 1 : 0))}k`;
+  return `$${Math.round(n)}`;
+}
+/** A coin's price, three significant digits. */
+function priceShort(n: number): string {
+  return `$${n >= 1 ? trimZeros(n.toFixed(2)) : Number(n.toPrecision(3)).toString()}`;
+}
+const pct1 = (n: number): string => `${trimZeros(n.toFixed(1))}%`;
+const FACTS_CHAINS: Readonly<Record<FactsNetwork, string>> = { robinhood: "Robinhood Chain", solana: "Solana", base: "Base", ethereum: "Ethereum", bsc: "BSC" };
+
+/**
+ * A COIN'S FACTS AS A ROOM HEARS THEM, written by code from what was measured
+ * (desk/facts.ts): the source and the time first, then only figures that were
+ * read, each a short published figure (the gate's research kind), and what
+ * could not be read. Never a reason, a person, an address or the word "rug";
+ * "fell" and "drop", never "crashed"; "buyers and sellers", never
+ * "transactions". At most five lines.
+ */
+export function coinFactsLines(f: CoinFacts, sym: string, ask: FactsAsk, now: number): string[] {
+  // The header carries the source and the time, so it must always be sayable: a coin whose ticker the
+  // gate refuses (RUG, SCAM, HONEYPOT) is named "This coin" rather than lose its source and time (review r2).
+  const head = (name: string): string => `${name} on ${FACTS_CHAINS[f.network] ?? "its chain"}, from GeckoTerminal at ${hhmm(f.observedAt)} UTC:`;
+  const out = [admitTgLine(head(sym), { agentName: "", kind: "research", recentOwn: [] }).ok ? head(sym) : head("This coin")];
+  // How far back the closes reach: the pool's whole life, or the last N days.
+  const whole = f.barsFromMs !== null && f.poolCreatedAtMs !== null && f.barsFromMs <= f.poolCreatedAtMs + 3_600_000;
+  const days = f.barsFromMs !== null ? Math.max(1, Math.round((now - f.barsFromMs) / 86_400_000)) : null;
+  const closeWhere = whole || days === null ? "its highest hourly close on its main pool" : `its highest hourly close on its main pool in the last ${days} days`;
+  const below = f.drawdownPct !== null ? (f.drawdownPct < 0.05 ? "it is at that high now" : `it is ${pct1(f.drawdownPct)} below that`) : null;
+  if (f.high && f.fdvNowUsd !== null && f.high.fdvUsd !== null) {
+    out.push(`About ${usdShort(f.fdvNowUsd)} now (fully diluted); ${closeWhere} was about ${usdShort(f.high.fdvUsd)}, ${dayOf(f.high.atMs)} at ${hhmm(f.high.atMs)} UTC${below ? `, so ${below}` : ""}.`);
+  } else if (f.high) {
+    out.push(`About ${priceShort(f.priceUsd)} a coin now; ${closeWhere} was about ${priceShort(f.high.closeUsd)}, ${dayOf(f.high.atMs)} at ${hhmm(f.high.atMs)} UTC${below ? `, so ${below}` : ""}.`);
+  } else {
+    const change = f.change24hPct !== null ? `; ${f.change24hPct < 0 ? `down ${pct1(-f.change24hPct)}` : `up ${pct1(f.change24hPct)}`} in the last 24h on its main pool` : "";
+    out.push(`About ${f.fdvNowUsd !== null ? `${usdShort(f.fdvNowUsd)} now (fully diluted)` : `${priceShort(f.priceUsd)} a coin now`}${change}; its hourly closes could not be read.`);
+  }
+  if (ask === "dev") {
+    // A holding not read is said as not read, never as none (that would read as "the dev sold it all").
+    out.push(f.creatorHoldingPct !== null
+      ? `GeckoTerminal lists its creator as holding about ${pct1(f.creatorHoldingPct)} of supply now (it doesn't say when that was last updated).`
+      : f.info === "read"
+        ? "GeckoTerminal doesn't list a holding share for its creator."
+        : "Couldn't read the creator's holding from GeckoTerminal just now.");
+  }
+  if (f.steepest && ask !== "dev") {
+    out.push(`The biggest drop: about ${Math.round(f.steepest.pct)}% in ${HOUR_WORDS[f.steepest.hours] ?? `${f.steepest.hours} hours`} from ${hhmm(f.steepest.fromMs)} UTC on ${dayOf(f.steepest.fromMs)}.`);
+  }
+  const flow = f.sellers24h !== null && f.buyers24h !== null ? `in the last 24h, ${f.sellers24h.toLocaleString("en-US")} sellers and ${f.buyers24h.toLocaleString("en-US")} buyers` : null;
+  if (f.liquidityUsd !== null || flow) {
+    out.push(`${f.liquidityUsd !== null ? `Main pool liquidity about ${usdShort(f.liquidityUsd)}` : "On its main pool"}${flow ? `; ${flow}` : ""}.`);
+  }
+  if (ask === "data" && f.holders) {
+    const top = f.holders.top10Pct !== null ? `; the top 10 hold ${pct1(f.holders.top10Pct)}` : "";
+    const at = f.holders.updatedAtMs !== null ? ` (GeckoTerminal's count from ${dayOf(f.holders.updatedAtMs)}, ${hhmm(f.holders.updatedAtMs)} UTC)` : " (GeckoTerminal's count)";
+    out.push(`Holders ${f.holders.count.toLocaleString("en-US")}${top}${at}.`);
+  } else if (ask === "data" && f.info !== "read") {
+    out.push("Couldn't read the holders from GeckoTerminal just now.");
+  }
+  out.push(
+    ask === "why"
+      ? "The data shows when and how far it fell, not why; I can't see who sold or whether liquidity was pulled."
+      : ask === "dev"
+        ? "I can't see the creator's past sales, only what GeckoTerminal lists now."
+        : "I can't see who sold, why it fell, or whether liquidity was pulled.",
+  );
+  return out;
+}
+
+/** The lines a facts read that could not answer says: plainly, never a guess. */
+export const FACTS_BUSY = "I've looked up enough market data in here for now; ask again in a few minutes.";
+export const factsUnreadLine = (sym: string): string => `Couldn't read the market data for ${sym} just now, try again in a bit.`;
+export const factsNotFoundLine = (sym: string, where: string): string => `I couldn't find a market for ${sym}${where ? ` on ${where}` : ""} to measure.`;
+export const factsWhichLine = (sym: string): string => `Which ${sym} do you mean? Fomo lists it on more than one chain; say the chain.`;
+/** Two coins of one ticker on the one chain: never "say the chain" again. */
+export const factsSameChainLine = (sym: string, where: string): string => `Fomo lists more than one ${sym} on ${where}, so I can't tell which one you mean.`;
+export const factsUnknownLine = (sym: string): string => `I couldn't find ${sym} on Fomo.`;
+export const factsUnsupportedLine = (sym: string): string => `I can't measure ${sym} on that chain.`;
 
 /** "tg-group:<chatId>:<threadId|0>": per room and forum topic, from the trusted update. */
 export function tgGroupConversationKey(chatId: number, threadId?: number): string {
@@ -623,6 +920,27 @@ function boundedBroker(b: FomoBroker, ms: number): { broker: FomoBroker; done: (
 }
 
 /**
+ * The fixed question for a routed theses request asked about the coin this
+ * room's memory holds, or null: exactly one remembered token, with the same
+ * symbol, and the same chain when the request names one.
+ */
+async function rememberedThesesText(b: FomoBroker, key: string, req: Extract<TgFomoRequest, { kind: "coin" }>, now: number): Promise<string | null> {
+  try {
+    const m = deserialize(await b.memory.get(key));
+    const toks = rememberedSubjects(m, "token", now).filter((s): s is Extract<typeof s, { kind: "token" }> => s.kind === "token");
+    if (toks.length !== 1) return null;
+    const tok = toks[0]!;
+    const sym = String(req.symbol ?? "").replace(/^\$+/, "").toUpperCase();
+    if (!tok.symbol || tok.symbol.replace(/^\$+/, "").toUpperCase() !== sym) return null;
+    if (req.chain && tgChainOf(tok.chain) !== req.chain) return null;
+    const n = quoteCount(req.quotes);
+    return n ? `quote the newest ${n} theses on it` : "what are the theses on it?";
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The group port over a broker getter (index.ts passes the child's broker).
  * Every method resolves; nothing throws into the group handler.
  */
@@ -664,12 +982,102 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
     }
   };
 
+  /**
+   * A COIN'S FACTS (Milla, 2026-10-09: "when asked for actual facts she should
+   * be able to look"). The coin is resolved from this room's memory first (no
+   * credit), else once through Fomo's own resolver (one charge to the room's
+   * cap, like any lookup); several chains ask which, none says so. Then the
+   * public index is read (opts.facts: GeckoTerminal, bounded per chat and per
+   * agent) and said as measured lines, with whether it collapsed for the
+   * handler's collapse permit. Null when no reader is wired.
+   */
+  const factsAnswer = async (q: Parameters<TgFomoPort["ask"]>[0], req: Extract<TgFomoRequest, { kind: "coin" }>): Promise<TgFomoAnswer | null> => {
+    const reader = opts.facts;
+    if (!reader) return null;
+    const sym = String(req.symbol ?? "").replace(/^\$+/, "").toUpperCase();
+    if (!TICKER.test(sym)) return null;
+    const ask: FactsAsk = req.ask === "why" || req.ask === "data" || req.ask === "dev" ? req.ask : "what";
+    const t = now();
+    const timeoutMs = typeof q.timeoutMs === "number" && Number.isFinite(q.timeoutMs) ? Math.max(1, Math.min(q.timeoutMs, 30_000)) : 25_000;
+    const until = t + timeoutMs;
+    const say = (text: string, extra: Partial<TgFomoAnswer> = {}): TgFomoAnswer => ({ text, deflect: false, status: "ok", ...extra });
+    const key = tgGroupConversationKey(q.chatId, q.threadId);
+    const b = brokerNow();
+    // 1. The room's remembered coin: same symbol (and chain when one was named), with its address.
+    let token: TokenIdentity | null = null;
+    let charged = false;
+    if (b) {
+      const bounded = boundedBroker(b, Math.min(2_000, timeoutMs));
+      try {
+        const m = deserialize(await bounded.broker.memory.get(key));
+        const toks = rememberedSubjects(m, "token", t).filter((x): x is Extract<typeof x, { kind: "token" }> =>
+          x.kind === "token" && typeof x.address === "string" && typeof x.chain === "string" && (x.symbol ?? "").replace(/^\$+/, "").toUpperCase() === sym && (!req.chain || tgChainOf(x.chain) === req.chain));
+        if (toks.length === 1) {
+          const remembered = chainFromUserText(toks[0]!.chain!);
+          if (remembered) token = { chain: remembered, address: toks[0]!.address!, key: "" };
+        }
+      } finally {
+        bounded.done();
+      }
+    }
+    // 2. Else Fomo's resolver, once.
+    if (!token) {
+      if (!b) return say(TG_FOMO_UNAVAILABLE, { status: "unavailable", free: true });
+      const bounded = boundedBroker(b, Math.max(1, Math.min(8_000, until - now())));
+      let env: FomoEnvelope | null = null;
+      try {
+        env = await bounded.broker.call("fomo_resolve_subject", { query: `$${sym}`, kind: "token", ...(req.chain ? { chain: CHAIN_WORDS[req.chain] } : {}) }, {
+          surface: "telegram-group",
+          audience: "group",
+          conversationKey: key,
+          priority: "interactive",
+          groupId: String(q.chatId),
+        });
+      } catch {
+        env = null;
+      } finally {
+        bounded.done();
+      }
+      charged = !!env && !(env.usage?.providerCalls === 0);
+      if (!env || env.status === "failed" || env.status === "unavailable" || env.status === "not-authorized") return say(GROUP_FOMO_UNREACHED, { status: env?.status === "unavailable" ? "unavailable" : "failed" });
+      if (env.status === "budget-limited") return say(groupRefusalLine(env.reason, now(), env.retryAt ?? null), { status: "budget-limited" });
+      if (env.status === "needs-clarification") {
+        // Two coins of that ticker on the one chain asked (or the only chain they are on): asking for the chain
+        // again would loop, and the facts path takes no address, so say plainly it cannot tell (review r2).
+        const chains = new Set((env.candidates ?? []).flatMap((c) => (c?.subject?.kind === "token" ? [String(c.subject.token.chain.slug)] : [])));
+        const one = req.chain ? CHAIN_WORDS[req.chain] : chains.size === 1 ? [...chains][0]! : null;
+        return say(one ? factsSameChainLine(sym, chainLabel(one)) : factsWhichLine(sym), charged ? {} : { free: true });
+      }
+      const subj = env.subject as ResolvedSubject | null;
+      if (env.status === "not-found" || !subj || subj.kind !== "token") return say(factsUnknownLine(sym), charged ? {} : { free: true });
+      token = subj.token;
+    }
+    // 3. The public index.
+    const network = tgChainOf(token.chain.slug);
+    const where = chainLabel(token.chain.slug);
+    const coin = { symbol: sym, ...(network ? { chain: network } : {}), aspect: "facts" as const };
+    const free = charged ? {} : { free: true };
+    if (!network) return say(factsUnsupportedLine(sym), { ...free, coin });
+    const read = await reader({ network, address: token.address, chatId: q.chatId, timeoutMs: Math.max(1, Math.min(10_000, until - now() - 500)), withInfo: ask === "dev" || ask === "data" });
+    log(`[tg-fomo] coin facts ${read.ok ? "read" : read.why}${charged ? " (resolved by Fomo)" : ""}`);
+    if (!read.ok) {
+      const line = read.why === "busy" ? FACTS_BUSY : read.why === "not-found" ? factsNotFoundLine(sym, where) : read.why === "unsupported" ? factsUnsupportedLine(sym) : factsUnreadLine(sym);
+      return say(line, { ...free, coin });
+    }
+    const lines = coinFactsLines(read.facts, sym, ask, now());
+    return say(lines.join("\n"), { ...free, coin, collapse: { coin: sym, ...(network ? { chain: network } : {}), collapsed: collapseOf(read.facts), atMs: read.facts.observedAt } });
+  };
+
   return {
     async ask(q): Promise<TgFomoAnswer | null> {
       try {
         if (!q || !isUsableChatId(q.chatId)) return null;
-        const text = q.request ? requestText(q.request) : typeof q.text === "string" ? q.text : null;
+        // WHAT HAPPENED TO A COIN, as measured market facts: never the Fomo planner.
+        if (q.request?.kind === "coin" && q.request.aspect === "facts") return await factsAnswer(q, q.request);
+        let text = q.request ? requestText(q.request) : typeof q.text === "string" ? q.text : null;
         if (!text || !text.trim()) return null;
+        /** The words as asked (a line, or the request's fixed question): what looseCoin and looseTrader read. */
+        const asked: string = text;
         const b = brokerNow();
         const t = now();
         // The bot's own @username and names (trusted: from getMe and the
@@ -683,15 +1091,23 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         let loose = false;
         const wanted = q.request
           ? undefined
-          : (plan: FomoQuestionPlan, memory?: SubjectMemory | null): boolean => !(loose = looseCoin(text, plan) || looseTrader(text, plan, memory ?? null, selfNames, t));
+          : (plan: FomoQuestionPlan, memory?: SubjectMemory | null): boolean => !(loose = looseCoin(asked, plan) || looseTrader(asked, plan, memory ?? null, selfNames, t));
         if (!b) {
           // Honest about it, but only for a question the research would have taken.
-          const plan = classifyFomoQuestion(text, { memory: null, now: t, selfNames });
+          const plan = classifyFomoQuestion(asked, { memory: null, now: t, selfNames });
           return plan && (!wanted || wanted(plan)) ? { text: TG_FOMO_UNAVAILABLE, deflect: false, status: "unavailable" } : null;
         }
         const conversationKey = tgGroupConversationKey(q.chatId, q.threadId);
         const timeoutMs = typeof q.timeoutMs === "number" && Number.isFinite(q.timeoutMs) ? Math.max(1, Math.min(q.timeoutMs, 30_000)) : 25_000;
         const bounded = boundedBroker(b, timeoutMs);
+        // A ROUTED COIN'S THESES, MEMORY FIRST: the coin this room's memory
+        // holds, when it is the one asked about (same symbol, and chain when one
+        // was named), is asked about as "it", so the read is that token's own
+        // kept copy and never a search by symbol across every chain.
+        if (q.request?.kind === "coin" && q.request.aspect === "theses") {
+          const said = await rememberedThesesText(bounded.broker, conversationKey, q.request, t);
+          if (said) text = said;
+        }
         const r = await answerFomoQuestion({
           text,
           broker: bounded.broker,
@@ -705,6 +1121,7 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
           maxChars,
           selfNames,
           ...(wanted ? { wanted } : {}),
+          ...(q.fresh === true ? { retryEmpty: true } : {}),
           sayableHandle: sayableTraderHandle,
         }).finally(() => bounded.done());
         if (!r.handled) {
@@ -721,9 +1138,23 @@ export function createTgFomoPort(broker: () => FomoBroker | null, opts: TgFomoPo
         const said: TgFomoAnswer = { text: groupScrub(groupWords(groupScrub(r.text))), deflect: false, status: answerStatus(r.envelopes) };
         // A remembered trader board: the rows the text shows, so the handler can say which the room heard (heard()).
         if (r.board) said.board = { at: r.board.at, ranks: boardRanksIn(said.text) };
-        // A coin's theses: material for the group model to say in its own words (tg-groups/theses.ts).
-        const theses = thesesMaterial(r, said.text);
-        if (theses) said.theses = theses;
+        // A COIN'S THESES QUOTED, on the OWNER'S explicit ask only (Milla,
+        // 2026-10-09: "Owner's DM"): her DM gets the quotes (tg-groups/quotes.ts),
+        // the digest stays the fallback, and no paraphrase is asked for (no
+        // model call at all). Anyone else's ask is the digest: a stranger's
+        // words never reach the group, so they are never built for it.
+        const quotes = q.owner === true ? thesesQuotes(r, t) : null;
+        if (quotes) {
+          said.quotes = quotes;
+          log(`[tg-fomo] theses quoted (${quotes.quotes.length} kept, ${quotes.leftOut} left out)`);
+        } else {
+          // A coin's theses: material for the group model to say in its own words (tg-groups/theses.ts).
+          const theses = thesesMaterial(r, said.text);
+          if (theses) said.theses = theses;
+        }
+        // The one coin a single-coin answer is about, by its plain name (never an address).
+        const coin = answerCoin(r, quotes !== null);
+        if (coin) said.coin = coin;
         // NOTHING BOUGHT FROM THE PROVIDER: nothing looked up at all (a
         // clarification, the capabilities line, "is fomo working?"), or every
         // read a kept copy (or refused before any call), so the room's

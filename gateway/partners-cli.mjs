@@ -1,21 +1,32 @@
 #!/usr/bin/env node
 /**
  * Operator CLI to issue, revoke and list partner keys.
- * The separate developer portal supports wallet-authenticated self-service keys.
  *
- * There is no key-minting endpoint and there should never be one. A route that
- * mints credentials is the single most valuable thing on this host to
- * compromise, and there are going to be fewer than ten partners. A CLI that an
- * operator runs deliberately is the right amount of friction for something that
- * happens roughly never.
+ * Most keys no longer come from here. Developers mint their own at
+ * merrymen.dev/api, through this gateway's /developer/v1 routes
+ * (lib/developer-api.mjs): only the site, holding MERRYMEN_DEVELOPER_PORTAL_SECRET,
+ * may call them, and only for a wallet that has just signed in. Those keys are
+ * fixed: read:agents, write:agents and chat:agents at 30 requests a minute, at
+ * most five active per wallet.
+ *
+ * This CLI is for what the portal deliberately cannot do: other scopes, a custom
+ * quota (--rpm), or a key that belongs to no developer wallet. Such a key does
+ * not show in the portal, which cannot rotate or revoke it; do that here. Both
+ * kinds share one registry, $MERRYMEN_DATA_DIR/partners.jsonl.
  *
  *   MERRYMEN_GATEWAY_SECRET=… MERRYMEN_DATA_DIR=/data \
- *     node partners-cli.mjs issue --name prism --scopes read:agents,read:market
+ *     node partners-cli.mjs issue --name prism --app-id prism-production \
+ *       --scopes read:agents,write:agents,chat:agents
  *   node partners-cli.mjs revoke <keyId>
  *   node partners-cli.mjs list
  *
+ * Pass --scopes: the default (read:agents, read:theses, read:market) cannot
+ * create agents or chat. Reuse --app-id when rotating, or the new key is a
+ * different application that cannot reach the old one's connections.
+ *
  * The full key is printed ONCE, on issue. Only its HMAC is written down, so a
- * lost key is re-issued and never recovered.
+ * lost key is re-issued and never recovered. A revocation reaches the running
+ * gateway within its registry TTL (30 seconds).
  */
 
 import { DEFAULT_SCOPES, SCOPES, hashSecret, loadRegistry, makeKey, writeRecord } from "./lib/partners.mjs";

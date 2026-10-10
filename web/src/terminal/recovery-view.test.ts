@@ -94,7 +94,8 @@ describe("owner recovery presentation", () => {
       onWithdraw: noop, onLimits: noop, onResign: noop, onSettings: noop }));
     assert.equal(page.querySelector(".desk-status")!.textContent, "RECOVERING");
     assert.ok(page.querySelector(".desk-status")!.classList.contains("paused"));
-    assert.match(page.body.textContent!, /Trading paused for recovery.*Last recorded agent balance/);
+    // The card scrolls with the thread (chat-room.test.ts); the pill and the qualified balance stay pinned.
+    assert.match(page.querySelector(".desk-conversation > .agent-recovery")!.textContent!, /Trading paused for recovery/);
     assert.equal(page.querySelector(".portfolio-summary .recovery-balance-label")!.textContent, "Last recorded agent balance");
     assert.equal(page.querySelector(".desk-blocked"), null);
     assert.equal(page.querySelector(".desk-confirm"), null);
@@ -349,16 +350,21 @@ describe("where the money is during recovery", () => {
   });
 
   it("App derives the funds from the account that carried the hold, and only while it holds", () => {
-    // App renders under next/navigation and cannot be mounted here (see
-    // account-read.ts), so the one line that pairs the two is pinned in source.
+    // Pin the shared account source here; app-telegram-state.test.ts mounts
+    // App to verify the Settings behavior before its portfolio feed is ready.
     const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
     assert.match(app, /const recovery = pausedRecovery\(account\?\.status\.recovery\);/);
     assert.match(app, /\.\.\.\(recovery \? \{ chg24: null, recoveryFunds: recoveryFunds\(account\.status\) \} : \{\}\)/);
     assert.equal(app.match(/recoveryFunds\(/g)?.length, 1, "computed once, never re-derived");
     assert.match(readFileSync(new URL("./screens/Home.tsx", import.meta.url), "utf8"),
-      /<AgentStrip hasAgent=\{hasAgent\} recovery=\{mine\?\.recovery\} funds=\{mine\?\.recoveryFunds\}\/>/);
+      /<AgentStrip hasAgent=\{hasAgent\} recovery=\{mine\?\.recovery\} funds=\{mine\?\.recoveryFunds\} agentDown=\{mine\?\.agentDown\}\/>/);
     assert.match(readFileSync(new URL("./Desktop.tsx", import.meta.url), "utf8"),
-      /<AgentStrip hasAgent recovery=\{mine\.recovery\} funds=\{mine\.recoveryFunds\}\/>/);
+      /<AgentStrip hasAgent recovery=\{mine\.recovery\} funds=\{mine\.recoveryFunds\} agentDown=\{mine\.agentDown\}\/>/);
+    // The link-code wait's "agent isn't running" comes from the same account.
+    // A recovery hold is its own reason, never "not known down": a held tenant
+    // is not admitted, so nothing runs its worker, and the recovery listener
+    // answers only an owner already linked to that bot and mints no code.
+    assert.match(app, /const agentDown = recovery \? "recovery" as const : agentDownOf\(account\?\.status, Date\.now\(\)\);/);
   });
 
   it("reads the hold without changing it, and keeps the hold's own words", () => {

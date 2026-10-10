@@ -267,6 +267,11 @@ describe("the board folds retired agents into a count", () => {
     assert.deepEqual(r.agents.map((a) => a.name).sort(), ["Amber Heron", "Newborn", "Robin", "Waiting"]);
     assert.equal(r.agents.find((a) => a.name === "Robin")!.slug, null, "the running unlinked agent stays");
     assert.equal(r.retired, 4, "Killed, Lapsed and two unrun Robins");
+    // And each folded account is listed under the count; with no valuation on
+    // record none has a return, so none is invented.
+    assert.deepEqual(r.retiredAgents.map((a) => a.name).sort(), ["Killed", "Lapsed", "Robin", "Robin"]);
+    assert.equal(r.retiredAgents.find((a) => a.name === "Killed")!.slug, "bbbbbbbbbbbbbbbb");
+    assert.ok(r.retiredAgents.every((a) => a.pnlBps === null && a.pnlUsdg === null));
   });
 
   it("a ledger too old to say how agents are doing lists everyone and counts nothing", async () => {
@@ -278,6 +283,7 @@ describe("the board folds retired agents into a count", () => {
     );
     assert.equal(r.agents.length, 2);
     assert.equal(r.retired, null);
+    assert.deepEqual(r.retiredAgents, []);
   });
 
   it("an unreadable ledger has no retired count either", async () => {

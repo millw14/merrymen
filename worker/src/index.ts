@@ -141,7 +141,7 @@ import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
 import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
 import { boundedRead } from "./optional-read-deadline";
 import { recoverReceiptBasis } from "./receipt-basis-recovery";
-import { MarketReviewClock, quietReviewRow } from "./market-review";
+import { MarketReviewClock, quietReviewRow, quietReviewScope } from "./market-review";
 import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
 import { intentDecisionRow } from "./decision-row";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
@@ -266,7 +266,9 @@ import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
 import { gasFields, installKeyRecorded, settleKeyInstall } from "./key-install-accounting";
 import { ethPrice8FromFeed, ethUsdFeed, priceGasAt, type EthFeed } from "./eth-feed";
 import { ExecBackoff, KEY_INSTALL_HOLD_MS, heldReply, type Hold } from "./exec-backoff";
-import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
+import { bookCapitalFlow, bookInitialCapital, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
+import { readInitialCapital } from "./initial-capital";
+import type { RpcCall } from "./chain-capital";
 import {
   claimEnergy,
   claimEnergyNotice,
@@ -298,6 +300,7 @@ import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
 import { COIN_LOOK, chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
 import { createDesk } from "./desk/desk";
+import { createCoinFactsReader, FactsLimiter } from "./desk/facts";
 import type { TgDeskPort } from "./telegram/tg-groups/types";
 import { readDexTokenPairs } from "./venues/dexscreener";
 import { startNotifier } from "./telegram/notifier";
@@ -4152,7 +4155,7 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall },
   ): Promise<"held" | "settled"> => {
     const record = async (
       deltaUsdg: bigint,
@@ -4346,7 +4349,31 @@ async function main() {
     // EXACT BEFORE INFERRED. When the scan covered the window it is the whole
     // truth about money crossing the boundary, and inference must not book the
     // same movement a second time from the balance change it already explains.
-    const covered = scan ? await scanChainFlows(scan) : false;
+    let covered = false;
+    if (initialCapitalLicence !== null && !initialCapitalComplete && (cashUsdg > 0n || equityUsdg > 0n)) {
+      // Receipt proof is mandatory even with the optional ongoing scanner off.
+      // A failed read leaves the licence and baseline available for the retry.
+      if (!scan?.initialRpc || !scan.grant || cashUsdg !== equityUsdg || paperActive()) {
+        throw new Error("Initial funding needs complete cash-only receipt evidence");
+      }
+      const capital = await readInitialCapital(scan.initialRpc, {
+        account: scan.smartAccount, chainId: scan.grant.chainId, licence: initialCapitalLicence,
+      });
+      if (capital.cashUsdg6 !== cashUsdg) throw new Error("Initial funding balance changed while receipts were read");
+      const booked = await bookInitialCapital(agentId, capital);
+      if (booked.kind === "refused") throw new Error(booked.why);
+      highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+      initialCapitalComplete = true;
+      chainScanCursor = capital.blockNumber;
+      covered = true;
+    } else if (initialCapitalLicence !== null && !initialCapitalComplete) {
+      // No funding yet. Keep the initial baseline open so observeRailCash can
+      // see the first deposit and publish a live rail. Settling zero here would
+      // pin execMode to lastCash=0 and prevent the live-only booker from starting.
+      return "held";
+    } else if (cfg.depositScanEnabled && scan) {
+      covered = await scanChainFlows(scan);
+    }
 
     // THE LEDGER, READ ONCE AND AFTER THE BALANCE — and the settlement queue
     // only after the ledger. The resolver queues a settlement BEFORE it writes
@@ -4472,9 +4499,9 @@ async function main() {
             if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "changed while the worker was stopped");
           }
         } else if (plan.action === "book-opening-balance") {
-          // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
-          // the orchestrator READ durable state and found none.
-          if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
+          // A funded hosted opening must have been covered by the receipt path
+          // above. Keep this guard even if a future caller omits its RPC seam.
+          if (plan.amountUsdg > 0n) throw new Error("Hosted initial funding requires verified receipts");
         } else if (plan.action === "resume-with-drift") {
           doubtContributions(`cash moved across the downtime window and nothing could price it`);
           await addEvent(
@@ -4600,7 +4627,7 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall },
   ): Promise<"held" | "settled"> => {
     try {
       return await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
@@ -4757,6 +4784,8 @@ async function main() {
   };
   /** The believed truth about contributions, folded from every licence seen. */
   let truth: ContributionTruth = INITIAL_CONTRIBUTION_TRUTH;
+  let initialCapitalLicence: "new-account" | "untouched-book" | null = null;
+  let initialCapitalComplete = false;
   /** Cash at the anchor's newest durable observation. The downtime baseline. */
   let anchorCashUsdg: bigint | null = null;
   /**
@@ -4794,6 +4823,9 @@ async function main() {
     console.log(anchorLine(agentId, verdict));
     const l = accountingLicence(verdict, { hosted: isHostedMode() });
     accounting.openingBalanceLicence = l.licence;
+    initialCapitalLicence = l.licence === "new-account" ? "new-account"
+      : isHostedMode() && verdict.kind === "valid" && verdict.accounting.kind === "established"
+        && verdict.accounting.initialCapitalEligible === true ? "untouched-book" : null;
     anchorHwmUsdg = l.highWaterMarkUsdg;
     anchorHwmWithdrawnUsdg = l.highWaterWithdrawnUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
@@ -4860,6 +4892,7 @@ async function main() {
    * after arm. Throws when the ledger will not answer — never a guess.
    */
   async function durableNetContributions(agentId: string): Promise<bigint | null> {
+    if (initialCapitalLicence !== null && !initialCapitalComplete) return null;
     const local = await getNetContributionsSince(agentId, anchorWrittenAtSec ?? 0);
     return durableNetContributionsUsdg6({
       anchorNetUsdg6: anchorNetContributionsUsdg,
@@ -12342,9 +12375,11 @@ async function main() {
         agentId,
         balances.cashUsdg,
         equityUsdg,
-        cfg.depositScanEnabled
+        cfg.depositScanEnabled || (initialCapitalLicence !== null && !initialCapitalComplete)
           ? {
               chain: makeReconcileChain(client),
+              initialRpc: (method, params) => (client.request as unknown as
+                (args: { method: string; params: unknown[] }) => Promise<unknown>)({ method, params }),
               smartAccount: grant.smartAccount as `0x${string}`,
               // So the flow classifier can tell a class trade from a withdrawal.
               grant,
@@ -12424,8 +12459,9 @@ async function main() {
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
-        contributionsKnown: accounting.contributionsKnown,
-        why: accounting.why,
+        contributionsKnown: accounting.contributionsKnown && (initialCapitalLicence === null || initialCapitalComplete),
+        why: initialCapitalLicence !== null && !initialCapitalComplete
+          ? "first funding is waiting for complete deposit receipt verification" : accounting.why,
         // ONE RULE, IN CORE. This read `usdg > 0 ? "net" : "unknown"` here and
         // in two other places, and all three took a sponsored agent's genuine
         // zero for an absence. See packages/core/src/gas-basis.ts.
@@ -12671,10 +12707,32 @@ async function main() {
       reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
       const clock = reviewClock(agentId);
       if (!clock.due(now, reviewPreparationMs)) return;
+      // A quiet Trencher still talks about its own coins. The basket remains
+      // watched for accounting, but cannot become its fallback market view.
+      const trenchScope = cfg.strategy === "trencher"
+        ? {
+            // Read the existing entry records only. trenchOpen also repairs
+            // exit baselines, which a fallback explanation must not do.
+            held: (await Promise.all(positions.map(async p =>
+              (autoTrenchBalances.get(p.token.toLowerCase()) ?? 0n) > 0n || await getTrenchEntry(agentId, basisMode, p.symbol)
+                ? p.token : null,
+            ))).filter((token): token is `0x${string}` => token !== null),
+            candidates: (await trenchCandidates())
+              .filter(c => shouldEnter(c, cfg.trencherFastEnabled ? TRENCHER_FAST : TRENCHER_DEFAULTS, now).enter)
+              .map(c => c.token),
+          }
+        : { held: [], candidates: [] };
+      const scope = quietReviewScope({
+        strategy: cfg.strategy,
+        positions: positions.filter(p => !p.priceStale),
+        universe: watchTokens,
+        trencherHeld: trenchScope.held,
+        trencherCandidates: trenchScope.candidates,
+      });
       const focus = chooseFocus({
         agentId,
-        positions: positions.filter(p => !p.priceStale).map(p => ({ ...p, valueUsdg: Number(p.valueUsdg) })),
-        universe: watchTokens.map(t => ({ symbol: t.symbol, address: t.address })),
+        positions: scope.positions.map(p => ({ ...p, valueUsdg: Number(p.valueUsdg) })),
+        universe: scope.universe.map(t => ({ symbol: t.symbol, address: t.address })),
         prices: market.prices,
         paused: market.pausedTokens,
       });
@@ -12691,6 +12749,7 @@ async function main() {
       // was written at as its mark — see quietReviewRow, where a test runs it.
       await addDecision(quietReviewRow({
         id, agentId, review, quote, focusSymbol: focus?.symbol, historyRead: history?.read ?? false,
+        waitingForTrencher: cfg.strategy === "trencher" && !focus,
       }));
       // Failed persistence leaves this decision due for the next tick.
       if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) {
@@ -13017,7 +13076,7 @@ async function main() {
               // Null when the ledger could not be read, and core refuses on
               // null rather than assuming a clean history.
               currentAccountingHistoryAuditable: historyAuditable,
-              contributionsKnown: accounting.contributionsKnown,
+              contributionsKnown: accounting.contributionsKnown && (initialCapitalLicence === null || initialCapitalComplete),
               equityComplete: !bookIncomplete,
               gasBasis: gasBasisOf(gasNow),
               // ASKED, NOT ASSUMED. This was hardcoded `false`, which is not a
@@ -14740,6 +14799,7 @@ async function main() {
     paper: paperActive(),
     paused: isPaused(),
     workerAliveSec: 0, // the worker itself is answering, so it's alive
+    admission: { level: admission.level, draining },
     grant: active
       ? {
           perTradeUsdg: active.grant.caps.perTradeUsdg,
@@ -14846,6 +14906,11 @@ async function main() {
     // ticker shape /buy parses and the same watch-set resolution it uses.
     buyable: (symbol) => /^[A-Za-z]{1,6}$/.test(symbol) && resolveOrderToken(symbol, watchTokens).kind === "token",
     tailsAvailable: () => !fomoOff && fomoTailsState() === "on",
+    // A coin's measured facts for a room that asks what happened to it
+    // (docs/tg-groups.md "A coin's facts, on request"): GeckoTerminal's public
+    // index on the fleet quota, at most 4 reads per room per 10 minutes and 20
+    // per agent per hour, 10 s each. Independent of the desk's switch.
+    facts: createCoinFactsReader({ limiter: new FactsLimiter() }),
   });
 
   // Kept for the SIGTERM handler below, which stops the poll on the way out.

@@ -7,12 +7,13 @@ import {
   type LiveAgent,
   type LiveMine,
   type ReadState,
+  type RetiredAgent,
   type Thesis,
 } from "../live";
 import { strategyName } from "../strategy";
 import { Empty, ReadEmpty, Face, Stamp, NameBlock } from "../ui";
 import { unrankedShort } from "@/lib/rank-pnl";
-import { performanceOf, staleSince } from "../agent-performance";
+import { performanceOf } from "../agent-performance";
 import { boardOrder, type BoardRow } from "../board-order";
 import { useNow } from "../clock";
 import { shortDateTime } from "@/lib/format";
@@ -34,6 +35,7 @@ export function Board({
   onDesk,
   read = "ok",
   retired = null,
+  retiredAgents = [],
 }: {
   compact?: boolean;
   preview?: boolean;
@@ -44,6 +46,8 @@ export function Board({
    * could not tell, and then nothing was folded and nothing is said.
    */
   retired?: number | null;
+  /** The folded accounts with their final returns, listed under the count. */
+  retiredAgents?: RetiredAgent[];
   agents: LiveAgent[];
   theses: Thesis[];
   mine: LiveMine | null;
@@ -59,7 +63,6 @@ export function Board({
   // A minute is fine enough for "how old is this valuation", and it is the
   // only clock on this page.
   const nowSec = Math.floor(useNow(60_000) / 1000);
-  const stale = staleSince(agents, nowSec);
 
   return (
     <div className={`page board-page${preview ? " board-preview" : ""}`}>
@@ -90,13 +93,6 @@ export function Board({
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
         <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the paper book in the current accounting period and remain outside live rankings. Switching between paper and live does not reset that paper baseline. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure, so a book that has not traded shows No trades yet rather than a flat return, and trades no valuation includes yet show Awaiting first valuation. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked. Below the ranked live returns, every other agent that shows a return is listed by it, highest first, paper included, and then those with no return to show.</p></details>
-      )}
-      {/* STALENESS, AND ONLY STALENESS. When no agent has been valued for a
-          while, every figure below is older than it looks, and the time a
-          tooltip used to hold is said here once and on each row. It never
-          says why nothing newer exists: nothing on this page records that. */}
-      {stale !== null && rows.length > 0 && (
-        <p className="performance-banner" role="status">No new valuations since {shortDateTime(stale * 1000)}. Each figure is as of its agent&apos;s last valuation.</p>
       )}
 
       {rows.length === 0 ? (
@@ -134,12 +130,20 @@ export function Board({
           Only a number is printed: null means the server could not tell, and
           then it folded nothing. Zero folded nothing either. */}
       {folded > 0 && (
-        <p
-          className="board-retired"
-          title="Accounts nothing is running any more: killed, expired, or never linked to a named agent. One agent re-granted can leave more than one."
-        >
-          Retired accounts ({folded})
-        </p>
+        <details className="board-retired">
+          <summary title="Accounts nothing is running any more: killed, expired, or never linked to a named agent. One agent re-granted can leave more than one.">
+            Retired accounts ({folded})
+          </summary>
+          {/* FROZEN FINAL RETURNS: nothing runs these, so each figure is the
+              last its book recorded, never ranked among the agents above. */}
+          {retiredAgents.length > 0 && (
+            <div className="board-retired-list">
+              {retiredAgents.map((r, i) => (
+                <RetiredRank key={`${r.slug ?? r.name}-${i}`} row={r} onProfile={onProfile} />
+              ))}
+            </div>
+          )}
+        </details>
       )}
     </div>
   );
@@ -181,7 +185,7 @@ function Rank({
           <div className="rank-meta">
             {a.glance.known === false ? null : <Stamp>{strategyName(a.glance.id)}</Stamp>}
             <span className="rank-trades">{tradeLine(a)}</span>
-            {a.mode && a.mode !== "live" && (!a.performance || a.mode !== performance.book)
+            {a.mode && a.mode !== "live" && (!a.performance || a.mode !== performance.book) && !performance.notRunning
               && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
             {/* KEPT THROUGH THE RECOVERY HOLD, and said neutrally: never
                 "expired", never "re-sign" — see read-leaderboard.ts. */}
@@ -191,17 +195,76 @@ function Rank({
         <div className="rank-nums">
           <span className="rank-value" title={performance.title}>
             <span className="rank-have" aria-label={`Current value ${performance.value}`}>{performance.value}</span>
-            {a.performance && <small className="rank-book">{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
-            {performance.lastValued !== null && <small className="rank-book">{performance.lastValued}</small>}
-            {performance.lastValued === null && performance.asOf !== null && <small className="rank-book performance-asof">{performance.asOf}</small>}
+            {/* CLEAN ON PURPOSE: when it was valued, and whether a newer
+                trade is in it, are in the title — not lines under the figure. */}
+            {a.performance && <small className="rank-book">{performance.bookLabel}</small>}
           </span>
           <span className="rank-return" title={performance.title}>
             <span className={`chg ${displayedReturn == null || displayedReturn === 0 ? "" : displayedReturn > 0 ? "up" : "down"}${performance.state !== null ? " performance-state" : ""}`}>
-              {performance.state ?? (displayedReturn == null ? performance.gasIncomplete ? "Gas accounting unavailable" : a.performance ? "Unavailable" : a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn))}
+              {performance.state ?? (displayedReturn == null ? noReturn(a) : `${performance.estimated ? "≈ " : ""}${pctBps(displayedReturn)}`)}
             </span>
             {performance.pnl !== null && <small className="rank-pnl">{performance.pnl} P&L</small>}
-            {performance.note !== null && <small className="rank-book performance-note">{performance.note}</small>}
-            {performance.gasIncomplete && displayedReturn != null && <small className="rank-book">Gas accounting unavailable</small>}
+          </span>
+        </div>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * WHAT A ROW WITH NO MEASURED RETURN SAYS — never a blank. A book that never
+ * traded says so; one from an older server prints its figure, approximate;
+ * one whose trades no valuation includes yet says that. The row's tooltip
+ * (performanceOf's title) carries the detail.
+ */
+function noReturn(a: LiveAgent): string {
+  const trades = (a.liveFills ?? a.landed ?? 0) + (a.paperFills ?? a.filledPaper ?? 0);
+  if (trades === 0) return "No trades yet";
+  // Only from an older server that sent no performance: a current one's
+  // performance supersedes these, and they are not a fallback for it.
+  const legacy = a.performance ? undefined
+    : [a.pnlBps, a.paperPnlBps].find((n): n is number => typeof n === "number" && Number.isFinite(n) && n !== 0);
+  if (legacy !== undefined) return `≈ ${pctBps(legacy)}`;
+  // The actual reason when the server gave one, unless the fills show the
+  // valuation simply has not caught up yet.
+  const pending = a.performance?.valuation === "awaiting" || a.performance?.fillsAtMark === 0;
+  if (!pending && a.unrankedWhy) return unrankedShort(a.unrankedWhy);
+  return "Awaiting valuation";
+}
+
+function RetiredRank({ row, onProfile }: { row: RetiredAgent; onProfile: (slug: string) => void }) {
+  const ret = row.pnlBps;
+  const approx = row.estimated ? "≈ " : "";
+  const pnl = row.pnlUsdg === null ? null
+    : `${approx}${row.pnlUsdg > 0 ? "+" : row.pnlUsdg < 0 ? "−" : ""}${money(Math.abs(row.pnlUsdg))}`;
+  return (
+    <div className="rank retired" title={row.lastValuedAt !== null ? `Last valued ${shortDateTime(row.lastValuedAt * 1000)}` : undefined}>
+      <button
+        type="button"
+        className="rank-hit"
+        disabled={row.slug === null}
+        onClick={() => row.slug && onProfile(row.slug)}
+      >
+        <span className="n">—</span>
+        <Face name={row.name} slug={row.slug ?? row.name} />
+        <div className="rank-who">
+          <div className="rank-name"><NameBlock title={row.name} /></div>
+          <div className="rank-meta">
+            <span className="rank-trades">
+              {row.trades > 0 ? `${row.trades} ${row.book === "paper" ? "paper " : ""}trade${row.trades === 1 ? "" : "s"}` : "No trades"}
+            </span>
+            <Stamp>Retired</Stamp>
+          </div>
+        </div>
+        <div className="rank-nums">
+          <span className="rank-value">
+            {row.book && <small className="rank-book">{row.book === "paper" ? "Paper" : "Live"}</small>}
+          </span>
+          <span className="rank-return">
+            <span className={`chg ${ret == null || ret === 0 ? "" : ret > 0 ? "up" : "down"}`}>
+              {ret == null ? (row.trades === 0 ? "No trades" : "Not valued") : `${approx}${pctBps(ret)}`}
+            </span>
+            {pnl !== null && <small className="rank-pnl">{pnl} P&L</small>}
           </span>
         </div>
       </button>

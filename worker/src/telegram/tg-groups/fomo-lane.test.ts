@@ -1868,3 +1868,481 @@ describe("a reused copy keeps its age line in the room, whatever fills the line 
     assert.deepEqual(tg.texts(CHAT)[0]!.split("\n"), [answer[0]!, answer[1]!, answer[3]!, answer[4]!, answer[5]!, AGE]);
   });
 });
+
+describe("a coin's facts, asked of the room's Fomo coin (WP8, Milla 2026-10-09)", () => {
+  const theses = (): TgFomoAnswer => ({
+    text: "What traders on Fomo are saying about AUTON on Solana (25 recent theses from 13 traders):\nAgainst it: fears it could collapse.\nTheir claims, not facts; newest 25 of 4,199.",
+    deflect: false,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "theses" },
+  });
+  const facts = (): TgFomoAnswer => ({
+    text: "AUTON on Solana, from GeckoTerminal at 01:15 UTC:\nI can't see who sold, why it fell, or whether liquidity was pulled.",
+    deflect: false,
+    free: true,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "facts" },
+    collapse: { coin: "AUTON", collapsed: true, atMs: T0 },
+  });
+
+  it("'what happened to pons' with no Fomo behind it is never a facts ask; 'what happened to $PONS' stays the desk's", async () => {
+    make();
+    await said(msg("pine what happened to pons?"));
+    assert.ok(!fomo!.asks.some((a) => a.request?.kind === "coin" && a.request.aspect === "facts"), JSON.stringify(fomo!.asks));
+    clock += MIN;
+    await said(msg("pine what happened to $PONS?"));
+    assert.ok(!fomo!.asks.some((a) => a.request?.kind === "coin" && a.request.aspect === "facts"), JSON.stringify(fomo!.asks));
+    assert.equal(desk!.asks.length, 1, "the desk read it, as before");
+  });
+
+  it("'what happened to it' under a Fomo coin answer is that coin's facts, asked by code", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    const answerId = 5_000;
+    clock += 30 * SEC;
+    await said(msg("pine what happened to it", { replyTo: { messageId: answerId, fromId: BOT.id, fromIsBot: true, text: tg.texts(CHAT)[0]! } }));
+    const last = fomo!.asks[fomo!.asks.length - 1]!;
+    assert.deepEqual(last.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+    assert.match(tg.texts(CHAT).slice(-1)[0]!, /^AUTON on Solana, from GeckoTerminal at 01:15 UTC:/);
+    assert.equal(desk!.asks.length, 0, "never the desk's chart");
+  });
+
+  it("the topic's last Fomo coin answers 'why did it rug?' and 'did the dev dump?' without a reply, for half an hour", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += 2 * MIN;
+    await said(msg("pine why did it rug?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "why" });
+    clock += 2 * MIN;
+    await said(msg("pine did the dev dump?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "dev" });
+    // Another coin named, with no Fomo context of its own: not this lane.
+    clock += MIN;
+    const before = fomo!.asks.length;
+    await said(msg("pine what happened to pons?"));
+    assert.ok(fomo!.asks.slice(before).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")));
+    // Past half an hour, "it" is no coin.
+    clock += 31 * MIN;
+    const later = fomo!.asks.length;
+    await said(msg("pine why did it rug?"));
+    assert.ok(fomo!.asks.slice(later).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")));
+  });
+
+  it("a coin named on Fomo or on another chain is asked as facts with nothing before it", async () => {
+    fomo!.answer = facts;
+    make();
+    await said(msg("pine what happened to $AUTON on solana?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+  });
+
+  it("a chat line, a person or another coin is never the room's coin's facts (review, 2026-10-09)", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    const before = fomo!.asks.length;
+    for (const line of ["pine what happened to you last night?", "pine what happened to him?", "pine what went wrong with the trade?", "pine what happened to the fomo leaderboard?", "pine why did he dump?", "pine show me the numbers on pepe", "pine what are the facts on bonk?"]) {
+      clock += MIN;
+      await said(msg(line));
+    }
+    assert.ok(fomo!.asks.slice(before).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")), JSON.stringify(fomo!.asks.slice(before)));
+    // "facts" alone is slang for "true", even under the answer.
+    clock += MIN;
+    await said(msg("facts", { replyTo: { messageId: 5_000, fromId: BOT.id, fromIsBot: true, text: tg.texts(CHAT)[0]! } }));
+    assert.ok(fomo!.asks.slice(before).every((a) => !(a.request?.kind === "coin" && a.request.aspect === "facts")));
+    // The coin itself still is.
+    clock += MIN;
+    await said(msg("pine what happened to the coin?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+  });
+
+  it("'what happened to auton on base?' after the Solana AUTON is asked about Base, never answered with the Solana coin (review, 2026-10-09)", async () => {
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts() : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to auton on base?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "base", aspect: "facts", ask: "what" });
+    clock += MIN;
+    await said(msg("pine what happened to auton on solana?"));
+    assert.deepEqual(fomo!.asks.slice(-1)[0]!.request, { kind: "coin", symbol: "AUTON", chain: "solana", aspect: "facts", ask: "what" });
+  });
+
+  it("a facts answer that bought nothing gives the room's research slot back", async () => {
+    fomo!.answer = facts;
+    make();
+    for (let i = 0; i < 8; i++) {
+      clock += 10 * SEC;
+      await said(msg(`pine what happened to $AUTON on solana? ${"?".repeat(i + 1)}`));
+    }
+    assert.ok(!tg.texts(CHAT).some((t) => /enough research lookups/.test(t)), tg.texts(CHAT).join("\n---\n"));
+  });
+});
+
+describe("rug banter: only with a collapse permit, never at a person, never a brag back to back (WP9)", () => {
+  /** The model's next line, whatever it is asked (a routing call gets words, which is no pick). */
+  let content = "";
+  let modelCalls = 0;
+  const withModel = (): void => {
+    envVars.MERRYMEN_TG_GROUPS_LLM_KEY = "k-test";
+    envVars.MERRYMEN_TG_GROUPS_LLM_PROVIDER = "openai";
+    envVars.MERRYMEN_TG_GROUPS_LLM_BASE_URL = "https://llm.test/v1";
+    envVars.MERRYMEN_TG_GROUPS_MODEL = "fake";
+    modelCalls = 0;
+    globalThis.fetch = (async () => {
+      modelCalls += 1;
+      return { ok: true, json: async () => ({ choices: [{ message: { content } }] }) };
+    }) as never;
+  };
+  const theses = (): TgFomoAnswer => ({
+    text: "What traders on Fomo are saying about AUTON on Solana (25 recent theses from 13 traders):\nAgainst it: fears it could collapse.\nTheir claims, not facts; newest 25 of 4,199.",
+    deflect: false,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "theses" },
+  });
+  const facts = (collapsed: boolean) => (): TgFomoAnswer => ({
+    text: "AUTON on Solana, from GeckoTerminal at 12:00 UTC:\nI can't see who sold, why it fell, or whether liquidity was pulled.",
+    deflect: false,
+    free: true,
+    coin: { symbol: "AUTON", chain: "solana", aspect: "facts" },
+    collapse: { coin: "AUTON", collapsed, atMs: clock },
+  });
+  const last = (): string => tg.texts(CHAT).slice(-1)[0] ?? "";
+  const answers = (collapsed: boolean) => (q: SpyAsk): TgFomoAnswer => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts(collapsed)() : theses());
+
+  it("no permit: 'auton rugged lol' from the model is dropped, and the room hears a template or nothing", async () => {
+    withModel();
+    fomo!.answer = theses;
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    content = "auton rugged lol";
+    const before = tg.texts(CHAT).length;
+    await said(msg("pine lmao auton"));
+    assert.ok(tg.texts(CHAT).slice(before).every((t) => !/rug/i.test(t)), tg.texts(CHAT).slice(before).join(" | "));
+  });
+
+  it("a measured collapse: the brag goes out once; the next brag waits; a person is never the one who rugged", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    clock += MIN;
+    content = "rugged cause it wasn't merrymen 😤";
+    await said(msg("pine lmao auton"));
+    assert.equal(last(), "rugged cause it wasn't merrymen 😤");
+    clock += MIN;
+    content = "should've been a merrymen coin";
+    await said(msg("pine rip"));
+    assert.notEqual(last(), "should've been a merrymen coin", "a brag right after a brag is refused (brag: false)");
+    clock += MIN;
+    content = "the dev rugged it";
+    await said(msg("pine auton tho"));
+    assert.notEqual(last(), "the dev rugged it");
+    // Twenty minutes on, and with no brag in its last eight lines, a fresh one may go.
+    for (let i = 0; i < 8; i++) {
+      clock += 3 * MIN;
+      content = `nah fr ${["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"][i]} vibes today`;
+      await said(msg(`pine you good ${i}`));
+    }
+    clock += MIN;
+    content = "auton? should've been one of ours 😤";
+    await said(msg("pine auton lol"));
+    assert.equal(last(), "auton? should've been one of ours 😤");
+  });
+
+  it("a line about another coin never gets the permit: 'lol' is no pointer, and another coin named sets none (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    for (const [line, model] of [
+      ["pine pons is pumping lol", "pons? rugged lol"],
+      ["pine pons is pumping lol", "lol it rugged tho"],
+      ["pine damn pons", "pons? rugged lol"],
+      ["pine auton and $pons lol", "pons? rugged lol"],
+    ] as const) {
+      clock += MIN;
+      content = model;
+      await said(msg(line));
+      assert.notEqual(last(), model, line);
+    }
+    // A pointer at the coin itself still has its permit.
+    clock += MIN;
+    content = "yeah it rugged, sadly";
+    await said(msg("pine this one huh"));
+    assert.equal(last(), "yeah it rugged, sadly");
+    // Once the room knows PONS (its own Fomo answer), a line naming both coins gets neither permit.
+    fomo!.answer = (q) => (/pons/iu.test(q.text) ? { ...theses(), text: theses().text.replace(/AUTON/gu, "PONS"), coin: { symbol: "PONS", chain: "solana", aspect: "theses" } } : answers(true)(q));
+    clock += MIN;
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    clock += MIN;
+    content = "yep, that one rugged too";
+    await said(msg("pine auton and pons huh"));
+    assert.notEqual(last(), "yep, that one rugged too");
+    clock += MIN;
+    content = "auton? rugged for real";
+    await said(msg("pine auton for real"));
+    assert.equal(last(), "auton? rugged for real", "the coin alone keeps its permit");
+  });
+
+  it("under the permit a rug word beside another coin the room knows is never said (review r2)", async () => {
+    withModel();
+    fomo!.answer = (q) => (/pons/iu.test(q.text) ? { ...theses(), text: theses().text.replace(/AUTON/gu, "PONS"), coin: { symbol: "PONS", chain: "solana", aspect: "theses" } } : answers(true)(q));
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    clock += MIN;
+    await said(msg("pine what are people saying about $PONS on fomo?"));
+    clock += MIN;
+    content = "auton rugged, pons is cooked";
+    await said(msg("pine lmao auton"));
+    assert.notEqual(last(), "auton rugged, pons is cooked");
+    clock += MIN;
+    content = "auton? rugged for real";
+    await said(msg("pine auton for real"));
+    assert.equal(last(), "auton? rugged for real", "the coin alone keeps its permit");
+  });
+
+  it("a measured permit is the coin's on its chain: the same ticker on another chain gets none (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? { ...facts(true)(), collapse: { coin: "AUTON", chain: "solana", collapsed: true, atMs: clock } } : theses());
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    clock += 3 * 60 * MIN;
+    content = "auton rugged lol";
+    await said(msg("pine the auton on base looks strong"));
+    assert.notEqual(last(), "auton rugged lol");
+    clock += MIN;
+    content = "auton? rugged for real";
+    await said(msg("pine auton on solana huh"));
+    assert.equal(last(), "auton? rugged for real", "the measured coin, on its own chain, keeps its permit");
+  });
+
+  /** AUTON on Solana measured clear, then AUTON on Base measured collapsed: the two chains' answers, by message id. */
+  async function twoAutons(): Promise<{ sol: TgMessage["replyTo"]; base: TgMessage["replyTo"] }> {
+    withModel();
+    const coinFacts = (chain: "solana" | "base", collapsed: boolean): TgFomoAnswer => ({
+      text: `AUTON on ${chain === "base" ? "Base" : "Solana"}, from GeckoTerminal at 12:00 UTC:\nI can't see who sold, why it fell, or whether liquidity was pulled.`,
+      deflect: false,
+      free: true,
+      coin: { symbol: "AUTON", chain, aspect: "facts" },
+      collapse: { coin: "AUTON", chain, collapsed, atMs: clock },
+    });
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? coinFacts(q.request.chain === "base" ? "base" : "solana", q.request.chain === "base") : theses());
+    make();
+    const ownLast = (): NonNullable<TgMessage["replyTo"]> => {
+      const l = (store.room(CHAT)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+      return { messageId: l.messageId, fromId: BOT.id, fromIsBot: true, text: l.text };
+    };
+    await said(msg("pine what are people saying about $AUTON on solana on fomo?"));
+    const sol = ownLast();
+    clock += MIN;
+    await said(msg("pine what happened to it", { replyTo: sol }));
+    assert.ok(logs.includes("[tg-groups] collapse not measured"), logs.join("\n"));
+    clock += MIN;
+    await said(msg("pine what happened to auton on base?"));
+    assert.ok(logs.includes("[tg-groups] collapse measured"), logs.join("\n"));
+    return { sol, base: ownLast() };
+  }
+
+  it("a Base AUTON's collapse never lands on the Solana AUTON measured clear: under its answer, or once it is the topic's coin again (review r2)", async () => {
+    const { sol } = await twoAutons();
+    for (const [line, under] of [["pine lmao auton", sol], ["pine rip this one", sol]] as const) {
+      clock += MIN;
+      content = "auton rugged lol";
+      await said(msg(line, { replyTo: under }));
+      assert.notEqual(last(), "auton rugged lol", line);
+    }
+    // The Solana coin the topic's last again, replying to nothing.
+    clock += MIN;
+    await said(msg("pine what are people saying about $AUTON on solana on fomo?"));
+    clock += MIN;
+    content = "auton rugged lol";
+    await said(msg("pine lmao auton"));
+    assert.notEqual(last(), "auton rugged lol");
+  });
+
+  it("the Base AUTON keeps its permit under its own answer, and replying to nothing while it is the topic's coin (review r2)", async () => {
+    const { base } = await twoAutons();
+    clock += MIN;
+    content = "auton? rugged for real";
+    await said(msg("pine lmao auton", { replyTo: base }));
+    assert.equal(last(), "auton? rugged for real");
+    clock += 10 * MIN;
+    content = "yep that one got rugged, sadly";
+    await said(msg("pine damn auton"));
+    assert.equal(last(), "yep that one got rugged, sadly");
+  });
+
+  it("a brag in other words ('wasn't ours') is spent too: the next waits, and the prompt says so (review, 2026-10-09)", async () => {
+    withModel();
+    const prompts: string[] = [];
+    const modelFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+      prompts.push(String(init?.body ?? ""));
+      return modelFetch(url as never, init as never);
+    }) as never;
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    content = "rugged. wasn't ours 😤";
+    await said(msg("pine lmao auton"));
+    assert.equal(last(), "rugged. wasn't ours 😤");
+    clock += MIN;
+    prompts.length = 0;
+    content = "auton? should've been ours 😤";
+    await said(msg("pine auton tho"));
+    assert.notEqual(last(), "auton? should've been ours 😤");
+    assert.ok(prompts.some((p) => p.includes("none this time")), "the prompt says no brag this time");
+  });
+
+  it("a line said under a brag-allowed permit spends the brag, whatever its words (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    content = "rugged. not on our watch 😤";
+    await said(msg("pine lmao auton"));
+    assert.equal(last(), "rugged. not on our watch 😤");
+    clock += MIN;
+    content = "auton? should've been ours 😤";
+    await said(msg("pine auton tho"));
+    assert.notEqual(last(), "auton? should've been ours 😤");
+  });
+
+  it("a coin it holds gets no permit: 'rugged' is refused even after a measured collapse", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    class HeldPort extends FakePort {
+      override heldNames(): string[] {
+        return ["AUTON"];
+      }
+    }
+    make({ port: () => new HeldPort() });
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    content = "auton rugged lol";
+    await said(msg("pine lmao auton"));
+    assert.notEqual(last(), "auton rugged lol");
+  });
+
+  it("the room's word: 'auton rugged lol' about the room's Fomo coin permits; a question, a negation or another coin does not", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    for (const line of ["did it rug?", "not a rug", "pepe rugged", "the market rugged today", "everyone rugged lol", "crypto rugged"]) {
+      clock += 10 * SEC;
+      await said(msg(line, { fromId: ANN + 1, fromFirstName: "Bob" }));
+    }
+    assert.ok(!logs.includes("[tg-groups] collapse said by the room"), "nothing set yet");
+    clock += 10 * SEC;
+    content = "auton rugged lol";
+    await said(msg("pine lol auton"));
+    assert.notEqual(last(), "auton rugged lol", "no permit yet");
+    clock += 10 * SEC;
+    await said(msg("auton rugged lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"));
+    clock += 10 * SEC;
+    content = "yeah auton rugged";
+    await said(msg("pine auton huh"));
+    assert.equal(last(), "yeah auton rugged");
+  });
+
+  it("the room's word: a pointer replying to nothing sets nothing; under the coin's answer it does (review, 2026-10-09)", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    for (const line of ["yeah froggy, it rugged", "lost everything on my last play, it rugged", "bought some pons yesterday. it rugged", "the market rugged today"]) {
+      clock += 10 * SEC;
+      await said(msg(line, { fromId: ANN + 1, fromFirstName: "Bob" }));
+    }
+    assert.ok(!logs.includes("[tg-groups] collapse said by the room"), logs.join("\n"));
+    clock += 10 * SEC;
+    content = "yeah auton rugged";
+    await said(msg("pine auton huh"));
+    assert.notEqual(last(), "yeah auton rugged", "no permit from a pointer replying to nothing");
+    clock += 10 * SEC;
+    await said(msg("it rugged", { fromId: ANN + 1, fromFirstName: "Bob", replyTo: { messageId: 5_000, fromId: BOT.id, fromIsBot: true, text: tg.texts(CHAT)[0]! } }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"), "under the coin's answer, the pointer is that coin");
+  });
+
+  it("the room saying another chain's AUTON rugged sets nothing for the room's Solana AUTON (review r2)", async () => {
+    withModel();
+    fomo!.answer = (q) => (q.request?.kind === "coin" && q.request.aspect === "facts" ? facts(true)() : { ...theses(), coin: { symbol: "AUTON", chain: "solana", aspect: "theses" } });
+    make();
+    await said(msg("pine what are people saying about $AUTON on solana on fomo?"));
+    const answer = (store.room(CHAT)?.lines ?? []).filter((x) => x.own).slice(-1)[0]!;
+    clock += 10 * SEC;
+    await said(msg("auton rugged on base lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    clock += 10 * SEC;
+    await said(msg("it rugged on base", { fromId: ANN + 1, fromFirstName: "Bob", replyTo: { messageId: answer.messageId, fromId: BOT.id, fromIsBot: true, text: answer.text } }));
+    assert.ok(!logs.includes("[tg-groups] collapse said by the room"), logs.join("\n"));
+    clock += 10 * SEC;
+    content = "solana auton? rugged for real";
+    await said(msg("pine auton on solana huh"));
+    assert.notEqual(last(), "solana auton? rugged for real");
+    // Said of the room's own coin, it still sets the room's word.
+    clock += 10 * SEC;
+    await said(msg("auton rugged on solana lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"), logs.join("\n"));
+  });
+
+  it("a fresh measurement that finds no collapse clears the room's word", async () => {
+    withModel();
+    fomo!.answer = answers(false);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += 10 * SEC;
+    await said(msg("auton rugged lol", { fromId: ANN + 1, fromFirstName: "Bob" }));
+    assert.ok(logs.includes("[tg-groups] collapse said by the room"));
+    clock += 10 * SEC;
+    await said(msg("pine what happened to it"));
+    assert.ok(logs.includes("[tg-groups] collapse not measured"));
+    clock += 10 * SEC;
+    content = "yeah auton rugged";
+    await said(msg("pine auton huh"));
+    assert.notEqual(last(), "yeah auton rugged");
+    // And the room's word cannot set it again over that measurement.
+    clock += 10 * SEC;
+    await said(msg("auton rugged lol", { fromId: ANN + 2, fromFirstName: "Cy" }));
+    clock += 10 * SEC;
+    await said(msg("pine auton for real"));
+    assert.notEqual(last(), "yeah auton rugged");
+  });
+
+  it("the owner's forget clears every permit", async () => {
+    withModel();
+    fomo!.answer = answers(true);
+    make();
+    await said(msg("pine what are people saying about $AUTON on fomo?"));
+    clock += MIN;
+    await said(msg("pine what happened to it"));
+    clock += MIN;
+    groups.forgetChat(CHAT);
+    await groups.drain();
+    clock += MIN;
+    content = "auton rugged lol";
+    await said(msg("pine lmao auton"));
+    assert.notEqual(last(), "auton rugged lol");
+  });
+});

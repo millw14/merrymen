@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FilePartnerStore } from "./partner-store";
+import { FilePartnerStore, type PartnerConnection } from "./partner-store";
 import { createPartnerService } from "./partner-service";
 import { verifyPartnerRequest } from "./partner-bridge";
+import { PartnerRuntimeError } from "./partner-runtime";
 // Exercise the actual gateway signer against the app verifier.
 import { signPartnerRequest } from "../../../gateway/lib/partner-bridge.mjs";
 
@@ -28,9 +29,10 @@ after(() => {
   if (failures.length) throw failures[0];
 });
 
-function fixture() {
+type ServiceDeps = Parameters<typeof createPartnerService>[0];
+function fixture(overrides: Partial<ServiceDeps> = {}, waits?: ConstructorParameters<typeof FilePartnerStore>[3]) {
   const home = mkdtempSync(join(tmpdir(), "merrymen-partner-service-"));
-  const store = new FilePartnerStore(home, undefined, () => secret);
+  const store = new FilePartnerStore(home, undefined, () => secret, waits);
   fixtures.push({ home, store });
   let replies = 0;
   const service = createPartnerService({ store, secret,
@@ -41,6 +43,7 @@ function fixture() {
       await Promise.resolve();
       return { reply: `Received ${message}`, generation: "model", runtime };
     },
+    ...overrides,
   });
   const call = async (method: string, path: string, body?: unknown, selectedKey = key) => {
     const raw = body === undefined ? "" : JSON.stringify(body);
@@ -50,6 +53,14 @@ function fixture() {
   };
   return { store, call, service, replies: () => replies };
 }
+
+test("a key whose name is not well-formed text can still create connections", async () => {
+  const f = fixture();
+  const oddKey = { ...key, name: "Test App \ud800" };
+  const created = await f.call("POST", "/agents", { external_user_id: "odd-name-user" }, oddKey);
+  assert.equal(created.status, 202);
+  assert.equal((await f.store.byId(key.appId, created.body.id))?.partnerName, "Test App \ufffd");
+});
 
 test("gateway signatures bind exact method, body, path and principal, and reject replay", async () => {
   const path = "/agents", raw = '{"external_user_id":"user-1"}';
@@ -92,6 +103,24 @@ test("create is repeatable and never accepts caller-supplied ownership or privat
   assert.equal((await call("POST", "/agents", { external_user_id: "u2" }, { ...key, scopes: ["read:agents"] })).status, 403);
 });
 
+test("an identifier, name or message that is not well-formed text is refused at the edge, before any write or model call", async () => {
+  const { store, call, replies } = fixture();
+  const lone = JSON.parse('"\\ud800"') as string;
+  for (const body of [{ external_user_id: `user-${lone}` }, { external_user_id: "user-2", name: `Robin ${lone}` }]) {
+    const refused = await call("POST", "/agents", body);
+    assert.equal(refused.status, 400, JSON.stringify(body));
+    assert.equal(refused.body.error.code, "bad_request");
+  }
+  assert.deepEqual((await call("GET", "/agents")).body, { data: [] });
+  const created = await call("POST", "/agents", { external_user_id: "user-1", name: "Robin 😀" });
+  assert.equal(created.status, 202);
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const chat = await call("POST", `/agents/${created.body.id}/messages`, { message: `hello ${lone}`, request_id: "request_lone" });
+  assert.equal(chat.status, 400);
+  assert.equal(chat.body.error.code, "bad_request");
+  assert.equal(replies(), 0);
+});
+
 test("pending agents cannot chat; other apps cannot read or activate their connections", async () => {
   const { call } = fixture();
   const created = await call("POST", "/agents", { external_user_id: "user-1" });
@@ -123,6 +152,154 @@ test("chat is grounded to the consented tenant, serialized and idempotent; disco
   assert.equal((await call("GET", `${path}/messages`)).status, 409);
   assert.equal((await call("POST", `${path}/messages`, { message: "status", request_id: "request_2" })).status, 409);
   assert.equal(replies(), 1);
+});
+
+test("runtime refusals reach the partner with their own status and code, never as a generic outage", async () => {
+  const { store, call } = fixture({
+    readRuntime: async () => { throw new PartnerRuntimeError(503, "runtime_unavailable", "The agent's current permission could not be read."); },
+    reply: async () => { throw new PartnerRuntimeError(400, "invalid_message", "Send a message between 1 and 2000 characters."); },
+  });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const detail = await call("GET", `/agents/${created.body.id}`);
+  assert.equal(detail.status, 503);
+  assert.equal(detail.body.error.code, "runtime_unavailable");
+  const chat = await call("POST", `/agents/${created.body.id}/messages`, { message: "hello", request_id: "request_1" });
+  assert.equal(chat.status, 400);
+  assert.equal(chat.body.error.code, "invalid_message");
+  // Anything that is not a partner-facing answer still becomes a generic 503.
+  const leaky = fixture({ readRuntime: async () => { throw new Error("postgres://user:password@internal"); } });
+  const other = await leaky.call("POST", "/agents", { external_user_id: "user-2" });
+  await leaky.store.bindAuthorized(other.body.id, key.appId, tenant, ["read:agents"]);
+  const hidden = await leaky.call("GET", `/agents/${other.body.id}`);
+  assert.equal(hidden.status, 503);
+  assert.equal(hidden.body.error.code, "upstream_unavailable");
+  assert.doesNotMatch(JSON.stringify(hidden.body), /password/);
+});
+
+test("a message the store would refuse is refused before the model is called", async () => {
+  const { store, call, replies } = fixture();
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const path = `/agents/${created.body.id}/messages`;
+  for (const message of ["hello\u0007", "bell\u0000", "  \u001b[31m red"]) {
+    const refused = await call("POST", path, { message, request_id: "request_bad" });
+    assert.equal(refused.status, 400, JSON.stringify(message));
+    assert.equal(refused.body.error.code, "bad_request");
+  }
+  assert.equal(replies(), 0, "no generation was paid for a message that could never be saved");
+  const ok = await call("POST", path, { message: "line one\n\tline two\r\n", request_id: "request_ok" });
+  assert.equal(ok.status, 200);
+  assert.equal(replies(), 1);
+});
+
+test("a model reply that is too long, has control characters or an oversized proposal is fitted, not blamed on the partner", async () => {
+  const replies: Array<Pick<Awaited<ReturnType<ServiceDeps["reply"]>>, "reply" | "command">> = [
+    // After the controls go, the emoji's two halves sit at 15,998 and 15,999: across the cut.
+    { reply: `Start\u0000\u001b ${"a".repeat(15_992)}😀${"b".repeat(50)}`, command: { id: "open-settings", args: {} } },
+    { reply: "Here is a proposal.", command: { id: "change-settings", args: { changes: "x".repeat(9000) } } },
+    { reply: "\u0000\u0001\u0002" },
+  ];
+  const { store, call } = fixture({ reply: async () => ({ ...replies.shift()!, generation: "model" as const, runtime }) });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const path = `/agents/${created.body.id}/messages`;
+  const long = await call("POST", path, { message: "tell me everything", request_id: "request_long" });
+  assert.equal(long.status, 200);
+  assert.ok(long.body.reply.length <= 16_000);
+  assert.match(long.body.reply, /^Start a+…$/, "controls dropped, cut before the emoji rather than through it");
+  assert.ok(long.body.reply.isWellFormed());
+  assert.deepEqual(long.body.proposal, { id: "open-settings", args: {} });
+  const big = await call("POST", path, { message: "propose something", request_id: "request_big" });
+  assert.equal(big.status, 200);
+  assert.equal(big.body.reply, "Here is a proposal.");
+  assert.equal(big.body.proposal, null);
+  const empty = await call("POST", path, { message: "say nothing", request_id: "request_empty" });
+  assert.equal(empty.status, 200);
+  assert.match(empty.body.reply, /did not return a usable reply.*not executed any action/);
+  // Saved like any other reply: a retry returns it rather than generating again.
+  assert.deepEqual((await call("POST", path, { message: "tell me everything", request_id: "request_long" })).body, long.body);
+  assert.equal((await call("GET", path)).body.messages.length, 6);
+});
+
+test("a retry that outwaits a running generation gets a retryable conversation_busy, then the saved reply", async () => {
+  let started!: () => void, finish!: () => void;
+  const generating = new Promise<void>(resolve => { started = resolve; });
+  const finished = new Promise<void>(resolve => { finish = resolve; });
+  let generated = 0;
+  const { store, call } = fixture({ reply: async () => {
+    generated++;
+    started();
+    await finished;
+    return { reply: "The one answer.", generation: "model" as const, runtime };
+  } }, { conversation: 100, enrollment: 100 });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const path = `/agents/${created.body.id}/messages`, body = { message: "status", request_id: "request_1" };
+  const original = call("POST", path, body);
+  await generating;
+  const busy = await call("POST", path, body);
+  assert.equal(busy.status, 409);
+  assert.equal(busy.body.error.code, "conversation_busy");
+  assert.equal(busy.body.error.retry_after, 2, "the hint rides in the body, which the gateway forwards");
+  assert.equal(busy.headers.get("retry-after"), "2");
+  finish();
+  const answered = await original;
+  assert.equal(answered.status, 200);
+  const retried = await call("POST", path, body);
+  assert.deepEqual(retried.body, answered.body);
+  assert.equal(generated, 1);
+});
+
+test("an activation that committed is reported as a success even when the status read then fails", async () => {
+  let linked: PartnerConnection | null = null;
+  const enrollment = {
+    challenge: async () => { throw new Error("unused"); },
+    activate: async () => ({ connection: linked!, smartAccount: tenant, chainId: 4663, replayed: false }),
+  } as unknown as ServiceDeps["enrollment"];
+  const { store, call } = fixture({ enrollment, readRuntime: async () => { throw new PartnerRuntimeError(503, "runtime_unavailable", "The agent's current permission could not be read."); } });
+  const created = await call("POST", "/agents", { external_user_id: "user-1" });
+  linked = await store.bindAuthorized(created.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  const activated = await call("POST", `/agents/${created.body.id}/activate`, { grant: {}, challenge_token: "x", signature: "0x" });
+  assert.equal(activated.status, 200);
+  assert.equal(activated.body.id, created.body.id);
+  assert.equal(activated.body.status, "connected");
+  assert.equal(activated.body.runtime_available, false);
+  assert.equal(activated.body.agent, undefined);
+  assert.deepEqual(activated.body.wallet, { smart_account: tenant, chain_id: 4663 });
+  // With the runtime readable, the detail carries it and no unavailability marker.
+  const healthy = fixture({ enrollment });
+  const other = await healthy.call("POST", "/agents", { external_user_id: "user-2" });
+  linked = await healthy.store.bindAuthorized(other.body.id, key.appId, tenant, ["read:agents"]);
+  const full = await healthy.call("POST", `/agents/${other.body.id}/activate`, { grant: {}, challenge_token: "x", signature: "0x" });
+  assert.equal(full.body.status, "starting");
+  assert.equal(full.body.runtime_available, undefined);
+  assert.equal(full.body.agent.id, "robin");
+});
+
+test("after a disconnect, requesting the connection again starts a fresh authorization under a new id", async () => {
+  const { store, call } = fixture();
+  const original = await call("POST", "/agents", { external_user_id: "user-1", name: "Robin" });
+  await store.bindAuthorized(original.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  assert.equal((await call("POST", `/agents/${original.body.id}/messages`, { message: "private", request_id: "request_old" })).status, 200);
+  assert.equal((await call("DELETE", `/agents/${original.body.id}/connection`)).status, 200);
+  const fresh = await call("POST", "/agents", { external_user_id: "user-1", name: "Robin" });
+  assert.equal(fresh.status, 202);
+  assert.notEqual(fresh.body.id, original.body.id);
+  assert.equal(fresh.body.status, "pending_authorization");
+  assert.match(fresh.body.onboarding_url, /^https:\/\/app\.merrymen\.dev\/connect#token=/);
+  // The new connection needs the owner again and sees none of the old conversation.
+  assert.equal((await call("GET", `/agents/${fresh.body.id}/messages`)).status, 409);
+  await store.bindAuthorized(fresh.body.id, key.appId, tenant, ["read:agents", "chat:agents"]);
+  assert.deepEqual((await call("GET", `/agents/${fresh.body.id}/messages`)).body.messages, []);
+  // The old id still answers, as disconnected, and cannot chat.
+  const old = await call("GET", `/agents/${original.body.id}`);
+  assert.equal(old.status, 200);
+  assert.equal(old.body.status, "disconnected");
+  assert.equal(old.body.agent, undefined);
+  assert.equal((await call("GET", `/agents/${original.body.id}/messages`)).status, 409);
+  const listed = new Map((await call("GET", "/agents")).body.data.map((c: { id: string; status: string }) => [c.id, c.status]));
+  assert.deepEqual(listed, new Map([[fresh.body.id, "connected"]]), "the user is listed once, by the connection that replaced the old one");
 });
 
 test("key chat scope cannot substitute for owner consent", async () => {

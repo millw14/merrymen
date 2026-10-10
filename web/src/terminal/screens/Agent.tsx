@@ -25,6 +25,7 @@ import {
   type ChatMessage,
 } from "../account";
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
+import { positionLabel, tokenForPosition } from "../position-token";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
 import { NameChip } from "../NameChip";
@@ -560,7 +561,6 @@ export function Agent({
   const silence = notRunningNote(displayedAutonomy);
   return (
     <div className="desk-page">
-      <RecoveryNotice recovery={recovery}/>
       {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
           The sentence existed — status-line.ts has had a testnet branch for
           months — but it renders on /you, and an owner who thinks their agent
@@ -762,9 +762,8 @@ export function Agent({
                   <Empty compact kind="positions" title={recovery ? "Saved positions pending reconciliation." : "No positions reported yet."}/>
                 )}
                 {positions.map((p) => {
-                  const token = tokens.find(
-                    (t) => t.symbol.toUpperCase() === p.symbol.toUpperCase(),
-                  );
+                  const token = tokenForPosition(p, tokens);
+                  const label = positionLabel(p);
                   // The value AND the %, never one standing in for the other:
                   // the small line prints the coin's name when it is listed, so
                   // this is the only place on the row the money figure can be.
@@ -773,13 +772,13 @@ export function Agent({
                     <button
                       type="button"
                       className="desk-position"
-                      key={p.symbol}
+                      key={p.token ?? p.symbol}
                       disabled={!token}
                       onClick={() => token && onToken(token.id)}
                     >
-                      <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
+                      <Coin symbol={label.replace(/^\$/, "")} logo={token?.logo ?? ""} />
                       <span>
-                        <strong>{p.symbol}</strong>
+                        <strong title={p.token ?? undefined}>{label}</strong>
                         {/* The coin's name when it is listed. Not the detail: that is
                             printed on the right now, and would read twice. */}
                         {token?.name ? <small>{token.name}</small> : null}
@@ -848,6 +847,13 @@ export function Agent({
           setAway(isAway);
         }}
       >
+        {/* THE RECOVERY CARD SCROLLS WITH THE THREAD, like the announcements
+            below. Pinned as the page's first child, its four parts were the
+            tallest thing on a phone's Chat tab and the conversation got two
+            lines — "chatting on mobile is a headache". What must not be
+            scrolled past stays pinned: the RECOVERING pill in the header, and
+            "Last recorded agent balance · Reconciliation pending" on the figure. */}
+        <RecoveryNotice recovery={recovery}/>
         {!recovery && <TrencherAnnouncement hasAgent={!!mine} />}
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only

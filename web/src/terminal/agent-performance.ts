@@ -25,6 +25,8 @@ export interface AgentPerformance {
   gasOps?: { sponsored: number; priced: number; unpriced: number; unrecorded: number } | null;
   /** An operator is checking this return; it is withheld (return-review.ts). Absent is not under review. */
   underReview?: boolean;
+  /** The return leaves out gas costs not yet on record — approximate (book-performance.ts). */
+  pnlEstimated?: boolean;
 }
 
 const number = (n: unknown) => typeof n === "number" && Number.isFinite(n) ? n : null;
@@ -72,6 +74,7 @@ export function performanceFromWire(raw: unknown): AgentPerformance {
     valuation: p.valuation === "current" || p.valuation === "awaiting" ? p.valuation : null,
     gasOps: gasOpsOf(p.gasOps),
     underReview,
+    pnlEstimated: p.pnlEstimated === true && !underReview,
   };
 }
 
@@ -155,16 +158,19 @@ export function performanceOf(agent: LiveAgent, nowSec?: number) {
     equityAt !== null ? `Valued ${fullDateTime(equityAt * 1000)}` : "Valuation time unavailable",
     pnlAt !== null ? `P&L measured ${fullDateTime(pnlAt * 1000)}` : "Measured P&L unavailable",
     p?.held ? "Latest value is pending reconciliation; P&L uses the last measured valuation." : "",
-    p?.gasComplete === false ? "Gas accounting unavailable; exact P&L is unavailable." : "",
+    p?.gasComplete === false ? (p.pnlEstimated ? "Approximate: some gas costs are not on record yet, so the exact return may be slightly lower." : "Some gas costs are not on record yet.") : "",
     p?.valuation === "awaiting" ? "A newer trade is not in this return yet; it waits for the next valuation." : "",
   ].filter(Boolean).join(". ");
   const { state, note } = stateOf(agent, p, bps);
+  const approx = p?.pnlEstimated === true ? "≈ " : "";
   return {
     book, bookLabel, bps, title,
     value: p && !published ? "Private" : equity === null ? "—" : dollars(equity),
-    pnl: pnl === null || state !== null ? null : `${pnl > 0 ? "+" : pnl < 0 ? "−" : ""}${dollars(Math.abs(pnl))}`,
+    pnl: pnl === null || state !== null ? null : `${approx}${pnl > 0 ? "+" : pnl < 0 ? "−" : ""}${dollars(Math.abs(pnl))}`,
     held: p?.held === true,
     gasIncomplete: p?.gasComplete === false,
+    /** The figure is approximate (gas not all on record): print it with "≈". */
+    estimated: p?.pnlEstimated === true,
     notRunning,
     /** Visible as-of text for a row nothing is running; null when unvalued. */
     lastValued: notRunning && equityAt !== null ? `Last valued ${shortDateTime(equityAt * 1000)}` : null,

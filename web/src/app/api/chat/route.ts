@@ -102,5 +102,7 @@ export async function POST(req: Request) {
     : null;
   // The Fomo switches are settings change-settings may name only where this deployment runs Fomo.
   const fomoSettings = fomoEnabledFor(hosted);
-  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo, recovery, fomoSettings });
+  // `hosted` so a failed model call can say whether it ran on the house's key
+  // (agent-chat.ts onHouseAccount): ours to fix, or the owner's.
+  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply, fomo, recovery, fomoSettings, hosted });
 }

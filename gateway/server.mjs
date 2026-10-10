@@ -20,9 +20,10 @@ import { createStore, hasRedis } from "./lib/store.mjs";
 import { CLAIM_HTML } from "./lib/claimPage.mjs";
 import { addSignup, signupCount } from "./lib/signups.mjs";
 import { createPartners } from "./lib/partners.mjs";
-import { createPartnerApi } from "./lib/partner-api.mjs";
+import { createPartnerApi, partnerError } from "./lib/partner-api.mjs";
 import { createPartnerBridge } from "./lib/partner-bridge.mjs";
 import { createDeveloperApi } from "./lib/developer-api.mjs";
+import { createBilling, createPaymentsClient, parseBillingConfig } from "./lib/billing.mjs";
 
 // ── config (env) ─────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT || 8787);
@@ -83,17 +84,22 @@ const gw = createGateway({
 });
 
 // ── http plumbing ────────────────────────────────────────────────────────────
+/**
+ * An oversized upload is refused, not cut off. This used to destroy the socket
+ * on the first byte over the cap, before any handler could answer, so every
+ * documented 413 arrived as a connection reset that a caller cannot tell from
+ * an outage. Past the cap nothing is buffered: the rest is read and discarded
+ * while the refusal goes out, up to a ceiling past which nobody is owed one.
+ */
+const DRAIN_LIMIT_BYTES = 16 * MAX_BODY_BYTES;
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on("data", (c) => {
       size += c.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("payload too large"));
-        req.destroy();
-        return;
-      }
+      if (size > DRAIN_LIMIT_BYTES) return req.destroy();
+      if (size > MAX_BODY_BYTES) return reject(new Error("payload too large"));
       chunks.push(c);
     });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
@@ -148,7 +154,9 @@ function respond(res, r) {
     res.writeHead(r.status, { "content-type": r.contentType || "application/json", ...cors });
     return res.end(r.text);
   }
-  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...cors });
+  // `headers` come from the partner API alone: a relayed Retry-After, and the
+  // quota headers on a metered answer.
+  res.writeHead(r.status, { "content-type": "application/json", "cache-control": "no-store", ...r.headers, ...cors });
   res.end(JSON.stringify(r.json ?? {}));
 }
 
@@ -158,13 +166,42 @@ function respond(res, r) {
 // store. It reuses MERRYMEN_GATEWAY_SECRET as an HMAC PEPPER over per-key
 // secrets rather than as the key material itself, so revoking one partner does
 // not invalidate every holder token at the same time.
+//
+// BILLING: MERRYMEN-paid plans for that API (lib/billing.mjs). OFF unless every
+// requirement holds, an explicit MERRYMEN_DATA_DIR on a persistent volume among
+// them; each reason it is not on is a [billing] line here at boot. Its ledger
+// is the only record of who paid, so it is built ONCE and shared by the
+// partner gate (metering) and the developer API (accounts, plans, payments): a
+// second instance would keep a second index and credit one transfer twice. Its
+// chain client is its own, read-only, and asked about payments alone; the
+// holder gate's client above is not touched.
+const billingConfig = parseBillingConfig(process.env);
+for (const note of billingConfig.notes) console.error(`[billing] ${note}`);
+const billing = await createBilling({ ...billingConfig,
+  publicClient: billingConfig.rpc ? createPaymentsClient(billingConfig.rpc) : null });
+{
+  // Said at every boot, before "listening", so the deploy log shows a degraded
+  // mode rather than a developer's 503 or a partner's missing quota headers.
+  const asked = JSON.stringify(billingConfig.requested.slice(0, 20));
+  const on = billing.mode !== "off";
+  const degraded = billing.mode !== billingConfig.requested || (on && !billing.paymentsReady) || !!billing.blocked;
+  (degraded ? console.error : console.log)(`[gateway] partner billing: ${billing.mode}`
+    + (billing.mode !== billingConfig.requested ? ` (MERRYMEN_BILLING=${asked}; see the [billing] lines above)` : "")
+    + (!on ? ", nothing is metered"
+      : `, ${billing.enforced ? "quotas enforced" : "metered, no quota refused, each key at its own rate or its plan's if higher"}; payments ${billing.paymentsReady ? `to ${billingConfig.treasury}` : "UNAVAILABLE"}`)
+    + (billing.blocked ? `; ledger writes REFUSED (${billing.blocked})` : ""));
+}
+
 const partners = createPartners({ secret: SECRET });
-const partnerApi = createPartnerApi({ partners, store,
+const partnerApi = createPartnerApi({ partners, store, billing,
   forward: createPartnerBridge({ secret: process.env.MERRYMEN_PARTNER_BRIDGE_SECRET,
     origin: process.env.MERRYMEN_PARTNER_APP_ORIGIN || "https://app.merrymen.dev" }),
 });
+// No chain client for sign-in, deliberately: developer sign-in is checked
+// locally, so no RPC can vouch for a signature (see refusal() in
+// lib/developer-api.mjs). Billing's client checks payment transfers and nothing else.
 const developerApi = createDeveloperApi({ portalSecret: process.env.MERRYMEN_DEVELOPER_PORTAL_SECRET,
-  gatewaySecret: SECRET, partners, partnerApi, store });
+  gatewaySecret: SECRET, partners, partnerApi, store, billing });
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -183,9 +220,12 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && pathname === "/healthz") return respond(res, gw.health());
     if (pathname.startsWith("/developer/v1/")) {
-      let body = {};
-      try { if (req.method === "POST") { const raw = await readBody(req); if (Buffer.byteLength(raw) > 8192) return respond(res, { status: 413, json: { error: { message: "Request too large" } } }); body = JSON.parse(raw); } }
-      catch { return respond(res, { status: 400, json: { error: { message: "Invalid request" } } }); }
+      // Size is plumbing; shape is the developer API's rule, so it gets raw text.
+      let body;
+      if (req.method === "POST") {
+        try { body = await readBody(req); } catch { body = null; }
+        if (body === null || Buffer.byteLength(body) > 8192) return respond(res, { status: 413, json: { error: { code: "request_too_large", message: "Request too large" } } });
+      }
       return respond(res, await developerApi.handle({ method: req.method, path: pathname.slice("/developer/v1".length),
         authorization: req.headers.authorization, session: req.headers["x-developer-session"], body,
         ip: req.headers["x-developer-ip"] || ip }));
@@ -303,8 +343,9 @@ const server = createServer(async (req, res) => {
     if (partnerApi.owns(pathname)) {
       let body = "";
       if (req.method === "POST") {
+        // partnerError, like every other partner refusal: a report needs its request_id.
         try { body = await readBody(req); }
-        catch { return respond(res, { status: 413, json: { error: { code: "bad_request", message: "Request body is too large" } } }); }
+        catch { return respond(res, partnerError(413, "bad_request", "Request body is too large")); }
       }
       const r = await partnerApi.handle({
         method: req.method,
@@ -326,4 +367,48 @@ server.listen(PORT, () => {
   console.log(`[gateway] Merrymen AI listening on :${PORT} — model forced to "${MODEL}", min hold ${MIN_TOKENS} $MERRYMEN`);
   console.log(`[gateway] discovery: ${BITQUERY_KEY ? "Bitquery ON (named queries only)" : "Bitquery OFF (no key set)"}`);
   if (!hasRedis) console.log("[gateway] state store: in-memory (fine for a single process; set KV_REST_API_URL/TOKEN for multi-instance).");
+  // Optional services, so not fatal, but say so at boot: otherwise the first
+  // sign of a missing secret is a partner's or developer's 503.
+  for (const [name, routes] of [["MERRYMEN_PARTNER_BRIDGE_SECRET", "partner agent routes"], ["MERRYMEN_DEVELOPER_PORTAL_SECRET", "developer portal routes"]]) {
+    if (Buffer.byteLength(process.env[name] || "") < 32) console.error(`[gateway] ${name} is unset or under 32 bytes: ${routes} will answer 503.`);
+  }
 });
+
+/**
+ * A deploy (SIGTERM) or Ctrl-C (SIGINT) saves what is left of the partner usage
+ * before the process goes. Under enforce every served count is already in
+ * usage.json (the gate waits for it); what is left are units given back (a
+ * platform failure, a request cut off below) and observe's counts, which the
+ * 10 s timer would otherwise pick up. New connections stop at once; requests
+ * already inside get up to 3 s to finish, so their answers reach the partner
+ * and what they counted, or gave back on a platform failure, is in what is
+ * saved. One still running after that is cut off, as it always was, and gives
+ * its unit back first: the partner never gets that answer and will resend.
+ * Then queued billing writes finish (5 s at most, lib/billing.mjs close()). The
+ * ledger itself needs nothing here: each record is flushed by the append that
+ * made it. A second signal exits at once, and so does a close still hanging
+ * after 10 s, rather than waiting for the host's SIGKILL. The host must allow
+ * that long between SIGTERM and SIGKILL for the save to land; otherwise a
+ * deploy charges partners for requests it cut off.
+ */
+const DRAIN_MS = 3_000;
+let stopping = false;
+async function stop(signal) {
+  if (stopping) process.exit(1);
+  stopping = true;
+  console.log(`[gateway] ${signal}: saving usage counts, then exiting`);
+  setTimeout(() => process.exit(1), 10_000).unref();
+  const drained = new Promise((resolve) => server.close(() => resolve()));
+  // A kept-alive connection goes idle once its answer is out, and would hold
+  // the close open for the whole 3 s: close each as it does.
+  server.closeIdleConnections();
+  const sweep = setInterval(() => server.closeIdleConnections(), 50);
+  await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, DRAIN_MS))]);
+  clearInterval(sweep);
+  const cut = partnerApi.releaseUnfinished();
+  if (cut) console.log(`[gateway] ${signal}: ${cut} partner request${cut === 1 ? "" : "s"} still running ${cut === 1 ? "was" : "were"} cut off: ${cut === 1 ? "its unit is" : "their units are"} given back`);
+  await billing.close();
+  process.exit(0);
+}
+process.on("SIGTERM", () => stop("SIGTERM"));
+process.on("SIGINT", () => stop("SIGINT"));

@@ -58,6 +58,14 @@ export interface AgentStatus {
   balances?: GrantBalances;
   workerAliveAt?: number | null;
   /**
+   * TRUE WHEN NEITHER HEARTBEAT SOURCE COULD BE READ — no file and the ledger
+   * read failed or there is no database. `workerAliveAt` is null then too, but
+   * it means "could not tell", not "never heard from", and the chat must not
+   * tell an owner whose agent may be trading that it has not started.
+   * Absent whenever a source answered.
+   */
+  heartbeatUnread?: true;
+  /**
    * HAS THE WORKER STOPPED REPORTING? `workerAliveAt` older than the watchdog's
    * window for this owner's tick — never shorter than one order's run, which
    * the mirrored row can lag the file by — plus a margin for the mirror.
@@ -541,6 +549,7 @@ export async function GET(req: Request) {
   let mode: AgentStatus["mode"] = null;
   let gasSponsored: boolean | null = null;
   let liveBlocker: string | null = null;
+  let heartbeatRead = false;
   try {
     // Hosted status must come from this authenticated account, never a web-service file.
     if (hostedTenant !== undefined) throw new Error("Hosted heartbeat is account-scoped.");
@@ -550,6 +559,7 @@ export async function GET(req: Request) {
       sponsorGas?: boolean;
     };
     workerAliveAt = hb.at;
+    heartbeatRead = true;
     mode = hb.mode ?? null;
     // Absent on a heartbeat written before this field existed — unknown, not no.
     gasSponsored = hb.sponsorGas ?? null;
@@ -580,8 +590,10 @@ export async function GET(req: Request) {
                   live_blocker?: string | null;
                 }
               | undefined)
-          : undefined,
+          : null,
       );
+      // undefined is a ledger that answered with no row; null is no ledger.
+      if (row !== null) heartbeatRead = true;
       if (row?.beat_at) {
         workerAliveAt = Number(row.beat_at);
         mode = (row.mode as AgentStatus["mode"]) ?? null;
@@ -632,6 +644,7 @@ export async function GET(req: Request) {
     grant: publicGrant,
     balances,
     workerAliveAt,
+    ...(heartbeatRead ? {} : { heartbeatUnread: true as const }),
     workerStale,
     mode,
     gasSponsored,

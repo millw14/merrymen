@@ -35,6 +35,7 @@ before(async () => {
   const intercepted = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
     if (parent?.filename === screen) {
       if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => ({ account: { address: signerAddress }, did: "did:privy:test" }) };
+      if (id === "@/lib/trencher-permission") return { TRENCHER_FACTORY: `0x${"e".repeat(40)}` };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
       if (id === "../tier") return { loadTier: async () => null, newAgentQualifies: () => true };
       if (id === "../account-session") return { fetchAccountForSession: async () => current };
@@ -44,6 +45,7 @@ before(async () => {
       };
       if (id === "@/lib/session") return {
         loadGrant: () => stored,
+        retryGrantHandoff: async () => { writes.push("/api/grants"); return { ok: true }; },
         isPrivyOwned: () => true,
         createPrivyOwnedWallet: async () => { mintCalls++; return { local: grant, handoff: { ok: false, error: "temporary activation failure" } }; },
       };
@@ -70,6 +72,8 @@ const screen = () => React.createElement(CreateAgent, { account, onRefresh() {},
 
 async function limits() {
   await ui.render(screen());
+  await ui.click("Customise strategy and limits");
+  await act(async () => { ui.container.querySelector<HTMLInputElement>('input[value="steady-basket"]')!.click(); });
   const input = ui.container.querySelector<HTMLInputElement>("#agent-name")!;
   assert.ok(input, "new-agent form is reachable for an account without a saved wallet");
   await act(async () => {
@@ -83,8 +87,6 @@ async function limits() {
 async function failedActivation() {
   await limits(); await ui.click("Create agent");
   assert.equal(mintCalls, 1);
-  await act(async () => { ui.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); });
-  await ui.click("Continue");
   assert.match(ui.container.textContent!, /Retry activation/);
   writes = [];
 }

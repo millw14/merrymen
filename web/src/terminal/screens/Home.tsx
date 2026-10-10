@@ -36,6 +36,7 @@ export function Home({
   hasAgent,
   read,
   retired = null,
+  retiredAgents = [],
 }: {
   tokens: LiveToken[];
   agents: LiveAgent[];
@@ -67,6 +68,7 @@ export function Home({
   read: import("../live").ReadState;
   /** Accounts the board folded into a count. See Board. */
   retired?: number | null;
+  retiredAgents?: import("../live").RetiredAgent[];
 }) {
   // A count we do not have sorts last and filters out — it is not a zero, but
   // it is also not evidence that anybody bought anything, so an unread row does
@@ -185,7 +187,7 @@ export function Home({
           A reading, not a second set of controls: it says what the settings
           say and links to them. It renders nothing for a visitor with no
           agent, who has no bot to connect and no strategy to run. */}
-      <AgentStrip hasAgent={hasAgent} recovery={mine?.recovery} funds={mine?.recoveryFunds}/>
+      <AgentStrip hasAgent={hasAgent} recovery={mine?.recovery} funds={mine?.recoveryFunds} agentDown={mine?.agentDown}/>
 
       {/*
         THE LEADERBOARD, NOT A SECOND COPY OF IT.
@@ -205,6 +207,7 @@ export function Home({
         preview
         read={read}
         retired={retired}
+        retiredAgents={retiredAgents}
         agents={agents}
         theses={theses}
         mine={mine}

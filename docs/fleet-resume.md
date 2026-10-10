@@ -16,6 +16,7 @@ every step from the Railway dashboard, followed by what each mechanism does:
 - [Owner stop requests](#owner-stop-requests-applied-before-any-worker-arms) (`worker/src/recovery-reply-arm.ts`): every recorded `/pause` and `/kill` is applied once before a worker arms.
 - [Attested-gap admission](#attested-gap-admission) (`worker/src/ledger-resume.ts`): preview, approve, archive the home, register an empty book under the approval, prove its seed, spawn through the ordinary path.
 - [Automatic admission of re-signed paper tenants](#automatic-admission-of-re-signed-paper-tenants) (`MERRYMEN_RESUME_AUTO_PAPER`): a re-sign is previewed by the orchestrator itself, and a paper tenant that could not arm live and holds nothing is approved by it, through the same path.
+- [Genuinely new tenants under an explicit list](#genuinely-new-tenants-under-an-explicit-list) (`MERRYMEN_ROLLOUT_NEW_TENANTS`, `worker/src/new-tenant-admission.ts`): an agent created since the incident, with no home and no history, starts without being named; every pre-incident tenant the list does not name stays held.
 - [The volume steps](#the-volume-steps-adopt-release-re-halt) (`worker/src/persistent-home.ts`): adopt the volume under its halt, release the halt into a rollout scope, re-halt it for a rollback.
 
 This is an application change requiring Milla's review under `AGENTS.md`.
@@ -446,7 +447,10 @@ refused by the continuity gate until admitted:
    watch its first ticks.
 
 A tenant with no history at all (a brand-new account) needs none of this: the
-ordinary empty-book path admits it.
+ordinary empty-book path admits it. Under `all`, that is the whole story.
+Under an explicit list it is still held unless the list names it, or
+`MERRYMEN_ROLLOUT_NEW_TENANTS` is set
+([below](#genuinely-new-tenants-under-an-explicit-list)).
 
 **With `MERRYMEN_RESUME_AUTO_PAPER=1`, re-signers need less of this.** The
 orchestrator previews a tenant itself when its grant row changes (step 1
@@ -484,6 +488,8 @@ and that `/pause` works again.
 | step 2–3 (halted, nobody admitted) | nothing trades | **Rollback** to `4b4220e3` (restores its variables); repeat step 1 before going forward again |
 | step 4 onwards | `MERRYMEN_FLEET_ROLLOUT=none`, deploy | `MERRYMEN_REHALT_HOME=<token>`, deploy; then **Rollback** to `4b4220e3`. Admitted tenants' bots stay silent under the listener; the rest are answered |
 | one tenant misbehaving | remove it from `MERRYMEN_FLEET_ROLLOUT`, deploy; its owner's `/pause` also works | — |
+| one new tenant misbehaving (admitted by `MERRYMEN_ROLLOUT_NEW_TENANTS`) | add it to `MERRYMEN_ACCOUNTING_HOLD_TENANTS`, deploy; its owner's `/pause` also works | — |
+| every new tenant | remove `MERRYMEN_ROLLOUT_NEW_TENANTS`, deploy | — |
 
 Railway has two actions on an old deployment. **Rollback** restores that
 deployment's Docker image and its custom variables (Railway docs, "Deployment
@@ -931,6 +937,146 @@ cleanly again, is never approved twice.
   still stands, so re-signs made while it was off are owed then.
 - Under `FLEET_HALT` no reconcile pass runs, so nothing is previewed or
   approved either.
+
+## Genuinely new tenants under an explicit list
+
+`MERRYMEN_ROLLOUT_NEW_TENANTS=observe|exits-only|trade`.
+`worker/src/new-tenant-admission.ts` (the proof and the record),
+`worker/src/fleet-rollout.ts` (the level), `worker/src/orchestrator.ts`
+(`refreshNewTenantAdmissions`, `newTenantFreeCheck`, `newTenantLooksNew`,
+`recordNewTenant`).
+
+### Why
+
+An explicit `MERRYMEN_FLEET_ROLLOUT` holds every tenant it does not name. That
+is what keeps the pre-incident tenants out until their accounting is
+reviewed, but it also held every agent created since: no worker, so no link
+code for its bot ("starting up" for good), and no line saying why. Milla
+decided on 2026-10-09 that every genuinely new agent must start without
+being named, while the pre-incident tenants stay held.
+
+### What it does
+
+Only under an explicit list. Under `none` (the emergency stop) and `all` it
+does nothing, and the startup line says so; a valid value is still accepted
+there, so switching to `none` in an emergency never also needs this removed.
+Unset, nothing changes. Any other value (empty, `none`, `off`, a different
+case) refuses boot.
+
+Each reconcile pass, after every tenant the list names has had its turn, a
+tenant the list does not name is **admitted at this variable's level** once
+the orchestrator has proved it genuinely new and **recorded** that in
+Postgres, before its first spawn:
+
+1. **Not new, and held, if any of these is true.** The accounting hold names
+   it. A kill request was seen for it this pass. It has a home
+   (`children/<tenant>`, any state, even empty) or an archive
+   (`archive/<tenant>`) on the volume. Postgres holds anything for it: the
+   new-book predicate `registerLedgerSource` refuses on (`sharedLedgerHistory`:
+   a mirror cursor past zero, a row for its account in any table the book
+   mirrors, a paper checkpoint), any mirror cursor at all for the tenant
+   (which catches an agent re-created under a new account after its home was
+   lost), an `agents` row registered by its owner key or wallet, a
+   ledger-import receipt or generation, an attested-gap approval, attestation
+   or archived pre-image, a `fleet_recovery_health` row, or an owner
+   `/pause`/`/kill` in `recovery_reply_controls`. The grant's timestamps are
+   never used: re-signing moves them.
+2. **Any read that fails means "not this pass".** That includes a table the
+   predicate needs that is missing, an unverifiable volume, the record table
+   unreadable, or no `DATABASE_URL`. The tenant stays held and is asked again
+   next pass, with an `[alert]`. A *fact* (a home, history) is remembered
+   for the life of the process and said once:
+   `new tenants: 0x… is not new — <why>; it stays held. If it should run, name it in MERRYMEN_FLEET_ROLLOUT …`.
+3. **The process cap, as the automatic lane leaves it.** A new tenant starts
+   only while the processes running leave more than 8 of the 48 slots free
+   (`AUTO_PAPER_HEADROOM`), and never while a named tenant waited for a slot
+   that pass. The Postgres read, which scans every book table, is only made
+   once a slot is there. At most 8 tenants are read per pass.
+4. **Proved again under its lease, then recorded, then spawned.** The lease
+   is taken, the whole proof is read again, and the row goes into
+   `fleet_new_tenant_admissions` (tenant, account, chain, the level asked,
+   time, an evidence digest). The write authority (the lease, `FLEET_HALT`,
+   the drain, the accounting hold, a kill, the route still open, the list
+   still not naming it) is checked before and after the insert. Lost after
+   it, the insert is rolled back. A grant that changed account, chain or
+   owner since the first look is not recorded on the old proof. Only then
+   does the spawn run, through the ordinary path, `registerLedgerSource`
+   included.
+
+From then on **the record admits it**, not a fresh look: its first spawn gives
+it a home and its worker gives it history, so a fresh look would hold it on
+the next restart. It runs at the variable's level **as it reads now**:
+lowering the variable lowers every new tenant, and removing it holds them all.
+A tenant the list names runs at the list's level, recorded or not.
+
+### Restarts and two orchestrators
+
+- **Crash after the record, before the spawn:** the next process reads the
+  record and spawns it, with no new proof.
+- **Crash before the record commits:** nothing is recorded and nothing was
+  spawned; the next pass proves it again.
+- **Two orchestrators** (a deploy overlap): only the one holding the tenant's
+  lease records or spawns. The insert is `ON CONFLICT DO NOTHING`, and either
+  one's record admits it on both.
+- **A record that cannot be read:** tenants it admitted that are already
+  running keep running (a failed read stops no one). No tenant is proved or
+  started from it until it reads again. One `[alert]` when it fails, one line
+  when it recovers.
+- **A tenant created mid-pass** is not in that pass's roster; the next pass
+  sees it.
+
+### What you will read
+
+- At boot:
+  `fleet rollout: MERRYMEN_ROLLOUT_NEW_TENANTS=<level> — a tenant the list does not name is admitted at <level> once it is proved genuinely new …`
+  (or that it has no effect under `none`/`all`, or that it is unset).
+- Per admission:
+  `new tenants: 0x… admitted at <level> (MERRYMEN_ROLLOUT_NEW_TENANTS) — … recorded in fleet_new_tenant_admissions (evidence …) before its first spawn. To hold it: …`.
+- Each pass, when it changes (or every five minutes):
+  `new tenants (MERRYMEN_ROLLOUT_NEW_TENANTS=<level>): N admitted this pass · W waiting for a process slot · H not new and held (V with a home or archive on the volume, P with history in Postgres) · U not answered this pass`.
+- The heartbeat's rollout line:
+  `fleet| rollout 49 named (new at <level>) — admitted: trade … · exits-only … · observe … · new N of those; not run: held … · expired …`.
+  `new N` counts the admitted tenants that came in this way, and they are
+  already counted in their level. The heartbeat row carries `new` beside the
+  levels.
+- Railway → Postgres → **Data** → `fleet_new_tenant_admissions`: every
+  tenant admitted this way.
+
+**With 49 named tenants, the cap matters.** If 40 or more processes are
+running (workers and hold processes), or any named tenant is waiting for a
+slot, no new tenant starts, and each pass says how many wait. Free slots by
+holding or retiring tenants. Never raise the cap to make room.
+
+### Revoking
+
+- **One new tenant:** add it to `MERRYMEN_ACCOUNTING_HOLD_TENANTS` and deploy.
+  The accounting hold is checked before the rollout, so the tenant is stood
+  down whatever its record says. Removing it from the hold lets the record
+  admit it again.
+- **One new tenant, for good:** delete its row from
+  `fleet_new_tenant_admissions`. The next pass stands its worker down, and
+  since it has a home by then it is never proved new again. It stays held
+  until the list names it.
+- **Every new tenant:** remove `MERRYMEN_ROLLOUT_NEW_TENANTS` and deploy.
+  The records stay, so setting it again re-admits them.
+- **Give one a reviewed level instead:** name it in `MERRYMEN_FLEET_ROLLOUT`.
+- Its owner's `/pause` and `/kill`, a dashboard revoke, an expired key and
+  `FLEET_HALT` stop it exactly as they stop any tenant.
+
+### What it never does
+
+- It never admits a tenant with any history, so it is not a way around
+  attested-gap admission. A pre-incident tenant whose home was lost is caught
+  by its Postgres history. One with no home and no history anywhere has
+  nothing to reconcile, and `registerLedgerSource` gives it the same fresh
+  book it would give any new account.
+- It treats a command an owner queued on the site before their first worker
+  started (an order, a selftest) as history, as `registerLedgerSource` does:
+  a fresh book must not replay it. Such a tenant's line names `agent_commands`.
+  Review it and name it in the list.
+- It never writes to a tenant's home or ledger. The record is the
+  orchestrator's alone: a child has no `DATABASE_URL`, and never sees this
+  variable or the list.
 
 ## The volume steps: adopt, release, re-halt
 

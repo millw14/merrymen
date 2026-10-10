@@ -11,6 +11,7 @@ import { openSecret, sealSecret } from "./store-crypto";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import type { MemorySource } from "./memory-safeguard";
 import type { TenantLease } from "./tenant-lease";
+import { assertNoPendingReceiptAttestation, ensureReceiptAttestationSchema } from "./receipt-attestation-state";
 import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_ADDITIVE_DDL, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 
@@ -347,6 +348,7 @@ export async function ensureLedgerImportSchema(shared: Db, dialect: Dialect = "p
   void dialect;
   await shared.exec(LEDGER_IMPORT_SCHEMA);
   await shared.exec(LEDGER_IMPORT_GENERATIONS_SCHEMA);
+  await ensureReceiptAttestationSchema(shared);
 }
 
 /** The attested-gap tables (ledger-import-schema.ts). Additive; nothing else reads them. */
@@ -403,6 +405,7 @@ export async function stageLedgerImport(o: {
   const a = openArtifact(o.artifact, o.dek), dialect = o.dialect ?? "postgres";
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(o.targetVolumeId) || Date.now() - a.capturedAtMs > 5 * 60_000 || a.capturedAtMs > Date.now() + 10_000) throw refuse();
   await ensureLedgerImportSchema(o.shared, dialect);
+  await assertNoPendingReceiptAttestation(o.shared, a.tenant);
   await o.shared.tx(async db => {
     leaseOkay(o.lease, a.tenant); await o.assertSource();
     if (canonical(await bindings(db, a.tenant, a.smartAccount, dialect, true)) !== canonical(a.bindings)) throw refuse();
@@ -465,8 +468,10 @@ export async function restoreLedgerImport(o: {
   shared: Db; dek: Buffer; lease: TenantLease; dialect?: Dialect;
 }): Promise<"none" | "present" | "restored" | "resumed"> {
   const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
-  leaseOkay(o.lease, tenant); volumeOkay(o.volume, o.home, tenant);
+  leaseOkay(o.lease, tenant);
   await ensureLedgerImportSchema(o.shared, dialect);
+  await assertNoPendingReceiptAttestation(o.shared, tenant);
+  volumeOkay(o.volume, o.home, tenant);
   const file = path.join(o.home, "merrymen.db"), marker = path.join(o.home, LEDGER_IMPORT_PENDING_FILE);
   return o.shared.tx<"none" | "present" | "restored" | "resumed"> (async db => {
     leaseOkay(o.lease, tenant);
@@ -566,16 +571,40 @@ export async function invalidateLedgerImportsUnlessListed(shared: Db, wanted: Re
   for (const row of rows) if (!wanted.has(address(row.tenant))) await invalidateLedgerImport(row.tenant, shared, { beforeMs: listedAtMs, absentOnly: true });
 }
 
+/**
+ * DOES POSTGRES ALREADY HOLD A LEDGER FOR THIS ACCOUNT: a mirror cursor past
+ * zero for the tenant, a row for the account in any table the book mirrors
+ * (discovered_pools is nobody's), or a paper checkpoint. The table that says
+ * so first, or null. The new-book branch of registerLedgerSource refuses on
+ * it, and the orchestrator's admission of unnamed new tenants
+ * (new-tenant-admission.ts) asks the same question through this one function,
+ * so the two can never disagree about what history is. A read that fails
+ * throws, and both callers fail closed on that.
+ */
+export async function sharedLedgerHistory(db: Pick<Db, "prepare">, tenant: string, account: string): Promise<string | null> {
+  const marks = await db.prepare("SELECT last_id FROM mirror_state WHERE tenant = ?").all(tenant) as Array<{ last_id: unknown }>;
+  if (marks.some(m => String(m.last_id) !== "0")) return "mirror_state";
+  for (const table of names.filter(t => t !== "discovered_pools")) {
+    const key = table === "agents" ? "smart_account" : "agent_id";
+    const row = await db.prepare(`SELECT count(*) AS n FROM ${table} WHERE LOWER(${key}) = ?`).get(account) as { n: unknown };
+    if (Number(row.n) !== 0) return table;
+  }
+  const checkpoint = await db.prepare("SELECT 1 FROM paper_checkpoints WHERE LOWER(agent_id) = ? LIMIT 1").get(account);
+  return checkpoint ? "paper_checkpoints" : null;
+}
+
 /** Every genuinely new empty book gets a nonpayload receipt before its first fork. */
 export async function registerLedgerSource(o: {
   tenant: string; smartAccount: string; chainId: number; home: string; volume: LedgerImportVolume;
   shared: Db; lease: TenantLease; dialect?: Dialect;
 }): Promise<void> {
   const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
-  leaseOkay(o.lease, tenant); volumeOkay(o.volume, o.home, tenant);
+  leaseOkay(o.lease, tenant);
+  await ensureLedgerImportSchema(o.shared, dialect);
+  await assertNoPendingReceiptAttestation(o.shared, tenant);
+  volumeOkay(o.volume, o.home, tenant);
   const file = path.join(o.home, "merrymen.db"); if (present(file)) plain(file, false);
   if (readPending(o.home) || present(path.join(o.home, "ledger-source-blocked.json"))) throw refuse();
-  await ensureLedgerImportSchema(o.shared, dialect);
   await o.shared.tx(async db => {
     leaseOkay(o.lease, tenant);
     const current = await grantBinding(db, tenant, dialect, true);
@@ -608,15 +637,7 @@ export async function registerLedgerSource(o: {
       await db.prepare("INSERT INTO tenant_ledger_import_generations(generation,tenant,state) VALUES(?,?,'consumed')").run(generation, tenant);
       leaseOkay(o.lease, tenant); return;
     }
-    const marks = await db.prepare("SELECT last_id FROM mirror_state WHERE tenant = ?").all(tenant) as Array<{ last_id: unknown }>;
-    if (marks.some(m => String(m.last_id) !== "0")) throw refuse();
-    for (const table of names.filter(t => t !== "discovered_pools")) {
-        const key = table === "agents" ? "smart_account" : "agent_id";
-        const row = await db.prepare(`SELECT count(*) AS n FROM ${table} WHERE LOWER(${key}) = ?`).get(account) as { n: unknown };
-        if (Number(row.n) !== 0) throw refuse();
-    }
-    const checkpoint = await db.prepare("SELECT 1 FROM paper_checkpoints WHERE LOWER(agent_id) = ? LIMIT 1").get(account);
-    if (checkpoint) throw refuse();
+    if (await sharedLedgerHistory(db, tenant, account) !== null) throw refuse();
     if (!present(file)) {
       const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); fchmodSync(fd, 0o600); closeSync(fd);
       const created = new DatabaseSync(file);
@@ -766,6 +787,7 @@ export async function registerAttestedGapSource(o: {
   if (readPending(o.home) || present(path.join(o.home, "ledger-source-blocked.json"))) throw refuse();
   const file = path.join(o.home, "merrymen.db");
   await ensureLedgerResumeSchema(o.shared);
+  await assertNoPendingReceiptAttestation(o.shared, tenant);
   const forUpdate = dialect === "postgres" ? " FOR UPDATE" : "";
   return o.shared.tx(async db => {
     leaseOkay(o.lease, tenant);

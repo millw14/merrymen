@@ -610,12 +610,23 @@ both for a repo build rooted at `/gateway` and for a `railway up` run from
 
 **Preserve the volume.** `/data/ios-beta.jsonl` is the iOS beta waiting list
 (`gateway/lib/signups.mjs`), and `/data/partners.jsonl` is the append-only partner
-key registry, including revocations. Nonces, rate limits and the balance cache
+key registry, including revocations, for portal and CLI keys alike. Nonces, rate limits and the balance cache
 are in-process unless shared KV is configured. Losing the waiting-list file
 silently resets the count; losing the partner registry loses issued keys and
 its durable revocation overrides. Re-point the existing service and retain
 `MERRYMEN_DATA_DIR=/data`; check `GET /ios-beta` and a known partner key's `/meta`
 before and after any change to the service's source.
+
+With partner billing (§5d) the same volume also holds `/data/billing.jsonl`,
+the append-only ledger of developer accounts, payments and charges, and
+`/data/usage.json`, the partner request counts. The ledger is the only record
+of who paid: lose it and every transfer ever credited can be credited again.
+Billing stays off unless `MERRYMEN_DATA_DIR` is set as a service variable (the
+`/data` default alone does not count) to a directory that exists on a mounted
+volume: with the volume detached, `/data` is missing or on the container's own
+disk, and billing stays off and says so at boot rather than keep a ledger the
+next deploy wipes. It must never run on a second replica or on a host without
+a persistent disk.
 
 Fallback if a repo build is ever wrong: `railway service source disconnect
 --service merrymen-gateway`, then `cd gateway && railway up`. Rollback through
@@ -630,11 +641,20 @@ grants and partner connections in the shared database; the orchestrator runs
 the normal tenant worker. Deploy the gateway and web changes together. An
 updated gateway alone cannot provide enrollment or chat.
 
+The developer portal at `https://merrymen.dev/api` is a third piece: the
+marketing site (`site/`, its own Vercel project) proxies wallet sign-in and key
+management to the gateway's `/developer/v1` routes, which write keys to the
+same partner registry on the gateway's volume.
+
 | Service | Variable | Requirement |
 | --- | --- | --- |
-| gateway + web | `MERRYMEN_PARTNER_BRIDGE_SECRET` | The same dedicated random secret, at least 32 bytes, on both services. Keep separate from holder/session secrets and never distribute to partners. |
+| gateway + web | `MERRYMEN_PARTNER_BRIDGE_SECRET` | The same dedicated random secret, at least 32 bytes, on both services. Keep separate from holder/session secrets and never distribute to partners. Rotating it voids outstanding enrollment challenges, and `POST /agents` for a user with an unexpired pending authorization fails until its 30 minutes pass. |
 | gateway | `MERRYMEN_PARTNER_APP_ORIGIN` | `https://app.merrymen.dev` (the default); HTTPS required outside localhost development. |
 | web | `MERRYMEN_PUBLIC_ORIGIN` | `https://app.merrymen.dev`, also used for optional hosted onboarding links. |
+| gateway + site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | The same random secret, at least 32 bytes, on the gateway and the site. It proves a request came through the site and cannot sign anyone in on its own. A hash of it is mixed into the developer session key, so rotating it (both services together) signs every developer out while partner keys keep working: the switch for a leaked session cookie. It ends sessions, not what one did: afterwards list the affected developer's keys (portal `GET /keys` or `node partners-cli.mjs list`), revoke any minted while the cookie was exposed, and reissue any it revoked. Unset or shorter, the gateway's `/developer/v1` answers 503 `unavailable` and the site answers 503 "Developer sign-in is temporarily unavailable". The site's `/api` page also reads it when it renders (at build, then at most once a minute) to fetch the plans; without it that page shows the built-in plans table and says paid plans are coming soon. Server-only, never `NEXT_PUBLIC_*`. |
+| site | `MERRYMEN_DEVELOPER_GATEWAY_ORIGIN` | Optional, server-only. Defaults to `https://ai.merrymen.dev`; set it to point a preview or local site at another gateway. Must be a bare `https://` origin (plain `http://` only for `localhost` or `127.0.0.1`); anything else makes the portal answer 503 rather than send the secret elsewhere. |
+| gateway | `MERRYMEN_GATEWAY_SECRET` | Already required for holder tokens. It also peppers every partner key's stored hash and derives the key that signs developer sign-in challenges and sessions, so rotating it invalidates every partner key and signs every developer out. |
+| gateway | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Optional for a single process. Without them (the in-memory store), developer sessions are bound to the process: every gateway restart or deploy signs developers out, because their logouts would not survive it. With KV, sessions and logouts survive deploys, and an unreachable KV makes session checks, logouts and sign-ins answer 503 `unavailable` rather than guess. |
 
 Keep the usual shared `DATABASE_URL`/`MERRYMEN_STORE_DEK` and orchestrator worker
 configuration from the sections above. Web needs an LLM credential for generated
@@ -642,18 +662,213 @@ chat replies; without one, partner chat returns a factual status fallback. The
 bridge secret is never a `NEXT_PUBLIC_*` variable and is not needed by partners.
 The web build includes the browser SDK at `/sdk/merrymen-browser.js`; this static
 module permits browser imports, while authenticated partner calls stay on each
-partner's backend.
+partner's backend. Its first line names the build (`SDK_VERSION`).
 
-Issue partner keys using the gateway CLI and a stable `--app-id`; retain that
-app ID when rotating keys. See [the partner integration guide](../gateway/PARTNER-API.md)
-for issuance, owner consent, embedded setup and API examples. The partner key is
-not a substitute for the owner's signed grant.
+Developers issue their own keys at `https://merrymen.dev/api`: five active keys
+per wallet, scopes `read:agents`, `write:agents` and `chat:agents`, 30 requests
+a minute each while partner billing is off. The console asks for a developer
+account before a new key, and with billing on (§5d) the gateway requires one;
+then the account's plan sets its keys' quota and rate. Sign-in is an ordinary wallet (EOA) signature checked on the
+gateway with no RPC call, so smart-contract wallets cannot sign in and no chain
+endpoint can vouch for a signature. A session lasts up to eight hours; the
+site's logout revokes it on the gateway (best effort, five-second timeout)
+before clearing the cookie. The gateway CLI still issues operator keys, with a
+stable `--app-id` retained across rotations, for other scopes, a custom quota
+or a key no developer wallet owns. See
+[the partner integration guide](../gateway/PARTNER-API.md) for issuance, owner
+consent, embedded setup and API examples. The partner key is not a substitute
+for the owner's signed grant.
+
+Partner chat answers one message per connection at a time, and activation one
+per owner wallet, through Postgres advisory locks that hold across replicas.
+Each web replica holds at most six of these locks at once, four chats and two
+activations, so slow chats never stop activations: a holder pins a connection
+from that replica's Postgres pool (pg's default of ten) for its turn, and four
+connections stay free for everything else. A chat's model call is held to 18
+seconds, and to what is left of the request's 40-second budget. A waiting
+request holds no connection. A chat waits up to 20 seconds and an activation
+up to 10, counting queueing and connection checkout, then gets 409
+`conversation_busy` or `enrollment_busy` with `Retry-After: 2`. Busy answers
+under heavy chat load are this bound working, not a fault.
 
 Verify `GET /partner/v1/health`, then authenticated `/meta`, then an explicitly
 authorized test connection through creation, challenge, activation, worker
-heartbeat and chat. Health and metadata alone do not test the bridge or worker.
-Confirm the reported mode and funding blocker before claiming an agent is
-trading. Disconnecting app access leaves the owner's worker and grant in place.
+heartbeat and chat. Health and metadata alone do not test the bridge or worker:
+both are answered by the gateway without calling web, so a gateway whose
+bridge is broken still reports healthy. Confirm the reported mode and funding
+blocker before claiming an agent is trading. Disconnecting app access leaves
+the owner's worker and grant in place.
+
+**When partner calls fail.** Partners see only the error code and a
+`request_id`; the gateway logs the rest, one line per non-2xx bridge answer,
+starting `[gateway] partner bridge: <METHOD> <route> <request_id> key <keyId>`.
+Grep for the partner's `request_id`. No line means the runtime answered with a
+2xx, or the gateway refused the request itself (an unknown or revoked key, a
+missing scope, a rate limit, an oversize body), which it does not log. What the
+line ends with:
+
+| Log line ends with | Partner sees | Meaning and fix |
+| --- | --- | --- |
+| `not sent: MERRYMEN_PARTNER_BRIDGE_SECRET is unset or under 32 bytes` | 503 `upstream_unavailable` | Set the bridge secret on the gateway. The gateway also says so at boot. |
+| `got no answer: <error name> (<cause>)`, or `answered HTTP <status>, then its body failed: ...` | 503 `upstream_unavailable` | Web unreachable, DNS, a redirect, or no complete answer within 45 seconds. Check `MERRYMEN_PARTNER_APP_ORIGIN` and the web service. |
+| `answered HTTP 401 unauthorized: the runtime refused this gateway, not the partner...` | 503 `upstream_unavailable` | Web refused the bridge signature: the bridge secret differs between the services, or their clocks are more than 60 seconds apart (rarely, a replayed request). The same line with `404 not_found` means web is not in hosted mode (`MERRYMEN_HOSTED=1`). |
+| `answered HTTP <status> <content-type>, not the runtime's JSON` | 503 `upstream_invalid_response` | Something in front of the partner route answered instead of it: a proxy page, or a middleware refusal such as `text/plain` 403 "blocked: cross-site request to the local API", which is what took down every partner POST and DELETE until `/api/partner/*` was exempted from that block. |
+| `answered HTTP <status> <code>` | that status and code | The runtime's own answer, relayed as written; `upstream_unavailable` here means web hit an unexpected error, or lacks the bridge secret itself. |
+
+The gateway also logs at boot when `MERRYMEN_PARTNER_BRIDGE_SECRET` or
+`MERRYMEN_DEVELOPER_PORTAL_SECRET` is unset or under 32 bytes. The site logs
+`[developer] ...` when its portal secret or gateway origin is unusable.
+
+## 5d. Partner API billing
+
+Developers pay for partner API plans (Free, then Crumbs, Loaf and Feast per 30
+days, from `gateway/lib/billing-plans.mjs`) by sending $MERRYMEN from the
+wallet they signed in with to a dedicated payments address, the treasury. The
+gateway verifies each transfer on chain read-only (it never sends a
+transaction and holds no key), keeps an append-only ledger on its volume and
+counts every partner request made with a portal key. It is **off** until the
+gateway's variables below say otherwise. The full operator reference
+(settings and fallbacks, files and locks, log lines, shutdown,
+`billing-cli.mjs`) is [the gateway README](../gateway/README.md#partner-billing);
+what partners see is
+[PARTNER-API.md](../gateway/PARTNER-API.md#plans-and-billing).
+
+### Release gate: the legal pages come first
+
+**Do not set `MERRYMEN_PAYMENTS_TREASURY` in production until the owner has
+updated the site's Terms of Use and Privacy Policy.** Nothing in the code
+enforces this: with billing on, setting a treasury is what opens the pay flow
+on merrymen.dev/api. Today both pages conflict with paid plans:
+
+- **Terms, introduction** (`site/app/terms/page.tsx`, lines 48–56): the scope
+  is the hosted service, its MCP server, the self-hosted software and the
+  website. It does not cover the developer/partner API or paid plans.
+- **Terms, §6 Fees** (lines 128–147): says neither fee is collected and no
+  money moves to us, and that the terms will change before any fee is. That
+  passage is about trading fees, but API plans move $MERRYMEN to a Merrymen
+  payments wallet, and the terms say nothing about them. They need to cover:
+  30-day plans, that every request is metered, and the 402 at quota; that
+  payments are not refunded; that credit stays on the account and is never
+  paid out (and whether it expires); that only transfers from the signed-in
+  wallet are credited, not ones from other wallets, exchanges, smart accounts
+  or swaps; that plan numbers can change from the next charge; pro-rated
+  upgrades, downgrades at renewal, and a renewal's cost shown as due before
+  the period ends; reversals after a chain reorganization, which can leave
+  credit below zero; and operator adjustments and comps.
+- **Terms, §12 Limitation of liability** (line 249): liability is limited to
+  "the fees you have actually paid us in the 12 months before the claim". Plan
+  payments in $MERRYMEN would count as fees paid; the owner has to decide how.
+- **Privacy, §10 This website** (`site/components/PrivacyPolicyDoc.tsx`, lines
+  771–786, served at `/privacy` and `/privacypolicy`): says the developer page
+  keeps the wallet's address and each key's name, permissions and status, and
+  uses the IP briefly to limit sign-in attempts. Billing adds the developer
+  account's name; plan selections; payment records (transaction hash, amount,
+  block number and hash, sending wallet, the payments address it matched, log
+  indexes); charges, reversals, adjustments and comps, with operator notes;
+  per-key request counts (`usage.json`); the IP, for up to 24 hours, under the
+  three-accounts-per-IP-per-day limit; and, in the developer's own browser,
+  the signed-in wallet's address with its unanswered payment hashes in
+  localStorage (`mm_developer_pending_payments`) until each is answered or
+  forgotten.
+- **Privacy, §4 retention table** (lines 511–549): no row for the billing
+  ledger, which is append-only and kept indefinitely as the accounting record
+  (it is replayed from the first line at every boot, so removing lines is not
+  a routine deletion), or for request counts, dropped 30 days after their
+  window ends.
+- **Privacy, §5 providers** (lines 551–575): the payments RPC
+  (`MERRYMEN_PAYMENTS_RPC`, else `MERRYMEN_GATEWAY_RPC`) receives every
+  transaction hash being checked, and is not listed. Pay with wallet also has
+  the developer's own wallet make `eth_accounts`, `eth_chainId` and
+  `balanceOf` requests through that wallet's RPC.
+
+### Settings
+
+| Service | Variable | Requirement |
+| --- | --- | --- |
+| gateway | `MERRYMEN_DATA_DIR` | `/data`, set **as a service variable**, on the service's volume. Left to the default, billing stays off. |
+| gateway | `MERRYMEN_BILLING` | `off` (unset), then `observe`, then `enforce`, as in the steps below. Any other value is off. |
+| gateway | `MERRYMEN_PAYMENTS_TREASURY` | A new address used for API billing and nothing else: any $MERRYMEN transfer to it, at or after the start block, from a wallet that has, or later creates, a developer account can be credited to that account. A multisig or cold wallet is fine; the gateway never needs its key. Only after the release gate above. |
+| gateway | `MERRYMEN_PAYMENTS_START_BLOCK` | Required with the treasury (without it the treasury is ignored and `enforce` runs as `observe`). Robinhood Chain's current block when the treasury is first set; earlier transfers are never credited. Leave it unchanged when rotating. |
+| gateway | `MERRYMEN_PAYMENTS_PREVIOUS_TREASURIES` | Optional, comma-separated: old treasuries still accepted after a rotation. |
+| gateway | `MERRYMEN_PAYMENTS_RPC` | Optional; defaults to `MERRYMEN_GATEWAY_RPC`. Must answer chain 4663 (checked at boot, before each credit and before each reconciliation), or payments are unavailable. Trusted to report receipts. |
+| gateway | `MERRYMEN_PAYMENTS_MIN_CONFIRMATIONS` / `MERRYMEN_PAYMENTS_MIN_AGE_SEC` | Optional: `64` blocks and `120` seconds by default, both required before a transfer is credited. |
+| gateway | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `12` or more. A shutdown lets requests in flight finish, saves the units it gives back, and exits within 10 s; a shorter wait before SIGKILL can charge partners for requests the deploy cut off. Counts of served requests are already on disk. |
+| site | `MERRYMEN_DEVELOPER_PORTAL_SECRET` | As in §5c; the `/api` page also reads it to show the plans. |
+| site | (Vercel function duration) | The `/api/developer/[action]` route sets `maxDuration = 60` and gives a payment check 45 s upstream, since each check reads the chain. The site's Vercel plan must allow a 60-second function. |
+
+Billing runs on **one gateway instance only**. Railway already forbids
+replicas on a service with a volume; keep it that way, and never enable billing
+from `gateway/render.yaml`, which has no disk.
+
+The site may deploy before the gateway. Against a gateway without billing it
+shows the built-in plans table with paid plans coming soon, and keeps the key
+flow it has today.
+
+### Turning it on
+
+1. **Deploy with billing off** (`MERRYMEN_BILLING` unset). Boot logs
+   `[gateway] partner billing: off, nothing is metered`. Partners see no
+   change beyond a new `billing: null` field in `/meta` (the per-IP limit
+   stays 240 a minute; observe and enforce raise it to 600). Developers can
+   already create accounts, and the console asks for one before a new key.
+   Confirm `MERRYMEN_DATA_DIR=/data` is a service variable and set
+   `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.
+   **Deploy the site (Vercel) before step 2.** The gateway deploys on its own,
+   and once billing is on it refuses a new key without an account (409
+   `account_required`); a merrymen.dev build from before accounts cannot
+   create one, so its developers could not mint keys. Check that, signed in,
+   `GET https://merrymen.dev/api/developer/account` answers 404
+   `account_missing` (or the account), not a bare `Not found`.
+2. **Observe** (`MERRYMEN_BILLING=observe`, no treasury yet). Boot logs, on
+   stderr, `[gateway] partner billing: observe, metered, no quota refused, each
+   key at its own rate or its plan's if higher; payments UNAVAILABLE`, which is
+   expected without a treasury. Every portal-key request is now counted and
+   carries the quota headers, `/meta` shows `billing`, and new keys need an
+   account (the console offers to create one). Nothing is refused for quota and
+   no rate limit goes down (the per-IP limit rises to 600, and a paid plan can
+   raise a key's rate). Keep it on for a
+   while; a full 30-day window shows every Free window turning over. Watch
+   `node billing-cli.mjs list` and `show <wallet>` (usage by key) on the
+   gateway (`railway ssh`), and the `[billing]` log lines. Wallets that have
+   keys but no account appear only in `/data/usage.json` (keys
+   `<wallet>|<window start>`).
+3. **Open payments**, once the release gate is met: set the treasury and the
+   start block and redeploy. Boot logs `[billing] PAYMENTS CONFIG RECORDED:
+   treasury 0x…, previous [], start block N`, and the billing line moves to
+   stdout ending `payments to 0x…`. The Plans section at
+   `merrymen.dev/api#plans` stops saying "coming soon" within a minute.
+   Optionally, check one payment end to end from an account you control (at
+   least 1 MERRYMEN).
+4. **Comp existing partners**, if needed, before quotas bite. A developer
+   creates an account in the console first; then
+   `node billing-cli.mjs comp <wallet> <tier> <days> --note "…"` (refused while
+   a period they paid for is running), or `adjust` to add credit.
+5. **Enforce** (`MERRYMEN_BILLING=enforce`). Boot logs `[gateway] partner
+   billing: enforce, quotas enforced; payments to 0x…` on stdout. If it says
+   `observe (MERRYMEN_BILLING="enforce"…)`, the treasury or start block is
+   missing; if it says `payments UNAVAILABLE`, the payments RPC is missing or
+   answers a chain other than 4663 (a `[billing]` line above says which
+   chain); quotas are then enforced while nobody can pay, so go back to
+   observe until it is fixed. From now on a spent quota is a 402, and each
+   account's keys share one per-minute bucket at its plan's rate: a developer
+   with several keys on Free drops from 30 a minute per key to 30 a minute
+   for all of them.
+6. **Watch** for `[billing] PAYMENT REVERSED`, `LEDGER CORRUPT`, `ANOTHER
+   PROCESS APPENDED`, `CLOCK` and `ledger append failed` (what each means is
+   in the gateway README). `node billing-cli.mjs reconcile` re-checks recent
+   payments without writing anything.
+
+**Going back.** Set `MERRYMEN_BILLING` to `observe` or `off` and redeploy.
+The ledger and the counts stay on the volume and are read again when billing
+comes back. While off, nothing is metered, charged or renewed, choosing a plan
+and paying answer 503 `billing_off`, and paid periods still end on their
+dates.
+
+**Rotating the treasury.** Set the new address, move the old one into
+`MERRYMEN_PAYMENTS_PREVIOUS_TREASURIES`, keep the start block, redeploy, and
+keep the old address listed for a while: the console checks the address again
+before paying, but someone who copied it by hand does not. Each change is
+recorded in the ledger (`PAYMENTS CONFIG RECORDED`).
 
 ## 6. Deploy & verify
 - Web comes up at `MERRYMEN_PUBLIC_ORIGIN`; `GET /api/version` returns 200.

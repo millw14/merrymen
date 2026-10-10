@@ -45,11 +45,8 @@ describe("the leaderboard explains its two refusals", () => {
     assert.match(PAGE, /trades no valuation includes yet show Awaiting first valuation/);
   });
 
-  it("says how old the figures are when nothing new has been valued, and only that", () => {
-    // A tooltip held the valuation time, and while no agent was valued every
-    // figure on the board was a day old without a word. The banner states the
-    // time — and only the time: nothing here records why valuations stopped.
-    assert.match(PAGE, /No new valuations since \{shortDateTime\(stale \* 1000\)\}\. Each figure is as of its agent&apos;s last valuation\./);
+  it("carries no staleness banner: the leaderboard stays clean and each row's title says when", () => {
+    assert.doesNotMatch(PAGE, /No new valuations since/);
   });
 });
 

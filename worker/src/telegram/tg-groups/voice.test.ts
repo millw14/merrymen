@@ -912,3 +912,90 @@ describe("say", () => {
     assert.equal(await say({ kind: "answer", mood: "normal" }, null as never, model, gate), null);
   });
 });
+
+// ── the collapse permit (docs/tg-groups.md "Rugged coins", Milla 2026-10-09) ──
+
+describe("the collapse permit: 'rugged' and one playful brag, only for an answer or an ambient line", () => {
+  const measured = { coin: "AUTON", source: "measured" as const, atMs: T0, brag: true };
+  const said = { coin: "AUTON", source: "room" as const, atMs: T0, brag: true };
+
+  it("the RUGGED block appears only with a permit, and only for an answer or an ambient line", () => {
+    const answer = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ collapse: measured }))!;
+    assert.match(answer.prompt, /RUGGED: «AUTON» is measured as collapsed/);
+    assert.match(answer.prompt, /you may say it rugged or got rugged, and you may add one playful Merrymen brag in fresh words of your own/);
+    assert.match(answer.prompt, /Still never: say any person, dev, team, insider, whale or trader rugged/);
+    assert.match(answer.prompt, /Merrymen's own coin included/);
+    assert.match(answer.prompt, /Don't explain why it fell/);
+    assert.match(buildPrompt({ kind: "ambient", topic: "coin" }, ctx({ collapse: measured }))!.prompt, /RUGGED:/);
+    assert.match(buildPrompt({ kind: "ambient", topic: "banter" }, ctx({ collapse: said }))!.prompt, /RUGGED: people here say «AUTON» rugged; you have not measured it\./);
+    assert.doesNotMatch(buildPrompt({ kind: "answer", mood: "normal" }, ctx())!.prompt, /RUGGED/);
+    for (const intent of [{ kind: "roast", owner: false }, { kind: "kind" }, { kind: "answer", mood: "private-ask" }, { kind: "coin-ack" }, { kind: "coin-passed", notes: [] }, { kind: "faded-again" }] as TgIntent[]) {
+      const p = buildPrompt(intent, ctx({ collapse: measured, coinName: "AUTON" }));
+      assert.ok(!p || !/RUGGED/.test(p.prompt), intent.kind);
+    }
+  });
+
+  it("no digit anywhere in a prompt with a permit, and the system prompt is unchanged byte for byte", () => {
+    const withIt = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ collapse: measured }))!;
+    const without = buildPrompt({ kind: "answer", mood: "normal" }, ctx())!;
+    assert.ok(!/\p{N}/u.test(withIt.prompt), withIt.prompt);
+    assert.equal(withIt.system, without.system);
+    assert.match(withIt.system, /rug, scam/);
+  });
+
+  it("with the brag spent there is no brag sentence", () => {
+    const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ collapse: { ...measured, brag: false } }))!;
+    assert.doesNotMatch(p.prompt, /playful Merrymen brag/);
+    assert.match(p.prompt, /You made a Merrymen joke lately: none this time\./);
+  });
+
+  it("every template entry still passes with no permit (the pool proof's own context)", () => {
+    for (const intent of ALL_INTENTS) for (const e of templatePool(intent, ctx())) assert.ok(admitTgLine(e, gateFor(intent, ctx())).ok, `${intent.kind}: ${e}`);
+  });
+});
+
+describe("say with a collapse permit: the gate gets it for an answer, never for a roast", () => {
+  const realFetch = globalThis.fetch;
+  let home: string;
+  let store: TgGroupsStore;
+  let gate: TgModelGate;
+  let content = "";
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tg-voice-rug-"));
+    store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => T0, debounceMs: 60_000 });
+    store.ensureRoom(CHAT, { title: "frens", kind: "supergroup" });
+    gate = new TgModelGate(store, { perDay: 100, now: () => T0, log: () => {} });
+    globalThis.fetch = (async () => ({ ok: true, json: async () => ({ choices: [{ message: { content } }] }) })) as never;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+  const c = (over: Partial<SpeakCtx> = {}) => ctx({ room: store.room(CHAT)!, ...over });
+  const permit = { coin: "AUTON", source: "measured" as const, atMs: T0, brag: true };
+
+  it("an answer may say it rugged with a brag; a roast may not; no permit, no rug", async () => {
+    content = "rugged cause it wasn't merrymen 😤";
+    assert.equal(await say({ kind: "answer", mood: "normal" }, c({ collapse: permit }), model, gate), "rugged cause it wasn't merrymen 😤");
+    assert.notEqual(await say({ kind: "roast", owner: false }, c({ collapse: permit }), model, gate), "rugged cause it wasn't merrymen 😤");
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c(), model, gate), "rugged cause it wasn't merrymen 😤");
+    content = "the dev rugged it";
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: permit }), model, gate), "the dev rugged it");
+    content = "auton rugged lol";
+    assert.equal(await say({ kind: "ambient", topic: "banter" }, c({ collapse: { ...permit, brag: false } }), model, gate), "auton rugged lol");
+    content = "should've been a merrymen coin";
+    assert.equal(await say({ kind: "ambient", topic: "banter" }, c({ collapse: { ...permit, brag: false } }), model, gate), null, "brag spent: silence for an ambient line");
+  });
+
+  it("the room's other coins reach the gate with the permit: a rug word beside one is never said (review r2)", async () => {
+    content = "auton rugged, pons is cooked";
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: { ...permit, others: ["pons"] } }), model, gate), "auton rugged, pons is cooked");
+    assert.equal(await say({ kind: "answer", mood: "normal" }, c({ collapse: permit }), model, gate), "auton rugged, pons is cooked", "without the room's other coins the gate cannot know pons");
+  });
+
+  it("a coin named like someone being talked to is never the permit's subject", async () => {
+    content = "alice rugged lol";
+    assert.notEqual(await say({ kind: "answer", mood: "normal" }, c({ collapse: { ...permit, coin: "alice" }, senderName: "alice" }), model, gate), "alice rugged lol");
+  });
+});

@@ -27,7 +27,7 @@
  * allowance (a reserve the gate checks where it takes the allowance), so
  * routing never spends what the lines that must be written need.
  */
-import { consents, deskNameOk } from "./detect";
+import { consents, deskNameOk, fomoFactsOf, thesesQuotesOf } from "./detect";
 import { INVISIBLE, promptSafe } from "./memory";
 import { callChoice, type TgChoiceSpec, type TgModel, type TgModelGate, type TgModelReserve } from "./model";
 import type { TgBoardRow, TgFomoChain, TgFomoRequest, TgLine, TgRoom, TgTraderAbout } from "./types";
@@ -97,7 +97,7 @@ export function routeSpec(can: RouteServes): TgChoiceSpec {
       properties: {
         action: { type: "string", enum: routeActions(can) },
         board: { type: "string", enum: ["trending", "graduated", "most_held"] },
-        aspect: { type: "string", enum: ["theses", "buyers", "sellers", "activity", "research"] },
+        aspect: { type: "string", enum: ["theses", "buyers", "sellers", "activity", "research", "facts"] },
         side: { type: "string", enum: ["buy", "sell"] },
         chain: { type: "string", enum: [...ROUTE_CHAINS] },
         coin: { type: "string", maxLength: 24 },
@@ -112,7 +112,7 @@ const ACTION_LINES: Record<RouteAction, string> = {
   chat: "chat: anything else: banter, opinions, jokes, life, questions about you or the people here, a feeling of fomo (\"i have fomo\"), or anything you are not sure about.",
   fomo_leaderboard: "fomo_leaderboard: who the best or top traders on Fomo are, who is winning, who made the most; also when they ask what the top one made money on, holds or traded.",
   fomo_board: "fomo_board: Fomo's coin lists: what is trending (board trending), newly graduated or launched coins (board graduated), the most held coins (board most_held). Put a chain in chain only when they want one chain's coins (\"robinhood coins\", \"on solana\").",
-  fomo_coin: "fomo_coin: Fomo's view of ONE coin: its theses (aspect theses), who is buying it (buyers), who is selling it (sellers), a full research dive (research), or what is going on with it (activity). Put its name in coin.",
+  fomo_coin: "fomo_coin: Fomo's view of ONE coin: its theses (aspect theses), who is buying it (buyers), who is selling it (sellers), a full research dive (research), what is going on with it (activity), or what happened to it, why it fell or rugged, or its numbers (facts). Put its name in coin.",
   fomo_crowd: "fomo_crowd: what Fomo's traders as a group are buying or selling (side buy or sell). Put a chain in chain only when they want one chain's coins.",
   fomo_small_coins: "fomo_small_coins: small or early coins getting attention on Fomo. Put a chain in chain only when they want one chain's coins.",
   fomo_trader: "fomo_trader: ONE Fomo trader by name: who they are or whether you know them (about profile), what they hold (about holdings), what they bought or sold lately (about trades), what they made or lost money on, their P&L, how much they made or how they are doing (about earnings). Put the name in trader.",
@@ -465,7 +465,7 @@ export function rowIn(text: unknown): TgBoardRow | undefined {
   return { rank, about, ...(side ? { side } : {}) };
 }
 
-const ASPECTS: ReadonlySet<string> = new Set(["theses", "buyers", "sellers", "activity", "research"]);
+const ASPECTS: ReadonlySet<string> = new Set(["theses", "buyers", "sellers", "activity", "research", "facts"]);
 
 /**
  * The model's choice as something the handler can run, or null. Null for
@@ -505,8 +505,15 @@ export function parseRoute(raw: unknown, ctx: RouteCtx): TgRoute | null {
     case "fomo_coin": {
       const coin = groundedCoin(o.coin, ctx);
       if (!coin) return null;
-      const aspect = typeof o.aspect === "string" && ASPECTS.has(o.aspect) ? (o.aspect as "theses" | "buyers" | "sellers" | "activity" | "research") : "activity";
-      return fomo({ kind: "coin", symbol: coin.toUpperCase(), aspect });
+      const aspect = typeof o.aspect === "string" && ASPECTS.has(o.aspect) ? (o.aspect as "theses" | "buyers" | "sellers" | "activity" | "research" | "facts") : "activity";
+      // A chain only from the asker's own words, as for a board (groundedChain).
+      const chain = groundedChain(o.chain, ctx);
+      // The theses themselves only when the line's own words ask for them
+      // (detect.ts thesesQuotesOf): never a model's field, whatever it sends.
+      const quotes = aspect === "theses" ? thesesQuotesOf(ctx.line, ctx.selfNames) : null;
+      // What kind of facts question, from the line's own words; "what happened" by default.
+      const ask = aspect === "facts" ? fomoFactsOf(ctx.line, ctx.selfNames)?.ask ?? "what" : undefined;
+      return fomo({ kind: "coin", symbol: coin.toUpperCase(), ...(chain ? { chain } : {}), aspect, ...(quotes ? { quotes: quotes.n } : {}), ...(ask ? { ask } : {}) });
     }
     case "fomo_crowd": {
       const window = windowIn(line);

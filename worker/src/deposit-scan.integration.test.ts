@@ -186,7 +186,7 @@ describe("receipt capital scan", () => {
     const failure = block.slice(block.lastIndexOf("} catch (e) {"));
     assert.match(failure, /throw new Error\(`chain scan held/);
     assert.doesNotMatch(failure.slice(0, failure.indexOf("chainScanCursor = head;")), /return false/);
-    const look = source.slice(source.indexOf("const covered = scan ? await scanChainFlows(scan) : false;"));
+    const look = source.slice(source.indexOf("let covered = false;"));
     assert.ok(look.indexOf("const listedAt") < look.indexOf("takeSettlements()"));
     const retry = source.slice(source.indexOf("const reconcileFlowsOrRetry = async"), source.indexOf("let highWaterMarkUsdg = 0n;"));
     assert.match(retry, /catch \(e\) \{[\s\S]*return "held";/);

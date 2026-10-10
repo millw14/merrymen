@@ -28,6 +28,7 @@ import {
   extractCas,
   extractCashtags,
   fomoAskOf,
+  fomoFactsOf,
   fomoFollowUpOf,
   greetingOf,
   hasForeignMint,
@@ -46,11 +47,16 @@ import {
   lineMood,
   metaLineOf,
   offerShaped,
+  pushbackOf,
   reactionOnly,
   routeWorthy,
   selfNamesOf,
   type BotSelf,
+  roomSaysRugged,
+  thesesQuotesOf,
+  quoteAskByCode,
 } from "./detect";
+import { quotesAskedIn } from "../../fomo/intent";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1137,4 +1143,145 @@ describe("metaLineOf: a line about its own silence (live 2026-10-07)", () => {
   ];
   for (const t of no) it(`content of its own: ${JSON.stringify(t)}`, () => assert.equal(metaLineOf(t, self), null));
   it("never throws on junk", () => assert.equal(metaLineOf(undefined), null));
+});
+
+describe("pushbackOf (the AUTON incident, 2026-10-08)", () => {
+  it("pushing back on an answer: read it again", () => {
+    for (const t of [
+      "there has to be thesis.", "there must be some", "check again", "pine look again pls", "are you sure?", "u sure", "that's wrong", "that’s not right", "try again", "refresh it", "recheck", "there are definitely theses",
+      "pine, check again", "@pinebot are you sure?", "bro there has to be thesis on $PONS", "hmm are you sure? check again", "lol that's cap",
+    ]) {
+      assert.equal(pushbackOf(t, ["pine"]), true, t);
+    }
+  });
+  it("an ordinary line is not one", () => {
+    for (const t of ["what are people saying about pons", "thanks", "lol", "how's the market", "send it", "has to be the dev", "i'm sure it'll pump"]) {
+      assert.equal(pushbackOf(t), false, t);
+    }
+  });
+  it("a pushback inside other words is banter, never one (review on #306)", () => {
+    for (const t of [
+      "not right now", "i bought the wrong one lol", "wrong chain", "no way i'm selling", "try again later", "there are some whales buying", "refresh my memory, what's pons",
+      "are you sure we should buy", "there must be some mistake", "check again tomorrow", "u sure you're not rugging us", "impossible", "no way", "that one's wrong lol",
+    ]) {
+      assert.equal(pushbackOf(t, ["pine"]), false, t);
+    }
+  });
+});
+
+describe("the theses themselves, a coin's facts, and a room saying it rugged (Milla, 2026-10-09)", () => {
+  const names = ["Shogun", "@shogunbot"];
+  it("the live lines reach the research as follow-ups, and two of them ask for the theses themselves", () => {
+    for (const t of ["can you list the last 10", "show me these thesis, dont summarise", "what are people saying about it on thesis on fomo"]) {
+      assert.equal(fomoFollowUpOf(t, names), true, t);
+    }
+    assert.deepEqual(thesesQuotesOf("can you list the last 10", names), { n: 10, asked: 10 });
+    assert.deepEqual(thesesQuotesOf("show me these thesis, dont summarise", names), { n: 10, asked: 10 });
+    assert.equal(thesesQuotesOf("what are people saying about it on thesis on fomo", names), null, "the digest stays the default");
+  });
+
+  it("the quote cue here agrees with the planner's (fomo/intent.ts), row for row", () => {
+    const rows = [
+      "can you list the last 10", "show me these thesis, dont summarise", "what did they say exactly", "show me the last 5", "list the last 25 theses on $AUTON",
+      "list the last ten", "give me the newest three", "quote them", "word for word pls", "in their own words", "don't summarise it", "no summary, the actual theses",
+      "show me them all", "what are people saying about it", "summarise them", "show me the data", "what happened in the last 10 minutes", "any theses?",
+      "what are the theses on $AUTON", "theses on $AUTON in the last 24h", "list the trending coins", "the last one",
+    ];
+    for (const t of rows) assert.deepEqual(thesesQuotesOf(t, names), quotesAskedIn(t), t);
+  });
+
+  it("a list or a 'last one' about something else is never quotes, nor a follow-up for a list alone (review, 2026-10-09)", () => {
+    for (const t of ["shogun can you list some good movies?", "shogun can you list your favourite coins?", "shogun who was the last one to sell?", "what was the latest one?", "shogun show me the last 5 buys", "can you list the last 10 sellers", "who are the last 5 buyers?", "the last one"]) {
+      assert.equal(thesesQuotesOf(t, names), null, t);
+      assert.deepEqual(thesesQuotesOf(t, names), quotesAskedIn(t.replace(/^shogun /u, "")), t);
+    }
+    assert.equal(fomoFollowUpOf("shogun can you list some good movies?", names), false);
+    assert.equal(fomoFollowUpOf("shogun can you list your favourite coins?", names), false);
+    for (const t of ["can you list the last 10", "pls list", "shogun list them", "show me the last 5"]) {
+      assert.ok(thesesQuotesOf(t, names), t);
+      assert.equal(fomoFollowUpOf(t, names), true, t);
+    }
+  });
+
+  it("an explicit quote ask reaches the research: 'quotes pls', 'no summary, just the posts', 'last 10?', 'quote the theses on …' (review, 2026-10-09)", () => {
+    for (const t of ["quotes pls", "word for word pls", "no summary, just the posts", "the last 10 please", "last 10?"]) assert.equal(fomoFollowUpOf(t, names), true, t);
+    for (const t of ["nice quote", "the posts are mid", "my last 2 trades were trash", "the last one lol", "gm pls"]) assert.equal(fomoFollowUpOf(t, names), false, t);
+    assert.notEqual(fomoAskOf("quote the theses on $AUTON on solana on fomo", names), null);
+    assert.notEqual(fomoAskOf("shogun quote the theses on $AUTON on solana on fomo", names), null);
+    assert.equal(fomoAskOf("quote me on that", names), null);
+  });
+
+  it("quoteAskByCode: an explicit ask or a bare count, never another 'last N' (review, 2026-10-09)", () => {
+    for (const t of ["show me the last 5", "can you list the last 10", "list them", "shogun show me the last 5", "the last 10 please", "show me these thesis, dont summarise", "what did they say exactly", "quote them"]) {
+      assert.equal(quoteAskByCode(t, names), true, t);
+    }
+    for (const t of ["who were the last 3 on the leaderboard?", "what about the last 2 traders", "what were kaleo's last 3 trades?", "what about the last 5 buyers", "list the trending coins", "the last one lol"]) {
+      assert.equal(quoteAskByCode(t, names), false, t);
+    }
+  });
+
+  it("'summarise them' and 'don't summarise' are asked even with no question mark", () => {
+    assert.equal(fomoFollowUpOf("summarise them", names), true);
+    assert.equal(fomoFollowUpOf("dont summarise", names), true);
+    assert.equal(fomoFollowUpOf("lol summaries are mid", names), false);
+    for (const t of ["shogun recap them", "shogun tldr", "shogun sum them up"]) assert.equal(fomoFollowUpOf(t, names), true, t);
+  });
+
+  it("fomoFactsOf: what happened, why, the data, the dev; never a statement or the market", () => {
+    const rows: Array<[string, ReturnType<typeof fomoFactsOf>]> = [
+      ["what happened to auton", { ask: "what", coin: "AUTON" }],
+      ["what happened to $AUTON?", { ask: "what", coin: "AUTON" }],
+      ["shogun what happened to it", { ask: "what", coin: null }],
+      // The present is the coin's activity on Fomo, never its facts.
+      ["what's happening with pons", null],
+      ["what's happening with $AUTON on solana on fomo?", null],
+      ["what went wrong with pons?", { ask: "what", coin: "PONS" }],
+      ["why did it rug", { ask: "why", coin: null }],
+      ["why did auton rug?", { ask: "why", coin: "AUTON" }],
+      ["did auton rug?", { ask: "why", coin: "AUTON" }],
+      ["show me the data", { ask: "data", coin: null }],
+      ["facts?", { ask: "data", coin: null }],
+      ["did the dev dump?", { ask: "dev", coin: null }],
+      ["the dev dumped lol", null],
+      ["auton rugged", null],
+      ["what happened to the market today", null],
+      ["what happened to sol", null],
+      // A person, the room or anything but a coin, and a bare "facts" (review, 2026-10-09).
+      ["shogun what happened to you last night?", null],
+      ["what happened to him?", null],
+      ["what went wrong with the trade?", null],
+      ["what happened to the fomo leaderboard?", null],
+      ["why did he dump?", null],
+      ["facts", null],
+      ["show me the numbers on pepe", { ask: "data", coin: "PEPE" }],
+      ["what are the facts on bonk?", { ask: "data", coin: "BONK" }],
+      ["what happened to the coin?", { ask: "what", coin: null }],
+      ["why did the coin dump?", { ask: "why", coin: null }],
+      ["show me the data on it", { ask: "data", coin: null }],
+    ];
+    for (const [t, want] of rows) assert.deepEqual(fomoFactsOf(t, names), want, t);
+  });
+
+  it("roomSaysRugged: a statement that a coin rugged, never a question, a negation, a maybe or a person", () => {
+    const rows: Array<[string, ReturnType<typeof roomSaysRugged>]> = [
+      ["auton rugged lol", { coin: "AUTON" }],
+      ["auton just got rugged", { coin: "AUTON" }],
+      ["it rugged", { coin: null }],
+      ["full rug lol", { coin: null }],
+      ["this was a rug", { coin: null }],
+      ["did it rug?", null],
+      ["not a rug", null],
+      ["it didn't rug", null],
+      ["this could rug", null],
+      ["the dev rugged it", null],
+      ["they rugged", null],
+      ["rugby is on", null],
+      // A subject that names no coin is no pointer at the room's (review, 2026-10-09).
+      ["the market rugged today", null],
+      ["everyone rugged lol", null],
+      ["crypto rugged", null],
+      ["the price rugged", null],
+    ];
+    for (const [t, want] of rows) assert.deepEqual(roomSaysRugged(t, names), want, t);
+  });
 });

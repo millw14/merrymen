@@ -436,7 +436,15 @@ export interface TgDeskThinkRequest {
 export type TgFomoRequest =
   | { kind: "leaderboard"; window?: "24h" | "7d" | "30d" | "all"; row?: TgBoardRow }
   | { kind: "board"; board: "trending" | "graduated" | "most-held"; chain?: TgFomoChain }
-  | { kind: "coin"; symbol: string; aspect: "theses" | "buyers" | "sellers" | "activity" | "research" }
+  /**
+   * One coin. `chain` only when the line's own words name it (route.ts
+   * groundedChain). `quotes`: its theses themselves, how many (1 to 10), set
+   * only by code from the line's own words (detect.ts thesesQuotesOf), never
+   * by a model. Aspect "facts" is what happened to it, as measured market
+   * facts (tg-fomo-port.ts, desk/facts.ts), with `ask` the kind of question;
+   * it never reaches the Fomo planner.
+   */
+  | { kind: "coin"; symbol: string; chain?: TgFomoChain; aspect: "theses" | "buyers" | "sellers" | "activity" | "research" | "facts"; quotes?: number; ask?: "what" | "why" | "data" | "dev" }
   | { kind: "crowd"; side: "buy" | "sell"; window?: "24h" | "7d" | "30d"; chain?: TgFomoChain }
   | { kind: "small-coins"; chain?: TgFomoChain }
   | { kind: "about" }
@@ -515,9 +523,70 @@ export interface TgThesesMaterial {
   samples: string[];
 }
 
+/**
+ * A COIN'S THESES, QUOTED (Milla, 2026-10-09: on the owner's explicit ask
+ * only, and said to her DM, never a room: "Owner's DM"). THIRD-PARTY WORDS: each quote is one stranger's thesis, cleaned (links,
+ * addresses, handles, $tags and markup out), cut to at most ~160 characters,
+ * pre-gated by the port as the `quote` kind and gated again by the handler
+ * (quotes.ts), dropped and never repaired. Never a trader's own theses, never
+ * the coin's dev's own posts. `who` is a sayable public handle or "a trader".
+ */
+export interface TgThesesQuotes {
+  /** The coin's plain name (never an address). */
+  coin: string;
+  /** Its chain in words ("Solana"), or "". */
+  where: string;
+  /** What the line asked for (may be more than `n`). */
+  asked: number;
+  /** How many of the newest were considered: min(asked, 10, rows read). */
+  n: number;
+  quotes: { who: string; age: string; text: string }[];
+  /** Of the newest `n`, how many were left out by a check. */
+  leftOut: number;
+  /** The provider's count of the coin's theses, when it is more than `n`. */
+  total: number | null;
+}
+
+/** What a single-coin answer was about: its theses (the digest), its theses quoted, its activity, a research dive, or its facts. */
+export type TgFomoCoinAspect = "theses" | "quotes" | "activity" | "research" | "facts";
+
+/**
+ * THE COLLAPSE PERMIT (docs/tg-groups.md "Rugged coins"; Milla, 2026-10-09):
+ * the persona may say this coin "rugged", and add a playful Merrymen brag,
+ * because a facts lookup measured its collapse ("measured") or someone in the
+ * room said it rugged ("room"). A sayable name only: no figure, no address.
+ * `brag`: false when a brag went out lately (none back to back).
+ */
+export interface TgCollapse {
+  coin: string;
+  source: "measured" | "room";
+  atMs: number;
+  brag: boolean;
+  /** The other coins the room knows by name: a rug word beside one of them carries the rug to a coin nobody measured (review r2). */
+  others?: string[];
+  /** Names the room has heard from it as people (a quote's author, a board's trader): never beside the rug word (review r2). */
+  people?: string[];
+}
+
 export interface TgFomoAnswer {
   text: string;
   deflect: boolean;
+  /** A coin's theses quoted, on the owner's explicit ask only (quotes.ts words them for her DM); `text` is the digest, the fallback. */
+  quotes?: TgThesesQuotes;
+  /**
+   * The one coin a single-coin answer is about (theses, quotes, activity,
+   * research or facts): its plain symbol and chain, never an address. The
+   * handler remembers it by message, so "what happened to it" under the
+   * answer knows the coin.
+   */
+  coin?: { symbol: string; chain?: TgFomoChain; aspect: TgFomoCoinAspect };
+  /**
+   * A facts answer's measurement: whether the coin collapsed (desk/facts.ts
+   * collapseOf), on which chain, and when that was read. The handler sets or
+   * clears the room's collapse permit from it (WP9), for that chain's coin
+   * only; never a figure.
+   */
+  collapse?: { coin: string; chain?: TgFomoChain; collapsed: boolean; atMs: number };
   /** A coin's theses, for the group model to put in its own words (theses.ts); `text` is the code digest. */
   theses?: TgThesesMaterial;
   /** Only when the owner asked (`owner` on the ask): her next moves. */
@@ -562,6 +631,13 @@ export interface TgFomoPort {
     request?: TgFomoRequest;
     /** The asker is the owner (trusted sender id, never through a chat): her moves come back too. */
     owner?: boolean;
+    /**
+     * The asker pushed back on the last research answer ("there has to be
+     * theses", "check again"): read again rather than serve a held "nothing
+     * here" (fomo/chat.ts retryEmpty). Never a forced refresh: a copy with
+     * something in it keeps its window, the room's two hours included.
+     */
+    fresh?: boolean;
     chatId: number;
     threadId?: number;
     timeoutMs?: number;

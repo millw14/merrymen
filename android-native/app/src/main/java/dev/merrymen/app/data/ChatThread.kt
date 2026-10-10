@@ -773,7 +773,7 @@ class ChatThread internal constructor(
           _card.value = out.command?.let { PendingCard(it, Scope(key, ownerTurn.get(), on, chatCard = true)) }
         }
         is Asked.Failed -> {
-          val line = failureLine(out.failure, out.status, out.kind, out.provider)
+          val line = failureLine(out.failure, out.status, out.kind, out.provider, out.house)
           val retry = if (retryHelps(out.failure, out.kind)) q else null
           append(key, ChatLine(lineId("agent"), "agent", clock(), line, failed = out.failure, retry = retry))
           _draft.update { d -> if (d.isNotBlank()) d else q }

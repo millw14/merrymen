@@ -26,6 +26,8 @@ import { pausedRecovery, recoveryAutonomy, recoveryFunds } from "./recovery-view
 import { workerSilentSince } from "./worker-stale";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
+import { workerHeardFromOf } from "./chat-payload";
+import { agentDownOf } from "./agent-status";
 import { chatTape } from "./chat-thread";
 import "./chat.css";
 import {
@@ -473,7 +475,20 @@ export function App() {
   }), recovery);
   // `recoveryFunds` from the same `account` as `recovery`, so the notice never
   // pairs one tenant's hold with another read's account or cash.
+  // `workerHeardFrom` from the same answer as the verdict: whether ANY beat
+  // ever landed, which IDLE alone cannot say — a never-started agent and one
+  // before its first pass both wear it. The chat needs the difference.
+  // See workerHeardFromOf: only an explicit null is "never", absent is unknown.
+  // `agentDown` from the same answer too, for the Telegram link-code wait on
+  // Home and in Settings. A recovery hold is its own reason: the held tenant
+  // is not admitted, nothing runs its worker, and the recovery listener links
+  // no new chat (agent-status.ts AgentDown).
+  // Settings can open before a portfolio exists or its feed answers. Its
+  // Telegram wait depends on the authoritative grants read alone.
+  const agentDown = recovery ? "recovery" as const : agentDownOf(account?.status, Date.now());
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
+    workerHeardFrom: workerHeardFromOf(account.status),
+    agentDown,
     ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
@@ -520,6 +535,7 @@ export function App() {
         <DesktopSidebar
           reads={live.reads}
           retired={live.retired}
+          retiredAgents={live.retiredAgents}
           mine={displayMine}
           hasAgent={!!mine}
           tokens={live.tokens}
@@ -568,7 +584,7 @@ export function App() {
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
         {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
-        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
+        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings} agentDown={agentDown}/>}
         {screen.kind === "grant" && <Wallet key={epoch}/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
@@ -577,6 +593,7 @@ export function App() {
             theses={live.theses}
             read={live.reads.board}
             retired={live.retired}
+            retiredAgents={live.retiredAgents}
             mine={mine}
             tokenTab={tokenTab}
             onTokenTab={setTokenTab}

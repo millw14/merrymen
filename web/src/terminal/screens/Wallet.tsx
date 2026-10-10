@@ -3,7 +3,7 @@
 import Link from "../Link";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
-import { revokeFromBrowser } from "@/lib/revoke-client";
+import { assertRevocationFunded, revokeFromBrowser } from "@/lib/revoke-client";
 import { stopAgentForReplacement } from "@/lib/stop-agent";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
@@ -900,6 +900,11 @@ export default function GrantPage() {
     setStatus("starting…");
     try {
       await verifyCurrentAccount();
+      // Every network revoked below must be able to pay its own fee before the
+      // service is stopped; an empty account would be stopped for nothing.
+      for (const network of new Set([previousGrant?.chainId ?? selectedChain, selectedChain])) {
+        await assertRevocationFunded({ smartAccount: expectedAccount, chainId: network });
+      }
       const options = {
         caps,
         onStatus: setStatus,
@@ -1061,6 +1066,11 @@ export default function GrantPage() {
         }
       }
       if (autonomousTrencher && !TRENCHER_FACTORY) throw new Error("The verified Trencher deployment is unavailable; your existing permission has not been replaced.");
+      // Revocation is self-funded on every network it runs on. An account with
+      // no ETH is refused here, before the stop below leaves its agent idle.
+      for (const network of new Set([grant.chainId, chainId])) {
+        await assertRevocationFunded({ smartAccount: grant.smartAccount as `0x${string}`, chainId: network });
+      }
       // FETCH SETTINGS AT CLICK TIME, not from mount state. This is the exact
       // button an owner presses right after saving a new token or the adapter
       // address in /settings — and the mount-time fetch predates that save, so

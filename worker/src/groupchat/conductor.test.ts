@@ -1283,6 +1283,43 @@ describe("the model", () => {
     sim.close();
   });
 
+  it("an account held over billing pauses the model fifteen minutes at a time, and the same process finds it again once paid", async () => {
+    // Groq's words for the house account on 2026-10-09: a 400, which used to
+    // be "other" — six failed lines before any pause. A bill is settled by
+    // paying it, not by a restart, so it must never be "off until restart".
+    const held =
+      "groq 400 — organization_delinquent: Organization has been restricted because of overdue payment(s). " +
+      "Please update the payment method at https://console.groq.com/settings/billing/manage and then contact support.";
+    const asks: number[] = [];
+    let clock = T0;
+    let paid = false;
+    const llm = async () => {
+      asks.push(clock);
+      if (!paid) throw new Error(held);
+      return MODEL_LINES[asks.length % MODEL_LINES.length]!;
+    };
+    const tick = (now: number) => {
+      clock = now;
+    };
+    const sim = new Sim(awakeFleet(4, 0x8c), { creds: CREDS, llm, seed: 33 });
+    await sim.setup();
+    await sim.run(T0, T0 + HOUR, 15 * SEC, tick);
+    assert.ok(asks.length >= 2, `asked ${asks.length} times in an hour: the hold is probed again, not given up on`);
+    for (let i = 1; i < asks.length; i++) {
+      assert.ok(asks[i]! - asks[i - 1]! >= 15 * MIN, `asked again after ${(asks[i]! - asks[i - 1]!) / MIN} minutes`);
+    }
+    assert.ok(sim.logs.some((l) => /model paused 15m \(billing hold\)/.test(l)), sim.logs.join(" | "));
+    assert.ok(!sim.logs.some((l) => /until restart/.test(l)), "a bill is not a key to replace");
+    assert.ok(sim.agentRows().some((r) => r.created_at_ms > asks[0]!), "templates carried the room");
+
+    // Paid. The SAME conductor — no redeploy — speaks with the model again.
+    paid = true;
+    const before = asks.length;
+    await sim.run(T0 + HOUR, T0 + 2 * HOUR, 15 * SEC, tick);
+    assert.ok(asks.length - before >= 2, `${asks.length - before} model calls in the hour after the bill was paid`);
+    sim.close();
+  });
+
   it("a model that keeps answering nothing is paused like a failing one", async () => {
     const asks: number[] = [];
     let clock = T0;
