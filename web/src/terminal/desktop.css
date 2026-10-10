@@ -1,0 +1,2005 @@
+/*
+ * THE DESKTOP CHROME, TERMINAL STYLE: the header strip and the left sidebar.
+ *
+ * Imported last from app/layout.tsx on purpose: terminal.css and polish.css
+ * restyle these in several separate @media blocks, and the latest source
+ * order wins at equal specificity. Everything the desktop chrome looks like on
+ * a wide viewport is decided here, so a reviewer has one file to read.
+ *
+ * The look: no box around the column, no pills. Section names are small
+ * tracked caps on a hairline; token rows are ONE LINE EACH — a logo the height
+ * of the text, the symbol, the name in lowercase, then mono figures aligned
+ * right. A long name is cut with an ellipsis, never wrapped, so the dotted
+ * rules between rows always stay straight.
+ */
+@media (min-width: 1100px) {
+  .terminal-host .desktop-sidebar {
+    --sidebar-padding: 14px;
+    border: 0;
+    border-radius: 0;
+    padding: 6px 10px 0 var(--sidebar-padding);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Section tabs ── */
+  .terminal-host .desktop-explore-tabs {
+    margin: 0;
+    padding: 0;
+    gap: 14px;
+    justify-content: flex-start;
+    border-bottom: 1px solid var(--line);
+  }
+  .terminal-host .desktop-explore-tabs button {
+    padding: 12px 0 11px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-explore-tabs button[aria-selected="true"] {
+    color: var(--tx);
+  }
+  .terminal-host .desktop-explore-tabs button[aria-selected="true"]::after {
+    height: 1px;
+    border-radius: 0;
+    background: var(--tx);
+  }
+
+  /* ── Market heading: "ROBINHOOD CHAIN · 24" and the column label ── */
+  .terminal-host .desktop-market-heading {
+    padding: 14px 0 4px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-market-heading h2 {
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: uppercase;
+    color: inherit;
+  }
+  .terminal-host .desktop-market-heading > span {
+    font: inherit;
+    color: inherit;
+  }
+
+  /* ── Filters: plain words, the active one lit ── */
+  .terminal-host .desktop-market-tabs {
+    padding: 2px 0 8px;
+    gap: 14px;
+  }
+  .terminal-host .desktop-market-tabs button {
+    padding: 4px 0;
+    border-radius: 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-market-tabs button[aria-pressed="true"] {
+    background: none;
+    color: var(--tx);
+  }
+  .terminal-host .desktop-market-tabs .desktop-sort {
+    padding: 4px 0;
+  }
+
+  /* ── Rows ── */
+  .terminal-host .desktop-market-row {
+    grid-template-columns: 11px minmax(0, 1fr) auto 50px;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    border-top: 1px dotted var(--line);
+    border-radius: 0;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 12px;
+    line-height: 1.2;
+  }
+  .terminal-host .desktop-market-row:first-child {
+    border-top-color: transparent;
+  }
+  .terminal-host .desktop-market-row:hover,
+  .terminal-host .desktop-market-row.selected {
+    background: none;
+  }
+  .terminal-host .desktop-market-row.selected .desktop-market-name strong {
+    color: var(--lime);
+  }
+  .terminal-host .desktop-market-row:hover .desktop-market-name small {
+    color: var(--tx-2);
+  }
+  .terminal-host .desktop-market-row .coin {
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    font-size: 6px;
+    font-weight: 600;
+  }
+  /* Symbol and name on one line; the name takes what is left and is cut. */
+  .terminal-host .desktop-market-row .desktop-market-name {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+  }
+  .terminal-host .desktop-market-row .desktop-market-name strong {
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--tx);
+  }
+  .terminal-host .desktop-market-row .desktop-market-name small {
+    min-width: 0;
+    font-size: 12px;
+    color: var(--faint);
+    text-transform: lowercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .terminal-host .desktop-market-row > strong {
+    font-size: 12px;
+    font-weight: 400;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .terminal-host .desktop-market-row > small {
+    font-size: 12px;
+    text-align: right;
+    white-space: nowrap;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-market-row > small.up {
+    color: var(--up);
+  }
+  .terminal-host .desktop-market-row > small.down {
+    color: var(--down);
+  }
+  .terminal-host .desktop-market-list {
+    padding-bottom: 8px;
+  }
+  .terminal-host .desktop-market-list > .meta {
+    padding: 12px 0;
+    font-size: 12px;
+    color: var(--faint);
+  }
+
+  /* ── Footer: are the reads live, and what time is it ── */
+  .terminal-host .desktop-sidebar-foot {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0 10px;
+    border-top: 1px solid var(--line);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-sidebar-foot > span::before {
+    content: "";
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--faint);
+    vertical-align: 1px;
+  }
+  .terminal-host .desktop-sidebar-foot.live > span::before {
+    background: var(--up);
+  }
+
+  /* ── The header: one 52px line, everything as text ── */
+  .terminal-host .app {
+    grid-template-rows: 52px minmax(0, 1fr);
+  }
+  /* With the price tape along the bottom, a third row holds it. */
+  .terminal-host .app.has-tape {
+    grid-template-rows: 52px minmax(0, 1fr) auto;
+  }
+  .terminal-host .desktop-header {
+    border-bottom: 1px solid var(--line);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .terminal-host .desktop-brand {
+    gap: 9px;
+    padding-left: var(--sidebar-padding, 14px);
+    font-family: var(--sans);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+  }
+  .terminal-host .desktop-brand svg {
+    width: 22px;
+    height: 22px;
+  }
+  /* Search is a line of text with the key that opens it, not a field. */
+  .terminal-host .desktop-header .desktop-search {
+    width: auto;
+    justify-self: start;
+    margin: 0;
+    padding: 0;
+    gap: 8px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    text-transform: lowercase;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-header .desktop-search:hover {
+    color: var(--tx-2);
+  }
+  .terminal-host .desktop-header .desktop-search svg {
+    width: 12px;
+    height: 12px;
+  }
+  .terminal-host .desktop-header .desktop-search::after {
+    content: "/";
+    padding: 0 4px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    font-size: 10px;
+    line-height: 14px;
+  }
+  .terminal-host .desktop-header-account {
+    gap: 18px;
+    padding-right: 4px;
+  }
+  .terminal-host .desktop-settings-link {
+    padding: 0;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-settings-link:hover {
+    color: var(--tx);
+  }
+  /* "PAPER $964.00": the label stays, inline, because it carries the truth. */
+  .terminal-host .desktop-header-account > span {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 12px;
+  }
+  .terminal-host .desktop-header-account > span small {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-header-account > span strong {
+    font-weight: 500;
+  }
+  .terminal-host .desktop-header-account .desktop-fund {
+    min-height: 0;
+    padding: 0 0 1px;
+    border-radius: 0;
+    border-bottom: 1px solid var(--tx);
+    background: none;
+    color: var(--tx);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .terminal-host .desktop-header-account .desktop-fund:hover {
+    color: var(--lime);
+    border-bottom-color: var(--lime);
+  }
+  .terminal-host .desktop-account-menu > summary {
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .terminal-host .desktop-account-menu > summary svg {
+    width: 12px;
+    height: 12px;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-header-account .face {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+  }
+  .terminal-host .desktop-account-menu nav {
+    top: calc(100% + 10px);
+    width: 190px;
+    padding: 4px;
+    border-radius: 4px;
+    box-shadow: none;
+  }
+  .terminal-host .desktop-account-menu nav a {
+    padding: 8px 10px;
+    border-radius: 2px;
+    font-size: 12px;
+  }
+}
+
+/*
+ * THE FEED AND LEADERBOARD PANELS, in the same voice as the market list.
+ *
+ * Both reuse the full screens in `compact` mode (Feed.tsx, Board.tsx), so
+ * nothing here changes what they say — only the chrome around it. Pills become
+ * words, cards become rows on dotted rules, avatars shrink to the text's own
+ * height, and the empty state loses its artwork.
+ */
+@media (min-width: 1100px) {
+  /* ── Headings: the same tracked mono caps as "ROBINHOOD CHAIN" ── */
+  .terminal-host .desktop-sidebar .feed-head,
+  .terminal-host .desktop-sidebar .board-head {
+    margin: 0;
+    min-height: 0;
+    padding: 14px 0 6px;
+  }
+  .terminal-host .desktop-sidebar .feed-head h2,
+  .terminal-host .desktop-sidebar .board-head h2 {
+    margin: 0;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* ── Filters: words, the active one lit; no borders, no fills ── */
+  .terminal-host .desktop-sidebar .feed-views,
+  .terminal-host .desktop-sidebar .wins {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 14px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+  }
+  .terminal-host .desktop-sidebar .feed-views button,
+  .terminal-host .desktop-sidebar .wins button {
+    min-width: 0;
+    min-height: 0;
+    padding: 4px 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-sidebar .feed-views button[aria-pressed="true"],
+  .terminal-host .desktop-sidebar .wins button.on {
+    background: none;
+    border-color: transparent;
+    color: var(--tx);
+  }
+  /* "Real money" is a switch, not a filter: a dot that lights, on its own line
+     under the words, and a hairline closes the control block. */
+  .terminal-host .desktop-sidebar .feed-real-row {
+    justify-content: flex-start;
+    margin: 0 0 6px;
+    padding: 2px 0 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .terminal-host .desktop-sidebar .feed-real {
+    min-height: 0;
+    padding: 2px 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-sidebar .feed-real::before {
+    content: "";
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--line);
+    vertical-align: 1px;
+  }
+  .terminal-host .desktop-sidebar .feed-real.on {
+    color: var(--tx);
+    background: none;
+    border-color: transparent;
+  }
+  .terminal-host .desktop-sidebar .feed-real.on::before {
+    background: var(--up);
+  }
+  .terminal-host .desktop-sidebar .feed-sort-row {
+    margin: 0 0 6px;
+  }
+  .terminal-host .desktop-sidebar .feed-page > .wire,
+  .terminal-host .desktop-sidebar .board {
+    padding: 0 0 8px;
+  }
+
+  /* ── Feed rows ── */
+  .terminal-host .desktop-sidebar .wire {
+    --mark: 16px;
+    --gap: 8px;
+  }
+  .terminal-host .desktop-sidebar .wire::before {
+    display: none;
+  }
+  .terminal-host .desktop-sidebar .wire-beat {
+    padding: 10px 0;
+    border-top: 1px dotted var(--line);
+    border-bottom: 0;
+  }
+  .terminal-host .desktop-sidebar .wire-beat:first-child {
+    border-top-color: transparent;
+    padding-top: 4px;
+  }
+  .terminal-host .desktop-sidebar .wire-mark {
+    padding-top: 2px;
+  }
+  .terminal-host .desktop-sidebar .wire-mark .face {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    box-shadow: none;
+  }
+  .terminal-host .desktop-sidebar .wire-line,
+  .terminal-host .desktop-sidebar .wire-line strong {
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .terminal-host .desktop-sidebar .wire-line strong {
+    font-weight: 500;
+  }
+  .terminal-host .desktop-sidebar .wire-when {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+  }
+  .terminal-host .desktop-sidebar .wire-why {
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .terminal-host .desktop-sidebar .trench-byline {
+    margin-bottom: 4px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  /* The trade figures: no card. A buy or sell keeps its meaning as a thin
+     coloured rule on the left — the accent still means money moved. */
+  .terminal-host .desktop-sidebar .wire-parts {
+    gap: 4px;
+    margin-top: 2px;
+    padding: 2px 0 2px 8px;
+    border-left: 1px solid var(--line);
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+  }
+  .terminal-host .desktop-sidebar .wire-beat.buy .wire-parts {
+    border-left-color: var(--up);
+    box-shadow: none;
+  }
+  .terminal-host .desktop-sidebar .wire-beat.sell .wire-parts {
+    border-left-color: var(--down);
+    background: none;
+    box-shadow: none;
+  }
+  .terminal-host .desktop-sidebar .wire-beat.turned .wire-parts {
+    border-left-color: var(--line);
+  }
+  .terminal-host .desktop-sidebar .wire-part {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 12px;
+  }
+  .terminal-host .desktop-sidebar .wire-seat {
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .terminal-host .desktop-sidebar .wire-seat .coin {
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    font-size: 6px;
+  }
+  .terminal-host .desktop-sidebar .wire-part-fig b,
+  .terminal-host .desktop-sidebar .wire-call {
+    font-size: 12px;
+    font-weight: 400;
+  }
+  .terminal-host .desktop-sidebar .wire-pill {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .terminal-host .desktop-sidebar .wire-like {
+    padding: 2px 0;
+    border: 0;
+    border-radius: 0;
+    font-size: 11px;
+  }
+  .terminal-host .desktop-sidebar .wire-beat.wire-new > .wire-body {
+    border-radius: 0;
+  }
+
+  /* ── Leaderboard rows ── */
+  .terminal-host .desktop-sidebar .ranking-help {
+    margin: 0 0 8px;
+    font-size: 11px;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-sidebar .ranking-help summary {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .terminal-host .desktop-sidebar .rank {
+    padding: 0;
+    border-bottom: 0;
+    border-top: 1px dotted var(--line);
+  }
+  .terminal-host .desktop-sidebar .rank:first-child {
+    border-top-color: transparent;
+  }
+  .terminal-host .desktop-sidebar .rank.you {
+    margin: 0;
+    padding: 0;
+    border-left: 0;
+    border-radius: 0;
+    background: none;
+  }
+  .terminal-host .desktop-sidebar .rank.you .rank-name strong {
+    color: var(--lime);
+  }
+  .terminal-host .desktop-sidebar .board-page .rank-hit {
+    grid-template-columns: 18px 16px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 9px 0;
+  }
+  .terminal-host .desktop-sidebar .rank-hit .face {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+  }
+  .terminal-host .desktop-sidebar .rank .n {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+  }
+  .terminal-host .desktop-sidebar .board-page .rank .rank-name strong {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0;
+  }
+  .terminal-host .desktop-sidebar .board-page .rank-meta {
+    gap: 6px;
+    margin-top: 1px;
+    font-size: 11px;
+  }
+  .terminal-host .desktop-sidebar .rank-meta .stamp {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+  }
+  .terminal-host .desktop-sidebar .rank-trades {
+    font-size: 11px;
+  }
+  .terminal-host .desktop-sidebar .board-page .rank-nums {
+    gap: 1px;
+    font-family: var(--font-geist-mono), var(--mono);
+  }
+  .terminal-host .desktop-sidebar .board-page .rank .rank-have,
+  .terminal-host .desktop-sidebar .board-page .rank .chg {
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0;
+  }
+  .terminal-host .desktop-sidebar .rank-book,
+  .terminal-host .desktop-sidebar .rank-pnl {
+    font-size: 10px;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-sidebar .board-retired {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--faint);
+  }
+
+  /* ── Empty states: a line of text, not a card with artwork ── */
+  .terminal-host .desktop-sidebar .blank {
+    min-height: 0;
+    gap: 6px;
+    padding: 16px 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    align-items: flex-start;
+    text-align: left;
+  }
+  .terminal-host .desktop-sidebar .empty-art {
+    display: none;
+  }
+  .terminal-host .desktop-sidebar .blank strong {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--tx-2);
+  }
+  .terminal-host .desktop-sidebar .blank-note,
+  .terminal-host .desktop-sidebar .blank p {
+    font-size: 12px;
+  }
+  .terminal-host .desktop-sidebar .blank .fund.solid {
+    min-height: 0;
+    margin-top: 2px;
+    padding: 0 0 1px;
+    border-radius: 0;
+    border-bottom: 1px solid var(--tx);
+    background: none;
+    color: var(--tx);
+    font-size: 12px;
+    font-weight: 500;
+  }
+}
+
+/*
+ * THE TAPE ALONG THE BOTTOM: it runs.
+ *
+ * live-motion.css says the tape scrolls and never marquees, and the reason —
+ * a sliding strip is hard to read — still stands; this is the owner's call,
+ * made with that known. So the run is kept honest: it is one CSS transform on
+ * the compositor (no JavaScript frame, no layout, no paint), it pauses the
+ * moment a pointer or focus lands on it, and a reader who asked the OS for
+ * less motion gets the still, hand-scrolled strip back.
+ */
+@media (min-width: 1100px) {
+  .terminal-host .terminal-tape {
+    height: 32px;
+    margin-top: 0;
+    gap: 0;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .terminal-host .terminal-tape .mm-ticker-scroll {
+    gap: 0;
+    overflow: hidden;
+    /* The ends fade so a row entering or leaving does not pop. */
+    mask-image: linear-gradient(90deg, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+  }
+  .terminal-host .terminal-tape .mm-ticker-track {
+    display: flex;
+    width: max-content;
+    will-change: transform;
+    animation: tape-run var(--tape-seconds, 60s) linear infinite;
+  }
+  .terminal-host .terminal-tape .mm-ticker-run {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    padding-right: 22px;
+    padding-left: var(--sidebar-padding, 14px);
+  }
+  .terminal-host .terminal-tape .mm-ticker-run[aria-hidden="true"] {
+    padding-left: 0;
+  }
+  .terminal-host .terminal-tape .mm-ticker-scroll:hover .mm-ticker-track,
+  .terminal-host .terminal-tape .mm-ticker-scroll:focus-within .mm-ticker-track {
+    animation-play-state: paused;
+  }
+  .terminal-host .terminal-tape .mm-tick {
+    align-items: center;
+    gap: 6px;
+  }
+  .terminal-host .terminal-tape .mm-tick .coin {
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    font-size: 6px;
+    font-weight: 600;
+  }
+  .terminal-host .terminal-tape .mm-tick .k {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+  .terminal-host .terminal-tape .mm-tick b {
+    font-weight: 400;
+    color: var(--tx);
+  }
+  .terminal-host .terminal-tape .sound-toggle {
+    padding: 4px 0 4px 14px;
+    border-radius: 0;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .terminal-host .terminal-tape .sound-toggle[aria-pressed="true"] {
+    background: none;
+    color: var(--lime);
+  }
+}
+@keyframes tape-run {
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .terminal-host .terminal-tape .mm-ticker-scroll {
+    overflow-x: auto;
+    mask-image: none;
+  }
+  .terminal-host .terminal-tape .mm-ticker-track {
+    animation: none;
+    will-change: auto;
+  }
+  .terminal-host .terminal-tape .mm-ticker-run[aria-hidden="true"] {
+    display: none;
+  }
+}
+
+/*
+ * THE RIGHT-HAND COLUMN: your agent, positions, limits. Borderless.
+ *
+ * The three boxes become three runs of text parted by hairlines, with the same
+ * voice as the sidebar: tracked mono caps for headings and labels, figures in
+ * mono, actions as underlined words. The balance keeps its pixel face and its
+ * size — it is the one figure on the page that should be read from across the
+ * room. The account-entry states (loading, failed, create) take the same
+ * treatment, so a failed read no longer arrives in a bordered card with a
+ * white button.
+ */
+@media (min-width: 1100px) {
+  .terminal-host .desktop-portfolio {
+    gap: 0;
+    padding-right: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .terminal-host .desktop-portfolio > section,
+  .terminal-host .desktop-portfolio .hosted-entry {
+    padding: 18px 0 20px 4px;
+    border: 0;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+  }
+  .terminal-host .desktop-portfolio > section:first-child,
+  .terminal-host .desktop-portfolio > .hosted-entry:first-child {
+    padding-top: 10px;
+    border-top: 0;
+  }
+
+  /* ── Headings and the status word ── */
+  .terminal-host .desktop-portfolio .desktop-section-heading {
+    margin-bottom: 12px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-portfolio .desktop-section-heading h2,
+  .terminal-host .desktop-portfolio .hosted-entry h2 {
+    margin: 0;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-portfolio .desktop-section-heading > span,
+  .terminal-host .desktop-portfolio .desktop-section-heading > button {
+    font: inherit;
+    color: inherit;
+    padding: 0;
+  }
+  .terminal-host .desktop-portfolio .desktop-section-heading > button:hover {
+    color: var(--tx);
+  }
+  .terminal-host .desktop-portfolio .desktop-running {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .terminal-host .desktop-portfolio .desktop-section-heading .coin {
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    font-size: 6px;
+  }
+
+  /* ── The agent line ── */
+  .terminal-host .desktop-agent-id {
+    gap: 8px;
+    padding: 0;
+  }
+  .terminal-host .desktop-agent-id .face {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+  }
+  .terminal-host .desktop-agent-id > span {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+  }
+  .terminal-host .desktop-agent-id strong {
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .terminal-host .desktop-agent-id small {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    color: var(--faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .terminal-host .desktop-agent-id > svg {
+    width: 13px;
+    height: 13px;
+  }
+  .terminal-host .desktop-agent-id:hover strong {
+    color: var(--lime);
+  }
+
+  /* ── The balance ── */
+  .terminal-host .desktop-balance {
+    margin-top: 16px;
+    font-size: 36px;
+    letter-spacing: -0.03em;
+  }
+  .terminal-host .desktop-balance + p {
+    margin: 8px 0 16px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
+  .terminal-host .desktop-portfolio .recovery-balance-label {
+    display: block;
+    margin-top: 16px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-portfolio .recovery-balance-label + .desktop-balance {
+    margin-top: 4px;
+  }
+
+  /* ── Add funds · Withdraw: two words, not two buttons ── */
+  .terminal-host .desktop-money-actions {
+    gap: 18px;
+    margin-bottom: 14px;
+  }
+  .terminal-host .desktop-money-actions button {
+    flex: none;
+    gap: 5px;
+    padding: 0 0 2px;
+    border-radius: 0;
+    border-bottom: 1px solid var(--line);
+    background: none;
+    color: var(--tx-2);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .terminal-host .desktop-money-actions button:first-child {
+    background: none;
+    color: var(--tx);
+    border-bottom-color: var(--tx);
+  }
+  .terminal-host .desktop-money-actions button:hover {
+    color: var(--lime);
+    border-bottom-color: var(--lime);
+  }
+  .terminal-host .desktop-money-actions button svg {
+    width: 11px;
+    height: 11px;
+  }
+
+  /* ── Label · figure rows ── */
+  .terminal-host .desktop-cash {
+    margin-top: 0;
+    padding: 7px 0;
+    border-top: 1px dotted var(--line);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--faint);
+  }
+  .terminal-host .desktop-cash > span {
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+  }
+  .terminal-host .desktop-cash strong {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--tx);
+  }
+  .terminal-host .desktop-cash + .desktop-cash {
+    border-top-style: dotted;
+  }
+  .terminal-host .desktop-token-context > p {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--tx-2);
+  }
+
+  /* ── Positions ── */
+  .terminal-host .desktop-position {
+    gap: 8px;
+    padding: 8px 0;
+    border-top: 1px dotted var(--line);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 12px;
+  }
+  .terminal-host .desktop-position:hover {
+    background: none;
+  }
+  .terminal-host .desktop-position:hover strong {
+    color: var(--lime);
+  }
+  .terminal-host .desktop-position .coin {
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    font-size: 6px;
+  }
+  .terminal-host .desktop-position strong {
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .terminal-host .desktop-position > span:last-child {
+    font-size: 12px;
+    color: var(--tx-2);
+  }
+
+  /* ── The blocker: a plain paragraph with an underlined remedy ── */
+  .terminal-host .desktop-blocked {
+    margin-top: 10px;
+    padding: 10px 0 0 10px;
+    border: 0;
+    border-left: 1px solid var(--down);
+    border-radius: 0;
+    background: none;
+    gap: 5px;
+  }
+  .terminal-host .desktop-blocked strong {
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .terminal-host .desktop-blocked p {
+    font-size: 12px;
+  }
+  .terminal-host .desktop-blocked button {
+    padding: 0 0 1px;
+    border: 0;
+    border-bottom: 1px solid var(--tx);
+    border-radius: 0;
+    background: none;
+    color: var(--tx);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .terminal-host .desktop-portfolio .meta {
+    font-size: 12px;
+    color: var(--faint);
+  }
+
+  /* ── Chat with X ── */
+  .terminal-host .desktop-chat-link {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px dotted var(--line);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--tx-2);
+  }
+  .terminal-host .desktop-chat-link:hover {
+    color: var(--lime);
+  }
+  .terminal-host .desktop-chat-link svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  /* ── Telegram and the rest of the strip ── */
+  .terminal-host .desktop-portfolio .agent-strip-row {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    border-top: 1px dotted var(--line);
+  }
+  .terminal-host .desktop-portfolio .agent-strip-label {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* ── The account-entry states: loading, failed, create ── */
+  .terminal-host .desktop-portfolio .hosted-entry h2 {
+    margin-bottom: 12px;
+  }
+  .terminal-host .desktop-portfolio .hosted-entry p {
+    margin: 0 0 14px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--tx-2);
+  }
+  .terminal-host .desktop-portfolio .hosted-entry .flow-primary,
+  .terminal-host .desktop-portfolio .hosted-entry .flow-secondary {
+    display: inline-flex;
+    width: auto;
+    min-height: 0;
+    padding: 0 0 1px;
+    border: 0;
+    border-bottom: 1px solid var(--tx);
+    border-radius: 0;
+    background: none;
+    color: var(--tx);
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-decoration: none;
+  }
+  .terminal-host .desktop-portfolio .hosted-entry .flow-primary:hover {
+    color: var(--lime);
+    border-bottom-color: var(--lime);
+  }
+  .terminal-host .desktop-portfolio .hosted-entry .flow-primary:disabled {
+    color: var(--faint);
+    border-bottom-color: var(--line);
+    cursor: default;
+  }
+}
+
+/*
+ * THE OUTAGE LINE, THE TOKEN PAGE AND THE SEARCH POP-UP.
+ * Not gated on width: the search dialog and the outage line are on the phone
+ * too, and the token rules below are harmless there.
+ */
+
+/* ── The outage line: text only. skeleton.css loads after this sheet and
+   styles the same class, so these carry `.app` to outrank it. ── */
+.terminal-host .app .load-failure {
+  margin: 0 0 14px;
+  padding: 0;
+  border: 0;
+  gap: 4px 14px;
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+  color: var(--faint);
+}
+.terminal-host .app .load-failure strong {
+  font-weight: 400;
+  color: var(--tx-2);
+}
+.terminal-host .app .load-failure button {
+  padding: 0 0 1px;
+  border: 0;
+  border-bottom: 1px solid var(--tx-2);
+  border-radius: 0;
+  background: none;
+  color: var(--tx-2);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.terminal-host .app .load-failure button:hover {
+  color: var(--tx);
+  border-bottom-color: var(--tx);
+}
+.terminal-host .app .load-failure button:disabled {
+  color: var(--faint);
+  border-bottom-color: var(--line);
+}
+
+/* ── The search pop-up ── */
+.terminal-host .search-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 16px 16px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(6px);
+}
+.terminal-host .search-dialog {
+  width: min(100%, 560px);
+  max-height: 72vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 6px 18px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-variant-numeric: tabular-nums;
+}
+.terminal-host .search-dialog .find {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.terminal-host .search-dialog .find-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 0 4px;
+  padding: 8px 0;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.terminal-host .search-dialog .find-bar .back {
+  display: none;
+}
+.terminal-host .search-dialog .find-bar::before {
+  content: "/";
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--faint);
+}
+.terminal-host .search-dialog .find-bar .search {
+  min-height: 36px;
+  padding: 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 15px;
+  color: var(--tx);
+  outline: 0;
+}
+.terminal-host .search-dialog .find-bar .search::placeholder {
+  color: var(--faint);
+}
+.terminal-host .search-dialog .tok {
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 0;
+  padding: 9px 4px;
+  margin: 0 -4px;
+  border-top: 1px dotted var(--line);
+  border-radius: 3px;
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 12px;
+}
+.terminal-host .search-dialog .tok:first-of-type {
+  border-top-color: transparent;
+}
+.terminal-host .search-dialog .tok:hover,
+.terminal-host .search-dialog .tok:focus-visible {
+  background: var(--card);
+  outline: 0;
+}
+.terminal-host .search-dialog .tok .coin,
+.terminal-host .search-dialog .tok .face {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  font-size: 6px;
+}
+.terminal-host .search-dialog .tok strong,
+.terminal-host .search-dialog .tok .name-block strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.terminal-host .search-dialog .tok .meta {
+  margin: 1px 0 0;
+  font-size: 11px;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.terminal-host .search-dialog .tok .px {
+  font-size: 12px;
+  font-weight: 400;
+}
+.terminal-host .search-dialog .blank {
+  min-height: 0;
+  padding: 16px 0;
+  border: 0;
+  background: none;
+}
+.terminal-host .search-dialog .blank .empty-art {
+  display: none;
+}
+.terminal-host .search-dialog .blank strong {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--tx-2);
+}
+.terminal-host .search-dialog-keys {
+  flex: none;
+  margin: 6px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+.terminal-host .search-dialog-keys kbd {
+  margin-right: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+}
+.terminal-host .search-dialog-keys kbd + kbd,
+.terminal-host .search-dialog-keys kbd:not(:first-child) {
+  margin-left: 10px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .terminal-host .search-dialog {
+    animation: search-in 140ms var(--ease) both;
+  }
+}
+@keyframes search-in {
+  from { opacity: 0; transform: translateY(-6px); }
+}
+
+/* ── The token page: borderless, labels in mono caps, figures in mono ── */
+@media (min-width: 1100px) {
+  .terminal-host .token-top {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .terminal-host .token-top .back {
+    display: none;
+  }
+  .terminal-host .token-top .coin {
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    font-size: 8px;
+  }
+  .terminal-host .token-top h1 {
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+  }
+  .terminal-host .token-sub {
+    margin-top: 3px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
+  .terminal-host .token-sub button {
+    font-size: 11px;
+    color: var(--faint);
+  }
+  .terminal-host .token-sub button:hover {
+    color: var(--tx);
+  }
+  .terminal-host .token-acts {
+    gap: 14px;
+  }
+  .terminal-host .token-acts button {
+    width: auto;
+    height: auto;
+    color: var(--faint);
+  }
+  .terminal-host .token-acts button svg {
+    width: 15px;
+    height: 15px;
+  }
+  .terminal-host .token-acts button:hover,
+  .terminal-host .token-acts button.on {
+    color: var(--lime);
+  }
+  /* The five figures: labels as caps, no column rules, one hairline under. */
+  .terminal-host .token-market-strip {
+    margin: 0 0 14px;
+    padding: 14px 0 16px;
+    border-top: 0;
+    border-bottom: 1px solid var(--line);
+    gap: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+  .terminal-host .token-market-strip > div {
+    gap: 6px;
+    padding-left: 0;
+    border-left: 0;
+  }
+  .terminal-host .token-market-strip span {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .token-market-strip strong {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 15px;
+    font-weight: 400;
+  }
+  /* Window and chart-kind controls: words on a line, the active one lit. */
+  .terminal-host .token-plot .tv-tools {
+    margin: 0 0 8px;
+    gap: 14px;
+  }
+  .terminal-host .tv-windows {
+    flex: 1;
+    gap: 14px;
+  }
+  .terminal-host .tv-windows button {
+    flex: none;
+    min-width: 0;
+    padding: 4px 0;
+    border-radius: 0;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    color: var(--faint);
+  }
+  .terminal-host .tv-windows button.on {
+    background: none;
+    color: var(--tx);
+    box-shadow: 0 1px 0 var(--tx);
+  }
+  .terminal-host .tv-windows button:hover {
+    color: var(--tx-2);
+  }
+  .terminal-host .tv-kinds {
+    gap: 10px;
+  }
+  .terminal-host .tv-kinds button,
+  .terminal-host .chart-reset {
+    width: auto;
+    height: auto;
+    color: var(--faint);
+  }
+  .terminal-host .tv-kinds button svg,
+  .terminal-host .chart-reset svg {
+    width: 14px;
+    height: 14px;
+  }
+  .terminal-host .tv-kinds button.on {
+    color: var(--lime);
+  }
+  .terminal-host .token-plot > .meta {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    color: var(--faint);
+  }
+  /* Who holds it, under the chart. */
+  .terminal-host .held-sec {
+    margin-top: 22px;
+  }
+  .terminal-host .held-head h3,
+  .terminal-host .holder-table-wrap h3 {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .held {
+    padding: 12px 0;
+    border-bottom: 1px dotted var(--line);
+  }
+  .terminal-host .held .face {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+  }
+  .terminal-host .held-id strong {
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .terminal-host .held-sub,
+  .terminal-host .held-top > b {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+  }
+}
+
+/*
+ * THE TOKEN PAGE, LEDGER LAYOUT.
+ *
+ * One header line: logo, symbol, the verified badge, then name and address in mono.
+ * Watch and share are words, drawn from the buttons' own labels. The five
+ * figures run as one strip under a hairline, the window and chart controls on
+ * the line below, the chart under that, and the holders as a table whose rows
+ * sit on dotted rules. The rules here follow the earlier token block and win
+ * over it where they overlap.
+ */
+@media (min-width: 1100px) {
+  .terminal-host .token-top {
+    align-items: center;
+    padding-bottom: 12px;
+  }
+  .terminal-host .token-who {
+    gap: 8px;
+  }
+  .terminal-host .token-top .coin {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    font-size: 6px;
+  }
+  .terminal-host .token-who > div {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+  .terminal-host .token-top h1 {
+    gap: 6px;
+    font-size: 14px;
+  }
+
+  .terminal-host .token-sub {
+    margin: 0;
+    min-width: 0;
+    gap: 6px;
+    color: var(--faint);
+  }
+  .terminal-host .token-sub > span {
+    text-transform: lowercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .terminal-host .token-sub button::before {
+    content: "· ";
+  }
+  /* The label is the control: no icon, the word in caps. */
+  .terminal-host .token-acts {
+    gap: 16px;
+  }
+  .terminal-host .token-acts button {
+    display: inline-flex;
+    padding: 2px 0;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .token-acts button svg {
+    display: none;
+  }
+  .terminal-host .token-acts button::after {
+    content: attr(aria-label);
+  }
+  .terminal-host .token-acts button:hover::after {
+    color: var(--tx);
+  }
+  .terminal-host .token-acts button.on::after {
+    color: var(--lime);
+  }
+
+  /* ── The strip: one line of label·figure pairs ── */
+  .terminal-host .token-market-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 24px;
+    margin: 0;
+    padding: 12px 0;
+    border-top: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .terminal-host .token-market-strip > div {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+  }
+  .terminal-host .token-market-strip span {
+    font-size: 10px;
+  }
+  .terminal-host .token-market-strip strong {
+    font-size: 12px;
+  }
+
+  /* ── Controls on the line under it, chart under that ── */
+  .terminal-host .token-plot .tv-tools {
+    margin: 0;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .terminal-host .tv-ohlc {
+    margin: 10px 0 0;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--faint);
+  }
+
+  /* ── Holders: the table, on dotted rules ── */
+  .terminal-host .held-sec {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+  .terminal-host .held-sec > h3 {
+    margin: 0 0 4px;
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .terminal-host .held-sec > .meta {
+    font-family: var(--font-geist-mono), var(--mono);
+    font-size: 11px;
+    color: var(--faint);
+  }
+  .terminal-host .holder-table {
+    font-size: 12px;
+    font-family: var(--font-geist-mono), var(--mono);
+  }
+  .terminal-host .holder-table th {
+    padding: 8px 8px 8px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .terminal-host .holder-table td {
+    padding: 10px 8px 10px 0;
+    border-bottom: 1px dotted var(--line);
+    font-size: 12px;
+  }
+  .terminal-host .holder-table tr:hover td {
+    background: none;
+  }
+  .terminal-host .holder-table tr:hover .holder-agent strong {
+    color: var(--lime);
+  }
+  .terminal-host .holder-agent {
+    gap: 8px;
+  }
+  .terminal-host .holder-agent .face {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+  }
+  .terminal-host .holder-agent > span {
+    gap: 2px;
+  }
+  .terminal-host .holder-agent strong {
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .terminal-host .holder-agent small {
+    font-size: 11px;
+  }
+  .terminal-host .holder-thesis {
+    font-family: var(--sans);
+    font-size: 12px;
+  }
+  .terminal-host .held-sec .blank {
+    min-height: 0;
+    padding: 12px 0;
+    border: 0;
+    background: none;
+  }
+  .terminal-host .held-sec .blank .empty-art {
+    display: none;
+  }
+  .terminal-host .held-sec .blank strong {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--tx-2);
+  }
+}
+
+/* ── The verified mark: an outlined seal in lime, on every width ── */
+.terminal-host .verified {
+  width: auto;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--lime);
+}
+.terminal-host .verified::after {
+  content: none;
+}
+.terminal-host .verified svg {
+  width: 13px;
+  height: 13px;
+}
+
+/*
+ * THE FORM PAGES — settings, wallet, limits — with room to breathe.
+ *
+ * forms.css gives every form one vocabulary (.mm-section, .mm-field, .mm-hint,
+ * .mm-btn …); this keeps the vocabulary and changes the look, at every width,
+ * because these pages are read on the phone as much as the desktop. The
+ * moves: one column instead of two, section names as tracked mono caps with
+ * air above them, inputs as a line rather than a box, buttons and chips as
+ * words, and the hint for every field sitting under it in plain sight.
+ * Specificity: `.terminal-host .terminal-form-page …` outranks forms.css's
+ * `.terminal-form-page …` and this sheet loads after it.
+ */
+.terminal-host .terminal-form-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding-bottom: 64px;
+}
+.terminal-host .terminal-form-page .terminal-form-heading {
+  margin: 10px 0 8px;
+}
+.terminal-host .terminal-form-page .terminal-form-heading h1 {
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.terminal-host .terminal-form-page p,
+.terminal-host .terminal-form-page .mm-note {
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--tx-2);
+}
+.terminal-host .terminal-form-page .mm-note {
+  margin: 0 0 8px;
+}
+.terminal-host .terminal-form-page ul,
+.terminal-host .terminal-form-page ol {
+  max-width: 62ch;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--tx-2);
+}
+
+/* ── Sections and groups: a caps line with air above it ── */
+.terminal-host .terminal-form-page .mm-section,
+.terminal-host .terminal-form-page .settings-group > summary,
+.terminal-host .terminal-form-page .mm-advanced > summary {
+  margin: 0;
+  padding: 44px 0 18px;
+  border: 0;
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.terminal-host .terminal-form-page .settings-group,
+.terminal-host .terminal-form-page .mm-advanced {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.terminal-host .terminal-form-page .settings-group > summary,
+.terminal-host .terminal-form-page .mm-advanced > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  list-style: none;
+  cursor: pointer;
+}
+.terminal-host .terminal-form-page .settings-group > summary::-webkit-details-marker,
+.terminal-host .terminal-form-page .mm-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+.terminal-host .terminal-form-page .settings-group > summary::before,
+.terminal-host .terminal-form-page .mm-advanced > summary::before {
+  content: "+";
+  width: 10px;
+  flex: none;
+  color: var(--tx-2);
+}
+.terminal-host .terminal-form-page .settings-group[open] > summary::before,
+.terminal-host .terminal-form-page .mm-advanced[open] > summary::before {
+  content: "−";
+}
+.terminal-host .terminal-form-page .settings-group > summary:hover,
+.terminal-host .terminal-form-page .mm-advanced > summary:hover {
+  color: var(--tx);
+}
+/* A group's own section line repeats the summary; it becomes a thin rule. */
+.terminal-host .terminal-form-page .settings-group > .mm-section {
+  height: 0;
+  padding: 0 0 18px;
+  overflow: hidden;
+  color: transparent;
+}
+
+/* ── Fields: one column, label above, hint under ── */
+.terminal-host .terminal-form-page .mm-grid,
+.terminal-host .terminal-form-page .grant-fields {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 26px;
+  max-width: 520px;
+}
+.terminal-host .terminal-form-page .mm-field,
+.terminal-host .terminal-form-page .field {
+  gap: 7px;
+}
+.terminal-host .terminal-form-page .setting-field > label {
+  gap: 7px;
+}
+.terminal-host .terminal-form-page .setting-field .mm-labelrow {
+  padding-right: 0;
+}
+.terminal-host .terminal-form-page .mm-label,
+.terminal-host .terminal-form-page .field-label,
+.terminal-host .terminal-form-page .rk {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.terminal-host .terminal-form-page .mm-hint,
+.terminal-host .terminal-form-page .setting-hint {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--tx-2);
+}
+.terminal-host .terminal-form-page .mm-hint.mm-bad {
+  color: var(--down);
+}
+.terminal-host .terminal-form-page .mm-getkey {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--tx-2);
+}
+.terminal-host .terminal-form-page .mm-getkey:hover {
+  color: var(--tx);
+  border-bottom-color: var(--tx);
+}
+
+/* ── Inputs: a line, not a box ── */
+.terminal-host .terminal-form-page input:not([type=checkbox]):not([type=radio]),
+.terminal-host .terminal-form-page select,
+.terminal-host .terminal-form-page textarea {
+  min-height: 36px;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.terminal-host .terminal-form-page textarea {
+  min-height: 72px;
+  line-height: 1.5;
+}
+.terminal-host .terminal-form-page input:not([type=checkbox]):not([type=radio]):hover,
+.terminal-host .terminal-form-page select:hover,
+.terminal-host .terminal-form-page textarea:hover {
+  border-bottom-color: var(--faint);
+}
+.terminal-host .terminal-form-page input:focus-visible,
+.terminal-host .terminal-form-page select:focus-visible,
+.terminal-host .terminal-form-page textarea:focus-visible {
+  outline: 0;
+  border-bottom-color: var(--tx);
+}
+.terminal-host .terminal-form-page input::placeholder,
+.terminal-host .terminal-form-page textarea::placeholder {
+  color: var(--faint);
+}
+.terminal-host .terminal-form-page input[type=checkbox],
+.terminal-host .terminal-form-page input[type=radio] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--lime);
+}
+.terminal-host .terminal-form-page .mm-unit,
+.terminal-host .terminal-form-page .field-unit {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* ── Toggles, rows, boxes: dotted rules instead of cards ── */
+.terminal-host .terminal-form-page .mm-toggle {
+  margin: 0;
+  padding: 12px 0;
+  border: 0;
+  border-top: 1px dotted var(--line);
+  border-radius: 0;
+  font-size: 13px;
+}
+.terminal-host .terminal-form-page .mm-toggle + .mm-toggle {
+  border-top-style: dotted;
+}
+.terminal-host .terminal-form-page .mm-rows {
+  margin: 10px 0;
+}
+.terminal-host .terminal-form-page .mm-row {
+  padding: 10px 0;
+  border-bottom: 1px dotted var(--line);
+  font-size: 13px;
+}
+.terminal-host .terminal-form-page .mainnet-warning,
+.terminal-host .terminal-form-page .restore-box,
+.terminal-host .terminal-form-page .restore-preview,
+.terminal-host .terminal-form-page .key-box,
+.terminal-host .terminal-form-page .grant-summary,
+.terminal-host .terminal-form-page .saved-wallet,
+.terminal-host .terminal-form-page .paper-note,
+.terminal-host .terminal-form-page .fund-addr,
+.terminal-host .terminal-form-page .setup-progress {
+  padding: 14px 0 14px 12px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+}
+.terminal-host .terminal-form-page .mainnet-warning {
+  border-left-color: var(--down);
+}
+.terminal-host .terminal-form-page .chain-card,
+.terminal-host .terminal-form-page .preset-card {
+  padding: 14px 0 14px 12px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+}
+.terminal-host .terminal-form-page .chain-card.selected,
+.terminal-host .terminal-form-page .preset-card.selected {
+  border-left-color: var(--lime);
+}
+
+/* ── Buttons and chips: words ── */
+.terminal-host .terminal-form-page .mm-chips,
+.terminal-host .terminal-form-page .caps {
+  gap: 6px 18px;
+  margin: 10px 0;
+}
+.terminal-host .terminal-form-page .mm-chips button,
+.terminal-host .terminal-form-page .cap,
+.terminal-host .terminal-form-page .copy-btn,
+.terminal-host .terminal-form-page .mm-btn,
+.terminal-host .terminal-form-page .mode-tab,
+.terminal-host .terminal-form-page .btn-kill {
+  min-height: 0;
+  padding: 2px 0 3px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+  color: var(--tx-2);
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.terminal-host .terminal-form-page .mm-chips button:hover,
+.terminal-host .terminal-form-page .cap:hover,
+.terminal-host .terminal-form-page .copy-btn:hover,
+.terminal-host .terminal-form-page .mm-btn:hover,
+.terminal-host .terminal-form-page .mode-tab:hover {
+  color: var(--tx);
+  border-bottom-color: var(--tx);
+}
+.terminal-host .terminal-form-page .cap.on,
+.terminal-host .terminal-form-page .mode-tab.on,
+.terminal-host .terminal-form-page button[aria-pressed=true] {
+  background: none;
+  color: var(--tx);
+  border-color: transparent;
+  border-bottom-color: var(--lime);
+}
+.terminal-host .terminal-form-page .btn-kill {
+  color: var(--down);
+  border-bottom-color: var(--down);
+}
+/* The one solid control on the page: what saves it. */
+.terminal-host .terminal-form-page .mm-btn.primary,
+.terminal-host .terminal-form-page .grant-btn {
+  min-height: 0;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--tx);
+  color: var(--ink);
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.terminal-host .terminal-form-page .mm-btn.primary:hover,
+.terminal-host .terminal-form-page .grant-btn:hover {
+  background: var(--lime);
+  color: var(--ink);
+  border-bottom-color: transparent;
+}
+.terminal-host .terminal-form-page .mm-danger,
+.terminal-host .terminal-form-page .grant-error,
+.terminal-host .terminal-form-page .grant-cap-error {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.terminal-host .terminal-form-page .mm-tag {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.terminal-host .terminal-form-page [role="status"] {
+  font-size: 12px;
+  color: var(--tx-2);
+}
+/* Fields that sit outside a grid still need the grid's distance between them. */
+.terminal-host .terminal-form-page :not(.mm-grid) > .mm-field + .mm-field,
+.terminal-host .terminal-form-page :not(.mm-grid) > .mm-hint + .mm-field,
+.terminal-host .terminal-form-page :not(.mm-grid) > p + .mm-field,
+.terminal-host .terminal-form-page :not(.mm-grid) > .mm-field + p,
+.terminal-host .terminal-form-page :not(.mm-grid) > .mm-field + .mm-btn {
+  margin-top: 22px;
+}
+.terminal-host .terminal-form-page .mm-btn.primary {
+  margin-top: 26px;
+}
+.terminal-host .terminal-form-page .mm-btn.primary + .mm-hint {
+  margin-top: 10px;
+}

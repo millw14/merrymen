@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import Link from "./Link";
 /**
  * WHO THIS IS FOR — executed by a test rather than read, because the runner
  * globs `*.test.ts` and nothing in this file is reachable from it.

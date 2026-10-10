@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AgentStrip } from "./AgentStrip";
-import Link from "next/link";
+import Link from "./Link";
 import { useWatchlist } from "./watchlist";
 import { useGroupChatSupported } from "./groupchat";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "./assistant-connect";
@@ -58,6 +58,19 @@ export function DesktopHeader({
 }: Actions & { hasAgent?: boolean; mine: LiveMine }) {
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, mine.recovery);
   const accountMenu = useRef<HTMLDetailsElement>(null);
+  // "/" OPENS SEARCH, as the hint beside the word says (desktop.css). Only
+  // when nothing is being typed into: a slash in the chat composer is a slash.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, select, [contenteditable]")) return;
+      event.preventDefault();
+      onScreen({ kind: "search" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onScreen]);
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
   // The desktop's way into the group chat; hidden where the install has no room.
   const room = useGroupChatSupported();
@@ -103,7 +116,7 @@ export function DesktopHeader({
           {hasAgent ? "Add funds" : "Your account"}
         </button>
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
-          <summary><Face name={mine.name} slug={mine.slug}/><span>Account</span><ChevronDown size={14}/></summary>
+          <summary><Face name={mine.name} slug={mine.slug}/><span>{hasAgent && mine.name ? mine.name : "Account"}</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
             <Link href="/you">Portfolio</Link>
             <Link href="/settings">Settings</Link>
@@ -204,23 +217,23 @@ export function DesktopSidebar({
         hidden={section !== "markets"}
       >
         <div className="desktop-market-heading">
-          <h2>Robinhood Chain</h2>
-          <span>{list.length} {list.length === 1 ? "token" : "tokens"}</span>
+          <h2>Robinhood Chain · {list.length}</h2>
+          <span aria-label="Price and daily change">24h</span>
         </div>
         <div className="desktop-market-tabs">
           <button
             aria-pressed={filter === "all"}
             onClick={() => setFilter("all")}
           >
-            All tokens
+            All
           </button>
           <button
             aria-pressed={filter === "held"}
             onClick={() => setFilter("held")}
           >
-            Your holdings
+            Held
           </button>
-          <button aria-pressed={filter === "watch"} onClick={() => setFilter("watch")}>Watchlist</button>
+          <button aria-pressed={filter === "watch"} onClick={() => setFilter("watch")}>Watch</button>
           <button
             className="desktop-sort"
             title={
@@ -246,16 +259,17 @@ export function DesktopSidebar({
               onClick={() => openToken(t.id)}
             >
               <Coin symbol={t.symbol} logo={t.logo} />
-              <span>
+              {/* ONE LINE PER TOKEN. The name takes whatever width is left
+                  and is cut with an ellipsis (sidebar.css), never wrapped, so
+                  the dotted rule between rows stays straight. */}
+              <span className="desktop-market-name">
                 <strong>{t.symbol}</strong>
-                <small>{t.name}</small>
+                <small title={t.name}>{t.name}</small>
               </span>
-              <span>
-                <strong title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></strong>
-                <small className={deltaClass(t.change24hPct)}>
-                  {pctPts(t.change24hPct)}
-                </small>
-              </span>
+              <strong title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></strong>
+              <small className={deltaClass(t.change24hPct)}>
+                {pctPts(t.change24hPct)}
+              </small>
             </button>
           ))}
           {/* "Markets are unavailable" is a claim about the venue; "we have not
@@ -392,7 +406,25 @@ export function DesktopSidebar({
           onDesk={() => onTab("agent")}
         />}
       </section>
+      <SidebarFoot live={reads.market === "ok"} />
     </aside>
+  );
+}
+
+/**
+ * The status line under the column: whether the market read answered, and the
+ * clock. The clock is client time, so the server renders a different second
+ * than the browser does a moment later — React is told to accept that for this
+ * one node rather than throw the hydration warning.
+ */
+function SidebarFoot({ live }: { live: boolean }) {
+  const now = useNow(1000);
+  const time = new Date(now).toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return (
+    <div className={live ? "desktop-sidebar-foot live" : "desktop-sidebar-foot"}>
+      <span>{live ? "live" : "offline"}</span>
+      <time suppressHydrationWarning>{time}</time>
+    </div>
   );
 }
 export function DesktopPortfolio({

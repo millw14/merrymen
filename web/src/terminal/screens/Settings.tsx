@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
+import Link from "../Link";
 import { useEffect, useRef, useState } from "react";
-import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
 import { XPosting } from "../XPosting";
 import { AgentImageField } from "../AgentImageField";
@@ -54,7 +53,10 @@ function Field(props: {
       </span>
       <span className="mm-input">{props.children}</span>
     </label>
-    {props.hint && <details className="setting-help"><summary aria-label={`About ${props.label}`}><CircleHelp size={15}/></summary><div className="mm-hint">{props.hint}</div></details>}
+    {/* THE EXPLANATION IS ALWAYS ON THE PAGE, under the control it is about.
+        It sat behind a "?" that opened a floating card; the page is meant to
+        explain itself, and a hint nobody opens explains nothing. */}
+    {props.hint && <p className="mm-hint setting-hint">{props.hint}</p>}
     </div>
   );
 }

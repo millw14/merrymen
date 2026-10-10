@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
+import Link from "@/terminal/Link";
 import { compactUsd } from "@/lib/format";
 import type { DiscoveryRow, FreshRow, Payload } from "@/lib/read-discoveries";
 

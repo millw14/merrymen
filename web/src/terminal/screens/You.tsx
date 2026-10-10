@@ -4,7 +4,7 @@ import { money, pctPts, type LiveMine } from "../live";
 import { strategyName } from "../strategy";
 import { Empty, Face } from "../ui";
 import { BalanceFigure } from "../studio";
-import Link from "next/link";
+import Link from "../Link";
 import { SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
 import { RecoveryNotice } from "../RecoveryNotice";
