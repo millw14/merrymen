@@ -14,14 +14,19 @@ import {
   ADMISSION_LEVEL_ENV,
   FLEET_ROLLOUT_ENV,
   MAX_ROLLOUT_TENANTS,
+  ROLLOUT_NEW_TENANTS_ENV,
   childAdmissionLevel,
   fleetRollout,
+  newTenantLevel,
+  newTenantRouteOpen,
+  newTenantsStartupLine,
   railwayHosted,
   rolloutAdmitsWholeFleet,
   rolloutCounts,
   rolloutHeld,
   rolloutLevel,
   rolloutLine,
+  rolloutNewTenants,
   rolloutStartupLine,
   rolloutSummary,
   WORKER_ENFORCED_LEVELS,
@@ -284,5 +289,149 @@ describe("the levels a worker in this tree obeys", () => {
     // Every level the rollout hands a child is one the gate reads as itself,
     // not as the `observe` it falls back to on a word it does not know.
     for (const level of WORKER_ENFORCED_LEVELS) assert.equal(gate.admissionFrom(level, true).level, level);
+  });
+});
+
+describe("MERRYMEN_ROLLOUT_NEW_TENANTS: genuinely new tenants, under an explicit list only", () => {
+  const withNew = (rollout: string | undefined, level: string | undefined, extra: Record<string, string> = {}) =>
+    level === undefined ? env(rollout, extra) : env(rollout, { [ROLLOUT_NEW_TENANTS_ENV]: level, ...extra });
+  const list = `${A}:trade,${B}:observe`;
+
+  describe("its grammar", () => {
+    it("unset is null: today's behaviour exactly", () => {
+      assert.equal(rolloutNewTenants(env(list)), null);
+    });
+
+    it("is one of the three levels, exactly, whitespace around it ignored", () => {
+      for (const level of ["observe", "exits-only", "trade"] as const) {
+        assert.equal(rolloutNewTenants(withNew(list, level)), level);
+        assert.equal(rolloutNewTenants(withNew(list, ` ${level}\n`)), level);
+      }
+    });
+
+    it("anything else refuses, naming the variable and never repeating the value", () => {
+      for (const value of ["", " ", "none", "off", "0", "held", "all", "Trade", "TRADE", "exits_only", "paper", "trade,observe", `${A}:trade`]) {
+        assert.throws(() => rolloutNewTenants(withNew(list, value)), (e: Error) => {
+          assert.match(e.message, /^MERRYMEN_ROLLOUT_NEW_TENANTS is not observe, exits-only or trade .*; refusing to start rather than guess/, JSON.stringify(value));
+          assert.doesNotMatch(e.message, /0x[0-9a-f]{40}/i);
+          return true;
+        });
+      }
+    });
+
+    it("a valid value is accepted beside none and all, so the emergency stop never needs it removed to boot", () => {
+      assert.equal(rolloutNewTenants(withNew("none", "trade")), "trade");
+      assert.equal(rolloutNewTenants(withNew("all", "observe")), "observe");
+    });
+  });
+
+  describe("whether it is in effect (newTenantLevel)", () => {
+    it("only under an explicit list", () => {
+      assert.equal(newTenantLevel(withNew(list, "exits-only")), "exits-only");
+      assert.equal(newTenantLevel(withNew("none", "trade")), null, "never under none, the emergency stop");
+      assert.equal(newTenantLevel(withNew("all", "trade")), null, "nothing to add under all");
+      assert.equal(newTenantLevel(withNew(undefined, "trade")), null, "unset rollout off Railway is all");
+    });
+
+    it("fails closed: a refused rollout, or a malformed value read after boot, admits nobody new", () => {
+      assert.equal(newTenantLevel(withNew("halt", "trade")), null);
+      assert.equal(newTenantLevel(withNew(undefined, "trade", { RAILWAY_SERVICE_ID: "s" })), null);
+      assert.equal(newTenantLevel(withNew(list, "bogus")), null);
+      assert.equal(newTenantLevel(withNew(list, undefined)), null);
+    });
+
+    it("the route is open only for a tenant the list does not name", () => {
+      const e = withNew(list, "trade");
+      assert.equal(newTenantRouteOpen(C, e), true);
+      assert.equal(newTenantRouteOpen(A, e), false);
+      assert.equal(newTenantRouteOpen(A.toUpperCase().replace("0X", "0x"), e), false);
+      assert.equal(newTenantRouteOpen(C, withNew(list, undefined)), false);
+      assert.equal(newTenantRouteOpen(C, withNew("none", "trade")), false);
+    });
+  });
+
+  describe("the level a recorded new tenant runs at (rolloutLevel)", () => {
+    const recorded = new Set([C, A]);
+
+    it("a recorded, unnamed tenant runs at the variable's level, read now", () => {
+      assert.equal(rolloutLevel(C, withNew(list, "observe"), recorded), "observe");
+      assert.equal(rolloutLevel(C, withNew(list, "trade"), recorded), "trade", "raised with the variable");
+      assert.equal(rolloutLevel(C.toUpperCase().replace("0X", "0x"), withNew(list, "exits-only"), recorded), "exits-only");
+      assert.equal(childAdmissionLevel(C, withNew(list, "exits-only"), recorded), "exits-only");
+      assert.equal(rolloutHeld(C, withNew(list, "exits-only"), recorded), false);
+    });
+
+    it("an unrecorded unnamed tenant is held: the record is what admits, never the variable alone", () => {
+      assert.equal(rolloutLevel(D, withNew(list, "trade"), recorded), "held");
+      assert.equal(rolloutLevel(D, withNew(list, "trade")), "held");
+      assert.equal(childAdmissionLevel(D, withNew(list, "trade"), recorded), "observe");
+    });
+
+    it("a tenant the list names keeps the list's level, recorded or not", () => {
+      assert.equal(rolloutLevel(A, withNew(list, "observe"), recorded), "trade");
+      assert.equal(rolloutLevel(B, withNew(list, "trade"), new Set([B])), "observe", "never raised by the variable");
+    });
+
+    it("unset, none or a refused value holds every recorded tenant again; all admits everybody as before", () => {
+      assert.equal(rolloutLevel(C, withNew(list, undefined), recorded), "held", "removing the variable holds them all");
+      assert.equal(rolloutLevel(C, withNew("none", "trade"), recorded), "held");
+      assert.equal(rolloutLevel(C, withNew(list, "bogus"), recorded), "held");
+      assert.equal(rolloutLevel(C, withNew("halt", "trade"), recorded), "held");
+      assert.equal(rolloutLevel(C, withNew("all", "observe"), recorded), "trade");
+    });
+  });
+
+  describe("what the operator reads", () => {
+    it("unset: the counts are exactly what they were, with no `new` at all", () => {
+      const counts = rolloutCounts([A, B, C], withNew(list, undefined), { newTenants: new Set([C]) });
+      assert.deepEqual(counts, { trade: 1, "exits-only": 0, observe: 1, held: 1, expired: 0, absent: 0 });
+      assert.equal(rolloutLine(counts, withNew(list, undefined)),
+        "fleet| rollout 2 named — admitted: trade 1 · exits-only 0 · observe 1; not run: held 1 · expired 0");
+    });
+
+    it("open: recorded tenants are counted at their level, and `new N` says how many of the admitted came in that way", () => {
+      const e = withNew(list, "exits-only");
+      const counts = rolloutCounts([A, B, C, D], e, { newTenants: new Set([C]) });
+      assert.deepEqual(counts, { trade: 1, "exits-only": 1, observe: 1, held: 1, expired: 0, absent: 0, new: 1 });
+      assert.equal(rolloutLine(counts, e),
+        "fleet| rollout 2 named (new at exits-only) — admitted: trade 1 · exits-only 1 · observe 1 · new 1 of those; not run: held 1 · expired 0");
+    });
+
+    it("a recorded tenant the accounting hold names is held, and one whose key expired is expired: neither is counted new", () => {
+      const e = withNew(list, "trade");
+      const counts = rolloutCounts([A, B, C, D], e, { newTenants: new Set([C, D]), accountingHeld: new Set([C]), unexpired: new Set([A, B, C]) });
+      assert.deepEqual(counts, { trade: 1, "exits-only": 0, observe: 1, held: 1, expired: 1, absent: 0, new: 0 });
+    });
+
+    it("a recorded tenant the list now names is counted at the list's level, not as new", () => {
+      const e = withNew(`${A}:trade,${C}:observe`, "trade");
+      assert.deepEqual(rolloutCounts([A, C], e, { newTenants: new Set([C]) }),
+        { trade: 1, "exits-only": 0, observe: 1, held: 0, expired: 0, absent: 0, new: 0 });
+    });
+
+    it("the heartbeat's scope says the route, within its vocabulary, and still never a tenant", () => {
+      for (const level of ["observe", "exits-only", "trade"]) {
+        const e = withNew(list, level);
+        const summary = rolloutSummary(rolloutCounts([A, C], e, { newTenants: new Set([C]) }), e);
+        assert.equal(summary.scope, `2 named (new at ${level})`);
+        // fleet-heartbeat.ts safeScope, which drops a scope outside it.
+        assert.match(summary.scope, /^[A-Za-z0-9][A-Za-z0-9 _()-]{0,47}$/);
+        assert.doesNotMatch(JSON.stringify(summary), /0x/i);
+        assert.equal(summary.levels.new, 1);
+      }
+      assert.ok(`${MAX_ROLLOUT_TENANTS} named (new at exits-only)`.length <= 48, "the longest list still fits");
+      assert.equal(rolloutSummary(null, withNew("none", "trade")).scope, "none", "shut: the name is what it always was");
+    });
+
+    it("the startup line says what the value does under the scope that took", () => {
+      assert.match(newTenantsStartupLine(withNew(list, undefined)), /MERRYMEN_ROLLOUT_NEW_TENANTS unset — a tenant the rollout does not name is held, new or not, as before$/);
+      assert.match(newTenantsStartupLine(withNew("none", "trade")), /=trade has no effect under none — the emergency stop admits nobody/);
+      assert.match(newTenantsStartupLine(withNew("all", "trade")), /=trade has no effect under all/);
+      assert.match(newTenantsStartupLine(withNew("halt", "trade")), /the rollout itself is refused — nobody is admitted/);
+      const open = newTenantsStartupLine(withNew(list, "observe"));
+      assert.match(open, /=observe — a tenant the list does not name is admitted at observe once it is proved genuinely new/);
+      assert.match(open, /recorded in fleet_new_tenant_admissions before its first spawn/);
+      assert.throws(() => newTenantsStartupLine(withNew(list, "bogus")), /MERRYMEN_ROLLOUT_NEW_TENANTS is not observe/);
+    });
   });
 });
