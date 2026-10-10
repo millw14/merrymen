@@ -84,8 +84,15 @@ export const managerNotices = {
     text: `Your bot @${username} was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes.`,
     buttons: back(home),
   }),
+  /**
+   * SAVED, NOT RUNNING. Only the agent's own worker (or its hold process)
+   * starts the bot and mints the code "Open my bot" carries, and an agent the
+   * fleet holds (not yet admitted, an expired session key, a recovery or
+   * accounting hold) has neither. This side cannot see which, so it says what
+   * the bot waits for rather than promising when it will answer.
+   */
   connected: (username: string, home: string | null): ManagerNotice => ({
-    text: `✅ Connected @${username} to your Merrymen agent.\nMerrymen will show "Open my bot" once your agent has started it.`,
+    text: `✅ Connected @${username} to your Merrymen agent.\n@${username} replies once your agent is running. Merrymen then shows "Open my bot" to link your chat with it. If your agent is paused for recovery, that waits until it resumes.`,
     buttons: back(home),
   }),
   expired: (home: string | null): ManagerNotice => ({ text: "This setup expired. Start again from Merrymen.", buttons: back(home) }),

@@ -104,7 +104,7 @@ function buttons() {
   return { connect: ready.reply_markup!.inline_keyboard![0]![0]!.callback_data!, cancel: ready.reply_markup!.inline_keyboard![1]![0]!.callback_data!, markup: ready.reply_markup };
 }
 const BACK = { inline_keyboard: [[{ text: "Back to Merrymen", url: "https://app.merrymen.test" }]] };
-const CONNECTED = "✅ Connected @my_merrymen_bot to your Merrymen agent.\nMerrymen will show \"Open my bot\" once your agent has started it.";
+const CONNECTED = "✅ Connected @my_merrymen_bot to your Merrymen agent.\n@my_merrymen_bot replies once your agent is running. Merrymen then shows \"Open my bot\" to link your chat with it. If your agent is paused for recovery, that waits until it resumes.";
 let presses = 0;
 /** A press of a manager button, as Telegram delivers it: by default the bound user, in their private chat with the manager. */
 function pressOf(data: string, over: { from?: object; chat?: object; inline?: boolean } = {}) {

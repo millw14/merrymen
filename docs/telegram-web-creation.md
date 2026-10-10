@@ -119,12 +119,18 @@ Telegram rejects it, the owner chooses another in the same dialog.
 | --- | --- | --- |
 | A bot is made for a setup underway | ✅ @bot is ready. Connect it to your Merrymen agent? | Connect @bot · Not this bot |
 | A bot is made with no setup underway (it expired, was cancelled or replaced, or never began) | Your bot @bot was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes. | Back to Merrymen |
-| **Connect** saved it, or the page did | ✅ Connected @bot to your Merrymen agent. Merrymen will show "Open my bot" once your agent has started it. | Back to Merrymen |
+| **Connect** saved it, or the page did | ✅ Connected @bot to your Merrymen agent. @bot replies once your agent is running. Merrymen then shows "Open my bot" to link your chat with it. If your agent is paused for recovery, that waits until it resumes. | Back to Merrymen |
 | **Not this bot** | Cancelled. Start again from Merrymen when you're ready. (The bot itself stays in Telegram; it can be deleted in @BotFather.) | Back to Merrymen |
 | **Connect** on an expired setup | This setup expired. Start again from Merrymen. | Back to Merrymen |
 | **Connect** when the agent already has a bot | …already has a Telegram bot… replace the bot in Settings. | Back to Merrymen |
 | **Connect** on a bot another agent holds | …already connected to another Merrymen agent… (never whose) | Back to Merrymen |
 | **Connect** fails for any other reason | Couldn't connect right now. Try again, or connect from Merrymen. | The same two buttons |
+
+Connected means saved, not running. Only the agent's worker (or its hold
+process) starts the bot and mints the code "Open my bot" carries; an agent the
+fleet holds (not yet admitted, an expired session key, a recovery or
+accounting hold) runs neither, and the web cannot see which. So the message
+says what the bot waits for and never promises when it will answer.
 
 Back to Merrymen opens `MERRYMEN_PUBLIC_ORIGIN`. Each creation is answered
 once: Telegram's redelivery of the same update says nothing again. A message
@@ -168,6 +174,14 @@ The page keeps checking the setup while it shows **Connect this bot**, so a
 connection or cancellation made in Telegram appears there by itself, and it
 checks again at once when it comes back into view (a phone's browser tab sleeps
 while its owner is in Telegram).
+
+Save is held until a connected bot reads back in Settings only for a
+connection that page itself confirmed. A browser can still hold the id of a
+setup connected in Telegram that it never saw finish (its tab was closed), and
+by its next visit the bot may have been switched off, removed or replaced from
+elsewhere. Such a setup is settled by reading Settings back as it is now,
+without requiring that bot; then the id is forgotten and Save released. Only a
+failed readback keeps the hold, with Refresh Settings to try again.
 
 Local tests use synthetic tokens and disposable SQLite/Postgres databases. Real
 Telegram creation, manager capability and webhook delivery need the operator

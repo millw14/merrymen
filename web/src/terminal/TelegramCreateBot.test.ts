@@ -17,7 +17,7 @@ let refreshed: { owner: string; signal: AbortSignal }[];
 let active: boolean[];
 let refresh: () => Promise<void>;
 let reconcile: () => Promise<void>;
-let reconciled: { owner: string; signal: AbortSignal }[];
+let reconciled: { owner: string; signal: AbortSignal; botUsername: string | null }[];
 let hasBot: boolean;
 let opened: number;
 let popup: Window | null;
@@ -29,7 +29,7 @@ const post = (call: Call) => JSON.parse(String(call.init?.body)) as Record<strin
 const posts = () => calls.filter(call => call.init?.method === "POST");
 const drain = () => act(async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); });
 async function advance(ms: number) { await act(async () => mock.timers.tick(ms)); await drain(); }
-const render = (owner: string | null = OWNER) => ui.render(React.createElement(TelegramCreateBot, { owner, hasBot, onActiveChange: value => active.push(value), onAvailableChange: value => availabilities.push(value), onConnected: async (scope, signal) => { refreshed.push({ owner: scope, signal }); await refresh(); }, onIntentMissing: async (scope, signal) => { reconciled.push({ owner: scope, signal }); await reconcile(); } }));
+const render = (owner: string | null = OWNER) => ui.render(React.createElement(TelegramCreateBot, { owner, hasBot, onActiveChange: value => active.push(value), onAvailableChange: value => availabilities.push(value), onConnected: async (scope, signal) => { refreshed.push({ owner: scope, signal }); await refresh(); }, onIntentMissing: async (scope, signal, botUsername) => { reconciled.push({ owner: scope, signal, botUsername }); await reconcile(); } }));
 const buttons = () => [...ui.container.querySelectorAll("button")].map(button => button.textContent);
 
 beforeEach(() => {
@@ -391,19 +391,62 @@ describe("Telegram bot creation through the actual client component", () => {
     assert.doesNotMatch(ui.container.textContent ?? "", /sensitive diagnostic/);
   });
 
-  it("retains the safe save hold after connection when its required readback fails", async () => {
-    localStorage.setItem(storageKey(OWNER), ID);
-    respond = async () => json({ available: true, intent: intent("connected") });
-    refresh = async () => { throw new Error("readback failed"); };
+  it("retains the safe save hold after this tab's connection when its required readback fails", async () => {
     await render();
+    await ui.click("Create Telegram bot");
+    respond = async call => call.init?.method === "POST" ? json({ intent: intent("connected") }) : json({ available: true, intent: intent("confirm") });
+    await advance(3000);
+    refresh = async () => { throw new Error("readback failed"); };
+    await ui.click("Connect this bot");
     await drain();
     assert.equal(active.at(-1), true);
     assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    assert.equal(reconciled.length, 0, "a bot this tab connected must read back as saved: nothing weaker releases Save");
     assert.match(ui.container.textContent ?? "", /Refresh Settings before saving/);
     refresh = async () => {};
     await ui.click("Refresh Settings");
     await drain();
     assert.equal(refreshed.length, 2);
+    assert.equal(active.at(-1), false);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+  });
+
+  it("lets go of a stored setup connected in Telegram once Settings is read back as it is now, even with that bot since removed or replaced", async () => {
+    // Connected from the manager chat while this browser was away. Since then
+    // the token was removed or the bot replaced elsewhere, so Settings can
+    // never confirm that bot: requiring it would hold Save on every visit.
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("connected") });
+    refresh = async () => { throw new Error("Telegram bot changed"); };
+    const readback = deferred<void>();
+    reconcile = () => readback.promise;
+    await render(); await drain();
+    assert.equal(reconciled.length, 1, "Settings is read back without requiring the connection");
+    assert.equal(reconciled[0].botUsername, null, "nor that setup's bot");
+    assert.equal(active.at(-1), true, "Save waits for that readback");
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    readback.resolve(); await drain();
+    assert.equal(active.at(-1), false, "Save is released");
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null, "and the id forgotten, so the next visit does not hold Save again");
+    assert.doesNotMatch(ui.container.textContent ?? "", /Bot saved as|Refresh Settings|Couldn't/);
+    assert.ok(buttons().includes("Create Telegram bot"), "with no bot in Settings now, creation is offered again");
+    const count = calls.length;
+    await advance(30_000);
+    assert.equal(calls.length, count, "nothing left polling");
+  });
+
+  it("keeps holding a connection made in Telegram while no Settings readback succeeds, then lets go", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("connected") });
+    refresh = async () => { throw new Error("Telegram settings not confirmed"); };
+    reconcile = async () => { throw new Error("Settings unavailable"); };
+    await render(); await drain();
+    assert.equal(active.at(-1), true);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    assert.match(ui.container.textContent ?? "", /Refresh Settings before saving/);
+    reconcile = async () => {};
+    await ui.click("Refresh Settings"); await drain();
+    assert.equal(reconciled.length, 2);
     assert.equal(active.at(-1), false);
     assert.equal(localStorage.getItem(storageKey(OWNER)), null);
   });

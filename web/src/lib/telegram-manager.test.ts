@@ -157,9 +157,14 @@ describe("what the manager says, and what its buttons carry", () => {
       text: "Your bot @my_merrymen_bot was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes.",
       buttons: back,
     });
+    // Saved is not running: a held agent (outside the rollout, an expired
+    // session key, a recovery or accounting hold) never starts the bot, so the
+    // message says what the bot waits for, never that it will soon answer.
     assert.deepEqual(managerNotices.connected("my_merrymen_bot", home), {
-      text: "✅ Connected @my_merrymen_bot to your Merrymen agent.\nMerrymen will show \"Open my bot\" once your agent has started it.", buttons: back,
+      text: "✅ Connected @my_merrymen_bot to your Merrymen agent.\n@my_merrymen_bot replies once your agent is running. Merrymen then shows \"Open my bot\" to link your chat with it. If your agent is paused for recovery, that waits until it resumes.",
+      buttons: back,
     });
+    assert.doesNotMatch(managerNotices.connected("my_merrymen_bot", home).text, /will show|has started|is live|is listening/);
     assert.deepEqual(managerNotices.expired(home), { text: "This setup expired. Start again from Merrymen.", buttons: back });
     assert.match(managerNotices.cancelled("my_merrymen_bot", home).text, /^Cancelled\. Start again from Merrymen when you're ready\.\n.*@my_merrymen_bot.*@BotFather/);
     assert.match(managerNotices.alreadyHasBot("my_merrymen_bot", home).text, /already has a Telegram bot.*replace the bot in Settings/);

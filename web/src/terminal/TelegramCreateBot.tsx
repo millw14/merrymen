@@ -232,14 +232,34 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
     return () => { document.removeEventListener("visibilitychange", wake); window.removeEventListener("pageshow", wake); };
   }, [owner]);
 
+  /**
+   * CONNECTED: SETTINGS IS READ BACK BEFORE SAVE IS RELEASED. A connection
+   * this tab confirmed must read back as saved (onConnected: that bot,
+   * switched on); anything less keeps the hold, with Refresh Settings.
+   *
+   * One this tab never confirmed (made with Telegram's Connect, or found under
+   * a stored id whose tab closed before it saw the end) can have been switched
+   * off, removed or replaced since, from another device, and then never reads
+   * back as that bot: requiring it held Save on every visit, with nothing to
+   * clear it. So when that check fails, Settings is read back as it is now
+   * (onIntentMissing, with no bot to require), and then the id is forgotten
+   * and Save released: the setup is over, and what Settings holds is what it
+   * shows. Only a failed readback keeps the hold.
+   */
   useEffect(() => {
     if (!intent || intent.status !== "connected" || current.refreshed || !owner) return;
     const ctl = controller();
+    const confirmedHere = current.confirmationAttempted;
     patch(owner, { busy: true, error: null });
-    void Promise.resolve().then(() => callbacks.current.onConnected(owner, ctl.signal, intent.botUsername!)).then(() => {
+    const settle = (changes: Partial<View>) => {
       if (!valid(ctl, owner)) return;
       remember(owner, null);
-      patch(owner, { busy: false, refreshed: true, confirmationAttempted: false, error: null });
+      patch(owner, { busy: false, confirmationAttempted: false, error: null, ...changes });
+    };
+    void Promise.resolve().then(() => callbacks.current.onConnected(owner, ctl.signal, intent.botUsername!)).then(() => settle({ refreshed: true }), async error => {
+      if (confirmedHere || !valid(ctl, owner)) throw error;
+      await callbacks.current.onIntentMissing(owner, ctl.signal, null);
+      settle({ intent: null, telegramUrl: null });
     }).catch(() => { if (valid(ctl, owner)) patch(owner, { busy: false, error: "The bot was connected, but Settings couldn't refresh. Refresh Settings before saving other changes." }); }).finally(() => controllers.current.delete(ctl));
     return () => { ctl.abort(); controllers.current.delete(ctl); };
   }, [owner, intent?.id, intent?.status, refreshAttempt]);

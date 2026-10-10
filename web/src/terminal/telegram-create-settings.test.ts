@@ -225,6 +225,32 @@ describe("managed Telegram creation through Settings", () => {
     assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), false);
   });
 
+  it("does not lock Save behind a stored setup connected in Telegram whose bot was later removed, switched off or replaced", async () => {
+    const save = () => [...ui.container.querySelectorAll("button")].find(button => button.textContent === "Save settings")!;
+    const withToken = (telegramEnabled: boolean) => ({ ...fixture(), telegramBotToken: { set: true, hint: "masked" }, values: { ...fixture().values, telegramEnabled } });
+    const later: Record<string, () => SettingsView> = {
+      removed: () => fixture(),
+      "switched off": () => withToken(false),
+      replaced: () => { telegramReply = () => json({ botUsername: "replacement_testbot", linkCode: "replacement-proof" }); return withToken(true); },
+    };
+    for (const [change, settings] of Object.entries(later)) {
+      // Connected from the manager chat while this browser was away (its
+      // poll never saw it), then changed from another device.
+      localStorage.setItem(`merrymen.telegram.create.v1:${OWNER}`, ID);
+      phase = "connected";
+      server = settings();
+      await ui.remount(React.createElement(Settings, { onFund: () => {}, slug: null })); await drain();
+      assert.equal(localStorage.getItem(`merrymen.telegram.create.v1:${OWNER}`), null, `${change}: the setup is forgotten`);
+      assert.equal(save().disabled, false, `${change}: Save is released`);
+      assert.equal(token().disabled, false, `${change}: so is the manual token field`);
+      assert.doesNotMatch(ui.container.textContent ?? "", /Refresh Settings before saving|Finish or cancel Telegram setup/, change);
+    }
+    assert.ok(ui.container.querySelector('a[href="https://t.me/replacement_testbot?start=replacement-proof"]'), "the bot Settings holds now is the one shown");
+    await ui.click("Save settings");
+    assert.equal(writes.length, 1);
+    assert.equal("telegramBotToken" in writes[0], false);
+  });
+
   it("lets an unconnected missing candidate start over without discarding manual edits", async () => {
     await prepare();
     missingIntent = true;
