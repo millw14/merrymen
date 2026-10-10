@@ -353,11 +353,15 @@ describe("Telegram bot creation through the actual client component", () => {
     assert.equal(active.at(-1), false);
   });
 
-  it("bounds even an excessively long server expiry to fifteen minutes", async () => {
-    respond = async call => call.init?.method === "POST" ? json({ intent: intent("waiting_telegram", { expiresAt: Date.now() + 86_400_000 }), telegramUrl: "https://t.me/MerrymenManagerBot?start=server_nonce" }) : json({ available: true });
+  it("bounds even an excessively long server expiry to thirty minutes, the server's own window", async () => {
+    const far = Date.now() + 86_400_000;
+    respond = async call => call.init?.method === "POST" ? json({ intent: intent("waiting_telegram", { expiresAt: far }), telegramUrl: "https://t.me/MerrymenManagerBot?start=server_nonce" }) : json({ available: true });
     await render();
     await ui.click("Create Telegram bot");
-    await advance(15 * 60_000);
+    respond = async () => json({ available: true, intent: intent("waiting_telegram", { expiresAt: far }) });
+    await advance(30 * 60_000 - 1);
+    assert.doesNotMatch(ui.container.textContent ?? "", /setup expired/, "still open just short of thirty minutes");
+    await advance(1);
     assert.match(ui.container.textContent ?? "", /setup expired/);
     const count = calls.length;
     await advance(30_000);
@@ -465,5 +469,90 @@ describe("Telegram bot creation through the actual client component", () => {
     await render();
     assert.equal(posts().length, 1, "existing bot remains managed by the existing Settings controls");
     assert.equal(ui.container.querySelector('button.mm-btn.primary'), null);
+  });
+
+  it("shows a bot connected from Telegram while it offers Connect here, and refreshes Settings for it", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("confirm") });
+    await render();
+    assert.ok(buttons().includes("Connect this bot"));
+    respond = async () => json({ available: true, intent: intent("connected") });
+    await advance(3000);
+    assert.equal(posts().length, 0, "nothing asked of the server: Telegram's Connect made the connection");
+    assert.equal(refreshed.length, 1);
+    assert.match(ui.container.textContent ?? "", /Bot saved as @merrymen_testbot/);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.equal(active.at(-1), false);
+  });
+
+  it("shows a setup turned down in Telegram (Not this bot) as ended, and forgets it", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("confirm") });
+    await render();
+    respond = async () => json({ available: true, intent: intent("cancelled") });
+    await advance(3000);
+    assert.match(ui.container.textContent ?? "", /didn't finish/);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.equal(reconciled.length, 0, "never confirmed here: nothing to read back");
+    assert.ok(buttons().includes("Create Telegram bot"));
+    assert.equal(active.at(-1), false);
+  });
+
+  it("stops polling while it confirms, so a read from before the answer cannot put Connect back", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("confirm") });
+    await render();
+    const before = deferred<Response>();
+    respond = async () => before.promise;
+    await advance(3000);
+    const poll = calls.at(-1)!;
+    const answer = deferred<Response>();
+    respond = async call => call.init?.method === "POST" ? answer.promise : json({ available: true, intent: intent("connected") });
+    await ui.click("Connect this bot");
+    assert.equal(poll.init?.signal?.aborted, true, "stopped before the answer can arrive, not only once it has");
+    before.resolve(json({ available: true, intent: intent("confirm") })); await drain();
+    answer.resolve(json({ intent: intent("connected") })); await drain();
+    assert.equal(refreshed.length, 1);
+    assert.match(ui.container.textContent ?? "", /Bot saved as @merrymen_testbot/);
+    assert.equal(buttons().includes("Connect this bot"), false);
+  });
+
+  it("reads the setup at once when the page comes back into view, rather than at the next poll", async () => {
+    await render();
+    await ui.click("Create Telegram bot");
+    respond = async () => json({ available: true, intent: intent("connected") });
+    const count = calls.length;
+    await act(async () => { document.dispatchEvent(new ui.dom.window.Event("visibilitychange")); }); await drain();
+    assert.equal(calls.length, count + 1);
+    assert.equal(refreshed.length, 1, "connected in Telegram while this tab was away");
+    assert.match(ui.container.textContent ?? "", /Bot saved as @merrymen_testbot/);
+  });
+
+  it("asks the server about a setup it marked expired while asleep, and finds the bot it connected meanwhile", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("waiting_bot", { expiresAt: Date.now() + 60_000 }) });
+    await render();
+    // Asleep: the poll never comes back, and this tab's own deadline passes.
+    const asleep = deferred<Response>();
+    respond = async () => asleep.promise;
+    await advance(60_000);
+    assert.match(ui.container.textContent ?? "", /setup expired/);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID, "only this tab's clock said so: the id is kept to ask");
+    respond = async () => json({ available: true, intent: intent("connected") });
+    await act(async () => { ui.dom.window.dispatchEvent(new ui.dom.window.Event("pageshow")); }); await drain();
+    assert.equal(refreshed.length, 1);
+    assert.match(ui.container.textContent ?? "", /Bot saved as @merrymen_testbot/);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    asleep.resolve(json({ available: true, intent: intent("waiting_bot") })); await drain();
+    assert.match(ui.container.textContent ?? "", /Bot saved as @merrymen_testbot/, "the old poll's late answer is dropped");
+  });
+
+  it("does not ask again about a setup the server itself said had expired", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: true, intent: intent("expired") });
+    await render(); await drain();
+    const count = calls.length;
+    await act(async () => { document.dispatchEvent(new ui.dom.window.Event("visibilitychange")); }); await drain();
+    assert.equal(calls.length, count);
   });
 });

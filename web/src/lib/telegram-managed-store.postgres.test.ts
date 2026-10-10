@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { makePgDb, type Db, type Stmt } from "../../../worker/src/db";
 import { openSecret, sealSecret } from "../../../worker/src/store-crypto";
-import { ensureManagedTelegramSchema, ManagedTelegramError, ManagedTelegramStore } from "./telegram-managed-store";
+import { ensureManagedTelegramSchema, MANAGED_INTENT_TTL_MS, ManagedTelegramError, ManagedTelegramStore } from "./telegram-managed-store";
 
 const fixtureUrl = process.env.MERRYMEN_TEST_PG_URL;
 const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -85,7 +85,8 @@ test("Postgres: managed bot intents, replay, claims and encrypted settings are a
         assert.equal(columns.rows.find((row) => row.column_name === field)?.data_type, "bigint");
       }
       const began = await storeA.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
-      assert.equal(began.intent.expiresAt, NOW + 600_000);
+      assert.equal(MANAGED_INTENT_TTL_MS, 1_800_000);
+      assert.equal(began.intent.expiresAt, NOW + 1_800_000);
       await reset();
     });
 
@@ -119,6 +120,13 @@ test("Postgres: managed bot intents, replay, claims and encrypted settings are a
       assert.equal((await storeB.candidate(creation)).outcome, "already_candidate");
       assert.equal((await storeB.candidate({ ...creation, updateId: 32, botId: "1002", username: "second_test_bot" })).outcome, "ignored");
       assert.equal((await storeB.get(scope(A, intent.id)))?.botId, BOT);
+      // A creation nobody's setup is waiting for is unmatched once, and its redelivery on another pool is silent.
+      const stray = { ...creation, updateId: 33, telegramUserId: USER + 9, botId: "1003", username: "stray_test_bot" };
+      assert.equal((await storeA.candidate(stray)).outcome, "unmatched");
+      assert.equal((await storeB.candidate(stray)).outcome, "ignored");
+      // The Telegram user the setup bound finds it from a button on either pool; nobody else does.
+      assert.equal((await storeB.forTelegramUser({ intentId: intent.id, managerBotId: MANAGER, telegramUserId: USER, now: NOW }))?.tenant, A);
+      assert.equal(await storeB.forTelegramUser({ intentId: intent.id, managerBotId: MANAGER, telegramUserId: USER + 9, now: NOW }), null);
       await reset();
     });
 

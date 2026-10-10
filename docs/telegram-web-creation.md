@@ -1,12 +1,24 @@
 # Telegram bot creation from the web
 
-Hosted Settings → Telegram has a **Create Telegram bot** button. It opens a
-private chat with the Merrymen manager. The user starts that chat, taps its
-creation button, approves the bot name in Telegram, and confirms the displayed
-username back in Settings. Merrymen retrieves and seals the token on the server;
-users never copy it. **Open your bot** then uses the existing private `/start`
-link to finish linking their agent. Saving a token does not prove a listener is
-running, and it does not enable trading or change a wallet permission.
+Hosted Settings → Telegram has a **Create Telegram bot** button (Home has the
+same flow as **Set up Telegram**). It opens a private chat with the Merrymen
+manager. The user starts that chat, taps its creation button and approves the
+bot name in Telegram. The manager then answers in the same chat:
+
+> ✅ @their_bot is ready.
+> Connect it to your Merrymen agent?
+>
+> [Connect @their_bot] [Not this bot]
+
+**Connect** saves the bot right there; the page in Merrymen, which keeps
+checking, shows it saved without another click. The page also still offers
+**Connect this bot**, so either place works, and whichever comes second finds
+it already done. Merrymen retrieves and seals the token on the server; users
+never copy it. **Open your bot** then uses the existing private `/start` link to
+finish linking their agent. Saving a token does not prove a listener is running,
+and it does not enable trading or change a wallet permission.
+
+The whole setup, from the button to choosing the bot, has **30 minutes**.
 
 Existing bots keep their current connection. Manual BotFather token entry remains
 under **Connect an existing bot**. Creating a new bot refuses to replace a saved
@@ -69,10 +81,15 @@ web service runs a readiness probe:
 3. `getWebhookInfo` reports the manager's webhook URL, and:
    - **empty**: the service sets it to
      `${MERRYMEN_PUBLIC_ORIGIN}/api/telegram/manager/webhook` with the webhook
-     secret and `allowed_updates: ["message", "managed_bot"]`, then reads it back;
+     secret and `allowed_updates: ["message", "managed_bot", "callback_query"]`,
+     then reads it back;
    - **already this URL**: it is set again once per process with the current
      secret (Telegram never reports the secret, so a rotated or hand-set one
-     cannot be detected otherwise);
+     cannot be detected otherwise), and again at any probe whose
+     `getWebhookInfo` lists fewer update types than those three. A webhook set
+     before the Connect button existed (`["message", "managed_bot"]`) is
+     therefore refreshed by itself after the deploy, including if a replica
+     still running the old code sets the old list back; nobody sets it by hand;
    - **any other URL**: it is **left untouched** and creation stays unavailable
      here. This protects another environment sharing the token. To move it,
      clear it yourself (`deleteWebhook`) or give this environment its own
@@ -87,30 +104,70 @@ endpoint answers only `available: true|false`. When it is false, Settings
 opens **Connect an existing bot** instead of showing a Create button.
 
 Keep a single delivery method for the manager: do not also poll it with
-`getUpdates`. Pending intents expire after ten minutes; creation messages must
-be fresh and belong to the privately bound human sender. Keep callback receipts
-at least through the provider's retry window. The tables contain private
-account associations and are not public analytics data.
+`getUpdates`. Pending intents expire after thirty minutes; creation messages
+must be fresh and belong to the privately bound human sender. Keep update
+receipts at least through the provider's retry window. The tables contain
+private account associations and are not public analytics data.
 
 The bot username Telegram suggests in its creation dialog is
 `merrymen_<8 random hex>_bot`; it never contains the owner's Telegram id. If
 Telegram rejects it, the owner chooses another in the same dialog.
+
+## What the manager says in Telegram
+
+| When | The manager says | Buttons |
+| --- | --- | --- |
+| A bot is made for a setup underway | ✅ @bot is ready. Connect it to your Merrymen agent? | Connect @bot · Not this bot |
+| A bot is made with no setup underway (it expired, was cancelled or replaced, or never began) | Your bot @bot was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes. | Back to Merrymen |
+| **Connect** saved it, or the page did | ✅ Connected @bot to your Merrymen agent. Merrymen will show "Open my bot" once your agent has started it. | Back to Merrymen |
+| **Not this bot** | Cancelled. Start again from Merrymen when you're ready. (The bot itself stays in Telegram; it can be deleted in @BotFather.) | Back to Merrymen |
+| **Connect** on an expired setup | This setup expired. Start again from Merrymen. | Back to Merrymen |
+| **Connect** when the agent already has a bot | …already has a Telegram bot… replace the bot in Settings. | Back to Merrymen |
+| **Connect** on a bot another agent holds | …already connected to another Merrymen agent… (never whose) | Back to Merrymen |
+| **Connect** fails for any other reason | Couldn't connect right now. Try again, or connect from Merrymen. | The same two buttons |
+
+Back to Merrymen opens `MERRYMEN_PUBLIC_ORIGIN`. Each creation is answered
+once: Telegram's redelivery of the same update says nothing again. A message
+Telegram refuses to deliver is logged with a fixed line
+(`[telegram-create] the manager's … message could not be sent`) and not retried;
+the page in Merrymen still offers the bot.
+
+**Who may press Connect.** Only the Telegram user that the setup's `/start`
+challenge bound, in their private chat with the manager. That challenge came
+from the signed-in owner's own Merrymen page, so the bound user stands for that
+owner for this one setup; pressing connects exactly the bot the creation
+message proposed, nothing else. A button carries `mc:` or `mx:`, the setup's
+random id and the public bot id (at most 60 bytes). It never carries the
+challenge, the wallet address or a token. The server finds the setup only
+through the presser's Telegram id. Connect runs exactly the web confirmation:
+the settings lock, `getManagedBotToken` and `getMe`, then one transaction for
+the claim, the sealed token and the completion. Pressing twice, or Telegram
+redelivering a press, connects nothing twice. A press from anyone else, or
+anywhere else, is answered and changes nothing.
 
 ## Association and retry guarantees
 
 A signed wallet session creates a random, tenant-bound `/start` challenge; only
 its hash is stored. A private, authenticated Telegram delivery binds one active
 intent per Telegram user. A fresh `managed_bot_created` service message proposes
-an immutable first candidate. An explicit web confirmation checks its bot ID,
-gets its managed token and verifies `getMe` before a first-wins bot claim. Claim,
+an immutable first candidate. An explicit confirmation (the signed-in owner's on
+the web, or the bound Telegram user's Connect button) checks its bot ID, gets
+its managed token and verifies `getMe` before a first-wins bot claim. Claim,
 encrypted settings and completion commit in one transaction under the normal
 settings-save lock. Only `telegramBotToken` and `telegramEnabled` change.
 
 The editable username is not account authority. Generic `managed_bot` events
 also describe rotations and owner changes and cannot consume a creation intent.
-Update receipts survive restarts. A lost confirmation response is reconciled
-before the form can save an obsolete manual-token draft. Cancellation never
-deletes a bot created in Telegram; its owner retains it there.
+Update receipts survive restarts, including a creation that matched no setup,
+so its redelivery stays silent. A lost confirmation response is reconciled
+before the form can save an obsolete manual-token draft. Cancellation, on the
+web or with Not this bot, never deletes a bot created in Telegram; its owner
+retains it there.
+
+The page keeps checking the setup while it shows **Connect this bot**, so a
+connection or cancellation made in Telegram appears there by itself, and it
+checks again at once when it comes back into view (a phone's browser tab sleeps
+while its owner is in Telegram).
 
 Local tests use synthetic tokens and disposable SQLite/Postgres databases. Real
 Telegram creation, manager capability and webhook delivery need the operator
@@ -125,5 +182,7 @@ from the authenticated endpoint.
 Official contracts: [Managed Bots](https://core.telegram.org/bots/features#managed-bots),
 [request keyboard](https://core.telegram.org/bots/api#keyboardbuttonrequestmanagedbot),
 [creation service message](https://core.telegram.org/bots/api#managedbotcreated),
+[inline buttons](https://core.telegram.org/bots/api#inlinekeyboardbutton) and
+[their presses](https://core.telegram.org/bots/api#answercallbackquery),
 [managed token retrieval](https://core.telegram.org/bots/api#getmanagedbottoken),
 [webhook authentication](https://core.telegram.org/bots/api#setwebhook).

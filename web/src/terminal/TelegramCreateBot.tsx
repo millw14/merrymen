@@ -42,7 +42,8 @@ interface View {
   needsReconciliation: boolean;
 }
 const POLL_MS = 3000;
-const MAX_PENDING_MS = 15 * 60_000;
+/** The server's setup window (MANAGED_INTENT_TTL_MS), which also bounds a longer expiry the server might send. */
+const MAX_PENDING_MS = 30 * 60_000;
 const ID = /^[A-Za-z0-9_-]{16,64}$/;
 const storageKey = (owner: string) => `merrymen.telegram.create.v1:${owner}`;
 const initial = (owner: string): View => ({ owner, available: null, intent: null, telegramUrl: null, loading: true, busy: false, error: null, refreshed: false, confirmationAttempted: false, needsReconciliation: false });
@@ -98,6 +99,9 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   function patch(scope: string, changes: Partial<View>) { if (ownerRef.current === scope) setView(previous => previous.owner === scope ? { ...previous, ...changes } : previous); }
   function remember(scope: string, id: string | null) {
     try { if (id) localStorage.setItem(storageKey(scope), id); else localStorage.removeItem(storageKey(scope)); } catch { /* The current flow still works without browser storage. */ }
+  }
+  function remembered(scope: string): string | null {
+    try { return localStorage.getItem(storageKey(scope)); } catch { return null; }
   }
   function until(intent: TelegramCreateIntent) {
     if (deadline.current?.id !== intent.id) deadline.current = { id: intent.id, at: Math.min(intent.expiresAt, Date.now() + MAX_PENDING_MS) };
@@ -180,12 +184,20 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   useEffect(() => () => { for (const ctl of controllers.current) ctl.abort(); controllers.current.clear(); for (const popup of popups.current) popup.close(); popups.current.clear(); callbacks.current.onActiveChange?.(false); }, []);
 
   const intent = current.intent;
+  /**
+   * POLLED UNTIL IT ENDS, "confirm" INCLUDED. The bot can now be connected,
+   * or turned down, from the manager's own buttons in Telegram, so a page
+   * showing Connect keeps reading too: a connection made there reads back
+   * "connected" and Settings is refreshed as for one made here. confirm()
+   * stops this loop before it asks, so a read from before its answer cannot
+   * put "confirm" back over "connected".
+   */
   useEffect(() => {
     if (!intent || !pending(intent) || !owner || current.loading) return;
     const ctl = controller();
     let timer: ReturnType<typeof setTimeout>;
     const expire = setTimeout(() => { if (!valid(ctl, owner)) return; ctl.abort(); patch(owner, { intent: { ...intent, status: "expired" }, error: null, busy: false }); }, Math.max(0, until(intent) - Date.now()));
-    if (intent.status !== "confirm" && !current.error) {
+    if (!current.error) {
       const poll = async () => {
         try { await read(owner, intent.id, ctl); if (valid(ctl, owner)) timer = setTimeout(poll, POLL_MS); }
         catch (error) { if (valid(ctl, owner)) patch(owner, { busy: false, error: failure(error) }); }
@@ -194,6 +206,31 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
     }
     return () => { ctl.abort(); controllers.current.delete(ctl); clearTimeout(timer); clearTimeout(expire); };
   }, [owner, intent?.id, intent?.status, intent?.expiresAt, current.error, current.loading]);
+
+  /**
+   * BACK FROM TELEGRAM. A phone puts this tab to sleep while its owner is in
+   * Telegram, making and maybe connecting the bot there, and a sleeping tab's
+   * timers fire late: the next poll up to a minute after it wakes, or this
+   * tab's own deadline first, which would say "expired" over a bot that was
+   * connected. So coming back into view reads the setup at once: one still
+   * underway, or one this tab marked expired by its own clock (its id is
+   * still stored: an expiry the server reported is forgotten, and not asked
+   * about again).
+   */
+  useEffect(() => {
+    if (!owner) return;
+    const wake = () => {
+      if (document.visibilityState === "hidden") return;
+      const seen = viewRef.current, it = seen.intent;
+      if (seen.owner !== owner || !it || seen.loading || seen.busy || seen.needsReconciliation || seen.error) return;
+      if (!pending(it) && !(it.status === "expired" && remembered(owner) === it.id)) return;
+      const ctl = controller();
+      void read(owner, it.id, ctl).catch(error => { if (valid(ctl, owner)) patch(owner, { busy: false, error: failure(error) }); }).finally(() => controllers.current.delete(ctl));
+    };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("pageshow", wake);
+    return () => { document.removeEventListener("visibilitychange", wake); window.removeEventListener("pageshow", wake); };
+  }, [owner]);
 
   useEffect(() => {
     if (!intent || intent.status !== "connected" || current.refreshed || !owner) return;
@@ -229,6 +266,9 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   }
   async function confirm() {
     if (!owner || disabled || current.busy || !intent || intent.status !== "confirm" || !intent.botId || hasBot || until(intent) <= Date.now()) return;
+    // No read from before this answer may land after it (the poll above).
+    for (const ctl of controllers.current) ctl.abort();
+    controllers.current.clear();
     const ctl = controller();
     patch(owner, { busy: true, error: null, confirmationAttempted: true });
     try {

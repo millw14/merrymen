@@ -1,7 +1,9 @@
 /**
  * A web intent is the authority to choose a newly created managed bot. Telegram
  * creation notifications carry no web state, so they can only propose a bot to
- * a fresh, privately bound intent; an authenticated web confirmation saves it.
+ * a fresh, privately bound intent. A confirmation saves it: the signed-in web
+ * owner's, or the manager's Connect button pressed by the Telegram user the
+ * intent's /start challenge bound (forTelegramUser), and nobody else's.
  *
  * No network calls, token retrieval or bot moves live here. The caller
  * authenticates Telegram deliveries and holds withSettingsSaveLock when
@@ -14,7 +16,15 @@ import { rootDb, type Db } from "../../../worker/src/db";
 import { botIdOf, claimBot, ensureBotClaims } from "../../../worker/src/telegram-claims";
 import { openSecret, requireDek, sealSecret } from "../../../worker/src/store-crypto";
 
-export const MANAGED_INTENT_TTL_MS = 10 * 60_000;
+/**
+ * THIRTY MINUTES FROM "Set up Telegram" TO A BOT. Ten was too short: an owner
+ * who began at 03:09 made their bot at 03:24, after the intent had expired,
+ * and the creation was ignored with nothing said. Naming a bot, and finding
+ * the way back from Telegram on a phone, takes longer than ten minutes often
+ * enough. The window still ends: an old challenge cannot bind, and an old
+ * candidate cannot be saved.
+ */
+export const MANAGED_INTENT_TTL_MS = 30 * 60_000;
 export const MANAGED_MESSAGE_FRESHNESS_MS = 2 * 60_000;
 const ACTIVE = "('waiting_telegram', 'waiting_bot', 'confirm')";
 
@@ -164,11 +174,19 @@ type IntentRow = {
   bot_id: string | null; bot_username: string | null; completed_at: number | null;
 };
 type Scope = { tenant: string; intentId: string; managerBotId: string; now?: number };
+type TelegramUserScope = { intentId: string; managerBotId: string; telegramUserId: number; now?: number };
 type UpdateScope = { managerBotId: string; updateId: number; telegramUserId: number; now?: number };
-type UpdateOutcome = "bound" | "candidate" | "ignored";
+/**
+ * "unmatched": a fresh creation message for which this Telegram user had no
+ * setup underway (expired, cancelled, connected or never begun). Recorded so
+ * a redelivery of that update is told apart from it, and the manager's one
+ * "this setup had expired" reply is never sent twice.
+ */
+type UpdateOutcome = "bound" | "candidate" | "unmatched" | "ignored";
 type Receipt = { payload_hash: string; outcome: UpdateOutcome; intent_id: string | null };
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const intentIdOk = (id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(id);
 const active = (row: IntentRow, now: number) =>
   (row.status === "waiting_telegram" || row.status === "waiting_bot" || row.status === "confirm") && Number(row.expires_at) > now;
 
@@ -207,6 +225,18 @@ function publicIntent(row: IntentRow, now: number): ManagedTelegramIntent {
 async function readIntent(db: Db, tenant: string, id: string, manager: string): Promise<IntentRow | undefined> {
   return await db.prepare("SELECT * FROM telegram_managed_intents WHERE tenant = ? AND id = ? AND manager_bot_id = ?")
     .get(tenant, id, manager) as IntentRow | undefined;
+}
+/** Only through the Telegram user its /start bound: a button names an id, and an id alone is no authority. */
+async function readUserIntent(db: Db, id: string, manager: string, user: string): Promise<IntentRow | undefined> {
+  return await db.prepare("SELECT * FROM telegram_managed_intents WHERE id = ? AND manager_bot_id = ? AND telegram_user_id = ?")
+    .get(id, manager, user) as IntentRow | undefined;
+}
+/** Cancel a setup still underway and free its user's lease. Ended ones are left as they are: a connection is never undone here. */
+async function cancelRow(db: Db, row: IntentRow, now: number): Promise<void> {
+  if (!active(row, now)) return;
+  const changed = await db.prepare(`UPDATE telegram_managed_intents SET status = 'cancelled' WHERE id = ? AND tenant = ? AND status IN ${ACTIVE}`)
+    .run(row.id, row.tenant);
+  if (changed.changes === 1) await db.prepare("DELETE FROM telegram_managed_users WHERE intent_id = ?").run(row.id);
 }
 
 /** Read raw settings, without defaults or field filtering: unknown fields survive. */
@@ -293,14 +323,49 @@ export class ManagedTelegramStore {
     return this.db.tx(async (db) => {
       const row = await readIntent(db, tenant, args.intentId, manager);
       if (!row) return null;
-      if (active(row, now)) {
-        const changed = await db.prepare(`UPDATE telegram_managed_intents SET status = 'cancelled' WHERE id = ? AND tenant = ? AND status IN ${ACTIVE}`)
-          .run(row.id, tenant);
-        if (changed.changes === 1) await db.prepare("DELETE FROM telegram_managed_users WHERE intent_id = ?").run(row.id);
-      }
+      await cancelRow(db, row, now);
       const current = await readIntent(db, tenant, args.intentId, manager);
       return current ? publicIntent(current, now) : null;
     });
+  }
+
+  /**
+   * THE INTENT A MANAGER BUTTON NAMES, for the Telegram user who pressed it.
+   * Found by its id, this manager and that user together, never by anything
+   * else the button or the message carries: the user is the one the intent's
+   * /start challenge bound, and only that user can confirm or cancel it from
+   * Telegram. The tenant is for this server's own use (its settings lock and
+   * completion); it never goes into a response, a message or a log.
+   */
+  async forTelegramUser(args: TelegramUserScope): Promise<{ tenant: `0x${string}`; intent: ManagedTelegramIntent } | null> {
+    const manager = numericId(args.managerBotId), user = numericId(args.telegramUserId), now = clock(args.now);
+    if (!intentIdOk(args.intentId)) return null;
+    await ensureManagedTelegramSchema(this.db);
+    const row = await readUserIntent(this.db, args.intentId, manager, user);
+    return row ? { tenant: tenantKey(row.tenant) as `0x${string}`, intent: publicIntent(row, now) } : null;
+  }
+
+  /** The manager's "Not this bot": the web cancel, keyed by the Telegram user as forTelegramUser is. */
+  async cancelForTelegramUser(args: TelegramUserScope): Promise<ManagedTelegramIntent | null> {
+    const manager = numericId(args.managerBotId), user = numericId(args.telegramUserId), now = clock(args.now);
+    if (!intentIdOk(args.intentId)) return null;
+    await ensureManagedTelegramSchema(this.db);
+    return this.db.tx(async (db) => {
+      const row = await readUserIntent(db, args.intentId, manager, user);
+      if (!row) return null;
+      await cancelRow(db, row, now);
+      const current = await readUserIntent(db, args.intentId, manager, user);
+      return current ? publicIntent(current, now) : null;
+    });
+  }
+
+  /** Whom the manager tells about a connection made on the web. Server use only, like the tenant above. */
+  async boundTelegramUser(args: Scope): Promise<number | null> {
+    const tenant = tenantKey(args.tenant), manager = numericId(args.managerBotId);
+    await ensureManagedTelegramSchema(this.db);
+    const row = await readIntent(this.db, tenant, args.intentId, manager);
+    const user = row?.telegram_user_id ? Number(row.telegram_user_id) : NaN;
+    return Number.isSafeInteger(user) && user > 0 ? user : null;
   }
 
   /** Caller has authenticated a private /start from this non-bot Telegram user. */
@@ -345,8 +410,14 @@ export class ManagedTelegramStore {
     });
   }
 
-  /** Only a fresh creation service message may supply the first candidate. */
-  async candidate(args: UpdateScope & { kind: "managed_bot_created"; botId: string; username: string; messageDate: number }): Promise<{ outcome: "candidate" | "already_candidate" | "ignored" }> {
+  /**
+   * Only a fresh creation service message may supply the first candidate.
+   * "candidate" (with the intent it proposes to) and "unmatched" come only
+   * from an update's first delivery, so the manager's reply to either is sent
+   * once; a redelivery answers "already_candidate" or "ignored".
+   */
+  async candidate(args: UpdateScope & { kind: "managed_bot_created"; botId: string; username: string; messageDate: number }): Promise<
+    { outcome: "candidate"; intentId: string } | { outcome: "already_candidate" | "unmatched" | "ignored" }> {
     if (args.kind !== "managed_bot_created") return { outcome: "ignored" };
     const manager = numericId(args.managerBotId), user = numericId(args.telegramUserId), id = updateId(args.updateId), now = clock(args.now);
     const bot = numericId(args.botId), date = messageDate(args.messageDate, now);
@@ -359,7 +430,11 @@ export class ManagedTelegramStore {
       const row = await db.prepare(`SELECT * FROM telegram_managed_intents
         WHERE manager_bot_id = ? AND telegram_user_id = ? AND status IN ${ACTIVE} AND expires_at > ?`)
         .get(manager, user, now) as IntentRow | undefined;
-      if (!row || row.bound_message_date === null || row.bound_update_id === null
+      if (!row) {
+        await record(db, manager, id, "unmatched", null);
+        return { outcome: "unmatched" };
+      }
+      if (row.bound_message_date === null || row.bound_update_id === null
         || date < Number(row.bound_message_date) || id <= Number(row.bound_update_id)) return { outcome: "ignored" };
       if (row.status !== "waiting_bot") return { outcome: "ignored" };
       const changed = await db.prepare(`UPDATE telegram_managed_intents SET status = 'confirm', bot_id = ?, bot_username = ?
@@ -367,11 +442,11 @@ export class ManagedTelegramStore {
         .run(bot, args.username, row.id, manager, now);
       if (changed.changes !== 1) return { outcome: "ignored" };
       await record(db, manager, id, "candidate", row.id);
-      return { outcome: "candidate" };
+      return { outcome: "candidate", intentId: row.id };
     });
   }
 
-  /** Authenticated web selection, under the caller's per-tenant settings lock. */
+  /** An authenticated selection (web owner, or bound Telegram user), under the caller's per-tenant settings lock. */
   async complete(args: Scope & { botId: string; token?: string; confirmedBotId?: string | null }): Promise<ManagedTelegramIntent> {
     const tenant = tenantKey(args.tenant), manager = numericId(args.managerBotId), bot = numericId(args.botId), now = clock(args.now);
     if (bot === manager) throw new ManagedTelegramError("manager_bot_reserved", 400);

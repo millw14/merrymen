@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { boundedJson, managedBotIdentity, managerWebhookUrl, suggestedUsername, TelegramManager, validWebhookSecret } from "./telegram-manager";
+import { boundedJson, managedBotIdentity, managerNotices, managerWebhookUrl, parsePress, pressData, suggestedUsername, TelegramManager, validWebhookSecret } from "./telegram-manager";
 
 const config = { token: "11111:manager_test_secret", username: "merrymen_manager_bot", webhookSecret: "a".repeat(32) };
 const identity = { id: "22222", username: "my_merrymen_bot" };
@@ -59,18 +59,44 @@ describe("Telegram manager transport", () => {
     assert.notEqual(suggested[0], suggested[1]);
     assert.ok(Array.from({ length: 50 }, suggestedUsername).every(name => /^[a-z][a-z0-9_]{4,31}$/.test(name) && /bot$/.test(name)));
   });
-  it("reads the webhook URL only, and calls a webhook ours, unset or elsewhere", async () => {
+  it("reads the webhook URL and its update types, and calls a webhook ours, stale, unset or elsewhere", async () => {
     const ours = "https://app.merrymen.test/api/telegram/manager/webhook";
-    for (const [url, state] of [["", "unset"], [ours, "ours"], ["https://staging.merrymen.test/api/telegram/manager/webhook", "elsewhere"]] as const) {
-      assert.equal(await new TelegramManager(config, transport(method => { assert.equal(method, "getWebhookInfo"); return { url, pending_update_count: 0 }; })).webhook(ours), state);
+    const elsewhere = "https://staging.merrymen.test/api/telegram/manager/webhook";
+    const all = ["message", "managed_bot", "callback_query"];
+    for (const [url, allowed, state] of [
+      ["", undefined, "unset"],
+      [ours, all, "ours"],
+      [ours, [...all, "edited_message"].reverse(), "ours"],
+      [ours, ["message", "managed_bot"], "stale"],
+      [ours, undefined, "stale"],
+      [elsewhere, all, "elsewhere"],
+      [elsewhere, ["message"], "elsewhere"],
+    ] as const) {
+      const info = { url, pending_update_count: 0, ...(allowed ? { allowed_updates: allowed } : {}) };
+      assert.equal(await new TelegramManager(config, transport(method => { assert.equal(method, "getWebhookInfo"); return info; })).webhook(ours), state, `${url} ${allowed}`);
     }
     await assert.rejects(new TelegramManager(config, transport(() => ({}))).webhook(ours));
   });
   it("sets the webhook with this deployment's secret and the update types the webhook reads", async () => {
     const calls: { method: string; body: Record<string, unknown> }[] = [];
     await new TelegramManager(config, transport((method, body) => { calls.push({ method, body }); return true; })).setWebhook("https://app.merrymen.test/api/telegram/manager/webhook");
-    assert.deepEqual(calls, [{ method: "setWebhook", body: { url: "https://app.merrymen.test/api/telegram/manager/webhook", secret_token: config.webhookSecret, allowed_updates: ["message", "managed_bot"] } }]);
+    assert.deepEqual(calls, [{ method: "setWebhook", body: { url: "https://app.merrymen.test/api/telegram/manager/webhook", secret_token: config.webhookSecret, allowed_updates: ["message", "managed_bot", "callback_query"] } }]);
     await assert.rejects(new TelegramManager(config, transport(() => false)).setWebhook("https://app.merrymen.test/api/telegram/manager/webhook"));
+  });
+  it("sends, edits and answers with exactly the notice's text and buttons", async () => {
+    const calls: { method: string; body: Record<string, unknown> }[] = [];
+    const manager = new TelegramManager(config, transport((method, body) => { calls.push({ method, body }); return true; }));
+    const ready = managerNotices.ready(identity, "4f1c2b8e-1111-4222-8333-944455556666");
+    await manager.send(54321, ready);
+    await manager.edit(54321, 77, managerNotices.expired(null));
+    await manager.answer("cbq-1");
+    await manager.answer("cbq-2", "This setup expired.");
+    assert.deepEqual(calls, [
+      { method: "sendMessage", body: { chat_id: 54321, text: ready.text, reply_markup: { inline_keyboard: ready.buttons } } },
+      { method: "editMessageText", body: { chat_id: 54321, message_id: 77, text: "This setup expired. Start again from Merrymen." } },
+      { method: "answerCallbackQuery", body: { callback_query_id: "cbq-1" } },
+      { method: "answerCallbackQuery", body: { callback_query_id: "cbq-2", text: "This setup expired." } },
+    ]);
   });
   it("bounds each probe call by the caller's timeout", async () => {
     let signal: AbortSignal | undefined;
@@ -103,4 +129,44 @@ it("bounds bodies even without Content-Length", async () => {
 });
 it("accepts only a real safe numeric bot identity", () => {
   for (const invalid of [{ ...bot, id: "22222" }, { ...bot, is_bot: false }, { ...bot, id: 0 }, { ...bot, id: Number.MAX_SAFE_INTEGER + 1 }, { ...bot, username: "bad/urlbot" }]) assert.equal(managedBotIdentity(invalid), null);
+});
+
+describe("what the manager says, and what its buttons carry", () => {
+  const intentId = "4f1c2b8e-1111-4222-8333-944455556666";
+  const home = "https://app.merrymen.test";
+  it("offers the made bot with Connect and Not this bot, naming only the intent and the bot, in at most 64 bytes", () => {
+    const ready = managerNotices.ready(identity, intentId);
+    assert.equal(ready.text, "✅ @my_merrymen_bot is ready.\nConnect it to your Merrymen agent?");
+    assert.deepEqual(ready.buttons, [[{ text: "Connect @my_merrymen_bot", callback_data: `mc:${intentId}:22222` }], [{ text: "Not this bot", callback_data: `mx:${intentId}:22222` }]]);
+    // The longest a bot id can be still fits Telegram's 64-byte limit.
+    const longest = pressData("connect", intentId, "9".repeat(20));
+    assert.ok(Buffer.byteLength(longest) <= 64, `${Buffer.byteLength(longest)} bytes`);
+    assert.deepEqual(parsePress(`mc:${intentId}:22222`), { action: "connect", intentId, botId: "22222" });
+    assert.deepEqual(parsePress(`mx:${intentId}:22222`), { action: "cancel", intentId, botId: "22222" });
+  });
+  it("reads no other button: anything malformed, padded or longer is nobody's press", () => {
+    for (const data of [undefined, null, 7, "", `mc:${intentId}`, `mc:${intentId}:22222:1`, `mz:${intentId}:22222`, `mc:${intentId}:0`, `mc:${intentId}:-5`,
+      `mc:short:22222`, `mc:${intentId}x:22222`, ` mc:${intentId}:22222`, `mc:${intentId}:22222\n`, `mc:${"a".repeat(37)}:22222`, `mc:${intentId}:${"1".repeat(21)}`]) {
+      assert.equal(parsePress(data), null, String(data));
+    }
+    assert.throws(() => pressData("connect", "not/an/id-0123456789", "22222"));
+  });
+  it("says what happened in plain words, with the way back to Merrymen, and nothing else", () => {
+    const back = [[{ text: "Back to Merrymen", url: home }]];
+    assert.deepEqual(managerNotices.unmatched("my_merrymen_bot", home), {
+      text: "Your bot @my_merrymen_bot was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes.",
+      buttons: back,
+    });
+    assert.deepEqual(managerNotices.connected("my_merrymen_bot", home), {
+      text: "✅ Connected @my_merrymen_bot to your Merrymen agent.\nMerrymen will show \"Open my bot\" once your agent has started it.", buttons: back,
+    });
+    assert.deepEqual(managerNotices.expired(home), { text: "This setup expired. Start again from Merrymen.", buttons: back });
+    assert.match(managerNotices.cancelled("my_merrymen_bot", home).text, /^Cancelled\. Start again from Merrymen when you're ready\.\n.*@my_merrymen_bot.*@BotFather/);
+    assert.match(managerNotices.alreadyHasBot("my_merrymen_bot", home).text, /already has a Telegram bot.*replace the bot in Settings/);
+    assert.match(managerNotices.claimed("my_merrymen_bot", home).text, /already connected to another Merrymen agent/);
+    const failed = managerNotices.failed(identity, intentId);
+    assert.equal(failed.text, "Couldn't connect right now. Try again, or connect from Merrymen.");
+    assert.deepEqual(failed.buttons, managerNotices.ready(identity, intentId).buttons, "the buttons stay, to try again");
+    assert.deepEqual(managerNotices.expired(null).buttons, [], "no public origin: no button, rather than a broken one");
+  });
 });
