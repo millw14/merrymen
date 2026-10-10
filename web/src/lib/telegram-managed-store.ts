@@ -180,12 +180,19 @@ type UpdateScope = { managerBotId: string; updateId: number; telegramUserId: num
  * "unmatched": a fresh creation message for which this Telegram user had no
  * setup underway (expired, cancelled, connected or never begun). Recorded so
  * a redelivery of that update is told apart from it, and the manager's one
- * "this setup had expired" reply is never sent twice.
+ * "no setup is waiting" reply is never sent twice.
  */
 type UpdateOutcome = "bound" | "candidate" | "unmatched" | "ignored";
 type Receipt = { payload_hash: string; outcome: UpdateOutcome; intent_id: string | null };
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+/**
+ * A stable, private-intent-specific suggestion, inside Telegram's 32-character
+ * username limit. The 64 random-looking bits disclose neither the /start
+ * challenge nor the owner's identity. Domain separation keeps this public
+ * value distinct from the challenge hash used to authorize the bind.
+ */
+const suggestedUsername = (challengeHash: string) => `merrymen_${hash(`merrymen:managed-bot-username:v1:${challengeHash}`).slice(0, 16)}_bot`;
 const intentIdOk = (id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(id);
 const active = (row: IntentRow, now: number) =>
   (row.status === "waiting_telegram" || row.status === "waiting_bot" || row.status === "confirm") && Number(row.expires_at) > now;
@@ -369,7 +376,8 @@ export class ManagedTelegramStore {
   }
 
   /** Caller has authenticated a private /start from this non-bot Telegram user. */
-  async bind(args: UpdateScope & { challenge: string; messageDate?: number }): Promise<{ outcome: "bound" | "already_bound" | "ignored" }> {
+  async bind(args: UpdateScope & { challenge: string; messageDate?: number }): Promise<
+    { outcome: "bound" | "already_bound"; suggestedUsername: string } | { outcome: "ignored" }> {
     const manager = numericId(args.managerBotId), user = numericId(args.telegramUserId), id = updateId(args.updateId), now = clock(args.now);
     const date = messageDate(args.messageDate ?? Math.floor(now / 1000), now);
     if (!/^mm_[A-Za-z0-9_-]{43}$/.test(args.challenge)) return { outcome: "ignored" };
@@ -377,14 +385,15 @@ export class ManagedTelegramStore {
     await ensureManagedTelegramSchema(this.db);
     return this.db.tx(async (db) => {
       const update = await receive(db, manager, id, { kind: "start", challengeHash, user, date });
-      if (!update.fresh) return { outcome: update.receipt.outcome === "bound" && await replayActive(db, update.receipt, manager, now) ? "already_bound" : "ignored" };
       const row = await db.prepare("SELECT * FROM telegram_managed_intents WHERE challenge_hash = ? AND manager_bot_id = ?")
         .get(challengeHash, manager) as IntentRow | undefined;
       if (!row || !active(row, now) || date * 1000 < Number(row.created_at) - 1000) return { outcome: "ignored" };
+      if (!update.fresh) return update.receipt.outcome === "bound" && update.receipt.intent_id === row.id && row.status === "waiting_bot"
+        ? { outcome: "already_bound", suggestedUsername: suggestedUsername(row.challenge_hash) } : { outcome: "ignored" };
       if (row.telegram_user_id !== null) {
-        if (row.telegram_user_id !== user) return { outcome: "ignored" };
+        if (row.telegram_user_id !== user || row.status !== "waiting_bot") return { outcome: "ignored" };
         await record(db, manager, id, "bound", row.id);
-        return { outcome: "already_bound" };
+        return { outcome: "already_bound", suggestedUsername: suggestedUsername(row.challenge_hash) };
       }
       // This lease is globally keyed by Telegram user, across tenants/managers.
       // INSERT then SELECT sees a racing winner under PG READ COMMITTED.
@@ -402,25 +411,38 @@ export class ManagedTelegramStore {
         WHERE id = ? AND manager_bot_id = ? AND status = 'waiting_telegram' AND expires_at > ? AND telegram_user_id IS NULL`)
         .run(user, now, date, id, row.id, manager, now);
       if (bound.changes !== 1) {
+        // Another delivery may have bound this same challenge and user while
+        // we waited for its lease. Keep that winner's lease and suggestion.
+        const current = await readUserIntent(db, row.id, manager, user);
+        if (current && active(current, now)) {
+          if (current.status !== "waiting_bot") return { outcome: "ignored" };
+          await record(db, manager, id, "bound", row.id);
+          return { outcome: "already_bound", suggestedUsername: suggestedUsername(current.challenge_hash) };
+        }
         await db.prepare("DELETE FROM telegram_managed_users WHERE telegram_user_id = ? AND intent_id = ?").run(user, row.id);
         return { outcome: "ignored" };
       }
       await record(db, manager, id, "bound", row.id);
-      return { outcome: "bound" };
+      return { outcome: "bound", suggestedUsername: suggestedUsername(row.challenge_hash) };
     });
   }
 
   /**
-   * Only a fresh creation service message may supply the first candidate.
+   * A fresh creation service message may supply the first candidate. Telegram's
+   * generic managed_bot update has no message date: it may supply a candidate
+   * only when its username matches this waiting intent's unpredictable
+   * suggestion, with a newer update ID and the same bound user and manager.
+   * Generic updates never produce unsolicited unmatched-bot notices.
    * "candidate" (with the intent it proposes to) and "unmatched" come only
    * from an update's first delivery, so the manager's reply to either is sent
    * once; a redelivery answers "already_candidate" or "ignored".
    */
-  async candidate(args: UpdateScope & { kind: "managed_bot_created"; botId: string; username: string; messageDate: number }): Promise<
+  async candidate(args: UpdateScope & { botId: string; username: string } &
+    ({ kind: "managed_bot_created"; messageDate: number } | { kind: "managed_bot_updated"; messageDate?: never })): Promise<
     { outcome: "candidate"; intentId: string } | { outcome: "already_candidate" | "unmatched" | "ignored" }> {
-    if (args.kind !== "managed_bot_created") return { outcome: "ignored" };
+    if (args.kind !== "managed_bot_created" && args.kind !== "managed_bot_updated") return { outcome: "ignored" };
     const manager = numericId(args.managerBotId), user = numericId(args.telegramUserId), id = updateId(args.updateId), now = clock(args.now);
-    const bot = numericId(args.botId), date = messageDate(args.messageDate, now);
+    const bot = numericId(args.botId), date = args.kind === "managed_bot_created" ? messageDate(args.messageDate, now) : null;
     if (bot === manager) throw new ManagedTelegramError("manager_bot_reserved", 400);
     if (!/^[A-Za-z0-9_]{5,32}$/.test(args.username) || !/bot$/i.test(args.username)) throw new ManagedTelegramError("invalid_bot_username", 400);
     await ensureManagedTelegramSchema(this.db);
@@ -431,12 +453,20 @@ export class ManagedTelegramStore {
         WHERE manager_bot_id = ? AND telegram_user_id = ? AND status IN ${ACTIVE} AND expires_at > ?`)
         .get(manager, user, now) as IntentRow | undefined;
       if (!row) {
+        if (args.kind === "managed_bot_updated") return { outcome: "ignored" };
+        // Telegram may report the same creation through both delivery types.
+        // A delayed native message for a bot already proposed by the link is
+        // not an unrelated creation, even after connection or cancellation.
+        const accepted = await db.prepare(`SELECT id FROM telegram_managed_intents
+          WHERE manager_bot_id = ? AND telegram_user_id = ? AND bot_id = ? LIMIT 1`).get(manager, user, bot);
+        if (accepted) return { outcome: "ignored" };
         await record(db, manager, id, "unmatched", null);
         return { outcome: "unmatched" };
       }
       if (row.bound_message_date === null || row.bound_update_id === null
-        || date < Number(row.bound_message_date) || id <= Number(row.bound_update_id)) return { outcome: "ignored" };
+        || (date !== null && date < Number(row.bound_message_date)) || id <= Number(row.bound_update_id)) return { outcome: "ignored" };
       if (row.status !== "waiting_bot") return { outcome: "ignored" };
+      if (args.kind === "managed_bot_updated" && args.username.toLowerCase() !== suggestedUsername(row.challenge_hash)) return { outcome: "ignored" };
       const changed = await db.prepare(`UPDATE telegram_managed_intents SET status = 'confirm', bot_id = ?, bot_username = ?
         WHERE id = ? AND manager_bot_id = ? AND status = 'waiting_bot' AND bot_id IS NULL AND expires_at > ?`)
         .run(bot, args.username, row.id, manager, now);

@@ -29,17 +29,20 @@ let telegramWebhook: string;
 let telegramAllowed: unknown;
 let canManage: boolean;
 let logs: string[];
+let candidateUsername = "my_merrymen_bot";
+let beforeTelegram: ((method: string, body: Record<string, unknown>) => Promise<void>) | null = null;
 /** When set, another environment's setWebhook lands right after ours. */
 let racingWebhook: string | null = null;
 const fakeFetch = (async (input, init) => {
   const method = String(input).split("/").at(-1)!;
   const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
   telegramCalls.push({ method, body, locked: lockDepth > 0 });
+  await beforeTelegram?.(method, body);
   if (failing.has(method)) return Response.json({ ok: false, error_code: 400, description: `Bad Request: refused ${config.token}` }, { status: 400 });
   if (method === "setWebhook") { telegramWebhook = racingWebhook ?? String(body.url); telegramAllowed = racingWebhook ? undefined : body.allowed_updates; }
   const result = method === "getManagedBotToken" ? "22222:managed_test_secret" :
     method === "getMe" && String(input).includes(config.token) ? { id: 11111, username: config.username, is_bot: true, can_manage_bots: canManage } :
-    method === "getMe" ? { id: 22222, username: "my_merrymen_bot", is_bot: true } :
+    method === "getMe" ? { id: 22222, username: candidateUsername, is_bot: true } :
     method === "getWebhookInfo" ? { url: telegramWebhook, has_custom_certificate: false, pending_update_count: 0, ...(telegramAllowed ? { allowed_updates: telegramAllowed } : {}) } : true;
   return Response.json({ ok: true, result });
 }) as typeof fetch;
@@ -64,7 +67,7 @@ beforeEach(async () => {
   await db.exec("CREATE TABLE tenant_settings (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL, updated_at INTEGER NOT NULL)");
   await db.prepare("INSERT INTO tenant_settings VALUES (?, ?, ?)").run(A, sealSecret(JSON.stringify({ dailyBudgetUsdg: 14, telegramControl: false, telegramAllowlist: [-123] }), dek), 1);
   useBotClaimsDbForTest(db); telegramCalls = []; telegramWebhook = ""; telegramAllowed = undefined; canManage = true; logs = []; racingWebhook = null;
-  locks = []; lockDepth = 0; failing = new Set(); presses = 0;
+  locks = []; lockDepth = 0; failing = new Set(); presses = 0; candidateUsername = "my_merrymen_bot"; beforeTelegram = null;
   service = handlers();
 });
 afterEach(() => { mock.timers.reset(); });
@@ -228,6 +231,14 @@ describe("readiness: the button shows only when creation can work", () => {
     assert.equal(telegramWebhook, elsewhere);
     assert.deepEqual(telegramAllowed, ["message"]);
   });
+  it("stays unavailable if webhook readback still omits managed bot events after setWebhook succeeds", async () => {
+    beforeTelegram = async method => {
+      if (method === "getWebhookInfo" && telegramWebhook === OURS) telegramAllowed = ["message", "callback_query"];
+    };
+    assert.equal((await availability()).available, false);
+    assert.equal((await service.POST(req({ action: "begin", owner: A }))).status, 503);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM telegram_managed_intents").get()!.n, 0);
+  });
   it("never overwrites a webhook pointing at another environment: unavailable, one log line, no secret in it", async () => {
     mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
     const elsewhere = "https://staging.merrymen.test/api/telegram/manager/webhook";
@@ -254,7 +265,7 @@ describe("readiness: the button shows only when creation can work", () => {
     assert.deepEqual(await availability(), { available: false });
     assert.deepEqual(methods(), ["getMe", "getWebhookInfo", "setWebhook", "getWebhookInfo"]);
     assert.equal(telegramWebhook, elsewhere, "the other environment's webhook is left as it is");
-    assert.match(logs[0], /changed while it was being set/);
+    assert.match(logs[0], /changed or is missing update types after being set/);
   });
   it("answers availability with a bare boolean: no token, secret, URL or reason reaches the browser", async () => {
     canManage = false;
@@ -294,7 +305,7 @@ describe("manager delivery and credential save", () => {
     assert.equal((await webhook({ update_id: 10 }, "wrong")).status, 401);
     assert.equal(telegramCalls.length, 0);
   });
-  it("never consumes a generic token rotation/owner event as creation", async () => {
+  it("ignores a generic event without a privately bound setup", async () => {
     const { intent } = await begin();
     await webhook({ update_id: 10, managed_bot: { user: { id: 54321 }, bot: { id: 22222, is_bot: true, username: "my_merrymen_bot" } } });
     assert.equal((await service.POST(req({ action: "confirm", owner: A, intentId: intent.id, botId: "22222" }))).status, 409);
@@ -336,7 +347,7 @@ describe("the next step in Telegram, once the bot is made", () => {
     await webhook({ update_id: 10, message: message({ text: `/start ${challenge}` }) });
     const creation = { update_id: 11, message: created() };
     assert.deepEqual(await (await webhook(creation)).json(), { ok: true });
-    const offers = bodies("sendMessage").filter(m => m.reply_markup?.inline_keyboard);
+    const offers = bodies("sendMessage").filter(m => m.reply_markup?.inline_keyboard && / is ready\./.test(m.text));
     assert.deepEqual(offers, [{ chat_id: 54321, text: "✅ @my_merrymen_bot is ready.\nConnect it to your Merrymen agent?", reply_markup: { inline_keyboard: [
       [{ text: "Connect @my_merrymen_bot", callback_data: `mc:${begun.intent.id}:22222` }],
       [{ text: "Not this bot", callback_data: `mx:${begun.intent.id}:22222` }],
@@ -365,8 +376,8 @@ describe("the next step in Telegram, once the bot is made", () => {
     mock.timers.tick(31 * 60_000);
     const creation = { update_id: 11, message: created() };
     await webhook(creation);
-    const expired = "Your bot @my_merrymen_bot was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes.";
-    assert.deepEqual(bodies("sendMessage").filter(m => m.reply_markup?.inline_keyboard), [{ chat_id: 54321, text: expired, reply_markup: BACK }]);
+    const expired = "Your bot @my_merrymen_bot was created, but no Merrymen setup is waiting for it, so it wasn't connected. To connect a new bot, start again from Merrymen and create it within 30 minutes.";
+    assert.deepEqual(bodies("sendMessage").filter(m => m.reply_markup?.inline_keyboard && m.text.startsWith("Your bot")), [{ chat_id: 54321, text: expired, reply_markup: BACK }]);
     const count = telegramCalls.length;
     assert.equal((await webhook(creation)).status, 200);
     assert.equal(telegramCalls.length, count, "Telegram's redelivery is not a second creation");
@@ -395,9 +406,9 @@ describe("the Connect and Not this bot buttons", () => {
     const begun = await readyCandidate(); const { connect } = buttons();
     telegramCalls = []; locks = [];
     assert.deepEqual(await (await webhook(pressOf(connect))).json(), { ok: true });
-    assert.deepEqual(telegramCalls.map(c => [c.method, c.locked]), [["getManagedBotToken", true], ["getMe", true], ["answerCallbackQuery", false], ["editMessageText", false]]);
+    assert.deepEqual(telegramCalls.map(c => [c.method, c.locked]), [["answerCallbackQuery", false], ["getManagedBotToken", false], ["getMe", false], ["editMessageText", false]]);
     assert.deepEqual(locks, [A], "the bound user's tenant, found by the store, not by anything in the press");
-    assert.deepEqual(telegramCalls[2]!.body, { callback_query_id: "cbq-1" });
+    assert.deepEqual(telegramCalls[0]!.body, { callback_query_id: "cbq-1", text: "Connecting…" });
     assert.deepEqual(telegramCalls[3]!.body, { chat_id: 54321, message_id: 77, text: CONNECTED, reply_markup: BACK });
     const row = raw.prepare("SELECT sealed FROM tenant_settings WHERE tenant=?").get(A) as { sealed: string };
     assert.deepEqual(JSON.parse(openSecret(row.sealed, dek)), { dailyBudgetUsdg: 14, telegramControl: false, telegramAllowlist: [-123], telegramBotToken: "22222:managed_test_secret", telegramEnabled: true });
@@ -514,8 +525,8 @@ describe("the Connect and Not this bot buttons", () => {
     raw.prepare("UPDATE tenant_settings SET sealed=? WHERE tenant=?").run(sealSecret(JSON.stringify(existing), dek), A);
     telegramCalls = [];
     await webhook(pressOf(connect));
-    assert.equal(bodies("answerCallbackQuery")[0]!.text, "Your agent already has a bot.");
-    assert.deepEqual(bodies("editMessageText")[0], { chat_id: 54321, message_id: 77, reply_markup: BACK,
+    assert.equal(bodies("answerCallbackQuery")[0]!.text, "Connecting…");
+    assert.deepEqual(bodies("sendMessage")[0], { chat_id: 54321, reply_markup: BACK,
       text: "Your Merrymen agent already has a Telegram bot, so @my_merrymen_bot wasn't connected. To use @my_merrymen_bot instead, replace the bot in Settings on Merrymen." });
     const row = raw.prepare("SELECT sealed FROM tenant_settings WHERE tenant=?").get(A) as { sealed: string };
     assert.deepEqual(JSON.parse(openSecret(row.sealed, dek)), existing);
@@ -527,7 +538,7 @@ describe("the Connect and Not this bot buttons", () => {
     raw.prepare("INSERT INTO telegram_bot_claims VALUES (?, ?, 1)").run("22222", B);
     telegramCalls = [];
     await webhook(pressOf(connect));
-    assert.deepEqual(bodies("editMessageText")[0], { chat_id: 54321, message_id: 77, reply_markup: BACK,
+    assert.deepEqual(bodies("sendMessage")[0], { chat_id: 54321, reply_markup: BACK,
       text: "@my_merrymen_bot is already connected to another Merrymen agent, so it wasn't connected to yours." });
     assert.deepEqual({ ...raw.prepare("SELECT bot_id, tenant FROM telegram_bot_claims").get() as object }, { bot_id: "22222", tenant: B });
     assertNothingSecret(begun.challenge, [B, B.slice(2)]);
@@ -537,14 +548,15 @@ describe("the Connect and Not this bot buttons", () => {
     failing.add("getManagedBotToken");
     telegramCalls = [];
     assert.equal((await webhook(pressOf(connect))).status, 200);
-    assert.equal(bodies("answerCallbackQuery")[0]!.text, "Couldn't connect right now. Try again.");
-    assert.deepEqual(bodies("editMessageText")[0], { chat_id: 54321, message_id: 77, text: "Couldn't connect right now. Try again, or connect from Merrymen.", reply_markup: markup });
+    assert.equal(bodies("answerCallbackQuery")[0]!.text, "Connecting…");
+    assert.deepEqual(bodies("sendMessage")[0], { chat_id: 54321, text: "Couldn't connect right now. Try again, or connect from Merrymen." });
+    assert.equal(bodies("editMessageText").length, 0, "a transient failure leaves the original buttons unchanged");
     assert.deepEqual(logs, ["a Connect button in Telegram failed (Bot API)"]);
     failing.clear();
     const held = handlers({ saveLock: (async () => SAVE_BUSY) as unknown as typeof withSettingsSaveLock });
     telegramCalls = [];
     await webhook(pressOf(connect), config.webhookSecret, held);
-    assert.equal(bodies("editMessageText")[0]!.text, "Couldn't connect right now. Try again, or connect from Merrymen.");
+    assert.equal(bodies("sendMessage")[0]!.text, "Couldn't connect right now. Try again, or connect from Merrymen.");
     assert.equal(logs.at(-1), "a Connect button in Telegram failed (busy)");
     assert.equal((await availability(service, begun.intent.id)).intent?.status, "confirm");
     telegramCalls = [];
@@ -569,7 +581,7 @@ describe("a connection made on the page", () => {
     const confirm = { action: "confirm", owner: A, intentId: begun.intent.id, botId: "22222" };
     telegramCalls = [];
     assert.equal((await service.POST(req(confirm))).status, 200);
-    assert.deepEqual(telegramCalls.map(c => [c.method, c.locked]), [["getManagedBotToken", true], ["getMe", true], ["sendMessage", false]]);
+    assert.deepEqual(telegramCalls.map(c => [c.method, c.locked]), [["getManagedBotToken", false], ["getMe", false], ["sendMessage", false]]);
     assert.deepEqual(telegramCalls[2]!.body, { chat_id: 54321, text: CONNECTED, reply_markup: BACK });
     assert.equal((await service.POST(req(confirm))).status, 200);
     assert.equal(bodies("sendMessage").length, 1, "a repeated confirmation says nothing again");
@@ -582,5 +594,139 @@ describe("a connection made on the page", () => {
     assert.equal(res.status, 200);
     assert.equal((await res.json() as { intent: { status: string } }).intent.status, "connected");
     assert.deepEqual(logs, ["the manager's Connected message could not be sent"]);
+  });
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+describe("iPhone link and overlapping deliveries", () => {
+  it("accepts the real generic event without a date, proposes only the suggested bot, then connects after the owner's tap", async () => {
+    const begun = await begin();
+    const challenge = new URL(begun.telegramUrl).searchParams.get("start")!;
+    await webhook({ update_id: 10, message: message({ text: `/start ${challenge}` }) });
+    const offered = bodies("sendMessage").flatMap(m => m.reply_markup?.inline_keyboard?.flat() ?? []).find(b => b.url?.startsWith("https://t.me/newbot/"));
+    assert.ok(offered?.url, "a native creation link was sent in the manager chat");
+    candidateUsername = new URL(offered.url).pathname.split("/").at(-1)!;
+    const event = (update_id: number, username = candidateUsername, id = 54321) => ({ update_id, managed_bot: {
+      user: { id, is_bot: false }, bot: { id: 22222, is_bot: true, username },
+    } });
+    for (const invalid of [event(9), event(11, "unrelated_bot"), event(12, candidateUsername, 77777)]) {
+      assert.equal((await webhook(invalid)).status, 200);
+      assert.equal((await availability(service, begun.intent.id)).intent?.status, "waiting_bot");
+    }
+    assert.equal((await webhook(event(13))).status, 200);
+    assert.equal((await availability(service, begun.intent.id)).intent?.status, "confirm");
+    assert.ok(!methods().includes("getManagedBotToken"), "the generic event has no authority to save credentials");
+    const { connect } = buttons();
+    const count = bodies("sendMessage").length;
+    await webhook(event(13));
+    await webhook({ update_id: 14, message: created({ id: 22222, is_bot: true, username: candidateUsername }) });
+    assert.equal(bodies("sendMessage").length, count, "duplicate and alternate notices don't propose a second candidate");
+    await webhook(pressOf(connect));
+    assert.equal((await availability(service, begun.intent.id)).intent?.status, "connected");
+    const settings = raw.prepare("SELECT sealed FROM tenant_settings WHERE tenant=?").get(A) as { sealed: string };
+    assert.equal(JSON.parse(openSecret(settings.sealed, dek)).telegramBotToken, "22222:managed_test_secret");
+    const sentAfterConnection = bodies("sendMessage").length;
+    await webhook({ update_id: 15, message: created({ id: 22222, is_bot: true, username: candidateUsername }) });
+    assert.equal(bodies("sendMessage").length, sentAfterConnection, "a delayed creation notice cannot claim the saved bot was not connected");
+    assertNothingSecret(challenge);
+  });
+
+  it("acknowledges both concurrent Connect taps before slow Telegram calls, saves once, and leaves both replies connected", async () => {
+    const begun = await readyCandidate();
+    const { connect } = buttons();
+    const entered = deferred(), release = deferred();
+    let credentialCalls = 0;
+    beforeTelegram = async method => {
+      if (method === "getManagedBotToken") {
+        credentialCalls++;
+        if (credentialCalls === 2) entered.resolve();
+        await release.promise;
+      }
+    };
+    telegramCalls = []; locks = [];
+    const first = webhook(pressOf(connect));
+    const second = webhook(pressOf(connect));
+    try {
+      await entered.promise;
+      assert.equal(bodies("answerCallbackQuery").length, 2, "both tap spinners stop before credentials return");
+      assert.equal(locks.length, 0, "slow credentials hold no settings lock");
+    } finally { release.resolve(); }
+    assert.deepEqual((await Promise.all([first, second])).map(r => r.status), [200, 200]);
+    assert.equal((await availability(service, begun.intent.id)).intent?.status, "connected");
+    assert.ok(bodies("editMessageText").every(m => m.text === CONNECTED));
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM telegram_bot_claims").get()!.n, 1);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM telegram_managed_intents WHERE status='connected'").get()!.n, 1);
+  });
+
+  it("a delayed failure reply cannot restore retry buttons over a concurrent success", async () => {
+    const begun = await readyCandidate(); const { connect } = buttons();
+    const entered = deferred(), release = deferred();
+    failing.add("getManagedBotToken");
+    beforeTelegram = async (method, body) => {
+      if (method === "sendMessage" && String(body.text).startsWith("Couldn't connect")) {
+        entered.resolve(); await release.promise;
+      }
+    };
+    telegramCalls = [];
+    const failed = webhook(pressOf(connect));
+    try {
+      await entered.promise;
+      failing.clear();
+      assert.equal((await webhook(pressOf(connect))).status, 200);
+    } finally { release.resolve(); }
+    assert.equal((await failed).status, 200);
+    assert.equal((await availability(service, begun.intent.id)).intent?.status, "connected");
+    assert.deepEqual(bodies("editMessageText").map(m => m.text), [CONNECTED]);
+    assert.ok(!bodies("sendMessage")[0].reply_markup, "the refused attempt cannot create stale retry buttons");
+  });
+
+  it("lets cancellation win while credentials are pending, and never resurrects the cancelled setup", async () => {
+    const begun = await readyCandidate(); const { connect, cancel } = buttons();
+    const entered = deferred(), release = deferred();
+    beforeTelegram = async method => { if (method === "getManagedBotToken") { entered.resolve(); await release.promise; } };
+    telegramCalls = [];
+    const pending = webhook(pressOf(connect));
+    try {
+      await entered.promise;
+      assert.equal((await webhook(pressOf(cancel))).status, 200);
+    } finally { release.resolve(); }
+    assert.equal((await pending).status, 200);
+    assert.equal((await availability(service, begun.intent.id)).intent?.status, "cancelled");
+    assert.ok(bodies("editMessageText").every(m => m.text.startsWith("Cancelled.")));
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM telegram_bot_claims").get()!.n, 0);
+  });
+
+  it("allows another manager update to finish while a creation prompt is still sending", async () => {
+    const begun = await begin(); const challenge = new URL(begun.telegramUrl).searchParams.get("start")!;
+    const entered = deferred(), release = deferred();
+    beforeTelegram = async (method, body) => {
+      if (method === "sendMessage" && (body.reply_markup as { keyboard?: unknown })?.keyboard) {
+        entered.resolve(); await release.promise;
+      }
+    };
+    const start = webhook({ update_id: 10, message: message({ text: `/start ${challenge}` }) });
+    try {
+      await entered.promise;
+      assert.equal((await webhook({ update_id: 11, message: created() })).status, 200);
+      assert.equal((await availability(service, begun.intent.id)).intent?.status, "confirm");
+    } finally { release.resolve(); }
+    assert.equal((await start).status, 200);
+  });
+
+  it("does not tell an already connected owner that an unrelated second bot means their setup expired", async () => {
+    const begun = await readyCandidate();
+    await webhook(pressOf(buttons().connect));
+    telegramCalls = [];
+    await webhook({ update_id: 20, message: created({ id: 33333, is_bot: true, username: "second_merrymen_bot" }) });
+    assert.equal((await availability(service, begun.intent.id)).intent?.status, "connected");
+    const said = bodies("sendMessage").map(m => m.text).join("\n");
+    assert.match(said, /second_merrymen_bot/);
+    assert.doesNotMatch(said, /expired/);
+    assert.ok(!methods().includes("getManagedBotToken"));
   });
 });

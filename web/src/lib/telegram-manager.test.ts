@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { boundedJson, managedBotIdentity, managerNotices, managerWebhookUrl, parsePress, pressData, suggestedUsername, TelegramManager, validWebhookSecret } from "./telegram-manager";
+import { boundedJson, managedBotIdentity, managerNotices, managerWebhookUrl, parsePress, pressData, TelegramManager, validWebhookSecret } from "./telegram-manager";
 
 const config = { token: "11111:manager_test_secret", username: "merrymen_manager_bot", webhookSecret: "a".repeat(32) };
 const identity = { id: "22222", username: "my_merrymen_bot" };
@@ -40,24 +40,28 @@ describe("Telegram manager transport", () => {
     const denied = (async () => Response.json({ ok: false, description: config.token })) as typeof fetch;
     await assert.rejects(new TelegramManager(config, denied).assertReady(), error => !String(error).includes(config.token));
   });
-  it("sends a private request keyboard, no arbitrary correlation parameter, and no owner id in the public username", async () => {
-    const suggested: string[] = [];
-    for (let i = 0; i < 2; i++) {
-      await new TelegramManager(config, transport((method, body) => {
-        assert.equal(method, "sendMessage"); assert.equal(body.chat_id, 54321);
-        const markup = body.reply_markup as { keyboard: { request_managed_bot: Record<string, unknown> }[][] };
-        suggested.push(String(markup.keyboard[0]![0]!.request_managed_bot.suggested_username));
-        assert.ok(!("state" in markup.keyboard[0]![0]!.request_managed_bot));
-        return true;
-      })).offerCreation(54321);
+  it("offers the native keyboard and the iPhone/iPad link separately with the same intent-specific username", async () => {
+    const calls: { method: string; body: Record<string, unknown> }[] = [];
+    const suggested = "merrymen_a123456789abcdef_bot";
+    await new TelegramManager(config, transport((method, body) => { calls.push({ method, body }); return true; })).offerCreation(54321, suggested);
+    assert.equal(calls.length, 2, "reply and inline keyboards need separate messages");
+    assert.ok(calls.every(call => call.method === "sendMessage" && call.body.chat_id === 54321));
+    assert.deepEqual(calls[0]!.body.reply_markup, { keyboard: [[{ text: "Create my Telegram bot", request_managed_bot: {
+      request_id: 1, suggested_name: "My Merrymen", suggested_username: suggested,
+    } }]], resize_keyboard: true, one_time_keyboard: true });
+    assert.deepEqual(calls[1]!.body.reply_markup, { inline_keyboard: [[{ text: "Create my bot on iPhone or iPad",
+      url: `https://t.me/newbot/merrymen_manager_bot/${suggested}?name=My%20Merrymen`,
+    }]] });
+    assert.match(String(calls[1]!.body.text), /iPhone or iPad/);
+    assert.match(String(calls[1]!.body.text), /Keep the suggested username/);
+  });
+  it("rejects an invalid suggestion before sending either offer", async () => {
+    let calls = 0;
+    const manager = new TelegramManager(config, transport(() => { calls++; return true; }));
+    for (const name of ["", "merrymen_54321_bot", "merrymen_a123456789abcdef_bot?tenant=owner"]) {
+      await assert.rejects(manager.offerCreation(54321, name));
     }
-    for (const username of suggested) {
-      assert.match(username, /^merrymen_[0-9a-f]{8}_bot$/);
-      assert.ok(username.length >= 5 && username.length <= 32);
-      assert.ok(!username.includes("54321"), "the owner's Telegram id never appears in a public bot username");
-    }
-    assert.notEqual(suggested[0], suggested[1]);
-    assert.ok(Array.from({ length: 50 }, suggestedUsername).every(name => /^[a-z][a-z0-9_]{4,31}$/.test(name) && /bot$/.test(name)));
+    assert.equal(calls, 0);
   });
   it("reads the webhook URL and its update types, and calls a webhook ours, stale, unset or elsewhere", async () => {
     const ours = "https://app.merrymen.test/api/telegram/manager/webhook";
@@ -154,7 +158,7 @@ describe("what the manager says, and what its buttons carry", () => {
   it("says what happened in plain words, with the way back to Merrymen, and nothing else", () => {
     const back = [[{ text: "Back to Merrymen", url: home }]];
     assert.deepEqual(managerNotices.unmatched("my_merrymen_bot", home), {
-      text: "Your bot @my_merrymen_bot was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes.",
+      text: "Your bot @my_merrymen_bot was created, but no Merrymen setup is waiting for it, so it wasn't connected. To connect a new bot, start again from Merrymen and create it within 30 minutes.",
       buttons: back,
     });
     // Saved is not running: a held agent (outside the rollout, an expired

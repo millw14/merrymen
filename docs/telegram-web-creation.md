@@ -2,8 +2,12 @@
 
 Hosted Settings → Telegram has a **Create Telegram bot** button (Home has the
 same flow as **Set up Telegram**). It opens a private chat with the Merrymen
-manager. The user starts that chat, taps its creation button and approves the
-bot name in Telegram. The manager then answers in the same chat:
+manager. The user starts that chat and approves the bot name in Telegram.
+The manager offers the usual creation button and a second **Create my bot on
+iPhone or iPad** link. The link opens Telegram's create-bot screen directly;
+keep its suggested username so Merrymen can associate the resulting notice
+with this setup. The bot's display name can be changed. The manager then
+answers in the same chat:
 
 > ✅ @their_bot is ready.
 > Connect it to your Merrymen agent?
@@ -82,7 +86,7 @@ web service runs a readiness probe:
    - **empty**: the service sets it to
      `${MERRYMEN_PUBLIC_ORIGIN}/api/telegram/manager/webhook` with the webhook
      secret and `allowed_updates: ["message", "managed_bot", "callback_query"]`,
-     then reads it back;
+     then reads it back and requires this URL and all three update types;
    - **already this URL**: it is set again once per process with the current
      secret (Telegram never reports the secret, so a rotated or hand-set one
      cannot be detected otherwise), and again at any probe whose
@@ -110,21 +114,24 @@ receipts at least through the provider's retry window. The tables contain
 private account associations and are not public analytics data.
 
 The bot username Telegram suggests in its creation dialog is
-`merrymen_<8 random hex>_bot`; it never contains the owner's Telegram id. If
-Telegram rejects it, the owner chooses another in the same dialog.
+`merrymen_<16 hex>_bot`, derived with a domain-separated hash of this setup's
+random challenge hash. It stays the same when `/start` is retried and never
+contains the owner's Telegram id. The native request button permits a different
+username. The iPhone/iPad link requires this exact suggestion; if it is taken,
+start a new setup for a new suggestion, or connect an existing bot manually.
 
 ## What the manager says in Telegram
 
 | When | The manager says | Buttons |
 | --- | --- | --- |
 | A bot is made for a setup underway | ✅ @bot is ready. Connect it to your Merrymen agent? | Connect @bot · Not this bot |
-| A bot is made with no setup underway (it expired, was cancelled or replaced, or never began) | Your bot @bot was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes. | Back to Merrymen |
+| A bot is made with no setup underway (it expired, was cancelled or replaced, or never began) | Your bot @bot was created, but no Merrymen setup is waiting for it, so it wasn't connected. To connect a new bot, start again from Merrymen and create it within 30 minutes. | Back to Merrymen |
 | **Connect** saved it, or the page did | ✅ Connected @bot to your Merrymen agent. @bot replies once your agent is running. Merrymen then shows "Open my bot" to link your chat with it. If your agent is paused for recovery, that waits until it resumes. | Back to Merrymen |
 | **Not this bot** | Cancelled. Start again from Merrymen when you're ready. (The bot itself stays in Telegram; it can be deleted in @BotFather.) | Back to Merrymen |
 | **Connect** on an expired setup | This setup expired. Start again from Merrymen. | Back to Merrymen |
 | **Connect** when the agent already has a bot | …already has a Telegram bot… replace the bot in Settings. | Back to Merrymen |
 | **Connect** on a bot another agent holds | …already connected to another Merrymen agent… (never whose) | Back to Merrymen |
-| **Connect** fails for any other reason | Couldn't connect right now. Try again, or connect from Merrymen. | The same two buttons |
+| **Connect** fails for any other reason | A separate message: Couldn't connect right now. Try again, or connect from Merrymen. | Original proposal retains its buttons |
 
 Connected means saved, not running. Only the agent's worker (or, when its
 practice book would not restore, its hold process) starts the bot and mints the
@@ -164,9 +171,12 @@ message proposed, nothing else. A button carries `mc:` or `mx:`, the setup's
 random id and the public bot id (at most 60 bytes). It never carries the
 challenge, the wallet address or a token. The server finds the setup only
 through the presser's Telegram id. Connect runs exactly the web confirmation:
-the settings lock, `getManagedBotToken` and `getMe`, then one transaction for
-the claim, the sealed token and the completion. Pressing twice, or Telegram
-redelivering a press, connects nothing twice. A press from anyone else, or
+`getManagedBotToken` and `getMe`, then a fresh intent read under the settings
+lock and one transaction for the claim, the sealed token and the completion.
+Token lookups and manager messages do not hold a settings or manager delivery
+lock. Valid taps are acknowledged before token lookup. Refused attempts send
+a separate message so a late failure cannot replace a concurrent success.
+Pressing twice, or Telegram redelivering a press, connects nothing twice. A press from anyone else, or
 anywhere else, is answered and changes nothing.
 
 ## Association and retry guarantees
@@ -180,8 +190,25 @@ its managed token and verifies `getMe` before a first-wins bot claim. Claim,
 encrypted settings and completion commit in one transaction under the normal
 settings-save lock. Only `telegramBotToken` and `telegramEnabled` change.
 
-The editable username is not account authority. Generic `managed_bot` events
-also describe rotations and owner changes and cannot consume a creation intent.
+The editable username alone is not account authority. The deep link reports a
+`managed_bot` event, not a `managed_bot_created` service message. It has **no
+creation timestamp or event-kind discriminator**: Telegram also uses it for
+token and ownership changes. This event may propose a candidate only when all
+of these match:
+
+- The authenticated manager webhook and the human Telegram account bound by
+  the private `/start` challenge.
+- An unexpired intent still in `waiting_bot`.
+- An update ID strictly later than the binding `/start` update.
+- The exact per-intent suggested username, compared case-insensitively.
+
+These establish setup correlation, not proof of the event's reason. A token
+rotation for the same bot during that setup can match; it still cannot save a
+token without the owner's explicit Connect, live credential validation, and
+exclusive tenant claim. Unrelated, earlier, expired or already-decided generic
+events are ignored. A delayed native creation notice for a bot already accepted
+through the generic event is silent, including after connection.
+
 Update receipts survive restarts, including a creation that matched no setup,
 so its redelivery stays silent. A lost confirmation response is reconciled
 before the form can save an obsolete manual-token draft. Cancellation, on the
@@ -194,6 +221,10 @@ checks again at once when it comes back into view (a phone's browser tab sleeps
 while its owner is in Telegram). A check that fails (a deploy's 502 or 503, or
 a fetch the phone killed while the tab slept) shows its error and the checks go
 on, further apart each time up to 30 seconds; the first that works clears it.
+Only the latest poll or wake read may update the page, so an older response
+cannot restore Connect after a newer read found the connection. The local
+browser deadline keeps Save held until the setup or saved Settings is read
+back; Telegram may have connected the bot while the browser slept.
 
 Save is held until a connected bot reads back in Settings only for a
 connection that page itself confirmed. A browser can still hold the id of a
@@ -216,6 +247,8 @@ from the authenticated endpoint.
 Official contracts: [Managed Bots](https://core.telegram.org/bots/features#managed-bots),
 [request keyboard](https://core.telegram.org/bots/api#keyboardbuttonrequestmanagedbot),
 [creation service message](https://core.telegram.org/bots/api#managedbotcreated),
+[generic managed-bot event](https://core.telegram.org/bots/api#managedbotupdated),
+[managed-bot creation links](https://core.telegram.org/api/links#managed-bot-creation-request-links),
 [inline buttons](https://core.telegram.org/bots/api#inlinekeyboardbutton) and
 [their presses](https://core.telegram.org/bots/api#answercallbackquery),
 [managed token retrieval](https://core.telegram.org/bots/api#getmanagedbottoken),

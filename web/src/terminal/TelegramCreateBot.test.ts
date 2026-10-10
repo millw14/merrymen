@@ -341,16 +341,18 @@ describe("Telegram bot creation through the actual client component", () => {
     assert.equal(active.at(-1), false);
   });
 
-  it("expires an unanswered setup and stops polling rather than waiting indefinitely", async () => {
+  it("stops polling at the local deadline but keeps Save held until the connection is checked", async () => {
     await render();
     await ui.click("Create Telegram bot");
     respond = async () => json({ available: true, intent: intent("waiting_bot", { expiresAt: 1_800_000_060_000 }) });
     await advance(60_000);
-    assert.match(ui.container.textContent ?? "", /setup expired/);
+    assert.match(ui.container.textContent ?? "", /connection hasn't been checked/);
     const count = calls.length;
     await advance(120_000);
     assert.equal(calls.length, count);
-    assert.equal(active.at(-1), false);
+    assert.equal(active.at(-1), true, "Telegram can have connected the bot while this browser could not read it");
+    assert.ok(buttons().includes("Check setup"));
+    assert.equal(buttons().includes("Create Telegram bot"), false);
   });
 
   it("bounds even an excessively long server expiry to thirty minutes, the server's own window", async () => {
@@ -360,9 +362,10 @@ describe("Telegram bot creation through the actual client component", () => {
     await ui.click("Create Telegram bot");
     respond = async () => json({ available: true, intent: intent("waiting_telegram", { expiresAt: far }) });
     await advance(30 * 60_000 - 1);
-    assert.doesNotMatch(ui.container.textContent ?? "", /setup expired/, "still open just short of thirty minutes");
+    assert.equal(buttons().includes("Check setup"), false, "still open just short of thirty minutes");
     await advance(1);
-    assert.match(ui.container.textContent ?? "", /setup expired/);
+    assert.ok(buttons().includes("Check setup"));
+    assert.equal(active.at(-1), true);
     const count = calls.length;
     await advance(30_000);
     assert.equal(calls.length, count);
@@ -579,7 +582,8 @@ describe("Telegram bot creation through the actual client component", () => {
     const asleep = deferred<Response>();
     respond = async () => asleep.promise;
     await advance(60_000);
-    assert.match(ui.container.textContent ?? "", /setup expired/);
+    assert.match(ui.container.textContent ?? "", /connection hasn't been checked/);
+    assert.equal(active.at(-1), true);
     assert.equal(localStorage.getItem(storageKey(OWNER)), ID, "only this tab's clock said so: the id is kept to ask");
     respond = async () => json({ available: true, intent: intent("connected") });
     await act(async () => { ui.dom.window.dispatchEvent(new ui.dom.window.Event("pageshow")); }); await drain();
@@ -598,6 +602,55 @@ describe("Telegram bot creation through the actual client component", () => {
     await act(async () => { document.dispatchEvent(new ui.dom.window.Event("visibilitychange")); }); await drain();
     assert.equal(calls.length, count);
   });
+
+  for (const staleResult of ["confirm", "error"]) {
+    it(`ignores an older wake read's ${staleResult} after another wake finds the bot connected`, async () => {
+      localStorage.setItem(storageKey(OWNER), ID);
+      respond = async () => json({ available: true, intent: intent("confirm") });
+      await render();
+      const before = deferred<Response>();
+      respond = async () => before.promise;
+      await act(async () => { document.dispatchEvent(new ui.dom.window.Event("visibilitychange")); }); await drain();
+      const oldWake = calls.at(-1)!;
+      respond = async () => json({ available: true, intent: intent("connected") });
+      await act(async () => { ui.dom.window.dispatchEvent(new ui.dom.window.Event("pageshow")); }); await drain();
+      assert.equal(oldWake.init?.signal?.aborted, true);
+      assert.equal(refreshed.length, 1);
+      assert.equal(active.at(-1), false);
+      before.resolve(staleResult === "confirm" ? json({ available: true, intent: intent("confirm") }) : json({ error: "old read failed" }, 503));
+      await drain();
+      assert.match(ui.container.textContent ?? "", /Bot saved as @merrymen_testbot/);
+      assert.equal(buttons().includes("Connect this bot"), false);
+      assert.equal(buttons().includes("Try again"), false);
+      assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+      assert.equal(active.at(-1), false);
+    });
+  }
+
+  for (const status of ["expired", "cancelled"]) {
+    it(`reconciles a local timeout before releasing Save when the server reports ${status}`, async () => {
+      localStorage.setItem(storageKey(OWNER), ID);
+      respond = async () => json({ available: true, intent: intent("confirm") });
+      await render();
+      const asleep = deferred<Response>();
+      respond = async () => asleep.promise;
+      await advance(60_000);
+      assert.equal(active.at(-1), true);
+      assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+      const readback = deferred<void>();
+      reconcile = () => readback.promise;
+      respond = async () => json({ available: true, intent: intent(status) });
+      await ui.click("Check setup"); await drain();
+      assert.equal(reconciled.length, 1);
+      assert.equal(active.at(-1), true, "the old draft must wait for authoritative Settings");
+      readback.resolve(); await drain();
+      assert.equal(active.at(-1), false);
+      assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+      assert.ok(buttons().includes("Create Telegram bot"));
+      asleep.resolve(json({ available: true, intent: intent("confirm") })); await drain();
+      assert.equal(active.at(-1), false, "a late pre-timeout answer cannot re-open the setup");
+    });
+  }
 
   /**
    * ONE FAILED READ IS NOT THE END OF THE SETUP. A 502/503 during a deploy,

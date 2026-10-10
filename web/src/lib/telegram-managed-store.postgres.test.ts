@@ -113,6 +113,40 @@ test("Postgres: managed bot intents, replay, claims and encrypted settings are a
       await reset();
     });
 
+    await t.test("concurrent starts keep the same suggestion and user lease across separate pools", async () => {
+      const began = await storeA.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+      const start = { managerBotId: MANAGER, updateId: 25, telegramUserId: USER, challenge: began.challenge, messageDate: DATE, now: NOW };
+      const results = await Promise.all([storeA.bind(start), storeB.bind({ ...start, updateId: 26 })]);
+      assert.deepEqual(results.map(result => result.outcome).sort(), ["already_bound", "bound"]);
+      assert.ok(results.every(result => result.outcome !== "ignored"));
+      if (results[0]!.outcome === "ignored" || results[1]!.outcome === "ignored") throw new Error("concurrent start did not bind");
+      assert.equal(results[0]!.suggestedUsername, results[1]!.suggestedUsername);
+      assert.deepEqual(await storeB.bind(start), { outcome: "already_bound", suggestedUsername: results[0]!.suggestedUsername });
+      assert.equal((await dbA.prepare("SELECT COUNT(*) AS n FROM telegram_managed_users WHERE intent_id=?").get(began.intent.id) as { n: number }).n, 1);
+      await reset();
+    });
+
+    await t.test("generic creation races and replays across pools choose one candidate and never save settings", async () => {
+      const began = await storeA.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+      const bound = await storeA.bind({ managerBotId: MANAGER, updateId: 27, telegramUserId: USER, challenge: began.challenge, messageDate: DATE, now: NOW });
+      if (bound.outcome === "ignored") throw new Error("fixture did not bind");
+      const update = { kind: "managed_bot_updated" as const, managerBotId: MANAGER, updateId: 28, telegramUserId: USER,
+        botId: BOT, username: bound.suggestedUsername, now: NOW };
+      const competing = { ...update, updateId: 29, botId: "1002" };
+      const results = await Promise.all([storeA.candidate(update), storeB.candidate(competing)]);
+      assert.deepEqual(results.map(result => result.outcome).sort(), ["candidate", "ignored"]);
+      const winner = results[0]!.outcome === "candidate" ? update : competing;
+      assert.equal((await storeB.get(scope(A, began.intent.id)))?.botId, winner.botId);
+      assert.equal((await storeB.candidate(winner)).outcome, "already_candidate");
+      const losing = winner === update ? competing : update;
+      assert.equal((await storeA.candidate(losing)).outcome, "ignored");
+      assert.equal(await readSettings(A), null);
+      assert.deepEqual(await dbA.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+      await storeA.cancel(scope(A, began.intent.id));
+      assert.equal((await storeB.candidate(winner)).outcome, "ignored");
+      await reset();
+    });
+
     await t.test("a creation update replays durably across pools and does not choose a second bot", async () => {
       const intent = await prepare(storeA, A, USER, 30);
       const creation = { kind: "managed_bot_created" as const, managerBotId: MANAGER, updateId: 31, telegramUserId: USER,

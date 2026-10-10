@@ -90,6 +90,8 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   const callbacks = useRef({ onActiveChange, onAvailableChange, onConnected, onIntentMissing });
   callbacks.current = { onActiveChange, onAvailableChange, onConnected, onIntentMissing };
   const controllers = useRef(new Set<AbortController>());
+  /** Polls and browser wake events share one read: only its latest answer can land. */
+  const readController = useRef<AbortController | null>(null);
   const popups = useRef(new Set<Window>());
   const priorOwner = useRef(owner);
   const deadline = useRef<{ id: string; at: number } | null>(null);
@@ -128,38 +130,57 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
    * and a lost response says nothing either way). So Settings is read back
    * first (onIntentMissing), which also drops an older manual token draft that
    * would overwrite that bot, and only then is the id forgotten and Save
-   * released. A failed readback keeps both. An end this tab never confirmed
-   * cannot have saved anything: it is forgotten at once.
+   * released. A failed readback keeps both. A local timeout also requires
+   * reconciliation: Telegram may have connected the bot while this tab slept.
+   * An explicit server end with no uncertain write is forgotten at once.
    */
   async function read(scope: string, id: string | null, ctl: AbortController) {
-    const ask = async (withId: string | null) => {
-      const params = new URLSearchParams({ owner: scope });
-      if (withId) params.set("intent", withId);
-      const data = await requestJson<{ available: unknown; intent?: unknown }>(`/api/telegram/create?${params}`, { signal: ctl.signal });
-      if (typeof data.available !== "boolean") throw new Error("Invalid availability");
-      const found = withId && data.intent ? intentFrom(data.intent) : null;
-      if (found && found.id !== withId) throw new Error("Setup changed");
-      return { available: data.available, intent: found };
-    };
-    let answer: Awaited<ReturnType<typeof ask>> | null = null;
-    try { answer = await ask(id); }
-    catch (error) { if (!valid(ctl, scope) || !id || !(error instanceof RequestError) || error.status !== 404) throw error; }
-    if (!valid(ctl, scope)) return;
-    const prior = viewRef.current.owner === scope ? viewRef.current : null;
-    const intent = answer?.intent ?? null;
-    const ended = intent?.status === "expired" || intent?.status === "cancelled";
-    if (id && (!intent || (ended && prior?.confirmationAttempted))) {
-      patch(scope, { needsReconciliation: true, busy: true });
-      await callbacks.current.onIntentMissing(scope, ctl.signal, intent?.botUsername ?? prior?.intent?.botUsername ?? null);
-      if (!valid(ctl, scope)) return;
-      if (!answer) { answer = await ask(null); if (!valid(ctl, scope)) return; }
-      remember(scope, null); deadline.current = null;
-      patch(scope, { available: answer.available, intent, loading: false, busy: false, needsReconciliation: false, error: null, telegramUrl: null, confirmationAttempted: false });
-      return;
+    // A wake can overlap a poll, or another wake (pageshow + visibilitychange).
+    // Cancel only the previous request, not its polling controller/timers.
+    readController.current?.abort();
+    const readCtl = controller();
+    readController.current = readCtl;
+    const abortRead = () => readCtl.abort();
+    ctl.signal.addEventListener("abort", abortRead, { once: true });
+    if (ctl.signal.aborted) readCtl.abort();
+    const currentRead = () => valid(ctl, scope) && valid(readCtl, scope);
+    try {
+      const ask = async (withId: string | null) => {
+        const params = new URLSearchParams({ owner: scope });
+        if (withId) params.set("intent", withId);
+        const data = await requestJson<{ available: unknown; intent?: unknown }>(`/api/telegram/create?${params}`, { signal: readCtl.signal });
+        if (typeof data.available !== "boolean") throw new Error("Invalid availability");
+        const found = withId && data.intent ? intentFrom(data.intent) : null;
+        if (found && found.id !== withId) throw new Error("Setup changed");
+        return { available: data.available, intent: found };
+      };
+      let answer: Awaited<ReturnType<typeof ask>> | null = null;
+      try { answer = await ask(id); }
+      catch (error) { if (!currentRead() || !id || !(error instanceof RequestError) || error.status !== 404) throw error; }
+      if (!currentRead()) return;
+      const prior = viewRef.current.owner === scope ? viewRef.current : null;
+      const intent = answer?.intent ?? null;
+      const ended = intent?.status === "expired" || intent?.status === "cancelled";
+      const locallyExpired = prior?.needsReconciliation && prior.intent?.status === "expired";
+      if (id && (!intent || (ended && (prior?.confirmationAttempted || locallyExpired)))) {
+        patch(scope, { needsReconciliation: true, busy: true });
+        await callbacks.current.onIntentMissing(scope, readCtl.signal, intent?.botUsername ?? prior?.intent?.botUsername ?? null);
+        if (!currentRead()) return;
+        if (!answer) { answer = await ask(null); if (!currentRead()) return; }
+        remember(scope, null); deadline.current = null;
+        patch(scope, { available: answer.available, intent, loading: false, busy: false, needsReconciliation: false, error: null, telegramUrl: null, confirmationAttempted: false });
+        return;
+      }
+      if (ended) { remember(scope, null); deadline.current = null; }
+      else if (intent) remember(scope, intent.id);
+      patch(scope, { available: answer!.available, intent, loading: false, needsReconciliation: false, error: null });
+    } catch (error) {
+      if (currentRead()) throw error;
+    } finally {
+      ctl.signal.removeEventListener("abort", abortRead);
+      controllers.current.delete(readCtl);
+      if (readController.current === readCtl) readController.current = null;
     }
-    if (ended) { remember(scope, null); deadline.current = null; }
-    else if (intent) remember(scope, intent.id);
-    patch(scope, { available: answer!.available, intent, loading: false, needsReconciliation: false, error: null });
   }
 
   useEffect(() => {
@@ -209,7 +230,13 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
     const ctl = controller();
     let timer: ReturnType<typeof setTimeout>;
     const backoff = () => Math.min(POLL_MS * 2 ** failures.current, RETRY_MAX_MS);
-    const expire = setTimeout(() => { if (!valid(ctl, owner)) return; ctl.abort(); patch(owner, { intent: { ...intent, status: "expired" }, error: null, busy: false }); }, Math.max(0, until(intent) - Date.now()));
+    const expire = setTimeout(() => {
+      if (!valid(ctl, owner)) return;
+      ctl.abort();
+      // Telegram can have connected the bot while this tab was asleep or
+      // offline. Our clock alone cannot release Save over an older token draft.
+      patch(owner, { intent: { ...intent, status: "expired" }, needsReconciliation: true, error: null, busy: false });
+    }, Math.max(0, until(intent) - Date.now()));
     const poll = async () => {
       if (!valid(ctl, owner)) return;
       if (viewRef.current.owner === owner && viewRef.current.busy) { timer = setTimeout(poll, POLL_MS); return; }
@@ -236,7 +263,7 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
     const wake = () => {
       if (document.visibilityState === "hidden") return;
       const seen = viewRef.current, it = seen.intent;
-      if (seen.owner !== owner || !it || seen.loading || seen.busy || seen.needsReconciliation) return;
+      if (seen.owner !== owner || !it || seen.loading || seen.busy || (seen.needsReconciliation && it.status !== "expired")) return;
       if (!pending(it) && !(it.status === "expired" && remembered(owner) === it.id)) return;
       const ctl = controller();
       void read(owner, it.id, ctl).then(() => { failures.current = 0; }, error => { if (valid(ctl, owner)) patch(owner, { busy: false, error: failure(error) }); }).finally(() => controllers.current.delete(ctl));
@@ -326,7 +353,7 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
       const next = intentFrom(data.intent);
       if (next.id !== intent.id || !["connected", "cancelled", "expired"].includes(next.status)) throw new Error("Setup changed");
       if (next.status === "connected") patch(owner, { intent: next, telegramUrl: null });
-      else { remember(owner, null); patch(owner, { intent: null, telegramUrl: null, confirmationAttempted: false }); }
+      else { remember(owner, null); patch(owner, { intent: null, telegramUrl: null, confirmationAttempted: false, needsReconciliation: false }); }
     } catch (error) { if (valid(ctl, owner)) patch(owner, { error: failure(error) }); }
     finally { controllers.current.delete(ctl); if (valid(ctl, owner)) patch(owner, { busy: false }); }
   }

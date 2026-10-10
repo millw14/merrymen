@@ -268,6 +268,122 @@ describe("managed bot intent authority", () => {
   });
 });
 
+describe("intent-correlated iPhone/iPad creation", () => {
+  async function waiting() {
+    const f = await fixture();
+    const began = await f.store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const start = { managerBotId: MANAGER, updateId: 20, telegramUserId: USER, challenge: began.challenge, messageDate: DATE, now: NOW };
+    const bound = await f.store.bind(start);
+    assert.equal(bound.outcome, "bound");
+    const update = { kind: "managed_bot_updated" as const, managerBotId: MANAGER, updateId: 21, telegramUserId: USER,
+      botId: BOT, username: bound.suggestedUsername, now: NOW };
+    return { ...f, began, start, bound, update };
+  }
+
+  it("keeps a domain-separated 64-bit suggestion across retries and restarts, but changes it for a replacement intent", async () => {
+    const { db, store, began, start, bound } = await waiting();
+    assert.match(bound.suggestedUsername, /^merrymen_[0-9a-f]{16}_bot$/);
+    assert.ok(bound.suggestedUsername.length <= 32);
+    const digest = createHash("sha256").update(began.challenge).digest("hex");
+    assert.ok(!bound.suggestedUsername.includes(digest.slice(0, 16)), "public suggestion is not a prefix of the challenge hash");
+    assert.deepEqual(await new ManagedTelegramStore(db).bind(start), { ...bound, outcome: "already_bound" });
+    assert.deepEqual(await store.bind({ ...start, updateId: 22 }), { ...bound, outcome: "already_bound" });
+    assert.deepEqual(await store.bind({ ...start, updateId: 23, telegramUserId: USER + 1 }), { outcome: "ignored" });
+    const replacement = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const second = await store.bind({ ...start, updateId: 24, challenge: replacement.challenge });
+    assert.notEqual(second.outcome, "ignored");
+    if (second.outcome !== "ignored") assert.notEqual(second.suggestedUsername, bound.suggestedUsername);
+    assert.deepEqual(await store.bind(start), { outcome: "ignored" }, "cancelled old setup gets no creation offer");
+    assert.equal(await settingsOf(db), null);
+  });
+
+  it("proposes a matching generic event without a message date, case insensitively, without saving credentials", async () => {
+    const { db, store, began, update } = await waiting();
+    const event = { ...update, username: update.username.toUpperCase() };
+    assert.deepEqual(await store.candidate(event), { outcome: "candidate", intentId: began.intent.id });
+    assert.deepEqual(await new ManagedTelegramStore(db).candidate(event), { outcome: "already_candidate" });
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "confirm");
+    assert.equal((await store.get(scoped(began.intent.id)))?.botUsername, event.username);
+    assert.equal(await settingsOf(db), null);
+    assert.deepEqual(await db.prepare("SELECT * FROM telegram_bot_claims").all(), []);
+    await assert.rejects(store.candidate({ ...event, botId: "1002" }), errorCode("update_conflict"));
+  });
+
+  it("ignores generic events from a wrong user, manager, username, or older update without unmatched notices", async () => {
+    const { store, began, update } = await waiting();
+    const cases = [
+      { ...update, updateId: 19 },
+      { ...update, updateId: 22, telegramUserId: USER + 1 },
+      { ...update, updateId: 23, managerBotId: OTHER_MANAGER },
+      { ...update, updateId: 24, username: "unrelated_test_bot" },
+    ];
+    for (const event of cases) {
+      assert.deepEqual(await store.candidate(event), { outcome: "ignored" });
+      assert.deepEqual(await store.candidate(event), { outcome: "ignored" }, "an ignored update stays ignored on replay");
+    }
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "waiting_bot");
+    assert.equal((await store.candidate({ ...update, updateId: 25 })).outcome, "candidate");
+  });
+
+  it("ignores generic events after expiry, cancellation, or before any setup", async () => {
+    for (const ended of ["expired", "cancelled"] as const) {
+      const { store, began, start, update } = await waiting();
+      if (ended === "cancelled") await store.cancel(scoped(began.intent.id));
+      const now = ended === "expired" ? NOW + MANAGED_INTENT_TTL_MS : NOW;
+      assert.deepEqual(await store.candidate({ ...update, now }), { outcome: "ignored" }, ended);
+      assert.deepEqual(await store.bind({ ...start, messageDate: Math.floor(now / 1000), updateId: 30, now }), { outcome: "ignored" });
+      assert.equal((await store.get(scoped(began.intent.id, { now })))?.status, ended);
+    }
+    const { store } = await fixture();
+    assert.deepEqual(await store.candidate({ kind: "managed_bot_updated", managerBotId: MANAGER, updateId: 1,
+      telegramUserId: USER, botId: BOT, username: "merrymen_0123456789abcdef_bot", now: NOW }), { outcome: "ignored" });
+  });
+
+  it("does not offer another creation or replace a candidate after confirmation is pending or complete", async () => {
+    const { db, store, began, start, update } = await waiting();
+    await store.candidate(update);
+    for (const status of ["confirm", "connected"] as const) {
+      if (status === "connected") await store.complete({ ...scoped(began.intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT });
+      assert.deepEqual(await store.bind(start), { outcome: "ignored" }, `${status}: exact start redelivery`);
+      assert.deepEqual(await store.bind({ ...start, updateId: status === "confirm" ? 30 : 40 }), { outcome: "ignored" });
+      assert.deepEqual(await store.candidate({ ...update, updateId: status === "confirm" ? 31 : 41, botId: "1002" }), { outcome: "ignored" });
+      assert.equal((await store.get(scoped(began.intent.id)))?.status, status);
+      assert.equal((await store.get(scoped(began.intent.id)))?.botId, BOT);
+    }
+    assert.deepEqual(await store.candidate(update), { outcome: "ignored" }, "completed candidate cannot be replayed");
+    assert.equal((await settingsOf(db))?.telegramBotToken, TOKEN);
+  });
+
+  it("does not accept a previous intent's suggested bot into a replacement setup", async () => {
+    const { store, began, start, update } = await waiting();
+    await store.cancel(scoped(began.intent.id));
+    const replacement = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    const rebound = await store.bind({ ...start, updateId: 30, challenge: replacement.challenge });
+    assert.notEqual(rebound.outcome, "ignored");
+    assert.deepEqual(await store.candidate({ ...update, updateId: 31 }), { outcome: "ignored" });
+    assert.equal((await store.get(scoped(replacement.intent.id)))?.status, "waiting_bot");
+  });
+
+  it("silences delayed native delivery of an already connected generic candidate while reporting an unrelated second bot", async () => {
+    const { store, began, update } = await waiting();
+    await store.candidate(update);
+    await store.complete({ ...scoped(began.intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT });
+    const native = { ...update, kind: "managed_bot_created" as const, updateId: 30, messageDate: DATE };
+    assert.deepEqual(await store.candidate(native), { outcome: "ignored" });
+    assert.deepEqual(await store.candidate(native), { outcome: "ignored" });
+    assert.deepEqual(await store.candidate({ ...native, updateId: 31, botId: "1002", username: "second_test_bot" }), { outcome: "unmatched" });
+    assert.deepEqual(await store.candidate({ ...native, updateId: 32, telegramUserId: USER + 1 }), { outcome: "unmatched" }, "suppression is scoped to the bound user");
+    assert.deepEqual(await store.candidate({ ...native, updateId: 33, managerBotId: OTHER_MANAGER }), { outcome: "unmatched" }, "suppression is scoped to the manager");
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "connected");
+  });
+
+  it("still accepts a native creation with a user-chosen username", async () => {
+    const { store, began, update } = await waiting();
+    assert.deepEqual(await store.candidate({ ...update, kind: "managed_bot_created", username: "chosen_by_owner_bot", messageDate: DATE }),
+      { outcome: "candidate", intentId: began.intent.id });
+  });
+});
+
 describe("atomic managed bot confirmation", () => {
   it("preserves the latest complete settings and existing mirror; changes no owner, allowlist, risk or pause authority", async () => {
     const { db, store } = await fixture({ telegramAllowlist: [], strategy: "before" });

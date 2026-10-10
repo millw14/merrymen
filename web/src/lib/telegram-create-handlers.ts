@@ -14,7 +14,7 @@ const json = (body: unknown, status = 200) => Response.json(body, { status, head
 const unavailable = () => json({ available: false, error: "Bot creation is not available right now. You can still connect an existing bot." }, 503);
 const tenantPattern = /^0x[0-9a-f]{40}$/i;
 const idPattern = /^[A-Za-z0-9_-]{16,64}$/;
-/** Serialize manager delivery, including a retried creation prompt. Separate from settings saves. */
+/** Serialize update state changes. Telegram network calls run after this lock is released. */
 const MANAGER_DELIVERY_LOCK = 1_297_692_148;
 function webOrigin(req: Request): string {
   if (process.env.MERRYMEN_PUBLIC_ORIGIN) return requestOrigin(req);
@@ -108,10 +108,9 @@ function readiness(deps: Dependencies) {
       if (webhook !== "ours" || asserted !== key) {
         await manager.setWebhook(url, PROBE_CALL_MS);
         webhook = await manager.webhook(url, PROBE_CALL_MS);
-        // Our URL is what creation needs. Should the types read back short
-        // all the same, the next probe sets them again; the buttons they
-        // carry are a convenience the page in Merrymen also offers.
-        if (webhook !== "ours" && webhook !== "stale") { tell("the manager bot's webhook changed while it was being set; it was left as it is"); return false; }
+        // The deep link requires managed_bot delivery, and Connect requires
+        // callback_query. A successful set alone does not verify either.
+        if (webhook !== "ours") { tell("the manager bot's webhook changed or is missing update types after being set"); return false; }
         asserted = key;
       }
     } catch { tell("the manager bot's webhook could not be read or set"); return false; }
@@ -163,7 +162,7 @@ const TOAST = {
   connectFailed: "Couldn't connect right now. Try again.",
   failed: "Couldn't do that right now. Try again.",
 };
-type Reply = { toast?: string; notice?: ManagerNotice };
+type Reply = { toast?: string; notice?: ManagerNotice; separate?: boolean };
 /** What one completion did. "connected" is `fresh` when this call made the connection, not an earlier one. */
 type Connection =
   | { outcome: "connected"; intent: ManagedTelegramIntent; fresh: boolean }
@@ -180,8 +179,8 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
   /**
    * ONE COMPLETION, FROM MERRYMEN OR FROM TELEGRAM. The page's Connect and
    * the manager's Connect button both come here, so a bot is saved one way:
-   * under the tenant's settings lock, the intent as it stands, then the bot's
-   * live token (getManagedBotToken, and getMe for it), then complete()'s one
+   * first the bot's live token (getManagedBotToken, and getMe for it), then
+   * re-read the intent under the tenant's settings lock and complete()'s one
    * transaction (claim, sealed token, connected). Who may ask is settled by
    * the caller: the signed-in tenant, or the Telegram user whose /start bound
    * the intent. A connection already made answers as made, and asks Telegram
@@ -189,16 +188,27 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
    */
   async function connect(config: TelegramManagerConfig, tenant: `0x${string}`, intentId: string, botId: string | null): Promise<Connection> {
     const managerBotId = botIdOf(config.token)!;
-    const result = await deps.saveLock(tenant, async (claims): Promise<Connection> => {
-      if (!claims.db) return { outcome: "unavailable" };
-      const store = new ManagedTelegramStore(claims.db);
-      const scope = { tenant, intentId, managerBotId };
-      const intent = await store.get(scope);
+    const scope = { tenant, intentId, managerBotId };
+    const inspect = (intent: ManagedTelegramIntent | null): Connection | null => {
       if (!intent) return { outcome: "not_found" };
       if (!botId || botId !== intent.botId) return { outcome: "bot_changed" };
       if (intent.status === "connected") return { outcome: "connected", intent, fresh: false };
       if (intent.status !== "confirm" || !intent.botId || !intent.botUsername) return { outcome: "not_ready", intent };
-      const { token, bot } = await deps.manager(config).credentials({ id: intent.botId, username: intent.botUsername });
+      return null;
+    };
+    const pending = await new ManagedTelegramStore(await deps.db()).get(scope);
+    const previous = inspect(pending);
+    if (previous) return previous;
+    // Token checks can take seconds. Do them without pinning a database
+    // connection or preventing a second tap, cancel, or Settings save. The
+    // intent and settings are checked again under the lock before committing.
+    const { token, bot } = await deps.manager(config).credentials({ id: pending!.botId!, username: pending!.botUsername! });
+    const result = await deps.saveLock(tenant, async (claims): Promise<Connection> => {
+      if (!claims.db) return { outcome: "unavailable" };
+      const store = new ManagedTelegramStore(claims.db);
+      const intent = await store.get(scope);
+      const current = inspect(intent);
+      if (current) return current;
       const connected = await store.complete({ ...scope, botId: bot.id, token, confirmedBotId: bot.id });
       return { outcome: "connected", intent: connected, fresh: true };
     }, 3_000);
@@ -236,14 +246,14 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
   function refused(error: unknown, bot: ManagedBotIdentity, intentId: string): Reply {
     if (error instanceof ManagedTelegramError) {
       if (error.code === "intent_expired") return { toast: TOAST.expired, notice: managerNotices.expired(home()) };
-      if (error.code === "bot_already_configured") return { toast: TOAST.alreadyHasBot, notice: managerNotices.alreadyHasBot(bot.username, home()) };
-      if (error.code === "bot_claimed") return { toast: TOAST.claimed, notice: managerNotices.claimed(bot.username, home()) };
+      if (error.code === "bot_already_configured") return { toast: TOAST.alreadyHasBot, notice: managerNotices.alreadyHasBot(bot.username, home()), separate: true };
+      if (error.code === "bot_claimed") return { toast: TOAST.claimed, notice: managerNotices.claimed(bot.username, home()), separate: true };
       if (error.code === "candidate_mismatch" || error.code === "intent_not_found") return { toast: TOAST.notYours };
     }
     // A store code is one of its own fixed strings; nothing else about the error is logged.
     const reason = error === "busy" || error === "unavailable" ? error : error instanceof ManagedTelegramError ? error.code : error instanceof TelegramManagerError ? "Bot API" : "error";
     deps.log(`a Connect button in Telegram failed (${reason})`);
-    return { toast: TOAST.connectFailed, notice: managerNotices.failed(bot, intentId) };
+    return { toast: TOAST.connectFailed, notice: { text: managerNotices.failed(bot, intentId).text, buttons: [] }, separate: true };
   }
 
   /**
@@ -265,11 +275,13 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
    * tap sends another: both are safe, since a connected or cancelled intent
    * answers as it stands and the message is edited to the same words.
    */
-  async function decide(config: TelegramManagerConfig, user: number, pressed: ManagerPress): Promise<Reply> {
+  async function decide(config: TelegramManagerConfig, user: number, pressed: ManagerPress, acknowledge: () => Promise<void>): Promise<Reply> {
     const scope = { intentId: pressed.intentId, managerBotId: botIdOf(config.token)!, telegramUserId: user };
     const found = await new ManagedTelegramStore(await deps.db()).forTelegramUser(scope);
     if (!found || !found.intent.botUsername || found.intent.botId !== pressed.botId) return { toast: TOAST.notYours };
     const bot = { id: pressed.botId, username: found.intent.botUsername };
+    if (found.intent.status !== "confirm") return ended(found.intent, bot.username, pressed.action);
+    await acknowledge();
     if (pressed.action === "cancel") {
       // The web cancel's lock: a cancel never lands in the middle of a completion.
       const result = await deps.saveLock(found.tenant, async claims => claims.db ? await new ManagedTelegramStore(claims.db).cancelForTelegramUser(scope) : undefined, 3_000);
@@ -278,7 +290,13 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
     }
     let connection: Connection;
     try { connection = await connect(config, found.tenant, pressed.intentId, pressed.botId); }
-    catch (error) { return refused(error, bot, pressed.intentId); }
+    catch (error) {
+      // A concurrent confirmation or cancellation may have finished while
+      // Telegram refused this request. Preserve that final state in the reply.
+      const current = await new ManagedTelegramStore(await deps.db()).forTelegramUser(scope);
+      if (current && current.intent.status !== "confirm") return ended(current.intent, bot.username, "connect");
+      return refused(error, bot, pressed.intentId);
+    }
     if (connection.outcome === "connected") return { notice: managerNotices.connected(bot.username, home()) };
     if (connection.outcome === "not_ready") return ended(connection.intent, bot.username, "connect");
     if (connection.outcome === "not_found" || connection.outcome === "bot_changed") return { toast: TOAST.notYours };
@@ -294,12 +312,22 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
     const pressed = parsePress(query.data);
     const valid = Number.isSafeInteger(query.from?.id) && user > 0 && query.from?.is_bot === false && query.message?.chat?.type === "private" &&
       query.message.chat.id === user && Number.isSafeInteger(query.message.message_id) && messageId > 0 && pressed !== null;
-    let reply: Reply;
-    try { reply = valid ? await decide(config, user, pressed!) : { toast: TOAST.unavailable }; }
-    catch { deps.log("a manager button press could not be checked"); reply = { toast: TOAST.failed }; }
     const manager = deps.manager(config);
-    await manager.answer(query.id, reply.toast, NOTICE_CALL_MS).catch(() => {});
-    if (valid && reply.notice) await manager.edit(user, messageId, reply.notice, NOTICE_CALL_MS).catch(() => {});
+    let answered = false;
+    const acknowledge = async () => {
+      answered = true;
+      await manager.answer(query.id as string, pressed!.action === "connect" ? "Connecting…" : "Cancelling…", NOTICE_CALL_MS).catch(() => {});
+    };
+    let reply: Reply;
+    try { reply = valid ? await decide(config, user, pressed!, acknowledge) : { toast: TOAST.unavailable }; }
+    catch { deps.log("a manager button press could not be checked"); reply = { toast: TOAST.failed }; }
+    if (!answered) await manager.answer(query.id, reply.toast, NOTICE_CALL_MS).catch(() => {});
+    // A refusal did not change durable state. Say it separately: a delayed
+    // failure edit must never overwrite a concurrent successful Connect edit.
+    // Terminal states are immutable, so their shared message edits agree.
+    if (valid && reply.notice && reply.separate) await tell(config, user, () => reply.notice!, "button result");
+    else if (valid && reply.notice) await manager.edit(user, messageId, reply.notice, NOTICE_CALL_MS).catch(() => {});
+    else if (answered && reply.toast) await tell(config, user, () => ({ text: reply.toast!, buttons: [] }), "button result");
   }
 
   return {
@@ -373,7 +401,8 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
       if (!validWebhookSecret(req.headers.get("x-telegram-bot-api-secret-token"), config.webhookSecret)) return json({ error: "Unauthorized." }, 401);
       let raw: unknown;
       try { raw = await boundedJson(req); } catch { return json({ error: "Invalid update." }, 400); }
-      const update = raw as { update_id?: unknown; callback_query?: unknown; message?: {
+      const update = raw as { update_id?: unknown; callback_query?: unknown;
+        managed_bot?: { user?: { id?: unknown; is_bot?: unknown }; bot?: unknown }; message?: {
         date?: unknown; from?: { id?: unknown; is_bot?: unknown }; chat?: { id?: unknown; type?: unknown };
         text?: unknown; managed_bot_created?: { bot?: unknown };
       } } | null;
@@ -381,26 +410,40 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
       // A press is answered whatever it finds, and never asks for redelivery:
       // its presser has been told, and can press again.
       if (update.callback_query !== undefined) { await press(config, update.callback_query); return json({ ok: true }); }
+      const managerBotId = botIdOf(config.token)!;
+      const now = Date.now();
+      // Deep-link creation has no service message or event timestamp. The
+      // store accepts this broader event only for a waiting setup's exact
+      // nonce username, bound user, manager and post-/start update sequence.
+      // It proposes a candidate; it never saves credentials or connects it.
+      if (update.managed_bot !== undefined) {
+        const managed = update.managed_bot;
+        const bot = managedBotIdentity(managed?.bot);
+        const user = managed?.user;
+        if (!bot || bot.id === managerBotId || !Number.isSafeInteger(user?.id) || Number(user?.id) <= 0 || user?.is_bot !== false) return json({ ok: true });
+        try {
+          const result = await withAdvisoryLock(await deps.db(), MANAGER_DELIVERY_LOCK, Number(managerBotId) % 2_147_483_647,
+            db => new ManagedTelegramStore(db).candidate({ kind: "managed_bot_updated", managerBotId, updateId: Number(update.update_id), telegramUserId: Number(user.id), botId: bot.id, username: bot.username, now }), 10_000);
+          if (result.outcome === "candidate") await tell(config, Number(user.id), () => managerNotices.ready(bot, result.intentId), "Connect");
+          return json({ ok: true });
+        } catch { return json({ error: "Please retry delivery." }, 503); }
+      }
       const message = update.message;
-      // Generic managed_bot updates include token rotations and owner changes;
-      // they are never proof that this web request created a bot.
       if (!message || message.chat?.type !== "private" || !Number.isSafeInteger(message.from?.id) ||
           Number(message.from?.id) <= 0 || message.from?.is_bot !== false || message.chat.id !== message.from.id ||
           !Number.isSafeInteger(message.date)) return json({ ok: true });
       const date = Number(message.date);
-      const now = Date.now();
       if (date * 1000 > now + 30_000 || date * 1000 < now - MANAGED_MESSAGE_FRESHNESS_MS) return json({ ok: true });
       const userId = Number(message.from.id);
-      const managerBotId = botIdOf(config.token)!;
       const challenge = typeof message.text === "string" ? /^\/start(?:@[A-Za-z0-9_]+)? (mm_[A-Za-z0-9_-]{43})$/.exec(message.text)?.[1] : undefined;
       const bot = managedBotIdentity(message.managed_bot_created?.bot);
       if ((!challenge && !bot) || bot?.id === managerBotId) return json({ ok: true });
       try {
-        return await withAdvisoryLock(await deps.db(), MANAGER_DELIVERY_LOCK, Number(managerBotId) % 2_147_483_647, async db => {
+        const delivery = await withAdvisoryLock(await deps.db(), MANAGER_DELIVERY_LOCK, Number(managerBotId) % 2_147_483_647, async db => {
           const store = new ManagedTelegramStore(db);
           if (challenge) {
             const result = await store.bind({ managerBotId, updateId: Number(update.update_id), challenge, telegramUserId: userId, messageDate: date, now });
-            if (result.outcome !== "ignored") await deps.manager(config).offerCreation(userId);
+            return result.outcome === "ignored" ? null : { kind: "offer" as const, username: result.suggestedUsername };
           } else if (bot) {
             // THE NEXT STEP, IN TELEGRAM. A bot made for a setup underway is
             // offered at once (Connect, or Not this bot), so nobody is left in
@@ -409,11 +452,17 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
             // outcomes come only from the update's first delivery, and a send
             // that fails is not retried, since Merrymen's page still offers it.
             const result = await store.candidate({ kind: "managed_bot_created", managerBotId, updateId: Number(update.update_id), telegramUserId: userId, botId: bot.id, username: bot.username, messageDate: date, now });
-            if (result.outcome === "candidate") await tell(config, userId, () => managerNotices.ready(bot, result.intentId), "Connect");
-            else if (result.outcome === "unmatched") await tell(config, userId, () => managerNotices.unmatched(bot.username, home()), "setup expired");
+            if (result.outcome === "candidate") return { kind: "notice" as const, notice: managerNotices.ready(bot, result.intentId), what: "Connect" };
+            if (result.outcome === "unmatched") return { kind: "notice" as const, notice: managerNotices.unmatched(bot.username, home()), what: "unmatched setup" };
           }
-          return json({ ok: true });
+          return null;
         }, 10_000);
+        // A slow Bot API send must not hold the manager-wide database lock.
+        // /start offers can retry, with the same username; candidate notices
+        // are best effort and the web page remains the durable fallback.
+        if (delivery?.kind === "offer") await deps.manager(config).offerCreation(userId, delivery.username);
+        else if (delivery?.kind === "notice") await tell(config, userId, () => delivery.notice, delivery.what);
+        return json({ ok: true });
       } catch { return json({ error: "Please retry delivery." }, 503); }
     },
   };

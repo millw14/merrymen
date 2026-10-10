@@ -1,14 +1,14 @@
 /** Server-only Bot API transport. Tokens never appear in a response or a log. */
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { botIdOf } from "../../../worker/src/telegram/state";
 
 export interface TelegramManagerConfig { token: string; username: string; webhookSecret: string }
 /** Where Telegram delivers the manager's updates, under this deployment's public origin. */
 export const MANAGER_WEBHOOK_PATH = "/api/telegram/manager/webhook";
 /**
- * `managed_bot` is subscribed to as Telegram documents it; only `message` (a
- * /start, a creation) and `callback_query` (the Connect and Not this bot
- * buttons) are acted on, and the webhook says why. A webhook already set
+ * `managed_bot` also supplies candidates from the iPhone/iPad creation link,
+ * when it matches the waiting intent's suggestion. `message` carries /start
+ * and native creation, and `callback_query` the confirmation buttons. A webhook already set
  * without one of these is set again by the readiness probe ("stale").
  */
 export const MANAGER_ALLOWED_UPDATES = ["message", "managed_bot", "callback_query"] as const;
@@ -81,7 +81,7 @@ export const managerNotices = {
   }),
   /** A bot made with no setup underway for its maker: nothing was connected, and they are told so. */
   unmatched: (username: string, home: string | null): ManagerNotice => ({
-    text: `Your bot @${username} was created, but this Merrymen setup had expired, so it wasn't connected. Start again from Merrymen and create the bot within 30 minutes.`,
+    text: `Your bot @${username} was created, but no Merrymen setup is waiting for it, so it wasn't connected. To connect a new bot, start again from Merrymen and create it within 30 minutes.`,
     buttons: back(home),
   }),
   /**
@@ -117,17 +117,6 @@ export const managerNotices = {
   }),
 };
 const markup = (notice: ManagerNotice) => notice.buttons.length ? { reply_markup: { inline_keyboard: notice.buttons } } : {};
-/**
- * A PUBLIC USERNAME THAT SAYS NOTHING ABOUT ITS OWNER. #284 suggested
- * `merrymen_<telegram user id>_bot`, which would have published the owner's
- * numeric Telegram id in a bot username anyone can look up, for as long as the
- * bot exists. Eight random hex digits instead: `merrymen_1a2b3c4d_bot`, 21
- * characters, inside Telegram's 5 to 32 and ending in "bot" as it requires. A
- * clash is Telegram's to report, and the owner picks another in its dialog.
- */
-export function suggestedUsername(): string {
-  return `merrymen_${randomBytes(4).toString("hex")}_bot`;
-}
 function botIdentity(value: unknown): ManagedBotIdentity | null {
   const u = value as { id?: unknown; is_bot?: unknown; username?: unknown } | null;
   if (!u || !Number.isSafeInteger(u.id) || Number(u.id) <= 0 || u.is_bot !== true ||
@@ -178,16 +167,22 @@ export class TelegramManager {
   /**
    * The creation offer: Telegram's own request button, which makes the bot and
    * reports it to the webhook (managed_bot_created), which then sends `ready`.
-   * THE SEAM FOR ANOTHER WAY TO MAKE THE BOT: a further row of this keyboard,
-   * or a second message after this one, would go here. None is added yet.
+   * iPhone/iPad can instead use Telegram's creation link. Both offer exactly
+   * the waiting intent's suggestion; only that username correlates the link's
+   * generic managed_bot event, so the link instructions ask the user to keep it.
    */
-  async offerCreation(userId: number): Promise<void> {
+  async offerCreation(userId: number, suggestedUsername: string): Promise<void> {
+    if (!/^merrymen_[0-9a-f]{16}_bot$/.test(suggestedUsername)) throw new TelegramManagerError();
     await this.call(this.config.token, "sendMessage", {
       chat_id: userId,
       text: "Create your Merrymen bot below. Telegram will ask you to approve its name. Then confirm here, or in Merrymen, which bot to connect.",
       reply_markup: { keyboard: [[{ text: "Create my Telegram bot", request_managed_bot: {
-        request_id: 1, suggested_name: "My Merrymen", suggested_username: suggestedUsername(),
+        request_id: 1, suggested_name: "My Merrymen", suggested_username: suggestedUsername,
       } }]], resize_keyboard: true, one_time_keyboard: true },
+    });
+    await this.send(userId, {
+      text: "On iPhone or iPad, use the button below. Keep the suggested username so Merrymen can recognize your bot. You can change its display name.",
+      buttons: [[{ text: "Create my bot on iPhone or iPad", url: `https://t.me/newbot/${encodeURIComponent(this.config.username)}/${suggestedUsername}?name=My%20Merrymen` }]],
     });
   }
   /** A private message from the manager. */
