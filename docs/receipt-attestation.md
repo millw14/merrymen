@@ -12,12 +12,38 @@ USDG transfer in the unconfirmed tail makes the preview or commit wait, includin
 a withdrawal followed by a matching deposit. Both the confirmed snapshot and
 observed head are checked again for a reorganization before accepting evidence.
 
+Existing owner-operation records are allowed only for confirmed, successful
+root-key **nonce revocations**: the exact canonical direct Kernel
+`invalidateNonce(uint32)` call. They must have no USDG legs, covered logs or
+token movements, and must agree between the original and shared books with a
+complete mirror witness. An `acknowledged` label alone is insufficient; it can
+also describe a withdrawal. Failed, unknown, unconfirmed or unrecorded operations
+refuse the repair. This bounded protocol accepts at most 64 owner records.
+
+The protocol freshly scans the account's complete EntryPoint history through
+the same observed head, verifies each operation against its canonical receipt,
+block and transaction, and rechecks both the confirmed and observed block
+hashes. Each transaction must send zero native value to EntryPoint and contain
+the proved account/nonce's exact revocation call. Any Transfer touching the
+account or current grant-derived custody anywhere in that receipt refuses,
+including outside the operation's own execution. Generic execute calls are
+excluded even when their explicit call value is zero. Recorded self-paid native
+gas is preserved; this is a USDG accounting proof, not a reconstruction of all
+native-ETH transfers or a new wallet permission.
+
 It preserves the account, signed permission and caps, original SQLite file and
 source identity, consumed generation, every existing journal entry, flow IDs,
 flow amount and bookkeeping time, epoch, high-water marks, budgets, and all
 mirror cursors. It changes only the flow's provenance fields in the original
 SQLite file and its existing shared row. A correcting journal mark and a
 permanent shared audit record retain the original flow and verified receipt.
+When owner revocations are present, the permanent plan also retains every
+original owner row, current custody scope, receipt and transaction responses,
+and a stable proof binding the operation, canonical block hash and calldata.
+The approval digest includes that stable proof and excludes the changing scan
+head. Retry reads the proof again; it never trusts a previous `acknowledged`
+record to bypass fresh verification. No owner-operation row, gas amount,
+permission, cap or cursor is changed by attestation.
 
 ## Operator workflow
 
@@ -45,6 +71,10 @@ Do not delete, recreate, import over, or reset the original tenant home.
    create a repair schema/audit, or write a local repair marker. Other ordinary
    orchestrator startup work is unaffected. The result includes the exact
    amount, source/shared flow IDs, receipt reference, and `approvalDigest`.
+   For preserved owner revocations, `ownerProofSummary` also gives their count,
+   the current custody addresses and the stable digest of their complete proof.
+   Review that supplemental proof summary before approving the repair. Empty
+   owner histories omit the summary, including legacy pending plans.
 4. Review that result. For an approved repair, keep the same account, tenant,
    hold and rollout; change mode to `commit` and set approval to the complete
    returned digest. Restart through the normal deployment path. The protocol

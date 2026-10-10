@@ -14,6 +14,7 @@ import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { canonicalJson, JOURNAL_GENESIS, journalHash } from "./store";
 import type { TenantLease } from "./tenant-lease";
 import { ensureReceiptAttestationSchema, readReceiptAttestation } from "./receipt-attestation-state";
+import { attestationCustody, attestationOwnerRows, proveAttestationOwnerOperations, type AttestedOwnerProof } from "./receipt-attestation-owner";
 
 const MARKER = "ledger-source-blocked.json";
 const OTHER_MARKERS = ["ledger-import.pending.json", "restore-blocked.json", "energy-unrestored.json"];
@@ -38,13 +39,15 @@ function present(file: string): boolean {
 const PROTECTED = ["agents", "trades", "equity", "fee_accruals", "positions", "cost_basis", "position_floors",
   "class_positions", "trench_positions", "risk_periods", "energy_days", "paper_book", "owner_operations", "agent_commands", "flows_quarantine"] as const;
 const MUST_BE_EMPTY = ["fee_accruals", "positions", "cost_basis", "position_floors", "class_positions", "trench_positions",
-  "risk_periods", "owner_operations", "flows_quarantine"] as const;
+  "risk_periods", "flows_quarantine"] as const;
 
 interface Snapshot {
   flow: Row;
   agent: Row;
   protectedDigest: string;
   journal: { digest: string; count: number; head: string; lastSeq: number };
+  /** Omitted for original v1 empty-owner plans, preserving their retry digest. */
+  ownerOperations?: Row[];
 }
 interface Receipt {
   txHash: string; blockNumber: number; blockHash: string; logIndex: number; at: number;
@@ -57,6 +60,7 @@ interface Plan {
   file: { inode: string; identity: Row; volumeId: string };
   source: Row; grant: Row; marks: Row[];
   local: Snapshot; shared: Snapshot; receipt: Receipt;
+  ownerProof?: AttestedOwnerProof;
   /** Exact RPC responses used for the original verification; no credentials or keys. */
   evidence: Array<{ method: string; params: unknown[]; result: unknown }>;
 }
@@ -76,6 +80,7 @@ export interface ReceiptAttestationReport {
   approvalDigest: string;
   tenant: string; account: string; amountUsdg: number;
   localFlowId: number; sharedFlowId: number; receipt: Receipt;
+  ownerProofSummary?: { operationCount: number; custody: string[]; proofDigest: string };
 }
 
 function authority(o: ReceiptAttestationOptions): void {
@@ -169,7 +174,8 @@ async function snapshot(db: Db, account: string, chainId: number, local: boolean
         || (original.epoch != null && safeInteger(original.epoch) !== 1)
         || (original.chainId != null && safeInteger(original.chainId) !== chainId)) refuse("original flow journal does not prove the sole inferred deposit");
   }
-  return { flow, agent: agents[0]!, protectedDigest: hash(Object.fromEntries(Object.entries(values).map(([name, rs]) => [name, sorted(rs)]))), journal: journalState(journal, local) };
+  return { flow, agent: agents[0]!, protectedDigest: hash(Object.fromEntries(Object.entries(values).map(([name, rs]) => [name, sorted(rs)]))), journal: journalState(journal, local),
+    ...(values.owner_operations!.length ? { ownerOperations: [...values.owner_operations!].sort((a, b) => safeInteger(a.id) - safeInteger(b.id)) } : {}) };
 }
 async function sharedIdentity(db: Db, o: ReceiptAttestationOptions, lock = false): Promise<{ source: Row; grant: Row; marks: Row[] }> {
   const tenant = o.tenant.toLowerCase(), account = o.smartAccount.toLowerCase();
@@ -188,7 +194,22 @@ async function sharedIdentity(db: Db, o: ReceiptAttestationOptions, lock = false
   if (!marks.some(r => r.table_name === "flows" && safeInteger(r.last_id) > 0)) refuse("flow has no original mirror witness");
   return { source, grant, marks };
 }
-async function chainEvidence(o: ReceiptAttestationOptions): Promise<{ receipt: Receipt; evidence: Plan["evidence"] }> {
+async function chainEvidence(o: ReceiptAttestationOptions, local: Snapshot, shared: Snapshot, marks: Row[]): Promise<{ receipt: Receipt; evidence: Plan["evidence"]; ownerProof?: AttestedOwnerProof }> {
+  const scope = { account: o.smartAccount.toLowerCase(), tenant: o.tenant.toLowerCase(), chainId: o.chainId };
+  const ownerRecords = attestationOwnerRows(local.ownerOperations ?? [], { ...scope, local: true });
+  if (!same(ownerRecords, attestationOwnerRows(shared.ownerOperations ?? [], { ...scope, local: false }))) refuse("original and mirrored owner operations differ");
+  if (local.ownerOperations?.length) {
+    const last = local.ownerOperations.at(-1)!, cursor = marks.find(r => r.table_name === "owner_operations");
+    if (!cursor || safeInteger(cursor.last_id) !== safeInteger(last.id) || safeInteger(cursor.last_stamp) !== safeInteger(last.created_at)) refuse("owner operations have no complete mirror witness");
+  }
+  // Deliberately project only public custody fields; never read sealed keys or
+  // signatures into the permanent plan. The surrounding grant version witness
+  // is checked again before either durable amendment.
+  const publicGrant = await o.shared.prepare(`SELECT grant_json->>'grantFeatures' AS "grantFeatures",
+    grant_json->>'ponsClassVaultAddress' AS "ponsClassVaultAddress", grant_json->>'trencherVaultAddress' AS "trencherVaultAddress",
+    grant_json->>'trencherFactoryAddress' AS "trencherFactoryAddress" FROM grants WHERE tenant=?`).get(scope.tenant) as Row | undefined;
+  if (!publicGrant) refuse("grant custody is unavailable");
+  const custody = attestationCustody(publicGrant);
   const evidence: Plan["evidence"] = [];
   let bytes = 0;
   const rpc: RpcCall = async (method, params) => {
@@ -205,9 +226,17 @@ async function chainEvidence(o: ReceiptAttestationOptions): Promise<{ receipt: R
   const receipt = evidence.find(x => x.method === "eth_getTransactionReceipt" && String(x.params[0]).toLowerCase() === deposit.txHash.toLowerCase())?.result as { blockHash?: unknown; logs?: Array<{ logIndex: string; topics: string[]; address: string }> } | undefined;
   const log = receipt?.logs?.find(x => Number(BigInt(x.logIndex)) === deposit.logIndex);
   if (!receipt || typeof receipt.blockHash !== "string" || !log || log.address.toLowerCase() !== CASH.USDG.toLowerCase()) refuse("receipt evidence disappeared");
+  const observed = evidence.find(x => x.method === "eth_blockNumber")?.result;
+  if (typeof observed !== "string" || !/^0x[0-9a-f]+$/i.test(observed)) refuse("observed head evidence disappeared");
+  const headTag = `0x${BigInt(observed).toString(16)}`;
+  const header = evidence.find(x => x.method === "eth_getBlockByNumber" && x.params[0] === headTag)?.result as { hash?: unknown } | undefined;
+  if (typeof header?.hash !== "string") refuse("observed header evidence disappeared");
+  const ownerProof = await proveAttestationOwnerOperations(rpc, { ...scope, custody, records: ownerRecords,
+    confirmedBlock: capital.blockNumber, confirmedHash: capital.blockHash, observedHead: BigInt(observed), observedHash: header.hash });
   return { receipt: { txHash: deposit.txHash.toLowerCase(), blockNumber: deposit.blockNumber, blockHash: receipt.blockHash.toLowerCase(),
     logIndex: deposit.logIndex, at: deposit.at, amountUsdg6: String(deposit.amountUsdg6),
-    from: `0x${log.topics[1]!.slice(-40)}`.toLowerCase(), to: `0x${log.topics[2]!.slice(-40)}`.toLowerCase(), token: log.address.toLowerCase() }, evidence };
+    from: `0x${log.topics[1]!.slice(-40)}`.toLowerCase(), to: `0x${log.topics[2]!.slice(-40)}`.toLowerCase(), token: log.address.toLowerCase() }, evidence,
+    ...(ownerProof ? { ownerProof } : {}) };
 }
 function corrected(flow: Row, receipt: Receipt, chainId: number): Row {
   return { ...flow, source: "chain-log", tx_hash: receipt.txHash, block_number: receipt.blockNumber, log_index: receipt.logIndex, chain_id: chainId };
@@ -263,12 +292,12 @@ export async function attestOriginalReceipt(o: ReceiptAttestationOptions): Promi
         || plan.tenant !== o.tenant.toLowerCase() || plan.account !== o.smartAccount.toLowerCase() || plan.chainId !== o.chainId) refuse("permanent audit was modified");
     assertMarker(o, plan, false);
     await verify(o, plan);
-    const fresh = await chainEvidence(o);
-    if (!same(fresh.receipt, plan.receipt)) refuse("chain receipt changed since approval");
+    const fresh = await chainEvidence(o, plan.local, plan.shared, plan.marks);
+    if (!same(fresh.receipt, plan.receipt) || !same(fresh.ownerProof ?? null, plan.ownerProof ?? null)) refuse("chain receipt or owner proof changed since approval");
   } else {
     if (present(path.join(o.home, MARKER))) refuse("another source barrier exists");
     const identity = await sharedIdentity(o.shared, o), local = await readLocal(o), shared = await snapshot(o.shared, o.smartAccount.toLowerCase(), o.chainId, false);
-    const { receipt, evidence } = await chainEvidence(o);
+    const { receipt, evidence, ownerProof } = await chainEvidence(o, local.snap, shared, identity.marks);
     for (const flow of [local.snap.flow, shared.flow]) {
       if (flow.source !== "inferred" || flow.tx_hash !== null || flow.block_number !== null || flow.log_index !== null
           || (flow.chain_id !== null && safeInteger(flow.chain_id) !== o.chainId)
@@ -278,13 +307,15 @@ export async function attestOriginalReceipt(o: ReceiptAttestationOptions): Promi
     if ([local.snap.agent, shared.agent].some(agent => String(agent.owner_address).toLowerCase() !== identity.grant.owner)) refuse("original owner differs from the stored permission");
     if (identity.source.source_inode !== local.file.inode || identity.source.source_identity !== local.file.identity.book_id) refuse("consumed source receipt differs from local file");
     plan = { version: 1, tenant: o.tenant.toLowerCase(), account: o.smartAccount.toLowerCase(), chainId: o.chainId,
-      ...identity, file: local.file, local: local.snap, shared, receipt, evidence };
+      ...identity, file: local.file, local: local.snap, shared, receipt, evidence, ...(ownerProof ? { ownerProof } : {}) };
     await verify(o, plan);
   }
   const digest = approvalDigest(plan);
   const report = (state: ReceiptAttestationReport["state"]): ReceiptAttestationReport => ({ state, approvalDigest: digest,
     tenant: plan.tenant, account: plan.account, amountUsdg: Number(plan.receipt.amountUsdg6) / 1_000_000,
-    localFlowId: safeInteger(plan.local.flow.id), sharedFlowId: safeInteger(plan.shared.flow.id), receipt: plan.receipt });
+    localFlowId: safeInteger(plan.local.flow.id), sharedFlowId: safeInteger(plan.shared.flow.id), receipt: plan.receipt,
+    ...(plan.ownerProof ? { ownerProofSummary: { operationCount: plan.ownerProof.operations.length,
+      custody: plan.ownerProof.custody, proofDigest: hash(plan.ownerProof) } } : {}) });
   if (o.mode !== "commit") return report(old?.state === "pending" ? "pending" : old?.state === "applied" ? "applied" : "preview");
   if (o.approvedDigest !== digest) refuse("approval does not match this exact evidence");
   await ensureReceiptAttestationSchema(o.shared);
