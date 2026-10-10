@@ -2,9 +2,10 @@ import { requestOrigin, tenantOf } from "./auth";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "./order-owner";
 import { SAVE_BUSY, withSettingsSaveLock } from "./telegram-claims";
 import { botIdOf } from "../../../worker/src/telegram/state";
+import { createHash } from "node:crypto";
 import { makePgDb, withAdvisoryLock, type Db } from "../../../worker/src/db";
-import { ManagedTelegramStore, ManagedTelegramError, MANAGED_MESSAGE_FRESHNESS_MS } from "./telegram-managed-store";
-import { boundedJson, managedBotIdentity, TelegramManager, TelegramManagerError, validWebhookSecret, type TelegramManagerConfig } from "./telegram-manager";
+import { ensureManagedTelegramSchema, ManagedTelegramStore, ManagedTelegramError, MANAGED_MESSAGE_FRESHNESS_MS } from "./telegram-managed-store";
+import { boundedJson, managedBotIdentity, managerWebhookUrl, TelegramManager, TelegramManagerError, validWebhookSecret, type TelegramManagerConfig } from "./telegram-manager";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 const unavailable = () => json({ available: false, error: "Bot creation is not available right now. You can still connect an existing bot." }, 503);
@@ -27,12 +28,96 @@ interface Dependencies {
   db(): Promise<Db>;
   manager(config: TelegramManagerConfig): TelegramManager;
   saveLock: typeof withSettingsSaveLock;
+  /** This deployment's manager webhook URL, or null without an https public origin. */
+  webhookUrl(): string | null;
+  /** One line per change of readiness. Fixed reasons only: never a token, secret or URL. */
+  log(line: string): void;
 }
 const defaults: Omit<Dependencies, "config"> = {
   auth: tenantOf,
   db: () => makePgDb(process.env.DATABASE_URL!),
   manager: config => new TelegramManager(config), saveLock: withSettingsSaveLock,
+  webhookUrl: () => managerWebhookUrl(process.env.MERRYMEN_PUBLIC_ORIGIN),
+  log: line => console.warn(`[telegram-create] ${line}`),
 };
+
+/** A passed probe is trusted this long; a failed one only briefly, so a fix shows within a minute. */
+const READY_TTL_MS = 5 * 60_000;
+const NOT_READY_TTL_MS = 30_000;
+/** Each Bot API call a probe makes, and the longest a Settings visit waits on a probe. */
+const PROBE_CALL_MS = 5_000;
+const PROBE_WAIT_MS = 8_000;
+
+/**
+ * NEVER A BUTTON THAT FAILS. Availability used to mean only that the variables
+ * were set: Settings offered Create Telegram bot while the manager's tables did
+ * not exist, its Bot Management Mode was off or its webhook pointed nowhere,
+ * and the owner found out after Telegram had made them a bot nothing would
+ * ever hear about. Now the button shows only after this has passed: tables
+ * made (ensureManagedTelegramSchema), getMe says the manager can manage bots,
+ * and the manager's webhook is this deployment's URL.
+ *
+ * THE WEBHOOK, CONSERVATIVELY. Telegram's getWebhookInfo reports a URL, never
+ * the secret. Empty: nobody has one, so this deployment sets its own, with its
+ * secret and the update types the webhook reads, and reads it back (two
+ * deployments racing for an unset manager: whoever's URL is there afterwards
+ * won, and the other refuses). Already this deployment's URL: set again once
+ * per process, because the secret cannot be read back and a URL set by hand,
+ * or before the secret was rotated, would have every delivery refused (401)
+ * with nothing here able to tell; re-setting our own URL to our own secret can
+ * hurt nothing. Any other URL: another environment's (staging and production
+ * sharing one manager token, say), and overwriting it would silently break
+ * that one. Refused, with one log line, and creation stays unavailable here.
+ *
+ * Per process, per configuration: a changed token, username, secret or origin
+ * is probed afresh. One probe at a time, shared by every request waiting on
+ * it; a Settings visit waits at most PROBE_WAIT_MS and is told unavailable if
+ * Telegram is slower than that, while the probe finishes and is kept.
+ */
+function readiness(deps: Dependencies) {
+  let memo: { key: string; until: number; result: Promise<boolean> } | null = null;
+  let asserted: string | null = null;
+  let said: string | null = null;
+  const tell = (line: string | null) => {
+    if (said === line) return;
+    if (line !== null) deps.log(`one-click Telegram unavailable: ${line}`);
+    else if (said !== null) deps.log("one-click Telegram available");
+    said = line;
+  };
+  async function probe(config: TelegramManagerConfig, url: string | null, key: string): Promise<boolean> {
+    if (!url) { tell("MERRYMEN_PUBLIC_ORIGIN is not an https origin, so the manager has no webhook URL"); return false; }
+    try { await ensureManagedTelegramSchema(await deps.db()); }
+    catch { tell("its tables could not be created or read"); return false; }
+    const manager = deps.manager(config);
+    try { await manager.assertReady(PROBE_CALL_MS); }
+    catch { tell("the manager bot's getMe failed, or Bot Management Mode is off for it"); return false; }
+    try {
+      let webhook = await manager.webhook(url, PROBE_CALL_MS);
+      if (webhook === "elsewhere") { tell("the manager bot's webhook points at another URL; it was left as it is"); return false; }
+      if (webhook === "unset" || asserted !== key) {
+        await manager.setWebhook(url, PROBE_CALL_MS);
+        webhook = await manager.webhook(url, PROBE_CALL_MS);
+        if (webhook !== "ours") { tell("the manager bot's webhook changed while it was being set; it was left as it is"); return false; }
+        asserted = key;
+      }
+    } catch { tell("the manager bot's webhook could not be read or set"); return false; }
+    tell(null);
+    return true;
+  }
+  return async function ready(config: TelegramManagerConfig): Promise<boolean> {
+    const url = deps.webhookUrl();
+    const key = createHash("sha256").update(JSON.stringify([config.token, config.username, config.webhookSecret, url])).digest("hex");
+    if (!memo || memo.key !== key || memo.until <= Date.now()) {
+      const entry = { key, until: Infinity, result: probe(config, url, key).catch(() => false) };
+      memo = entry;
+      void entry.result.then(ok => { entry.until = Date.now() + (ok ? READY_TTL_MS : NOT_READY_TTL_MS); });
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([memo.result, new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), PROBE_WAIT_MS); })]);
+    } finally { clearTimeout(timer); }
+  };
+}
 function failure(error: unknown): Response {
   if (error instanceof ManagedTelegramError) {
     const messages: Record<string, string> = {
@@ -52,6 +137,7 @@ function failure(error: unknown): Response {
 /** No secret-bearing errors or unscoped intent lookups leave these handlers. */
 export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> & Partial<Omit<Dependencies, "config">>) {
   const deps = { ...defaults, ...overrides };
+  const ready = readiness(deps);
   return {
     async GET(req: Request): Promise<Response> {
       try {
@@ -62,11 +148,14 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
         const config = deps.config();
         if (!config) return json({ available: false });
         const intentId = url.searchParams.get("intent");
-        if (!intentId) return json({ available: true });
+        if (!intentId) return json({ available: await ready(config) });
         if (!idPattern.test(intentId)) return json({ error: "Invalid setup request." }, 400);
+        // A setup already underway is read whether or not a new one could
+        // start: its candidate can still be confirmed, and a connected one
+        // must be seen as connected, without the webhook.
         const intent = await new ManagedTelegramStore(await deps.db()).get({ tenant, intentId, managerBotId: botIdOf(config.token)! });
         if (!intent) return json({ error: "This setup request isn't available. Start again." }, 404);
-        return json({ available: true, intent });
+        return json({ available: await ready(config), intent });
       } catch (error) { return failure(error); }
     },
     async POST(req: Request): Promise<Response> {
@@ -86,6 +175,9 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
         if (!config) return unavailable();
         const managerBotId = botIdOf(config.token)!;
         if (body.action !== "begin" && (typeof body.intentId !== "string" || !idPattern.test(body.intentId))) return json({ error: "Invalid setup request." }, 400);
+        // Only a new setup needs the webhook; confirm and cancel finish one.
+        // Probed before the settings lock, so a slow Telegram never holds it.
+        if (body.action === "begin" && !(await ready(config))) return unavailable();
         const result = await deps.saveLock(tenant, async claims => {
           if (!claims.db) return unavailable();
           const store = new ManagedTelegramStore(claims.db);
@@ -96,7 +188,6 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
           }
           const manager = deps.manager(config);
           if (body.action === "begin") {
-            await manager.assertReady();
             const { intent, challenge } = await store.begin({ tenant, managerBotId });
             return json({ intent, telegramUrl: `https://t.me/${config.username}?start=${encodeURIComponent(challenge)}` });
           }

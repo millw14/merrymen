@@ -12,9 +12,8 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { makePgDb, type Db, type Stmt } from "../../../worker/src/db";
-import { TELEGRAM_BOT_CLAIMS_DDL } from "../../../worker/src/telegram-claims";
 import { openSecret, sealSecret } from "../../../worker/src/store-crypto";
-import { ManagedTelegramError, ManagedTelegramStore } from "./telegram-managed-store";
+import { ensureManagedTelegramSchema, ManagedTelegramError, ManagedTelegramStore } from "./telegram-managed-store";
 
 const fixtureUrl = process.env.MERRYMEN_TEST_PG_URL;
 const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -50,10 +49,12 @@ test("Postgres: managed bot intents, replay, claims and encrypted settings are a
     await admin.query(`CREATE SCHEMA ${schema}`);
     const dbA = await makePgDb(scopedUrl("web-a"));
     const dbB = await makePgDb(scopedUrl("web-b"));
-    // exec applies the driver's canonical INTEGER -> BIGINT translation.
-    // Exercise the exact operator migration, not only a translated test schema.
+    // Nobody applies a migration: two web replicas (separate pools) make the
+    // managed tables, and the bot claims, at the same moment on first use,
+    // as they do after a deploy. The advisory lock must make that one creation.
+    await Promise.all([ensureManagedTelegramSchema(dbA), ensureManagedTelegramSchema(dbB)]);
+    // The documented SQL stays applicable over what the store made.
     await dbA.exec(readFileSync(new URL("../../../docs/migrations/2026-10-05-telegram-managed.sql", import.meta.url), "utf8"));
-    await dbA.exec(TELEGRAM_BOT_CLAIMS_DDL);
     await dbA.exec("CREATE TABLE tenant_settings (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL, updated_at INTEGER NOT NULL)");
     const storeA = new ManagedTelegramStore(dbA), storeB = new ManagedTelegramStore(dbB);
     const scope = (tenant: string, intentId: string) => ({ tenant, intentId, managerBotId: MANAGER, now: NOW });
@@ -78,7 +79,7 @@ test("Postgres: managed bot intents, replay, claims and encrypted settings are a
       return began.intent;
     };
 
-    await t.test("translated explicit migration stores all intent clocks as BIGINT", async () => {
+    await t.test("self-provisioned tables store all intent clocks as BIGINT", async () => {
       const columns = await admin.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name='telegram_managed_intents'", [schema]);
       for (const field of ["created_at", "expires_at", "bound_at", "bound_message_date", "bound_update_id", "completed_at"]) {
         assert.equal(columns.rows.find((row) => row.column_name === field)?.data_type, "bigint");

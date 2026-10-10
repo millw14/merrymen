@@ -24,6 +24,8 @@ let telegramReads: string[];
 let telegramReply: () => Response;
 let hosted: boolean;
 let missingIntent: boolean;
+/** What the create endpoint's readiness probe says. */
+let createAvailable: boolean;
 let fomo: boolean;
 const setup = () => ({ id: ID, status: phase, expiresAt: Date.now() + 60_000, botUsername: phase === "confirm" || phase === "connected" ? "merrymen_testbot" : null, botId: phase === "confirm" || phase === "connected" ? "1234567" : null });
 
@@ -68,6 +70,7 @@ beforeEach(() => {
   server = fixture(); writes = []; phase = "waiting_telegram"; refreshedOwner = OWNER; loseConfirmation = false; telegramReads = [];
   hosted = true;
   missingIntent = false;
+  createAvailable = true;
   fomo = false;
   telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: "link-proof" });
   globalThis.fetch = async (input, init) => {
@@ -82,7 +85,7 @@ beforeEach(() => {
       const params = new URL(url, "https://app.example.test").searchParams;
       assert.equal(params.get("owner"), OWNER);
       if (params.has("intent") && missingIntent) return json({ error: "setup_not_found" }, 404);
-      return json({ available: true, ...(params.has("intent") ? { intent: setup() } : {}) });
+      return json({ available: createAvailable, ...(params.has("intent") ? { intent: setup() } : {}) });
     }
     if (url === "/api/telegram/create" && method === "POST") {
       const body = JSON.parse(String(init?.body));
@@ -133,6 +136,21 @@ describe("managed Telegram creation through Settings", () => {
     assert.ok(token());
     assert.match(ui.container.textContent ?? "", /Connect an existing bot/);
     assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), false);
+  });
+  it("opens Connect an existing bot, with no dead Create button, when creation is not ready", async () => {
+    createAvailable = false;
+    await mount(); await drain();
+    const drawer = [...ui.container.querySelectorAll<HTMLDetailsElement>("#telegram details")].find(d => d.querySelector("summary")?.textContent === "Connect an existing bot")!;
+    assert.ok(drawer, "the manual drawer is rendered");
+    assert.equal(drawer.open, true, "the manual path is open when it is the only one");
+    assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), false);
+    assert.equal(token().disabled, false);
+  });
+  it("keeps Connect an existing bot collapsed while one-click creation is ready", async () => {
+    await mount(); await drain();
+    const drawer = [...ui.container.querySelectorAll<HTMLDetailsElement>("#telegram details")].find(d => d.querySelector("summary")?.textContent === "Connect an existing bot")!;
+    assert.equal(drawer.open, false);
+    assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), true);
   });
   it("reloads both owner-bound views and preserves unrelated drafts while removing the old token", async () => {
     await prepare();
@@ -236,7 +254,7 @@ describe("managed Telegram creation through Settings", () => {
     telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: null, linkPending: true });
     await ui.click("Connect this bot"); await drain();
     assert.equal([...ui.container.querySelectorAll("button")].find(button => button.textContent === "Save settings")?.disabled, false);
-    assert.match(ui.container.textContent ?? "", /Waiting for its Telegram launch link/);
+    assert.match(ui.container.textContent ?? "", /Your bot is saved\. Waiting for your agent to pick it up and make its link/);
     assert.equal(ui.container.querySelector('a[href*="?start="]'), null);
     telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: "new-link-proof" });
     await act(async () => mock.timers.tick(3000)); await drain();
@@ -253,7 +271,8 @@ describe("managed Telegram creation through Settings", () => {
     telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: null, linkPending: true });
     await ui.click("Connect this bot"); await drain();
     await act(async () => mock.timers.tick(60_000)); await drain();
-    assert.match(ui.container.textContent ?? "", /launch link isn't ready yet\. Refresh Settings to check again\./);
+    assert.match(ui.container.textContent ?? "", /Its link appears here once your agent is running and has picked it up\. Refresh Settings to check again\./);
+    assert.doesNotMatch(ui.container.textContent ?? "", /bot is listening/i);
     assert.equal(ui.container.querySelector('a[href*="?start="]'), null);
     const reads = telegramReads.length;
     await act(async () => mock.timers.tick(60_000)); await drain();

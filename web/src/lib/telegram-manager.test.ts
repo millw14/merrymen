@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { boundedJson, managedBotIdentity, TelegramManager, validWebhookSecret } from "./telegram-manager";
+import { boundedJson, managedBotIdentity, managerWebhookUrl, suggestedUsername, TelegramManager, validWebhookSecret } from "./telegram-manager";
 
 const config = { token: "11111:manager_test_secret", username: "merrymen_manager_bot", webhookSecret: "a".repeat(32) };
 const identity = { id: "22222", username: "my_merrymen_bot" };
@@ -40,15 +40,58 @@ describe("Telegram manager transport", () => {
     const denied = (async () => Response.json({ ok: false, description: config.token })) as typeof fetch;
     await assert.rejects(new TelegramManager(config, denied).assertReady(), error => !String(error).includes(config.token));
   });
-  it("sends a private request keyboard, no arbitrary correlation parameter", async () => {
-    await new TelegramManager(config, transport((method, body) => {
-      assert.equal(method, "sendMessage"); assert.equal(body.chat_id, 54321);
-      const markup = body.reply_markup as { keyboard: { request_managed_bot: Record<string, unknown> }[][] };
-      assert.equal(markup.keyboard[0]![0]!.request_managed_bot.suggested_username, "merrymen_54321_bot");
-      assert.ok(!("state" in markup.keyboard[0]![0]!.request_managed_bot));
-      return true;
-    })).offerCreation(54321);
+  it("sends a private request keyboard, no arbitrary correlation parameter, and no owner id in the public username", async () => {
+    const suggested: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      await new TelegramManager(config, transport((method, body) => {
+        assert.equal(method, "sendMessage"); assert.equal(body.chat_id, 54321);
+        const markup = body.reply_markup as { keyboard: { request_managed_bot: Record<string, unknown> }[][] };
+        suggested.push(String(markup.keyboard[0]![0]!.request_managed_bot.suggested_username));
+        assert.ok(!("state" in markup.keyboard[0]![0]!.request_managed_bot));
+        return true;
+      })).offerCreation(54321);
+    }
+    for (const username of suggested) {
+      assert.match(username, /^merrymen_[0-9a-f]{8}_bot$/);
+      assert.ok(username.length >= 5 && username.length <= 32);
+      assert.ok(!username.includes("54321"), "the owner's Telegram id never appears in a public bot username");
+    }
+    assert.notEqual(suggested[0], suggested[1]);
+    assert.ok(Array.from({ length: 50 }, suggestedUsername).every(name => /^[a-z][a-z0-9_]{4,31}$/.test(name) && /bot$/.test(name)));
   });
+  it("reads the webhook URL only, and calls a webhook ours, unset or elsewhere", async () => {
+    const ours = "https://app.merrymen.test/api/telegram/manager/webhook";
+    for (const [url, state] of [["", "unset"], [ours, "ours"], ["https://staging.merrymen.test/api/telegram/manager/webhook", "elsewhere"]] as const) {
+      assert.equal(await new TelegramManager(config, transport(method => { assert.equal(method, "getWebhookInfo"); return { url, pending_update_count: 0 }; })).webhook(ours), state);
+    }
+    await assert.rejects(new TelegramManager(config, transport(() => ({}))).webhook(ours));
+  });
+  it("sets the webhook with this deployment's secret and the update types the webhook reads", async () => {
+    const calls: { method: string; body: Record<string, unknown> }[] = [];
+    await new TelegramManager(config, transport((method, body) => { calls.push({ method, body }); return true; })).setWebhook("https://app.merrymen.test/api/telegram/manager/webhook");
+    assert.deepEqual(calls, [{ method: "setWebhook", body: { url: "https://app.merrymen.test/api/telegram/manager/webhook", secret_token: config.webhookSecret, allowed_updates: ["message", "managed_bot"] } }]);
+    await assert.rejects(new TelegramManager(config, transport(() => false)).setWebhook("https://app.merrymen.test/api/telegram/manager/webhook"));
+  });
+  it("bounds each probe call by the caller's timeout", async () => {
+    let signal: AbortSignal | undefined;
+    const hang = (async (_input, init) => { signal = init?.signal ?? undefined; return await new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))); }) as typeof fetch;
+    const started = Date.now();
+    // AbortSignal.timeout's timer does not hold the event loop open; this one
+    // does, so the test waits for the abort rather than ending with it pending.
+    const keepAlive = setTimeout(() => {}, 5_000);
+    try {
+      await assert.rejects(new TelegramManager(config, hang).assertReady(30));
+    } finally { clearTimeout(keepAlive); }
+    assert.ok(signal?.aborted);
+    assert.ok(Date.now() - started < 2_000);
+  });
+});
+it("builds the manager webhook only under an https public origin", () => {
+  assert.equal(managerWebhookUrl("https://app.merrymen.dev"), "https://app.merrymen.dev/api/telegram/manager/webhook");
+  assert.equal(managerWebhookUrl("https://app.merrymen.dev/"), "https://app.merrymen.dev/api/telegram/manager/webhook");
+  for (const origin of [undefined, null, "", "http://app.merrymen.dev", "https://app.merrymen.dev/base", "https://user:pw@app.merrymen.dev", "https://app.merrymen.dev?x=1", "not a url"]) {
+    assert.equal(managerWebhookUrl(origin), null, String(origin));
+  }
 });
 it("authenticates webhook secrets without unequal-length comparison errors", () => {
   assert.equal(validWebhookSecret(config.webhookSecret, config.webhookSecret), true);
