@@ -30,7 +30,7 @@ export function SearchDialog({
   onProfile: (slug: string) => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const backdropPress = useRef(false);
+  const backdropPress = useRef<"none" | "pressed" | "released">("none");
   // Capture before Search's autofocus runs during the commit. Capturing in
   // the effect can mistake the search input for the button that opened it.
   const [opener] = useState(() => typeof document === "undefined" ? null : document.activeElement);
@@ -79,11 +79,14 @@ export function SearchDialog({
   return (
     <dialog ref={dialog} className="search-dialog-backdrop" aria-label="Search tokens or agents" onKeyDown={onKeyDown}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
-      onPointerDown={(event) => { backdropPress.current = event.target === event.currentTarget; }}
-      onPointerCancel={() => { backdropPress.current = false; }}
+      onPointerDown={(event) => { backdropPress.current = event.target === event.currentTarget ? "pressed" : "none"; }}
+      onPointerUp={(event) => {
+        backdropPress.current = backdropPress.current === "pressed" && event.target === event.currentTarget ? "released" : "none";
+      }}
+      onPointerCancel={() => { backdropPress.current = "none"; }}
       onClick={(event) => {
-        const dismiss = backdropPress.current && event.target === event.currentTarget;
-        backdropPress.current = false;
+        const dismiss = backdropPress.current === "released" && event.target === event.currentTarget;
+        backdropPress.current = "none";
         if (dismiss) onClose();
       }}>
       <div className="search-dialog">

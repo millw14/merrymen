@@ -102,7 +102,7 @@ async function type(value: string) {
   });
 }
 
-async function pointer(target: Element, type: "pointerdown" | "pointercancel" | "click") {
+async function pointer(target: Element, type: "pointerdown" | "pointerup" | "pointercancel" | "click") {
   await act(async () => {
     target.dispatchEvent(new ui.dom.window.MouseEvent(type, { bubbles: true, cancelable: true }));
   });
@@ -176,16 +176,21 @@ it("only dismisses a pointer gesture that starts and finishes on the backdrop", 
   const backdrop = modal()!;
   const panel = ui.container.querySelector(".search-dialog")!;
   await pointer(panel, "pointerdown");
+  await pointer(backdrop, "pointerup");
   await pointer(backdrop, "click");
   assert.equal(modal(), backdrop, "dragging from the panel does not dismiss the dialog");
   await pointer(backdrop, "pointerdown");
-  await pointer(panel, "click");
+  await pointer(panel, "pointerup");
+  // A browser may target click at the common ancestor of the down/up nodes.
+  await pointer(backdrop, "click");
   assert.equal(modal(), backdrop, "releasing in the panel does not dismiss the dialog");
   await pointer(backdrop, "pointerdown");
   await pointer(backdrop, "pointercancel");
+  await pointer(backdrop, "pointerup");
   await pointer(backdrop, "click");
   assert.equal(modal(), backdrop, "a canceled gesture cannot dismiss it later");
   await pointer(backdrop, "pointerdown");
+  await pointer(backdrop, "pointerup");
   await pointer(backdrop, "click");
   assert.equal(modal(), null);
   assert.equal(dismissals, 1);
