@@ -6892,6 +6892,8 @@ html[lang|="ko"] .terminal-host {
 .terminal-host .create-secret code { overflow-wrap:anywhere; min-width:0; user-select:all; font-size:13px; line-height:1.8; }
 .terminal-host .create-secret button { flex-shrink:0; margin-left:auto; }
 .terminal-host .create-agent .flow-primary { gap:10px; margin-top:24px; }
+.terminal-host .create-quick-actions { display:grid; gap:10px; }
+.terminal-host .create-quick-actions .copy-btn { min-height:44px; padding:10px 16px; border:1px solid var(--line); border-radius:10px; text-align:center; }
 .terminal-host .create-agent .hosted-funding { margin:24px 0; padding:18px; border:1px solid var(--line); border-radius:14px; }
 .terminal-host .desktop-market-tabs { flex-wrap:wrap; }
 .terminal-host .account-balance .account-fund + .account-fund { margin-top:10px; background:var(--card); color:var(--tx); border:1px solid var(--line); }
