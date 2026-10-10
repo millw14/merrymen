@@ -266,6 +266,11 @@ describe("the seam is the only way through", () => {
       for (const m of body.matchAll(/\$\$\{([^}]{1,60})\}/g)) {
         const line = body.slice(body.lastIndexOf("\n", m.index) + 1, body.indexOf("\n", m.index));
         if (/^\s*(\*|\/\/)/.test(line)) continue; // prose about the rule
+        // A token cashtag ($SWARM) is an identifier, not a currency amount.
+        // Admit only this return expression; every money interpolation in the
+        // same file remains covered. Its ticker and position-render tests pin
+        // the cashtag separately from the locale-formatted value beside it.
+        if (f === "src/terminal/position-token.ts" && line.trim() === 'return `$${ticker}`;') continue;
         offenders.push(`${f}: ${m[0]}`);
       }
     }

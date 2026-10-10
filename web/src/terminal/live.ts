@@ -336,7 +336,7 @@ export interface LiveMine {
    * than its receipt, may still be in `costUsd` — false only when the ledger
    * said so, and null when that could not be read. See positionsOf.
    */
-  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
+  positions?: {symbol:string;token?:string|null;displaySymbol?:string|null;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
   /**
    * Where /api/feed read the name: "settings", "ledger", or "fallback" when it
@@ -1234,6 +1234,8 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
       const costUsd = c === null || !Number.isFinite(c) || c <= 0 ? null : c;
       return {
         symbol:p.symbol,
+        token:p.token,
+        displaySymbol:p.display_symbol,
         valueUsd:p.value_usdg,
         stale:!!p.price_stale,
         costUsd,
@@ -1583,5 +1585,5 @@ interface Feed {
     tx_hash?: string | null;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
+  positions?: {symbol:string; token?:string|null; display_symbol?:string|null; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
 }

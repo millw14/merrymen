@@ -29,6 +29,7 @@ import {
   type LiveState,
 } from "./live";
 import { positionFigures, positionsOf } from "./account";
+import { positionLabel, tokenForPosition } from "./position-token";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
@@ -151,8 +152,8 @@ export function DesktopSidebar({
   const [sort, setSort] = useState<"name" | "change">("name");
   // For "as of" on a stale valuation (performanceOf); a minute is fine enough.
   const nowSec = Math.floor(useNow(60_000) / 1000);
-  const held = new Set(positionsOf(mine).map((p) => p.symbol));
-  const list = tokens.filter((t) => filter === "held" ? held.has(t.symbol) : filter === "watch" ? watchlist.ids.includes(t.id) : true);
+  const held = new Set(positionsOf(mine).map((p) => tokenForPosition(p, tokens)?.id).filter(Boolean));
+  const list = tokens.filter((t) => filter === "held" ? held.has(t.id) : filter === "watch" ? watchlist.ids.includes(t.id) : true);
   list.sort((a, b) =>
     sort === "name"
       ? a.symbol.localeCompare(b.symbol)
@@ -550,7 +551,7 @@ export function DesktopPortfolio({
           <div className="desktop-cash">
             <span>{recovery ? "Saved position" : "Your position"}</span>
             <strong>
-              {positionsOf(mine).find((p) => p.symbol === selectedToken.symbol)
+              {positionsOf(mine).find((p) => tokenForPosition(p, tokens)?.id === selectedToken.id)
                 ?.detail ?? (recovery ? "No saved position available" : "Not held")}
             </strong>
           </div>
@@ -563,18 +564,19 @@ export function DesktopPortfolio({
         </div>
         {recovery ? <p className="meta">Reconciliation pending</p> : null}
         {positionsOf(mine).map((p) => {
-          const t = tokens.find((t) => t.symbol === p.symbol);
+          const t = tokenForPosition(p, tokens);
+          const label = positionLabel(p);
           // The value AND the %, never one standing in for the other — see positionFigures.
           const f = positionFigures(p);
           return (
             <button
-              key={p.symbol}
+              key={p.token ?? p.symbol}
               className="desktop-position"
               disabled={!t}
               onClick={() => t && onScreen({ kind: "token", id: t.id })}
             >
-              <Coin symbol={p.symbol} logo={t?.logo ?? ""} />
-              <strong>{p.symbol}</strong>
+              <Coin symbol={label.replace(/^\$/, "")} logo={t?.logo ?? ""} />
+              <strong title={p.token ?? undefined}>{label}</strong>
               <span>
                 {f.value}
                 {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}
