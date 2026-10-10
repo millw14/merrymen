@@ -109,7 +109,7 @@ test("a complete withdrawal preserves evidenced dollar profit or loss without in
   }
 });
 
-test("exact live performance and rank refuse unpriced or unrecorded gas, while proved sponsorship is free", async () => {
+test("unpriced or unrecorded gas withholds the rank and marks the return approximate, while proved sponsorship is free", async () => {
   for (const [cost, complete] of [
     [{ gas: null, wei: "123" }, false],
     [{ gas: null }, false],
@@ -124,14 +124,64 @@ test("exact live performance and rank refuse unpriced or unrecorded gas, while p
       await op(db, 5, cost);
       const result = await readBookPerformance(db, ACCOUNT, 2, true);
       assert.equal(result.performance.gasComplete, complete, JSON.stringify(cost));
-      assert.equal(result.performance.pnlUsdg, complete ? 10 : null);
-      assert.equal(result.performance.pnlBps, complete ? 1000 : null);
+      // The return stands either way; without every cost on record it leaves
+      // the unpriced gas out, says so, and is never ranked.
+      assert.equal(result.performance.pnlUsdg, 10);
+      assert.equal(result.performance.pnlBps, 1000);
+      assert.equal(result.performance.pnlEstimated === true, !complete);
       assert.equal(result.liveRank.pnlBps, complete ? 1000 : null);
       // Its own reason: the deposits ARE evidenced (contributions_known = 1),
       // so "quality-unknown" would say the opposite of what the profile says.
       assert.equal(result.liveRank.unrankedWhy, complete ? null : "gas-pending");
     } finally { raw.close(); }
   }
+});
+
+test("unevidenced capital still yields an approximate return against the first valuation, net of later flows, never ranked", async () => {
+  const { raw, db } = await ledger();
+  try {
+    await db.prepare("UPDATE agents SET contributions_known = 0").run();
+    await mark(db, 100, 10);
+    await op(db, 12, { gas: 0 });
+    // A 50 deposit after the first valuation is capital, not gain.
+    await db.prepare("INSERT INTO flows (agent_id, epoch, direction, amount_usdg, source, at) VALUES (?, 2, 'in', 50, 'chain-log', 20)").run(ACCOUNT);
+    await mark(db, 165, 30);
+    const result = await readBookPerformance(db, ACCOUNT, 2, true);
+    assert.equal(result.liveRank.pnlBps, null);
+    assert.equal(result.liveRank.unrankedWhy, "contributions-unevidenced");
+    assert.equal(result.performance.pnlEstimated, true);
+    assert.equal(result.performance.pnlUsdg, 15);
+    assert.equal(result.performance.pnlBps, 1000, "15 over 100 + 50");
+    // Gas spent before the baseline is already in it and is not charged again.
+    const { raw: raw3, db: early } = await ledger();
+    try {
+      await early.prepare("UPDATE agents SET contributions_known = 0").run();
+      await op(early, 5, { gas: 3, wei: "3000" });
+      await mark(early, 100, 10);
+      await op(early, 12, { gas: 1, wei: "1000", hash: "0xLATER" });
+      await mark(early, 120, 30);
+      const r = await readBookPerformance(early, ACCOUNT, 2, true);
+      assert.equal(r.performance.pnlUsdg, 19, "120 − 100 − the 1 spent after the baseline");
+    } finally { raw3.close(); }
+    // A book with no filled trade has drift, not a return.
+    const { raw: raw4, db: idle } = await ledger();
+    try {
+      await idle.prepare("UPDATE agents SET contributions_known = 0").run();
+      await mark(idle, 100, 10);
+      await mark(idle, 130, 30);
+      const r = await readBookPerformance(idle, ACCOUNT, 2, true);
+      assert.equal(r.performance.pnlBps, null);
+      assert.equal(r.performance.pnlEstimated, undefined);
+    } finally { raw4.close(); }
+    // One valuation alone has nothing to measure against.
+    const { raw: raw2, db: one } = await ledger();
+    try {
+      await one.prepare("UPDATE agents SET contributions_known = 0").run();
+      await mark(one, 100, 10);
+      await op(one, 5, { gas: 0 });
+      assert.equal((await readBookPerformance(one, ACCOUNT, 2, true)).performance.pnlBps, null);
+    } finally { raw2.close(); }
+  } finally { raw.close(); }
 });
 
 test("gas-pending is said only where every other gate passed; an earlier refusal keeps its own words", async () => {
@@ -189,7 +239,7 @@ test("an unread settlement-column probe cannot fall back to a submission-time co
   } finally { raw.close(); }
 });
 
-test("legacy settlements with unknown time refuse an exact cost horizon unless their owner cost is proved zero", async () => {
+test("legacy settlements with unknown time refuse an exact cost horizon, and an exact rank, unless their owner cost is proved zero", async () => {
  for (const status of ["landed", "reverted"]) {
   for (const hasSettlementColumn of [true, false]) {
   for (const [cost, known] of [
@@ -209,7 +259,11 @@ test("legacy settlements with unknown time refuse an exact cost horizon unless t
       await mark(db, 120, 30, "live", true);
       const result = await readBookPerformance(db, ACCOUNT, 2, true);
       assert.equal(result.performance.gasComplete, known, JSON.stringify(cost));
-      assert.equal(result.performance.pnlUsdg, known ? 10 : null);
+      // Unknown-time costs give an approximate return: never ranked, never
+      // more than the gain with no gas at all.
+      assert.equal(result.performance.pnlEstimated === true, !known);
+      assert.ok(result.performance.pnlUsdg !== null && result.performance.pnlUsdg <= 10);
+      if (known) assert.equal(result.performance.pnlUsdg, 10);
       assert.equal(result.liveRank.pnlBps, known ? 1000 : null);
     } finally { raw.close(); }
   }

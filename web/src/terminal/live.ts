@@ -373,6 +373,8 @@ export interface LiveState {
    * only when it is a number — see read-leaderboard.ts.
    */
   retired: number | null;
+  /** The folded accounts with their final returns (read-leaderboard RetiredRow). */
+  retiredAgents: RetiredAgent[];
   /**
    * WHETHER EACH READ ACTUALLY HAPPENED — carried beside the data, not instead
    * of it.
@@ -539,6 +541,7 @@ export function seedLive(): LiveState {
     mine: null,
     feedTenant: undefined,
     retired: null,
+    retiredAgents: [],
     // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
     // draw before the first fetch returns; every empty array beside it is an
     // absence of a request, and a screen that reads them as an absence of
@@ -644,7 +647,38 @@ export const LIVE_READ_URLS: Record<LiveReadKey, string> = {
 };
 
 type MarketBody = { tokens: MarketTok[]; source?: string };
-type BoardBody = { agents: BoardRow[]; source?: string; retired?: unknown };
+type BoardBody = { agents: BoardRow[]; source?: string; retired?: unknown; retiredAgents?: unknown };
+
+/** A folded account and its frozen final return, as the board lists it. */
+export interface RetiredAgent {
+  slug: string | null;
+  name: string;
+  book: "live" | "paper" | null;
+  pnlBps: number | null;
+  pnlUsdg: number | null;
+  estimated: boolean;
+  trades: number;
+  lastValuedAt: number | null;
+}
+
+function retiredAgentsOf(raw: unknown): RetiredAgent[] {
+  if (!Array.isArray(raw)) return [];
+  const num = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : null);
+  return raw.flatMap((r): RetiredAgent[] => {
+    if (!r || typeof r !== "object") return [];
+    const o = r as Record<string, unknown>;
+    return [{
+      slug: typeof o.slug === "string" && o.slug ? o.slug : null,
+      name: typeof o.name === "string" && o.name ? o.name : "Agent",
+      book: o.book === "live" || o.book === "paper" ? o.book : null,
+      pnlBps: num(o.pnlBps),
+      pnlUsdg: num(o.pnlUsdg),
+      estimated: o.estimated === true,
+      trades: Math.max(0, Math.floor(num(o.trades) ?? 0)),
+      lastValuedAt: num(o.lastValuedAt),
+    }];
+  });
+}
 type ThesesBody = { theses: Thesis[]; source?: string };
 
 interface Bodies {
@@ -987,6 +1021,7 @@ export function liveOf(s: LiveSources): LiveState {
     // count did not reach a screen, and folded agents left the board without
     // a word. A number only when the server sent one.
     retired: typeof board?.retired === "number" && Number.isFinite(board.retired) ? board.retired : null,
+    retiredAgents: retiredAgentsOf(board?.retiredAgents),
     // WHETHER EACH READ HAPPENED, carried alongside what it returned. A body
     // that arrived with `source: "none"` counts as unreadable even though the
     // request succeeded: that shape IS the reader telling us it could not open

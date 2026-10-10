@@ -6919,6 +6919,10 @@ html[lang|="ko"] .terminal-host {
 .terminal-host .ranking-help p {margin:10px 0;}
 /* The accounts the board folded into a count, under the list. Quiet: an account of what is not shown, not a row. */
 .terminal-host .board-retired {margin:12px 0 0;color:var(--tx-2);font-size:12px;}
+.terminal-host .board-retired > summary {cursor:pointer;padding:8px 0;}
+.terminal-host .board-retired-list {margin-top:4px;color:var(--tx);font-size:initial;}
+.terminal-host .board-retired-list .rank.retired {opacity:.78;}
+.terminal-host .board-retired-list .rank-hit:disabled {cursor:default;}
 
 /* An entry that is not a settled fill — a paper book or a pre-trade estimate.
    read-token.ts: "a pretend fill must not look like a real one". */
