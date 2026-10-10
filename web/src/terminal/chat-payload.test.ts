@@ -24,15 +24,31 @@ test("normal and older-server chat payloads retain their existing display state"
     assert.equal(state.liveTradingEnabled, true);
     assert.equal(state.liveBlocker, "dead-policy");
     assert.equal(state.stopped, false);
+    assert.equal(state.workerHeardFrom, null, "a screen that never said is unknown, not never-started");
     assert.equal("lastRecorded" in state, false);
   }
 });
 
+test("the chat is told whether any heartbeat ever landed, and the desk's own reason when it is not trading", () => {
+  const heard = chatStateOf({ ...args, mine: { ...mine, workerHeardFrom: true } });
+  assert.equal(heard.workerHeardFrom, true);
+  assert.equal(heard.workerReason, null, "LIVE has no reason to give");
+  const never = chatStateOf({ ...args, liveBlocker: null, stopped: true,
+    mine: { ...mine, workerHeardFrom: false, statusLabel: "IDLE", autonomy: autonomyOf({ mode: null, liveBlocker: null }) } });
+  assert.equal(never.workerHeardFrom, false);
+  assert.equal(never.workerReason, null, "nothing is invented for an agent that never started");
+  const blocked = chatStateOf({ ...args, mine: { ...mine, workerHeardFrom: true, statusLabel: "BLOCKED",
+    autonomy: autonomyOf({ mode: "paper", liveBlocker: "dead-policy" }) } });
+  assert.match(String(blocked.workerReason), /signed before a fix/);
+});
+
 test("a recovery-held display snapshot is explicitly last recorded, without current book or authority claims", () => {
-  const state = chatStateOf({ ...args, mine: { ...mine, recovery } });
+  const state = chatStateOf({ ...args, mine: { ...mine, recovery, workerHeardFrom: false } });
   assert.equal(state.workerStatus, "Trading paused for recovery");
   assert.equal(state.stopped, true);
   assert.equal(state.liveBlocker, null);
+  assert.equal(state.workerHeardFrom, null, "a hold answers whether it is running, not the browser's heartbeat read");
+  assert.equal(state.workerReason, null);
   for (const field of ["equity", "cashUsd", "vaultUsd", "positions", "liveTradingEnabled", "paperTradingEnabled",
     "stopLossBps", "takeProfitBps"] as const) assert.equal(state[field], null, field);
   assert.deepEqual(state.recovery, recovery);

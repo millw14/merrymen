@@ -464,7 +464,11 @@ export function App() {
   }), recovery);
   // `recoveryFunds` from the same `account` as `recovery`, so the notice never
   // pairs one tenant's hold with another read's account or cash.
+  // `workerHeardFrom` from the same answer as the verdict: whether ANY beat
+  // ever landed, which IDLE alone cannot say — a never-started agent and one
+  // before its first pass both wear it. The chat needs the difference.
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
+    workerHeardFrom: account.status.workerAliveAt != null,
     ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.

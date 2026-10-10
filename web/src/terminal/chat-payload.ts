@@ -108,6 +108,21 @@ export function chatStateOf(args: {
     paperTradingEnabled: recovery ? null : recorded.paperTradingEnabled,
     liveTradingEnabled: recovery ? null : recorded.liveTradingEnabled,
     workerStatus: recovery ? "Trading paused for recovery" : mine.statusLabel ?? "Unknown",
+    /**
+     * HAS THIS AGENT EVER STARTED — the fact `stopped` cannot carry. IDLE is
+     * what a never-spawned agent shows, and also what a beating worker shows
+     * before its first pass or with nothing to trade; a tester's new agent,
+     * handed only `stopped: true`, told him the flag was "just a record".
+     * Whether any heartbeat ever reached us (App.tsx, from `workerAliveAt`)
+     * tells the two apart. Null is a screen that never said, and the prompt
+     * then claims neither way.
+     *
+     * `workerReason` is the desk's own sentence for why it is not trading, so
+     * the chat names the cause the screen names and invents none. Both give
+     * way to a hold, like everything above.
+     */
+    workerHeardFrom: recovery ? null : mine.workerHeardFrom ?? null,
+    workerReason: recovery ? null : mine.autonomy?.reason?.slice(0, 400) ?? null,
     liveBlocker: recovery ? null : liveBlocker ?? null,
     positions: recovery ? null : chatPositionsOf(mine),
     cashUsd: recovery ? null : recorded.cashUsd,
