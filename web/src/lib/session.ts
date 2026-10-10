@@ -1182,6 +1182,9 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
   }
 }
 
+/** Retry delivery of the same saved permission with fresh authentication, without signing again. */
+export { postGrant as retryGrantHandoff };
+
 /**
  * Create a BRAND-NEW agent wallet: a fresh owner key is generated in-browser
  * (this is the account's sudo signer and the root of fund custody — no external

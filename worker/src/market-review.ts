@@ -55,6 +55,24 @@ export function reviewSource(review: Pick<MarketReview, "publish">): string {
 /** Filed when there was no review to write: private, and never a mark. */
 export const RESEARCH_UNAVAILABLE_SOURCE = "research-unavailable";
 
+/** Narrow explanation inputs only; the complete watch set still values the book. */
+export function quietReviewScope<P extends { token: string }, T extends { address: string; kind?: string }>(args: {
+  strategy: string;
+  positions: readonly P[];
+  universe: readonly T[];
+  trencherHeld: readonly string[];
+  trencherCandidates: readonly string[];
+}): { positions: P[]; universe: T[] } {
+  if (args.strategy !== "trencher") return { positions: [...args.positions], universe: [...args.universe] };
+  const memecoins = new Set(args.universe.filter(t => t.kind === "memecoin").map(t => t.address.toLowerCase()));
+  const held = new Set(args.trencherHeld.map(t => t.toLowerCase()));
+  const candidates = new Set(args.trencherCandidates.map(t => t.toLowerCase()));
+  return {
+    positions: args.positions.filter(p => memecoins.has(p.token.toLowerCase()) && held.has(p.token.toLowerCase())),
+    universe: args.universe.filter(t => memecoins.has(t.address.toLowerCase()) && candidates.has(t.address.toLowerCase())),
+  };
+}
+
 /**
  * THE DECISION ROW A QUIET REVIEW IS WRITTEN AS — built here, where a test can
  * run it, and written by the tick's quietReview.
@@ -76,6 +94,8 @@ export function quietReviewRow(args: {
   /** The name chooseFocus picked, for the row that could not review it. */
   focusSymbol?: string;
   historyRead: boolean;
+  /** An empty Trencher scope is waiting, not a reason to substitute a stock. */
+  waitingForTrencher?: boolean;
 }): {
   id: string;
   agent_id: string;
@@ -109,7 +129,9 @@ export function quietReviewRow(args: {
     source: RESEARCH_UNAVAILABLE_SOURCE,
     mark_usd: null,
     symbol: args.focusSymbol,
-    reason: "Research does not establish a fresh, informative price series; hold and retry next review.",
+    reason: args.waitingForTrencher
+      ? "Trencher has no freshly priced holding or eligible candidate to review; waiting for the next discovery check."
+      : "Research does not establish a fresh, informative price series; hold and retry next review.",
     evidence_json: JSON.stringify({ kind: "research-unavailable", quote, historyRead: args.historyRead }),
   };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff } from "lucide-react";
 import {
   DEFAULT_BASKET_SYMBOLS,
@@ -11,9 +11,10 @@ import {
   type CustomToken,
   isWallTooWide,
 } from "@merrymen/core";
-import { createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
+import { createPrivyOwnedWallet, isPrivyOwned, loadGrant, retryGrantHandoff, type Grant, type GrantCaps } from "@/lib/session";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
+import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { loadRecoveryGrants, trustedSavedGrant } from "@/lib/saved-grant-binding";
 import { needsPermissionReplacement } from "@/lib/permission-replacement";
 import { requestJson, RetryButton, SignIn, PRIVY_BETA, type AccountState } from "../HostedControls";
@@ -46,12 +47,14 @@ import { useT } from "@/lib/i18n";
  * missing. What was wrong was letting somebody choose it without knowing.
  */
 const STRATEGIES = [
+  {id:"trencher",name:"Trencher",description:"Find verified memecoin pools, with Brain reviews and automatic exits."},
   {id:"steady-basket",name:"Steady basket",description:"Buy a little of your selected stocks on a schedule."},
   {id:"even-keel",name:"Even keel",description:"Keep the stocks in your basket evenly weighted.",circle:true},
   {id:"dip-hunter",name:"Dip hunter",description:"Look for pullbacks in the stocks you follow.",circle:true},
   {id:"llm-strategist",name:"Strategist",description:"Assess the market with AI and follow its reasoning."},
 ];
 const EXAMPLES:Record<string,string>={
+  "trencher":"For example, assess an active memecoin pool, buy within your limits, and monitor it for an exit. No token addresses to add.",
   "steady-basket":"For example, buy small amounts of your selected stocks over time instead of buying everything at once.",
   "even-keel":"For example, if one stock grows to dominate your basket, adjust positions toward your target weights.",
   "dip-hunter":"For example, wait for a pullback that matches the strategy before considering an entry.",
@@ -60,9 +63,9 @@ const EXAMPLES:Record<string,string>={
 const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
 export function CreateAgent({account,accountFailed=false,retrying=false,onRefresh,onSignedIn,onBack,onDone,onFund}:{account:AccountState|null;accountFailed?:boolean;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void;onBack:()=>void;onDone:()=>void;onFund:(grant:Grant)=>void}) {
   const t = useT();
-  const [step,setStep]=useState<"agent"|"market"|"limits"|"backup"|"fund">("agent");
-  const [name,setName]=useState("");
-  const [strategy,setStrategy]=useState("steady-basket");
+  const [step,setStep]=useState<"quick"|"agent"|"market"|"limits"|"backup"|"fund">("quick");
+  const [name,setName]=useState("My Merryman");
+  const [strategy,setStrategy]=useState("trencher");
   /**
    * WHAT IT TRADES, ASKED DURING SETUP — and the reason this step exists at all.
    *
@@ -106,6 +109,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   const [grant,setGrant]=useState<Grant|null>(null);
   const [armed,setArmed]=useState(false);
   const [busy,setBusy]=useState(false);
+  const inFlight=useRef(false);
   const [status,setStatus]=useState("");
   const [error,setError]=useState("");
   const savedContext=account ? `${account.session.hosted}:${account.session.address?.toLowerCase()??""}:${account.status.exists}` : "";
@@ -132,7 +136,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     if(local?.smartAccount.toLowerCase()===account.status.grant.smartAccount.toLowerCase()) {
       setGrant(local);setArmed(account.status.exists);
       const saved=localStorage.getItem(`merrymen.backup.${local.smartAccount.toLowerCase()}`)==="1";
-      setStep(saved ? "fund" : "backup");
+      setStep(isPrivyOwned(local) || saved ? "fund" : "backup");
     }
   },[account?.status.grant?.smartAccount]);
   useEffect(()=>{
@@ -157,9 +161,11 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   if(!grant&&!privyOwner)return <section className="create-agent"><h1>Use a protected signing wallet.</h1><p>New mainnet agents require a Privy wallet so their owner key is not stored in this browser.</p>{PRIVY_BETA?<><p>Sign in with X or email, then wait for your signing wallet to become ready.</p><SignIn onDone={onSignedIn}/><RetryButton retrying={retrying} onRetry={onRefresh}/></>:<p>Protected wallet sign-in is not enabled on this installation. Enable it before creating a mainnet agent, or use testnet from Wallet &amp; permissions.</p>}<a href="/grant">Manage an existing wallet or use testnet</a></section>;
   if(!grant&&!account.status.exists&&!recovery)return <section className="create-agent"><SkeletonRows rows={3} label="Checking your saved wallet"/></section>;
   if(!grant&&recovery?.failed)return <section className="create-agent"><h1>Couldn&apos;t check your saved wallet.</h1><p>Restore access to browser storage and reload before creating or replacing a permission.</p><a href="/grant#resign">Open Wallet &amp; permissions</a><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
-  async function create() {
-    if(busy || grant || !account)return;
+  async function create(practice=paper, liveConsent=false) {
+    if(inFlight.current || busy || grant || !account)return;
     if(!privyOwner){setError("Your signing wallet is not ready. Sign in with X or email and try again.");return;}
+    if(!name.trim()){setError(t("create.errName"));return;}
+    if(strategy==="trencher"&&!TRENCHER_FACTORY){setError("Trencher's verified trading vault is not configured on this installation. Choose another strategy or try again after setup is complete.");return;}
     // WAS `validAmount`, which took a dot decimal and nothing else — while the
     // field above is `inputMode="decimal"`, which renders a COMMA key on a
     // Spanish, German, French, Portuguese, Turkish or Indonesian keyboard. The
@@ -188,8 +194,9 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     }
     if(!perTrade.ok||!perDay.ok)return;
     if(perTrade.value>perDay.value){setError(t("create.errOrder"));return;}
-    if(!paper&&!ack){setError(t("create.errAck"));return;}
-    setBusy(true);setError("");
+    if(!practice&&!ack&&!liveConsent){setError(t("create.errAck"));return;}
+    inFlight.current=true;
+    setPaper(practice);setBusy(true);setError("");
     try {
       // The account prop may have been loaded before another tab changed login.
       // Confirm this tenant and its no-agent status before any settings write.
@@ -210,7 +217,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
       const pons=await verifiedAdapter(address(settings.values.ponsAdapterAddress),4663,setStatus);
       // The market answers ride the settings write that was already happening —
       // one round trip, not four.
-      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({owner:account.session.hosted?account.session.address:undefined,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!paper,assetMode,basketSymbols:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens]})});
+      await requestJson("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({owner:account.session.hosted?account.session.address:undefined,agentName:name.trim(),strategy,paperTradingEnabled:true,liveTradingEnabled:!practice,assetMode:strategy==="trencher"?"crypto":assetMode,basketSymbols:strategy==="trencher"?[]:basket,customTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens],...(strategy==="trencher"?{discoveryEnabled:true,officialCoinsEnabled:true,trencherFastEnabled:true,trencherLiveEnabled:!practice,tickSeconds:15}:{})})});
       /**
        * MERGED LOCALLY, NOT RE-READ — and getting this wrong would silently
        * undo the whole point of the step.
@@ -224,15 +231,16 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
        */
       // The PARSED values, not `Number(trade)`. The raw string is what the
       // owner typed, and `Number("10,50")` is NaN while `Number("1.000")` is 1.
-      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
+      const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),...(strategy==="trencher"?{trencherFactory:TRENCHER_FACTORY as `0x${string}`} : {}),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
       const result=await createPrivyOwnedWallet(privyOwner.account,privyOwner.did,mintOptions);
-      setGrant(result.local);setArmed(result.handoff.ok);setStep("backup");setStatus("");
-      if(!result.handoff.ok)setError(result.handoff.error ?? "Your wallet was created, but the service could not activate your agent. Save its recovery key before retrying.");
-    }catch(e){setError(e instanceof Error ? e.message : "Could not create your agent. Try again.");}
-    finally{setBusy(false);}
+      setGrant(result.local);setArmed(result.handoff.ok);setStep(isPrivyOwned(result.local)?"fund":"backup");setStatus("");
+      if(!result.handoff.ok)setError(result.handoff.error ?? "Your wallet was created, but the service could not activate your agent. Retry activation with this saved permission.");
+    }catch(e){setStatus("");setError(e instanceof Error ? e.message : "Could not create your agent. Try again.");}
+    finally{inFlight.current=false;setBusy(false);}
   }
   async function retryActivation(){
-    if(!grant || busy || !account)return;
+    if(!grant || inFlight.current || busy || !account)return;
+    inFlight.current=true;
     setBusy(true);setError("");
     try{
       if(needsPermissionReplacement(grant))throw new Error("This permission was selected for revocation. Resume it from Wallet & permissions instead of activating it again.");
@@ -243,15 +251,31 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
       if(current.account.status.exists&&current.account.status.grant?.smartAccount.toLowerCase()!==grant.smartAccount.toLowerCase())throw new Error("A different agent is active for this account. Reload before continuing.");
       if(needsPermissionReplacement(grant))throw new Error("This permission is awaiting replacement. Resume it from Wallet & permissions.");
       const {demoOwnerPrivateKey:owner,...publicGrant}=grant;
-      await requestJson("/api/grants",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(account?.session.hosted ? publicGrant : grant)});
+      const handoff=await retryGrantHandoff(account.session.hosted?publicGrant:grant);
+      if(!handoff.ok)throw new Error(handoff.error??"Could not activate your agent. Your saved permission is ready to retry.");
       setArmed(true);onRefresh();
-    }catch(e){setError(e instanceof Error ? e.message : "Could not activate your agent.");}finally{setBusy(false);}
+    }catch(e){setError(e instanceof Error ? e.message : "Could not activate your agent.");}finally{inFlight.current=false;setBusy(false);}
   }
-  const index=["agent","market","limits","backup","fund"].indexOf(step);
+  const steps=(strategy==="trencher"?["agent","limits","fund"]:["agent","market","limits","fund"]);
+  if(grant?.demoOwnerPrivateKey)steps.splice(steps.length-1,0,"backup");
+  const index=steps.indexOf(step);
   return <section className="create-agent">
-    <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
-    <ol className="create-steps" aria-label="Setup progress">{["Agent","Market","Limits","Backup","Ready"].map((label,i)=><li key={label} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{label}</li>)}</ol>
-    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError(t("create.errName"));return;}setError("");setStep("market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it opens nothing new until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
+    <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep(strategy==="trencher"?"agent":"market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
+    {step!=="quick"&&<ol className="create-steps" aria-label="Setup progress">{steps.map((stage,i)=><li key={stage} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{stage==="fund"?"Ready":stage[0]!.toUpperCase()+stage.slice(1)}</li>)}</ol>}
+    {step==="quick"&&<>
+      <div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Start your Trencher.</h1><p>Finds verified memecoin pools, asks Brain before buying, and monitors exits. No token addresses to enter.</p></div>
+      <fieldset disabled={busy} style={{border:0,padding:0,margin:0}}>
+        <label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} onChange={e=>setName(e.target.value)}/>
+        <dl className="fund-breakdown"><div><dt>Planned entries</dt><dd>$2.50</dd></div><div><dt>Trencher vault limits</dt><dd>$5 per buy · $25 per 24 hours</dd></div><div><dt>Signed trading limits</dt><dd>$10 per trade · $50 per day</dd></div><div><dt>Permission</dt><dd>7 days · 5% drawdown · 24 operations/day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>
+        <p className="create-note">Starting live authorizes real-money trades once funded. Every entry needs Brain approval and must pass your limits. Memecoins can lose all their value.</p>
+        <p className="create-note">Approve the wallet prompts to finish. Your signing wallet keeps ownership; keep access to your sign-in account.</p>
+        {!TRENCHER_FACTORY&&<p className="flow-error" role="status">Trencher's verified trading vault is not configured on this installation. You can choose another strategy below.</p>}
+        <div className="create-quick-actions"><button className="flow-primary" disabled={!TRENCHER_FACTORY} onClick={()=>void create(false,true)}>{busy?"Setting up your agent…":"Start live Trencher"}</button>
+        <button className="copy-btn" disabled={!TRENCHER_FACTORY} onClick={()=>void create(true)}>Practise first</button>
+        <button className="copy-btn" onClick={()=>{setError("");setStep("agent");}}>Customise strategy and limits</button></div>
+      </fieldset>
+    </>}
+    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError(t("create.errName"));return;}setError("");setStep(strategy==="trencher"?"limits":"market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it opens nothing new until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
             {/* THE READER'S STANDING, not the rule. The badge above states the
                 requirement; this says whether THEY meet it, which is the only
                 half that decides whether to press the button. "I had to go to
@@ -375,9 +399,9 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
         asking somebody to confirm they saved them is asking them to lie, and
         the sibling screen went further and warned them off funding an account
         that was working. So this step says what is actually true of each. */}
-    {step==="backup"&&grant&&isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Your X login holds the key that owns this account. There is nothing here to write down — merrymen never sees it, so it cannot show it to you or lose it.</p></div><div className="create-secret"><code>Held by your Privy login</code></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I understand: if I lose access to this X account, merrymen cannot recover these funds for me.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setStep("fund");}}>Continue</button></>}
+    {step==="backup"&&grant&&isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Your signing wallet holds the key that owns this account. There is nothing here to write down — merrymen never sees it, so it cannot show it to you or lose it.</p></div><div className="create-secret"><code>Held by your Privy login</code></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I understand: if I lose access to my sign-in account, merrymen cannot recover these funds for me.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setStep("fund");}}>Continue</button></>}
     {step==="backup"&&grant&&!isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Save the recovery key before you go. It lets you recover this wallet if you lose this device.</p></div><label className="create-label">Recovery key</label><div className="create-secret"><code>{reveal ? grant.demoOwnerPrivateKey : "•••• •••• •••• •••• •••• ••••"}</code><button aria-label={reveal?"Hide recovery key":"Reveal recovery key"} onClick={()=>setReveal(!reveal)}>{reveal?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I saved my recovery key somewhere safe.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setReveal(false);setStep("fund");}}>Continue</button></>}
-    {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?"Ready when you are.":"One last connection."}</h1><p>{armed?(paper ? "Your wallet is connected. Open your agent to check its status and follow paper trades." : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation to connect it to your agent."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>Open your agent</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
+    {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?"Ready when you are.":"One last connection."}</h1><p>{armed?(paper ? "Your wallet is connected. Open your agent to check its status and follow paper trades." : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation to connect it to your agent."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="trencher"&&<p className="create-note">Brain reviews and eligible pools are required before Trencher buys. Open your agent to check its current status. Keep access to the sign-in account that controls your wallet.</p>}{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>Open your agent</button></>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
     {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}{isWallTooWide(error)&&<> <a href="/settings">Review custom tokens</a></>}</p>}
   </section>;
 }

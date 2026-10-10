@@ -156,7 +156,7 @@ describe("the preconditions", () => {
     const controls = await check(f.shared, { readable: false, why: "controls unreadable (Error)", failed: true });
     assert.deepEqual([controls.refusals, controls.unreadable], [["owner controls cannot be read (controls unreadable (Error))"], ["owner controls cannot be read (controls unreadable (Error))"]]);
     // The anchor's own read fails: deriveBootstrapAccounting answers `unknown`, which it gives for nothing else.
-    const anchor = await check(failing(f.shared, /SELECT hwm_usdg, hwm_withdrawn_usdg, epoch FROM agents/));
+    const anchor = await check(failing(f.shared, /SELECT hwm_usdg, hwm_withdrawn_usdg,/));
     assert.equal(anchor.anchor, "unknown");
     assert.deepEqual([anchor.refusals, anchor.unreadable], [["the accounting anchor cannot be derived"], ["the accounting anchor cannot be derived"]]);
     // A valid risk period reads as valid; the same with its carried read failing is an outage, not "invalid".
@@ -1978,4 +1978,3 @@ describe("registerAttestedGapSource", () => {
     assert.ok(columns.includes("chain_from_block") && columns.includes("chain_head"), columns.join(","));
   });
 });
-

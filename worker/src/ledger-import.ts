@@ -11,6 +11,7 @@ import { openSecret, sealSecret } from "./store-crypto";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import type { MemorySource } from "./memory-safeguard";
 import type { TenantLease } from "./tenant-lease";
+import { assertNoPendingReceiptAttestation, ensureReceiptAttestationSchema } from "./receipt-attestation-state";
 import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_ADDITIVE_DDL, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 
@@ -347,6 +348,7 @@ export async function ensureLedgerImportSchema(shared: Db, dialect: Dialect = "p
   void dialect;
   await shared.exec(LEDGER_IMPORT_SCHEMA);
   await shared.exec(LEDGER_IMPORT_GENERATIONS_SCHEMA);
+  await ensureReceiptAttestationSchema(shared);
 }
 
 /** The attested-gap tables (ledger-import-schema.ts). Additive; nothing else reads them. */
@@ -403,6 +405,7 @@ export async function stageLedgerImport(o: {
   const a = openArtifact(o.artifact, o.dek), dialect = o.dialect ?? "postgres";
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(o.targetVolumeId) || Date.now() - a.capturedAtMs > 5 * 60_000 || a.capturedAtMs > Date.now() + 10_000) throw refuse();
   await ensureLedgerImportSchema(o.shared, dialect);
+  await assertNoPendingReceiptAttestation(o.shared, a.tenant);
   await o.shared.tx(async db => {
     leaseOkay(o.lease, a.tenant); await o.assertSource();
     if (canonical(await bindings(db, a.tenant, a.smartAccount, dialect, true)) !== canonical(a.bindings)) throw refuse();
@@ -465,8 +468,10 @@ export async function restoreLedgerImport(o: {
   shared: Db; dek: Buffer; lease: TenantLease; dialect?: Dialect;
 }): Promise<"none" | "present" | "restored" | "resumed"> {
   const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
-  leaseOkay(o.lease, tenant); volumeOkay(o.volume, o.home, tenant);
+  leaseOkay(o.lease, tenant);
   await ensureLedgerImportSchema(o.shared, dialect);
+  await assertNoPendingReceiptAttestation(o.shared, tenant);
+  volumeOkay(o.volume, o.home, tenant);
   const file = path.join(o.home, "merrymen.db"), marker = path.join(o.home, LEDGER_IMPORT_PENDING_FILE);
   return o.shared.tx<"none" | "present" | "restored" | "resumed"> (async db => {
     leaseOkay(o.lease, tenant);
@@ -594,10 +599,12 @@ export async function registerLedgerSource(o: {
   shared: Db; lease: TenantLease; dialect?: Dialect;
 }): Promise<void> {
   const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
-  leaseOkay(o.lease, tenant); volumeOkay(o.volume, o.home, tenant);
+  leaseOkay(o.lease, tenant);
+  await ensureLedgerImportSchema(o.shared, dialect);
+  await assertNoPendingReceiptAttestation(o.shared, tenant);
+  volumeOkay(o.volume, o.home, tenant);
   const file = path.join(o.home, "merrymen.db"); if (present(file)) plain(file, false);
   if (readPending(o.home) || present(path.join(o.home, "ledger-source-blocked.json"))) throw refuse();
-  await ensureLedgerImportSchema(o.shared, dialect);
   await o.shared.tx(async db => {
     leaseOkay(o.lease, tenant);
     const current = await grantBinding(db, tenant, dialect, true);
@@ -780,6 +787,7 @@ export async function registerAttestedGapSource(o: {
   if (readPending(o.home) || present(path.join(o.home, "ledger-source-blocked.json"))) throw refuse();
   const file = path.join(o.home, "merrymen.db");
   await ensureLedgerResumeSchema(o.shared);
+  await assertNoPendingReceiptAttestation(o.shared, tenant);
   const forUpdate = dialect === "postgres" ? " FOR UPDATE" : "";
   return o.shared.tx(async db => {
     leaseOkay(o.lease, tenant);

@@ -19,6 +19,7 @@ import {
 } from "./energy-days";
 import type { EnergyCounters, LastGood } from "./energy";
 import { energyDayUnrestored } from "./energy-seed";
+import { initialCapitalHistoryEmpty } from "./initial-capital-history";
 import { BUDGET_SEED_SCHEMA, budgetUnrestored } from "./budget-seed";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
@@ -2228,6 +2229,73 @@ export async function bookCapitalFlow(
     if (!inserted) return { kind: "already" };
     await applyHwmDelta(db, flow.agentId, flow.direction === "in" ? amount : -amount);
     return { kind: "booked", epoch: account.epoch };
+  });
+}
+
+/**
+ * The first real funding of a positively identified untouched hosted live book.
+ * Explicit paper history belongs to its separate book and is retained. The complete
+ * receipt set, audit facts and capital peaks commit together: a crash cannot
+ * leave half an opening balance for the next bootstrap to mistake for history.
+ * An existing book is never reconstructed here, even when its net is zero.
+ */
+export async function bookInitialCapital(
+  agentId: string,
+  capital: import("./initial-capital").InitialCapital,
+): Promise<CapitalBooking> {
+  const refuse = (): CapitalBooking => ({ kind: "refused", why: "initial capital requires an untouched epoch-one live book and complete matching receipts" });
+  if (capital.account !== agentId.toLowerCase() || !Number.isSafeInteger(capital.chainId) || capital.chainId <= 0
+    || capital.cashUsdg6 <= 0n || capital.cashUsdg6 > BigInt(Number.MAX_SAFE_INTEGER)
+    || !capital.deposits.length || capital.deposits.length > 64 || !/^0x[0-9a-f]{64}$/i.test(capital.blockHash)) return refuse();
+  const keys = new Set<string>();
+  for (const d of capital.deposits) {
+    const key = `${d.txHash.toLowerCase()}:${d.logIndex}`;
+    if (!/^0x[0-9a-f]{64}$/i.test(d.txHash) || !Number.isSafeInteger(d.blockNumber) || d.blockNumber < 0
+      || BigInt(d.blockNumber) > capital.blockNumber || !Number.isSafeInteger(d.logIndex) || d.logIndex < 0
+      || !Number.isSafeInteger(d.at) || d.at <= 0 || d.amountUsdg6 <= 0n || keys.has(key)) return refuse();
+    keys.add(key);
+  }
+  if (capital.deposits.reduce((sum, d) => sum + d.amountUsdg6, 0n) !== capital.cashUsdg6) return refuse();
+  if (capital.deposits.some(d => BigInt(Math.round((Number(d.amountUsdg6) / 1e6) * 1e6)) !== d.amountUsdg6)
+    || BigInt(Math.round(capital.deposits.reduce((sum, d) => sum + Number(d.amountUsdg6) / 1e6, 0) * 1e6)) !== capital.cashUsdg6) return refuse();
+  return getDb().tx(async (db): Promise<CapitalBooking> => {
+    const account = await db.prepare(`UPDATE agents SET epoch = epoch WHERE smart_account = ?
+      RETURNING epoch, chain_id, mode, hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg`).get(agentId) as
+      (FlowAccount & { hwm_usdg: number; hwm_withdrawn_usdg: number; accrued_fee_usdg: number }) | undefined;
+    if (!account || account.epoch !== 1 || account.chain_id !== capital.chainId || account.mode !== "live"
+      || Number(account.hwm_withdrawn_usdg) !== 0 || Number(account.accrued_fee_usdg) !== 0) return refuse();
+    const prior = await db.prepare(`SELECT direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id
+      FROM flows WHERE LOWER(agent_id) = LOWER(?)`).all(agentId) as Array<{
+        direction: string; amount_usdg: number; tx_hash: string | null; block_number: number | null;
+        log_index: number | null; source: string; epoch: number; chain_id: number | null;
+      }>;
+    if (prior.length) {
+      // Only a complete, exact retry is idempotent. Partial or inferred history
+      // needs the separate maintenance path, never a top-up of this batch.
+      if (prior.length !== capital.deposits.length || Number(account.hwm_usdg) !== Number(capital.cashUsdg6) / 1e6
+        || prior.some(p => !capital.deposits.some(d => p.tx_hash?.toLowerCase() === d.txHash.toLowerCase()
+          && p.log_index === d.logIndex && p.block_number === d.blockNumber && p.amount_usdg === Number(d.amountUsdg6) / 1e6
+          && p.direction === "in" && p.source === "chain-log" && p.epoch === 1 && p.chain_id === capital.chainId))) return refuse();
+      if (!await initialCapitalHistoryEmpty(db, agentId, { ignoreFlows: true, bookedCashUsdg: Number(capital.cashUsdg6) / 1e6 })) return refuse();
+      return { kind: "already" };
+    }
+    if (Number(account.hwm_usdg) !== 0) return refuse();
+    if (!await initialCapitalHistoryEmpty(db, agentId, { ignoreFlows: true, heldCashUsdg: Number(capital.cashUsdg6) / 1e6 })) return refuse();
+    if (await db.prepare("SELECT 1 FROM journal WHERE LOWER(agent_id) = LOWER(?) AND kind = 'flow' LIMIT 1").get(agentId)) return refuse();
+    for (const d of capital.deposits) {
+      const inserted = await insertFlowWithJournal(db, { agentId, direction: "in", amountUsdg: Number(d.amountUsdg6) / 1e6,
+        source: "chain-log", txHash: d.txHash, blockNumber: d.blockNumber, logIndex: d.logIndex,
+        mode: "live", chainId: capital.chainId }, 1, capital.chainId);
+      if (!inserted) throw new Error("Initial capital receipt identity changed during booking");
+    }
+    await applyHwmDelta(db, agentId, Number(capital.cashUsdg6) / 1e6);
+    await appendJournalRow(db, agentId, 1, "mark", { initialCapital: {
+      chainId: capital.chainId, blockNumber: capital.blockNumber.toString(), blockHash: capital.blockHash,
+      cashUsdg6: capital.cashUsdg6.toString(), receipts: capital.deposits.map(d => ({
+        txHash: d.txHash.toLowerCase(), logIndex: d.logIndex, blockNumber: d.blockNumber, at: d.at, amountUsdg6: d.amountUsdg6.toString(),
+      })),
+    } });
+    return { kind: "booked", epoch: 1 };
   });
 }
 

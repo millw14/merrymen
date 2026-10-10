@@ -44,8 +44,8 @@ import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta
 import { carriedDecisionsFrom, carriedHistory, historyFileKey, overlayHistory } from "./history-overlay";
 import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
 import { heldSqlSync, isHeld } from "../held-marks";
-import { agentEpoch, energyStatusLine, openRO, readPositions, redactAddresses, resolveAgent, type StatusContext } from "./reads";
-import { settingsListText } from "./settings-chat";
+import { admissionStatusLine, agentEpoch, energyStatusLine, openRO, readPositions, redactAddresses, resolveAgent, type StatusContext } from "./reads";
+import { settingsListText, strategySettingsSummary } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
 import { isActiveClassState, isQuoteTokenRow } from "../class-active";
 import { dollars, when } from "./trade-rows";
@@ -333,11 +333,13 @@ const agentStatus: ChatTool = {
         const s = ctx.status;
         const lines: string[] = [];
         lines.push(`Name: ${s.name}. Strategy: ${s.strategy}.`);
+        const admission = admissionStatusLine(s.admission);
+        if (admission) lines.push(admission);
         lines.push(
           s.paper
             ? "Mode: PRACTICE — trades are simulated at live prices, no real money moves."
             : ctx.cfg.liveTradingEnabled
-              ? "Mode: real money (live trading is on)."
+              ? "Live trading setting: on (real money). This setting alone does not establish that orders can run."
               : "Mode: live trading is OFF, so no real orders are placed.",
         );
         lines.push(ctx.paused ? "The owner's PAUSE button is ON — I place no new trades until they resume." : "The pause button is off.");
@@ -1184,6 +1186,8 @@ const settingsTool: ChatTool = {
     // long, and these lines are the ones the owner was told to go and find.
     const live = { now: ctx.now, paused: ctx.paused };
     let missing = launchpadStillNeeded(c, ctx.grant, live);
+    const admission = admissionStatusLine(ctx.status.admission);
+    if (admission) missing.unshift(admission);
     // THE LEDGER ONLY TO BACK "NOTHING IS STOPPING IT". The worker's refusal
     // (live_blocker) is on the agent row, and reading it opens the ledger,
     // which this tool otherwise never does (answer-session.integration.test.ts
@@ -1207,6 +1211,8 @@ const settingsTool: ChatTool = {
       if (blocker && settledNeed(blocker, ctx) !== "just-signed") missing = launchpadStillNeeded(c, ctx.grant, { ...live, blocker });
     }
     const extra = [
+      ...(admission ? [admission] : []),
+      ...(c.strategy === "trencher" ? [strategySettingsSummary(c as unknown as Record<string, unknown>)] : []),
       `live trading (real money): ${c.liveTradingEnabled ? "on" : "off"} — dashboard only: Settings → Trading mode → "live trading"`,
       `practice mode: ${c.paperTradingEnabled ? "on" : "off"}`,
       `launchpad buying: ${c.classSnipeEnabled && c.classPerEntryUsdg > 0 ? "on" : "off"} — dashboard only: Settings → Custom tokens & discovery (a section that starts closed) → "launchpad buying (class route)", with the scout settings just above it`,
@@ -1215,7 +1221,7 @@ const settingsTool: ChatTool = {
         : "launchpad buying: nothing I can see is stopping it",
       `memecoin strategy with real money: ${c.trencherLiveEnabled ? "on" : "off"} — dashboard only: Settings → What it trades → Trencher mode → "let trencher trade for real"`,
     ];
-    return cap(`${extra.join("\n")}\n${strip(settingsListText(c as unknown as Record<string, unknown>))}`);
+    return cap(`${extra.join("\n")}\n${strip(settingsListText(c as unknown as Record<string, unknown>, { includeStrategySummary: false }))}`);
   },
 };
 

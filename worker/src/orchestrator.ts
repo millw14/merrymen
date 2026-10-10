@@ -121,6 +121,9 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
+import { attestOriginalReceipt, type ReceiptAttestationOptions, type ReceiptAttestationReport } from "./receipt-attestation";
+import { assertNoPendingReceiptAttestation, ensureReceiptAttestationSchema } from "./receipt-attestation-state";
+import { receiptAttestationRequest, receiptAttestationTenant } from "./receipt-attestation-controls";
 import {
   ADMISSION_LEVEL_ENV,
   FLEET_ROLLOUT_ENV,
@@ -1388,6 +1391,27 @@ const accountingMaintenanceLocalState = (tenant: string) => ({
     restartPending.has(tenant) || exitingChildren.has(tenant) || retiringExpired.has(tenant) || leaseLossDraining.has(tenant),
   localHomePresent: existsSync(childHome(tenant)),
 });
+
+/** The only mutation entry: ownership is derived from actual supervisor state. */
+export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOptions,
+  "tenant" | "smartAccount" | "shared" | "rpc" | "mode" | "approvedDigest" | "dialect" | "checkpoint">): Promise<ReceiptAttestationReport> {
+  const tenant = o.tenant.toLowerCase() as `0x${string}`, lease = leases.get(tenant), volume = persistentFleetHome();
+  if (!lease || !volume) throw new Error("Receipt attestation requires the supervisor's tenant lease and verified persistent volume.");
+  const grant = await getGrantStore().get(tenant);
+  if (!grant || grant.smartAccount.toLowerCase() !== o.smartAccount.toLowerCase()) throw new Error("Receipt attestation requires the same current stored account permission; do not replace it to repair accounting.");
+  const assertQuiescent = () => {
+    if (stopping || copiesClosed || leases.get(tenant) !== lease || !lease.healthy()
+        || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation requires a quiet supervisor with its original healthy lease.");
+  };
+  assertQuiescent();
+  // Wait for every already-scheduled copy. New copies queue behind the complete
+  // repair and must pass its shared pending gate before touching a cursor.
+  return mirrorSerially(tenant, async () => {
+    assertQuiescent();
+    return attestOriginalReceipt({ ...o, tenant, smartAccount: grant.smartAccount, chainId: grant.chainId,
+      home: childHome(tenant), volume, lease, assertQuiescent });
+  });
+}
 
 function log(msg: string): void {
   console.log(`[orchestrator] ${msg}`);
@@ -3118,6 +3142,14 @@ const LEDGER_SOURCE_BLOCK = "ledger-source-blocked.json";
 // in this supervisor. Keep the deployment for recovery if durable storage fails.
 const blockedLedgerHomes = new Set<string>();
 const removedLedgerPending = new Map<string, TenantLease>();
+const receiptSchemaReady = new WeakSet<Db>();
+async function receiptSourceAllowsWrite(shared: Db, tenant: string): Promise<void> {
+  if (!receiptSchemaReady.has(shared)) {
+    await ensureReceiptAttestationSchema(shared);
+    receiptSchemaReady.add(shared);
+  }
+  await assertNoPendingReceiptAttestation(shared, tenant);
+}
 
 /** Publish the source gate without changing any ledger, cursor, permission or source barrier. */
 async function reportFleetSource(tenant: `0x${string}`, grant: StoredGrant, lease: TenantLease, cause: RecoveryCause | null): Promise<boolean> {
@@ -3170,6 +3202,7 @@ async function pausedSourceCause(tenant: string): Promise<RecoveryCause | null> 
   const handle = openChildLedger(home);
   try {
     const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    await receiptSourceAllowsWrite(shared, tenant);
     if (!handle) {
       // No DDL and no zero substitution: an old cursor is evidence that an
       // absent local file is an accounting blocker, including before renewal.
@@ -3288,6 +3321,7 @@ async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home =
     if (copiesClosed && !drainPass) throw new Error("The fleet is being called home; no new ledger copy starts before the next owner's.");
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror no longer owns the current worker and lease.");
     if (ledgerSourceBlocked(home)) throw new Error("Ledger source is blocked; preserve the home and recover its accounting before rearming.");
+    await receiptSourceAllowsWrite(shared, tenant);
     // Check the original witnesses BEFORE mirrorTenant can advance any cursor.
     // Retrying a rebuilt source after that advancement can otherwise erase the
     // shared position on the second pass, once its rewind evidence is gone.
@@ -3325,6 +3359,7 @@ async function ledgerSourceAllowsResume(tenant: string, afterRestore = false): P
   }
   try {
     const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+    await receiptSourceAllowsWrite(shared, tenant);
     await shared.exec(translateSchema(MIRROR_STATE_DDL));
     try { await shared.exec("ALTER TABLE mirror_state ADD COLUMN last_stamp INTEGER"); } catch { /* already present */ }
     if (!handle) {
@@ -3739,6 +3774,7 @@ async function resumeAdmission(tenant: `0x${string}`, lease: TenantLease, grant:
   let approval: ApprovalRow | null;
   try {
     shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    await receiptSourceAllowsWrite(shared, tenant);
     approval = await readOpenApproval(shared, tenant);
   } catch (e) {
     sayTenantAlert(tenant, `[alert] ${tenant}: resume approvals unreadable (${errorKind(e)}) — retaining its home without starting a worker`);
@@ -9895,6 +9931,42 @@ async function runIdentityAuditIfAsked(): Promise<void> {
   }
 }
 
+async function runReceiptAttestationIfAsked(): Promise<void> {
+  const request = receiptAttestationRequest(process.env);
+  if (!request) return;
+  if (!process.env.DATABASE_URL || !persistentFleetHome()) throw new Error("Receipt attestation requires shared Postgres and the verified original persistent home.");
+  const store = getGrantStore(), roster: Array<{ tenant: string; account: string }> = [];
+  for (const tenant of await store.listTenants()) {
+    const grant = await store.get(tenant);
+    if (grant) roster.push({ tenant, account: grant.smartAccount });
+  }
+  const tenant = receiptAttestationTenant(request, roster);
+  if (!accountingTenantHeld(tenant) || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation target must be explicitly held with no local incarnation.");
+  let lease = leases.get(tenant), temporary = false;
+  if (!lease) {
+    lease = await acquireTenantLease(tenant) ?? undefined;
+    if (!lease) throw new Error("Receipt attestation tenant is still leased by another supervisor.");
+    leases.set(tenant, lease); temporary = true;
+  }
+  try {
+    const shared = await makePgDb(process.env.DATABASE_URL), rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
+    let id = 0;
+    const rpc: ReceiptAttestationOptions["rpc"] = async (method, params) => {
+      const response = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }), signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`Receipt evidence RPC returned HTTP ${response.status}`);
+      const body = await response.json() as { result?: unknown; error?: { message?: string } };
+      if (body.error) throw new Error(body.error.message ?? "Receipt evidence RPC failed");
+      return body.result ?? null;
+    };
+    const report = await attestReceiptUnderSupervisor({ tenant, smartAccount: request.account, shared, rpc, mode: request.mode, approvedDigest: request.approvedDigest });
+    log(`receipt-attestation| ${JSON.stringify(report)}`);
+    log("receipt-attestation| Original grant, account, ledger generation, row IDs, flow time, epoch, high-water mark and mirror witnesses retained. Operator hold and rollout are unchanged.");
+  } finally {
+    if (temporary && leases.get(tenant) === lease && !accountingMaintenanceLocalState(tenant).processPresent) await releaseLease(tenant);
+  }
+}
+
 async function runReconstructionDryRunIfAsked(): Promise<void> {
   if ((process.env.MERRYMEN_ACCOUNTING_RECONSTRUCT ?? "").trim() !== "1") return;
   const url = process.env.DATABASE_URL;
@@ -12090,6 +12162,7 @@ export async function runOrchestrator(): Promise<void> {
   assertHostedFleetStart();
   // Validate operator intent before either entry path can initialize anything.
   const accountingHolds = accountingHoldTenants(process.env);
+  receiptAttestationRequest(process.env);
   // THE ROLLOUT TOO, and for both paths: a malformed value, or an unset one on
   // Railway, refuses here, before the halt, the volume or a lease is touched.
   const rollout = fleetRollout(process.env);
@@ -12204,7 +12277,7 @@ export async function runOrchestrator(): Promise<void> {
   // recheck shutdown/hold/fresh-state at the commit boundary inside the job.
   await runAccountingReconstructionAtStartup({
     heldTenants: accountingHolds,
-    reconstruct: runReconstructionDryRunIfAsked,
+    reconstruct: async () => { await runReceiptAttestationIfAsked(); await runReconstructionDryRunIfAsked(); },
     onError: (error) => log(`accounting reconstruction failed — ${error instanceof Error ? error.message : String(error)}`),
   });
   if (stopping) return;

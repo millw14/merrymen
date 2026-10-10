@@ -536,7 +536,7 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
   }
 
   /** `moveBot`: the owner answered "Move it here" to a bot another agent holds. */
-  async function save(opts: { moveBot?: boolean } = {}) {
+  async function save(opts: { moveBot?: boolean; startTrencher?: boolean } = {}) {
     if (saveInFlight.current || telegramCreateActive.current) return;
     if (statusTimer.current) clearTimeout(statusTimer.current);
     setSettingsVerified(false);
@@ -546,7 +546,7 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
     setBotMoved(false);
     // An unreadable field would be sent as typed and rejected, or — worse, if
     // it were ever blanked first — sent as "" and read as "clear to default".
-    const unreadable = Object.entries(numError);
+    const unreadable = Object.entries(numError).filter(([key]) => !opts.startTrencher || key !== "tickSeconds");
     if (unreadable.length > 0) {
       setStatus(null);
       setErrors(unreadable.map(([k, why]) => `${k}: ${why}`));
@@ -588,6 +588,13 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
     if (agentEnabled !== null) body.telegramAgentEnabled = agentEnabled;
     if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
     if (opts.moveBot) body.moveBot = true;
+    // One explicit real-money action supplies the complete preset. Do not
+    // depend on React committing a series of toggles before the save starts.
+    if (opts.startTrencher) Object.assign(body, {
+      strategy: "trencher", assetMode: "crypto", tickSeconds: "15",
+      officialCoinsEnabled: true, discoveryEnabled: true,
+      trencherFastEnabled: true, liveTradingEnabled: true, trencherLiveEnabled: true,
+    });
     // Secrets: only send when the user typed something or hit clear ("").
     saveInFlight.current = true;
     let accepted = false;
@@ -621,6 +628,11 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
       if (!fresh.ok) throw new Error("Settings readback unavailable");
       const savedView = (await fresh.json()) as SettingsView;
       if (savedView.owner !== view?.owner) throw new Error("Settings owner changed");
+      if (opts.startTrencher && (savedView.values.strategy !== "trencher"
+        || savedView.values.assetMode !== "crypto" || Number(savedView.values.tickSeconds) !== 15
+        || savedView.values.officialCoinsEnabled !== true || savedView.values.discoveryEnabled !== true
+        || savedView.values.trencherFastEnabled !== true || savedView.values.liveTradingEnabled !== true
+        || savedView.values.trencherLiveEnabled !== true)) throw new Error("Trencher settings were not confirmed");
       setView(savedView);
       setStatus("Changes saved");
       setSettingsVerified(true);
@@ -628,6 +640,7 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
       setBotMoved(json.botMoved === true);
       onSaved?.();
       setDraft({});
+      if (opts.startTrencher) setNumError(({ tickSeconds: _replaced, ...rest }) => rest);
       setSymbols(null);
       setTgEnabled(null);
       setTgControl(null);
@@ -675,7 +688,9 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
       statusTimer.current = setTimeout(() => setStatus(null), 4000);
     } catch {
       setErrors([accepted
-        ? "Your save was accepted, but the saved settings could not be checked. Your edits are still shown. Reload Settings to confirm before renewing permission."
+        ? opts.startTrencher
+          ? "Your save was accepted, but the saved settings could not be checked. Live Trencher may already be enabled. Reload Settings to confirm; the switches shown here may be out of date."
+          : "Your save was accepted, but the saved settings could not be checked. Your edits are still shown. Reload Settings to confirm before renewing permission."
         : "could not reach the settings API"]);
       setStatus(null);
     } finally {
@@ -943,10 +958,23 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
           <div className="mm-section">{t("settings.section.whatItTrades")}</div>
           <div id="trencher-setup" className="mm-hint" aria-labelledby="trencher-mode">
             <b id="trencher-mode">Trencher mode · fast memecoin setup</b>
+            <p>Find coins automatically and trade with your existing wallet. Entries are $2.50, within your signed limits. This enables real-money trading, coin discovery and fast exits together.</p>
+            <button type="button" className="mm-btn primary" disabled={status === "saving…" || telegramCreating}
+              onClick={() => void save({ startTrencher: true })}>Enable live Trencher</button>
+            <p>No new key is created. Saves your changes on this page. If your wallet already has current, unexpired Autonomous Trencher permission, you do not need to sign again.</p>
+            {agentDown ? <p role="status">{agentDown === "recovery"
+              ? "The service is still restoring this agent. Settings can be saved now; wallet signatures will not remove that hold."
+              : "Your agent still needs attention before trading. Check its status on Home after saving."}</p> : null}
+            {status === "saving…" && <p role="status">Saving settings…</p>}
+            {settingsVerified && !hasUnsavedChanges && <p role="status">Settings saved. <Link href="/grant#resign">Review trading permission</Link> if Autonomous Trencher is not already enabled. Re-signing is only needed when permission is missing, expired or outdated.</p>}
+            {errors.length > 0 && <div className="mm-danger" role="alert">{errors.map((error, i) => <div key={i}>{error}</div>)}</div>}
+            {botClaimed && <p className="mm-danger" role="alert">{botClaimed} Nothing has been saved. Resolve the bot choice at the bottom of this page, then save again.</p>}
+            {telegramCreating ? <p className="mm-hint" role="status">Finish or cancel Telegram setup before saving other settings.</p> : null}
+            <details><summary>Customise Trencher settings</summary>
             <p>Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells.
               Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds.
               New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.</p>
-            <p>Entries remain $5, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
+            <p>Entries are $2.50, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
               With Autonomous Trencher permission, it finds verified pool tokens itself; no custom-token list is required. Existing positions remain monitored for exits.</p>
             <button type="button" className="mm-btn" disabled={status === "saving…"} onClick={() => {
               setAssetMode("crypto");
@@ -1007,15 +1035,11 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
               You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
             </p>}
             <button type="button" className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…" || telegramCreating}>Save settings</button>
-            {telegramCreating ? <p className="mm-hint" role="status">Finish or cancel Telegram setup before saving other settings.</p> : null}
             <p className="mm-hint">Saves all changes on this page. Preparing settings does not turn on real-money trading or change your signed limits.</p>
-            {status === "saving…" && <p role="status">Saving settings…</p>}
-            {settingsVerified && !hasUnsavedChanges && <p role="status">Settings saved. <Link href="/grant#resign">Review trading permission</Link> to check Autonomous Trencher access.</p>}
-            {errors.length > 0 && <div className="mm-danger" role="alert">{errors.map((error, i) => <div key={i}>{error}</div>)}</div>}
-            {botClaimed && <p className="mm-danger" role="alert">{botClaimed} Nothing has been saved. Resolve the bot choice at the bottom of this page, then save again.</p>}
-            <p>After saving, review your trading permission and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
+            <p>Autonomous Trencher permission is available after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
               Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
             <p>Already saved and renewed? Preparation does not force a trade. The agent still waits for an eligible pool and fresh Brain approval within your limits. Check your agent’s status for a pause, expired permission or accounting blocker.</p>
+            </details>
           </div>
           <div className="mm-grid">
             <label className="mm-field">

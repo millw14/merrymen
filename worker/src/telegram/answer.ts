@@ -185,7 +185,9 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
       await seed("agent_status");
       await seed("permission_status");
     }
-    if (/\b(?:settings?|configured|threshold|limit|cap|stop loss|take profit|buy size)\b|how much.*\b(?:buy|spend)\b/i.test(i.question)) await seed("settings");
+    const strategyQuestion = /\b(?:strategy|playbook|trencher|basket)\b|what (?:do|will|can) you trade/i.test(i.question);
+    if (strategyQuestion && !used.includes("agent_status")) await seed("agent_status");
+    if (strategyQuestion || /\b(?:settings?|configured|threshold|limit|cap|stop loss|take profit|buy size)\b|how much.*\b(?:buy|spend)\b/i.test(i.question)) await seed("settings");
     if (/\b(?:mean|means|meaning|explain)\b|\bwhat (?:is|are)\b/i.test(i.question)) await seed("explain_term", { question: i.question });
     if(/\b(?:trades?|traded|bought|sold|pnl|profit|loss)\b|p&l|why.*\b(?:buy|sell)\b/i.test(i.question)) {
       const isPnl=/\b(?:pnl|profit|loss)\b|p&l/i.test(i.question);

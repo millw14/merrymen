@@ -245,6 +245,24 @@ describe("the list and the done message", () => {
     assert.doesNotMatch(t, /trade messages: /, "the master notification switch is not listed");
   });
 
+  it("distinguishes Trencher's entries from the preserved stock basket", () => {
+    const t = settingsListText({ ...ctx.current, basketSymbols: ["QQQ", "NVDA", "TSLA"], trencherFastEnabled: true });
+    assert.match(t, /Trencher looks for eligible memecoins/);
+    assert.match(t, /saved stock basket \(not used by Trencher\): <b>QQQ, NVDA, TSLA<\/b>/);
+    assert.match(t, /Fast Trencher is on: entries require Brain review/);
+    assert.match(t, /permission, funding and every risk check/);
+  });
+
+  it("does not claim that selecting Trencher enabled its Brain-reviewed setup", () => {
+    assert.match(settingsListText(ctx.current), /Fast Trencher is off.*selecting the strategy alone does not enable/);
+  });
+
+  it("keeps basket settings unchanged for basket strategies", () => {
+    const t = settingsListText({ ...ctx.current, strategy: "steady-basket" });
+    assert.match(t, /• basket: <b>QQQ<\/b>/);
+    assert.doesNotMatch(t, /not used by Trencher|Trencher looks for/);
+  });
+
   it("says when it takes effect", () => {
     assert.match(appliedText("buyPerTickUsdg", 20, true), /\$20\.00.*within a minute/);
   });

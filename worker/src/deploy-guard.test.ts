@@ -336,6 +336,7 @@ describe("the one-shot census", () => {
     "MERRYMEN_INSPECT_TENANT", "MERRYMEN_COHORT_VET", "MERRYMEN_IDENTITY_AUDIT", "MERRYMEN_BRAIN_DATASET",
     "MERRYMEN_TG_RECOVERY_ID", "MERRYMEN_TG_RECOVERY_CHAT_ID", "MERRYMEN_TG_RECOVERY_CONFIRM", "MERRYMEN_TG_RECOVERY_BODY_SHA256",
     "MERRYMEN_RECONCILE_SHADOW", "MERRYMEN_BACKFILL_LIVE_INTENT",
+    "MERRYMEN_RECEIPT_ATTEST_ACCOUNT", "MERRYMEN_RECEIPT_ATTEST_TENANT", "MERRYMEN_RECEIPT_ATTEST_MODE", "MERRYMEN_RECEIPT_ATTEST_APPROVAL",
   ];
   /** Standing configuration and the rollout's own controls: never counted. */
   const STANDING = [
@@ -371,6 +372,42 @@ describe("the one-shot census", () => {
     const printed = all(r);
     for (const [name, value] of values) assert.ok(!printed.includes(value), `the value of ${name} was printed`);
     assert.ok(!printed.includes("9".repeat(40)));
+  });
+});
+
+describe("one precisely scoped receipt attestation during staged rollout", () => {
+  const start = (role: string, env: NodeJS.ProcessEnv) => runDeployGuard(["--phase=start", `--role=${role}`], env);
+  const predeploy = (env: NodeJS.ProcessEnv) => runDeployGuard(["--phase=predeploy"], env);
+  const tenant = `0x${"a".repeat(40)}`, account = `0x${"b".repeat(40)}`;
+  const scoped = { ...FLEET, MERRYMEN_FLEET_ROLLOUT: "none", MERRYMEN_ACCOUNTING_HOLD_TENANTS: tenant,
+    MERRYMEN_RECEIPT_ATTEST_ACCOUNT: account, MERRYMEN_RECEIPT_ATTEST_TENANT: tenant, MERRYMEN_RECEIPT_ATTEST_MODE: "dry-run" };
+  it("accepts only the named held protocol, keeping all other fleet protection", async () => {
+    for (const mode of ["dry-run", "commit"]) {
+      const env = { ...scoped, MERRYMEN_RECEIPT_ATTEST_MODE: mode,
+        ...(mode === "commit" ? { MERRYMEN_RECEIPT_ATTEST_APPROVAL: "a".repeat(64) } : {}) };
+      assert.equal((await start("start:orchestrator", env)).code, 0);
+      assert.equal((await start("start:orchestrator", { ...env, MERRYMEN_IMAGE: "wrong" })).code, EX_CONFIG);
+      assert.equal((await start("start:orchestrator", { ...env, MERRYMEN_PERSISTENT_HOME_REQUIRED: "0" })).code, EX_CONFIG);
+      assert.equal((await start("start:orchestrator", { ...env, RAILWAY_SERVICE_ID: "wrong" })).code, EX_CONFIG);
+      assert.equal((await predeploy({ ...env, MERRYMEN_START: "start:orchestrator", RAILWAY_GIT_BRANCH: "feature", RAILWAY_GIT_COMMIT_SHA: SHA })).code, EX_CONFIG);
+    }
+  });
+  it("refuses incomplete/invalid scope, wrong/malformed hold, unapproved commit and any mixed one-shot", async () => {
+    const changes = [
+      { MERRYMEN_RECEIPT_ATTEST_ACCOUNT: undefined }, { MERRYMEN_RECEIPT_ATTEST_TENANT: undefined },
+      { MERRYMEN_RECEIPT_ATTEST_MODE: undefined }, { MERRYMEN_RECEIPT_ATTEST_TENANT: "" },
+      { MERRYMEN_RECEIPT_ATTEST_ACCOUNT: `${account},${account}` }, { MERRYMEN_RECEIPT_ATTEST_MODE: "apply" },
+      { MERRYMEN_ACCOUNTING_HOLD_TENANTS: undefined }, { MERRYMEN_ACCOUNTING_HOLD_TENANTS: account },
+      { MERRYMEN_ACCOUNTING_HOLD_TENANTS: `${tenant},malformed` }, { MERRYMEN_RECEIPT_ATTEST_MODE: "commit" },
+      { MERRYMEN_RECEIPT_ATTEST_MODE: "commit", MERRYMEN_RECEIPT_ATTEST_APPROVAL: "not-a-digest" },
+      { MERRYMEN_RECEIPT_ATTEST_APPROVAL: "a".repeat(64) }, { MERRYMEN_REPAIR_HWM: "apply" },
+      { MERRYMEN_ACCOUNTING_DIAGNOSE: "1" }, { MERRYMEN_RECEIPT_ATTEST_BYPASS: "1" },
+    ];
+    for (const changed of changes) {
+      const r = await start("start:orchestrator", { ...scoped, ...changed });
+      assert.equal(r.code, EX_CONFIG, JSON.stringify(changed));
+      assert.ok(!all(r).includes(tenant) && !all(r).includes(account), "scope values never enter guard logs");
+    }
   });
 });
 

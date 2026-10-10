@@ -156,13 +156,13 @@ import {
 import { admitCapitalFlow, tradingModeOf } from "./paper-boundary";
 import { classifyRpcError } from "./rpc-error";
 import { fillSymbolFor } from "./token-label";
+import { BOOKING_CONFIRMATIONS } from "./chain-confirmations";
+export { BOOKING_CONFIRMATIONS } from "./chain-confirmations";
 
 export const BOOKING_FORMAT = "merrymen.chain-gap-booking.v1";
 export const APPLY_FORMAT = "merrymen.chain-gap-booking.apply.v1";
 export const REVERT_FORMAT = "merrymen.chain-gap-booking.revert.v1";
 export const RECEIPTS_FORMAT = "merrymen.chain-gap-booking.receipts.v1";
-/** Only facts this deep are booked: a reorg could still take back a shallower one, and the row with it. The receipt gas preview's depth. */
-export const BOOKING_CONFIRMATIONS = 64n;
 /** The receipts table: one row per booked row, kept (as 'reverted') after a revert. */
 export const BOOKINGS_TABLE = "chain_gap_bookings";
 /** How the reconciler and the key-install resolver name a revert whose message is gone. */
