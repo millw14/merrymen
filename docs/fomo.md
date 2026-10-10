@@ -510,6 +510,15 @@ group line, `tg-groups/handler.ts` (below, "Asking for a tail").
 - **Caps.** 3 active tails per owner (renewing one does not count, and may change its
   hours and `consider`), 1–12 hours each, counted under the owner's lock row like
   watches.
+- **Every told buy is measured for the tail leaderboard.** After a buy notice lands,
+  the child records its entry mark (`fomo_record_tail_mark`: entry price from a top
+  pool quote — GeckoTerminal's solana pools for Solana mints, its pools read for
+  Robinhood Chain; an unquotable buy is told without a mark, never mis-marked). A
+  worker pass settles due horizons (+1h, +24h) for every owner, first write wins, and
+  marks live 90 days for per-trader stats (`fomo_tail_marks`; `tail-marks.ts` owns the
+  math). A tail's end summary says the trader's settled record so far (+1h average over
+  settled calls, hit rate, sample size); nothing settled, nothing said. Hers only: every
+  tally reads her own tails' marks, never the fleet's.
 - **Tailing again soon after the end continues the tail.** There is one row per owner
   and trader, and an ended tail's row is what its end summary is read from for 15
   minutes. Tailing the same trader again inside those 15 minutes continues that tail

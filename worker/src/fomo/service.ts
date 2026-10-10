@@ -113,6 +113,7 @@ import {
   type ResolveData,
   type TailData,
   type ExtendTailData,
+  type MarkData,
   type ThesisView,
   type TokenActivityData,
   type TokenRef,
@@ -3361,6 +3362,38 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
    * tails are switched off or there is no live feed, because it keeps
    * telling what nothing would tell. Local only: no provider call, ever.
    */
+  /**
+   * Record one told tail buy's entry mark for the tail leaderboard. The child
+   * calls this after a buy notice SENDS (telegram/notifier.ts): the mark and
+   * the sent log share at-most-once semantics, so a mark means "told". Local
+   * only: no provider call, ever. A repeat records nothing.
+   */
+  async function toolRecordTailMark(ic: Inv, args: ToolArgs["fomo_record_tail_mark"]): Promise<FomoEnvelope<MarkData>> {
+    const a = new Answer();
+    a.requested = { eventId: args.eventId, tokenId: args.tokenId };
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const recorded = await store.recordTailMark(db, {
+      tenant: ic.cc.tenant,
+      eventKey: args.eventId,
+      traderUserId: args.traderUserId,
+      handle: args.handle,
+      tokenKey: args.tokenId,
+      entryPrice8: args.entryPrice8,
+      entryAtMs: args.entryAtMs,
+      entryPool: args.entryPool ?? "",
+      nowMs: ic.now,
+    });
+    return finish(ic, a, {
+      cls: "profile",
+      mode: "cached-ok",
+      subject: null,
+      data: { action: "mark", eventId: args.eventId, recorded },
+      rows: recorded ? 1 : 0,
+      essential: [],
+      status: "ok",
+    });
+  }
+
   async function toolExtendTail(ic: Inv, args: ToolArgs["fomo_extend_tail"]): Promise<FomoEnvelope<ExtendTailData>> {
     const a = new Answer();
     a.requested = { trader: args.trader.kind, hours: args.hours };
@@ -3607,6 +3640,8 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         return toolUntail(ic, args as ToolArgs[typeof tool]);
       case "fomo_extend_tail":
         return toolExtendTail(ic, args as ToolArgs[typeof tool]);
+      case "fomo_record_tail_mark":
+        return toolRecordTailMark(ic, args as ToolArgs[typeof tool]);
     }
   }
 

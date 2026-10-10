@@ -221,6 +221,12 @@ export interface ChildTail {
    * while the tail runs. `capped` when the read hit its bound (a floor).
    */
   totals: { buys: number; sells: number; theses: number; coins: number; capped: boolean } | null;
+  /**
+   * The owner's settled leaderboard tally for this trader (her tails only),
+   * for the end summary; null while nothing has settled. The worker reads it
+   * from the shared store when it writes the file; the child only renders it.
+   */
+  markTally?: { calls: number; settledH1: number; avgH1Pct: number | null; hitRateH1: number | null } | null;
 }
 
 export interface ChildTailEvent {

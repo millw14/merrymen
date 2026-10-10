@@ -116,6 +116,7 @@ import {
   activeWatches,
   claimNextResearch,
   deadLetter,
+  dueTailMarks,
   enqueueResearch,
   ensureFomoSchema,
   eventsForToken,
@@ -136,6 +137,7 @@ import {
   markEventsProcessed,
   markGapRecovered,
   markRetracted,
+  markTenants,
   pruneFomo,
   publicationByIdForPass,
   publicationsByState,
@@ -151,9 +153,11 @@ import {
   routedTenants,
   setCheckpoint,
   setHeldTokens,
+  settleTailMark,
   setTenantRoute,
   subjectPublicationCount,
   sweepJobs,
+  tailMarksForTrader,
   tailOwners,
   tenantKey,
   tenantsWatching,
@@ -171,7 +175,9 @@ import {
   type StoredTraderEvidence,
 } from "./fomo/store";
 import { AlertStream, type ClockPort, type SocketLike, type StreamState, type StreamStateDetail, type TimerPort } from "./fomo/stream";
+import { readTokenPools, solanaMarkPrice } from "./venues/geckoterminal";
 import { capabilityFromStream, mergeCapability, type StreamProbe } from "./fomo/capabilities";
+import { dueHorizons, rowToMark, tallyMarks, toPrice8 } from "./fomo/tail-marks";
 import type {
   CoinDossier,
   CohortVersion,
@@ -291,6 +297,11 @@ export const TAIL_ENDED_KEEP_MS = FOMO_LIMITS.tailEndedKeepMs;
 const TAIL_EVENT_SCAN = 60;
 /** Events read to tally a whole ended tail (a floor past this, said so). */
 const TAIL_TOTALS_SCAN = 500;
+/** Tail call marks live this long for leaderboard tallies (store.ts FOMO_RETENTION.tailMarksMs). */
+const TAIL_MARKS_KEEP_MS = 90 * 86_400_000;
+/** Tenants settled per tail-marks pass, and marks settled per tenant: the pass stays a sip, never a flood. */
+const TAIL_MARKS_TENANTS = 10;
+const TAIL_MARKS_PER_TENANT = 5;
 /** Robinhood Chain token keys, for the thesis read's prefix. */
 const ROBINHOOD_KEY_PREFIX = "eip155:4663:";
 /** A replica that is not the leader asks for the lease this often. */
@@ -2000,6 +2011,73 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
    * provider call). An ended tail also carries its whole tally for the end
    * summary.
    */
+  /**
+   * One token key's top-pool USD price as an 8dp mark string. Solana mints go
+   * to GeckoTerminal's solana pools; Robinhood Chain to its pools read. Null
+   * when no pool quotes it: an unquotable horizon waits, it is never zeroed.
+   */
+  const markQuote = async (tokenKey: string): Promise<{ price8: string; atMs: number } | null> => {
+    const parts = tokenKey.split(":");
+    if (parts.length < 3) return null;
+    const namespace = parts[0];
+    const address = parts.slice(2).join(":");
+    if (namespace === "solana") {
+      const q = await solanaMarkPrice(address);
+      if (!q) return null;
+      const price8 = toPrice8(q.priceUsd);
+      return price8 ? { price8, atMs: q.at } : null;
+    }
+    if (namespace === "eip155") {
+      const pools = await readTokenPools(address.toLowerCase()).catch(() => null);
+      const priced = (pools ?? []).filter((p) => typeof p.priceUsd === "number" && p.priceUsd > 0);
+      if (priced.length === 0) return null;
+      priced.sort((a, b) => (b.reserveUsd ?? -1) - (a.reserveUsd ?? -1));
+      const price8 = toPrice8(priced[0]!.priceUsd);
+      return price8 ? { price8, atMs: Date.now() } : null;
+    }
+    return null;
+  };
+
+  /**
+   * Land due horizon re-quotes for tail call marks, across owners. One
+   * indexed tenant read, then at most a few price reads per tenant: a due
+   * horizon with no quotable pool waits for the next pass, it never blocks
+   * one. First write wins (settleTailMark), so two replicas racing settle
+   * the same mark once.
+   */
+  const settleTailMarks = async (dbConn: Db, now: number): Promise<void> => {
+    const tenants = await markTenants(dbConn, now, TAIL_MARKS_TENANTS).catch(() => []);
+    for (const tenant of tenants) {
+      const due = await dueTailMarks(dbConn, tenant, now, TAIL_MARKS_PER_TENANT).catch(() => []);
+      for (const m of due) {
+        const price = await markQuote(m.tokenKey).catch(() => null);
+        if (!price) continue;
+        const horizons = dueHorizons(
+          { eventKey: m.eventKey, traderUserId: m.traderUserId, handle: m.handle, tokenKey: m.tokenKey, entryPriceUsd: Number(m.entryPrice8), entryAtMs: m.entryAtMs,
+            h1PriceUsd: m.h1Price8 === null ? undefined : Number(m.h1Price8), h1AtMs: m.h1AtMs,
+            h24PriceUsd: m.h24Price8 === null ? undefined : Number(m.h24Price8), h24AtMs: m.h24AtMs },
+          now,
+        );
+        for (const h of horizons) {
+          await settleTailMark(dbConn, { tenant, eventKey: m.eventKey, horizon: h, price8: price.price8, atMs: price.atMs }).catch(() => false);
+        }
+      }
+    }
+  };
+
+  /**
+   * One trader's settled leaderboard tally for the child file (her tails
+   * only): the marks table read through the tally fold. Null while nothing
+   * has settled — the summary says the record, never a zero-sample average.
+   */
+  const tailTallyFor = async (dbConn: Db, tenant: string, userId: string, now: number): Promise<ChildTail["markTally"]> => {
+    const rows = await tailMarksForTrader(dbConn, tenant, userId, now - TAIL_MARKS_KEEP_MS).catch(() => []);
+    const tally = tallyMarks(rows.flatMap((r) => rowToMark(r) ?? []));
+    const t = tally.find((x) => x.traderUserId === userId) ?? null;
+    if (!t || t.settledH1 === 0) return null;
+    return { calls: t.calls, settledH1: t.settledH1, avgH1Pct: t.avgH1Pct, hitRateH1: t.hitRateH1 };
+  };
+
   const tailsBlockFor = async (tenant: string, now: number): Promise<ChildTail[]> => {
     const active = await activeTails(db, tenant, now);
     const ended = await recentlyEndedTails(db, tenant, now - TAIL_ENDED_KEEP_MS, now);
@@ -2028,9 +2106,11 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
         }
         totals = { ...tally, coins: coins.size, capped: read.length >= TAIL_TOTALS_SCAN };
       }
+      const markTally = await tailTallyFor(db, tenant, t.userId, now);
       return {
         userId: t.userId,
         handle: t.handle,
+        markTally,
         createdAt: t.createdAtMs,
         expiresAt: t.expiresAtMs,
         ended: isEnded,
@@ -2206,6 +2286,7 @@ export function makeFomoPass(deps: FomoPassDeps): FomoPass {
     // "in progress" for ever. The sweep fails it with a reason the owner can
     // be told; a live lease is left alone.
     await step("jobs-sweep", async () => void (await sweepJobs(db, clock.now())));
+    await step("tail-marks", () => settleTailMarks(db, clock.now()));
     startJobs(now);
     await step("outbox", () => runOutbox(now));
     if (now - lastPruneAt >= PRUNE_EVERY_MS) {

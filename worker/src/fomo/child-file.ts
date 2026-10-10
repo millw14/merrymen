@@ -589,7 +589,19 @@ function tailOf(v: unknown): ChildTail | null {
     consider: v.consider,
     events: events.slice(0, CHILD_FOMO_LIMITS.tailEvents),
     totals: tailTotalsOf(v.totals),
+    markTally: markTallyOf(v.markTally),
   };
+}
+
+function markTallyOf(v: unknown): ChildTail["markTally"] {
+  if (v === null || v === undefined) return null;
+  if (!isRecord(v)) return null;
+  const calls = count(v.calls);
+  const settledH1 = count(v.settledH1);
+  if (calls === null || settledH1 === null) return null;
+  const avg = typeof v.avgH1Pct === "number" && Number.isFinite(v.avgH1Pct) ? v.avgH1Pct : null;
+  const hit = typeof v.hitRateH1 === "number" && Number.isFinite(v.hitRateH1) && v.hitRateH1 >= 0 && v.hitRateH1 <= 1 ? v.hitRateH1 : null;
+  return { calls, settledH1, avgH1Pct: avg, hitRateH1: hit };
 }
 
 /**

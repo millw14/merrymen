@@ -109,6 +109,7 @@ const TOOL_FRESHNESS: Readonly<Record<FomoToolName, FreshnessClass>> = {
   fomo_tail_trader: "activity",
   fomo_untail_trader: "activity",
   fomo_extend_tail: "activity",
+  fomo_record_tail_mark: "activity",
 };
 
 /** The registered tool names (read-only and mutation), for both ends of the wire. */

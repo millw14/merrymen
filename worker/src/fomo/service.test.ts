@@ -44,6 +44,7 @@ import { FOMO_GROUP_OFF, renderEnvelope } from "./render";
 import * as store from "./store";
 import type {
   ExtendTailData,
+  MarkData,
   OpportunitiesData,
   RankingsData,
   ResearchCoinData,
@@ -1006,6 +1007,37 @@ describe("tails", () => {
 });
 
 // ── Permission, audience, configuration ─────────────────────────────────
+
+describe("tail marks", () => {
+  const MARK = {
+    traderUserId: "11111111-1111-1111-1111-111111111111",
+    eventId: "ev-1",
+    handle: "Uni",
+    tokenId: "solana:1399811149:Mint11111111111111111111111111111111111111111",
+    entryPrice8: "0.05000000",
+    entryAtMs: NOW - 30 * 60_000,
+    entryPool: "PONS / SOL",
+  };
+
+  it("records one told buy's entry mark, and a repeat records nothing", async () => {
+    const h = await harness();
+    const first = await h.invoke<MarkData>("fomo_record_tail_mark", { ...MARK });
+    assert.equal(first.status, "ok");
+    assert.deepEqual(first.data, { action: "mark", eventId: "ev-1", recorded: true });
+    const again = await h.invoke<MarkData>("fomo_record_tail_mark", { ...MARK });
+    assert.equal(again.data?.recorded, false, "a retried tell never double-books");
+    const rows = await store.tailMarksForTrader(h.db, OWNER, MARK.traderUserId, 0);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.entryPrice8, "0.05000000");
+  });
+
+  it("refuses an unshaped price without storing", async () => {
+    const h = await harness();
+    const bad = await h.invoke<MarkData>("fomo_record_tail_mark", { ...MARK, eventId: "ev-2", entryPrice8: "0.050000000" });
+    assert.equal(bad.status, "failed");
+    assert.equal((await store.tailMarksForTrader(h.db, OWNER, MARK.traderUserId, 0)).length, 0);
+  });
+});
 
 describe("the order of checks", () => {
   it("data access off: not-authorized with ZERO provider calls and no cache read", async () => {

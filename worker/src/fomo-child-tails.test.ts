@@ -35,7 +35,7 @@ const TAIL: ChildTail = {
       text: null,
     },
   ],
-  totals: null,
+  totals: null, markTally: null,
 };
 
 function rig(o: { settings?: Partial<FomoChildSettings>; live?: Partial<FomoLiveFacts>; fileAccess?: FomoAccess; tails?: ChildTail[] | undefined; off?: boolean; noFile?: boolean } = {}) {
