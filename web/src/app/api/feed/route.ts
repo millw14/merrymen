@@ -51,6 +51,9 @@ export interface EquityPoint {
 }
 export interface PositionRow {
   symbol: string;
+  /** Address and display label; symbol remains the original ledger key. */
+  token?: string | null;
+  display_symbol?: string | null;
   raw_balance: string;
   ui_multiplier: string;
   price_usd: number;

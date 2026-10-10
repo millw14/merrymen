@@ -17,6 +17,7 @@ import { describe, it } from "node:test";
 import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 import { autonomyOf } from "@merrymen/core";
 import { positionFigures, positionsOf } from "./account";
 import { idleChat } from "./test-chat";
@@ -153,4 +154,54 @@ describe("a position with a known return", () => {
     const positions = text(html).split("Positions")[1]?.split("Available cash")[0] ?? "";
     assert.equal(positions.match(/\$12\.00/g)?.length, 1, positions);
   });
+});
+
+describe("recorded token tickers on the owner's positions", () => {
+  const saved = [
+    { symbol: "TA861AA8136E", token: "0x7eebda046d451bc7a7d12491eff72a861aa8136e", displaySymbol: "SWARM" },
+    { symbol: "TF0705389870", token: "0x56910d4409f3a0c78c64dd8d0545ff0705389870", displaySymbol: "Index" },
+    { symbol: "TBEE89668018", token: "0xcb77210e1a8caac7684021b31410cbee89668018", displaySymbol: "VORTA" },
+  ];
+
+  it("the selected token's holding is matched by address, never a shared ticker", async () => {
+    const { DesktopPortfolio } = await import("./Desktop");
+    const actual = { ...cashcat, id: saved[0]!.token, symbol: "SWARM" };
+    const other = { ...cashcat, symbol: "SWARM" };
+    for (const selectedToken of [actual, other]) {
+      const html = renderToStaticMarkup(createElement(DesktopPortfolio, {
+        mine: mine([position(saved[0]!)]), tokens: [other, actual], selectedToken,
+        stopped: false, perTrade: 10, perDay: 50, onScreen: noop, onTab: noop,
+      } as never));
+      const doc = new JSDOM(html).window.document;
+      const holding = [...doc.querySelectorAll(".desktop-cash")].find(row => row.textContent?.startsWith("Your position"));
+      assert.equal(holding?.querySelector("strong")?.textContent, selectedToken === actual ? "$12.00" : "Not held");
+    }
+  });
+
+  for (const surface of ["desktop", "agent"] as const) {
+    it(`${surface} prints actual cashtags, values and returns even when tokens are no longer listed`, async () => {
+      const { DesktopPortfolio } = await import("./Desktop");
+      const { Agent } = await import("./screens/Agent");
+      const props = {
+        mine: mine(saved.map(p => position(p))), tokens: [], stopped: false,
+        perTrade: 10, perDay: 50, chat: idleChat, onScreen: noop, onTab: noop,
+        onToken: noop, onDeposit: noop, onWithdraw: noop, onLimits: noop,
+        onResign: noop, onSettings: noop,
+      };
+      const html = renderToStaticMarkup(surface === "desktop"
+        ? createElement(DesktopPortfolio, props as never)
+        : createElement(Agent, props as never));
+      const doc = new JSDOM(html).window.document;
+      const rows = [...doc.querySelectorAll(surface === "desktop" ? ".desktop-position" : ".desk-position")];
+      assert.equal(rows.length, 3);
+      rows.forEach((row, i) => {
+        assert.equal(row.querySelector("strong")?.textContent, `$${saved[i]!.displaySymbol}`);
+        assert.equal(row.querySelector("strong")?.getAttribute("title"), saved[i]!.token);
+        assert.ok(!row.textContent?.includes(saved[i]!.symbol), "bookkeeping IDs are not visible");
+        assert.match(row.textContent ?? "", /\$12\.00/);
+        assert.match(row.textContent ?? "", /\+20\.00%/);
+        assert.ok(row.hasAttribute("disabled"), "an unlisted coin cannot navigate to another token");
+      });
+    });
+  }
 });

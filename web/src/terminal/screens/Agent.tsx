@@ -25,6 +25,7 @@ import {
   type ChatMessage,
 } from "../account";
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
+import { positionLabel, tokenForPosition } from "../position-token";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
 import { NameChip } from "../NameChip";
@@ -761,9 +762,8 @@ export function Agent({
                   <Empty compact kind="positions" title={recovery ? "Saved positions pending reconciliation." : "No positions reported yet."}/>
                 )}
                 {positions.map((p) => {
-                  const token = tokens.find(
-                    (t) => t.symbol.toUpperCase() === p.symbol.toUpperCase(),
-                  );
+                  const token = tokenForPosition(p, tokens);
+                  const label = positionLabel(p);
                   // The value AND the %, never one standing in for the other:
                   // the small line prints the coin's name when it is listed, so
                   // this is the only place on the row the money figure can be.
@@ -772,13 +772,13 @@ export function Agent({
                     <button
                       type="button"
                       className="desk-position"
-                      key={p.symbol}
+                      key={p.token ?? p.symbol}
                       disabled={!token}
                       onClick={() => token && onToken(token.id)}
                     >
-                      <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
+                      <Coin symbol={label.replace(/^\$/, "")} logo={token?.logo ?? ""} />
                       <span>
-                        <strong>{p.symbol}</strong>
+                        <strong title={p.token ?? undefined}>{label}</strong>
                         {/* The coin's name when it is listed. Not the detail: that is
                             printed on the right now, and would read twice. */}
                         {token?.name ? <small>{token.name}</small> : null}

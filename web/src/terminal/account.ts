@@ -1,5 +1,6 @@
 import {money, pctPts, type LiveMine, type Thesis} from "./live";
 import type { OrderReceipt } from "@/lib/order-state";
+import type { PositionIdentity } from "./position-token";
 
 /**
  * A QUESTION AND ITS ANSWER — the shape the chat was stored in before it had
@@ -83,7 +84,12 @@ export function spentToday(mine: Pick<LiveMine, "moves">, now: number): number {
   }, 0);
 }
 
-export function positionsOf(mine: Pick<LiveMine, "positions" | "glance">) {
+interface PositionView extends PositionIdentity {
+  detail: string;
+  pnl: number | null;
+}
+
+export function positionsOf(mine: Pick<LiveMine, "positions" | "glance">): PositionView[] {
   // THE POSITION'S OWN %, which mineOf computed from the recorded cost and this
   // mapping threw away as `pnl: null` — so the desk never showed one. Null
   // stays null and says why: no cost on record is "cost unknown", never 0%.
@@ -104,6 +110,7 @@ export function positionsOf(mine: Pick<LiveMine, "positions" | "glance">) {
   if(mine.positions) return mine.positions.filter(p=>p.valueUsd>0).map(p=>{
     const unconfirmed = p.costUsd !== null && p.costFromQuote !== false;
     return {symbol:p.symbol,
+      token:p.token, displaySymbol:p.displaySymbol,
       detail:`${money(p.valueUsd)}${p.stale ? " · last mark" : ""}${p.costUsd === null ? " · cost unknown" : unconfirmed ? " · cost unconfirmed" : ""}`,
       pnl:!p.stale && !unconfirmed && p.pnlPct !== null && Number.isFinite(p.pnlPct) ? p.pnlPct : null};
   });

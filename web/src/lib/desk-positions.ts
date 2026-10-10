@@ -9,9 +9,13 @@
 import type { Db } from "../../../worker/src/db";
 import { basisUsdg } from "./basis-usdg";
 import { distinctTrades } from "./distinct-trades";
+import { positionTokenAddress, readPositionLabels } from "./position-labels";
 
 export interface DeskPositionRow {
   symbol: string;
+  /** Full address and saved fill label, for display only. `symbol` remains the ledger key. */
+  token?: string | null;
+  display_symbol?: string | null;
   raw_balance: string;
   ui_multiplier: string;
   price_usd: number;
@@ -185,7 +189,7 @@ export async function readCostFromQuote(
  * THROWS only when the positions table itself cannot be read.
  */
 export async function readDeskPositions(db: Db, account: string, book: "paper" | "live"): Promise<DeskPositionRow[]> {
-  let rows: (DeskPositionRow & { token?: string | null })[];
+  let rows: DeskPositionRow[];
   try {
     rows = (await db
       .prepare(
@@ -201,7 +205,7 @@ export async function readDeskPositions(db: Db, account: string, book: "paper" |
              ON f.agent_id = p.agent_id AND f.symbol = p.symbol AND f.mode = ?
           WHERE p.agent_id = ? ORDER BY p.value_usdg DESC`,
       )
-      .all(book, book, account)) as unknown as (DeskPositionRow & { token?: string | null })[];
+      .all(book, book, account)) as unknown as DeskPositionRow[];
   } catch {
     // price_source arrives with a worker migration. The dashboard can be
     // running against a database the upgraded worker hasn't opened yet, and
@@ -229,13 +233,17 @@ export async function readDeskPositions(db: Db, account: string, book: "paper" |
   } catch {
     provenance = null;
   }
+  const labels = await readPositionLabels(db, account, book, rows.map((r) => r.token));
   return rows.map(({ token, ...p }) => {
     // MICRO-USDG → USDG at the boundary, so no browser has to know the column
     // keeps a different unit from every other money field on this response.
     const cost = basisUsdg((p as { cost_usdg?: unknown }).cost_usdg);
     const known = provenance && token ? provenance.get(token.toLowerCase()) : undefined;
+    const address = positionTokenAddress(token);
     return {
       ...p,
+      token: address,
+      display_symbol: address ? labels.get(address) ?? null : null,
       cost_usdg: cost,
       cost_from_quote: cost === null ? null : known === undefined ? null : known,
     };
