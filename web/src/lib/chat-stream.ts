@@ -65,6 +65,8 @@ export interface StreamedReply {
   kind?: string;
   provider?: string;
   detail?: string;
+  /** For a model failure: the account that failed is the house's, not the owner's (agent-chat.ts onHouseAccount). */
+  house?: boolean;
 }
 
 /**
@@ -125,6 +127,9 @@ export async function readReplyStream(
         ...text("kind"),
         ...text("provider"),
         ...text("detail"),
+        // The one field that is not a string, so `text` would drop it — and a
+        // failure on the house's key would be said as the owner's to fix.
+        ...(typeof payload.house === "boolean" ? { house: payload.house } : {}),
       };
     }
     return null;

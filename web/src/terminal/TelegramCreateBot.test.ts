@@ -23,12 +23,14 @@ let opened: number;
 let popup: Window | null;
 let closed: number;
 let navigations: string[];
+let availabilities: (boolean | null)[];
 const intent = (status = "waiting_telegram", extra: Record<string, unknown> = {}) => ({ id: ID, status, expiresAt: Date.now() + 60_000, botUsername: status === "confirm" || status === "connected" ? "merrymen_testbot" : null, botId: status === "confirm" || status === "connected" ? "1234567" : null, ...extra });
 const post = (call: Call) => JSON.parse(String(call.init?.body)) as Record<string, unknown>;
 const posts = () => calls.filter(call => call.init?.method === "POST");
 const drain = () => act(async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); });
 async function advance(ms: number) { await act(async () => mock.timers.tick(ms)); await drain(); }
-const render = (owner: string | null = OWNER) => ui.render(React.createElement(TelegramCreateBot, { owner, hasBot, onActiveChange: value => active.push(value), onConnected: async (scope, signal) => { refreshed.push({ owner: scope, signal }); await refresh(); }, onIntentMissing: async (scope, signal) => { reconciled.push({ owner: scope, signal }); await reconcile(); } }));
+const render = (owner: string | null = OWNER) => ui.render(React.createElement(TelegramCreateBot, { owner, hasBot, onActiveChange: value => active.push(value), onAvailableChange: value => availabilities.push(value), onConnected: async (scope, signal) => { refreshed.push({ owner: scope, signal }); await refresh(); }, onIntentMissing: async (scope, signal) => { reconciled.push({ owner: scope, signal }); await reconcile(); } }));
+const buttons = () => [...ui.container.querySelectorAll("button")].map(button => button.textContent);
 
 beforeEach(() => {
   ui = testDom();
@@ -40,6 +42,7 @@ beforeEach(() => {
   hasBot = false;
   opened = closed = 0;
   navigations = [];
+  availabilities = [];
   popup = null;
   ui.dom.window.open = () => { opened++; return popup; };
   refresh = async () => {};
@@ -117,8 +120,8 @@ describe("Telegram bot creation through the actual client component", () => {
     assert.deepEqual(post(posts()[1]), { action: "confirm", owner: OWNER, intentId: ID, botId: "1234567" });
     assert.equal(refreshed.length, 1);
     assert.equal(refreshed[0].owner, OWNER);
-    assert.match(ui.container.textContent ?? "", /Open your bot below to finish linking Telegram/);
-    assert.doesNotMatch(ui.container.textContent ?? "", /listening|private reports/i);
+    assert.match(ui.container.textContent ?? "", /Bot saved as @merrymen_testbot\. It answers once your agent is running/);
+    assert.doesNotMatch(ui.container.textContent ?? "", /listening|private reports|connected/i, "saved is not live: the worker has to run first");
     assert.equal(localStorage.getItem(storageKey(OWNER)), null);
     assert.equal(active.at(-1), false);
   });
@@ -144,6 +147,98 @@ describe("Telegram bot creation through the actual client component", () => {
     assert.equal(localStorage.getItem(storageKey(OWNER)), null);
     assert.equal(active.at(-1), false);
     assert.ok([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"));
+  });
+
+  it("releases Save, after a Settings readback, when creation became unavailable while a setup id was stored", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: false });
+    const readback = deferred<void>();
+    reconcile = () => readback.promise;
+    await render(); await drain();
+    assert.equal(reconciled.length, 1, "the bot may have been saved: Settings is read back before letting go");
+    assert.equal(active.at(-1), true);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    readback.resolve(); await drain();
+    assert.equal(active.at(-1), false, "Save is released, not held forever");
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.equal(calls.length, 1, "the unavailable answer already says what a recheck would");
+    assert.match(ui.container.textContent ?? "", /Bot creation isn't available right now/);
+    assert.doesNotMatch(ui.container.textContent ?? "", /Couldn't check|setup changed/i);
+    assert.equal(buttons().includes("Create Telegram bot"), false);
+    assert.equal(availabilities.at(-1), false);
+  });
+
+  it("keeps the hold while that readback fails, and lets go once it succeeds", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: false });
+    reconcile = async () => { throw new Error("Settings unavailable"); };
+    await render(); await drain();
+    assert.equal(active.at(-1), true);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    reconcile = async () => {};
+    await ui.click("Try again"); await drain();
+    assert.equal(reconciled.length, 2);
+    assert.equal(active.at(-1), false);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+  });
+
+  it("forgets a stored setup that reads back expired or cancelled, with nothing to reconcile", async () => {
+    for (const status of ["expired", "cancelled"]) {
+      localStorage.setItem(storageKey(OWNER), ID);
+      respond = async () => json({ available: true, intent: intent(status) });
+      await ui.remount(React.createElement(TelegramCreateBot, { owner: OWNER, hasBot: false, onActiveChange: value => active.push(value), onConnected: async () => {}, onIntentMissing: async () => { assert.fail("an end this browser never confirmed saved nothing"); } }));
+      await drain();
+      assert.equal(localStorage.getItem(storageKey(OWNER)), null, `${status} is forgotten`);
+      assert.equal(active.at(-1), false);
+      assert.ok(buttons().includes("Create Telegram bot"));
+    }
+  });
+
+  it("reads Settings back before forgetting a setup that expired after this tab asked to confirm", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async call => call.init?.method === "POST" ? Promise.reject(new Error("lost confirmation")) : json({ available: true, intent: intent("confirm") });
+    await render();
+    await ui.click("Connect this bot");
+    const readback = deferred<void>();
+    reconcile = () => readback.promise;
+    respond = async () => json({ available: true, intent: intent("expired") });
+    await ui.click("Try again"); await drain();
+    assert.equal(reconciled.length, 1);
+    assert.equal(active.at(-1), true, "the confirmation may have committed just before the row expired");
+    assert.equal(localStorage.getItem(storageKey(OWNER)), ID);
+    readback.resolve(); await drain();
+    assert.equal(active.at(-1), false);
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.match(ui.container.textContent ?? "", /setup expired/);
+    assert.ok(buttons().includes("Create Telegram bot"));
+  });
+
+  it("tells Settings whether creation can start, so the manual path can lead when it can't", async () => {
+    respond = async () => json({ available: false });
+    await render();
+    assert.equal(availabilities.at(-1), false);
+    respond = async () => json({ available: true });
+    await ui.remount(React.createElement(TelegramCreateBot, { owner: OWNER, hasBot: false, onAvailableChange: value => availabilities.push(value), onConnected: async () => {}, onIntentMissing: async () => {} }));
+    assert.equal(availabilities.at(-1), true);
+  });
+
+  it("reports creation unavailable when the availability check itself fails, and offers no Create button", async () => {
+    respond = async () => Promise.reject(new Error("network down"));
+    await render(); await drain();
+    assert.equal(availabilities.at(-1), false);
+    assert.equal(buttons().includes("Create Telegram bot"), false);
+    assert.ok(buttons().includes("Try again"));
+    assert.equal(active.at(-1), false, "a failed check with no setup stored holds nothing");
+  });
+
+  it("says creation is unavailable beside a stored setup that ended, rather than nothing", async () => {
+    localStorage.setItem(storageKey(OWNER), ID);
+    respond = async () => json({ available: false, intent: intent("expired") });
+    await render(); await drain();
+    assert.equal(localStorage.getItem(storageKey(OWNER)), null);
+    assert.match(ui.container.textContent ?? "", /Bot creation isn't available right now/);
+    assert.equal(buttons().includes("Create Telegram bot"), false);
+    assert.equal(active.at(-1), false);
   });
 
   it("clears malformed persisted IDs and checks availability without sending them", async () => {

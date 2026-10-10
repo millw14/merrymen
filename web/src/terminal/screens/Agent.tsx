@@ -560,7 +560,6 @@ export function Agent({
   const silence = notRunningNote(displayedAutonomy);
   return (
     <div className="desk-page">
-      <RecoveryNotice recovery={recovery}/>
       {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
           The sentence existed — status-line.ts has had a testnet branch for
           months — but it renders on /you, and an owner who thinks their agent
@@ -848,6 +847,13 @@ export function Agent({
           setAway(isAway);
         }}
       >
+        {/* THE RECOVERY CARD SCROLLS WITH THE THREAD, like the announcements
+            below. Pinned as the page's first child, its four parts were the
+            tallest thing on a phone's Chat tab and the conversation got two
+            lines — "chatting on mobile is a headache". What must not be
+            scrolled past stays pinned: the RECOVERING pill in the header, and
+            "Last recorded agent balance · Reconciliation pending" on the figure. */}
+        <RecoveryNotice recovery={recovery}/>
         {!recovery && <TrencherAnnouncement hasAgent={!!mine} />}
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only

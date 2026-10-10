@@ -94,7 +94,8 @@ describe("owner recovery presentation", () => {
       onWithdraw: noop, onLimits: noop, onResign: noop, onSettings: noop }));
     assert.equal(page.querySelector(".desk-status")!.textContent, "RECOVERING");
     assert.ok(page.querySelector(".desk-status")!.classList.contains("paused"));
-    assert.match(page.body.textContent!, /Trading paused for recovery.*Last recorded agent balance/);
+    // The card scrolls with the thread (chat-room.test.ts); the pill and the qualified balance stay pinned.
+    assert.match(page.querySelector(".desk-conversation > .agent-recovery")!.textContent!, /Trading paused for recovery/);
     assert.equal(page.querySelector(".portfolio-summary .recovery-balance-label")!.textContent, "Last recorded agent balance");
     assert.equal(page.querySelector(".desk-blocked"), null);
     assert.equal(page.querySelector(".desk-confirm"), null);

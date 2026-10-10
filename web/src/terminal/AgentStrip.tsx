@@ -19,6 +19,12 @@
  * question the buried settings were failing to answer ("is this actually on,
  * and if not, what do I do?") and leaves the changing where it already is.
  *
+ * ONE EXCEPTION, TELEGRAM'S SETUP. The owner later asked for "a single button
+ * on home that takes care of telegram completely", so the Telegram row carries
+ * the next step's button (see TelegramLine). It sets up, connects, turns on
+ * and links the bot; it is not a second copy of any setting, and everything
+ * else about Telegram is still changed in Settings.
+ *
  * ── WHY IT FETCHES ITS OWN DATA ──────────────────────────────────────────
  *
  * `SetupChecklist` — the existing quiet status strip — does the same, and it
@@ -53,7 +59,7 @@
  * element under a lead-in line, and every message here stays plain text.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n";
 import { shortDateTime } from "@/lib/format";
@@ -61,37 +67,81 @@ import { heldNotice, telegramRow, trencherRow, type TelegramRow, type TrencherRo
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import { RecoveryNotice } from "./RecoveryNotice";
+import { TelegramCreateBot } from "./TelegramCreateBot";
 import { pausedRecovery, recoveryTelegram, type RecoveryFunds } from "./recovery-view";
 
 interface SettingsShape {
+  /** Hosted: the signed-in tenant the values were read for. Null self-hosted. */
+  owner?: string | null;
   values?: { strategy?: string | null; trencherLiveEnabled?: boolean | null; assetMode?: string | null };
 }
+
+/** How often Home re-reads Telegram while a step is waiting on the agent or on Telegram. */
+const TG_POLL_MS = 4000;
+/** And for how long, so a tab left open does not poll forever. */
+const TG_POLL_FOR_MS = 15 * 60_000;
 
 export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; recovery?: FleetRecoveryView | null; funds?: RecoveryFunds | null }) {
   const t = useT();
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
+  const [owner, setOwner] = useState<string | null>(null);
+  /** True while Home's one Telegram button is mid-setup (TelegramCreateBot's onActiveChange). */
+  const [creating, setCreating] = useState(false);
+  const live = useRef(true);
+  useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
+
+  /**
+   * RE-READ TELEGRAM. Resolves true only when a status landed, so the one
+   * button's "bot connected" step can tell a refresh that worked from one
+   * that didn't. A failure leaves the last reading in place.
+   */
+  const refreshTg = useCallback(async (): Promise<boolean> => {
+    try {
+      const r = await fetch("/api/telegram");
+      if (!r.ok) return false;
+      const s = (await r.json()) as TelegramStatus;
+      if (live.current && s) setTg(s);
+      return !!s;
+    } catch { return false; }
+  }, []);
 
   useEffect(() => {
     if (!hasAgent) return;
-    let live = true;
     // BEST EFFORT, BOTH OF THEM. A rejected promise or a non-ok response
     // leaves the state null, which reads as "unread" and prints "checking…".
     // Nothing here may throw into the home screen's render.
-    void fetch("/api/telegram")
-      .then((r) => (r.ok ? (r.json() as Promise<TelegramStatus>) : null))
-      .then((s) => { if (live && s) setTg(s); })
-      .catch(() => {});
+    void refreshTg();
     void fetch("/api/settings")
       .then((r) => (r.ok ? (r.json() as Promise<SettingsShape>) : null))
-      .then((s) => { if (live && s?.values) setSettings(s.values); })
+      .then((s) => {
+        if (!live.current || !s) return;
+        if (s.values) setSettings(s.values);
+        setOwner(typeof s.owner === "string" && /^0x[0-9a-f]{40}$/i.test(s.owner) ? s.owner : null);
+      })
       .catch(() => {});
-    return () => { live = false; };
-  }, [hasAgent]);
+  }, [hasAgent, refreshTg]);
+
+  const row = telegramRow(tg);
+
+  /**
+   * THE ONE BUTTON'S LATER STEPS WAIT ON SOMEBODY ELSE: the agent picking the
+   * bot up and minting its link code, then the owner pressing Start in
+   * Telegram. Re-read while either is pending, and when the owner comes back
+   * to this tab from Telegram, so the button moves on without a reload.
+   */
+  const waiting = hasAgent && row.kind === "unlinked";
+  useEffect(() => {
+    if (!waiting) return;
+    const until = Date.now() + TG_POLL_FOR_MS;
+    const timer = setInterval(() => { if (Date.now() > until) clearInterval(timer); else void refreshTg(); }, TG_POLL_MS);
+    const back = () => { if (document.visibilityState === "visible") void refreshTg(); };
+    document.addEventListener("visibilitychange", back);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", back); };
+  }, [waiting, refreshTg]);
 
   if (!hasAgent) return null;
 
-  const row = telegramRow(tg);
   const held = heldNotice(tg, row);
   const recovering = pausedRecovery(recovery);
   const bot = recoveryTelegram(tg);
@@ -104,7 +154,7 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
         <Row tone="quiet" label="Trencher" value="Trading paused"/>
       </> : <>
         {held !== null ? <HeldLine reason={held} /> : null}
-        <TelegramLine row={row} />
+        <TelegramLine row={row} owner={owner} creating={creating} onCreating={setCreating} refresh={refreshTg} />
         <TrencherLine row={trencherRow(settings)} />
       </>}
     </section>
@@ -126,21 +176,54 @@ function HeldLine({ reason }: { reason: string }) {
   );
 }
 
-function TelegramLine({ row }: { row: TelegramRow }) {
+/**
+ * ONE BUTTON THAT TAKES CARE OF TELEGRAM. The owner's words: "I need a single
+ * button on home that takes care of telegram completely."
+ *
+ * So the step the owner is on is a single primary control on this row, and it
+ * moves on by itself: Set up Telegram (creates the bot in Telegram, no token
+ * to copy) → Connect @bot → Open my bot (carries the link code, so pressing
+ * Start in Telegram links the chat) → connected. A bot that is saved but
+ * switched off gets Turn on Telegram. Where one press can't fix it (another
+ * agent holds the bot, the token was refused), the row still says why and
+ * links to Settings, which stays the one place to change everything else.
+ *
+ * The create step is TelegramCreateBot itself, drawn compact: the same
+ * server flow and checks as Settings, not a second implementation. It stays
+ * mounted while a setup is in flight even after the token lands, so it can
+ * finish and forget its stored setup before the row moves on.
+ */
+function TelegramLine({ row, owner, creating, onCreating, refresh }: {
+  row: TelegramRow;
+  owner: string | null;
+  creating: boolean;
+  onCreating: (active: boolean) => void;
+  refresh: () => Promise<boolean>;
+}) {
   const t = useT();
+  if (owner && (row.kind === "no-token" || creating)) {
+    const reread = async () => { if (!(await refresh())) throw new Error("Telegram status unavailable"); };
+    return (
+      <Row tone="quiet" label="Telegram" value={row.kind === "no-token" ? t("strip.tg.notSetUp") : t("strip.tg.startingUp")}
+        action={<TelegramCreateBot compact owner={owner} hasBot={row.kind !== "no-token" && row.kind !== "unread"}
+          onActiveChange={onCreating} onConnected={reread} onIntentMissing={reread} />}
+      />
+    );
+  }
   switch (row.kind) {
     case "unread":
       return <Row tone="quiet" label="Telegram" value={t("strip.checking")} />;
     case "no-token":
+      // Self-hosted (no signed-in owner to create for): the manual path.
       return (
         <Row tone="quiet" label="Telegram" value={t("strip.tg.notSetUp")}
-          action={<Link href="/settings#telegram">{t("strip.tg.connect")}</Link>}
+          action={<Link className="mm-btn primary" href="/settings#telegram">Connect Telegram</Link>}
         />
       );
     case "off":
       return (
         <Row tone="warn" label="Telegram" value={t("strip.tg.off")}
-          action={<Link href="/settings#telegram">{t("strip.tg.turnOn")}</Link>}
+          action={<TurnOnTelegram owner={owner} refresh={refresh} />}
         />
       );
     case "unverified":
@@ -184,9 +267,12 @@ function TelegramLine({ row }: { row: TelegramRow }) {
         <Row tone="warn" label="Telegram" value={row.linkCode ? t("strip.tg.ready") : t("strip.tg.startingUp")}
           action={
             row.linkCode ? (
-              <LinkCode code={row.linkCode} botUsername={row.botUsername} />
+              <LinkCode code={row.linkCode} botUsername={row.botUsername} primary />
             ) : (
-              <span className="mm-hint">{row.linkPending ? t("strip.tg.pickingUp") : t("strip.tg.noCodeYet")}</span>
+              <>
+                <button type="button" className="mm-btn primary" disabled>Starting your bot…</button>
+                <span className="mm-hint">{row.linkPending ? t("strip.tg.pickingUp") : t("strip.tg.noCodeYet")}</span>
+              </>
             )
           }
         />
@@ -254,16 +340,20 @@ function TelegramLine({ row }: { row: TelegramRow }) {
   }
 }
 
-/** The code, the way to send it, and the warning that goes with it. Shared by every row that shows one. */
-function LinkCode({ code, botUsername }: { code: string; botUsername: string | null }) {
+/**
+ * The code, the way to send it, and the warning that goes with it. Shared by
+ * every row that shows one. `primary`: the row's one button (unlinked), so
+ * the deep link is drawn as it; pressing Start in Telegram sends the code.
+ */
+function LinkCode({ code, botUsername, primary = false }: { code: string; botUsername: string | null; primary?: boolean }) {
   const t = useT();
   return (
     <>
       {botUsername ? (
         // Carries the code into the chat instead of asking somebody
         // to retype it, the way the mobile client already does.
-        <a href={`https://t.me/${botUsername}?start=${code}`} target="_blank" rel="noreferrer">
-          {t("strip.tg.open")}
+        <a className={primary ? "mm-btn primary" : undefined} href={`https://t.me/${botUsername}?start=${code}`} target="_blank" rel="noreferrer">
+          {primary ? "Open my bot" : t("strip.tg.open")}
         </a>
       ) : null}
       <span className="mm-hint">{t("strip.tg.sendThis")}</span>
@@ -272,6 +362,41 @@ function LinkCode({ code, botUsername }: { code: string; botUsername: string | n
           of reach of a translator's autocorrect. */}
       <code>/link {code}</code>
       <span className="mm-hint">{t("strip.tg.codeWarning")}</span>
+    </>
+  );
+}
+
+/**
+ * A SAVED BOT THAT IS SWITCHED OFF, turned on from here: the one setting this
+ * press changes, for the owner Settings was read for (the route refuses a
+ * different signed-in wallet), then the row re-reads what the server says.
+ */
+function TurnOnTelegram({ owner, refresh }: { owner: string | null; refresh: () => Promise<boolean> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function turnOn() {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(owner ? { telegramEnabled: true, owner } : { telegramEnabled: true }),
+      });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => null)) as { errors?: unknown } | null;
+        const first = Array.isArray(body?.errors) && typeof body.errors[0] === "string" ? body.errors[0] : null;
+        throw new Error(first ?? "Couldn't turn Telegram on. Try again.");
+      }
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : "Couldn't turn Telegram on. Try again.");
+    } finally { setBusy(false); }
+  }
+  return (
+    <>
+      <button type="button" className="mm-btn primary" disabled={busy} onClick={() => void turnOn()}>{busy ? "Turning on…" : "Turn on Telegram"}</button>
+      {error ? <span className="mm-danger" role="alert">{error}</span> : null}
     </>
   );
 }

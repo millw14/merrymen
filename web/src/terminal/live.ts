@@ -297,6 +297,14 @@ export interface LiveMine {
    * book. Computed once in App.tsx from /api/grants, never re-derived.
    */
   autonomy: import("@merrymen/core").Autonomy;
+  /**
+   * Has any heartbeat of this agent's worker ever reached us — `workerAliveAt`
+   * on the same /api/grants answer, set once in App.tsx (workerHeardFromOf).
+   * False only when that answer said null; absent or null where nobody read
+   * it, or the server never said, and the chat then claims neither way
+   * (chat-payload.ts).
+   */
+  workerHeardFrom?: boolean | null;
   /** Owner-only, proven recovery hold. Saved records are not current trading authority. */
   recovery?: FleetRecoveryView | null;
   /**

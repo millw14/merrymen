@@ -737,7 +737,7 @@ html[lang|="ko"] .terminal-host {
   --sans: "Geist Numerals", "DM Sans", system-ui, sans-serif;
   --pixel: "Geist Pixel", ui-monospace, monospace;
   --mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  --nav: 76px;
+  --nav: 76px; /* the old 52px bar's sum; phones derive it from the real bar in polish.css */
   --r: 16px;
   --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
 }
@@ -4014,14 +4014,19 @@ html[lang|="ko"] .terminal-host {
   scrollbar-width: thin;
 }
 :where(.terminal-host) .desk-page > .desk-conversation {
-  /* A FLOOR, SO THE CHAT CANNOT BE SQUEEZED OUT OF EXISTENCE.
-     `min-height: 0` let this flex child give up ALL its space to a tall
-     sibling: measured with a proposals card present, the conversation was
-     twelve pixels tall on a 1536x742 desktop. Zero is the right value for a
-     child that must be allowed to shrink; it is the wrong value for the one
-     the screen is named after. It keeps its own scroller either way, which is
-     what the auto-follow in Agent.tsx writes scrollTop to. */
-  min-height: 220px;
+  /* THE FLOOR THAT NEVER HELD. This block carried `min-height: 220px` ("so
+     the chat cannot be squeezed out of existence" — twelve pixels, measured on
+     a 1536x742 desktop with a proposals card), and the next day 1b4ea3e's
+     more specific `.body > .desk-page > .desk-conversation { min-height: 0 }`
+     above zeroed it on every surface, for the reason given there: inside a
+     shell that clips, a floor pushes the composer out of reach. A test went
+     on pinning the dead text while a phone in the recovery state measured
+     sixty-nine pixels of conversation.
+
+     A floor only holds where the shell scrolls when it is reached, so it lives
+     where that is true: the phone's rule in polish.css. Here the conversation
+     keeps its own scroller, which is what the auto-follow in Agent.tsx writes
+     scrollTop to. */
   overflow-y: auto;
   padding: 0 0 8px;
   scrollbar-width: thin;
@@ -7852,13 +7857,6 @@ html[lang|="ko"] .terminal-host {
 }
 :where(.terminal-host) .proposals-fold:hover { color: var(--tx); }
 
-/* ── and the conversation keeps a floor ───────────────────────────────────
-   `.body > .desk-page` is a fixed-height grid whose only flexible track is the
-   conversation, so every banner above it comes straight out of the one area
-   the screen exists for. A floor means an extra banner scrolls the page
-   instead of eating the chat. */
-
-
 /* ── the desktop chat dock ────────────────────────────────────────────────
    Reported: "for pc can you make the chat more easy? like maybe aligning it to
    the right like a small popup that can be moved around", and separately "i
@@ -8466,7 +8464,8 @@ html[lang|="ko"] .terminal-host {
 }
 
 /* ── WHAT IS CONNECTED, ON THE HOME SCREEN ──────────────────────────────────
-   A reading, not a control panel, so it is styled as a list of facts rather
+   A reading, plus Telegram's one button (see AgentStrip TelegramLine), not a
+   control panel, so it is styled as a list of facts rather
    than as a card competing with the hero above it. One quiet rule between
    rows; no border, no fill, no shadow — those say "separate object", and this
    belongs to the screen it sits on.
@@ -8543,6 +8542,49 @@ html[lang|="ko"] .terminal-host {
 :where(.terminal-host) .agent-strip-action code {
   white-space: nowrap;
   user-select: all;
+}
+/* THE ONE TELEGRAM BUTTON. `.mm-btn` is only styled inside the form page (see
+   .resign-actions above), so the strip gives its single primary control the
+   same geometry as Home's Deposit: full width, the inverted pill, 48px tall,
+   so it reads as the next thing to press. Cancel is a quiet text link beside
+   it, never a second button competing with it. */
+:where(.terminal-host) .agent-strip-action > .mm-btn.primary,
+:where(.terminal-host) .agent-strip-action .tg-one > .mm-btn.primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--tx);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+:where(.terminal-host) .agent-strip-action .mm-btn.primary:disabled {
+  opacity: .55;
+  cursor: default;
+}
+:where(.terminal-host) .agent-strip-action .tg-one {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  width: 100%;
+}
+:where(.terminal-host) .agent-strip-action .tg-one p { margin: 0; flex-basis: 100%; }
+:where(.terminal-host) .tg-one-cancel {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tx-2);
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 /* ══ WAVE 2 — THE FEED ROW ════════════════════════════════════════════════

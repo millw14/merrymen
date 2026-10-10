@@ -30,10 +30,26 @@
  *
  * NOT FOR THE PUBLIC FEED. Every sentence here names a remedy or a provider;
  * `thesis-policy.ts` keeps both off the public row on purpose.
+ *
+ * ── A BILL NOBODY PAID IS NOT "A REASON I DON'T RECOGNISE" ───────────────
+ *
+ * On 2026-10-09 a tester started a new hosted agent and every chat message
+ * answered "My brain couldn't answer that time, for a reason I don't
+ * recognise. If asking again gets the same, its setup needs a look." Every
+ * house-key call in production was failing with
+ *
+ *     groq 400 — organization_delinquent: Organization has been restricted
+ *     because of overdue payment(s). Please update the payment method at …
+ *
+ * — a 400, so none of the buckets below caught it, and the owner was sent to
+ * look at a setup with nothing wrong in it. Nothing logged it either; it took
+ * production log archaeology to find. A provider holding the account for
+ * money is its own kind ("billing"), and it does not pass on its own.
  */
 
 export type LlmFailureKind =
   | "key-rejected"
+  | "billing"
   | "rate-limited"
   | "provider-down"
   | "unreachable"
@@ -54,6 +70,35 @@ export interface LlmFailure {
  * tool-call path now uses `providerError` too, so the colon form is legacy.
  */
 const PROVIDER_LINE = /^(\w[\w-]*)\s+(\d{3})(?:\s*[—:]\s*(.*))?$/s;
+
+/**
+ * THE ACCOUNT BEHIND THE KEY IS ON HOLD FOR MONEY — each provider's own words
+ * for it: Groq's organization_delinquent ("overdue payment(s)"), OpenAI's
+ * insufficient_quota, Anthropic's "credit balance is too low", OpenRouter's
+ * "Insufficient credits" and "requires more credits". A 402 says it too.
+ *
+ * NAMED CONDITIONS ONLY, NEVER THE WORD "BILLING" OR A BILLING URL. Groq's
+ * ordinary daily rate limit is a 429 that ends "Need more tokens? Upgrade to
+ * Dev Tier today at https://console.groq.com/settings/billing", and Gemini's
+ * per-minute limit says "check your plan and billing details": both pass on
+ * their own, and calling them a billing hold would stop the retry that fixes
+ * them. Nor "exceeded your current quota", which is OpenAI's billing message
+ * and Gemini's rate limit in the same words — OpenAI's code is what tells them
+ * apart.
+ */
+const BILLING_HOLD = /organization_delinquent|overdue payment|insufficient_quota|credit balance is too low|insufficient[_ ]credits|requires more credits/i;
+
+/**
+ * THE HOLDER GATEWAY'S UPSTREAM IS THE HOUSE'S. The "merrymen" provider is our
+ * own gateway (gateway/lib/core.mjs chat), which forces the model and relays
+ * the upstream's status and body as they came. So on 2026-10-09 the house
+ * Groq account's organization_delinquent reached every holder as
+ * "merrymen 400 — organization_delinquent", and they were told to settle a
+ * bill with Merrymen — for a perk that has no bill. A held account or a missing
+ * model there is ours, whoever's holder token asked; a refused token is not
+ * (the gateway's own 401 is an expired claim), so that one keeps its words.
+ */
+export const HOUSE_GATEWAY = "merrymen";
 
 /**
  * Did this error come back from a model provider?
@@ -93,6 +138,28 @@ export function describeLlmFailure(message: string): LlmFailure {
   const detail = m[3] ?? "";
   const name = provider.charAt(0).toUpperCase() + provider.slice(1);
 
+  // BEFORE THE KEY AND THE RATE LIMIT. Groq says it with a 400 and OpenAI with
+  // a 429 whose code contains "quota" — read as a rate limit, the owner was
+  // told to try again shortly about a bill.
+  if (status === 402 || BILLING_HOLD.test(detail)) {
+    if (provider === HOUSE_GATEWAY) {
+      // Not "billing" in the words: the house's bill is the operator's
+      // business, not a holder's (terminal/chat-thread.ts llmLine).
+      return {
+        kind: "billing",
+        text: "Merrymen AI's own provider has paused the account it runs on, so I can't answer in my own words right now. That's ours to fix, not yours — your holder token is fine.",
+      };
+    }
+    return {
+      kind: "billing",
+      // THIS CANNOT TELL WHOSE KEY IT IS — the house's or one saved in
+      // Settings — so it says both, and which one is whose to fix.
+      text:
+        `${name} has put the account behind the API key I'm using on hold over billing, so I can't answer in my own words until that's settled. ` +
+        `If it's a ${name} key you saved in this agent's Settings, settle it with ${name} or switch provider; ` +
+        `if you never added one, it's the house key and that's ours to fix, not yours.`,
+    };
+  }
   if (status === 401 || status === 403 || /invalid_api_key|invalid api key|unauthori[sz]ed/i.test(detail)) {
     return {
       kind: "key-rejected",
@@ -108,6 +175,12 @@ export function describeLlmFailure(message: string): LlmFailure {
     return { kind: "rate-limited", text: `${name} is rate-limiting me right now. Nothing is wrong with the key — try again shortly.` };
   }
   if (status === 404 || /model_not_found|does not exist/i.test(detail)) {
+    if (provider === HOUSE_GATEWAY) {
+      return {
+        kind: "model-missing",
+        text: "Merrymen AI says the model it runs me on isn't available right now. That's ours to fix, not yours — your holder token is fine, and no model in Settings changes it.",
+      };
+    }
     return {
       kind: "model-missing",
       text: `${name} says the model this agent is set to use doesn't exist or isn't available on this key. Check the model name in Settings.`,

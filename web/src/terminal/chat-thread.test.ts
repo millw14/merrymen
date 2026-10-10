@@ -568,13 +568,13 @@ describe("failures, in the agent's voice", () => {
   });
 
   it("RETRY ONLY WHERE ASKING AGAIN CAN HELP — and no line promises it where it cannot", () => {
-    const helps = (kind: "key-rejected" | "model-missing" | "other" | "rate-limited" | "provider-down" | "unreachable") =>
+    const helps = (kind: "key-rejected" | "model-missing" | "billing" | "other" | "rate-limited" | "provider-down" | "unreachable") =>
       retryHelps("llm-error", { llm: { kind, provider: "Groq" } });
     for (const kind of ["rate-limited", "provider-down", "unreachable"] as const) {
       assert.equal(helps(kind), true, kind);
       assert.match(failureLine("llm-error", { llm: { kind, provider: "Groq" } }), /[Tt]ry again/, kind);
     }
-    for (const kind of ["key-rejected", "model-missing", "other"] as const) {
+    for (const kind of ["key-rejected", "model-missing", "billing", "other"] as const) {
       assert.equal(helps(kind), false, kind);
       assert.doesNotMatch(failureLine("llm-error", { llm: { kind, provider: "Groq" } }), /moment|try again/i, kind);
     }
@@ -589,12 +589,78 @@ describe("failures, in the agent's voice", () => {
     // A kind this browser has never heard of is not guessed at: it is a
     // reason it does not recognise, and no Retry is promised for it.
     const unknown = llmFailureOf("brand-new-kind", "Groq");
-    assert.deepEqual(unknown, { kind: "other", provider: "Groq" });
+    assert.deepEqual(unknown, { kind: "other", provider: "Groq", house: false });
     assert.equal(retryHelps("llm-error", { llm: unknown }), false);
-    assert.deepEqual(llmFailureOf("rate-limited", "Groq"), { kind: "rate-limited", provider: "Groq" });
+    assert.deepEqual(llmFailureOf("rate-limited", "Groq"), { kind: "rate-limited", provider: "Groq", house: false });
+    assert.deepEqual(llmFailureOf("billing", "Groq", true), { kind: "billing", provider: "Groq", house: true });
+    // The house's key only on a literal true: a string, a 1, a missing field
+    // are the owner's, and the owner's copy is said.
+    for (const house of ["true", 1, null, undefined, {}]) {
+      assert.equal(llmFailureOf("billing", "Groq", house).house, false, String(house));
+    }
     // A provider "name" that is not a short plain name is not repeated.
     for (const provider of ["<b>Groq</b>", "x".repeat(41), "", 42, null, "groq 401 — {\"error\":1}"]) {
       assert.equal(llmFailureOf("rate-limited", provider).provider, null, String(provider));
+    }
+  });
+
+  it("AN ACCOUNT HELD OVER BILLING IS SAID AS ONE — not 'a reason I don't recognise', and no Retry", () => {
+    // 2026-10-09: the house Groq account was held over an unpaid bill, and a
+    // new hosted agent told its tester "its setup needs a look" — about a
+    // setup with nothing wrong in it.
+    const own = failureLine("llm-error", { llm: { kind: "billing", provider: "Groq", house: false } });
+    assert.equal(
+      own,
+      "My brain couldn't answer: Groq has put the account behind its API key on hold over billing. Asking again won't help until that's settled, or another provider is chosen in Settings.",
+    );
+    assert.equal(
+      failureLine("llm-error", { llm: { kind: "billing", provider: null } }),
+      "My brain couldn't answer: its provider has put the account behind its API key on hold over billing. Asking again won't help until that's settled, or another provider is chosen in Settings.",
+      "a route that did not say whose key is the owner's copy",
+    );
+    for (const house of [true, false]) {
+      const llm = { kind: "billing" as const, provider: "Groq", house };
+      assert.equal(retryHelps("llm-error", { llm }), false, `a bill does not pass with time (house: ${house})`);
+      assert.doesNotMatch(failureLine("llm-error", { llm }), /recognise|setup needs a look|moment|try again/i);
+    }
+  });
+
+  it("ON THE HOUSE'S KEY IT IS OURS TO FIX — and the tenant is not told the house's bill is overdue", () => {
+    const house = (kind: "billing" | "key-rejected" | "model-missing", provider: string | null = "Groq") =>
+      failureLine("llm-error", { llm: { kind, provider, house: true } });
+    assert.equal(
+      house("billing"),
+      "My brain's provider, Groq, has paused the house account I run on, so I can't answer in my own words right now. That's ours to fix, not yours — nothing in your Settings will change it.",
+    );
+    assert.equal(
+      house("billing", null),
+      "My brain's provider has paused the house account I run on, so I can't answer in my own words right now. That's ours to fix, not yours — nothing in your Settings will change it.",
+    );
+    assert.doesNotMatch(house("billing"), /billing|overdue|payment|credit/i, "the operator's business, not a tenant's");
+    assert.equal(
+      house("key-rejected"),
+      "My brain couldn't answer: Groq refused the house key I run on. That's ours to fix, not yours — nothing in your Settings will change it.",
+    );
+    assert.equal(
+      house("model-missing"),
+      "My brain couldn't answer: Groq says the house model I run on isn't available. That's ours to fix, not yours — nothing in your Settings will change it.",
+    );
+    // The owner's own key is still theirs to replace, word for word as before.
+    assert.equal(
+      failureLine("llm-error", { llm: { kind: "key-rejected", provider: "Groq", house: false } }),
+      "My brain couldn't answer: Groq refused the API key it's set up with. Asking again won't help until that key is replaced.",
+    );
+    assert.equal(
+      failureLine("llm-error", { llm: { kind: "model-missing", provider: "Groq", house: false } }),
+      "My brain couldn't answer: Groq says the model it's set to use isn't available. Asking again won't help until the model is changed.",
+    );
+    // Every other kind reads the same whoever's key it is.
+    for (const kind of ["rate-limited", "provider-down", "unreachable", "other"] as const) {
+      assert.equal(
+        failureLine("llm-error", { llm: { kind, provider: "Groq", house: true } }),
+        failureLine("llm-error", { llm: { kind, provider: "Groq", house: false } }),
+        kind,
+      );
     }
   });
 

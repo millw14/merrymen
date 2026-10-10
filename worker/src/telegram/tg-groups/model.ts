@@ -24,10 +24,10 @@
  * every call against a per-agent daily allowance and a per-chat hourly one,
  * both in the durable store (a redeploy does not hand out a fresh day), runs
  * at most two calls at once, time-boxes each at 20 s, and pauses all group
- * calls after a provider says no: ten minutes for a rate limit, until UTC
- * midnight for a spent daily cap, a rejected key or a missing model. A
- * failure is logged by its KIND only — never the key, the prompt or the
- * provider's own words — and never reaches a group (rule 5).
+ * calls after a provider says no: ten minutes for a rate limit or an account
+ * held over billing, until UTC midnight for a spent daily cap, a rejected key
+ * or a missing model. A failure is logged by its KIND only — never the key,
+ * the prompt or the provider's own words — and never reaches a group (rule 5).
  *
  * NAMING: never write the web room's name (group + chat, joined or separated)
  * in code here. See types.ts.
@@ -256,11 +256,18 @@ function classify(e: unknown): Failure {
   const f = describeLlmFailure(msg);
   let kind: string = f.kind;
   if (!isLlmProviderFailure(msg)) {
-    if (status === 429) kind = "rate-limited";
+    if (status === 402) kind = "billing";
+    else if (status === 429) kind = "rate-limited";
     else if (status === 401 || status === 403) kind = "key-rejected";
     else if (status === 404) kind = "model-missing";
     else if (status !== null && status >= 500) kind = "provider-down";
   }
+  // AN ACCOUNT HELD OVER BILLING: the ten-minute pause, so a paid bill brings
+  // the model back within ten minutes instead of at midnight. An OpenAI
+  // insufficient_quota 429 came this way as "daily-cap" (DAILY_CAP says
+  // "quota") and waited for a midnight that changes nothing about a bill; it is
+  // "billing" now, read before any rate limit (llm-failure.ts).
+  if (kind === "billing") return { kind, pause: "short" };
   if (kind === "rate-limited") return DAILY_CAP.test(msg) ? { kind: "daily-cap", pause: "day" } : { kind, pause: "short" };
   if (kind === "key-rejected" || kind === "model-missing") return { kind, pause: "day" };
   return { kind, pause: null };

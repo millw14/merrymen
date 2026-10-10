@@ -3,22 +3,40 @@
  * creation notifications carry no web state, so they can only propose a bot to
  * a fresh, privately bound intent; an authenticated web confirmation saves it.
  *
- * No network calls, boot-time DDL, token retrieval or bot moves live here. The
- * caller authenticates Telegram deliveries and holds withSettingsSaveLock when
+ * No network calls, token retrieval or bot moves live here. The caller
+ * authenticates Telegram deliveries and holds withSettingsSaveLock when
  * completing. All writes then share one Db transaction, including the claim
  * and encrypted settings. Only the token and enabled flag change: connecting
  * the owner's chat remains the existing worker's /start /link flow.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { Db } from "../../../worker/src/db";
-import { botIdOf, claimBot } from "../../../worker/src/telegram-claims";
+import { rootDb, type Db } from "../../../worker/src/db";
+import { botIdOf, claimBot, ensureBotClaims } from "../../../worker/src/telegram-claims";
 import { openSecret, requireDek, sealSecret } from "../../../worker/src/store-crypto";
 
 export const MANAGED_INTENT_TTL_MS = 10 * 60_000;
 export const MANAGED_MESSAGE_FRESHNESS_MS = 2 * 60_000;
 const ACTIVE = "('waiting_telegram', 'waiting_bot', 'confirm')";
 
-/** Apply in an explicit, reviewed migration. Runtime methods never create it. */
+/**
+ * THE SCHEMA, MADE BY THE STORE AT FIRST USE (ensureManagedTelegramSchema).
+ *
+ * #284 shipped this behind a hand-applied migration, and runtime DDL was
+ * banned in its comments, docs and tests. Other stores here create their own
+ * tables at first use (lib/partner-store.ts, for one), and the cost of the ban
+ * was a feature that could not be switched on without an operator opening a
+ * production shell (railway ssh, psql, the SQL file) on a live service. The
+ * owner's call on 2026-10-10 was that
+ * one-click Telegram must work with nothing but the manager bot, its variables
+ * and a deploy, so the store makes these three tables itself. They hold
+ * onboarding state only: no trading record, wallet or existing link is in them.
+ *
+ * Written once in the sqlite spelling, as everywhere in this repo: PgDb.exec
+ * (translateSchema) turns every INTEGER into BIGINT, which is what the
+ * millisecond clocks need. docs/migrations/2026-10-05-telegram-managed.sql
+ * stays as the reviewed Postgres spelling of the same schema, and a test holds
+ * the two equal.
+ */
 export const TELEGRAM_MANAGED_DDL = `
   CREATE TABLE IF NOT EXISTS telegram_managed_intents (
     id TEXT PRIMARY KEY,
@@ -57,6 +75,67 @@ export const TELEGRAM_MANAGED_DDL = `
     PRIMARY KEY (manager_bot_id, update_id)
   );
 `;
+
+/**
+ * The schema lock's key. Distinct from every single-key advisory lock in the
+ * repo (tg-groups-ferry.ts and fomo/store.ts list them) and from the
+ * manager's delivery lock beside it (1_297_692_148): a shared key would only
+ * make unrelated first uses queue behind each other, but there is no reason to.
+ */
+export const MANAGED_SCHEMA_LOCK = 1_297_692_149;
+const schemaReady = new WeakMap<Db, Promise<void>>();
+
+/** Under SQLite there is one process and one connection: nothing to lock against. */
+async function lockSchema(tx: Db): Promise<void> {
+  try { await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(MANAGED_SCHEMA_LOCK); }
+  catch (e) { if (!/no such function: pg_advisory_xact_lock/i.test(String((e as Error)?.message ?? ""))) throw e; }
+}
+
+/**
+ * CREATE THE TABLES ONCE PER DATABASE, SAFE AGAINST EVERY OTHER WEB REPLICA
+ * DOING IT AT THE SAME MOMENT.
+ *
+ * After the deploy that brings this, every web replica's first Settings visit
+ * asks for these tables at once, and Postgres's IF NOT EXISTS is not atomic
+ * against that: the loser can fail on the catalog's own unique index (23505),
+ * see a table appear mid-statement (42P07) or find its row type already made
+ * (42710). So the DDL runs in a transaction holding an advisory lock, which
+ * serializes the replicas, and those three codes are still answered by running
+ * it again: an operator applying the documented SQL by hand takes no lock, and
+ * once the other creator has finished, the second run finds everything there.
+ *
+ * Memoised on the database (rootDb), not on the connection a settings lock
+ * pinned from it, and forgotten on any failure so the next request tries
+ * again. The bot-claims table complete() writes to is made here too
+ * (ensureBotClaims); web settings saves and the orchestrator already make it,
+ * but a database where neither has yet must not fail a confirmation for it.
+ */
+export function ensureManagedTelegramSchema(db: Db): Promise<void> {
+  const root = rootDb(db);
+  const existing = schemaReady.get(root);
+  if (existing) return existing;
+  const started = (async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await db.tx(async (tx) => {
+          await lockSchema(tx);
+          await tx.exec(TELEGRAM_MANAGED_DDL);
+        });
+        break;
+      } catch (e) {
+        const code = (e as { code?: unknown }).code;
+        if (attempt < 3 && (code === "23505" || code === "42P07" || code === "42710")) continue;
+        throw e;
+      }
+    }
+    await ensureBotClaims(db);
+  })().catch((error: unknown) => {
+    if (schemaReady.get(root) === started) schemaReady.delete(root);
+    throw error;
+  });
+  schemaReady.set(root, started);
+  return started;
+}
 
 export type ManagedTelegramStatus =
   | "waiting_telegram" | "waiting_bot" | "confirm" | "connected" | "expired" | "cancelled";
@@ -179,6 +258,7 @@ export class ManagedTelegramStore {
   async begin(args: { tenant: string; managerBotId: string; now?: number }): Promise<{ intent: ManagedTelegramIntent; challenge: string }> {
     const tenant = tenantKey(args.tenant), manager = numericId(args.managerBotId), now = clock(args.now);
     const dek = requireDek();
+    await ensureManagedTelegramSchema(this.db);
     const id = randomUUID(), challenge = `mm_${randomBytes(32).toString("base64url")}`;
     const row = await this.db.tx(async (db) => {
       refuseExistingBot((await readSettings(db, tenant, dek)).value);
@@ -201,13 +281,15 @@ export class ManagedTelegramStore {
   }
 
   async get(args: Scope): Promise<ManagedTelegramIntent | null> {
-    const now = clock(args.now);
-    const row = await readIntent(this.db, tenantKey(args.tenant), args.intentId, numericId(args.managerBotId));
+    const now = clock(args.now), tenant = tenantKey(args.tenant), manager = numericId(args.managerBotId);
+    await ensureManagedTelegramSchema(this.db);
+    const row = await readIntent(this.db, tenant, args.intentId, manager);
     return row ? publicIntent(row, now) : null;
   }
 
   async cancel(args: Scope): Promise<ManagedTelegramIntent | null> {
     const tenant = tenantKey(args.tenant), manager = numericId(args.managerBotId), now = clock(args.now);
+    await ensureManagedTelegramSchema(this.db);
     return this.db.tx(async (db) => {
       const row = await readIntent(db, tenant, args.intentId, manager);
       if (!row) return null;
@@ -227,6 +309,7 @@ export class ManagedTelegramStore {
     const date = messageDate(args.messageDate ?? Math.floor(now / 1000), now);
     if (!/^mm_[A-Za-z0-9_-]{43}$/.test(args.challenge)) return { outcome: "ignored" };
     const challengeHash = hash(args.challenge);
+    await ensureManagedTelegramSchema(this.db);
     return this.db.tx(async (db) => {
       const update = await receive(db, manager, id, { kind: "start", challengeHash, user, date });
       if (!update.fresh) return { outcome: update.receipt.outcome === "bound" && await replayActive(db, update.receipt, manager, now) ? "already_bound" : "ignored" };
@@ -269,6 +352,7 @@ export class ManagedTelegramStore {
     const bot = numericId(args.botId), date = messageDate(args.messageDate, now);
     if (bot === manager) throw new ManagedTelegramError("manager_bot_reserved", 400);
     if (!/^[A-Za-z0-9_]{5,32}$/.test(args.username) || !/bot$/i.test(args.username)) throw new ManagedTelegramError("invalid_bot_username", 400);
+    await ensureManagedTelegramSchema(this.db);
     return this.db.tx(async (db) => {
       const update = await receive(db, manager, id, { kind: args.kind, user, bot, username: args.username, date });
       if (!update.fresh) return { outcome: update.receipt.outcome === "candidate" && await replayActive(db, update.receipt, manager, now) ? "already_candidate" : "ignored" };
@@ -291,6 +375,7 @@ export class ManagedTelegramStore {
   async complete(args: Scope & { botId: string; token?: string; confirmedBotId?: string | null }): Promise<ManagedTelegramIntent> {
     const tenant = tenantKey(args.tenant), manager = numericId(args.managerBotId), bot = numericId(args.botId), now = clock(args.now);
     if (bot === manager) throw new ManagedTelegramError("manager_bot_reserved", 400);
+    await ensureManagedTelegramSchema(this.db);
     return this.db.tx(async (db) => {
       const row = await readIntent(db, tenant, args.intentId, manager);
       if (!row) throw new ManagedTelegramError("intent_not_found", 404);

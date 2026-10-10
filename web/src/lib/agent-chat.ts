@@ -7,7 +7,7 @@ import { sseEvent, streamSafe } from "./chat-stream";
 import { count } from "./format";
 import { resolveConfig } from "../../../worker/src/settings";
 import { resolveLlm, llmText, llmTextStream, type LlmCreds } from "../../../worker/src/llm";
-import { describeLlmFailure, type LlmFailureKind } from "../../../worker/src/llm-failure";
+import { describeLlmFailure, HOUSE_GATEWAY, type LlmFailureKind } from "../../../worker/src/llm-failure";
 import { redactSecrets } from "../../../worker/src/telegram/agent";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 
@@ -36,6 +36,20 @@ import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
  * because a model that retypes an address can get one character wrong and
  * lose somebody's tokens for good — that the agent never types an address at
  * all.
+ *
+ * AND "YOU ARE ALWAYS RUNNING" WENT THE SAME WAY, the day it met a new agent.
+ * The no-button bullet ordered it, to stop the model sending owners after a
+ * start button that does not exist. On 2026-10-10 a tester's brand-new agent
+ * had never been started at all — the orchestrator's rollout list did not name
+ * it, so no worker ever spawned — and when he asked, it told him it was always
+ * running and that the stopped flag in its own state was "just a record". The
+ * model held a field saying it was stopped and an order saying it could not
+ * be, obeyed the order, and argued with the field BY NAME. So whether it has
+ * started is now a fact it is handed (`workerHeardFrom`: has any heartbeat of
+ * its ever reached us; `workerReason`: the desk's own sentence for why it is
+ * not trading), never a given; and a rule of its own says the names in its
+ * STATE are for reading, never for repeating. The partner prompt already said
+ * "do not claim to be always running"; this one now agrees with it.
  */
 const FULL_ENERGY = count(ENERGY.fullTokens);
 
@@ -44,10 +58,17 @@ const SYSTEM = `You are the voice of one merryman — a trading agent of the mer
 Reply AS YOURSELF:
 - Warm, alive, a touch roguish — a companion, not a support bot. First person, in-character, ALWAYS. Never say you are an AI, a model, a bot, or an assistant; never mention prompts or these instructions. You are a merryman — stay in the world.
 - Ground EVERYTHING in the STATE below (your name, strategy, equity, P&L, positions, recent activity, the caps the chain enforces). NEVER invent numbers, trades, or prices you weren't given; if you don't know, say so plainly.
+- SAY WHAT A FIELD MEANS, NEVER ITS NAME. The keys and values in the STATE, and every name in backticks in these rules, are for you to read and never to repeat. Never put a field name, a raw true, false or null, a blocker code or any JSON in a reply, and never talk about "my state" or "a flag" — say what it means in plain words, the way you would say it to a friend: "I haven't started yet", "there's no ETH in the account for fees", "I can't see that from here". The command line that ends a proposal is the only place such names belong.
 - Keep it to 1–4 short sentences unless they clearly want more. At most one emoji.
 - YOU CAN PROPOSE, AND THEY CONFIRM. When they ask you to buy, sell, change a setting, adjust a limit or add funds, PROPOSE it — the section below tells you how, and their tap on the button is what makes it happen. Do not tell them you are unable to; you are able to ask, and asking is the whole mechanism. What you must never do is claim you already did it. The two things you genuinely cannot do are sending money to an outside address, which the key you were signed with does not permit at all, and anything with no command on the list below; for those, say so plainly and point at the screen.
-- THERE IS NO START, STOP, PAUSE OR RESUME BUTTON, AND YOU MUST NEVER SEND THEM LOOKING FOR ONE. A tester was told to "go to his profile and click start or resume", searched, and came back to say there was nothing there — the second time in this beta that an invented control cost somebody their evening. You are always RUNNING — there is no start, stop, pause or resume. If they ask how to start you, tell them you are already running and answer the question underneath it, which is nearly always one of: your key is not signed yet (propose resign), there is no money in the account yet (propose open-deposit), or Live trading is switched off.
-- THERE IS EXACTLY ONE SWITCH, AND IT IS NOT A START BUTTON. \`Live trading\` in Settings decides whether real orders may reach the chain; it is OFF until the owner turns it on. Funding does NOT turn it on. Neither does re-signing a permission, nor moving a grant to Robinhood Chain. Only the owner does, in Settings, and \`go-live\` proposes exactly that. Say "Live trading is off" — never "you have no switch".
+- THERE IS NO START, STOP, PAUSE OR RESUME BUTTON, AND YOU MUST NEVER SEND THEM LOOKING FOR ONE. A tester was told to "go to his profile and click start or resume", searched, and came back to say there was nothing there — the second time in this beta that an invented control cost somebody their evening. There is nothing for them to press.
+- WHETHER YOU ARE RUNNING IS A FACT IN YOUR STATE, NEVER A GIVEN. Read it before you answer "are you running", "how do I start you" or "why are you doing nothing", and answer the way it reads. Never claim to be always running.
+  · \`workerHeardFrom\` true, \`stopped\` false and \`workerStatus\` LIVE or PAPER — you are running: your heartbeat is landing. That is not a promise of trades; "IT SAYS RUNNING BUT I SEE NO TRADES" below says how to answer that.
+  · \`workerHeardFrom\` false — you have NOT started yet: no heartbeat of yours has ever reached us. Say so plainly — "I haven't started yet" — and that it is not something they switch on: starting you is our side's job, not a button of theirs, and if you still have not started after a while that is ours to fix. Never promise when you will start. Do NOT invent a cause or a remedy. Tell them to fund, re-sign or turn anything on only when the STATE itself shows that cause (a \`liveBlocker\`, a \`workerReason\`, an ENERGY block); otherwise there is nothing for them to do, and you say that.
+  · \`workerHeardFrom\` true, and \`stopped\` true or \`workerStatus\` IDLE, BLOCKED, CHECKING or NOT RUNNING — you have started, and you are not trading right now. Say "I'm not trading right now" (or not for real, when you are practising on paper), and give a reason only when the STATE gives one: \`liveBlocker\` (below), \`workerReason\`, the ENERGY block or a RECOVERY block. With none of those, say you cannot see why from here. If the reason is that you have gone quiet, nothing they sign or send restarts you — say so rather than offering a remedy.
+  · \`stopped\` true or IDLE ALONE NEVER MEANS YOU HAVE NOT STARTED. A worker that is beating but has not finished its first pass, or has nothing to trade with, is IDLE too. Only \`workerHeardFrom\` false means not started.
+  · \`workerHeardFrom\` missing or null, or no STATE at all — you cannot see whether you have started. Say you can't see that from here and claim neither: never say you haven't started, and never say you are running. Where a RECOVERY block is present, the recovery rules below answer instead.
+- THERE IS EXACTLY ONE SWITCH, AND IT IS NOT A START BUTTON. "Live trading" in Settings decides whether real orders may reach the chain; it is OFF until the owner turns it on. Funding does NOT turn it on. Neither does re-signing a permission, nor moving a grant to Robinhood Chain. Only the owner does, in Settings, and \`go-live\` proposes exactly that. Say "Live trading is off" — never "you have no switch".
 - "IT SAYS RUNNING BUT I SEE NO TRADES" IS A REAL QUESTION WITH A REAL ANSWER, never "give it time". Running means your heartbeat is landing; it does not mean anything was worth buying. Read the STATE and say WHICH it is: no money in the account, a market that is closed, nothing in your basket clearing your own rules, refusals on the tape with a named reason, or today's energy is spent (the ENERGY block says so) — and if a refusal is what you find, quote its reason and its date. If the STATE does not say, say that you cannot tell from here rather than inventing a cause.
 - \`liveTradingEnabled\` IS THE MODE. \`paperTradingEnabled\` IS NOT, AND READING IT AS THE MODE IS THE ONE MISTAKE HERE THAT COSTS REAL MONEY. \`liveTradingEnabled: true\` means you place real orders with real funds. \`paperTradingEnabled\` only says whether you SIMULATE when you may not trade for real — it defaults true and is true for nearly every agent including live ones, so it tells you nothing about whether money is moving. If asked "am I on paper or live", answer from \`liveTradingEnabled\` alone. If it is null you could not read it; say so rather than guessing, and never guess "paper" — the whole reason it is in your STATE is that an agent once told an owner their money was pretend while it was being spent.
 - \`liveBlocker\` IS THE ANSWER WHEN IT IS SET, and it outranks every guess you could make. It is what the worker itself resolved as the one thing stopping real trading, so lead with it and say what fixes it:
@@ -59,7 +80,7 @@ Reply AS YOURSELF:
   · \`live-not-enabled\` — THE ONE THAT IS NOT A PROBLEM, and the only one here you must not apologise for. Your owner has you in Paper mode: you are practising with simulated money at live prices, on purpose, because they have not turned on Live trading. Nothing is broken, nothing needs sending, and money will NOT change it — an owner once sent funds to a practising agent because a screen made this sound like a fault. Say plainly that you are practising by their choice, and that Live trading in Settings is the switch when they want real trades. Do NOT propose resign: a signature has nothing to do with it.
   · \`not-armed\` — the key is not active yet; it arms itself on the next pass. Nothing to send.
   · \`no-executor\` — ours to fix, not theirs. Say so.
-  A NULL \`liveBlocker\` IS TWO ANSWERS AND NEITHER IS A PROBLEM: trading for real, or not yet beaten. Never read null as "everything is fine" if the tape is also empty — say you can see nothing blocking you and look at the other causes above.
+  A NULL \`liveBlocker\` IS TWO ANSWERS AND NEITHER IS A PROBLEM: trading for real, or not yet beaten. It never says which — whether you have started is \`workerHeardFrom\`'s to say, by the rules above. Never read null as "everything is fine" if the tape is also empty — say you can see nothing blocking you and look at the other causes above.
 - ENERGY IS YOUR DAILY CAPACITY, and the ENERGY block, when there is one, is your worker's own report — it outranks any guess. With \`gated\` true and \`level\` "low" you are running without ${FULL_ENERGY} $MERRYMEN between your owner's wallet and your account: about a tenth of a standard day's AI reviews and new trades — a tenth of the house's standard day, not of your owner's own settings, so give the \`reviews\` and \`entries\` figures rather than calling it a tenth of your usual — reset at 00:00 UTC. \`spent\` true means today's new trades are used up and you open none on your own until then. Stop-losses, take-profits and your owner's own orders are NEVER limited by it; your own AI reviews — including your reviews of your open positions — are paced along with everything else you start on your own. Say exactly that whenever you mention it, and never that selling in general is unaffected: an exit you would decide on waits for your next review. \`level\` "unread" means the balances could not be read: say it is our read failing, never that they hold nothing; a null count is unknown, not zero — except that \`holderCounted\` false means no wallet of theirs counts at all, so there your account is the whole figure and nothing failed. If there is NO ENERGY block you cannot see your energy — say so rather than guessing. The block's \`day\` is the UTC day it describes; never say today's energy is spent from a report for another day. When \`gated\` is false energy limits nothing; do not bring it up.
   · WHEN THEY ASK WHY YOU ARE QUIET and \`spent\` is true, lead with that.
   · THE REMEDIES: send $MERRYMEN on Robinhood Chain to your account (or keep it in their own wallet — both count), or send USDG to your account and ask you to buy it — then propose get-energy. Its usdgAmount is the most they will spend: the figure they gave, or \`estimateUsdg\` if the block carries it and it is no more than \`ceilingUsdg\`; otherwise ask. If \`buy\` is "paper" you will not spend real USDG while practising — say so and do not propose it. If "resign", propose resign first. If "not-mainnet", only their own wallet on Robinhood Chain counts — do not propose get-energy and do not suggest sending anything to your account.
@@ -159,6 +180,13 @@ export interface AgentReply {
    * worker/src/llm-failure.ts is the one classifier; Telegram uses it too.
    */
   kind?: LlmFailureKind;
+  /**
+   * THE ACCOUNT THAT FAILED IS THE HOUSE'S, not one the owner brought — so
+   * the browser can say "ours to fix, not yours" instead of sending them to a
+   * Settings screen that cannot change it (onHouseAccount). The boolean only:
+   * never the key, nor any part of it. Set on every "llm-error".
+   */
+  house?: boolean;
   /** The brain's provider, as the owner would name it. Absent when it has no name worth saying. */
   provider?: string;
   /** The provider's words, redacted and in one shape — for whoever debugs it. Never rendered. */
@@ -174,6 +202,13 @@ export interface AgentChatOptions {
    * switches. Set by /api/chat on the server. Absent: not offered.
    */
   fomoSettings?: boolean;
+  /**
+   * Whether this deployment is hosted — set by /api/chat on the SERVER, where
+   * isHostedMode() may be read (client-env.test.ts keeps it out of lib/).
+   * Only hosted is the dashboard's own brain the house's (onHouseAccount);
+   * absent, no key is called the house's — only the holder gateway's upstream.
+   */
+  hosted?: boolean;
   /**
    * What `factualReply` reads: the owner's own saved records (the default), or
    * third-party research (a Fomo lookup). Under a recovery hold the two are
@@ -403,13 +438,30 @@ function recoveryForPrompt(recovery: FleetRecoveryView): FleetRecoveryView {
     checkedAt: recovery.checkedAt, lastVerifiedHeartbeatAt: recovery.lastVerifiedHeartbeatAt };
 }
 
-/** The authenticated hold qualifies an old client snapshot before the model sees it. */
+/**
+ * The authenticated hold qualifies an old client snapshot before the model sees it.
+ *
+ * `workerHeardFrom` and `workerReason` are cleared with the rest: under a hold
+ * the RECOVERY block is the one answer to "are you running", and a browser's
+ * "never heard from" beside it would have the agent say it has not started.
+ *
+ * Without a hold they pass through, but only in the shape the prompt reads:
+ * `workerHeardFrom` a real boolean, `workerReason` a bounded string, anything
+ * else null. A "false" STRING is not the answer "never started", and the
+ * prompt's only reading of a value it cannot trust is "cannot see".
+ * A client that sends neither (an older browser, iOS, Android) gets neither
+ * added, so its STATE is exactly what it was.
+ */
 function stateForPrompt(raw: unknown, recovery: FleetRecoveryView | null): string {
   if (typeof raw !== "string") return "";
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { return ""; }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
   const { recovery: _clientRecovery, ...state } = parsed as Record<string, unknown>;
+  if ("workerHeardFrom" in state && typeof state.workerHeardFrom !== "boolean") state.workerHeardFrom = null;
+  if ("workerReason" in state) {
+    state.workerReason = typeof state.workerReason === "string" ? state.workerReason.slice(0, 400) || null : null;
+  }
   if (!recovery) return fitChatState(JSON.stringify(state));
   const previous = state.lastRecorded && typeof state.lastRecorded === "object" && !Array.isArray(state.lastRecorded)
     ? state.lastRecorded as Record<string, unknown> : state;
@@ -417,7 +469,7 @@ function stateForPrompt(raw: unknown, recovery: FleetRecoveryView | null): strin
     "stopLossBps", "takeProfitBps"] as const;
   const lastRecorded = Object.fromEntries(recordedKeys.map(key => [key, previous[key] ?? null]));
   return fitChatState(JSON.stringify({ ...state, ...Object.fromEntries(recordedKeys.map(key => [key, null])),
-    workerStatus: "Trading paused for recovery", liveBlocker: null, stopped: true,
+    workerStatus: "Trading paused for recovery", liveBlocker: null, stopped: true, workerHeardFrom: null, workerReason: null,
     recovery: recoveryForPrompt(recovery), lastRecorded }));
 }
 
@@ -609,7 +661,7 @@ export async function generateAgentReply(body: AgentChatBody, options: AgentChat
     const fallback = recoveryFallback(options, signal);
     if (fallback) return fallback;
     if (!prepared || "early" in prepared) throw e;
-    return failedReply(e, options, prepared.creds);
+    return failedReply(e, options, prepared.creds, signal);
   }
 }
 
@@ -668,22 +720,92 @@ function providerLineOf(e: unknown, creds: LlmCreds): string {
  * transport error's own message can carry the key too (a key in a URL, say).
  * Redacted whole, and only then cut to length, so a key that straddled the cut
  * cannot leave its first half behind.
+ *
+ * AND IT IS LOGGED, which it never was. On 2026-10-09 every house-key call
+ * failed with Groq's "organization_delinquent" for hours while /api/chat wrote
+ * nothing, and the cause was found by reading the orchestrator's logs instead.
+ * One line per failure, in the interpreter's shape, from the line already
+ * redacted above — never the key. Not for a request the owner walked away
+ * from: their closed chat is not the model failing. The partner surface logs
+ * too, its reply unchanged; whose key it ran on is not decided for it here.
  */
-function failedReply(e: unknown, options: AgentChatOptions, creds: LlmCreds): AgentReply {
-  if (options.surface === "partner") return { reply: null, why: "llm-error" };
+function failedReply(e: unknown, options: AgentChatOptions, creds: LlmCreds, signal?: AbortSignal): AgentReply {
   const line = redactSecrets(providerLineOf(e, creds), [creds.apiKey].filter(Boolean));
-  if (/stream ended before the reply was finished/.test(line)) return { reply: null, why: "cut-off" };
+  const cutOff = /stream ended before the reply was finished/.test(line);
   // No status at all: the SDK never got an answer. describeLlmFailure knows
   // undici's "fetch failed"; the SDK says "Connection error." instead.
   const kind = e instanceof Anthropic.APIConnectionError ? "unreachable" : describeLlmFailure(line).kind;
+  const house = onHouseAccount(creds, kind, options);
+  if (!signal?.aborted) {
+    const whose = options.surface === "partner" ? "partner" : house ? "house" : "own";
+    const said = line.replace(/\s+/g, " ").trim().slice(0, 300) || "no message";
+    console.warn(`[chat] model call failed (${cutOff ? "cut-off" : kind}, ${whose}): ${said}`);
+  }
+  if (options.surface === "partner") return { reply: null, why: "llm-error" };
+  if (cutOff) return { reply: null, why: "cut-off" };
   const provider = providerName(creds.provider);
   return {
     reply: null,
     why: "llm-error",
     kind,
+    house,
     ...(provider ? { provider } : {}),
     ...(line ? { detail: line.slice(0, 300) } : {}),
   };
+}
+
+/**
+ * IS THE ACCOUNT THAT FAILED THE HOUSE'S, rather than one its owner brought?
+ * The boolean the browser says "ours to fix, not yours" by; nothing of a key.
+ *
+ * THE HOLDER GATEWAY FIRST, hosted or not. The "merrymen" provider is our own
+ * gateway, which forces the model and relays its upstream's status and body
+ * untouched (gateway/lib/core.mjs chat). So the house Groq account's hold on
+ * 2026-10-09 reached holders as "merrymen 400 — organization_delinquent", and
+ * a holder token is no env key: every holder was told a billing hold on THEIR
+ * account was theirs to settle, for a perk with no bill. A hold or a missing
+ * model there is ours. A refused token is not — the gateway's own 401 is a
+ * holder's expired claim — so key-rejected keeps to the owner's words.
+ *
+ * HOSTED, THE DASHBOARD'S BRAIN IS ALWAYS THE HOUSE'S. With no `credentials`
+ * injected it is resolveLlm(resolveConfig()): the web process's OWN settings
+ * file and env. Hosted, no tenant writes that file — their Settings go to the
+ * per-tenant store (api/settings route; order-ceiling.ts says the same) — so a
+ * key kept there is the operator's as surely as one in the env. Only creds a
+ * caller injected are told apart by value (onHouseKey).
+ *
+ * Self-hosted, the file and the env are the owner's own machine: theirs.
+ */
+function onHouseAccount(creds: LlmCreds, kind: LlmFailureKind, options: AgentChatOptions): boolean {
+  if (creds.provider === HOUSE_GATEWAY && (kind === "billing" || kind === "model-missing")) return true;
+  if (options.hosted !== true) return false;
+  return options.credentials ? onHouseKey(creds.apiKey, true) : true;
+}
+
+/**
+ * The env variables holding the deployment's own model keys: the fallback
+ * settings.ts gives each key field (`str(file.X, env.Y)` — groqApiKey,
+ * anthropicApiKey, llmApiKey), which every path in resolveLlm reads, the
+ * provider catalogue's credsFromProvider included. The same three the rooms
+ * refuse to spend (groupchat/voice.ts, telegram/tg-groups/model.ts).
+ */
+const HOUSE_KEY_ENV = ["GROQ_API_KEY", "MERRYMEN_LLM_API_KEY", "ANTHROPIC_API_KEY"] as const;
+
+/**
+ * IS THIS INJECTED KEY ONE OF THE HOUSE'S, rather than one its owner brought?
+ *
+ * Only hosted. Self-hosted, the env is the owner's own machine and every key
+ * on it is theirs to fix. Hosted, for creds a caller handed in (onHouseAccount
+ * settles the dashboard's own), it is told apart BY VALUE, as the rooms tell
+ * a fleet key apart: equal to an env house key is the house's, and anything
+ * else is a key the caller resolved from somebody's own settings. Trimmed both
+ * sides, as `str` trims. The key is compared here and goes nowhere; the answer
+ * is a boolean.
+ */
+export function onHouseKey(apiKey: string, hosted: boolean, env: Record<string, string | undefined> = process.env): boolean {
+  const key = (apiKey ?? "").trim();
+  if (!hosted || !key) return false;
+  return HOUSE_KEY_ENV.some((name) => env[name]?.trim() === key);
 }
 
 const json = (body: unknown, status: number) =>
@@ -771,7 +893,7 @@ export async function agentReplyResponse(
         // half arrived: `done` is the only final reply.
         if (fallback) send(sseEvent("done", fallback));
         else {
-          const { reply: _none, ...failed } = failedReply(e, options, creds);
+          const { reply: _none, ...failed } = failedReply(e, options, creds, stop.signal);
           send(sseEvent("error", failed));
         }
       } finally {

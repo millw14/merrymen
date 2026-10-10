@@ -201,7 +201,8 @@ describe("/api/chat injects it on the server", () => {
     assert.match(ROUTE, /const account = hosted \? grant\?\.smartAccount \?\? null : await diskAgent\(\)/, "the caller cannot name the agent");
     assert.match(ROUTE, /ceilingFor\(req, hosted\)/);
     // Beside it, the server's own Fomo research context (lib/fomo-chat.ts), never the body's.
-    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply, fomo, recovery, fomoSettings \}\)/);
+    // And whether the deployment is hosted, so a failed call can say it ran on the house's key.
+    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply, fomo, recovery, fomoSettings, hosted \}\)/);
     assert.match(ROUTE, /const fomoSettings = fomoEnabledFor\(hosted\);/, "the Fomo switches only where the deployment runs Fomo");
   });
 

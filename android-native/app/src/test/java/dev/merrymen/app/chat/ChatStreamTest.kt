@@ -133,7 +133,22 @@ class ChatStreamTest {
     assertEquals("llm-error", out.why)
     assertEquals("rate-limited", out.kind)
     assertEquals("Groq", out.provider)
+    assertFalse("no house flag is the owner's own key", out.house)
     assertTrue(shown.none { it.contains("429") })
+  }
+
+  @Test fun anErrorEventSaysWhetherTheKeyWasTheHouses() {
+    fun houseOf(flag: String): Boolean {
+      val failed = event("error", """{"why":"llm-error","kind":"billing","provider":"Groq"$flag,"detail":"groq 400 — organization_delinquent"}""")
+      val (out, _) = readSplitAt(failed.toByteArray(), listOf(20))
+      assertEquals("billing", out.kind)
+      return out.house
+    }
+    assertTrue(houseOf(""","house":true"""))
+    assertFalse(houseOf(""","house":false"""))
+    assertFalse(houseOf(""))
+    assertFalse("only the literal true", houseOf(""","house":"true""""))
+    assertFalse(houseOf(""","house":null"""))
   }
 
   @Test fun noiseAndBrokenJsonAreIgnoredNotThrown() {
@@ -191,6 +206,16 @@ class ChatStreamTest {
     assertEquals("open-settings", r.command!!.id)
     server.answer("""{"reply":null,"why":"llm-error","kind":"key-rejected","provider":"Groq","detail":"401 bad key"}""")
     assertEquals(Asked.Failed("llm-error", kind = "key-rejected", provider = "Groq"), api.askAgent(ChatBody(message = "hi")) {})
+    server.answer("""{"reply":null,"why":"llm-error","kind":"billing","provider":"Groq","house":true,"detail":"groq 400 — organization_delinquent"}""")
+    assertEquals(Asked.Failed("llm-error", kind = "billing", provider = "Groq", house = true), api.askAgent(ChatBody(message = "hi")) {})
+  }
+
+  @Test fun aStreamedErrorCarriesTheHouseFlagToTheAnswer() = runBlocking {
+    server.enqueue(
+      MockResponse().setHeader("content-type", "text/event-stream")
+        .setBody(event("error", """{"why":"llm-error","kind":"billing","provider":"Groq","house":true,"detail":"groq 400"}""")),
+    )
+    assertEquals(Asked.Failed("llm-error", kind = "billing", provider = "Groq", house = true), api.askAgent(ChatBody(message = "hi")) {})
   }
 
   @Test fun anErrorStatusIsTheServerNotAGarbledAnswer() = runBlocking {

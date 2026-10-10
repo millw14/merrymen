@@ -1,5 +1,9 @@
--- Explicit PostgreSQL migration; review and back up before applying.
--- No runtime route applies this schema. Millisecond timestamps require BIGINT.
+-- The Postgres spelling of TELEGRAM_MANAGED_DDL (web/src/lib/telegram-managed-store.ts).
+-- Since 2026-10-10 the web service creates these tables itself at first use
+-- (ensureManagedTelegramSchema), so applying this by hand is no longer a step;
+-- it is kept as the reviewed schema, and a test holds it equal to the DDL.
+-- Running it anyway is harmless: every statement is IF NOT EXISTS.
+-- Millisecond timestamps require BIGINT.
 BEGIN;
 
   CREATE TABLE IF NOT EXISTS telegram_managed_intents (

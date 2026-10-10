@@ -79,20 +79,30 @@
 }
 
 /*
- * ABOVE THE CHAT, THE CHAT GIVES WAY.
+ * ABOVE THE CHAT, THE CHAT GIVES WAY — ON A WIDE SCREEN.
  *
- * On a phone the desk page is a fixed-height column inside a `.body` that is
- * `overflow: hidden`, sized to fill the screen exactly. Anything mounted above
- * it pushes its bottom — the composer — under the tab bar. While the notice is
- * up, the desk takes the height that is left instead of a fixed one; the
- * conversation is its flexible child, so that is what shrinks.
+ * The desk page was a fixed-height column inside a `.body` that is `overflow:
+ * hidden`, so anything mounted above it pushed its bottom — the composer — out
+ * of sight. This rule made the desk take the height that is left while the
+ * notice is up. On a phone polish.css now does that for EVERY page, whatever
+ * is above it, and keeps the page's content floor — and this rule's
+ * `min-height: 0` outranks that floor, letting the page shrink below what it
+ * holds so the composer spills past `.body`'s end padding and under the tab
+ * bar, the trap groupchat.css records: measured at 375x667 with this notice
+ * up, 66px under the bar with no scroll left to bring it out. So it is the
+ * desktop page's alone now, where the shell still clips and nothing else does
+ * this. The margin too: the phone's shell already spaces its children, and at
+ * 390x750 over a home indicator those 12px were most of the 13 by which the
+ * bar still covered the composer.
  */
-.terminal-host .body:has(> .service-notice) > .desk-page {
-  flex: 1 1 auto;
-  height: auto;
-  min-height: 0;
-}
+@media (min-width: 1100px) {
+  .terminal-host .body:has(> .service-notice) > .desk-page {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
 
-.terminal-host .body:has(> .desk-page) > .service-notice {
-  margin-bottom: 12px;
+  .terminal-host .body:has(> .desk-page) > .service-notice {
+    margin-bottom: 12px;
+  }
 }

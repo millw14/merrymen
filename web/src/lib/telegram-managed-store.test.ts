@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
-import { wrapSqlite, type Db } from "../../../worker/src/db";
+import { translateSchema, wrapSqlite, type Db } from "../../../worker/src/db";
 import { TELEGRAM_BOT_CLAIMS_DDL } from "../../../worker/src/telegram-claims";
 import { TELEGRAM_STATE_DDL, TELEGRAM_LIVENESS_DDL } from "../../../worker/src/telegram-store";
 import { openSecret, sealSecret } from "../../../worker/src/store-crypto";
 import {
+  ensureManagedTelegramSchema,
   MANAGED_INTENT_TTL_MS,
   ManagedTelegramError,
   ManagedTelegramStore,
@@ -66,6 +68,26 @@ async function ready(store: ManagedTelegramStore, over: { tenant?: string; manag
   return began.intent;
 }
 const errorCode = (code: string) => (e: unknown) => e instanceof ManagedTelegramError && e.code === code;
+const tableNames = async (db: Db) => (await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all())
+  .map((r) => (r as { name: string }).name);
+/** The same database, counting the managed DDL it is asked to run, and failing the first runs with `failures`. */
+function counting(inner: Db, failures: unknown[] = []) {
+  const seen = { ddl: 0 };
+  const wrap = (db: Db): Db => ({
+    prepare: (sql) => db.prepare(sql),
+    exec: async (sql) => {
+      if (sql.includes("telegram_managed_intents")) {
+        seen.ddl++;
+        const failure = failures.shift();
+        if (failure) throw failure;
+      }
+      return db.exec(sql);
+    },
+    tx: (fn) => db.tx((tx) => fn(wrap(tx))),
+  });
+  return { db: wrap(inner), seen };
+}
+const sqlError = (code: string) => Object.assign(new Error(`synthetic ${code}`), { code });
 
 describe("managed bot intent authority", () => {
   it("stores only the hash of a random, tenant-bound, ten-minute /start challenge", async () => {
@@ -87,11 +109,58 @@ describe("managed bot intent authority", () => {
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM telegram_managed_intents WHERE status='waiting_telegram'").get() as { n: number }).n, 1);
   });
 
-  it("fails closed without the migration and never runs boot DDL", async () => {
-    const { db, store } = await fixture(undefined, { managed: false });
-    await assert.rejects(store.begin({ tenant: A, managerBotId: MANAGER, now: NOW }), /no such table/);
-    assert.equal(await db.prepare("SELECT name FROM sqlite_master WHERE name='telegram_managed_intents'").get(), undefined);
-    assert.equal(await settingsOf(db), null);
+  it("creates its own tables at first use, once per database, with nobody applying a migration", async () => {
+    const { db: raw } = await fixture(undefined, { managed: false, claims: false });
+    const { db, seen } = counting(raw);
+    assert.ok(!(await tableNames(raw)).includes("telegram_managed_intents"));
+    const store = new ManagedTelegramStore(db);
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    for (const table of ["telegram_managed_intents", "telegram_managed_users", "telegram_managed_updates", "telegram_bot_claims"]) {
+      assert.ok((await tableNames(raw)).includes(table), `${table} is made at first use`);
+    }
+    await new ManagedTelegramStore(db).get(scoped(began.intent.id));
+    await store.cancel(scoped(began.intent.id));
+    assert.equal(seen.ddl, 1, "once per database, not once per store or per call");
+    assert.equal(await settingsOf(raw), null, "making the tables writes no settings");
+  });
+
+  it("is idempotent over tables that already exist, and keeps their rows", async () => {
+    const { db, store } = await fixture();
+    const began = await store.begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    await db.exec(TELEGRAM_MANAGED_DDL);
+    await ensureManagedTelegramSchema(db);
+    assert.equal((await store.get(scoped(began.intent.id)))?.status, "waiting_telegram");
+  });
+
+  it("concurrent first uses share one creation", async () => {
+    const { db: raw } = await fixture(undefined, { managed: false });
+    const { db, seen } = counting(raw);
+    const results = await Promise.all([A, B].map((tenant) => new ManagedTelegramStore(db).begin({ tenant, managerBotId: MANAGER, now: NOW })));
+    assert.equal(results.length, 2);
+    assert.equal(seen.ddl, 1);
+  });
+
+  it("answers another creator's catalog race by running again, and forgets any other failure so the next use retries", async () => {
+    for (const code of ["23505", "42P07", "42710"]) {
+      const { db: raw } = await fixture(undefined, { managed: false });
+      const { db, seen } = counting(raw, [sqlError(code)]);
+      await new ManagedTelegramStore(db).begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+      assert.equal(seen.ddl, 2, `${code} means the tables now exist: one more run finds them`);
+    }
+    const { db: raw } = await fixture(undefined, { managed: false });
+    const { db, seen } = counting(raw, [sqlError("XX000")]);
+    await assert.rejects(new ManagedTelegramStore(db).begin({ tenant: A, managerBotId: MANAGER, now: NOW }), /synthetic XX000/);
+    assert.ok(!(await tableNames(raw)).includes("telegram_managed_intents"));
+    await new ManagedTelegramStore(db).begin({ tenant: A, managerBotId: MANAGER, now: NOW });
+    assert.equal(seen.ddl, 2);
+    assert.ok((await tableNames(raw)).includes("telegram_managed_intents"));
+  });
+
+  it("is, on Postgres, the documented SQL: every INTEGER becomes the BIGINT the millisecond clocks need", () => {
+    const normal = (sql: string) => sql.replace(/--[^\n]*\n/g, "").replace(/\b(?:BEGIN|COMMIT);/g, "").replace(/\s+/g, " ").trim();
+    const documented = readFileSync(new URL("../../../docs/migrations/2026-10-05-telegram-managed.sql", import.meta.url), "utf8");
+    assert.equal(normal(translateSchema(TELEGRAM_MANAGED_DDL)), normal(documented));
+    assert.doesNotMatch(translateSchema(TELEGRAM_MANAGED_DDL), /\bINTEGER\b/);
   });
 
   it("refuses an existing token before allocating another bot intent", async () => {
@@ -269,13 +338,12 @@ describe("atomic managed bot confirmation", () => {
     assert.equal((await db.prepare("SELECT intent_id FROM telegram_managed_users").get() as { intent_id: string }).intent_id, intent.id);
   });
 
-  it("missing claims schema fails closed and is not added automatically", async () => {
+  it("makes the bot-claims table a confirmation needs, on a database where nothing else has yet", async () => {
     const { db, store } = await fixture(undefined, { claims: false });
     const intent = await ready(store);
-    await assert.rejects(store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT }), /no such table/);
-    assert.equal(await settingsOf(db), null);
-    assert.equal(await db.prepare("SELECT name FROM sqlite_master WHERE name='telegram_bot_claims'").get(), undefined);
-    assert.equal((await store.get(scoped(intent.id)))?.status, "confirm");
+    assert.equal((await store.complete({ ...scoped(intent.id), botId: BOT, token: TOKEN, confirmedBotId: BOT })).status, "connected");
+    assert.equal((await settingsOf(db))?.telegramBotToken, TOKEN);
+    assert.deepEqual((await db.prepare("SELECT bot_id, tenant FROM telegram_bot_claims").all()).map((r) => ({ ...r as object })), [{ bot_id: BOT, tenant: A }]);
   });
 
   it("serializes competing confirmation attempts with a single final saved bot", async () => {

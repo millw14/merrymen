@@ -536,6 +536,13 @@ export interface LlmFailureSaid {
   kind: LlmFailureKind;
   /** "Groq", "Anthropic" — null when the route named nobody. */
   provider: string | null;
+  /**
+   * The account that failed is the HOUSE's (agent-chat.ts onHouseAccount). Then a
+   * refused key, a missing model or a held account is ours to fix, and the
+   * owner is told so rather than sent to a Settings screen that cannot change
+   * it. Absent or false: the owner's own, or the route did not say.
+   */
+  house?: boolean;
 }
 
 /** What else is known about a failure, for the sentence that says it. */
@@ -548,6 +555,7 @@ export interface FailureFacts {
 
 const LLM_KINDS: ReadonlySet<LlmFailureKind> = new Set<LlmFailureKind>([
   "key-rejected",
+  "billing",
   "rate-limited",
   "provider-down",
   "unreachable",
@@ -558,12 +566,14 @@ const LLM_KINDS: ReadonlySet<LlmFailureKind> = new Set<LlmFailureKind>([
 /**
  * The route's classification, as read off the wire. A kind this browser does
  * not know is "other" — said as a reason it does not recognise, which is true —
- * and a provider name that is not a short plain name is not repeated.
+ * and a provider name that is not a short plain name is not repeated. The
+ * house's key only on a literal `true`: anything else is the owner's.
  */
-export function llmFailureOf(kind: unknown, provider: unknown): LlmFailureSaid {
+export function llmFailureOf(kind: unknown, provider: unknown, house?: unknown): LlmFailureSaid {
   return {
     kind: typeof kind === "string" && LLM_KINDS.has(kind as LlmFailureKind) ? (kind as LlmFailureKind) : "other",
     provider: typeof provider === "string" && /^[A-Za-z0-9][\w .-]{0,39}$/.test(provider) ? provider : null,
+    house: house === true,
   };
 }
 
@@ -576,23 +586,43 @@ const PASSING: ReadonlySet<LlmFailureKind> = new Set<LlmFailureKind>(["rate-limi
  * Yes for everything that passes — a network, a timeout, a stream cut short,
  * a server that did not answer. NOT for a model failure that will fail the
  * same way every time until somebody changes something: a rejected key, a
- * model that does not exist, or a refusal nobody recognised. A chip there is
- * a button that cannot work, beside a sentence telling the owner it might.
+ * model that does not exist, an account held until a bill is paid, or a
+ * refusal nobody recognised. A chip there is a button that cannot work, beside
+ * a sentence telling the owner it might.
  */
 export function retryHelps(kind: ChatFailure, facts: FailureFacts = {}): boolean {
   if (kind !== "llm-error") return true;
   return !!facts.llm && PASSING.has(facts.llm.kind);
 }
 
-/** A model failure in the agent's words, by its kind — never the provider's. */
-function llmLine({ kind, provider }: LlmFailureSaid): string {
+/**
+ * A model failure in the agent's words, by its kind — never the provider's.
+ *
+ * ON THE HOUSE'S KEY, IT IS OURS TO FIX, and the owner is told so. On
+ * 2026-10-09 the house Groq account was held over an unpaid bill and every
+ * new hosted agent answered "its setup needs a look" — a tester with nothing
+ * wrong in their setup was sent to look at it. A held account, a refused key
+ * or a missing model on the house's key is not theirs to change, and nothing
+ * in their Settings will. Nor does a tenant hear why the house's account is
+ * held: "paused" is enough; the bill is the operator's business.
+ */
+function llmLine({ kind, provider, house }: LlmFailureSaid): string {
   const whose = provider ?? "its provider";
   const aside = provider ? `, ${provider},` : "";
+  const ours = "That's ours to fix, not yours — nothing in your Settings will change it.";
   switch (kind) {
+    case "billing":
+      return house
+        ? `My brain's provider${aside} has paused the house account I run on, so I can't answer in my own words right now. ${ours}`
+        : `My brain couldn't answer: ${whose} has put the account behind its API key on hold over billing. Asking again won't help until that's settled, or another provider is chosen in Settings.`;
     case "key-rejected":
-      return `My brain couldn't answer: ${whose} refused the API key it's set up with. Asking again won't help until that key is replaced.`;
+      return house
+        ? `My brain couldn't answer: ${whose} refused the house key I run on. ${ours}`
+        : `My brain couldn't answer: ${whose} refused the API key it's set up with. Asking again won't help until that key is replaced.`;
     case "model-missing":
-      return `My brain couldn't answer: ${whose} says the model it's set to use isn't available. Asking again won't help until the model is changed.`;
+      return house
+        ? `My brain couldn't answer: ${whose} says the house model I run on isn't available. ${ours}`
+        : `My brain couldn't answer: ${whose} says the model it's set to use isn't available. Asking again won't help until the model is changed.`;
     case "rate-limited":
       return `My brain is being rate-limited by ${whose} right now. Give it a moment and try again.`;
     case "provider-down":
