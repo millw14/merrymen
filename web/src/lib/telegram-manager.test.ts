@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { boundedJson, managedBotIdentity, managerNotices, managerWebhookUrl, parsePress, pressData, TelegramManager, validWebhookSecret } from "./telegram-manager";
+import { boundedJson, managedBotIdentity, managerNotices, managerWebhookUrl, parsePress, pressData, TelegramManager, TelegramManagerError, validWebhookSecret } from "./telegram-manager";
 
 const config = { token: "11111:manager_test_secret", username: "merrymen_manager_bot", webhookSecret: "a".repeat(32) };
 const identity = { id: "22222", username: "my_merrymen_bot" };
@@ -101,6 +101,29 @@ describe("Telegram manager transport", () => {
       { method: "answerCallbackQuery", body: { callback_query_id: "cbq-1" } },
       { method: "answerCallbackQuery", body: { callback_query_id: "cbq-2", text: "This setup expired." } },
     ]);
+  });
+  it("accepts an already-identical edit while keeping that rejection an error for sendMessage", async () => {
+    for (const description of ["Bad Request: message is not modified", "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message"]) {
+      const request = (async () => Response.json({ ok: false, error_code: 400, description }, { status: 400 })) as typeof fetch;
+      const manager = new TelegramManager(config, request);
+      await manager.edit(54321, 77, managerNotices.expired(null));
+      await assert.rejects(manager.send(54321, managerNotices.expired(null)), error => error instanceof TelegramManagerError && !error.message.includes(description));
+    }
+  });
+  it("keeps other edit failures sanitized, including similar descriptions and mismatched error codes", async () => {
+    for (const [status, error_code, description] of [
+      [400, 400, `Bad Request: message to edit not found ${config.token}`],
+      [400, 400, "Bad Request: message is not modified unexpectedly"],
+      [400, 400, "Bad Request: message is not modifiedx"],
+      [400, 400, null],
+      [400, 403, "Bad Request: message is not modified"],
+      [403, 400, "Bad Request: message is not modified"],
+      [200, 400, "Bad Request: message is not modified"],
+    ] as const) {
+      const request = (async () => Response.json({ ok: false, error_code, description }, { status })) as typeof fetch;
+      await assert.rejects(new TelegramManager(config, request).edit(54321, 77, managerNotices.expired(null)),
+        error => error instanceof TelegramManagerError && error.message === "Telegram could not complete this step. Please try again.");
+    }
   });
   it("bounds each probe call by the caller's timeout", async () => {
     let signal: AbortSignal | undefined;

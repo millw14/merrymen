@@ -176,6 +176,9 @@ lock and one transaction for the claim, the sealed token and the completion.
 Token lookups and manager messages do not hold a settings or manager delivery
 lock. Valid taps are acknowledged before token lookup. Refused attempts send
 a separate message so a late failure cannot replace a concurrent success.
+If Telegram refuses a final-state edit, the manager logs a fixed reason and
+sends that result as a separate message. An already-identical edit counts as
+success, avoiding duplicate messages on normal callback retries.
 Pressing twice, or Telegram redelivering a press, connects nothing twice. A press from anyone else, or
 anywhere else, is answered and changes nothing.
 

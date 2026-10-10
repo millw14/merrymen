@@ -28,6 +28,7 @@ let service: ReturnType<typeof createTelegramHandlers>;
 let telegramWebhook: string;
 let telegramAllowed: unknown;
 let canManage: boolean;
+let unchangedEdits = false;
 let logs: string[];
 let candidateUsername = "my_merrymen_bot";
 let beforeTelegram: ((method: string, body: Record<string, unknown>) => Promise<void>) | null = null;
@@ -38,6 +39,7 @@ const fakeFetch = (async (input, init) => {
   const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
   telegramCalls.push({ method, body, locked: lockDepth > 0 });
   await beforeTelegram?.(method, body);
+  if (method === "editMessageText" && unchangedEdits) return Response.json({ ok: false, error_code: 400, description: "Bad Request: message is not modified: specified new message content and reply markup are exactly the same" }, { status: 400 });
   if (failing.has(method)) return Response.json({ ok: false, error_code: 400, description: `Bad Request: refused ${config.token}` }, { status: 400 });
   if (method === "setWebhook") { telegramWebhook = racingWebhook ?? String(body.url); telegramAllowed = racingWebhook ? undefined : body.allowed_updates; }
   const result = method === "getManagedBotToken" ? "22222:managed_test_secret" :
@@ -67,7 +69,7 @@ beforeEach(async () => {
   await db.exec("CREATE TABLE tenant_settings (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL, updated_at INTEGER NOT NULL)");
   await db.prepare("INSERT INTO tenant_settings VALUES (?, ?, ?)").run(A, sealSecret(JSON.stringify({ dailyBudgetUsdg: 14, telegramControl: false, telegramAllowlist: [-123] }), dek), 1);
   useBotClaimsDbForTest(db); telegramCalls = []; telegramWebhook = ""; telegramAllowed = undefined; canManage = true; logs = []; racingWebhook = null;
-  locks = []; lockDepth = 0; failing = new Set(); presses = 0; candidateUsername = "my_merrymen_bot"; beforeTelegram = null;
+  locks = []; lockDepth = 0; failing = new Set(); presses = 0; candidateUsername = "my_merrymen_bot"; beforeTelegram = null; unchangedEdits = false;
   service = handlers();
 });
 afterEach(() => { mock.timers.reset(); });
@@ -423,7 +425,7 @@ describe("the Connect and Not this bot buttons", () => {
     const claims = raw.prepare("SELECT * FROM telegram_bot_claims").all();
     telegramCalls = [];
     // Telegram refuses an answer to an old press and an edit that changes nothing: neither is an error here.
-    failing.add("answerCallbackQuery"); failing.add("editMessageText");
+    failing.add("answerCallbackQuery"); unchangedEdits = true;
     assert.equal((await webhook(first)).status, 200);
     assert.equal((await webhook(pressOf(connect))).status, 200);
     assert.deepEqual(methods(), ["answerCallbackQuery", "editMessageText", "answerCallbackQuery", "editMessageText"]);
@@ -435,6 +437,30 @@ describe("the Connect and Not this bot buttons", () => {
     assert.equal(res.status, 200);
     assert.equal((await res.json() as { intent: { status: string } }).intent.status, "connected");
     assert.ok(!methods().includes("sendMessage") && !methods().includes("getManagedBotToken"));
+  });
+  for (const action of ["connect", "cancel"] as const) {
+    it(`sends the committed ${action} result separately when Telegram refuses the edit`, async () => {
+      const begun = await readyCandidate();
+      const data = buttons()[action];
+      telegramCalls = [];
+      failing.add("editMessageText");
+      assert.equal((await webhook(pressOf(data))).status, 200);
+      assert.equal((await availability(service, begun.intent.id)).intent?.status, action === "connect" ? "connected" : "cancelled");
+      const finalNotice = bodies("editMessageText")[0];
+      assert.deepEqual(bodies("sendMessage"), [{ chat_id: 54321, text: finalNotice.text, reply_markup: finalNotice.reply_markup }]);
+      assert.deepEqual(logs, ["the manager's button result message could not be edited"]);
+      assertNothingSecret(begun.challenge);
+    });
+  }
+  it("preserves the saved connection if both the edit and fallback message fail", async () => {
+    const begun = await readyCandidate(); const { connect } = buttons();
+    telegramCalls = [];
+    failing.add("editMessageText"); failing.add("sendMessage");
+    assert.equal((await webhook(pressOf(connect))).status, 200);
+    assert.equal((await availability(service, begun.intent.id)).intent?.status, "connected");
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM telegram_bot_claims").get()!.n, 1);
+    assert.deepEqual(logs, ["the manager's button result message could not be edited", "the manager's button result message could not be sent"]);
+    assertNothingSecret(begun.challenge);
   });
   it("refuses a press from anyone but the Telegram user the setup bound, or from anywhere but that private chat", async () => {
     const begun = await readyCandidate(); const { connect, cancel } = buttons();

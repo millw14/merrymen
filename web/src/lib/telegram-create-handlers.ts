@@ -326,7 +326,17 @@ export function createTelegramHandlers(overrides: Pick<Dependencies, "config"> &
     // failure edit must never overwrite a concurrent successful Connect edit.
     // Terminal states are immutable, so their shared message edits agree.
     if (valid && reply.notice && reply.separate) await tell(config, user, () => reply.notice!, "button result");
-    else if (valid && reply.notice) await manager.edit(user, messageId, reply.notice, NOTICE_CALL_MS).catch(() => {});
+    else if (valid && reply.notice) {
+      try { await manager.edit(user, messageId, reply.notice, NOTICE_CALL_MS); }
+      catch {
+        // Completion may already have committed. The temporary tap toast is
+        // not a durable receipt, so deliver the outcome in a new message when
+        // the old message cannot be edited. An unchanged edit succeeds in the
+        // transport and does not send a duplicate receipt on normal retries.
+        deps.log("the manager's button result message could not be edited");
+        await tell(config, user, () => reply.notice!, "button result");
+      }
+    }
     else if (answered && reply.toast) await tell(config, user, () => ({ text: reply.toast!, buttons: [] }), "button result");
   }
 

@@ -132,7 +132,11 @@ export class TelegramManager {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs), redirect: "error",
       });
-      const data = await res.json() as { ok?: unknown; result?: unknown };
+      const data = await res.json() as { ok?: unknown; result?: unknown; error_code?: unknown; description?: unknown };
+      // An idempotent edit already has its desired text and buttons. Telegram
+      // reports that as a 400; only this exact edit rejection is successful.
+      if (method === "editMessageText" && res.status === 400 && data.ok === false && data.error_code === 400
+        && typeof data.description === "string" && /^Bad Request: message is not modified(?::|$)/.test(data.description)) return true;
       if (!res.ok || data.ok !== true) throw new TelegramManagerError();
       return data.result;
     } catch { throw new TelegramManagerError(); }
