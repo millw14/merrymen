@@ -10,6 +10,7 @@ import { translateQuery, translateSchema, wrapSqlite, type Db } from "./db";
 import { attestOriginalReceipt } from "./receipt-attestation";
 import { assertNoPendingReceiptAttestation, readReceiptAttestation } from "./receipt-attestation-state";
 import { receiptFixture, TEST_ACCOUNT, TEST_TENANT } from "./receipt-attestation-fixture";
+import { seedOwnerRevocations } from "./receipt-attestation-owner-fixture";
 import { acquireTenantLease, PgTenantLeaseManager } from "./tenant-lease";
 import { JOURNAL_GENESIS, journalHash } from "./store";
 import { registerLedgerSource, restoreLedgerImport } from "./ledger-import";
@@ -81,15 +82,18 @@ test("Postgres: original receipt attestation, durable interruptions and actual t
     };
   }
   const source = async (db: Db) => db.prepare("SELECT * FROM flows WHERE LOWER(agent_id)=?").get(TEST_ACCOUNT.toLowerCase()) as Promise<Record<string, unknown>>;
+  const owners = async (db: Db) => (await db.prepare("SELECT * FROM owner_operations WHERE LOWER(agent_id)=? ORDER BY id").all(TEST_ACCOUNT.toLowerCase()) as Record<string, unknown>[]).map(row => ({ ...row }));
   const other = async (db: Db) => ({ agent: await db.prepare("SELECT * FROM agents WHERE smart_account=?").get(OTHER), flow: await db.prepare("SELECT * FROM flows WHERE agent_id=?").get(OTHER) });
 
-  for (const boundary of ["audit", "marker", "local", "shared", "cleared"] as const) await t.test(`crash after ${boundary}: fresh connections resume once without changing money or other tenants`, async () => {
+  for (const boundary of ["audit", "marker", "local", "shared", "cleared"] as const) await t.test(`crash after ${boundary}: fresh connections preserve proved owner records and resume once without changing money or other tenants`, async () => {
     const f = await fixture();
     try {
+      const ownerEvidence = await seedOwnerRevocations(f, boundary === "audit" ? 23 : 2);
       assert.equal(await f.competitor.acquire(TEST_TENANT), null, "another supervisor cannot hold the same tenant");
       const original = { agents: await f.shared.prepare("SELECT * FROM agents ORDER BY smart_account").all(),
         localAgent: await f.local.prepare("SELECT * FROM agents").all(), marks: await f.shared.prepare("SELECT * FROM mirror_state").all(),
-        source: await f.shared.prepare("SELECT * FROM tenant_ledger_import").all(), journal: await f.local.prepare("SELECT * FROM journal ORDER BY seq").all(), other: await other(f.shared) };
+        source: await f.shared.prepare("SELECT * FROM tenant_ledger_import").all(), journal: await f.local.prepare("SELECT * FROM journal ORDER BY seq").all(), other: await other(f.shared),
+        localOwners: await owners(f.local), sharedOwners: await owners(f.shared) };
       const before = readFileSync(f.file), preview = await attestOriginalReceipt(f.options);
       assert.equal(preview.state, "preview"); assert.deepEqual(readFileSync(f.file), before);
       assert.equal(await readReceiptAttestation(f.shared, TEST_TENANT), undefined, "preview did not create an audit");
@@ -99,9 +103,18 @@ test("Postgres: original receipt attestation, durable interruptions and actual t
       try {
         assert.equal((await source(wrapSqlite(reopened))).source, ["local", "shared", "cleared"].includes(boundary) ? "chain-log" : "inferred");
         assert.equal((await source(fresh)).source, ["shared", "cleared"].includes(boundary) ? "chain-log" : "inferred");
-        assert.equal((await readReceiptAttestation(fresh, TEST_TENANT))!.state, ["shared", "cleared"].includes(boundary) ? "applied" : "pending");
+        const audit = (await readReceiptAttestation(fresh, TEST_TENANT))!;
+        assert.equal(audit.state, ["shared", "cleared"].includes(boundary) ? "applied" : "pending");
+        const plan = JSON.parse(String(audit.plan_json));
+        assert.deepEqual(plan.local.ownerOperations, original.localOwners);
+        assert.deepEqual(plan.shared.ownerOperations, original.sharedOwners);
+        assert.equal(plan.ownerProof.operations.length, ownerEvidence.receipts.size);
+        assert.ok(plan.ownerProof.operations.every((proof: { callKind: string }) => proof.callKind === "invalidate-nonce"));
+        assert.deepEqual(await owners(wrapSqlite(reopened)), original.localOwners);
+        assert.deepEqual(await owners(fresh), original.sharedOwners);
         if (["audit", "marker", "local"].includes(boundary)) await assert.rejects(assertNoPendingReceiptAttestation(fresh, TEST_TENANT), /unfinished/);
       } finally { reopened.close(); }
+      const permanentPlan = (await readReceiptAttestation(fresh, TEST_TENANT))!.plan_json;
       const options = { ...f.options, shared: fresh, mode: "commit" as const, approvedDigest: preview.approvalDigest };
       assert.equal((await attestOriginalReceipt(options)).state, "applied");
       assert.equal((await attestOriginalReceipt(options)).state, "applied", "exact replay is idempotent");
@@ -115,11 +128,61 @@ test("Postgres: original receipt attestation, durable interruptions and actual t
       assert.deepEqual(await fresh.prepare("SELECT * FROM mirror_state").all(), original.marks);
       assert.deepEqual(await fresh.prepare("SELECT * FROM tenant_ledger_import").all(), original.source);
       assert.deepEqual(await other(fresh), original.other);
+      assert.deepEqual(await owners(f.local), original.localOwners);
+      assert.deepEqual(await owners(fresh), original.sharedOwners);
+      assert.equal((await readReceiptAttestation(fresh, TEST_TENANT))!.plan_json, permanentPlan, "retries retain the original approval and owner receipt evidence");
       const journal = await f.local.prepare("SELECT * FROM journal ORDER BY seq").all() as Record<string, unknown>[];
       assert.equal(journal.length, 2); assert.deepEqual(journal.slice(0, 1), original.journal);
       let head = JOURNAL_GENESIS;
       for (const row of journal) { assert.equal(row.prev_hash, head); assert.equal(row.hash, journalHash(head, String(row.payload_json))); head = String(row.hash); }
       assert.equal(existsSync(path.join(f.options.home, "ledger-source-blocked.json")), false);
+    } finally { await f.close(); }
+  });
+
+  for (const boundary of ["audit", "local", "shared"] as const) await t.test(`owner receipt loss after ${boundary} refuses fresh retry until the same canonical evidence returns`, async () => {
+    const f = await fixture();
+    try {
+      const evidence = await seedOwnerRevocations(f);
+      const preview = await attestOriginalReceipt(f.options);
+      const options = { ...f.options, mode: "commit" as const, approvedDigest: preview.approvalDigest };
+      await assert.rejects(attestOriginalReceipt({ ...options, checkpoint(at) { if (at === boundary) throw new Error("owner proof interruption"); } }), /owner proof interruption/);
+      const fresh = f.wrap(await f.connect());
+      const before = { file: readFileSync(f.file), source: await source(fresh), owners: await owners(fresh),
+        audit: await readReceiptAttestation(fresh, TEST_TENANT), marks: await fresh.prepare("SELECT * FROM mirror_state").all(), other: await other(fresh) };
+      const missingTx = evidence.receipts.keys().next().value!;
+      await assert.rejects(attestOriginalReceipt({ ...options, shared: fresh,
+        rpc: async (method, params) => method === "eth_getTransactionReceipt" && params[0] === missingTx ? null : evidence.rpc(method, params) }), /owner operations lack/);
+      assert.deepEqual(readFileSync(f.file), before.file);
+      assert.deepEqual(await source(fresh), before.source); assert.deepEqual(await owners(fresh), before.owners);
+      assert.deepEqual(await readReceiptAttestation(fresh, TEST_TENANT), before.audit);
+      assert.deepEqual(await fresh.prepare("SELECT * FROM mirror_state").all(), before.marks);
+      assert.deepEqual(await other(fresh), before.other);
+      assert.equal(existsSync(path.join(f.options.home, "ledger-source-blocked.json")), boundary !== "audit");
+      if (boundary !== "shared") await assert.rejects(assertNoPendingReceiptAttestation(fresh, TEST_TENANT), /unfinished/);
+      assert.equal((await attestOriginalReceipt({ ...options, shared: fresh })).state, "applied");
+      assert.equal((await attestOriginalReceipt({ ...options, shared: fresh })).state, "applied");
+      assert.equal((await source(fresh)).amount_usdg, 200);
+      assert.equal((await fresh.prepare("SELECT COUNT(*) AS n FROM flows WHERE LOWER(agent_id)=?").get(TEST_ACCOUNT.toLowerCase()) as { n: number }).n, 1);
+      assert.deepEqual(await owners(fresh), before.owners);
+    } finally { await f.close(); }
+  });
+
+  for (const side of ["local", "shared"] as const) await t.test(`${side} owner raw-row mutation after approval refuses despite unchanged receipt meaning`, async () => {
+    const f = await fixture();
+    try {
+      await seedOwnerRevocations(f);
+      const preview = await attestOriginalReceipt(f.options);
+      const options = { ...f.options, mode: "commit" as const, approvedDigest: preview.approvalDigest };
+      await assert.rejects(attestOriginalReceipt({ ...options, checkpoint(at) { if (at === "marker") throw new Error("owner row interruption"); } }), /owner row interruption/);
+      const db = side === "local" ? f.local : f.shared;
+      await db.prepare("UPDATE owner_operations SET created_at=created_at+1 WHERE LOWER(agent_id)=?").run(TEST_ACCOUNT.toLowerCase());
+      const before = { file: readFileSync(f.file), owners: await owners(f.shared), audit: await readReceiptAttestation(f.shared, TEST_TENANT) };
+      await assert.rejects(attestOriginalReceipt(options), /accounting preimages changed/);
+      assert.deepEqual(readFileSync(f.file), before.file); assert.deepEqual(await owners(f.shared), before.owners);
+      assert.deepEqual(await readReceiptAttestation(f.shared, TEST_TENANT), before.audit);
+      assert.equal((await source(f.local)).source, "inferred"); assert.equal((await source(f.shared)).source, "inferred");
+      assert.equal(existsSync(path.join(f.options.home, "ledger-source-blocked.json")), true);
+      await assert.rejects(assertNoPendingReceiptAttestation(f.shared, TEST_TENANT), /unfinished/);
     } finally { await f.close(); }
   });
 
