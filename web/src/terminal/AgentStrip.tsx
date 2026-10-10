@@ -149,8 +149,15 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
     <section className="agent-strip" aria-label={t("strip.aria")}>
       {recovering ? <>
         <RecoveryNotice recovery={recovering} funds={funds}/>
-        <Row tone="warn" label="Telegram" value={bot.label}
-          action={bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>
+        {/* SETTING UP A BOT IS NOT TRADING, so a held account gets the same
+            one button for the two steps that only save it: create one, or
+            turn a saved one on. Every other state keeps the recovery wording,
+            which says honestly what a held agent does with its bot. */}
+        {owner && (row.kind === "no-token" || creating)
+          ? <TelegramLine row={row} owner={owner} creating={creating} onCreating={setCreating} refresh={refreshTg} />
+          : <Row tone="warn" label="Telegram" value={bot.label}
+              action={row.kind === "off" ? <TurnOnTelegram owner={owner} refresh={refreshTg} />
+                : bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>}
         <Row tone="quiet" label="Trencher" value="Trading paused"/>
       </> : <>
         {held !== null ? <HeldLine reason={held} /> : null}
