@@ -64,6 +64,10 @@ test("workerHeardFromOf: only the route's explicit null is 'never'; absent or ma
   assert.equal(workerHeardFromOf({ workerAliveAt: undefined }), null);
   assert.equal(workerHeardFromOf(null), null);
   assert.equal(workerHeardFromOf(undefined), null);
+  // Neither heartbeat source could be read: the null means "could not tell".
+  assert.equal(workerHeardFromOf({ workerAliveAt: null, heartbeatUnread: true }), null);
+  assert.equal(workerHeardFromOf({ workerAliveAt: 1_791_000_000, heartbeatUnread: true }), true);
+  assert.equal(workerHeardFromOf({ workerAliveAt: null, heartbeatUnread: "yes" }), false, "only the route's literal true");
   for (const odd of ["1791000000", 0, -5, Number.NaN, Number.POSITIVE_INFINITY, true, {}]) {
     assert.equal(workerHeardFromOf({ workerAliveAt: odd }), null, `${String(odd)} is not a heartbeat`);
   }

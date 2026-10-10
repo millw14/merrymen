@@ -137,6 +137,19 @@ test("never heard from is null — not stopped", async () => {
   assert.equal(body.workerAliveAt, null);
   assert.equal(body.workerStale, null);
   assert.deepEqual(settingsReads, [], "and no tick is needed to say so");
+  assert.equal(body.heartbeatUnread, undefined, "the ledger answered, so null really is never");
+});
+
+test("a heartbeat nobody could read is marked unread, so null is not 'never'", async () => {
+  db.exec("DROP TABLE agents");
+  const response = await GET(new Request(`${ORIGIN}/api/grants`, {
+    headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(A)}` },
+  }));
+  assert.equal(response.status, 200);
+  const body = await response.json() as AgentStatus;
+  assert.equal(body.workerAliveAt, null);
+  assert.equal(body.heartbeatUnread, true);
+  assert.equal(body.workerStale, null);
 });
 
 test("self-hosted judges the heartbeat file, with the worker's own tick", async () => {

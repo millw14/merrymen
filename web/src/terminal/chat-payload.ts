@@ -71,12 +71,17 @@ export const tapeFor = (moves: LiveMine["moves"]) =>
  *     reading that as "never started" would have the chat tell an owner whose
  *     agent may be trading that it has not begun.
  *
+ * A null the route marks `heartbeatUnread` is also unknown: neither source
+ * could be read, so it cannot mean "never".
+ *
  * `!= null` used to do this and folded the third answer into the second.
  */
-export function workerHeardFromOf(status: { workerAliveAt?: unknown } | null | undefined): boolean | null {
+export function workerHeardFromOf(
+  status: { workerAliveAt?: unknown; heartbeatUnread?: unknown } | null | undefined,
+): boolean | null {
   if (!status || !("workerAliveAt" in status)) return null;
   const at = status.workerAliveAt;
-  if (at === null) return false;
+  if (at === null) return status.heartbeatUnread === true ? null : false;
   return typeof at === "number" && Number.isFinite(at) && at > 0 ? true : null;
 }
 
