@@ -205,3 +205,29 @@ describe("AgentStrip under a recovery hold: setting up a bot is not trading", ()
     assert.match(ui.container.textContent ?? "", /Waiting for recovery|Listening for public questions/);
   });
 });
+
+describe("Turn on Telegram waits until it knows whose bot it is", () => {
+  for (const recovery of [null, { state: "history-only", tradingPaused: true, history: "available", memory: "unknown",
+    checkedAt: 1_791_111_100, lastVerifiedHeartbeatAt: 1_791_110_000 }]) {
+    it(`${recovery ? "held" : "normal"}: hidden while /api/settings is unanswered, and the write names that owner`, async () => {
+      let answerSettings!: (r: Response) => void;
+      const settingsGate = new Promise<Response>(resolve => { answerSettings = resolve; });
+      respond = async call => {
+        if (path(call) === "/api/telegram") return json(tgStatus({ enabled: false }));
+        if (path(call) === "/api/settings" && call.init?.method === "PUT") return json({ ok: true });
+        if (path(call) === "/api/settings") return settingsGate;
+        return json({});
+      };
+      await ui.render(React.createElement(AgentStrip, { hasAgent: true, recovery: recovery as never }));
+      await drain();
+      assert.ok(![...ui.container.querySelectorAll("button")].some(b => b.textContent === "Turn on Telegram"), "no write offered before the owner is known");
+      answerSettings(json({ owner: OWNER, values: {} }));
+      await drain();
+      await ui.click("Turn on Telegram");
+      await drain();
+      const put = calls.find(c => c.init?.method === "PUT")!;
+      assert.equal((JSON.parse(String(put.init!.body)) as { owner?: string }).owner, OWNER);
+    });
+  }
+});
+
