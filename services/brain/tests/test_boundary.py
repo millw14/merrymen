@@ -1002,3 +1002,73 @@ def test_a_forced_hold_is_distinguishable_from_a_chosen_one():
     assert shut.why and len(shut.why) > 0
     assert refused.why and len(refused.why) > 0
     assert len(shut.caveats) == 3
+
+
+def test_catalysts_travel_with_the_thesis_and_pass_the_address_backstop():
+    """
+    A thesis says why this instrument; the catalysts say why NOW. They are
+    written by the manager in the same reply as the thesis, so the public post
+    and the intent are still two readings of one decision — and, like every
+    other free-text field the manager writes, an address-shaped catalyst drops
+    the whole decision rather than being redacted.
+    """
+    import asyncio
+
+    import pytest
+
+    from brain.analyst import AnalystView
+    from brain.budget import RunBudget, TIERS
+    from brain.escalation import EscalationVerdict
+    from brain.graph import BrainGraph
+    from brain.schemas import DecideRequest, MarketState, PortfolioQuality, PortfolioState
+
+    book = PortfolioState(
+        snapshot_id="s", as_of=1, cash_usdg=10_000_000, equity_usdg=10_000_000,
+        net_contributions_usdg=10_000_000,
+        quality=PortfolioQuality(
+            audit_passed=True, epoch=1, current_accounting_history_auditable=True,
+            contributions_known=True, equity_complete=True, gas_basis="net",
+            position_history_available=True,
+        ),
+    )
+    req = DecideRequest(
+        schema_version="1.0.0", run_id="r", agent_id="0xa", trigger_id="t",
+        portfolio=book,
+        market=MarketState(
+            snapshot_id="m", as_of=1, instrument_id="pons:c01:wif", symbol="WIF",
+            instrument_class="memecoin", price_usd="0.00001200", signals={},
+        ),
+    )
+
+    def assemble(catalysts):
+        graph = BrainGraph(llm=None)
+        return graph._assemble(
+            req,
+            RunBudget(run_id="r", agent_id="0xa", tier="research", limits=TIERS["research"]),
+            gate_assess(book),
+            {"action": "buy", "confidence": 0.7, "suggested_delta_usdg": 5_000_000,
+             "thesis": "the tape woke up", "catalysts": catalysts},
+            bull="", bear="", depth_used="analysts",
+            escalation=EscalationVerdict(False, [], "no condition met"),
+            candidate_action="buy",
+            views=[AnalystView(lens="onchain", direction="buy", confidence=0.7,
+                               evidence_strength=0.6, note="")],
+        )
+
+    d = assemble(["5-minute trade rate is 3x the hour's", "18 new traders in five minutes"])
+    assert d.catalysts == ["5-minute trade rate is 3x the hour's", "18 new traders in five minutes"]
+    assert "catalysts" in d.model_dump(), "the field must reach the wire"
+
+    # Absent is fine — an older prompt never asked for them.
+    assert assemble(None).catalysts == []
+
+    # The backstop applies to catalysts exactly as it does to risks.
+    with pytest.raises(ValueError, match="address-shaped"):
+        assemble(["buy 0x5b87957b9de0817994175faa089697d85f176983 now"])
+
+    # And the prompt asks for them, so they are the manager's words, not a
+    # post-hoc explanation assembled from somewhere else.
+    import inspect
+
+    src = inspect.getsource(BrainGraph._decide)
+    assert '"catalysts"' in src, "the manager must be asked for catalysts in the same reply as the thesis"

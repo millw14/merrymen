@@ -16,6 +16,7 @@ import {
   HOSTED_FORBIDDEN_SETTING_FIELDS,
   LLM_PROVIDER_IDS,
   LLM_PROVIDERS,
+  PROFILE_ENUM_FIELDS,
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
@@ -322,6 +323,11 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   classMaxPositions: [0, 1_000],
   classMaxHoldSec: [60, 30 * 86_400],
   classMinDepthUsdg: [0, 10_000_000],
+  // THE TRADING PROFILE'S TWO NUMBERS. A conviction floor is a fraction, so
+  // this loop's Number.isFinite range check is the right shape; the top-N is
+  // bounded because each researched candidate is a paid Brain run.
+  profileConvictionMin: [0, 1],
+  profileResearchTopN: [1, 5],
   // The class exit by curve progress: the worker's clamp (settings.ts, 1-100)
   // and the chat spec's bounds. It was missing, so a change approved from an
   // assistant or saved from a client came back {ok:true, ignored:[…]} and
@@ -763,6 +769,25 @@ async function saveSettings(
     if (v === null || v === undefined || v === "") setOrClear("assetMode", undefined);
     else if (v === "all" || v === "stocks" || v === "crypto") setOrClear("assetMode", v as never);
     else errors.push("assetMode: must be all, stocks or crypto");
+  }
+
+  /**
+   * ── trading profile (closed enums) ────────────────────────────────────
+   *
+   * Five string enums, validated by membership against core's own lists —
+   * the same shape as `assetMode` above, in a loop because five copies of
+   * that branch is five chances to leave one out. An unknown word is an
+   * error, never a silent default: the owner typed it and must be told.
+   * Free text is impossible here by construction, which matters because the
+   * profile is rendered into a model prompt.
+   */
+  for (const [key, allowed] of Object.entries(PROFILE_ENUM_FIELDS)) {
+    const k = key as keyof MerrymenSettings;
+    if (!(k in body)) continue;
+    const v = body[k];
+    if (v === null || v === undefined || v === "") setOrClear(k, undefined);
+    else if (typeof v === "string" && (allowed as readonly string[]).includes(v)) setOrClear(k, v as never);
+    else errors.push(`${key}: must be one of ${allowed.join(", ")}`);
   }
 
   /**
