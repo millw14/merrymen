@@ -20,6 +20,14 @@ interface Props {
   onAvailableChange?: (available: boolean | null) => void;
   onConnected: (owner: string, signal: AbortSignal, botUsername: string) => Promise<void> | void;
   onIntentMissing: (owner: string, signal: AbortSignal, botUsername: string | null) => Promise<void> | void;
+  /**
+   * HOME'S ONE BUTTON: the same flow, drawn as a single primary control whose
+   * label and action follow the setup (create, open Telegram, connect this
+   * bot), with cancel as a quiet link beside it. The logic is this file's,
+   * unchanged; only the drawing differs. When creation can't start here it
+   * becomes a way to the manual path in Settings instead of a dead button.
+   */
+  compact?: boolean;
 }
 interface View {
   owner: string;
@@ -67,7 +75,7 @@ function failure(error: unknown): string {
   return "Couldn't check Telegram setup. Try again.";
 }
 
-export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = false, onActiveChange, onAvailableChange, onConnected, onIntentMissing }: Props) {
+export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = false, onActiveChange, onAvailableChange, onConnected, onIntentMissing, compact = false }: Props) {
   const owner = /^0x[0-9a-f]{40}$/i.test(suppliedOwner ?? "") ? suppliedOwner!.toLowerCase() : "";
   const [view, setView] = useState<View>(() => initial(owner));
   const [attempt, setAttempt] = useState(0);
@@ -252,6 +260,33 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   if (!owner) return <p className="mm-hint">Sign in to create a Telegram bot.</p>;
   if (hasBot && !intent && !current.needsReconciliation) return null;
   const ended = intent && ["expired", "cancelled", "error"].includes(intent.status);
+  if (compact) {
+    const quietCancel = <button type="button" className="tg-one-cancel" disabled={disabled || current.busy} onClick={() => void cancel()}>Cancel</button>;
+    let primary: React.ReactNode;
+    let note: string | null = null;
+    let secondary: React.ReactNode = null;
+    if (current.loading) primary = <button type="button" className="mm-btn primary" disabled>Checking Telegram…</button>;
+    else if (current.error) { note = current.error; primary = <button type="button" className="mm-btn primary" disabled={disabled || current.busy} onClick={() => intent?.status === "connected" ? setRefreshAttempt(n => n + 1) : setAttempt(n => n + 1)}>Try again</button>; }
+    else if (ended && (current.confirmationAttempted || current.needsReconciliation)) { note = "Checking whether your bot was saved."; primary = <button type="button" className="mm-btn primary" disabled={disabled || current.busy} onClick={() => setAttempt(n => n + 1)}>Check setup</button>; secondary = quietCancel; }
+    else if (current.needsReconciliation) primary = <button type="button" className="mm-btn primary" disabled>Checking Telegram…</button>;
+    else if (intent && ["waiting_telegram", "waiting_bot"].includes(intent.status)) {
+      note = intent.status === "waiting_bot" ? "Pick a name for your bot in Telegram. This updates by itself." : "Approve the new bot in Telegram, then come back here.";
+      primary = current.telegramUrl ? <a className="mm-btn primary" href={current.telegramUrl} target="_blank" rel="noopener noreferrer">Open Telegram</a> : <button type="button" className="mm-btn primary" disabled>Waiting for Telegram…</button>;
+      secondary = quietCancel;
+    } else if (intent?.status === "confirm") {
+      note = "Telegram made your bot. Connect it to your agent.";
+      primary = <button type="button" className="mm-btn primary" disabled={disabled || current.busy || until(intent) <= Date.now() || hasBot} onClick={() => void confirm()}>{current.busy ? "Connecting…" : `Connect @${intent.botUsername}`}</button>;
+      secondary = quietCancel;
+    } else if (intent?.status === "connected") primary = <button type="button" className="mm-btn primary" disabled>Bot saved, starting it…</button>;
+    else if (current.available === true) {
+      if (ended) note = intent.status === "expired" ? "That setup expired. Start again when you're ready." : "That setup didn't finish. You can start again.";
+      primary = <button type="button" className="mm-btn primary" disabled={disabled || current.busy} onClick={() => void begin()}>{current.busy ? "Opening Telegram…" : "Set up Telegram"}</button>;
+    } else primary = <a className="mm-btn primary" href="/settings#telegram">Connect Telegram</a>;
+    return <div className="tg-one" aria-label="Set up Telegram" aria-busy={current.loading || current.busy}>
+      {primary}{secondary}
+      {note ? <p className={current.error ? "mm-danger" : "mm-hint"} role={current.error ? "alert" : "status"}>{note}</p> : null}
+    </div>;
+  }
   return <div className="mm-field" aria-label="Create Telegram bot" aria-busy={current.loading || current.busy}>
     {current.loading ? <p className="mm-hint" role="status">Checking Telegram setup…</p> : null}
     {current.error ? <p className="mm-danger" role="alert">{current.error}</p> : null}

@@ -8460,7 +8460,8 @@ html[lang|="ko"] .terminal-host {
 }
 
 /* ── WHAT IS CONNECTED, ON THE HOME SCREEN ──────────────────────────────────
-   A reading, not a control panel, so it is styled as a list of facts rather
+   A reading, plus Telegram's one button (see AgentStrip TelegramLine), not a
+   control panel, so it is styled as a list of facts rather
    than as a card competing with the hero above it. One quiet rule between
    rows; no border, no fill, no shadow — those say "separate object", and this
    belongs to the screen it sits on.
@@ -8537,6 +8538,49 @@ html[lang|="ko"] .terminal-host {
 :where(.terminal-host) .agent-strip-action code {
   white-space: nowrap;
   user-select: all;
+}
+/* THE ONE TELEGRAM BUTTON. `.mm-btn` is only styled inside the form page (see
+   .resign-actions above), so the strip gives its single primary control the
+   same geometry as Home's Deposit: full width, the inverted pill, 48px tall,
+   so it reads as the next thing to press. Cancel is a quiet text link beside
+   it, never a second button competing with it. */
+:where(.terminal-host) .agent-strip-action > .mm-btn.primary,
+:where(.terminal-host) .agent-strip-action .tg-one > .mm-btn.primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--tx);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+:where(.terminal-host) .agent-strip-action .mm-btn.primary:disabled {
+  opacity: .55;
+  cursor: default;
+}
+:where(.terminal-host) .agent-strip-action .tg-one {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  width: 100%;
+}
+:where(.terminal-host) .agent-strip-action .tg-one p { margin: 0; flex-basis: 100%; }
+:where(.terminal-host) .tg-one-cancel {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tx-2);
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 /* ══ WAVE 2 — THE FEED ROW ════════════════════════════════════════════════
