@@ -37,6 +37,7 @@ describe("every orchestrator one-shot is counted from the commit that adds it", 
   /** One-shots whose gate a helper in another module reads: function → [module, helper, gate]. */
   const HELPER_GATES: Record<string, [string, string, string]> = {
     runRepairIfAsked: ["worker/src/accounting-repair.ts", "parseRepairOptions", "MERRYMEN_REPAIR"],
+    runReceiptAttestationIfAsked: ["worker/src/receipt-attestation-controls.ts", "receiptAttestationRequest", "MERRYMEN_RECEIPT_ATTEST_ACCOUNT"],
   };
   /** What runOrchestrator runs that is NOT a one-shot, each for a reason. */
   const STANDING_PASSES = new Set([

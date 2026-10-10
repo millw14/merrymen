@@ -23,6 +23,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY } from "../../../packages/core/src/index";
 import type { EnergyStatus } from "../../../packages/core/src/index";
 import { count as countTokens, STILL_RUNS } from "../energy-copy";
+import type { AdmissionLevel } from "../worker-admission";
 
 export function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -210,6 +211,17 @@ export interface StatusContext {
    * spoken: off and observe limit nothing, so there is nothing to tell.
    */
   energy?: EnergyStatus | null;
+  /** This process's boot admission, supplied by the same state that gates orders. */
+  admission?: { level: AdmissionLevel; draining: boolean };
+}
+
+/** Current service restrictions, even before any trade has been attempted. */
+export function admissionStatusLine(admission: StatusContext["admission"]): string | null {
+  if (!admission) return null;
+  if (admission.draining) return "Service restart: this agent is restarting and sends no new orders.";
+  if (admission.level === "observe") return "Service observation hold: this agent can read and review, but buys and sells are blocked. The service operator controls this hold.";
+  if (admission.level === "exits-only") return "Service exit-only hold: new buys are blocked; existing positions may be closed through the usual risk checks. The service operator controls this hold.";
+  return null;
 }
 
 /**
@@ -273,6 +285,8 @@ export function readStatus(ctx: StatusContext): string {
   const alive = ctx.workerAliveSec !== null && ctx.workerAliveSec < 90;
   lines.push(`• worker: ${alive ? "alive" : "not running"}${ctx.paused ? " · ⏸ paused" : ""}`);
   lines.push(`• strategy: ${esc(ctx.strategy)} · venue: ${esc(ctx.venue)}`);
+  const admission = admissionStatusLine(ctx.admission);
+  if (admission) lines.push(`• ${admission}`);
   if (ctx.paper) {
     lines.push(`• mode: 📜 <b>paper</b> — fills simulate at live prices, nothing signs`);
   }

@@ -1,3 +1,5 @@
+import { scopedReceiptAttestationAllowed } from "./receipt-attestation-controls";
+
 /**
  * THE DEPLOY GUARD: ACCIDENT PREVENTION FOR THE HOSTED SERVICES.
  *
@@ -40,7 +42,9 @@
  *                       MERRYMEN_IMAGE. Then a census prints the NAMES (never
  *                       the values) of the one-shot operator variables that are
  *                       set, and the orchestrator role is refused while any is
- *                       set and MERRYMEN_FLEET_ROLLOUT is not exactly `all`.
+ *                       set and MERRYMEN_FLEET_ROLLOUT is not exactly `all`,
+ *                       except the complete, held, single-tenant receipt
+ *                       attestation protocol described below.
  *                       runOrchestrator() runs the orchestrator's checks again
  *                       itself (hostedOrchestratorRefusals), because the script
  *                       is not the only way to start it.
@@ -58,8 +62,8 @@
  * image older than this file, fails the pre-deploy step for the same reason:
  * clear the service's pre-deploy command first, on purpose.
  *
- * WHAT `MERRYMEN_FLEET_ROLLOUT=all` DOES AND DOES NOT MEAN HERE. It is the one
- * value that lets the orchestrator start with a one-shot set, because it is
+ * WHAT `MERRYMEN_FLEET_ROLLOUT=all` DOES AND DOES NOT MEAN HERE. It lets the
+ * orchestrator start with ordinary one-shots set, because it is
  * the rollout's declared end state: the whole fleet admitted, nothing held for
  * review by the rollout. It is not proof of that. Until the staged rollout
  * itself ships, that variable does nothing else, so setting it purely to quiet
@@ -128,13 +132,17 @@ export function onRailway(env: NodeJS.ProcessEnv): boolean {
  * here or listed in the test as standing, a gate read by a helper module is
  * listed with it, and anything else runOrchestrator runs is named as a
  * standing pass — so a new one-shot is counted from the commit that adds it.
+ * The receipt-attestation exception still counts all its controls. It requires
+ * exactly that protocol, a named account and tenant, explicit mode, the exact
+ * tenant's maintenance hold and a digest for commit. It never admits trading
+ * or allows another one-shot through a staged rollout.
  */
 const ONE_SHOT_EXACT: ReadonlySet<string> = new Set([
   "MERRYMEN_ACCOUNTING_RECONSTRUCT", "MERRYMEN_ACCOUNTING_DIAGNOSE", "MERRYMEN_GAS_AUDIT",
   "MERRYMEN_INSPECT_TENANT", "MERRYMEN_COHORT_VET", "MERRYMEN_IDENTITY_AUDIT", "MERRYMEN_BRAIN_DATASET",
   "MERRYMEN_RECONCILE_SHADOW", "MERRYMEN_BACKFILL_LIVE_INTENT",
 ]);
-const ONE_SHOT_FAMILY = /^MERRYMEN_(?:REPAIR(?:_[A-Z0-9_]+)?|ANNOUNCE_[A-Z0-9_]+|TG_RECOVERY_[A-Z0-9_]+|(?:ENABLE|HALT|RESUME)_CLASS_[A-Z0-9_]+)$/;
+const ONE_SHOT_FAMILY = /^MERRYMEN_(?:REPAIR(?:_[A-Z0-9_]+)?|RECEIPT_ATTEST_[A-Z0-9_]+|ANNOUNCE_[A-Z0-9_]+|TG_RECOVERY_[A-Z0-9_]+|(?:ENABLE|HALT|RESUME)_CLASS_[A-Z0-9_]+)$/;
 
 export function isOneShotVariable(name: string): boolean {
   return ONE_SHOT_EXACT.has(name) || ONE_SHOT_FAMILY.test(name);
@@ -179,7 +187,11 @@ export function fleetStartChecks(env: NodeJS.ProcessEnv, role: FleetRole): { cen
   const census = oneShotCensus(env);
   // Exactly `all`, as written: a value the rollout parser might also read as
   // all ("ALL", " all") is not one this guard has to guess about.
-  if (role === "start:orchestrator" && census.length && env.MERRYMEN_FLEET_ROLLOUT !== "all") {
+  // This one protocol has a complete, typed, single-tenant scope and explicit
+  // maintenance hold. Its runtime also proves the roster, lease and no-child
+  // state. No other one-shot can accompany it through a staged rollout.
+  if (role === "start:orchestrator" && census.length && env.MERRYMEN_FLEET_ROLLOUT !== "all"
+      && !scopedReceiptAttestationAllowed(env, census)) {
     reasons.push(`one-shot operator variables are set (${census.join(" ")}) while MERRYMEN_FLEET_ROLLOUT is not all — delete them before the orchestrator starts over a partly held fleet`);
   }
   return { census, reasons };

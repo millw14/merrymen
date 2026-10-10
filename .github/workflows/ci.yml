@@ -134,7 +134,8 @@ jobs:
     # Production's partner store is Postgres, and its locks, slot limits, list
     # ordering and reconnect SQL exist only on that dialect. Managed Telegram
     # creation also needs real transactions for intents, claims and sealed settings.
-    # The app-test shards have no database, so this job runs both store suites.
+    # Original-deposit attestation must prove its crash barriers with real leases.
+    # The app-test shards have no database, so these suites run here.
     services:
       postgres:
         # By digest, like the actions above: a moved tag is a supply-chain rewrite.
@@ -164,7 +165,7 @@ jobs:
         # green: this job fails unless it actually ran.
         run: |
           set -o pipefail
-          npx tsx --test --test-reporter=spec web/src/lib/partner-store.postgres.test.ts web/src/lib/telegram-managed-store.postgres.test.ts | tee "$RUNNER_TEMP/postgres.out"
+          npx tsx --test --test-reporter=spec web/src/lib/partner-store.postgres.test.ts web/src/lib/telegram-managed-store.postgres.test.ts worker/src/receipt-attestation.postgres.test.ts | tee "$RUNNER_TEMP/postgres.out"
           grep -q '^ℹ skipped 0$' "$RUNNER_TEMP/postgres.out"
           grep -q '^ℹ pass [1-9]' "$RUNNER_TEMP/postgres.out"
         env:

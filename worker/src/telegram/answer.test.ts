@@ -367,6 +367,20 @@ describe("contextual follow-ups refresh evidence before narration", () => {
     assert.ok(!a!.used.includes("market_read"));
     assert.ok(s.seen[0]!.find((m) => m.role === "user")!.text.includes("Configured stop loss: 8%."));
   });
+  for (const question of ["Why are you talking about a stock basket?", "Are you really a Trencher?", "What do you trade?"]) {
+    it(`reads the actual strategy and setup before explaining it: ${question}`, async () => {
+      const s = scripted([{ text: "I use Trencher; that stock basket is saved but does not choose my entries.", toolUses: [] }]);
+      const a = await answerQuestion({ ...base(s.turn), question,
+        history: [{ role: "assistant", content: "I trade a QQQ, NVDA and TSLA basket." }],
+        lookup: async name => name === "agent_status" ? "Current strategy: trencher." : name === "settings"
+          ? "Trencher looks for eligible memecoins. The saved stock basket does not choose its entries." : "No other evidence." });
+      assert.ok(a!.used.includes("agent_status"));
+      assert.ok(a!.used.includes("settings"));
+      const prompt = s.seen[0]!.find(m => m.role === "user")!.text;
+      assert.match(prompt, /CURRENT FACTS ALREADY READ[\s\S]*Current strategy: trencher/);
+      assert.match(prompt, /saved stock basket does not choose its entries/);
+    });
+  }
   it("an evidence failure is marked explicitly and never replaced by old quoted prices", async () => {
     const s = scripted([{ text: "I couldn't check the current market, so I can't give a verified entry.", toolUses: [] }]);
     await answerQuestion({ ...base(s.turn), question: "best entry?", replyContext: reference, lookup: async () => { throw new Error("network down"); } });
