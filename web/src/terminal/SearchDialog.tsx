@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { LiveAgent, LiveToken } from "./live";
 import { Search } from "./screens/Search";
 
@@ -13,8 +13,8 @@ import { Search } from "./screens/Search";
  * and enters that screen (App.tsx), so Back returns to where they were.
  *
  * Keys: Escape closes; Up and Down move between results; Enter opens the
- * focused one, which is the button's own behaviour. A click on the backdrop
- * closes it too.
+ * focused one, which is the button's own behaviour. Tab stays inside the
+ * dialog. A click that starts and finishes on the backdrop closes it too.
  */
 export function SearchDialog({
   tokens,
@@ -29,32 +29,70 @@ export function SearchDialog({
   onToken: (id: string) => void;
   onProfile: (slug: string) => void;
 }) {
-  const panel = useRef<HTMLDivElement>(null);
-  // The page under it must not scroll while it is open.
+  const dialog = useRef<HTMLDialogElement>(null);
+  const backdropPress = useRef(false);
+  // Capture before Search's autofocus runs during the commit. Capturing in
+  // the effect can mistake the search input for the button that opened it.
+  const [opener] = useState(() => typeof document === "undefined" ? null : document.activeElement);
   useEffect(() => {
+    const node = dialog.current!;
     const was = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = was; };
-  }, []);
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") { event.preventDefault(); onClose(); return; }
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const root = panel.current;
+    // A real modal makes the rest of the document inert, including controls
+    // in the portfolio and wallet beneath this overlay.
+    node.showModal();
+    node.querySelector<HTMLInputElement>("input.search")?.focus({ preventScroll: true });
+    return () => {
+      node.close();
+      document.body.style.overflow = was;
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true });
+    };
+  }, [opener]);
+  const onKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    const root = dialog.current;
     if (!root) return;
+    if (event.key === "Tab") {
+      // Search's full-page Back button is hidden in this presentation. The
+      // visible close control remains reachable even when there are no hits.
+      const controls = [...root.querySelectorAll<HTMLElement>(".search-dialog-close, input.search, button.tok")];
+      const at = controls.indexOf(document.activeElement as HTMLElement);
+      const next = at < 0 ? (event.shiftKey ? controls.length - 1 : 0)
+        : (at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
+      controls[next]?.focus();
+      event.preventDefault();
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const items = [...root.querySelectorAll<HTMLElement>(".tok, input.search")];
     const at = items.indexOf(document.activeElement as HTMLElement);
+    if (at < 0) return;
     const next = event.key === "ArrowDown" ? Math.min(items.length - 1, at + 1) : Math.max(0, at - 1);
     items[next]?.focus();
     event.preventDefault();
   };
   return (
-    <div className="search-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={panel} className="search-dialog" role="dialog" aria-modal="true" aria-label="Search tokens or agents" onKeyDown={onKeyDown}>
+    <dialog ref={dialog} className="search-dialog-backdrop" aria-label="Search tokens or agents" onKeyDown={onKeyDown}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onPointerDown={(event) => { backdropPress.current = event.target === event.currentTarget; }}
+      onPointerCancel={() => { backdropPress.current = false; }}
+      onClick={(event) => {
+        const dismiss = backdropPress.current && event.target === event.currentTarget;
+        backdropPress.current = false;
+        if (dismiss) onClose();
+      }}>
+      <div className="search-dialog">
+        <button type="button" className="search-dialog-close" onClick={onClose}>Close search</button>
         <Search tokens={tokens} agents={agents} onBack={onClose} onToken={onToken} onProfile={onProfile} />
         <p className="search-dialog-keys" aria-hidden="true">
           <kbd>↑↓</kbd> move <kbd>↵</kbd> open <kbd>esc</kbd> close
         </p>
       </div>
-    </div>
+    </dialog>
   );
 }

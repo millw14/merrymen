@@ -17,6 +17,7 @@ const OWNER = `0x${"a".repeat(40)}`;
 let testDom: typeof import("./test-dom").testDom;
 let json: typeof import("./test-dom").json;
 let Settings: typeof import("./screens/Settings").default;
+let Link: typeof import("./Link").default;
 let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
 
@@ -42,6 +43,7 @@ before(async () => {
   });
   try {
     Settings = createRequire(import.meta.url)(settingsPath).default;
+    Link = createRequire(import.meta.url)(fileURLToPath(new URL("./Link.tsx", import.meta.url))).default;
   } finally {
     intercepted.mock.restore();
     Reflect.deleteProperty(g, "window");
@@ -66,6 +68,7 @@ function view(): SettingsView {
 
 beforeEach(() => {
   ui = testDom();
+  ui.dom.window.history.replaceState(null, "", "/settings");
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -96,8 +99,33 @@ async function arriveWith(hash: string) {
   assert.ok(announced, "jsdom delivered the hash change before mount");
 }
 
-async function mount() {
-  await ui.render(React.createElement(Settings, { onFund: () => {}, slug: null, onSaved: () => {} }));
+async function mount(links: React.ReactNode = null) {
+  await ui.render(React.createElement(React.Fragment, null, links,
+    React.createElement(Settings, { onFund: () => {}, slug: null, onSaved: () => {} })));
+}
+
+function settingLinks() {
+  return React.createElement("nav", null, ...["telegram", "trencher-mode", "launchpad-buying"].map(id =>
+    React.createElement(Link, { key: id, id: `jump-${id}`, href: `/settings#${id}` }, id)));
+}
+
+async function follow(id: string) {
+  const link = ui.container.querySelector<HTMLAnchorElement>(`#jump-${id}`);
+  assert.ok(link);
+  await act(async () => { link.click(); });
+}
+
+async function traverse(direction: "back" | "forward") {
+  await act(async () => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = ui.dom.window.setTimeout(() => reject(new Error(`No hashchange after history.${direction}()`)), 1000);
+      ui.dom.window.addEventListener("hashchange", () => {
+        ui.dom.window.clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      ui.dom.window.history[direction]();
+    });
+  });
 }
 
 function groupOf(id: string): HTMLDetailsElement {
@@ -109,6 +137,76 @@ function groupOf(id: string): HTMLDetailsElement {
 }
 
 describe("a link to one setting opens the group it sits in", () => {
+  it("follows the real in-place Link on an already mounted Settings screen", async () => {
+    await mount(settingLinks());
+    const scrolled: string[] = [];
+    for (const id of ["telegram", "trencher-mode", "launchpad-buying"]) {
+      ui.container.querySelector<HTMLElement>(`#${id}`)!.scrollIntoView = () => { scrolled.push(id); };
+    }
+    const telegram = groupOf("telegram");
+    assert.equal(telegram.open, false);
+    await follow("telegram");
+    assert.equal(ui.dom.window.location.hash, "#telegram");
+    assert.equal(telegram.open, true);
+    assert.deepEqual(scrolled, ["telegram"]);
+
+    // A user can close the drawer and return to the same remedy link.
+    telegram.open = false;
+    const entries = ui.dom.window.history.length;
+    await follow("telegram");
+    assert.equal(telegram.open, true);
+    assert.equal(ui.dom.window.history.length, entries, "the same anchor does not add duplicate Back entries");
+    await follow("trencher-mode");
+    await follow("launchpad-buying");
+    assert.equal(groupOf("launchpad-buying").open, true);
+    assert.deepEqual(scrolled, ["telegram", "telegram", "trencher-mode", "launchpad-buying"]);
+  });
+
+  it("Back and Forward restore and reveal the previously selected setting", async () => {
+    await mount(settingLinks());
+    const scrolled: string[] = [];
+    for (const id of ["telegram", "trencher-mode"]) {
+      ui.container.querySelector<HTMLElement>(`#${id}`)!.scrollIntoView = () => { scrolled.push(id); };
+    }
+    await follow("telegram");
+    await follow("trencher-mode");
+    groupOf("telegram").open = false;
+    await traverse("back");
+    assert.equal(ui.dom.window.location.hash, "#telegram");
+    assert.equal(groupOf("telegram").open, true);
+    await traverse("forward");
+    assert.equal(ui.dom.window.location.hash, "#trencher-mode");
+    assert.deepEqual(scrolled, ["telegram", "trencher-mode", "telegram", "trencher-mode"]);
+  });
+
+  it("keeps cross-screen anchor arrival for the Settings mount effect", async () => {
+    ui.dom.window.history.replaceState(null, "", "/home");
+    await ui.render(settingLinks());
+    let earlyHashChanges = 0;
+    const count = () => { earlyHashChanges++; };
+    ui.dom.window.addEventListener("hashchange", count);
+    await follow("telegram");
+    assert.equal(ui.dom.window.location.pathname, "/settings");
+    assert.equal(ui.dom.window.location.hash, "#telegram");
+    assert.equal(earlyHashChanges, 0, "do not send the new screen's anchor to the old screen");
+    ui.dom.window.removeEventListener("hashchange", count);
+    await mount(settingLinks());
+    assert.equal(groupOf("telegram").open, true, "the read-completion effect still reveals a newly mounted Settings screen");
+  });
+
+  it("keeps ordinary Link navigation in place without spurious anchor events", async () => {
+    await ui.render(React.createElement(Link, { id: "jump-profile", href: "/you" }, "Profile"));
+    let hashChanges = 0;
+    ui.dom.window.addEventListener("hashchange", () => { hashChanges++; });
+    const entries = ui.dom.window.history.length;
+    await follow("profile");
+    assert.equal(ui.dom.window.location.pathname, "/you");
+    assert.equal(ui.dom.window.history.length, entries + 1);
+    assert.equal(hashChanges, 0);
+    await follow("profile");
+    assert.equal(ui.dom.window.history.length, entries + 1, "the current screen remains a no-op");
+  });
+
   it("lands on launchpad buying, under the name the agent uses for it", async () => {
     await arriveWith("#launchpad-buying");
     await mount();

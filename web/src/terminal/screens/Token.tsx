@@ -204,8 +204,8 @@ export function Token({
       <div className="token-market-strip">
         <div>
           <span>
-            {/* The strip is desktop-only (terminal.css), and it reads as one
-                line there, so the labels are one word each. */}
+            {/* The desktop-only strip keeps the price label compact; the
+                source and measurement remain in the figure's tooltip. */}
             {token.priceUsd == null
               ? "Close"
               : token.priceSource === "robinhood"
@@ -245,7 +245,7 @@ export function Token({
           </strong>
         </div>
         <div>
-          <span>Holders</span>
+          <span>Agents holding</span>
           {/* Every agent holding it, the private ones included — not only the public rows below. */}
           <strong>{holdersFigure(holdersRead, holderCoverage)}</strong>
         </div>

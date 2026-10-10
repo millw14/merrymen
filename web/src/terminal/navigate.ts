@@ -36,9 +36,19 @@ export function isScreenPath(href: string): boolean {
   return path.startsWith("/t/") || path.startsWith("/a/");
 }
 
-/** Enter a screen in place. A no-op when it is the screen already showing. */
+/** Enter a screen in place, or reveal an anchor on the screen already showing. */
 export function goTo(path: string): void {
   if (typeof window === "undefined") return;
-  if (window.location.pathname === path) return;
-  window.history.pushState(null, "", path);
+  const previous = new URL(window.location.href);
+  const next = new URL(path, previous);
+  // Keep Next's patched history method: it carries the current router tree
+  // into this entry so Back/Forward can restore the screen without a reload.
+  if (next.href !== previous.href) window.history.pushState(null, "", path);
+  if (next.pathname === previous.pathname && next.hash) {
+    // pushState does not emit hashchange. Settings listens for it to open the
+    // target's collapsed group and scroll into view; usePathname cannot notice
+    // a same-screen anchor. Re-clicking an anchor reveals it again without
+    // creating another history entry. New screens reveal after they mount.
+    window.dispatchEvent(new window.HashChangeEvent("hashchange", { oldURL: previous.href, newURL: next.href }));
+  }
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { timeOnly } from "@/lib/format";
 import { AgentStrip } from "./AgentStrip";
 import Link from "./Link";
 import { useWatchlist } from "./watchlist";
@@ -422,7 +423,7 @@ export function DesktopSidebar({
  */
 function SidebarFoot({ live }: { live: boolean }) {
   const now = useNow(1000);
-  const time = new Date(now).toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const time = timeOnly(now);
   return (
     <div className={live ? "desktop-sidebar-foot live" : "desktop-sidebar-foot"}>
       <span>{live ? "live" : "offline"}</span>

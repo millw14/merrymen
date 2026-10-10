@@ -1137,12 +1137,27 @@
   position: fixed;
   inset: 0;
   z-index: 60;
-  display: flex;
+  display: none;
   align-items: flex-start;
   justify-content: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
   padding: 12vh 16px 16px;
+  border: 0;
   background: color-mix(in srgb, var(--bg) 72%, transparent);
   backdrop-filter: blur(6px);
+  color: inherit;
+  font: inherit;
+}
+.terminal-host .search-dialog-backdrop[open] {
+  display: flex;
+}
+.terminal-host .search-dialog-backdrop::backdrop {
+  background: transparent;
 }
 .terminal-host .search-dialog {
   width: min(100%, 560px);
@@ -1155,6 +1170,27 @@
   border-radius: 6px;
   background: var(--bg);
   font-variant-numeric: tabular-nums;
+}
+.terminal-host .search-dialog-close {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--tx-2);
+}
+.terminal-host .search-dialog-close:hover {
+  color: var(--tx);
+}
+.terminal-host .search-dialog-close:focus-visible {
+  outline: 2px solid var(--tx);
+  outline-offset: 2px;
 }
 .terminal-host .search-dialog .find {
   display: flex;
@@ -1833,11 +1869,16 @@
 .terminal-host .terminal-form-page textarea:hover {
   border-bottom-color: var(--faint);
 }
-.terminal-host .terminal-form-page input:focus-visible,
+.terminal-host .terminal-form-page input:not([type=checkbox]):not([type=radio]):focus-visible,
 .terminal-host .terminal-form-page select:focus-visible,
 .terminal-host .terminal-form-page textarea:focus-visible {
   outline: 0;
   border-bottom-color: var(--tx);
+}
+.terminal-host .terminal-form-page input[type=checkbox]:focus-visible,
+.terminal-host .terminal-form-page input[type=radio]:focus-visible {
+  outline: 2px solid var(--tx);
+  outline-offset: 2px;
 }
 .terminal-host .terminal-form-page input::placeholder,
 .terminal-host .terminal-form-page textarea::placeholder {
@@ -1972,6 +2013,26 @@
   background: var(--lime);
   color: var(--ink);
   border-bottom-color: transparent;
+}
+/* Keep the compact desktop treatment without shrinking phone touch targets. */
+@media (max-width: 1099px) {
+  .terminal-host .terminal-form-page .mm-chips button,
+  .terminal-host .terminal-form-page .cap,
+  .terminal-host .terminal-form-page .copy-btn,
+  .terminal-host .terminal-form-page .mm-btn,
+  .terminal-host .terminal-form-page .mode-tab,
+  .terminal-host .terminal-form-page .btn-kill {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+  .terminal-host .terminal-form-page .mm-btn.primary,
+  .terminal-host .terminal-form-page .grant-btn {
+    min-height: 46px;
+    padding: 14px 22px;
+    font-size: 14px;
+  }
 }
 .terminal-host .terminal-form-page .mm-danger,
 .terminal-host .terminal-form-page .grant-error,
