@@ -206,6 +206,71 @@ describe("AgentStrip under a recovery hold: setting up a bot is not trading", ()
   });
 });
 
+/**
+ * A SAVED BOT ON AN AGENT THAT ISN'T RUNNING. A tenant the fleet holds (not
+ * admitted by the rollout, an accounting hold) or whose session key expired
+ * gets no worker and no hold process, so nothing mints its link code. The
+ * strip was telling that owner "Your agent mints a link code on its next
+ * pass. Check back shortly." and re-reading every four seconds, for a pass
+ * that never comes. /api/grants already says the worker is silent, never
+ * heard from, or the key expired (App.tsx agentDown); the row says that.
+ */
+describe("AgentStrip: a saved bot whose agent isn't running", () => {
+  const settingsFor = (owner: string | null) => json({ owner, values: { strategy: "momentum" } });
+  const mount = async (agentDown: "stopped" | "not-started" | "expired" | null, tg: Record<string, unknown> = {}) => {
+    respond = async call => {
+      if (path(call) === "/api/telegram") return json(tgStatus({ linkCode: null, linkPending: false, ...tg }));
+      if (path(call) === "/api/settings") return settingsFor(OWNER);
+      return json({});
+    };
+    await ui.render(React.createElement(AgentStrip, { hasAgent: true, recovery: null, agentDown }));
+    await drain();
+  };
+  const text = () => ui.container.textContent ?? "";
+
+  for (const linkPending of [false, true]) {
+    it(`stopped worker, no code (${linkPending ? "a stale row" : "no row"}): says it isn't running, promises no pass, and does not poll`, async () => {
+      await mount("stopped", { linkPending });
+      assert.match(text(), /@merrymen_testbot answers once your agent is running; it isn't running right now\./);
+      assert.doesNotMatch(text(), /check back|shortly|next pass|picked up/i);
+      assert.ok(![...ui.container.querySelectorAll("button")].some(b => b.textContent === "Starting your bot…"), "no step that claims the bot is starting");
+      assert.equal(primaries().length, 0);
+      const reads = calls.filter(c => path(c) === "/api/telegram").length;
+      await advance(60_000);
+      assert.equal(calls.filter(c => path(c) === "/api/telegram").length, reads, "nothing will mint a code, so nothing to poll for");
+    });
+  }
+
+  it("never heard from: says it hasn't started, and promises no pass", async () => {
+    await mount("not-started");
+    assert.match(text(), /answers once your agent is running; it hasn't started yet\./);
+    assert.doesNotMatch(text(), /check back|shortly|next pass/i);
+  });
+
+  it("expired session key: points to renewal, not to a pass", async () => {
+    await mount("expired");
+    assert.match(text(), /can't run until you renew its trading permission/);
+    assert.doesNotMatch(text(), /check back|shortly|next pass/i);
+    const renew = [...ui.container.querySelectorAll<HTMLAnchorElement>("a")].find(a => a.textContent?.startsWith("Renew permission"));
+    assert.ok(renew, "a way to renew");
+    assert.equal(new URL(renew.href).pathname, "/grant");
+    assert.equal(new URL(renew.href).hash, "#resign");
+  });
+
+  it("a code already on file is still shown: the hold changes only the wait", async () => {
+    await mount("stopped", { linkCode: "code_789" });
+    assert.equal(primary().textContent, "Open my bot");
+  });
+
+  it("an agent that is running (or not known not to be) keeps the wait and the re-read", async () => {
+    await mount(null);
+    assert.equal(primary().textContent, "Starting your bot…");
+    const reads = calls.filter(c => path(c) === "/api/telegram").length;
+    await advance(4000);
+    assert.ok(calls.filter(c => path(c) === "/api/telegram").length > reads);
+  });
+});
+
 describe("Turn on Telegram waits until it knows whose bot it is", () => {
   for (const recovery of [null, { state: "history-only", tradingPaused: true, history: "available", memory: "unknown",
     checkedAt: 1_791_111_100, lastVerifiedHeartbeatAt: 1_791_110_000 }]) {

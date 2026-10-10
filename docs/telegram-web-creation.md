@@ -132,6 +132,15 @@ fleet holds (not yet admitted, an expired session key, a recovery or
 accounting hold) runs neither, and the web cannot see which. So the message
 says what the bot waits for and never promises when it will answer.
 
+Home and Settings do the same once the bot is saved. They cannot see the
+fleet's reasons either, but `/api/grants` says what follows from them: the
+session key has expired, the worker's heartbeat is stale, or no heartbeat was
+ever written. With no link code and any of those (outside a recovery hold, whose
+own process links chats and has its own wording), they say the bot answers once
+the agent is running and that it isn't (or hasn't started, or needs its
+permission renewed, with a link to renew), instead of "check back shortly", and
+Home stops re-reading every few seconds until the agent runs.
+
 Back to Merrymen opens `MERRYMEN_PUBLIC_ORIGIN`. Each creation is answered
 once: Telegram's redelivery of the same update says nothing again. A message
 Telegram refuses to deliver is logged with a fixed line

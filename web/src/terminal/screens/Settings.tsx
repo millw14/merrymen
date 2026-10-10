@@ -16,7 +16,7 @@ import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, TELEGRAM_GROUPS_CHATTINESS, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant, type TelegramGroupsChattiness } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
-import { telegramLabel, telegramRow, type TelegramRow } from "../agent-status";
+import { telegramLabel, telegramRow, type AgentDown, type TelegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
 import { SettingsProposal } from "../SettingsProposal";
 import { count, shortDateTime } from "@/lib/format";
@@ -96,7 +96,9 @@ function TelegramListeningNote({ row }: { row: TelegramRow }) {
 }
 
 /** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
-export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; slug: string | null; onSaved?: () => void}) {
+export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{onFund:()=>void; slug: string | null; onSaved?: () => void;
+  /** Why nothing will mint a Telegram link code now, from /api/grants (App.tsx, agent-status.ts agentDownOf). */
+  agentDown?: AgentDown | null}) {
   const t = useT();
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -291,6 +293,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     const ready = (status: TelegramStatus) => !status.botElsewhere && status.botUsername === botUsername && /^[A-Za-z0-9_-]{1,64}$/.test(status.linkCode ?? "");
     if (tg && ready(tg)) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
     if (tg?.botElsewhere) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    // NOTHING WILL MAKE THE LINK while the agent is down (held, never
+    // started, an expired key): the hint below says so, and a minute of
+    // "waiting for your agent" would say the opposite.
+    if (agentDown !== null) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
     const ctl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const stop = (text: string | null) => {
@@ -316,7 +322,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     };
     timer = setTimeout(poll, 3000);
     return () => { ctl.abort(); clearTimeout(timer); clearTimeout(expiry); };
-  }, [telegramLaunch, view?.owner]);
+  }, [telegramLaunch, view?.owner, agentDown]);
 
   useEffect(() => {
     try {
@@ -1762,6 +1768,15 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   (lib/telegram-listening.ts). Neither is "check back". */}
               {tg?.botElsewhere
                 ? t("settings.tg.elsewhere")
+                : agentDown !== null && view.telegramBotToken.set
+                ? <>
+                    {/* NOR "CHECK BACK" WHEN NOTHING WILL MINT ONE: an agent
+                        the fleet holds, never started, or with an expired
+                        key has no worker and no hold process
+                        (agent-status.ts agentDownOf). */}
+                    {t(agentDown === "expired" ? "settings.tg.expired" : agentDown === "stopped" ? "settings.tg.notRunning" : "settings.tg.notStarted")}
+                    {agentDown === "expired" ? <>{" "}<Link href="/grant#resign">{t("settings.tg.renew")}</Link></> : null}
+                  </>
                 : tg?.linkPending && tg.enabled
                 ? t("settings.tg.pickingUp")
                 : view.telegramBotToken.set
@@ -1967,6 +1982,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               </>
             ) : tg?.botElsewhere ? (
               t("settings.tg.elsewhereShort")
+            ) : agentDown !== null && view.telegramBotToken.set ? (
+              t("settings.tg.notRunningShort")
             ) : tg?.linkPending && tg.enabled ? (
               t("settings.tg.pickingUp")
             ) : (

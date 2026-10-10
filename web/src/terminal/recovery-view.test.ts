@@ -357,9 +357,12 @@ describe("where the money is during recovery", () => {
     assert.match(app, /\.\.\.\(recovery \? \{ chg24: null, recoveryFunds: recoveryFunds\(account\.status\) \} : \{\}\)/);
     assert.equal(app.match(/recoveryFunds\(/g)?.length, 1, "computed once, never re-derived");
     assert.match(readFileSync(new URL("./screens/Home.tsx", import.meta.url), "utf8"),
-      /<AgentStrip hasAgent=\{hasAgent\} recovery=\{mine\?\.recovery\} funds=\{mine\?\.recoveryFunds\}\/>/);
+      /<AgentStrip hasAgent=\{hasAgent\} recovery=\{mine\?\.recovery\} funds=\{mine\?\.recoveryFunds\} agentDown=\{mine\?\.agentDown\}\/>/);
     assert.match(readFileSync(new URL("./Desktop.tsx", import.meta.url), "utf8"),
-      /<AgentStrip hasAgent recovery=\{mine\.recovery\} funds=\{mine\.recoveryFunds\}\/>/);
+      /<AgentStrip hasAgent recovery=\{mine\.recovery\} funds=\{mine\.recoveryFunds\} agentDown=\{mine\.agentDown\}\/>/);
+    // The link-code wait's "agent isn't running" comes from the same account,
+    // and never under a recovery hold, whose own process links chats.
+    assert.match(app, /agentDown: recovery \? null : agentDownOf\(account\.status, Date\.now\(\)\),/);
   });
 
   it("reads the hold without changing it, and keeps the hold's own words", () => {

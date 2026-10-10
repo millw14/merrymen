@@ -27,6 +27,7 @@ import { workerSilentSince } from "./worker-stale";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
 import { workerHeardFromOf } from "./chat-payload";
+import { agentDownOf } from "./agent-status";
 import { chatTape } from "./chat-thread";
 import "./chat.css";
 import {
@@ -469,8 +470,12 @@ export function App() {
   // ever landed, which IDLE alone cannot say — a never-started agent and one
   // before its first pass both wear it. The chat needs the difference.
   // See workerHeardFromOf: only an explicit null is "never", absent is unknown.
+  // `agentDown` from the same answer too, for the Telegram link-code wait on
+  // Home and in Settings: never under a recovery hold, whose process links
+  // chats (agent-status.ts agentDownOf).
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
     workerHeardFrom: workerHeardFromOf(account.status),
+    agentDown: recovery ? null : agentDownOf(account.status, Date.now()),
     ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
@@ -566,7 +571,7 @@ export function App() {
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
         {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
         {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
-        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
+        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings} agentDown={mine?.agentDown ?? null}/>}
         {screen.kind === "grant" && <Wallet key={epoch}/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
