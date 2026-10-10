@@ -350,8 +350,8 @@ describe("where the money is during recovery", () => {
   });
 
   it("App derives the funds from the account that carried the hold, and only while it holds", () => {
-    // App renders under next/navigation and cannot be mounted here (see
-    // account-read.ts), so the one line that pairs the two is pinned in source.
+    // Pin the shared account source here; app-telegram-state.test.ts mounts
+    // App to verify the Settings behavior before its portfolio feed is ready.
     const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
     assert.match(app, /const recovery = pausedRecovery\(account\?\.status\.recovery\);/);
     assert.match(app, /\.\.\.\(recovery \? \{ chg24: null, recoveryFunds: recoveryFunds\(account\.status\) \} : \{\}\)/);
@@ -364,7 +364,7 @@ describe("where the money is during recovery", () => {
     // A recovery hold is its own reason, never "not known down": a held tenant
     // is not admitted, so nothing runs its worker, and the recovery listener
     // answers only an owner already linked to that bot and mints no code.
-    assert.match(app, /agentDown: recovery \? "recovery" as const : agentDownOf\(account\.status, Date\.now\(\)\),/);
+    assert.match(app, /const agentDown = recovery \? "recovery" as const : agentDownOf\(account\?\.status, Date\.now\(\)\);/);
   });
 
   it("reads the hold without changing it, and keeps the hold's own words", () => {
