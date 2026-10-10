@@ -86,6 +86,13 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
   const [owner, setOwner] = useState<string | null>(null);
+  /**
+   * Has /api/settings answered, so `owner` is a reading and not a default?
+   * Null before then means "not read"; after, it means self-hosted. The one
+   * write here, Turn on Telegram, waits for it: sent without an owner, the
+   * route would apply it to whichever wallet the session holds by then.
+   */
+  const [ownerRead, setOwnerRead] = useState(false);
   /** True while Home's one Telegram button is mid-setup (TelegramCreateBot's onActiveChange). */
   const [creating, setCreating] = useState(false);
   const live = useRef(true);
@@ -118,6 +125,7 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
         if (!live.current || !s) return;
         if (s.values) setSettings(s.values);
         setOwner(typeof s.owner === "string" && /^0x[0-9a-f]{40}$/i.test(s.owner) ? s.owner : null);
+        setOwnerRead(true);
       })
       .catch(() => {});
   }, [hasAgent, refreshTg]);
@@ -149,12 +157,19 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
     <section className="agent-strip" aria-label={t("strip.aria")}>
       {recovering ? <>
         <RecoveryNotice recovery={recovering} funds={funds}/>
-        <Row tone="warn" label="Telegram" value={bot.label}
-          action={bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>
+        {/* SETTING UP A BOT IS NOT TRADING, so a held account gets the same
+            one button for the two steps that only save it: create one, or
+            turn a saved one on. Every other state keeps the recovery wording,
+            which says honestly what a held agent does with its bot. */}
+        {owner && (row.kind === "no-token" || creating)
+          ? <TelegramLine row={row} owner={owner} ownerRead={ownerRead} creating={creating} onCreating={setCreating} refresh={refreshTg} />
+          : <Row tone="warn" label="Telegram" value={bot.label}
+              action={row.kind === "off" && ownerRead ? <TurnOnTelegram owner={owner} refresh={refreshTg} />
+                : bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>}
         <Row tone="quiet" label="Trencher" value="Trading paused"/>
       </> : <>
         {held !== null ? <HeldLine reason={held} /> : null}
-        <TelegramLine row={row} owner={owner} creating={creating} onCreating={setCreating} refresh={refreshTg} />
+        <TelegramLine row={row} owner={owner} ownerRead={ownerRead} creating={creating} onCreating={setCreating} refresh={refreshTg} />
         <TrencherLine row={trencherRow(settings)} />
       </>}
     </section>
@@ -193,9 +208,11 @@ function HeldLine({ reason }: { reason: string }) {
  * mounted while a setup is in flight even after the token lands, so it can
  * finish and forget its stored setup before the row moves on.
  */
-function TelegramLine({ row, owner, creating, onCreating, refresh }: {
+function TelegramLine({ row, owner, ownerRead, creating, onCreating, refresh }: {
   row: TelegramRow;
   owner: string | null;
+  /** See AgentStrip's ownerRead: Turn on Telegram waits for it. */
+  ownerRead: boolean;
   creating: boolean;
   onCreating: (active: boolean) => void;
   refresh: () => Promise<boolean>;
@@ -223,7 +240,7 @@ function TelegramLine({ row, owner, creating, onCreating, refresh }: {
     case "off":
       return (
         <Row tone="warn" label="Telegram" value={t("strip.tg.off")}
-          action={<TurnOnTelegram owner={owner} refresh={refresh} />}
+          action={ownerRead ? <TurnOnTelegram owner={owner} refresh={refresh} /> : undefined}
         />
       );
     case "unverified":
