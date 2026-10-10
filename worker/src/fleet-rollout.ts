@@ -33,9 +33,30 @@
  * discard (kill-request.ts). The tenant is then removed, not held, and the
  * removed-agent sweep keeps its original book as it does for any revoke.
  *
- * ONLY EVER NARROWS. Every gate that already stops a tenant (FLEET_HALT, the
- * accounting hold, a lost lease, a pending kill, the source fences) still
- * stops it; this adds one more reason to stop and removes none.
+ * ONLY EVER NARROWS, BUT FOR ONE ROUTE THE OWNER ASKED FOR. Every gate that
+ * already stops a tenant (FLEET_HALT, the accounting hold, a lost lease, a
+ * pending kill, the source fences) still stops it; the list adds one more
+ * reason to stop and removes none.
+ *
+ * The one route: MERRYMEN_ROLLOUT_NEW_TENANTS (observe | exits-only | trade).
+ * On 2026-10-09, with the list naming 49 tenants and production live, a tester
+ * created a new agent and nothing ever started for it: no worker, no link code
+ * for its bot ("starting up" for good), no line saying why. The list exists so
+ * the pre-incident fleet comes back a few reviewed tenants at a time; a tenant
+ * created since has no accounting to review. The owner decided that day that
+ * every genuinely new agent must start without being named. So, under an
+ * explicit list only, a tenant the list does not name is admitted at this
+ * variable's level once the orchestrator has proved it new (no home or archive
+ * on the volume, no history in Postgres) and recorded that, durably, before
+ * its first spawn (new-tenant-admission.ts). That is one more way in, and no
+ * gate fewer: the accounting hold, FLEET_HALT, a pending kill, an expired
+ * key, the lease, the process cap and every source fence stop it exactly as
+ * they stop a named tenant, and its first spawn still goes through the
+ * new-book path (registerLedgerSource), which refuses any account with
+ * history. Never under `none`, the emergency stop; nothing to add under
+ * `all`. A tenant the list names keeps the list's level. Unset, nothing
+ * changes from before: a tenant the list does not name is held, recorded or
+ * not.
  *
  * NO `halt` VALUE. Stopping the fleet is FLEET_HALT's job, and it already has
  * a reviewed release path. A second spelling of "stop" here would be a second
@@ -185,8 +206,70 @@ export function fleetRollout(env: Env = process.env): FleetRollout {
   return rollout;
 }
 
-/** This tenant's level. Fails closed: a value that cannot be read admits nobody. */
-export function rolloutLevel(tenant: string, env: Env = process.env): RolloutLevel {
+export const ROLLOUT_NEW_TENANTS_ENV = "MERRYMEN_ROLLOUT_NEW_TENANTS";
+
+const refuseNew = (why: string) =>
+  new Error(`${ROLLOUT_NEW_TENANTS_ENV} ${why}; refusing to start rather than guess which tenants it admits`);
+
+/**
+ * THE LEVEL MERRYMEN_ROLLOUT_NEW_TENANTS ASKS FOR, OR NULL WHEN UNSET. Throws
+ * on anything else, by the rollout's own rule: runOrchestrator asks this at
+ * boot beside fleetRollout, so a typo is a failed boot, never a guess. One of
+ * the grammar's three words, exactly (whitespace around it ignored, as around
+ * a rollout entry), and only one a worker in this build enforces. No `none`,
+ * `off` or empty value: removing the variable is the one way to turn it off.
+ *
+ * Whether it is IN EFFECT is newTenantLevel's question: a valid value is
+ * accepted beside `none` and `all` too, so that flipping the rollout to
+ * `none` in an emergency never also needs this deleted to boot.
+ */
+export function rolloutNewTenants(env: Env = process.env): AdmissionLevel | null {
+  const raw = env[ROLLOUT_NEW_TENANTS_ENV];
+  if (raw === undefined) return null;
+  const value = raw.trim();
+  if (value !== "observe" && value !== "exits-only" && value !== "trade") {
+    throw refuseNew("is not observe, exits-only or trade (remove it to admit no tenant the list does not name)");
+  }
+  if (!WORKER_ENFORCED_LEVELS.has(value)) throw refuseNew(`asks for ${value}, which no worker in this build enforces`);
+  return value;
+}
+
+/**
+ * THE LEVEL A RECORDED NEW TENANT IS ADMITTED AT NOW, or null when the route
+ * is shut: the variable unset, the rollout not an explicit list (`none` is the
+ * emergency stop; `all` admits everybody already), or either value refused.
+ * Read on every ask, never remembered, so lowering the variable lowers every
+ * tenant it admitted and removing it holds them all again. Fails closed.
+ */
+export function newTenantLevel(env: Env = process.env): AdmissionLevel | null {
+  try {
+    if (fleetRollout(env).scope !== "list") return null;
+    return rolloutNewTenants(env);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * COULD THE NEW-TENANT ROUTE ADMIT THIS TENANT AT ALL: the route is open and
+ * the list does not name it. Whether it IS new, and whether it has been
+ * recorded, are new-tenant-admission.ts's and the orchestrator's questions.
+ */
+export function newTenantRouteOpen(tenant: string, env: Env = process.env): boolean {
+  if (newTenantLevel(env) === null) return false;
+  const rollout = fleetRollout(env);
+  return rollout.scope === "list" && !rollout.levels.has(tenant.toLowerCase());
+}
+
+/**
+ * This tenant's level. Fails closed: a value that cannot be read admits nobody.
+ *
+ * `admittedNew` is the orchestrator's record of tenants the new-tenant route
+ * has admitted (new-tenant-admission.ts, lowercase). It is asked only for a
+ * tenant an explicit list does not name, and answers at the level the variable
+ * gives now; left out, or with the route shut, nothing differs from before.
+ */
+export function rolloutLevel(tenant: string, env: Env = process.env, admittedNew?: ReadonlySet<string>): RolloutLevel {
   let rollout: FleetRollout;
   try {
     rollout = fleetRollout(env);
@@ -195,12 +278,16 @@ export function rolloutLevel(tenant: string, env: Env = process.env): RolloutLev
   }
   if (rollout.scope === "all") return "trade";
   if (rollout.scope === "none") return "held";
-  return rollout.levels.get(tenant.toLowerCase()) ?? "held";
+  const lc = tenant.toLowerCase();
+  const named = rollout.levels.get(lc);
+  if (named) return named;
+  if (admittedNew?.has(lc)) return newTenantLevel(env) ?? "held";
+  return "held";
 }
 
 /** Out of the rollout: nothing is started or leased for it. Its owner's kill, and an expired key's scrub, still are carried out. */
-export function rolloutHeld(tenant: string, env: Env = process.env): boolean {
-  return rolloutLevel(tenant, env) === "held";
+export function rolloutHeld(tenant: string, env: Env = process.env, admittedNew?: ReadonlySet<string>): boolean {
+  return rolloutLevel(tenant, env, admittedNew) === "held";
 }
 
 /**
@@ -210,8 +297,8 @@ export function rolloutHeld(tenant: string, env: Env = process.env): boolean {
  * rather than an unset variable or a word no worker knows: one the worker's
  * admission gate obeys by refusing every intent (worker-admission.ts).
  */
-export function childAdmissionLevel(tenant: string, env: Env = process.env): AdmissionLevel {
-  const level = rolloutLevel(tenant, env);
+export function childAdmissionLevel(tenant: string, env: Env = process.env, admittedNew?: ReadonlySet<string>): AdmissionLevel {
+  const level = rolloutLevel(tenant, env, admittedNew);
   return level === "held" ? "observe" : level;
 }
 
@@ -252,26 +339,40 @@ export interface RolloutCounts {
    * somebody who is not being admitted, and should hear about it.
    */
   absent: number;
+  /**
+   * Of the admitted, those the new-tenant route admits (the list does not name
+   * them; new-tenant-admission.ts recorded them). Already counted at their
+   * level: this says how many of those figures came in that way. Present only
+   * while the route is open, so with MERRYMEN_ROLLOUT_NEW_TENANTS unset the
+   * counts are exactly what they were before it existed.
+   */
+  new?: number;
 }
 
 /**
  * How many of the roster sit at each level, and how many named tenants it
  * lacks. `accountingHeld` and `unexpired` are reconcile's own answers for the
  * same pass (lowercase); left out, nobody is accounting-held and no key has
- * expired.
+ * expired. `newTenants` is the orchestrator's record of tenants the
+ * new-tenant route admitted (rolloutLevel says how it is read).
  */
 export function rolloutCounts(
   roster: readonly string[],
   env: Env = process.env,
-  pass: { accountingHeld?: ReadonlySet<string>; unexpired?: ReadonlySet<string> } = {},
+  pass: { accountingHeld?: ReadonlySet<string>; unexpired?: ReadonlySet<string>; newTenants?: ReadonlySet<string> } = {},
 ): RolloutCounts {
   const counts: RolloutCounts = { trade: 0, "exits-only": 0, observe: 0, held: 0, expired: 0, absent: 0 };
+  const routeOpen = newTenantLevel(env) !== null;
+  if (routeOpen) counts.new = 0;
   const present = new Set(roster.map((tenant) => tenant.toLowerCase()));
   for (const tenant of present) {
-    const level = rolloutLevel(tenant, env);
+    const level = rolloutLevel(tenant, env, pass.newTenants);
     if (level === "held" || pass.accountingHeld?.has(tenant)) counts.held += 1;
     else if (pass.unexpired && !pass.unexpired.has(tenant)) counts.expired += 1;
-    else counts[level] += 1;
+    else {
+      counts[level] += 1;
+      if (routeOpen && pass.newTenants?.has(tenant) && newTenantRouteOpen(tenant, env)) counts.new! += 1;
+    }
   }
   try {
     const rollout = fleetRollout(env);
@@ -282,10 +383,19 @@ export function rolloutCounts(
   return counts;
 }
 
+/**
+ * The scope's name. An explicit list with the new-tenant route open says the
+ * route's level beside it, "49 named (new at trade)", within the heartbeat's
+ * vocabulary for a scope (fleet-heartbeat.ts safeScope); with it shut, the
+ * name is what it always was.
+ */
 function scopeName(env: Env): string {
   try {
     const rollout = fleetRollout(env);
-    if (rollout.scope === "list") return `${rollout.levels.size} named`;
+    if (rollout.scope === "list") {
+      const level = newTenantLevel(env);
+      return `${rollout.levels.size} named${level ? ` (new at ${level})` : ""}`;
+    }
     if (rollout.scope === "all" && rollout.unset) return "all (unset off Railway)";
     return rollout.scope;
   } catch {
@@ -302,7 +412,7 @@ export function rolloutLine(counts: RolloutCounts | null, env: Env = process.env
   if (!counts) return `fleet| rollout ${scopeName(env)} — the last pass could not read the roster`;
   return (
     `fleet| rollout ${scopeName(env)} — admitted: trade ${counts.trade} · exits-only ${counts["exits-only"]} · ` +
-    `observe ${counts.observe}; not run: held ${counts.held} · expired ${counts.expired}` +
+    `observe ${counts.observe}${counts.new === undefined ? "" : ` (new ${counts.new})`}; not run: held ${counts.held} · expired ${counts.expired}` +
     (counts.absent > 0 ? `; named but not in the roster ${counts.absent}` : "")
   );
 }
@@ -333,5 +443,27 @@ export function rolloutStartupLine(rollout: FleetRollout): string {
   return (
     `fleet rollout: ${rollout.levels.size} named tenant(s) — trade ${by.trade} · exits-only ${by["exits-only"]} · observe ${by.observe}; ` +
     "every other tenant is held, and the fleet-wide writers (history repair, holder-claims backfill, MCP background) stay off"
+  );
+}
+
+/**
+ * Said once at boot beside the rollout's line: MERRYMEN_ROLLOUT_NEW_TENANTS's
+ * value, and what it does under the scope that took. Throws on a malformed
+ * value, as rolloutNewTenants does; runOrchestrator has asked that already.
+ */
+export function newTenantsStartupLine(env: Env = process.env): string {
+  const level = rolloutNewTenants(env);
+  if (level === null) {
+    return `fleet rollout: ${ROLLOUT_NEW_TENANTS_ENV} unset — a tenant the rollout does not name is held, new or not, as before`;
+  }
+  let scope: FleetRollout["scope"] | "refused";
+  try { scope = fleetRollout(env).scope; } catch { scope = "refused"; }
+  if (scope === "none") return `fleet rollout: ${ROLLOUT_NEW_TENANTS_ENV}=${level} has no effect under none — the emergency stop admits nobody, new or not`;
+  if (scope === "all") return `fleet rollout: ${ROLLOUT_NEW_TENANTS_ENV}=${level} has no effect under all — every tenant is admitted at trade already`;
+  if (scope === "refused") return `fleet rollout: ${ROLLOUT_NEW_TENANTS_ENV}=${level}, but the rollout itself is refused — nobody is admitted`;
+  return (
+    `fleet rollout: ${ROLLOUT_NEW_TENANTS_ENV}=${level} — a tenant the list does not name is admitted at ${level} once it is proved genuinely new ` +
+    "(no home and no archive on the volume, no history in Postgres) and recorded in fleet_new_tenant_admissions before its first spawn; " +
+    "the accounting hold, FLEET_HALT, kills, expired keys, leases and the process cap stop it as they stop any tenant"
   );
 }

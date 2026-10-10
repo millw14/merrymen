@@ -124,16 +124,24 @@ import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, r
 import {
   ADMISSION_LEVEL_ENV,
   FLEET_ROLLOUT_ENV,
+  ROLLOUT_NEW_TENANTS_ENV,
   childAdmissionLevel,
   fleetRollout,
+  newTenantLevel,
+  newTenantRouteOpen,
+  newTenantsStartupLine,
   rolloutAdmitsWholeFleet,
   rolloutCounts,
   rolloutHeld,
   rolloutLine,
+  rolloutNewTenants,
   rolloutStartupLine,
   rolloutSummary,
   type RolloutCounts,
 } from "./fleet-rollout";
+import {
+  NEW_TENANT_HEADROOM, NEW_TENANT_LOOKS_PER_PASS, admitNewTenant, newTenantRefusal, newTenantRoom, readNewTenantAdmissions, type NewTenantScope,
+} from "./new-tenant-admission";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -458,11 +466,59 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  * and is asked with rolloutHeld: the accounting hold has never stopped those,
  * and this change does not make it. Neither hold defers its owner's kill, nor
  * keeps an expired key's copy on the volume.
+ *
+ * A tenant the new-tenant route has admitted (newTenantAdmissions) is in the
+ * rollout like a named one, at MERRYMEN_ROLLOUT_NEW_TENANTS's level as it
+ * reads now; the accounting hold is asked first, and still holds it.
  */
 function operatorHold(tenant: string): string | null {
   if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
-  if (rolloutHeld(tenant)) return `${FLEET_ROLLOUT_ENV} does not admit this tenant`;
+  if (rolloutHeld(tenant, process.env, newTenantAdmissions)) return `${FLEET_ROLLOUT_ENV} does not admit this tenant`;
   return null;
+}
+
+/**
+ * TENANTS THE NEW-TENANT ROUTE HAS ADMITTED (MERRYMEN_ROLLOUT_NEW_TENANTS,
+ * new-tenant-admission.ts), lowercase: fleet_new_tenant_admissions as the
+ * start of the last reconcile pass read it, and every tenant this process has
+ * recorded since. Read before that pass asks who is held, so a restarted
+ * orchestrator never stands down a tenant its record admits.
+ *
+ * Only ever the record's answer, and only for the rollout's question: the
+ * rollout reads it for a tenant an explicit list does not name, at the level
+ * the variable gives now (fleet-rollout.ts rolloutLevel), so with the
+ * variable unset, or the scope `none` or `all`, it changes nothing. A pass
+ * that cannot read the table keeps the last answer rather than stop running
+ * agents over a failed read, and admits nobody new until it reads again.
+ */
+let newTenantAdmissions: ReadonlySet<string> = new Set();
+/** False while the last read of the record failed: no new tenant is proved or recorded until it reads. */
+let newTenantRecordReadable = true;
+/** The last read failure said, so it is said once per kind rather than every pass. */
+let newTenantReadAlert: string | null = null;
+/**
+ * UNNAMED TENANTS FOUND NOT NEW ON A FACT, and the fact: a home or an archive
+ * on the volume, or history in Postgres. None of those goes away, so this
+ * process does not read them again; a read that failed is never kept here.
+ */
+const notNewTenants = new Map<string, { why: string; onVolume: boolean }>();
+/** The last "not new" summary said (newTenantSummary), and when. */
+let lastNewTenantSummary: { line: string; at: number } | null = null;
+/** The last count of new tenants waiting for a slot said, so the alert is said once per change. */
+let lastNewTenantWait: { waiting: number; at: number } | null = null;
+
+/** Test seam: forget what this process knows of the new-tenant route, as a restart would, so the next pass reads the record afresh. */
+export function forgetNewTenantAdmissionsForTest(): void {
+  newTenantAdmissions = new Set();
+  newTenantRecordReadable = true;
+  newTenantReadAlert = null;
+  notNewTenants.clear();
+  lastNewTenantSummary = null;
+  lastNewTenantWait = null;
+}
+/** Test seam: the tenants the new-tenant route admits, as this process holds them now. */
+export function newTenantAdmissionsForTest(): string[] {
+  return [...newTenantAdmissions].sort();
 }
 
 function operatorHeld(tenant: string): boolean {
@@ -693,9 +749,14 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): 
    * MERRYMEN_HOLDER_ADDRESS is: it names other tenants, which is an answer to
    * a question about somebody else, and a child that read it might one day
    * mistake another tenant's level for its own.
+   *
+   * The same for MERRYMEN_ROLLOUT_NEW_TENANTS: a tenant that route admitted
+   * gets its level here, reduced to its own, like any other, and the
+   * fleet-wide variable never reaches a child.
    */
   delete env[FLEET_ROLLOUT_ENV];
-  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant);
+  delete env[ROLLOUT_NEW_TENANTS_ENV];
+  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant, process.env, newTenantAdmissions);
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
@@ -4039,7 +4100,7 @@ async function autoAdmitResignedPaper(roster: ReadonlyArray<{ tenant: string; ke
         continue;
       }
       log(`resume auto-paper: ${tenant} self-approved (a re-signed paper tenant that could not arm live and holds nothing; evidence ` +
-        `${entry.digest!.slice(0, 12)}…) — its admission starts this pass, at ${childAdmissionLevel(tenant)}, the level ${FLEET_ROLLOUT_ENV} gives it`);
+        `${entry.digest!.slice(0, 12)}…) — its admission starts this pass, at ${childAdmissionLevel(tenant, process.env, newTenantAdmissions)}, the level ${FLEET_ROLLOUT_ENV} gives it`);
       await settle(change, "auto-approved", run);
     } catch (e) {
       // Anything that threw on the way (a verdict read that failed — schema
@@ -5527,7 +5588,7 @@ async function retireExpiredGrants(
     // should not sit on the volume, and in its backups, for as long as the
     // tenant is held. What follows stops a process, mirrors its book under the
     // lease and then lets the lease go: that waits for the pass that admits it.
-    if (rolloutHeld(lc)) continue;
+    if (rolloutHeld(lc, process.env, newTenantAdmissions)) continue;
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.
@@ -6048,6 +6109,10 @@ export async function reconcile(): Promise<void> {
   }
   tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+  // THE NEW-TENANT ROUTE'S RECORD, before anything below asks who is held: a
+  // tenant it admitted is in the rollout, and a pass that asked first would
+  // stand its running agent down. Shut, it reads nothing and admits nobody.
+  await refreshNewTenantAdmissions();
   // Remain wanted: a maintenance hold must not revoke the grant or wipe its
   // home. A fresh held deployment starts no process for these tenants. Also
   // stand down a local incarnation if a hold is introduced during a test or
@@ -6076,7 +6141,7 @@ export async function reconcile(): Promise<void> {
   // unchanged, on the pass that admits it. The accounting hold has never
   // skipped either.
   await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
-  await reportPausedFleetSources(tenants.filter((tenant) => !rolloutHeld(tenant)));
+  await reportPausedFleetSources(tenants.filter((tenant) => !rolloutHeld(tenant, process.env, newTenantAdmissions)));
   // A delete/re-grant cannot outrun the stopped source's unfinished final
   // copy. Retry under precisely the retained lease before permitting a fork.
   for (const [tenant, lease] of removedLedgerPending) {
@@ -6112,7 +6177,7 @@ export async function reconcile(): Promise<void> {
   // The heartbeat's count of the whole roster (fleetHealth): admitted per
   // level, held by either operator hold, or expired. After the retirement
   // above, whose re-read of a re-signed key this roster's expiries include.
-  lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible });
+  lastRolloutCounts = rolloutCounts(tenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible, newTenants: newTenantAdmissions });
   const expiredCount = tenants.length - eligibleToSpawn.length;
   if (!lastRosterLog || lastRosterLog.active !== eligibleToSpawn.length || lastRosterLog.expired !== expiredCount || Date.now() - lastRosterLog.at > 5 * 60_000) {
     log(`grant roster: ${eligibleToSpawn.length} unexpired, ${expiredCount} expired or unreadable; only unexpired keys may consume worker processes`);
@@ -6139,11 +6204,32 @@ export async function reconcile(): Promise<void> {
   // watched: a kill above has taken them out of `wanted`.
   await autoAdmitResignedPaper(grantKeys.filter((g) => wanted.has(g.tenant)), eligible);
   await refreshResumePending();
-  for (const tenant of eligibleToSpawn) {
+  // NEW TENANTS LAST, AND ONLY IN THE ROOM LEFT (MERRYMEN_ROLLOUT_NEW_TENANTS,
+  // new-tenant-admission.ts). With the route open, every tenant an explicit
+  // list does not name (and the accounting hold does not) goes after every
+  // tenant it does: recorded ones, which its record admits, and unproven
+  // ones, which are held unless proved new below. Each waits while starting
+  // it would leave fewer than NEW_TENANT_HEADROOM of the process slots free,
+  // or while any named tenant waited for a slot this pass, so a new tenant
+  // never takes a slot a named one needs. Shut, the order and every step are
+  // exactly what they were.
+  const newRouteOpen = newTenantLevel(process.env) !== null;
+  const byNewRoute = (lc: string): boolean => newRouteOpen && newTenantRouteOpen(lc, process.env) && !accountingTenantHeld(lc);
+  const spawnOrder = newRouteOpen
+    ? [...eligibleToSpawn.filter((t) => !byNewRoute(t.toLowerCase())), ...eligibleToSpawn.filter((t) => byNewRoute(t.toLowerCase()))]
+    : eligibleToSpawn;
+  const newPass = { looks: 0, waiting: 0, onVolume: 0, history: 0 };
+  for (const tenant of spawnOrder) {
     const lc = tenant.toLowerCase() as `0x${string}`;
+    // An unnamed tenant the route has not recorded: held, and taken past the
+    // next line only to be proved new (newTenantLooksNew, read-only, before
+    // any lease) and recorded under its lease (recordNewTenant) before it is
+    // spawned. Recorded, operatorHeld no longer holds it.
+    const unproven = byNewRoute(lc) && !newTenantAdmissions.has(lc);
     // First, before a lease is so much as asked for: nothing below this line
-    // is for a tenant the operator holds, the lease attempt included.
-    if (operatorHeld(lc)) continue;
+    // is for a tenant the operator holds, the lease attempt included — but
+    // for that proof and its record.
+    if (operatorHeld(lc) && !unproven) continue;
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
@@ -6189,6 +6275,17 @@ export async function reconcile(): Promise<void> {
       gaveUpUntil.delete(lc);
       log(`${lc}: stand-down over — trying once more`);
     }
+    // Before the cap's own check, whose room is never smaller: a new tenant
+    // waiting here is never counted among the named tenants the cap deferred.
+    let proved: NewTenantScope | null = null;
+    if (byNewRoute(lc)) {
+      if (newTenantRoom({ running: localChildProcessCount(), cap: MAX_LOCAL_CHILD_PROCESSES, namedWaiting: capacityDeferred }) <= 0) {
+        newPass.waiting += 1;
+        await releaseLease(lc);
+        continue;
+      }
+      if (unproven && !(proved = await newTenantLooksNew(lc, newPass))) continue;
+    }
     if (localChildProcessCount() >= MAX_LOCAL_CHILD_PROCESSES) {
       capacityDeferred += 1;
       // A tenant that cannot run here must not keep a lease that would keep
@@ -6210,6 +6307,12 @@ export async function reconcile(): Promise<void> {
       }
       leases.set(lc, lease);
     }
+    // PROVED NEW, AND RECORDED UNDER THE LEASE BEFORE ITS FIRST SPAWN, or not
+    // spawned: the lease taken only to record it goes back.
+    if (proved && !(await recordNewTenant(lc, proved))) {
+      await releaseLease(lc);
+      continue;
+    }
     await spawnChild(lc, cool?.restarts ?? 0);
   }
   if (capacityDeferred > 0 && (!lastCapacityLog || lastCapacityLog.deferred !== capacityDeferred || Date.now() - lastCapacityLog.at > 60_000)) {
@@ -6218,6 +6321,7 @@ export async function reconcile(): Promise<void> {
   } else if (capacityDeferred === 0) {
     lastCapacityLog = null;
   }
+  if (newRouteOpen) sayNewTenantPass(newPass);
   // HELD TENANTS WHOSE RESTORE IS DUE AGAIN, and the handover to trading when
   // it takes. See retryHold.
   //
