@@ -107,6 +107,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const saveInFlight = useRef(false);
   const telegramCreateActive = useRef(false);
   const [telegramCreating, setTelegramCreating] = useState(false);
+  /** Null until the create endpoint has answered; false opens "Connect an existing bot". */
+  const [telegramCreateAvailable, setTelegramCreateAvailable] = useState<boolean | null>(null);
   const settingsOwner = useRef(view?.owner);
   settingsOwner.current = view?.owner;
   const [trencherPrepared, setTrencherPrepared] = useState(false);
@@ -297,8 +299,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setTelegramLaunch(null);
       setTelegramLaunchNote(text ? { owner, text } : null);
     };
-    setTelegramLaunchNote({ owner, text: "Your bot is connected. Waiting for its Telegram launch link…" });
-    const expiry = setTimeout(() => stop("Your bot is connected. Its Telegram launch link isn't ready yet. Refresh Settings to check again."), 60_000);
+    // SAVED IS NOT LISTENING. Only this agent's running worker picks the bot
+    // up and mints its link code, and a brand-new agent may not be running
+    // yet; a minute of waiting here proves nothing about the bot either way.
+    setTelegramLaunchNote({ owner, text: "Your bot is saved. Waiting for your agent to pick it up and make its link…" });
+    const expiry = setTimeout(() => stop("Your bot is saved. Its link appears here once your agent is running and has picked it up. Refresh Settings to check again."), 60_000);
     const poll = async () => {
       try {
         const status = await requestJson<TelegramStatus>(`/api/telegram?owner=${encodeURIComponent(owner)}`, { signal: ctl.signal });
@@ -1720,6 +1725,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             hasBot={view.telegramBotToken.set}
             disabled={status === "saving…"}
             onActiveChange={active => { telegramCreateActive.current = active; setTelegramCreating(active); }}
+            onAvailableChange={setTelegramCreateAvailable}
             onConnected={(owner, signal, botUsername) => refreshTelegramCreation(owner, signal, botUsername, true)}
             onIntentMissing={(owner, signal, botUsername) => refreshTelegramCreation(owner, signal, botUsername, false)}
           /> : null}
@@ -1759,11 +1765,15 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 : tg?.linkPending && tg.enabled
                 ? t("settings.tg.pickingUp")
                 : view.telegramBotToken.set
-                  ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
+                  ? "No link code yet. Your agent makes one once it is running with this token set — check back shortly."
                   : "Your link code appears here once a bot is connected."}
             </p>
           )}
-          <details className="settings-group" open={view.telegramBotToken.set}>
+          {/* THE MANUAL PATH, OPEN WHEN IT IS THE ONLY ONE. Collapsed, it hid
+              behind "Bot creation isn't available right now" with nothing to
+              click: open it whenever creation can't start here, so the
+              @BotFather route is on screen. */}
+          <details className="settings-group" open={view.telegramBotToken.set || hosted === false || telegramCreateAvailable === false}>
           <summary>Connect an existing bot</summary>
           <p className="mm-hint">Already have a bot? Get its token from <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> and add it here.</p>
           <div className="mm-grid">

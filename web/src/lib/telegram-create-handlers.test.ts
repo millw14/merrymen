@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { sealSecret, openSecret } from "../../../worker/src/store-crypto";
 import { TELEGRAM_BOT_CLAIMS_DDL } from "../../../worker/src/telegram-claims";
 import { createTelegramHandlers } from "./telegram-create-handlers";
-import { TELEGRAM_MANAGED_DDL } from "./telegram-managed-store";
 import { TelegramManager } from "./telegram-manager";
 import { useBotClaimsDbForTest } from "./telegram-claims";
 import { mintSession } from "./auth";
@@ -13,17 +12,25 @@ import { GET as telegramStatus } from "../app/api/telegram/route";
 
 const A = `0x${"a".repeat(40)}` as const, B = `0x${"b".repeat(40)}` as const;
 const config = { token: "11111:manager_test_secret", username: "merrymen_manager_bot", webhookSecret: "h".repeat(32) };
+const OURS = "https://app.merrymen.test/api/telegram/manager/webhook";
 const dek = Buffer.alloc(32, 9);
 const beforeDek = process.env.MERRYMEN_STORE_DEK;
 let raw: DatabaseSync, db: Db;
 let telegramCalls: { method: string; body: unknown }[] = [];
 let service: ReturnType<typeof createTelegramHandlers>;
+/** The manager's webhook as Telegram holds it, and whether getMe says it may manage bots. */
+let telegramWebhook: string;
+let canManage: boolean;
+let logs: string[];
 const fakeFetch = (async (input, init) => {
   const method = String(input).split("/").at(-1)!;
-  telegramCalls.push({ method, body: JSON.parse(String(init?.body)) });
+  const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+  telegramCalls.push({ method, body });
+  if (method === "setWebhook") telegramWebhook = String(body.url);
   const result = method === "getManagedBotToken" ? "22222:managed_test_secret" :
-    method === "getMe" && String(input).includes(config.token) ? { id: 11111, username: config.username, is_bot: true, can_manage_bots: true } :
-    method === "getMe" ? { id: 22222, username: "my_merrymen_bot", is_bot: true } : true;
+    method === "getMe" && String(input).includes(config.token) ? { id: 11111, username: config.username, is_bot: true, can_manage_bots: canManage } :
+    method === "getMe" ? { id: 22222, username: "my_merrymen_bot", is_bot: true } :
+    method === "getWebhookInfo" ? { url: telegramWebhook, has_custom_certificate: false, pending_update_count: 0 } : true;
   return Response.json({ ok: true, result });
 }) as typeof fetch;
 before(() => { process.env.MERRYMEN_STORE_DEK = dek.toString("base64"); });
@@ -31,18 +38,26 @@ after(() => {
   if (beforeDek === undefined) delete process.env.MERRYMEN_STORE_DEK; else process.env.MERRYMEN_STORE_DEK = beforeDek;
   useBotClaimsDbForTest(null); raw?.close();
 });
+const handlers = (over: Partial<Parameters<typeof createTelegramHandlers>[0]> = {}) => createTelegramHandlers({ config: () => config, db: async () => db,
+  // Transport auth seam is exercised with explicit tenant, production uses signed wallet cookie.
+  auth: req => req.headers.get("x-test-tenant") as typeof A | null,
+  manager: c => new TelegramManager(c, fakeFetch), webhookUrl: () => OURS, log: line => logs.push(line), ...over });
 beforeEach(async () => {
+  // No managed tables: every flow below starts on a database nobody migrated.
   raw?.close(); raw = new DatabaseSync(":memory:"); db = wrapSqlite(raw);
-  await db.exec(TELEGRAM_MANAGED_DDL);
   await db.exec(TELEGRAM_BOT_CLAIMS_DDL);
   await db.exec("CREATE TABLE tenant_settings (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL, updated_at INTEGER NOT NULL)");
   await db.prepare("INSERT INTO tenant_settings VALUES (?, ?, ?)").run(A, sealSecret(JSON.stringify({ dailyBudgetUsdg: 14, telegramControl: false, telegramAllowlist: [-123] }), dek), 1);
-  useBotClaimsDbForTest(db); telegramCalls = [];
-  service = createTelegramHandlers({ config: () => config, db: async () => db,
-    // Transport auth seam is exercised with explicit tenant, production uses signed wallet cookie.
-    auth: req => req.headers.get("x-test-tenant") as typeof A | null,
-    manager: c => new TelegramManager(c, fakeFetch) });
+  useBotClaimsDbForTest(db); telegramCalls = []; telegramWebhook = ""; canManage = true; logs = [];
+  service = handlers();
 });
+afterEach(() => { mock.timers.reset(); });
+const availability = async (h = service, intent?: string) => {
+  const res = await h.GET(new Request(`http://localhost/api/telegram/create?owner=${A}${intent ? `&intent=${intent}` : ""}`, { headers: { "x-test-tenant": A } }));
+  assert.equal(res.status, 200, await res.clone().text());
+  return await res.json() as { available: boolean; intent?: { id: string; status: string } };
+};
+const methods = () => telegramCalls.map(c => c.method);
 const req = (body: unknown, tenant: string | null = A, origin = "http://localhost") => new Request("http://localhost/api/telegram/create", {
   method: "POST", headers: { "Content-Type": "application/json", Origin: origin, ...(tenant ? { "x-test-tenant": tenant } : {}) }, body: JSON.stringify(body),
 });
@@ -66,12 +81,13 @@ describe("web bot creation account boundary", () => {
     const saved = { hosted: process.env.MERRYMEN_HOSTED, secret: process.env.MERRYMEN_SESSION_SECRET };
     process.env.MERRYMEN_HOSTED = "1"; process.env.MERRYMEN_SESSION_SECRET = "synthetic-local-auth-secret-32-plus-characters";
     try {
-      const handlers = createTelegramHandlers({ config: () => config });
+      // The real cookie auth; no public origin, so the probe stops before any database or Bot API call.
+      const cookied = createTelegramHandlers({ config: () => config, webhookUrl: () => null, log: () => {} });
       const signed = mintSession(A);
       const get = (cookie: string, owner = A) => new Request(`http://localhost/api/telegram/create?owner=${owner}`, { headers: { cookie: `mm_session=${encodeURIComponent(cookie)}` } });
-      assert.equal((await handlers.GET(get(signed))).status, 200);
-      assert.equal((await handlers.GET(get(signed + "x"))).status, 401);
-      assert.equal((await handlers.GET(get(mintSession(B)))).status, 409);
+      assert.equal((await cookied.GET(get(signed))).status, 200);
+      assert.equal((await cookied.GET(get(signed + "x"))).status, 401);
+      assert.equal((await cookied.GET(get(mintSession(B)))).status, 409);
       assert.equal((await telegramStatus(new Request(`http://localhost/api/telegram?owner=${A}`, { headers: { cookie: `mm_session=${encodeURIComponent(mintSession(B))}` } }))).status, 409);
       assert.equal(telegramCalls.length, 0);
     } finally {
@@ -112,6 +128,79 @@ describe("web bot creation account boundary", () => {
     assert.deepEqual(await (await disabled.GET(new Request(`http://localhost/?owner=${A}`))).json(), { available: false });
     assert.equal((await disabled.POST(req({ action: "begin", owner: A }))).status, 503);
     assert.equal(telegramCalls.length, 0);
+  });
+});
+describe("readiness: the button shows only when creation can work", () => {
+  it("makes the tables, checks the manager, sets an unset webhook to this deployment's own, then says available", async () => {
+    assert.equal(raw.prepare("SELECT name FROM sqlite_master WHERE name='telegram_managed_intents'").get(), undefined);
+    assert.deepEqual(await availability(), { available: true });
+    assert.ok(raw.prepare("SELECT name FROM sqlite_master WHERE name='telegram_managed_intents'").get(), "tables made by the probe");
+    assert.deepEqual(methods(), ["getMe", "getWebhookInfo", "setWebhook", "getWebhookInfo"]);
+    assert.deepEqual(telegramCalls[2].body, { url: OURS, secret_token: config.webhookSecret, allowed_updates: ["message", "managed_bot"] });
+    assert.equal(telegramWebhook, OURS);
+    await availability(); await begin();
+    assert.deepEqual(methods().slice(4), [], "a passed probe is cached: polls and begin call Telegram no more");
+    assert.deepEqual(logs, []);
+  });
+  it("re-asserts its own URL once per process, since Telegram cannot report the secret, and not again while it stays", async () => {
+    mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+    telegramWebhook = OURS;
+    assert.equal((await availability()).available, true);
+    assert.deepEqual(methods(), ["getMe", "getWebhookInfo", "setWebhook", "getWebhookInfo"]);
+    mock.timers.tick(6 * 60_000);
+    telegramCalls = [];
+    assert.equal((await availability()).available, true);
+    assert.deepEqual(methods(), ["getMe", "getWebhookInfo"], "after the cache expires: checked, not set again");
+    telegramWebhook = "";
+    mock.timers.tick(6 * 60_000);
+    telegramCalls = [];
+    assert.equal((await availability()).available, true);
+    assert.deepEqual(methods(), ["getMe", "getWebhookInfo", "setWebhook", "getWebhookInfo"], "a webhook someone deleted is set again");
+  });
+  it("never overwrites a webhook pointing at another environment: unavailable, one log line, no secret in it", async () => {
+    mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+    const elsewhere = "https://staging.merrymen.test/api/telegram/manager/webhook";
+    telegramWebhook = elsewhere;
+    assert.deepEqual(await availability(), { available: false });
+    assert.equal((await service.POST(req({ action: "begin", owner: A }))).status, 503);
+    assert.equal(telegramWebhook, elsewhere);
+    assert.ok(!methods().includes("setWebhook"));
+    assert.deepEqual(methods(), ["getMe", "getWebhookInfo"], "a failed probe is cached briefly too");
+    mock.timers.tick(31_000);
+    assert.equal((await availability()).available, false);
+    assert.equal(logs.length, 1, "said once, not once per probe");
+    assert.match(logs[0], /webhook points at another URL/);
+    for (const secret of [config.token, config.webhookSecret, "manager_test_secret", elsewhere]) assert.ok(!logs[0].includes(secret));
+    assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM telegram_managed_intents").get() as { n: number }).n, 0);
+    telegramWebhook = "";
+    mock.timers.tick(31_000);
+    assert.equal((await availability()).available, true, "recovers once the other webhook is gone");
+    assert.match(logs.at(-1)!, /available$/);
+  });
+  it("is unavailable without an https public origin, before any Bot API call", async () => {
+    assert.deepEqual(await availability(handlers({ webhookUrl: () => null })), { available: false });
+    assert.deepEqual(telegramCalls, []);
+    assert.match(logs[0], /MERRYMEN_PUBLIC_ORIGIN/);
+  });
+  it("is unavailable while the manager cannot manage bots, and sets no webhook for it", async () => {
+    canManage = false;
+    assert.deepEqual(await availability(), { available: false });
+    assert.deepEqual(methods(), ["getMe"]);
+    assert.match(logs[0], /Bot Management Mode/);
+  });
+  it("is unavailable when the database cannot make the tables", async () => {
+    assert.deepEqual(await availability(handlers({ db: async () => { throw new Error("database down"); } })), { available: false });
+    assert.deepEqual(telegramCalls, []);
+  });
+  it("still reads a setup underway when creation is not ready, so a candidate can be confirmed", async () => {
+    const { intent } = await readyCandidate();
+    const notReady = handlers();
+    telegramWebhook = "https://staging.merrymen.test/api/telegram/manager/webhook";
+    const read = await availability(notReady, intent.id);
+    assert.equal(read.available, false);
+    assert.equal(read.intent?.status, "confirm");
+    const confirmed = await notReady.POST(req({ action: "confirm", owner: A, intentId: intent.id, botId: "22222" }));
+    assert.equal(confirmed.status, 200, await confirmed.clone().text());
   });
 });
 describe("manager delivery and credential save", () => {

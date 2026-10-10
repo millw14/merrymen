@@ -16,6 +16,8 @@ interface Props {
   hasBot: boolean;
   disabled?: boolean;
   onActiveChange?: (active: boolean) => void;
+  /** False once the server says creation can't start here, so Settings can put the manual path first. */
+  onAvailableChange?: (available: boolean | null) => void;
   onConnected: (owner: string, signal: AbortSignal, botUsername: string) => Promise<void> | void;
   onIntentMissing: (owner: string, signal: AbortSignal, botUsername: string | null) => Promise<void> | void;
 }
@@ -65,7 +67,7 @@ function failure(error: unknown): string {
   return "Couldn't check Telegram setup. Try again.";
 }
 
-export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = false, onActiveChange, onConnected, onIntentMissing }: Props) {
+export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = false, onActiveChange, onAvailableChange, onConnected, onIntentMissing }: Props) {
   const owner = /^0x[0-9a-f]{40}$/i.test(suppliedOwner ?? "") ? suppliedOwner!.toLowerCase() : "";
   const [view, setView] = useState<View>(() => initial(owner));
   const [attempt, setAttempt] = useState(0);
@@ -74,8 +76,8 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   ownerRef.current = owner;
   const viewRef = useRef(view);
   viewRef.current = view;
-  const callbacks = useRef({ onActiveChange, onConnected, onIntentMissing });
-  callbacks.current = { onActiveChange, onConnected, onIntentMissing };
+  const callbacks = useRef({ onActiveChange, onAvailableChange, onConnected, onIntentMissing });
+  callbacks.current = { onActiveChange, onAvailableChange, onConnected, onIntentMissing };
   const controllers = useRef(new Set<AbortController>());
   const popups = useRef(new Set<Window>());
   const priorOwner = useRef(owner);
@@ -93,31 +95,55 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
     if (deadline.current?.id !== intent.id) deadline.current = { id: intent.id, at: Math.min(intent.expiresAt, Date.now() + MAX_PENDING_MS) };
     return Math.min(deadline.current.at, intent.expiresAt);
   }
+  /**
+   * READ THIS BROWSER'S SETUP, AND LET GO OF IT ONLY ONCE SETTINGS SAYS WHAT
+   * WAS SAVED.
+   *
+   * A setup the server no longer offers is gone in one of three ways: its row
+   * is missing (404), creation has been switched off or is not ready, so the
+   * server answers without it, or it reads back expired or cancelled. #284
+   * handled only the first. The second threw "Setup changed" and left Save
+   * disabled for good, retry or not, in any browser holding an id from before
+   * the switch; the third kept the dead id in storage, to be read again on
+   * every visit.
+   *
+   * A row that is gone, or one that ended after this tab asked to confirm, may
+   * still have saved a bot (the row can expire after a confirmation commits,
+   * and a lost response says nothing either way). So Settings is read back
+   * first (onIntentMissing), which also drops an older manual token draft that
+   * would overwrite that bot, and only then is the id forgotten and Save
+   * released. A failed readback keeps both. An end this tab never confirmed
+   * cannot have saved anything: it is forgotten at once.
+   */
   async function read(scope: string, id: string | null, ctl: AbortController) {
-    const params = new URLSearchParams({ owner: scope });
-    if (id) params.set("intent", id);
-    let data: { available: unknown; intent?: unknown };
-    let reconciledMissing = false;
-    try { data = await requestJson<typeof data>(`/api/telegram/create?${params}`, { signal: ctl.signal }); }
-    catch (error) {
-      if (!valid(ctl, scope) || !id || !(error instanceof RequestError) || error.status !== 404) throw error;
-      // The row can expire after a successful confirmation. Re-read Settings
-      // before forgetting it so an old manual token cannot overwrite that bot.
-      patch(scope, { needsReconciliation: true, busy: true });
-      await callbacks.current.onIntentMissing(scope, ctl.signal, viewRef.current.owner === scope ? viewRef.current.intent?.botUsername ?? null : null);
-      if (!valid(ctl, scope)) return;
-      params.delete("intent");
-      data = await requestJson<typeof data>(`/api/telegram/create?${params}`, { signal: ctl.signal });
-      id = null;
-      reconciledMissing = true;
-    }
+    const ask = async (withId: string | null) => {
+      const params = new URLSearchParams({ owner: scope });
+      if (withId) params.set("intent", withId);
+      const data = await requestJson<{ available: unknown; intent?: unknown }>(`/api/telegram/create?${params}`, { signal: ctl.signal });
+      if (typeof data.available !== "boolean") throw new Error("Invalid availability");
+      const found = withId && data.intent ? intentFrom(data.intent) : null;
+      if (found && found.id !== withId) throw new Error("Setup changed");
+      return { available: data.available, intent: found };
+    };
+    let answer: Awaited<ReturnType<typeof ask>> | null = null;
+    try { answer = await ask(id); }
+    catch (error) { if (!valid(ctl, scope) || !id || !(error instanceof RequestError) || error.status !== 404) throw error; }
     if (!valid(ctl, scope)) return;
-    if (typeof data.available !== "boolean") throw new Error("Invalid availability");
-    const intent = data.intent ? intentFrom(data.intent) : null;
-    if (id && (!intent || intent.id !== id)) throw new Error("Setup changed");
-    if (reconciledMissing) { remember(scope, null); deadline.current = null; }
-    if (intent) remember(scope, intent.id);
-    patch(scope, { available: data.available, intent, loading: false, needsReconciliation: false, error: null, ...(reconciledMissing ? { busy: false, telegramUrl: null, confirmationAttempted: false } : {}) });
+    const prior = viewRef.current.owner === scope ? viewRef.current : null;
+    const intent = answer?.intent ?? null;
+    const ended = intent?.status === "expired" || intent?.status === "cancelled";
+    if (id && (!intent || (ended && prior?.confirmationAttempted))) {
+      patch(scope, { needsReconciliation: true, busy: true });
+      await callbacks.current.onIntentMissing(scope, ctl.signal, intent?.botUsername ?? prior?.intent?.botUsername ?? null);
+      if (!valid(ctl, scope)) return;
+      if (!answer) { answer = await ask(null); if (!valid(ctl, scope)) return; }
+      remember(scope, null); deadline.current = null;
+      patch(scope, { available: answer.available, intent, loading: false, busy: false, needsReconciliation: false, error: null, telegramUrl: null, confirmationAttempted: false });
+      return;
+    }
+    if (ended) { remember(scope, null); deadline.current = null; }
+    else if (intent) remember(scope, intent.id);
+    patch(scope, { available: answer!.available, intent, loading: false, needsReconciliation: false, error: null });
   }
 
   useEffect(() => {
@@ -137,6 +163,10 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   useEffect(() => {
     callbacks.current.onActiveChange?.(!!active);
   }, [active]);
+  const availability = owner ? current.available : false;
+  useEffect(() => {
+    callbacks.current.onAvailableChange?.(availability);
+  }, [availability]);
   useEffect(() => () => { for (const ctl of controllers.current) ctl.abort(); controllers.current.clear(); for (const popup of popups.current) popup.close(); popups.current.clear(); callbacks.current.onActiveChange?.(false); }, []);
 
   const intent = current.intent;
@@ -239,7 +269,11 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
       <button type="button" className="mm-btn primary" disabled={disabled || current.busy || until(intent) <= Date.now() || hasBot} onClick={() => void confirm()}>{current.busy ? "Connecting…" : "Connect this bot"}</button>
       <button type="button" className="mm-btn" disabled={disabled || current.busy} onClick={() => void cancel()}>Cancel setup</button>
     </> : null}
-    {intent?.status === "connected" ? <p className="mm-hint" role="status">{current.refreshed ? <>Bot connected as <strong>@{intent.botUsername}</strong>. Open your bot below to finish linking Telegram.</> : "Bot connected. Refreshing Settings…"}</p> : null}
+    {/* SAVED, NOT LISTENING. The token is in Settings; the bot answers only
+        once this agent's worker runs and picks it up, and only that worker
+        mints the link code "Open my bot" needs. A new agent can wait for
+        that, so nothing here says the bot is live. */}
+    {intent?.status === "connected" ? <p className="mm-hint" role="status">{current.refreshed ? <>Bot saved as <strong>@{intent.botUsername}</strong>. It answers once your agent is running; its link to open it appears below then.</> : "Bot saved. Refreshing Settings…"}</p> : null}
     {ended && (current.confirmationAttempted || current.needsReconciliation) ? <>
       <p className="mm-hint" role="status">The connection hasn&apos;t been checked yet. Check setup or cancel before saving other settings.</p>
       <button type="button" className="mm-btn" disabled={disabled || current.busy} onClick={() => setAttempt(n => n + 1)}>Check setup</button>
