@@ -4,8 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -1770,19 +1768,6 @@ private fun TradeLine(r: PoolTradeRow, onOpen: (String) -> Unit) {
     )
   }
 }
-
-/**
- * OPEN A PAGE IN THE USER'S OWN BROWSER — a Custom Tab, never the WebView,
- * which exists for our own signature ceremonies (see Owner.openX). Returns
- * the sentence to show when nothing on the device can open it.
- */
-private fun openInBrowser(ctx: Context, url: String): String? =
-  try {
-    CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(ctx, Uri.parse(url))
-    null
-  } catch (e: android.content.ActivityNotFoundException) {
-    "Nothing on this device can open the explorer link."
-  }
 
 // ---------------------------------------------------------------------------
 // CLIPBOARD AND SHARE

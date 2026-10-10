@@ -665,6 +665,16 @@ fun SettingsScreen(nav: NavHostController) {
           }
         }
       }
+
+      // Available even signed out or when the server cannot load settings.
+      PanelSectionHeading("Privacy and account")
+      PolicyLinks()
+      PolicyLink("Request account deletion", ACCOUNT_DELETION_URL, Modifier.fillMaxWidth())
+      NoteLine(
+        "Request account and associated data deletion through support@merrymen.dev. " +
+          "Support may ask you to verify account ownership. Deleting account data stops your hosted agent. " +
+          "Public blockchain records cannot be erased.",
+      )
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }

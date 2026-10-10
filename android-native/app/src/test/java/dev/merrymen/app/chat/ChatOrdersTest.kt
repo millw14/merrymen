@@ -3,6 +3,7 @@ package dev.merrymen.app.chat
 import dev.merrymen.app.chat.ChatRig.Companion.A
 import dev.merrymen.app.chat.ChatRig.Companion.json
 import dev.merrymen.app.data.receiptText
+import dev.merrymen.app.ui.COMMANDS
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -90,7 +91,13 @@ class ChatOrdersTest {
     waitFor("A") { chat.thread.value.key == A }
     runBlocking { chat.sendNow("ape into cash cat with 5", null) }
     chat.confirm { _, _ -> }
-    waitFor("the found coin's card") { chat.card.value?.found != null }
+    // The lookup publishes its replacement card before appending the result
+    // messages. Wait for the same ready state as the UI before inspecting the
+    // completed lookup or tapping again; the busy flag prevents a second tap
+    // while the first confirmation still holds the card.
+    waitFor("the found coin's card ready to confirm") {
+      chat.card.value?.found != null && !chat.confirming.value
+    }
     val card = chat.card.value!!
     assertEquals("buy", card.command.id)
     assertEquals("0x1da81ca017949efbe07972776580d04592ba9b63", card.found!!.address)
@@ -176,6 +183,29 @@ class ChatOrdersTest {
     assertEquals("the page's name, not the command's id", "/deposit" to "Add funds", went)
     assertNull(chat.card.value)
     assertEquals("only the question was sent", listOf("/api/chat"), rig.writes().map { it.path })
+  }
+
+  @Test fun aSettingsProposalOpensTheWebReviewOnlyAfterConfirmationAndNeverWrites() {
+    rig.route("POST /api/chat") {
+      json("""{"reply":"Review this in Settings.","command":{"id":"change-settings","args":{"changes":"liveTradingEnabled=true; maxImpactBps=0"}}}""")
+    }
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    runBlocking { chat.sendNow("change my settings", null) }
+    assertNotNull("the proposal still needs an owner tap", chat.card.value)
+    assertEquals(
+      "the phone does not claim it parsed or prefilled the proposed changes",
+      "Open Settings, where you can describe the change and approve it.",
+      COMMANDS.getValue("change-settings").say(mapOf("changes" to "liveTradingEnabled=true; maxImpactBps=0")),
+    )
+    assertEquals(listOf("/api/chat"), rig.writes().map { it.path })
+    var went: Pair<String, String>? = null
+    chat.confirm { path, title -> went = path to title }
+    waitFor("the web proposal panel") { went != null }
+    assertEquals("/settings#proposal" to "Review settings", went)
+    assertNull(chat.card.value)
+    assertEquals("real-money settings remain subject to the web panel's approval", listOf("/api/chat"), rig.writes().map { it.path })
   }
 
   @Test fun aColdStartResumesTheFollowAndAsksEvenPastTheDeadline() {
