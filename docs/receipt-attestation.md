@@ -6,6 +6,12 @@ with any successful or unsettled trade, position, withdrawal, fee, later epoch,
 multiple flows, missing original journal evidence, or inconsistent cash/high-water
 marks. It is deliberately narrower than general accounting reconstruction.
 
+Deposit receipts and the matching balance must be at least 64 blocks behind
+the observed chain head, matching the existing capital-booking policy. Any
+USDG transfer in the unconfirmed tail makes the preview or commit wait, including
+a withdrawal followed by a matching deposit. Both the confirmed snapshot and
+observed head are checked again for a reorganization before accepting evidence.
+
 It preserves the account, signed permission and caps, original SQLite file and
 source identity, consumed generation, every existing journal entry, flow IDs,
 flow amount and bookkeeping time, epoch, high-water marks, budgets, and all

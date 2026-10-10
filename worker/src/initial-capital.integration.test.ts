@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { CASH } from "../../packages/core/src/index";
 import { TRANSFER_TOPIC, type RpcCall } from "./chain-capital";
 import { readInitialCapital } from "./initial-capital";
+import { BOOKING_CONFIRMATIONS } from "./chain-confirmations";
 import { initialCapitalHistoryEmpty } from "./initial-capital-history";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { accountingLicence, BOOTSTRAP_SCHEMA_VERSION, classifyAnchor } from "./bootstrap-state";
@@ -36,7 +37,7 @@ const transfer = (n: bigint, index: number, incoming = true) => ({
 const DEPOSIT = transfer(200_000_000n, 1);
 type RpcState = { calls: [string, unknown[]][]; rpc: RpcCall };
 function rpcFixture(o: {
-  logs?: ReturnType<typeof transfer>[]; balance?: bigint;
+  logs?: ReturnType<typeof transfer>[]; balance?: bigint; head?: bigint;
   replace?: (method: string, params: unknown[], value: unknown) => unknown;
 } = {}): RpcState {
   const calls: [string, unknown[]][] = [];
@@ -45,11 +46,12 @@ function rpcFixture(o: {
     calls.push([method, params]);
     let value: unknown;
     if (method === "eth_chainId") value = "0x1237";
-    else if (method === "eth_blockNumber") value = "0x65";
+    else if (method === "eth_blockNumber") value = `0x${(o.head ?? (101n + BOOKING_CONFIRMATIONS)).toString(16)}`;
     else if (method === "eth_getBlockByNumber") value = { number: params[0], hash: params[0] === "0x64" ? HASH : HEAD, timestamp: "0x6553f100" };
     else if (method === "eth_getLogs") {
-      const topics = (params[0] as { topics: (null | string | string[])[] }).topics;
-      value = logs.filter(l => topics.every((t, i) => t === null || (Array.isArray(t) ? t.includes(l.topics[i]!) : t === l.topics[i])));
+      const { topics, fromBlock, toBlock } = params[0] as { topics: (null | string | string[])[]; fromBlock: string; toBlock: string };
+      value = logs.filter(l => BigInt(l.blockNumber) >= BigInt(fromBlock) && BigInt(l.blockNumber) <= BigInt(toBlock)
+        && topics.every((t, i) => t === null || (Array.isArray(t) ? t.includes(l.topics[i]!) : t === l.topics[i])));
     } else if (method === "eth_getTransactionReceipt") value = { transactionHash: TX, status: "0x1", blockNumber: "0x64", blockHash: HASH, logs };
     else if (method === "eth_call") value = data(o.balance ?? 200_000_000n);
     else throw new Error(`Unexpected RPC ${method}`);
@@ -77,16 +79,61 @@ beforeEach(async () => {
 after(() => { raw.close(); store.closeStoreForTest(); rmSync(HOME, { recursive: true, force: true }); });
 
 describe("initial funding receipt evidence", () => {
-  it("reads full inbound/outbound history and reconciles against one pinned balance", async () => {
+  it("pins history and balance to head minus 64, and proves the unconfirmed tail is empty", async () => {
     const f = rpcFixture();
     const evidence = await read(f.rpc);
     assert.equal(evidence.cashUsdg6, 200_000_000n);
     assert.equal(evidence.deposits[0]?.at, 1_700_000_000);
+    assert.equal(evidence.blockNumber, 101n);
     assert.equal(evidence.blockHash, HEAD);
-    assert.equal(f.calls.filter(([m]) => m === "eth_getLogs").length, 2);
-    for (const [, params] of f.calls.filter(([m]) => m === "eth_getLogs")) assert.deepEqual(
+    const logCalls = f.calls.filter(([m]) => m === "eth_getLogs");
+    assert.equal(logCalls.length, 4);
+    for (const [, params] of logCalls.slice(0, 2)) assert.deepEqual(
+      [(params[0] as { fromBlock: string }).fromBlock, (params[0] as { toBlock: string }).toBlock], ["0x66", "0xa5"]);
+    for (const [, params] of logCalls.slice(2)) assert.deepEqual(
       [(params[0] as { fromBlock: string }).fromBlock, (params[0] as { toBlock: string }).toBlock], ["0x0", "0x65"]);
     assert.equal(f.calls.find(([m]) => m === "eth_call")?.[1][1], "0x65");
+    for (const tag of ["0x65", "0xa5"]) assert.equal(f.calls.filter(([m, p]) => m === "eth_getBlockByNumber" && p[0] === tag).length, 2);
+  });
+  it("refuses heads below the confirmation depth before requesting a range or balance", async () => {
+    for (const head of [0n, BOOKING_CONFIRMATIONS - 1n]) {
+      const f = rpcFixture({ head });
+      await assert.rejects(read(f.rpc));
+      assert.deepEqual(f.calls.map(([method]) => method), ["eth_chainId", "eth_blockNumber"]);
+    }
+    assert.equal(count("flows"), 0); assert.equal(await peak(), 0);
+  });
+  it("holds at 63 confirmations and books once at exactly 64 after a funded held tick", async () => {
+    const immature = rpcFixture({ head: 100n + BOOKING_CONFIRMATIONS - 1n });
+    await assert.rejects(read(immature.rpc));
+    assert.equal(immature.calls.some(([m]) => m === "eth_call" || m === "eth_getTransactionReceipt"), false);
+    assert.equal(count("flows"), 0); assert.equal(await peak(), 0);
+    mark(200, "live", 1);
+    const mature = await read(rpcFixture({ head: 100n + BOOKING_CONFIRMATIONS }).rpc);
+    assert.equal(mature.blockNumber, 100n); assert.equal(mature.blockHash, HASH);
+    assert.equal((await store.bookInitialCapital(ACCOUNT, mature)).kind, "booked");
+    assert.equal((await store.bookInitialCapital(ACCOUNT, mature)).kind, "already");
+    assert.equal(count("flows"), 1); assert.equal(await peak(), 200);
+  });
+  for (const [name, recent] of [
+    ["incoming deposit", [transfer(1_000_000n, 2)]],
+    ["withdrawal", [transfer(1_000_000n, 2, false)]],
+    ["out-and-back with unchanged cash", [transfer(1_000_000n, 2, false), transfer(1_000_000n, 3)]],
+  ] as const) it(`holds unconfirmed ${name} even when confirmed cash still matches`, async () => {
+    const logs = [DEPOSIT, ...recent.map(log => ({ ...log, blockNumber: "0x66" }))];
+    await assert.rejects(read(rpcFixture({ logs, balance: 200_000_000n }).rpc));
+    assert.equal(count("flows"), 0); assert.equal(await peak(), 0);
+  });
+  it("holds unreadable or malformed tail evidence without booking confirmed funds", async () => {
+    for (const response of [null, { logs: [] }, "unavailable"]) {
+      await assert.rejects(read(rpcFixture({ replace: (m, p, value) => m === "eth_getLogs"
+        && (p[0] as { fromBlock: string }).fromBlock === "0x66" ? response : value }).rpc));
+    }
+    await assert.rejects(read(rpcFixture({ replace: (m, p, value) => {
+      if (m === "eth_getLogs" && (p[0] as { fromBlock: string }).fromBlock === "0x66") throw new Error("tail RPC unavailable");
+      return value;
+    } }).rpc));
+    assert.equal(count("flows"), 0); assert.equal(await peak(), 0);
   });
   it("refuses an established/unknown licence without asking the chain", async () => {
     const f = rpcFixture();
@@ -101,10 +148,11 @@ describe("initial funding receipt evidence", () => {
     ["noncanonical deposit block", (m: string, p: unknown[], v: unknown) => m === "eth_getBlockByNumber" && p[0] === "0x64" ? { ...(v as object), hash: HEAD } : v],
     ["missing block timestamp", (m: string, p: unknown[], v: unknown) => m === "eth_getBlockByNumber" && p[0] === "0x64" ? { ...(v as object), timestamp: null } : v],
   ] as const) it(`holds ${name}`, async () => { await assert.rejects(read(rpcFixture({ replace }).rpc)); });
-  it("holds a head reorg during the scan", async () => {
-    let heads = 0;
-    await assert.rejects(read(rpcFixture({ replace: (m, p, v) => m === "eth_getBlockByNumber" && p[0] === "0x65" && ++heads > 1
+  for (const tag of ["0x65", "0xa5"]) it(`holds a reorg of pinned block ${tag} during the scan`, async () => {
+    let reads = 0;
+    await assert.rejects(read(rpcFixture({ replace: (m, p, v) => m === "eth_getBlockByNumber" && p[0] === tag && ++reads > 1
       ? { ...(v as object), hash: HASH } : v }).rpc));
+    assert.equal(count("flows"), 0); assert.equal(await peak(), 0);
   });
   it("holds withdrawals and trade proceeds, even when the net reconciles", async () => {
     await assert.rejects(read(rpcFixture({ logs: [DEPOSIT, transfer(10_000_000n, 2, false)], balance: 190_000_000n }).rpc));

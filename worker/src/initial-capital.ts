@@ -1,6 +1,7 @@
 /** Receipt evidence for a genuinely new hosted book. Never an established-book backfill. */
 import { CASH } from "../../packages/core/src/index";
-import { scanFleetCapital, type RawChainLog, type RpcCall } from "./chain-capital";
+import { scanFleetCapital, TRANSFER_TOPIC, type RawChainLog, type RpcCall } from "./chain-capital";
+import { BOOKING_CONFIRMATIONS } from "./chain-confirmations";
 
 export interface InitialCapitalDeposit {
   txHash: string;
@@ -34,8 +35,10 @@ function sameLog(a: RawChainLog, b: RawChainLog): boolean {
 }
 
 /**
- * Scan genesis through one pinned head, then reconcile receipts with balanceOf
- * at that same head. Only deposits are accepted: a withdrawal, swap, reserve
+ * Scan genesis through one confirmed snapshot, then reconcile receipts with
+ * balanceOf at that same block. Require the unconfirmed tail to be empty in
+ * both directions, so recent or offsetting flows cannot hide from this proof.
+ * Only deposits are accepted: a withdrawal, swap, reserve
  * purchase, missing receipt, conflicting log or reorg holds the first funding.
  * The caller must possess the bootstrap's new-account or untouched-book
  * receipt licence. An RPC failure never licenses an inferred opening balance.
@@ -53,11 +56,25 @@ export async function readUntouchedFundingReceipts(rpc: RpcCall, o: {
 }): Promise<InitialCapital> {
   if (!ADDRESS.test(o.account) || !Number.isSafeInteger(o.chainId) || o.chainId <= 0) throw refused();
   if (integer(await rpc("eth_chainId", [])) !== BigInt(o.chainId)) throw refused();
-  const blockNumber = integer(await rpc("eth_blockNumber", []));
-  if (blockNumber > BigInt(Number.MAX_SAFE_INTEGER)) throw refused();
+  const head = integer(await rpc("eth_blockNumber", []));
+  if (head < BOOKING_CONFIRMATIONS || head > BigInt(Number.MAX_SAFE_INTEGER)) throw refused();
+  const blockNumber = head - BOOKING_CONFIRMATIONS;
   const tag = `0x${blockNumber.toString(16)}`;
+  const headTag = `0x${head.toString(16)}`;
   const first = await rpc("eth_getBlockByNumber", [tag, false]) as { number?: unknown; hash?: unknown } | null;
   if (!first || integer(first.number) !== blockNumber || typeof first.hash !== "string" || !HASH.test(first.hash)) throw refused();
+  const firstHead = await rpc("eth_getBlockByNumber", [headTag, false]) as { number?: unknown; hash?: unknown } | null;
+  if (!firstHead || integer(firstHead.number) !== head || typeof firstHead.hash !== "string" || !HASH.test(firstHead.hash)) throw refused();
+  const account = o.account.toLowerCase();
+  const accountTopic = `0x${account.slice(2).padStart(64, "0")}`;
+  // The maintenance reader has no tick balance to compare against. Prove that
+  // nothing moved after the confirmed snapshot, even if it moved out and back.
+  // This fixed 64-block window needs no broad historical fallback: unread holds.
+  for (const topics of [[TRANSFER_TOPIC, accountTopic], [TRANSFER_TOPIC, null, accountTopic]]) {
+    const tail = await rpc("eth_getLogs", [{ address: CASH.USDG, topics,
+      fromBlock: `0x${(blockNumber + 1n).toString(16)}`, toBlock: headTag }]);
+    if (!Array.isArray(tail) || tail.length !== 0) throw refused();
+  }
   const found = new Map<string, RawChainLog & { blockHash: string }>();
   const verified: RpcCall = async (method, params) => {
     const value = await rpc(method, params);
@@ -93,7 +110,6 @@ export async function readUntouchedFundingReceipts(rpc: RpcCall, o: {
     }
     return value;
   };
-  const account = o.account.toLowerCase();
   const capital = (await scanFleetCapital(verified, { accounts: [account], usdgToken: CASH.USDG,
     fromBlock: 0n, toBlock: blockNumber, includeCapitalTimestamps: true })).get(account);
   if (!capital?.complete || capital.movements.length !== found.size || !capital.movements.length
@@ -102,8 +118,10 @@ export async function readUntouchedFundingReceipts(rpc: RpcCall, o: {
     data: `0x70a08231${account.slice(2).padStart(64, "0")}` }, tag]));
   if (cashUsdg6 <= 0n || cashUsdg6 > BigInt(Number.MAX_SAFE_INTEGER)
     || capital.movements.reduce((n, m) => n + BigInt(m.amountRaw), 0n) !== cashUsdg6) throw refused();
-  const last = await rpc("eth_getBlockByNumber", [tag, false]) as { hash?: unknown } | null;
-  if (last?.hash !== first.hash) throw refused();
+  const last = await rpc("eth_getBlockByNumber", [tag, false]) as { number?: unknown; hash?: unknown } | null;
+  const lastHead = await rpc("eth_getBlockByNumber", [headTag, false]) as { number?: unknown; hash?: unknown } | null;
+  if (!last || integer(last.number) !== blockNumber || last.hash !== first.hash
+    || !lastHead || integer(lastHead.number) !== head || lastHead.hash !== firstHead.hash) throw refused();
   return { account, chainId: o.chainId, blockNumber, blockHash: first.hash, cashUsdg6,
     deposits: capital.movements.map(m => ({ txHash: m.txHash, blockNumber: m.blockNumber,
       logIndex: m.logIndex, at: m.at!, amountUsdg6: BigInt(m.amountRaw) })) };

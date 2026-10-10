@@ -53,22 +53,24 @@ export async function receiptFixture(sharedDb?: Db, lease?: TenantLease) {
   await shared.prepare("INSERT INTO mirror_state(tenant,table_name,last_id,last_stamp,updated_at) VALUES(?,'flows',7,1791595716,1791595801)").run(TEST_TENANT);
   const log = { address: CASH.USDG, topics: [TRANSFER_TOPIC, topic(FROM), topic(TEST_ACCOUNT)], data: `0x${(200_000_000n).toString(16).padStart(64, "0")}`,
     blockNumber: "0x50", blockHash: BLOCK_HASH, transactionHash: TX, logIndex: "0x11", removed: false };
-  let healthy = true, quiet = true;
+  // The receipt at block 80 is older than the 64-block finality window at head 160.
+  let head = 160n, healthy = true, quiet = true;
   const rpc: RpcCall = async (method, params) => {
     if (method === "eth_chainId") return "0x1237";
-    if (method === "eth_blockNumber") return "0x60";
+    if (method === "eth_blockNumber") return `0x${head.toString(16)}`;
     if (method === "eth_getBlockByNumber") return { number: params[0], hash: params[0] === "0x50" ? BLOCK_HASH : `0x${"ba".repeat(32)}`, timestamp: "0x6ac95d13" };
-    if (method === "eth_call") return `0x${(200_000_000n).toString(16)}`;
+    if (method === "eth_call") return `0x${(BigInt(String(params[1])) >= 80n ? 200_000_000n : 0n).toString(16)}`;
     if (method === "eth_getTransactionReceipt") return { status: "0x1", transactionHash: TX, blockNumber: "0x50", blockHash: BLOCK_HASH, logs: [log] };
     if (method === "eth_getLogs") {
-      const filter = params[0] as { topics: (string | string[] | null)[] };
-      return filter.topics.every((item, i) => item == null || (Array.isArray(item) ? item : [item]).some(t => t.toLowerCase() === log.topics[i]!.toLowerCase())) ? [log] : [];
+      const filter = params[0] as { fromBlock: string; toBlock: string; topics: (string | string[] | null)[] };
+      return BigInt(filter.fromBlock) <= 80n && BigInt(filter.toBlock) >= 80n
+        && filter.topics.every((item, i) => item == null || (Array.isArray(item) ? item : [item]).some(t => t.toLowerCase() === log.topics[i]!.toLowerCase())) ? [log] : [];
     }
     throw new Error(`Unexpected fixture RPC ${method}`);
   };
   const options: ReceiptAttestationOptions = { tenant: TEST_TENANT, smartAccount: TEST_ACCOUNT, chainId: 4663, home, volume, shared, rpc,
     lease: lease ?? { tenant: TEST_TENANT, backend: "postgres", healthy: () => healthy, async release() { healthy = false; } },
     assertQuiescent() { if (!quiet) throw new Error("Supervisor still owns a process"); }, dialect: sharedDb ? "postgres" : "sqlite" };
-  return { options, file, local, raw, shared, log, rpc, setHealthy(value: boolean) { healthy = value; }, setQuiet(value: boolean) { quiet = value; },
+  return { options, file, local, raw, shared, log, rpc, setHead(value: bigint) { head = value; }, setHealthy(value: boolean) { healthy = value; }, setQuiet(value: boolean) { quiet = value; },
     close() { raw.close(); memory?.close(); rmSync(root, { recursive: true, force: true }); } };
 }

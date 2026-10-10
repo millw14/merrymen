@@ -30,6 +30,67 @@ test("dry run writes no schema, file, journal, source metadata or shared row", a
   } finally { f.close(); }
 });
 
+test("a deposit 63 blocks deep cannot preview or write; exactly 64 blocks deep can be attested", async () => {
+  const f = await fixture();
+  try {
+    const before = readFileSync(f.file);
+    f.setHead(143n); // Original receipt is at block 80.
+    await assert.rejects(attestOriginalReceipt(f.options), /receipts are incomplete/);
+    await assert.rejects(attestOriginalReceipt({ ...f.options, mode: "commit", approvedDigest: "0".repeat(64) }), /receipts are incomplete/);
+    assert.deepEqual(readFileSync(f.file), before);
+    assert.equal(await readReceiptAttestation(f.shared, TEST_TENANT), undefined);
+    assert.equal(existsSync(path.join(f.options.home, "ledger-source-blocked.json")), false);
+    f.setHead(144n);
+    const preview = await attestOriginalReceipt(f.options);
+    assert.equal(preview.state, "preview");
+    assert.equal((await attestOriginalReceipt({ ...f.options, mode: "commit", approvedDigest: preview.approvalDigest })).state, "applied");
+    const plan = JSON.parse(String((await readReceiptAttestation(f.shared, TEST_TENANT))!.plan_json));
+    assert.ok(plan.evidence.some((entry: { method: string; params: unknown[] }) => entry.method === "eth_call" && entry.params[1] === "0x50"),
+      "the permanent proof reconciles cash at the confirmed receipt block");
+  } finally { f.close(); }
+});
+
+for (const netZero of [false, true]) test(`unconfirmed ${netZero ? "withdrawal and refund" : "withdrawal"} refuses repair even with unchanged confirmed cash`, async () => {
+  const f = await fixture();
+  try {
+    const before = readFileSync(f.file);
+    const outgoing = { ...f.log, topics: [f.log.topics[0]!, f.log.topics[2]!, f.log.topics[1]!],
+      blockNumber: "0x90", blockHash: `0x${"de".repeat(32)}`, transactionHash: `0x${"ab".repeat(32)}`, logIndex: "0x12" };
+    const refund = { ...outgoing, topics: f.log.topics, logIndex: "0x13" };
+    const rpc: typeof f.rpc = async (method, params) => {
+      const result = await f.rpc(method, params);
+      if (method !== "eth_getLogs") return result;
+      const filter = params[0] as { fromBlock: string; toBlock: string; topics: (string | string[] | null)[] };
+      const extra = (netZero ? [outgoing, refund] : [outgoing]).filter(log => BigInt(filter.fromBlock) <= BigInt(log.blockNumber)
+        && BigInt(filter.toBlock) >= BigInt(log.blockNumber)
+        && filter.topics.every((item, i) => item == null || (Array.isArray(item) ? item : [item]).some(topic => topic.toLowerCase() === log.topics[i]!.toLowerCase())));
+      return [...result as unknown[], ...extra];
+    };
+    await assert.rejects(attestOriginalReceipt({ ...f.options, rpc }), /receipts are incomplete/);
+    assert.deepEqual(readFileSync(f.file), before);
+    assert.equal(await readReceiptAttestation(f.shared, TEST_TENANT), undefined);
+    assert.equal(existsSync(path.join(f.options.home, "ledger-source-blocked.json")), false);
+  } finally { f.close(); }
+});
+
+test("pending repair retains both barriers when receipt depth regresses and resumes only with 64-block evidence", async () => {
+  const f = await fixture();
+  try {
+    const preview = await attestOriginalReceipt(f.options);
+    await assert.rejects(attestOriginalReceipt({ ...f.options, mode: "commit", approvedDigest: preview.approvalDigest,
+      checkpoint(at) { if (at === "marker") throw new Error("stop before amendment"); } }), /stop before amendment/);
+    const before = readFileSync(f.file);
+    f.setHead(143n);
+    await assert.rejects(attestOriginalReceipt({ ...f.options, mode: "commit", approvedDigest: preview.approvalDigest }), /receipts are incomplete/);
+    assert.deepEqual(readFileSync(f.file), before);
+    assert.equal((await readReceiptAttestation(f.shared, TEST_TENANT))!.state, "pending");
+    assert.equal(existsSync(path.join(f.options.home, "ledger-source-blocked.json")), true);
+    f.setHead(144n);
+    const resumed = await attestOriginalReceipt({ ...f.options, mode: "commit", approvedDigest: preview.approvalDigest });
+    assert.equal(resumed.state, "applied"); assert.equal(resumed.approvalDigest, preview.approvalDigest);
+  } finally { f.close(); }
+});
+
 test("the corrected original/shared flow gives the actual next worker a known resume licence without reopening capital", async () => {
   const f = await fixture();
   try {
