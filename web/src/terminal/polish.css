@@ -5,11 +5,21 @@
 .terminal-host .tabbar .tab { align-content: center; gap: 4px; min-width: 0; border-radius: 24px; }
 .terminal-host .tabbar .tab.on { background: var(--line); }
 @media (max-width: 1099px) {
+  /* THE BAR'S REAL SIZE, NAMED ONCE. #230 made the floating bar 64px tall and
+     lifted it to the home indicator; the chat column went on subtracting
+     `--nav: 76px`, a sum written for the 52px bar 14px off the edge, and on an
+     iPhone the bar painted over the composer by 8–56px. Anything that must
+     clear the bar clears THIS — its height, its lift, and 8px of air. */
+  .terminal-host {
+    --tabbar-h: 64px;
+    --tabbar-clear: calc(var(--tabbar-h) + max(10px, env(safe-area-inset-bottom)) + 8px);
+    --nav: var(--tabbar-clear);
+  }
   .terminal-host .app > .tabbar {
     display: grid;
     z-index: 20;
     width: min(360px, calc(100% - 24px));
-    height: 64px;
+    height: var(--tabbar-h);
     padding: 4px;
     box-sizing: border-box;
     bottom: max(10px, env(safe-area-inset-bottom));
@@ -170,17 +180,52 @@
   .terminal-host .alpha-gate .flow-primary { width:100%; min-height:50px; padding:14px 12px; border-radius:12px; background:#38dda0; color:#07150e; font-size:15px; font-weight:600; box-sizing:border-box; }
   .terminal-host .alpha-gate .hosted-auth { width:100%; }
   .terminal-host .alpha-threshold { margin:4px 0 8px; }
-  .terminal-host .body:has(> .desk-page) { padding-top:12px; padding-bottom:calc(92px + env(safe-area-inset-bottom)); gap:10px; }
-  .terminal-host .body > .desk-page { gap:16px; }
-  .terminal-host .desk-header { display:grid; grid-template-columns:44px minmax(0,1fr); gap:4px 12px; }
-  .terminal-host .desk-header > .face { width:44px; height:44px; grid-row:1 / 3; }
-  .terminal-host .desk-header h1 { font-size:20px; }
-  .terminal-host .desk-header p { font-size:14px; }
-  .terminal-host .desk-status { grid-column:2; margin:0; justify-self:start; font-size:12px; }
-  .terminal-host .desk-portfolio { padding:0 0 16px; border-bottom:1px solid var(--line); }
-  .terminal-host .desk-equity { font-size:50px; }
-  .terminal-host .portfolio-summary .meta { font-size:14px; }
-  .terminal-host .agent-portfolio-meta { font-size:14px; margin-top:12px; }
+  /* "CHATTING ON MOBILE IS A HEADACHE." On a 390x750 iPhone in the recovery
+     state the Chat tab gave the conversation SIXTY-NINE pixels — two lines —
+     and the tab bar sat on the composer. Three things, each defensible alone:
+
+     The page was a FIXED height, `100dvh - var(--nav) - 26px`, with --nav
+     still the 52px bar's sum, inside a `.body` that clips. Anything the shell
+     mounts above it (the tour's relaunch row, a service notice, the outage
+     banner) pushed the composer under the bar by exactly its own height.
+
+     The conversation's 220px floor never applied. 1b4ea3e zeroed it with a
+     more specific `.body > .desk-page > .desk-conversation { min-height: 0 }`
+     because a floor inside a clipping parent pushed the composer out of reach,
+     so the rigid header — a 44px face, a 50px balance, the recovery card —
+     took every pixel and the chat took what was left.
+
+     And the header was built for a screen with nothing else to do.
+
+     So, the group chat's pattern (groupchat.css, the top of the file): the
+     page takes what the shell LEAVES, the shell clears the real bar, and when
+     the floors add up to more than the screen the shell scrolls instead of
+     clipping. The page keeps `min-height: auto` and stops being a scroller of
+     its own, so it is never smaller than what it holds and `.body`'s end
+     padding lands after the composer, not after a box the composer spilt out
+     of. `contain: size` keeps the history out of that floor, so the
+     conversation is still the one thing that scrolls. Phone only: the dock
+     and the desktop page size themselves. */
+  .terminal-host .body:has(> .desk-page) { padding-top:12px; padding-bottom:var(--tabbar-clear); gap:10px; overflow-y:auto; }
+  /* The language picker and "Take the tour again" stay on every other tab;
+     above a chat they were 48px of the conversation, every visit. */
+  .terminal-host .body:has(> .desk-page) > .tour-relaunch { display:none; }
+  .terminal-host .body > .desk-page { flex:1 1 auto; height:auto; min-height:auto; overflow:visible; gap:10px; }
+  .terminal-host .body > .desk-page > .desk-conversation { min-height:160px; contain:size; }
+  /* One row: face, name, pill. The pill is what says RECOVERING, so it stays
+     pinned here while the recovery card scrolls with the thread (Agent.tsx). */
+  .terminal-host .desk-header { gap:10px; }
+  .terminal-host .desk-header > .face { width:32px; height:32px; }
+  .terminal-host .desk-header > div { flex:1 1 auto; min-width:0; }
+  .terminal-host .desk-header h1 { font-size:16px; }
+  .terminal-host .desk-header p { font-size:13px; margin-top:1px; }
+  .terminal-host .desk-status { flex-shrink:0; font-size:12px; white-space:nowrap; }
+  .terminal-host .desk-portfolio { padding:0 0 10px; border-bottom:1px solid var(--line); }
+  .terminal-host .desk-portfolio .portfolio-summary { padding-bottom:6px; }
+  .terminal-host .desk-portfolio .portfolio-summary > div { gap:4px; }
+  .terminal-host .desk-equity { font-size:28px; }
+  .terminal-host .portfolio-summary .meta { font-size:13px; }
+  .terminal-host .agent-portfolio-meta { font-size:13px; margin-top:4px; }
   .terminal-host .chat-divider { font-size:14px; margin:0 0 16px; }
   .terminal-host .desk-reply { grid-template-columns:36px minmax(0,1fr); gap:12px; }
   .terminal-host .desk-reply > .face { width:36px; height:36px; }
