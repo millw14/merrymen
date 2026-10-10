@@ -520,7 +520,7 @@ export function DesktopPortfolio({
             `hasAgent` is true by construction here: this component takes a
             non-nullable `LiveMine`, and App renders it only on `desktop &&
             mine`. The type is the gate. */}
-        <AgentStrip hasAgent recovery={mine.recovery} funds={mine.recoveryFunds}/>
+        <AgentStrip hasAgent recovery={mine.recovery} funds={mine.recoveryFunds} agentDown={mine.agentDown}/>
       </section>
       {selectedToken && (
         <section className="desktop-token-context">

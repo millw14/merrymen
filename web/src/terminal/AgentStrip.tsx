@@ -63,7 +63,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n";
 import { shortDateTime } from "@/lib/format";
-import { heldNotice, telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
+import { heldNotice, telegramRow, trencherRow, type AgentDown, type TelegramRow, type TrencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import { RecoveryNotice } from "./RecoveryNotice";
@@ -81,7 +81,13 @@ const TG_POLL_MS = 4000;
 /** And for how long, so a tab left open does not poll forever. */
 const TG_POLL_FOR_MS = 15 * 60_000;
 
-export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; recovery?: FleetRecoveryView | null; funds?: RecoveryFunds | null }) {
+export function AgentStrip({ hasAgent, recovery, funds, agentDown = null }: {
+  hasAgent: boolean;
+  recovery?: FleetRecoveryView | null;
+  funds?: RecoveryFunds | null;
+  /** Why nothing will mint a link code now, from /api/grants (App.tsx, agent-status.ts agentDownOf). */
+  agentDown?: AgentDown | null;
+}) {
   const t = useT();
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [settings, setSettings] = useState<SettingsShape["values"] | null>(null);
@@ -131,14 +137,22 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
   }, [hasAgent, refreshTg]);
 
   const row = telegramRow(tg);
+  const recovering = pausedRecovery(recovery);
 
   /**
    * THE ONE BUTTON'S LATER STEPS WAIT ON SOMEBODY ELSE: the agent picking the
    * bot up and minting its link code, then the owner pressing Start in
    * Telegram. Re-read while either is pending, and when the owner comes back
    * to this tab from Telegram, so the button moves on without a reload.
+   *
+   * NOT WHILE THE AGENT IS DOWN WITH NO CODE: nothing will mint one, so there
+   * is nothing to wait for. App re-reads /api/grants on its own clock, and
+   * when the agent runs `agentDown` clears and this starts again. A recovery
+   * hold is such a time whatever `agentDown` says: the held tenant runs no
+   * worker, and the recovery listener links no new chat. Each re-read here is
+   * a live getMe with the owner's token, for a code that would never come.
    */
-  const waiting = hasAgent && row.kind === "unlinked";
+  const waiting = hasAgent && row.kind === "unlinked" && !((agentDown !== null || recovering !== null) && row.linkCode === null);
   useEffect(() => {
     if (!waiting) return;
     const until = Date.now() + TG_POLL_FOR_MS;
@@ -151,8 +165,12 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
   if (!hasAgent) return null;
 
   const held = heldNotice(tg, row);
-  const recovering = pausedRecovery(recovery);
   const bot = recoveryTelegram(tg);
+  // A bot saved while held that nobody has linked: it has no code, and none
+  // comes until the agent resumes (see `waiting`). Said, not left at "Replies
+  // are not confirmed", which reads as a fault to look into.
+  const savedUnlinked = (row.kind === "unlinked" || (row.kind === "held" && !row.linked)) && row.linkCode === null
+    ? (row.botUsername ? `@${row.botUsername}` : "Your bot") : null;
   return (
     <section className="agent-strip" aria-label={t("strip.aria")}>
       {recovering ? <>
@@ -165,11 +183,12 @@ export function AgentStrip({ hasAgent, recovery, funds }: { hasAgent: boolean; r
           ? <TelegramLine row={row} owner={owner} ownerRead={ownerRead} creating={creating} onCreating={setCreating} refresh={refreshTg} />
           : <Row tone="warn" label="Telegram" value={bot.label}
               action={row.kind === "off" && ownerRead ? <TurnOnTelegram owner={owner} refresh={refreshTg} />
+                : savedUnlinked !== null ? <span className="mm-hint">{t("strip.tg.recoveryWhy", { bot: savedUnlinked })}</span>
                 : bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>}
         <Row tone="quiet" label="Trencher" value="Trading paused"/>
       </> : <>
         {held !== null ? <HeldLine reason={held} /> : null}
-        <TelegramLine row={row} owner={owner} ownerRead={ownerRead} creating={creating} onCreating={setCreating} refresh={refreshTg} />
+        <TelegramLine row={row} owner={owner} ownerRead={ownerRead} creating={creating} onCreating={setCreating} refresh={refreshTg} agentDown={agentDown} />
         <TrencherLine row={trencherRow(settings)} />
       </>}
     </section>
@@ -208,7 +227,7 @@ function HeldLine({ reason }: { reason: string }) {
  * mounted while a setup is in flight even after the token lands, so it can
  * finish and forget its stored setup before the row moves on.
  */
-function TelegramLine({ row, owner, ownerRead, creating, onCreating, refresh }: {
+function TelegramLine({ row, owner, ownerRead, creating, onCreating, refresh, agentDown = null }: {
   row: TelegramRow;
   owner: string | null;
   /** See AgentStrip's ownerRead: Turn on Telegram waits for it. */
@@ -216,6 +235,8 @@ function TelegramLine({ row, owner, ownerRead, creating, onCreating, refresh }: 
   creating: boolean;
   onCreating: (active: boolean) => void;
   refresh: () => Promise<boolean>;
+  /** See AgentStrip's agentDown: only the unlinked row with no code reads it. */
+  agentDown?: AgentDown | null;
 }) {
   const t = useT();
   if (owner && (row.kind === "no-token" || creating)) {
@@ -279,7 +300,28 @@ function TelegramLine({ row, owner, ownerRead, creating, onCreating, refresh }: 
        * cannot make about a code that is simply not minted yet. Or, when a
        * new bot was saved, the agent has not picked it up yet: the code on
        * file was the old bot's and would not link this one, so none is shown.
+       *
+       * UNLESS NOTHING WILL MAKE THAT PASS. An agent the fleet holds, one
+       * never started, or one whose key expired has no worker and no hold
+       * process, so "check back shortly" was a promise of a pass that never
+       * comes, and "Starting your bot…" a step that never finishes. It says
+       * what the bot waits for instead, and where renewal is the remedy,
+       * links to it.
        */
+      if (!row.linkCode && agentDown !== null) {
+        const bot = row.botUsername ? `@${row.botUsername}` : "Your bot";
+        const why = agentDown === "expired" ? "strip.tg.expiredWhy" : agentDown === "stopped" ? "strip.tg.notRunningWhy" : agentDown === "recovery" ? "strip.tg.recoveryWhy" : "strip.tg.notStartedWhy";
+        return (
+          <Row tone="warn" label="Telegram" value={t("strip.tg.savedNotRunning")}
+            action={
+              <>
+                <span className="mm-hint">{t(why, { bot })}</span>
+                {agentDown === "expired" ? <Link href="/grant#resign">{t("strip.tg.renew")}</Link> : null}
+              </>
+            }
+          />
+        );
+      }
       return (
         <Row tone="warn" label="Telegram" value={row.linkCode ? t("strip.tg.ready") : t("strip.tg.startingUp")}
           action={

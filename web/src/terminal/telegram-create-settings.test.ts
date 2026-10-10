@@ -22,6 +22,8 @@ let refreshedOwner: string;
 let loseConfirmation: boolean;
 let telegramReads: string[];
 let telegramReply: () => Response;
+/** What a plain GET /api/telegram (Settings' own first read) answers. */
+let telegramPlain: () => Response;
 let hosted: boolean;
 let missingIntent: boolean;
 /** What the create endpoint's readiness probe says. */
@@ -73,12 +75,13 @@ beforeEach(() => {
   createAvailable = true;
   fomo = false;
   telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: "link-proof" });
+  telegramPlain = () => json({});
   globalThis.fetch = async (input, init) => {
     const url = String(input), method = init?.method ?? "GET";
     if (url === "/api/auth/session") return json({ hosted, address: OWNER, fomo });
     if (url === "/api/settings" && method === "GET") return json({ ...server, owner: phase === "connected" ? refreshedOwner : server.owner });
     if (url === "/api/settings" && method === "PUT") { writes.push(JSON.parse(String(init?.body))); return json({ ok: true }); }
-    if (url === "/api/telegram") return json({});
+    if (url === "/api/telegram") return telegramPlain();
     if (url.startsWith("/api/telegram?")) { telegramReads.push(url); return telegramReply(); }
     if (url === "/api/models") return json({ code: "missing_key" }, 400);
     if (url.startsWith("/api/telegram/create?") && method === "GET") {
@@ -105,15 +108,15 @@ beforeEach(() => {
 });
 afterEach(async () => { await ui.close(); mock.timers.reset(); globalThis.fetch = originalFetch; });
 const drain = () => act(async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); });
-const mount = () => ui.render(React.createElement(Settings, { onFund: () => {}, slug: null }));
+const mount = (extra: Record<string, unknown> = {}) => ui.render(React.createElement(Settings, { onFund: () => {}, slug: null, ...extra }));
 async function type(input: HTMLInputElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(ui.dom.window.HTMLInputElement.prototype, "value")!.set!;
   await act(async () => { setter.call(input, value); input.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true })); });
 }
 const token = () => ui.container.querySelector<HTMLInputElement>('#telegram input[type="password"]')!;
 const agentName = () => [...ui.container.querySelectorAll(".mm-label")].find(label => label.textContent === "Agent name")!.closest("label")!.querySelector<HTMLInputElement>("input")!;
-async function prepare() {
-  await mount();
+async function prepare(extra: Record<string, unknown> = {}) {
+  await mount(extra);
   assert.equal(ui.container.querySelector("#telegram-groups")?.closest("details#telegram"), ui.container.querySelector("#telegram"));
   await type(token(), "123456:obsolete-manual-token");
   await type(agentName(), "Robin Hood");
@@ -225,6 +228,32 @@ describe("managed Telegram creation through Settings", () => {
     assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Create Telegram bot"), false);
   });
 
+  it("does not lock Save behind a stored setup connected in Telegram whose bot was later removed, switched off or replaced", async () => {
+    const save = () => [...ui.container.querySelectorAll("button")].find(button => button.textContent === "Save settings")!;
+    const withToken = (telegramEnabled: boolean) => ({ ...fixture(), telegramBotToken: { set: true, hint: "masked" }, values: { ...fixture().values, telegramEnabled } });
+    const later: Record<string, () => SettingsView> = {
+      removed: () => fixture(),
+      "switched off": () => withToken(false),
+      replaced: () => { telegramReply = () => json({ botUsername: "replacement_testbot", linkCode: "replacement-proof" }); return withToken(true); },
+    };
+    for (const [change, settings] of Object.entries(later)) {
+      // Connected from the manager chat while this browser was away (its
+      // poll never saw it), then changed from another device.
+      localStorage.setItem(`merrymen.telegram.create.v1:${OWNER}`, ID);
+      phase = "connected";
+      server = settings();
+      await ui.remount(React.createElement(Settings, { onFund: () => {}, slug: null })); await drain();
+      assert.equal(localStorage.getItem(`merrymen.telegram.create.v1:${OWNER}`), null, `${change}: the setup is forgotten`);
+      assert.equal(save().disabled, false, `${change}: Save is released`);
+      assert.equal(token().disabled, false, `${change}: so is the manual token field`);
+      assert.doesNotMatch(ui.container.textContent ?? "", /Refresh Settings before saving|Finish or cancel Telegram setup/, change);
+    }
+    assert.ok(ui.container.querySelector('a[href="https://t.me/replacement_testbot?start=replacement-proof"]'), "the bot Settings holds now is the one shown");
+    await ui.click("Save settings");
+    assert.equal(writes.length, 1);
+    assert.equal("telegramBotToken" in writes[0], false);
+  });
+
   it("lets an unconnected missing candidate start over without discarding manual edits", async () => {
     await prepare();
     missingIntent = true;
@@ -314,5 +343,91 @@ describe("managed Telegram creation through Settings", () => {
     const reads = telegramReads.length;
     await act(async () => mock.timers.tick(60_000)); await drain();
     assert.equal(telegramReads.length, reads);
+  });
+});
+
+/**
+ * A SAVED BOT ON AN AGENT THAT ISN'T RUNNING. A tenant the fleet holds (not
+ * admitted, an accounting hold) or whose session key expired has no worker and
+ * no hold process, so nothing mints its link code; "check back shortly" was a
+ * promise of a pass that never comes. App hands Settings what /api/grants says
+ * (agentDown), and the hint says that instead.
+ */
+describe("Settings: a saved bot whose agent isn't running", () => {
+  const saved = () => {
+    server = { ...server, telegramBotToken: { set: true, hint: "masked" }, values: { ...server.values, telegramEnabled: true } };
+  };
+  const section = () => ui.container.querySelector("#telegram")?.textContent ?? "";
+
+  for (const linkPending of [false, true]) {
+    it(`stopped worker, no code (${linkPending ? "a stale row" : "no row"}): says it isn't running, never "check back shortly"`, async () => {
+      saved();
+      telegramPlain = () => json({ enabled: true, hasToken: true, connected: true, botUsername: "merrymen_testbot", ownerId: null, allowlist: [], linkCode: null, linkPending, botElsewhere: false, listening: null, tradingHeld: null });
+      await mount({ agentDown: "stopped" });
+      await drain();
+      assert.match(section(), /Your bot is saved\. Its link code appears here once your agent is running, and it isn't running right now\./);
+      assert.doesNotMatch(section(), /check back|shortly|next pass/i);
+    });
+  }
+
+  it("expired session key: points to renewal", async () => {
+    saved();
+    telegramPlain = () => json({ enabled: true, hasToken: true, connected: true, botUsername: "merrymen_testbot", ownerId: null, allowlist: [], linkCode: null, linkPending: false, botElsewhere: false, listening: null, tradingHeld: null });
+    await mount({ agentDown: "expired" });
+    await drain();
+    assert.match(section(), /it can't run until you renew its trading permission/);
+    assert.doesNotMatch(section(), /check back|shortly/i);
+    const renew = [...ui.container.querySelectorAll<HTMLAnchorElement>("#telegram a")].find(a => a.textContent?.startsWith("Renew permission"));
+    assert.equal(renew?.getAttribute("href"), "/grant#resign");
+  });
+
+  it("an agent not known to be down keeps the existing wording", async () => {
+    saved();
+    telegramPlain = () => json({ enabled: true, hasToken: true, connected: true, botUsername: "merrymen_testbot", ownerId: null, allowlist: [], linkCode: null, linkPending: true, botElsewhere: false, listening: null, tradingHeld: null });
+    await mount();
+    await drain();
+    assert.match(section(), /Your agent hasn't picked up this bot yet/);
+  });
+
+  /**
+   * TRADING PAUSED FOR RECOVERY. Most held tenants show as a recovery hold:
+   * not admitted, so no worker and no hold process, and the recovery listener
+   * answers only an owner already linked to that exact bot and mints no code.
+   * App hands Settings "recovery" (it used to hand null, on the false belief
+   * that the recovery process links chats), and the hint says what waits.
+   */
+  for (const linkPending of [false, true]) {
+    it(`recovery hold, a saved bot with no code (${linkPending ? "not picked up" : "no row"}): says it waits for the agent to resume, never "check back shortly"`, async () => {
+      saved();
+      telegramPlain = () => json({ enabled: true, hasToken: true, connected: true, botUsername: "merrymen_testbot", ownerId: null, allowlist: [], linkCode: null, linkPending, botElsewhere: false, listening: null, tradingHeld: null });
+      await mount({ agentDown: "recovery" });
+      await drain();
+      assert.match(section(), /Your bot is saved\. Trading is paused for recovery, so @merrymen_testbot won't answer yet and has no link code; both come once your agent resumes\./);
+      const page = ui.container.textContent ?? "";
+      assert.match(page, /no link code until your agent resumes/, "the short Advanced line too");
+      assert.doesNotMatch(page, /check back|shortly|next pass|hasn't started|isn't running|until your agent is running/i);
+    });
+  }
+
+  it("connecting a bot under a recovery hold: no minute of waiting for a link nothing will make, and no polling", async () => {
+    await prepare({ agentDown: "recovery" });
+    telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: null, linkPending: true });
+    await ui.click("Connect this bot"); await drain();
+    assert.doesNotMatch(ui.container.textContent ?? "", /Waiting for your agent to pick it up/);
+    assert.match(section(), /Trading is paused for recovery/);
+    const reads = telegramReads.length;
+    await act(async () => mock.timers.tick(60_000)); await drain();
+    assert.equal(telegramReads.length, reads, "no launch-link polling");
+  });
+
+  it("connecting a bot for an agent that isn't running: no minute of waiting for a link nothing will make", async () => {
+    await prepare({ agentDown: "stopped" });
+    telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: null, linkPending: true });
+    await ui.click("Connect this bot"); await drain();
+    assert.doesNotMatch(ui.container.textContent ?? "", /Waiting for your agent to pick it up/);
+    assert.match(section(), /it isn't running right now/);
+    const reads = telegramReads.length;
+    await act(async () => mock.timers.tick(60_000)); await drain();
+    assert.equal(telegramReads.length, reads, "no launch-link polling");
   });
 });

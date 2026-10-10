@@ -187,7 +187,7 @@ export function Home({
           A reading, not a second set of controls: it says what the settings
           say and links to them. It renders nothing for a visitor with no
           agent, who has no bot to connect and no strategy to run. */}
-      <AgentStrip hasAgent={hasAgent} recovery={mine?.recovery} funds={mine?.recoveryFunds}/>
+      <AgentStrip hasAgent={hasAgent} recovery={mine?.recovery} funds={mine?.recoveryFunds} agentDown={mine?.agentDown}/>
 
       {/*
         THE LEADERBOARD, NOT A SECOND COPY OF IT.
