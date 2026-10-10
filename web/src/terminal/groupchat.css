@@ -33,8 +33,9 @@
    375x667 phone was enough). `contain: size` on the log keeps the whole
    history out of that floor, so the log is still the one scroller.
 
-   The bottom padding clears the phone's floating tab bar (14px off the edge,
-   52px tall) plus the home indicator. */
+   The bottom padding clears the phone's floating tab bar — 64px tall, lifted
+   max(10px, the home indicator) off the edge since #230; see --tabbar-clear
+   in polish.css — with 18px to spare, or 28px over a 34px indicator. */
 :where(.terminal-host) .app[data-screen="groupchat"] > .body {
   flex: none;
   height: 100dvh;
