@@ -308,8 +308,9 @@ export interface LiveMine {
   /**
    * Why nothing will mint a Telegram link code right now (an expired key, a
    * stopped or never-started worker), from the same /api/grants answer, set
-   * once in App.tsx (agentDownOf). Null when running or not known not to be,
-   * and always null under a recovery hold, whose own process links chats.
+   * once in App.tsx (agentDownOf). "recovery" under a recovery hold, which
+   * runs no worker and links no new chat. Null when running or not known not
+   * to be.
    */
   agentDown?: import("./agent-status").AgentDown | null;
   /** Owner-only, proven recovery hold. Saved records are not current trading authority. */

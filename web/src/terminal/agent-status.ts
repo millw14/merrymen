@@ -38,13 +38,14 @@ import type { AgentStatus } from "@/app/api/grants/route";
 /**
  * WHY NOTHING WILL MINT A LINK CODE RIGHT NOW, or null.
  *
- * Only the agent's running worker (or a recovery hold's process) picks a saved
- * bot up and mints its link code. A tenant the fleet holds (not admitted by
- * the rollout, an accounting hold) or whose session key has expired gets
- * neither, for as long as that lasts, so "your agent mints one on its next
- * pass, check back shortly" was a promise of a pass that never comes. The web
- * cannot see the fleet's reasons, but /api/grants already says what follows
- * from them, and that is what this reads:
+ * Only the agent's running worker (or, for a practice book that would not
+ * restore, its hold process: telegram/hold.ts) picks a saved bot up and mints
+ * its link code. A tenant the fleet holds (not admitted by the rollout, an
+ * accounting hold) or whose session key has expired gets neither, for as
+ * long as that lasts, so "your agent mints one on its next pass, check back
+ * shortly" was a promise of a pass that never comes. The web cannot see the
+ * fleet's reasons, but /api/grants already says what follows from them, and
+ * that is what this reads:
  *
  *   expired      the session key's window has passed: nothing runs until the
  *                owner renews it (the orchestrator spawns only unexpired keys)
@@ -54,18 +55,24 @@ import type { AgentStatus } from "@/app/api/grants/route";
  *
  * NEVER A GUESS. An unread heartbeat (`heartbeatUnread`) or an older server
  * that sends no verdict is null, so a running agent is never told it is down.
- * A recovery hold is the caller's to exclude: its hold process does link
- * chats, and recovery-view.ts says so in its own words.
+ *
+ * AND `recovery`, WHICH THIS NEVER RETURNS: App sets it for a proven recovery
+ * hold (pausedRecovery), whatever the heartbeat says. A held tenant is one the
+ * rollout has not admitted, so the orchestrator starts neither its worker nor
+ * a hold process; the recovery listener has no /link and answers only an
+ * owner already linked to that exact bot (recovery-reply-store.ts
+ * readReplySnapshot). So a bot saved while held gets no code and no replies
+ * until the agent resumes, and the page says that, not "check back shortly".
  *
  * PICKED FROM `AgentStatus`, as worker-stale.ts does, so a renamed field fails
  * to compile rather than silently never saying "not running".
  */
-export type AgentDown = "expired" | "stopped" | "not-started";
+export type AgentDown = "expired" | "stopped" | "not-started" | "recovery";
 
 export function agentDownOf(
   status: (Pick<AgentStatus, "workerAliveAt" | "workerStale" | "heartbeatUnread"> & { grant?: { expiresAt?: number } }) | null | undefined,
   nowMs: number,
-): AgentDown | null {
+): Exclude<AgentDown, "recovery"> | null {
   if (!status) return null;
   const expiresAt = status.grant?.expiresAt;
   if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt * 1000 < nowMs) return "expired";

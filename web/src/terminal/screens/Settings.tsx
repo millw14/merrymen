@@ -293,9 +293,9 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
     const ready = (status: TelegramStatus) => !status.botElsewhere && status.botUsername === botUsername && /^[A-Za-z0-9_-]{1,64}$/.test(status.linkCode ?? "");
     if (tg && ready(tg)) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
     if (tg?.botElsewhere) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
-    // NOTHING WILL MAKE THE LINK while the agent is down (held, never
-    // started, an expired key): the hint below says so, and a minute of
-    // "waiting for your agent" would say the opposite.
+    // NOTHING WILL MAKE THE LINK while the agent is down (held, paused for
+    // recovery, never started, an expired key): the hint below says so, and
+    // a minute of "waiting for your agent" would say the opposite.
     if (agentDown !== null) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
     const ctl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1771,10 +1771,12 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
                 : agentDown !== null && view.telegramBotToken.set
                 ? <>
                     {/* NOR "CHECK BACK" WHEN NOTHING WILL MINT ONE: an agent
-                        the fleet holds, never started, or with an expired
-                        key has no worker and no hold process
-                        (agent-status.ts agentDownOf). */}
-                    {t(agentDown === "expired" ? "settings.tg.expired" : agentDown === "stopped" ? "settings.tg.notRunning" : "settings.tg.notStarted")}
+                        the fleet holds (a recovery hold among them), never
+                        started, or with an expired key has no worker and no
+                        hold process (agent-status.ts AgentDown). */}
+                    {agentDown === "recovery"
+                      ? t("settings.tg.recovery", { bot: tg?.botUsername ? `@${tg.botUsername}` : "your bot" })
+                      : t(agentDown === "expired" ? "settings.tg.expired" : agentDown === "stopped" ? "settings.tg.notRunning" : "settings.tg.notStarted")}
                     {agentDown === "expired" ? <>{" "}<Link href="/grant#resign">{t("settings.tg.renew")}</Link></> : null}
                   </>
                 : tg?.linkPending && tg.enabled
@@ -1983,7 +1985,7 @@ export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{
             ) : tg?.botElsewhere ? (
               t("settings.tg.elsewhereShort")
             ) : agentDown !== null && view.telegramBotToken.set ? (
-              t("settings.tg.notRunningShort")
+              t(agentDown === "recovery" ? "settings.tg.recoveryShort" : "settings.tg.notRunningShort")
             ) : tg?.linkPending && tg.enabled ? (
               t("settings.tg.pickingUp")
             ) : (

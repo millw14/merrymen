@@ -204,6 +204,38 @@ describe("AgentStrip under a recovery hold: setting up a bot is not trading", ()
     assert.equal(primaries().length, 0);
     assert.match(ui.container.textContent ?? "", /Waiting for recovery|Listening for public questions/);
   });
+
+  /**
+   * A NEW BOT SAVED WHILE HELD. The tenant is not admitted, so no worker and
+   * no hold process runs, and the recovery listener answers only an owner
+   * already linked to that exact bot: nothing mints this bot's code until the
+   * agent resumes. The strip re-read /api/telegram (a live getMe with the
+   * owner's token) every four seconds for fifteen minutes, waiting for it.
+   */
+  for (const agentDown of [null, "recovery"] as const) {
+    for (const [what, tg] of [
+      ["not picked up", { linkPending: true }],
+      ["the old bot's held row", { linkPending: true, listening: { state: "held", lastOkAt: null, reason: "recovery-replies" }, tradingHeld: "recovery-replies" }],
+    ] as const) {
+      it(`a new unlinked bot with no code (${what}, agentDown ${agentDown}): says it answers once the agent resumes, and does not poll`, async () => {
+        respond = async call => {
+          if (path(call) === "/api/telegram") return json(tgStatus({ linkCode: null, ...tg }));
+          if (path(call) === "/api/settings") return settingsFor(OWNER);
+          return json({});
+        };
+        await ui.render(React.createElement(AgentStrip, { hasAgent: true, recovery: held, agentDown }));
+        await drain();
+        const text = ui.container.textContent ?? "";
+        assert.match(text, /Saved\. @merrymen_testbot answers once your agent resumes\./);
+        assert.doesNotMatch(text, /check back|shortly|next pass|Starting your bot/i);
+        assert.equal(primaries().length, 0);
+        const reads = calls.filter(c => path(c) === "/api/telegram").length;
+        await advance(60_000);
+        await act(async () => { document.dispatchEvent(new ui.dom.window.Event("visibilitychange")); }); await drain();
+        assert.equal(calls.filter(c => path(c) === "/api/telegram").length, reads, "nothing will mint a code while held, so no getMe every four seconds");
+      });
+    }
+  }
 });
 
 /**

@@ -137,6 +137,7 @@ export function AgentStrip({ hasAgent, recovery, funds, agentDown = null }: {
   }, [hasAgent, refreshTg]);
 
   const row = telegramRow(tg);
+  const recovering = pausedRecovery(recovery);
 
   /**
    * THE ONE BUTTON'S LATER STEPS WAIT ON SOMEBODY ELSE: the agent picking the
@@ -146,9 +147,12 @@ export function AgentStrip({ hasAgent, recovery, funds, agentDown = null }: {
    *
    * NOT WHILE THE AGENT IS DOWN WITH NO CODE: nothing will mint one, so there
    * is nothing to wait for. App re-reads /api/grants on its own clock, and
-   * when the agent runs `agentDown` clears and this starts again.
+   * when the agent runs `agentDown` clears and this starts again. A recovery
+   * hold is such a time whatever `agentDown` says: the held tenant runs no
+   * worker, and the recovery listener links no new chat. Each re-read here is
+   * a live getMe with the owner's token, for a code that would never come.
    */
-  const waiting = hasAgent && row.kind === "unlinked" && !(agentDown !== null && row.linkCode === null);
+  const waiting = hasAgent && row.kind === "unlinked" && !((agentDown !== null || recovering !== null) && row.linkCode === null);
   useEffect(() => {
     if (!waiting) return;
     const until = Date.now() + TG_POLL_FOR_MS;
@@ -161,8 +165,12 @@ export function AgentStrip({ hasAgent, recovery, funds, agentDown = null }: {
   if (!hasAgent) return null;
 
   const held = heldNotice(tg, row);
-  const recovering = pausedRecovery(recovery);
   const bot = recoveryTelegram(tg);
+  // A bot saved while held that nobody has linked: it has no code, and none
+  // comes until the agent resumes (see `waiting`). Said, not left at "Replies
+  // are not confirmed", which reads as a fault to look into.
+  const savedUnlinked = (row.kind === "unlinked" || (row.kind === "held" && !row.linked)) && row.linkCode === null
+    ? (row.botUsername ? `@${row.botUsername}` : "Your bot") : null;
   return (
     <section className="agent-strip" aria-label={t("strip.aria")}>
       {recovering ? <>
@@ -175,6 +183,7 @@ export function AgentStrip({ hasAgent, recovery, funds, agentDown = null }: {
           ? <TelegramLine row={row} owner={owner} ownerRead={ownerRead} creating={creating} onCreating={setCreating} refresh={refreshTg} />
           : <Row tone="warn" label="Telegram" value={bot.label}
               action={row.kind === "off" && ownerRead ? <TurnOnTelegram owner={owner} refresh={refreshTg} />
+                : savedUnlinked !== null ? <span className="mm-hint">{t("strip.tg.recoveryWhy", { bot: savedUnlinked })}</span>
                 : bot.detail ? <span className="mm-hint">{bot.detail}</span> : undefined}/>}
         <Row tone="quiet" label="Trencher" value="Trading paused"/>
       </> : <>
@@ -301,7 +310,7 @@ function TelegramLine({ row, owner, ownerRead, creating, onCreating, refresh, ag
        */
       if (!row.linkCode && agentDown !== null) {
         const bot = row.botUsername ? `@${row.botUsername}` : "Your bot";
-        const why = agentDown === "expired" ? "strip.tg.expiredWhy" : agentDown === "stopped" ? "strip.tg.notRunningWhy" : "strip.tg.notStartedWhy";
+        const why = agentDown === "expired" ? "strip.tg.expiredWhy" : agentDown === "stopped" ? "strip.tg.notRunningWhy" : agentDown === "recovery" ? "strip.tg.recoveryWhy" : "strip.tg.notStartedWhy";
         return (
           <Row tone="warn" label="Telegram" value={t("strip.tg.savedNotRunning")}
             action={

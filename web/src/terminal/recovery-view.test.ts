@@ -360,9 +360,11 @@ describe("where the money is during recovery", () => {
       /<AgentStrip hasAgent=\{hasAgent\} recovery=\{mine\?\.recovery\} funds=\{mine\?\.recoveryFunds\} agentDown=\{mine\?\.agentDown\}\/>/);
     assert.match(readFileSync(new URL("./Desktop.tsx", import.meta.url), "utf8"),
       /<AgentStrip hasAgent recovery=\{mine\.recovery\} funds=\{mine\.recoveryFunds\} agentDown=\{mine\.agentDown\}\/>/);
-    // The link-code wait's "agent isn't running" comes from the same account,
-    // and never under a recovery hold, whose own process links chats.
-    assert.match(app, /agentDown: recovery \? null : agentDownOf\(account\.status, Date\.now\(\)\),/);
+    // The link-code wait's "agent isn't running" comes from the same account.
+    // A recovery hold is its own reason, never "not known down": a held tenant
+    // is not admitted, so nothing runs its worker, and the recovery listener
+    // answers only an owner already linked to that bot and mints no code.
+    assert.match(app, /agentDown: recovery \? "recovery" as const : agentDownOf\(account\.status, Date\.now\(\)\),/);
   });
 
   it("reads the hold without changing it, and keeps the hold's own words", () => {

@@ -389,6 +389,37 @@ describe("Settings: a saved bot whose agent isn't running", () => {
     assert.match(section(), /Your agent hasn't picked up this bot yet/);
   });
 
+  /**
+   * TRADING PAUSED FOR RECOVERY. Most held tenants show as a recovery hold:
+   * not admitted, so no worker and no hold process, and the recovery listener
+   * answers only an owner already linked to that exact bot and mints no code.
+   * App hands Settings "recovery" (it used to hand null, on the false belief
+   * that the recovery process links chats), and the hint says what waits.
+   */
+  for (const linkPending of [false, true]) {
+    it(`recovery hold, a saved bot with no code (${linkPending ? "not picked up" : "no row"}): says it waits for the agent to resume, never "check back shortly"`, async () => {
+      saved();
+      telegramPlain = () => json({ enabled: true, hasToken: true, connected: true, botUsername: "merrymen_testbot", ownerId: null, allowlist: [], linkCode: null, linkPending, botElsewhere: false, listening: null, tradingHeld: null });
+      await mount({ agentDown: "recovery" });
+      await drain();
+      assert.match(section(), /Your bot is saved\. Trading is paused for recovery, so @merrymen_testbot won't answer yet and has no link code; both come once your agent resumes\./);
+      const page = ui.container.textContent ?? "";
+      assert.match(page, /no link code until your agent resumes/, "the short Advanced line too");
+      assert.doesNotMatch(page, /check back|shortly|next pass|hasn't started|isn't running|until your agent is running/i);
+    });
+  }
+
+  it("connecting a bot under a recovery hold: no minute of waiting for a link nothing will make, and no polling", async () => {
+    await prepare({ agentDown: "recovery" });
+    telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: null, linkPending: true });
+    await ui.click("Connect this bot"); await drain();
+    assert.doesNotMatch(ui.container.textContent ?? "", /Waiting for your agent to pick it up/);
+    assert.match(section(), /Trading is paused for recovery/);
+    const reads = telegramReads.length;
+    await act(async () => mock.timers.tick(60_000)); await drain();
+    assert.equal(telegramReads.length, reads, "no launch-link polling");
+  });
+
   it("connecting a bot for an agent that isn't running: no minute of waiting for a link nothing will make", async () => {
     await prepare({ agentDown: "stopped" });
     telegramReply = () => json({ botUsername: "merrymen_testbot", linkCode: null, linkPending: true });

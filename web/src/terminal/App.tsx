@@ -471,11 +471,12 @@ export function App() {
   // before its first pass both wear it. The chat needs the difference.
   // See workerHeardFromOf: only an explicit null is "never", absent is unknown.
   // `agentDown` from the same answer too, for the Telegram link-code wait on
-  // Home and in Settings: never under a recovery hold, whose process links
-  // chats (agent-status.ts agentDownOf).
+  // Home and in Settings. A recovery hold is its own reason: the held tenant
+  // is not admitted, nothing runs its worker, and the recovery listener links
+  // no new chat (agent-status.ts AgentDown).
   const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
     workerHeardFrom: workerHeardFromOf(account.status),
-    agentDown: recovery ? null : agentDownOf(account.status, Date.now()),
+    agentDown: recovery ? "recovery" as const : agentDownOf(account.status, Date.now()),
     ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.

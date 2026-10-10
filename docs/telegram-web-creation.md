@@ -126,20 +126,29 @@ Telegram rejects it, the owner chooses another in the same dialog.
 | **Connect** on a bot another agent holds | …already connected to another Merrymen agent… (never whose) | Back to Merrymen |
 | **Connect** fails for any other reason | Couldn't connect right now. Try again, or connect from Merrymen. | The same two buttons |
 
-Connected means saved, not running. Only the agent's worker (or its hold
-process) starts the bot and mints the code "Open my bot" carries; an agent the
-fleet holds (not yet admitted, an expired session key, a recovery or
-accounting hold) runs neither, and the web cannot see which. So the message
-says what the bot waits for and never promises when it will answer.
+Connected means saved, not running. Only the agent's worker (or, when its
+practice book would not restore, its hold process) starts the bot and mints the
+code "Open my bot" carries; an agent the fleet holds (not yet admitted, an
+expired session key, a recovery or accounting hold) runs neither, and the web
+cannot see which. So the message says what the bot waits for and never
+promises when it will answer.
 
 Home and Settings do the same once the bot is saved. They cannot see the
 fleet's reasons either, but `/api/grants` says what follows from them: the
 session key has expired, the worker's heartbeat is stale, or no heartbeat was
-ever written. With no link code and any of those (outside a recovery hold, whose
-own process links chats and has its own wording), they say the bot answers once
+ever written. With no link code and any of those, they say the bot answers once
 the agent is running and that it isn't (or hasn't started, or needs its
 permission renewed, with a link to renew), instead of "check back shortly", and
 Home stops re-reading every few seconds until the agent runs.
+
+A recovery hold gets the same treatment in its own words. A held tenant is one
+the rollout has not admitted, so nothing runs its worker, and the recovery
+listener (where it runs at all) has no `/link` and answers only an owner
+already linked to that exact bot. A bot saved while held therefore has no code
+and no replies until the agent resumes: Settings says "Trading is paused for
+recovery, so @bot won't answer yet and has no link code; both come once your
+agent resumes", Home's recovery row says "Saved. @bot answers once your agent
+resumes", and neither waits or re-reads for a code.
 
 Back to Merrymen opens `MERRYMEN_PUBLIC_ORIGIN`. Each creation is answered
 once: Telegram's redelivery of the same update says nothing again. A message
@@ -182,7 +191,9 @@ retains it there.
 The page keeps checking the setup while it shows **Connect this bot**, so a
 connection or cancellation made in Telegram appears there by itself, and it
 checks again at once when it comes back into view (a phone's browser tab sleeps
-while its owner is in Telegram).
+while its owner is in Telegram). A check that fails (a deploy's 502 or 503, or
+a fetch the phone killed while the tab slept) shows its error and the checks go
+on, further apart each time up to 30 seconds; the first that works clears it.
 
 Save is held until a connected bot reads back in Settings only for a
 connection that page itself confirmed. A browser can still hold the id of a

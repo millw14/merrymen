@@ -42,6 +42,8 @@ interface View {
   needsReconciliation: boolean;
 }
 const POLL_MS = 3000;
+/** The longest wait between reads while they keep failing (doubling from POLL_MS). */
+const RETRY_MAX_MS = 30_000;
 /** The server's setup window (MANAGED_INTENT_TTL_MS), which also bounds a longer expiry the server might send. */
 const MAX_PENDING_MS = 30 * 60_000;
 const ID = /^[A-Za-z0-9_-]{16,64}$/;
@@ -91,6 +93,8 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
   const popups = useRef(new Set<Window>());
   const priorOwner = useRef(owner);
   const deadline = useRef<{ id: string; at: number } | null>(null);
+  /** Reads of a pending setup that failed in a row; the next waits longer for each. */
+  const failures = useRef(0);
   const current = view.owner === owner ? view : initial(owner);
   const active = current.loading || current.busy || current.needsReconciliation || pending(current.intent) || (current.confirmationAttempted && !current.refreshed) || (current.intent?.status === "connected" && !current.refreshed);
 
@@ -190,20 +194,29 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
    * showing Connect keeps reading too: a connection made there reads back
    * "connected" and Settings is refreshed as for one made here. confirm()
    * stops this loop before it asks, so a read from before its answer cannot
-   * put "confirm" back over "connected".
+   * put "confirm" back over "connected"; and while it (or cancel) is still
+   * asking, a poll waits its turn.
+   *
+   * A FAILED READ IS NOT THE END. A 502/503 during a deploy, or a fetch a
+   * phone killed while this tab slept, used to stop every later read: a bot
+   * then connected in Telegram was never seen here, and at this tab's
+   * deadline the page said the setup expired. So the error is shown and the
+   * reads go on, further apart each time (up to RETRY_MAX_MS); the first one
+   * that works clears it.
    */
   useEffect(() => {
     if (!intent || !pending(intent) || !owner || current.loading) return;
     const ctl = controller();
     let timer: ReturnType<typeof setTimeout>;
+    const backoff = () => Math.min(POLL_MS * 2 ** failures.current, RETRY_MAX_MS);
     const expire = setTimeout(() => { if (!valid(ctl, owner)) return; ctl.abort(); patch(owner, { intent: { ...intent, status: "expired" }, error: null, busy: false }); }, Math.max(0, until(intent) - Date.now()));
-    if (!current.error) {
-      const poll = async () => {
-        try { await read(owner, intent.id, ctl); if (valid(ctl, owner)) timer = setTimeout(poll, POLL_MS); }
-        catch (error) { if (valid(ctl, owner)) patch(owner, { busy: false, error: failure(error) }); }
-      };
-      timer = setTimeout(poll, POLL_MS);
-    }
+    const poll = async () => {
+      if (!valid(ctl, owner)) return;
+      if (viewRef.current.owner === owner && viewRef.current.busy) { timer = setTimeout(poll, POLL_MS); return; }
+      try { await read(owner, intent.id, ctl); failures.current = 0; if (valid(ctl, owner)) timer = setTimeout(poll, POLL_MS); }
+      catch (error) { if (valid(ctl, owner)) { failures.current++; patch(owner, { busy: false, error: failure(error) }); timer = setTimeout(poll, backoff()); } }
+    };
+    timer = setTimeout(poll, current.error ? backoff() : POLL_MS);
     return () => { ctl.abort(); controllers.current.delete(ctl); clearTimeout(timer); clearTimeout(expire); };
   }, [owner, intent?.id, intent?.status, intent?.expiresAt, current.error, current.loading]);
 
@@ -215,17 +228,18 @@ export function TelegramCreateBot({ owner: suppliedOwner, hasBot, disabled = fal
    * connected. So coming back into view reads the setup at once: one still
    * underway, or one this tab marked expired by its own clock (its id is
    * still stored: an expiry the server reported is forgotten, and not asked
-   * about again).
+   * about again). Also after a read that failed while it slept: that error
+   * is exactly what a frozen tab's killed fetch leaves behind.
    */
   useEffect(() => {
     if (!owner) return;
     const wake = () => {
       if (document.visibilityState === "hidden") return;
       const seen = viewRef.current, it = seen.intent;
-      if (seen.owner !== owner || !it || seen.loading || seen.busy || seen.needsReconciliation || seen.error) return;
+      if (seen.owner !== owner || !it || seen.loading || seen.busy || seen.needsReconciliation) return;
       if (!pending(it) && !(it.status === "expired" && remembered(owner) === it.id)) return;
       const ctl = controller();
-      void read(owner, it.id, ctl).catch(error => { if (valid(ctl, owner)) patch(owner, { busy: false, error: failure(error) }); }).finally(() => controllers.current.delete(ctl));
+      void read(owner, it.id, ctl).then(() => { failures.current = 0; }, error => { if (valid(ctl, owner)) patch(owner, { busy: false, error: failure(error) }); }).finally(() => controllers.current.delete(ctl));
     };
     document.addEventListener("visibilitychange", wake);
     window.addEventListener("pageshow", wake);

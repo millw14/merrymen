@@ -332,6 +332,11 @@ export const EN = {
   "settings.tg.notStarted": "Your bot is saved. Its link code appears here once your agent is running, and it hasn't started yet.",
   "settings.tg.expired": "Your bot is saved. Its link code appears here once your agent is running, and it can't run until you renew its trading permission.",
   "settings.tg.notRunningShort": "no link code until your agent is running",
+  // Trading paused for recovery (agent-status.ts AgentDown "recovery"): the
+  // held tenant runs no worker, and the recovery listener links no new chat.
+  // {bot} is "@name", or "your bot" when the name is not known.
+  "settings.tg.recovery": "Your bot is saved. Trading is paused for recovery, so {bot} won't answer yet and has no link code; both come once your agent resumes.",
+  "settings.tg.recoveryShort": "no link code until your agent resumes",
   "settings.tg.renew": "Renew permission →",
   "settings.tg.elsewhere": "This bot is connected to another Merrymen agent, so this one doesn't read it and has no link code for it. To move it here, save its token again and confirm the move; you'll then /link again here.",
   "settings.tg.elsewhereShort": "no link code: this bot is connected to another Merrymen agent",
@@ -377,6 +382,7 @@ export const EN = {
   "strip.tg.notRunningWhy": "Saved. {bot} answers once your agent is running; it isn't running right now.",
   "strip.tg.notStartedWhy": "Saved. {bot} answers once your agent is running; it hasn't started yet.",
   "strip.tg.expiredWhy": "Saved. {bot} answers once your agent is running, and it can't run until you renew its trading permission.",
+  "strip.tg.recoveryWhy": "Saved. {bot} answers once your agent resumes.",
   "strip.tg.renew": "Renew permission →",
   "strip.tg.elsewhere": "connected to another agent",
   "strip.tg.elsewhereWhy": "This bot is connected to another Merrymen agent, so this one doesn't read it.",
