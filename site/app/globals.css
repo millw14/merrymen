@@ -322,7 +322,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
 .doc-body h1 { font-size: 46px; margin: 0 0 10px; }
 .doc-lead { color: var(--text-dim); font-size: 18px; margin: 0 0 32px; }
 .doc-body h2 { font-size: 26px; margin: 54px 0 6px; scroll-margin-top: 90px; }
-.doc-body h3 { font-family: var(--font-display); font-size: 18px; margin: 28px 0 4px; }
+.doc-body h3 { font-size: 22px; margin: 28px 0 4px; }
 .doc-body p, .doc-body li { color: var(--text-dim); font-size: 15.5px; line-height: 1.78; }
 .doc-body ul, .doc-body ol { padding-left: 22px; }
 .doc-body li { margin: 6px 0; }
@@ -347,7 +347,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
 }
 .tier-card.compact { align-items: flex-start; }
 .tier-emoji { font-size: 30px; line-height: 1; }
-.tier-name { font-family: var(--font-display); font-size: 17px; color: var(--text); font-weight: 700; }
+.tier-name { font-family: var(--font-serif), "Iowan Old Style", Palatino, Georgia, serif; font-size: 22px; color: var(--text); font-weight: 500; }
 .tier-min { font-size: 12.5px; color: var(--text-dim); }
 .tier-sym { color: var(--gold); font-weight: 600; }
 .tier-discount {
@@ -453,7 +453,10 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
    monospace numeric treatment, and the note blocks under each. */
 
 .watch-page, .scope-page { padding: 90px 0 40px; }
-.watch-page h1, .scope-page h1 { font-size: clamp(38px, 6vw, 76px); margin: 0; }
+.watch-page h1, .scope-page h1 { font-size: clamp(44px, 6vw, 76px); line-height: 1.05; letter-spacing: -.02em; margin: 0; }
+@media (min-width: 901px) {
+  .watch-page h1, .scope-page h1 { font-size: 52px; }
+}
 .watch-lede { color: var(--text-dim); font-size: 17px; max-width: 62ch; margin: 20px 0 0; line-height: 1.6; }
 
 .watch-form { display: flex; gap: 12px; flex-wrap: wrap; margin: 34px 0 0; }
@@ -683,8 +686,10 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
     radial-gradient(120% 60% at 50% 100%, rgba(7,10,8,0.55), transparent 60%);
 }
 .app-hero-inner { padding-top: 20svh; padding-bottom: 3rem; }
-.app-hero h1 { font-size: clamp(2.6rem, 11vw, 4.6rem); line-height: 1.02; margin: 0.55rem 0 0.9rem; text-shadow: 0 2px 24px rgba(0,0,0,0.55); }
-.app-lede { max-width: 34rem; color: var(--text-2); font-size: 1.06rem; text-shadow: 0 1px 12px rgba(0,0,0,0.6); }
+.app-hero h1 { font-size: clamp(2.6rem, 11vw, 4.6rem); line-height: 1.02; margin: 0.55rem 0 0.9rem; color: #f1eee4; text-shadow: 0 2px 24px rgba(0,0,0,0.55); }
+.app-lede { max-width: 34rem; color: #bdc5bb; font-size: 1.06rem; text-shadow: 0 1px 12px rgba(0,0,0,0.6); }
+.app-hero .tag { color: #adb7ac; }
+.app-hero .tag .n { color: #a6ca58; }
 .app-hero-cta { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-top: 1.4rem; }
 .app-hero-fine { color: var(--text-dim); font-size: 0.84rem; margin-top: 1rem; max-width: 34rem; }
 .app-hero-fine em { color: var(--text-2); font-style: normal; }
@@ -711,7 +716,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
   width: 88px; height: 22px; border-radius: 12px; background: #060806; z-index: 2;
 }
 .app-screen {
-  border-radius: 32px; background: #0a0e0a; border: 1px solid #141a14;
+  border-radius: 32px; background: #0a0e0a; color: #f1eee4; border: 1px solid #141a14;
   padding: 3.2rem 1.1rem 1.4rem; min-height: 560px;
   display: flex; flex-direction: column; gap: 0.55rem;
   font-size: 0.86rem;

@@ -115,11 +115,9 @@ footer.foot { background: var(--bg-2); padding-top: 58px; }
 /* Content remains readable during client-side navigation and without motion. */
 .fx-ready [data-reveal] { opacity: 1; transform: none; clip-path: none; }
 
-/* Homepage visual system. Dark forest is the default so the first paint
-   matches dark mode. Light paper applies only after an explicit choice.
-   Scoped to the homepage so the live tools and documentation can be migrated
-   deliberately instead of inheriting a half-finished theme. */
-body:has(.home-page) {
+/* Site visual system. Dark forest is the default so the first paint
+   matches dark mode. Light paper applies only after an explicit choice. */
+body {
   color-scheme: dark;
   --bg: #142018;
   --bg-1: #18271d;
@@ -137,19 +135,19 @@ body:has(.home-page) {
   background: var(--bg);
   color: var(--text);
 }
-body:has(.home-page) .nav,
-body:has(.home-page) .nav.scrolled {
+body .nav,
+body .nav.scrolled {
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   border-bottom-color: var(--line);
 }
-body:has(.home-page) .btn { border-radius: 4px; font-weight: 600; }
-body:has(.home-page) .btn-primary { background: var(--text); color: var(--bg); }
-body:has(.home-page) .btn-primary:hover { background: var(--lime); color: #fff; }
-body:has(.home-page) .btn-primary .box { background: var(--bg); }
-body:has(.home-page) .btn-primary .box svg { color: var(--text); }
-body:has(.home-page) .btn-ghost { background: transparent; border-color: var(--line); }
-body:has(.home-page) .nav-menu-toggle { border-radius: 4px; background: transparent; }
-body:has(.home-page) .theme-toggle {
+body .btn { border-radius: 4px; font-weight: 600; }
+body .btn-primary { background: var(--text); color: var(--bg); }
+body .btn-primary:hover { background: var(--lime); color: #fff; }
+body .btn-primary .box { background: var(--bg); }
+body .btn-primary .box svg { color: var(--text); }
+body .btn-ghost { background: transparent; border-color: var(--line); }
+body .nav-menu-toggle { border-radius: 4px; background: transparent; }
+body .theme-toggle {
   border: 1px solid var(--line);
   background: transparent;
   color: var(--text);
@@ -159,8 +157,8 @@ body:has(.home-page) .theme-toggle {
   font: 600 13px var(--font-sans);
   cursor: pointer;
 }
-body:has(.home-page) .theme-toggle:hover { background: var(--bg-3); }
-html[data-theme="light"] body:has(.home-page) {
+body .theme-toggle:hover { background: var(--bg-3); }
+html[data-theme="light"] body {
   color-scheme: light;
   --bg: #f2efe6;
   --bg-1: #ebe7dc;
@@ -179,6 +177,12 @@ html[data-theme="light"] body:has(.home-page) {
   color: var(--text);
 }
 
+h1, h2, h3, h4 {
+  font-family: var(--font-serif), "Iowan Old Style", Palatino, Georgia, serif;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
 .home-page h1 {
   font-family: var(--font-sans);
   font-weight: 500;
@@ -536,7 +540,7 @@ html[data-theme="light"] .band-desk {
 }
 .home-page .wordmark { color: #3d5646; font-family: var(--font-sans); }
 html[data-theme="light"] .home-page .wordmark { color: #26382b; }
-body:has(.home-page) footer.foot {
+body footer.foot {
   --bg: #142018;
   --bg-1: #18271d;
   --bg-2: #1d2d22;
