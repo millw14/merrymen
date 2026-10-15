@@ -218,7 +218,10 @@ class AccountStatusTest {
     assertEquals(BlockerFix.Deposit, blockerFixOf("no-gas"))
     assertEquals(BlockerFix.Deposit, blockerFixOf("no-cash"))
     // Money is NOT the fix for a dead policy, and the sentence says so.
-    assertTrue(blockerAdviceOf("dead-policy")!!.say.contains("adding funds will not help"))
+    val renewal = blockerAdviceOf("dead-policy")!!.say
+    assertTrue(renewal.contains("Funding alone cannot fix it"))
+    assertTrue(renewal.contains("revoking the old permissions requires network fees"))
+    assertFalse(renewal.contains("free"))
     assertEquals(BlockerFix.Resign, blockerFixOf("dead-policy"))
     assertEquals(BlockerFix.Resign, blockerFixOf("wrong-chain"))
     assertEquals(BlockerFix.Resign, blockerFixOf("grant-too-wide"))

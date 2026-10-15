@@ -1,0 +1,70 @@
+name: Android
+
+on:
+  pull_request:
+    paths:
+      - "android-native/**"
+      - ".github/workflows/android.yml"
+      # These are the shared contracts exercised by Android's mirror tests.
+      - "web/src/lib/live-blocker.ts"
+      - "web/src/lib/chat-commands.ts"
+      - "web/src/terminal/screens/Settings.tsx"
+      - "worker/src/thesis-policy.ts"
+      - "packages/core/src/risk-level.ts"
+  push:
+    branches: [main]
+    paths:
+      - "android-native/**"
+      - ".github/workflows/android.yml"
+      - "web/src/lib/live-blocker.ts"
+      - "web/src/lib/chat-commands.ts"
+      - "web/src/terminal/screens/Settings.tsx"
+      - "worker/src/thesis-policy.ts"
+      - "packages/core/src/risk-level.ts"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: android · build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: android-native
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android-native/**/*.gradle.kts
+            android-native/gradle/libs.versions.toml
+            android-native/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Check Android SDK packages
+        run: |
+          android_sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$android_sdk"
+          test -x "$android_sdk/cmdline-tools/latest/bin/sdkmanager"
+          # Use the hosted runner's existing SDK and accepted licenses. Install
+          # only this app's pinned platform/tools; never accept new agreements.
+          "$android_sdk/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$android_sdk" \
+            "platforms;android-36" "build-tools;35.0.0" </dev/null
+
+      - name: Test, lint and build debug app
+        run: ./gradlew --no-daemon --max-workers=2 --no-configuration-cache testDebugUnitTest lintRelease assembleDebug sdkReleaseDependencyData
+
+      - name: Verify release guards
+        run: ./scripts/test-release-guards.sh

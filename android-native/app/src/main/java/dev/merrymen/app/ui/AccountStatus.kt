@@ -272,15 +272,15 @@ internal val BLOCKER_ADVICE: Map<String, BlockerAdvice> = mapOf(
     funding = true, resign = false, fault = true,
   ),
   "dead-policy" to BlockerAdvice(
-    "This agent's trading permission was signed before a fix and cannot reach the chain. Re-signing it is free and takes a moment — adding funds will not help until you do.",
+    "This agent's trading permission was signed before a fix and cannot reach the chain. Funding alone cannot fix it. Renew it on the wallet page; revoking the old permissions requires network fees.",
     funding = false, resign = true, fault = true,
   ),
   "wrong-chain" to BlockerAdvice(
-    "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused.",
+    "This agent's permission is for a different network than the one trading happens on. It needs a new grant on Robinhood Chain; funds sent here will sit unused. And funds already sent to this address on another network are not recovered by that new grant — it routes future deposits only, never moves what is stuck elsewhere.",
     funding = false, resign = true, fault = true,
   ),
   "grant-too-wide" to BlockerAdvice(
-    "This agent's permission set covers too many tokens and venues to install on-chain, so its first operation can never be signed. Re-signing with fewer of either is free and fixes it — adding funds will not, because nothing has been spent.",
+    "This agent's permission set is too large to install on-chain, so its first operation can never be signed. Renew it on the web wallet page — a new signature there seals a narrower permission set that usually fits; if it is still too large, drop a token or venue. Funding alone cannot fix the oversized permission; revoking it requires network fees.",
     funding = false, resign = true, fault = true,
   ),
   "not-armed" to BlockerAdvice(
@@ -774,33 +774,7 @@ private val DAY = DateTimeFormatter.ofPattern("MMM d", Locale.US)
  */
 fun rejectRuleLabel(rule: String?): String? = if (rule == null) null else REJECT_LABELS[rule]
 
-internal val REJECT_LABELS: Map<String, String> = mapOf(
-  "per-trade-cap" to "past the per-trade cap",
-  "deposit-cap" to "past the per-trade cap, which a vault deposit is measured against too",
-  "daily-cap" to "past today's spending cap",
-  "ops-cap" to "past today's number of trades",
-  "drawdown-breaker" to "the drawdown breaker was tripped",
-  "asset-allowlist" to "that asset is not in its signed permissions",
-  "target-allowlist" to "that venue is not in its signed permissions",
-  "transfer-recipient-allowlist" to "that recipient is not in its signed permissions",
-  "no-gas" to "the account had no gas",
-  "no-route" to "no route to trade it",
-  "no-quote" to "no price could be quoted",
-  "no-liquidity" to "not enough liquidity to fill",
-  "slippage" to "the price moved too far between quote and fill",
-  "insufficient-balance" to "it did not hold what it tried to spend",
-  "curve-graduated" to "that launch had already graduated",
-  "no-curve-adapter" to "this grant carries no adapter for that launchpad",
-  "curve-provenance" to "the launch could not be verified",
-  "no-exit" to "its signed permission cannot sell that token, so the buy was refused before anything was sent",
-  "not-armed" to "it has no signed trading key yet",
-  "dead-policy" to "its signature seals a policy contract that is not on this chain",
-  "grant-too-wide" to "its permission set is too wide to install on-chain",
-  "no-executor" to "no bundler is configured to submit anything",
-  "live-not-enabled" to "its owner has not turned on live trading, so it places no real orders",
-  "wrong-chain" to "its key was signed for a different network",
-  "no-cash" to "the account held no USDG to trade with",
-)
+internal val REJECT_LABELS: Map<String, String> = dev.merrymen.app.data.REJECT_RULE_LABELS
 
 // ── Telegram and Trencher, as a reading ────────────────────────────────────
 

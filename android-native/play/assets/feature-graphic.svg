@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="500" viewBox="0 0 1024 500">
+  <rect width="1024" height="500" fill="#070806"/>
+  <path d="M64 70H960 M64 430H960" stroke="#28392C" stroke-width="1"/>
+  <g transform="translate(638 85) scale(3)">
+    <path fill="#4AD696" d="M38,30 C58,38 58,70 38,78 L42,74 C58,66 58,42 42,34 Z"/>
+    <path fill="none" stroke="#4AD696" stroke-width="2" d="M40,32 L40,76"/>
+    <path fill="none" stroke="#ECECE4" stroke-width="2" d="M40,54 L72,54"/>
+    <path fill="#ECECE4" d="M72,50 L80,54 L72,58 Z"/>
+  </g>
+  <text x="70" y="225" font-family="Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="-3" fill="#ECECE4">merrymen</text>
+  <text x="73" y="285" font-family="Arial, sans-serif" font-size="27" fill="#A7B2A8">Your agent. Your limits.</text>
+  <text x="73" y="388" font-family="Arial, sans-serif" font-size="17" letter-spacing="2" fill="#4AD696">MARKETS · RESEARCH · PORTFOLIO</text>
+</svg>

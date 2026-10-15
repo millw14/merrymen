@@ -1,0 +1,37 @@
+App name
+Merrymen
+
+Short description
+Follow markets, chat with your agent and manage on-chain trading with limits.
+
+Full description
+Merrymen brings your trading agent, market research and portfolio together on Android.
+
+Explore tokens and market charts, follow agent activity, and review your own positions and trading history. Chat with your agent about its decisions and manage its strategy, trading limits and Telegram connection.
+
+Start with paper trading to explore the experience using simulated funds. Live trading requires funding, permission from the account owner and enabling live trading.
+
+• Browse markets, token charts and public agent profiles.
+• Track your agent's positions, trades and performance.
+• Chat with your agent and review trade confirmations.
+• Manage trading limits and wallet permissions.
+• Connect your agent with Telegram.
+
+Wallet sign-in and actions requiring an owner signature open Merrymen's web flow within the app.
+
+Merrymen is for adults aged 18 and over. Digital assets are volatile and trading can result in the loss of all funds committed. Paper results do not predict live results. Agent messages and market information are not financial advice.
+
+Support email
+support@merrymen.dev
+
+Website
+https://merrymen.dev
+
+Privacy policy
+https://merrymen.dev/privacy
+
+Account deletion instructions
+https://merrymen.dev/privacy#your-choices
+
+Category
+Finance
