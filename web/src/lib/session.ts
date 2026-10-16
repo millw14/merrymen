@@ -23,21 +23,7 @@ import { GRANT_TRENCHER } from "@merrymen/core";
 
 import { createPublicClient, erc20Abi, http, parseAbi, type Address, type LocalAccount } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { createKernelAccount, getPluginsEnableTypedData, KernelV3_3AccountAbi } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
-import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
-import {
-  serializePermissionAccount,
-  toPermissionValidator,
-} from "@zerodev/permissions";
-import { toECDSASigner } from "@zerodev/permissions/signers";
-import {
-  CallPolicyVersion,
-  ParamCondition,
-  toCallPolicy,
-  toRateLimitPolicy,
-  toTimestampPolicy,
-} from "@zerodev/permissions/policies";
 import {
   CASH,
   MORPHO,
@@ -327,6 +313,19 @@ async function prepareGrantCore(
    */
   const sealedPonsAdapter = ponsAdapterForSigning(chainId, ponsAdapterAddress);
 
+  // Reading a saved grant must not download the account-signing SDK before
+  // the dashboard can hydrate. Load it when this existing async flow needs it.
+  const [
+    { createKernelAccount, getPluginsEnableTypedData, KernelV3_3AccountAbi },
+    { signerToEcdsaValidator },
+    { serializePermissionAccount, toPermissionValidator },
+    { toECDSASigner },
+  ] = await Promise.all([
+    import("@zerodev/sdk"),
+    import("@zerodev/ecdsa-validator"),
+    import("@zerodev/permissions"),
+    import("@zerodev/permissions/signers"),
+  ]);
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
 
@@ -1499,6 +1498,10 @@ export async function previewOwnerAccount(
   ownerPrivateKey: `0x${string}`,
   chainId: number = robinhoodChain.id,
 ): Promise<OwnerPreview> {
+  const [{ createKernelAccount }, { signerToEcdsaValidator }] = await Promise.all([
+    import("@zerodev/sdk"),
+    import("@zerodev/ecdsa-validator"),
+  ]);
   const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
   const ownerAccount = privateKeyToAccount(ownerPrivateKey);

@@ -4,6 +4,21 @@ import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "../../../worker/src/db";
 import { readLeaderboard } from "./read-leaderboard";
 
+test("an unreadable agent directory is different from a successfully read empty one", async () => {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  const read = () => readLeaderboard(fn => fn(db), async () => [], undefined, async () => null);
+  try {
+    assert.equal((await read()).source, "none", "a missing agents table is not evidence of zero agents");
+    raw.exec("CREATE TABLE agents(smart_account TEXT, name TEXT, x_handle TEXT, x_verified INTEGER, epoch INTEGER, created_at INTEGER)");
+    assert.equal((await read()).source, "none", "an older schema cannot vouch for a directory it could not query");
+    raw.exec("ALTER TABLE agents ADD COLUMN mode TEXT");
+    const empty = await read();
+    assert.equal(empty.source, "sqlite", "a later successful read recovers without restarting the reader");
+    assert.deepEqual(empty.agents, []);
+  } finally { raw.close(); }
+});
+
 test("board includes paper and idle agents without ranking simulated returns, and deduplicates re-grants", async () => {
   const raw = new DatabaseSync(":memory:");
   const db = wrapSqlite(raw);

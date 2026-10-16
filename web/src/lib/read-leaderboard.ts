@@ -201,9 +201,10 @@ export async function readLeaderboard(
         )
         .all()) as typeof rows;
     } catch {
-      // A ledger written by an older worker has no `mode`. An empty board is
-      // the honest render of that, never a 500.
-      return { source: "sqlite", agents: [], retired: null, retiredAgents: [] };
+      // A refused query (including an older schema) says nothing about how
+      // many agents exist. Let the client retry and retain a previously read
+      // directory instead of replacing it with a successful, cacheable zero.
+      return { source: "none", agents: [], retired: null, retiredAgents: [] };
     }
 
     // One row per public identity after a re-grant; the newest account wins.

@@ -38,14 +38,7 @@
 import { privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
 import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
-import {
-  ownerFromPrivateKey,
-  ownerFromSigner,
-  planRecovery,
-  recoverFunds,
-  type RecoverPlan,
-  type RecoveryOwner,
-} from "@merrymen/recover";
+import type { RecoverPlan, RecoveryOwner } from "@merrymen/recover";
 
 export interface BrowserWallet {
   smartAccount: `0x${string}`;
@@ -71,7 +64,7 @@ export interface BrowserWallet {
  * account from the wrong signer produces a different, empty account, and a
  * sweep of it would report success having moved nothing.
  */
-function ownerOf(w: BrowserWallet): RecoveryOwner {
+function ownerOf(w: BrowserWallet, { ownerFromSigner, ownerFromPrivateKey }: typeof import("@merrymen/recover")): RecoveryOwner {
   if (w.ownerAccount) return ownerFromSigner(w.ownerAccount);
   if (w.ownerKey) return ownerFromPrivateKey(w.ownerKey);
   throw new Error(
@@ -172,9 +165,11 @@ export const grantExtraTokens = (grantTokens: readonly string[] = []) =>
 
 /** What is in the account, read straight from the chain. No relay, no session. */
 export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
+  const recovery = await import("@merrymen/recover");
+  const { planRecovery } = recovery;
   const plan = (await planRecovery({
     chain: chainOf(w.chainId),
-    owner: ownerOf(w),
+    owner: ownerOf(w, recovery),
     // ALWAYS passed: the server route cannot check this for a pasted key, but
     // the browser knows which account this wallet is meant to be, so a wrong key
     // fails loudly instead of sweeping a stranger's empty account.
@@ -207,13 +202,17 @@ export async function sweepFromBrowser(
    */
   approvedClass?: { vault: `0x${string}`; tokens: readonly `0x${string}`[] },
 ) {
+  // Defer the same recovery engine until the owner requests it. Import failure
+  // occurs before a relay ticket is signed, and changes no recovery authority.
+  const recovery = await import("@merrymen/recover");
+  const { recoverFunds } = recovery;
   // Arms the relay by setting the ticket cookie. Same-origin requests carry it
   // automatically from here, including the ones viem makes inside recoverFunds.
   await getRecoveryTicket(w);
 
   return recoverFunds({
     chain: chainOf(w.chainId),
-    owner: ownerOf(w),
+    owner: ownerOf(w, recovery),
     bundlerUrl: relayUrl(w.chainId),
     to,
     expectedSmartAccount: w.smartAccount,

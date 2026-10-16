@@ -139,19 +139,23 @@ export function liveClocks(d: LiveClockDeps): (ClockSpec & { key: LiveClockKey }
       pass: publicRead("theses"),
     },
     {
-      // THE MARKET AND THE QUOTES TOGETHER, ONCE. The quotes were read twice a
-      // pass — once on their own and again inside the Promise.all — and both
-      // answers were applied. The session change, which needs the stock list
-      // and nothing else, is started beside it and never waited for
-      // (readChanges, above).
+      // Start both reads once, but publish each as soon as it answers. A slow
+      // quote service must not hide the token list already read from market.
+      // Keep the pass in flight until both finish so retries cannot duplicate
+      // a quote request. Session changes remain independent (above).
       key: "market",
       half: "market",
       everyMs: MARKET_EVERY_MS,
       paused: d.hidden,
       pass: async () => {
-        const [raw, quotes] = await Promise.all([d.fetchRead("market"), d.loadQuotes()]);
-        d.update((prev) => withQuotes(withRead(prev, "market", raw, true), quotes));
-        readChanges(marketTokensOf(raw));
+        const [raw] = await Promise.all([
+          d.fetchRead("market").then((raw) => {
+            d.update((prev) => withRead(prev, "market", raw, true));
+            readChanges(marketTokensOf(raw));
+            return raw;
+          }),
+          d.loadQuotes().then((quotes) => d.update((prev) => withQuotes(prev, quotes))),
+        ]);
         return verdict(raw);
       },
     },

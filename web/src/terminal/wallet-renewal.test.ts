@@ -11,6 +11,7 @@ import type { LocalAccount } from "viem";
 import type { PrivyOwner } from "./usePrivyOwner";
 import { needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants } from "@/lib/saved-grant-binding";
+import { goTo } from "./navigate";
 let deferred: typeof import("./test-dom").deferred;
 let json: typeof import("./test-dom").json;
 let testDom: typeof import("./test-dom").testDom;
@@ -230,6 +231,50 @@ describe("the funded wallet's re-sign control", () => {
     await type(renewalInput("drawdown limit"), "8");
     await ui.render(React.createElement(Wallet));
     assert.deepEqual(scrolled, ["resign"], "form changes must not drag the owner back to the anchor");
+  });
+
+  it("follows and repeats an in-place re-sign link without changing the permission or asking for a signature", async () => {
+    ui.dom.window.history.replaceState(null, "", "/grant?chain=4663");
+    const scrolled: string[] = [];
+    Object.defineProperty(ui.dom.window.HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value(this: HTMLElement) { scrolled.push(this.id); },
+    });
+    await ui.render(React.createElement(Wallet));
+    assert.ok(ui.container.querySelector("#resign"));
+    const before = storageSnapshot();
+    assert.deepEqual(scrolled, []);
+    await act(async () => { goTo("/grant?chain=4663#resign"); });
+    assert.deepEqual(scrolled, ["resign"]);
+    assert.equal(window.location.search, "?chain=4663");
+    const entries = window.history.length;
+    await act(async () => { goTo("/grant?chain=4663#resign"); });
+    assert.deepEqual(scrolled, ["resign", "resign"], "an explicit second click may reveal the section again");
+    assert.equal(window.history.length, entries);
+    await act(async () => { goTo("/grant?chain=4663#fund"); });
+    await ui.render(React.createElement(Wallet));
+    assert.deepEqual(scrolled, ["resign", "resign"], "other anchors do not jump to the signing control");
+    assertExistingPermissionKept(before);
+  });
+
+  it("keeps a re-sign link pending until its delayed grant section appears", async () => {
+    ui.dom.window.history.replaceState(null, "", "/grant");
+    const pendingGrant = deferred<Response>();
+    const fetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => String(input) === "/api/grants" ? pendingGrant.promise : fetch(input, init);
+    const scrolled: string[] = [];
+    Object.defineProperty(ui.dom.window.HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value(this: HTMLElement) { scrolled.push(this.id); },
+    });
+    await ui.render(React.createElement(Wallet));
+    await act(async () => { goTo("/grant#resign"); });
+    assert.deepEqual(scrolled, []);
+    await act(async () => { pendingGrant.resolve(json({ exists: true, grant: activeGrant, gasSponsored: true })); });
+    assert.deepEqual(scrolled, ["resign"]);
+    await ui.render(React.createElement(Wallet));
+    assert.deepEqual(scrolled, ["resign"], "settled renders do not repeat the explicit link");
+    assert.equal(revokeCalls + mintCalls + stopCalls, 0);
   });
 
   for (const binding of [undefined, { version: "legacy-wallet-owner-v1" }, { version: "privy-did-owner-v1" }] as const) {

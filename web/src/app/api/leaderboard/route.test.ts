@@ -36,6 +36,7 @@ function row(publicBook: boolean, equityUsdg: number | null = 1000.25, pnlUsdg: 
   };
 }
 const board = (agents: LeaderRow[]): LeaderboardRead => ({ source: "sqlite", retired: 0, retiredAgents: [], agents });
+const unreadable: LeaderboardRead = { source: "none", agents: [], retired: null, retiredAgents: [] };
 
 /** Small shared-cache model honoring the response's actual Cache-Control. */
 function cdn(origin: () => Promise<Response>) {
@@ -94,4 +95,21 @@ test("fully private, legacy and empty percentage-only directories retain shared 
     assert.deepEqual(await second.json(), board(agents));
     assert.equal(reads, 1, "the percentage-only response is still shared-cacheable");
   }
+});
+
+test("a failed directory read is not cached as zero agents and a retry can immediately recover", async () => {
+  let reads = 0;
+  const cachedGet = cdn(handler(async () => ++reads === 1 ? unreadable : board([row(false)])));
+  const failed = await cachedGet();
+  assert.equal(failed.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await failed.json(), unreadable);
+  const recovered = await cachedGet();
+  assert.equal(reads, 2, "the cache must ask again instead of replaying the failed empty body");
+  assert.deepEqual(await recovered.json(), board([row(false)]));
+});
+
+test("a database-open rejection is an unreadable, uncached directory without internal error details", async () => {
+  const response = await handler(async () => { throw new Error("private database connection detail"); })();
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), unreadable);
 });

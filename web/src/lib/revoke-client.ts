@@ -3,9 +3,7 @@
 import { createPublicClient, encodeFunctionData, http, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { formatUserOperation, formatUserOperationRequest, getUserOperationHash, type RpcUserOperation, type UserOperation } from "viem/account-abstraction";
-import { createKernelAccount, createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
-import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { assertDerivedAccount, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import { userOpGasConfig } from "../../../worker/src/gas";
 import { getRecoveryTicket, relayUrl, redact, type BrowserWallet } from "./recover-client";
@@ -69,6 +67,10 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
   if (!chain) throw new Error("Unknown account network; refusing to revoke on another chain.");
   const signer = w.ownerAccount ?? (w.ownerKey ? privateKeyToAccount(w.ownerKey) : null);
   if (!signer) throw new Error("Sign in as this wallet's owner, or unlock its recovery key, to revoke permissions on-chain.");
+  const [{ createKernelAccount, createKernelAccountClient }, { signerToEcdsaValidator }] = await Promise.all([
+    import("@zerodev/sdk"),
+    import("@zerodev/ecdsa-validator"),
+  ]);
   const publicClient = createPublicClient({ chain, transport: http() });
   // Confirmation polls are bounded and cannot reuse a cached pre-receipt head.
   const confirmationClient = createPublicClient({ chain, cacheTime: 0, transport: http(undefined, { timeout: 2_500, retryCount: 0 }) });

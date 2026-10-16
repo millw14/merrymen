@@ -25,6 +25,7 @@ import {
 } from "./live-clocks";
 import { bannerOf, startClocks, type ClockView } from "./refresh-loop";
 import { testDom } from "./test-dom";
+import type { TokenQuote } from "./quotes";
 
 function fakeClock() {
   let now = 1_000_000;
@@ -75,6 +76,7 @@ function shell(opts: {
   account?: () => Promise<void>;
   hidden?: () => boolean;
   changes?: () => Promise<Map<string, number>>;
+  quotes?: () => Promise<Map<string, TokenQuote>>;
 } = {}) {
   const clock = fakeClock();
   let sources: LiveSources = seedSources();
@@ -87,7 +89,7 @@ function shell(opts: {
     },
     loadQuotes: async () => {
       asked.push("quotes");
-      return new Map();
+      return opts.quotes ? opts.quotes() : new Map();
     },
     loadChanges: async () => {
       asked.push("changes");
@@ -137,6 +139,34 @@ describe("the shell's reads", () => {
     await settle();
     await s.clock.advance(60_000);
     assert.equal(s.count("quotes"), s.count("market"));
+    s.clocks.stop();
+  });
+
+  it("shows the token list while quotes are still downloading, without overlapping retries", async () => {
+    let finishQuotes!: (quotes: Map<string, TokenQuote>) => void;
+    const s = shell({ quotes: () => new Promise((resolve) => { finishQuotes = resolve; }) });
+    await settle();
+    assert.equal(s.live().reads.market, "ok");
+    assert.ok(s.live().tokens.length > 0);
+    assert.equal(s.count("changes"), 1, "the token list can start its independent chart read");
+    s.clocks.retryNow("market");
+    await settle();
+    assert.equal(s.count("quotes"), 1, "retry waits for the outstanding pass");
+    finishQuotes(new Map());
+    await settle();
+    assert.equal(s.count("quotes"), 2, "one requested retry runs after completion");
+    s.clocks.stop();
+  });
+
+  it("applies fresh quotes while the token metadata request is still outstanding", async () => {
+    const baseline = liveOf(seedSources()).tokens.find((t) => t.kind !== "memecoin")!;
+    const s = shell({
+      answer: (key) => key === "market" ? new Promise(() => {}) : ok(BODIES[key]),
+      quotes: async () => new Map([[baseline.id, { priceUsd: 123, priceUpdatedAt: 1234, uiMultiplier: 1 }]]),
+    });
+    await settle();
+    assert.equal(s.live().reads.market, "unread");
+    assert.equal(s.live().tokens.find((t) => t.id === baseline.id)!.priceUsd, 123);
     s.clocks.stop();
   });
 

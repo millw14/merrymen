@@ -325,6 +325,18 @@ export function App() {
   // SEARCH OPENS OVER THE PAGE, not instead of it (SearchDialog). The /search
   // route still renders the full screen for a link that arrives there.
   const [searchOpen, setSearchOpen] = useState(false);
+  useEffect(() => { setSearchOpen(false); }, [pathname]);
+  useEffect(() => {
+    // Search is an overlay, so navigation does not unmount it by itself. Back
+    // must reveal the destination even when only its query or hash changed.
+    const dismissSearch = () => setSearchOpen(false);
+    window.addEventListener("popstate", dismissSearch);
+    window.addEventListener("hashchange", dismissSearch);
+    return () => {
+      window.removeEventListener("popstate", dismissSearch);
+      window.removeEventListener("hashchange", dismissSearch);
+    };
+  }, []);
   const openScreen = (next: Screen) => {
     if (next.kind === "search") {
       setSearchOpen(true);
@@ -546,6 +558,7 @@ export function App() {
           onSection={setSidebarSection}
           onScreen={openScreen}
           onTab={goTab}
+          onRetryAgents={() => clockShell.refreshReads("board")}
         />
       )}
       <div

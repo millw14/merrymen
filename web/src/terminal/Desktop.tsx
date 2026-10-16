@@ -145,11 +145,14 @@ export function DesktopSidebar({
   onScreen,
   onTab,
   reads,
+  onRetryAgents,
   retired = null,
   retiredAgents = [],
 }: Actions & {
   /** Whether each read happened — an empty list is not automatically a quiet one. */
   reads: LiveState["reads"];
+  /** Retry the shell's existing public board clock, without another poll. */
+  onRetryAgents?: () => void;
   /** Accounts the board folded into a count. See Board. */
   retired?: number | null;
   retiredAgents?: import("./live").RetiredAgent[];
@@ -167,6 +170,7 @@ export function DesktopSidebar({
   const [sort, setSort] = useState<"name" | "change">("name");
   // For "as of" on a stale valuation (performanceOf); a minute is fine enough.
   const nowSec = Math.floor(useNow(60_000) / 1000);
+  const otherAgents = agents.filter((a) => a.slug !== mine.slug);
   const held = new Set(positionsOf(mine).map((p) => tokenForPosition(p, tokens)?.id).filter(Boolean));
   const list = tokens.filter((t) => filter === "held" ? held.has(t.id) : filter === "watch" ? watchlist.ids.includes(t.id) : true);
   list.sort((a, b) =>
@@ -321,11 +325,11 @@ export function DesktopSidebar({
         </button>}
         <div className="desktop-market-heading">
           <h2>Discover agents</h2>
-          <span>{agents.filter((a) => a.slug !== mine.slug).length}</span>
+          <span>{reads.board === "ok" ? otherAgents.length : "—"}</span>
         </div>
         <div className="desktop-market-list">
-          {agents
-            .filter((a) => a.slug !== mine.slug)
+          <AgentDirectoryState state={reads.board} empty={!otherAgents.length} onRetry={onRetryAgents}/>
+          {otherAgents
             .map((a) => {
               const performance = performanceOf(a, nowSec);
               // The board's words in the figure's place (performanceOf), and
@@ -399,7 +403,12 @@ export function DesktopSidebar({
         aria-labelledby="explore-tab-board"
         hidden={section !== "board"}
       >
-        {section === "board" && <Board
+        {section === "board" && <>
+        {reads.board !== "ok" && <>
+          <div className="desktop-market-heading"><h2>Leaderboard</h2></div>
+          <AgentDirectoryState state={reads.board} empty={!agents.length} onRetry={onRetryAgents}/>
+        </>}
+        {(reads.board === "ok" || agents.length > 0) && <Board
           compact
           read={reads.board}
           retired={retired}
@@ -410,10 +419,25 @@ export function DesktopSidebar({
           onProfile={openProfile}
           onDesk={() => onTab("agent")}
         />}
+        </>}
       </section>
       <SidebarFoot live={reads.market === "ok"} />
     </aside>
   );
+}
+
+function AgentDirectoryState({ state, empty, onRetry }: {
+  state: LiveState["reads"]["board"];
+  empty: boolean;
+  onRetry?: () => void;
+}) {
+  if (state === "ok" && !empty) return null;
+  return <div className="desktop-agent-read-state">
+    <p className="meta" role="status">{state === "unread" ? "Loading agents…"
+      : state === "unreadable" ? "Couldn't load agents. It will retry automatically."
+      : "No other agents are listed yet."}</p>
+    {state === "unreadable" && onRetry && <button type="button" className="mm-btn" onClick={onRetry}>Try again</button>}
+  </div>;
 }
 
 /**

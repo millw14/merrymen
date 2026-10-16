@@ -11,7 +11,7 @@
  * response is not stored, so turning publication off cannot replay its dollars.
  */
 import { NextResponse } from "next/server";
-import { readLeaderboard } from "@/lib/read-leaderboard";
+import { readLeaderboard, type LeaderboardRead } from "@/lib/read-leaderboard";
 
 /**
  * NOT PRERENDERED AT BUILD, and that is a correctness rule rather than a
@@ -34,10 +34,17 @@ import { readLeaderboard } from "@/lib/read-leaderboard";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const r = await readLeaderboard();
+  let r: LeaderboardRead;
+  try {
+    r = await readLeaderboard();
+  } catch {
+    // Opening the database can fail before its query-level guards run. The
+    // public response carries no internal errors and is never cached.
+    r = { source: "none", agents: [], retired: null, retiredAgents: [] };
+  }
   const publishedBook = r.agents.some((agent) => agent.performance?.publicBook === true)
     || r.retiredAgents.some((agent) => agent.pnlUsdg !== null);
   return NextResponse.json(r, {
-    headers: { "Cache-Control": publishedBook ? "no-store" : "public, s-maxage=60, stale-while-revalidate=120" },
+    headers: { "Cache-Control": r.source === "none" || publishedBook ? "no-store" : "public, s-maxage=60, stale-while-revalidate=120" },
   });
 }

@@ -1388,12 +1388,23 @@ export default function GrantPage() {
   // first time it exists (resign-anchor.ts says why only once).
   const resignJumped = useRef(false);
   useEffect(() => {
-    const present = document.getElementById(RESIGN_ANCHOR) !== null;
-    if (!shouldJumpToResign(window.location.hash, resignJumped.current, present)) return;
-    resignJumped.current = true;
-    // Instant, like a real anchor jump: a smooth scroll is driven by animation
-    // frames, which a hidden tab or an in-app browser may never deliver.
-    document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "start" });
+    const reveal = () => {
+      const present = document.getElementById(RESIGN_ANCHOR) !== null;
+      if (!shouldJumpToResign(window.location.hash, resignJumped.current, present)) return;
+      resignJumped.current = true;
+      // Instant, like a real anchor jump: a smooth scroll is driven by animation
+      // frames, which a hidden tab or an in-app browser may never deliver.
+      document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "start" });
+    };
+    const followLink = () => {
+      // An explicit link (including a repeated click) is a new request to see
+      // the section. Ordinary balance/form updates retain the one-time guard.
+      resignJumped.current = false;
+      reveal();
+    };
+    reveal();
+    window.addEventListener("hashchange", followLink);
+    return () => window.removeEventListener("hashchange", followLink);
   }, [wizStep, grant, serverArmed, replacementRequired]);
 
   // SIGNED IN ON THIS SCREEN. It loads the grant once, on mount, as whoever
