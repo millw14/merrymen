@@ -94,7 +94,7 @@ import {
   type XAccount,
   type XPost,
 } from "./xpost/store";
-import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, draft, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, xpostModel, xpostModelWarning, type AnswerIntentKind, type WriterFacts, type XStyle } from "./xpost/writer";
+import { answerPrompt, answerQuestion, buyPrompt, casualPrompt, checkPrompt, INSIGHT_VOCABULARY, insightPrompt, introPrompt, introTemplate, modelAnswers, replyPrompt, sellPrompt, sherwoodClaimed, sherwoodMentioned, sherwoodNamed, tryDraft, xpostModel, xpostModelWarning, type AnswerIntentKind, type DraftResult, type WriterFacts, type XStyle } from "./xpost/writer";
 import { appendPublicToken, appendPublicWallet, hasPublicWallet, publicTokenStillAllowed, publicWalletStillAllowed, type PublicWallet } from "./xpost/public-wallet";
 import { readPublicProjectDescription } from "./orchestrator-xpost-project";
 import { banterAsk, boughtNames, carriesResearch, classifyTag, createXResearch, generalTradesQuestion, MARKET_MAJORS, modelNamed, namesACoin, ownCoinTicker, sayable, selfAsk, unshowableName, type ResearchBundle, type TagIntent, type XResearch } from "./orchestrator-xpost-research";
@@ -198,6 +198,25 @@ const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "u
 const CHAT_LINE_KINDS: ReadonlySet<string> = new Set(["chat", "own-trades", "capabilities", "onboarding"]);
 /** Log counters that describe a standing condition rather than something that happened. */
 const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed", "active-reply-polls-spent"]);
+/** The most reasons said after one count; the rest are counted, not named. */
+const WHYS_SAID = 4;
+
+/**
+ * A count's reasons as the log says them: " (insight no-draft:timeout, buy
+ * gate:too-short x2)". Operator codes only, and held to their alphabet here
+ * too (lowercase letters, digits, ":", "-", "_", one space between kind and
+ * reason, at most 64 characters each), so nothing a model or a provider wrote
+ * could ever reach the line through one.
+ */
+export function whyText(whys: ReadonlyMap<string, number> | undefined): string {
+  if (!whys?.size) return "";
+  const said = [...whys].slice(0, WHYS_SAID).map(([why, n]) => {
+    const code = why.toLowerCase().replace(/\s+/g, " ").replace(/[^a-z0-9:_ -]+/g, "").replace(/ +/g, " ").trim().slice(0, 64) || "unknown";
+    return n > 1 ? `${code} x${n}` : code;
+  });
+  const more = whys.size - said.length;
+  return ` (${said.join(", ")}${more > 0 ? `, +${more} more` : ""})`;
+}
 
 // ── the knobs ───────────────────────────────────────────────────────────────
 
@@ -973,7 +992,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const started = monotonic();
       const at = () => nowMs + Math.max(0, Math.round(monotonic() - started));
       const counts = new Map<string, number>();
-      const bump = (k: string, n = 1) => counts.set(k, (counts.get(k) ?? 0) + n);
+      /** Why, by count: a skip's kind and reason, operator codes only (writeIntent's `why`), said after its count. */
+      const details = new Map<string, Map<string, number>>();
+      const bump = (k: string, n = 1, detail?: string) => {
+        counts.set(k, (counts.get(k) ?? 0) + n);
+        if (!detail) return;
+        const d = details.get(k) ?? new Map<string, number>();
+        d.set(detail, (d.get(detail) ?? 0) + n);
+        details.set(k, d);
+      };
       ownerFailure = "";
       try {
         await ensureXpostSchema(shared, dialect);
@@ -1392,7 +1419,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           await sweep(at(), (post) => post.kind === "answer" && comments.has(post.xUserId) && drafted.has(post.xUserId));
         }
 
-        return { log: summary(counts, nowMs), ...(notes.length ? { notes } : {}) };
+        return { log: summary(counts, nowMs, details), ...(notes.length ? { notes } : {}) };
       } catch (e) {
         const text = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200);
         if (!lastFail || lastFail.text !== text || nowMs - lastFail.at > 20 * MIN) {
@@ -1495,7 +1522,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     profiles: Map<string, ChatProfile>,
     nowMs: number,
     at: () => number,
-    bump: (k: string, n?: number) => void,
+    bump: (k: string, n?: number, detail?: string) => void,
     zoneOf: (tenant: string, consentTz: string | null) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
     comments: Map<string, XReply[]>,
     /** Only the answers to this pass's batches: its posts' plan is not due (see the step). */
@@ -1614,7 +1641,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           }
           const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, shownOwn, recentFleet, talked);
           if (r.outcome === "key-spent") continue;
-          bump(r.outcome);
+          bump(r.outcome, 1, r.why);
           if (r.outcome === "no-model-budget") {
             model = false;
             continue;
@@ -1659,7 +1686,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               : await writeReply(shared, account, f, comments.get(account.xUserId)!, z.tz, at, recentOwn, shownOwn, recentFleet);
             if (!result) break;
             answerDrafts++;
-            bump(result.body ? (isActive ? "drafted-answer" : "drafted-reply") : (isActive ? "answer-skipped" : "reply-skipped"));
+            bump(result.body ? (isActive ? "drafted-answer" : "drafted-reply") : (isActive ? "answer-skipped" : "reply-skipped"), 1, result.why);
             if (result.body) {
               if (isActive) answered.add(account.xUserId);
               recentOwn.unshift(result.body);
@@ -1723,7 +1750,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
     at: () => number, recentOwn: string[], shownOwn: string[], recentFleet: string[], said: string[], posts: readonly XPost[] = [],
     bump: (k: string, n?: number) => void = () => {}, sendBy = Number.POSITIVE_INFINITY,
-  ): Promise<{ body: string | null; lookedUp?: boolean } | null> {
+  ): Promise<{ body: string | null; lookedUp?: boolean; why?: string } | null> {
     if (!creds) return null;
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
@@ -2180,14 +2207,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // said lately, none. A paper agent's lines say paper: it is gated as a
       // paper reply.
       const lines = templated ? modelAnswers(comment.id, facts.style, lineOpts) : chatLines.length ? chatLines : market;
-      const raw = coded
-        ? lines[0]!
+      const out: DraftResult = coded
+        ? { ok: true, text: lines[0]! }
         // A LARP CHECK IN ITS OWN VOICE (writer.ts checkPrompt): the take code reached, texted back casually.
         : asked.kind === "check"
-        ? await draft(creds, checkPrompt({ ...facts, question: candidate.text, research: looked?.research ?? [], ...(looked?.creatorClaim ? { creatorClaim: looked.creatorClaim } : {}) }),
+        ? await tryDraft(creds, checkPrompt({ ...facts, question: candidate.text, research: looked?.research ?? [], ...(looked?.creatorClaim ? { creatorClaim: looked.creatorClaim } : {}) }),
           { call: deps.llm, timeoutMs: deps.draftTimeoutMs })
-        : await draft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
+        : await tryDraft(creds, answerPrompt({ ...facts, question: candidate.text, recentBuys: buys, boughtLately: boughtKind(f),
           said: said.map(withoutReplyOptOut), walletPublic, coinNamed, general, ...(looked ?? {}) }), { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+      const raw = out.ok ? out.text : null;
       const mode = f.mode === "idle" ? null : f.mode;
       // AN ANSWER NOT TOLD ITS BUYS, BACKSTOPPED AT THE GATE (red-team 2026-10-12):
       // a tag that named a coin, or any question that is not a plain one about
@@ -2380,16 +2408,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // greeting or banter was one a follow-up may be chatted under
       // (ANSWER_PLAIN_THREAD, still read on older rows); neither is answered
       // since 2026-10-13, so every answer closes its thread.
+      const reason = body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
+        : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : accused ? "gate:accusation"
+        : verdict && !verdict.ok ? `gate:${verdict.reason}` : out.ok ? "no-draft" : `no-draft:${out.reason}`;
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "answer", dedupeKey, body: body ?? "",
         coin: lookedUp ? ANSWER_LOOKED_UP : null, decisionId: null, dueAtMs: finishedAt, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: comment.id, replyAuthorId: comment.authorId,
         status: body ? "scheduled" : "skipped",
-        reason: body ? null : claimed ? "gate:sherwood-claim" : named || postsName ? "gate:sherwood-drafted" : unlooked ? "gate:unlooked-source"
-          : unlookedCoin ? "gate:unlooked-coin" : untrusted ? "gate:trust-talk" : pointed ? "gate:deictic-pick" : accused ? "gate:accusation"
-          : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+        reason,
       });
-      return id === null ? null : { body, lookedUp };
+      return id === null ? null : { body, lookedUp, ...(reason ? { why: reason } : {}) };
     }
     return null;
   }
@@ -2397,7 +2426,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   async function writeReply(
     shared: Db, account: XAccount, f: AgentFacts, comments: XReply[], tz: string | null,
     at: () => number, recentOwn: string[], shownOwn: string[], recentFleet: string[],
-  ): Promise<{ body: string | null; lookedUp?: boolean } | null> {
+  ): Promise<{ body: string | null; lookedUp?: boolean; why?: string } | null> {
     if (!creds) return null;
     const nowMs = at();
     const consentAt = await replyConsentAt(shared, account.tenant, account.xUserId);
@@ -2428,7 +2457,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const facts = writerFacts(f, localDay(tz, nowMs), shownOwn);
       const paper = fill.paper;
       const prompt = replyPrompt({ ...facts, parentBody: parent.body, comment: candidate.text, coin: coin.label, paper });
-      const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+      const out = await tryDraft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+      const raw = out.ok ? out.text : null;
       // A drafted reply never names sherwood: only an answer's code-built line
       // does. Read on its letters, in the draft and in what would be posted.
       const named = raw !== null && (sherwoodNamed(raw) || sherwoodMentioned(raw));
@@ -2446,13 +2476,15 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const finalDueAt = replyDueAt({ parent, authorId: comment.authorId, commentAtMs: comment.createdAtMs,
         posts, tenant: account.tenant, xUserId: account.xUserId, nowMs: finishedAt, tz, clock: PLAN_CLOCK, perDay: cadenceOf(account.tenant).perDay, ownerPerDay: account.prefs.perDay });
       const body = finalDueAt !== null && verdict?.ok ? verdict.text : null;
+      const reason = body ? null : finalDueAt === null ? "stale" : named || postsName ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}`
+        : out.ok ? "no-draft" : `no-draft:${out.reason}`;
       const id = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "reply", dedupeKey, body: body ?? "",
         coin: parent.coin, decisionId: parent.decisionId, dueAtMs: finalDueAt ?? dueAtMs, nowMs: finishedAt,
         replyToTweetId: comment.id, replyRootTweetId: parent.tweetId!, replyAuthorId: comment.authorId,
-        status: body ? "scheduled" : "skipped", reason: body ? null : finalDueAt === null ? "stale" : named || postsName ? "gate:sherwood-drafted" : verdict && !verdict.ok ? `gate:${verdict.reason}` : "no-draft",
+        status: body ? "scheduled" : "skipped", reason,
       });
-      return id === null ? null : { body };
+      return id === null ? null : { body, ...(reason ? { why: reason } : {}) };
     }
     return null;
   }
@@ -2463,13 +2495,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
    * condition (the model's allowance spent, an owner whose plan keeps
    * failing) is said when it changes, or every twenty minutes while it
    * lasts, not every minute. A post waiting for its owner to wake is not news.
+   * A SKIP SAYS WHY (2026-10-17): "not-posted 2 (insight no-draft:timeout,
+   * buy gate:too-short)", the kind and the reason its row keeps, so a slot
+   * that went nowhere is read in the log, not only in xpost_posts.reason.
    */
-  function summary(counts: Map<string, number>, nowMs: number): string | null {
+  function summary(counts: Map<string, number>, nowMs: number, details: Map<string, Map<string, number>> = new Map()): string | null {
     const events: string[] = [];
     const conditions: string[] = [];
     for (const [k, n] of counts) {
       if (k === "waiting") continue;
-      const part = k === "owner-failed" && ownerFailure ? `${k} ${n} (${ownerFailure})` : `${k} ${n}`;
+      const part = k === "owner-failed" && ownerFailure ? `${k} ${n} (${ownerFailure})` : `${k} ${n}${whyText(details.get(k))}`;
       (CONDITIONS.has(k) ? conditions : events).push(part);
     }
     const text = conditions.join(", ");
@@ -2523,7 +2558,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     shownOwn: string[],
     recentFleet: string[],
     talked: string[] = [],
-  ): Promise<{ outcome: string; body: string | null }> {
+  ): Promise<{ outcome: string; body: string | null; why?: string }> {
     // A KEY ALREADY SPENT IS NOT DRAFTED AGAIN. The plan weighs the X
     // account's history, so a key this owner wrote for the X account it had
     // connected earlier (today's casual key, say) is not in it and comes back
@@ -2620,15 +2655,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       const spec = recapFigures(intent);
       const lined = said ? (figuresFor(said, spec, ownNamesOf(f.name), []) ?? figuresFor(said, spec.filter((x) => x.kind !== "traded"), ownNamesOf(f.name), [])) : null;
       const recapBody = lined?.line ? lined.text : null;
+      const recapReason = said ? "recap-figures-left-out" : why;
       const written = await schedulePost(shared, {
         tenant: account.tenant, xUserId: account.xUserId, kind: "recap", dedupeKey: intent.dedupeKey, body: recapBody ?? "",
         // WHAT IT COVERS, IN THE SAME INSERT (planner.ts recapCoverText): no
         // later plan posts those trades one by one or recaps them again.
         coin: recapCoverText(intent.covers), decisionId: null, dueAtMs: intent.dueAtMs, nowMs,
-        status: recapBody ? "scheduled" : "skipped", reason: recapBody ? null : said ? "recap-figures-left-out" : why,
+        status: recapBody ? "scheduled" : "skipped", reason: recapBody ? null : recapReason,
       });
       if (written === null) return { outcome: "already-written", body: null };
-      return { outcome: recapBody ? "drafted-recap" : "not-posted", body: recapBody };
+      if (recapBody) return { outcome: "drafted-recap", body: recapBody };
+      return { outcome: "not-posted", body: null, why: `recap ${recapReason}` };
     } else {
       // A trade-talk day is handed no seed, any other day no coin: neither is
       // offered, or vouched to the gate, on the day it is not about.
@@ -2660,13 +2697,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let reason = "no-model";
     if (creds) {
       if (await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs)) {
-        // Null is PASS, an empty answer, an error or a timeout alike: the key
-        // is spent either way, so a model outage costs posts, never a loop of
-        // calls on the allowance.
-        const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
-        if (raw === null) reason = "no-draft";
+        // PASS, an empty answer, an error or a timeout alike spend the key, so
+        // a model outage costs posts, never a loop of calls on the allowance;
+        // which one it was is kept (no-draft:timeout, no-draft:groq-429).
+        const out = await tryDraft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
+        if (!out.ok) reason = `no-draft:${out.reason}`;
         else {
-          const v = admitXPost(raw, gate, BASE_GATE);
+          const v = admitXPost(out.text, gate, BASE_GATE);
           if (v.ok && projectDescription && !/\bproject says\b/i.test(v.text)) reason = "gate:project-attribution";
           else if (v.ok) body = v.text;
           else reason = `gate:${v.reason}`;
@@ -2764,6 +2801,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       reason: body ? null : reason,
     });
     if (written === null) return { outcome: "already-written", body: null };
-    return { outcome: body ? (insight ? "drafted-insight" : `drafted-${intent.kind}`) : "not-posted", body };
+    if (body) return { outcome: insight ? "drafted-insight" : `drafted-${intent.kind}`, body };
+    // The skip says why in the pass's line: the kind and the reason the row keeps, an operator code only.
+    return { outcome: "not-posted", body: null, why: `${insight ? "insight" : intent.kind} ${reason}` };
   }
 }

@@ -1458,8 +1458,44 @@ export function xpostModelWarning(creds: LlmCreds | null, env: Env): string | nu
 const PASS_LINE = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
 
 /**
- * One draft from the model, or null. Null on a timeout, a thrown error, an
- * empty answer or PASS — a failure costs a post, never a throw.
+ * WHY THERE IS NO DRAFT, as an operator code (stored as `no-draft:<code>` and
+ * said in the pass's count line): `pass`, `empty` (an empty answer),
+ * `out-of-tokens` (a reasoning model spent the budget before writing),
+ * `timeout`, `<provider>-<status>` (`groq-429`), `network`, or `error` for any
+ * other throw. Never the model's words and never the provider's message: only
+ * the provider's id from config and a three-digit status are read off a failure.
+ */
+export type DraftMiss = "pass" | "empty" | "out-of-tokens" | "timeout" | "network" | "error" | `${string}-${number}`;
+
+export type DraftResult = { ok: true; text: string } | { ok: false; reason: DraftMiss };
+
+/** The provider's id, letters and digits only (`creds.provider` is config, e.g. "groq"). */
+function providerCode(creds: LlmCreds): string {
+  return String(creds.provider ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 16) || "llm";
+}
+
+/**
+ * A thrown call, read for its kind only. llmText throws `<provider> <status> —
+ * <detail>` for an HTTP refusal (llm.ts providerFailure) and `<provider>
+ * <model> returned an empty reply` / `ran out of tokens` for a 200 with no
+ * text; the SDK's own errors carry `status`. Only the status digits leave here.
+ */
+function missOf(creds: LlmCreds, e: unknown): DraftMiss {
+  const message = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  const own = typeof (e as { status?: unknown } | null)?.status === "number" ? (e as { status: number }).status : null;
+  const said = /^\S+ ([1-5]\d\d)(?:\s|$)/.exec(message)?.[1];
+  const status = own !== null && Number.isInteger(own) && own >= 100 && own <= 599 ? own : said ? Number(said) : null;
+  if (status !== null) return `${providerCode(creds)}-${status}`;
+  if (/ran out of tokens before writing a reply/.test(message)) return "out-of-tokens";
+  if (/returned an empty reply/.test(message)) return "empty";
+  if (/fetch failed|network request failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN/i.test(message)) return "network";
+  return "error";
+}
+
+/**
+ * One draft from the model, or why not. Not a draft on a timeout, a thrown
+ * error, an empty answer or PASS — a failure costs a post, never a throw — and
+ * the result says which (DraftMiss), so a skipped slot is never silent.
  *
  * THE TEXT THAT WAS JUDGED IS THE TEXT RETURNED: trimmed, with the quotes the
  * model wrapped round it taken off — the same string the PASS and empty checks
@@ -1471,11 +1507,11 @@ const PASS_LINE = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
  * stops the pass from waiting, and the losing promise is caught so it cannot
  * surface later as an unhandled rejection.
  */
-export async function draft(
+export async function tryDraft(
   creds: LlmCreds,
   prompt: Prompt,
   opts: { timeoutMs?: number; call?: typeof llmText } = {},
-): Promise<string | null> {
+): Promise<DraftResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const call = opts.call ?? llmText;
@@ -1483,22 +1519,33 @@ export async function draft(
     const answer = Promise.resolve()
       .then(() => call(creds, { system: prompt.system, prompt: prompt.prompt, maxTokens: 400 }))
       .then(
-        (v) => (typeof v === "string" ? v : null),
-        () => null,
+        (v): DraftResult => (typeof v === "string" ? { ok: true, text: v } : { ok: false, reason: "empty" }),
+        (e): DraftResult => ({ ok: false, reason: missOf(creds, e) }),
       );
-    const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), timeoutMs);
+    const timeout = new Promise<DraftResult>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, reason: "timeout" }), timeoutMs);
     });
     const out = await Promise.race([answer, timeout]);
-    if (out === null) return null;
-    const text = out.trim().replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
-    if (text === "" || PASS_LINE.test(text)) return null;
-    return text;
-  } catch {
-    return null;
+    if (!out.ok) return out;
+    const text = out.text.trim().replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
+    if (text === "") return { ok: false, reason: "empty" };
+    if (PASS_LINE.test(text)) return { ok: false, reason: "pass" };
+    return { ok: true, text };
+  } catch (e) {
+    return { ok: false, reason: missOf(creds, e) };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/** One draft from the model, or null (tryDraft, without the why). */
+export async function draft(
+  creds: LlmCreds,
+  prompt: Prompt,
+  opts: { timeoutMs?: number; call?: typeof llmText } = {},
+): Promise<string | null> {
+  const out = await tryDraft(creds, prompt, opts);
+  return out.ok ? out.text : null;
 }
 
 // ── the intro without a model ───────────────────────────────────────────────

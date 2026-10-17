@@ -22,7 +22,7 @@ process.env.MERRYMEN_X_CLIENT_SECRET = "x-client-secret-never-to-a-child";
 process.env.MERRYMEN_XPOST_LLM_KEY = "gsk_x_only_key_never_to_a_child";
 
 const { childEnv } = await import("./orchestrator");
-const { X_MUSINGS, X_TAKES, casualInputs, casualSeed, makeXPoster, talkedOf, tradeTalkDay, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { X_MUSINGS, X_TAKES, casualInputs, casualSeed, makeXPoster, talkedOf, tradeTalkDay, whyText, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
 const { TRAIT_VOICE } = await import("./groupchat/templates");
 const { admitAgentLine } = await import("./groupchat/policy");
 const { isAsleep } = await import("./groupchat/clock");
@@ -335,7 +335,10 @@ function poster(
     others?: Record<string, CallFact[]>;
     tz?: string | null;
     creds?: LlmCreds | null;
-    answer?: (prompt: string) => string;
+    /** The model's answer: a text, a throw (a provider's failure), or a promise that never settles (a timeout). */
+    answer?: (prompt: string) => string | Promise<string>;
+    /** How long a draft is waited for. Default: the writer's own. */
+    draftTimeoutMs?: number;
     llmPerDay?: number;
     fleetPerDay?: number;
     perDay?: number;
@@ -372,6 +375,7 @@ function poster(
       saleCard: over.saleCard,
       renderCard: over.renderCard,
       publicProjectDescription: over.publicProjectDescription,
+      ...(over.draftTimeoutMs ? { draftTimeoutMs: over.draftTimeoutMs } : {}),
       llm: async (_creds, { prompt }) => {
         w.prompts.push(prompt);
         return answer(prompt);
@@ -471,7 +475,7 @@ describe("owner-scoped token contracts", () => {
         },
         answer: () => scenario === "attributed" ? "pepe's project says it helps people share art. i bought on paper because the pool was deep." : BUY,
       });
-      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      const log = (await p.step(w.db, ROSTER, new Map(), T0 + MIN)).log ?? "";
       const post = (await rows(w)).find((r) => r.kind === "buy")!;
       assert.ok(post);
       assert.equal(reads, scenario === "balanced" ? 0 : 1);
@@ -481,6 +485,7 @@ describe("owner-scoped token contracts", () => {
       if (scenario === "unattributed") {
         assert.equal(post.status, "skipped");
         assert.equal(post.reason, "gate:project-attribution");
+        assert.match(log, /\bnot-posted 1 \(buy gate:project-attribution\)/);
       } else {
         assert.equal(post.status, "scheduled");
         assert.match(post.body, /\n\n0x[0-9a-f]{40}$/);
@@ -836,10 +841,50 @@ describe("one step after another", () => {
     assert.equal((await rows(w))[0]?.status, "scheduled", "the template stood in");
     await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
     const r = await rows(w);
-    assert.deepEqual(r.map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", "no-draft"]]);
+    assert.deepEqual(r.map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", "no-draft:pass"]]);
     assert.equal(r[1]?.body, "", "nothing refused is kept");
     await p.step(w.db, ROSTER, new Map(), T0 + 13 * MIN);
     assert.equal(w.prompts.length, 2, "the skipped buy is not drafted again");
+  });
+
+  it("a skipped slot says why in the pass's line: its kind and the code its row keeps, never the draft or the provider's words", async (t) => {
+    const cases: [string, Parameters<typeof poster>[1], string][] = [
+      ["a PASS", { answer: (p) => (/very first post/.test(p) ? INTRO : "PASS") }, "no-draft:pass"],
+      ["an empty answer", { answer: (p) => (/very first post/.test(p) ? INTRO : "  ") }, "no-draft:empty"],
+      ["a provider's refusal", { answer: (p) => {
+        if (/very first post/.test(p)) return INTRO;
+        throw new Error("groq 429 — rate_limit_exceeded: Rate limit reached for model m in organization org_private on tokens per day");
+      } }, "no-draft:groq-429"],
+      ["a reasoning model out of tokens", { answer: (p) => {
+        if (/very first post/.test(p)) return INTRO;
+        throw new Error("groq m ran out of tokens before writing a reply (spent 400 on reasoning) — raise maxTokens or pick a model that does not reason");
+      } }, "no-draft:out-of-tokens"],
+      ["a timeout", { draftTimeoutMs: 20, answer: (p) => (/very first post/.test(p) ? INTRO : new Promise<string>(() => {})) }, "no-draft:timeout"],
+      ["a draft too short", { answer: (p) => (/very first post/.test(p) ? INTRO : "pepe, paper") }, "gate:too-short"],
+      ["an alert", { answer: (p) => (/very first post/.test(p) ? INTRO : "BUY ALERT: picked up pepe on paper, curve early") }, "gate:alert"],
+    ];
+    for (const [what, over, reason] of cases) {
+      const w = await world(t, T0);
+      const p = poster(w, { ...over, calls: [call({ decisionId: "d-pepe", atSec: (T0 + 2 * MIN) / 1000 })] });
+      await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+      const log = (await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN)).log;
+      // The whole line, exactly: the kind and the code, and nothing of the draft or the provider's message.
+      assert.equal(log, `xpost: sent 1, not-posted 1 (buy ${reason})`, what);
+      assert.deepEqual((await rows(w)).map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", reason]], what);
+    }
+  });
+
+  it("a pass's reasons are said once each, counted, at most four, and held to an operator code's letters", () => {
+    assert.equal(whyText(undefined), "");
+    assert.equal(whyText(new Map()), "");
+    assert.equal(whyText(new Map([["casual no-draft:timeout", 1]])), " (casual no-draft:timeout)");
+    assert.equal(whyText(new Map([["insight no-draft:groq-429", 2], ["buy gate:too-short", 1]])), " (insight no-draft:groq-429 x2, buy gate:too-short)");
+    const many = new Map(["a", "b", "c", "d", "e", "f"].map((k) => [`casual gate:${k}`, 1]));
+    assert.equal(whyText(many), " (casual gate:a, casual gate:b, casual gate:c, casual gate:d, +2 more)");
+    // Whatever reached it, nothing but a code's alphabet is said, and never more than sixty-four characters of one.
+    assert.equal(whyText(new Map([["Buy gate:<b>\"$PEPE\"</b>\n@you https://x.co/?k=1", 1]])), " (buy gate:bpepeb you https:xcok1)");
+    assert.equal(whyText(new Map([["x".repeat(200), 1]])), ` (${"x".repeat(64)})`);
+    assert.equal(whyText(new Map([["$$$", 1]])), " (unknown)");
   });
 
   it("a draft the gate refuses is written off with its reason, and never posted", async (t) => {

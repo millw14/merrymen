@@ -35,6 +35,7 @@ import {
   sherwoodClaimed,
   sherwoodMentioned,
   sherwoodNamed,
+  tryDraft,
   xpostCreds,
   xpostModel,
   xpostModelWarning,
@@ -650,6 +651,57 @@ describe("a draft is the model's answer, or null — never a throw", () => {
     assert.equal(await draft(ROOM, P, { call: () => { throw new Error("sync"); } }), null);
     assert.equal(await draft(ROOM, P, { call: () => new Promise(() => {}), timeoutMs: 20 }), null);
     assert.equal(await draft(ROOM, P, { call: async () => "passing thought: soup is great" }), "passing thought: soup is great", "a word that starts with pass is not PASS");
+  });
+
+  it("says why there is no draft: PASS, empty, out of tokens, a provider's status, the network, a timeout, or an error", async () => {
+    type Call = NonNullable<NonNullable<Parameters<typeof tryDraft>[2]>["call"]>;
+    const why = async (call: Call, timeoutMs?: number) => {
+      const out = await tryDraft(ROOM, P, { call, ...(timeoutMs ? { timeoutMs } : {}) });
+      return out.ok ? `text:${out.text}` : out.reason;
+    };
+    assert.equal(await why(async () => "PASS"), "pass");
+    assert.equal(await why(async () => '"pass."'), "pass");
+    assert.equal(await why(async () => "   "), "empty");
+    assert.equal(await why(async () => '""'), "empty", "only quotes is empty");
+    assert.equal(await why(async () => undefined as unknown as string), "empty");
+    assert.equal(await why(async () => Promise.reject(new Error("groq 429 — rate_limit_exceeded: Rate limit reached for model in organization org_secret"))), "groq-429");
+    assert.equal(await why(async () => Promise.reject(new Error("groq 503"))), "groq-503");
+    assert.equal(await why(async () => Promise.reject(Object.assign(new Error("Overloaded"), { status: 529 }))), "groq-529", "an SDK error's own status");
+    assert.equal(await why(async () => Promise.reject(new Error("groq openai/gpt-oss-120b ran out of tokens before writing a reply (spent 400 on reasoning) — raise maxTokens"))), "out-of-tokens");
+    assert.equal(await why(async () => Promise.reject(new Error("groq openai/gpt-oss-120b returned an empty reply (finish_reason: stop)"))), "empty");
+    assert.equal(await why(async () => Promise.reject(new TypeError("fetch failed"))), "network");
+    assert.equal(await why(async () => Promise.reject(new Error("anthropic network request failed"))), "network");
+    assert.equal(await why(() => { throw new Error("sync"); }), "error");
+    assert.equal(await why(async () => Promise.reject("a string, not an Error")), "error");
+    assert.equal(await why(() => new Promise(() => {}), 20), "timeout");
+    assert.equal(await why(async () => "passing thought: soup is great"), "text:passing thought: soup is great");
+    // The provider's id is read from config, letters and digits only.
+    const odd = await tryDraft({ ...ROOM, provider: "My Proxy/v2 <x>" }, P, { call: async () => Promise.reject(new Error("My 401")) });
+    assert.deepEqual(odd, { ok: false, reason: "myproxyv2x-401" });
+  });
+
+  it("reads llmText's own failures without carrying its message, a key or a model's words", async () => {
+    const realFetch = globalThis.fetch;
+    const reply = (status: number, body: unknown) => (async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })) as typeof fetch;
+    const cases: [typeof fetch, string][] = [
+      [reply(429, { error: { code: "rate_limit_exceeded", message: "Rate limit reached for gsk_room_key in org_123" } }), "groq-429"],
+      [reply(401, { error: { message: "Invalid API Key" } }), "groq-401"],
+      [reply(500, "upstream down"), "groq-500"],
+      [reply(200, { choices: [{ finish_reason: "length", message: { content: "", reasoning: "hmm, private thoughts" } }], usage: { completion_tokens_details: { reasoning_tokens: 398 } } }), "out-of-tokens"],
+      [reply(200, { choices: [{ finish_reason: "stop", message: { content: "" } }] }), "empty"],
+      [reply(200, { choices: [{ finish_reason: "stop", message: { content: "PASS" } }] }), "pass"],
+      [(async () => { throw new TypeError("fetch failed"); }) as typeof fetch, "network"],
+    ];
+    try {
+      for (const [fetch, reason] of cases) {
+        globalThis.fetch = fetch;
+        const out = await tryDraft(ROOM, P);
+        assert.deepEqual(out, { ok: false, reason }, reason);
+        assert.match(out.ok ? "" : out.reason, /^[a-z0-9-]{1,32}$/, "an operator code, nothing more");
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
 

@@ -226,6 +226,24 @@ test("no opt-out line on any answer, a person's first or their fifth, a greeting
   assert.ok(w.sends.slice(sent).every((s) => (s.reply as { in_reply_to_tweet_id: string }).in_reply_to_tweet_id !== "100000000000000508"), "nothing to someone who said stop");
 });
 
+test("a skipped answer says why in the pass's line, as its row keeps it: the model's failure or the gate's code, never its words (2026-10-17)", async (t) => {
+  const cases: [string, NonNullable<Parameters<typeof world>[1]>["answer"], string][] = [
+    ["a PASS", "PASS", "no-draft:pass"],
+    ["a provider's refusal", () => { throw new Error("groq 429 — rate_limit_exceeded: Rate limit reached in organization org_private"); }, "no-draft:groq-429"],
+    ["an empty reply", () => { throw new Error("groq test returned an empty reply (finish_reason: stop)"); }, "no-draft:empty"],
+    ["an opt-out in its own words", "doing good, keeping it chill. reply stop anytime if you want me gone.", "gate:opt-out-said"],
+  ];
+  for (const [what, answer, reason] of cases) {
+    const w = await world(t, { answer });
+    const r = await w.step();
+    const [row] = await w.answers();
+    assert.deepEqual([row?.status, row?.reason], ["skipped", reason], what);
+    assert.match(r.log ?? "", new RegExp(`\\banswer-skipped 1 \\(${reason}\\)`), `${what}: ${r.log}`);
+    assert.doesNotMatch(r.log ?? "", /rate_limit|org_private|finish_reason|keeping it chill/, what);
+    assert.equal(w.sends.length, 0, what);
+  }
+});
+
 test("a draft that words an opt-out its own way is never posted, and nothing replaces it with code's line (2026-10-12)", async (t) => {
   for (const draft of ["doing good, keeping it chill. reply stop anytime if you want me gone.", "doing good, keeping it chill, and you can opt out whenever."]) {
     const w = await world(t, { answer: draft });

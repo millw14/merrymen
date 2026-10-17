@@ -423,6 +423,46 @@ reply consent; it does not erase recipient opt-outs or published posts.
 
 `worker/src/xpost/store.ts` is the only code that touches them.
 
+### Why a post was skipped: the pass's line (2026-10-17)
+
+A skipped row keeps its reason in `xpost_posts.reason`, an operator code
+never shown publicly. The orchestrator's one line a pass says it too, after
+the count, with the kind of post it was, so a slot that went nowhere is read
+in the deploy log without a database query:
+
+```
+[orchestrator] xpost: not-posted 1 (insight no-draft:groq-429)
+[orchestrator] xpost: sent 1, not-posted 1 (buy gate:too-short)
+[orchestrator] xpost: answer-skipped 1 (gate:opt-out-said)
+```
+
+The kind is the intent's (`intro`, `buy`, `sell`, `casual`, `recap`), or
+`insight` for an active owner's market-insight slot. Up to four reasons are
+named per count, each with `xN` when it repeats, then `+N more`; each is held
+to lowercase letters, digits, `:`, `-` and `_`. `answer-skipped` and
+`reply-skipped` carry their reason the same way.
+
+When the model gives no draft, the reason says which way (`writer.ts`
+`tryDraft`):
+
+| Reason | What happened |
+|---|---|
+| `no-draft:pass` | the model answered PASS |
+| `no-draft:empty` | an empty answer (or only quotes) |
+| `no-draft:out-of-tokens` | a reasoning model spent `maxTokens` before writing (`finish_reason: length`) |
+| `no-draft:timeout` | no answer within the draft timeout (20 s) |
+| `no-draft:<provider>-<status>` | the provider refused, e.g. `no-draft:groq-429` (rate limit), `groq-400`, `groq-503`. Only the provider's id from config and the HTTP status; never the provider's message |
+| `no-draft:network` | the request never reached the provider |
+| `no-draft:error` | anything else thrown |
+
+Every other reason is unchanged: `gate:<code>` (the gate's refusal, e.g.
+`gate:too-short`, `gate:has-digits`, `gate:source-named`),
+`insight-figures-left-out`, `sale-outcome-invalid`,
+`token-disclosure-invalid`, `wallet-intro-invalid`, `recap-gate`,
+`recap-figures-left-out`, `template:<code>`, `sale-words:<code>`,
+`no-budget`. This is observability only: no gate, screen or allowance
+changed. Rows written before this release keep a bare `no-draft`.
+
 ## Configuration
 
 | Var | Where | Default | Meaning |
