@@ -554,10 +554,11 @@ export type FomoReadToolName =
   | "fomo_get_rankings"
   | "fomo_find_opportunities"
   | "fomo_research_coin"
-  | "fomo_get_research_status";
+  | "fomo_get_research_status"
+  | "fomo_ghost_pnl";
 
 /** Authorized mutations — a separate registry, never offered where read-only tools are. */
-export type FomoMutationToolName = "fomo_watch_coin" | "fomo_unwatch_coin" | "fomo_tail_trader" | "fomo_untail_trader" | "fomo_extend_tail";
+export type FomoMutationToolName = "fomo_watch_coin" | "fomo_unwatch_coin" | "fomo_tail_trader" | "fomo_untail_trader" | "fomo_extend_tail" | "fomo_record_tail_mark" | "fomo_ghost_config" | "fomo_ghost_enter";
 
 export type FomoToolName = FomoReadToolName | FomoMutationToolName;
 

@@ -1283,6 +1283,33 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   };
 
   /**
+   * /ghost for ONE sender (executor.ts CommandDeps.fomoGhost). Owner-gated
+   * like tailOps; config applies immediately through fomo_ghost_config and
+   * pnl reads through fomo_ghost_pnl. Fake money only, so no confirm card:
+   * nothing here can move real funds.
+   */
+  const ghostOps = (msg: Pick<TgMessage, "chatId" | "fromId">, cfg: ResolvedConfig): NonNullable<CommandDeps["fomoGhost"]> => {
+    const brokerNow = (): FomoBroker | null => (deps.fomoOff === true ? null : fomoBroker());
+    return {
+      owner: fomoOwnerDm(msg),
+      run: async (cmd) => {
+        const b = brokerNow();
+        if (!b) return esc(TAIL_UNAVAILABLE_TEXT);
+        if (cmd.op === "pnl") {
+          const env = await b.call("fomo_ghost_pnl", { days: 30 }, tailOpts(msg.chatId));
+          return tailAnswer(env);
+        }
+        const ref = cmd.handle ? { kind: "handle", value: cmd.handle } as const : null;
+        const env = await b.call("fomo_ghost_config", {
+          trader: ref, op: cmd.op,
+          amountMicro: cmd.amountMicro, mode: cmd.mode,
+        }, tailOpts(msg.chatId));
+        return tailAnswer(env);
+      },
+    };
+  };
+
+  /**
    * The capabilities one chat message may use, bound to WHO sent it.
    *
    * A factory rather than an object built inside `handle`, because a button
@@ -1666,6 +1693,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       },
       help: () => HELP_TEXT,
       fomoTails: tailOps(msg, cfg),
+      fomoGhost: ghostOps(msg, cfg),
       now,
     };
     return cmdDeps;

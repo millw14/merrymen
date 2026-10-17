@@ -179,7 +179,7 @@ function signal(token: TokenIdentity, over: Partial<ChildSignal> = {}): ChildSig
 
 /** Her considered tail of this trader, running for another two hours (the block the orchestrator writes beside tailTriggerKeys). */
 function consideredTail(userId: string, over: Partial<ChildTail> = {}): ChildTail {
-  return { userId, handle: "tailed", createdAt: T0 - 600_000, expiresAt: T0 + 2 * 3_600_000, ended: false, consider: true, events: [], totals: null, ...over };
+  return { userId, handle: "tailed", createdAt: T0 - 600_000, expiresAt: T0 + 2 * 3_600_000, ended: false, consider: true, events: [], totals: null, markTally: null, ...over };
 }
 
 function fileOf(signals: ChildSignal[], over: Partial<ChildFomoFile> = {}): ChildFomoFile {

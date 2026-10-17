@@ -178,6 +178,16 @@ export interface CommandDeps {
     /** /tails. `which`: she asked to stop one without saying which; the list asks, and nothing stops. */
     list(which?: boolean): Promise<string>;
   };
+  /**
+   * FOMO GHOST PAPER (docs/fomo.md "Ghost paper"), the service's. `owner`:
+   * the linked owner in her own DM, decided from trusted ids like fomoTails.
+   * Config applies immediately (no confirm card: fake money only); pnl reads.
+   */
+  fomoGhost?: {
+    owner: boolean;
+    /** Run one parsed /ghost command. */
+    run(cmd: Extract<Command, { kind: "ghost" }>): Promise<string>;
+  };
   now?: () => number;
 }
 
@@ -482,6 +492,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "unwatch":
       return deps.removeWatcher(cmd.id);
     // ── Fomo tails: the linked owner in her own DM, and nobody else ─────────
+    case "ghost": {
+      const g = deps.fomoGhost;
+      if (!g) return "Ghost paper isn't available here.";
+      if (!g.owner) return TAIL_OWNER_ONLY_TEXT;
+      return await g.run(cmd);
+    }
     case "tail":
     case "untail":
     case "tails": {
