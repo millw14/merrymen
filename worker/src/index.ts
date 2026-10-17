@@ -1,5 +1,6 @@
 import { EVIDENCE_BUDGET_MS, brainEvidence, readPoolEvidence } from "./venues/pool-evidence";
 import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
+import { errorText, guardStdio } from "./redact-urls";
 /**
  * merrymen worker — the 24/7 loop.
  *
@@ -729,6 +730,9 @@ const keyInstallTriedAt = new WeakMap<AgentExecutor, number>();
 const KEY_INSTALL_RETRY_MS = KEY_INSTALL_HOLD_MS;
 
 async function main() {
+  // FIRST, before anything can fail and print viem's error — which names the
+  // read RPC's URL, and with it the provider's key. See redact-urls.ts.
+  guardStdio();
   await initStore();
   const selftest = process.argv.includes("--selftest");
 
@@ -10863,7 +10867,10 @@ async function main() {
         }
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      // Redacted at the source: this text becomes the event, the reject_rule
+      // and the `autonomy| 1h refusals` line, and a viem error carries the RPC
+      // URL. Sliced below, so a key cut in half must already be gone.
+      const msg = errorText(e);
       console.error(`[execute] ${intent.kind} failed:`, msg);
 
       // ── WE DO NOT KNOW ──────────────────────────────────────────────────
@@ -15340,7 +15347,7 @@ async function main() {
   // Shared by the regular tick and the command tick: a command tick that
   // throws is the same silence, one owner's order closer to them.
   const tickFailed = async (e: unknown) => {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errorText(e);
     console.error("[tick]", e);
     if (active && msg !== lastTickError) {
       lastTickError = msg;

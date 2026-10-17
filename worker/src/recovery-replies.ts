@@ -60,6 +60,7 @@ import { RecoveryReplyBotLeases, type ReplyLease, type ReplyLeaseClient } from "
 import { getMe, getUpdates, sendMessage, sendPhotoBytes, esc, answerCallbackQuery, type TgMessage, type TgCallback, type TelegramOpts } from "./telegram/api";
 import { createRecoveryPublicReply, RECOVERY_PUBLIC_HELP, RECOVERY_PUBLIC_HELD, RECOVERY_PUBLIC_UNAVAILABLE, RECOVERY_PUBLIC_BUSY, RECOVERY_PUBLIC_BUTTON_HELD, isRecoveryPublicRequest, parseRecoveryPublicAsk } from "./telegram/recovery-public-reply";
 import { createRecoveryPublicLook } from "./telegram/recovery-public-transport";
+import { guardStdio } from "./redact-urls";
 interface ReplyConnection extends ReplyQuery {
     release(error?: Error): void;
     /**
@@ -1503,6 +1504,9 @@ export async function runRecoveryReplies(options: RecoveryReplyOptions = {}): Pr
     return signalled ? "stopped" : "one-pass";
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    // Its own Railway role, so nothing relays this output: it is guarded here.
+    // An error that names a keyed URL loses the key (redact-urls.ts).
+    guardStdio();
     // ONE LAST LINE, by how it ended: a clean stop on SIGTERM exits 0 with its
     // own line; a refusal exits 1 and names its fleet reason. Railway restarts
     // only the second (ON_FAILURE), and the line says which one happened.

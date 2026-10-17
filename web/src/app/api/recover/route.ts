@@ -31,13 +31,16 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 import { ownerFromPrivateKey, planRecovery, recoverFunds } from "@merrymen/recover";
+import { errorText } from "../../../../../worker/src/redact-urls";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const isKey = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{64}$/.test(v);
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
-const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+// Into a JSON response, and a failed read or send is viem's error: it names the
+// RPC or bundler URL, key included. See worker/src/redact-urls.ts.
+const msg = (e: unknown) => errorText(e);
 
 async function readGrant(): Promise<StoredGrant | null> {
   try {

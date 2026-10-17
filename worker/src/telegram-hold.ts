@@ -17,7 +17,11 @@
 import { resolveConfig } from "./settings";
 import { createStateRef, ensureLinkCode, retireLegacyCode } from "./telegram/state";
 import { startHoldTelegram } from "./telegram/hold";
+import { guardStdio } from "./redact-urls";
 
+// Like a trading child's main(): an error that names a keyed URL loses the key
+// before it is printed. The orchestrator's relay redacts it again on the way out.
+guardStdio();
 const tgState = createStateRef();
 const cfg = resolveConfig();
 if (cfg.telegramBotToken) {

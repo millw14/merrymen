@@ -33,6 +33,7 @@ import { ENERGY_WORDS } from "./energy-words";
 import type { SignReason } from "./sign-prompt";
 import { calculateChatMath, parseChatMath, STOCK_TOKENS } from "../../../packages/core/src/index";
 import { marketQuestionPlan, referencedTradeId, replyReferenceBlock, replyTradeNeedsClarification } from "./question-context";
+import { errorText } from "../redact-urls";
 
 /** Rounds of lookups before it must answer. */
 export const MAX_ROUNDS = 4;
@@ -214,7 +215,9 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
         try {
           output = tool ? await lookup(call.name, call.input ?? {}, i.tools) : `There is no lookup called ${call.name}.`;
         } catch (e) {
-          output = `That lookup failed (${e instanceof Error ? e.message.slice(0, 120) : "unknown error"}). Say you couldn't check it.`;
+          // To the model provider: a chain lookup fails as viem's error, which
+          // names the RPC URL and its key (redact-urls.ts).
+          output = `That lookup failed (${e instanceof Error ? errorText(e).slice(0, 120) : "unknown error"}). Say you couldn't check it.`;
         }
         markSignature(call.name, output);
         used.push(call.name);

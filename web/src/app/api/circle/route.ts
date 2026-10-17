@@ -64,6 +64,7 @@ import { holderWalletFor, type HolderWallet } from "@/lib/holder-wallet";
 import { agentAccountFor } from "@/lib/agent-account";
 import { countedAgent, readStanding, standingTokens } from "@/lib/merrymen-standing";
 import { createPublicClient } from "viem";
+import { errorText } from "../../../../../worker/src/redact-urls";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -196,7 +197,9 @@ export async function GET(req: Request) {
       holderBalance: null,
       agentBalance: null,
       tier: null,
-      error: e instanceof Error ? e.message : String(e),
+      // To the browser. A failed standing read is viem's error, which names the
+      // RPC URL and its key (worker/src/redact-urls.ts).
+      error: errorText(e),
       ...table,
     });
   }

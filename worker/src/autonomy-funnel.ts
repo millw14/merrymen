@@ -33,6 +33,7 @@
  *     unreported hold could not be seen beside them.
  */
 import { isGasRefusal, isMarketRefusal } from "./thesis-policy";
+import { redactUrls } from "./redact-urls";
 import { PRIVATE_REVIEW_SOURCE, RESEARCH_UNAVAILABLE_SOURCE, REVIEW_SOURCE } from "./market-review";
 
 /**
@@ -277,7 +278,11 @@ export function foldFunnel(
     const n = Number(r.n);
     if (!Number.isFinite(n) || n <= 0) continue;
     const status = String(r.status ?? "");
-    const rule = String(r.rule ?? "");
+    // A `couldn't submit: …` rule is an error's text, and rows written before
+    // redact-urls.ts carry the RPC URL with its key. This line is printed
+    // every few seconds for an hour after one, so it is redacted on the way
+    // out as well as on the way in. Prefixes, and so stages, are unchanged.
+    const rule = redactUrls(String(r.rule ?? ""));
     if (status === "rejected" && ADMISSION_RULES.has(rule)) {
       f.admissionHeld += n;
       continue;

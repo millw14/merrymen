@@ -143,6 +143,7 @@ import type { TgGroupsStore } from "./tg-groups/store";
 import type { TgCoinsPort, TgDeskPort, TgFomoPort, TgGroupFactsPort, TgOwnerOutcome, TgOwnerPort } from "./tg-groups/types";
 import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 import type { HeldGroupEntry } from "./held-groups";
+import { errorText } from "../redact-urls";
 
 /**
  * Commands that are really questions when they arrive as WORDS: answered by
@@ -2128,7 +2129,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     try {
       reply = await executeCommand(cmd, cmdDeps);
     } catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
+      // To the owner's chat, the event feed and the history the model replays.
+      // A trade, transfer or depth read fails as viem's error, RPC URL and key
+      // included (redact-urls.ts).
+      const m = errorText(e);
       deps.note("warn", `Telegram: ${cmd.kind} failed — ${m}`);
       // A command that failed INSIDE a model call (/why narration, say) would
       // otherwise echo "groq 401 — invalid_api_key: Invalid API Key" at the
@@ -2519,7 +2523,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         makeCmdDeps(cb, cfg, opts.token, {}),
       );
     } catch (e) {
-      result = `🚫 that failed: ${esc((e instanceof Error ? e.message : String(e)).slice(0, 200))}`;
+      result = `🚫 that failed: ${esc(errorText(e).slice(0, 200))}`;
     }
     await answerCallbackQuery(opts, cb.id, parsed.yes ? "Done" : "Cancelled");
     // The question becomes its answer, so it cannot be pressed twice.

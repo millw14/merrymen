@@ -47,6 +47,7 @@
  */
 import { llmAgentTurn, type AgentMsg, type AgentTurn, type LlmCreds, type ToolSpec } from "../llm";
 import type { Signals } from "./driver";
+import { errorText } from "../redact-urls";
 
 /** A page the model may ask for, by index. Assembled from on-chain metadata. */
 export interface DeskLink {
@@ -418,7 +419,8 @@ export async function runDesk(opts: {
           output = `no such tool: ${use.name}`;
         }
       } catch (e) {
-        output = `that could not be read: ${e instanceof Error ? e.message : String(e)}`;
+        // To the model provider, and a failed read is viem's error: URL and key (redact-urls.ts).
+        output = `that could not be read: ${errorText(e)}`;
       }
       results.push({ id: use.id, name: use.name, output: output.slice(0, 4_000) });
     }
