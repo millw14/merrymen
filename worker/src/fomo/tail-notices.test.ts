@@ -183,6 +183,31 @@ describe("which notices are due", () => {
     assert.deepEqual(r.notices.map((n) => n.kind), ["sell"]);
   });
 
+  it("a told buy carries its mark identity; the end summary says the settled tally", () => {
+    const r = pass(input([tail([ev(1)])], { assessmentOf: () => null, researched: false }));
+    assert.equal(r.notices.length, 1);
+    assert.deepEqual(r.notices[0]!.buyMark, {
+      eventKey: "ev-1",
+      traderUserId: UNI,
+      handle: "unipcs",
+      tokenKey: r.notices[0]!.buyMark!.tokenKey,
+      address: r.notices[0]!.buyMark!.address,
+      chainSlug: "robinhood",
+    });
+    const sell = pass(input([tail([ev(2, { kind: "sell" })])], { assessmentOf: () => null, researched: false }));
+    assert.equal(sell.notices[0]!.buyMark, undefined, "sells carry no mark");
+    const t = tail([], {
+      ended: true,
+      expiresAt: NOW - 5 * MIN,
+      totals: { buys: 4, sells: 1, theses: 2, coins: 3, capped: false },
+      markTally: { calls: 6, settledH1: 4, avgH1Pct: 25, hitRateH1: 0.75 },
+    });
+    const end = pass(input([t])).notices[0]!;
+    assert.match(end.html, /Their tailed calls so far: \+1h avg \+25\.0% over 4 settled, 75% green \(from 6 calls tailed\)\./);
+    const bare = pass(input([tail([], { ended: true, expiresAt: NOW - 5 * MIN, totals: { buys: 4, sells: 1, theses: 2, coins: 3, capped: false } })])).notices[0]!;
+    assert.doesNotMatch(bare.html, /tailed calls so far/, "nothing settled, nothing said");
+  });
+
   it("an ended tail's summary is told once, with its tally, and no buttons", () => {
     const t = tail([], { ended: true, expiresAt: NOW - 5 * MIN, totals: { buys: 4, sells: 1, theses: 2, coins: 3, capped: false } });
     const r = pass(input([t]));
