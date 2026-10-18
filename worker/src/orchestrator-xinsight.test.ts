@@ -37,7 +37,7 @@ const INSIGHT = "majors grinding a little higher on the day while the week stays
 const isInsight = (prompt: string) => /your read on the crypto market right now/.test(prompt);
 const isCasual = (prompt: string) => /Write one casual post/.test(prompt);
 
-async function world(t: TestContext, o: { active?: boolean; research?: XResearch | null; draft?: string; facts?: AgentFacts } = {}) {
+async function world(t: TestContext, o: { active?: boolean; research?: XResearch | null; draft?: string | (() => Promise<string>); facts?: AgentFacts } = {}) {
   const raw = new DatabaseSync(":memory:");
   t.after(() => raw.close());
   const db = wrapSqlite(raw), dek = randomBytes(32);
@@ -63,7 +63,7 @@ async function world(t: TestContext, o: { active?: boolean; research?: XResearch
     deps: { dialect: "sqlite", fetch, monotonic: () => 0, member: async () => ({ tz: null }), facts: async () => new Map([[TENANT, o.facts ?? FACTS]]),
       llm: async (_creds, input) => {
         prompts.push(`${input.system ?? ""}\n\n${input.prompt}`);
-        return isInsight(input.prompt) ? o.draft ?? INSIGHT : "PASS";
+        return isInsight(input.prompt) ? (typeof o.draft === "function" ? o.draft() : o.draft ?? INSIGHT) : "PASS";
       },
       ...(research ? { research: { gather: async (input) => { asked.push(input.intent.kind); return research.gather(input); } } } : {}),
     },
@@ -136,7 +136,7 @@ test("market data unreadable: the casual post as before, never an insight; and r
     assert.ok(w.prompts.some(isCasual), "the casual prompt");
     assert.ok(!w.prompts.some(isInsight), "no insight prompt");
     // The test model passes on a casual prompt: the slot is spent as before.
-    assert.deepEqual([row.status, row.reason], ["skipped", "no-draft"]);
+    assert.deepEqual([row.status, row.reason], ["skipped", "no-draft:pass"]);
   }
 });
 
@@ -148,8 +148,30 @@ test("an insight whose figures line cannot be put in is skipped, never posted on
     nowMs: NOW - DAY, dueAtMs: NOW - DAY });
   await store.claimPost(w.db, buy!, NOW - DAY);
   await store.markPosted(w.db, buy!, "998", NOW - DAY);
-  const { row } = await w.firstCasual();
+  const { row, log } = await w.firstCasual();
   assert.deepEqual([row.status, row.reason, row.body], ["skipped", "insight-figures-left-out", ""]);
+  assert.match(log, /not-posted 1 \(insight insight-figures-left-out\)/);
+});
+
+test("an insight slot that goes nowhere says why in the pass's line: the model's failure or the gate's code, never its words", async (t) => {
+  const cases: [string, Parameters<typeof world>[1], string][] = [
+    ["the house model rate-limited", { research: reading(), draft: async () => { throw new Error("groq 429 — rate_limit_exceeded: tokens per day (TPD): Limit 500000, Used 499812"); } }, "insight no-draft:groq-429"],
+    ["the house model down", { research: reading(), draft: async () => { throw new Error("groq 503 — service unavailable"); } }, "insight no-draft:groq-503"],
+    ["the house model unreachable", { research: reading(), draft: async () => { throw new TypeError("fetch failed"); } }, "insight no-draft:network"],
+    ["a PASS", { research: reading(), draft: "PASS" }, "insight no-draft:pass"],
+    ["a digit", { research: reading(), draft: "majors up 2% on the day, momentum concentrated onchain." }, "insight gate:has-digits"],
+    ["a source named", { research: reading(), draft: "per coingecko the majors are up a little on the day, volume thin." }, "insight gate:source-named"],
+    // No market read: the casual post as before, and its skip is a casual one.
+    ["no market read", { research: null }, "casual no-draft:pass"],
+  ];
+  for (const [what, o, why] of cases) {
+    const w = await world(t, o);
+    const { row, log } = await w.firstCasual();
+    assert.equal(row.status, "skipped", what);
+    // The whole line, exactly: the kind and the code, and nothing of the draft or the provider's message.
+    assert.equal(log, `xpost: not-posted 1 (${why})`, what);
+    assert.equal(row.reason, why.slice(why.indexOf(" ") + 1), `${what}: the row keeps the same code`);
+  }
 });
 
 test("every other owner's casual post is unchanged: no market read, the casual prompt", async (t) => {
