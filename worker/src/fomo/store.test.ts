@@ -1066,6 +1066,110 @@ describe("tails", () => {
   });
 });
 
+describe("tail marks", () => {
+  const rec = (db: Db, over: Record<string, unknown> = {}) =>
+    S.recordTailMark(db, {
+      tenant: A, eventKey: "ev-1", traderUserId: "u-1", handle: "@Uni", tokenKey: "k:t",
+      entryPrice8: "0.05000000", entryAtMs: T0, entryPool: "PONS / SOL", nowMs: T0, ...over,
+    } as Parameters<typeof S.recordTailMark>[1]);
+
+  it("records one mark per told buy and never remakes it", async () => {
+    const { db } = await fresh();
+    assert.equal(await rec(db), true);
+    assert.equal(await rec(db), false, "a retried tell never double-books");
+    assert.equal(await rec(db, { eventKey: "ev-2" }), true);
+    await assert.rejects(rec(db, { entryPrice8: "0.050000000" }), /decimal/, "prices keep 8dp shape");
+    await assert.rejects(rec(db, { eventKey: "ev-3", horizon: undefined, entryPrice8: null as never }), /decimal/);
+  });
+
+  it("due marks surface each untaken horizon once, oldest first", async () => {
+    const { db } = await fresh();
+    await rec(db, { eventKey: "ev-old", entryAtMs: T0 - 25 * HOUR });
+    await rec(db, { eventKey: "ev-new", entryAtMs: T0 - 30 * MIN });
+    const due = await S.dueTailMarks(db, A, T0, 10);
+    assert.deepEqual(due.map((m) => m.eventKey), ["ev-old"], "h1 and h24 both due on the old one, the new one due on neither");
+    assert.equal(await S.settleTailMark(db, { tenant: A, eventKey: "ev-old", horizon: "h1", price8: "0.10000000", atMs: T0 }), true);
+    assert.equal(await S.settleTailMark(db, { tenant: A, eventKey: "ev-old", horizon: "h1", price8: "0.20000000", atMs: T0 }), false, "first write wins");
+    const due2 = await S.dueTailMarks(db, A, T0, 10);
+    assert.deepEqual(due2.map((m) => m.eventKey), ["ev-old"], "h24 still due");
+    assert.deepEqual(await S.markTenants(db, T0, 10), [A.toLowerCase()], "a tenant with due horizons surfaces once");
+    assert.equal(await S.settleTailMark(db, { tenant: A, eventKey: "ev-old", horizon: "h24", price8: "0.02500000", atMs: T0 }), true);
+    assert.deepEqual(await S.dueTailMarks(db, A, T0, 10), [], "nothing due once both horizons land");
+    assert.equal(await S.settleTailMark(db, { tenant: B, eventKey: "ev-old", horizon: "h24", price8: "1", atMs: T0 }), false, "another tenant settles nothing");
+    assert.deepEqual(await S.markTenants(db, T0, 10), [], "nothing due, nobody surfaces");
+  });
+
+  it("reads one trader's marks newest first and keeps marks 90 days", async () => {
+    const { db } = await fresh();
+    await rec(db, { eventKey: "ev-1", entryAtMs: T0 - 2 * HOUR });
+    await rec(db, { eventKey: "ev-2", entryAtMs: T0 - HOUR });
+    await rec(db, { eventKey: "ev-x", traderUserId: "u-9", entryAtMs: T0 });
+    const rows = await S.tailMarksForTrader(db, A, "u-1", T0 - DAY);
+    assert.deepEqual(rows.map((m) => m.eventKey), ["ev-2", "ev-1"]);
+    assert.equal(rows[0]!.handle, "Uni", "the display handle loses the @");
+    assert.deepEqual(await S.tailMarksForTrader(db, A, "u-1", T0), [], "the window is honoured");
+    assert.equal(S.FOMO_RETENTION.tailMarksMs, 90 * DAY);
+    await S.pruneFomo(db, T0 + 91 * DAY);
+    assert.deepEqual(await S.tailMarksForTrader(db, A, "u-1", 0), [], "old marks prune");
+  });
+});
+
+describe("ghost paper", () => {
+  const prefs = (db: Db, over: Record<string, unknown> = {}) =>
+    S.setGhostPrefs(db, {
+      tenant: A, traderUserId: "u-1", enabled: true, mode: "scout-cut",
+      customUsdMicro: 0, capUsdMicro: 0, nowMs: T0, ...over,
+    } as Parameters<typeof S.setGhostPrefs>[1]);
+  const enter = (db: Db, over: Record<string, unknown> = {}) =>
+    S.enterGhostPosition(db, {
+      tenant: A, eventKey: "ev-1", traderUserId: "u-1", handle: "@Uni", tokenKey: "k:t",
+      entryPrice8: "0.05000000", sizeUsdMicro: 100_000_000, nowMs: T0, ...over,
+    } as Parameters<typeof S.enterGhostPosition>[1]);
+
+  it("prefs default to nothing, then stick", async () => {
+    const { db } = await fresh();
+    assert.equal(await S.getGhostPrefs(db, A, "u-1"), null);
+    await prefs(db);
+    const p = await S.getGhostPrefs(db, A, "u-1");
+    assert.equal(p?.enabled, true);
+    assert.equal(p?.mode, "scout-cut");
+    assert.equal(await S.getGhostPrefs(db, B, "u-1"), null, "another tenant reads nothing");
+  });
+
+  it("positions open once and settle each horizon once", async () => {
+    const { db } = await fresh();
+    assert.equal(await enter(db), true);
+    assert.equal(await enter(db), false, "a retried tell never double-papers");
+    assert.equal(await S.openGhostExposure(db, A), 100_000_000);
+    assert.equal(await S.settleGhostPosition(db, { tenant: A, eventKey: "ev-1", horizon: "h1", pnlMicro: 10_000_000, atMs: T0 }), true);
+    assert.equal(await S.settleGhostPosition(db, { tenant: A, eventKey: "ev-1", horizon: "h1", pnlMicro: 99, atMs: T0 }), false, "first write wins");
+    assert.equal(await S.openGhostExposure(db, A), 100_000_000, "still open until h24 lands");
+    assert.equal(await S.settleGhostPosition(db, { tenant: A, eventKey: "ev-1", horizon: "h24", pnlMicro: -5_000_000, atMs: T0 }), true);
+    assert.equal(await S.openGhostExposure(db, A), 0);
+    assert.equal(await S.settleGhostPosition(db, { tenant: B, eventKey: "ev-1", horizon: "h24", pnlMicro: 1, atMs: T0 }), false);
+    const rows = await S.ghostPositions(db, A, 0);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.h1PnlMicro, 10_000_000);
+    assert.equal(rows[0]!.h24PnlMicro, -5_000_000);
+    assert.equal((await S.ghostPosition(db, A, "ev-1"))?.sizeUsdMicro, 100_000_000, "the settle pass reads one position by event");
+    assert.equal(await S.ghostPosition(db, A, "ev-missing"), null);
+    assert.equal(await S.ghostPosition(db, B, "ev-1"), null, "another tenant reads nothing");
+  });
+
+  it("the kill switch and reset do what they say", async () => {
+    const { db } = await fresh();
+    await prefs(db);
+    await prefs(db, { traderUserId: "u-2" });
+    await enter(db);
+    assert.equal(await S.disableAllGhosts(db, A, T0), 2);
+    assert.equal((await S.getGhostPrefs(db, A, "u-1"))?.enabled, false);
+    assert.equal(await S.disableAllGhosts(db, A, T0), 0, "second stop switches off nothing");
+    assert.equal(await S.resetGhosts(db, A), 1);
+    assert.deepEqual(await S.ghostPositions(db, A, 0), []);
+    assert.equal((await S.getGhostPrefs(db, A, "u-1"))?.enabled, false, "reset wipes positions, prefs survive");
+  });
+});
+
 describe("tenant routes", () => {
   it("data access is the master switch, and a stale snapshot never undoes a newer one", async () => {
     const { db } = await fresh();

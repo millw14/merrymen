@@ -311,6 +311,11 @@ export interface TailNotice {
   key: string;
   tailUserId: string;
   kind: "buy" | "sell" | "thesis" | "end";
+  /**
+   * The told buy's mark identity (buys with a token only): the notifier
+   * prices it and the sender records the entry mark after the send lands.
+   */
+  buyMark?: { eventKey: string; traderUserId: string; handle: string | null; tokenKey: string; address: string; chainSlug: string };
   /** Telegram HTML, code-written and escaped; send with link previews off. */
   html: string;
   /** Stop and +1h for a running tail; none for an end summary. */
@@ -434,7 +439,12 @@ export function tailNotices(i: TailNoticeInput): { notices: TailNotice[]; log: T
     if (text.coveredThesis) recordGroup(log, groupKey(d.tail.userId, coinKey(text.coveredThesis), "thesis"), text.coveredThesis.at, i.now);
     // The last notice the cap allows says so, in the same claimed message (no extra send, no replay).
     const html = p.notices === TAIL_NOTICE_LIMITS.noticesPerTail ? `${text.html}\n${esc(TAIL_CAP_REACHED_LINE)}` : text.html;
-    push({ key: d.group, tailUserId: d.tail.userId, kind: d.ev.kind as TailNotice["kind"], html, buttons: buttonsFor(d.tail, i.now) });
+    const tok = d.ev.kind === "buy" ? d.ev.token : null;
+    const buyMark =
+      tok && tok.chain.slug
+        ? { eventKey: d.ev.eventKey, traderUserId: d.tail.userId, handle: d.tail.handle, tokenKey: tok.key, address: tok.address, chainSlug: tok.chain.slug }
+        : undefined;
+    push({ key: d.group, tailUserId: d.tail.userId, kind: d.ev.kind as TailNotice["kind"], html, buttons: buttonsFor(d.tail, i.now), ...(buyMark ? { buyMark } : {}) });
     return true;
   });
   for (const tail of i.tails) {
@@ -452,6 +462,11 @@ export function tailNotices(i: TailNoticeInput): { notices: TailNotice[]; log: T
 
 function esc(s: string): string {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** +12.3% or n/a: a leaderboard average with no settled sample is unknown, never zero. */
+function pct(x: number | null): string {
+  return x === null ? "n/a" : `${x >= 0 ? "+" : ""}${x.toFixed(1)}%`;
 }
 
 /** "14:05 UTC". */
@@ -715,9 +730,15 @@ function endSummary(tail: ChildTail, capped: boolean): string {
     ? `The feed showed ${t.buys} ${t.buys === 1 ? "buy" : "buys"}, ${t.sells} ${t.sells === 1 ? "sell" : "sells"} and ${t.theses} ${t.theses === 1 ? "thesis" : "theses"} across ${t.coins} ${t.coins === 1 ? "coin" : "coins"}${t.capped ? " (at least: I counted the first 500)" : ""}.`
     : "I couldn't count what the feed showed for it.";
   // The span is said: a tail continued after it ended sums from its first start.
+  const tally = tail.markTally;
+  const tallyLine =
+    tally && tally.settledH1 > 0
+      ? `Their tailed calls so far: +1h avg ${pct(tally.avgH1Pct)} over ${tally.settledH1} settled${tally.hitRateH1 === null ? "" : `, ${Math.round(tally.hitRateH1 * 100)}% green`} (from ${tally.calls} ${tally.calls === 1 ? "call" : "calls"} tailed).`
+      : null;
   return [
     `Tail on <b>${name}</b> (from ${clock(tail.createdAt)}) ended at ${clock(tail.expiresAt)}.`,
     counts,
+    ...(tallyLine ? [tallyLine] : []),
     ...(capped ? [esc(TAIL_CAP_SUMMARY_LINE)] : []),
     "Anything I entered came as a normal trade receipt.",
     esc(TAIL_COVERAGE),
