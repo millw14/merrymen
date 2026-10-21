@@ -1,6 +1,7 @@
 import { MessageSquare, Trophy, Search, UserRound, Layers, Activity, Wallet, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useAgentImageSrc } from "./agent-image-state";
+import { LogoMark } from "@/components/Logo";
 import { useWired } from "@/components/WiredProvider";
 import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
@@ -443,37 +444,7 @@ function SearchIcon() {
   );
 }
 
-export function LogoMark({ size = 22 }: { size?: number }) {
-  const w = Math.round(size * (940 / 630));
-  return (
-    <svg
-      className="logo-mark"
-      width={w}
-      height={size}
-      viewBox="0 0 940 630"
-      fill="currentColor"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden
-    >
-      <rect x="280" y="1" width="324" height="47" rx="23.5" />
-      <rect x="403" y="72" width="258" height="49" rx="24.5" />
-      <rect x="138" y="137" width="51" height="54" rx="25.5" />
-      <rect x="473" y="137" width="227" height="54" rx="27" />
-      <rect x="742" y="137" width="50" height="54" rx="25" />
-      <rect x="64" y="212" width="199" height="48" rx="24" />
-      <rect x="516" y="212" width="204" height="48" rx="24" />
-      <rect x="766" y="212" width="109" height="48" rx="24" />
-      <rect x="0" y="288" width="126" height="48" rx="24" />
-      <rect x="161" y="288" width="582" height="48" rx="24" />
-      <rect x="812" y="288" width="128" height="48" rx="24" />
-      <rect x="64" y="366" width="199" height="47" rx="23.5" />
-      <rect x="518" y="366" width="202" height="47" rx="23.5" />
-      <rect x="766" y="366" width="109" height="47" rx="23.5" />
-      <rect x="138" y="436" width="51" height="48" rx="24" />
-      <rect x="473" y="436" width="227" height="48" rx="24" />
-      <rect x="742" y="436" width="51" height="48" rx="24" />
-      <rect x="403" y="510" width="259" height="48" rx="24" />
-      <rect x="280" y="582" width="324" height="47" rx="23.5" />
-    </svg>
-  );
-}
+// The mark is drawn once, in components/Logo.tsx, which has no hooks so a
+// server component can render it as well. Re-exported so the tab bar, the
+// desktop rail and the connect lockup keep importing it from here.
+export { LogoMark };

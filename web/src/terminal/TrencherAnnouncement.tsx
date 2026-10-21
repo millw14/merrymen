@@ -43,7 +43,7 @@ export function TrencherAnnouncement({ hasAgent }: {
       });
       setVisible(act.show);
       if (act.notify) {
-        const notification = new Notification(TITLE, { body: MESSAGE, tag: RELEASE, icon: "/favicon.ico" });
+        const notification = new Notification(TITLE, { body: MESSAGE, tag: RELEASE, icon: "/icon-192.png" });
         localStorage.setItem(RELEASE + ":notified", "yes");
         notification.onclick = () => { window.focus(); window.location.assign("/settings#trencher-mode"); notification.close(); };
       }
