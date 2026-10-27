@@ -42,7 +42,10 @@ let restoredKeys: unknown[] = [];
 let previewOwner: (key: string, chainId: number) => Promise<{ smartAccount: string; owner: string }>;
 let stop: (expectedTenant?: string | null) => Promise<void>;
 let stopCalls = 0;
-let replacementStops: Array<{ tenant?: string | null; account: string; session?: string }> = [];
+let replacementStops: Array<{ wallet: string; tenant?: string | null; account: string; session?: string }> = [];
+let snapshotWallets: string[] = [];
+let localSnapshot: { current?: unknown; archived?: readonly unknown[] } = {};
+let snapshot: (wallet: string) => typeof localSnapshot;
 let destructiveStops = 0;
 let revokeCalls = 0;
 let mintCalls = 0;
@@ -79,13 +82,14 @@ before(async () => {
       };
       if (id === "@/lib/stop-agent") return {
         deleteAgent: (expectedTenant?: string | null) => { stopCalls++; destructiveStops++; return stop(expectedTenant); },
-        stopAgentForReplacement: (tenant: string | null | undefined, account: string, session?: string) => {
-          stopCalls++; replacementStops.push({ tenant, account, session }); return stop(tenant);
+        stopAgentForReplacement: (wallet: string, tenant: string | null | undefined, account: string, session?: string) => {
+          stopCalls++; replacementStops.push({ wallet, tenant, account, session }); return stop(tenant);
         },
       };
       if (id === "@/lib/session") return {
         FAUCET_URL: "https://faucet.testnet.chain.robinhood.com",
         loadGrant: () => storedGrantAvailable ? activeGrant : null,
+        localGrantsSnapshot: (wallet: string) => snapshot(wallet),
         listSavedWallets: () => savedWallets,
         isPrivyOwned: (g: StoredGrant | null) => g?.binding?.version === "privy-did-owner-v1",
         previewOwnerAccount: (key: string, chainId: number) => previewOwner(key, chainId),
@@ -119,6 +123,9 @@ beforeEach(() => {
   preflightCalls = 0;
   stopCalls = 0;
   replacementStops = [];
+  snapshotWallets = [];
+  localSnapshot = { current: { smartAccount: address }, archived: [] };
+  snapshot = wallet => { snapshotWallets.push(wallet); return localSnapshot; };
   destructiveStops = 0;
   revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 });
   previewOwner = async () => ({ smartAccount: address, owner: address });
@@ -530,7 +537,7 @@ describe("the funded wallet's re-sign control", () => {
     stop = async () => {
       events.push("stop");
       assert.equal(needsPermissionReplacement(activeGrant), true, "after preflight, the marker still precedes the stop");
-      assert.equal(loadRecoveryGrants().length, 1, "public recovery inputs are saved before the stop");
+      assert.equal(loadRecoveryGrants("spot").length, 1, "public recovery inputs are saved before the stop");
     };
     revoke = async () => {
       events.push("revoke requested");
@@ -642,7 +649,7 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     assert.equal(revokeCalls, 1);
-    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.deepEqual(replacementStops, [{ wallet: "spot", tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
     assert.equal(destructiveStops, 0, "renewal never deletes the agent's memory");
     assert.equal(mintCalls, 0);
     await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
@@ -770,7 +777,7 @@ describe("the funded wallet's re-sign control", () => {
     revoke = wallet => wallet.chainId === 46630 ? source.promise : destination.promise;
     stop = async () => {
       assert.equal(needsPermissionReplacement(activeGrant), true, "old-chain marker precedes DELETE");
-      assert.equal(loadRecoveryGrants()[0]?.chainId, 46630, "old-chain recovery snapshot precedes DELETE");
+      assert.equal(loadRecoveryGrants("spot")[0]?.chainId, 46630, "old-chain recovery snapshot precedes DELETE");
     };
     renew = async options => {
       assert.equal(options.chainId, 4663);
@@ -793,7 +800,7 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I understand restore first stops");
     await ui.click("Restore & arm 0x1111…1111");
     assert.deepEqual(revokeWallets.map(w => w.chainId), [46630]);
-    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.deepEqual(replacementStops, [{ wallet: "spot", tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
     assert.equal(destructiveStops, 0, "cross-network restore never uses destructive deletion");
     assert.equal(mintCalls, 0);
     assert.equal(input.matches(":disabled"), true);
@@ -833,7 +840,7 @@ describe("the funded wallet's re-sign control", () => {
     assert.deepEqual(revokeWallets.map(w => w.chainId), failedChain === 46630 ? [46630] : [46630, 4663]);
     assert.match(ui.container.textContent!, /Receipt unconfirmed/);
     assert.equal(needsPermissionReplacement(activeGrant), true);
-    assert.equal(loadRecoveryGrants()[0]?.chainId, 46630);
+    assert.equal(loadRecoveryGrants("spot")[0]?.chainId, 46630);
     storedGrantAvailable = false;
     await ui.remount(React.createElement(Wallet));
     assert.ok(ui.container.querySelector("#resign"), "the public snapshot survives losing the server grant");
@@ -897,7 +904,7 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(stopCalls, 0);
     assert.equal(revokeCalls, 0);
     assert.equal(mintCalls, 0);
-    assert.equal(loadRecoveryGrants().length, 0);
+    assert.equal(loadRecoveryGrants("spot").length, 0);
     assert.equal(needsPermissionReplacement(grant), false);
     assert.match(ui.container.textContent!, /Couldn.t check your agent/);
     await ui.click("Try again");
@@ -940,7 +947,7 @@ describe("the funded wallet's re-sign control", () => {
       assert.deepEqual(revokeWallets.map(w => w.chainId), [serverGrant.chainId]);
       assert.equal(needsPermissionReplacement(serverGrant), true);
       assert.equal(needsPermissionReplacement(activeGrant), false, "the current server permission is replaced, not stale local metadata");
-      const recovery = loadRecoveryGrants()[0]!;
+      const recovery = loadRecoveryGrants("spot")[0]!;
       assert.equal(recovery.serialized, undefined);
       assert.equal(recovery.demoSessionPrivateKey, undefined);
       assert.equal(recovery.demoOwnerPrivateKey, undefined);
@@ -978,7 +985,7 @@ describe("the funded wallet's re-sign control", () => {
     // Stop alone must remain usable and leave a renewal route after refresh.
     stop = async () => { exists = false; };
     await ui.click("Stop agent now");
-    assert.deepEqual(replacementStops, [{ tenant: owner.address, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.deepEqual(replacementStops, [{ wallet: "spot", tenant: owner.address, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
     assert.equal(destructiveStops, 0, "stopping permission never deletes agent memory");
     await ui.remount(React.createElement(Wallet));
     assert.ok(ui.container.querySelector("#resign"));
@@ -1028,5 +1035,85 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(mintCalls, 0);
   });
 
+  for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal: the preflight and the mint decide over ONE snapshot, taken at the click before anything is stopped`, async () => {
+    // THE RACE THIS CLOSES (perps slice 5b): the preflight was handed no
+    // previous grant and no local copies, while the mint read storage itself
+    // after the replacement journal was written, so the two could decide the
+    // carried-perps question over different inputs and a refusal could land
+    // only after the old permission was gone.
+    useRenewalOwner(kind);
+    const events: string[] = [];
+    snapshot = wallet => { events.push(`snapshot ${wallet}`); snapshotWallets.push(wallet); return localSnapshot; };
+    let checked: MintOptions | undefined;
+    let minted: MintOptions | undefined;
+    preflight = async (_signer, options) => { events.push("preflight"); checked = options; };
+    stop = async () => { events.push("stop"); };
+    revoke = async () => { events.push("revoke"); return { transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 }; };
+    renew = async options => {
+      events.push("mint");
+      minted = options;
+      return { local: { ...activeGrant, sessionKeyAddress: fixtureAddress(901) }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(events, ["snapshot spot", "preflight", "stop", "revoke", "mint"], "one snapshot, before the preflight and the stop");
+    assert.deepEqual(snapshotWallets, ["spot"], "this browser's grants for the wallet being renewed, read once");
+    assert.ok(checked && minted);
+    assert.equal(checked.localGrants, localSnapshot, "the preflight decides over the snapshot");
+    assert.equal(minted.localGrants, checked.localGrants, "and the mint over the very same object, not a later read");
+    // The server's view of the grant at this click, from the same account read
+    // that verified it, and the same object on both sides.
+    assert.equal((checked.previousGrant as { smartAccount?: string } | undefined)?.smartAccount, activeGrant.smartAccount);
+    assert.equal(minted.previousGrant, checked.previousGrant);
+    assert.equal(checked.purpose, "spot");
+    assert.equal(minted.purpose, "spot");
+    assert.equal(minted.minimumValidationNonce, 9);
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
 
+  it("a renewal whose server grant was already stopped hands the signer null (holds none), never 'not read'", async () => {
+    // null and undefined are different answers to priorPerpFor: null is the
+    // server saying it holds nothing (the browser's copy may carry a key, as
+    // after a kill); undefined is unread, which fails closed.
+    let exists = true;
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => String(input) === "/api/grants" ? json(exists ? { exists, grant: activeGrant } : { exists }) : fetch(input, init);
+    let minted: MintOptions | undefined;
+    renew = async options => { minted = options; return { local: { ...activeGrant, sessionKeyAddress: fixtureAddress(902) }, handoff: { ok: true } }; };
+    await ui.render(React.createElement(Wallet));
+    exists = false;
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(mintCalls, 1);
+    assert.equal(minted?.previousGrant, null);
+  });
+
+  for (const purpose of ["perps", "options"] as const) it(`a grant naming the ${purpose} wallet is refused on this Spot screen before anything is read, stopped, revoked or signed`, async () => {
+    // THE PATH THIS CLOSES (perps slice 5b review): renewKey followed whatever
+    // wallet the grant named, but its account read is Spot's GET /api/grants
+    // and its revocation derives the owner's Kernel account at index 0. A
+    // paper Perps grant renewed here was asked for ETH it never holds, or, with
+    // some, had its stop accepted and then failed revocation against an
+    // account its owner key does not control. The Perps renewal, with D6's
+    // exemption (perps-renewal.test.ts), is the Perps desk's; this screen
+    // refuses. A wallet this build does not know is refused the same way.
+    activeGrant = { ...grant, purpose, grantFeatures: [], grantTokens: [] } as unknown as StoredGrant;
+    const reads: string[] = [];
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => { reads.push(String(input)); return fetch(input, init); };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
+    const mounted = reads.length;
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(reads.slice(mounted), [], "not even the account is read for it");
+    assertExistingPermissionKept(before);
+    assert.equal(preflightCalls, 0, "nothing is checked for signing");
+    assert.deepEqual(fundingChecks, [], "no ETH is asked of it");
+    assert.deepEqual(replacementStops, [], "no stop names any wallet");
+    assert.deepEqual(snapshotWallets, [], "and no wallet's local grants are read");
+    assert.match(ui.container.textContent!, /This attempt kept your existing permission unchanged/);
+    if (purpose === "perps") assert.match(ui.container.textContent!, /A Perps wallet is not renewed from this screen\. Nothing was stopped or signed\./);
+  });
 });

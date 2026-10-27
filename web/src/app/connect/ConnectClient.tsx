@@ -61,7 +61,7 @@ async function readAccount(): Promise<AccountState> {
 // A grant can already be on the server while its owner is still at the backup
 // step. Reloading this page must not turn that into permission to skip backup.
 function needsBackup(account: AccountState): boolean {
-  const local = loadGrant();
+  const local = loadGrant("spot");
   if (!local || local.smartAccount.toLowerCase() !== account.status.grant?.smartAccount.toLowerCase()) return false;
   return localStorage.getItem(`merrymen.backup.${local.smartAccount.toLowerCase()}`) !== "1";
 }

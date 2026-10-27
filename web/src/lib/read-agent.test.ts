@@ -538,9 +538,76 @@ test("profile summary answers from the current registration without any financia
     assert.equal(p?.name, "Shogun");
     assert.equal(p?.summary, true);
     assert.equal(p?.joinedAt, T0 - 86_400);
-    assert.equal(statements.length, 1);
+    // One ledger query for the agent, beside the catalogue look that tells a
+    // fleet with no Perps wallet from one with (perps-wallets.ts: no table, no
+    // further read). Never a history, settings or book read.
+    const catalogue = /to_regclass|sqlite_master/;
+    assert.equal(statements.filter((sql) => !catalogue.test(sql)).length, 1, statements.join("\n"));
+    assert.ok(statements.some((sql) => catalogue.test(sql)), "the Perps wallets are asked about");
     assert.doesNotMatch(JSON.stringify(p), /smart_account|owner_address|equity|pnl|landed|holdings|publicBook/);
     const failed: Db = { ...light, prepare() { throw new Error("unread"); } };
     await assert.rejects(profileSummaryOf(failed, identity), /unread/, "failed reads cannot become not-found");
+  } finally { raw.close(); }
+});
+
+/**
+ * FIX 4 (perps slice 5b): THE PUBLIC PROFILE, ITS SUMMARY AND THE OWNER'S OWN
+ * BOOK STAY ON THE SPOT AGENT WHEN A PERPS WALLET EXISTS.
+ *
+ * The grants route never adds a Perps account to an identity (decision D2), so
+ * this is the backstop for one that got there anyway: a Perps worker's agents
+ * row is usually the NEWEST registration, which is the one agentRowOf picks.
+ */
+const PERPS = "0x00000000000000000000000000000000000000e1";
+async function withPerpsWallet(db: Db, recorded = true) {
+  await db.prepare(
+    `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, mode, epoch, beat_at, contributions_known, created_at)
+     VALUES (?, 'Perps paper agent', '0x1', '0x3', 4663, '{}', 0, 0, 'paper', 9, ?, 1, ?)`,
+  ).run(PERPS, T0 + 50 * 24 * H, T0 + 50 * 24 * H);
+  if (recorded) {
+    const { recordPerpsWallet } = await import("../../../worker/src/perps-wallets");
+    await recordPerpsWallet(db, { smartAccount: PERPS, owner: `0x${"8".repeat(40)}`, chainId: 4663, nowSec: T0 });
+  }
+}
+const both = { ...identity, accounts: [ACCOUNT, PERPS] };
+
+test("FIX 4: a newer Perps wallet's row is never the profile, the summary or the own book", async () => {
+  const { profileSummaryOf } = await import("./read-agent");
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0, 100);
+    // The premise: on record or not, the Perps row IS the newest registration.
+    await withPerpsWallet(db, false);
+    assert.equal((await profileOf(db, both, false))?.name, "Perps paper agent", "premise: without the record it wins");
+    const { recordPerpsWallet } = await import("../../../worker/src/perps-wallets");
+    await recordPerpsWallet(db, { smartAccount: PERPS, owner: `0x${"8".repeat(40)}`, chainId: 4663, nowSec: T0 });
+
+    assert.equal((await profileOf(db, both, false))?.name, "Shogun", "the public profile is the Spot agent");
+    assert.equal((await profileSummaryOf(db, both))?.name, "Shogun", "and so is its summary");
+    assert.equal((await profileSummaryOf(db, both))?.mode, "live");
+    const own = await ownBookOf(db, both);
+    assert.ok(own, "the owner's own book is still read");
+    assert.equal(await ownBookOf(db, { slug: "x", accounts: [PERPS] }), null, "a Perps account alone has no public agent");
+    assert.equal(await profileOf(db, { slug: "x", accounts: [PERPS], createdAt: T0 }, false), null);
+  } finally { raw.close(); }
+});
+
+test("FIX 4: an owner with no Perps wallet reads exactly what they did, and an unreadable record is never a guess", async () => {
+  const { profileSummaryOf } = await import("./read-agent");
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0, 100);
+    assert.equal((await profileOf(db, identity, false))?.name, "Shogun");
+    await withPerpsWallet(db);
+    // The record is there but cannot be read: never both wallets, never not-found.
+    const unread: Db = {
+      prepare(sql) {
+        if (/FROM perps_wallets/i.test(sql)) throw new Error("permission denied for table perps_wallets");
+        return db.prepare(sql);
+      },
+      exec: (sql) => db.exec(sql), tx: (fn) => db.tx(fn),
+    };
+    await assert.rejects(profileSummaryOf(unread, both), /perps_wallets/, "strict: unread, not not-found");
+    assert.equal(await profileOf(unread, both, false), null, "the profile answers unread (null), never the Perps row");
   } finally { raw.close(); }
 });

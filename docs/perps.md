@@ -29,11 +29,12 @@ the finished product; this table says how much of it main carries.
 | 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | merged (#361) |
 | 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | merged (#362) |
 | 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | merged (#365) |
-| 5. Web API, desk and CLI | making a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet; funding is its own PR after it. First, 5a: the inert foundation (below) | 5a in review |
+| 5. Web API, desk and CLI | making a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet; funding is its own PR after it. First, 5a: the inert foundation; then 5b: the Perps wallet's intake and status (below) | 5a and 5b in review |
 | 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | not yet |
 
-Until slice 5, nothing on main can make a Perps wallet, so none exists in
-production; every kill path already reaches one (rule 13), so that from the day
+Until slice 5b, nothing on main can make a Perps wallet, and from 5b only a
+deployment at `MERRYMEN_PERPS=paper` can, so none exists in production; every
+kill path already reaches one (rule 13), so that from the day
 one can exist it is stopped by every kill. Perps stays off in production while
 the slices land: an unset `MERRYMEN_PERPS` means off (rule 1), and each slice
 is safe to deploy alone with perps off.
@@ -170,6 +171,70 @@ who names no wallet can do changes, and no Perps capability is added, with
   `wallet-not-supported` before it reads or writes anything, and a test walks
   every route file to hold it. Only `/api/grants` reads the wallet itself.
 
+**What 5b carries: the Perps wallet's intake and status, and the browser
+signer that makes one.** No screen calls the signer for Perps yet: the desk
+and `/create?for=perps` are PR 3.
+
+- `POST /api/grants?wallet=perps` makes or renews a Perps wallet only at
+  `MERRYMEN_PERPS=paper` (`perpsCreationAllowed`); otherwise 403
+  `perps-wallet-not-offered` with nothing read or written. A renewal's first
+  step, `DELETE /api/grants?wallet=perps` with `purpose:
+  "permission-replacement"`, is refused the same way before the store or the
+  Perps home's `grant.json` is touched, so a renewal that cannot finish never
+  stops the wallet; the kill names no wallet and is never gated. Robinhood Chain
+  mainnet only (400 `perps-chain`). Hosted, its owner must be the login (403
+  `perps-owner`, before the nonce: only `privy-did-owner-v1` logins have one in
+  v1); its binding is verified against the text that names the wallet, so a
+  Spot binding replayed as Perps, or the reverse, is refused 403; its account
+  must derive from the owner at Kernel index 1 (403 on a mismatch, 503 when the
+  derivation cannot be made, never a pass); it is stored with
+  `getGrantStore("perps")`, whose conflicts answer 409 with their code and any
+  other failure a fixed 503. Self-hosted, the same wall and index-1 derivation
+  (a live eth_call that fails closed with 503), the Spot `grant.json` held to
+  the store's same-owner, other-account rules, then the Perps home's
+  `grant.json` archived and replaced whole. No public identity or name (D2).
+- The canonical wall rebuilds a Perps grant as the Perps wall
+  (`grantWallOptions` from its signed purpose). In this build that wall is
+  empty (D5): a Perps grant declaring any marker, token, sealed address, perp
+  block or the energy buy is refused `invalid_wall`.
+- `GET /api/grants?wallet=perps` answers from the Perps store, home, ledger,
+  heartbeat and settings tick, through core's `publicGrantView` (Spot keeps
+  its denylist view, D3), with the worker's `agents.perps` report and no
+  energy; every GET answer is `private, no-store`. It is answered whatever
+  `MERRYMEN_PERPS` says (D1).
+- `renewalSkipsRevocation` (`web/src/lib/perps-renewal.ts`): the one rule by
+  which a renewal may skip the on-chain revocation, true only for a Perps grant
+  whose wall rebuilds empty (D6). The server's retired-key fence still applies.
+  It has no caller yet. The dashboard renewal (`Wallet.tsx renewKey`) renews
+  Spot only and refuses any other grant before anything is read, stopped or
+  signed: its account read is Spot's `GET /api/grants` and its revocation
+  derives the Kernel account at index 0. The Perps renewal (PR 3) needs more
+  than loading the Perps grant: its account read through
+  `walletUrl("/api/grants", "perps")`; a revocation, when one is made, at
+  `accountIndexForPurpose("perps")`, or refused before the stop; D6 decided
+  from the page's own copy when the server holds none (an interrupted renewal),
+  as well as from the server's view when it holds one; and a decline before
+  the stop when `MERRYMEN_PERPS` is not paper (the stop is refused 403 then).
+- The browser signer (`web/src/lib/session.ts`): `MintOptions.purpose` (absent
+  is Spot) picks the Kernel index (`accountIndexForPurpose`, at both
+  derivations), the wall (`perpsOnly`, no Spot spender, no energy buy, no
+  scoped-spenders marker, no `tradeable-v2`: the empty wall the server
+  expects), the grant's own `purpose`, the claim it signs (`bindingMessage`
+  with the purpose), the storage slot (`merrymen.grant.perps.v1`; Spot's stays
+  `merrymen.grant.v1`) and the handoff URL (`walletUrl`, so
+  `/api/grants?wallet=perps`). A Perps signature refuses, before the owner
+  signs anything, every Spot opt-in, any Lighter key (new, carried, dropped or
+  recovered), and any network but mainnet. The storage helpers
+  (`loadGrant`, `clearGrant`, `listSavedWallets`, `localGrantsSnapshot`,
+  `previewOwnerAccount`) take the wallet with no default, as do
+  `loadRecoveryGrants` (whose snapshots now keep the purpose) and
+  `stopAgentForReplacement`; a kill still names no wallet.
+- `priorPerpFor` fails closed when the server's view is absent: this
+  browser's copy may say an account claims perps (`unknown`, refused) but never
+  supplies the key. A renewal takes one snapshot (the server's view at the
+  click and `localGrantsSnapshot(wallet)`) and hands the same objects to its
+  preflight and its mint.
+
 ## One login, two wallets
 
 A login holds two wallets, derived from **one owner key**:
@@ -197,9 +262,13 @@ directory until the first Perps write: until then every Perps read answers
 empty and every kill finds nothing, by a catalog look (`to_regclass`) or a
 `stat`, with no lock. Nothing ever rewrites a Spot row for Perps. Holder claims
 are the login's, not a wallet's: both settings stores share them. The public
-profile is one: the Perps account joins the identity's account history at the
-end and never becomes its first, which stays the Spot account every existing
-link stands for.
+profile is the Spot agent's alone: the Perps account never joins the login's
+public identity (decision D2). `POST /api/grants?wallet=perps` mints and names
+nothing, as the orchestrator adds nothing for a Perps worker, so no slug,
+profile, board, search or follow can resolve to it. The profile, summary and
+own-book reads (`read-agent.ts`) and the MCP public board and profile
+(`public-feed.ts`) also leave out every account in `perps_wallets`, as a
+backstop; the first-name count is Spot's alone.
 
 **One owner, two separate authorities.** Decided where both are written, under
 one lock for the tenant across both wallets (the file store's shared writer
@@ -579,9 +648,11 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
     `thesis-policy.ts`; every `perp-*` reject rule is withheld; no perp
     decision, order, fill, position, leverage or liquidation reaches the feed,
     theses, the group chat, X, the leaderboard's trade lists or `publicBook`.
-    Leaderboard equity includes perps per rule 12 and the profile shows a
-    "uses leverage" marker. The venue publishes the account anyway, and the
-    consent says so.
+    With two wallets per login, the Perps wallet is absent from every public
+    read: it never joins the public identity (D2), the leaderboard and profile
+    are the Spot agent's and their equity is the Spot wallet's, and no "uses
+    leverage" marker is shown (one would publish that a login runs perps). The
+    venue publishes the account anyway, and the consent says so.
 
 ## How it is built
 

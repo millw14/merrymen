@@ -33,6 +33,7 @@ import type { MerrymenSettings } from "@merrymen/core";
 import { STOCK_TOKENS } from "@merrymen/core";
 import { getIdentityStore, type PublicIdentity } from "@merrymen/identity-store";
 import type { Db } from "../../../../worker/src/db";
+import { readPerpsWallets } from "../../../../worker/src/perps-wallets";
 import { readLeaderboard } from "../read-leaderboard";
 import { profileOf, type AgentProfile, type HowItTrades } from "../read-agent";
 import { readTheses, WINDOW_SEC, type FeedThesis } from "../read-theses";
@@ -352,7 +353,19 @@ export async function readPublicBoard(
   // whose retired count is unknown means nothing was folded — so every row it
   // read would have been listed — while agents exist to list.
   if (board.agents.length === 0 && board.retired === null && agents.length > 0) throw new PublicLedgerUnreadable();
+  // NEVER A PERPS WALLET'S RUN (docs/perps.md rule 17; perps-wallets.ts). The
+  // board's rows come from the directory, which already leaves Perps wallets
+  // out, but the run each slug's valuation, flows and heartbeat are read from
+  // is the slug's newest registration, and a Perps worker's row is usually the
+  // newest. Unreadable is the ledger unread, never both wallets' runs.
+  let perps: ReadonlySet<string>;
+  try {
+    perps = await readPerpsWallets(db);
+  } catch {
+    throw new PublicLedgerUnreadable();
+  }
   for (const a of agents) {
+    if (perps.has(a.smart_account.toLowerCase())) continue;
     const slug = slugOf.get(a.smart_account.toLowerCase());
     if (!slug || runOf.has(slug)) continue;
     runOf.set(slug, { account: a.smart_account, epoch: Number(a.epoch ?? 1), beatAt: a.beat_at === null || a.beat_at === undefined ? null : Number(a.beat_at) });
@@ -817,8 +830,17 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
   const settings = onceSettings(deps.settings);
   const bits = await ownerBits(settings, identity.tenant);
   const publicBook = bits?.publicBook === true;
+  // Never a Perps wallet's account (rule 17): profileOf leaves them out
+  // (read-agent.ts agentRowOf), and so do the two reads below that walk the
+  // identity themselves. Unreadable is the ledger unread.
+  let perps: ReadonlySet<string>;
+  try {
+    perps = await readPerpsWallets(db);
+  } catch {
+    throw new PublicLedgerUnreadable();
+  }
   const profile: AgentProfile | null = await profileOf(db, identity, publicBook);
-  const accounts = identity.accounts.map((a) => a.toLowerCase());
+  const accounts = identity.accounts.map((a) => a.toLowerCase()).filter((a) => !perps.has(a));
   if (!profile) {
     // profileOf answers "none of its accounts is on this ledger" and "the
     // agents table could not be read" with the same null. The second is an

@@ -30,6 +30,7 @@ import { measuredMarks } from "./held-marks";
 import { everyLandedOpSponsored } from "./gasless";
 import { averageHoldSec } from "./hold-time";
 import type { Db } from "../../../worker/src/db";
+import { readPerpsWallets } from "../../../worker/src/perps-wallets";
 import { cache } from "react";
 import { withReadDb } from "@/lib/ledger";
 import { basisUsdg } from "@/lib/basis-usdg";
@@ -292,9 +293,26 @@ type AgentRow = {
  *
  * Every account this tenant has held: a re-grant must not split an agent's
  * history into two strangers.
+ *
+ * NEVER A PERPS WALLET'S (docs/perps.md rule 17; perps-wallets.ts). The newest
+ * registration wins below, and a Perps wallet's worker has an agents row of
+ * its own that is usually the newest, so an identity that ever named the Perps
+ * account would show the Perps paper agent on the public profile, its title,
+ * the summary and the owner's own book. The grants route never puts it there
+ * (decision D2); this is the backstop for one that got there anyway. A Perps
+ * record that cannot be read is the ledger unread: strict throws, the rest
+ * answer null — never the Perps row, and never a guess. An owner with no Perps
+ * wallet reads exactly the row they always did.
  */
 async function agentRowOf(db: Db, identity: ProfileIdentity, strict = false): Promise<AgentRow | null> {
-  const accounts = identity.accounts.map((a) => a.toLowerCase());
+  let perps: ReadonlySet<string>;
+  try {
+    perps = await readPerpsWallets(db);
+  } catch (error) {
+    if (strict) throw error;
+    return null;
+  }
+  const accounts = identity.accounts.map((a) => a.toLowerCase()).filter((a) => !perps.has(a));
   if (accounts.length === 0) return null;
   const inList = accounts.map(() => "?").join(", ");
   try {

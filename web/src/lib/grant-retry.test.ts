@@ -22,7 +22,7 @@ let grant: Grant;
 let requests: { url: string; init: RequestInit | undefined }[];
 let tokenReads: number;
 const proof = (beforeSubmit: () => Promise<void> = async () => {}): GrantRetryProof => ({ ownerSigner: { account: owner, binding: "privy-did-owner-v1", did: DID }, tenant: owner.address, beforeSubmit });
-const verify = (value: Grant) => verifyGrantBinding({ origin: ORIGIN, tenant: owner.address, owner: value.owner, smartAccount: value.smartAccount, chainId: value.chainId,
+const verify = (value: Grant) => verifyGrantBinding({ origin: ORIGIN, tenant: owner.address, owner: value.owner, smartAccount: value.smartAccount, chainId: value.chainId, purpose: "spot",
   ...value.binding!, verifiedDid: DID });
 
 beforeEach(async () => {
@@ -136,7 +136,7 @@ it("a legacy bound retry still requires both its distinct login signer and owner
     const value=JSON.parse(String(init?.body)) as Grant;
     assert.equal(value.demoOwnerPrivateKey,undefined);
     assert.equal(value.serialized,grant.serialized);
-    const verdict=await verifyGrantBinding({origin:ORIGIN,tenant:login.address,owner:value.owner,smartAccount:value.smartAccount,chainId:value.chainId,...value.binding!});
+    const verdict=await verifyGrantBinding({origin:ORIGIN,tenant:login.address,owner:value.owner,smartAccount:value.smartAccount,chainId:value.chainId,purpose:"spot",...value.binding!});
     return verdict.ok?Response.json({ok:true}):Response.json({error:verdict.why},{status:403});
   };
   assert.deepEqual(await retryGrantHandoff(grant,{tenant:login.address,ownerSigner:{account:owner,binding:"legacy-wallet-owner-v1",privateKey:grant.demoOwnerPrivateKey},beforeSubmit:async()=>{}}),{ok:true});
@@ -166,4 +166,20 @@ it("permission status matching includes every bound and stable provenance field,
   assert.equal(sameGrantPermission({...publicView,grantFeatures:[]},complete),false);
   assert.equal(sameGrantPermission({...publicView,binding:{...publicView.binding!,did:"did:privy:other"}},complete),false);
   assert.equal(sameGrantPermission({...publicView,binding:{...publicView.binding!,version:"legacy-wallet-owner-v1"}},complete),false);
+});
+
+it("a Privy Spot resume still matches its server view after perps slice 5b, and no other wallet's grant does", () => {
+  // CreateAgent.retryActivation compares GET /api/grants' grant with the saved
+  // one before skipping a handoff. Spot keeps main's denylist view (decision
+  // D3): binding.did and the rest are still there, and neither side names a
+  // wallet, which is Spot on both (core grantPurpose).
+  const { serialized: _serialized, demoSessionPrivateKey: _session, ...spotView } = grant;
+  assert.equal(grant.binding?.version, "privy-did-owner-v1");
+  assert.equal(sameGrantPermission(spotView, grant), true);
+  assert.equal(sameGrantPermission({ ...spotView, purpose: "spot" }, grant), true, "Spot, named or not, is Spot");
+  // The wallet is part of the permission: a view of the other wallet, or one
+  // naming no wallet this build knows, matches nothing.
+  assert.equal(sameGrantPermission({ ...spotView, purpose: "perps" }, grant), false);
+  assert.equal(sameGrantPermission(spotView, { ...grant, purpose: "perps" }), false);
+  assert.equal(sameGrantPermission({ ...spotView, purpose: "solana" } as never, grant), false);
 });

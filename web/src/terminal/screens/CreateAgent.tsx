@@ -157,7 +157,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
   const savedContext=account ? `${account.session.hosted}:${account.session.address?.toLowerCase()??""}:${account.status.exists}` : "";
   const [savedRecovery,setSavedRecovery]=useState<{context:string;grant:Grant|null;failed:boolean}|null>(null);
   async function recoverableFor(session:AccountState["session"]):Promise<Grant|null>{
-    for(const candidate of [loadGrant(),...loadRecoveryGrants()]){
+    for(const candidate of [loadGrant("spot"),...loadRecoveryGrants("spot")]){
       if(candidate&&await trustedSavedGrant(candidate,session,window.location.origin))return candidate;
     }
     return null;
@@ -176,7 +176,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
     // or its settings into that review; it stays blocked below, but declinable.
     if(!account?.status.grant||!setupRequest||setupRequest.id||setupRequest.invalid)return;
     void requestJson<{values:{liveTradingEnabled?:boolean;agentName?:string;strategy?:string}}>("/api/settings").then(({values})=>{setPaper(!(values.liveTradingEnabled ?? false));setName(values.agentName ?? "");setStrategy(values.strategy ?? "steady-basket");}).catch(()=>{});
-    const local=loadGrant();
+    const local=loadGrant("spot");
     if(local?.smartAccount.toLowerCase()===account.status.grant.smartAccount.toLowerCase()) {
       setGrant(local);setArmed(account.status.exists);
       const saved=localStorage.getItem(`merrymen.backup.${local.smartAccount.toLowerCase()}`)==="1";

@@ -90,8 +90,15 @@ const ACCOUNT_CLAIMED = "this agent account is already linked to a different log
  *  - No perpetuals left on Spot: a Spot grant that still carries the Lighter
  *    permission is legacy Perps authority, and has to be retired before a
  *    separate Perps wallet exists beside it.
+ *
+ * Exported for the one writer that is not a store: a self-hosted POST
+ * /api/grants, which writes each wallet's grant.json in its own home and
+ * holds the other wallet's file to these same three rules.
  */
-function assertIndependentWallets(incoming: StoredGrant, other: StoredRecord["grant"] | null): void {
+export function assertIndependentWallets(
+  incoming: StoredGrant,
+  other: Pick<StoredGrant, "owner" | "smartAccount" | "purpose" | "perp" | "grantFeatures"> | null,
+): void {
   if (!other) return;
   if (typeof other.owner !== "string" || typeof other.smartAccount !== "string") {
     throw new Error("Your other wallet's grant could not be read, so this one cannot be checked against it. Neither wallet was changed.");
