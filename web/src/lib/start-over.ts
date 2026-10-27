@@ -41,7 +41,8 @@
 // Relative, as ledger.ts reaches the worker: `tsx --test` resolves aliases
 // against the root tsconfig, which does not carry @merrymen/command-files.
 import { writeCommand } from "../../../worker/src/command-files";
-import { merrymenHome } from "../../../worker/src/home";
+import { purposeHome } from "../../../worker/src/home";
+import { isGrantPurpose, type GrantPurpose } from "../../../packages/core/src/grant";
 import { withReadDb } from "@/lib/ledger";
 import { queueRecoveryCheckedCommand, type CommandAdmission } from "./recovery-commands";
 
@@ -86,20 +87,29 @@ export type QueuedReset = { ok: true; id: string } | { ok: false; error: string;
 /**
  * QUEUE A PRACTICE RESET for `agent`, the one command the worker (or, while its
  * book is held, the orchestrator) can act on. Moved here from /api/paper-reset
- * so that route and Start over queue it the same way. Never throws.
+ * so that route and Start over queue it the same way. Never throws, but for a
+ * wallet that names none (below).
  *
  * Self-hosted shares one MERRYMEN_HOME with the worker, so the file goes
  * straight into the directory the worker drains: no table, no ferry. Hosted, it
  * is an agent_commands row bound to the smart account, which is what the ferry
  * and the orchestrator's held reset both select on.
+ *
+ * `wallet` names whose book, with no default. Self-hosted it picks the home the
+ * command lands in (`purposeHome`: Spot's is MERRYMEN_HOME, as it always was;
+ * Perps's is accounts/perps, which only that wallet's worker drains). Hosted
+ * the row is bound to `agent`, which the caller must resolve in the SAME wallet
+ * (agent-for.ts, given the same name), or a Perps reset would land on the Spot
+ * book. An unnamed wallet throws before anything is written.
  */
-export async function queuePaperReset(hosted: boolean, agent: string): Promise<QueuedReset> {
+export async function queuePaperReset(hosted: boolean, agent: string, wallet: GrantPurpose): Promise<QueuedReset> {
+  if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
   // Minted here, never accepted from the caller: an id a client chooses is an
   // id a client can collide with somebody else's.
   const id = crypto.randomUUID();
   if (!hosted) {
     try {
-      writeCommand(merrymenHome(), { id, kind: "paper-reset", at: Date.now() });
+      writeCommand(purposeHome(wallet), { id, kind: "paper-reset", at: Date.now() });
       return { ok: true, id };
     } catch (e) {
       return { ok: false, error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` };
@@ -107,7 +117,7 @@ export async function queuePaperReset(hosted: boolean, agent: string): Promise<Q
   }
   let admitted: CommandAdmission = { ok: false, why: "unreachable" };
   try {
-    admitted = await withReadDb(db => queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at: Date.now() }));
+    admitted = await withReadDb(db => queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at: Date.now() }), wallet);
   } catch { /* unreadable is a refusal */ }
   if (!admitted.ok) {
     if (admitted.why === "recovery") return { ok: false, status: 409,

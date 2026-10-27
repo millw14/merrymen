@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { NOT_OWN_BOOK, readOwnBook } from "@/lib/read-agent";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * THE OWNER'S OWN VIEW OF THEIR PROFILE: its trades with their sizes and
@@ -30,6 +31,8 @@ export const dynamic = "force-dynamic";
 const PRIVATE = { "Cache-Control": "private, no-store", Vary: "Cookie" };
 
 export async function GET(req: Request, { params }: { params: Promise<{ slug: string }> }) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const { slug } = await params;
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(slug)) return NextResponse.json({ error: "Invalid agent" }, { status: 400, headers: PRIVATE });
   if (!isHostedMode()) return NextResponse.json({ error: "Not available on a self-hosted install." }, { status: 404, headers: PRIVATE });

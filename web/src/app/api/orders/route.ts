@@ -80,6 +80,7 @@ import {
   type OrderBody,
 } from "@/lib/order-state";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -117,7 +118,7 @@ async function orderTtlFor(req: Request): Promise<number> {
   return orderTtlMs(tickSeconds);
 }
 
-const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
+const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req, "spot") : diskAgent("spot"));
 
 /**
  * The primary key for this order, in this minute.
@@ -141,6 +142,8 @@ function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: n
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // Hosted, `tenantOf` is a server-verified wallet and the account is resolved
   // through the grant store — a caller can never name someone else's agent.
   // Self-hosted there is no auth and the localhost middleware is the perimeter.
@@ -198,7 +201,7 @@ export async function POST(req: Request) {
   // against each open order's own `expiresAt`, and only a key collision is a
   // duplicate.
   const result = isHostedMode()
-    ? await withReadDb((db) => placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now })).catch(
+    ? await withReadDb((db) => placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now }), "spot").catch(
         () => ({ ok: false as const, why: "unreachable" as const }),
       )
     : // The web process and the worker share one MERRYMEN_HOME — no table, no ferry.
@@ -244,6 +247,8 @@ export async function POST(req: Request) {
  * line from it; an older worker's answer carries none and renders `result`.
  */
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
   const params = new URL(req.url).searchParams;
@@ -262,6 +267,6 @@ export async function GET(req: Request) {
     return NextResponse.json(selfHostedOrderReply(id, id ? readCommandState(merrymenHome(), id) : null, Date.now()));
   }
 
-  const reply = await withReadDb((db) => readHostedOrder(db, agent, id, Date.now())).catch(() => LEDGER_UNREADABLE);
+  const reply = await withReadDb((db) => readHostedOrder(db, agent, id, Date.now()), "spot").catch(() => LEDGER_UNREADABLE);
   return NextResponse.json(reply.body, { status: reply.status });
 }

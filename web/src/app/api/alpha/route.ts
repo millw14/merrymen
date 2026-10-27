@@ -59,6 +59,7 @@ import { holderWalletFor } from "@/lib/holder-wallet";
 import { agentAccountFor } from "@/lib/agent-account";
 import { AGENT_BALANCE_TTL_MS, readStanding } from "@/lib/merrymen-standing";
 import { sharedAlpha, type AlphaExtras, type DiscoveryRow, type Payload } from "@/lib/read-discoveries";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 /** Per-caller. Never cacheable — the answer depends on who is asking. */
@@ -155,6 +156,8 @@ function open(payload: Payload, alpha: AlphaExtras, tier: (typeof CIRCLE_TIERS)[
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // One read, shared with every viewer of the coins page through the same
   // single-flight memo. A locked reader costs exactly as much as an open one,
   // which is why the counts below are free to be honest.

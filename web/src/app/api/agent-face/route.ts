@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * AN AGENT'S FACE, generated from its public id.
@@ -33,6 +34,8 @@ const MAX_BYTES = 400_000;
 const TIMEOUT_MS = 5_000;
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const seed = new URL(req.url).searchParams.get("seed") ?? "";
   // Shape-checked BEFORE any outbound request, so this cannot be turned into a
   // way to make our server fetch an arbitrary robohash path.

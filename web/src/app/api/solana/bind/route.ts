@@ -3,10 +3,13 @@ import { authenticateSolana, consumeSolanaBindingProof, issueSolanaBindingChalle
 import { getSolanaBindingStore, SOLANA_OTHER_SIGN_IN } from "@/lib/solana-binding-store";
 import { solanaRequestBody, solanaResponse } from "@/lib/solana-api";
 import { consumeSolanaRebindProof, issueSolanaRebindChallenge } from "./rebind-proof";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   return solanaResponse(async () => {
     const principal = await authenticateSolana(req);
     const owner = new URL(req.url).searchParams.get("owner") ?? "";
@@ -18,6 +21,8 @@ export async function GET(req: Request) {
   });
 }
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   return solanaResponse(async () => {
     const principal = await authenticateSolana(req);
     const body = await solanaRequestBody(req, ["owner", "nonce", "signature"]);

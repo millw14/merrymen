@@ -38,6 +38,7 @@ import { isHostedMode } from "@merrymen/core";
 import { getImageStore, isImageKind, sha256Of } from "@merrymen/image-store";
 import { IMAGE_LIMITS, normaliseImage, refusalResponse } from "@/lib/agent-image";
 import { tenantOf } from "@/lib/auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 /** Per-caller and mutating: never cached, never shared. */
@@ -49,6 +50,8 @@ async function owner(req: Request): Promise<`0x${string}` | null> {
 }
 
 export async function PUT(req: Request, { params }: { params: Promise<{ kind: string }> }) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // HOSTED ONLY, like every other owner-write surface. A self-hosted install
   // runs one operator against one settings file and has no session to attribute
   // an upload to — the same 404 the rest of the hosted-only surface gives.
@@ -97,6 +100,8 @@ export async function PUT(req: Request, { params }: { params: Promise<{ kind: st
 }
 
 export async function DELETE(req: Request, { params }: { params: Promise<{ kind: string }> }) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return NextResponse.json({ error: "not found" }, { status: 404 });
   const tenant = await owner(req);
   if (!tenant) return NextResponse.json({ error: "sign in" }, { status: 401 });

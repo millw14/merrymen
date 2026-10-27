@@ -187,7 +187,7 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
         result: string | null;
       };
     const queue = async (acct: string): Promise<string> => {
-      const q = await queuePaperReset(true, acct);
+      const q = await queuePaperReset(true, acct, "spot");
       assert.ok(q.ok, q.ok ? "" : q.error);
       return q.id;
     };
@@ -455,7 +455,7 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       await heldBook(one, acct);
       const id = await queue(acct);
       await recordFleetRecoveryHold(two, scope, "source-continuity", nowSec, () => true);
-      const refused = await queuePaperReset(true, acct);
+      const refused = await queuePaperReset(true, acct, "spot");
       assert.ok(!refused.ok && refused.status === 409);
       assert.deepEqual(await queueRecoveryCheckedCommand(one, { id: "held-probe", agent: acct, kind: "selftest", at: Date.now() }),
         { ok: false, why: "recovery" });

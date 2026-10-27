@@ -40,6 +40,7 @@ import { canonicalTz, fmtHm, sleepWindow } from "../../../../../../worker/src/gr
 import { getMember, setMemberPrefs } from "../../../../../../worker/src/groupchat/store";
 import type { MeResponse, TzSource } from "../../../../../../worker/src/groupchat/types";
 import { agentOf, objectOf, PRIVATE_HEADERS, readBounded, roomNow, roomOpen, speakerOf, withRoom } from "../room";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -89,6 +90,8 @@ async function meFor(db: Db, tenant: `0x${string}`): Promise<MeResponse> {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!roomOpen()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   // Signed out is a complete answer, not an error: the screen shows the room
@@ -163,6 +166,8 @@ function changeOf(input: Record<string, unknown>): Change {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!roomOpen()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, "Sign in to change this.");

@@ -46,6 +46,7 @@ import {
   withSettingsSaveLock,
   type SaveClaims,
 } from "@/lib/telegram-claims";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -217,6 +218,8 @@ function redactUrl(u: unknown): string | undefined {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // Hosted: show the signed-in tenant's own settings (a signed-out caller sees
   // defaults — nothing personal, no secrets). Self-hosted: the single file.
   const tenant = isHostedMode() ? tenantOf(req) : null;
@@ -404,6 +407,8 @@ const STR_ARRAY_FIELDS: Record<string, number> = {
 };
 
 export async function PUT(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   let body: Partial<Record<keyof MerrymenSettings, unknown>>;
   try {
     body = (await req.json()) as typeof body;

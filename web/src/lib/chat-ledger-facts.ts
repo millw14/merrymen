@@ -1,12 +1,12 @@
 /** Owner chat facts are read on the server, never inferred from the browser's partial tape. */
-import { calculateChatMath, chatPeriodStart, parseChatMath } from "@merrymen/core";
+import { calculateChatMath, chatPeriodStart, parseChatMath, type GrantPurpose } from "@merrymen/core";
 import { readTradeFacts, type ChatTradeFact } from "../../../worker/src/chat-trades";
 import type { Db } from "../../../worker/src/db";
 import type { AgentChatBody } from "./agent-chat";
 import { decimalAmount } from "./format";
 import { withReadDb } from "./ledger";
 
-type ReadDb = <T>(fn: (db: Db | null) => Promise<T>) => Promise<T>;
+type ReadDb = <T>(fn: (db: Db | null) => Promise<T>, wallet: GrantPurpose) => Promise<T>;
 interface TradeQuestion { why: boolean; pnl: boolean; period: string; token?: string; side?: "buy" | "sell"; id?: number; timeZone?: string }
 
 function tradeQuestion(message: string, history: unknown): TradeQuestion | null {
@@ -112,7 +112,7 @@ export async function ledgerChatReply(
         ...(question.id !== undefined ? { id: question.id } : {}),
       });
       return question.pnl ? formatOwnerTradePnl(facts.trades, facts.complete, window.label) : formatOwnerTrades(facts.trades, facts.complete, window.label, question.why);
-    });
+    }, "spot");
   } catch {
     return "I can't read my trade history right now, so I won't guess what I traded or why.";
   }

@@ -196,15 +196,18 @@ describe("every archiver writes through the durable helper", () => {
 describe("grant.json changes only after the archive — and a kill without one does not delete", () => {
   it("web POST: archive, then replace; a failed archive is logged and arming goes on (best-effort, by design)", () => {
     const post = body(ROUTE, "export async function POST(");
-    before_(post, "const kept = await archiveCurrentGrant();", "await writeFileAtomic(GRANT_FILE,", "the copy is made before grant.json is replaced");
+    before_(post, 'const kept = await archiveCurrentGrant("spot");', "await writeFileAtomic(GRANT_FILE,", "the copy is made before grant.json is replaced");
     assert.match(post, /if \(kept\.kind === "failed"\) \{\s*console\.error\(/);
   });
 
   it("both web kill routes use the shared archive refusal before deleting or queuing a reset", () => {
+    // Each wallet's own grant.json, archive and pause marker (grantFiles: Spot's are
+    // the home's own, exactly the files homePaths names; Perps's are accounts/perps').
     const remove = body(WEB_ARCHIVE, "export async function removeSelfHostedGrant(");
-    before_(remove, "const kept = await archiveCurrentGrant();", "await rm(homePaths.grant(), { force: true });", "archive first");
-    before_(remove, 'if (kept.kind === "failed") throw new GrantArchiveError(kept.why, pauseForKeptGrant());', "await rm(homePaths.grant()", "refuse and pause before deleting");
-    before_(remove, "await rm(homePaths.grant(), { force: true });", "liftKillPause();", "lift only a kill's pause after removal");
+    assert.match(WEB_ARCHIVE, /const home = purposeHome\(wallet\);\s*return \{ home, grant: path\.join\(home, "grant\.json"\), archive: path\.join\(home, "grants"\) \};/);
+    before_(remove, "const kept = await archiveCurrentGrant(wallet);", "await rm(grant, { force: true });", "archive first");
+    before_(remove, "throw new GrantArchiveError(kept.why, pauseForKeptGrant(home),", "await rm(grant", "refuse and pause before deleting");
+    before_(remove, "await rm(grant, { force: true });", "liftKillPause(home);", "lift only a kill's pause after removal");
     for (const route of [ROUTE, DISCARD]) assert.match(route, /removeSelfHostedGrant/);
     // Start over answers the archive refusal the same way, and says what its Perps half did.
     assert.match(DISCARD, /if \(e instanceof GrantArchiveError\) \{\s*return NextResponse\.json\(\{ error: e\.message, paused: e\.paused, \.\.\.\(perps\.state === "none" \? \{\} : \{ perps: perps\.state \}\) \}, \{ status: 409 \}\);/);

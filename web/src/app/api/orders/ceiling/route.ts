@@ -11,11 +11,14 @@ import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { ceilingFor } from "@/lib/order-ceiling";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (isHostedMode() && !tenantOf(req)) return NextResponse.json({ error: "not signed in" }, { status: 401 });
   return NextResponse.json({ ceilingUsdg: await ceilingFor(req, isHostedMode()) });
 }

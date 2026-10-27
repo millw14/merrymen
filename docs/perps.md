@@ -28,8 +28,8 @@ the finished product; this table says how much of it main carries.
 | 1. Core and permission wall | the Lighter route, market and ABI constants, the `perp-lighter-v1` wall option, the canonical-wall marker, the signers' carry-forward. `POST /api/grants` refuses every perps grant (`perp-not-offered`) | merged (#359) |
 | 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | merged (#361) |
 | 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | merged (#362) |
-| 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | in review |
-| 5. Web API, desk and CLI | making and funding a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet | not yet |
+| 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | merged (#365) |
+| 5. Web API, desk and CLI | making a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet; funding is its own PR after it. First, 5a: the inert foundation (below) | 5a in review |
 | 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | not yet |
 
 Until slice 5, nothing on main can make a Perps wallet, so none exists in
@@ -144,6 +144,31 @@ perp rows and `paper_checkpoints.perp_json` stay in Postgres. An operator
 recovery path (admitting a fresh Perps book and restoring `perp_json` into
 it) is not built yet. Until it is, never replace a volume while Perps books
 are on it; the handover already refuses.
+
+**What 5a carries: the foundation, inert.** Nothing a Spot owner or a caller
+who names no wallet can do changes, and no Perps capability is added, with
+`MERRYMEN_PERPS` set or not. It lands the pieces the rest of slice 5 stands on:
+
+- the core wall's `perpsOnly` option (`WallOptions.perpsOnly`), set only from
+  a grant's signed `purpose` (`grantWallOptions`): a Perps wall carries no Spot
+  spender, token, adapter, vault, class, Pons or Trencher permission, only the
+  perp route when a perp block is sealed and the energy buy when asked for. A
+  paper Perps grant seals neither, so its wall is empty. Spot walls rebuild
+  byte for byte as before. No signer makes a Perps grant yet;
+- one perps gate: `MERRYMEN_PERPS`'s parser moved to
+  `packages/core/src/perps-ceiling.ts` (the worker re-exports it), read by the
+  web as `perpsOffered` (not off) and `perpsCreationAllowed` (paper)
+  (`web/src/lib/perps-enabled.ts`), which no route asks yet;
+- `walletUrl`, the one client builder for `?wallet=`;
+- the wallet named, with no default, on the web's shared server helpers
+  (`hostedAgentFor`, `diskAgent`, `withReadDb`, `archiveCurrentGrant`,
+  `removeSelfHostedGrant`, `queuePaperReset`). Every caller passes `spot`;
+  `perps` resolves only the Perps wallet (its store hosted, `accounts/perps`
+  self-hosted) and never the Spot one;
+- the route guard (`web/src/lib/route-guard.ts`): every API route that is not
+  wallet-aware refuses a `?wallet=` other than Spot with 400
+  `wallet-not-supported` before it reads or writes anything, and a test walks
+  every route file to hold it. Only `/api/grants` reads the wallet itself.
 
 ## One login, two wallets
 

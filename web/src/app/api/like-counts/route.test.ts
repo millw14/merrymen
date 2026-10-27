@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { NextResponse } from "next/server";
 import ts from "typescript";
 import type { ReadThesesOptions } from "@/lib/read-theses";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /** Execute the saved route; replace only its public feed/store dependencies. */
 function handler(
@@ -17,6 +18,7 @@ function handler(
   const exports: Partial<typeof import("./route")> = {};
   const require = (name: string) => {
     if (name === "next/server") return { NextResponse };
+    if (name === "@/lib/route-guard") return { walletNotSupported };
     if (name === "@/lib/read-theses") return { readTheses };
     if (name === "@/lib/like-store") return { getLikeStore: () => ({ counts }) };
     throw new Error(`Unexpected route dependency: ${name}`);
@@ -38,7 +40,7 @@ test("counts use the activity post IDs without reading return enrichment and kee
     assert.deepEqual(ids, ["new-post", "zero-likes"], "only IDs supplied by the publication-gated feed");
     return { "new-post": 3, "zero-likes": 0 };
   });
-  const response = await GET();
+  const response = await GET(new Request("https://app.merrymen.dev/api/like-counts"));
   assert.deepEqual(options, [{ figures: false }]);
   assert.equal(asks, 1);
   assert.deepEqual(await response.json(), { counts: { "new-post": 3, "zero-likes": 0 }, read: true });
@@ -52,7 +54,7 @@ test("feed and count failures remain unread and uncacheable", async () => {
       if (failedStage === "feed") throw new Error("private database error");
       return { source: "sqlite", theses: [{ postId: "published" }] };
     }, async () => { asks++; throw new Error("private database error"); });
-    const response = await GET();
+    const response = await GET(new Request("https://app.merrymen.dev/api/like-counts"));
     assert.equal(asks, failedStage === "feed" ? 0 : 1);
     assert.deepEqual(await response.json(), { counts: {}, read: false });
     assert.equal(response.headers.get("cache-control"), "no-store");

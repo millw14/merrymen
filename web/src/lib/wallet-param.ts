@@ -19,3 +19,27 @@ export function readWalletParam(req: Pick<Request, "url">): GrantPurpose | null 
   if (values.length === 0) return "spot";
   return values.length === 1 && isGrantPurpose(values[0]) ? values[0] : null;
 }
+
+/**
+ * THE ONE WAY A CLIENT NAMES A WALLET IN A URL: `walletUrl("/api/x", wallet)`.
+ *
+ * SPOT LEAVES THE URL EXACTLY AS IT WAS, byte for byte, so every request a Spot
+ * screen makes is the request it made before Perps existed (absent is Spot,
+ * readWalletParam). Perps adds `wallet=perps`, beside any query the URL
+ * already carries and in place of any `wallet=` it already names, so a URL can
+ * never name two wallets (which readWalletParam refuses).
+ *
+ * Here and not built by hand at each call site, because a hand-built `?` on a
+ * URL that already has a query, or a `wallet=` set twice, is a request for no
+ * wallet at all. And NOT `?purpose=`: see WALLET_PARAM.
+ *
+ * A path stays a path (a client's `/api/...`); an absolute URL stays absolute.
+ */
+export function walletUrl(url: string, wallet: GrantPurpose): string {
+  if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
+  if (wallet === "spot") return url;
+  const base = "http://wallet-url.invalid";
+  const parsed = new URL(url, base);
+  parsed.searchParams.set(WALLET_PARAM, wallet);
+  return parsed.origin === base ? `${parsed.pathname}${parsed.search}${parsed.hash}` : parsed.href;
+}

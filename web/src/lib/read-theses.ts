@@ -691,5 +691,5 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
     const theses = [...actions, ...views].sort((a, b) => b.at - a.at);
 
     return { source: "sqlite", theses, tradesComplete: rows.tradesComplete };
-  });
+  }, "spot");
 }

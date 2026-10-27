@@ -12,6 +12,7 @@
  */
 import { NextResponse } from "next/server";
 import { parseServiceNotice } from "@/lib/service-notice";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * NOT PRERENDERED AT BUILD, and that is a correctness rule rather than a
@@ -34,7 +35,9 @@ const CACHE = "public, max-age=60, s-maxage=60, stale-while-revalidate=60";
 /** The last refused value we logged, so a polled route does not log per request. */
 let logged: string | undefined;
 
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const raw = process.env.MERRYMEN_SERVICE_NOTICE;
   const read = parseServiceNotice(raw);
   if (!read.ok && logged !== raw) {

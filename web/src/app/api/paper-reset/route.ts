@@ -26,10 +26,11 @@ import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { queuePaperReset } from "@/lib/start-over";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
-const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
+const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req, "spot") : diskAgent("spot"));
 
 /**
  * The practice reset on its own, as the iOS and Android apps ask for it. The
@@ -38,9 +39,11 @@ const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskA
  * /api/grants/discard to do both (lib/start-over.ts).
  */
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-  const queued = await queuePaperReset(isHostedMode(), agent);
+  const queued = await queuePaperReset(isHostedMode(), agent, "spot");
   if (!queued.ok) return NextResponse.json({ error: queued.error }, { status: queued.status ?? 503 });
   return NextResponse.json({ id: queued.id, queued: true });
 }

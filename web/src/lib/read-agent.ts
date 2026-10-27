@@ -273,7 +273,7 @@ export const readAgent = cache(async function readAgent(
   }
 
   const found = identity;
-  return withReadDb(async (db): Promise<AgentProfile | null> => (db ? profileOf(db, found, publicBook) : null));
+  return withReadDb(async (db): Promise<AgentProfile | null> => (db ? profileOf(db, found, publicBook) : null), "spot");
 });
 
 type AgentRow = {
@@ -348,7 +348,7 @@ export async function readAgentSummary(
   return readDb(async (db) => {
     if (!db) throw new Error("Agent directory unavailable");
     return profileSummaryOf(db, identity);
-  });
+  }, "spot");
 }
 
 /**
@@ -408,7 +408,7 @@ export async function readOwnBook(
   }
   if (!identity || identity.tenant.toLowerCase() !== tenant.toLowerCase()) return NOT_OWN_BOOK;
   const found = identity;
-  const book = await withReadDb(async (db) => (db ? ownBookOf(db, found) : null));
+  const book = await withReadDb(async (db) => (db ? ownBookOf(db, found) : null), "spot");
   return book ? { status: 200, book } : { status: 404, error: "No trades on record for this agent." };
 }
 

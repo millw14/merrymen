@@ -557,7 +557,7 @@ export async function POST(req: Request) {
         get: () => getSettingsStore("spot").get(tenant),
         put: (s) => getSettingsStore("spot").put(tenant, s),
       },
-      ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
+      ledgerHasAgent: (account) => ledgerHasAgent((fn) => withReadDb(fn, "spot"), account),
     });
     return NextResponse.json({ ok: true });
   }
@@ -568,7 +568,7 @@ export async function POST(req: Request) {
   // BEST-EFFORT, deliberately: archiving must never block arming a grant. A
   // failure is said loudly, because the grant it failed to keep is about to be
   // replaced.
-  const kept = await archiveCurrentGrant();
+  const kept = await archiveCurrentGrant("spot");
   if (kept.kind === "failed") {
     console.error(`[grants] the outgoing grant was NOT archived (${kept.why}) — replacing grant.json anyway; its owner key is not in ~/.merrymen/grants/`);
   }
@@ -659,7 +659,7 @@ export async function DELETE(req: Request) {
   const solana = await solanaStopped(() => stopLocalSolanaForKill());
   const perps: PerpsHalf = renewal ? { state: "none" } : await perpsHalf(() => stopLocalPerpsForKill());
   try {
-    await removeSelfHostedGrant();
+    await removeSelfHostedGrant("spot");
   } catch (e) {
     if (e instanceof GrantArchiveError) {
       return NextResponse.json({ error: `${e.message}${solana ? " Your Solana strategy was stopped." : " Your Solana strategy could not be stopped either: try the kill again."}${perpsAfterKeptGrant(perps)}`,
@@ -841,6 +841,7 @@ export async function GET(req: Request) {
                 }
               | undefined)
           : null,
+        "spot",
       );
       // undefined is a ledger that answered with no row; null is no ledger.
       if (row !== null) heartbeatRead = true;
@@ -877,7 +878,7 @@ export async function GET(req: Request) {
         if (!db) throw new Error("Hosted recovery ledger is unavailable.");
         return readFleetRecoveryView(db,
           { tenant: hostedTenant, smartAccount: grant.smartAccount, chainId: grant.chainId }, workerAliveAt);
-      });
+      }, "spot");
     } catch {
       return NextResponse.json({ error: "Couldn't confirm this agent's recovery status. Please try again.", ownerFacing: true }, { status: 503 });
     }

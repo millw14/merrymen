@@ -17,6 +17,7 @@ import { NextResponse } from "next/server";
 import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { fetchMarket } from "@/lib/market";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * A DEAD DIRECTIVE IS WORSE THAN NO DIRECTIVE, so it is gone.
@@ -45,6 +46,8 @@ export interface SearchHit {
 const LIMIT = 8;
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const q = (new URL(req.url).searchParams.get("q") ?? "").trim().toLowerCase();
   // Two characters, because one matches most of the universe and the work is
   // wasted on a query nobody has finished typing.
@@ -109,7 +112,7 @@ export async function GET(req: Request) {
           sub: r.x_handle ? `@${r.x_handle}` : r.mode,
         });
       }
-    });
+    }, "spot");
   } catch {
     /* an unreadable ledger means no agent hits, never a 500 */
   }

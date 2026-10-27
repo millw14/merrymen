@@ -64,6 +64,7 @@ import {
   requestOrigin,
   tenantOf,
 } from "@/lib/auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -84,6 +85,8 @@ function requireTenant(req: Request): `0x${string}` | null {
 
 /** GET — the exact message this account's chosen wallet should sign. */
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) {
     return NextResponse.json(
@@ -112,6 +115,8 @@ interface LinkBody {
 
 /** POST — verify the signature and record the proof. */
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) {
     return NextResponse.json(
@@ -272,6 +277,8 @@ function utcStamp(ms: number): string {
 
 /** DELETE — unlink, and free the wallet for another account. */
 export async function DELETE(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) {
     return NextResponse.json(
@@ -324,6 +331,8 @@ export async function DELETE(req: Request) {
  * nothing about it rather than guess.
  */
 export async function PATCH(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ linked: null, reads: null, proof: null });
   const store = getSettingsStore("spot");

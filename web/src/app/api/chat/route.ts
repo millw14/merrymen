@@ -15,10 +15,13 @@ import { fomoChatTurn } from "@/lib/fomo-chat";
 import { fomoEnabledFor } from "@/lib/fomo-switch";
 import { withReadDb } from "@/lib/ledger";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const hosted = isHostedMode();
   const tenant = hosted ? tenantOf(req) : null;
   if (hosted && !tenant) {
@@ -62,7 +65,7 @@ export async function POST(req: Request) {
       recovery = await withReadDb(db => {
         if (!db) throw new Error("Recovery status is unavailable.");
         return readFleetRecoveryView(db, scope, null);
-      });
+      }, "spot");
     }
   } catch {
     return NextResponse.json({ reply: null, why: "recovery-unavailable" }, { status: 503 });
@@ -97,7 +100,7 @@ export async function POST(req: Request) {
   // ONLY WHILE ITS DAY LASTS. A report whose day has ended is not today's —
   // the worker may not have published since (currentEnergy) — so it is no
   // report, and the model says it cannot see its energy instead of blaming it.
-  const account = hosted ? grant?.smartAccount ?? null : await diskAgent();
+  const account = hosted ? grant?.smartAccount ?? null : await diskAgent("spot");
   const factualReply = fomo ? undefined : await ledgerChatReply(body, account, Math.floor(Date.now() / 1000));
   const report = currentEnergy(!recovery && account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
   const energy = report

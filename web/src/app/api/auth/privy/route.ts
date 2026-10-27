@@ -37,6 +37,7 @@ import {
   SESSION_COOKIE,
 } from "@/lib/auth";
 import { privyConfigured, privyTokenOf, verifyPrivyToken } from "@/lib/privy";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 
@@ -44,6 +45,8 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
 
 /** The same nonce discipline as the wallet login. One definition, in lib/auth. */
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!privyConfigured()) {
     return NextResponse.json({ error: "privy login is not configured here", ownerFacing: true }, { status: 501 });
   }
@@ -62,6 +65,8 @@ function providerOf(v: unknown): IdentityProvider {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!privyConfigured()) {
     return NextResponse.json({ error: "privy login is not configured here", ownerFacing: true }, { status: 501 });
   }

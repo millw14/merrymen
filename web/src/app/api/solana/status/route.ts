@@ -3,10 +3,13 @@ import { authenticateSolana, SolanaWebError } from "@/lib/solana-auth";
 import { getSolanaBindingStore, SOLANA_OTHER_SIGN_IN } from "@/lib/solana-binding-store";
 import { solanaResponse } from "@/lib/solana-api";
 import { takeSolanaStatusToken } from "./throttle";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   return solanaResponse(async () => {
     const principal = await authenticateSolana(req);
     const wait = takeSolanaStatusToken(principal.tenant);
