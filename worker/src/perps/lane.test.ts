@@ -12,19 +12,28 @@
  *                      strategist's handoff is consumed by one route and gone.
  *   the reset          a paper reset clears the book and every memory of it.
  *   the feed host      one feed per self-hosted process, none in a hosted child.
+ *   the owner's exits  Close and Close all close what is held, reduce-only,
+ *                      filed as the owner's; Close all halts entries first;
+ *                      a practice book that is not the account's is frozen.
+ *   at most once       a crash between closing and answering never closes
+ *                      again, and a stood-down Perps worker claims nothing.
  *   the wiring         index.ts calls the protective loop from the arm, never
  *                      from tick(); lane.ts and protect.ts read nothing from
  *                      the chain's market read; every paper_book
- *                      read-modify-write in index.ts runs under the lane lock.
+ *                      read-modify-write in index.ts runs under the lane lock;
+ *                      an owner's exit reaches the lane after the wallet check.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
+import { queuedCommandIds, readCommandState, runTickCommand, writeCommand, type FileCommand } from "../command-files";
 import type { ExecMode } from "../exec-mode";
 import type { AgentLimits, PerpOrderIntent, TradeIntent } from "../policy";
 import { perpsWalletRefusal } from "../policy";
+import { mergeSettings, perpsWorkerStoodDown } from "../settings";
 import { rejectRuleLabel, ownerRejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { buildOpenDraft } from "./drafts";
 import { createPaperPerpExecutor, PerpRefused, type PerpExecutor } from "./executor";
@@ -37,10 +46,12 @@ import {
   isHostedChildProcess,
   perpsRailOf,
   usdgText,
+  type DecideFn,
   type PerpLane,
   type PerpLaneConfig,
 } from "./lane";
 import { parseOrderBookDetails } from "./markets";
+import { readPerpExitOrder } from "./owner-order";
 import type { PerpRouteIntent } from "./route";
 
 const HERE = import.meta.dirname;
@@ -56,7 +67,10 @@ try {
 } finally {
   process.chdir(originalCwd);
 }
+/** A second connection to the same file, to count what the paper engine booked. */
+const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME, "merrymen.db"));
 after(() => {
+  raw.close();
   store.closeStoreForTest();
   rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
@@ -66,7 +80,7 @@ const BTC = parseOrderBookDetails(JSON.parse(readFileSync(path.join(HERE, "fixtu
 const FEED = path.join(scratch, "lighter-feed.json");
 let clock = 1_790_712_000_000;
 
-function writeFeed(mark = 802_000n): void {
+function writeFeed(mark = 802_000n, bidDepth = "1000"): void {
   const m: LighterFeedFileMarket = {
     observedAt: clock - 1_000,
     priceSource: "ws",
@@ -77,7 +91,7 @@ function writeFeed(mark = 802_000n): void {
     specObservedAt: clock - 60_000,
     takerFeePpm: 0,
     makerFeePpm: 0,
-    bids: [[(mark - 100n).toString(), "1000"]],
+    bids: [[(mark - 100n).toString(), bidDepth]],
     asks: [[mark.toString(), "1000"]],
     bookObservedAt: clock - 1_000,
     bookSource: "ws",
@@ -117,7 +131,13 @@ interface Rig {
   cfg: PerpLaneConfig;
 }
 async function rig(
-  opts: { cfg?: Partial<PerpLaneConfig>; wrap?: (ex: PerpExecutor) => PerpExecutor; store?: Partial<typeof store> } = {},
+  opts: {
+    cfg?: Partial<PerpLaneConfig>;
+    wrap?: (ex: PerpExecutor) => PerpExecutor;
+    store?: Partial<typeof store>;
+    execMode?: () => ExecMode;
+    decide?: DecideFn;
+  } = {},
 ): Promise<Rig> {
   const hex = (n++).toString(16).padStart(40, "0");
   const id = await store.ensureAgent({
@@ -145,7 +165,7 @@ async function rig(
     store: { ...store, ...(opts.store ?? {}) },
     armed: () => ({ agentId: id, smartAccount: `0x${hex}`, limits }),
     config: () => r.cfg,
-    execMode: () => PAPER,
+    execMode: opts.execMode ?? (() => PAPER),
     readFeed: (now) => readLighterFeed(FEED, now),
     now: () => clock,
     agentState: async ({ equityUsdg, equityKnown }) => ({
@@ -162,7 +182,7 @@ async function rig(
       refresh: async () => {},
     },
     events: async (_level, message) => void r.events.push(message),
-    decide: async () => ({ ok: true }),
+    decide: opts.decide ?? (async () => ({ ok: true })),
     paperExecutor: (o) => (opts.wrap ?? ((x) => x))(createPaperPerpExecutor(o)),
     log: () => {},
   });
@@ -424,6 +444,323 @@ describe("a paper reset", () => {
   });
 });
 
+// ── the owner's exits ───────────────────────────────────────────────────────
+
+const fillsOf = (id: string): number =>
+  Number((raw.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id = ? AND mode = 'paper'").get(id.toLowerCase()) as { n: number }).n);
+
+describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-perps)", () => {
+  it("Close all closes every practice position and halts new entries first — the next open is refused perp-entries-halted", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    await r.lane.report();
+    const reported = () => (JSON.parse(String((raw.prepare("SELECT perps FROM agents WHERE smart_account = ?").get(r.id) as { perps: string }).perps)) as { positions: unknown[] }).positions.length;
+    assert.equal(reported(), 1);
+    // No book: the desk could not read which book it saw, so every book (D11) — here, the practice one.
+    const out = await r.lane.flatten({});
+    assert.equal(reported(), 0, "agents.perps says so at once, not at the next pass");
+    assert.equal(out.ok, true, out.sentence);
+    assert.match(out.sentence, /Every practice perpetual position was closed/);
+    assert.match(out.sentence, /New practice positions are paused until you reset the practice book/);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true, "the halt is in the ledger, not only in this process");
+    const read = await r.lane.refresh();
+    assert.equal(read.view?.opensBlocked, "perps-entries-halted");
+    assert.deepEqual(await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true }), { status: "rejected", rejectRule: "perp-entries-halted" });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "nothing opened after the owner's Close all");
+  });
+
+  it("a close is filed as the owner's — source chat, reduce-only, the full size held — before anything is placed", async () => {
+    writeFeed();
+    const asked: { source: string; reason?: string; intent: TradeIntent }[] = [];
+    const r = await rig({ decide: async (intent, source, reason) => (asked.push({ source, reason, intent: { ...intent } }), { ok: true }) });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const held = (await store.getPerpPositions(r.id, "paper"))[0]!;
+    const out = await r.lane.close("BTC-PERP", { book: "paper" });
+    assert.equal(out.ok, true, out.sentence);
+    assert.equal(out.sentence, "BTC-PERP: the practice position was closed.");
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]!.source, "chat", "provenance.ts reads `chat` as owner-command");
+    assert.match(asked[0]!.reason ?? "", /the owner asked to close BTC-PERP reduce-only/);
+    const intent = asked[0]!.intent as PerpOrderIntent;
+    assert.equal(intent.effect, "close");
+    assert.equal(intent.reduceOnly, true);
+    assert.equal(intent.side, held.side);
+    assert.equal(intent.baseAmount, held.base);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+  });
+
+  it("a close whose decision cannot be written sends nothing — a fill nobody can attribute is not the owner's", async () => {
+    writeFeed();
+    let refuse = false;
+    const r = await rig({ decide: async () => (refuse ? { ok: false, why: "the decisions table did not answer" } : { ok: true }) });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    refuse = true;
+    const out = await r.lane.close("BTC-PERP", { book: "paper" });
+    assert.equal(out.ok, false);
+    assert.match(out.sentence, /could not be recorded, so nothing was sent/);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    assert.equal(fillsOf(r.id), fills);
+  });
+
+  it("owner close remains available with entries disabled and refuses an expired request", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    r.cfg.perpsEnabled = false;
+    r.cfg.perpsEntriesHalted = true;
+    assert.equal((await r.lane.close("BTC-PERP", { book: "paper", notAfterMs: clock - 1 })).ok, false);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    // At the deadline itself it still runs (command-files.ts isExpired's edge).
+    const out = await r.lane.close("BTC-PERP", { book: "paper", notAfterMs: clock });
+    assert.equal(out.ok, true, out.sentence);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+    const late = await r.lane.flatten({ notAfterMs: clock - 1 });
+    assert.equal(late.ok, false);
+    assert.match(late.sentence, /expired before it could run\. Nothing was sent and nothing was paused/);
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted ?? false, false, "an expired Close all pauses nothing either");
+  });
+
+  it("partial practice closes and flatten attempts report the position still open", async () => {
+    for (const action of ["close", "flatten"] as const) {
+      writeFeed();
+      const r = await rig();
+      await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+      const before = (await store.getPerpPositions(r.id, "paper"))[0]!.base;
+      assert.ok(before > 1n);
+      writeFeed(802_000n, "1");
+      const out = action === "close" ? await r.lane.close("BTC-PERP", { book: "paper" }) : await r.lane.flatten({ book: "paper" });
+      const after = (await store.getPerpPositions(r.id, "paper"))[0]!.base;
+      assert.ok(after > 0n && after < before, "the IOC filled only available liquidity");
+      assert.equal(out.ok, false);
+      assert.match(out.sentence, /remains? open/);
+      assert.doesNotMatch(out.sentence, /position was closed|Every practice perpetual position was closed/);
+    }
+  });
+
+  it("a failed halt write still closes and keeps this worker from reopening, without claiming a durable pause", async () => {
+    writeFeed();
+    const r = await rig({ store: { patchPerpAccount: async () => { throw new Error("ledger write unavailable"); } } });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const out = await r.lane.flatten({});
+    assert.equal(out.ok, false);
+    assert.match(out.sentence, /pause could not be saved/);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "exit still attempted");
+    assert.equal((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+    await r.lane.armed();
+    await r.lane.stopProtect();
+    assert.equal((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted", "re-arm never clears an unsaved owner halt");
+  });
+
+  it("A PRACTICE RESET ASKED FOR AFTER CLOSE ALL LIFTS ITS HALT, in the reset's own transaction, and practice entries open again", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await r.lane.flatten({ askedAt: clock - 5_000 })).ok, true);
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true);
+    await store.setAgentMode(r.id, "paper", 1, false);
+    const told: boolean[] = [];
+    await r.lane.resetPaper(
+      ({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })),
+      { askedAt: clock - 1_000 },
+    );
+    assert.deepEqual(told, [true]);
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, false, "the ledger's halt went with the old book");
+    assert.notEqual((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+    assert.equal((await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true })).status, "paper", "a practice entry opens on the new book");
+  });
+
+  it("A RESET ASKED FOR BEFORE THE CLOSE ALL NEVER LIFTS IT (hosted, the reset can reach the worker second), and one that cannot say when lifts nothing", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await r.lane.flatten({ askedAt: clock - 1_000 })).ok, true);
+    await store.setAgentMode(r.id, "paper", 1, false);
+    for (const opts of [{ askedAt: clock - 5_000 }, {}]) {
+      const told: boolean[] = [];
+      await r.lane.resetPaper(({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })), opts);
+      assert.deepEqual(told, [false], JSON.stringify(opts));
+      assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true, JSON.stringify(opts));
+      assert.equal((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted", JSON.stringify(opts));
+    }
+    assert.deepEqual(await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true }), { status: "rejected", rejectRule: "perp-entries-halted" });
+  });
+
+  it("a later reset lifts a halt this worker only held in memory (its write failed), and one an earlier worker stored", async () => {
+    writeFeed();
+    const failing = await rig({ store: { patchPerpAccount: async () => { throw new Error("ledger write unavailable"); } } });
+    assert.match((await failing.lane.flatten({ askedAt: clock - 5_000 })).sentence, /pause could not be saved/);
+    assert.equal((await failing.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+    await store.setAgentMode(failing.id, "paper", 1, false);
+    await failing.lane.resetPaper(({ clearEntriesHalt }) => store.resetPaperLedger(failing.id, 100, { clearEntriesHalt }), { askedAt: clock - 1_000 });
+    assert.notEqual((await failing.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+    // Stored by a worker before this one: no memory here, so only the ledger knows, and the reset lifts it.
+    const earlier = await rig();
+    await store.patchPerpAccount(earlier.id, "paper", { entriesHalted: true });
+    assert.equal((await earlier.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+    await store.setAgentMode(earlier.id, "paper", 1, false);
+    await earlier.lane.resetPaper(({ clearEntriesHalt }) => store.resetPaperLedger(earlier.id, 100, { clearEntriesHalt }), { askedAt: clock });
+    assert.equal((await store.getPerpAccount(earlier.id, "paper"))?.entriesHalted, false);
+    // And a reset that is not told to (every caller before this one) leaves the halt alone.
+    await store.patchPerpAccount(earlier.id, "paper", { entriesHalted: true });
+    await store.resetPaperLedger(earlier.id, 100);
+    assert.equal((await store.getPerpAccount(earlier.id, "paper"))?.entriesHalted, true);
+  });
+
+  it("a practice book that is not the account's book is frozen (rule 14): Close and Close all send nothing", async () => {
+    writeFeed();
+    let mode: ExecMode = PAPER;
+    const r = await rig({ execMode: () => mode });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    mode = { mode: "live" };
+    const close = await r.lane.close("BTC-PERP", { book: "paper" });
+    assert.equal(close.ok, false);
+    assert.match(close.sentence, /not on paper right now, so its practice perpetual positions stay exactly as they are/);
+    const all = await r.lane.flatten({});
+    assert.equal(all.ok, false);
+    assert.match(all.sentence, /New practice positions are paused/, "the halt is still the owner's to have");
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    assert.equal(fillsOf(r.id), fills);
+  });
+
+  it("a market this version does not trade, or one with nothing held, sends nothing", async () => {
+    writeFeed();
+    const r = await rig();
+    assert.match((await r.lane.close("NOPE-PERP" as never, { book: "paper" })).sentence, /not a perpetual market this version trades\. Nothing was sent/);
+    const none = await r.lane.close("BTC-PERP", { book: "paper" });
+    assert.equal(none.ok, false);
+    assert.equal(none.sentence, "BTC-PERP: there is no practice position to close. Nothing was sent.");
+    assert.equal(fillsOf(r.id), 0);
+  });
+});
+
+describe("an owner's exit, at most once (command-files.ts: the claim is the unlink)", () => {
+  const homes: string[] = [];
+  after(() => {
+    for (const h of homes) rmSync(h, { recursive: true, force: true });
+  });
+  const newHome = () => {
+    const h = mkdtempSync(path.join(scratch, "cmd-home-"));
+    homes.push(h);
+    return h;
+  };
+  const closeCommand = (id: string, expiresAt = clock + 60_000): FileCommand => ({
+    id,
+    kind: "trade",
+    at: clock - 1_000,
+    args: { side: "sell", symbol: "BTC-PERP", usdgAmount: 0, purpose: "close-perp", book: "paper" },
+    expiresAt,
+  });
+  /** index.ts runOrderCommand's exit dispatch, as a drain's `run`. */
+  const dispatch = (lane: PerpLane) => async (cmd: FileCommand) => {
+    const exit = readPerpExitOrder(cmd.args ?? {});
+    assert.ok(exit && "order" in exit && exit.order.purpose === "close-perp");
+    const r = await lane.close(exit.order.symbol, { book: exit.order.book, notAfterMs: cmd.expiresAt });
+    return { ok: r.ok, line: r.sentence };
+  };
+
+  it("a worker that crashes after closing and before answering never closes again — not even a position opened since", async () => {
+    writeFeed();
+    const r = await rig();
+    const home = newHome();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    writeCommand(home, closeCommand("exit-crash"));
+    // The close books, then the process dies before the result file is written.
+    await assert.rejects(
+      runTickCommand(home, {
+        now: () => clock,
+        run: async (cmd) => {
+          await dispatch(r.lane)(cmd);
+          throw new Error("SIGKILL between the close and its answer");
+        },
+        told: async () => {},
+      }),
+      /SIGKILL/,
+    );
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "the close itself landed");
+    const fills = fillsOf(r.id);
+    // The strategy opens BTC again before the worker comes back. A replayed
+    // close would now close a position the owner never asked to close.
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    const fillsBefore = fillsOf(r.id);
+    assert.ok(fillsBefore > fills);
+    // The restart's drain: the file was unlinked at the claim, so nothing is left to run.
+    let ran = 0;
+    await runTickCommand(home, { now: () => clock, run: async () => (ran++, { ok: true, line: "ran" }), told: async () => {} });
+    assert.equal(ran, 0, "a claimed command is never run twice");
+    assert.deepEqual(queuedCommandIds(home), []);
+    assert.equal(readCommandState(home, "exit-crash")?.state, "running", "claimed and unanswered — the orchestrator's sweep says it may have run");
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1, "the new position is untouched");
+    assert.equal(fillsOf(r.id), fillsBefore);
+  });
+
+  it("and were one ever run twice, the second finds nothing held and books nothing — a close is built from what is held", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await r.lane.close("BTC-PERP", { book: "paper" })).ok, true);
+    const fills = fillsOf(r.id);
+    const cash = (await store.getPaperBook(r.id, 100)).cashUsdg;
+    assert.equal((await r.lane.close("BTC-PERP", { book: "paper" })).ok, false);
+    const again = await r.lane.flatten({});
+    assert.equal(again.ok, true, again.sentence);
+    assert.match(again.sentence, /There were no practice perpetual positions open/);
+    assert.equal((await r.lane.flatten({})).ok, true, "a second Close all is the same halt and the same nothing");
+    assert.equal(fillsOf(r.id), fills);
+    assert.equal((await store.getPaperBook(r.id, 100)).cashUsdg, cash);
+  });
+
+  it("A STOOD-DOWN PERPS WORKER (D19) claims nothing: the queued exit waits, unclaimed, and the position stays exactly as it was", async () => {
+    const off = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps" });
+    const paper = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "paper" });
+    assert.equal(perpsWorkerStoodDown(off), true, "unset MERRYMEN_PERPS is off");
+    assert.equal(perpsWorkerStoodDown(mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "live" })), true, "live is off in this build");
+    assert.equal(perpsWorkerStoodDown(paper), false);
+    assert.equal(perpsWorkerStoodDown(mergeSettings({}, {})), false, "a Spot worker is never stood down here");
+    writeFeed();
+    const r = await rig();
+    const home = newHome();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    writeCommand(home, closeCommand("exit-off"));
+    let ran = 0;
+    const run = dispatch(r.lane);
+    await runTickCommand(home, { now: () => clock, mayRun: () => !perpsWorkerStoodDown(off), run: async (c) => (ran++, run(c)), told: async () => {} });
+    assert.equal(ran, 0);
+    assert.deepEqual(queuedCommandIds(home), ["exit-off"], "left in the queue, not claimed");
+    assert.equal(readCommandState(home, "exit-off")?.state, "queued");
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    assert.equal(fillsOf(r.id), fills);
+    // Perps back on paper, inside the window: the worker runs it, once.
+    await runTickCommand(home, { now: () => clock, mayRun: () => !perpsWorkerStoodDown(paper), run: async (c) => (ran++, run(c)), told: async () => {} });
+    assert.equal(ran, 1);
+    assert.equal(readCommandState(home, "exit-off")?.state, "done");
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+  });
+
+  it("…and one that waited past its window is answered expired when perps come back, with nothing sent", async () => {
+    writeFeed();
+    const r = await rig();
+    const home = newHome();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    writeCommand(home, closeCommand("exit-stale", clock - 1));
+    let ran = 0;
+    const paper = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "paper" });
+    await runTickCommand(home, { now: () => clock, mayRun: () => !perpsWorkerStoodDown(paper), run: async () => (ran++, { ok: true, line: "ran" }), told: async () => {} });
+    assert.equal(ran, 0);
+    const state = readCommandState(home, "exit-stale");
+    assert.equal(state?.state, "done");
+    assert.equal(state?.result?.ok, false);
+    assert.match(state?.result?.line ?? "", /^expired — .*Nothing was sent/);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+  });
+});
+
 // ── the wiring, read from source ────────────────────────────────────────────
 
 /** Code only: comments out, so a sentence ABOUT the loop is not a call TO it. */
@@ -573,11 +910,63 @@ describe("the wiring in index.ts", () => {
     assert.match(fn("runPaperReset"), /await perpLane\.resetPaper\(/);
   });
 
+  it("A PRACTICE RESET LIFTS A CLOSE-ALL HALT ONLY AS THE LANE DECIDES, from when the reset was asked for", () => {
+    assert.match(fn("runPaperReset"), /async \(\{ clearEntriesHalt \}\) => \{\s*const epoch = await resetPaperLedger\(id, cfg\.paperStartUsdg, \{ clearEntriesHalt \}\);/);
+    assert.match(fn("runPaperReset"), /\{ askedAt \},\s*\);/);
+    assert.match(fn("runCommand"), /if \(cmd\.kind === "paper-reset"\) return runPaperReset\(cmd\.at\);/);
+  });
+
   it("the route runs after the class route, inside tick(), and nothing perp is in the strategy loop", () => {
     const tick = fn("tick");
     const classEntries = tick.indexOf("await classGate.entries(");
     const route = tick.indexOf("await perpLane.runRoute(");
     assert.ok(classEntries > 0 && route > classEntries);
+  });
+
+  it("AN OWNER'S PERPETUAL EXIT reaches the lane only after the wallet check, read again from its own args, and is answered without a receipt", () => {
+    const run = fn("runOrderCommand");
+    const wallet = run.indexOf("const wrongWallet = walletOrderRefusal(cfg.workerWallet, orderRoute(cmd.args));");
+    const gate = run.indexOf("return placeOrder(");
+    assert.ok(wallet > 0 && gate > wallet, "the wallet is judged before every other gate");
+    assert.match(run.slice(wallet, gate), /if \(wrongWallet\) return no\(wrongWallet\);/);
+    const exit = run.indexOf("if (isPerpExitRoute(route)) {");
+    const submitters = [run.indexOf("submitEnergyBuy("), run.indexOf("submitChatTrade(")];
+    assert.ok(exit > gate && submitters.every((at) => at > exit), "an exit returns before any Spot submitter");
+    const branch = run.slice(exit, submitters[0]);
+    assert.match(branch, /const exit = readPerpExitOrder\(cmd\.args \?\? \{\}\);/);
+    assert.match(branch, /await perpLane\.close\(exit\.order\.symbol, \{ book: exit\.order\.book, notAfterMs \}\)/);
+    assert.match(branch, /await perpLane\.flatten\(\{ \.\.\.\(exit\.order\.book \? \{ book: exit\.order\.book \} : \{\}\), notAfterMs, askedAt: cmd\.at \}\)/);
+    assert.match(branch, /return \{ ok: result\.ok, line: result\.sentence \};/);
+    const at = CODE.indexOf("  function orderOutcome(");
+    const outcome = CODE.slice(at, CODE.indexOf("\n  }\n", at));
+    assert.match(outcome, /if \(isPerpExitRoute\(orderRoute\(cmd\.args\)\)\) return \{ ok: reply\.ok, line: reply\.line \};\s*const receipt =/);
+  });
+
+  it("A STOOD-DOWN PERPS WORKER'S DRAIN CLAIMS NOTHING (D19)", () => {
+    assert.match(fn("runQueuedCommand"), /mayRun: cmd => !!active && !perpsWorkerStoodDown\(cfg\) && !recoveryCommandRefused\(/);
+  });
+
+  it("THE DRAIN KNOWS WHICH ACCOUNT IS ARMED, so a command bound to another is answered and never run (command-files.ts notForThisAccount)", () => {
+    assert.match(fn("runQueuedCommand"), /account: \(\) => active\?\.grant\.smartAccount \?\? null,/);
+  });
+
+  it("AN OWNER'S PERPETUAL EXIT THAT EXPIRED IS ANSWERED WITHOUT A RECEIPT, on the drain's hook and in runCommand alike (order-receipt.ts expiredOrderReceipt)", () => {
+    assert.match(fn("runQueuedCommand"), /expiredReceipt: \(cmd\) => \(cmd\.kind === "trade" \? expiredOrderReceipt\(cmd\.args\) : undefined\)/);
+    const run = fn("runCommand");
+    assert.match(run, /const receipt = cmd\.kind === "trade" \? expiredOrderReceipt\(cmd\.args\) : undefined;/);
+    assert.match(run, /\.\.\.\(receipt \? \{ receipt \} : \{\}\),/);
+  });
+
+  it("PAUSE STOPS NEW PERP ENTRIES: the tick's pause return comes before the perps route, and after the order drain", () => {
+    const tick = fn("tick");
+    const drain = tick.indexOf("if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId, drainReads) : Promise.resolve())))) return;");
+    const paused = tick.indexOf("if (isPaused()) return;", drain);
+    const route = tick.indexOf("await perpLane.runRoute(");
+    assert.ok(drain > 0 && paused > drain && route > paused, `${drain} < ${paused} < ${route}`);
+  });
+
+  it("A PERPS WALLET'S ENERGY REPORT NAMES ITS WALLET, so a buy is never reported ready there (energy.ts energyBuyOf)", () => {
+    assert.match(CODE, /buy: energyBuyOf\(\{\s*chainId: grant\.chainId,\s*live: execMode\(\)\.mode === "live",\s*hasRoute: grantEnergyRoute\(grant\) !== null,\s*wallet: cfg\.workerWallet,\s*\}\)/);
   });
 
   it("the lane's reservation is released in a finally", () => {

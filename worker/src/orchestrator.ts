@@ -8254,7 +8254,7 @@ function receiptColumn(receipt: OrderReceipt | undefined): string | null {
 async function closeWithReceipt(
   shared: Db,
   set: { sql: string; args: unknown[] },
-  receipt: OrderReceipt,
+  receipt: OrderReceipt | undefined,
   where: { sql: string; args: unknown[] },
 ): Promise<void> {
   try {
@@ -8470,6 +8470,8 @@ export async function ferryForChild(
           // receipt, and the chat must not render one fact two ways depending on
           // who got there first. Only here, where nothing went out — the
           // "may have filled" closure below knows nothing, so templates nothing.
+          // An owner's perpetual exit has none, here as in the child: its
+          // sentence alone (order-receipt.ts expiredOrderReceipt).
           const expired = expiredOrderReceipt(args);
           if (r.claimed_at === null || r.claimed_at === undefined) {
             // Undelivered, so no file can exist yet; a replica that delivers it

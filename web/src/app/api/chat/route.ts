@@ -104,7 +104,7 @@ export async function POST(req: Request) {
   const factualReply = fomo ? undefined : await ledgerChatReply(body, account, Math.floor(Date.now() / 1000));
   const report = currentEnergy(!recovery && account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
   const energy = report
-    ? { ...report, ceilingUsdg: await ceilingFor(req, hosted).catch(() => null) }
+    ? { ...report, ceilingUsdg: await ceilingFor(req, hosted, "spot").catch(() => null) }
     : null;
   // The Fomo switches are settings change-settings may name only where this deployment runs Fomo.
   const fomoSettings = fomoEnabledFor(hosted);

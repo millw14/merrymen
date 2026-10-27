@@ -6,34 +6,51 @@
  * key fields (hint = last 4 chars). On PUT, a secret field that is absent or
  * undefined means "keep what's stored"; empty string means "clear"; any other
  * string replaces it. Non-secret fields: null/empty clears back to default.
+ *
+ * TWO WALLETS, EACH WITH ITS OWN SETTINGS (`?wallet=`; absent is Spot, so
+ * every client before Perps reaches exactly what it always reached). The Spot
+ * wallet's are everything below, unchanged. The Perps wallet's are a short
+ * allowlist of its own, kept in its own store or file and saved by its own
+ * writer — see "THE PERPS WALLET'S SETTINGS" at the end of this file.
  */
 
+import path from "node:path";
 import { mkdir, readFile, readdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { writeFileAtomic } from "@merrymen/atomic-write";
-import { homePaths, merrymenHome } from "@merrymen/home";
+import { homePaths, merrymenHome, purposeHome } from "@merrymen/home";
 import {
   HOSTED_FORBIDDEN_SETTING_FIELDS,
   LLM_PROVIDER_IDS,
   LLM_PROVIDERS,
+  PERPS_LIVE_CONSENT_VERSION,
+  PERPS_MARKETS_MAX,
+  PERPS_NUM_BOUNDS,
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
   TELEGRAM_GROUPS_CHATTINESS,
   isHostedMode,
+  isPerpKey,
   isValidCustomToken,
   officialCoinsFor,
+  perpsNumberOk,
   robinhoodChain,
   type LlmProviderInfo,
   type MerrymenSettings,
+  type PerpsDriver,
+  type PerpsNumKey,
   type SecretSettingKey,
 } from "@merrymen/core";
+// Relative, as the orders route reaches the worker: `tsx --test` resolves
+// against the root tsconfig, which has no @merrymen/settings.
+import { readSettingsFileWithText, writeSettingsFileIfUnchanged } from "../../../../../worker/src/settings";
 import { tenantOf } from "@/lib/auth";
 import { fomoEnabledFor } from "@/lib/fomo-switch";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
-import { getSettingsStore } from "@merrymen/settings-store";
+import { getSettingsStore, putSettingsIfUnchanged, readSettingsVersioned } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
 import { clearsStaleProviderModel } from "@/lib/settings-llm-model";
 import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
@@ -46,7 +63,9 @@ import {
   withSettingsSaveLock,
   type SaveClaims,
 } from "@/lib/telegram-claims";
-import { walletNotSupported } from "@/lib/route-guard";
+import { perpsOffered } from "@/lib/perps-enabled";
+import { NO_STORE_HEADERS, walletUnknown } from "@/lib/route-guard";
+import { readWalletParam } from "@/lib/wallet-param";
 
 export const dynamic = "force-dynamic";
 
@@ -218,8 +237,11 @@ function redactUrl(u: unknown): string | undefined {
 }
 
 export async function GET(req: Request) {
-  const walletRefused = walletNotSupported(req);
-  if (walletRefused) return walletRefused;
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was read.");
+  // The Perps wallet's own settings, read whatever MERRYMEN_PERPS says (D1):
+  // an owner who holds a Perps wallet can always see it, and switch it off.
+  if (wallet === "perps") return perpsSettingsView(req);
   // Hosted: show the signed-in tenant's own settings (a signed-out caller sees
   // defaults — nothing personal, no secrets). Self-hosted: the single file.
   const tenant = isHostedMode() ? tenantOf(req) : null;
@@ -407,14 +429,17 @@ const STR_ARRAY_FIELDS: Record<string, number> = {
 };
 
 export async function PUT(req: Request) {
-  const walletRefused = walletNotSupported(req);
-  if (walletRefused) return walletRefused;
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was saved.");
   let body: Partial<Record<keyof MerrymenSettings, unknown>>;
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ errors: ["body is not JSON"] }, { status: 400 });
   }
+  // The Perps wallet's settings: its own allowlist, its own store or file, and
+  // never the Spot wallet's bot claim (putPerps, at the end of this file).
+  if (wallet === "perps") return putPerps(req, body);
   // THE OWNER WHO CONFIRMED, when a chat card sent this (lib/order-owner.ts).
   // Not a setting: taken off before anything below reads the body, so it is
   // never stored and never reported as an unknown key.
@@ -1005,6 +1030,576 @@ async function saveSettings(
     ...(botClaim?.ok && botClaim.moved ? { botMoved: true } : {}),
     // Present only when something was dropped, so a caller can tell the
     // difference between 'saved' and 'saved, minus the field you cared about'.
+    ...(ignored.length > 0 ? { ignored } : {}),
+  });
+}
+
+/**
+ * ── THE PERPS WALLET'S SETTINGS ──────────────────────────────────────────
+ *
+ * `?wallet=perps`. A login's Perps wallet is its own account with its own
+ * worker, and its settings live apart from the Spot wallet's: hosted in the
+ * Perps settings store (`getSettingsStore("perps")`), self-hosted in the Perps
+ * home's own settings.json (`purposeHome("perps")`), the file its worker reads
+ * and the kill turns perps off in (perps-kill.ts turnOffLocalPaperPerps). One
+ * wallet's strategy, risk budget or secrets never become the other's.
+ *
+ * AN ALLOWLIST, NOT SPOT'S HANDLER. A Perps worker runs no Spot strategy, no
+ * bot, no groups and no Spot side lane, whatever its file says (worker
+ * settings.ts mergeSettings forces them off), so of Spot's keys only what a
+ * Perps worker reads is taken:
+ *   - the perps keys (core PERPS_SETTING_KEYS), each checked as core and the
+ *     worker check it, the consent record included;
+ *   - `strategy`, which is always `perps-only` (a body may echo it, never move it);
+ *   - `liveTradingEnabled`, false only (D5): this build has no real-money
+ *     perpetuals, and a true here would refuse the practice book
+ *     (exec-mode.ts perpsModeOf, perp-live-not-enabled).
+ * Every other key is REPORTED in `ignored` and never stored, as Spot's
+ * handler reports a key it does not know: a secret, a URL, a Telegram token
+ * or a holder address has no reader on this wallet, and a stored one would be
+ * one more copy to leak.
+ *
+ * NEVER THE BOT CLAIM. A Telegram bot belongs to the login's Spot wallet
+ * (lib/telegram-claims.ts). A save here takes the save lock that Spot's does
+ * (one save at a time per login) and does nothing else with it:
+ * botClaimForSave reads the stored token back and settles the login's claims
+ * to it, and run against this wallet's store, which holds no token, it would
+ * release the Spot wallet's bot for another account to take.
+ *
+ * REFUSED HERE, by name (D9, D10): the Brain driver (no Brain service ships
+ * with perps) and the strategist (a Perps worker builds no strategist, so it
+ * would quietly be manual); a style profile (`perpsStyle`: not in this build,
+ * which trades the fixed 4 h swing trend); and switching real-money perpetuals
+ * ON, whatever consent comes with it — "not available on this server yet" —
+ * so no consent is on file the day a later build could honour it.
+ *
+ * AN OFF IS NEVER REFUSED (docs/perps.md rules 1 and 8a): practice perps off,
+ * the live rail off, the real-money consent withdrawn. Written even when the
+ * rest of the save is refused (`offs`), over what was stored and never over the
+ * rest of the body, and the refusal says it was. And WHERE PERPS ARE NOT
+ * OFFERED (MERRYMEN_PERPS is not paper, D1), an off is the only thing a save
+ * may do: anything else is refused 403 `perps-wallet-not-offered` and nothing
+ * else is written, so a server that offers no Perps wallet grows no Perps
+ * settings, self-hosted as hosted (D19). GET stays readable.
+ *
+ * The same reading as Spot's: strict (a file that will not read is refused,
+ * never rewritten from nothing), written whole (atomically, 0600), and the
+ * Perps wallet's owner checked against the session first.
+ *
+ * WRITTEN ONLY OVER WHAT WAS READ. The kill turns this wallet's
+ * `perpsEnabled` off in the same blob and takes no save lock (nothing may
+ * hold a kill up): disablePaperPerpsForKill hosted, turnOffLocalPaperPerps
+ * self-hosted. A save that read before the kill and wrote its whole blob back
+ * after it switched practice perps on again under a kill that had answered
+ * "off", and a Perps wallet signed again on the same index-1 account then
+ * traded practice perps nobody had turned back on. So every write here is a
+ * compare and swap against the blob this save read (putSettingsIfUnchanged
+ * hosted, writeSettingsFileIfUnchanged self-hosted); when anything landed in
+ * between, nothing is written and the body is judged again from a fresh read,
+ * so the kill's off stands under every save that never named the switch. A
+ * body that switches practice perps ON over an off that landed while it was
+ * on its way is refused: an owner who means it after the kill says so again.
+ */
+
+/** The one strategy a Perps wallet runs (strategies/registry.ts: nobody picks it; the wallet does). */
+const PERPS_ONLY = "perps-only";
+
+/** The Perps home's settings.json, self-hosted: the file its worker reads and the kill writes. */
+const perpsSettingsFile = () => path.join(purposeHome("perps"), "settings.json");
+
+/** Every perps number, in core's table: one set of bounds and grids for this route and the worker. */
+const PERPS_NUM_KEYS = Object.keys(PERPS_NUM_BOUNDS) as PerpsNumKey[];
+
+/**
+ * The drivers a Perps wallet may run in this build (D9): core's list without
+ * the strategist, which a Perps worker cannot build. Brain is in no list.
+ */
+const PERPS_WALLET_DRIVERS = ["perp-trend", "manual"] as const satisfies readonly PerpsDriver[];
+
+/** Said to an owner who asks for real-money perpetuals here (D10). */
+const PERPS_LIVE_NOT_HERE =
+  "perpsLiveEnabled: real-money perpetuals are not available on this server yet, so no consent to them was recorded. Practice perpetuals are not affected";
+
+/** The headers every Perps settings answer carries: per-owner, never stored, and varying with the session that read it. */
+const PERPS_VIEW_HEADERS = { ...NO_STORE_HEADERS, Vary: "Cookie" };
+
+/**
+ * What a Perps read found: the settings and the version a write compares
+ * against (the stored text as read; null when nothing is stored), or why they
+ * could not be read.
+ */
+type PerpsStoredRead = { ok: true; settings: MerrymenSettings; version: string | null } | { ok: false; why: string };
+
+/**
+ * The Perps wallet's stored settings, or why they could not be read. Hosted, a
+ * store that throws is unreadable, never empty: an owner shown the defaults
+ * would read a saved allocation that is not theirs. Self-hosted, the file is
+ * read as the kill reads it (readSettingsFileAt): missing is empty, broken is
+ * refused.
+ */
+async function readPerpsStoredStrict(tenant: `0x${string}` | null): Promise<PerpsStoredRead> {
+  if (tenant) {
+    try {
+      const read = await readSettingsVersioned(getSettingsStore("perps"), tenant);
+      return { ok: true, settings: read.settings ?? {}, version: read.version };
+    } catch {
+      return { ok: false, why: "your Perps wallet's settings could not be read" };
+    }
+  }
+  const { read, text } = readSettingsFileWithText(perpsSettingsFile());
+  if (read.kind === "unusable") return { ok: false, why: `your Perps wallet's ${read.why}` };
+  return { ok: true, settings: read.kind === "parsed" ? read.settings : {}, version: text };
+}
+
+/**
+ * GET ?wallet=perps: the Perps wallet's own values, masked like Spot's, with
+ * the one strategy it runs. Nothing of the Spot wallet's choices is offered
+ * here (no symbols, coins, strategies or AI providers: none applies). An
+ * unreadable store or file is a 503 the desk can tell from "nothing saved".
+ */
+async function perpsSettingsView(req: Request): Promise<NextResponse> {
+  const hosted = isHostedMode();
+  const tenant = hosted ? tenantOf(req) : null;
+  let stored: MerrymenSettings = {};
+  if (!hosted || tenant) {
+    const read = await readPerpsStoredStrict(tenant);
+    if (!read.ok) {
+      return NextResponse.json(
+        { error: `${read.why[0]!.toUpperCase()}${read.why.slice(1)}. Nothing was changed; try again in a moment.`, code: "settings-unreadable", ownerFacing: true },
+        { status: 503, headers: PERPS_VIEW_HEADERS },
+      );
+    }
+    stored = read.settings;
+  }
+  const { secrets, values } = splitSecrets(stored);
+  const view: SettingsView = {
+    ...secrets,
+    values: {
+      ...values,
+      bundlerUrl: redactUrl(values.bundlerUrl),
+      rpcMainnet: redactUrl(values.rpcMainnet),
+      rpcTestnet: redactUrl(values.rpcTestnet),
+      telegramTranscribeBase: redactUrl(values.telegramTranscribeBase),
+      strategy: PERPS_ONLY,
+    },
+    defaults: SETTINGS_DEFAULTS,
+    knownSymbols: [],
+    officialCoins: [],
+    strategies: { builtin: [PERPS_ONLY], custom: [] },
+    llmProviders: [],
+    owner: hosted ? (tenant ?? "") : null,
+  };
+  return NextResponse.json(view, { headers: PERPS_VIEW_HEADERS });
+}
+
+/**
+ * PUT ?wallet=perps: who is asking, then the save. The owner checks are
+ * Spot's, before any field is read; the save runs under the login's save lock
+ * hosted, and touches no bot claim (see above).
+ */
+async function putPerps(req: Request, raw: unknown): Promise<NextResponse> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return NextResponse.json({ errors: ["the body must be a JSON object of settings"] }, { status: 400 });
+  }
+  const body = raw as Record<string, unknown>;
+  // Not settings, and taken off before anything reads the body: the owner who
+  // confirmed (checked below), Spot's answer to a bot claim (a Perps wallet
+  // holds no bot), and the consent stamp, which only this route writes, from
+  // its own clock — a client echoing it back changes nothing.
+  const claimedOwner = body.owner;
+  delete body.owner;
+  delete body.moveBot;
+  delete body.perpsLiveConsentAt;
+
+  let tenant: `0x${string}` | null = null;
+  if (isHostedMode()) {
+    tenant = tenantOf(req);
+    if (!tenant) return NextResponse.json({ errors: ["not signed in"] }, { status: 401 });
+    if (ownerMismatch(claimedOwner, tenant)) return NextResponse.json({ errors: [OWNER_CHANGED_SETTING] }, { status: 409 });
+    for (const k of HOSTED_FORBIDDEN_SETTING_FIELDS) delete body[k];
+  }
+  if (!tenant) return savePerpsSettings(body, null);
+  const account = tenant;
+  // The lock alone: its claims connection is never used for this wallet.
+  const saved = await withSettingsSaveLock(account, () => savePerpsSettings(body, account));
+  if (saved === SAVE_BUSY) return NextResponse.json({ error: "settings_busy", errors: [SETTINGS_BUSY_TEXT] }, { status: 503 });
+  return saved;
+}
+
+/**
+ * How many times a save is judged afresh when a write landed between its read
+ * and its own write. Saves take turns under the save lock, so what lands there
+ * is a writer that takes none — the kill, which writes once — and a second
+ * miss in a row is already rare.
+ */
+const PERPS_SAVE_ATTEMPTS = 3;
+
+/** One judgement's answer: what to tell the owner, or that the blob it read changed before it could write. */
+const PERPS_SAVE_RACED = Symbol("perps-save-raced");
+
+/**
+ * The Perps wallet's save: read what is stored, judge every allowlisted key,
+ * then write the whole blob, or only its offs, or nothing — each write only
+ * over the blob this read found. When something wrote in between (the kill),
+ * nothing was written, and the body is judged again from a fresh read.
+ */
+async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${string}` | null): Promise<NextResponse> {
+  // Whether practice perps were on in this save's FIRST read: an off that
+  // lands after it is one this body never saw (see judgePerpsSave).
+  let firstSawOn: boolean | null = null;
+  for (let attempt = 0; attempt < PERPS_SAVE_ATTEMPTS; attempt++) {
+    const read = await readPerpsStoredStrict(tenant);
+    if (read.ok && firstSawOn === null) firstSawOn = read.settings.perpsEnabled === true;
+    const answer = await judgePerpsSave(body, tenant, read, firstSawOn === true);
+    if (answer !== PERPS_SAVE_RACED) return answer;
+  }
+  return NextResponse.json(
+    { errors: ["Your Perps wallet's settings kept changing while this save was being written, so nothing was saved. Reload and try again."] },
+    { status: 503 },
+  );
+}
+
+/**
+ * One judgement of a Perps save against one read. `firstSawOn`: practice perps
+ * were on when this save first read, so an off stored now landed while the
+ * save was on its way.
+ */
+async function judgePerpsSave(
+  body: Record<string, unknown>,
+  tenant: `0x${string}` | null,
+  read: PerpsStoredRead,
+  firstSawOn: boolean,
+): Promise<NextResponse | typeof PERPS_SAVE_RACED> {
+  if (!read.ok) {
+    // Before any field is judged: nothing here can be saved without throwing
+    // away the rest of what could not be read.
+    return tenant
+      ? NextResponse.json({ errors: [`${read.why}, so nothing was saved. Try again in a moment.`] }, { status: 503 })
+      : NextResponse.json(
+          { errors: [`${read.why} — nothing was saved, so the rest of it is not lost. Fix or remove ${perpsSettingsFile()}, then save again.`] },
+          { status: 409 },
+        );
+  }
+  const stored = read.settings;
+  const next: MerrymenSettings = { ...stored, strategy: PERPS_ONLY };
+  const errors: string[] = [];
+  const touched = new Set<string>();
+  const setOrClear = <K extends keyof MerrymenSettings>(key: K, value: MerrymenSettings[K] | undefined) => {
+    touched.add(key as string);
+    if (value === undefined) delete next[key];
+    else next[key] = value;
+  };
+  // THE OFFS THIS BODY CARRIES, each as the change it makes to what was
+  // stored — only a switch that is on has an off to keep. Written even when
+  // the rest is refused (see the header above).
+  const offs: Array<{ key: string; apply: (s: MerrymenSettings) => void }> = [];
+  // The body keys that only turn something off, or change nothing: all a save
+  // may carry where Perps are not offered (D1).
+  const offOnly = new Set<string>();
+
+  // ── strategy: perps-only, always ────────────────────────────────────────
+  if ("strategy" in body) {
+    const v = body.strategy;
+    if (v === PERPS_ONLY || v === "" || v === null || v === undefined) {
+      touched.add("strategy");
+      offOnly.add("strategy");
+    } else {
+      errors.push(`strategy: a Perps wallet runs ${PERPS_ONLY}; your Spot wallet's strategy is chosen on your Spot wallet`);
+    }
+  }
+
+  // ── the switches: practice perps, and the account's live rail ───────────
+  if ("perpsEnabled" in body) {
+    const v = body.perpsEnabled;
+    if (v === null || v === undefined || v === false) {
+      setOrClear("perpsEnabled", v === false ? false : undefined);
+      offOnly.add("perpsEnabled");
+      if (stored.perpsEnabled === true) {
+        offs.push({ key: "perpsEnabled", apply: (s) => (v === false ? void (s.perpsEnabled = false) : void delete s.perpsEnabled) });
+      }
+    } else if (v === true) {
+      // AN OFF THAT LANDED WHILE THIS SAVE WAS ON ITS WAY — a kill, or another
+      // device — is never undone by it: this body was written before it.
+      if (firstSawOn && stored.perpsEnabled !== true) {
+        errors.push(
+          "perpsEnabled: practice perpetuals were switched off while this save was on its way (a kill, or another device), so it did not switch them back on. Reload, and switch them on again if you mean to",
+        );
+      } else setOrClear("perpsEnabled", true);
+    } else errors.push("perpsEnabled: must be true or false");
+  }
+  if ("liveTradingEnabled" in body) {
+    const v = body.liveTradingEnabled;
+    if (v === null || v === undefined || v === false) {
+      setOrClear("liveTradingEnabled", v === false ? false : undefined);
+      offOnly.add("liveTradingEnabled");
+      if (stored.liveTradingEnabled === true) {
+        offs.push({ key: "liveTradingEnabled", apply: (s) => (v === false ? void (s.liveTradingEnabled = false) : void delete s.liveTradingEnabled) });
+      }
+    } else if (v === true) {
+      errors.push("liveTradingEnabled: a Perps wallet trades only on paper in this version; real-money trading cannot be switched on for it");
+    } else errors.push("liveTradingEnabled: must be true or false");
+  }
+
+  // ── the numbers: core's bounds and grid, the worker's own check ─────────
+  // Each on its GRID as well as in range (whole leverage, counts and bps;
+  // hundredths of a USDG or a percent), because perps.ts refuses a fractional
+  // bps at open time, and a value stored here would then be an agent that
+  // silently stops. A typed value is read as Spot's numbers are (parseAmount,
+  // locale-aware) at the key's own grid.
+  for (const key of PERPS_NUM_KEYS) {
+    if (!(key in body)) continue;
+    const v = body[key];
+    const { min, max, decimals } = PERPS_NUM_BOUNDS[key];
+    const rule = `must be ${decimals === 0 ? "a whole number" : "a number with at most 2 decimals"} between ${min} and ${max}`;
+    if (v === "" || v === null || v === undefined) setOrClear(key, undefined);
+    else if (typeof v === "number") {
+      if (perpsNumberOk(key, v)) setOrClear(key, v);
+      else errors.push(`${key}: ${rule}`);
+    } else {
+      const parsed = parseAmount(String(v), { maxDecimals: decimals, min, max });
+      if (parsed.ok && perpsNumberOk(key, parsed.value)) setOrClear(key, parsed.value);
+      else if (!parsed.ok && parsed.reason === "ambiguous") errors.push(`${key}: "${String(v)}" reads as either ${parsed.readings.join(" or ")}`);
+      else errors.push(`${key}: ${rule}`);
+    }
+  }
+
+  // ── the driver (D9) ─────────────────────────────────────────────────────
+  if ("perpsDriver" in body) {
+    const v = body.perpsDriver;
+    if (v === null || v === undefined || v === "") setOrClear("perpsDriver", undefined);
+    else if (v === "strategist") {
+      errors.push(`perpsDriver: the strategist does not drive a Perps wallet in this version (its worker runs none, so it would do nothing); choose ${PERPS_WALLET_DRIVERS.join(" or ")}`);
+    } else if (v === "brain") {
+      errors.push(`perpsDriver: Brain is not available in this version; choose ${PERPS_WALLET_DRIVERS.join(" or ")}`);
+    } else if (typeof v === "string" && (PERPS_WALLET_DRIVERS as readonly string[]).includes(v)) setOrClear("perpsDriver", v as PerpsDriver);
+    else errors.push(`perpsDriver: must be ${PERPS_WALLET_DRIVERS.join(" or ")}`);
+  }
+
+  // ── a style profile (D9): not in this build ─────────────────────────────
+  // Nothing to store, so nothing to clear: a body that clears it changes nothing.
+  if ("perpsStyle" in body) {
+    const v = body.perpsStyle;
+    if (v === null || v === undefined || v === "") {
+      touched.add("perpsStyle");
+      offOnly.add("perpsStyle");
+    } else errors.push("perpsStyle: profiles are not available in this version; a Perps wallet trades the fixed 4 h swing trend");
+  }
+
+  /**
+   * ── the markets ─────────────────────────────────────────────────────
+   *
+   * AN UNKNOWN KEY IS AN ERROR, NEVER DROPPED (docs/perps.md "Settings"): a
+   * list quietly shortened reads "Changes saved" over a market set the owner
+   * did not choose. Keys only — `BTC-PERP`, never `BTC`, a spot symbol.
+   * Duplicates are refused rather than folded, so what is stored is exactly
+   * what was sent. An EMPTY list is refused too (unticking every market and
+   * getting the defaults back would be a choice nobody made) — except beside
+   * the switch going off, where it is that same gesture: the off says it all,
+   * and the stored list is kept for when perps come back on. Null clears to
+   * the default.
+   */
+  if ("perpsMarkets" in body) {
+    const v = body.perpsMarkets;
+    if (v === null || v === undefined) setOrClear("perpsMarkets", undefined);
+    else if (!Array.isArray(v)) errors.push("perpsMarkets: must be a list of market keys like BTC-PERP");
+    else if (v.length === 0) {
+      if (body.perpsEnabled === false) {
+        touched.add("perpsMarkets");
+        offOnly.add("perpsMarkets");
+      } else errors.push("perpsMarkets: pick at least one market (to stop perpetuals, switch them off instead)");
+    } else {
+      const shown = (k: unknown) => (typeof k === "string" ? k : JSON.stringify(k));
+      const unknown = v.filter((k) => !isPerpKey(k));
+      const twice = [...new Set(v.filter((k, i) => v.indexOf(k) !== i))];
+      if (unknown.length > 0) errors.push(`perpsMarkets: unknown markets ${unknown.map(shown).join(", ")} (keys look like BTC-PERP)`);
+      else if (twice.length > 0) errors.push(`perpsMarkets: listed more than once: ${twice.map(shown).join(", ")}`);
+      else if (v.length > PERPS_MARKETS_MAX) errors.push(`perpsMarkets: at most ${PERPS_MARKETS_MAX} markets`);
+      else setOrClear("perpsMarkets", v as string[]);
+    }
+  }
+
+  // ONE OPEN IS NEVER LARGER THAN ALL OPENS TOGETHER. Judged on what this save
+  // would leave stored (defaults filling the gaps), and only when it touches
+  // either number — a stored pair from an older build must not make every
+  // unrelated save fail. Skipped when either value was itself refused above,
+  // so the owner reads one error, not two. The worker reads an inversion that
+  // reaches it anyway in the restrictive direction.
+  if (
+    ("perpsPerTradeUsdg" in body || "perpsMaxOpenNotionalUsdg" in body) &&
+    !errors.some((e) => e.startsWith("perpsPerTradeUsdg:") || e.startsWith("perpsMaxOpenNotionalUsdg:"))
+  ) {
+    const perTrade = next.perpsPerTradeUsdg ?? SETTINGS_DEFAULTS.perpsPerTradeUsdg;
+    const open = next.perpsMaxOpenNotionalUsdg ?? SETTINGS_DEFAULTS.perpsMaxOpenNotionalUsdg;
+    if (open < perTrade) {
+      errors.push(`perpsMaxOpenNotionalUsdg: must be at least the per-trade limit (${perTrade} USDG) — one position can't be bigger than all of them together`);
+    }
+  }
+
+  /**
+   * ── the real-money consent (D10) ──────────────────────────────────────
+   *
+   * NOT A SWITCH: a record of the switch, the consent text's version, the
+   * region attestation, and a stamp only this route writes (docs/perps.md
+   * rule 1). In this build it can only be WITHDRAWN: switching it on, with
+   * any consent beside it, is refused (PERPS_LIVE_NOT_HERE), so no consent is
+   * on file the day a later build could count it. Any record stored here came
+   * from such a build (or a hand edit).
+   *
+   * WITHDRAWING IS NEVER REFUSED. `perpsLiveEnabled` false or null, or any
+   * part of the consent withdrawn (attestation false or null, version null),
+   * clears the whole record, and nothing else in the body is consulted for it:
+   * a malformed version beside an off must not keep an owner in, and neither
+   * must a `perpsLiveEnabled: true` echoed beside an unticked attestation.
+   *
+   * A BODY THAT REPEATS WHAT IS STORED CHANGES NOTHING and is not refused, so
+   * a client round-tripping the blob on an unrelated save neither fails nor
+   * re-stamps anything. Anything else that names these keys is an error.
+   */
+  const CONSENT_KEYS = ["perpsLiveEnabled", "perpsLiveConsentVersion", "perpsRegionAttested"] as const;
+  if (CONSENT_KEYS.some((k) => k in body)) {
+    const named = CONSENT_KEYS.filter((k) => k in body);
+    for (const k of named) touched.add(k);
+    const live = body.perpsLiveEnabled;
+    const version = body.perpsLiveConsentVersion;
+    const attested = body.perpsRegionAttested;
+    const revoke = (to: false | undefined) => {
+      setOrClear("perpsLiveEnabled", to);
+      setOrClear("perpsLiveConsentVersion", undefined);
+      setOrClear("perpsLiveConsentAt", undefined);
+      setOrClear("perpsRegionAttested", undefined);
+      for (const k of named) offOnly.add(k);
+      // Only a record that exists has a withdrawal to keep.
+      const hadRecord = (["perpsLiveEnabled", "perpsLiveConsentVersion", "perpsLiveConsentAt", "perpsRegionAttested"] as const).some((k) => stored[k] !== undefined);
+      if (hadRecord) {
+        offs.push({
+          key: "perpsLiveEnabled",
+          apply: (s) => {
+            if (to === false) s.perpsLiveEnabled = false;
+            else delete s.perpsLiveEnabled;
+            delete s.perpsLiveConsentVersion;
+            delete s.perpsLiveConsentAt;
+            delete s.perpsRegionAttested;
+          },
+        });
+      }
+    };
+    const repeatsStored = (k: (typeof CONSENT_KEYS)[number]) => !(k in body) || (body[k] ?? undefined) === (stored[k] ?? undefined);
+
+    // Withdrawals first, before any value beside them is type-checked.
+    if ("perpsLiveEnabled" in body && (live === false || live === null || live === undefined)) {
+      revoke(live === false ? false : undefined);
+    } else if ("perpsLiveEnabled" in body && live !== true) {
+      errors.push("perpsLiveEnabled: must be true or false");
+    } else if (attested === false || attested === null || version === null) {
+      // Part of the consent withdrawn: the whole record goes, whatever the
+      // switch beside it says. Only when there was no consent to withdraw is
+      // a `perpsLiveEnabled: true` here an attempt to switch on — refused.
+      const wasOn = stored.perpsLiveEnabled === true;
+      revoke(wasOn ? false : undefined);
+      if (live === true && !wasOn) {
+        offOnly.delete("perpsLiveEnabled");
+        errors.push(PERPS_LIVE_NOT_HERE);
+      }
+    } else if (attested !== undefined && attested !== null && typeof attested !== "boolean") {
+      errors.push("perpsRegionAttested: must be true or false");
+    } else if (version !== undefined && version !== null && !(typeof version === "number" && Number.isSafeInteger(version) && version >= 1)) {
+      errors.push("perpsLiveConsentVersion: must be the consent's version number");
+    } else if (live === true) {
+      if (stored.perpsLiveEnabled === true && repeatsStored("perpsLiveConsentVersion") && repeatsStored("perpsRegionAttested")) {
+        // Already on, and the body only echoes the record: nothing to write.
+        for (const k of named) offOnly.add(k);
+      } else {
+        errors.push(PERPS_LIVE_NOT_HERE);
+      }
+    } else if (repeatsStored("perpsLiveConsentVersion") && repeatsStored("perpsRegionAttested")) {
+      // No switch in the body, and the consent keys echo what is stored.
+      for (const k of named) offOnly.add(k);
+    } else {
+      errors.push(
+        `${"perpsRegionAttested" in body ? "perpsRegionAttested" : "perpsLiveConsentVersion"}: recorded only as part of a real-money consent (version ${PERPS_LIVE_CONSENT_VERSION}), and real-money perpetuals are not available on this server yet`,
+      );
+    }
+  }
+
+  // NAME WHAT WE DROPPED, as Spot's handler does: every key this wallet does
+  // not take, never stored. A key that failed validation is in `errors`.
+  const errored = new Set(errors.map((e) => e.split(":")[0]?.trim()).filter(Boolean));
+  const ignored = Object.keys(body).filter((k) => !touched.has(k) && !errored.has(k));
+  if (ignored.length > 0) console.warn(`[settings] Perps wallet ignored keys: ${ignored.join(", ")}`);
+
+  /**
+   * Hosted, the Perps store; self-hosted, the Perps home's file, replaced
+   * whole. The strategy is always perps-only. ONLY OVER THE BLOB THIS SAVE
+   * READ (`read.version`): "raced" when something wrote in between, and then
+   * nothing was written. Self-hosted, the look and the write are one
+   * synchronous step (writeSettingsFileIfUnchanged).
+   */
+  const version = read.version;
+  const persist = async (settings: MerrymenSettings): Promise<"saved" | "raced" | { failed: string }> => {
+    try {
+      const blob: MerrymenSettings = { ...settings, strategy: PERPS_ONLY };
+      const wrote = tenant
+        ? await putSettingsIfUnchanged(getSettingsStore("perps"), tenant, blob, version)
+        : writeSettingsFileIfUnchanged(perpsSettingsFile(), version, JSON.stringify(blob, null, 2));
+      return wrote ? "saved" : "raced";
+    } catch (e) {
+      return { failed: e instanceof Error ? e.message : String(e) };
+    }
+  };
+  const notSaved = (why: string) =>
+    NextResponse.json({ errors: [`Your Perps wallet's settings could not be saved (${why}). Nothing was changed; try again.`] }, { status: 503 });
+  /** The offs alone, over what was stored: the keys switched off, a reason they could not be written, or "raced". */
+  const saveOffs = async (): Promise<{ saved: string[] } | { failed: string } | "raced"> => {
+    if (offs.length === 0) return { saved: [] };
+    const offOnlyBlob: MerrymenSettings = { ...stored };
+    for (const off of offs) off.apply(offOnlyBlob);
+    const wrote = await persist(offOnlyBlob);
+    if (wrote === "raced") return "raced";
+    return wrote === "saved" ? { saved: [...new Set(offs.map((o) => o.key))] } : wrote;
+  };
+
+  // ── WHERE PERPS ARE NOT OFFERED, ONLY AN OFF (D1) ──────────────────────
+  // Judged after the body is read, so the offs are known, and before any of
+  // the rest is written: an owner can always switch a Perps wallet off, and
+  // nothing else is saved for one on a server that offers none.
+  if (!perpsOffered()) {
+    const wrote = await saveOffs();
+    if (wrote === "raced") return PERPS_SAVE_RACED;
+    if ("failed" in wrote) return notSaved(wrote.failed);
+    if (Object.keys(body).every((k) => offOnly.has(k))) {
+      return NextResponse.json({ ok: true, appliesWithin: "one worker tick", ...(wrote.saved.length > 0 ? { saved: wrote.saved } : {}) });
+    }
+    return NextResponse.json(
+      {
+        errors: [
+          "Perps wallets are not offered on this server yet, so only switching perpetuals off can be saved for one." +
+            (wrote.saved.length > 0 ? ` Switched off (${wrote.saved.join(", ")}) — that was saved. Nothing else was.` : " Nothing was saved."),
+        ],
+        code: "perps-wallet-not-offered",
+        ownerFacing: true,
+        ...(wrote.saved.length > 0 ? { saved: wrote.saved } : {}),
+      },
+      { status: 403 },
+    );
+  }
+
+  if (errors.length > 0) {
+    if (offs.length === 0) return NextResponse.json({ errors }, { status: 400 });
+    const wrote = await saveOffs();
+    if (wrote === "raced") return PERPS_SAVE_RACED;
+    if ("failed" in wrote) return notSaved(wrote.failed);
+    return NextResponse.json(
+      { errors, saved: wrote.saved, note: `Switched off (${wrote.saved.join(", ")}) — that was saved. Nothing else in this save was, because of the errors above.` },
+      { status: 400 },
+    );
+  }
+
+  const wrote = await persist(next);
+  if (wrote === "raced") return PERPS_SAVE_RACED;
+  if (wrote !== "saved") return notSaved(wrote.failed);
+  return NextResponse.json({
+    ok: true,
+    appliesWithin: "one worker tick",
     ...(ignored.length > 0 ? { ignored } : {}),
   });
 }

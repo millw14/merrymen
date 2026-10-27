@@ -70,7 +70,26 @@ export interface FileCommand {
    * matters is the one after the file lands.
    */
   expiresAt?: number;
+  /**
+   * The smart account this command was asked for, when its writer bound it to
+   * one. Optional; absent means whichever account the draining worker is
+   * armed on, as every command before it meant.
+   *
+   * A HOME IS NOT AN ACCOUNT. Hosted, a row is bound to its account by the
+   * ferry's join (agent_commands.agent_id), so the file only ever reaches that
+   * account's worker. Self-hosted the web writes the file straight into a
+   * wallet's home, and a home outlives the account in it: a Perps wallet made
+   * again under another owner key is another account in the same
+   * `accounts/perps`, and an exit the owner reviewed on the first would have
+   * been carried out on the second. So the self-hosted Perps writers stamp the
+   * account they resolved here, and the drain refuses it on any other
+   * (runTickCommand, `account`), at the claim, as it refuses a late one.
+   */
+  account?: string;
 }
+
+/** A smart account, as a command may be bound to one. */
+const ACCOUNT_OK = /^0x[0-9a-fA-F]{40}$/;
 
 /**
  * A command id, as a filename.
@@ -120,6 +139,8 @@ export function writeCommand(home: string, cmd: FileCommand): void {
   // See ID_OK. Refused rather than sanitised: an id we had to repair is an id
   // whose owner thinks it is something else, and the result row is keyed on it.
   if (!ID_OK.test(cmd.id)) throw new Error(`refusing to write a command whose id is not a plain id: ${cmd.id}`);
+  // An account the drain could never match is a command that could never run.
+  if (cmd.account !== undefined && !ACCOUNT_OK.test(cmd.account)) throw new Error("refusing to write a command bound to something that is not an account");
   const dir = commandDir(home);
   mkdirSync(dir, { recursive: true });
   // Written to a temp name and renamed, so a reader can never observe a
@@ -262,6 +283,13 @@ export async function runTickCommand(
     mayRun?: (cmd: FileCommand) => boolean;
     told: (cmd: FileCommand, outcome: CommandOutcome) => Promise<void>;
     /**
+     * The account this worker is armed on, for a command bound to one
+     * (FileCommand.account). A bound command is run only where this names the
+     * same account; anywhere else — another account, or none — it is
+     * answered at the claim, like a late one, and never handed to `run`.
+     */
+    account?: () => string | null;
+    /**
      * The receipt for a command answered here as expired, when it has one.
      *
      * A HOOK, because this file must not learn what an order's arguments mean
@@ -281,11 +309,21 @@ export async function runTickCommand(
       const receipt = deps.expiredReceipt?.(cmd);
       const dead: CommandOutcome = {
         ok: false,
-        line: expiredLine(cmd.expiresAt as number, now, "claim"),
+        line: cmd.kind === "paper-reset" ? expiredResetLine(cmd.expiresAt as number, now) : expiredLine(cmd.expiresAt as number, now, "claim"),
         ...(receipt ? { receipt } : {}),
       };
       writeCommandResult(home, resultOf(cmd.id, dead, now));
       await deps.told(cmd, dead);
+      continue;
+    }
+    // ASKED FOR ANOTHER ACCOUNT: answered, never run. Claimed like an expired
+    // one, so it leaves the queue with a receipt rather than sitting in front
+    // of the commands that are this account's.
+    const elsewhere = notForThisAccount(cmd, deps.account?.() ?? null);
+    if (elsewhere !== null) {
+      const refused: CommandOutcome = { ok: false, line: elsewhere };
+      writeCommandResult(home, resultOf(cmd.id, refused, now));
+      await deps.told(cmd, refused);
       continue;
     }
     // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
@@ -362,6 +400,36 @@ export function expiredLine(expiresAt: number, nowMs: number, where: "claim" | "
       ? `I picked this order up ${late} after its window closed`
       : `this order reached the front of my trade queue ${late} after its window closed`;
   return `expired — ${when}, and I will not fill it into a different market than the one it was placed for. Nothing was sent. Ask again if you still want it.`;
+}
+
+/**
+ * A practice reset the worker reached after its own deadline: the book was
+ * not touched, and the sentence says so rather than an order's words.
+ */
+export function expiredResetLine(expiresAt: number, nowMs: number): string {
+  return `expired — I picked up this practice reset ${howLate(nowMs - expiresAt)} after its window closed, so the practice book was not reset. Ask again if you still want it.`;
+}
+
+/** An account as a sentence names it: enough to tell two apart, not the whole address. */
+const shortAccount = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
+/**
+ * Why a command bound to an account must not run on this worker, or null
+ * when it may: it names none, or the one `armed` names (case aside). A bound
+ * command with no armed account to compare is refused — "which account?" has
+ * no answer that would make it safe to run.
+ */
+export function notForThisAccount(cmd: FileCommand, armed: string | null): string | null {
+  // Read as the file holds it: a binding that is not a string (a file this
+  // writer did not make) names no account this could be, and is refused too.
+  const bound: unknown = cmd.account;
+  if (bound === undefined) return null;
+  if (typeof bound === "string" && armed !== null && armed.toLowerCase() === bound.toLowerCase()) return null;
+  return (
+    `not run — this was asked for ${typeof bound === "string" ? `the account ${shortAccount(bound)}` : "another account"}, and ` +
+    (armed === null ? "no account is armed here now" : `this wallet's account is now ${shortAccount(armed)}`) +
+    ". Nothing was sent. Review it again on the account you mean."
+  );
 }
 
 /**

@@ -82,7 +82,7 @@ export async function startOver(deps: StartOverDeps): Promise<StartOverReset> {
 }
 
 /** A queued reset, or why it could not be queued, in the words /api/paper-reset answers with. */
-export type QueuedReset = { ok: true; id: string } | { ok: false; error: string; status?: 409 | 503 };
+export type QueuedReset = { ok: true; id: string; expiresAt?: number } | { ok: false; error: string; status?: 409 | 503 };
 
 /**
  * QUEUE A PRACTICE RESET for `agent`, the one command the worker (or, while its
@@ -101,23 +101,50 @@ export type QueuedReset = { ok: true; id: string } | { ok: false; error: string;
  * the row is bound to `agent`, which the caller must resolve in the SAME wallet
  * (agent-for.ts, given the same name), or a Perps reset would land on the Spot
  * book. An unnamed wallet throws before anything is written.
+ *
+ * A PERPS RESET CARRIES A DEADLINE (`expiresAt`, required: one without throws
+ * before anything is written). A Perps worker is stood down whenever the
+ * operator's MERRYMEN_PERPS is not paper, and its queue waits, unclaimed, for
+ * the next worker under paper (D19). A reset with no deadline waited out
+ * every stand-down and wiped the practice book whenever perps came back —
+ * days after the owner asked, positions opened since and all. With one, the
+ * worker that reaches it late answers it expired and touches nothing: the
+ * self-hosted file carries it, and hosted it rides the row's args, which the
+ * ferry lifts onto the child's file as it lifts an order's. The Spot reset is
+ * queued as it always was.
+ *
+ * AND SELF-HOSTED, THE ACCOUNT (FileCommand.account): the Perps home outlives
+ * the account in it, so the reset names the one it was asked for, and a
+ * worker armed on another answers it without running it. Hosted, the row is
+ * bound to `agent` and the ferry hands it only to that account's worker.
  */
-export async function queuePaperReset(hosted: boolean, agent: string, wallet: GrantPurpose): Promise<QueuedReset> {
+export async function queuePaperReset(
+  hosted: boolean,
+  agent: string,
+  wallet: GrantPurpose,
+  opts: { expiresAt?: number } = {},
+): Promise<QueuedReset> {
   if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
+  const expiresAt = opts.expiresAt;
+  if (wallet === "perps" && !(typeof expiresAt === "number" && Number.isSafeInteger(expiresAt))) {
+    throw new Error("A Perps practice reset carries a deadline");
+  }
   // Minted here, never accepted from the caller: an id a client chooses is an
   // id a client can collide with somebody else's.
   const id = crypto.randomUUID();
+  const at = Date.now();
+  const deadline = wallet === "perps" ? { expiresAt } : {};
   if (!hosted) {
     try {
-      writeCommand(purposeHome(wallet), { id, kind: "paper-reset", at: Date.now() });
-      return { ok: true, id };
+      writeCommand(purposeHome(wallet), { id, kind: "paper-reset", at, ...deadline, ...(wallet === "perps" ? { account: agent } : {}) });
+      return { ok: true, id, ...deadline };
     } catch (e) {
       return { ok: false, error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` };
     }
   }
   let admitted: CommandAdmission = { ok: false, why: "unreachable" };
   try {
-    admitted = await withReadDb(db => queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at: Date.now() }), wallet);
+    admitted = await withReadDb(db => queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at, ...deadline }), wallet);
   } catch { /* unreadable is a refusal */ }
   if (!admitted.ok) {
     if (admitted.why === "recovery") return { ok: false, status: 409,
@@ -128,5 +155,5 @@ export async function queuePaperReset(hosted: boolean, agent: string, wallet: Gr
       error: "couldn't queue it — the ledger is unreachable, which usually means this agent's worker has never run",
     };
   }
-  return { ok: true, id };
+  return { ok: true, id, ...deadline };
 }

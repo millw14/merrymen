@@ -1,7 +1,7 @@
 /**
  * WHAT EVERY API ROUTE SHARES BEFORE IT DOES ANYTHING ITS OWN.
  *
- * Three small things, in one neutral module so no route has to import another
+ * Four small things, in one neutral module so no route has to import another
  * route's library to get them (a route file exports only its handlers, and
  * the perps branch kept two of these in its custody module, which every route
  * that wanted a header would then have dragged in):
@@ -12,6 +12,8 @@
  *   every call is expensive.
  * - walletNotSupported: the refusal every route that is not wallet-aware gives
  *   a request naming a wallet it does not serve.
+ * - walletUnknown: the refusal a wallet-aware route gives a `?wallet=` that
+ *   names no wallet, or more than one.
  */
 import { NextResponse } from "next/server";
 // Relative, not `@/lib/…`: a route the worker's tests reach (decision/[id])
@@ -62,7 +64,8 @@ export function perRouteLimiter(perMinute: number, now: () => number = Date.now)
  * it exactly as they always did.
  *
  * Every route handler under app/api starts with it, or reads the wallet itself
- * through readWalletParam (the wallet-aware ones: /api/grants), and
+ * through readWalletParam (the wallet-aware ones: /api/grants, /api/settings,
+ * /api/orders and /api/paper-reset), and
  * route-guard.test.ts walks every route file to hold that, so a route added
  * later cannot forget. A route becomes wallet-aware by replacing this call
  * with readWalletParam and answering for each wallet it names.
@@ -75,6 +78,24 @@ export function walletNotSupported(req: Pick<Request, "url">): NextResponse | nu
     {
       error: `This request is answered for your Spot wallet only (${WALLET_PARAM}=spot, or no ${WALLET_PARAM}). Nothing was read or changed.`,
       code: "wallet-not-supported",
+    },
+    { status: 400, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * A WALLET-AWARE ROUTE REFUSES A `?wallet=` IT CANNOT READ, before it reads or
+ * writes anything: one that names no wallet (`?wallet=`, `?wallet=Perps`), or
+ * more than one (`?wallet=spot&wallet=perps`). readWalletParam answers null for
+ * each, and guessing which wallet was meant is how one wallet's request would
+ * be served with the other's money. 400, never stored. `nothing` says what was
+ * not done, in the route's own words ("Nothing was saved.").
+ */
+export function walletUnknown(nothing: string): NextResponse {
+  return NextResponse.json(
+    {
+      error: `That request names a wallet this server does not know (${WALLET_PARAM}=spot or ${WALLET_PARAM}=perps). ${nothing}`,
+      code: "wallet-unknown",
     },
     { status: 400, headers: NO_STORE_HEADERS },
   );

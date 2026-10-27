@@ -9,6 +9,15 @@
  * approved proposal for it read "Approved and applied" — which is what
  * happened to classExitAtGraduationPct. This runs the real PUT, hosted, for
  * each spec key at BOTH of its bounds, and reads the store back.
+ *
+ * PERPETUALS are the other way round and covered here too (docs/perps.md
+ * "Settings": every key is "in the worker's clamps, the web PUT allowlist with
+ * identical bounds … and spec-coverage.test.ts"). No perps key is in
+ * SETTING_SPECS — a conversation may not change one — so the Perps wallet's
+ * own PUT (`?wallet=perps`, its own store) is their only writer, and each is
+ * driven at both bounds and just past each, with a Perps worker's own
+ * resolver run on the same values: the two enforcement points must agree on
+ * every edge, not just share a table.
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -19,10 +28,12 @@ import { after, before, describe, it } from "node:test";
 
 import { mintSession } from "@/lib/auth";
 import { getSettingsStore, resetSettingsStoreForTest } from "@merrymen/settings-store";
+import { PERPS_NUM_BOUNDS, SETTINGS_DEFAULTS, type MerrymenSettings, type PerpsNumKey } from "@merrymen/core";
 import { SETTING_SPECS, validStoredSetting, type SettingSpec } from "../../../../../worker/src/telegram/setting-spec";
+import { mergeSettings } from "../../../../../worker/src/settings";
 
 const TENANT = "0xcccccccccccccccccccccccccccccccccccccccc";
-const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL"] as const;
+const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_PERPS"] as const;
 const original = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 let dir: string;
 let PUT: (req: Request) => Promise<Response>;
@@ -32,6 +43,8 @@ before(async () => {
   process.env.MERRYMEN_HOME = dir;
   process.env.MERRYMEN_HOSTED = "1";
   process.env.MERRYMEN_SESSION_SECRET = randomBytes(32).toString("hex");
+  // The Perps wallet's settings are written only where Perps are offered (D1).
+  process.env.MERRYMEN_PERPS = "paper";
   delete process.env.DATABASE_URL;
   resetSettingsStoreForTest();
   // After the env: the route resolves its paths when it loads.
@@ -46,8 +59,8 @@ after(() => {
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-async function put(body: Record<string, unknown>) {
-  const res = await PUT(new Request("https://app.example.test/api/settings", {
+async function put(body: Record<string, unknown>, query = "") {
+  const res = await PUT(new Request(`https://app.example.test/api/settings${query}`, {
     method: "PUT",
     headers: { "content-type": "application/json", cookie: `mm_session=${mintSession(TENANT)}` },
     body: JSON.stringify({ ...body, owner: TENANT }),
@@ -90,5 +103,71 @@ describe("SETTING_SPECS against PUT /api/settings", () => {
       assert.equal(res.status, 400, `${bad}: ${JSON.stringify(res.body)}`);
       assert.match(res.body.errors?.join(" ") ?? "", /classExitAtGraduationPct/);
     }
+  });
+});
+
+describe("every perps number against PUT /api/settings?wallet=perps, and a Perps worker on the same values", () => {
+  /**
+   * What each key needs beside it to be saved ALONE: the per-trade cap may not
+   * exceed the open-notional cap, so each is tested with the other out of the way.
+   */
+  const room: Partial<Record<PerpsNumKey, Record<string, number>>> = {
+    perpsPerTradeUsdg: { perpsMaxOpenNotionalUsdg: 100_000 },
+    perpsMaxOpenNotionalUsdg: { perpsPerTradeUsdg: 10 },
+  };
+  const perps = (body: Record<string, unknown>) => put(body, "?wallet=perps");
+  const stored = async () => ((await getSettingsStore("perps").get(TENANT)) ?? {}) as Record<string, unknown>;
+  /** A Perps wallet's worker resolving a settings file (worker settings.ts mergeSettings). */
+  const resolve = (s: Record<string, unknown>) => mergeSettings(s as MerrymenSettings, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "paper" });
+
+  for (const key of Object.keys(PERPS_NUM_BOUNDS) as PerpsNumKey[]) {
+    const { min, max, decimals } = PERPS_NUM_BOUNDS[key];
+    const step = decimals === 0 ? 1 : 0.01;
+
+    it(`${key}: saved at ${min} and ${max}, refused just past either — and the worker resolves exactly that`, async () => {
+      for (const value of [min, max]) {
+        await getSettingsStore("perps").put(TENANT, {});
+        const res = await perps({ ...room[key], [key]: value });
+        assert.equal(res.status, 200, `${key}=${value}: ${JSON.stringify(res.body)}`);
+        assert.equal((res.body.ignored ?? []).includes(key), false, `${key} came back ignored`);
+        assert.equal((await stored())[key], value, `${key}=${value} was not stored`);
+        assert.equal(resolve(await stored())[key], value, `the worker does not honour ${key}=${value}`);
+      }
+      for (const bad of [min - step, max + step]) {
+        await getSettingsStore("perps").put(TENANT, {});
+        const res = await perps({ ...room[key], [key]: bad });
+        assert.equal(res.status, 400, `${key}=${bad} was accepted: ${JSON.stringify(res.body)}`);
+        assert.match(res.body.errors?.join(" ") ?? "", new RegExp(`^${key}: must be`), `${key}=${bad}`);
+        assert.equal((await stored())[key], undefined, `${key}=${bad} was stored`);
+        // The worker, handed the same value from a file, refuses it to the default.
+        assert.equal(resolve({ ...room[key], [key]: bad })[key], SETTINGS_DEFAULTS[key], `the worker honours ${key}=${bad}`);
+      }
+      // Never into the Spot wallet's settings: a Perps number saved there is reported, not stored.
+      assert.equal(((await getSettingsStore("spot").get(TENANT)) as Record<string, unknown> | null)?.[key], undefined);
+    });
+
+    it(`${key}: off its grid is refused by both, typed or sent as a number`, async () => {
+      // Four places, not three: "10.001" typed is ten thousand and one to a
+      // German owner (parse-amount.ts), a reading this route rightly accepts.
+      const off = decimals === 0 ? min + 0.5 : min + 0.0015;
+      await getSettingsStore("perps").put(TENANT, {});
+      for (const sent of [off, String(off)]) {
+        const res = await perps({ ...room[key], [key]: sent });
+        assert.equal(res.status, 400, `${key}=${JSON.stringify(sent)}: ${JSON.stringify(res.body)}`);
+        assert.match(res.body.errors?.join(" ") ?? "", decimals === 0 ? /whole number/ : /at most 2 decimals/);
+      }
+      assert.equal(resolve({ ...room[key], [key]: off })[key], SETTINGS_DEFAULTS[key]);
+      // A typed value on the grid is read as the number it is.
+      const typed = await perps({ ...room[key], [key]: String(max) });
+      assert.equal(typed.status, 200, JSON.stringify(typed.body));
+      assert.equal((await stored())[key], max);
+    });
+  }
+
+  it("the Spot wallet reports a perps number as ignored, exactly as before", async () => {
+    const res = await put({ perpsMaxLeverage: 3 });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.ignored, ["perpsMaxLeverage"]);
+    assert.equal(((await getSettingsStore("spot").get(TENANT)) as Record<string, unknown> | null)?.perpsMaxLeverage, undefined);
   });
 });

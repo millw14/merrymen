@@ -10,6 +10,7 @@ import {
   drainCommandResults,
   dropCommandResult,
   expiredLine,
+  expiredResetLine,
   isExpired,
   markRunning,
   openCommands,
@@ -574,6 +575,93 @@ describe("the tick's drain", () => {
       const t = tick(home);
       await t.done;
       assert.deepEqual([t.ran, t.told], [[], []]);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("A PRACTICE RESET PAST ITS DEADLINE IS ANSWERED IN ITS OWN WORDS, and never run", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "late-reset", kind: "paper-reset", at: NOW - 25 * 60 * 60_000, expiresAt: NOW - 24 * 60 * 60_000 });
+      const t = tick(home);
+      await t.done;
+      assert.deepEqual(t.ran, []);
+      assert.equal(receipt(home, "late-reset")?.result?.line, expiredResetLine(NOW - 24 * 60 * 60_000, NOW));
+      assert.match(expiredResetLine(NOW - 24 * 60 * 60_000, NOW), /^expired — I picked up this practice reset 24 h after its window closed, so the practice book was not reset\./);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+/**
+ * A COMMAND BOUND TO AN ACCOUNT RUNS ONLY ON IT (FileCommand.account).
+ *
+ * Self-hosted the web writes into a wallet's home, and the home outlives the
+ * account in it: a Perps wallet made again under another owner key is another
+ * account in the same `accounts/perps`. A command names the account it was
+ * asked for, and the drain answers it — claimed, never run — anywhere else.
+ */
+describe("a command bound to an account", () => {
+  const NOW = 1_800_000_000_000;
+  const A = `0x${"aa".repeat(20)}`;
+  const B = `0x${"bb".repeat(20)}`;
+  const drain = async (home: string, armed: (() => string | null) | undefined) => {
+    const ran: string[] = [];
+    await runTickCommand(home, { now: () => NOW, run: async (cmd) => (ran.push(cmd.id), { ok: true, line: "ran" }), told: async () => {}, ...(armed ? { account: armed } : {}) });
+    return ran;
+  };
+
+  it("runs on its own account (case aside), and is answered — claimed, not run — on another, on none, or where the drain cannot say", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "mine", kind: "trade", at: NOW - 3, account: A, expiresAt: NOW + 60_000 });
+      assert.deepEqual(await drain(home, () => A.toUpperCase().replace(/^0X/, "0x")), ["mine"]);
+      for (const [id, armed] of [["other", () => B], ["unarmed", () => null], ["unasked", undefined]] as const) {
+        writeCommand(home, { id, kind: "paper-reset", at: NOW - 2, account: A });
+        assert.deepEqual(await drain(home, armed), [], id);
+        const st = readCommandState(home, id);
+        assert.equal(st?.state, "done", `${id}: answered, so it never sits in front of the account's own commands`);
+        assert.equal(st?.result?.ok, false);
+        assert.match(st?.result?.line ?? "", /^not run — this was asked for the account 0xaaaa…aaaa, and .*\. Nothing was sent\./, id);
+      }
+      assert.match(readCommandState(home, "other")?.result?.line ?? "", /this wallet's account is now 0xbbbb…bbbb/);
+      assert.deepEqual(openCommands(home), []);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a file whose binding is not a string is answered as bound elsewhere — claimed and answered, never thrown on and lost", async () => {
+    const home = tmpHome();
+    try {
+      mkdirSync(commandDir(home), { recursive: true });
+      writeFileSync(path.join(commandDir(home), "odd.json"), JSON.stringify({ id: "odd", kind: "trade", at: NOW, account: 42 }));
+      assert.deepEqual(await drain(home, () => A), []);
+      assert.match(readCommandState(home, "odd")?.result?.line ?? "", /^not run — this was asked for another account, and this wallet's account is now 0xaaaa…aaaa/);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a command that names no account runs wherever it is drained, as every command before it did", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "unbound", kind: "trade", at: NOW, expiresAt: NOW + 60_000 });
+      assert.deepEqual(await drain(home, () => B), ["unbound"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a binding that is not an account is never written", () => {
+    const home = tmpHome();
+    try {
+      for (const account of ["0x1234", "not-an-account", `${A} `, ""]) {
+        assert.throws(() => writeCommand(home, { id: "bad", kind: "trade", at: NOW, account }), /not an account/, account);
+      }
+      assert.deepEqual(openCommands(home), []);
     } finally {
       rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }

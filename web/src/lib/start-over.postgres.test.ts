@@ -481,6 +481,20 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       assert.deepEqual([old.claimed_at, old.done_at, old.result], [null, null, null], "legacy refusal is not marked as execution or supersession");
       assert.equal(await epochOf(acct), EPOCH + 2);
     });
+
+    await t.test("A PERPS RESET CARRIES ITS DEADLINE IN THE ROW'S ARGS, which the ferry lifts onto the child's file; a Spot reset's row has none", async () => {
+      const perps = account(0x31), spot = account(0x32);
+      const expiresAt = Date.now() + 600_000;
+      const q = await queuePaperReset(true, perps, "perps", { expiresAt });
+      assert.ok(q.ok, q.ok ? "" : q.error);
+      assert.equal(q.expiresAt, expiresAt);
+      const row = (await one.prepare("SELECT agent_id, kind, args FROM agent_commands WHERE id = ?").get(q.id)) as { agent_id: string; kind: string; args: string | null };
+      assert.deepEqual({ agent: row.agent_id, kind: row.kind, args: JSON.parse(String(row.args)) }, { agent: perps, kind: "paper-reset", args: { expiresAt } });
+      const s = await queuePaperReset(true, spot, "spot");
+      assert.ok(s.ok && s.expiresAt === undefined);
+      assert.equal(((await one.prepare("SELECT args FROM agent_commands WHERE id = ?").get(s.id)) as { args: string | null }).args, null);
+      await assert.rejects(queuePaperReset(true, perps, "perps"), /carries a deadline/);
+    });
   } finally {
     await admin.query(`DROP SCHEMA ${schema} CASCADE`).catch(() => {});
     for (const c of clients) await c.end().catch(() => {});

@@ -41,7 +41,7 @@
  *    and closed the tab gets a fill hours later, at a price they never saw,
  *    into a book they never looked at. The window is TWO TICKS of the tick this
  *    tenant actually runs, not a constant tuned for the default one — see
- *    orderTtlFor.
+ *    orderTtlFor (lib/order-ceiling.ts).
  *
  * ── WHAT THIS ROUTE DELIBERATELY DOES NOT DECIDE ─────────────────────────
  *
@@ -52,73 +52,86 @@
  * of the bug the wall exists to prevent. So the validation here is about the
  * SHAPE of a request and the SIZE the owner allowed; the meaning is decided
  * once more, in the process that holds the key.
+ *
+ * ── TWO WALLETS: `?wallet=spot` (or none) AND `?wallet=perps` ───────────
+ *
+ * A login has two wallets, each its own account, queue and worker, and the
+ * request names the one it means (wallet-param.ts; absent is Spot, exactly as
+ * every client before Perps sent it). Everything above holds for both, read
+ * for the wallet named: its account (agent-for.ts, never the other's), its
+ * ceiling and order window (its own settings), its one-at-a-time slot (its own
+ * account's rows), its queue (hosted, a row bound to its account, which the
+ * ferry hands only to that wallet's worker; self-hosted, its own home's
+ * commands). The Perps wallet differs in what it takes:
+ *
+ * - EXITS ONLY (readPerpsWalletOrder): close one perpetual position, or close
+ *   all of them, on the practice book. No entry, no Spot order, no energy buy
+ *   is ever queued for it, and the Spot wallet refuses an exit
+ *   (SPOT_WALLET_HOLDS_NO_PERPS). The worker judges both again
+ *   (order-gate.ts walletOrderRefusal) before anything is built.
+ * - BOUND TO THE ACCOUNT THE OWNER REVIEWED: a Perps order names it
+ *   (`expectedAccount`) and is refused when the Perps wallet is now another
+ *   one — a renewal in another tab, a different login — so a Close is never
+ *   carried out on an account nobody looked at. It is checked, never queued
+ *   as sent: what the order is bound to is the account this route resolved.
+ *   Hosted, the row's agent_id, which the ferry joins on, so only that
+ *   account's worker is handed it. Self-hosted, the file names it
+ *   (FileCommand.account), because the Perps home outlives the account in it,
+ *   and the worker answers it without running it on any other.
+ * - ONLY WHERE A PERPS WORKER RUNS (perps-enabled.ts perpsWorkersRun, D1).
+ *   Under any other MERRYMEN_PERPS the wallet's worker is stood down and its
+ *   practice positions are frozen; an exit queued then would run whenever
+ *   perps came back, closing positions at a price nobody was shown. So it is
+ *   refused, and nothing is queued or read.
+ * - The fleet recovery hold refuses a Perps exit as it refuses any order
+ *   (placeRecoveryCheckedOrder, D11). Rule 8a's "an exit is always
+ *   attemptable" waits for the live build, where a hold could strand a real
+ *   position; a practice position waiting out a hold costs nothing.
  */
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
-import { merrymenHome } from "@merrymen/home";
-import { isHostedMode } from "@merrymen/core";
+import { purposeHome } from "@merrymen/home";
+import { isHostedMode, type GrantPurpose } from "@merrymen/core";
 // RELATIVE, NOT THE ALIASES, so a test can run this route. `tsx --test`
 // resolves against the root tsconfig, which has no @merrymen/command-files or
 // @merrymen/settings; the build resolves either way (lib/order-ceiling.ts
 // reaches settings the same way). ceiling/route.test.ts runs POST for real.
 import { openCommands, readCommandState, writeCommand } from "../../../../../worker/src/command-files";
-import { resolveConfig } from "../../../../../worker/src/settings";
+import { isPerpExitPurpose } from "../../../../../worker/src/perps/owner-order";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
-import { ceilingFor } from "@/lib/order-ceiling";
+import { ceilingFor, orderTtlFor } from "@/lib/order-ceiling";
 import { OWNER_CHANGED, OWNER_CHANGED_LOOKUP, ownerMismatch } from "@/lib/order-owner";
 import { placeRecoveryCheckedOrder } from "@/lib/recovery-orders";
 import {
   LEDGER_UNREADABLE,
-  orderTtlMs,
+  SPOT_WALLET_HOLDS_NO_PERPS,
+  namesPerpExit,
   placedResponse,
   placeSelfHostedOrder,
   readHostedOrder,
   readOrder,
+  readPerpsWalletOrder,
   selfHostedOrderReply,
+  type OrderAsked,
   type OrderBody,
+  type PerpsWalletOrder,
 } from "@/lib/order-state";
-import { getSettingsStore } from "@merrymen/settings-store";
-import { walletNotSupported } from "@/lib/route-guard";
+import { perpsWalletRefused, perpsWorkersRun } from "@/lib/perps-enabled";
+import { walletUnknown } from "@/lib/route-guard";
+import { readWalletParam } from "@/lib/wallet-param";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * How long an order stays willing to fill, FOR THIS DEPLOYMENT'S ACTUAL TICK.
- *
- * A CONSTANT TUNED FOR THE DEFAULT IS WRONG EVERYWHERE ELSE. Five minutes was
- * sized for "one slow tick (60s default) and a ferry pass (15s) with room to
- * spare". The hosted fleet runs a 240s tick, and the child drains at most ONE
- * command per tick — so five minutes bought a single attempt, and an order that
- * missed it was dead. Observed exactly that in production: a child re-armed
- * (because a setting changed), its tick clock reset, and the queued order sat
- * through its whole window without being looked at once.
- *
- * Two ticks plus a ferry pass is the smallest window that survives missing one,
- * with the original five minutes as a floor so a fast tick does not make orders
- * expire faster than a person can watch them.
- *
- * READ FOR THE CALLER, not for this container — same lesson as the ceiling
- * above it. Hosted, `resolveConfig()` is the house's own settings file and says
- * nothing about this tenant's cadence.
- */
-async function orderTtlFor(req: Request): Promise<number> {
-  let tickSeconds = resolveConfig().tickSeconds;
-  if (isHostedMode()) {
-    const tenant = tenantOf(req);
-    try {
-      const own = tenant ? (await getSettingsStore("spot").get(tenant))?.tickSeconds : undefined;
-      if (typeof own === "number" && Number.isFinite(own) && own > 0) tickSeconds = own;
-    } catch {
-      /* the container's own tick is the safe fallback */
-    }
-  }
-  return orderTtlMs(tickSeconds);
-}
+const agentFor = (req: Request, wallet: GrantPurpose) => (isHostedMode() ? hostedAgentFor(req, wallet) : diskAgent(wallet));
 
-const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req, "spot") : diskAgent("spot"));
+/** The refusal while no Perps worker runs here (D1): `what` is what was not done. */
+const perpsStoodDown = (what: string) =>
+  perpsWalletRefused(
+    `${what} Practice perpetuals are not running here, so your Perps wallet's practice positions stay exactly as they are until they do. Kill all agents still stops it.`,
+  );
 
 /**
  * The primary key for this order, in this minute.
@@ -127,7 +140,7 @@ const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req, "spot")
  * a second, genuinely-intended order impossible: ask for the same thing again
  * next minute and it is a new id, as it should be.
  */
-function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string }, nowMs: number): string {
+function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string; book?: string }, nowMs: number): string {
   const bucket = Math.floor(nowMs / 60_000);
   // THE ENERGY MARKER IS PART OF WHAT THE ORDER IS, so it is part of its id: a
   // get-energy card and a plain buy card with the same numbers in the same
@@ -135,19 +148,29 @@ function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: n
   // "already queued" off the first. Appended only when present, so every other
   // order keeps the id it always had.
   const purpose = o.purpose ? `|${o.purpose}` : "";
+  // AN EXIT'S BOOK, the same way: a Close all of the practice book and a Close
+  // all of every book are two orders. Only an exit carries one, so every other
+  // order's id is unchanged (hashing "" adds nothing).
+  const book = isPerpExitPurpose(o.purpose) && o.book ? `|${o.book}` : "";
   return createHash("sha256")
     .update(`${agent.toLowerCase()}|${o.side}|${o.symbol}|${o.usdgAmount}|${bucket}${purpose}`)
+    .update(book)
     .digest("hex")
     .slice(0, 32);
 }
 
 export async function POST(req: Request) {
-  const walletRefused = walletNotSupported(req);
-  if (walletRefused) return walletRefused;
+  // WHICH WALLET, before anything is read: one this route cannot read is
+  // refused, never guessed (wallet-param.ts; absent is Spot).
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was queued.");
+  // NO PERPS WORKER RUNS HERE, so nothing is queued for one (D1), and nothing
+  // is read on the way to saying so.
+  if (wallet === "perps" && !perpsWorkersRun()) return perpsStoodDown("No Perps order was queued.");
   // Hosted, `tenantOf` is a server-verified wallet and the account is resolved
   // through the grant store — a caller can never name someone else's agent.
   // Self-hosted there is no auth and the localhost middleware is the perimeter.
-  const agent = await agentFor(req);
+  const agent = await agentFor(req, wallet);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
 
   let body: OrderBody;
@@ -156,6 +179,11 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "body is not JSON" }, { status: 400 });
   }
+  // A PERPS ORDER IS AN OBJECT, OR IT IS NOTHING: a JSON `null`, a list or a
+  // string is refused before a field is read off it.
+  if (wallet === "perps" && (!body || typeof body !== "object" || Array.isArray(body))) {
+    return NextResponse.json({ error: "That is not an order. Nothing was queued." }, { status: 400 });
+  }
   // FOR THE OWNER WHO CONFIRMED IT, OR NOT AT ALL. The session is whatever
   // this browser held when the request left; the chat card names the owner who
   // tapped, and another wallet signed in since (another tab can do it unseen)
@@ -163,7 +191,33 @@ export async function POST(req: Request) {
   if (isHostedMode() && ownerMismatch((body as { owner?: unknown }).owner, tenantOf(req))) {
     return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
   }
-  const read = readOrder(body);
+  // FOR THE PERPS ACCOUNT THE OWNER REVIEWED, OR NOT AT ALL. The desk and the
+  // chat card name the account they showed (`expectedAccount`), and the order
+  // is bound to the account resolved above — never to one the body names. A
+  // Perps wallet renewed or replaced since the owner looked is another
+  // account, and an exit for it is one nobody reviewed. Required: a Perps
+  // order that does not say which account it was reviewed for is refused.
+  if (wallet === "perps") {
+    const expected = (body as { expectedAccount?: unknown }).expectedAccount;
+    if (typeof expected !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(expected)) {
+      return NextResponse.json(
+        { error: "Reload your Perps wallet and review this again: the order does not say which account you reviewed. Nothing was queued." },
+        { status: 400 },
+      );
+    }
+    if (expected.toLowerCase() !== agent.toLowerCase()) {
+      return NextResponse.json(
+        { error: "Your Perps wallet has changed since you reviewed this, so nothing was queued. Review it again.", code: "account-changed" },
+        { status: 409 },
+      );
+    }
+  }
+  // WHAT EACH WALLET TAKES: the Perps wallet the owner's exits and nothing
+  // else; the Spot wallet everything it always took, and never an exit.
+  const read: { order: OrderAsked | PerpsWalletOrder } | { error: string } =
+    wallet === "perps" ? readPerpsWalletOrder(body)
+    : namesPerpExit(body) ? { error: SPOT_WALLET_HOLDS_NO_PERPS }
+    : readOrder(body);
   if ("error" in read) return NextResponse.json({ error: read.error }, { status: 400 });
   const order = read.order;
 
@@ -179,7 +233,7 @@ export async function POST(req: Request) {
   // smaller, SAFE direction) when the tenant stored none or the store cannot be
   // read. Enforced again in the worker, which reads the settings.json the
   // orchestrator wrote for that child: two gates, neither relying on the other.
-  const ceiling = await ceilingFor(req, isHostedMode());
+  const ceiling = await ceilingFor(req, isHostedMode(), wallet);
   if (ceiling > 0 && order.usdgAmount > ceiling) {
     return NextResponse.json(
       { error: `${order.usdgAmount} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.` },
@@ -188,7 +242,7 @@ export async function POST(req: Request) {
   }
 
   const now = Date.now();
-  const ttlMs = await orderTtlFor(req);
+  const ttlMs = await orderTtlFor(req, isHostedMode(), wallet);
   // ONE DEADLINE, stamped on the order and handed back to the card, so the
   // worker that enforces it, the slot that waits on it and the card that
   // follows it all read the same number.
@@ -201,13 +255,20 @@ export async function POST(req: Request) {
   // against each open order's own `expiresAt`, and only a key collision is a
   // duplicate.
   const result = isHostedMode()
-    ? await withReadDb((db) => placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now }), "spot").catch(
+    ? await withReadDb((db) => placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now }), wallet).catch(
         () => ({ ok: false as const, why: "unreachable" as const }),
       )
-    : // The web process and the worker share one MERRYMEN_HOME — no table, no ferry.
+    : // The web process and the worker share one MERRYMEN_HOME — no table, no
+      // ferry. Each wallet's worker drains its own home (purposeHome: Spot's is
+      // MERRYMEN_HOME itself, as it always was; Perps's is accounts/perps).
+      // A PERPS EXIT NAMES ITS ACCOUNT ON THE FILE: the Perps home outlives
+      // the account in it (a wallet made again under another owner key is
+      // another account in the same `accounts/perps`), so the account the
+      // owner reviewed rides with the exit and the worker runs it on no other
+      // (command-files.ts FileCommand.account).
       placeSelfHostedOrder(
-        { open: () => openCommands(merrymenHome()), write: (cmd) => writeCommand(merrymenHome(), cmd) },
-        { id, args, expiresAt, now },
+        { open: () => openCommands(purposeHome(wallet)), write: (cmd) => writeCommand(purposeHome(wallet), cmd) },
+        { id, args, expiresAt, now, ...(wallet === "perps" ? { account: agent } : {}) },
       );
 
   // THE DEADLINE GOES BACK WITH THE ID — and as a DURATION, so the card waits
@@ -247,9 +308,10 @@ export async function POST(req: Request) {
  * line from it; an older worker's answer carries none and renders `result`.
  */
 export async function GET(req: Request) {
-  const walletRefused = walletNotSupported(req);
-  if (walletRefused) return walletRefused;
-  const agent = await agentFor(req);
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was read.");
+  if (wallet === "perps" && !perpsWorkersRun()) return perpsStoodDown("Its orders were not read.");
+  const agent = await agentFor(req, wallet);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
   const params = new URL(req.url).searchParams;
   const id = params.get("id") ?? "";
@@ -264,9 +326,9 @@ export async function GET(req: Request) {
     // Self-hosted the files ARE the record: there is no orchestrator to ferry a
     // result into a table, so reading the table would answer "none" for an
     // order that had already filled.
-    return NextResponse.json(selfHostedOrderReply(id, id ? readCommandState(merrymenHome(), id) : null, Date.now()));
+    return NextResponse.json(selfHostedOrderReply(id, id ? readCommandState(purposeHome(wallet), id) : null, Date.now()));
   }
 
-  const reply = await withReadDb((db) => readHostedOrder(db, agent, id, Date.now()), "spot").catch(() => LEDGER_UNREADABLE);
+  const reply = await withReadDb((db) => readHostedOrder(db, agent, id, Date.now()), wallet).catch(() => LEDGER_UNREADABLE);
   return NextResponse.json(reply.body, { status: reply.status });
 }

@@ -257,11 +257,22 @@ describe("queuePaperReset", () => {
     rmSync(perpsHome(), { recursive: true, force: true });
   });
 
-  it("self-hosted, a Perps reset lands in the Perps home and never in the Spot worker's", async () => {
-    const queued = await startOver.queuePaperReset(false, PERPS, "perps");
+  it("self-hosted, a Perps reset lands in the Perps home and never in the Spot worker's, with its deadline and its account", async () => {
+    const expiresAt = Date.now() + 300_000;
+    const queued = await startOver.queuePaperReset(false, PERPS, "perps", { expiresAt });
     assert.equal(queued.ok, true);
     assert.equal(commands(perpsHome()).length, 1);
     assert.deepEqual(commands(home), []);
+    const file = JSON.parse(readFileSync(path.join(perpsHome(), "commands", commands(perpsHome())[0]!), "utf8")) as { expiresAt?: number; account?: string };
+    assert.equal(file.expiresAt, expiresAt);
+    assert.equal(file.account, PERPS);
+  });
+
+  it("A PERPS RESET WITH NO DEADLINE THROWS before anything is written: one could wait out a stand-down and wipe the book days later", async () => {
+    for (const opts of [undefined, {}, { expiresAt: Number.NaN }]) {
+      await assert.rejects(startOver.queuePaperReset(false, PERPS, "perps", opts), /carries a deadline/, JSON.stringify(opts));
+    }
+    assert.equal(existsSync(perpsHome()), false);
   });
 
   it("and a Spot reset lands where it always did", async () => {

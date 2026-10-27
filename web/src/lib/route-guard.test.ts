@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import ts from "typescript";
-import { NO_STORE_HEADERS, perRouteLimiter, walletNotSupported } from "./route-guard";
+import { NO_STORE_HEADERS, perRouteLimiter, walletNotSupported, walletUnknown } from "./route-guard";
 
 const ORIGIN = "https://app.merrymen.dev";
 const at = (query: string) => ({ url: `${ORIGIN}/api/pnl${query}` });
@@ -42,6 +42,17 @@ describe("walletNotSupported", () => {
       assert.equal(body.code, "wallet-not-supported", q);
       assert.match(body.error ?? "", /Spot wallet only.*Nothing was read or changed/, q);
     }
+  });
+});
+
+describe("walletUnknown, a wallet-aware route's refusal of a wallet it cannot read", () => {
+  it("is a 400 wallet-unknown that names both wallets and says what was not done, never stored", async () => {
+    const refused = walletUnknown("Nothing was queued.");
+    assert.equal(refused.status, 400);
+    assert.equal(refused.headers.get("cache-control"), "private, no-store");
+    const body = (await refused.json()) as { code?: string; error?: string };
+    assert.equal(body.code, "wallet-unknown");
+    assert.match(body.error ?? "", /wallet=spot or wallet=perps\)\. Nothing was queued\.$/);
   });
 });
 
@@ -68,8 +79,12 @@ describe("NO_STORE_HEADERS and perRouteLimiter", () => {
 // ── the sweep ───────────────────────────────────────────────────────────────
 
 const API = path.join(process.cwd(), "web", "src", "app", "api");
-/** Routes that read `?wallet=` themselves (readWalletParam) and answer for each wallet they name. */
-const WALLET_AWARE = new Set(["grants/route.ts"]);
+/**
+ * Routes that read `?wallet=` themselves (readWalletParam) and answer for each
+ * wallet they name: the grants (5b), and the Perps wallet's settings, exits
+ * and practice reset (5c).
+ */
+const WALLET_AWARE = new Set(["grants/route.ts", "settings/route.ts", "orders/route.ts", "paper-reset/route.ts"]);
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]);
 
 /**
@@ -331,14 +346,14 @@ describe("the sweep sees a handler however a route exports it", () => {
 // ── and it holds at run time, before anything is touched ────────────────────
 
 describe("a refused request reads and changes nothing", () => {
-  const ENV = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_GRANT_FILE", "DATABASE_URL"] as const;
+  const ENV = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_GRANT_FILE", "DATABASE_URL", "MERRYMEN_PERPS"] as const;
   const saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
   const SPOT_GRANT = JSON.stringify({ smartAccount: `0x${"22".repeat(20)}`, demoOwnerPrivateKey: `0x${"01".repeat(32)}` });
   let home = "";
   before(() => {
     home = mkdtempSync(path.join(tmpdir(), "mm-route-guard-"));
     process.env.MERRYMEN_HOME = home;
-    for (const k of ["MERRYMEN_HOSTED", "MERRYMEN_GRANT_FILE", "DATABASE_URL"] as const) delete process.env[k];
+    for (const k of ["MERRYMEN_HOSTED", "MERRYMEN_GRANT_FILE", "DATABASE_URL", "MERRYMEN_PERPS"] as const) delete process.env[k];
   });
   after(() => {
     for (const [k, v] of Object.entries(saved)) {
@@ -363,9 +378,15 @@ describe("a refused request reads and changes nothing", () => {
   it("a practice reset for ?wallet=perps queues nothing for the Spot book", async () => {
     writeFileSync(path.join(home, "grant.json"), SPOT_GRANT);
     const { POST } = await import("../app/api/paper-reset/route");
-    const res = await POST(new Request(`${ORIGIN}/api/paper-reset?wallet=perps`, { method: "POST" }));
-    assert.equal(res.status, 400);
-    assert.equal(existsSync(path.join(home, "commands")), false);
+    // Wallet-aware since 5c: an unreadable wallet is refused 400, and a Perps
+    // reset where no Perps worker runs (MERRYMEN_PERPS unset here) 403. Neither
+    // is ever served as the Spot wallet's reset.
+    for (const [q, status] of [["?wallet=perps", 403], ["?wallet=nope", 400], ["?wallet=spot&wallet=perps", 400]] as const) {
+      const res = await POST(new Request(`${ORIGIN}/api/paper-reset${q}`, { method: "POST" }));
+      assert.equal(res.status, status, q);
+      assert.equal(existsSync(path.join(home, "commands")), false, `${q}: nothing queued for Spot`);
+      assert.equal(existsSync(path.join(home, "accounts")), false, `${q}: nor for Perps`);
+    }
     // And Spot, named or not, is the reset it always was.
     const spot = await POST(new Request(`${ORIGIN}/api/paper-reset?wallet=spot`, { method: "POST" }));
     assert.equal(spot.status, 200);

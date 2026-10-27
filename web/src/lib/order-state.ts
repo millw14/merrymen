@@ -23,6 +23,10 @@
  */
 // Browser-safe: chat-commands.ts, which the card bundles, imports it too.
 import { MERRYMEN_TOKEN } from "@merrymen/core";
+// Browser-safe too (it imports one type), and by path: the worker checks an
+// exit with this same parser before it builds one, so the two gates cannot
+// come to disagree about what an exit is.
+import { isPerpExitPurpose, readPerpExitOrder, type PerpExitOrder } from "../../../worker/src/perps/owner-order";
 
 /**
  * How long after its expiry an UNCLAIMED row may still hold the one-at-a-time
@@ -304,6 +308,55 @@ export function readOrder(body: OrderBody): { order: OrderAsked } | { error: str
   return { order };
 }
 
+// ── the Perps wallet's orders: the owner's exits, and nothing else ────────
+
+/** What a Perps wallet's order queue carries: an exit, exactly as the worker's parser reads it. */
+export type PerpsWalletOrder = PerpExitOrder;
+
+/**
+ * Said to an owner whose Perps wallet was asked for anything but an exit.
+ * Nothing is queued: a buy, a sell or an energy buy would spend the practice
+ * book's collateral on tokens, and the worker refuses each again
+ * (order-gate.ts walletOrderRefusal).
+ */
+export const PERPS_WALLET_EXITS_ONLY =
+  "This is your Perps wallet: from the app it only closes perpetual positions (close one, or close all). Place Spot orders from your Spot wallet. Nothing was queued.";
+
+/**
+ * Said to an owner whose Spot wallet was asked to close a perpetual position.
+ * The Spot wallet holds none, and an exit there must never be read as a sell
+ * of something else; the worker refuses it again (walletOrderRefusal).
+ */
+export const SPOT_WALLET_HOLDS_NO_PERPS =
+  "Your Spot wallet holds no perpetual positions; close them from your Perps wallet. Nothing was queued.";
+
+/** Does this Spot order body name one of the Perps wallet's exits? Checked before readOrder, which knows no exits. */
+export function namesPerpExit(body: unknown): boolean {
+  return !!body && typeof body === "object" && isPerpExitPurpose((body as { purpose?: unknown }).purpose);
+}
+
+/**
+ * The exit a Perps wallet's order is asking for, or the reason it is not one.
+ *
+ * EXITS ONLY: `close-perp` (one market, the practice book) and
+ * `flatten-perps` (Close all; with no book when the desk could not read which
+ * book it saw, which the worker reads as every book, D11). The shape is
+ * worker/src/perps/owner-order.ts's, checked here with the worker's own
+ * parser, and what is queued is the parser's object — never the body — so
+ * nothing the request carried beside the exit (an `expectedAccount`, an
+ * `owner`, a field nobody reads) is ever written into the command.
+ *
+ * A BODY THAT IS NOT AN OBJECT IS REFUSED here, before any field is read: JSON
+ * `null`, a list or a string is not an order, and reading a field off one
+ * would throw.
+ */
+export function readPerpsWalletOrder(body: unknown): { order: PerpsWalletOrder } | { error: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "That is not an order. Nothing was queued." };
+  const exit = readPerpExitOrder(body as Record<string, unknown>);
+  if (exit === null) return { error: PERPS_WALLET_EXITS_ONLY };
+  return exit;
+}
+
 /**
  * Was this write refused because the row already exists?
  *
@@ -564,11 +617,19 @@ export interface OpenFile {
  * it only drains while armed. The file stays where it is; the worker drops it
  * as expired at the claim and writes the receipt that says so.
  *
+ * `account`, when given, is written on the file beside the deadline
+ * (command-files.ts FileCommand.account): the worker runs it only on that
+ * account, because a home outlives the account in it. The Perps wallet's
+ * exits carry it; Spot's orders are written as they always were.
+ *
  * A listing that throws is "unreachable", never "nothing waiting".
  */
 export function placeSelfHostedOrder(
-  files: { open(): OpenFile[]; write(cmd: { id: string; kind: "trade"; at: number; args: OrderAsked; expiresAt: number }): void },
-  o: { id: string; args: OrderAsked; expiresAt: number; now: number },
+  files: {
+    open(): OpenFile[];
+    write(cmd: { id: string; kind: "trade"; at: number; args: OrderAsked | PerpsWalletOrder; expiresAt: number; account?: string }): void;
+  },
+  o: { id: string; args: OrderAsked | PerpsWalletOrder; expiresAt: number; now: number; account?: string },
 ): PlaceResult {
   try {
     const held = files
@@ -577,7 +638,7 @@ export function placeSelfHostedOrder(
     if (held) return { ok: false, why: "in-flight" };
     // The id collision is handled by the file simply being rewritten, which
     // for an identical order in the same minute is a no-op.
-    files.write({ id: o.id, kind: "trade", at: o.now, args: o.args, expiresAt: o.expiresAt });
+    files.write({ id: o.id, kind: "trade", at: o.now, args: o.args, expiresAt: o.expiresAt, ...(o.account ? { account: o.account } : {}) });
     return { ok: true };
   } catch (e) {
     return { ok: false, why: "unreachable", detail: e instanceof Error ? e.message : String(e) };

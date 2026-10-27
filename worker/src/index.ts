@@ -125,14 +125,23 @@ import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from 
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { breakerTripped, drawdownOf, opsHeadroomOf, opsSpent, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
+import { expiredResetLine, isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { recoveryCommandRefused } from "./recovery-command-barrier";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, drainOnUnreadTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
 import { ADMISSION_LEVEL_ENV, DRAIN_INTENT_CHAIN_MS, DrainingRefused, admissionFrom, admissionRefusal, drainIntentChain } from "./worker-admission";
 import { closeStore } from "./store";
 import { CoalescedRefresh } from "./coalesced-refresh";
-import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
+import {
+  createTickBook,
+  isPerpExitRoute,
+  orderAsked,
+  orderReadsOf,
+  orderRoute,
+  placeOrder,
+  walletOrderRefusal,
+  type StatedReads,
+} from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -299,10 +308,12 @@ import {
   getPerpAccount,
   getPerpPositions,
   listSubmittedPerpOrders,
+  patchPerpAccount,
   perpLaneLedgerFacts,
   setAgentPerps,
 } from "./store";
 import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLaneStore } from "./perps/lane";
+import { readPerpExitOrder } from "./perps/owner-order";
 import { lighterFeedPath, readLighterFeed } from "./perps/feed-reader";
 import { startLighterFeed } from "./perps/feed";
 import { createLighterApi } from "./perps/api";
@@ -311,6 +322,7 @@ import {
   connectionKey,
   perpsCeilingNote,
   perpsKey,
+  perpsWorkerStoodDown,
   resolveConfig,
   settingsArmRefusal,
   settingsHoldNotice,
@@ -3710,6 +3722,8 @@ async function main() {
     bookPaperPerp,
     listSubmittedPerpOrders,
     getPerpAccount,
+    // The owner's Close all writes its entries halt through this (lane.ts flatten).
+    patchPerpAccount,
     perpLaneLedgerFacts,
     getAgentEpoch,
     setAgentPerps,
@@ -5710,6 +5724,8 @@ async function main() {
         chainId: grant.chainId,
         live: execMode().mode === "live",
         hasRoute: grantEnergyRoute(grant) !== null,
+        // A Perps wallet's worker never reports a buy as ready (energy.ts).
+        wallet: cfg.workerWallet,
       }),
       estimateUsdg: estimate,
       nowSec: now,
@@ -6881,8 +6897,17 @@ async function main() {
         // for grants and settings. See command-files.ts.
         await runTickCommand(merrymenHome(), {
           now: Date.now,
-          mayRun: cmd => !!active && !recoveryCommandRefused(merrymenHome(),
+          // A STOOD-DOWN PERPS WORKER CLAIMS NOTHING (settings.ts
+          // perpsWorkerStoodDown, D19): its positions are frozen, not run by
+          // owner orders, and every command waits in the queue, unclaimed, for
+          // a worker under paper to run it or answer it expired.
+          mayRun: cmd => !!active && !perpsWorkerStoodDown(cfg) && !recoveryCommandRefused(merrymenHome(),
             { smartAccount: active.grant.smartAccount, chainId: active.grant.chainId }, cmd),
+          // A COMMAND BOUND TO AN ACCOUNT RUNS ONLY ON THAT ACCOUNT. Self-hosted,
+          // a Perps exit or reset names the account the owner reviewed
+          // (FileCommand.account); a Perps wallet made again in this home since
+          // is another account, and the drain answers it without running it.
+          account: () => active?.grant.smartAccount ?? null,
           // The unlink WAS the claim, so a command reaching here is ours and
           // will not be replayed — a lost probe is a button pressed again, a
           // replayed one is gas nobody asked to spend twice.
@@ -6926,15 +6951,19 @@ async function main() {
     // vanished order and a never-delivered one must not read the same to the
     // person who clicked.
     if (isExpired(cmd, Date.now())) {
+      if (cmd.kind === "paper-reset") return { ok: false, line: expiredResetLine(cmd.expiresAt as number, Date.now()) };
       const late = Math.round((Date.now() - (cmd.expiresAt ?? 0)) / 1000);
+      // The receipt where an order has one: an owner's perpetual exit has none
+      // (expiredOrderReceipt), as when it runs (orderOutcome).
+      const receipt = cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined;
       return {
         ok: false,
         line: `expired — this was placed for a market ${late}s ago and I will not fill it into a different one. Ask again if you still want it.`,
-        ...(cmd.kind === "trade" ? { receipt: expiredOrderReceipt(cmd.args) } : {}),
+        ...(receipt ? { receipt } : {}),
       };
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
-    if (cmd.kind === "paper-reset") return runPaperReset();
+    if (cmd.kind === "paper-reset") return runPaperReset(cmd.at);
     if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, reads));
     return { ok: false, line: `unknown command '${cmd.kind}'` };
   }
@@ -6947,6 +6976,11 @@ async function main() {
    * figures it may print and the two states that get none.
    */
   function orderOutcome(cmd: FileCommand, reply: OrderReply): CommandOutcome {
+    // AN OWNER'S PERPETUAL EXIT IS ANSWERED IN ITS SENTENCE ALONE. A receipt
+    // templates a Spot fill — a token bought or sold, USDG moved, a tx — and
+    // a practice close has none of those; with no verdict it would read
+    // "refused" beside a sentence that says the position was closed.
+    if (isPerpExitRoute(orderRoute(cmd.args))) return { ok: reply.ok, line: reply.line };
     const receipt = orderReceipt(orderSubject(cmd.args), reply.verdict);
     return { ok: reply.ok, line: reply.line, ...(receipt ? { receipt } : {}) };
   }
@@ -6973,7 +7007,7 @@ async function main() {
    * not the closing equity: carrying a simulated balance across a deliberate
    * restart is what the owner asked NOT to happen.
    */
-  async function runPaperReset(): Promise<{ ok: boolean; line: string }> {
+  async function runPaperReset(askedAt: number): Promise<{ ok: boolean; line: string }> {
     // `active` carries the armed agent's id — the same handle runSelftestProbe
     // takes, and the same reason: nothing may be written for an agent that has
     // not armed on this process.
@@ -6992,12 +7026,18 @@ async function main() {
     // and the epoch moves; a protective pass booking in between would land a
     // stop's proceeds in the new book, and a breach clock, a cooldown or an
     // entry candle remembered from the old book would act on one that no
-    // longer exists (perps/lane.ts resetPaper).
-    const opened = await perpLane.resetPaper(async () => {
-      const epoch = await resetPaperLedger(id, cfg.paperStartUsdg);
-      if (trenchBrain.reset()) tgDeliver(tgBook.reset());
-      return epoch;
-    });
+    // longer exists (perps/lane.ts resetPaper). The owner's Close-all halt
+    // goes with the old book, in the reset's own transaction, unless that
+    // Close all was asked for after this reset (the lane decides, from when
+    // each was asked).
+    const opened = await perpLane.resetPaper(
+      async ({ clearEntriesHalt }) => {
+        const epoch = await resetPaperLedger(id, cfg.paperStartUsdg, { clearEntriesHalt });
+        if (trenchBrain.reset()) tgDeliver(tgBook.reset());
+        return epoch;
+      },
+      { askedAt },
+    );
     await addEvent(
       id,
       "ok",
@@ -7028,6 +7068,13 @@ async function main() {
    * not in the caller.
    */
   async function runOrderCommand(cmd: FileCommand, reads: StatedReads): Promise<OrderReply> {
+    // THE WALLET FIRST. This worker serves one of the login's two wallets
+    // (settings.ts workerWalletOf): a Perps wallet's takes the owner's
+    // perpetual exits and nothing else, and a Spot wallet's never takes one
+    // (order-gate.ts walletOrderRefusal). Before every other gate, so an order
+    // in the wrong home is answered by what it is, not by a read that failed.
+    const wrongWallet = walletOrderRefusal(cfg.workerWallet, orderRoute(cmd.args));
+    if (wrongWallet) return no(wrongWallet);
     // EVERY GATE BEFORE THE SUBMITTER lives in order-gate.ts, where a test
     // runs it: the unreadable market and the unread book (both drained with
     // their flag by the tick that could not read them — answered, not
@@ -7042,6 +7089,22 @@ async function main() {
       cmd.args,
       orderReadsOf(reads, { paused: isPaused(), ceilingUsdg: cfg.telegramMaxActionUsdg }),
       async (side, symbol, size, route) => {
+        // AN OWNER'S PERPETUAL EXIT GOES TO THE LANE, which re-reads the
+        // practice book under its own lock and closes what is held there
+        // (perps/lane.ts close, flatten). The order is read again from its own
+        // args rather than trusted from the route's name, so the book the owner
+        // chose reaches the lane typed; placeOrder already refused any other
+        // shape. Close all with no book is every book (D11).
+        if (isPerpExitRoute(route)) {
+          const exit = readPerpExitOrder(cmd.args ?? {});
+          if (exit === null || "error" in exit) return no(exit?.error ?? "That perpetual exit could not be read. Nothing was sent.");
+          const notAfterMs = typeof cmd.expiresAt === "number" ? cmd.expiresAt : undefined;
+          const result =
+            exit.order.purpose === "close-perp"
+              ? await perpLane.close(exit.order.symbol, { book: exit.order.book, notAfterMs })
+              : await perpLane.flatten({ ...(exit.order.book ? { book: exit.order.book } : {}), notAfterMs, askedAt: cmd.at });
+          return { ok: result.ok, line: result.sentence };
+        }
         // And from here the wall decides. submitChatTrade reports what the
         // LEDGER said, so this returns a verdict about a trade that really
         // happened or really did not.

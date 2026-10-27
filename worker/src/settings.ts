@@ -6,7 +6,8 @@
  * the new bundler/RPC; trading fields rebuild the strategy in place.
  */
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import {
   HOUSE_KEY_FIELDS,
   PERPS_DRIVERS,
@@ -359,6 +360,22 @@ export function perpsCeilingFor(
   if (cfg.perpsLiveTenants === null) return "live";
   const a = (smartAccount ?? "").trim().toLowerCase();
   return a !== "" && (cfg.perpsLiveTenants as readonly string[]).includes(a) ? "live" : "paper";
+}
+
+/**
+ * IS THIS A PERPS WALLET'S WORKER THAT THE OPERATOR HAS STOOD DOWN? (D19.)
+ *
+ * The orchestrator never starts a Perps worker unless MERRYMEN_PERPS is paper
+ * (orchestrator.ts perpsSpawnable), and a self-hosted one is to match it. A
+ * stood-down Perps wallet's positions are FROZEN, not managed by owner orders
+ * (docs/perps.md, D1): so a Perps worker that runs anyway under any other
+ * ceiling — started by hand, or by a CLI that has not learned the rule —
+ * drains no owner command. Each one stays queued, unclaimed, and is answered
+ * by the worker that next drains under paper: run if it is still inside its
+ * window, expired (nothing sent) if not. A Spot worker is never stood down here.
+ */
+export function perpsWorkerStoodDown(cfg: Pick<ResolvedConfig, "workerWallet" | "perpsOperatorCeiling">): boolean {
+  return cfg.workerWallet === "perps" && cfg.perpsOperatorCeiling !== "paper";
 }
 
 /**
@@ -839,13 +856,22 @@ function whereParseFailed(e: unknown, text: string): string {
 
 /** Read settings.json and say what is there. Remembers nothing — see settingsSource. */
 export function readSettingsFileAt(file: string): SettingsFileRead {
+  return readSettingsFileWithText(file).read;
+}
+
+/**
+ * readSettingsFileAt, and the text it read: null when the file was absent or
+ * would not be read. For a writer that must not land over a change it never
+ * saw (writeSettingsFileIfUnchanged): the text is what it hands back.
+ */
+export function readSettingsFileWithText(file: string): { read: SettingsFileRead; text: string | null } {
   let raw: string;
   try {
     raw = readFileSync(file, "utf8");
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { kind: "absent" };
-    return { kind: "unusable", why: `settings.json could not be read (${code ?? "unknown error"})` };
+    if (code === "ENOENT") return { read: { kind: "absent" }, text: null };
+    return { read: { kind: "unusable", why: `settings.json could not be read (${code ?? "unknown error"})` }, text: null };
   }
   let parsed: unknown;
   // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.
@@ -853,12 +879,38 @@ export function readSettingsFileAt(file: string): SettingsFileRead {
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    return { kind: "unusable", why: `settings.json is not valid JSON${whereParseFailed(e, text)}` };
+    return { read: { kind: "unusable", why: `settings.json is not valid JSON${whereParseFailed(e, text)}` }, text: raw };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { kind: "unusable", why: "settings.json is not a JSON object" };
+    return { read: { kind: "unusable", why: "settings.json is not a JSON object" }, text: raw };
   }
-  return { kind: "parsed", settings: parsed as MerrymenSettings };
+  return { read: { kind: "parsed", settings: parsed as MerrymenSettings }, text: raw };
+}
+
+/**
+ * WRITE ONLY OVER WHAT WAS READ: replace `file` with `data` (whole, 0600) if
+ * it still holds `seen` — the text readSettingsFileWithText returned, null for
+ * no file — and say whether it did. Nothing is written when it changed.
+ *
+ * SYNCHRONOUS ON PURPOSE. The look and the write run with nothing else in
+ * this process between them, so a writer here that is itself synchronous —
+ * the kill's turnOffLocalPaperPerps — lands wholly before or wholly after.
+ * Another process (`merrymen kill`, a self-hosted Telegram /kill) can still
+ * land between the look and the rename; closing that needs a lock across
+ * processes, which self-hosted does not have (D7).
+ */
+export function writeSettingsFileIfUnchanged(file: string, seen: string | null, data: string): boolean {
+  mkdirSync(path.dirname(file), { recursive: true });
+  let now: string | null;
+  try {
+    now = readFileSync(file, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    now = null;
+  }
+  if (now !== seen) return false;
+  writeFileAtomicSync(file, data, 0o600);
+  return true;
 }
 
 /** A settings.json this process could not use, and what it runs on instead. */

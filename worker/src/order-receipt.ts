@@ -25,7 +25,14 @@
  * into `filled` would put a practice trade on a surface that reads as money.
  * Those two return no receipt and the owner reads the line, which already says
  * exactly which of them it was.
+ *
+ * NOR DOES AN OWNER'S PERPETUAL EXIT, run or expired (perps/owner-order.ts):
+ * a receipt templates a Spot fill — a token bought or sold, USDG moved — and a
+ * Close or a Close all has none of those. Its arguments are a fixed `sell` of
+ * a `-PERP` or `ALL-PERPS` symbol, so a receipt would read as a Spot sell of
+ * an unnamed token, and a Close of a short is not a sell at all.
  */
+import { isPerpExitPurpose } from "./perps/owner-order";
 
 /** C3's statuses. Closed: a renderer switches on these and nothing else. */
 export type ReceiptStatus = "filled" | "refused" | "failed" | "expired";
@@ -202,7 +209,13 @@ export function orderReceipt(
 /**
  * The receipt for an order that is not run because its window closed before it
  * was reached. Nothing was built or sent, so every ledger field is null.
+ *
+ * NONE FOR AN OWNER'S PERPETUAL EXIT (see the header): every path that
+ * answers an expiry — the drain at the claim, the worker's own check and the
+ * orchestrator's never-ran sweep — asks here, so none of them can give a Close
+ * the Spot sell's receipt the run path never gives it (index.ts orderOutcome).
  */
-export function expiredOrderReceipt(args: Record<string, unknown> | undefined): OrderReceipt {
+export function expiredOrderReceipt(args: Record<string, unknown> | undefined): OrderReceipt | undefined {
+  if (isPerpExitPurpose(args?.purpose)) return undefined;
   return orderReceipt(orderSubject(args), { kind: "late" }) as OrderReceipt;
 }

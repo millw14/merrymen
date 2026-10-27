@@ -75,6 +75,7 @@ import { perpsCeilingFor, type ResolvedConfig } from "../settings";
 import type { PerpAccountRow, PerpOrderRow } from "../store";
 import { renderWhy, type Why } from "../strategies/reasons";
 import { ownerRejectRuleLabel } from "../thesis-policy";
+import { buildExitDraft } from "./drafts";
 import {
   createPaperPerpExecutor,
   PerpRefused,
@@ -92,6 +93,7 @@ import {
   emptyProtectMemory,
   evaluateProtection,
   protectCadenceMs,
+  protectCloseSlipBps,
   startProtectLoop,
   type PerpLaneLock,
   type ProtectLoop,
@@ -165,6 +167,8 @@ export type PerpLaneConfig = Pick<
 export interface PerpLaneStore extends PaperPerpStore {
   listSubmittedPerpOrders(agentId: string, mode: "paper"): Promise<readonly Pick<PerpOrderRow, "marketId" | "effect" | "reduceOnly" | "worstNotionalMicro">[]>;
   getPerpAccount(agentId: string, mode: "paper"): Promise<Pick<PerpAccountRow, "paperCollateralMicro" | "incident" | "entriesHalted"> | null>;
+  /** The owner's Close all halts entries through this (`flatten`); nothing else in the lane writes the account row's flags. */
+  patchPerpAccount(agentId: string, mode: "paper", patch: { entriesHalted: boolean }): Promise<void>;
   perpLaneLedgerFacts(
     agentId: string,
     mode: "paper",
@@ -393,15 +397,57 @@ export interface PerpLane {
   armed(): Promise<void>;
   /** Settings changed (perpsKey moved): re-read, re-announce, and make sure the protective loop runs. */
   configChanged(): Promise<void>;
-  /** A paper reset: `reset` runs under the lock, then every in-memory perp fact is forgotten. */
-  resetPaper<T>(reset: () => Promise<T>): Promise<T>;
+  /**
+   * A paper reset: `reset` runs under the lock, then every in-memory perp fact
+   * is forgotten. `askedAt` is when the owner asked for it (the command's
+   * `at`); with it, the reset also lifts the owner's Close-all halt, unless
+   * that halt was asked for after the reset was — `reset` is told which, and
+   * clears the ledger's halt in its own transaction (store.ts
+   * resetPaperLedger). Without it, no halt is lifted.
+   */
+  resetPaper<T>(reset: (o: { clearEntriesHalt: boolean }) => Promise<T>, opts?: { askedAt?: number }): Promise<T>;
   /** Write `agents.perps` from the last read. */
   report(): Promise<void>;
   /** Venue market ids the feed should carry: the allowed markets plus anything held. */
   feedMarketIds(): number[];
   /** Venue market ids the book HOLDS: the feed's funding history covers each (feed.ts heldMarketIds). */
   heldMarketIds(): number[];
+  /**
+   * THE OWNER'S CLOSE OF ONE PRACTICE POSITION (owner-order.ts close-perp),
+   * from the app's command drain. Reduce-only and the full size held, built
+   * from this call's own read under the lock and filed under the owner's
+   * decision (source `chat`, provenance owner-command), then the same lane
+   * every perp intent takes. Paper only: there is no real-money book in this
+   * build. The sentence is the owner's; `ok` only when the position is gone.
+   */
+  close(market: PerpKey, opts: { book: "paper"; notAfterMs?: number }): Promise<OwnerExitResult>;
+  /**
+   * THE OWNER'S CLOSE ALL (owner-order.ts flatten-perps): new entries halted
+   * FIRST (perp_accounts.entries_halted, and this process's own memory of it
+   * if that write fails), then every practice position closed as `close`
+   * closes one. An absent `book` is every book (D11), which in this build is
+   * the practice book. The halt lasts until the owner resets the practice
+   * book (resetPaper, for a reset asked for after this Close all: `askedAt`
+   * is when the owner asked for it); Resume needs the owner-controls history
+   * (docs/perps.md), which has not landed.
+   */
+  flatten(opts: { book?: "paper"; notAfterMs?: number; askedAt?: number }): Promise<OwnerExitResult>;
 }
+
+/** What an owner's exit came to, in the owner's words. */
+export interface OwnerExitResult {
+  ok: boolean;
+  sentence: string;
+}
+
+/**
+ * WHERE AN OWNER'S PRACTICE BOOK IS NOT THE ACCOUNT'S BOOK, nothing of it is
+ * touched — not even to close it. Rule 14: a practice book is never run beside
+ * a real one, and the lane neither trades nor protects it until the account is
+ * back on paper (readLocked). An owner's exit is a trade like any other.
+ */
+const PRACTICE_BOOK_FROZEN =
+  "This account is not on paper right now, so its practice perpetual positions stay exactly as they are until it is. Nothing was sent.";
 
 export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   const lock = deps.lock ?? createPerpLaneLock({ onOverrun: (i) => log(`lane lock held past ${i.holdMs} ms by ${i.label ?? "?"}`) });
@@ -433,6 +479,19 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   let tickUnreadKeys = new Set<string>();
   /** market_id → the first owed funding hour the feed does not carry: that position's funding is unread. */
   let fundingGaps = new Map<number, number>();
+  /**
+   * THE OWNER'S HALT AS THIS PROCESS HOLDS IT, by account and book, with when
+   * the newest Close all behind it was asked for. A Close all writes
+   * perp_accounts.entries_halted before it closes anything; this is for the
+   * write that failed, so the halt the owner was told about still holds here.
+   * NOT per-agent memory: forget() — an arm, another account — never clears
+   * it. Only the owner's practice reset does (resetPaper), and only a reset
+   * asked for after that Close all: hosted, an exit rides the ferry's short
+   * loop and a reset its reconcile pass, so a reset asked for first can reach
+   * the worker second, and must not lift the halt the later Close all set.
+   */
+  const ownerEntryHalts = new Map<string, number>();
+  const haltKey = (agentId: string, book: "paper") => `${agentId.toLowerCase()}:${book}`;
 
   function forget(): void {
     lastRead = null;
@@ -731,7 +790,8 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       // An unreadable cash figure is not zero: the view then states no free collateral.
       paperCashMicro: Number.isFinite(cash) ? BigInt(Math.round(cash * 1e6)) : null,
       incident: account?.incident !== null && account?.incident !== undefined,
-      entriesHalted: account?.entriesHalted ?? false,
+      // The ledger's halt, or the one this process holds because writing it failed.
+      entriesHalted: (account?.entriesHalted ?? false) || ownerEntryHalts.has(haltKey(a.agentId, "paper")),
     };
     const input: PerpsViewInput = {
       mode: "paper",
@@ -1260,6 +1320,77 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     }
   }
 
+  // ── the owner's exits ───────────────────────────────────────────────────
+
+  /** Past the request's own deadline? At the deadline itself it still runs — command-files.ts isExpired's edge. */
+  function lateFor(notAfterMs: number | undefined): boolean {
+    return typeof notAfterMs === "number" && Number.isFinite(notAfterMs) && deps.now() > notAfterMs;
+  }
+
+  /**
+   * ONE PRACTICE POSITION CLOSED FOR ITS OWNER, under the lock, on `r` — a read
+   * this same hold took.
+   *
+   * BUILT FROM WHAT IS HELD, NEVER FROM WHAT WAS ASKED. The order carries a
+   * market and nothing else (owner-order.ts): the side is the position's, the
+   * size is all of it, and the worst price is the protective close's
+   * (protect.ts protectCloseSlipBps: twice the owner's slippage, inside the
+   * venue's band). So it can only ever reduce, and a request run a second time
+   * finds nothing to close and sends nothing — the drain's claim is what keeps
+   * it to once (command-files.ts), and this is what makes a second run harmless
+   * if anything ever ran one.
+   *
+   * FILED AS THE OWNER'S. The decision row is written under source `chat`
+   * before anything is placed, so its provenance is owner-command and the fill
+   * joins it (the protective close's shape, under the route's source). A close
+   * whose decision cannot be written is not sent: a fill nobody can attribute
+   * would read as the strategy's exit in every book that reads provenance, and
+   * on paper waiting costs the owner nothing but a retry. Then the same lane
+   * every perp intent takes — policy, review, policy, place — and the paper
+   * engine books it into perp_fills, perp_positions and paper cash exactly as
+   * it books the lane's own exits.
+   */
+  async function ownerCloseLocked(
+    r: PerpLaneRead,
+    market: PerpKey,
+    reason: string,
+  ): Promise<{ kind: "none" } | { kind: "unpriced" } | { kind: "unstamped"; why: string } | { kind: "sent"; out: PerpOutcome }> {
+    const pos = r.view?.positions.get(market);
+    if (pos === undefined) return { kind: "none" };
+    const m = r.view?.markets.get(market);
+    const draft =
+      m === undefined ? null : buildExitDraft({ market: m, position: pos, effect: "close", maxSlippageBps: protectCloseSlipBps(deps.config().perpsMaxSlippageBps) });
+    if (draft === null) return { kind: "unpriced" };
+    const intent: PerpOrderIntent = { ...draft };
+    const stamped = await deps.decide(intent, "chat", reason);
+    if (!stamped.ok) return { kind: "unstamped", why: stamped.why };
+    return { kind: "sent", out: await executeLocked(intent, { equityUsdg: 0n, equityKnown: false }) };
+  }
+
+  /**
+   * `agents.perps` as the owner's exit left the book, so the desk that asked
+   * shows it now rather than at the next pass. Outside the lock, as a pass
+   * writes it; a report that fails to write never changes what the owner is
+   * told happened — the next pass writes it again.
+   */
+  async function reportAfterOwnerExit(): Promise<void> {
+    try {
+      await writeReport(lastRead);
+    } catch (e) {
+      log(`report after an owner exit not written: ${errText(e)}`);
+    }
+  }
+
+  /** How many practice positions are still held, from the ledger after the closes — never from an order's result. */
+  async function practiceLeft(a: PerpLaneAgent, marketId?: number): Promise<number | "unread"> {
+    try {
+      const held = await deps.store.getPerpPositions(a.agentId, "paper");
+      return held.filter((p) => p.base > 0n && (marketId === undefined || p.marketId === marketId)).length;
+    } catch {
+      return "unread";
+    }
+  }
+
   // ── the report ──────────────────────────────────────────────────────────
 
   async function writeReport(r: PerpLaneRead | null): Promise<void> {
@@ -1354,10 +1485,24 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       const r = await lock.run(refreshLocked, { label: "settings" });
       await writeReport(r);
     },
-    async resetPaper<T>(reset: () => Promise<T>) {
+    async resetPaper<T>(reset: (o: { clearEntriesHalt: boolean }) => Promise<T>, opts: { askedAt?: number } = {}) {
       return lock.run(
         async () => {
-          const out = await reset();
+          // A RESET STARTS THE PRACTICE BOOK OVER, ITS CLOSE-ALL HALT WITH IT:
+          // every practice position is closed into the old epoch, so the halt
+          // has nothing left to protect, and without this nothing in this
+          // build ever lifted it — one Close all ended practice entries on
+          // that account for good (re-creating the wallet is the same index-1
+          // account). Not a halt asked for after this reset was, and not for a
+          // reset that cannot say when it was asked.
+          const a = agentNow();
+          const key = a === null ? null : haltKey(a.agentId, "paper");
+          const haltAskedAt = key === null ? undefined : ownerEntryHalts.get(key);
+          const askedAt = opts.askedAt;
+          const clearEntriesHalt =
+            key !== null && typeof askedAt === "number" && Number.isFinite(askedAt) && (haltAskedAt === undefined || haltAskedAt <= askedAt);
+          const out = await reset({ clearEntriesHalt });
+          if (clearEntriesHalt && key !== null) ownerEntryHalts.delete(key);
           // The book those memories were about is gone: a breach clock, a
           // cooldown or an entry candle carried across would act on nothing.
           const keepRail = railKey;
@@ -1387,6 +1532,101 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     },
     heldMarketIds() {
       return [...new Set(lastHeldMarkets)].sort((x, y) => x - y);
+    },
+    async close(market, opts) {
+      // A shape check passed upstream (owner-order.ts); a market this build does not trade is refused here, by name.
+      if (perpMarketByKey(market) === null) return { ok: false, sentence: `${market} is not a perpetual market this version trades. Nothing was sent.` };
+      const out = await lock.run(
+        async (): Promise<OwnerExitResult> => {
+          // Judged once the lock is ours: a protective pass ahead of it may have held it for a while.
+          if (lateFor(opts.notAfterMs)) return { ok: false, sentence: `${market}: this close request expired before it could run. Nothing was sent.` };
+          const a = agentNow();
+          if (a === null) return { ok: false, sentence: "Nothing is armed, so no practice position could be closed. Nothing was sent." };
+          const r = await refreshLocked();
+          if (r.bookMode !== "paper") return { ok: false, sentence: PRACTICE_BOOK_FROZEN };
+          if (r.view === null) {
+            return { ok: false, sentence: `${market}: the practice book could not be read, so nothing was sent. Its stop stays in place.` };
+          }
+          const done = await ownerCloseLocked(r, market, `the owner asked to close ${market} reduce-only`);
+          if (done.kind === "none") return { ok: false, sentence: `${market}: there is no practice position to close. Nothing was sent.` };
+          if (done.kind === "unpriced") {
+            return { ok: false, sentence: `${market}: the exit price could not be read, so nothing was sent. Its stop stays in place.` };
+          }
+          if (done.kind === "unstamped") {
+            log(`${market} owner close not stamped: ${done.why}`);
+            return { ok: false, sentence: `${market}: the close could not be recorded, so nothing was sent. Its stop stays in place; ask again.` };
+          }
+          if (done.out.status === "dropped") {
+            return { ok: false, sentence: `${market}: the practice close did not fill — nothing on the book inside its worst price — so the position and its stop stay as they were.` };
+          }
+          if (done.out.status !== "paper") {
+            const rule = done.out.rejectRule;
+            const words = rule ? (ownerRejectRuleLabel(rule) ?? rule) : null;
+            return { ok: false, sentence: `${market}: the practice close was refused${words ? ` (${words})` : ""}, so the position and its stop stay as they were.` };
+          }
+          // AN IOC CAN FILL PART OF A CLOSE: the ledger, not the order's result, says whether it is gone.
+          const left = await practiceLeft(a, perpMarketByKey(market)!.marketId);
+          if (left === "unread") return { ok: false, sentence: `${market}: a practice close was booked, but what remains could not be read; part of the position may still be open.` };
+          if (left > 0) return { ok: false, sentence: `${market}: the practice close filled only part of the position; the rest remains open with its stop.` };
+          return { ok: true, sentence: `${market}: the practice position was closed.` };
+        },
+        { label: `owner close ${market}` },
+      );
+      await reportAfterOwnerExit();
+      return out;
+    },
+    async flatten(opts) {
+      const out = await lock.run(
+        async (): Promise<OwnerExitResult> => {
+          if (lateFor(opts.notAfterMs)) return { ok: false, sentence: "This Close all request expired before it could run. Nothing was sent and nothing was paused." };
+          const a = agentNow();
+          if (a === null) return { ok: false, sentence: "Nothing is armed, so no practice position could be closed. Nothing was sent and nothing was paused." };
+          // THE HALT FIRST: whatever the closes below find, no entry follows
+          // them. Held in this process before the write, so a write that fails
+          // still stops entries here — and the owner is told it did not save.
+          // Remembered with when it was asked for (the newest Close all wins),
+          // so a reset asked for before it never lifts it (resetPaper).
+          const key = haltKey(a.agentId, "paper");
+          const askedAt = typeof opts.askedAt === "number" && Number.isFinite(opts.askedAt) ? opts.askedAt : Date.now();
+          ownerEntryHalts.set(key, Math.max(ownerEntryHalts.get(key) ?? Number.NEGATIVE_INFINITY, askedAt));
+          let haltSaved = false;
+          try {
+            await deps.store.patchPerpAccount(a.agentId, "paper", { entriesHalted: true });
+            haltSaved = true;
+          } catch (e) {
+            log(`practice entries halt not stored: ${errText(e)}`);
+          }
+          const paused = haltSaved
+            ? "New practice positions are paused until you reset the practice book."
+            : "New practice positions are paused in this worker, but the pause could not be saved — turn perps off in Settings before it restarts.";
+          const r = await refreshLocked();
+          if (r.bookMode !== "paper") return { ok: false, sentence: `${PRACTICE_BOOK_FROZEN} ${paused}` };
+          if (r.view === null) {
+            return { ok: false, sentence: `The practice book could not be read, so no position was closed; they may still be open. ${paused}` };
+          }
+          // Every market held at this read, each closed on the same read (one
+          // market's close never moves another's position), and each refusal
+          // left to the count below rather than ending the rest.
+          const held = [...(r.view?.positions.keys() ?? [])];
+          for (const market of held) {
+            const done = await ownerCloseLocked(r, market, "the owner's Close all: close every practice position");
+            if (done.kind === "unstamped") log(`${market} owner close not stamped: ${done.why}`);
+          }
+          const left = await practiceLeft(a);
+          if (left === "unread") return { ok: false, sentence: `The remaining practice perpetual positions could not be read; some may still be open. ${paused}` };
+          if (left > 0) {
+            return {
+              ok: false,
+              sentence: `${left} practice position${left === 1 ? "" : "s"} remain${left === 1 ? "s" : ""} open after the close attempts, with ${left === 1 ? "its stop" : "their stops"}. ${paused}`,
+            };
+          }
+          const closed = held.length === 0 ? "There were no practice perpetual positions open." : "Every practice perpetual position was closed.";
+          return { ok: haltSaved, sentence: `${closed} ${paused}` };
+        },
+        { label: "owner close all" },
+      );
+      await reportAfterOwnerExit();
+      return out;
     },
   };
   return lane;

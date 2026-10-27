@@ -199,7 +199,8 @@ describe("/api/chat injects it on the server", () => {
     assert.match(ROUTE, /readAgentEnergy\(/);
     assert.match(ROUTE, /getGrantStore\("spot"\)\.get\(tenant\)/, "the grant is resolved from the authenticated tenant");
     assert.match(ROUTE, /const account = hosted \? grant\?\.smartAccount \?\? null : await diskAgent\("spot"\)/, "the caller cannot name the agent");
-    assert.match(ROUTE, /ceilingFor\(req, hosted\)/);
+    // The Spot wallet's ceiling: the chat's energy buy is a Spot order (order-ceiling.ts names the wallet).
+    assert.match(ROUTE, /ceilingFor\(req, hosted, "spot"\)/);
     // Beside it, the server's own Fomo research context (lib/fomo-chat.ts), never the body's.
     // And whether the deployment is hosted, so a failed call can say it ran on the house's key.
     assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply, fomo, recovery, fomoSettings, hosted, agentBrief \}\)/);
