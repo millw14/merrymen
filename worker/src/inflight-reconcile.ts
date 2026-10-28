@@ -41,6 +41,8 @@ import { backoffMs, classifyRpcError } from "./rpc-error";
 import { isEnergyReserveToken } from "../../packages/core/src/index";
 import { netTokenDeltas, type ReceiptLog } from "./fills";
 import { ENTRYPOINT } from "../../packages/core/src/index";
+import { validatorOfNonce } from "./asset-movements";
+import { ownerOperationOf, type OwnerOperationReading } from "./owner-operations";
 
 /** EntryPoint 0.7's per-op event — the account uses entryPoint 0.7 (executor.ts). */
 const ENTRYPOINT_ABI = parseAbi([
@@ -81,6 +83,12 @@ export interface ReconcileChain {
   }): Promise<RawLog[]>;
   /** The receipt's logs, for reading the op's USDG leg. Null if not found. */
   getReceiptLogs(txHash: Hex): Promise<readonly ReceiptLog[] | null>;
+  /**
+   * A block's timestamp, unix seconds — when a settled-late operation's gas was
+   * burned, so it can be priced at that moment (eth-feed.ts priceGasAt).
+   * Optional: a chain without it leaves recovered gas unpriced, as before.
+   */
+  getBlockTime?(blockNumber: bigint): Promise<number | null>;
 }
 
 export interface OrphanOp {
@@ -110,6 +118,32 @@ export interface OrphanOp {
    * arrived are the same evidence the live path books from, on the same receipt.
    */
   acquired: { token: string; qtyRaw: bigint; side: "buy" | "sell" } | null;
+  /** The nonce the EntryPoint's own event says the op spent. Null only for an event that did not carry one. */
+  nonce: bigint | null;
+  /**
+   * WHO SIGNED IT, from that nonce (asset-movements.ts validatorOfNonce):
+   * 'root' is the owner's own key, 'permission' the agent's session key. Null
+   * for anything this tree has not measured, which stays on the trades path.
+   */
+  validator: "root" | "permission" | "secondary" | null;
+  /** The block its UserOperationEvent is in, when the log carried one. */
+  blockNumber: bigint | null;
+  /**
+   * WHAT IT COST AND WHO PAID, from the same UserOperationEvent: actualGasCost,
+   * actualGasUsed, and its paymaster (zero = the account paid). Read and then
+   * thrown away before this field existed, so every op this sweep recorded
+   * landed with no gas at all — which the board reads as an unrecorded cost
+   * and withholds the agent's P&L for. Null only when the event did not carry
+   * both figures.
+   */
+  gas: { gasWei: bigint; gasUnits: bigint; gasPayer: "owner" | "sponsor" } | null;
+  /**
+   * AN OWNER'S OPERATION, READ (owner-operations.ts). Set only for a root op
+   * whose receipt was read, and only when the caller asked (`owner`). A root
+   * op is never a trade: the reconciler records this instead, and a root op
+   * with no reading is left for the next arm, never booked as the agent's.
+   */
+  owner: OwnerOperationReading | null;
 }
 
 /**
@@ -356,6 +390,12 @@ export async function findOrphanOps(opts: {
    * same range and comparing against something merely similar.
    */
   onLogs?: (logs: readonly RawLog[], complete: boolean, scannedTo: bigint) => void;
+  /**
+   * The book an owner's operation is read over: the account's custody
+   * contracts and its chain (owner-operations.ts ownerOperationOf). Without
+   * it a root op is still never given a fill, but carries no reading.
+   */
+  owner?: { custody: readonly string[]; chainId: number };
 }): Promise<OrphanOp[]> {
   const { chain, smartAccount, usdgToken, knownOpHashes, lookbackBlocks } = opts;
   const head = await chain.getBlockNumber();
@@ -390,10 +430,18 @@ export async function findOrphanOps(opts: {
   for (const raw of logs.logs) {
     let userOpHash: string;
     let success: boolean;
+    let nonce: bigint | null;
+    let gas: OrphanOp["gas"];
     try {
       const decoded = decodeEventLog({ abi: ENTRYPOINT_ABI, topics: raw.topics as [Hex, ...Hex[]], data: raw.data });
       userOpHash = String(decoded.args.userOpHash).toLowerCase();
       success = Boolean(decoded.args.success);
+      nonce = typeof decoded.args.nonce === "bigint" ? decoded.args.nonce : null;
+      // The same reading resolveSubmittedOps takes of the same event.
+      gas = typeof decoded.args.actualGasCost === "bigint" && typeof decoded.args.actualGasUsed === "bigint"
+        ? { gasWei: decoded.args.actualGasCost, gasUnits: decoded.args.actualGasUsed,
+            gasPayer: /^0x0{40}$/i.test(String(decoded.args.paymaster)) ? "owner" : "sponsor" }
+        : null;
     } catch {
       continue; // not a UserOperationEvent we can read — skip
     }
@@ -404,9 +452,20 @@ export async function findOrphanOps(opts: {
     seen.add(userOpHash);
 
     const txHash = raw.transactionHash;
+    // WHO SIGNED IT, from the EntryPoint's own event: a contract cannot forge
+    // a log at the EntryPoint's address, so the nonce is a structural proof.
+    const validator = nonce === null ? null : validatorOfNonce(nonce);
+    let blockNumber: bigint | null = null;
+    try {
+      const b = raw.blockNumber === undefined ? null : BigInt(raw.blockNumber);
+      if (b !== null && b > 0n) blockNumber = b;
+    } catch {
+      // an unreadable block number is just an absent one
+    }
     let notionalUsdg6 = 0n;
     let attributed = false;
     let acquired: OrphanOp["acquired"] = null;
+    let owner: OwnerOperationReading | null = null;
     const receiptLogs = await chain.getReceiptLogs(txHash).catch(() => null);
     if (receiptLogs) {
       const deltas = netTokenDeltas(receiptLogs, smartAccount);
@@ -415,10 +474,19 @@ export async function findOrphanOps(opts: {
         notionalUsdg6 = usdgDelta < 0n ? -usdgDelta : usdgDelta;
         attributed = true;
       }
-      const leg = pickAcquiredLeg(deltas, usdgToken);
+      // NEVER A FILL FOR THE OWNER'S OWN KEY. What a root op brought in is not
+      // a position the agent opened, and a basis read off it here would be
+      // booked by the reconciler as the agent's (owner-operations.ts).
+      const leg = validator === "root" ? null : pickAcquiredLeg(deltas, usdgToken);
       acquired = leg && { token: leg.token, qtyRaw: leg.qtyRaw, side: leg.side };
+      if (validator === "root" && opts.owner) {
+        owner = ownerOperationOf({
+          receiptLogs, userOpHash, txHash: String(txHash), account: smartAccount,
+          custody: opts.owner.custody, usdg: usdgToken, chainId: opts.owner.chainId,
+        });
+      }
     }
-    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired });
+    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired, nonce, validator, blockNumber, gas, owner });
   }
   return orphans;
 }

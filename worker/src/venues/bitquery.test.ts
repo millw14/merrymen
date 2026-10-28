@@ -10,12 +10,18 @@
  * and only for holders, which is the worst way for it to fail.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   MERRYMEN_GATEWAY_BITQUERY,
   parsePoolEvent,
   resolveBitquery,
   bitqueryAuthHeaders,
+  bitqueryHttpHint,
+  bitqueryQuery,
+  bitqueryRequestHeaders,
 } from "./bitquery";
 
 describe("resolveBitquery — whose quota is this?", () => {
@@ -191,6 +197,116 @@ describe("bitquery auth headers", () => {
     // billing, so nothing downstream would have caught a regression here.
     for (const key of ["ory_at_x", "plain", "", "ORY_AT_upper", "0x1234", "ory_at_"]) {
       assert.equal(Object.keys(bitqueryAuthHeaders(key)).length, 1, `two headers for ${JSON.stringify(key)}`);
+    }
+  });
+});
+
+/**
+ * THE GATEWAY'S TOKEN, WHICH NEVER ARRIVED.
+ *
+ * A Merry Circle token (`mmk_…`) is not `ory_at_…`, so the header rule above
+ * put it in `X-API-KEY`, and the gateway's /bitquery route reads
+ * `Authorization: Bearer` and nothing else. Every holder's discovery call was
+ * a 401, reported as an expired token or a wallet that no longer qualified.
+ * These drive the real bitqueryQuery against a stubbed fetch and read the
+ * request back through the gateway's own extraction rule.
+ */
+describe("bitqueryQuery — the header that reaches whoever answers", () => {
+  const SERVER = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "gateway", "server.mjs"),
+    "utf8",
+  );
+
+  /** gateway/server.mjs, /bitquery: `auth.startsWith("Bearer ") ? auth.slice(7) : ""`. */
+  const gatewayToken = (headers: Record<string, string>): string => {
+    const auth = headers.authorization ?? headers.Authorization ?? "";
+    return auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  };
+
+  async function captured(
+    creds: Parameters<typeof bitqueryQuery>[0],
+    status = 200,
+  ): Promise<{ headers: Record<string, string>; result: Awaited<ReturnType<typeof bitqueryQuery>> }> {
+    const real = globalThis.fetch;
+    let headers: Record<string, string> = {};
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      headers = { ...(init?.headers as Record<string, string>) };
+      return new Response(status === 200 ? JSON.stringify({ data: { ok: true } }) : "{}", { status });
+    }) as typeof fetch;
+    try {
+      const result = await bitqueryQuery(creds, "ping");
+      return { headers, result };
+    } finally {
+      globalThis.fetch = real;
+    }
+  }
+
+  it("the gateway route still reads Bearer and only Bearer — the rule this client must meet", () => {
+    const route = SERVER.slice(SERVER.indexOf('pathname === "/bitquery"'), SERVER.indexOf("gw.bitquery("));
+    assert.ok(route.length > 0, "the /bitquery route was found");
+    assert.match(route, /req\.headers\["authorization"\]/);
+    assert.match(route, /auth\.startsWith\("Bearer "\) \? auth\.slice\(7\) : ""/);
+    assert.doesNotMatch(route, /x-api-key/i, "if the gateway ever reads X-API-KEY, revisit bitqueryRequestHeaders");
+  });
+
+  it("a Merry Circle token goes in Authorization: Bearer, and the gateway reads it back intact", async () => {
+    const creds = resolveBitquery({ merrymenToken: "mmk_eyJhIjoiMHgxIn0.sig" })!;
+    const { headers, result } = await captured(creds);
+    assert.equal(result.ok, true);
+    assert.equal(gatewayToken(headers), "mmk_eyJhIjoiMHgxIn0.sig", "the token the gateway verifies is the one we hold");
+    assert.equal(headers["X-API-KEY"], undefined, "one credential header, never two");
+  });
+
+  it("an owner's V1 key still goes in X-API-KEY, as the gateway's own upstream call does", async () => {
+    const { headers } = await captured(resolveBitquery({ bitqueryApiKey: "BQY-legacy" })!);
+    assert.equal(headers["X-API-KEY"], "BQY-legacy");
+    assert.equal(headers.Authorization, undefined);
+  });
+
+  it("an owner's V2 token still goes in Bearer", async () => {
+    const { headers } = await captured(resolveBitquery({ bitqueryApiKey: "ory_at_v2" })!);
+    assert.equal(headers.Authorization, "Bearer ory_at_v2");
+    assert.equal(headers["X-API-KEY"], undefined);
+  });
+
+  it("bitqueryRequestHeaders: the gateway always gets Bearer, whatever the token looks like", () => {
+    for (const apiKey of ["mmk_x", "ory_at_y", "BQY", ""]) {
+      const h = bitqueryRequestHeaders({ apiKey, viaGateway: true });
+      assert.deepEqual(Object.keys(h), ["Authorization"]);
+      assert.equal(h.Authorization, `Bearer ${apiKey}`);
+    }
+    assert.deepEqual(bitqueryRequestHeaders({ apiKey: "BQY" }), { "X-API-KEY": "BQY" });
+  });
+});
+
+describe("bitqueryHttpHint — a refusal tells the owner what is actually wrong", () => {
+  it("a gateway 401 is about the token, a 403 about the wallet, a 503 about neither", () => {
+    assert.match(bitqueryHttpHint(401, true), /did not accept your Merry Circle token/);
+    assert.doesNotMatch(bitqueryHttpHint(401, true), /wallet|\$MERRYMEN/, "a 401 is not a holdings verdict");
+    assert.match(bitqueryHttpHint(403, true), /no longer holds enough \$MERRYMEN/);
+    assert.doesNotMatch(bitqueryHttpHint(403, true), /expired|claim a fresh/, "a 403 is not a token problem");
+    assert.match(bitqueryHttpHint(503, true), /this is not your token/);
+    assert.match(bitqueryHttpHint(503, true), /daily allowance/, "the gateway's fleet-wide cap is one of the 503s");
+    assert.match(bitqueryHttpHint(429, true), /per-wallet/);
+  });
+
+  it("a direct key's 401/403 points at /settings, and nothing else gets a guess", () => {
+    assert.match(bitqueryHttpHint(401, false), /\/settings/);
+    assert.match(bitqueryHttpHint(403, undefined), /\/settings/);
+    assert.equal(bitqueryHttpHint(429, false), "");
+    assert.equal(bitqueryHttpHint(500, true), "");
+  });
+
+  it("the hint is what bitqueryQuery reports — and the old misdiagnosis is gone", async () => {
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("{}", { status: 401 })) as typeof fetch;
+    try {
+      const r = await bitqueryQuery(resolveBitquery({ merrymenToken: "mmk_x" })!, "ping");
+      assert.equal(r.ok, false);
+      assert.match(r.error!, /^bitquery HTTP 401 — the gateway did not accept/);
+      assert.doesNotMatch(r.error!, /wallet no longer qualifies/);
+    } finally {
+      globalThis.fetch = real;
     }
   });
 });

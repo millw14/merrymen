@@ -74,7 +74,7 @@ describe("SETTING_SPECS against PUT /api/settings", () => {
         const res = await put({ [spec.key]: value });
         assert.equal(res.status, 200, `${spec.key}=${JSON.stringify(value)}: ${JSON.stringify(res.body)}`);
         assert.equal((res.body.ignored ?? []).includes(spec.key), false, `${spec.key} came back ignored: the route has no branch for it`);
-        const stored = (await getSettingsStore().get(TENANT)) as Record<string, unknown> | null;
+        const stored = (await getSettingsStore("spot").get(TENANT)) as Record<string, unknown> | null;
         assert.deepEqual(stored?.[spec.key], value, `${spec.key}=${JSON.stringify(value)} was not stored`);
       }
     });
@@ -84,7 +84,7 @@ describe("SETTING_SPECS against PUT /api/settings", () => {
     const ok = await put({ classExitAtGraduationPct: 50 });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(ok.body.ignored, undefined);
-    assert.equal(((await getSettingsStore().get(TENANT)) as Record<string, unknown>).classExitAtGraduationPct, 50);
+    assert.equal(((await getSettingsStore("spot").get(TENANT)) as Record<string, unknown>).classExitAtGraduationPct, 50);
     for (const bad of [0, 101]) {
       const res = await put({ classExitAtGraduationPct: bad });
       assert.equal(res.status, 400, `${bad}: ${JSON.stringify(res.body)}`);

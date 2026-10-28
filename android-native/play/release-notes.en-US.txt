@@ -1,0 +1,9 @@
+<en-US>
+Current Merrymen logo on the launcher and splash screen.
+Home opens without waiting for every account and version check.
+Agents, Activity and Markets are easier to find.
+Agent names stay visible when you return to Home.
+Lighter public activity and agent profiles; detailed performance loads on demand.
+Clearer unavailable, stale, paper and under-review financial states.
+Improved X sign-in with secure app/browser return where supported.
+</en-US>

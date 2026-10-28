@@ -1,0 +1,19 @@
+[workspace]
+members = ["programs/merrymen-vault"]
+resolver = "2"
+exclude = ["runtime-tests"]
+
+# No `lto` setting. The program's crate-type is ["cdylib", "lib"] (the runtime tests link
+# it as a library) and cargo never runs LTO on a cdylib/rlib pair, so `lto = "fat"` was
+# silently ignored: rustc got no -C lto (audit GAP4-5). The setting still changed cargo's
+# -C metadata hash and so the artifact bytes (same size, no LTO), which is why the
+# reviewed hash lives in build-manifests/ and nowhere else. Real LTO would need a
+# cdylib-only deploy build, a new artifact hash and a new review.
+[profile.release]
+overflow-checks = true
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1

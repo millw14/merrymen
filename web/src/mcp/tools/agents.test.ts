@@ -124,7 +124,7 @@ test("the screens on each path exist and lead where the text says", () => {
   assert.ok(wallet.includes(`fetch("/api/grants/discard", { method: "POST", keepalive: true,`), "discard sends one keepalive server request");
   assert.ok(wallet.includes(`body: JSON.stringify({ expectedTenant: session?.hosted ? session.address : undefined })`), "discard binds the request to the verified hosted tenant");
   const startOver = source("web/src/app/api/grants/discard/route.ts");
-  assert.ok(startOver.includes("remove: () => getGrantStore().remove(tenant)") && startOver.includes("remove: removeSelfHostedGrant"), "on both deployments");
+  assert.ok(startOver.includes('remove: () => getGrantStore("spot").remove(tenant)') && startOver.includes("remove: removeSelfHostedGrant"), "on both deployments");
 
   // You → Trading limits → Edit signed limits goes to /grant; You → Settings is /settings.
   assert.ok(you.includes("<strong>Trading limits</strong>"));

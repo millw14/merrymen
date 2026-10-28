@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SCOPES } from "@/mcp/scopes";
+import { DEFAULT_REQUEST_SCOPES, SCOPES } from "@/mcp/scopes";
 import { accessSummary, initialSelection, joinPhrases, previousNote } from "./summary";
 
 /** The scopes as the consent view offers them (no offline_access), in the view's (sorted) order. */
@@ -54,7 +54,7 @@ test("an agent permission is left out of the summary when no agent is ticked, as
   assert.match(withAgent.find((g) => g.level === "write")!.text, /chats with your agent/);
   // A sensitive permission that needs an agent is dropped too; one that does not stays.
   assert.deepEqual(accessSummary(nonStaff, ids("trade:propose", "drafts:write"), false), [
-    { level: "sensitive", label: "Suggest, only with your approval", text: "setting-change suggestions" },
+    { level: "sensitive", label: "Suggest, only with your approval", text: "agent setups and setting changes" },
   ]);
 });
 
@@ -136,6 +136,20 @@ test("with no agent at all, the defaults tick nothing that needs one", () => {
   const start = initialSelection(view({ agents: [] }));
   for (const s of nonStaff) if (s.needsAgent) assert.ok(!start.scopes.has(s.id), s.id);
   assert.ok(start.scopes.size > 0);
+});
+
+test("omitted-scope onboarding offers setup without selecting it for a new owner or a read-only reconnect", () => {
+  const scopes = nonStaff.filter((s) => DEFAULT_REQUEST_SCOPES.includes(s.id));
+  assert.ok(scopes.some((s) => s.id === "drafts:write"));
+  for (const agents of [[], [{ slug: "aaaa" }]]) {
+    const start = initialSelection({ scopes, agents });
+    assert.ok(!start.scopes.has("drafts:write"), "new owners must opt in to setup");
+    const reconnect = initialSelection({ scopes, agents, previous: { scopes: ["market:read"], agentSlugs: [] } });
+    assert.ok(!reconnect.scopes.has("drafts:write"), "an existing read-only connection does not gain setup permission");
+    assert.deepEqual([...reconnect.agents], [], "reconnecting does not share an agent on the owner's behalf");
+  }
+  const approvedBefore = initialSelection({ scopes, agents: [], previous: { scopes: ["market:read", "drafts:write"], agentSlugs: [] } });
+  assert.ok(approvedBefore.scopes.has("drafts:write"), "an owner's explicit earlier consent is preserved");
 });
 
 test("a previous choice that grants nothing starts from the defaults", () => {

@@ -665,18 +665,51 @@ describe("the same queries run on the hosted backend", () => {
           issued.push({ sql, args });
           return [];
         },
+        // Postgres's catalogue, asked first (perps-wallets.ts): the record is there.
+        get: async (...args: unknown[]) => {
+          issued.push({ sql, args });
+          return /to_regclass/.test(sql) ? { t: "perps_wallets" } : undefined;
+        },
       }),
     };
     for (const opts of [{}, { agentSlug: SLUG }, { symbol: "TSLA" }]) {
       issued.length = 0;
       await readTheses(opts, (fn) => fn(fake as never), identities, settings);
-      assert.equal(issued.length, 2, "one query per lane when the first page is short");
+      // Plus the one read of the Perps wallets the feed leaves out (rule 17),
+      // after the catalogue says the record is there.
+      const perpsWallets = /perps_wallets/;
+      assert.equal(issued.filter((q) => /to_regclass\('perps_wallets'\)/.test(q.sql)).length, 1);
+      assert.equal(issued.filter((q) => /FROM perps_wallets/.test(q.sql)).length, 1);
+      assert.equal(issued.filter((q) => !perpsWallets.test(q.sql)).length, 2, "one query per lane when the first page is short");
       for (const q of issued) {
         const pg = translateQuery(q.sql);
         assert.ok(!pg.includes("?"), "a placeholder was left unrenumbered");
         const numbers = [...pg.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]));
         assert.deepEqual(numbers, q.args.map((_, i) => i + 1), "placeholders and arguments must line up one to one");
       }
+    }
+  });
+});
+
+describe("a Perps wallet's agent publishes nothing (docs/perps.md rule 17)", () => {
+  it("ITS ROWS ARE LEFT OFF THE FEED once the orchestrator has recorded the wallet, whatever they say", async () => {
+    const PERPS = "0x9999999999999999999999999999999999999999";
+    const agents = [...AGENTS, { account: PERPS, name: "Robin" }];
+    const rows: Row[] = [
+      ...changedAapl(),
+      { id: "perps-review", agent: PERPS, action: "hold", symbol: "TSLA", source: "market-review", reason: "Tape is quiet; nothing to take.", at: NOW - 60 },
+    ];
+    const { raw, db } = await ledger(rows, [], { agents });
+    try {
+      const listed = await readTheses({}, (fn) => fn(db), identities, settings);
+      assert.ok(listed.theses.some((t) => t.reason?.includes("Tape is quiet")), "unrecorded, it would publish — the record comes first");
+      const { recordPerpsWallet } = await import("../../../worker/src/perps-wallets");
+      await recordPerpsWallet(db, { smartAccount: PERPS, owner: `0x${"8".repeat(40)}`, chainId: 4663, nowSec: NOW });
+      const feed = await readTheses({}, (fn) => fn(db), identities, settings);
+      assert.ok(!feed.theses.some((t) => t.reason?.includes("Tape is quiet")), "a recorded Perps wallet's rows are left out");
+      assert.ok(feed.theses.some((t) => t.symbol === "AAPL"), "and everyone else's stay");
+    } finally {
+      raw.close();
     }
   });
 });

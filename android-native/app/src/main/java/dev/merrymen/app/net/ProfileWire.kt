@@ -85,6 +85,9 @@ data class ProfileTrade(
 
 @Serializable
 data class AgentProfile(
+  /** Identity only; optional performance/history have not been requested. */
+  val summary: Boolean = false,
+  val performance: BookPerformance? = null,
   val slug: String? = null,
   val name: String? = null,
   val handle: String? = null,
@@ -104,6 +107,8 @@ data class AgentProfile(
   val landed: Int? = null,
   /** Fills on paper — a separate counter, never folded into [landed]. */
   val filledPaper: Int? = null,
+  /** Distinct simulated trades; filledPaper also includes other operations. */
+  val paperFills: Int? = null,
   val refused: Int? = null,
   val gas: ProfileGas? = null,
   val funded: Boolean? = null,
@@ -160,6 +165,15 @@ private val AGENT_ID = Regex("^[a-zA-Z0-9_-]{1,100}$")
  */
 suspend fun MerrymenApi.agentProfile(slug: String): ApiResult<AgentProfile> =
   if (!AGENT_ID.matches(slug)) ApiResult.Refused(400, "That isn't an agent's id.") else getJson("/api/agents/$slug")
+
+suspend fun MerrymenApi.agentSummary(slug: String): ApiResult<AgentProfile> =
+  if (!AGENT_ID.matches(slug)) ApiResult.Refused(400, "That isn't an agent's id.") else getJson("/api/agents/$slug?view=summary")
+
+suspend fun MerrymenApi.agentActivity(slug: String): ApiResult<ThesesPage> =
+  if (!AGENT_ID.matches(slug)) ApiResult.Refused(400, "That isn't an agent's id.") else getJson("/api/agents/$slug?view=activity")
+
+suspend fun MerrymenApi.agentDetails(slug: String): ApiResult<AgentProfile> =
+  if (!AGENT_ID.matches(slug)) ApiResult.Refused(400, "That isn't an agent's id.") else getJson("/api/agents/$slug?view=details")
 
 /**
  * GET /api/agents/{slug}/own. The SERVER decides whether this session owns the

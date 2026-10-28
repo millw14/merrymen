@@ -33,7 +33,7 @@ interface FetchModelsBody {
  */
 async function readSavedSettings(req: Request): Promise<MerrymenSettings> {
   const tenant = isHostedMode() ? tenantOf(req) : null;
-  if (isHostedMode()) return tenant ? ((await getSettingsStore().get(tenant)) ?? {}) : {};
+  if (isHostedMode()) return tenant ? ((await getSettingsStore("spot").get(tenant)) ?? {}) : {};
   try {
     return JSON.parse(
       (await readFile(homePaths.settings(), "utf8")).replace(/^﻿/, ""),

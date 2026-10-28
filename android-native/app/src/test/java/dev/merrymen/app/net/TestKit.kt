@@ -128,10 +128,14 @@ class MemoryCookies(val jar: PersistentCookieJar) : CookieStores {
   /** Set to make the WebView's store refuse, as a missing or mid-update WebView does. */
   var webRefuses = false
 
-  override suspend fun harvest(origin: String) {
-    val url = origin.toHttpUrlOrNull() ?: return
+  override suspend fun harvest(origin: String) { harvestChecked(origin) }
+
+  override suspend fun harvestChecked(origin: String): Boolean {
+    if (webRefuses) return false
+    val url = origin.toHttpUrlOrNull() ?: return false
     val raw = web.entries.joinToString("; ") { "${it.key}=${it.value}" }
-    jar.saveFromResponse(url, WebAuth.webCookies(raw, url))
+    jar.saveFromResponse(url, harvestedWebCookies(raw, url))
+    return true
   }
 
   override suspend fun dropFromJar(name: String) {

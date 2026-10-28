@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { MAX_LOOKBACK_BLOCKS, PONS_LAUNCH_TOPIC, PONS_V2_FACTORY, parseLaunchLogs } from "./pons";
+import { MAX_LOOKBACK_BLOCKS, PONS_LAUNCH_TOPIC, PONS_V2_FACTORY, parseLaunchLogs, readLaunchCreator } from "./pons";
 
 /**
  * Reading the launchpad merrymen could not see.
@@ -111,5 +111,52 @@ describe("pons launch parsing", () => {
   it("pins the factory and topic verified on-chain", () => {
     assert.equal(PONS_V2_FACTORY, "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e");
     assert.match(PONS_LAUNCH_TOPIC, /^0x[0-9a-f]{64}$/);
+  });
+});
+
+describe("readLaunchCreator — the factory's record of who launched a token, never the token's own", () => {
+  // eth_getLogs as the node answers it: hex block numbers, the emitter in `address`.
+  const rpcLog = (over: Partial<{ address: string; topics: string[] }> = {}) => ({
+    address: PONS_V2_FACTORY.toLowerCase(),
+    topics: [TOPIC, pad(PIZZA.token), pad(PIZZA.curve), pad(PIZZA.creator)],
+    data: `${pad(PIZZA.quote)}${"0".repeat(64)}${word(PIZZA.threshold)}`,
+    blockNumber: "0x2e6e1d8",
+    transactionHash: "0xdeadbeef",
+    ...over,
+  });
+  const node = (answer: (params: Record<string, unknown>) => unknown) => {
+    const asked: Record<string, unknown>[] = [];
+    return {
+      asked,
+      client: {
+        getBlockNumber: async () => 50_000_000n,
+        request: async ({ params }: { params: Record<string, unknown>[] }) => (asked.push(params[0]!), answer(params[0]!)),
+      } as never,
+    };
+  };
+
+  it("names the creator topic of the factory's launch event, asked by the token's own topic", async () => {
+    const { client, asked } = node(() => [rpcLog()]);
+    assert.deepEqual(await readLaunchCreator(client, PIZZA.token.toUpperCase().replace("0X", "0x")), { state: "known", creator: PIZZA.creator });
+    assert.equal(asked[0]!.address, PONS_V2_FACTORY, "only the factory's logs are asked for");
+    assert.deepEqual(asked[0]!.topics, [TOPIC, pad(PIZZA.token)]);
+    assert.equal(BigInt(asked[0]!.toBlock as string) - BigInt(asked[0]!.fromBlock as string), MAX_LOOKBACK_BLOCKS);
+  });
+
+  it("a log from any other emitter is not a launch, whatever it says", async () => {
+    const forged = rpcLog({ address: PIZZA.token, topics: [TOPIC, pad(PIZZA.token), pad(PIZZA.curve), pad("0x00000000000000000000000000000000000000d3")] });
+    assert.deepEqual(await readLaunchCreator(node(() => [forged]).client, PIZZA.token), { state: "none" });
+  });
+
+  it("no launch in the window is 'none', and a record naming two creators is 'none' too", async () => {
+    assert.deepEqual(await readLaunchCreator(node(() => []).client, PIZZA.token), { state: "none" });
+    const twice = [rpcLog(), rpcLog({ topics: [TOPIC, pad(PIZZA.token), pad(PIZZA.curve), pad("0x00000000000000000000000000000000000000d3")] })];
+    assert.deepEqual(await readLaunchCreator(node(() => twice).client, PIZZA.token), { state: "none" });
+    assert.deepEqual(await readLaunchCreator(node(() => [rpcLog()]).client, "0x00000000000000000000000000000000000000c1"), { state: "none" }, "a launch of another token is not this one's");
+  });
+
+  it("a node that cannot be asked is 'unreadable', which a caller retries and must not cache as 'none'", async () => {
+    assert.deepEqual(await readLaunchCreator(node(() => { throw new Error("rpc down"); }).client, PIZZA.token), { state: "unreadable" });
+    assert.deepEqual(await readLaunchCreator(node(() => ({ error: "x" })).client, PIZZA.token), { state: "unreadable" });
   });
 });

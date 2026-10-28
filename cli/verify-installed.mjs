@@ -112,7 +112,68 @@ export async function verifyNativeModules(installedRoot) {
   assert.match(transformed.code, /answer = 42/);
 }
 
-export function auditPhysicalLock(snapshot) {
+/**
+ * ONE TIME-BOXED EXCEPTION, for one advisory in five packages, in force
+ * through `lastDay` (UTC) and never after.
+ *
+ * GHSA-mrhx-c7xc-m3w5 (zod < 4.6.6, high: memory exhaustion while validating
+ * oversized constrained collections) was widened on 2026-10-23 to every zod 3
+ * release, and no zod 3 release is patched. Five wallet and payment SDKs pin
+ * zod 3 in their latest releases, so no upgrade removes these copies: Coinbase
+ * CDP, Privy (api-base), Reown (appkit-wallet), wagmi (connectors) and x402.
+ * Merrymen's own zod is patched.
+ *
+ * Excused: the zod finding, when that advisory is all it reports and every
+ * flagged copy is a zod 3 whose direct parent is one of the five; then any
+ * package flagged only because it depends on something excused. Anything else
+ * fails as before: another advisory, a zod copy anywhere else, a zod 4 copy,
+ * or any day after `lastDay`.
+ */
+export const ZOD3_EXCEPTION = Object.freeze({
+  advisory: "GHSA-mrhx-c7xc-m3w5",
+  lastDay: "2026-11-08",
+  parents: Object.freeze(["@coinbase/cdp-sdk", "@privy-io/api-base", "@reown/appkit-wallet", "@wagmi/connectors", "x402"]),
+});
+
+/** The package directly above a node: `…/node_modules/@a/b/node_modules/zod` → `@a/b`. */
+function parentOf(node) {
+  const owner = node.slice(0, node.lastIndexOf("/node_modules/"));
+  return owner.slice(owner.lastIndexOf("node_modules/") + "node_modules/".length);
+}
+
+/**
+ * npm audit's report, judged: every finding must be excused by the exception
+ * above or the audit fails, naming what is left. Returns the excused zod nodes.
+ */
+export function evaluateAudit(audit, packages, now = new Date(), exception = ZOD3_EXCEPTION) {
+  if (audit.error) throw new Error(`npm audit failed: ${JSON.stringify(audit.error)}`);
+  const vulnerabilities = audit.vulnerabilities ?? {};
+  const inForce = now.toISOString().slice(0, 10) <= exception.lastDay;
+  const zod = vulnerabilities.zod;
+  const excused = new Set();
+  if (inForce && zod &&
+      zod.via.length > 0 && zod.via.every((via) => typeof via === "object" && via.url?.endsWith(`/${exception.advisory}`)) &&
+      zod.nodes.length > 0 && zod.nodes.every((node) => exception.parents.includes(parentOf(node)) && /^3\./.test(packages[node]?.version ?? ""))) {
+    excused.add("zod");
+  }
+  for (let grew = excused.size > 0; grew; ) {
+    grew = false;
+    for (const [name, finding] of Object.entries(vulnerabilities)) {
+      if (excused.has(name) || finding.via.length === 0 || !finding.via.every((via) => typeof via === "string" && excused.has(via))) continue;
+      excused.add(name);
+      grew = true;
+    }
+  }
+  const remaining = Object.entries(vulnerabilities).filter(([name]) => !excused.has(name));
+  if (remaining.length > 0) {
+    const named = remaining.map(([name, finding]) => `${name} (${finding.severity}: ${finding.via.map((via) => typeof via === "string" ? `via ${via}` : via.url ?? via.title).join(", ")})`).join("; ");
+    const ended = zod && !inForce ? ` The zod 3 exception for ${exception.advisory} ended after ${exception.lastDay}.` : "";
+    throw new Error(`Installed dependency audit failed: ${remaining.length} vulnerable packages: ${named}.${ended}`);
+  }
+  return excused.size > 0 ? [...zod.nodes] : [];
+}
+
+export function auditPhysicalLock(snapshot, now = new Date()) {
   const directory = mkdtempSync(path.join(tmpdir(), "merrymen-installed-audit-"));
   try {
     writeFileSync(path.join(directory, "package.json"), JSON.stringify(snapshot.manifest));
@@ -124,9 +185,13 @@ export function auditPhysicalLock(snapshot) {
     if (result.error) throw result.error;
     let audit;
     try { audit = JSON.parse(result.stdout); } catch { throw new Error(`npm audit returned invalid output: ${result.stderr}`); }
-    assert.equal(result.status, 0, `Installed dependency audit failed: ${JSON.stringify(audit.metadata?.vulnerabilities ?? audit.error ?? audit)}`);
-    assert.equal(audit.metadata?.vulnerabilities?.total, 0, "Physical dependency audit must report zero vulnerabilities");
-    return audit.metadata;
+    // npm exits 1 whenever it reports anything, excused or not; a failure
+    // with no report is still a failure.
+    if (result.status !== 0 && !audit.error && Object.keys(audit.vulnerabilities ?? {}).length === 0) {
+      throw new Error(`npm audit exited ${result.status} without a report: ${result.stderr}`);
+    }
+    const excused = evaluateAudit(audit, snapshot.lock.packages, now);
+    return { metadata: audit.metadata, excused };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -139,8 +204,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const snapshot = physicalLock(root);
     assertPatched(snapshot.lock.packages);
     await verifyNativeModules(root);
-    const metadata = auditPhysicalLock(snapshot);
-    console.log(`[merrymen] Verified ${Object.keys(snapshot.lock.packages).length - 1} installed packages; native sharp, esbuild and Next SWC work; audit: ${metadata.vulnerabilities.total} vulnerabilities.`);
+    const { metadata, excused } = auditPhysicalLock(snapshot);
+    const exception = excused.length === 0 ? "" :
+      `, all excused through ${ZOD3_EXCEPTION.lastDay} for ${ZOD3_EXCEPTION.advisory} (zod 3 at ${excused.join(", ")})`;
+    if (exception && process.env.GITHUB_ACTIONS) {
+      console.log(`::warning title=Audit exception::${ZOD3_EXCEPTION.advisory} is excused for ${excused.length} zod 3 copies until ${ZOD3_EXCEPTION.lastDay}; after that this check fails again.`);
+    }
+    console.log(`[merrymen] Verified ${Object.keys(snapshot.lock.packages).length - 1} installed packages; native sharp, esbuild and Next SWC work; audit: ${metadata.vulnerabilities.total} vulnerabilities${exception}.`);
   } catch (error) {
     console.error(`[merrymen] Installed package verification failed: ${error.message}`);
     process.exitCode = 1;

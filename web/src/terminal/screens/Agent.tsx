@@ -25,6 +25,7 @@ import {
   type ChatMessage,
 } from "../account";
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
+import { positionLabel, tokenForPosition } from "../position-token";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
 import { NameChip } from "../NameChip";
@@ -36,9 +37,12 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
-import { ENERGY_NOTICE_PREFIX, type EnergyStatus } from "@merrymen/core";
+import { ENERGY_NOTICE_PREFIX, isOwnerActionRule, type EnergyStatus } from "@merrymen/core";
 import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
 import { EnergyNote } from "../EnergyNote";
+import { RecoveryNotice } from "../RecoveryNotice";
+import { ownerTradeEmptyTitle, pausedRecovery, recoveryAutonomy } from "../recovery-view";
+import { notRunningNote } from "../worker-stale";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
@@ -64,6 +68,8 @@ export function Agent({
   energy,
   account,
   chainId,
+  followTradeLinks = false,
+  routePath,
 }: {
   mine: LiveMine;
   tokens: LiveToken[];
@@ -117,6 +123,10 @@ export function Agent({
   account?: string | null;
   /** The grant's chain: $MERRYMEN sent to the account only counts on Robinhood Chain. */
   chainId?: number | null;
+  /** Only the route's Agent follows #trades; the floating chat stays independent. */
+  followTradeLinks?: boolean;
+  /** The route may change between /chat and /agent without remounting this screen. */
+  routePath?: string;
 }) {
   const ask = chat.draft;
   const setAsk = chat.setDraft;
@@ -134,6 +144,10 @@ export function Agent({
   const running = chat.confirming;
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
+  const linkedPortfolio = useRef(false);
+  const portfolioMounted = useRef(false);
+  const portfolioOpener = useRef<HTMLElement | null>(null);
+  const portfolioSummary = useRef<HTMLButtonElement>(null);
   const viewport = useRef<HTMLElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const portfolio = useRef<HTMLDialogElement>(null);
@@ -189,11 +203,64 @@ export function Agent({
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  // The owner shortcut opens the existing portfolio, with all of its normal
+  // evidence and export gates. Hash history controls only a linked opening;
+  // browsing to an unrelated anchor must not close a manually opened panel.
+  useEffect(() => {
+    if (!followTradeLinks) return;
+    const syncPortfolio = () => {
+      const requested = ["/agent", "/chat"].includes(window.location.pathname) && window.location.hash === "#trades";
+      if (requested) {
+        linkedPortfolio.current = true;
+        setView("trades");
+        setExpanded(true);
+      } else if (linkedPortfolio.current) {
+        linkedPortfolio.current = false;
+        setExpanded(false);
+      }
+    };
+    syncPortfolio();
+    window.addEventListener("hashchange", syncPortfolio);
+    window.addEventListener("popstate", syncPortfolio);
+    return () => {
+      window.removeEventListener("hashchange", syncPortfolio);
+      window.removeEventListener("popstate", syncPortfolio);
+    };
+  }, [followTradeLinks, routePath]);
+  const closePortfolio = () => {
+    linkedPortfolio.current = false;
+    setExpanded(false);
+    if (followTradeLinks && ["/agent", "/chat"].includes(window.location.pathname) && window.location.hash === "#trades") {
+      // Keep query parameters and Next's history state, and do not add another
+      // Back stop. A later mount must not reopen a panel the owner dismissed.
+      window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+    }
+  };
   useEffect(() => {
     const dialog = portfolio.current;
-    if (expanded && !dialog?.open) dialog?.showModal();
-    if (!expanded && dialog?.open) dialog.close();
+    if (!dialog) return;
+    if (expanded && !dialog.open) {
+      const focused = document.activeElement;
+      portfolioOpener.current = focused instanceof HTMLElement && focused !== document.body && !dialog.contains(focused)
+        ? focused : portfolioSummary.current;
+      dialog.showModal();
+    }
+    if (!expanded) {
+      if (dialog.open) dialog.close();
+      const opener = portfolioOpener.current;
+      portfolioOpener.current = null;
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+    }
   }, [expanded]);
+  useEffect(() => {
+    portfolioMounted.current = true;
+    const dialog = portfolio.current;
+    return () => {
+      portfolioMounted.current = false;
+      if (dialog?.open) dialog.close();
+      if (portfolioOpener.current?.isConnected) portfolioOpener.current.focus({ preventScroll: true });
+    };
+  }, []);
   // App mounts this screen only after it has a confirmed agent and a readable
   // owner book. Loading and failed account reads remain on AccountEntry; neither
   // is evidence that the owner has no agent.
@@ -205,7 +272,9 @@ export function Agent({
    * tick. Right after a top-up the two disagree, and it is the worker — the
    * process that actually runs or idles the strategy — that is current.
    */
-  const energyNow = energyView(energy, Date.now() / 1000);
+  const recovery = pausedRecovery(mine.recovery);
+  const displayedAutonomy = recoveryAutonomy(mine.autonomy, recovery);
+  const energyNow = energyView(recovery ? null : energy, Date.now() / 1000);
   const remedies = energyRemedies(energy, chainId);
   /**
    * Has this owner chosen a strategy their tier will not run?
@@ -216,7 +285,7 @@ export function Agent({
    * change here.
    */
   const circleLocked =
-    isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies &&
+    !recovery && isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies &&
     !workerSaysFull(energy);
   /**
    * THE SAME SENTENCE ONCE. The worker writes one dated warn event the first
@@ -239,9 +308,22 @@ export function Agent({
     (t) => t.symbol.toUpperCase() === latest?.symbol?.toUpperCase(),
   );
   const change = dailyChange(mine);
+  /**
+   * IS IT TRADING RIGHT NOW, as this screen says it everywhere at once — the
+   * chat's context, the agent's own first line and the questions offered.
+   *
+   * `stopped` comes from `mode` alone, and `mode` is the last thing a worker
+   * said: a worker that went quiet while LIVE stays "not stopped" forever. So
+   * the pill said NOT RUNNING while the agent's line below it offered "my
+   * latest recorded trade", and the chat was told `stopped: false` beside
+   * `workerStatus: "NOT RUNNING"` — two answers to one question, and the model
+   * free to pick the wrong one. The prop keeps its meaning for every other
+   * reader; this screen asks the displayed verdict too.
+   */
+  const notTrading = stopped || recovery !== null || displayedAutonomy.state === "not-running";
   // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
   // chat-payload.ts by the controller, from this screen's own view of it.
-  const context: ChatContext = { mine, liveBlocker, perTrade, perDay, stopped };
+  const context: ChatContext = { mine, liveBlocker: recovery ? null : liveBlocker, perTrade, perDay, stopped: notTrading };
   /**
    * ASK, AND SHOW IT AT ONCE.
    *
@@ -515,8 +597,31 @@ export function Agent({
    * Deliberately wrapping the RENDER rather than folding it into `blocked`
    * above, which `live-blocker.test.ts` pins literally as the child's verdict
    * arriving unmodified.
+   *
+   * ONLY A VERDICT ABOUT THE KEY. `staleBlocker` is now the bare fact — signed
+   * since the worker last spoke — and a signature says nothing about ETH or
+   * USDG, so "your agent has no ETH" stays up through a re-sign exactly as the
+   * verdict's own CHECKING arm keeps it (`isOwnerActionRule`). This used to
+   * come for free from `state === "checking"`, and stopped doing so the day a
+   * silent worker could answer NOT RUNNING instead.
    */
-  const blockerIsStale = staleBlocker === true;
+  const blockerIsStale = staleBlocker === true && isOwnerActionRule(liveBlocker);
+  /**
+   * AN EXPIRED KEY, SAID ON THE SCREEN ITS OWNER OPENS.
+   *
+   * The desktop has rendered this banner from the verdict for a long time; the
+   * desk reads the worker's raw rule, and an expired agent has none — it is
+   * retired before the rail is assessed — so the desk said nothing about it, or
+   * worse, kept showing whatever blocker was on record before it expired.
+   *
+   * FROM THE VERDICT, NOT A RULE OF OUR OWN. There is no `expired` advice and
+   * no invented `liveBlocker`: that field carries the worker's word, and mixing
+   * ours into it is how two surfaces end up disagreeing. And from
+   * `displayedAutonomy`, so a recovery hold — which clears the rule — offers no
+   * renewal while trading is paused.
+   */
+  const renewal = displayedAutonomy.rule === "expired" && displayedAutonomy.action ? displayedAutonomy : null;
+  const silence = notRunningNote(displayedAutonomy);
   return (
     <div className="desk-page">
       {/* WHAT IS STOPPING THIS AGENT, ON THE SCREEN ITS OWNER OPENS.
@@ -528,7 +633,18 @@ export function Agent({
           to trade. Their owners are the ones reporting "it doesn't trade".
           Only they can fix it — a re-sign needs their signature — so the least
           this screen can do is say so and point at the control. */}
-      {blocked && !blockerIsStale && (
+      {renewal && renewal.action && (
+        <section className="desk-blocked" role="status">
+          <p>{renewal.headline}</p>
+          <button type="button" onClick={onResign}>
+            {renewal.action.label} →
+          </button>
+        </section>
+      )}
+      {/* IN PLACE OF the worker's last blocker, not beside it: an expired
+          agent was retired before the rail was assessed, so whatever blocker
+          is on record predates the expiry and is no longer the story. */}
+      {blocked && !blockerIsStale && !recovery && !renewal && (
         /* AN ALARM ONLY WHEN SOMETHING IS WRONG. This panel is red, and it was
            rendered for every blocker there is — including the one that means
            "your agent is practising, exactly as you asked". An owner who had
@@ -553,6 +669,28 @@ export function Agent({
               Start live trading →
             </button>
           )}
+        </section>
+      )}
+      {/* SINCE WHEN IT HAS BEEN QUIET, under the NOT RUNNING pill. The neutral
+          panel: nothing here is the owner's to fix, and a button would be the
+          CHECKING loop again. BELOW any blocker, because that panel still names
+          something only the owner can do. Null during a hold (worker-stale.ts). */}
+      {silence && (
+        <section className="desk-note" role="status">
+          <p>{silence}</p>
+        </section>
+      )}
+      {/* A KEY ABOUT TO EXPIRE, while it still works. The neutral panel, never
+          the red one: nothing is wrong yet, and a key with two days left trades
+          exactly like one with ninety. Gated on the hold here because the
+          verdict's chip survives `recoveryAutonomy` — no renewal is offered
+          while trading is paused. The words are the verdict's. */}
+      {!recovery && displayedAutonomy.expiresSoon && (
+        <section className="desk-note" role="status">
+          <p>Renewal happens on the wallet page, where revoking the old permission requires network fees.</p>
+          <button type="button" onClick={onResign}>
+            {displayedAutonomy.expiresSoon.label} →
+          </button>
         </section>
       )}
       {/* THE WARNINGS NOBODY HAS EVER SEEN, finally somewhere somebody looks.
@@ -582,26 +720,28 @@ export function Agent({
               finds out, and names it in one tap. Renders nothing otherwise. */}
           <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
-        <span className={`desk-status ${stopped ? "paused" : ""}`}>
+        {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
+        <span className={`desk-status ${notTrading ? "paused" : ""}`}>
           <i />
-          {mine.statusLabel ?? "Offline"}
+          {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
         </span>
       </header>
       <section className="desk-portfolio">
         <button
           type="button"
           className="portfolio-summary"
+          ref={portfolioSummary}
           aria-expanded={expanded}
           aria-controls="agent-portfolio"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => expanded ? closePortfolio() : setExpanded(true)}
         >
           <div>
-            <span className="account-label">Agent balance</span>
+            <span className={recovery ? "account-label recovery-balance-label" : "account-label"}>{recovery ? "Last recorded agent balance" : "Agent balance"}</span>
             <strong className="desk-equity">
               <BalanceFigure value={mine.equity} />
             </strong>
-            <span className={mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
-              {mine.chg24 == null
+            <span className={recovery || mine.chg24 == null ? "meta" : mine.chg24 < 0 ? "down" : "up"}>
+              {recovery ? "Reconciliation pending" : mine.chg24 == null
                 ? "Daily change unavailable"
                 : `${mine.chg24 >= 0 ? "+" : "−"}${money(Math.abs(mine.chg24))}${change == null ? "" : ` (${pctPts(change)})`} today`}
             </span>
@@ -614,11 +754,13 @@ export function Agent({
         {
           <div className="agent-portfolio-meta">
             <span>
-              {positions.length}{" "}
-              {positions.length === 1 ? "position" : "positions"}
+              {recovery && positions.length === 0 ? "Saved positions pending" : <>
+                {positions.length}{" "}{recovery ? "saved " : ""}
+                {positions.length === 1 ? "position" : "positions"}
+              </>}
             </span>
             {mine.glance.cashUsd != null && (
-              <span>{money(mine.glance.cashUsd)} cash</span>
+              <span>{recovery ? "Last recorded cash: " : ""}{money(mine.glance.cashUsd)}{recovery ? "" : " cash"}</span>
             )}
           </div>
         }
@@ -627,12 +769,12 @@ export function Agent({
           className="portfolio-dialog"
           id="agent-portfolio"
           aria-labelledby="portfolio-title"
-          onClose={() => setExpanded(false)}
-          onCancel={() => setExpanded(false)}
+          onClose={(event) => { if (portfolioMounted.current && !event.currentTarget.open) closePortfolio(); }}
+          onCancel={(event) => { event.preventDefault(); closePortfolio(); }}
         >
           <header className="portfolio-dialog-header">
             <div>
-              <h2 id="portfolio-title">Portfolio</h2>
+              <h2 id="portfolio-title">{recovery ? "Last recorded portfolio" : "Portfolio"}</h2>
               <p>
                 {mine.name} · {money(mine.equity)}
               </p>
@@ -640,7 +782,7 @@ export function Agent({
             <button
               type="button"
               aria-label="Close portfolio"
-              onClick={() => setExpanded(false)}
+              onClick={closePortfolio}
             >
               <X size={20} />
             </button>
@@ -664,7 +806,7 @@ export function Agent({
                 aria-pressed={view === "positions"}
                 onClick={() => setView("positions")}
               >
-                Positions · {positions.length}
+                {recovery ? "Saved positions" : "Positions"} · {recovery && positions.length === 0 ? "—" : positions.length}
               </button>
               <button
                 type="button"
@@ -681,12 +823,11 @@ export function Agent({
             {view === "positions" ? (
               <>
                 {positions.length === 0 && (
-                  <Empty compact kind="positions" title="No positions reported yet."/>
+                  <Empty compact kind="positions" title={recovery ? "Saved positions pending reconciliation." : "No positions reported yet."}/>
                 )}
                 {positions.map((p) => {
-                  const token = tokens.find(
-                    (t) => t.symbol.toUpperCase() === p.symbol.toUpperCase(),
-                  );
+                  const token = tokenForPosition(p, tokens);
+                  const label = positionLabel(p);
                   // The value AND the %, never one standing in for the other:
                   // the small line prints the coin's name when it is listed, so
                   // this is the only place on the row the money figure can be.
@@ -695,13 +836,13 @@ export function Agent({
                     <button
                       type="button"
                       className="desk-position"
-                      key={p.symbol}
+                      key={p.token ?? p.symbol}
                       disabled={!token}
                       onClick={() => token && onToken(token.id)}
                     >
-                      <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
+                      <Coin symbol={label.replace(/^\$/, "")} logo={token?.logo ?? ""} />
                       <span>
-                        <strong>{p.symbol}</strong>
+                        <strong title={p.token ?? undefined}>{label}</strong>
                         {/* The coin's name when it is listed. Not the detail: that is
                             printed on the right now, and would read twice. */}
                         {token?.name ? <small>{token.name}</small> : null}
@@ -714,7 +855,7 @@ export function Agent({
                   );
                 })}
                 <div className={mine.autonomy.simulated ? "desk-cash is-simulated" : "desk-cash"}>
-                  <span>{mine.autonomy.moneyLabel}</span>
+                  <span>{displayedAutonomy.moneyLabel}</span>
                   <strong>{money(mine.glance.cashUsd ?? null)}</strong>
                 </div>
                 {mine.glance.vaultUsd != null && (
@@ -737,7 +878,7 @@ export function Agent({
                   showMoney
                   allowPnlCards
                   tapeFull={mine.moves.length >= DESK_TAPE_ROWS}
-                  emptyTitle="No trades yet."
+                  emptyTitle={ownerTradeEmptyTitle(recovery)}
                   onToken={onToken}
                 />
               </div>
@@ -770,7 +911,14 @@ export function Agent({
           setAway(isAway);
         }}
       >
-        <TrencherAnnouncement hasAgent={!!mine} />
+        {/* THE RECOVERY CARD SCROLLS WITH THE THREAD, like the announcements
+            below. Pinned as the page's first child, its four parts were the
+            tallest thing on a phone's Chat tab and the conversation got two
+            lines — "chatting on mobile is a headache". What must not be
+            scrolled past stays pinned: the RECOVERING pill in the header, and
+            "Last recorded agent balance · Reconciliation pending" on the figure. */}
+        <RecoveryNotice recovery={recovery}/>
+        {!recovery && <TrencherAnnouncement hasAgent={!!mine} />}
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only
             flexible row on a fixed-height screen: measured at 375px, the
@@ -842,12 +990,12 @@ export function Agent({
             onResign={onResign}
           />
         )}
-        {!blocked && !circleLocked && notice && (
+        {!recovery && !blocked && !circleLocked && notice && (
           <section className="desk-notice" role="status">
             <p>{notice.message}</p>
           </section>
         )}
-        <Proposals onResign={onResign} />
+        {!recovery && <Proposals onResign={onResign} />}
         <div className="chat-divider">
           <span>Conversation</span>
         </div>
@@ -856,7 +1004,7 @@ export function Agent({
           <div>
             <strong>{mine.name}</strong>
             <p>
-              {stopped
+              {notTrading
                 ? "I’m not trading right now. You can review my portfolio and trading limits here."
                 : latest
                   ? "Here’s my latest recorded trade."
@@ -959,7 +1107,7 @@ export function Agent({
             The sentence below is OURS, from the registry — if the model wrote
             it, it could describe one action and request another, and this
             would be confirming the description rather than the act. */}
-        {pending && commandFor(pending.id) && (
+        {!recovery && pending && commandFor(pending.id) && (
           <section
             className={`desk-confirm${commandFor(pending.id)!.weighty ? " is-weighty" : ""}`}
             role="group"
@@ -993,8 +1141,8 @@ export function Agent({
         {!chat.sending && !pending && (
           <div className="desk-prompts">
             {chatChips({
-              liveBlocker,
-              stopped,
+              liveBlocker: recovery ? null : liveBlocker,
+              stopped: notTrading,
               latestSymbol: latest?.symbol ?? null,
               holding: positions.map((p) => p.symbol),
               lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,

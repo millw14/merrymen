@@ -1,12 +1,54 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { marketReview, MarketReviewClock, PRIVATE_REVIEW_SOURCE, REVIEW_SOURCE, reviewSource, type ReviewQuote } from "./market-review";
+import { marketReview, MarketReviewClock, PRIVATE_REVIEW_SOURCE, REVIEW_SOURCE, reviewSource, quietReviewScope, quietReviewRow, type ReviewQuote } from "./market-review";
+import { chooseFocus, type HeldPosition } from "./brain-focus";
 import { publishableThesis } from "./thesis-policy";
 import { memoryLines, sentimentLine } from "./brain-material";
 const quote = (over: Partial<ReviewQuote> = {}): ReviewQuote => ({ symbol: "TSLA", priceUsd: 102, at: 1800000000, stale: false, ...over });
 const history = [{ at: quote().at - 3600, priceUsd: 100 }, { at: quote().at - 1800, priceUsd: 103 }, { at: quote().at - 60, priceUsd: 101 }];
 const row = (source: string, review: { action: "hold"; symbol: string; reason: string }) =>
   ({ source, ...review, first_at: quote().at, last_at: quote().at, name: "shogun" });
+
+describe("quiet reviews follow the active strategy", () => {
+  const stocks = ["QQQ", "NVDA", "TSLA"].map((symbol, i) => ({ symbol, address: `0x${String(i + 1).repeat(40)}`, kind: "stock" }));
+  const coin = { symbol: "COIN", address: `0x${"a".repeat(40)}`, kind: "memecoin" };
+  const unrelated = { symbol: "OTHER", address: `0x${"b".repeat(40)}`, kind: "memecoin" };
+  const universe = [...stocks, coin, unrelated];
+  const holding = (t: typeof coin, valueUsdg: number): HeldPosition => ({ symbol: t.symbol, token: t.address,
+    valueUsdg, price8: 100_000_000n, priceStale: false, priceSource: t.kind === "stock" ? "chainlink" : "pool" });
+  const positions = [holding(stocks[0]!, 100_000_000), holding(coin, 2_000_000), holding(unrelated, 5_000_000)];
+  const focus = (scope: { positions: HeldPosition[]; universe: typeof universe }) => chooseFocus({
+    agentId: "test", ...scope, paused: new Set(),
+    prices: new Map(universe.map(t => [t.symbol, { price8: 100_000_000n, stale: false, source: t.kind === "stock" ? "chainlink" : "pool" }])),
+  });
+  it("reviews only the Trencher position even when a stock and unrelated coin are larger", () => {
+    const scope = quietReviewScope({ strategy: "trencher", positions, universe, trencherHeld: [coin.address.toUpperCase()], trencherCandidates: [] });
+    assert.equal(focus(scope)?.symbol, "COIN");
+    assert.equal(focus(scope)?.held, true);
+    assert.equal(positions.length, 3, "accounting holdings remain intact");
+    assert.equal(universe.length, 5, "accounting watch set remains intact");
+  });
+  it("uses an eligible memecoin candidate and never substitutes the saved stock basket", () => {
+    const scope = quietReviewScope({ strategy: "trencher", positions, universe, trencherHeld: [], trencherCandidates: [coin.address, stocks[0]!.address] });
+    assert.equal(focus(scope)?.symbol, "COIN");
+    assert.equal(focus(scope)?.held, false);
+  });
+  it("records honest private waiting when no Trencher holding or candidate is available", () => {
+    const scope = quietReviewScope({ strategy: "trencher", positions, universe, trencherHeld: [], trencherCandidates: [] });
+    assert.equal(focus(scope), null);
+    const decision = quietReviewRow({ id: "wait", agentId: "test", review: null, quote: null, historyRead: false, waitingForTrencher: true });
+    assert.match(decision.reason, /Trencher.*waiting/);
+    assert.doesNotMatch(decision.reason, /QQQ|NVDA|TSLA/);
+    assert.equal(decision.symbol, undefined);
+    assert.equal(decision.mark_usd, null);
+    assert.equal(publishableThesis(decision), null);
+  });
+  it("keeps the full basket review unchanged for other strategies", () => {
+    const scope = quietReviewScope({ strategy: "steady-basket", positions, universe, trencherHeld: [], trencherCandidates: [] });
+    assert.deepEqual(scope, { positions, universe });
+    assert.equal(focus(scope)?.symbol, "QQQ");
+  });
+});
 
 describe("research-backed quiet decisions", () => {
   it("says one third-person line built from the observation, with the evidence beside it", () => {

@@ -25,8 +25,66 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
+import React from "react";
+import { autonomyOf } from "@merrymen/core";
+import type { TierView } from "@/app/api/tier/route";
+import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
+import type { ChatController } from "./chat-controller";
+import type { LiveMine } from "./live";
+import { Agent } from "./screens/Agent";
+import { isStrategyId, type StrategyId } from "./strategy";
+import { UNREADABLE_TIER } from "./tier";
+import { json, testDom } from "./test-dom";
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+const noop = () => {};
+const WARNING = "Example worker warning, unrelated to energy";
+const LOW_TIER: TierView = { ...UNREADABLE_TIER, why: "ok", holderTokens: 60_000, agentTokens: 39_999,
+  tokens: 99_999, bonusStrategies: false, agentAccount: `0x${"1".repeat(40)}` };
+const HELD: FleetRecoveryView = { state: "history-only", tradingPaused: true, history: "available",
+  memory: "unknown", checkedAt: 1_791_111_100, lastVerifiedHeartbeatAt: null };
+const MINE: LiveMine = { name: "Example Robin", slug: "example", handle: null, owner: "you", mode: "live",
+  equity: 100, chg24: null, moves: [], thesis: null, statusLabel: "LIVE",
+  glance: { id: "custom", label: "", cashUsd: 90 }, autonomy: autonomyOf({ mode: "live", liveBlocker: null }),
+  notice: { level: "warn", message: WARNING, at: "2026-10-04T00:00:00Z" } };
+
+/** Mount the real screen and resolve its own authenticated tier read without any network. */
+async function withAgent(options: { strategy?: StrategyId; tier?: TierView; liveBlocker?: string; recovery?: FleetRecoveryView },
+  inspect: (container: HTMLElement) => void) {
+  const ui = testDom(), originalFetch = globalThis.fetch;
+  const saved = new Map(["ResizeObserver", "self"].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true,
+    value: class { observe() {} unobserve() {} disconnect() {} } });
+  Object.defineProperty(globalThis, "self", { configurable: true, writable: true, value: ui.dom.window });
+  const calls: { url: string; method: string }[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, method: init?.method ?? "GET" });
+    if (url === "/api/tier") return json(options.tier ?? LOW_TIER);
+    if (url === "/api/proposals") return json({ proposals: [], covered: [], why: null });
+    return json({ error: "not scripted" }, 404);
+  }) as typeof fetch;
+  ui.dom.window.localStorage.setItem("merrymen:trencher-fast:v2:dismissed", "yes");
+  const chat = { draft: "", setDraft: noop, proposal: null, setProposal: noop, confirming: false,
+    messages: [], sending: false, streaming: "", ceiling: 10 } as unknown as ChatController;
+  try {
+    await ui.render(React.createElement(Agent, { mine: { ...MINE, recovery: options.recovery,
+      glance: { ...MINE.glance, id: options.strategy ?? "custom" } }, tokens: [], perTrade: 10, perDay: 50,
+      stopped: false, chat, liveBlocker: options.liveBlocker ?? null, chainId: 4663, onToken: noop,
+      onDeposit: noop, onWithdraw: noop, onLimits: noop, onResign: noop, onSettings: noop }));
+    assert.ok(calls.every(call => call.method === "GET"), "rendering banners cannot mutate settings, permissions or orders");
+    assert.equal(calls.filter(call => call.url === "/api/tier").length, 1, "standing comes from the screen's tier read");
+    inspect(ui.container);
+  } finally {
+    try { await ui.close(); }
+    finally {
+      globalThis.fetch = originalFetch;
+      for (const [name, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else Reflect.deleteProperty(globalThis, name);
+      }
+    }
+  }
+}
 
 /** The names the WORKER refuses to run for a non-holder. */
 function gatedInWorker(): string[] {
@@ -148,26 +206,77 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     assert.ok(!/settings\??\.holderAddress/.test(fn.slice(0, fn.indexOf("\n}\n"))), "the self-declared field must not be read");
   });
 
-  it("and a worker warning now reaches a screen that ships", () => {
+  it("and a worker warning now reaches a screen that ships", async () => {
     // Every gate that reports itself with addEvent() and nothing else was
     // invisible: /api/feed selected the events table, live.ts had no field for
     // it, and the only renderer sits in a route that returns null.
     const live = readFileSync(new URL("./live.ts", import.meta.url), "utf8");
     assert.match(live, /notice\?: \{ level: string; message: string; at: string \} \| null;/);
     assert.match(live, /e\.level === "warn" \|\| e\.level === "err"/);
-    const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
-    // `notice` is mine.notice, minus the one dated "Energy spent for …" line
-    // while the energy panel is already saying it (energy-banner.test.ts).
-    assert.match(agent, /\{!blocked && !circleLocked && notice && \(/);
-    assert.match(agent, /const notice =\s*mine\.notice &&/);
+    await withAgent({}, page => {
+      const notice = page.querySelector(".desk-notice");
+      assert.equal(notice?.textContent, WARNING);
+      assert.ok(page.querySelector(".desk-conversation")!.contains(notice), "the warning scrolls with the conversation");
+      assert.equal(page.querySelector(".desk-blocked, .desk-circle-locked, .agent-recovery"), null);
+    });
   });
 
-  it("and the blocker still outranks it, because one is resolved and one is a log line", () => {
-    const agent = readFileSync(new URL("./screens/Agent.tsx", import.meta.url), "utf8");
-    assert.ok(
-      agent.indexOf("{blocked && (") < agent.indexOf("{!blocked && !circleLocked && notice && ("),
-      "the resolved blocker must render above the notice",
-    );
+  it("and the blocker still outranks it, because one is resolved and one is a log line", async () => {
+    await withAgent({ liveBlocker: "dead-policy", strategy: "even-keel" }, page => {
+      const blocked = page.querySelector(".desk-blocked"), circle = page.querySelector(".desk-circle-locked");
+      assert.ok(blocked, "a resolved permission fault remains visible");
+      assert.match(blocked.textContent!, /Renew it on the wallet page/);
+      assert.ok(circle, "the independent strategy standing remains visible below the blocker");
+      assert.ok(blocked.compareDocumentPosition(circle) & 4, "the resolved blocker renders before the Circle banner");
+      assert.ok(!page.querySelector(".desk-conversation")!.contains(blocked), "the resolved blocker stays pinned");
+      assert.equal(page.querySelector(".desk-notice"), null, "a generic log warning cannot compete with either condition");
+    });
+    await withAgent({ liveBlocker: "dead-policy" }, page => {
+      assert.ok(page.querySelector(".desk-blocked"));
+      assert.equal(page.querySelector(".desk-circle-locked, .desk-notice"), null);
+    });
+  });
+
+  it("a Circle lock suppresses the generic notice and reports the combined standing", async () => {
+    for (const strategy of gatedInWorker()) {
+      assert.ok(isStrategyId(strategy), `${strategy}: the terminal must recognize every worker-gated strategy`);
+      await withAgent({ strategy }, page => {
+        const circle = page.querySelector(".desk-circle-locked");
+        assert.ok(circle, `${strategy}: the holder-only strategy has a persistent banner`);
+        assert.match(circle.textContent!, /wallet and my account hold 100,000 \$MERRYMEN between them — right now 99,999/);
+        assert.equal(page.querySelector(".desk-blocked, .desk-notice"), null);
+      });
+    }
+    const tier = { ...LOW_TIER, agentTokens: 40_000, tokens: 100_000, bonusStrategies: true };
+    await withAgent({ strategy: "even-keel", tier }, page => {
+      assert.equal(page.querySelector(".desk-circle-locked"), null, "the current agent's tokens qualify the combined standing");
+      assert.equal(page.querySelector(".desk-notice")?.textContent, WARNING);
+    });
+  });
+
+  it("unread and signed-out standing never becomes a claimed zero balance", async () => {
+    await withAgent({ strategy: "even-keel", tier: UNREADABLE_TIER }, page => {
+      const circle = page.querySelector(".desk-circle-locked");
+      assert.ok(circle);
+      assert.match(circle.textContent!, /We couldn't read your \$MERRYMEN balance/);
+      assert.doesNotMatch(circle.textContent!, /right now 0|you hold 0/);
+      assert.equal(page.querySelector(".desk-notice"), null);
+    });
+    await withAgent({ strategy: "even-keel", tier: { ...UNREADABLE_TIER, why: "sign-in" } }, page => {
+      assert.equal(page.querySelector(".desk-circle-locked"), null, "signed-out standing is not proof of a strategy lock");
+      assert.equal(page.querySelector(".desk-notice")?.textContent, WARNING);
+    });
+  });
+
+  it("recovery outranks stale Circle, permission and worker notices without offering a rearm remedy", async () => {
+    for (const liveBlocker of [undefined, "dead-policy", "live-not-enabled"]) await withAgent({
+      strategy: "even-keel", tier: LOW_TIER, liveBlocker, recovery: HELD,
+    }, page => {
+      assert.match(page.querySelector(".agent-recovery")!.textContent!, /Trading paused for recovery/);
+      assert.equal(page.querySelector(".desk-circle-locked, .desk-blocked, .desk-note, .desk-notice"), null);
+      assert.ok(!page.textContent!.includes(WARNING));
+      assert.doesNotMatch(page.textContent!, /Fix it — re-sign my permission|Start live trading|Merry Circle strategy — it opens nothing/);
+    });
   });
 
   it("AND THE CIRCLE BLOCK IS ITS OWN BANNER, not a line in the log slot", () => {

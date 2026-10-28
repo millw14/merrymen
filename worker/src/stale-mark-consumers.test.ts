@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { publishesAView } from "./brain-shadow";
-import { autonomyHolds } from "./orchestrator";
+import { autonomyHolds } from "./autonomy-funnel";
 
 describe("the autonomy line counts every hold", () => {
   it("a stale-mark hold has its own bucket", () => {
@@ -51,6 +51,18 @@ describe("the autonomy line counts every hold", () => {
     // The query ran and found none: that is a count, and "0 stale-mark" is
     // the true sentence. (A query that FAILED prints no line at all.)
     assert.match(autonomyHolds([{ kind: "MODEL_HOLD", n: 1 }]), /\b0 stale-mark\b/);
+  });
+
+  it("quiet reviews have their own bucket, so unreported is again only what nobody classified", () => {
+    // ~360 an hour of them used to fill "unreported", where a real unclassified
+    // hold could not be seen beside them.
+    const line = autonomyHolds([
+      { kind: "QUIET_REVIEW", n: 360 },
+      { kind: "unreported", n: 2 },
+    ]);
+    assert.match(line, /\b360 quiet-review\b/);
+    assert.match(line, /\b2 unreported\b/);
+    assert.doesNotMatch(line, /QUIET_REVIEW/, "named, not printed under its raw kind");
   });
 });
 

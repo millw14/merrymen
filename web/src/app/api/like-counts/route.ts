@@ -71,8 +71,8 @@ export interface LikeCountsResponse {
 
 export async function GET() {
   try {
-    // Session-free, and the same read the public feed serves.
-    const { theses } = await readTheses();
+    // Same publication gate and post IDs; counts do not need return enrichment.
+    const { theses } = await readTheses({ figures: false });
     const ids = theses.map((t) => t.postId).filter((id): id is string => !!id);
     const counts = await getLikeStore().counts(ids);
     return NextResponse.json({ counts, read: true } satisfies LikeCountsResponse, {

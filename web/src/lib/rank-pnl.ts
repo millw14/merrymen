@@ -52,7 +52,31 @@ export type UnrankedWhy =
    * An agent that has not armed since quality shipped has made no claim, and
    * picking an answer on its behalf is the mistake that runs in both directions.
    */
-  | "quality-unknown";
+  | "quality-unknown"
+  /**
+   * EVERYTHING ELSE HOLDS, AND THE GAS IS NOT ALL ON RECORD YET.
+   *
+   * Capital is evidenced, a trade filled and a valuation was measured — this
+   * function would have published a number — but at least one execution has no
+   * recorded owner gas cost, so the net return is not known exactly. Never set
+   * here: rankPnl is given a gas total, not its completeness. book-performance.ts
+   * sets it only where this function returned a number.
+   *
+   * It used to borrow "quality-unknown", which says the opposite thing about a
+   * different input: those books had contributions_known = 1, and their public
+   * profiles said the deposits were evidenced while the board said nobody had
+   * assessed them.
+   */
+  | "gas-pending"
+  /**
+   * AN OPERATOR IS CHECKING THIS RETURN BEFORE IT IS PUBLISHED.
+   *
+   * Named in the web's MERRYMEN_RETURN_REVIEW (return-review.ts), and set by
+   * book-performance.ts whatever this function would have said: the review
+   * exists because a figure that passes every gate here can still be wrong —
+   * a token withdrawal nobody has booked reads as a trading loss.
+   */
+  | "review-pending";
 
 export interface RankInputs {
   /** Capital in, less capital out. Null when nothing is on record. */
@@ -110,6 +134,10 @@ export function unrankedLabel(why: UnrankedWhy): string {
       return "deposit history unavailable";
     case "quality-unknown":
       return "return unavailable";
+    case "gas-pending":
+      return "gas cost not yet fully recorded";
+    case "review-pending":
+      return "return under review";
     default: {
       const exhaustive: never = why;
       return exhaustive;
@@ -130,6 +158,10 @@ export function unrankedShort(why: UnrankedWhy): string {
       return "unverified deposits";
     case "quality-unknown":
       return "unranked";
+    case "gas-pending":
+      return "gas pending";
+    case "review-pending":
+      return "under review";
     default: {
       const exhaustive: never = why;
       return exhaustive;

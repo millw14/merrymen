@@ -58,7 +58,7 @@ before(async () => {
   });
   const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
   grants.resetGrantStoreForTest();
-  mock.method(grants.getGrantStore(), "tenantForAccount", async () => {
+  mock.method(grants.getGrantStore("spot"), "tenantForAccount", async () => {
     ownershipReads += 1;
     throw new Error("Connection terminated unexpectedly");
   });
@@ -136,4 +136,18 @@ it("the Rialto target and the v4 UniversalRouter are refused the same way", asyn
     assert.equal(res.body.code, "invalid_wall");
   }
   assert.equal(noncesSpent, 0);
+});
+
+it("a really signed claim for a chain Merrymen does not run on is refused before its nonce is spent", async () => {
+  // The wall does not read the chain, the binding signs whatever id it is
+  // given, and the derivation maps any id but the testnet to mainnet: before
+  // the chain check, chain 1 got as far as the ownership read.
+  const { grant, owner } = await signerGrant({ account: SMART });
+  for (const chainId of [1, 46631, "4663", undefined]) {
+    const res = await post({ ...grant, chainId } as unknown as StoredGrant, owner);
+    assert.equal(res.status, 400, `${String(chainId)}: ${JSON.stringify(res.body)}`);
+    assert.equal(res.body.code, "unsupported_chain");
+  }
+  assert.equal(noncesSpent, 0);
+  assert.equal(ownershipReads, 0);
 });

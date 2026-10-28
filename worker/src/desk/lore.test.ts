@@ -212,7 +212,7 @@ describe("optional lore within the existing desk budget", () => {
     assert.deepEqual(target, [TOKEN]);
     assert.equal(result.failed, false);
     assert.equal(result.profile?.source, "token-published metadata");
-    assert.equal(result.profile?.url, `https://explorer.robinhood.com/address/${TOKEN}`);
+    assert.equal(result.profile?.url, `https://robinhoodchain.blockscout.com/token/${TOKEN}`);
     assert.equal(result.profile?.chainId, 4663);
     assert.equal(signal?.aborted, true, "pending index/quota work is cancelled after the preferred source answers");
   });
@@ -323,4 +323,32 @@ describe("optional lore within the existing desk budget", () => {
     const throwing = createLoreReader({ indexed: async () => { throw new Error("provider error"); } });
     assert.equal((await throwing(TOKEN)).failed, true);
   });
+});
+
+it("reads contract-bound public metadata after a Pro outage without leaking credentials", async () => {
+  const oldFetch = globalThis.fetch, oldKey = process.env.MERRYMEN_COINGECKO_PRO_API_KEY, oldHome = process.env.MERRYMEN_FLEET_HOME;
+  process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-metadata-key";
+  delete process.env.MERRYMEN_FLEET_HOME;
+  resetDeskReadsForTest();
+  let calls = 0;
+  globalThis.fetch = async (input, init) => {
+    calls++;
+    const pro = String(input).startsWith("https://pro-api.coingecko.com/");
+    assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), pro ? "private-metadata-key" : null);
+    assert.equal(init?.redirect, "error");
+    return pro ? new Response("unavailable", { status: 503 }) : Response.json(body());
+  };
+  try {
+    const result = await readTokenInfo(TOKEN);
+    assert.equal(result.info?.token, TOKEN);
+    assert.equal(result.info?.description, "A meme about hooks on Robinhood Chain.");
+    assert.equal(result.provider, "geckoterminal-public");
+    assert.equal(result.primaryFailure, "http-503");
+    assert.equal(calls, 2);
+    assert.doesNotMatch(JSON.stringify(result), /private-metadata-key/);
+  } finally {
+    globalThis.fetch = oldFetch; resetDeskReadsForTest();
+    if (oldKey === undefined) delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY; else process.env.MERRYMEN_COINGECKO_PRO_API_KEY = oldKey;
+    if (oldHome === undefined) delete process.env.MERRYMEN_FLEET_HOME; else process.env.MERRYMEN_FLEET_HOME = oldHome;
+  }
 });

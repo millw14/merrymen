@@ -196,7 +196,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
   try {
     const orch = await makePgDb(scoped("orchestrator"));
     const web = await makePgDb(scoped("web"));
-    const settings = new PgSettingsStore(scoped("settings"), connect);
+    const settings = new PgSettingsStore(scoped("settings"), "spot", connect);
     /** What a save's claim step reads back after its write: the sealed settings in this Postgres. */
     const pgSettings = (before: MerrymenSettings | null) => ({ before, read: (tn: `0x${string}`) => settings.get(tn) });
     /** For a claim step whose settle and undo these subtests never run. */
@@ -829,7 +829,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       // own pool, with Telegram's getMe answered by a stub.
       process.env.MERRYMEN_HOSTED = "1";
       resetGrantStoreForTest();
-      useSettingsStoreForTest(settings);
+      useSettingsStoreForTest(settings, "spot");
       const { reconcile, childHome, setSpawnForTest, setBotClaimsDbForTest, setBotConfirmForTest } = await import("./orchestrator");
       const { getGrantStore } = await import("./grant-store");
       const orchClaims = await makePgDb(scoped("orchestrator-claims"));
@@ -913,7 +913,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       // A stranger's `<id>:guess` for O's bot, whose own Telegram is off at first.
       await settings.put(RS, withBot("444:fake-guessed-secret"));
       await settings.put(RO, { telegramEnabled: false, telegramBotToken: "444:the-real-secret" } as MerrymenSettings);
-      for (const [i, tn] of [RA, RB, RC, RD, RS, RO].entries()) await getGrantStore().put(tn, grant(i));
+      for (const [i, tn] of [RA, RB, RC, RD, RS, RO].entries()) await getGrantStore("spot").put(tn, grant(i));
 
       await reconcile();
       let claims = await readBotClaims(web);

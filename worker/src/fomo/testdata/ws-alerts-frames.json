@@ -1,0 +1,58 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "frames": [
+    {
+      "type": "welcome",
+      "stream": "alerts",
+      "realtime": true,
+      "delaySeconds": 0,
+      "heartbeatSeconds": 20,
+      "filter": {
+        "userId": "6dcf7c78-2537-522a-8307-3f9970c081be"
+      }
+    },
+    {
+      "type": "heartbeat",
+      "ts": 1788378000000,
+      "lastEventAt": 1788377995000,
+      "quietSeconds": 5,
+      "buffered": 0
+    },
+    {
+      "type": "alert",
+      "alertType": "buy",
+      "source": "feed",
+      "eventId": "149318d0-70af-4acb-a607-b126dd4db4a3",
+      "userId": "6dcf7c78-2537-522a-8307-3f9970c081be",
+      "tradeId": "a323b5ca-c769-4b07-a422-833c4cafbe1f",
+      "swapId": null,
+      "transferId": null,
+      "trader": "frankdegods",
+      "token": "PONS",
+      "tokenAddress": "0x39DBED3A00000000000000000000000000000C0D",
+      "chainId": 4663,
+      "chain": "robinhood",
+      "usdValue": 40000,
+      "positionValueUsd": 40000,
+      "text": "frankdegods bought $PONS ($4K size)",
+      "ts": 1788378000000,
+      "replay": true
+    },
+    {
+      "type": "alert",
+      "alertType": "sell",
+      "source": "feed",
+      "eventId": "e0000000-0000-4000-8000-000000000004",
+      "userId": "254245a7-575a-51be-9bc3-090a924789eb",
+      "tradeId": "094dd0b3-22ff-41ba-b676-f093c8293f01",
+      "trader": "0xdetweiler",
+      "token": "plumber",
+      "tokenAddress": "0x51fb760000000000000000000000000000000b0b",
+      "chainId": 4663,
+      "chain": "robinhood",
+      "usdValue": -2465.61,
+      "realizedPnlUsd": -2465.61,
+      "ts": 1788377980000
+    }
+  ]
+}

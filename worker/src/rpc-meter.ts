@@ -20,7 +20,7 @@
  * It is also the seam. When the limiter arrives it goes here, and no call site
  * changes.
  */
-import { http, type Transport } from "viem";
+import { createPublicClient, http, type Chain, type Transport } from "viem";
 import { DECLINED_MARKER, QUOTA_MARKER, classifyRpcError, saysQuotaExhausted, type RpcErrorKind } from "./rpc-error";
 import { merrymenHome } from "./home";
 import { clearCooldown, publishCooldown, readCooldown } from "./rpc-cooldown";
@@ -161,9 +161,12 @@ const BATCH_WAIT_MS = 20;
  * unit is the wrong shape for an operation that must not be silently retried
  * alongside somebody else's read.
  */
-export function chainRead(url: string | undefined, label = "read"): Transport {
+export function chainRead(url: string | undefined, label = "read", limits: { timeoutMs?: number } = {}): Transport {
   const transport = metered(
     http(url, {
+      // viem's own 10s unless a caller says otherwise: an operator scan asks
+      // for a whole account history in one eth_getLogs.
+      ...(limits.timeoutMs === undefined ? {} : { timeout: limits.timeoutMs }),
       /**
        * ── THE GOVERNOR SITS HERE, BELOW THE BATCHING, NOT ABOVE IT ────────
        *
@@ -319,6 +322,26 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
     }
     return transport(opts);
   }) as Transport;
+}
+
+/**
+ * THE SAME READ PATH, AS ONE BARE JSON-RPC CALL — for a tool that speaks raw
+ * methods (chain-capital.ts RpcCall) rather than a viem client.
+ *
+ * The orchestrator's accounting tools posted straight to MERRYMEN_RPC_MAINNET
+ * with fetch, so the house endpoint's spent quota (2026-10-15 on) left the
+ * reconstruction short of every window it read: a repair that fails closed
+ * for want of a read the chain's public RPC would have served. This goes
+ * through `chainRead` — governed, metered, failed over to `chain`'s own
+ * default endpoint — and returns each result as the endpoint gave it.
+ */
+export function chainReadRpc(
+  url: string | undefined,
+  chain: Chain,
+  limits: { label?: string; timeoutMs?: number } = {},
+): (method: string, params: unknown[]) => Promise<unknown> {
+  const client = createPublicClient({ chain, transport: chainRead(url, limits.label ?? "read", { timeoutMs: limits.timeoutMs }) });
+  return (method, params) => client.request({ method, params } as never) as Promise<unknown>;
 }
 
 /**

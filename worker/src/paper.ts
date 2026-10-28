@@ -150,6 +150,16 @@ export function applyPaperIntent(
     return { ok: true, book: next, positions: pos, receipt: `paper: ${n} USDG sent out` };
   }
 
+  // ── perps ─────────────────────────────────────────────────────────────
+  // NAMED, never left to the catch-all below: the perp lane owns execution and
+  // has its own paper engine (docs/perps.md rule 14 — the venue's book,
+  // decimals, margin, funding and liquidation). This spot book holds no perp
+  // position and posts no perp margin, so a perp intent that reached it was
+  // routed wrong and is refused, not simulated as something it is not.
+  if (intent.kind === "perp-order" || intent.kind === "perp-margin") {
+    return { ok: false, reason: "handled by the perp lane", book, positions };
+  }
+
   // ── swap ──────────────────────────────────────────────────────────────
   if (intent.kind !== "swap") return { ok: false, reason: `unsupported paper intent ${intent.kind}`, book, positions };
   // The selftest no-op (USDG→USDG) fills as a zero-move success.

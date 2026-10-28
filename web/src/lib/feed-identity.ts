@@ -80,7 +80,7 @@ export interface IdentitySources {
  *
  * THE BUG THIS EXISTS TO FIX, because it made a working feature look broken.
  * Hosted, a tenant's settings are written to the per-tenant sealed store
- * (`getSettingsStore().put(tenant, …)` in api/settings), and NOTHING ever writes
+ * (`getSettingsStore("spot").put(tenant, …)` in api/settings), and NOTHING ever writes
  * the web container's own `~/.merrymen/settings.json`. This function used to
  * read that file unconditionally, so on the hosted deploy the read always threw
  * and every tenant got the fallback below: name null → the console fell back to

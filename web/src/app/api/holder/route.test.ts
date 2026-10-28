@@ -81,8 +81,8 @@ before(async () => {
 });
 beforeEach(() => {
   const client = sqliteClient();
-  store = new stores.PgSettingsStore("postgres://stand-in", async () => client);
-  stores.useSettingsStoreForTest(store);
+  store = new stores.PgSettingsStore("postgres://stand-in", "spot", async () => client);
+  stores.useSettingsStoreForTest(store, "spot");
 });
 after(() => {
   mock.restoreAll();

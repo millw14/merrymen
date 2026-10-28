@@ -117,9 +117,9 @@ export const SCOPES: readonly ScopeInfo[] = [
   },
   {
     id: "drafts:write", level: "sensitive", needsAgent: false, defaultOn: false,
-    title: "Suggest setting changes for you to approve",
-    phrase: "setting-change suggestions",
-    detail: "Prepare agent drafts and setting changes. Nothing changes until you approve it in Merrymen.",
+    title: "Prepare agent setups and suggest setting changes",
+    phrase: "agent setups and setting changes",
+    detail: "Prepare a new Merryman or suggest settings for your review in Merrymen. You approve each proposal; creating an agent also requires you to review its limits and sign with your own wallet.",
     capabilities: ["drafts.write"],
   },
   {
@@ -195,9 +195,13 @@ export function advertisedScopesFor(profile: McpProfile): readonly string[] {
   return profile === "directory" ? ADVERTISED_SCOPES.filter((s) => DIRECTORY_SET.has(s)) : ADVERTISED_SCOPES;
 }
 
-/** What a client gets asked for when it requests no scope at all: read access plus chat. */
+/**
+ * Offered when a client omits scope: read access, chat and an OPTIONAL setup
+ * permission. This is a request, never a grant: drafts:write stays default-off
+ * and requires the owner to explicitly tick it on the consent screen.
+ */
 export const DEFAULT_REQUEST_SCOPES: readonly string[] = [
-  "market:read", "agents:read", "portfolio:read", "decisions:read", "reports:read", "chat:write", "offline_access",
+  "market:read", "agents:read", "portfolio:read", "decisions:read", "reports:read", "chat:write", "drafts:write", "offline_access",
 ];
 
 /** The scope that grants a capability. Exactly one scope per capability, checked by a test. */

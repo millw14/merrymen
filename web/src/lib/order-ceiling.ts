@@ -28,6 +28,6 @@ export function ceilingFor(req: Request, hosted: boolean): Promise<number> {
     hosted,
     tenant: tenantOf(req),
     fallback: resolveConfig().telegramMaxActionUsdg,
-    stored: (tenant) => getSettingsStore().get(tenant as `0x${string}`),
+    stored: (tenant) => getSettingsStore("spot").get(tenant as `0x${string}`),
   });
 }

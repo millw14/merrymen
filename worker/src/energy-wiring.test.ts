@@ -31,6 +31,15 @@ function body(name: string): string {
 }
 
 describe("the forks that start NEW autonomous work ask", () => {
+  it("an exemption resolves against the armed grant's account before the shared plan and report", () => {
+    const refresh = body("refreshEnergy");
+    const selected = refresh.indexOf("const mode = energyModeForAccount(cfg.energyGate, grant.smartAccount, cfg.energyExemptAccounts);");
+    assert.ok(selected >= 0);
+    assert.ok(refresh.indexOf("energyNow = energyPlan({") > selected);
+    assert.ok(refresh.indexOf("energyReport = energyStatus({") > selected);
+    assert.doesNotMatch(refresh, /energyModeForAccount\([^;]*(?:agentName|xHandle|holderAddress)/);
+  });
+
   it("THE BRAIN WAKE GUARD is closed while today's reviews are paced or spent", () => {
     assert.match(
       CODE,

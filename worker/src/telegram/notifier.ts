@@ -25,6 +25,7 @@ import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
 import { cpuPercent, procRunning } from "../pc/platform";
 import { esc, sendMessage as sendTelegramMessage } from "./api";
+import type { InlineKeyboard } from "./api";
 import { makeChatTally, telegramLog, type ChatTally } from "./poll-rules";
 import { pnlCardFromFill } from "../pnl-card";
 import { sendPnlPhoto } from "./pnl-photo";
@@ -121,6 +122,14 @@ export interface NotifierDeps {
    */
   tally?: ChatTally;
   now?: () => number;
+  /**
+   * The owner's Fomo tail notices due now (fomo/tail-notifier.ts), asked
+   * only AFTER this pass's own gates (Telegram on, a bot token,
+   * notifications on, a linked owner). Each is code-written HTML; `claim()`
+   * records it durably and is awaited BEFORE the send, which happens only on
+   * true (at most once). Absent: no tails here.
+   */
+  tailNotices?: () => Promise<Array<{ html: string; keyboard?: InlineKeyboard; claim(): Promise<boolean> }>>;
 }
 
 const LOOP_GAP_MS = 15_000;
@@ -1154,6 +1163,28 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
         }
         // Persist the observed states (edge detection needs them next pass).
         deps.stateRef.set({ ...deps.stateRef.get(), watchers: updated });
+      }
+    }
+
+    // ── Fomo tail notices (fomo/tail-notifier.ts) ──────────────────────────
+    //
+    // Past every gate above: Telegram on, a token, notifications on, a linked
+    // owner. The recipient is re-checked before each claim, and each notice is
+    // claimed durably BEFORE it is sent: a crash in between loses a notice,
+    // never repeats one. Previews off; the text is code-written HTML.
+    if (deps.tailNotices) {
+      try {
+        const due = await deps.tailNotices();
+        for (const n of due) {
+          const cur = deps.getCfg();
+          const recipient = !stopped && deps.stateRef.get().ownerId === chatId && cur.telegramEnabled && cur.telegramNotifyEnabled && cur.telegramBotToken === token;
+          if (!recipient) break;
+          if (!(await n.claim())) break;
+          const sent = await sendMessage({ token }, chatId, n.html, { disablePreview: true, ...(n.keyboard && n.keyboard.length > 0 ? { keyboard: n.keyboard } : {}) });
+          if (sent.ok) console.log("[notify] fomo tail notice sent");
+        }
+      } catch (e) {
+        console.log(`[notify] fomo tail notices skipped (${e instanceof Error ? e.name : "error"})`);
       }
     }
 

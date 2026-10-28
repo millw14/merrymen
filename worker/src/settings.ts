@@ -9,20 +9,32 @@
 import { readFileSync } from "node:fs";
 import {
   HOUSE_KEY_FIELDS,
+  PERPS_DRIVERS,
+  PERPS_LIVE_CONSENT_VERSION,
+  PERPS_MARKETS_MAX,
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
   TELEGRAM_GROUPS_CHATTINESS,
+  isGrantPurpose,
   isHostedMode,
+  isPerpKey,
   isValidCustomToken,
+  perpsNumberOk,
   type CustomToken,
+  type GrantPurpose,
   type MerrymenSettings,
+  type PerpKey,
+  type PerpsDriver,
+  type PerpsNumKey,
   type TelegramGroupsChattiness,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { writeFileAtomicSync } from "./atomic-write";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
-import { energyModeOf, type EnergyMode } from "./energy";
+import { normalizeAgentBrief } from "./agent-brief";
+import type { DiscoveryFocus } from "./discovery-focus";
+import { energyExemptAccountsOf, energyModeOf, type EnergyMode } from "./energy";
 
 /**
  * A tenant settings file with every house-key field removed (hosted mode). The
@@ -55,6 +67,9 @@ export interface ResolvedConfig {
   rialtoApiKeyHeader: string;
   breakerAddress: `0x${string}` | undefined;
   agentName: string | undefined;
+  /** Saved per-agent preferences never grant execution authority. */
+  agentBrief: string | undefined;
+  discoveryFocus: DiscoveryFocus;
   xHandle: string | undefined;
   /**
    * Proof that xHandle is theirs, written only by /api/x-proof.
@@ -90,6 +105,8 @@ export interface ResolvedConfig {
    * both unenforceable and against the token's stance.
    */
   energyGate: EnergyMode;
+  /** Operator env only: exact verified smart accounts whose energy is observed, not enforced. */
+  energyExemptAccounts: readonly string[];
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -113,6 +130,17 @@ export interface ResolvedConfig {
   /** Poll Bitquery for new pairs and report them. Never trades. */
   discoveryEnabled: boolean;
   discoveryIntervalMin: number;
+  /** Answer Fomo questions when asked. Read-only; enforced on every surface (docs/fomo.md). */
+  fomoDataAccess: boolean;
+  /** Let the shared trader cohort and watched coins route research to this agent. Never trades. */
+  fomoMonitoringEnabled: boolean;
+  /** Let Fomo research nominate coins into the existing memecoin review. Not a copy-trade. */
+  fomoFollowEnabled: boolean;
+  /**
+   * Fomo data key (secret). Self-hosted only: a house field hosted, and removed
+   * from every hosted child's environment (CHILD_SECRET_STRIP).
+   */
+  fomoApiKey: string | undefined;
   /** Scout mode: may the agent buy tokens it cannot price? Off by default. */
   trencherLiveEnabled: boolean;
   trencherFastEnabled: boolean;
@@ -197,6 +225,190 @@ export interface ResolvedConfig {
   telegramAgentAutoShell: boolean;
   /** Model↔tool step budget per /agent task. */
   telegramAgentMaxSteps: number;
+
+  // ── perpetuals (docs/perps.md "Settings", rule 1) ────────────────────────
+  //
+  // Every owner field below is read from the tenant's OWN settings file or not
+  // at all — no env term. The last three are the operator's, from env only,
+  // and can only ever take capability away. NONE of this decides whether EXITS
+  // run: venue state does (rule 8a), whatever these say.
+  //
+  // UNITS AS STORED: USDG and percentages on a 0.01 grid, leverage, counts and
+  // bps whole (core PERPS_NUM_BOUNDS). So `BigInt(Math.round(usdg * 100)) *
+  // 10_000n` is exact micro-USDG and `Math.round(pct * 100)` exact bps — convert
+  // that way and no cap has to pick a rounding direction.
+  /** The owner's paper switch. */
+  perpsEnabled: boolean;
+  /**
+   * The owner's REAL-MONEY consent, EFFECTIVE: true only when the stored switch
+   * is on AND its consent is complete and current (version ===
+   * PERPS_LIVE_CONSENT_VERSION, region attested, stamped). A switch left on
+   * under an older consent text reads false here — see perpsLiveConsentStale.
+   *
+   * NOT the operator's word: it does not include the operator ceiling, which
+   * depends on the smart account (perpsCeilingFor). Live perps need both.
+   */
+  perpsLiveEnabled: boolean;
+  /**
+   * The owner switched real perps on, but the consent on file is incomplete or
+   * for an older text. The status says "re-confirm in Settings", never "off":
+   * the owner did choose it, and must be told why it is not in force.
+   */
+  perpsLiveConsentStale: boolean;
+  perpsLiveConsentVersion: number | null;
+  /** Unix ms the consent was stamped by the settings PUT; null = none on file. */
+  perpsLiveConsentAt: number | null;
+  perpsRegionAttested: boolean;
+  perpsDriver: PerpsDriver;
+  /** Markets the agent may OPEN in. May be EMPTY (see the resolver) — never widened to a default. */
+  perpsMarkets: PerpKey[];
+  perpsMaxLeverage: number;
+  perpsPerTradeUsdg: number;
+  perpsMaxOpenNotionalUsdg: number;
+  perpsMaxCollateralUsdg: number;
+  perpsMaxOpensPerDay: number;
+  perpsStopLossPct: number;
+  perpsStopSlipBps: number;
+  perpsTakeProfitPct: number;
+  perpsLiqBufferPct: number;
+  perpsMaxSlippageBps: number;
+  /**
+   * MERRYMEN_PERPS — the most this deployment allows before the tenant
+   * allowlist is applied. Use perpsCeilingFor(cfg, smartAccount), never this
+   * alone, to decide whether an account may open live.
+   */
+  perpsOperatorCeiling: PerpsCeiling;
+  /**
+   * MERRYMEN_PERPS_LIVE_TENANTS, lowercased smart accounts. HOSTED ONLY: an
+   * array (empty = nobody live) hosted, null self-hosted, where the one owner
+   * on the box needs nobody's list.
+   */
+  perpsLiveTenants: readonly `0x${string}`[] | null;
+  /** MERRYMEN_HALT_PERP_ENTRIES — no opens anywhere; exits and protection keep running. */
+  perpsEntriesHalted: boolean;
+  /**
+   * WHICH OF THE LOGIN'S TWO WALLETS THIS WORKER SERVES (workerWalletOf).
+   * Spot unless whatever started the worker said Perps. A Perps worker trades
+   * perps and nothing else; a Spot worker never trades perps.
+   */
+  workerWallet: GrantPurpose;
+}
+
+/**
+ * MERRYMEN_WALLET_PURPOSE: which wallet's worker this process is (docs/perps.md
+ * "One login, two wallets"). It is set by whatever starts a Perps wallet's
+ * worker — the orchestrator's per-wallet slot (slice 4), `merrymen start` for
+ * the Perps home (slice 5) — never by a tenant: it is the operator's
+ * environment, like MERRYMEN_PERPS, and a settings file cannot name it.
+ * Unset is Spot, which every worker on main is. Anything else refuses to
+ * resolve: a worker must never guess which wallet's authority it holds.
+ *
+ * index.ts checks it against the signed grant's own `purpose` at every arm, so
+ * the variable alone can neither give a Spot grant perps nor a Perps grant spot.
+ */
+export function workerWalletOf(env: Record<string, string | undefined>): GrantPurpose {
+  const v = (env.MERRYMEN_WALLET_PURPOSE ?? "").trim();
+  if (v === "") return "spot";
+  if (!isGrantPurpose(v)) throw new Error(`MERRYMEN_WALLET_PURPOSE must be spot or perps, not ${JSON.stringify(v).slice(0, 40)}`);
+  return v;
+}
+
+/**
+ * How far the operator lets perps go, weakest first. An operator lever, so it
+ * restricts and never grants: "live" here still needs the owner's own consent
+ * and a perps grant; it only stops the deployment being what says no.
+ */
+export const PERPS_CEILINGS = ["off", "paper", "live"] as const;
+export type PerpsCeiling = (typeof PERPS_CEILINGS)[number];
+
+/**
+ * MERRYMEN_PERPS, read restrict-only (docs/perps.md rule 1).
+ *
+ * UNSET IS OFF, hosted and self-hosted, as MERRYMEN_SOLANA is: perps land on
+ * main in slices, and the next deploy of anything else ships every slice
+ * already merged, so nothing may depend on an operator remembering to set
+ * `off`. An operator turns paper on by writing `paper`. (The perps branch
+ * defaulted hosted to paper and self-hosted to live, with an untested write
+ * path; the plan's Phase 1 fix 5 replaced that.)
+ *
+ * `live` IS OFF IN THIS BUILD. Real-money perps are not built yet (Phase 4 of
+ * the plan, after the mainnet checklist): there is no live executor, no
+ * reconciler and no on-chain leg to reach. An operator who writes `live` gets
+ * nothing rather than paper, so a deployment is never trading practice perps
+ * its operator believes are real; perpsCeilingNote says so at startup.
+ *
+ * Anything else it does not recognise is OFF: a typo in a variable that exists
+ * to take capability away must not hand it back.
+ */
+export function perpsCeilingOf(raw: string | undefined): PerpsCeiling {
+  const v = (raw ?? "").trim().toLowerCase();
+  return v === "paper" ? "paper" : "off";
+}
+
+/**
+ * The startup line for an operator whose MERRYMEN_PERPS asked for more than
+ * this build gives (perpsCeilingOf), or null when it asked for nothing more.
+ */
+export function perpsCeilingNote(raw: string | undefined): string | null {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "" || v === "off" || v === "paper") return null;
+  if (v === "live") return "MERRYMEN_PERPS=live: real-money perps are not in this build, so perps are OFF (set paper for practice perps).";
+  return `MERRYMEN_PERPS=${JSON.stringify(raw).slice(0, 40)} is not off, paper or live, so perps are OFF.`;
+}
+
+/**
+ * MERRYMEN_PERPS_LIVE_TENANTS, hosted only. An entry that is not an address
+ * can never match an account, so dropping it removes nothing but itself.
+ */
+function perpsLiveTenantsOf(raw: string | undefined, hosted: boolean): readonly `0x${string}`[] | null {
+  if (!hosted) return null;
+  const out = new Set<`0x${string}`>();
+  for (const part of (raw ?? "").split(",")) {
+    const a = part.trim().toLowerCase();
+    if (/^0x[0-9a-f]{40}$/.test(a)) out.add(a as `0x${string}`);
+  }
+  return [...out].sort();
+}
+
+/**
+ * MERRYMEN_HALT_PERP_ENTRIES, read so that only an explicit "no" is no. Its
+ * documented form is `=1`; an operator who writes `=yes` or `=halt` in an
+ * incident means halt, and a restrict-only switch that failed open on spelling
+ * would fail at the one moment it is reached for.
+ */
+function perpsEntriesHaltedOf(raw: string | undefined): boolean {
+  const v = (raw ?? "").trim().toLowerCase();
+  return !(v === "" || v === "0" || v === "false" || v === "no" || v === "off");
+}
+
+/**
+ * The most an account may do with perps, as far as the OPERATOR is concerned:
+ * MERRYMEN_PERPS, then, hosted, the live allowlist. `smartAccount` is the
+ * account the grant trades from (grant.smartAccount — never the SIWE tenant,
+ * which is a different address). Unknown account hosted = not on the list.
+ *
+ * Opens only. It never stands between a live venue account and its exits.
+ */
+export function perpsCeilingFor(
+  cfg: Pick<ResolvedConfig, "perpsOperatorCeiling" | "perpsLiveTenants">,
+  smartAccount: string | null | undefined,
+): PerpsCeiling {
+  if (cfg.perpsOperatorCeiling !== "live") return cfg.perpsOperatorCeiling;
+  if (cfg.perpsLiveTenants === null) return "live";
+  const a = (smartAccount ?? "").trim().toLowerCase();
+  return a !== "" && (cfg.perpsLiveTenants as readonly string[]).includes(a) ? "live" : "paper";
+}
+
+/**
+ * A perps number from the FILE ONLY: the value when it is in bounds and on the
+ * grid, else the default — the house's reading of a bad value (`num()` does
+ * the same). Never the nearest bound: a leverage of 50 does not mean "as much
+ * as allowed". The PUT refuses anything this would discard, so only a
+ * hand-edited or older file ever reaches it.
+ */
+function perpsNum(file: MerrymenSettings, key: PerpsNumKey): number {
+  const v = file[key];
+  return perpsNumberOk(key, v) ? v : SETTINGS_DEFAULTS[key];
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
@@ -270,6 +482,7 @@ export function mergeSettings(
 ): ResolvedConfig {
   const d = SETTINGS_DEFAULTS;
   const hosted = isHostedMode();
+  const workerWallet = workerWalletOf(env);
 
   // HOSTED: the house owns the connection/credential/endpoint fields. Drop them
   // from the tenant file so every `str(file.X, env.X)` below falls through to the
@@ -342,6 +555,71 @@ export function mergeSettings(
     : [];
   const basketSymbols = fileSymbols.length > 0 ? fileSymbols : d.basketSymbols;
 
+  // ── perpetuals ──────────────────────────────────────────────────────────
+  // NO ENVIRONMENT TERM FOR ANY OWNER FIELD — `undefined` in every env slot,
+  // the liveTradingEnabled reasoning above applied to a whole block. A
+  // `MERRYMEN_PERPS_LIVE=1` on the orchestrator would be the house consenting
+  // to leverage for every owner in the fleet at once; a `MERRYMEN_PERPS_MAX_
+  // LEVERAGE` would be the house raising every owner's risk. settings.test.ts
+  // sets such variables and asserts nothing moves.
+  //
+  // THE CONSENT IS A RECORD, NOT A SWITCH. The switch counts only with the
+  // version the owner agreed to being the current one, the regional
+  // attestation, and the stamp the PUT writes. Any part missing is no consent:
+  // a partial record is how a client that sent only `perpsLiveEnabled: true`
+  // — an old build, a scripted PUT — would otherwise have turned leverage on.
+  const liveAsked = file.perpsLiveEnabled === true;
+  const consentVersion =
+    typeof file.perpsLiveConsentVersion === "number" && Number.isSafeInteger(file.perpsLiveConsentVersion) && file.perpsLiveConsentVersion >= 1
+      ? file.perpsLiveConsentVersion
+      : null;
+  const consentAt =
+    typeof file.perpsLiveConsentAt === "number" && Number.isSafeInteger(file.perpsLiveConsentAt) && file.perpsLiveConsentAt > 0
+      ? file.perpsLiveConsentAt
+      : null;
+  const regionAttested = file.perpsRegionAttested === true;
+  const perpsLiveEnabled = liveAsked && consentVersion === PERPS_LIVE_CONSENT_VERSION && regionAttested && consentAt !== null;
+
+  // MARKETS FAIL CLOSED, NOT TO THE DEFAULT. The PUT refuses unknown keys, so
+  // a bad entry here means a hand-edited or damaged file — and falling back to
+  // BTC and ETH would open markets the owner never picked, which is the
+  // opposite of what an owner who named ["SOL-PERP", "typo"] asked for. So:
+  // unknown and duplicate keys are dropped, what the owner did name is kept in
+  // their order up to the cap, and a list that names nothing valid resolves to
+  // NO markets (no opens; exits never consult this). Only an ABSENT field takes
+  // the default.
+  let perpsMarkets: PerpKey[];
+  if (Array.isArray(file.perpsMarkets)) {
+    const seen = new Set<string>();
+    perpsMarkets = [];
+    for (const k of file.perpsMarkets) {
+      if (!isPerpKey(k) || seen.has(k)) continue;
+      seen.add(k);
+      perpsMarkets.push(k);
+    }
+    perpsMarkets = perpsMarkets.slice(0, PERPS_MARKETS_MAX);
+  } else {
+    perpsMarkets = (d.perpsMarkets as string[]).filter(isPerpKey);
+  }
+
+  // A DRIVER THIS BUILD DOES NOT KNOW IS `manual`, NOT THE DEFAULT. Absent is
+  // the contract's default (perp-trend). Present but unrecognised — a newer
+  // build's value, a damaged file — must not become an autonomous producer the
+  // owner never chose; `manual` produces nothing on its own.
+  const perpsDriver: PerpsDriver =
+    file.perpsDriver === undefined
+      ? d.perpsDriver
+      : (PERPS_DRIVERS as readonly string[]).includes(file.perpsDriver as string)
+        ? (file.perpsDriver as PerpsDriver)
+        : "manual";
+
+  // THE PER-TRADE CAP NEVER EXCEEDS THE OPEN-NOTIONAL CAP. The PUT refuses the
+  // inversion; a file that holds one anyway is read in the restrictive
+  // direction — one open can never be larger than all opens together, so the
+  // smaller number is the only one that could ever bind.
+  const perpsMaxOpenNotionalUsdg = perpsNum(file, "perpsMaxOpenNotionalUsdg");
+  const perpsPerTradeUsdg = Math.min(perpsNum(file, "perpsPerTradeUsdg"), perpsMaxOpenNotionalUsdg);
+
   return {
     bundlerApiKey: str(file.bundlerApiKey, env.MERRYMEN_BUNDLER_API_KEY),
     bundlerUrl: str(file.bundlerUrl, env.MERRYMEN_BUNDLER_URL),
@@ -358,6 +636,8 @@ export function mergeSettings(
     rialtoApiKeyHeader: str(file.rialtoApiKeyHeader, env.MERRYMEN_RIALTO_API_KEY_HEADER, d.rialtoApiKeyHeader)!,
     breakerAddress,
     agentName,
+    agentBrief: normalizeAgentBrief(file.agentBrief),
+    discoveryFocus: oneOf(file.discoveryFocus, undefined, ["balanced", "new-projects"] as const, "balanced"),
     xHandle,
     xProof,
     v4AdapterAddress,
@@ -405,6 +685,7 @@ export function mergeSettings(
     // off self-hosted whatever they say. Reaches hosted children through
     // childEnv; it is not a secret, so CHILD_SECRET_STRIP leaves it alone.
     energyGate: hosted ? energyModeOf(env.MERRYMEN_ENERGY_GATE) : "off",
+    energyExemptAccounts: hosted ? energyExemptAccountsOf(env.MERRYMEN_ENERGY_EXEMPT_ACCOUNTS) : [],
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest
@@ -432,6 +713,13 @@ export function mergeSettings(
     maxPriceDivergenceBps: num(file.maxPriceDivergenceBps, env.MERRYMEN_MAX_PRICE_DIVERGENCE_BPS, d.maxPriceDivergenceBps, 10, 10_000),
     discoveryEnabled: bool(file.discoveryEnabled, env.MERRYMEN_DISCOVERY_ENABLED, d.discoveryEnabled),
     discoveryIntervalMin: num(file.discoveryIntervalMin, env.MERRYMEN_DISCOVERY_INTERVAL_MIN, d.discoveryIntervalMin, 1, 1440),
+    fomoDataAccess: bool(file.fomoDataAccess, env.MERRYMEN_FOMO_DATA_ACCESS, d.fomoDataAccess ?? true),
+    fomoMonitoringEnabled: bool(file.fomoMonitoringEnabled, env.MERRYMEN_FOMO_MONITORING, d.fomoMonitoringEnabled ?? false),
+    fomoFollowEnabled: bool(file.fomoFollowEnabled, env.MERRYMEN_FOMO_FOLLOW, d.fomoFollowEnabled ?? false),
+    // MERRYMEN_FOMO_API_KEY is the house convention; FOMO_API_KEY is the name
+    // the provider's own docs use, accepted so an operator following them is
+    // not silently unconfigured. Both are stripped from hosted children.
+    fomoApiKey: str(file.fomoApiKey, env.MERRYMEN_FOMO_API_KEY ?? env.FOMO_API_KEY),
     trencherLiveEnabled: bool(file.trencherLiveEnabled, env.MERRYMEN_TRENCHER_LIVE, d.trencherLiveEnabled),
     trencherFastEnabled: bool(file.trencherFastEnabled, env.MERRYMEN_TRENCHER_FAST, d.trencherFastEnabled),
     sponsorGasEnabled: bool(file.sponsorGasEnabled, env.MERRYMEN_SPONSOR_GAS, d.sponsorGasEnabled),
@@ -506,6 +794,56 @@ export function mergeSettings(
     telegramAgentEnabled: hosted ? false : bool(file.telegramAgentEnabled, env.MERRYMEN_TELEGRAM_AGENT, d.telegramAgentEnabled),
     telegramAgentAutoShell: hosted ? false : bool(file.telegramAgentAutoShell, env.MERRYMEN_TELEGRAM_AGENT_AUTOSHELL, d.telegramAgentAutoShell),
     telegramAgentMaxSteps: num(file.telegramAgentMaxSteps, env.MERRYMEN_TELEGRAM_AGENT_MAX_STEPS, d.telegramAgentMaxSteps, 1, 60),
+    perpsEnabled: bool(file.perpsEnabled, undefined, d.perpsEnabled),
+    perpsLiveEnabled,
+    perpsLiveConsentStale: liveAsked && !perpsLiveEnabled,
+    perpsLiveConsentVersion: consentVersion,
+    perpsLiveConsentAt: consentAt,
+    perpsRegionAttested: regionAttested,
+    perpsDriver,
+    perpsMarkets,
+    perpsMaxLeverage: perpsNum(file, "perpsMaxLeverage"),
+    perpsPerTradeUsdg,
+    perpsMaxOpenNotionalUsdg,
+    perpsMaxCollateralUsdg: perpsNum(file, "perpsMaxCollateralUsdg"),
+    perpsMaxOpensPerDay: perpsNum(file, "perpsMaxOpensPerDay"),
+    perpsStopLossPct: perpsNum(file, "perpsStopLossPct"),
+    perpsStopSlipBps: perpsNum(file, "perpsStopSlipBps"),
+    perpsTakeProfitPct: perpsNum(file, "perpsTakeProfitPct"),
+    perpsLiqBufferPct: perpsNum(file, "perpsLiqBufferPct"),
+    perpsMaxSlippageBps: perpsNum(file, "perpsMaxSlippageBps"),
+    // THE OPERATOR'S THREE, from env ONLY and restrict-only — the energyGate
+    // shape: `file` is never consulted, so a tenant can neither lift a ceiling
+    // they are under nor halt someone else's entries. They reach hosted
+    // children through childEnv like MERRYMEN_ENERGY_GATE (not secrets, so
+    // CHILD_SECRET_STRIP leaves them alone).
+    perpsOperatorCeiling: perpsCeilingOf(env.MERRYMEN_PERPS),
+    perpsLiveTenants: perpsLiveTenantsOf(env.MERRYMEN_PERPS_LIVE_TENANTS, hosted),
+    perpsEntriesHalted: perpsEntriesHaltedOf(env.MERRYMEN_HALT_PERP_ENTRIES),
+    workerWallet,
+    // A PERPS WALLET'S WORKER RUNS NO SPOT PRODUCER, whatever its settings file
+    // says. The Perps wallet holds the Lighter account and nothing else
+    // (docs/perps.md "One login, two wallets"); its paper cash is the perp
+    // book's collateral, and a basket buy, a launch snipe or a scout entry
+    // would spend it on tokens. `perps-only` is the builtin that proposes
+    // nothing (strategies/registry.ts); the perp lane runs beside it.
+    ...(workerWallet === "perps"
+      ? {
+          strategy: "perps-only",
+          discoveryEnabled: false,
+          officialCoinsEnabled: false,
+          classSnipeEnabled: false,
+          scoutEnabled: false,
+          trencherLiveEnabled: false,
+          trencherFastEnabled: false,
+          fomoFollowEnabled: false,
+          // NO BOT AND NO GROUPS, whatever the file says: a Perps wallet's
+          // worker runs none in this build (the orchestrator hands it no
+          // token either). The bot seat a Perps-only login needs is slice 6a's.
+          telegramEnabled: false,
+          telegramGroupsEnabled: false,
+        }
+      : {}),
   };
 }
 
@@ -665,10 +1003,13 @@ export function settingsProblem(): SettingsProblem | null {
  * last good read in force the agent carries on with it (settingsHoldNotice):
  * stopping a running agent over a typo would turn an edit into an outage.
  */
+/** How the arm refusal below begins, for readers that find it among the agent's events (web attention.ts). */
+export const SETTINGS_ARM_REFUSAL_PREFIX = "this agent is NOT TRADING: ";
+
 export function settingsArmRefusal(p: SettingsProblem | null, hosted = isHostedMode()): string | null {
   if (!p || p.holding) return null;
   return (
-    `this agent is NOT TRADING: ${p.why}, and nothing usable has been read from it since this worker started. ` +
+    `${SETTINGS_ARM_REFUSAL_PREFIX}${p.why}, and nothing usable has been read from it since this worker started. ` +
     `Rather than trade on settings nobody chose (paper, the default strategy, an empty Telegram allowlist), it will not start. ` +
     (hosted
       ? "The file is ours, not yours: it is rewritten from your saved settings within a minute, and the agent starts on the tick after."
@@ -825,5 +1166,55 @@ export function strategyKey(cfg: ResolvedConfig): string {
     cfg.strategistStopLossBps,
     cfg.deskEnabled,
     cfg.deskMaxSteps,
+    // WHAT THE STRATEGIST IS BUILT TO SAY ABOUT PERPS. Its perpActions schema
+    // and prompt exist only while perps are on and it is the driver, and name
+    // the owner's markets (docs/perps.md "The perps route") — all baked in when
+    // the strategy is built, so without these a switch flipped on the dashboard
+    // would leave the strategist blind to it, or still proposing after it was
+    // turned off, until a restart. The rest of the perps block is perpsKey's.
+    cfg.perpsEnabled,
+    cfg.perpsDriver,
+    cfg.perpsMarkets.join(","),
+  ].join("|");
+}
+
+/**
+ * Fingerprint of EVERY perps field — the perp route rebuilds (and re-reads its
+ * markets, caps and driver) when this changes.
+ *
+ * ALL OF THEM, including the ones a tick could read live, because the failure
+ * this guards against is the one strategyKey's notes keep recording: a field
+ * baked in somewhere, missing from the key, that "looked saved and did nothing
+ * until a restart". For a cap that is not a nuisance, it is an owner lowering
+ * their leverage and the agent opening at the old one. A rebuild on a field
+ * that did not need one costs nothing; a missing one costs exactly that.
+ *
+ * The consent record and the operator's levers are in it too: turning live off
+ * (or the operator restricting) must take effect at once, not at the next
+ * unrelated change.
+ */
+export function perpsKey(cfg: ResolvedConfig): string {
+  return [
+    cfg.perpsEnabled,
+    cfg.perpsLiveEnabled,
+    cfg.perpsLiveConsentStale,
+    cfg.perpsLiveConsentVersion ?? "",
+    cfg.perpsLiveConsentAt ?? "",
+    cfg.perpsRegionAttested,
+    cfg.perpsDriver,
+    cfg.perpsMarkets.join(","),
+    cfg.perpsMaxLeverage,
+    cfg.perpsPerTradeUsdg,
+    cfg.perpsMaxOpenNotionalUsdg,
+    cfg.perpsMaxCollateralUsdg,
+    cfg.perpsMaxOpensPerDay,
+    cfg.perpsStopLossPct,
+    cfg.perpsStopSlipBps,
+    cfg.perpsTakeProfitPct,
+    cfg.perpsLiqBufferPct,
+    cfg.perpsMaxSlippageBps,
+    cfg.perpsOperatorCeiling,
+    cfg.perpsLiveTenants === null ? "self-hosted" : cfg.perpsLiveTenants.join(","),
+    cfg.perpsEntriesHalted,
   ].join("|");
 }

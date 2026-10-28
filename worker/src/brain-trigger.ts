@@ -97,7 +97,8 @@ export interface TriggerVerdict {
   candidates: TriggerReason[];
 }
 
-const pctMove = (now: number | null, before: number | null): number => {
+/** Fractional move between two readings, either way. Unknown on either side is no move. */
+export const pctMove = (now: number | null, before: number | null): number => {
   if (now === null || before === null || before === 0) return 0;
   return Math.abs(now - before) / Math.abs(before);
 };

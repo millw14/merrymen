@@ -12,7 +12,7 @@ const tooManyClients = () => Object.assign(new Error("sorry, too many clients al
 describe("hosted stores recover from a refused startup", () => {
   it("grant reads fail closed, then retry the next independent connection attempt", async () => {
     let attempts = 0;
-    const store = new PgGrantStore("postgres://stand-in", async () => {
+    const store = new PgGrantStore("postgres://stand-in", "spot", async () => {
       attempts += 1;
       if (attempts === 1) throw tooManyClients();
       return {
@@ -32,7 +32,7 @@ describe("hosted stores recover from a refused startup", () => {
 
   it("concurrent first callers share one failed grant connection", async () => {
     let attempts = 0;
-    const store = new PgGrantStore("postgres://stand-in", async () => {
+    const store = new PgGrantStore("postgres://stand-in", "spot", async () => {
       attempts += 1;
       throw tooManyClients();
     });
@@ -44,7 +44,7 @@ describe("hosted stores recover from a refused startup", () => {
   it("a failed grant table setup closes its connection before retrying", async () => {
     let opened = 0;
     let closed = 0;
-    const store = new PgGrantStore("postgres://stand-in", async () => {
+    const store = new PgGrantStore("postgres://stand-in", "spot", async () => {
       opened += 1;
       const fail = opened <= 2;
       return {
@@ -66,7 +66,7 @@ describe("hosted stores recover from a refused startup", () => {
   it("a grant connection lost after setup is replaced for the next read", async () => {
     let attempts = 0;
     const socket: { error: (() => void) | null } = { error: null };
-    const store = new PgGrantStore("postgres://stand-in", async () => {
+    const store = new PgGrantStore("postgres://stand-in", "spot", async () => {
       attempts += 1;
       return {
         async query() { return { rows: [] }; },

@@ -104,8 +104,8 @@ test("Postgres: the web's energy and holder reads across the upgrade", { skip: !
     });
 
     await t.test("holderWalletFor over the Postgres claims store: linked while claimed, login otherwise", async () => {
-      const store = new PgSettingsStore(scoped.toString(), connect);
-      useSettingsStoreForTest(store);
+      const store = new PgSettingsStore(scoped.toString(), "spot", connect);
+      useSettingsStoreForTest(store, "spot");
       await store.put(T1, { holderProof: { address: W1, at: 1 } });
       assert.deepEqual(await holderWalletFor(T1), { address: T1, source: "login" }, "an unclaimed proof does not count");
       assert.deepEqual(await store.takeHolder(W1, T1), { ok: true, fresh: true });

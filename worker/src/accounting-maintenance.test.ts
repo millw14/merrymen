@@ -5,6 +5,9 @@ import { ACCOUNTING_HOLD_ENV, accountingCommitRefusal, accountingHoldTenants, ac
 const TENANT = "0x1111111111111111111111111111111111111111";
 const OTHER = "0x2222222222222222222222222222222222222222";
 const ACCOUNT = "0xa96Bf429888e1aAb4255762d17d29C53f6a0370d";
+/** A real Solana key, bare and as an agent id. */
+const SOL_KEY = "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH";
+const SOL_AGENT = `sol:${SOL_KEY}`;
 const fresh = () => ({ processPresent: false, localHomePresent: false });
 const valid = () => ({
   mode: "commit", accounts: [ACCOUNT.toLowerCase()], plans: [{ smartAccount: ACCOUNT, tenant: TENANT }],
@@ -26,6 +29,24 @@ describe("operator accounting maintenance scope", () => {
       assert.throws(() => accountingHoldTenants({ [ACCOUNTING_HOLD_ENV]: invalid }), /refusing a partial hold/);
     });
   }
+  it("refuses a hold naming a tenant that is not 0x (fleet-id.ts), in so many words, never echoing it", () => {
+    for (const other of [SOL_AGENT, SOL_KEY, "rh:ABC-123"]) {
+      assert.throws(() => accountingHoldTenants({ [ACCOUNTING_HOLD_ENV]: `${TENANT},${other}` }), (e: Error) => {
+        assert.match(e.message, /names a tenant that is not a complete Robinhood Chain address .*refusing a partial hold$/);
+        assert.ok(!e.message.includes(SOL_KEY.slice(0, 8)) && !e.message.includes("rh:"));
+        return true;
+      });
+    }
+    // Never held by this hold, so never past a repair's "explicitly held" precondition either.
+    assert.equal(accountingTenantHeld(SOL_AGENT, { [ACCOUNTING_HOLD_ENV]: TENANT }), false);
+  });
+  it("refuses a commit naming, or resolving to, an id that is not 0x, as what it is", () => {
+    assert.match(accountingCommitRefusal({ ...valid(), accounts: [SOL_KEY] })!, /not a complete Robinhood Chain address .*repairs no other chain's/);
+    assert.match(accountingCommitRefusal({ ...valid(), accounts: [ACCOUNT, SOL_KEY] })!, /not a complete Robinhood Chain address/, "not merely the first");
+    const plans = [{ smartAccount: ACCOUNT, tenant: SOL_AGENT }];
+    // Whatever the hold says: no hold can name it.
+    assert.ok(accountingCommitRefusal({ ...valid(), plans })!.includes(`resolves to a tenant that is not a Robinhood Chain address (Solana id "${SOL_AGENT}")`), "named as written, never case-folded");
+  });
   it("refuses commit until the exact resolved tenant is explicitly held", () => {
     assert.match(accountingCommitRefusal({ ...valid(), env: {} })!, /must be explicitly held/);
     assert.match(accountingCommitRefusal({ ...valid(), env: { [ACCOUNTING_HOLD_ENV]: OTHER } })!, /must be explicitly held/);

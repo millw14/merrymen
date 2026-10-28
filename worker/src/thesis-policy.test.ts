@@ -17,16 +17,25 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
+import { base58Encode, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { wrapSqlite } from "./db";
 import { readPeerTheses } from "./peer-theses";
 import {
   LANDED_STATUSES,
+  PUBLISHABLE_SOURCES,
+  PUBLISHABLE_STRATEGIES,
+  WITHHELD_PERP_SOURCES,
+  WITHHELD_REJECT_RULES,
+  ownerRejectRuleLabel,
   outcomeOf,
   publicationNarrowing,
   publishableThesis,
   readerHead,
+  rejectRuleLabel,
+  rejectRuleRemedy,
   type ThesisRow,
 } from "./thesis-policy";
+import { readFileSync } from "node:fs";
 
 describe("a coin's name is printed as it was typed", () => {
   const head = (display_name: string) => {
@@ -171,6 +180,137 @@ describe("a peer's landed trade is not buried under refusals the gate drops", ()
       assert.ok(peer.some((t) => t.action === "sell" && t.outcome === "landed"), "the landed exit is in the peer file");
     } finally {
       raw.close();
+    }
+  });
+});
+
+describe("the address backstop knows Solana ids (Solana P0)", () => {
+  const SIG = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
+  const IDS = [SOLANA_USDG_MINT, SIG, `https://solscan.io/token/${SOLANA_USDG_MINT}`];
+  const row = (over: Partial<ThesisRow> = {}): ThesisRow => ({
+    name: "Shogun",
+    slug: "0123456789abcdef",
+    source: "class-route",
+    action: "buy",
+    symbol: "MOON",
+    size_usdg: 5,
+    reason: "taking 5.00 USDG of MOON — early on the curve",
+    status: "landed",
+    said: 1,
+    last_at: 1_700_000_000,
+    first_at: 1_700_000_000,
+    mode: "live",
+    ...over,
+  });
+  const post = "Buyer breadth narrowed while depth held; broader buying would improve my view.";
+
+  it("drops the row wherever a 0x address drops it", () => {
+    assert.ok(publishableThesis(row()), "the fixture must publish");
+    for (const id of IDS) {
+      assert.equal(publishableThesis(row({ source: "strategist", reason: `rotating into ${id}` })), null, id);
+      assert.equal(publishableThesis(row({ name: id })), null, id);
+      assert.equal(publishableThesis(row({ x_handle: id })), null, id);
+    }
+    // A ticker cannot hold one (symbol is shown as given): the same drop.
+    assert.equal(publishableThesis(row({ symbol: SOLANA_USDG_MINT })), null);
+  });
+
+  it("costs a post its voice, not the trade, exactly as a 0x one does", () => {
+    for (const id of [`0x${"ab".repeat(20)}`, ...IDS]) {
+      const t = publishableThesis(row({ reason: null, post: `${post} ${id}` }));
+      assert.equal(t, null, `${id}: a post was all it had`);
+      const kept = publishableThesis(row({ post: `${post} ${id}` }))!;
+      assert.ok(kept, id);
+      assert.equal(kept.post, null, id);
+      assert.match(kept.reason!, /early on the curve/);
+    }
+    assert.equal(publishableThesis(row({ reason: null, post }))!.post, post);
+  });
+
+  it("knows a Solana id glued to the words around it (audit regressions F3)", () => {
+    const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+    const glued = [`CA${SOLANA_USDG_MINT}`, `ca${letters}`, `${letters}is the one`, `tx${SIG}done`, `${SOLANA_USDG_MINT}l`];
+    for (const id of glued) {
+      // A glued mint costs the post, and a post was all this row had.
+      assert.equal(publishableThesis(row({ reason: null, post: `${post} ${id}` })), null, id);
+      const kept = publishableThesis(row({ post: `${post} ${id}` }))!;
+      assert.ok(kept, id);
+      assert.equal(kept.post, null, id);
+      assert.match(kept.reason!, /early on the curve/);
+      // The final backstop drops the row wherever it sits.
+      assert.equal(publishableThesis(row({ source: "strategist", reason: `rotating into ${id}` })), null, id);
+      assert.equal(publishableThesis(row({ name: `${id}` })), null, id);
+    }
+    // Prose, tickers, URLs and a short hashtag still publish.
+    const plain = `${post} $SOL $BONK #BuyTheDip https://merrymen.xyz/t/0123456789abcdef`;
+    assert.equal(publishableThesis(row({ reason: null, post: plain }))!.post, plain);
+  });
+});
+
+/**
+ * PERPS ARE NEVER PUBLISHED IN v1 (docs/perps.md rule 17).
+ *
+ * Pinned the way the strategist's own absence is pinned (strategist-publish
+ * .test.ts): by the SOURCES being absent from every publishable list, and by
+ * the gate refusing a perp row even when one arrives under a publishable key —
+ * because Lighter's public tape is keyed by account, and one published "open
+ * BTC long" with a timestamp is the agent's venue account and its live
+ * liquidation price for anyone who looks.
+ */
+describe("perps are withheld from every public surface", () => {
+  it("THE PERP SOURCES ARE ABSENT from the policy and from the strategy list — change both or neither", () => {
+    assert.deepEqual([...WITHHELD_PERP_SOURCES], ["perp-route", "perp:strategist"]);
+    for (const source of WITHHELD_PERP_SOURCES) {
+      assert.ok(!PUBLISHABLE_SOURCES.includes(source), `${source} must never be publishable`);
+    }
+    for (const s of PUBLISHABLE_SOURCES) assert.ok(!/perp/i.test(s), `${s} names perps and is publishable`);
+    for (const s of PUBLISHABLE_STRATEGIES as readonly string[]) assert.ok(!/perp/i.test(s), `strategy ${s} names perps`);
+  });
+
+  const ok: ThesisRow = {
+    agent_id: "0xabc",
+    name: "Shogun",
+    source: "brain",
+    action: "hold",
+    symbol: "TSLA",
+    reason: "Flow is two-sided and the book is deep enough.",
+    said: 1,
+    last_at: 1,
+    first_at: 1,
+    mode: "live",
+  };
+
+  it("the fixture publishes — so each refusal below is the perp rule and nothing else", () => {
+    assert.ok(publishableThesis(ok));
+  });
+
+  it("a perp row is dropped by source, by market key or by action — whichever it carries", () => {
+    for (const source of [...WITHHELD_PERP_SOURCES, "strategy:perp-trend"]) {
+      assert.equal(publishableThesis({ ...ok, source }), null, source);
+    }
+    // Filed under a PUBLISHABLE source by mistake: still never published.
+    assert.equal(publishableThesis({ ...ok, symbol: "BTC-PERP" }), null, "a -PERP market key");
+    for (const action of ["open-long", "open-short", "reduce-long", "close-short", "perp-deposit", "perp-withdraw", "perp-claim"]) {
+      assert.equal(publishableThesis({ ...ok, source: "strategist", action }), null, action);
+    }
+  });
+
+  it("every perp refusal policy.ts can return is withheld — with the owner's words and a remedy, no public label", () => {
+    const src = readFileSync(new URL("./policy.ts", import.meta.url), "utf8");
+    const perpRules = new Set<string>();
+    for (const m of src.matchAll(/rule:\s*[^,}\n]*/g)) {
+      for (const q of m[0].matchAll(/"(perp-[a-z-]+)"/g)) perpRules.add(q[1]!);
+    }
+    assert.ok(perpRules.size >= 20, `expected the perp rules, parsed ${perpRules.size}`);
+    for (const rule of perpRules) {
+      assert.ok(Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule), `${rule} is not withheld`);
+      assert.equal(rejectRuleLabel(rule), null, `${rule} must have no public sentence`);
+      assert.ok(ownerRejectRuleLabel(rule), `${rule} needs the owner's words`);
+      assert.ok(rejectRuleRemedy(rule), `${rule} needs a remedy`);
+    }
+    // And the perpsModeOf rules, which reach an open through the rail.
+    for (const rule of ["perp-live-not-enabled", "perp-not-granted", "perp-venue-unready", "perp-operator-off"]) {
+      assert.ok(perpRules.has(rule), `${rule} must be a literal policy.ts returns`);
     }
   });
 });

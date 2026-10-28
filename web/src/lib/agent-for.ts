@@ -49,7 +49,7 @@ export async function hostedAgentFor(req: Request): Promise<`0x${string}` | null
   const tenant = tenantOf(req);
   if (!tenant) return null;
   try {
-    const grant = await getGrantStore().get(tenant);
+    const grant = await getGrantStore("spot").get(tenant);
     return (grant?.smartAccount as `0x${string}`) ?? null;
   } catch {
     // An unreadable store is "we cannot tell", and the honest render of that is

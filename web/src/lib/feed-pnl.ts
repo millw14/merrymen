@@ -29,6 +29,8 @@ export interface FeedPnlSource {
   equity?: readonly { equity_usdg: number }[];
   netContributionsUsdg?: number | null;
   measured?: FeedMeasured | null;
+  /** Why the contributions are null though flows are on record — see the feed route. */
+  contributionsWithheld?: "review" | "unread" | null;
 }
 
 /** The numerator and denominator the owner's return is computed from. */
@@ -42,4 +44,21 @@ export function pnlBasisOf(feed: FeedPnlSource | null | undefined): { latest: nu
   }
   const curve = (feed?.equity ?? []).map((e) => Number(e.equity_usdg)).filter(Number.isFinite);
   return { latest: curve.length ? curve[curve.length - 1]! : null, contributed: contributions };
+}
+
+/**
+ * WHY THERE IS NO RETURN, when the feed withheld the contributions it would be
+ * divided by (distinct-flows.ts). The same reasons, in the same words, as the
+ * public page gives for the same account: "review" is one transfer booked two
+ * ways, the return under review; "unread" is records that contradict each
+ * other, the return unavailable. Null when nothing was withheld — and then the
+ * contributions, null or not, go through rankPnl as before. Without this, null
+ * contributions read as "no deposit on record" on a funded account.
+ */
+export function withheldWhy(feed: FeedPnlSource | null | undefined): "review-pending" | "quality-unknown" | null {
+  switch (feed?.contributionsWithheld) {
+    case "review": return "review-pending";
+    case "unread": return "quality-unknown";
+    default: return null;
+  }
 }

@@ -1,0 +1,16 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "plan": "starter",
+  "dailyLimit": 40000,
+  "planExpiresAt": "2027-01-15T08:30:00.000+00:00",
+  "credits": {
+    "monthly": 1000000,
+    "usedThisMonth": 4321,
+    "prepaid": 0,
+    "remaining": 995679
+  },
+  "streams": {
+    "appFeed": { "path": "/ws/alerts", "included": true },
+    "onChain": { "path": "/ws/trades", "included": false }
+  }
+}

@@ -131,6 +131,7 @@ describe("GET", () => {
       perDayMax: 3,
       replyEnabled: false,
       repliesAvailable: false,
+      repliesActive: false,
       upcoming: [],
       recent: [],
     });
@@ -344,11 +345,15 @@ describe("prefs — what it posts", () => {
     await connect(OWNER_A);
     await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
     const buy = await draft(OWNER_A, { kind: "buy", coin: "frog", decisionId: "d1" });
+    // A recap names the coins it bought: it is a buy post's kind for this switch.
+    const recap = await draft(OWNER_A, { kind: "recap", coin: "buy:d1 buy:d2 buy:d3" });
     const casual = await draft(OWNER_A);
     const intro = await draft(OWNER_A, { kind: "intro" });
     await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }));
     assert.equal(statusOf(buy), "cancelled");
     assert.equal((w.raw.prepare("SELECT reason FROM xpost_posts WHERE id = ?").get(buy) as { reason: string }).reason, "kind-off");
+    assert.equal(statusOf(recap), "cancelled");
+    assert.equal((w.raw.prepare("SELECT reason FROM xpost_posts WHERE id = ?").get(recap) as { reason: string }).reason, "kind-off");
     assert.equal(statusOf(casual), "scheduled");
     assert.equal(statusOf(intro), "scheduled", "the hello is not a kind the owner turns off");
     assert.equal((await getAccount(w.db, OWNER_A))?.posting, true, "posting itself stays on");
@@ -360,6 +365,7 @@ describe("prefs — what it posts", () => {
     await read(await post(OWNER_A, { action: "prefs", owner: OWNER_A, buys: false }));
     // Planned by a pass that read the account before the change landed.
     await draft(OWNER_A, { kind: "buy", coin: "frog", decisionId: "d9", body: "grabbed some frog on paper" });
+    await draft(OWNER_A, { kind: "recap", coin: "buy:d9 buy:d10 buy:d11", body: "busy stretch. recap: 3 buys." });
     await draft(OWNER_A, { body: "a thought that stays" });
     const body = await read<XAccountBody>(await get(OWNER_A));
     assert.deepEqual(body.upcoming.map((p) => p.body), ["a thought that stays"]);
@@ -441,6 +447,49 @@ describe("comment reply consent", () => {
     assert.equal(await repliesEnabledFor(w.db, OWNER_A, X_USER.id), false);
     assert.equal(statusOf(waiting), "cancelled");
     assert.equal(statusOf(ordinary), "scheduled");
+  });
+
+  it("scope active: only the owners MERRYMEN_XPOST_ACTIVE_TENANTS names may turn replies on", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "active";
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesAvailable, false, "not named, not available");
+    assert.equal((await read(await reply(true), 503)).error, X_COPY.repliesUnavailable);
+    assert.equal(await repliesEnabledFor(w.db, OWNER_A, X_USER.id), false);
+    w.env.MERRYMEN_XPOST_ACTIVE_TENANTS = OWNER_B;
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesAvailable, false, "another owner named is not this one");
+    assert.equal((await read<XAccountBody>(await get(OWNER_B))).repliesAvailable, true);
+    w.env.MERRYMEN_XPOST_ACTIVE_TENANTS = `${OWNER_B},${OWNER_A}`;
+    const body = await read<XAccountBody>(await get(OWNER_A));
+    assert.equal(body.repliesAvailable, true);
+    assert.equal(body.repliesActive, true, "and its warning says it answers tags");
+    assert.deepEqual(await read(await reply(true)), { ok: true, replyEnabled: true });
+  });
+
+  it("any other value of the gate is off for everyone, and turning replies off still works", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "1";
+    await reply(true);
+    w.env.MERRYMEN_XPOST_ACTIVE_TENANTS = OWNER_A;
+    for (const value of ["yes", "Active", " 1 "]) {
+      w.env.MERRYMEN_XPOST_REPLIES_APPROVED = value;
+      assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesAvailable, false, value);
+      assert.equal((await read(await reply(true), 503)).error, X_COPY.repliesUnavailable, value);
+    }
+    assert.deepEqual(await read(await reply(false)), { ok: true, replyEnabled: false });
+  });
+
+  it("says when the operator made this owner's agent active, read by address the way the orchestrator reads it", async () => {
+    await connect(OWNER_A);
+    await postingOn();
+    w.env.MERRYMEN_XPOST_REPLIES_APPROVED = "1";
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesActive, false, "unset is nobody");
+    w.env.MERRYMEN_XPOST_ACTIVE_TENANTS = ` alan , ${OWNER_A.toUpperCase().replace("0X", "0x")} `;
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesActive, true);
+    assert.equal((await read<XAccountBody>(await get(OWNER_B))).repliesActive, false, "only the owners it names");
+    w.env.MERRYMEN_XPOST_ACTIVE_TENANTS = "alan";
+    assert.equal((await read<XAccountBody>(await get(OWNER_A))).repliesActive, false, "a name is not an identity");
   });
 
   it("returns validated comment context for upcoming and posted replies", async () => {

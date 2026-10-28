@@ -125,22 +125,35 @@ export interface PublicIdentity {
   tenant: `0x${string}`;
   /** Minted once, never re-minted, never derived. Links depend on it. */
   slug: string;
-  /** Every smart account this tenant has held, newest first. */
+  /**
+   * Every smart account this tenant has held, newest first — except a Perps
+   * wallet's, which joins at the end and never becomes the first: the first is
+   * the Spot account the public profile and every existing link stand for.
+   */
   accounts: `0x${string}`[];
   social?: SocialIdentity | null;
   createdAt: number;
   updatedAt: number;
 }
 
+/**
+ * `primary: false` is a Perps wallet's account: claimed for this tenant like
+ * any other, added to the end of the history, never moved to the front.
+ */
+export interface EnsureIdentityOptions {
+  primary?: boolean;
+}
+
 export interface IdentityStore {
   /**
-   * Mint-if-absent, and record `account` as this tenant's current one.
+   * Mint-if-absent, and record `account` as this tenant's current one (or, not
+   * primary, as one more of its accounts).
    *
    * Idempotent, and it MUST NOT change an existing slug — every published link
    * and every follow edge depends on that. Calling it on a re-grant appends the
    * new account and leaves the slug alone.
    */
-  ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity>;
+  ensure(tenant: `0x${string}`, account: `0x${string}`, options?: EnsureIdentityOptions): Promise<PublicIdentity>;
   get(tenant: `0x${string}`): Promise<PublicIdentity | null>;
   bySlug(slug: string): Promise<PublicIdentity | null>;
   /** Resolve a social login to the tenant that claimed it. */
@@ -178,11 +191,20 @@ export interface IdentityStore {
 
 const now = () => Math.floor(Date.now() / 1000);
 
-/** Newest first, no duplicates, case-normalised. */
-function withAccount(accounts: `0x${string}`[], account: `0x${string}`): `0x${string}`[] {
+/** Newest first, no duplicates, case-normalised. Not primary: kept where it is, or added last. */
+function withAccount(accounts: `0x${string}`[], account: `0x${string}`, primary = true): `0x${string}`[] {
   const a = account.toLowerCase() as `0x${string}`;
+  if (!primary) return accounts.some((x) => x.toLowerCase() === a) ? [...accounts] : [...accounts, a];
   return [a, ...accounts.filter((x) => x.toLowerCase() !== a)];
 }
+
+/**
+ * One tenant's ensures, one at a time, across every service sharing the
+ * database. `accounts` is read and then rewritten whole, so a Spot ensure and
+ * a Perps ensure from two processes would each write back a history missing
+ * the other's account.
+ */
+const IDENTITY_LOCK_NS = 0x4d4d4944;
 
 // ── file backend ─────────────────────────────────────────────────────────────
 
@@ -205,7 +227,7 @@ export class FileIdentityStore implements IdentityStore {
       return null;
     }
   }
-  async ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
+  async ensure(tenant: `0x${string}`, account: `0x${string}`, options: EnsureIdentityOptions = {}): Promise<PublicIdentity> {
     // ONE IDENTITY PER ACCOUNT, on this backend too. Single-process and
     // single-writer, so a scan is the whole enforcement — but the RULE has to
     // be the same one, or a self-hosted install permits what hosted refuses.
@@ -218,7 +240,7 @@ export class FileIdentityStore implements IdentityStore {
     }
     const existing = await this.get(tenant);
     const rec: PublicIdentity = existing
-      ? { ...existing, accounts: withAccount(existing.accounts, account), updatedAt: now() }
+      ? { ...existing, accounts: withAccount(existing.accounts, account, options.primary !== false), updatedAt: now() }
       : {
           tenant: tenant.toLowerCase() as `0x${string}`,
           slug: mintSlug(),
@@ -437,21 +459,25 @@ async function backfillClaims(c: PgClientLike): Promise<ClaimState> {
     }
   }
 
-  try {
-    const { rows: grantRows } = await c.query(
-      `SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants`,
-    );
-    for (const r of grantRows) {
-      const acc = (r as { smart_account?: unknown }).smart_account;
-      if (acc === null || acc === undefined) continue;
-      observed.push({ account: String(acc), tenant: String(r.tenant ?? ""), source: "installed-grant" });
+  // BOTH WALLETS' GRANTS. A Perps account is claimed exactly as a Spot one is.
+  for (const table of ["grants", "perps_grants"] as const) {
+    try {
+      const { rows: grantRows } = await c.query(
+        `SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM ${table}`,
+      );
+      for (const r of grantRows) {
+        const acc = (r as { smart_account?: unknown }).smart_account;
+        if (acc === null || acc === undefined) continue;
+        observed.push({ account: String(acc), tenant: String(r.tenant ?? ""), source: "installed-grant" });
+      }
+    } catch (e) {
+      // The grants tables live in the same database but are owned by another
+      // store, and a deployment that has not created one yet (perps_grants,
+      // on any fleet that never had a Perps wallet) has nothing to backfill
+      // from it. A connection or permission failure cannot prove there are no
+      // grant claims, so it must refuse this backfill.
+      if ((e as { code?: unknown } | null)?.code !== "42P01") throw e;
     }
-  } catch (e) {
-    // The grants table lives in the same database but is owned by another
-    // store, and a deployment that has not created it yet is a fresh install
-    // with nothing to backfill. A connection or permission failure cannot
-    // prove there are no grant claims, so it must refuse this backfill.
-    if ((e as { code?: unknown } | null)?.code !== "42P01") throw e;
   }
 
   const { rows: claimRows } = await c.query(`SELECT smart_account, tenant FROM agent_account`);
@@ -614,10 +640,10 @@ export class PgIdentityStore implements IdentityStore {
    * no interleaving in which both proceed, and no ordering in which the loser
    * silently overwrites.
    */
-  async ensure(tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
-    return this.withClient((c) => this.ensureWithin(c, tenant, account));
+  async ensure(tenant: `0x${string}`, account: `0x${string}`, options: EnsureIdentityOptions = {}): Promise<PublicIdentity> {
+    return this.withClient((c) => this.ensureWithin(c, tenant, account, options.primary !== false));
   }
-  private async ensureWithin(c: PgClientLike, tenant: `0x${string}`, account: `0x${string}`): Promise<PublicIdentity> {
+  private async ensureWithin(c: PgClientLike, tenant: `0x${string}`, account: `0x${string}`, primary: boolean): Promise<PublicIdentity> {
     const t = tenant.toLowerCase();
     const a = account.toLowerCase();
     if (this.claims.ok === false) {
@@ -629,6 +655,7 @@ export class PgIdentityStore implements IdentityStore {
 
     await c.query("BEGIN");
     try {
+      await c.query(`SELECT pg_advisory_xact_lock($1::int, hashtext($2))`, [IDENTITY_LOCK_NS, t]);
       await c.query(
         `INSERT INTO agent_account (smart_account, tenant, claimed_at)
          VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,
@@ -638,7 +665,7 @@ export class PgIdentityStore implements IdentityStore {
 
       const existing = await this.getWithin(c, tenant);
       if (existing) {
-        const accounts = withAccount(existing.accounts, account);
+        const accounts = withAccount(existing.accounts, account, primary);
         await c.query(`UPDATE agent_identity SET accounts = $2, updated_at = $3 WHERE tenant = $1`, [
           t,
           JSON.stringify(accounts),
@@ -674,6 +701,8 @@ export class PgIdentityStore implements IdentityStore {
           if (attempt === 2 || !isSlugCollision(e)) throw e;
           if (!(await this.rollback(c))) throw e;
           await c.query("BEGIN");
+          // The ROLLBACK let the tenant's lock go with everything else.
+          await c.query(`SELECT pg_advisory_xact_lock($1::int, hashtext($2))`, [IDENTITY_LOCK_NS, t]);
           await c.query(
             `INSERT INTO agent_account (smart_account, tenant, claimed_at)
              VALUES ($1, $2, $3) ON CONFLICT (smart_account) DO NOTHING`,

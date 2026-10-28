@@ -168,7 +168,9 @@ describe("the helper: durable means synced, renamed, and the directory synced", 
 
 describe("every archiver writes through the durable helper", () => {
   it("the worker's archiveCurrentGrant", () => {
-    const fn = body(GRANT, "export function archiveCurrentGrant(");
+    // archiveGrantFile does the work, for Spot's grant.json and a Perps wallet's (perps-kill.ts).
+    assert.match(body(GRANT, "export function archiveCurrentGrant("), /return archiveGrantFile\(grantFilePath\(\), homePaths\.grantsArchive\(\)\);/);
+    const fn = body(GRANT, "export function archiveGrantFile(");
     assert.doesNotMatch(fn, IN_PLACE_WRITE);
     assert.match(fn, /writeFileAtomicSync\(path\.join\(dir, `\$\{account\.toLowerCase\(\)\}\.json`\), raw, 0o600, \{ durable: true \}\);/);
     assert.match(fn, /if \(mkdirSync\(dir, \{ recursive: true, mode: 0o700 \}\) !== undefined\) fsyncDirSync\(path\.dirname\(dir\)\);/, "a new archive directory's own entry is synced too");
@@ -203,10 +205,12 @@ describe("grant.json changes only after the archive — and a kill without one d
     before_(remove, "const kept = await archiveCurrentGrant();", "await rm(homePaths.grant(), { force: true });", "archive first");
     before_(remove, 'if (kept.kind === "failed") throw new GrantArchiveError(kept.why, pauseForKeptGrant());', "await rm(homePaths.grant()", "refuse and pause before deleting");
     before_(remove, "await rm(homePaths.grant(), { force: true });", "liftKillPause();", "lift only a kill's pause after removal");
-    for (const route of [ROUTE, DISCARD]) {
-      assert.match(route, /removeSelfHostedGrant/);
-      assert.match(route, /if \(e instanceof GrantArchiveError\) return NextResponse\.json\(\{ error: e\.message, paused: e\.paused \}, \{ status: 409 \}\);/);
-    }
+    for (const route of [ROUTE, DISCARD]) assert.match(route, /removeSelfHostedGrant/);
+    // Start over answers the archive refusal the same way, and says what its Perps half did.
+    assert.match(DISCARD, /if \(e instanceof GrantArchiveError\) \{\s*return NextResponse\.json\(\{ error: e\.message, paused: e\.paused, \.\.\.\(perps\.state === "none" \? \{\} : \{ perps: perps\.state \}\) \}, \{ status: 409 \}\);/);
+    // The kill switch says whether it stopped the local Solana strategy and the local Perps
+    // wallet too, which it does first.
+    assert.match(ROUTE, /if \(e instanceof GrantArchiveError\) \{\s*return NextResponse\.json\(\{ error: `\$\{e\.message\}[^`]*`,\s*paused: e\.paused, solana: solana \? "stopped" : "not-stopped", \.\.\.\(perps\.state === "none" \? \{\} : \{ perps: perps\.state \}\) \}, \{ status: 409 \}\);/);
   });
 
   it("the worker's Telegram /kill: archive, then remove the SAME file; a failed archive pauses and returns first", () => {
@@ -220,7 +224,7 @@ describe("grant.json changes only after the archive — and a kill without one d
     assert.doesNotMatch(kill, /rmSync\(homePaths\.grant\(\)/);
     assert.match(GRANT, /export function grantFilePath\(\): string \{\s*return process\.env\.MERRYMEN_GRANT_FILE \?\? homePaths\.grant\(\);/);
     assert.match(body(GRANT, "export function loadGrantFile("), /const file = grantFilePath\(\);/);
-    assert.match(body(GRANT, "export function archiveCurrentGrant("), /const file = grantFilePath\(\);/);
+    assert.match(body(GRANT, "export function archiveCurrentGrant("), /archiveGrantFile\(grantFilePath\(\),/);
   });
 
   it("merrymen kill: archive, then remove; a failed archive pauses and returns first", () => {

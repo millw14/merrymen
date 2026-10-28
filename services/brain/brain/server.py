@@ -31,8 +31,10 @@ from .llm import Llm, LlmConfig
 from .schemas import (
     AnalyzeRequest,
     BrainDecision,
+    DECIDE_CAPABILITIES,
     DecideRequest,
     DeskRefusal,
+    LENS_KEYS,
     Refusal,
     SCHEMA_VERSION,
 )
@@ -120,6 +122,15 @@ async def health() -> dict:
         "quick_model": os.getenv("BRAIN_QUICK_MODEL", "openai/gpt-oss-20b"),
         "tiers": {k: vars(v) for k, v in TIERS.items()},
         "desk_concurrency": _desk_slots.limit,
+        # WHICH LENSES THIS BUILD ACCEPTS. `MarketState` refuses a signals key
+        # it does not know, so a worker that sends a new lens to an older build
+        # gets a 422 and loses the whole decision, not just the lens. Reading
+        # this first lets it send the lens only where it is understood.
+        "lens_keys": sorted(LENS_KEYS),
+        # WHICH OPTIONAL DECIDE FIELDS IT ACCEPTS, for the same reason: the
+        # request model forbids unknown keys, so the worker sends the desk
+        # policy only to a build that names "strategy-terms" here.
+        "capabilities": sorted(DECIDE_CAPABILITIES),
     }
 
 

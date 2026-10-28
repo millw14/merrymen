@@ -52,7 +52,7 @@ describe("it knows who is asking", () => {
 
   it("the settings half comes from the tenant's store, not the container's file", () => {
     // The identical fix /api/feed's identity read already carries.
-    assert.match(CODE, /getSettingsStore\(\)\.get\(tenant\)/);
+    assert.match(CODE, /getSettingsStore\("spot"\)\.get\(tenant\)/);
     const fn = CODE.slice(CODE.indexOf("async function settingsFor"));
     const hosted = fn.indexOf("isHostedMode()");
     const file = fn.indexOf("SETTINGS_FILE");
@@ -146,7 +146,7 @@ describe("the link survives the orchestrator's next pass", () => {
 
   it("and the orchestrator promotes it into the stored allowlist", () => {
     assert.match(ORCH, /async function publishChildTelegram/);
-    assert.match(ORCH, /getSettingsStore\(\)\.put\(tenant, \{ \.\.\.stored, telegramAllowlist/);
+    assert.match(ORCH, /getSettingsStore\("spot"\)\.put\(tenant, \{ \.\.\.stored, telegramAllowlist/);
     // ONLY WHEN SOMETHING IS NEW. `put` replaces the whole sealed blob and the
     // web is its other writer, so an unconditional write on a 15-second loop
     // would race a tenant's save on the settings page. And each link ONCE, so

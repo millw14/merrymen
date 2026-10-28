@@ -62,7 +62,6 @@ import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OriginCheck
 import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.SettingsRead
-import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.said
 import dev.merrymen.app.net.settingsRead
 import dev.merrymen.app.ui.LoadedBlock
@@ -412,13 +411,13 @@ fun SettingsScreen(nav: NavHostController) {
   val c = LocalContainer.current
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
+  val identityKnown by c.repo.identityKnown.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
   // WHOSE FORM THIS IS: the server it was read from and the wallet it was read for.
   val form = currentFormOwner(c.repo)
   // Keyed on both: another wallet's — or another server's — read, draft,
   // consent and notes never survive a change.
   var state by remember(form) { mutableStateOf<Loaded<SettingsRead>>(Loaded.Loading) }
-  var telegram by remember(form) { mutableStateOf<TelegramStatus?>(null) }
   var draft by remember(form) { mutableStateOf(SettingsDraft()) }
   var origin by remember { mutableStateOf("") }
   var note by remember(form) { mutableStateOf<String?>(null) }
@@ -441,11 +440,14 @@ fun SettingsScreen(nav: NavHostController) {
   val scope = rememberCoroutineScope()
 
   suspend fun load() {
+    if (!c.repo.identityKnown.value || c.repo.serverTurn.value % 2L != 0L) {
+      state = Loaded.Loading
+      return
+    }
     state = readSettingsFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() }
-    telegram = (c.api.telegram() as? ApiResult.Ok)?.value
   }
 
-  LaunchedEffect(form) {
+  LaunchedEffect(form, identityKnown) {
     origin = c.repo.originNow()
     load()
   }
@@ -526,7 +528,6 @@ fun SettingsScreen(nav: NavHostController) {
         SettingsForm(
           env = env,
           keys = read.keys,
-          telegram = telegram,
           hosted = hosted,
           draft = draft,
           onDraft = { draft = it; ownerChanged = false },
@@ -665,6 +666,16 @@ fun SettingsScreen(nav: NavHostController) {
           }
         }
       }
+
+      // Available even signed out or when the server cannot load settings.
+      PanelSectionHeading("Privacy and account")
+      PolicyLinks()
+      PolicyLink("Request account deletion", ACCOUNT_DELETION_URL, Modifier.fillMaxWidth())
+      NoteLine(
+        "Request account and associated data deletion through support@merrymen.dev. " +
+          "Support may ask you to verify account ownership. Deleting account data stops your hosted agent. " +
+          "Public blockchain records cannot be erased.",
+      )
     }
     Spacer(Modifier.height(LocalBottomInset.current))
   }

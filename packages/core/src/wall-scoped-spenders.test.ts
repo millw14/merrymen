@@ -41,6 +41,7 @@ import { GRANT_SCOPED_SPENDERS } from "./grant";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS } from "./tokens";
 import { ENERGY_ROUTE_V1 } from "./energy";
+import { LIGHTER_ROUTE_V1 } from "./perps";
 import { CallPolicyVersion, toCallPolicy } from "@zerodev/permissions/policies";
 
 const CAPS = { perTradeUsdg: 50, dailyUsdg: 200, expiryDays: 30, maxDrawdownPct: 20, maxOpsPerDay: 100 };
@@ -57,6 +58,12 @@ const coin = (i: number) => ({
   decimals: 18,
 });
 const UBIK = coin(0);
+/** A canonical Lighter API public key at the route's index — the key perps.test.ts and worker/src/wall.test.ts use. */
+const PERP = {
+  apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex,
+  apiPublicKey: "0x2427c4493c2df1a3ecdd750f1398b865e5428907c41065f0612cb3fa6b5ea0d7ac00465b07f3acd7" as const,
+};
+const PROXY = LIGHTER_ROUTE_V1.proxy.toLowerCase();
 
 /** class vault + Trencher + the v4 adapter + `n` coins — the owner's wall. */
 const everything = (n: number): WallOptions => ({
@@ -146,6 +153,46 @@ describe("who is approved for what, scoped", () => {
   });
 });
 
+describe("perps: the Lighter proxy pulls USDG and nothing else, scoped or not", () => {
+  // The proxy joins `usdgSpenders`, never `spenders`, so scoping has nothing to
+  // filter it out of and nothing to add it to. Pinned on both shapes because
+  // an old grant still rebuilds unscoped, and an uncapped allowance over the
+  // book for an upgradeable venue contract is wrong on either.
+  const all: WallOptions = { ...everything(2), ponsAdapterAddress: PONS_ADAPTER, energyBuy: true, perpLighter: PERP };
+  const shapes = { unscoped: perms({ ...all, scopedSpenders: false }), scoped: perms({ ...all, scopedSpenders: true }) };
+  const onProxy = (ps: Perm[]) => ps.filter((p) => p.target.toLowerCase() === PROXY);
+
+  it("the proxy is on the USDG approve, and that approve is the same on both shapes", () => {
+    for (const [shape, ps] of Object.entries(shapes)) {
+      assert.ok(spendersOf(approveOf(ps, CASH.USDG)).includes(PROXY), `${shape}: USDG approve names the proxy`);
+    }
+    assert.deepEqual(spendersOf(approveOf(shapes.scoped, CASH.USDG)), spendersOf(approveOf(shapes.unscoped, CASH.USDG)));
+  });
+
+  it("and on no stock or custom-coin approve, on either shape", () => {
+    for (const [shape, ps] of Object.entries(shapes)) {
+      for (const t of [...stocks, coin(0).address, coin(1).address]) {
+        assert.ok(!spendersOf(approveOf(ps, t)).includes(PROXY), `${shape}: ${t} approve must not name the proxy`);
+      }
+      // And no approve at all other than USDG's — the explicit list above is
+      // the case that matters; this catches any token a later change adds.
+      for (const p of ps.filter((p) => p.functionName === "approve" && p.target.toLowerCase() !== CASH.USDG.toLowerCase())) {
+        assert.ok(!spendersOf(p).includes(PROXY), `${shape}: ${p.target} approve must not name the proxy`);
+      }
+    }
+  });
+
+  it("the three proxy permissions are the same on both shapes", () => {
+    // deposit, changePubKey, withdrawPendingBalance — scoping is about who may
+    // pull which token, and none of these is an approve.
+    assert.deepEqual(
+      onProxy(shapes.scoped).map((p) => p.functionName),
+      ["deposit", "changePubKey", "withdrawPendingBalance"],
+    );
+    assert.deepEqual(onProxy(shapes.scoped), onProxy(shapes.unscoped));
+  });
+});
+
 describe("strictly narrower, and the old wall untouched", () => {
   const combos: WallOptions[] = [
     {},
@@ -153,6 +200,7 @@ describe("strictly narrower, and the old wall untouched", () => {
     everything(3),
     { ...everything(1), ponsAdapterAddress: PONS_ADAPTER, energyBuy: true },
     { v4AdapterAddress: V4_ADAPTER, allowRialto: true },
+    { ...everything(1), ponsAdapterAddress: PONS_ADAPTER, energyBuy: true, perpLighter: PERP },
   ];
 
   it("without the flag, byte for byte what was built before it existed", () => {
@@ -192,6 +240,20 @@ describe("strictly narrower, and the old wall untouched", () => {
     const unscoped = toCallPolicy({ policyVersion: CallPolicyVersion.V0_0_4, permissions: perms({ ...opts, scopedSpenders: false }) as never });
     assert.equal(sealed.getPolicyData(), expected.getPolicyData());
     assert.notEqual(sealed.getPolicyData(), unscoped.getPolicyData());
+  });
+
+  it("and seals perps together with it — neither option is dropped for the other", () => {
+    // Both are forwarded by name in buildWallPolicies. Dropping perps would sign
+    // `perp-lighter-v1` over a wall with no deposit; dropping scoping would sign
+    // the wall the signer had sized as too large.
+    const base = { ...everything(3), scopedSpenders: true };
+    const opts = { ...base, perpLighter: PERP };
+    const data = (o: WallOptions) =>
+      toCallPolicy({ policyVersion: CallPolicyVersion.V0_0_4, permissions: perms(o) as never }).getPolicyData();
+    const sealed = buildWallPolicies({ caps: CAPS, smartAccount: ACCOUNT, now: 1, ...opts }).policies[1]!;
+    assert.equal(sealed.getPolicyData(), data(opts));
+    assert.notEqual(sealed.getPolicyData(), data(base), "perps dropped");
+    assert.notEqual(sealed.getPolicyData(), data({ ...opts, scopedSpenders: false }), "scoping dropped");
   });
 });
 

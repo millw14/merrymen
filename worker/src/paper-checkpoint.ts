@@ -1,10 +1,373 @@
-import type { Db } from "./db";
+import { tablePresent, type Db } from "./db";
+import { perpMarketById } from "../../packages/core/src/index";
+import { applyLedgerMigrations } from "./ledger-migrations";
+import { textInt } from "./perp-ledger-rules";
 
 export const PAPER_CHECKPOINT_SCHEMA = `CREATE TABLE IF NOT EXISTS paper_checkpoints (
   agent_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, cash_usdg REAL NOT NULL,
   vault_usdg REAL NOT NULL, hwm_usdg REAL NOT NULL, shares TEXT NOT NULL,
   basis_json TEXT NOT NULL, updated_at INTEGER NOT NULL
 );`;
+
+/**
+ * THE PAPER PERP BOOK RIDES THE CHECKPOINT (docs/perps.md, "Hosted"; rule 14).
+ *
+ * A paper venue has no source but this. There is no Lighter account behind a
+ * simulated position to re-read at arm, and the paper engine draws a
+ * position's margin straight out of paper cash (store.ts bookPaperPerp), so a
+ * redeploy that restored the cash and not the perps would put the agent back
+ * with the margin already gone and no position holding it — paper equity
+ * falling by the whole perp book, read by every surface as a loss.
+ *
+ * NULLABLE, like every column added to a table rows already live in: NULL is a
+ * checkpoint with no perp book (every one written before this, and every
+ * agent that never traded paper perps — every Spot agent), which restores
+ * exactly as before.
+ */
+export const PAPER_CHECKPOINT_ALTERS: readonly string[] = ["ALTER TABLE paper_checkpoints ADD COLUMN perp_json TEXT"];
+
+/** The databases whose checkpoint migration this process has run, or is running. */
+const altered = new WeakMap<Db, Promise<void>>();
+/** When each database's migration last failed: not tried again for PERP_JSON_RETRY_MS. */
+const alterFailedAt = new WeakMap<Db, number>();
+/** And why: the last failure's SQLSTATE (failureCode), for the error a paper perp book's checkpoint carries. */
+const alterFailedCode = new WeakMap<Db, string>();
+/** How long a failed perp_json migration waits before it is tried again — a mirror pass's length, about. */
+const PERP_JSON_RETRY_MS = 60_000;
+
+/**
+ * Create the checkpoint table and bring it up to date.
+ *
+ * THE MIGRATION RUNS THROUGH applyLedgerMigrations, ONCE PER DATABASE PER
+ * PROCESS, never as a bare ALTER per call. This is called on every mirror pass
+ * for every tenant, and a Postgres ADD COLUMN — IF NOT EXISTS included — takes
+ * an AccessExclusiveLock on a table every tenant upserts every fifteen
+ * seconds: issued per call, every checkpoint write and restore would queue
+ * behind it. The runner asks the catalogue first and skips a column already
+ * there, and the one ADD it does make waits a bounded time for its lock
+ * (ledger-migrations.ts ADD_COLUMN_LOCK). Concurrent passes share the one
+ * attempt. The CREATE stays per call, as it always was.
+ *
+ * A FAILED ONE HOLDS A SPOT BOOK ONCE A WINDOW AT MOST. Only a book with a
+ * paper perp book needs `perp_json`; every other checkpoint writes and
+ * restores exactly as it did before the column existed. So a migration that
+ * failed — most likely its lock held by another session, but whatever the
+ * cause, named by its SQLSTATE in the log — answers false, and is not tried
+ * again for PERP_JSON_RETRY_MS: not by the next tenant in the same pass, each
+ * of which would otherwise wait the full bounded lock wait behind the same
+ * holder. The one attempt in each window still waits that bounded wait (about
+ * 14 s on Postgres), and so does a checkpoint running beside it. The callers
+ * decide: the mirror writes a book without perps the old way and fails only a
+ * book that has some, naming the same code; the restore reads either shape.
+ * True once the column is there.
+ */
+export async function ensurePaperCheckpointSchema(db: Db): Promise<boolean> {
+  await db.exec(PAPER_CHECKPOINT_SCHEMA);
+  let done = altered.get(db);
+  if (!done) {
+    const failedAt = alterFailedAt.get(db);
+    if (failedAt !== undefined && Date.now() - failedAt < PERP_JSON_RETRY_MS) return false;
+    done = applyLedgerMigrations(db, PAPER_CHECKPOINT_ALTERS).catch((e: unknown) => {
+      altered.delete(db);
+      alterFailedAt.set(db, Date.now());
+      alterFailedCode.set(db, failureCode(e));
+      throw e;
+    });
+    altered.set(db, done);
+  }
+  try {
+    await done;
+    alterFailedAt.delete(db);
+    return true;
+  } catch (e) {
+    const code = failureCode(e);
+    // A lock wait passes by itself; anything else (a missing privilege, say)
+    // will not, and a Perps book stays uncheckpointed until someone looks.
+    console.warn(code === LOCK_NOT_AVAILABLE
+      ? `[paper] paper_checkpoints.perp_json could not be added yet (${code}, its lock held elsewhere) — books without perps are checkpointed as before; tried again in ${PERP_JSON_RETRY_MS / 1000}s`
+      : `[alert] paper_checkpoints.perp_json could not be added (${code}) — not a lock wait; books without perps are checkpointed as before, paper perp books are not; tried again in ${PERP_JSON_RETRY_MS / 1000}s`);
+    return false;
+  }
+}
+
+const LOCK_NOT_AVAILABLE = "55P03";
+
+/** A failure's SQLSTATE, which never quotes table contents, or its class name. */
+function failureCode(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : e instanceof Error ? e.name : "Error";
+}
+
+/** One paper perp position as a checkpoint carries it. Integers are canonical decimal strings. */
+export interface PaperPerpPosition {
+  market_id: number;
+  side: "long" | "short";
+  /** venue base units, > 0 */
+  base: string;
+  /** venue price units, > 0 */
+  entry_price: string;
+  /** micro-USDG, ≥ 0 — debited from paper cash when the position opened */
+  allocated_margin_micro: string;
+  imf_bp: number;
+  margin_mode: "isolated" | "cross";
+  realized_micro: string | null;
+  funding_micro: string | null;
+  /**
+   * The last funding hour charged, unix seconds. MANDATORY: the paper engine
+   * refuses to charge an hour at or before it (paper.ts applyPaperFunding),
+   * and that is all that stops a restored position paying the same hour twice.
+   * Every position the engine opens carries one (the hour it opened in).
+   */
+  funding_hour_applied: number;
+  /** The resting stop child, both or neither. */
+  stop_trigger: string | null;
+  stop_price: string | null;
+  /**
+   * THE LEVEL THE POSITION IS PROTECTED AT (store.ts perp_positions
+   * recorded_stop_*; paper.ts PaperPerpPosition.recordedStop), both or
+   * neither. A gapped or part-filled stop leaves the child gone and this
+   * standing; restored without it, the protective loop would re-place the
+   * stop at the settings ceiling rather than the position's own level.
+   */
+  recorded_stop_trigger: string | null;
+  recorded_stop_price: string | null;
+  /** The resting take-profit child, both or neither. */
+  take_trigger: string | null;
+  take_price: string | null;
+  opened_at: number | null;
+}
+
+/** The paper perp book: the cross collateral and every open position, from ONE read. */
+export interface PaperPerpState {
+  v: 1;
+  collateral_micro: string;
+  positions: PaperPerpPosition[];
+  /**
+   * The paper rail's nonce high-water as the book last stood (optional; absent
+   * is none). Every paper identity is derived from it — a fill's
+   * `paper:<kind>:<market>:<nonce>`, a leg's nonce × 8 + leg — and the next
+   * nonce is max(high-water + 1, now in ms) (perps/executor.ts). A restored
+   * child on a clock behind the old one would otherwise mint an identity the
+   * shared tape already holds, and the mirror's ON CONFLICT DO NOTHING would
+   * drop the real fill.
+   */
+  nonce_high_water?: string | null;
+  /**
+   * The newest perp fill or funding row of this epoch the book had booked, by
+   * its created_at (optional; absent is none). The checkpoint's own
+   * `updated_at` is paper_book's, which a funding hour never moves (funding
+   * moves a position's margin, not cash) and a liquidation that returns
+   * nothing does not move either — so it alone could not say which of the
+   * shared tape's facts this book already holds.
+   */
+  tape_at?: number | null;
+}
+
+const CANON_INT = /^-?(0|[1-9]\d*)$/;
+
+/**
+ * WHY A PAPER PERP BOOK IS REFUSED, or null. Everything a restore would write
+ * back into a book is checked here first: money and margins non-negative
+ * integers, every market one this build knows (a restored position in a
+ * market the engine cannot price is a position nobody can close), no market
+ * twice, the IMF inside the venue's own range, the funding hour present, and
+ * every trigger with its bound — stop, take and recorded stop each both or
+ * neither, because the paper engine refuses to read a position with half a
+ * pair (perps/executor.ts positionOf) and would throw on every tick.
+ */
+export function paperPerpRejection(perpJson: string | null | undefined): string | null {
+  if (perpJson === null || perpJson === undefined) return null;
+  let s: PaperPerpState;
+  try {
+    s = JSON.parse(perpJson) as PaperPerpState;
+  } catch (e) {
+    return `perp_json is unreadable (${e instanceof Error ? e.message : String(e)})`;
+  }
+  if (!s || typeof s !== "object" || Array.isArray(s)) return "perp_json is not an object";
+  if (s.v !== 1) return `perp_json version ${String(s.v)} is not one this build reads`;
+  const nonNeg = (v: unknown) => typeof v === "string" && CANON_INT.test(v) && BigInt(v) >= 0n;
+  const optNonNeg = (v: unknown) => v === null || nonNeg(v);
+  const optCount = (v: unknown) => v === null || v === undefined || (typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+  if (!nonNeg(s.collateral_micro)) return `paper perp collateral is ${String(s.collateral_micro)}, not a non-negative integer`;
+  if (s.nonce_high_water !== undefined && !optNonNeg(s.nonce_high_water)) return `paper perp nonce high-water is ${String(s.nonce_high_water)}`;
+  if (!optCount(s.tape_at)) return `paper perp tape time is ${String(s.tape_at)}`;
+  if (!Array.isArray(s.positions)) return "paper perp positions is not a list";
+  const seen = new Set<number>();
+  for (const p of s.positions) {
+    if (!p || typeof p !== "object") return "a paper perp position is not an object";
+    const id = p.market_id;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || perpMarketById(id) === null) {
+      return `paper perp market ${String(id)} is not a market this build knows`;
+    }
+    if (seen.has(id)) return `paper perp market ${id} is held twice`;
+    seen.add(id);
+    const key = perpMarketById(id)!.key;
+    if (p.side !== "long" && p.side !== "short") return `${key} side is ${String(p.side)}`;
+    if (!nonNeg(p.base) || BigInt(p.base) === 0n) return `${key} holds ${String(p.base)} base`;
+    if (!nonNeg(p.entry_price) || BigInt(p.entry_price) === 0n) return `${key} entry price is ${String(p.entry_price)}`;
+    if (!nonNeg(p.allocated_margin_micro)) return `${key} margin is ${String(p.allocated_margin_micro)}, not a non-negative integer`;
+    if (typeof p.imf_bp !== "number" || !Number.isSafeInteger(p.imf_bp) || p.imf_bp < 1 || p.imf_bp > 10_000) {
+      return `${key} imf is ${String(p.imf_bp)}`;
+    }
+    if (p.margin_mode !== "isolated" && p.margin_mode !== "cross") return `${key} margin mode is ${String(p.margin_mode)}`;
+    for (const [name, v] of [["realized", p.realized_micro], ["funding", p.funding_micro]] as const) {
+      if (v !== null && (typeof v !== "string" || !CANON_INT.test(v))) return `${key} ${name} is ${String(v)}`;
+    }
+    if (typeof p.funding_hour_applied !== "number" || !Number.isSafeInteger(p.funding_hour_applied) || p.funding_hour_applied < 0) {
+      return `${key} funding hour is ${String(p.funding_hour_applied)}: a restored position without it would pay an hour it already paid`;
+    }
+    for (const [name, trigger, bound] of [
+      ["stop", p.stop_trigger, p.stop_price],
+      ["recorded stop", p.recorded_stop_trigger, p.recorded_stop_price],
+      ["take", p.take_trigger, p.take_price],
+    ] as const) {
+      // `undefined` is a key the book never wrote: not a null, refused like any other unreadable value.
+      if (!optNonNeg(trigger) || !optNonNeg(bound)) return `${key} ${name} is ${String(trigger)} / ${String(bound)}`;
+      if ((trigger === null) !== (bound === null)) return `${key} ${name} has half a pair (trigger ${String(trigger)}, bound ${String(bound)})`;
+    }
+    if (p.opened_at !== null && (typeof p.opened_at !== "number" || !Number.isSafeInteger(p.opened_at) || p.opened_at < 0)) {
+      return `${key} opened at is ${String(p.opened_at)}`;
+    }
+  }
+  return null;
+}
+
+/** Is there a table by that name in this child's sqlite? A child from before perps has none of them. */
+async function childHasTable(db: Db, name: string): Promise<boolean> {
+  return (await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name)) !== undefined;
+}
+
+/**
+ * THE PAPER PERP BOOK OF ONE AGENT, read on the caller's handle — which is the
+ * paper_book snapshot's transaction, so the collateral, the positions, the
+ * high-water and the cash beside them are one instant (a book read between a
+ * fill's cash write and its position write would restore money that is in
+ * two places, or none). Null when the agent has no paper perp book at all —
+ * every Spot agent, whose perp tables are there and empty.
+ *
+ * A collateral that was never set is '0' only when nothing is open: margin
+ * against positions with no collateral row is not a book, and is carried as
+ * such (null) for the check to refuse.
+ */
+export async function readPaperPerpState(db: Db, account: string, epoch: number): Promise<string | null> {
+  if (!(await childHasTable(db, "perp_accounts")) || !(await childHasTable(db, "perp_positions"))) return null;
+  const acct = (await db
+    .prepare(`SELECT paper_collateral_micro, nonce_high_water FROM perp_accounts WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`)
+    .get(account)) as { paper_collateral_micro: string | null; nonce_high_water: string | null } | undefined;
+  // SELECT *: a book an earlier build made may lack the recorded-stop columns,
+  // and a column that is not there is a level that was never recorded.
+  const rows = (await db
+    .prepare(`SELECT * FROM perp_positions WHERE LOWER(agent_id)=LOWER(?) AND mode='paper' AND base <> '0' ORDER BY market_id ASC`)
+    .all(account)) as Record<string, unknown>[];
+  if (!acct && rows.length === 0) return null;
+  const collateral = acct?.paper_collateral_micro ?? (rows.length === 0 ? "0" : null);
+  let tapeAt: number | null = null;
+  for (const table of ["perp_fills", "perp_funding"] as const) {
+    if (!(await childHasTable(db, table))) continue;
+    const r = (await db
+      .prepare(`SELECT MAX(created_at) AS at FROM ${table} WHERE LOWER(agent_id)=LOWER(?) AND mode='paper' AND epoch=?`)
+      .get(account, epoch)) as { at: unknown } | undefined;
+    if (r?.at !== null && r?.at !== undefined) tapeAt = Math.max(tapeAt ?? 0, Number(r.at));
+  }
+  const str = (v: unknown) => (v === null || v === undefined ? null : String(v));
+  const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+  const state = {
+    v: 1,
+    collateral_micro: collateral,
+    nonce_high_water: str(acct?.nonce_high_water),
+    tape_at: tapeAt,
+    positions: rows.map((r) => ({
+      market_id: Number(r.market_id),
+      side: r.side,
+      base: str(r.base),
+      entry_price: str(r.entry_price),
+      allocated_margin_micro: str(r.allocated_margin_micro),
+      imf_bp: num(r.imf_bp),
+      margin_mode: r.margin_mode,
+      realized_micro: str(r.realized_micro),
+      funding_micro: str(r.funding_micro),
+      funding_hour_applied: num(r.funding_hour_applied),
+      stop_trigger: str(r.stop_trigger),
+      stop_price: str(r.stop_price),
+      recorded_stop_trigger: str(r.recorded_stop_trigger),
+      recorded_stop_price: str(r.recorded_stop_price),
+      take_trigger: str(r.take_trigger),
+      take_price: str(r.take_price),
+      opened_at: num(r.opened_at),
+    })),
+  };
+  return JSON.stringify(state);
+}
+
+/**
+ * Write a validated paper perp book into a child's ledger, inside the
+ * restore's transaction.
+ *
+ * Its rows are stamped NOW (unixepoch), not with the checkpoint's time: the
+ * restored book IS the rail's newest word, and the mirror's newer-wins copy
+ * and its flatten-on-evidence both read the stamp — so a stale shared
+ * position the restored book does not hold goes flat on the next pass, and
+ * the restored rows replace the shared ones rather than losing to them.
+ *
+ * THE HIGH-WATER ONLY RISES: the larger of the checkpoint's and whatever this
+ * ledger already holds. One already there that cannot be read refuses the
+ * restore — guessing it low is exactly how an identity gets minted twice.
+ */
+async function writePaperPerpState(db: Db, account: string, perpJson: string): Promise<void> {
+  const s = JSON.parse(perpJson) as PaperPerpState;
+  const agent = account.toLowerCase();
+  const held = (await db.prepare(`SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'`).get(agent)) as
+    | { nonce_high_water: string | null }
+    | undefined;
+  const heldHigh = held?.nonce_high_water === null || held?.nonce_high_water === undefined ? null : textInt(held.nonce_high_water);
+  if (held?.nonce_high_water != null && heldHigh === null) throw new Error(`the paper nonce high-water ${held.nonce_high_water} is unreadable`);
+  const carried = s.nonce_high_water === null || s.nonce_high_water === undefined ? null : textInt(s.nonce_high_water);
+  const high = carried === null ? heldHigh : heldHigh === null || carried > heldHigh ? carried : heldHigh;
+  await db
+    .prepare(
+      `INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro, nonce_high_water) VALUES (?, 'paper', ?, ?)
+       ON CONFLICT(agent_id, mode) DO UPDATE SET paper_collateral_micro = excluded.paper_collateral_micro,
+         nonce_high_water = excluded.nonce_high_water, updated_at = unixepoch()`,
+    )
+    .run(agent, s.collateral_micro, high === null ? null : high.toString());
+  await db.prepare(`DELETE FROM perp_positions WHERE agent_id = ? AND mode = 'paper'`).run(agent);
+  for (const p of s.positions) {
+    await db
+      .prepare(
+        `INSERT INTO perp_positions (agent_id, mode, market_id, side, base, entry_price, allocated_margin_micro, imf_bp,
+                                     margin_mode, realized_micro, funding_micro, stop_trigger, stop_price,
+                                     recorded_stop_trigger, recorded_stop_price, take_trigger, take_price,
+                                     funding_hour_applied, opened_at, updated_at, source)
+         VALUES (?, 'paper', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), 'paper')`,
+      )
+      .run(agent, p.market_id, p.side, p.base, p.entry_price, p.allocated_margin_micro, p.imf_bp, p.margin_mode,
+        p.realized_micro, p.funding_micro, p.stop_trigger, p.stop_price, p.recorded_stop_trigger, p.recorded_stop_price,
+        p.take_trigger, p.take_price, p.funding_hour_applied, p.opened_at);
+  }
+}
+
+/**
+ * The paper perp facts of one epoch the SHARED tape holds past `at` — fills
+ * and funding, the two that move a paper book's money — by created_at, the
+ * child's own stamp the mirror copies as written. `strict`: past it
+ * (`>`), the checkpoint path, whose book holds everything up to and including
+ * its own time; otherwise at or past it (`>=`), the upgrade path, whose mark
+ * holds nothing booked in its own second. A shared database without the perp
+ * tables yet holds no such row, and its absence is asked of the catalogue,
+ * never learned from a failed read. Every perp writer, and the mirror, store
+ * the account lowercased, so the account is matched as it is stored.
+ */
+async function laterPaperPerpFacts(db: Db, account: string, epoch: number, at: number, strict: boolean): Promise<number> {
+  let n = 0;
+  for (const table of ["perp_fills", "perp_funding"] as const) {
+    if (!(await tablePresent(db, table))) continue;
+    const r = (await db
+      .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE agent_id = ? AND mode = 'paper' AND epoch = ? AND created_at ${strict ? ">" : ">="} ?`)
+      .get(account.toLowerCase(), epoch, at)) as { n: unknown } | undefined;
+    n += Number(r?.n ?? 0);
+  }
+  return n;
+}
 
 export async function recordPaperRecoveryHealth(db:Db,account:string,blocked:boolean):Promise<void> {
   await db.exec(`CREATE TABLE IF NOT EXISTS paper_recovery_health (
@@ -15,7 +378,8 @@ export async function recordPaperRecoveryHealth(db:Db,account:string,blocked:boo
     .run(account.toLowerCase(),blocked?1:0,Math.floor(Date.now()/1000));
 }
 
-type Checkpoint = {agent_id:string; epoch:number; cash_usdg:number; vault_usdg:number; hwm_usdg:number; shares:string; basis_json:string; updated_at:number};
+/** `perp_json` is optional in the type because every checkpoint from before perps lacks it; absent and NULL read alike. */
+type Checkpoint = {agent_id:string; epoch:number; cash_usdg:number; vault_usdg:number; hwm_usdg:number; shares:string; basis_json:string; updated_at:number; perp_json?: string | null};
 type Basis = {symbol:string; qty_raw:string; cost_usdg:string};
 
 /**
@@ -159,7 +523,9 @@ export function multipliersFrom(rows: readonly Record<string, unknown>[]): Multi
  * into an investigation.
  *
  * The RULES ARE UNCHANGED — every clause accepts and rejects exactly what it
- * did before. Only the answer got wider.
+ * did before. Only the answer got wider. The one clause added since is the
+ * paper perp book's (paperPerpRejection), which a checkpoint without one —
+ * every Spot agent's — passes as it always did.
  */
 export function paperCheckpointRejection(row: Checkpoint, multiplierOf: MultiplierOf = ONE): string | null {
   try {
@@ -191,7 +557,9 @@ export function paperCheckpointRejection(row: Checkpoint, multiplierOf: Multipli
       if (BigInt(b.qty_raw)<0n || BigInt(b.cost_usdg)<0n) return `${b.symbol} basis is negative`;
       if (!shares[b.symbol] && BigInt(b.qty_raw)!==0n) return `${b.symbol} has basis for ${b.qty_raw} raw but is not held`;
     }
-    return null;
+    // THE PAPER PERP BOOK, by the same standard: a restore point it cannot
+    // write back whole is not a restore point. NULL is no perp book.
+    return paperPerpRejection(row.perp_json);
   } catch (e) { return `unreadable (${e instanceof Error ? e.message : String(e)})`; }
 }
 
@@ -216,10 +584,15 @@ async function multipliersFor(db: Db, account: string): Promise<MultiplierOf> {
 
 export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<number> {
   if (!await child.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='paper_book'").get()) return 0;
-  await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+  const withPerps = await ensurePaperCheckpointSchema(shared);
   const snapshots = await child.tx(async db => {
     const books = await db.prepare(`SELECT p.*, a.epoch FROM paper_book p JOIN agents a ON LOWER(a.smart_account)=LOWER(p.agent_id)`).all() as Checkpoint[];
-    for (const book of books) book.basis_json = JSON.stringify(await db.prepare(`SELECT symbol, qty_raw, cost_usdg FROM cost_basis WHERE agent_id=? AND mode='paper'`).all(book.agent_id));
+    for (const book of books) {
+      book.basis_json = JSON.stringify(await db.prepare(`SELECT symbol, qty_raw, cost_usdg FROM cost_basis WHERE agent_id=? AND mode='paper'`).all(book.agent_id));
+      // IN THE SAME TRANSACTION as the cash and shares above, so the paper
+      // perp book is the same instant as the spot book it sits beside.
+      book.perp_json = await readPaperPerpState(db, book.agent_id, Number(book.epoch));
+    }
     return books;
   });
   let count=0;
@@ -238,11 +611,30 @@ export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<numbe
     // The durable row is written in today's units, so a restore from it never
     // carries a legacy basis back into a book (see normalizedBasis).
     b.basis_json = JSON.stringify(normalizedBasis(b.shares, b.basis_json, multiplierOf).basis);
-    await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at)
-      VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET epoch=excluded.epoch,cash_usdg=excluded.cash_usdg,
-      vault_usdg=excluded.vault_usdg,hwm_usdg=excluded.hwm_usdg,shares=excluded.shares,basis_json=excluded.basis_json,updated_at=excluded.updated_at
+    // WITHOUT THE COLUMN (its migration waiting on a lock): a book with no
+    // perps is written exactly as before the column existed; one with perps
+    // is not written at all this pass, and its tenant's mirror says so.
+    if (!withPerps) {
+      if (b.perp_json !== null && b.perp_json !== undefined)
+        throw new Error(`paper_checkpoints.perp_json is not there yet (${alterFailedCode.get(shared) ?? "unknown"}); this paper perp book is checkpointed once it is`);
+      await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET epoch=excluded.epoch,cash_usdg=excluded.cash_usdg,
+        vault_usdg=excluded.vault_usdg,hwm_usdg=excluded.hwm_usdg,shares=excluded.shares,basis_json=excluded.basis_json,updated_at=excluded.updated_at
+        WHERE excluded.epoch > paper_checkpoints.epoch OR (excluded.epoch=paper_checkpoints.epoch AND excluded.updated_at>=paper_checkpoints.updated_at)`)
+        .run(b.agent_id,b.epoch,b.cash_usdg,b.vault_usdg,b.hwm_usdg,b.shares,b.basis_json,b.updated_at);
+      count++;
+      continue;
+    }
+    // perp_json travels with the rest of the row and is replaced with it —
+    // including by NULL, because a newer book with no paper perp book is a
+    // book whose perps are gone, and keeping the older ones would resurrect
+    // them.
+    await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at,perp_json)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET epoch=excluded.epoch,cash_usdg=excluded.cash_usdg,
+      vault_usdg=excluded.vault_usdg,hwm_usdg=excluded.hwm_usdg,shares=excluded.shares,basis_json=excluded.basis_json,updated_at=excluded.updated_at,
+      perp_json=excluded.perp_json
       WHERE excluded.epoch > paper_checkpoints.epoch OR (excluded.epoch=paper_checkpoints.epoch AND excluded.updated_at>=paper_checkpoints.updated_at)`)
-      .run(b.agent_id,b.epoch,b.cash_usdg,b.vault_usdg,b.hwm_usdg,b.shares,b.basis_json,b.updated_at);
+      .run(b.agent_id,b.epoch,b.cash_usdg,b.vault_usdg,b.hwm_usdg,b.shares,b.basis_json,b.updated_at,b.perp_json ?? null);
     count++;
   }
   return count;
@@ -268,9 +660,38 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
       return `local book retained${saidNormalized(normalized)}`;
     } catch { return 'local book retained'; }
   }
-  await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+  await ensurePaperCheckpointSchema(shared);
   let row = await shared.prepare(`SELECT p.* FROM paper_checkpoints p JOIN agents a ON LOWER(a.smart_account)=LOWER(p.agent_id)
     WHERE LOWER(p.agent_id)=LOWER(?) AND p.epoch=a.epoch`).get(account) as Checkpoint | undefined;
+  /** Set when the upgrade path had to close paper perps into collateral; said in the result. */
+  let foldedPerps = false;
+  /**
+   * THE INSTANT THE BOOK BEING RESTORED STANDS AT: the checkpoint's own time,
+   * or the newest perp fact its perp book had booked, whichever is later (see
+   * PaperPerpState.tape_at for why the first alone is not enough).
+   */
+  let bookAt = 0;
+  if (row) {
+    // A CHECKPOINT OLDER THAN THE SHARED PERP TAPE IS NOT A RESTORE POINT.
+    // Within one mirror pass the perp tape is copied BEFORE the snapshot
+    // block that writes this row, so a pass whose snapshot failed after its
+    // perp copy, and then a lost home, leaves a checkpoint from before a fill
+    // the shared tape already holds — a close, say. Restored, the book would
+    // reopen a position the tape shows closed, and the second close a
+    // restored child then books is a second closing fill under a new id:
+    // shared realized P&L counting the close twice. A Spot agent's tape is
+    // empty and passes as before. (Same-second facts stay indistinguishable
+    // by stamps alone; the identities they carry are the backstop.)
+    let tapeAt = 0;
+    try {
+      const s = row.perp_json ? (JSON.parse(row.perp_json) as PaperPerpState) : null;
+      if (typeof s?.tape_at === "number" && Number.isSafeInteger(s.tape_at)) tapeAt = s.tape_at;
+    } catch { /* unreadable: paperCheckpointRejection, below, refuses the row */ }
+    bookAt = Math.max(Number(row.updated_at), tapeAt);
+    if ((await laterPaperPerpFacts(shared, account, Number(row.epoch), bookAt, true)) > 0) {
+      throw new Error("paper perp fills or funding are newer than the durable checkpoint");
+    }
+  }
   /**
    * READ ONCE, FOR BOTH PATHS, AND FROM THE SHARED BOOK ON PURPOSE.
    *
@@ -291,6 +712,14 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     const later = await shared.prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND status='paper' AND created_at>=?`)
       .get(account,Number(mark.epoch),Number(mark.at)) as {n:number};
     if (Number(later.n)>0) throw new Error('paper fills are newer than the recoverable valuation');
+    // AND THE PAPER PERP BOOK'S OWN FACTS, which are never trades rows (the
+    // trades boundary, store.ts PERP_LEDGER_DDL): a paper perp fill or funding
+    // charge at or after the mark moved money the mark does not hold, exactly
+    // as a spot fill would. A shared database with no perp tables yet holds
+    // no such rows.
+    if ((await laterPaperPerpFacts(shared, account, Number(mark.epoch), Number(mark.at), false)) > 0) {
+      throw new Error('paper perp fills or funding are newer than the recoverable valuation');
+    }
     /**
      * ── THE CHECK THAT USED TO BE HERE, AND WHY IT COULD NEVER PASS ──────
      *
@@ -331,8 +760,33 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     const positions = await shared.prepare(`SELECT symbol,token,raw_balance,value_usdg FROM positions WHERE LOWER(agent_id)=LOWER(?)`).all(account) as Record<string,unknown>[];
     const value = positions.reduce((sum,p)=>sum+Number(p.value_usdg),0);
     if (!Number.isFinite(value)) throw new Error(`paper positions do not value (positions=${positions.length})`);
-    const markDelta = Number(mark.cash_usdg)+Number(mark.vault_usdg)+Number(mark.positions_usdg)-Number(mark.equity_usdg);
-    if (Math.abs(markDelta)>MARK_TOLERANCE_USDG) throw new Error(`the recoverable valuation does not add up (cash+vault+positions-equity=${markDelta})`);
+    /**
+     * THE PERP TERM OF THE SAME ROW (rule 12): C + ΣM + ΣU + T, written beside
+     * the total by addEquity and mirrored with it (ledger-mirror.ts, the
+     * equity entry's `optional`). NULL is a mark that carried no perp term —
+     * every row from before perps, and every Spot agent's — and contributes
+     * nothing, so for them this identity is exactly the one it always was. An
+     * unreadable value is a row that cannot be checked, and refuses. Without
+     * this the identity would refuse every paper agent whose last mark held a
+     * perp book: the agent-held-on-every-pass failure this path exists to end.
+     */
+    const perpTerm = (col: string): bigint => {
+      const v = mark[col];
+      if (v === null || v === undefined) return 0n;
+      const b = textInt(v);
+      if (b === null) throw new Error(`the recoverable valuation's ${col} (${String(v)}) is unreadable`);
+      return b;
+    };
+    const perpMicro =
+      perpTerm('perp_collateral_micro') + perpTerm('perp_isolated_margin_micro') + perpTerm('perp_unrealized_micro') + perpTerm('perp_in_transit_micro');
+    const gainMicro = perpTerm('perp_unrealized_gain_micro');
+    const markDelta = Number(mark.cash_usdg)+Number(mark.vault_usdg)+Number(mark.positions_usdg)+Number(perpMicro)/1e6-Number(mark.equity_usdg);
+    if (Math.abs(markDelta)>MARK_TOLERANCE_USDG) {
+      throw new Error(perpMicro === 0n
+        ? `the recoverable valuation does not add up (cash+vault+positions-equity=${markDelta})`
+        : `the recoverable valuation does not add up (cash+vault+positions+perps-equity=${markDelta})`);
+    }
+    if (perpMicro < 0n) throw new Error(`the recoverable valuation's paper perp book is negative (${perpMicro} micro)`);
     /**
      * SPLIT-INVARIANT, LIKE THE BOOK THIS IS RESTORING INTO — AND A PAPER
      * `raw_balance` ALREADY IS.
@@ -350,7 +804,23 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
       return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18}];
     }));
     const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
-    const peak=await shared.prepare(`SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`).get(account,Number(mark.epoch)) as {peak:number};
+    const peak = await paperPeakBasis(shared, account, Number(mark.epoch));
+    /**
+     * A PAPER PERP BOOK THIS PATH CANNOT RESTORE WHOLE IS CLOSED AT THE MARK.
+     *
+     * An equity row carries the perp book's value, not its positions, so the
+     * positions themselves are not recoverable from here. The two other
+     * answers are both worse: dropping the book loses its whole value from a
+     * book the owner can see, and refusing leaves a paper agent that is never
+     * started — and so can never be reset — for as long as the row stands.
+     * Folding every paper position into collateral at the very mark whose
+     * identity was just checked keeps paper equity exactly what the ledger
+     * last recorded, and the result says it happened. It is paper money, and
+     * only this path — which an agent with a sound checkpoint for its epoch
+     * never takes.
+     */
+    const perpJson = perpMicro > 0n ? JSON.stringify({ v: 1, collateral_micro: perpMicro.toString(), positions: [] }) : null;
+    foldedPerps = perpJson !== null;
     /**
      * THE HIGH-WATER MARK TAKES TODAY'S VALUATION TOO.
      *
@@ -360,22 +830,94 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
      * and it is what the fee and the drawdown breaker are judged against, so
      * leaving a real rise out would let a fee accrue on a gain that was never
      * realised. All three candidates, and the largest wins.
+     *
+     * EACH ON THE PEAK BASIS (rule 12): equity less the positive unrealized
+     * perp P&L it held, per position, so a wick that reverted can never have
+     * lifted the paper peak. For a row with no perp term it is the equity
+     * itself, exactly as before. Today's candidate includes the folded perp
+     * book, which is now collateral and no longer unrealized.
      */
-    row={agent_id:account,epoch:Number(mark.epoch),cash_usdg:Number(mark.cash_usdg),vault_usdg:Number(mark.vault_usdg),hwm_usdg:Math.max(Number(mark.equity_usdg),Number(peak.peak),Number(mark.cash_usdg)+Number(mark.vault_usdg)+value),shares:JSON.stringify(shares),basis_json:JSON.stringify(basis.filter(b=>shares[b.symbol])),updated_at:Number(mark.at)};
+    const hwm = Math.max(
+      Number(mark.equity_usdg) - Number(gainMicro) / 1e6,
+      peak,
+      Number(mark.cash_usdg) + Number(mark.vault_usdg) + value + Number(perpMicro) / 1e6,
+    );
+    row={agent_id:account,epoch:Number(mark.epoch),cash_usdg:Number(mark.cash_usdg),vault_usdg:Number(mark.vault_usdg),hwm_usdg:hwm,shares:JSON.stringify(shares),basis_json:JSON.stringify(basis.filter(b=>shares[b.symbol])),updated_at:Number(mark.at),perp_json:perpJson};
+    bookAt = Number(mark.at);
   }
   const why = paperCheckpointRejection(row, multiplierOf);
   if (why) throw new Error(`invalid paper checkpoint: ${why}`);
   // Restored in today's units, so the book comes back with basis == shares and
   // stays so through every later fill (see normalizedBasis).
   const { basis, normalized } = normalizedBasis(row.shares, row.basis_json, multiplierOf);
+  const restored = row;
   await child.tx(async db=>{
+    // paper_book's time is the instant the restored book stands at (bookAt):
+    // the checkpoint this book writes next must claim at least what this one
+    // held, or a funding hour booked before the restore would read as newer
+    // than it and refuse the next restore. For a book with no perps it is the
+    // checkpoint's own time, as it always was.
     await db.prepare(`INSERT INTO paper_book(agent_id,cash_usdg,vault_usdg,hwm_usdg,shares,updated_at) VALUES(?,?,?,?,?,?)`)
-      .run(account,row.cash_usdg,row.vault_usdg,row.hwm_usdg,row.shares,row.updated_at);
+      .run(account,restored.cash_usdg,restored.vault_usdg,restored.hwm_usdg,restored.shares,bookAt);
     await db.prepare("DELETE FROM cost_basis WHERE agent_id=? AND mode='paper'").run(account);
     for(const b of basis) await db.prepare(`INSERT INTO cost_basis(agent_id,mode,symbol,qty_raw,cost_usdg,updated_at) VALUES(?,'paper',?,?,?,?)`)
-      .run(account,b.symbol,b.qty_raw,b.cost_usdg,row.updated_at);
+      .run(account,b.symbol,b.qty_raw,b.cost_usdg,restored.updated_at);
+    // THE PAPER PERP BOOK, in the same transaction as the cash it was drawn
+    // from: half a book restored is a book whose money is in two places.
+    if (restored.perp_json !== null && restored.perp_json !== undefined) {
+      await writePaperPerpState(db, account, restored.perp_json);
+    }
   });
-  return `paper cash, holdings and basis restored${saidNormalized(normalized)}`;
+  const perpNote = foldedPerps
+    ? ' — paper perps at that valuation were closed into paper collateral at its own mark'
+    : restored.perp_json ? ', with the paper perp book' : '';
+  return `paper cash, holdings and basis restored${saidNormalized(normalized)}${perpNote}`;
+}
+
+/**
+ * THE PAPER PEAK OF AN EPOCH, ON THE PEAK BASIS: the highest equity less the
+ * positive unrealized perp P&L that row held (rule 12 — every peak, the paper
+ * peak included, ratchets on what is real). A row with no perp term (NULL) is
+ * its own equity, so for every Spot agent this is MAX(equity_usdg), as it was.
+ *
+ * Postgres: equity_usdg is double precision, and BIGINT ÷ 1000000.0 is
+ * numeric; the explicit cast keeps the whole expression double precision
+ * rather than leaning on an implicit numeric-to-float conversion.
+ *
+ * Only for a shared database whose equity table predates the perp columns
+ * does it fall back to the plain maximum — asked of the catalogue, never
+ * learned from a failed read — and there no row can have held a perp gain to
+ * subtract, so the answer is the same.
+ */
+async function paperPeakBasis(db: Db, account: string, epoch: number): Promise<number> {
+  const gain = await equityColumnPresent(db, "perp_unrealized_gain_micro");
+  const r = (await db
+    .prepare(
+      gain
+        ? `SELECT MAX(equity_usdg - CAST(COALESCE(CAST(perp_unrealized_gain_micro AS BIGINT), 0) AS DOUBLE PRECISION) / 1000000.0) AS peak
+             FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`
+        : `SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`,
+    )
+    .get(account, epoch)) as { peak: number | null } | undefined;
+  return Number(r?.peak ?? 0);
+}
+
+/**
+ * Does the shared `equity` table have this column? Postgres's catalogue
+ * first, as ledger-migrations.ts reads it; only SQLite's own absence of that
+ * catalogue selects SQLite's.
+ */
+async function equityColumnPresent(db: Db, column: string): Promise<boolean> {
+  try {
+    return !!(await db
+      .prepare(`SELECT 1 AS x FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+                 WHERE c.relname = 'equity' AND a.attname = ? AND a.attnum > 0 AND NOT a.attisdropped
+                   AND c.relkind IN ('r', 'p') AND pg_table_is_visible(c.oid)`)
+      .get(column));
+  } catch (e) {
+    if (!/^no such table: pg_catalog\.pg_attribute$/i.test((e as Error)?.message ?? "")) throw e;
+    return !!(await db.prepare("SELECT 1 AS x FROM pragma_table_info('equity') WHERE name = ?").get(column));
+  }
 }
 
 /**
@@ -417,6 +959,9 @@ export type BlockedBookReset = { ok: true; epoch: number } | { ok: false; why: s
  *   left behind, one missed checkpoint in the new epoch would restore the old
  *   book's shares beside the new book's cash. A live basis is another book
  *   (the primary key has a mode) and is never touched.
+ * - the PAPER perp book: its positions deleted and its collateral a read '0',
+ *   as resetPaperLedger leaves the worker's own. The live rail is never
+ *   touched.
  *
  * "NOTHING FILED UNDER" IS NOT ALWAYS epoch + 1. The mirror copies the append-
  * only tables before the agents row, so a pass that failed between the two,
@@ -456,12 +1001,22 @@ export async function resetBlockedPaperBookIn(db: Db, account: string, observedE
   if (agent.mode === "live") return { ok: false, why: "the agent last reported the live rail" };
   const mark = await db.prepare(`SELECT mode FROM equity WHERE LOWER(agent_id)=LOWER(?) ORDER BY at DESC, id DESC LIMIT 1`).get(account) as { mode: string | null } | undefined;
   if (mark?.mode !== "paper") return { ok: false, why: mark ? `the newest valuation is not a paper one (${String(mark.mode)})` : "there is no valuation to show the book is a paper one" };
+  // THE PERP TAPE FILES UNDER EPOCHS TOO, and the mirror copies it before the
+  // agents row exactly as it copies the tables above — the same "a step
+  // ahead" case. Each perp table is asked of the catalogue first: the caller
+  // holds a transaction, and on Postgres a read of a table that is not there
+  // would abort it.
+  const perpFiled: string[] = [];
+  for (const table of ["perp_fills", "perp_funding", "perp_carries", "perp_orders", "perp_transfers"] as const) {
+    if (await tablePresent(db, table)) perpFiled.push(table);
+  }
   const top = await db.prepare(`SELECT MAX(e) AS top FROM (
       SELECT MAX(epoch) AS e FROM equity WHERE LOWER(agent_id)=LOWER(?)
       UNION ALL SELECT MAX(epoch) AS e FROM trades WHERE LOWER(agent_id)=LOWER(?)
       UNION ALL SELECT MAX(epoch) AS e FROM flows WHERE LOWER(agent_id)=LOWER(?)
-      UNION ALL SELECT MAX(epoch) AS e FROM paper_checkpoints WHERE LOWER(agent_id)=LOWER(?)
-    ) filed`).get(account, account, account, account) as { top: number | string | null } | undefined;
+      UNION ALL SELECT MAX(epoch) AS e FROM paper_checkpoints WHERE LOWER(agent_id)=LOWER(?)${
+        perpFiled.map((t) => `\n      UNION ALL SELECT MAX(epoch) AS e FROM ${t} WHERE LOWER(agent_id)=LOWER(?)`).join("")}
+    ) filed`).get(account, account, account, account, ...perpFiled.map(() => account)) as { top: number | string | null } | undefined;
   const filed = Number(top?.top ?? 0);
   const epoch = Math.max(observedEpoch, Number.isFinite(filed) ? filed : 0) + 1;
   const moved = await db.prepare(`UPDATE agents SET epoch=? WHERE LOWER(smart_account)=LOWER(?) AND epoch=?`).run(epoch, account, observedEpoch);
@@ -469,5 +1024,20 @@ export async function resetBlockedPaperBookIn(db: Db, account: string, observedE
   await db.prepare(`DELETE FROM positions WHERE LOWER(agent_id)=LOWER(?)`).run(account);
   await db.prepare(`DELETE FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
   await db.prepare(`DELETE FROM position_floors WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
+  // AND THE PAPER PERP BOOK, which the worker's own reset clears with the
+  // cash (store.ts resetPaperLedger): the paper positions go, and the paper
+  // collateral goes to a READ '0' (never NULL, which a checkpoint reads as a
+  // torn book). Left here, the old open positions would stand in the shared
+  // book until the new child first writes its account row. The nonce
+  // high-water stays: it only ever rises, across a reset too. The live rail
+  // is another book and is never touched; the old checkpoint's perp_json is
+  // already out of reach, since a restore reads only the agent's own epoch.
+  if (await tablePresent(db, "perp_positions")) {
+    await db.prepare(`DELETE FROM perp_positions WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
+  }
+  if (await tablePresent(db, "perp_accounts")) {
+    await db.prepare(`UPDATE perp_accounts SET paper_collateral_micro='0', updated_at=? WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`)
+      .run(Math.floor(Date.now() / 1000), account);
+  }
   return { ok: true, epoch };
 }

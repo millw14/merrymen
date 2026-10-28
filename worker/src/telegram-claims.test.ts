@@ -418,7 +418,7 @@ describe("the orchestrator asks the claims on every path that writes a settings.
   it("THE SPAWN PATH IS GATED: spawnChild writes the settings with no pass, before a hold or a worker starts", () => {
     const fn = body("async function spawnChild(");
     const write = fn.indexOf("const settings = await writeSettingsForChild(tenant);");
-    const hold = fn.indexOf("await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour);");
+    const hold = fn.indexOf("await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour, resume.registered ? resume.generation : undefined);");
     const start = fn.indexOf("proc = spawn(");
     assert.ok(write > 0 && hold > write, "a hold is started with the gated settings");
     assert.ok(start > hold, "and a worker only after them");

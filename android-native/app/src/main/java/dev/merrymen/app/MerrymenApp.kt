@@ -5,8 +5,10 @@ import dev.merrymen.app.data.ChatThread
 import dev.merrymen.app.data.GroupChatRoom
 import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.data.Repository
+import dev.merrymen.app.data.PublicDirectory
 import dev.merrymen.app.data.Social
 import dev.merrymen.app.net.CookieStores
+import dev.merrymen.app.net.AndroidOAuthReturns
 import dev.merrymen.app.net.DeviceCookies
 import dev.merrymen.app.net.Http
 import dev.merrymen.app.net.MerrymenApi
@@ -17,6 +19,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -89,6 +92,7 @@ class AppGraph(
   // background) is asked again instead of showing "Can't reach merrymen".
   val api = MerrymenApi(http, store, recoverReads = true)
   val social = Social(api)
+  val publicDirectory = PublicDirectory(api)
 
   /**
    * THE GROUP CHAT, ONE ROOM FOR THE PROCESS. Held here rather than by the
@@ -100,6 +104,8 @@ class AppGraph(
   val groupChat = GroupChatRoom(api, appScope)
 
   val repo = Repository(api, store, cookies).also { repo ->
+    repo.addForgetHook { publicDirectory.forgetIfMoved() }
+    repo.addForgetHook { AndroidOAuthReturns.cancel() }
     // Likes and follows are per-wallet facts and must not outlive the wallet
     // they belong to — on sign-out, when another wallet signs in, or when the
     // app moves to another server.
@@ -123,7 +129,21 @@ class AppGraph(
    * sending it again. Identity asked again after a failed start is
    * Repository.askUntilKnown's job, not this one's.
    */
-  private val start = appScope.async(start = CoroutineStart.LAZY) { repo.bootstrap() }
+  private val localReady = CompletableDeferred<Unit>()
+  private val start = appScope.async(start = CoroutineStart.LAZY) {
+    try {
+      repo.bootstrap { localReady.complete(Unit) }
+    } catch (failure: Throwable) {
+      localReady.completeExceptionally(failure)
+      throw failure
+    }
+  }
+
+  /** Only local credential migration gates public screens, never a network read. */
+  suspend fun locallyReady() {
+    start.start()
+    localReady.await()
+  }
 
   /** The one start's answer, running it the first time it is asked for. */
   suspend fun started(): Loaded<Unit> = start.await()
@@ -141,9 +161,12 @@ class AppContainer(app: Application) {
   val social = graph.social
   val repo = graph.repo
   val groupChat = graph.groupChat
+  val publicDirectory = graph.publicDirectory
 
   /** The start, once per process. See [AppGraph.started]. */
   suspend fun started(): Loaded<Unit> = graph.started()
+
+  suspend fun locallyReady() = graph.locallyReady()
 
   /** The app-wide chat thread. Registers its own forget hook. */
   val chat = ChatThread(app, api, repo, appScope)

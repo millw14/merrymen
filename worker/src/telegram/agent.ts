@@ -28,12 +28,14 @@
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { solanaSecretIn, solanaSecretsIn, type SecretScanBudget } from "../../../packages/core/src/ids";
 import { llmAgentTurn, type AgentMsg, type LlmCreds, type ToolSpec } from "../llm";
 import * as pcp from "../pc/platform";
 import { sendDocument, sendPhoto, type TelegramOpts } from "./api";
 import { resolveInRoot, shellAllowed } from "./pc";
 import { getName } from "../soul";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
+import { errorText, redactUrls } from "../redact-urls";
 
 // ── pure guards (unit-tested directly) ───────────────────────────────────────
 
@@ -93,7 +95,10 @@ export function isDestructive(cmd: string): boolean {
 /** Secret-bearing paths the agent's FILE tools refuse even inside the files
  * root, and its shell refuses to name outright. Defense in depth, not a vault —
  * the durable control is redactSecrets() on all output, which is value-based. */
-const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret/i;
+// `perp-key` covers both homes of the Lighter API private key (docs/perps.md
+// rule 5): self-hosted `perp-keys/<pubkey>.json` and a hosted child's
+// `perp-key.json`. `\.merr` alone does not: MERRYMEN_HOME may be any path.
+const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|perp-key|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret|\bid\.json|keypair\.json/i;
 
 export function isSensitivePath(p: string): boolean {
   return SENSITIVE_PATH.test(p);
@@ -103,6 +108,9 @@ export function isSensitivePath(p: string): boolean {
  * a glob/recursion likely aimed at the merrymen home (the known evasion). */
 export function shellTouchesSecrets(cmd: string): boolean {
   if (SENSITIVE_PATH.test(cmd)) return true;
+  // A glob over dotfiles (".e*.local", "./.en?.solana.local", ".??v.solana.local")
+  // names .env.solana.local without spelling it (review finalise).
+  if (/(?:^|[\s/'"=:;|&(<>])\.[^\s/'"]*[*?[]/.test(cmd)) return true;
   // The `for /r … in (set*.json / gr*.json)` and `dir /s … *.json` evasions read
   // secret files without naming them. Refuse recursive/glob scans for json/key/env.
   if (/\bfor\s+\/r\b/i.test(cmd) && /\.(json|key|pem|env)/i.test(cmd)) return true;
@@ -116,22 +124,104 @@ export function shellTouchesSecrets(cmd: string): boolean {
 // whose bytes carry a secret is never sent. This is what actually protects the
 // bot token, provider keys, and the signed wallet grant.
 
-/** Key/credential shapes to redact even when we don't know the exact value. */
+/**
+ * Key/credential shapes to redact even when we don't know the exact value.
+ *
+ * EVERY QUANTIFIER IS BOUNDED. On Node 26 an unbounded one throws RangeError
+ * (Maximum call stack size exceeded) on a run of about 5.6M characters
+ * ("sk-", "eyJ" or "123456:" then millions of letters), well inside the 8 MB
+ * send_file scans: the scan then failed, and send_file sent the file unscanned.
+ * The bounds are far above any real key, bot token or JWT segment (a JWT's
+ * claims can run to kilobytes, hence its wider bound); a longer run still
+ * matches its first part, so it is still found and its prefix redacted.
+ */
 const SECRET_SHAPES: RegExp[] = [
   /0x[0-9a-fA-F]{64}/g, // 32-byte private keys
   // provider/API key prefixes. Most use a separator (sk-, gsk_, ghp_…); Google's
   // AIza keys are AIzaSy… with NO separator, so it gets its own branch (else dead).
-  /\b(?:(?:sk|gsk|xai|pk|rk|npm|ghp|glpat)[-_]|AIza)[A-Za-z0-9_-]{16,}/g,
-  /\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, // JWTs
-  /\b[0-9]{6,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot tokens (id:hash)
+  /\b(?:(?:sk|gsk|xai|pk|rk|npm|ghp|glpat)[-_]|AIza)[A-Za-z0-9_-]{16,4096}/g,
+  /\beyJ[A-Za-z0-9_-]{15,65536}\.[A-Za-z0-9_-]{10,65536}\.[A-Za-z0-9_-]{10,65536}/g, // JWTs
+  /\b[0-9]{6,32}:[A-Za-z0-9_-]{30,4096}/g, // Telegram bot tokens (id:hash)
+  // A Merrymen secret setting as written in an env file or a shell (.env.solana.local:
+  // the fee payer's seed, the store DEK, the Jupiter key, keyed RPC URLs), whatever its value.
+  /\bMERRYMEN_[A-Z0-9_]{0,64}(?:SEED|DEK|KEY|SECRET|TOKEN|RPC[A-Z0-9_]{0,32})[ \t]{0,16}=[ \t]{0,16}["']?[^\s"'#]{8,4096}/g,
 ];
+/**
+ * A Lighter auth token, `<deadline>:<account>:<keyIndex>:<160 hex>`, whole, so
+ * the account it authenticates goes with it (docs/perps.md rule 5). Run before
+ * LONG_HEX_RUN, which would otherwise take only its signature.
+ */
+const LIGHTER_AUTH_TOKEN = /\b\d{9,11}:\d{1,16}:\d{1,3}:[0-9a-fA-F]{160}/g;
 
-/** Replace known secret values + secret-shaped blobs with a marker. */
-export function redactSecrets(text: string, knownSecrets: string[]): string {
+/**
+ * A Lighter API private key is 40 bytes: 80 hex, 0x or bare, either case
+ * (docs/perps.md rule 5). Run BEFORE the 64-hex shape, which would otherwise
+ * eat the first 66 characters of a 0x key and leave its last 16 hex, a whole
+ * 64-bit limb, on show, and which never sees a bare key at all. Greedy, so a
+ * key inside a longer hex run is never half-shown; bounded like every shape
+ * above, and a longer run is taken in consecutive pieces. Lighter tx hashes
+ * are 80 hex too and go with it: over-redacting is the safe side here.
+ */
+const LONG_HEX_RUN = /(?:0x)?[0-9a-fA-F]{80,65536}/g;
+
+/**
+ * A digit AND a letter: a key, not somebody holding a key down. A random
+ * 80-hex key lacks one of the two with probability ~(10/16)^80 + (6/16)^80.
+ */
+function isKeyLikeHexRun(run: string): boolean {
+  const hex = run.startsWith("0x") ? run.slice(2) : run;
+  return /[0-9]/.test(hex) && /[a-fA-F]/.test(hex);
+}
+
+// Solana secret keys (a 64-byte keypair as base58, or the CLI's id.json byte
+// array) belong in this list too, but a shape alone would also take every
+// 64-byte transaction signature. So they are found by their own public key
+// (solanaSecretsIn) and stripped as values, first, so no shorter known value
+// can split one and leave the rest readable.
+
+/**
+ * Replace known secret values + secret-shaped blobs with a marker. `budget`
+ * goes to core's solanaSecretsIn (SecretScanBudget): absent, a full scan, as
+ * every caller but the group-chat prompt quoting wants.
+ */
+/**
+ * The Merrymen settings whose VALUES are secrets an agent tool must never
+ * return (review finalise): the Solana fee payer's seed (custody of its SOL),
+ * the store's data-encryption key, the Jupiter key and keyed RPC URLs.
+ */
+export const SOLANA_SECRET_SETTINGS = Object.freeze(["MERRYMEN_SOLANA_FEE_PAYER_SEED", "MERRYMEN_STORE_DEK", "MERRYMEN_JUPITER_API_KEY",
+  "MERRYMEN_SOLANA_RPC_MAINNET", "MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK", "MERRYMEN_SOLANA_RESOLVE_THIRD_RPC", "MERRYMEN_SOLANA_RECOVER_RPC"]);
+/**
+ * Those settings' values for the agent's secret list: from this process's
+ * environment and from each env file in `files` that exists (.env.solana.local
+ * in the working tree and in MERRYMEN_HOME), so a value only that file holds is
+ * redacted however the agent reads it. Unreadable files are skipped.
+ */
+export function solanaSecretValues(env: NodeJS.ProcessEnv, files: readonly string[]): string[] {
+  const values = SOLANA_SECRET_SETTINGS.map((name) => env[name]);
+  for (const file of files) {
+    let text: string;
+    try { text = readFileSync(file, "utf8"); } catch { continue; }
+    for (const line of text.split(/\r?\n/)) {
+      const m = /^\s{0,16}(?:export\s{1,16})?([A-Z0-9_]{1,128})\s{0,16}=\s{0,16}(.{0,8192})$/.exec(line);
+      if (!m || !(SOLANA_SECRET_SETTINGS as readonly string[]).includes(m[1]!)) continue;
+      values.push(m[2]!.trim().replace(/^(["'])(.*)\1$/, "$2"));
+    }
+  }
+  return values.filter((value): value is string => typeof value === "string" && value.length >= 8);
+}
+/** Tool output on its way to the model: secret values and shapes out, then keyed URLs reduced to their host. */
+function safeOutput(text: string, knownSecrets: string[]): string {
+  return redactUrls(redactSecrets(text, knownSecrets));
+}
+
+export function redactSecrets(text: string, knownSecrets: string[], budget?: SecretScanBudget): string {
   let out = text;
-  for (const s of knownSecrets) {
+  for (const s of [...solanaSecretsIn(text, budget), ...knownSecrets]) {
     if (s && s.length >= 8) out = out.split(s).join("[redacted]");
   }
+  out = out.replace(LIGHTER_AUTH_TOKEN, "[redacted]");
+  out = out.replace(LONG_HEX_RUN, (m) => (isKeyLikeHexRun(m) ? "[redacted]" : m));
   for (const re of SECRET_SHAPES) out = out.replace(re, "[redacted]");
   return out;
 }
@@ -140,7 +230,9 @@ export function redactSecrets(text: string, knownSecrets: string[]): string {
  * refuse sending a file that would exfiltrate credentials). */
 export function containsSecret(text: string, knownSecrets: string[]): boolean {
   if (knownSecrets.some((s) => s && s.length >= 8 && text.includes(s))) return true;
-  return SECRET_SHAPES.some((re) => {
+  if (solanaSecretIn(text)) return true;
+  for (const m of text.matchAll(LONG_HEX_RUN)) if (isKeyLikeHexRun(m[0])) return true;
+  return [LIGHTER_AUTH_TOKEN, ...SECRET_SHAPES].some((re) => {
     re.lastIndex = 0;
     return re.test(text);
   });
@@ -234,8 +326,8 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
         const r = await pcp.runShell(cmd, { timeoutMs: SHELL_TIMEOUT_MS, cwd: io.cwd.value || undefined });
         const out = ((r.stdout || "") + (r.stderr ? "\n" + r.stderr : "")).trim();
         // Redact any secret VALUE the command may have read, however it read it.
-        const safe = redactSecrets(out || "(no output)", cfg.secrets);
-        return `exit ${r.code ?? "?"}${r.reason ? ` (${r.reason})` : ""}\nworking dir ${redactSecrets(io.cwd.value || "(unset)", cfg.secrets)}\n${safe}`;
+        const safe = safeOutput(out || "(no output)", cfg.secrets);
+        return `exit ${r.code ?? "?"}${r.reason ? ` (${r.reason})` : ""}\nworking dir ${safeOutput(io.cwd.value || "(unset)", cfg.secrets)}\n${safe}`;
       },
     });
   }
@@ -255,7 +347,7 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
           if (!res.ok) return `REFUSED: ${res.reason}`;
           try {
             const raw = readFileSync(res.abs, "utf8");
-            const text = redactSecrets(raw, cfg.secrets);
+            const text = safeOutput(raw, cfg.secrets);
             return text.length > FILE_READ_CAP ? text.slice(0, FILE_READ_CAP) + "\n…(truncated)" : text;
           } catch (e) {
             return `error: ${e instanceof Error ? e.message : String(e)}`;
@@ -317,14 +409,25 @@ export function buildTools(cfg: AgentConfig, io: AgentIo): ToolImpl[] {
           // name, then send it" laundering path. Scan the WHOLE file (a secret can
           // sit anywhere, not just the first N KB); refuse to send a file too large
           // to scan in full rather than shipping it after a partial check.
+          let content: string | null = null;
           try {
             if (statSync(res.abs).size > SEND_SCAN_CAP) {
               return "REFUSED: that file is too large for me to scan for secrets before sending — share a smaller piece.";
             }
-            const content = readFileSync(res.abs, "utf8");
-            if (containsSecret(content, cfg.secrets)) return "REFUSED: that file contains something secret-shaped (a key/token) — I won't send it.";
+            content = readFileSync(res.abs, "utf8");
           } catch {
             /* stat/read failed (gone/permission) — the sendDocument below will error cleanly */
+          }
+          // Only a file that could not be read falls through. A scan that throws
+          // is a file nobody checked: refused, never sent.
+          if (content !== null) {
+            let secret: boolean;
+            try {
+              secret = containsSecret(content, cfg.secrets);
+            } catch {
+              return "REFUSED: I could not finish scanning that file for secrets — I won't send it.";
+            }
+            if (secret) return "REFUSED: that file contains something secret-shaped (a key/token) — I won't send it.";
           }
           const sent = await sendDocument(io.opts, io.chatId, res.abs, `📎 ${path.basename(res.abs)}`);
           io.note("warn", `Telegram agent: sent file ${path.basename(res.abs)}`);
@@ -566,7 +669,7 @@ export async function runAgentTask(task: string, deps: AgentRunDeps): Promise<vo
         }
         const impl = byName.get(use.name);
         const output = impl
-          ? await impl.exec(use.input).catch((e: unknown) => `error: ${e instanceof Error ? e.message : String(e)}`)
+          ? await impl.exec(use.input).catch((e: unknown) => `error: ${errorText(e)}`)
           : `error: unknown tool ${use.name}`;
         results.push({ id: use.id, name: use.name, output });
       }
@@ -574,7 +677,7 @@ export async function runAgentTask(task: string, deps: AgentRunDeps): Promise<vo
     }
     await deps.send(`⏸️ hit the ${deps.cfg.maxSteps}-step budget. Send another /agent task to continue, or raise the budget in the dashboard.`);
   } catch (e) {
-    const m = e instanceof Error ? e.message : String(e);
+    const m = errorText(e);
     deps.note("warn", `Telegram agent: failed — ${m.slice(0, 200)}`);
     // The agent loop IS model calls, so a provider refusal is the common
     // failure here. Same rule as the interpreter and the command path.

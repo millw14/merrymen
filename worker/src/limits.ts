@@ -4,8 +4,10 @@ import {
   RIALTO,
   STOCK_TOKENS,
   UNISWAP,
+  LIGHTER_ROUTE_V1,
   grantEnergyRoute,
   grantHasTransfer,
+  grantPerp,
   grantTrencher,
   grantHasV4,
   grantV4Adapter,
@@ -142,6 +144,24 @@ export function limitsFromGrant(
     ...((): { energy?: { router: string; token: string } } => {
       const route = grantEnergyRoute(grant);
       return route ? { energy: { router: route.router, token: route.path[route.path.length - 1]! } } : {};
+    })(),
+    // THE LIGHTER ROUTE, MIRRORED — from the GRANT, and NOT into allowedTargets
+    // (docs/perps.md rule 3; the energy precedent above).
+    //
+    // grantPerp answers only for the perp-lighter-v1 marker on chain 4663 with
+    // the route's key index and a canonical public key — all four, which is
+    // exactly when the wall sealed the deposit, key-registration and claim
+    // permissions. Settings never reach it: an owner who turns perps on without
+    // re-signing has a key that can post no margin, and checkPolicy says so
+    // (`perp-not-granted`) instead of building a UserOp the chain refuses. The
+    // proxy stays OUT of allowedTargets because the wall reaches it through
+    // three exact selectors and the USDG approve's ONE_OF spenders only; listed
+    // with the generic targets, any `swap` or `vault-deposit` could name it.
+    // The sealed private-key blob (`apiKeySealed`) is deliberately not copied:
+    // limits are logged and shown, and nothing that judges needs it.
+    ...((): { perp?: { proxy: `0x${string}`; apiKeyIndex: number; apiPublicKey: `0x${string}` } } => {
+      const p = grantPerp(grant);
+      return p ? { perp: { proxy: LIGHTER_ROUTE_V1.proxy, apiKeyIndex: p.apiKeyIndex, apiPublicKey: p.apiPublicKey } } : {};
     })(),
     // So the breaker can tell a de-risking sell (swap INTO cash) from a buy.
     cashToken: CASH.USDG as string,

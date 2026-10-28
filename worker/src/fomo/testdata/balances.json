@@ -1,0 +1,51 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "count": 2,
+  "totalValueUsd": 3133,
+  "upstreamRows": 2,
+  "truncated": false,
+  "complete": true,
+  "completeness": "complete",
+  "totalValueUsdIncludes": "holdings rows only",
+  "chainFiltered": false,
+  "otherEquity": 3492.8,
+  "livePerpPnl": {
+    "pnl": 79215.6
+  },
+  "byChain": {
+    "robinhood": {
+      "holdings": 1,
+      "valueUsd": 3120
+    },
+    "solana": {
+      "holdings": 1,
+      "valueUsd": 13
+    }
+  },
+  "holdings": [
+    {
+      "token": {
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D",
+        "networkId": 4663
+      },
+      "chain": "robinhood",
+      "amount": 1500,
+      "priceUsd": 2.08,
+      "valueUsd": 3120,
+      "change24h": 4.2
+    },
+    {
+      "token": {
+        "symbol": "FU2O",
+        "address": "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump",
+        "networkId": 1399811149
+      },
+      "chain": "solana",
+      "amount": 5000,
+      "priceUsd": 0.0026,
+      "valueUsd": 13,
+      "change24h": -12.5
+    }
+  ]
+}

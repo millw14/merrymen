@@ -64,8 +64,11 @@ export interface LiveClockDeps {
 /**
  * HOW OFTEN THE SESSION CHANGES ARE ASKED FOR: every five minutes, whatever the
  * last answer was. A success is cached that long anyway (quotes.ts), and a
- * failure is 25 chart requests at a venue that is failing, which the market's
- * thirty-second clock asked for twice as often as the old minute did.
+ * failure was 25 chart requests at a venue that is failing, which the market's
+ * thirty-second clock asked for twice as often as the old minute did. A venue
+ * that is down now costs at most four, and a pass that read nothing is kept for
+ * a minute (quotes.ts CHANGES_UNREAD_MS), so a fresh clock started within it
+ * asks the venue nothing.
  */
 export const CHANGES_EVERY_MS = 5 * 60_000;
 

@@ -10,7 +10,7 @@ import { test } from "node:test";
 import type { Db, Stmt } from "../../../../worker/src/db";
 import type { McpDb } from "../db";
 import {
-  CIMD_REDIRECTS_MAX_BYTES, acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, transientCimdAnswer, validRedirectUri, type CimdFetcher,
+  CIMD_REDIRECTS_MAX_BYTES, ClientError, acceptableCimdResponse, isCimdClientId, ownHostsOf, registerClient, parseCimd, redirectMatches, resolveClient, transientCimdAnswer, validRedirectUri, type CimdFetcher,
 } from "./clients";
 import { pkceS256 } from "./crypto";
 import { FORM_MAX, readBoundedText, readForm } from "./deps";
@@ -371,6 +371,48 @@ test("CIMD: app-scheme callbacks in a metadata document are ignored, not fatal",
   const doc = { client_id: id, redirect_uris: ["myapp://callback", "http://127.0.0.1/callback"], token_endpoint_auth_method: "none" };
   assert.deepEqual(parseCimd(id, Buffer.from(JSON.stringify(doc))).redirectUris, ["http://127.0.0.1/callback"]);
   assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...doc, redirect_uris: ["myapp://callback"] }))), /redirect_uris/);
+});
+
+test("CIMD: ChatGPT can negotiate public token auth from its advertised methods", async () => {
+  const id = "https://chatgpt.com/oauth/client.json";
+  const redirect = "https://chatgpt.com/connector_platform_oauth_redirect";
+  const fetcher = cimdFetcher([redirect], {}, {
+    token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+    token_endpoint_auth_method: "private_key_jwt",
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+  });
+  const d = await makeTestDb();
+  const deps = makeDeps(d, { fetcher });
+  const client = await resolveClient(d, id, deps.now(), {
+    ownHosts: ownHostsOf(deps.cfg), fetcher, cacheNew: true,
+  });
+  assert.equal(client.kind, "cimd");
+  assert.equal(client.authMethod, "none");
+  assert.equal((await authenticateClient(deps, new URLSearchParams({ client_id: id }), null)).authMethod, "none");
+  assert.equal((await startAuthorization(deps, authorizeParams(id, { redirect_uri: redirect }))).kind, "consent");
+});
+
+test("CIMD: offered token auth methods must be unambiguous and include the supported public method", () => {
+  const id = "https://client.example/oauth/metadata.json";
+  const base = { client_id: id, redirect_uris: ["https://client.example/cb"] };
+  for (const [methods, singular] of [
+    [["private_key_jwt"], "private_key_jwt"],
+    [["client_secret_basic"], undefined],
+    [["none"], "private_key_jwt"],
+    [["none", "private_key_jwt"], "client_secret_post"],
+    [[], undefined],
+    ["none", undefined],
+    [["none", 1], undefined],
+    [["none", "none"], undefined],
+  ] as const) {
+    const doc = { ...base, token_endpoint_auth_methods_supported: methods,
+      ...(singular === undefined ? {} : { token_endpoint_auth_method: singular }) };
+    assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify(doc))), ClientError);
+  }
+  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...base, token_endpoint_auth_method: "private_key_jwt" }))), /public clients/);
+  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...base, token_endpoint_auth_method: null,
+    token_endpoint_auth_methods_supported: ["none"] }))), /nonempty string/);
 });
 
 test("CIMD: the document must name itself, be public, and list safe redirects", async () => {
@@ -880,6 +922,44 @@ test("token-family writes are serialised on the connection row, so a revocation 
 });
 
 // ── round 3 ─────────────────────────────────────────────────────────────────
+
+test("omitting scopes offers optional setup but grants it only after explicit owner consent", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d, { agents: fixtureDirectory({}) });
+  const clientId = await publicClient(deps);
+  const req = await parkRequest(deps, clientId, { scope: null });
+  const view = await describeRequest(deps, req, OWNER_A);
+  assert.deepEqual(view.agents, []);
+  assert.equal(view.scopes.find((s) => s.id === "drafts:write")?.defaultOn, false);
+  const defaults = await decideRequest(deps, req, OWNER_A, { approve: true, agentSlugs: [] });
+  const tokens = await exchange(deps, clientId, defaults.location);
+  const principal = await verifyAccessToken(d, deps.cfg, tokens.access_token, deps.now());
+  assert.deepEqual([...principal!.scopes].sort(), ["market:read", "offline_access"]);
+  assert.deepEqual([...principal!.agentSlugs], []);
+
+  const next = await parkRequest(deps, clientId, { scope: null });
+  const selected = await decideRequest(deps, next, OWNER_A, { approve: true, scopes: ["market:read", "drafts:write"], agentSlugs: [] });
+  const selectedTokens = await exchange(deps, clientId, selected.location);
+  const selectedPrincipal = await verifyAccessToken(d, deps.cfg, selectedTokens.access_token, deps.now());
+  assert.deepEqual([...selectedPrincipal!.scopes].sort(), ["drafts:write", "market:read", "offline_access"]);
+  assert.deepEqual([...selectedPrincipal!.agentSlugs], []);
+  const oldPrincipal = await verifyAccessToken(d, deps.cfg, tokens.access_token, deps.now());
+  assert.ok(!oldPrincipal?.scopes.has("drafts:write"), "existing tokens cannot gain the newly approved scope");
+});
+
+test("omitting scopes on the directory never offers or grants setup permission", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d, { agents: fixtureDirectory({}) });
+  const clientId = await publicClient(deps);
+  const req = await parkRequest(deps, clientId, { scope: null, resource: DIR });
+  const view = await describeRequest(deps, req, OWNER_A);
+  assert.ok(!view.scopes.some((s) => s.id === "drafts:write"));
+  await assert.rejects(decideRequest(deps, req, OWNER_A, { approve: true, scopes: ["drafts:write"], agentSlugs: [] }), /directory/);
+  const selected = await decideRequest(deps, req, OWNER_A, { approve: true, agentSlugs: [] });
+  const tokens = await exchange(deps, clientId, selected.location, DIR);
+  const principal = await verifyAccessToken(d, deps.cfg, tokens.access_token, deps.now(), "directory");
+  assert.deepEqual([...principal!.scopes].sort(), ["market:read", "offline_access"]);
+});
 
 test("a client that requests exactly the 401 challenge's scope can be granted any non-staff scope, and only what the owner ticks", async () => {
   const d = await makeTestDb();

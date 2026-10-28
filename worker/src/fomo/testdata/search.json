@@ -1,0 +1,28 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "results": [
+    {
+      "type": "trader",
+      "handle": "CryptoKaleo",
+      "userId": "1f08e6ab-5c73-5443-9225-bfc496cde51f",
+      "displayName": "K A L E O",
+      "pnlUsd": 151383,
+      "volumeUsd": 119165,
+      "followers": 19967,
+      "wallets": {
+        "solana": "5AhfPStn66hRYoNNDfJHSDgCH7fBbwMQZUECRrhTo62F",
+        "evm": "0x7b4d16237683fe1765e727eadf99c6f02adf0b59"
+      },
+      "verified": true
+    },
+    {
+      "type": "token",
+      "symbol": "FU2O",
+      "address": "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump",
+      "name": "Fu2o",
+      "image": null,
+      "marketCapUsd": 89000,
+      "networkId": 1399811149
+    }
+  ]
+}

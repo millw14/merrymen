@@ -42,14 +42,66 @@ class ChatFailureTest {
   }
 
   @Test fun aModelFailureIsSaidByItsKindWithTheProvidersName() {
-    val kinds = listOf("key-rejected", "rate-limited", "provider-down", "unreachable", "model-missing", "other")
+    val kinds = listOf("key-rejected", "rate-limited", "provider-down", "unreachable", "model-missing", "billing", "other")
     val lines = kinds.map { failureLine("llm-error", kind = it, provider = "Groq") }
     assertEquals(kinds.size, lines.toSet().size)
     assertTrue(lines[0].contains("Groq refused the API key"))
     assertTrue(lines[1].contains("rate-limited by Groq"))
-    assertEquals("an unknown kind is 'other'", lines[5], failureLine("llm-error", kind = "new-kind", provider = "Groq"))
+    assertEquals("an unknown kind is 'other'", lines.last(), failureLine("llm-error", kind = "new-kind", provider = "Groq"))
     // A provider "name" that is really an error message is not repeated.
     assertFalse(failureLine("llm-error", kind = "rate-limited", provider = "<b>429: {\"error\"}").contains("429"))
+  }
+
+  /**
+   * The incident: the house Groq account was put on hold over an unpaid bill,
+   * and every hosted owner was told "a reason I don't recognise … its setup
+   * needs a look". The web's sentences (terminal/chat-thread.ts llmLine), word
+   * for word.
+   */
+  @Test fun aBillingHoldIsSaidAsOneAndAHouseKeyIsOursToFix() {
+    val ours = "That's ours to fix, not yours — nothing in your Settings will change it."
+    assertEquals(
+      "My brain's provider, Groq, has paused the house account I run on, so I can't answer in my own words right now. $ours",
+      failureLine("llm-error", kind = "billing", provider = "Groq", house = true),
+    )
+    assertEquals(
+      "My brain's provider has paused the house account I run on, so I can't answer in my own words right now. $ours",
+      failureLine("llm-error", kind = "billing", house = true),
+    )
+    assertEquals(
+      "My brain couldn't answer: Groq has put the account behind its API key on hold over billing. " +
+        "Asking again won't help until that's settled, or another provider is chosen in Settings.",
+      failureLine("llm-error", kind = "billing", provider = "Groq"),
+    )
+    assertEquals(
+      "My brain couldn't answer: its provider has put the account behind its API key on hold over billing. " +
+        "Asking again won't help until that's settled, or another provider is chosen in Settings.",
+      failureLine("llm-error", kind = "billing"),
+    )
+    assertEquals(
+      "My brain couldn't answer: Groq refused the house key I run on. $ours",
+      failureLine("llm-error", kind = "key-rejected", provider = "Groq", house = true),
+    )
+    assertEquals(
+      "My brain couldn't answer: Groq says the house model I run on isn't available. $ours",
+      failureLine("llm-error", kind = "model-missing", provider = "Groq", house = true),
+    )
+    // The owner's own key is said as it always was.
+    assertEquals(
+      "My brain couldn't answer: Groq refused the API key it's set up with. Asking again won't help until that key is replaced.",
+      failureLine("llm-error", kind = "key-rejected", provider = "Groq"),
+    )
+    assertEquals(
+      "My brain couldn't answer: Groq says the model it's set to use isn't available. Asking again won't help until the model is changed.",
+      failureLine("llm-error", kind = "model-missing", provider = "Groq"),
+    )
+    // A house key changes nothing where whose key it is does not matter.
+    for (kind in listOf("rate-limited", "provider-down", "unreachable", "other", "new-kind")) {
+      assertEquals(kind, failureLine("llm-error", kind = kind, provider = "Groq"), failureLine("llm-error", kind = kind, provider = "Groq", house = true))
+    }
+    // The operator's bill is not the tenant's business.
+    val house = failureLine("llm-error", kind = "billing", provider = "Groq", house = true)
+    assertFalse(house.contains("billing") || house.contains("overdue"))
   }
 
   @Test fun retryIsOfferedOnlyWhereAskingAgainCanWork() {
@@ -57,6 +109,7 @@ class ChatFailureTest {
     assertTrue(retryHelps("llm-error", "rate-limited"))
     assertFalse(retryHelps("llm-error", "key-rejected"))
     assertFalse(retryHelps("llm-error", "model-missing"))
+    assertFalse("a hold does not pass on its own", retryHelps("llm-error", "billing"))
     assertFalse(retryHelps("llm-error", null))
     assertFalse(retryHelps("no-address", null))
   }
@@ -83,6 +136,33 @@ class ChatFailureTest {
     assertNotNull("a rate limit passes: Retry", lines[3].retry)
     // Failures are ours, not the model's: left out of what it is told was said.
     assertEquals(listOf("hi", "hi again"), historyFor(lines).map { it.content })
+  }
+
+  @Test fun theHouseFlagReachesTheLineWhetherJsonOrStreamedAndAHoldHasNoRetry() {
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    val groqHold = "groq 400 — organization_delinquent: Organization has been restricted because of overdue payment(s)."
+
+    rig.route("POST /api/chat") {
+      json("""{"reply":null,"why":"llm-error","kind":"billing","provider":"Groq","house":true,"detail":"$groqHold"}""")
+    }
+    runBlocking { chat.sendNow("hi", null) }
+    rig.route("POST /api/chat") {
+      sse("error" to """{"why":"llm-error","kind":"billing","provider":"Groq","house":true,"detail":"$groqHold"}""")
+    }
+    runBlocking { chat.sendNow("hi again", null) }
+    // An older server says nothing of whose key it was: the owner's own.
+    rig.route("POST /api/chat") {
+      sse("error" to """{"why":"llm-error","kind":"billing","provider":"Groq","detail":"$groqHold"}""")
+    }
+    runBlocking { chat.sendNow("and again", null) }
+
+    val agent = chat.thread.value.messages.filter { it.role == "agent" }
+    val house = failureLine("llm-error", kind = "billing", provider = "Groq", house = true)
+    assertEquals(listOf(house, house, failureLine("llm-error", kind = "billing", provider = "Groq")), agent.map { it.text })
+    assertTrue("a hold does not pass on its own: no Retry", agent.all { it.retry == null && it.failed == "llm-error" })
+    assertTrue(agent.none { it.text.contains("organization_delinquent") || it.text.contains("overdue") })
   }
 
   @Test fun aRetryPutsTheQuestionAgainOnceAndGivesTheDraftBack() {

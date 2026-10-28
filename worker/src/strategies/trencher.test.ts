@@ -17,6 +17,7 @@ import {
   type OpenPosition,
 } from "./trencher";
 import { takeTick, type Snapshot, type Strategy } from "./types";
+import { entryGatesOf } from "../entry-gates";
 
 /**
  * A strategy may now return reasons alongside its intents. These tests are about
@@ -184,8 +185,11 @@ describe("fast Trencher exits", () => {
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_FAST).exit, true);
     assert.equal(shouldExit(fresh(), mark(0.001, NOW + 1800), TRENCHER_DEFAULTS).exit, false);
   });
-  it("keeps entry quality and size unchanged", () => {
-    assert.equal(TRENCHER_FAST.perEntryUsdg, TRENCHER_DEFAULTS.perEntryUsdg);
+  it("keeps entry quality, and halves the size to trade ten times in the vault's day", () => {
+    // The vault caps 25 USDG of buys a day at most 5 a buy: dollars, not trades.
+    assert.equal(TRENCHER_FAST.perEntryUsdg, 2_500_000n);
+    assert.equal(25_000_000n / TRENCHER_FAST.perEntryUsdg, 10n);
+    assert.ok(TRENCHER_FAST.perEntryUsdg <= TRENCHER_DEFAULTS.perEntryUsdg, "fast never sizes above the default");
     assert.equal(shouldEnter(candidate({ liquidityUsd: 5000 }), TRENCHER_FAST, NOW).enter, false);
     assert.equal(shouldEnter(candidate({ ageSec: 30 }), TRENCHER_FAST, NOW).enter, false);
     assert.equal(shouldEnter(candidate(), TRENCHER_FAST, NOW).enter, true);
@@ -309,5 +313,111 @@ describe("the unpriceable exit, once it can actually be reached", () => {
     assert.equal(intent.target,custodyVault);
     assert.equal(intent.sellAmountRaw,3n*10n**18n);
     assert.equal(intent.notionalUsdg,3_000_000n);
+  });
+});
+
+/**
+ * A COIN THE KEY CANNOT SELL BACK IS NOT A CANDIDATE.
+ *
+ * It cleared every entry bound, took the tick's one entry — and with the Brain
+ * required, a paid review first — and the wall refused it `no-exit`, every
+ * tick. Skipped before shouldEnter and before the Brain now, so the next
+ * candidate gets the slot; said once per coin, because the refusal used to be
+ * where the owner learned to re-sign.
+ */
+describe("entry gates: skipped before shouldEnter and the Brain", () => {
+  const USDG = "0x00000000000000000000000000000000000000aa" as const;
+  const LOCKED = "0x00000000000000000000000000000000000000c1" as const;
+  const OPEN = "0x00000000000000000000000000000000000000c2" as const;
+  const VAULT = "0x00000000000000000000000000000000000000f1" as const;
+  const gates = entryGatesOf({ allowedAssets: [USDG, LOCKED, OPEN], sellableAssets: [USDG, OPEN] });
+
+  const snap = (over: Partial<Snapshot> = {}): Snapshot =>
+    ({
+      cashUsdg: 1_000_000_000n,
+      vaultUsdg: 0n,
+      holdings: new Map(),
+      prices: new Map(),
+      pausedTokens: new Set<string>(),
+      staleFeeds: new Set<string>(),
+      sequencerUp: true,
+      spendHeadroomUsdg: 1_000_000_000n,
+      perTradeCapUsdg: 100_000_000n,
+      entryGates: gates,
+      ...over,
+    }) as Snapshot;
+
+  const build = (candidates: Candidate[], over: Record<string, unknown> = {}) => {
+    const notes: string[] = [];
+    const asked: string[] = [];
+    const s = makeTrencher({
+      cfg: TRENCHER_DEFAULTS,
+      swapRouter: "0x00000000000000000000000000000000000000f0",
+      usdgToken: USDG,
+      candidates: () => candidates,
+      open: () => [],
+      liquidityOf: () => null,
+      onNote: (_level, message) => notes.push(message),
+      brainOrder: (symbol) => {
+        asked.push(symbol);
+        return { side: "buy", usdgAmount: 5, decisionId: `d-${symbol}` } as never;
+      },
+      ...over,
+    });
+    return { s, notes, asked };
+  };
+
+  it("SKIPS THE LOCKED COIN and enters the next one in the same tick", async () => {
+    const { s } = build([candidate({ symbol: "LOCK", token: LOCKED }), candidate({ symbol: "OPEN", token: OPEN })]);
+    const intents = await run(s, snap());
+    assert.equal(intents.length, 1);
+    assert.equal(intents[0]?.kind === "swap" && intents[0].buyToken, OPEN);
+  });
+
+  it("the Brain is never asked about it — the paid review was the expensive half", async () => {
+    const { s, asked } = build([candidate({ symbol: "LOCK", token: LOCKED })], { brainRequired: true });
+    assert.deepEqual(await run(s, snap()), []);
+    assert.deepEqual(asked, []);
+  });
+
+  it("and shouldEnter never writes its 'passing on' note for it: the one sentence is the gate's, once", async () => {
+    const { s, notes } = build([candidate({ symbol: "LOCK", token: LOCKED, liquidityUsd: 1 })]);
+    for (let tick = 0; tick < 5; tick++) await run(s, snap());
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]!, /^trencher: skipping LOCK — this key can't approve it for a sell.*no-exit/);
+  });
+
+  it("AN ARM DOES NOT REBUILD THIS: a coin seen covered, then gated again, earns a fresh note", async () => {
+    // A re-sign reuses the strategy (only a settings change builds a new one),
+    // so the once-per-coin set is forgotten for a coin the moment it is seen
+    // ungated — not by an arm that never reaches it.
+    const covered = entryGatesOf({ allowedAssets: [USDG, LOCKED, OPEN], sellableAssets: [USDG, LOCKED, OPEN] });
+    const { s, notes } = build([candidate({ symbol: "LOCK", token: LOCKED })]);
+    const skips = () => notes.filter((n) => /^trencher: skipping LOCK/.test(n)).length;
+    await run(s, snap());
+    await run(s, snap());
+    assert.equal(skips(), 1, "once while the gate stands");
+    assert.equal((await run(s, snap({ entryGates: covered }))).length, 1, "a re-sign covers it: bought");
+    await run(s, snap());
+    assert.equal(skips(), 2, "a later re-sign drops it again: a new fact, said again");
+  });
+
+  it("WATCHED TOKENS ONLY: an unwatched candidate keeps shouldEnter's own sentence", async () => {
+    const stranger = "0x00000000000000000000000000000000000000d9" as const;
+    const { s, notes } = build([candidate({ symbol: "ANON", token: stranger, priceable: false, unpriceable: "not-watched" })]);
+    await run(s, snap());
+    assert.deepEqual(notes, ["trencher: passing on ANON — no watched token matches that symbol and address"]);
+  });
+
+  it("a custody candidate is judged by its vault, not by these lists", async () => {
+    const { s } = build([candidate({ symbol: "LOCK", token: LOCKED, custodyVault: VAULT })]);
+    const intents = await run(s, snap());
+    assert.equal(intents.length, 1);
+    assert.equal(intents[0]?.kind === "swap" && intents[0].custody, "trencher");
+  });
+
+  it("an absent hint gates nothing", async () => {
+    const { s } = build([candidate({ symbol: "LOCK", token: LOCKED })]);
+    assert.equal((await run(s, snap({ entryGates: undefined }))).length, 1);
   });
 });

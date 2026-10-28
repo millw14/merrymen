@@ -26,6 +26,8 @@
  * the fleet measurement that follows uninterpretable.
  */
 
+import { redactUrls } from "./redact-urls";
+
 export type RpcErrorKind =
   /** The provider refused because we asked too often. Ours to fix, not the chain's. */
   | "rate-limited"
@@ -167,7 +169,10 @@ export function classifyRpcError(e: unknown): RpcErrorVerdict {
     .filter((v): v is string => typeof v === "string")
     .join(" ");
   const lower = text.toLowerCase();
-  const detail = text.replace(/\s+/g, " ").trim().slice(0, 200) || "no message";
+  // Redacted BEFORE the slice: viem's message names the transport's URL, and a
+  // keyed provider's key is in it. Cut first, and a key split at character 200
+  // would no longer look like a URL to the redactor. See redact-urls.ts.
+  const detail = redactUrls(text.replace(/\s+/g, " ").trim()).slice(0, 200) || "no message";
 
   const codes: unknown[] = [err?.code, err?.status, (err?.cause as { code?: unknown } | null)?.code, (err?.cause as { status?: unknown } | null)?.status];
   const is = (n: number) => codes.some((c) => c === n || c === String(n));

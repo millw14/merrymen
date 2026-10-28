@@ -53,7 +53,6 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -70,7 +69,6 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import dev.merrymen.app.net.SettingsEnvelope
 import dev.merrymen.app.net.SettingsKeys
-import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.providerKey
 import dev.merrymen.app.net.secretStatus
 import dev.merrymen.app.ui.HOUSE_AGENT_NAME
@@ -87,7 +85,6 @@ import dev.merrymen.app.ui.liveTradingReadout
 import dev.merrymen.app.ui.outOfRange
 import dev.merrymen.app.ui.plainBound
 import dev.merrymen.app.ui.plainNumber
-import dev.merrymen.app.ui.telegramStartUrl
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.sans
@@ -287,14 +284,6 @@ private val CLASS_ROUTE = BoolField(
   help = "Separate from sealing a vault at /grant. That says this key COULD reach one; this says go and do it.",
 )
 
-/** Settings.tsx:1386-1392 — inside the collapsed `Telegram` group. */
-private val TELEGRAM = BoolField(
-  key = "telegramEnabled",
-  label = "enable telegram",
-  on = "the bot is listening",
-  off = "off",
-)
-
 /** Settings.tsx:1408-1433 — the `Telegram controls` section inside Advanced. */
 private val TELEGRAM_CONTROLS = listOf(
   BoolField(
@@ -335,8 +324,7 @@ private fun assetModeHint(mode: String): String = when (mode) {
  * Every control reads [SettingsShown] (the edit, else the stored value, else
  * the default) and writes through [onDraft], so the only thing a save can send
  * is what a control put there. [keys] is the masked-key status from the same
- * read, [telegram] the bridge status for the link code (null when unread —
- * which says "checking", never "no code"), and [hosted] the session route's
+ * read, and [hosted] the session route's
  * word on whether this is the hosted service.
  */
 @OptIn(ExperimentalLayoutApi::class)
@@ -344,7 +332,6 @@ private fun assetModeHint(mode: String): String = when (mode) {
 fun SettingsForm(
   env: SettingsEnvelope,
   keys: SettingsKeys?,
-  telegram: TelegramStatus?,
   hosted: Boolean?,
   draft: SettingsDraft,
   onDraft: (SettingsDraft) -> kotlin.Unit,
@@ -444,6 +431,18 @@ fun SettingsForm(
       }
     }
 
+    // These controls stay with the web form's provider validation and consent
+    // flows. SettingsScreen only renders this form for the resolved owner.
+    Disclosure("More agent settings") {
+      if (draft.dirty) Hint("Save your changes here before opening more settings.")
+      TextLink("AI provider and model →") { onWeb("/settings#agent-settings", "AI provider and model") }
+      TextLink("Research brief and discovery focus →") { onWeb("/settings#agent-settings", "Research preferences") }
+      TextLink("Telegram groups →") { onWeb("/settings#telegram-groups", "Telegram groups") }
+      if (hosted == true) {
+        TextLink("Posting on X →") { onWeb("/settings#x-posting", "Posting on X") }
+      }
+    }
+
     // ── PUBLIC BOOK ─────────────────────────────────────────────────────────
     SectionHeading("Public book")
     PublicBookField(shown, draft, onDraft)
@@ -536,15 +535,12 @@ fun SettingsForm(
     }
 
     // ── TELEGRAM (collapsed) ────────────────────────────────────────────────
-    // Settings.tsx:1322. THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT: two
-    // beta testers stopped where the two were in different drawers.
+    // The Telegram screen refreshes connection status and owns setup. Keeping
+    // the master switch there prevents an older native draft from turning off
+    // a bot the web setup just connected and enabled.
     Disclosure("Telegram") {
-      TelegramLinkLines(telegram, keys?.telegramBotToken?.set ?: env.telegramBotToken.set)
-      Spacer(Modifier.height(16.dp))
-      FieldGrid {
-        CheckField(TELEGRAM, shown.bool(TELEGRAM.key), setBool(TELEGRAM.key))
-        TextLink("Bot status and test →", onTelegram)
-      }
+      Hint("Create a bot, check its connection, or change Telegram settings.")
+      TextLink("Set up or manage Telegram →", onTelegram)
     }
 
     // ── KEYS (collapsed) ────────────────────────────────────────────────────
@@ -554,7 +550,7 @@ fun SettingsForm(
     Disclosure("Keys") {
       KeysStatus(env, keys, hosted)
       Spacer(Modifier.height(16.dp))
-      TextLink("Change on the web →") { onWeb("/settings", "Settings") }
+      TextLink("Change AI provider or key →") { onWeb("/settings#agent-settings", "AI provider and model") }
     }
 
     // ── ADVANCED (collapsed) ────────────────────────────────────────────────
@@ -782,35 +778,6 @@ private fun NumberField(f: NumField, shown: SettingsShown, draft: SettingsDraft,
     }
     val problem = draft.unreadable[f.key]?.let { "Can't send this: $it." } ?: outOfRange(f.key, shown.number(f.key))
     if (problem != null) Danger(AnnotatedString(problem))
-  }
-}
-
-/**
- * The link code and what to do with it, in one place (Settings.tsx:1337-1356).
- * A missing code is a WAIT, not an absence: the agent mints one on its next
- * pass after a token is saved. An unread bridge says so, never "no code".
- */
-@Composable
-private fun TelegramLinkLines(tg: TelegramStatus?, tokenSet: Boolean) {
-  val uri = LocalUriHandler.current
-  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    Hint("Create a bot with @BotFather and add its token on the web.")
-    val code = tg?.linkCode
-    when {
-      tg == null -> Hint("Checking the bridge for a link code…")
-      code != null -> {
-        Hint("Then send this to your bot to connect it:")
-        Text("/link $code", style = InputStyle, color = MerryColors.tx)
-        telegramStartUrl(tg.botUsername, code)?.let { url ->
-          TextLink("Open Telegram →") { runCatching { uri.openUri(url) } }
-        }
-        // A BEARER CREDENTIAL. `/link <code>` is accepted from any chat, first
-        // come, and grants control of this agent.
-        Hint("Anyone who has this code can control your agent — do not share or screenshot it.")
-      }
-      tokenSet -> Hint("No link code yet. Your agent mints one on its next pass with this token set — check back shortly.")
-      else -> Hint("Your link code appears here once a token is saved.")
-    }
   }
 }
 

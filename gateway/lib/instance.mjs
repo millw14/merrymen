@@ -5,7 +5,7 @@
  * half-set-up deployment tells the operator exactly which env var is missing.
  */
 import { createPublicClient, defineChain, http } from "viem";
-import { createGateway, clientIp } from "./core.mjs";
+import { bitqueryPointsPerDayFrom, createGateway, clientIp } from "./core.mjs";
 import { createStore, hasRedis } from "./store.mjs";
 
 const TOKEN_ADDRESS = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32"; // $MERRYMEN
@@ -43,6 +43,9 @@ export function getGateway() {
     tokenAddress: TOKEN_ADDRESS,
     publicClient: createPublicClient({ chain, transport: http(RPC) }),
     store: createStore(),
+    // The same fleet-wide daily cap as server.mjs: the serverless path spends
+    // from the same plan, and a cap only one runtime honours is no cap.
+    tunables: { BITQUERY_POINTS_PER_DAY: bitqueryPointsPerDayFrom(process.env.MERRYMEN_GATEWAY_BITQUERY_POINTS_PER_DAY).points },
   });
   return _gw;
 }

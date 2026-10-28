@@ -37,7 +37,7 @@
  */
 
 /**
- * The five kinds, closed.
+ * The kinds, closed.
  *
  *   brain                   — a BrainDecision. The model chose, within policy.
  *   deterministic-strategy  — a rule chose: steady-basket, even-keel, the class
@@ -51,6 +51,18 @@
  *   hard-risk-exit          — a stop-floor, a take-profit, a graduation cliff.
  *                             The machine cut it, and the distinguishing fact is
  *                             that it fires whatever the strategy wanted.
+ *   venue-forced            — the VENUE did it, and nobody here decided anything:
+ *                             a Lighter liquidation, auto-deleverage or market
+ *                             settlement fill (docs/perps.md rule 10). Not a
+ *                             hard-risk-exit — our risk machinery did not cut it,
+ *                             and saying it did would credit a rule for a loss
+ *                             the rule failed to prevent. NEVER INFERRED by
+ *                             `provenanceOf`: a forced fill has no intent and no
+ *                             Why, so the reconcile that books it states this
+ *                             explicitly. Fed to the breaker and alerted.
+ *
+ * Six, closed. A seventh is a decision about what the ledger may claim, not a
+ * tidy-up — decision-identity.test.ts pins the list.
  */
 export const PROVENANCE_KINDS = [
   "brain",
@@ -58,6 +70,7 @@ export const PROVENANCE_KINDS = [
   "owner-command",
   "peer-triggered-research",
   "hard-risk-exit",
+  "venue-forced",
 ] as const;
 export type Provenance = (typeof PROVENANCE_KINDS)[number];
 
@@ -80,6 +93,14 @@ const RISK_EXIT_CODES: ReadonlySet<string> = new Set([
   // The class route's two exits: a clock running out and a contract about to
   // stop accepting sells. Both fire regardless of what the entry scoring wanted.
   "class-exit",
+  // The perps route's risk exits (docs/perps.md): the resting venue stop
+  // filling, the protective loop closing on liquidation proximity, a breached
+  // or missing stop, funding bleed, a market status change, an incident, a
+  // stand-down, a kill or expiry. Every one fires whatever the strategy
+  // wanted. `perp-exit` is deliberately NOT here — a trend, age, funding or
+  // owner close is a view changing, and a take-profit child filling is the
+  // plan working, so they claim less.
+  "perp-risk-exit",
 ]);
 
 /**

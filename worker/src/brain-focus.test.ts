@@ -112,7 +112,8 @@ describe("an all-cash agent finally gets asked something", () => {
         positions: [],
         universe: [{ symbol: "NVDA", address: NVDA.address }],
         prices: new Map([["NVDA", q()]]),
-        paused: new Set(["NVDA"]),
+        // Lowercased ADDRESSES, the way snapshot.ts fills pausedTokens.
+        paused: new Set([NVDA.address.toLowerCase()]),
       }),
       null,
     );
@@ -131,6 +132,16 @@ describe("an all-cash agent finally gets asked something", () => {
       }),
       null,
     );
+  });
+
+  it("matches the paused set by ADDRESS, the key snapshot.ts writes — never by symbol", () => {
+    // The regression: the set holds addresses and the check asked it for a
+    // symbol, so no paused token was ever excluded. A symbol in the set now
+    // means nothing, and an address in it (any case in the universe) excludes.
+    const offered = (paused: Set<string>) =>
+      chooseFocus({ agentId: "0xagent", positions: [], universe: [{ symbol: "NVDA", address: NVDA.address.toUpperCase().replace("0X", "0x") }], prices: new Map([["NVDA", q()]]), paused });
+    assert.equal(offered(new Set(["NVDA"]))?.symbol, "NVDA", "a symbol is not a key of pausedTokens");
+    assert.equal(offered(new Set([NVDA.address.toLowerCase()])), null);
   });
 
   it("does NOT exclude a stale candidate — it prefers against it", () => {

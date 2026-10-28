@@ -216,6 +216,78 @@ export async function recentPonsLaunches(
   }
 }
 
+/** Who launched one token, as the factory recorded it, or why that is not known. */
+export type LaunchCreator = { state: "known"; creator: `0x${string}` } | { state: "none" } | { state: "unreadable" };
+
+/**
+ * WHO LAUNCHED ONE TOKEN, FROM THE FACTORY'S OWN LAUNCH EVENT — never from the
+ * token's word about itself.
+ *
+ * pons-meta.ts can read a `deployer` from the template's metadata getter, but
+ * that is a value the TOKEN returns: a contract that is not the template can
+ * answer the same selector with any address it likes, and a rug that names a
+ * decoy as its deployer would read as "the creator did not sell" while the
+ * real one sells. A log is different. Filtered by emitter at the node, and
+ * checked again here, it can only have come from PONS_V2_FACTORY, and topic3
+ * of its launch event is the creator (the probe recorded in this file's
+ * header). docs/deployer-following-sketch.md reached the same choice.
+ *
+ *   known       exactly one launch of this token, naming one creator
+ *   none        no launch of it by the factory inside the lookback (not a
+ *               Pons launch, or launched earlier than the window), or a record
+ *               that disagrees with itself — nothing is known, nothing assumed
+ *   unreadable  the node could not be asked; the next attempt may answer
+ *
+ * The lookback is MAX_LOOKBACK_BLOCKS, the span recentPonsLaunches already
+ * uses against this node. Filtered by the token's own topic the answer is one
+ * log, so the 10,000-log cap that sized it cannot bite.
+ */
+export async function readLaunchCreator(
+  client: Pick<PublicClient, "getBlockNumber" | "request">,
+  token: string,
+  lookbackBlocks: bigint = MAX_LOOKBACK_BLOCKS,
+): Promise<LaunchCreator> {
+  if (typeof token !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(token)) return { state: "none" };
+  const want = token.toLowerCase() as `0x${string}`;
+  const span = lookbackBlocks > MAX_LOOKBACK_BLOCKS ? MAX_LOOKBACK_BLOCKS : lookbackBlocks < 1n ? 1n : lookbackBlocks;
+  try {
+    const head = await client.getBlockNumber();
+    const from = head > span ? head - span : 0n;
+    const raw = (await client.request({
+      method: "eth_getLogs",
+      params: [
+        {
+          address: PONS_V2_FACTORY,
+          fromBlock: `0x${from.toString(16)}`,
+          toBlock: `0x${head.toString(16)}`,
+          topics: [PONS_LAUNCH_TOPIC, `0x${"0".repeat(24)}${want.slice(2)}`],
+        },
+      ],
+    } as never)) as unknown;
+    if (!Array.isArray(raw)) return { state: "unreadable" };
+    const factory = PONS_V2_FACTORY.toLowerCase();
+    const fromFactory = raw.filter(
+      (l): l is { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string } =>
+        !!l && typeof l === "object" && typeof (l as { address?: unknown }).address === "string" && (l as { address: string }).address.toLowerCase() === factory && Array.isArray((l as { topics?: unknown }).topics),
+    );
+    const launches = parseLaunchLogs(
+      fromFactory.map((l) => ({
+        topics: l.topics,
+        data: l.data,
+        blockNumber: typeof l.blockNumber === "string" && /^0x[0-9a-fA-F]+$/.test(l.blockNumber) ? BigInt(l.blockNumber) : null,
+        transactionHash: typeof l.transactionHash === "string" ? l.transactionHash : null,
+      })),
+    ).filter((l) => l.token === want);
+    const creators = new Set(launches.map((l) => l.creator));
+    if (creators.size !== 1) return { state: "none" };
+    const creator = [...creators][0]!;
+    if (/^0x0{40}$/.test(creator) || creator === want) return { state: "none" };
+    return { state: "known", creator };
+  } catch {
+    return { state: "unreadable" };
+  }
+}
+
 /** getReserves() — two words on a Pons curve, NOT Uniswap V2's three. */
 const SEL_GET_RESERVES = "0x0902f1ac";
 /** graduationThreshold() — agrees with the launch event's third data word. */

@@ -1,0 +1,26 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "board": "most-held",
+  "capturedAt": "2026-10-04T16:00:00Z",
+  "count": 1,
+  "source": "captured",
+  "stale": true,
+  "ageHours": 2,
+  "tokens": [
+    {
+      "rank": 1,
+      "image": null,
+      "token": {
+        "name": "Wrapped SOL",
+        "symbol": "SOL",
+        "address": "So11111111111111111111111111111111111111112"
+      },
+      "holders": null,
+      "network": "solana",
+      "priceUsd": 150,
+      "change24h": 1.1,
+      "marketCapUsd": 70000000000,
+      "volume24hUsd": 5000000
+    }
+  ]
+}

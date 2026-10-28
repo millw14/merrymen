@@ -29,6 +29,7 @@
 
 import { fileURLToPath } from "node:url";
 
+import { onchainIdIn } from "../../packages/core/src/ids";
 import { PNL_GLYPHS, PNL_GLYPH_EM } from "./pnl-glyphs";
 
 /** Template geometry, measured off `pnl/PNL.jpg` (1280x853). */
@@ -235,7 +236,11 @@ export function pnlCardFromFill(row: ClosedFillRow, coin?: string | null): PnlCa
   const named = (coin ?? "").trim();
   // Neither may be address-shaped: a resolver that could not name the coin
   // falls back to a short address, and that is exactly what must never be drawn.
-  const symbol = (/^0x/i.test(named) ? "" : named) || (/^0x/i.test(fromTarget) ? "" : fromTarget);
+  // A Solana key or program id has no 0x: core's detector catches a whole one,
+  // and a whole 0x address inside a longer name too. Glued to the words around
+  // it as well (CARD_ID_SCAN).
+  const addressy = (s: string): boolean => /^0x/i.test(s) || onchainIdIn(s, CARD_ID_SCAN);
+  const symbol = (addressy(named) ? "" : named) || (addressy(fromTarget) ? "" : fromTarget);
   if (!symbol) return null;
 
   const proceeds = toBase(row.fill_cash_usdg);
@@ -252,6 +257,71 @@ export function pnlCardFromFill(row: ClosedFillRow, coin?: string | null): PnlCa
 
 /** One cent, in USDG base units — below this a figure prints as 0.00. */
 const DUST_USDG = 10_000n;
+
+/**
+ * A `trades` row as the live-sell card reads it, joined to its decision for
+ * the coin's name. `coin_symbol` is the fill's symbol, else the decision's.
+ */
+export interface LiveSellRow extends ClosedFillRow {
+  kind?: string | null;
+  sell_token?: string | null;
+  coin_symbol?: string | null;
+  display_name?: string | null;
+}
+
+export type LiveSellCard = { kind: "card"; card: PnlCardData } | { kind: "ineligible"; reason: string };
+
+/**
+ * THE CARD'S ID SCANS ARE GLUED (audit regressions F3). A token names itself:
+ * one called "buy<mint>now" or "CA<mint>" would be drawn with the mint in it,
+ * and the card is an image, which no text backstop on X reads
+ * (xpost/public-wallet.ts sees only the words). The glued scan also finds a
+ * key or signature written against neighbouring letters or digits. Its one
+ * cost, an unbroken base58 run of 43 or more characters read as an id, is a
+ * name no coin has inside this 64-character ceiling; such a name is not
+ * printed, and the card falls back to the target or is not drawn.
+ */
+const CARD_ID_SCAN = { glued: true } as const;
+
+/**
+ * A coin's name fit to print: plain characters, not a contract address, not an
+ * autonomous token id, and carrying no address (0x or Solana) anywhere in it,
+ * glued to its neighbours or not (CARD_ID_SCAN). Null otherwise.
+ */
+export function printableCoinName(value: string | null | undefined): string | null {
+  const name = (value ?? "").trim();
+  return name && name.length <= 64 && /^[\x20-\x7e]+$/.test(name) && !/^0x/i.test(name) && !onchainIdIn(name, CARD_ID_SCAN) && !/^T[0-9A-F]{11}$/i.test(name) ? name : null;
+}
+
+/**
+ * THE ONE RULE FOR A CARD OF A LIVE SALE, wherever it is shown: the owner's
+ * desk (web /api/pnl) and an active agent's sale on X both ask this.
+ *
+ * A completed (landed) live sell of a swap or curve trade, with a measured
+ * realised P&L and proceeds, on a token the ledger names, whose proceeds and
+ * cost basis are both vouched for (`evidenced`, asked only once everything
+ * cheaper has passed), under a coin name fit to print. The house card has no
+ * practice watermark, so a paper trade is never one; a refusal or a pending
+ * attempt moved nothing. Then `pnlCardFromFill`'s own refusals (dust) apply.
+ *
+ * Pure but for `evidenced`, which the caller reads from its own ledger.
+ */
+export async function liveSellCard(row: LiveSellRow, evidenced: () => Promise<boolean>): Promise<LiveSellCard> {
+  if (row.status !== "landed" || row.fill_side !== "sell" || !["swap", "curve-trade"].includes(row.kind ?? "")) {
+    return { kind: "ineligible", reason: "P&L images are available for completed live sells only." };
+  }
+  if (typeof row.fill_cash_usdg !== "number" || !Number.isFinite(row.fill_cash_usdg) || row.fill_cash_usdg < 0 ||
+      typeof row.realized_pnl_usdg !== "number" || !Number.isFinite(row.realized_pnl_usdg) || !row.sell_token) {
+    return { kind: "ineligible", reason: "That trade has no measured realized P&L to print." };
+  }
+  if (!(await evidenced())) return { kind: "ineligible", reason: "The trade's proceeds and cost basis could not both be verified." };
+  // Autonomous token IDs and router addresses are not coin names. Match the
+  // desk's preference for a human name when the symbol is only an identifier.
+  const coin = printableCoinName(row.coin_symbol) ?? printableCoinName(row.display_name);
+  if (!coin) return { kind: "ineligible", reason: "The coin's name is unknown, so there is no P&L image to print." };
+  const card = pnlCardFromFill({ ...row, target: null }, coin);
+  return card ? { kind: "card", card } : { kind: "ineligible", reason: "That trade has no measured realized P&L large enough to print." };
+}
 
 /**
  * Where the template lives, resolved from this module rather than the cwd.

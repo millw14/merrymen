@@ -143,12 +143,14 @@ describe("the migration, against the rows that are actually there", () => {
     const { db } = await preMigration();
     await seedAgents(db);
     // A row written before the identity existed: hash in the RPC's case, no chain.
+    // A whole 0x + 64 hex hash, the only shape the migration folds.
+    const cased = `0x${"ABCDEF01".repeat(8)}`;
     await db
       .prepare(
         `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, at)
-         VALUES (?, 'in', 10, '0xABCDEF', 100, 0, 'chain-log', 1, 0)`,
+         VALUES (?, 'in', 10, ?, 100, 0, 'chain-log', 1, 0)`,
       )
-      .run(CANARY);
+      .run(CANARY, cased);
 
     await applyLedgerSchema(db);
 
@@ -156,7 +158,7 @@ describe("the migration, against the rows that are actually there", () => {
       tx_hash: string;
       chain_id: number;
     };
-    assert.equal(r.tx_hash, "0xabcdef", "normalised, so the two writers cannot disagree");
+    assert.equal(r.tx_hash, `0x${"abcdef01".repeat(8)}`, "normalised, so the two writers cannot disagree");
     assert.equal(Number(r.chain_id), CHAIN, "and the chain comes from the agent's own grant");
     assert.equal(await hasChainIdentityIndex(db), true);
   });
@@ -203,7 +205,7 @@ describe("the migration, against the rows that are actually there", () => {
     // re-running an ALTER is a no-op.
     const { db } = await preMigration();
     await seedAgents(db);
-    for (const hash of ["0xDEADBEEF", "0xdeadbeef"]) {
+    for (const hash of [`0x${"DEADBEEF".repeat(8)}`, `0x${"deadbeef".repeat(8)}`]) {
       await db
         .prepare(
           `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)

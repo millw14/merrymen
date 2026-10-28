@@ -9,13 +9,18 @@
  * what this page displayed.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { AlertTriangle, ArrowRight, Check, ShieldCheck, X } from "lucide-react";
 import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
 import { BrandLockup } from "../../BrandLockup";
 
-import { TERMINAL, approvable, bookBox, headline, resumeDecision, short, text, usdg, type SettingsCheck, type View } from "./approve-view";
+import { TERMINAL, approvable, bookBox, headline, resumeDecision, short, text, usdg, walletSetupUrl, type SettingsCheck, type View } from "./approve-view";
 export { approvable, bookBox, headline, outcomeBook, resumeDecision } from "./approve-view";
+
+const CreateSetup = dynamic(() => import("../../setup/[id]/SetupClient").then(m => m.SetupClient), {
+  loading: () => <div className="terminal-host partner-connect"><main className="connect-main"><p role="status">Loading your setup and limits…</p></main></div>,
+});
 
 /** What the owner reads when their session ended mid-decision: never a bare status word. */
 export const SESSION_ENDED = "Your session ended; sign in to finish.";
@@ -83,6 +88,12 @@ function Details({ v }: { v: View }) {
     return <ul className="mcp-checks">{diff.map((d) => <li key={d.label}><label><span><strong>{d.label}: {d.current} → {d.proposed}</strong><span>{d.help}</span></span></label></li>)}</ul>;
   }
   if (v.kind === "agent_draft") {
+    if(b.purpose === "create") {
+      const settings=(b.settings as Record<string,unknown>)??{};
+      const rows=v.settings_check?.rows;
+      const leftOut=v.settings_check?.left_out??(Array.isArray(b.left_out)?b.left_out:[]);
+      return <><ul className="mcp-checks">{rows?rows.map(d=><li key={d.key}><label><span><strong>{d.label}: {d.proposed}</strong><span>{d.help}</span></span></label></li>):Object.entries(settings).map(([k,val])=><li key={k}><label><span><strong>{k}</strong><span>{text(val)}</span></span></label></li>)}</ul>{leftOut.length>0&&<p className="mcp-note">Left out of this setup: {leftOut.map(text).join(", ")}. Safety floors such as the price-impact cap are only changed in Settings.</p>}<div className="connect-boundary"><ShieldCheck size={18} aria-hidden/><p>Review this setup, then continue to create your wallet and sign its trading limits. Your Merryman runs on Merrymen and you manage it from your assistant. Approving this page alone does not create a wallet, change settings or start trading.</p></div></>;
+    }
     const c = v.settings_check;
     if (!c) {
       const settings = (b.settings as Record<string, unknown>) ?? {};
@@ -138,6 +149,10 @@ export function ApproveClient({ id }: { id: string }) {
     try {
       const next = await call<View>(id, { decision, hash: on.binding_hash });
       setV(next);
+      // Only the owner's explicit continuation enters signing. Merely reading
+      // or reloading an approved proposal never navigates or signs anything.
+      const setup = decision === "approve" ? walletSetupUrl(next) : null;
+      if (setup) window.location.assign(setup);
       if (!TERMINAL.has(next.status)) poll.current = setTimeout(() => void load(), 5000);
     } catch (e) {
       if (isSignedOut(e)) {
@@ -167,8 +182,15 @@ export function ApproveClient({ id }: { id: string }) {
 
   const expired = v ? v.expires_at * 1000 < Date.now() : false;
   const deciding = v?.status === "awaiting_approval";
+  const setupUrl = v ? walletSetupUrl(v) : null;
   const noun = v?.kind === "trade" ? "Trade" : v?.kind === "settings" ? "Setting changes" : v?.kind === "agent_draft" ? "Agent setup" : v?.kind === "post" ? "Post" : "Request";
   const title = v && !deciding ? `${noun}: ${headline(v).toLowerCase()}` : v?.kind === "trade" ? "Approve this trade?" : v?.kind === "settings" ? "Approve these setting changes?" : v?.kind === "agent_draft" ? "Approve this agent setup?" : v?.kind === "post" ? "Approve this post?" : "Review a request";
+
+  // Creation has one owner review: the assistant's exact setup and the
+  // wallet's limits. The embedded flow still approves the stored hash before
+  // writing settings or signing; mounting it performs only authenticated reads.
+  if (!loading && !signedOut && v?.kind === "agent_draft" && v.binding.purpose === "create"
+    && (v.status === "awaiting_approval" || v.status === "applied")) return <CreateSetup id={id} />;
 
   return (
     <div className="terminal-host partner-connect mcp-connect">
@@ -196,11 +218,12 @@ export function ApproveClient({ id }: { id: string }) {
             {typeof v.summary.assistant_note === "string" && <p className="mcp-note">Assistant’s note (unverified): “{v.summary.assistant_note}”</p>}
             {v.status === "cancelled" && v.result?.requester_withdrawn === true && typeof v.result.why === "string" && <div className="connect-boundary mcp-warn"><AlertTriangle size={18} aria-hidden /><p>Cancelled because {v.result.why}. Nothing was sent, and it can no longer be approved.</p></div>}
             <Details v={v} />
+            {setupUrl&&!signedOut&&<a className="flow-primary" href={setupUrl}>Continue to wallet setup <ArrowRight size={16} aria-hidden/></a>}
             {v.result && <details open={TERMINAL.has(v.status)}><summary>Result</summary><pre className="mcp-activity">{JSON.stringify(v.result, null, 2)}</pre></details>}
             {/* No decision is offered while signed out: pressing it could not be sent. */}
             {v.status === "awaiting_approval" && !expired && !signedOut && <>
               {/* A settings change whose "before" moved, or a trade whose book moved, is refused by the server; no button offers it. */}
-              {approvable(v) && <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? "Working…" : "Approve"} {!busy && <ArrowRight size={16} aria-hidden />}</button>}
+              {approvable(v) && <button className="flow-primary" disabled={busy} onClick={() => void decide("approve")}>{busy ? "Working…" : v.kind === "agent_draft" && v.binding.purpose === "create" ? "Continue to wallet setup" : "Approve"} {!busy && <ArrowRight size={16} aria-hidden />}</button>}
               <button className="connect-cancel" disabled={busy} onClick={() => void decide("reject")}><X size={15} aria-hidden /> Decline</button>
             </>}
             {v.status === "awaiting_approval" && expired && <p className="mcp-note">This request expired. Ask your assistant for a fresh one.</p>}

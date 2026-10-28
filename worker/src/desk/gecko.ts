@@ -13,7 +13,7 @@
  * gets there only as an address someone posted.
  */
 import { readBoundedJson } from "../bounded-read";
-import { cachedGeckoDetail, geckoSource, GECKO_NETWORK, parseGeckoPool, type GeckoFetch, type GeckoPool } from "../venues/geckoterminal";
+import { cachedGeckoDetail, geckoRefusal, geckoSource, GECKO_NETWORK, parseGeckoPool, resetGeckoFeedsForTest, type GeckoLane, type GeckoSource, type GeckoFetch, type GeckoPool } from "../venues/geckoterminal";
 import type { FeedResult } from "../venues/fleet-feed-cache";
 import type { Bar } from "./ta";
 import { safeFetchUrl } from "../../../packages/core/src/index";
@@ -24,14 +24,20 @@ const FAIL_MEMO_MS = 5_000;
 const memo = new Map<string, { until: number; value: unknown }>();
 const pending = new Map<string, Promise<unknown>>();
 
-/** One request per key per minute, shared by every caller in this process. */
-async function memoized<T extends FeedResult>(key: string, run: () => Promise<T>, unavailable: (why: string) => T): Promise<T> {
+/**
+ * One request per key per minute, shared by every caller in this process.
+ * `route` is the provider route the run will ask for; on the Pro lane its
+ * template is what a plan refusal latches (venues/fleet-feed-cache.ts).
+ * `lane` names the fleet lane a read spends (geckoterminal.ts GeckoLane): the
+ * orchestrator passes its fleet home; a child's environment already has it.
+ */
+export async function memoized<T extends FeedResult>(key: string, run: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (why: string) => T, route?: string, lane?: GeckoLane): Promise<T> {
   const k = `${geckoSource().id}:${key}`;
   const hit = memo.get(k);
   if (hit && hit.until > Date.now()) return hit.value as T;
   const inFlight = pending.get(k);
   if (inFlight) return inFlight as Promise<T>;
-  const job = cachedGeckoDetail(`desk:${key}`, run, unavailable)
+  const job = cachedGeckoDetail(`desk:${key}`, run, unavailable, { ...(route ? { route } : {}), ...(lane ? { fleet: lane } : {}) })
     .catch(() => unavailable("unavailable"))
     .then((value) => {
       if (memo.size >= 256) memo.delete(memo.keys().next().value!);
@@ -47,23 +53,21 @@ async function memoized<T extends FeedResult>(key: string, run: () => Promise<T>
 export function resetDeskReadsForTest(): void {
   memo.clear();
   pending.clear();
+  // Tests that mock providers also need to forget the process-local shared
+  // lane. Advance its clock rather than waiting for real provider spacing.
+  let now = Date.now();
+  resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; await Promise.resolve(); } });
 }
 
-async function getJson(route: string, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
+export async function getJson(route: string, timeoutMs: number, signal?: AbortSignal, source: GeckoSource = geckoSource()): Promise<{ ok: true; body: unknown; observedAt: number } | { ok: false; failure: string; retryAfterMs?: number }> {
   // Fleet pacing can outlive an optional caller's read budget. Never begin a
   // request after that caller has already cancelled it.
   if (signal?.aborted || timeoutMs < 1) return { ok: false, failure: "unavailable" };
-  const source = geckoSource();
   const observedAt = Date.now();
   try {
     const timeout = AbortSignal.timeout(timeoutMs);
     const res = await fetch(`${source.base}${route}`, { headers: source.headers, redirect: "error", signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
-    if (!res.ok) {
-      const retry = res.headers.get("retry-after");
-      const ms = retry === null ? 0 : /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
-      await res.body?.cancel().catch(() => {});
-      return { ok: false, failure: `http-${res.status}`, retryAfterMs: Number.isFinite(ms) ? Math.max(0, ms) : 0 };
-    }
+    if (!res.ok) return { ok: false, ...await geckoRefusal(res) };
     const read = await readBoundedJson(res);
     return read.ok ? { ok: true, body: read.value, observedAt } : { ok: false, failure: "invalid-body" };
   } catch {
@@ -132,18 +136,21 @@ export function parseTokenInfo(body: unknown, token: string): IndexedTokenInfo |
 }
 
 /** Metadata spends the existing fleet detail quota; the fixed origin keeps keys private. */
-export async function readTokenInfo(address: string, timeoutMs = 3000, signal?: AbortSignal): Promise<TokenInfoRead> {
+export async function readTokenInfo(address: string, timeoutMs = 3000, signal?: AbortSignal, lane?: GeckoLane): Promise<TokenInfoRead> {
   const token = typeof address === "string" ? address.toLowerCase() : "";
   if (!/^0x[\da-f]{40}$/.test(token)) return { failed: true, failure: "invalid-token" };
+  const route = `/networks/${GECKO_NETWORK}/tokens/${token}/info`;
   return memoized<TokenInfoRead>(
     `info:${GECKO_NETWORK}:${token}`,
-    async () => {
-      const r = await getJson(`/networks/${GECKO_NETWORK}/tokens/${token}/info`, timeoutMs, signal);
+    async (source, remainingMs) => {
+      const r = await getJson(route, Math.min(timeoutMs, remainingMs), signal, source);
       if (!r.ok) return { failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const info = parseTokenInfo(r.body, token);
       return info ? { failed: false, observedAt: r.observedAt, info } : { failed: true, failure: "invalid-shape" };
     },
     (failure) => ({ failed: true, failure }),
+    route,
+    lane,
   );
 }
 
@@ -158,19 +165,22 @@ export function searchable(query: string): string | null {
 }
 
 /** GeckoTerminal's pool search, on Robinhood Chain only. Pools are parsed like every other feed. */
-export async function searchPools(query: string, timeoutMs = 8000, signal?: AbortSignal): Promise<GeckoFetch> {
+export async function searchPools(query: string, timeoutMs = 8000, signal?: AbortSignal, lane?: GeckoLane): Promise<GeckoFetch> {
   const q = searchable(query);
   if (!q) return { pools: [], failed: true, failure: "invalid-query" };
+  const route = `/search/pools?query=${encodeURIComponent(q)}&network=${GECKO_NETWORK}&page=1`;
   return memoized<GeckoFetch>(
     `search:${q.toLowerCase()}`,
-    async () => {
-      const r = await getJson(`/search/pools?query=${encodeURIComponent(q)}&network=${GECKO_NETWORK}&page=1`, timeoutMs, signal);
+    async (source, remainingMs) => {
+      const r = await getJson(route, Math.min(timeoutMs, remainingMs), signal, source);
       if (!r.ok) return { pools: [], failed: true, failure: r.failure, ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const data = (r.body as { data?: unknown })?.data;
       if (!Array.isArray(data)) return { pools: [], failed: true, failure: "invalid-shape" };
       return { pools: data.map(parseGeckoPool).filter((p): p is GeckoPool => p !== null), failed: false, observedAt: r.observedAt };
     },
     (failure) => ({ pools: [], failed: true, failure }),
+    route,
+    lane,
   );
 }
 
@@ -225,14 +235,16 @@ export async function readHourlyBars(poolId: string, token: string, limit = 168,
   const tok = typeof token === "string" ? token.toLowerCase() : "";
   if (!/^0x([\da-f]{40}|[\da-f]{64})$/.test(pool) || !/^0x[\da-f]{40}$/.test(tok)) return { failed: true, failure: "invalid-market", bars: [] };
   const n = Math.max(24, Math.min(168, Math.floor(limit)));
+  const route = `/networks/${GECKO_NETWORK}/pools/${pool}/ohlcv/hour?aggregate=1&limit=${n}&currency=usd&token=${tok}`;
   return memoized<BarsRead>(
     `hour:${pool}:${tok}:${n}`,
-    async () => {
-      const r = await getJson(`/networks/${GECKO_NETWORK}/pools/${pool}/ohlcv/hour?aggregate=1&limit=${n}&currency=usd&token=${tok}`, timeoutMs, signal);
+    async (source, remainingMs) => {
+      const r = await getJson(route, Math.min(timeoutMs, remainingMs), signal, source);
       if (!r.ok) return { failed: true, failure: r.failure, bars: [], ...(r.retryAfterMs !== undefined ? { retryAfterMs: r.retryAfterMs } : {}) };
       const parsed = parseHourlyBars(r.body, tok);
       return parsed ? { failed: false, observedAt: r.observedAt, ...parsed } : { failed: true, failure: "invalid-shape", bars: [] };
     },
     (failure) => ({ failed: true, failure, bars: [] }),
+    route,
   );
 }

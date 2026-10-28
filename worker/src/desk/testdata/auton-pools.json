@@ -1,0 +1,825 @@
+{
+ "_fixture": "trimmed from GeckoTerminal's public API, read 2026-10-09 ~01:15 UTC (AUTON on Solana); fields the facts reader does not use removed",
+ "data": [
+  {
+   "id": "solana_FiYyzxapRvkbUhF5ZD3mJigWwqBGhtVLH49MDSgCLHdB",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00003633764859",
+    "quote_token_price_usd": "108.953554506553635459647803246422338912946373682",
+    "address": "FiYyzxapRvkbUhF5ZD3mJigWwqBGhtVLH49MDSgCLHdB",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T18:43:40Z",
+    "fdv_usd": "36245.4588991482",
+    "price_change_percentage": {
+     "h24": "-98.47"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 4022,
+      "sells": 2700,
+      "buyers": 1157,
+      "sellers": 1576
+     }
+    },
+    "volume_usd": {
+     "h24": "685634.274473285"
+    },
+    "reserve_in_usd": "16193.6139"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_AECVu5BJndph7k61MmGWeidDh2PVeaHJysXzb2avXwBW",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00003770103622",
+    "quote_token_price_usd": "108.953554506553635459647803246422338912946373682",
+    "address": "AECVu5BJndph7k61MmGWeidDh2PVeaHJysXzb2avXwBW",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T20:52:50Z",
+    "fdv_usd": "37605.3875743451",
+    "price_change_percentage": {
+     "h24": "-98.46"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 4021,
+      "sells": 3022,
+      "buyers": 1439,
+      "sellers": 1616
+     }
+    },
+    "volume_usd": {
+     "h24": "1296379.64443784"
+    },
+    "reserve_in_usd": "968.092"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_4sYCu1udA5DS4GG7xyTtNYUY86hUurKLLQ2a3Tw82Z9D",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.0004286217986",
+    "quote_token_price_usd": "112.480002346143340230484568164806333917802265464",
+    "address": "4sYCu1udA5DS4GG7xyTtNYUY86hUurKLLQ2a3Tw82Z9D",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T21:06:44Z",
+    "fdv_usd": "427534.372400492",
+    "price_change_percentage": {
+     "h24": "-82.59"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 267,
+      "sells": 404,
+      "buyers": 140,
+      "sellers": 222
+     }
+    },
+    "volume_usd": {
+     "h24": "72926.7275194144"
+    },
+    "reserve_in_usd": "8302.8613"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_ErW52xixSRZUymkjXL9APcZ5ygoQvvL1VEgsedj9TxHm",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.0004922038822",
+    "quote_token_price_usd": "0.999657562484443795044614433618877720202403522709050918889958999",
+    "address": "ErW52xixSRZUymkjXL9APcZ5ygoQvvL1VEgsedj9TxHm",
+    "name": "AUTON / USDC",
+    "pool_created_at": "2026-10-06T22:03:46Z",
+    "fdv_usd": "490955.146370996",
+    "price_change_percentage": {
+     "h24": "-79.22"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 767,
+      "sells": 872,
+      "buyers": 427,
+      "sellers": 480
+     }
+    },
+    "volume_usd": {
+     "h24": "62833.9616910359"
+    },
+    "reserve_in_usd": "6796.0687"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_J8sGjRKPaFHFxfLR44T3yFWaaZmohcgzzBLz1zfqGNzH",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00005737046637",
+    "quote_token_price_usd": "109.316787616838026887055936999797374138730826964",
+    "address": "J8sGjRKPaFHFxfLR44T3yFWaaZmohcgzzBLz1zfqGNzH",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T20:54:51Z",
+    "fdv_usd": "57224.9157974148",
+    "price_change_percentage": {
+     "h24": "-97.61"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 2421,
+      "sells": 2150,
+      "buyers": 981,
+      "sellers": 1157
+     }
+    },
+    "volume_usd": {
+     "h24": "367294.201609116"
+    },
+    "reserve_in_usd": "1044.9588"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_H7fxfgPvkkjVFLsNKtPAN8Yc28NTZNf5u8ygapzfyZjN",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00006649551428",
+    "quote_token_price_usd": "112.444208021264573076732701600832596454162592731",
+    "address": "H7fxfgPvkkjVFLsNKtPAN8Yc28NTZNf5u8ygapzfyZjN",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T18:48:55Z",
+    "fdv_usd": "66326.8131905686",
+    "price_change_percentage": {
+     "h24": "-97.4"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 197,
+      "sells": 389,
+      "buyers": 126,
+      "sellers": 240
+     }
+    },
+    "volume_usd": {
+     "h24": "16131.5090599326"
+    },
+    "reserve_in_usd": "356.648"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_8cb4G9fBVmFRR5sdo4LZHfzBmFRdzjzeq1XouNCrSJ41",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.0002560136857",
+    "quote_token_price_usd": "112.194310576276820937064575531234165609540736406",
+    "address": "8cb4G9fBVmFRR5sdo4LZHfzBmFRdzjzeq1XouNCrSJ41",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-07T03:04:16Z",
+    "fdv_usd": "255364.171395846",
+    "price_change_percentage": {
+     "h24": "-89.15"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 775,
+      "sells": 973,
+      "buyers": 413,
+      "sellers": 550
+     }
+    },
+    "volume_usd": {
+     "h24": "24081.9995998654"
+    },
+    "reserve_in_usd": "88.0191"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_FZ7rJwCDnoFg2zZ8zF2afiJdRwzLL9Pfco4KApnkJ2Vo",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00003808453113",
+    "quote_token_price_usd": "108.953554506553635459647803246422338912946373682",
+    "address": "FZ7rJwCDnoFg2zZ8zF2afiJdRwzLL9Pfco4KApnkJ2Vo",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T20:53:49Z",
+    "fdv_usd": "37987.9095463987",
+    "price_change_percentage": {
+     "h24": "-98.44"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 1423,
+      "sells": 1786,
+      "buyers": 498,
+      "sellers": 773
+     }
+    },
+    "volume_usd": {
+     "h24": "2751.3122538346"
+    },
+    "reserve_in_usd": "81.7004"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_4EPUHiv4uEyiKnFX98YwzGJ5LkwwMB2iwU9x7rWiQwuW",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00004461081038",
+    "quote_token_price_usd": "110.57",
+    "address": "4EPUHiv4uEyiKnFX98YwzGJ5LkwwMB2iwU9x7rWiQwuW",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T22:22:48Z",
+    "fdv_usd": "44497.6314326227",
+    "price_change_percentage": {
+     "h24": "-98.11"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 2736,
+      "sells": 2697,
+      "buyers": 8,
+      "sellers": 12
+     }
+    },
+    "volume_usd": {
+     "h24": "146883.957339483"
+    },
+    "reserve_in_usd": null
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_6uB5xXCbNQd58eY6hBg7VAahoB1ifkDwy9kHXWgtMFhZ",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00003483795549",
+    "quote_token_price_usd": "109.18",
+    "address": "6uB5xXCbNQd58eY6hBg7VAahoB1ifkDwy9kHXWgtMFhZ",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-07T08:44:13Z",
+    "fdv_usd": "34749.5705649662",
+    "price_change_percentage": {
+     "h24": "-98.57"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 1111,
+      "sells": 1248,
+      "buyers": 5,
+      "sellers": 6
+     }
+    },
+    "volume_usd": {
+     "h24": "23034.6350746796"
+    },
+    "reserve_in_usd": null
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_A7SFA6eaSCXZQqRsoTXjmjM9s6Gfpw7HK3kbpaw6zhmY",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.0006575533744",
+    "quote_token_price_usd": "112.763693988157526752200542289242982540757452789",
+    "address": "A7SFA6eaSCXZQqRsoTXjmjM9s6Gfpw7HK3kbpaw6zhmY",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-07T12:49:00Z",
+    "fdv_usd": "655885.142011369",
+    "price_change_percentage": {
+     "h24": "-71.09"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 4,
+      "sells": 101,
+      "buyers": 4,
+      "sellers": 66
+     }
+    },
+    "volume_usd": {
+     "h24": "34.0325167204"
+    },
+    "reserve_in_usd": "11.4718"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_A3Fzz74kLiYA69KpQatk7r1PVsEygVYVahVDk7QSEgki",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.0001166417883",
+    "quote_token_price_usd": "0.999748470402242",
+    "address": "A3Fzz74kLiYA69KpQatk7r1PVsEygVYVahVDk7QSEgki",
+    "name": "AUTON / USDC",
+    "pool_created_at": "2026-10-07T22:47:53Z",
+    "fdv_usd": "116345.864627967",
+    "price_change_percentage": {
+     "h24": "-52.16"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 0,
+      "sells": 4,
+      "buyers": 0,
+      "sellers": 1
+     }
+    },
+    "volume_usd": {
+     "h24": "184.4412185018"
+    },
+    "reserve_in_usd": null
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_8zGiHTsjpWoH6ipnir45c7X4Yx3oiVE9o5N8bQga4zjK",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00003676085535",
+    "quote_token_price_usd": "109.435391212928424062020818748094080367449173885",
+    "address": "8zGiHTsjpWoH6ipnir45c7X4Yx3oiVE9o5N8bQga4zjK",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-08T16:49:00Z",
+    "fdv_usd": "36667.591971062",
+    "price_change_percentage": {
+     "h24": "27.17"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 137,
+      "sells": 132,
+      "buyers": 65,
+      "sellers": 75
+     }
+    },
+    "volume_usd": {
+     "h24": "26.9272309457"
+    },
+    "reserve_in_usd": "4.7393"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_AJbTPqTxSiNjfsnkja99LH2TcfsBUL8Bd1rP2ufSYazu",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.000107943088",
+    "quote_token_price_usd": "112.419316654766094140710008454",
+    "address": "AJbTPqTxSiNjfsnkja99LH2TcfsBUL8Bd1rP2ufSYazu",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-07T00:07:53Z",
+    "fdv_usd": "107669.233188298",
+    "price_change_percentage": {
+     "h24": "-95.37"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 116,
+      "sells": 280,
+      "buyers": 64,
+      "sellers": 132
+     }
+    },
+    "volume_usd": {
+     "h24": "20.6519143908"
+    },
+    "reserve_in_usd": "4.5517"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_5Cz7bnZ2s64BqaYjPhG8WF3WmtDreK8tcbF1gaiXzGD",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00004800948015",
+    "quote_token_price_usd": "0.99436135941133473372216330088888974006558826623092177473299372",
+    "address": "5Cz7bnZ2s64BqaYjPhG8WF3WmtDreK8tcbF1gaiXzGD",
+    "name": "AUTON / USDT",
+    "pool_created_at": "2026-10-06T18:44:40Z",
+    "fdv_usd": "47887.6786767422",
+    "price_change_percentage": {
+     "h24": "-98.77"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 1,
+      "sells": 49,
+      "buyers": 1,
+      "sellers": 11
+     }
+    },
+    "volume_usd": {
+     "h24": "2.9735373869"
+    },
+    "reserve_in_usd": "0.906"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_2iTirDNGLyrApx858CNwAwx5tL3zPCCM2HaEyXkkfKB2",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00003573034469",
+    "quote_token_price_usd": "108.785450341449607021947896737352968858679606112",
+    "address": "2iTirDNGLyrApx858CNwAwx5tL3zPCCM2HaEyXkkfKB2",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T18:44:44Z",
+    "fdv_usd": "35639.6957471318",
+    "price_change_percentage": {
+     "h24": "-98.52"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 70,
+      "sells": 168,
+      "buyers": 33,
+      "sellers": 61
+     }
+    },
+    "volume_usd": {
+     "h24": "3.4986683399"
+    },
+    "reserve_in_usd": "0.3813"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_CXcNGUNBZfs6v35KVEp7d1UCwrhkkub7MyMbL8DF5KPC",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00005653339768",
+    "quote_token_price_usd": "0.999850143676101588902370456795438564745929971167163402120318722",
+    "address": "CXcNGUNBZfs6v35KVEp7d1UCwrhkkub7MyMbL8DF5KPC",
+    "name": "AUTON / USDC",
+    "pool_created_at": "2026-10-06T18:46:36Z",
+    "fdv_usd": "56389.9707754766",
+    "price_change_percentage": {
+     "h24": "-98.57"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 0,
+      "sells": 26,
+      "buyers": 0,
+      "sellers": 4
+     }
+    },
+    "volume_usd": {
+     "h24": "1.1826012596"
+    },
+    "reserve_in_usd": "0.4257"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_k8jTthiySUpdZaENaTpKBCMNVdpfgUYfuga4SdEJ21G",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.00009613012937",
+    "quote_token_price_usd": "0.000036434461799868637092511476758815529681438950132048466515247936",
+    "address": "k8jTthiySUpdZaENaTpKBCMNVdpfgUYfuga4SdEJ21G",
+    "name": "LPPP / AUTON",
+    "pool_created_at": "2026-10-06T21:33:59Z",
+    "fdv_usd": "36342.0264910356",
+    "price_change_percentage": {
+     "h24": "-98.26"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 10,
+      "sells": 48,
+      "buyers": 6,
+      "sellers": 24
+     }
+    },
+    "volume_usd": {
+     "h24": "0.2991948781"
+    },
+    "reserve_in_usd": "0.0545"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_44sHXMkPeciUpqhecfCysVs7RcaxeM24VPMauQouBREV",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_8MbgovAELuwXY6MzCiujDrAH4B29jrTMMF5did9Vwdwk",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.0000352674316",
+    "quote_token_price_usd": "109.436410583788",
+    "address": "8MbgovAELuwXY6MzCiujDrAH4B29jrTMMF5did9Vwdwk",
+    "name": "AUTON / SOL",
+    "pool_created_at": "2026-10-06T22:29:32Z",
+    "fdv_usd": "35177.9570813533",
+    "price_change_percentage": {
+     "h24": "-98.46"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 7,
+      "sells": 42,
+      "buyers": 3,
+      "sellers": 27
+     }
+    },
+    "volume_usd": {
+     "h24": "0.05463646446"
+    },
+    "reserve_in_usd": "0.0109"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_So11111111111111111111111111111111111111112",
+      "type": "token"
+     }
+    }
+   }
+  },
+  {
+   "id": "solana_ECqtTtP6ojGHPwRCEQp6qC2ean6dhn4Kv4e4iTh52rca",
+   "type": "pool",
+   "attributes": {
+    "base_token_price_usd": "0.003203765774",
+    "quote_token_price_usd": "0.17231936949099872607850260363464591019541890192374270396878645",
+    "address": "ECqtTtP6ojGHPwRCEQp6qC2ean6dhn4Kv4e4iTh52rca",
+    "name": "AUTON / STONK",
+    "pool_created_at": "2026-10-06T21:32:12Z",
+    "fdv_usd": "3195637.72533072",
+    "price_change_percentage": {
+     "h24": "0"
+    },
+    "transactions": {
+     "h24": {
+      "buys": 0,
+      "sells": 0,
+      "buyers": 0,
+      "sellers": 0
+     }
+    },
+    "volume_usd": {
+     "h24": "0.0"
+    },
+    "reserve_in_usd": "39449.6626"
+   },
+   "relationships": {
+    "base_token": {
+     "data": {
+      "id": "solana_39ahtL8ynzE4amH26J29C93PA5172V3ft9UuUcqQS8fz",
+      "type": "token"
+     }
+    },
+    "quote_token": {
+     "data": {
+      "id": "solana_6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
+      "type": "token"
+     }
+    }
+   }
+  }
+ ]
+}

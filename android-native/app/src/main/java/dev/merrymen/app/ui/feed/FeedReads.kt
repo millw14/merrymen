@@ -6,6 +6,7 @@ import dev.merrymen.app.net.Discoveries
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.ThesesPage
 import dev.merrymen.app.net.TokensPage
+import dev.merrymen.app.net.publicActivity
 import dev.merrymen.app.ui.noticeFor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,7 +35,7 @@ class FeedReads(private val api: MerrymenApi, private val now: () -> Long = Syst
   val thesesLoop = ReadLoop(THESES_EVERY_MS) {
     // `source: "none"` is the reader saying it could not open the ledger — not
     // that nobody posted (read-theses.ts).
-    _theses.value = _theses.value.after(api.theses(), now()) { it.source == "none" }
+    _theses.value = _theses.value.after(api.publicActivity(), now()) { it.source == "none" }
     _theses.value.fresh
   }
 

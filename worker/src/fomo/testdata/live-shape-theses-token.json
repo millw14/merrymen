@@ -1,0 +1,96 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "key": "0xfa0e00000000000000000000000000000000f00d",
+  "kind": "theses",
+  "capturedAt": "2026-10-04T15:58:00.000Z",
+  "source": "live-fomo",
+  "theses": [
+    {
+      "id": "th_fake_1",
+      "tradeId": "7b7b7b7b-1111-4222-8333-000000000001",
+      "avatar": "https://example.invalid/avatars/t.png",
+      "tokenImage": "https://example.invalid/media/fake.png",
+      "text": "fabricated thesis th_fake_1",
+      "handle": "alpha_fake",
+      "name": "alpha_fake name",
+      "userId": "aaaaaaaa-1111-4222-8333-444444444444",
+      "equity": 0,
+      "tradeUsd": 500,
+      "realizedPnlUsd": 0,
+      "unrealizedPnlUsd": 42.5,
+      "isDev": false,
+      "ts": "2026-10-04T15:30:00.123Z",
+      "links": [],
+      "token": {
+        "symbol": "FAKE",
+        "address": "0xfa0e00000000000000000000000000000000f00d"
+      },
+      "networkId": 4663,
+      "likes": 3,
+      "replies": 1,
+      "chain": "robinhood"
+    },
+    {
+      "id": "th_fake_2",
+      "tradeId": "7b7b7b7b-1111-4222-8333-000000000001",
+      "avatar": "https://example.invalid/avatars/t.png",
+      "tokenImage": "https://example.invalid/media/fake.png",
+      "text": "fabricated thesis th_fake_2",
+      "handle": "alpha_fake",
+      "name": "alpha_fake name",
+      "userId": "aaaaaaaa-1111-4222-8333-444444444444",
+      "equity": 0,
+      "tradeUsd": 500,
+      "realizedPnlUsd": 0,
+      "unrealizedPnlUsd": 42.5,
+      "isDev": false,
+      "ts": "2026-10-04T15:30:00.123Z",
+      "links": [
+        {
+          "text": "https://example.invalid/post/1",
+          "link": "https://example.invalid/post/1",
+          "provider": "x"
+        }
+      ],
+      "token": {
+        "symbol": "FAKE",
+        "address": "0xfa0e00000000000000000000000000000000f00d"
+      },
+      "networkId": 4663,
+      "likes": 3,
+      "replies": 1,
+      "chain": "robinhood"
+    },
+    {
+      "id": "th_fake_3",
+      "tradeId": "7b7b7b7b-1111-4222-8333-000000000002",
+      "avatar": "https://example.invalid/avatars/t.png",
+      "tokenImage": "https://example.invalid/media/fake.png",
+      "text": "fabricated thesis th_fake_3",
+      "handle": "bravo_fake",
+      "name": "bravo_fake name",
+      "userId": "bbbbbbbb-1111-4222-8333-444444444444",
+      "equity": 0,
+      "tradeUsd": 0,
+      "realizedPnlUsd": 0,
+      "unrealizedPnlUsd": 0,
+      "isDev": false,
+      "ts": "2026-10-04T15:30:00.123Z",
+      "links": [],
+      "token": {
+        "symbol": "FAKE",
+        "address": "0xfa0e00000000000000000000000000000000f00d"
+      },
+      "networkId": 4663,
+      "likes": 3,
+      "replies": 1,
+      "chain": "robinhood"
+    }
+  ],
+  "count": 3,
+  "totalAvailable": 40,
+  "threshold": 0,
+  "minEquity": 0,
+  "minLikes": 0,
+  "sort": "recent"
+}

@@ -63,10 +63,13 @@ export interface ThesesResponse {
  * the caching above is: the answer has no caller in it.
  */
 const theses = thesesMemo(() => readTheses());
+const activity = thesesMemo(() => readTheses({ figures: false }));
 
-export async function GET() {
-  const r = await theses.get();
-  return NextResponse.json(r satisfies ThesesResponse, {
+export async function GET(req: Request) {
+  const activityOnly = new URL(req.url).searchParams.get("view") === "activity";
+  const r = await (activityOnly ? activity : theses).get();
+  const response = activityOnly ? { ...r, figuresIncluded: false } : r;
+  return NextResponse.json(response satisfies ThesesResponse, {
     headers: { "Cache-Control": THESES_CACHE_CONTROL },
   });
 }

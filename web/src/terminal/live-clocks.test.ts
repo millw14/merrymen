@@ -160,7 +160,9 @@ describe("the shell's reads", () => {
 
 describe("the session change beside each stock", () => {
   // loadSessionChanges asks the chart venue once per stock, four at a time,
-  // and caches only an answer that read something. The market pass awaited it,
+  // keeps an answer that read something for five minutes and one that read
+  // nothing for a minute, and stops after at most four requests at a venue
+  // that is down (quotes-session.test.ts). The market pass awaited it,
   // so a hanging venue (10s timeout, about seven rounds) held the market and
   // its quotes back for over a minute, and a failing one was asked for every
   // stock every thirty seconds — twice the old rate, at the endpoint failing.

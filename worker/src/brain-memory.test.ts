@@ -133,9 +133,9 @@ describe("memory is what the agent did, and where it last stood", () => {
 
   it("A CLOSED TRADE CARRIES ITS RESULT, when the result was read", () => {
     const [line] = memoryLines([trade(1, { action: "sell", head: "sell COIN1 (T00000000001) 6.50 USDG", realizedPct: 30 })], NOW);
-    assert.match(line!, /landed, \+30\.0% realized/);
+    assert.match(line!, /landed, \+30\.0% gross realized \(before gas and fees\)/);
     const [loss] = memoryLines([trade(1, { action: "sell", realizedPct: -12.345 })], NOW);
-    assert.match(loss!, /-12\.3% realized/);
+    assert.match(loss!, /-12\.3% gross realized \(before gas and fees\)/);
   });
 
   it("AND NOTHING when it was not — never a 0%", () => {

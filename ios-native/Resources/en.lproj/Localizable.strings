@@ -51,6 +51,7 @@
 "A summary every hour" = "A summary every hour";
 "above (the checkbox does that when you add it), you’ve" = "above (the checkbox does that when you add it), you’ve";
 "Account" = "Account";
+"act on Fomo research" = "act on Fomo research";
 "add chat id…" = "add chat id…";
 "Add funds" = "Add funds";
 "Add funds." = "Add funds.";
@@ -72,6 +73,7 @@
 "and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens. Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed." = "and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens. Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.";
 "another program has the bot" = "another program has the bot";
 "Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again." = "Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again.";
+"answer Fomo questions" = "answer Fomo questions";
 "Any OpenAI-compatible endpoint, e.g. https://your-host/v1" = "Any OpenAI-compatible endpoint, e.g. https://your-host/v1";
 "Anyone who has this code can control your agent — do not share or screenshot it." = "Anyone who has this code can control your agent — do not share or screenshot it.";
 "Anything you already hold stays priced, valued and sellable — including its stop-loss and take-profit. This only changes what your agent may" = "Anything you already hold stays priced, valued and sellable — including its stop-loss and take-profit. This only changes what your agent may";
@@ -95,7 +97,7 @@
 "Build your agent." = "Build your agent.";
 "bundler URL override" = "bundler URL override";
 "Buy" = "Buy";
-"Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold again. Needs a class vault factory in Connections and a re-signed key — and the scout budget above still bounds it." = "Buy a token straight off a Pons bonding curve, held in your own vault so it can be sold again. Needs a class vault factory in Connections and a re-signed key — and the scout budget above still bounds it.";
+"Buy a coin straight off a Pons launchpad's bonding curve, held in your own vault so it can be sold again. It buys nothing until scout mode above is on, with its budget and max per token each at least one entry; live trading is on; and a class vault factory is set in Connections, with your key re-signed after." = "Buy a coin straight off a Pons launchpad's bonding curve, held in your own vault so it can be sold again. It buys nothing until scout mode above is on, with its budget and max per token each at least one entry; live trading is on; and a class vault factory is set in Connections, with your key re-signed after.";
 "Buy amount per check" = "Buy amount per check";
 "Buy tokens without a reliable market price, within your scout budget. These positions are valued at purchase cost." = "Buy tokens without a reliable market price, within your scout budget. These positions are valued at purchase cost.";
 "Buys, sells and decisions." = "Buys, sells and decisions.";
@@ -115,7 +117,6 @@
 "Choose language" = "Choose language";
 "claim one" = "claim one";
 "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery." = "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery.";
-"class route" = "class route";
 "class route · buying a coin nobody listed" = "class route · buying a coin nobody listed";
 "Class vault factory contract" = "Class vault factory contract";
 "Claude / vision model" = "Claude / vision model";
@@ -199,6 +200,7 @@
 "in your trading basket" = "in your trading basket";
 "Keyboard" = "Keyboard";
 "Language" = "Language";
+"launchpad buying (class route)" = "launchpad buying (class route)";
 "Leave an API key blank to keep the saved key." = "Leave an API key blank to keep the saved key.";
 "let trencher trade for real" = "let trencher trade for real";
 "link code:" = "link code:";
@@ -243,10 +245,13 @@
 "needs a short symbol, a full 0x… address (42 chars) and whole-number decimals" = "needs a short symbol, a full 0x… address (42 chars) and whole-number decimals";
 "Network" = "Network";
 "Next" = "Next";
+"no link code until your agent is running" = "no link code until your agent is running";
+"no link code until your agent resumes" = "no link code until your agent resumes";
 "No link code yet. Your agent mints one on its next pass with this token set — check back shortly." = "No link code yet. Your agent mints one on its next pass with this token set — check back shortly.";
 "no link code: this bot is connected to another Merrymen agent" = "no link code: this bot is connected to another Merrymen agent";
 "no linked chats yet" = "no linked chats yet";
 "Normal — joins in now and then" = "Normal — joins in now and then";
+"Not copy trading. A trader buying is a reason to research, not an instruction: Brain decides, sizes stay inside your scout budget and per-token limit, and every cap, permission and the live-trading switch still apply." = "Not copy trading. A trader buying is a reason to research, not an instruction: Brain decides, sizes stay inside your scout budget and per-token limit, and every cap, permission and the live-trading switch still apply.";
 "not listening" = "not listening";
 "not set" = "not set";
 "not set up" = "not set up";
@@ -316,6 +321,7 @@
 "Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused." = "Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused.";
 "Realized P&L comes from a sale compared with the cost of what was sold. Open positions have unrealized gains or losses as prices move. A buy alone has not realized a profit. Missing cost basis is not zero profit." = "Realized P&L comes from a sale compared with the cost of what was sold. Open positions have unrealized gains or losses as prices move. A buy alone has not realized a profit. Missing cost basis is not zero profit.";
 "Recipient" = "Recipient";
+"Renew permission →" = "Renew permission →";
 "Required for chat and the Strategist." = "Required for chat and the Strategist.";
 "Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet." = "Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet.";
 "Required for token discovery unless you use a Merry Circle token." = "Required for token discovery unless you use a Merry Circle token.";
@@ -336,6 +342,11 @@
 "Save changes below, then" = "Save changes below, then";
 "save failed" = "save failed";
 "Saved on this browser." = "Saved on this browser.";
+"saved, agent not running" = "saved, agent not running";
+"Saved. {bot} answers once your agent is running, and it can't run until you renew its trading permission." = "Saved. {bot} answers once your agent is running, and it can't run until you renew its trading permission.";
+"Saved. {bot} answers once your agent is running; it hasn't started yet." = "Saved. {bot} answers once your agent is running; it hasn't started yet.";
+"Saved. {bot} answers once your agent is running; it isn't running right now." = "Saved. {bot} answers once your agent is running; it isn't running right now.";
+"Saved. {bot} answers once your agent resumes." = "Saved. {bot} answers once your agent resumes.";
 "scout budget (USDG)" = "scout budget (USDG)";
 "scout mode" = "scout mode";
 "scout mode · buying what can’t be priced yet" = "scout mode · buying what can’t be priced yet";
@@ -444,6 +455,8 @@
 "vs the pre-trade quote." = "vs the pre-trade quote.";
 "Wallet permissions." = "Wallet permissions.";
 "watch for new pairs" = "watch for new pairs";
+"watch the Fomo trader cohort" = "watch the Fomo trader cohort";
+"Watching the trader cohort and acting on Fomo research run only on the hosted service. On this install Fomo answers the questions you ask, and nothing more." = "Watching the trader cohort and acting on Fomo research run only on the hosted service. On this install Fomo answers the questions you ask, and nothing more.";
 "Watchlist" = "Watchlist";
 "We couldn’t read your $MERRYMEN balance just now, so we can’t tell whether it will run. That’s our read failing, not your wallet." = "We couldn’t read your $MERRYMEN balance just now, so we can’t tell whether it will run. That’s our read failing, not your wallet.";
 "weekend-gap: total USDG deployed per gap window." = "weekend-gap: total USDG deployed per gap window.";
@@ -468,6 +481,10 @@
 "Your agent, your boundaries." = "Your agent, your boundaries.";
 "Your balance, your positions and your performance. Adding funds and withdrawing live here too." = "Your balance, your positions and your performance. Adding funds and withdrawing live here too.";
 "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable." = "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.";
+"Your bot is saved. Its link code appears here once your agent is running, and it can't run until you renew its trading permission." = "Your bot is saved. Its link code appears here once your agent is running, and it can't run until you renew its trading permission.";
+"Your bot is saved. Its link code appears here once your agent is running, and it hasn't started yet." = "Your bot is saved. Its link code appears here once your agent is running, and it hasn't started yet.";
+"Your bot is saved. Its link code appears here once your agent is running, and it isn't running right now." = "Your bot is saved. Its link code appears here once your agent is running, and it isn't running right now.";
+"Your bot is saved. Trading is paused for recovery, so {bot} won't answer yet and has no link code; both come once your agent resumes." = "Your bot is saved. Trading is paused for recovery, so {bot} won't answer yet and has no link code; both come once your agent resumes.";
 "Your link code appears here once a token is saved." = "Your link code appears here once a token is saved.";
 "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit." = "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.";
 "Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted." = "Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted.";

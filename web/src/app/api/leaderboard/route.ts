@@ -12,6 +12,7 @@
  */
 import { NextResponse } from "next/server";
 import { readLeaderboard } from "@/lib/read-leaderboard";
+import { readAgentDirectory } from "@/lib/agent-directory";
 
 /**
  * NOT PRERENDERED AT BUILD, and that is a correctness rule rather than a
@@ -33,9 +34,16 @@ import { readLeaderboard } from "@/lib/read-leaderboard";
  */
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  if (new URL(req.url).searchParams.get("view") === "directory") {
+    const directory = await readAgentDirectory();
+    return NextResponse.json(directory, {
+      headers: { "Cache-Control": directory.source === "none" ? "no-store" : "public, max-age=5, s-maxage=15" },
+    });
+  }
   const r = await readLeaderboard();
-  const publishedBook = r.agents.some((agent) => agent.performance?.publicBook === true);
+  const publishedBook = r.agents.some((agent) => agent.performance?.publicBook === true)
+    || r.retiredAgents.some((agent) => agent.pnlUsdg !== null);
   return NextResponse.json(r, {
     headers: { "Cache-Control": publishedBook ? "no-store" : "public, s-maxage=60, stale-while-revalidate=120" },
   });

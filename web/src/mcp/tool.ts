@@ -20,18 +20,21 @@ import { mcpDb, type McpDb } from "./db";
 import { McpError, asMcpError, errorBody, type ErrorBody } from "./errors";
 import { auditDetail, logEvent, pseudonym, rateHit, recordToolCall, writeAudit } from "./observe";
 import { hasCapability, reachableAgents, requireCapability, resolveOwnedAgent } from "./policy";
-import type { Capability } from "./scopes";
+import { advertisedScopesFor, scopeFor, type Capability } from "./scopes";
 import type { Principal } from "./oauth/server";
+import { mcpConfig, type McpConfig } from "./config";
+import { bearerChallenge } from "./oauth/metadata";
 
-export interface ToolAnnotations {
-  /** True only when the tool changes nothing anywhere. */
-  readOnlyHint: boolean;
-  /** True when the tool can delete or overwrite something the owner cares about. */
-  destructiveHint?: boolean;
+interface ToolAnnotationBase {
   idempotentHint?: boolean;
   /** True when the tool reaches data sources outside Merrymen (market providers, the chain). */
   openWorldHint: boolean;
 }
+
+export type ToolAnnotations = ToolAnnotationBase & (
+  | { /** The tool changes nothing anywhere. */ readOnlyHint: true; destructiveHint?: false }
+  | { /** The tool changes state. */ readOnlyHint: false; /** True for an irreversible action or one that can delete or overwrite owner state. */ destructiveHint: boolean }
+);
 
 export interface Budget {
   /** Bucket name; defaults to the tool name. Tools sharing a costly backend share a bucket. */
@@ -91,6 +94,13 @@ export interface ToolDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = 
    * own kind against the connection's capabilities.
    */
   anyOf?: readonly Capability[];
+  /**
+   * Explicit directory alternatives for a read-only tool that also accepts a
+   * sensitive capability on the full server. Must be a nonempty subset of
+   * anyOf, all allowed on directory. Handlers still gate every private read.
+   * Without this, every original capability must be directory-safe.
+   */
+  directoryAnyOf?: readonly Capability[];
   input: I;
   output: O;
   annotations: ToolAnnotations;
@@ -148,6 +158,7 @@ export interface CallToolResult {
 }
 
 export interface RunDeps {
+  config?: McpConfig;
   now?: () => number;
   mcp?: () => Promise<McpDb>;
   ledger?: <T>(fn: (db: Db | null) => Promise<T>) => Promise<T>;
@@ -251,12 +262,21 @@ export const ERROR_META_KEY = "dev.merrymen/error";
  * would see a schema mismatch instead of the code. The envelope rides in the
  * text (after a blank line, as JSON) and in _meta.
  */
-function errorResult(e: McpError, traceId: string): CallToolResult {
+function errorResult(e: McpError, traceId: string, def: ToolDef, principal: Principal, cfg: McpConfig): CallToolResult {
   const body: ErrorBody = errorBody(e, traceId);
   const retry = e.retryAfterSec ? ` Retry after ${e.retryAfterSec}s.` : "";
+  const profile = principal.profile ?? "full";
+  const required = e.details?.required_scope ?? scopeFor(def.capability);
+  // Do not start an OAuth loop for staff access or a scope this profile can
+  // never grant. Object ownership failures likewise never request more access.
+  const challenge = cfg.enabled && (e.code === "unauthenticated" || e.code === "insufficient_scope") &&
+    typeof required === "string" && advertisedScopesFor(profile).includes(required)
+    ? bearerChallenge(cfg, { profile, scope: [required],
+      error: e.code === "unauthenticated" ? "invalid_token" : "insufficient_scope",
+      description: e.code === "unauthenticated" ? "Reconnect Merrymen to continue." : "Reconnect Merrymen and approve the required permission." }) : null;
   return {
     content: [{ type: "text", text: `Error ${e.code}: ${e.message}${retry}\n\n${JSON.stringify(body)}` }],
-    _meta: { [ERROR_META_KEY]: body.error },
+    _meta: { [ERROR_META_KEY]: body.error, ...(challenge ? { "mcp/www_authenticate": [challenge] } : {}) },
     isError: true,
   };
 }
@@ -328,7 +348,7 @@ export async function runTool(def: ToolDef, rawArgs: unknown, principal: Princip
     if (e.code === "internal") {
       logEvent("tool_internal_error", { tool: def.name, trace: traceId, error: error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : "unknown" });
     }
-    return errorResult(e, traceId);
+    return errorResult(e, traceId, def, principal, deps.config ?? mcpConfig());
   } finally {
     clearTimeout(timer);
     const ms = Date.now() - started;

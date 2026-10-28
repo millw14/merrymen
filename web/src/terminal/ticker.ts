@@ -23,6 +23,7 @@ export const STALE_SEC = 3600;
 export interface Tick {
   id: string;
   symbol: string;
+  logo: string;
   priceUsd: number;
   volume24hUsd: number | null;
   halted: boolean;
@@ -42,6 +43,7 @@ export function ticksOf(tokens: readonly LiveToken[], nowSec: number, max = TICK
     out.push({
       id: t.id,
       symbol: t.symbol,
+      logo: t.logo,
       priceUsd: t.priceUsd,
       volume24hUsd: finite(t.volume24hUsd) ? t.volume24hUsd : null,
       halted: t.halted === true,

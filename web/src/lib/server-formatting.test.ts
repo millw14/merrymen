@@ -58,7 +58,9 @@ describe("the server tree is handed nothing to format", () => {
     // One prop carrying a balance or a price would be rendered server-side, in
     // whatever locale the server guessed, and then re-rendered on the client in
     // the reader's own. This is the edit that would break everything below it.
-    const layout = read("app/(app)/layout.tsx");
+    // The one prop allowed is the Solana switch (solanaEnabled): a boolean from
+    // the server's environment, not a figure, so no locale renders it twice.
+    const layout = read("app/(app)/layout.tsx").replace("<App solana={solanaEnabled()} />", "<App />");
     assert.match(layout, /<App \/>/, "App must be rendered without props");
     assert.ok(!/<App\s+\w/.test(layout), "a prop on <App/> would put server data in the tree");
   });

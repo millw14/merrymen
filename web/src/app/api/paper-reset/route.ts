@@ -41,6 +41,6 @@ export async function POST(req: Request) {
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
   const queued = await queuePaperReset(isHostedMode(), agent);
-  if (!queued.ok) return NextResponse.json({ error: queued.error }, { status: 503 });
+  if (!queued.ok) return NextResponse.json({ error: queued.error }, { status: queued.status ?? 503 });
   return NextResponse.json({ id: queued.id, queued: true });
 }

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
-import { PAPER_CHECKPOINT_SCHEMA, mirrorPaperCheckpoints, multipliersFrom, paperCheckpointRejection, resetBlockedPaperBook, restorePaperCheckpoint, validPaperCheckpoint } from "./paper-checkpoint";
+import { PAPER_CHECKPOINT_SCHEMA, ensurePaperCheckpointSchema, mirrorPaperCheckpoints, multipliersFrom, paperCheckpointRejection, resetBlockedPaperBook, restorePaperCheckpoint, validPaperCheckpoint } from "./paper-checkpoint";
 import { applyLedgerSchema } from "./store";
+import { MIRROR_STATE_DDL } from "./ledger-mirror";
+import { readPgEvidence } from "./ledger-resume";
 
 test("paper cash, inventory and basis survive a fresh child without resetting or overwriting a running book", async()=>{
   const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
@@ -568,5 +570,110 @@ test("THE NEW EPOCH IS ONE NOTHING WAS FILED UNDER, even when rows ran ahead of 
     assert.equal(await restorePaperCheckpoint((await freshHome()).db, shared.db, blocked), "no durable checkpoint");
   } finally {
     shared.raw.close();
+  }
+});
+
+test("THE perp_json COLUMN ARRIVES WITHOUT MOVING ANY SPOT EVIDENCE: a NULL leaves the resume digest as it was, a perp book moves it", async () => {
+  // ledger-resume.ts reads paper_checkpoints with SELECT *, so the column's
+  // arrival alone would otherwise change every tenant's evidence digest and
+  // send every open approval back for a re-preview.
+  const raw = new DatabaseSync(":memory:");
+  try {
+    const shared = wrapSqlite(raw);
+    await applyLedgerSchema(shared);
+    await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+    await shared.exec(MIRROR_STATE_DDL);
+    await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at) VALUES(?,1,900,0,1000,'{}','[]',10)`).run(blocked);
+    const args = { tenant: "0x00000000000000000000000000000000000000aa", account: blocked, nowSec: 2_000_000_000 };
+    const before = JSON.stringify(await readPgEvidence(shared, args));
+    await ensurePaperCheckpointSchema(shared);
+    assert.equal(JSON.stringify(await readPgEvidence(shared, args)), before, "a NULL perp_json is the evidence a row from before the column was");
+    await shared.prepare("UPDATE paper_checkpoints SET perp_json = ?").run(JSON.stringify({ v: 1, collateral_micro: "0", positions: [] }));
+    assert.notEqual(JSON.stringify(await readPgEvidence(shared, args)), before, "a perp book is evidence");
+  } finally {
+    raw.close();
+  }
+});
+
+test("THE perp_json MIGRATION NEVER HOLDS A SPOT BOOK: with paper_checkpoints locked, a Spot book is checkpointed and restored as before, and the migration is not retried per tenant", async () => {
+  const ACCT = `0x${"ab".repeat(20)}`;
+  const agentRow = `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, created_at, hwm_usdg, accrued_fee_usdg, epoch, mode, x_verified, hwm_withdrawn_usdg)
+    VALUES (?, 'a', ?, ?, 1, '{}', 0, 9999999999, 'active', 0, 0, 0, 1, 'paper', 0, 0)`;
+  const child = wrapSqlite(new DatabaseSync(":memory:"));
+  await applyLedgerSchema(child);
+  await child.prepare(agentRow).run(ACCT, ACCT, ACCT);
+  await child.prepare("INSERT INTO paper_book (agent_id, cash_usdg, vault_usdg, hwm_usdg, shares) VALUES (?, 100, 0, 100, '{}')").run(ACCT);
+  // The shared ledger as main left it — paper_checkpoints without perp_json —
+  // and another session holding that table's lock: every ALTER times out.
+  const sharedRaw = new DatabaseSync(":memory:");
+  const inner = wrapSqlite(sharedRaw);
+  await applyLedgerSchema(inner);
+  await inner.exec(PAPER_CHECKPOINT_SCHEMA);
+  await inner.prepare(agentRow).run(ACCT, ACCT, ACCT);
+  let alters = 0;
+  const shared = {
+    prepare: (sql: string) => inner.prepare(sql),
+    tx: (fn: never) => inner.tx(fn),
+    async exec(sql: string) {
+      if (/ALTER TABLE paper_checkpoints/i.test(sql)) {
+        alters += 1;
+        throw Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
+      }
+      return inner.exec(sql);
+    },
+  } as unknown as Parameters<typeof mirrorPaperCheckpoints>[1];
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(await mirrorPaperCheckpoints(child, shared), 1, "the Spot book is checkpointed");
+    assert.equal(await mirrorPaperCheckpoints(child, shared), 1);
+    assert.equal(alters, 1, "tried once, not once per tenant or per pass while it stays locked");
+    const row = sharedRaw.prepare("SELECT cash_usdg FROM paper_checkpoints WHERE agent_id = ?").get(ACCT) as { cash_usdg: number };
+    assert.equal(row.cash_usdg, 100);
+    // A rebuilt Spot home restores from it, the column still absent.
+    const fresh = wrapSqlite(new DatabaseSync(":memory:"));
+    await applyLedgerSchema(fresh);
+    await fresh.prepare(agentRow).run(ACCT, ACCT, ACCT);
+    const said = await restorePaperCheckpoint(fresh, shared, ACCT);
+    const book = (await fresh.prepare("SELECT cash_usdg FROM paper_book WHERE agent_id = ?").get(ACCT)) as { cash_usdg: number } | undefined;
+    assert.equal(book?.cash_usdg, 100, `restored without waiting on the perp column (${said})`);
+  } finally {
+    console.warn = warn;
+  }
+});
+
+test("A perp_json MIGRATION THAT IS NOT A LOCK WAIT IS AN ALERT, and a paper perp book's refusal names its SQLSTATE", async () => {
+  const ACCT = `0x${"cd".repeat(20)}`;
+  const agentRow = `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, created_at, hwm_usdg, accrued_fee_usdg, epoch, mode, x_verified, hwm_withdrawn_usdg)
+    VALUES (?, 'a', ?, ?, 1, '{}', 0, 9999999999, 'active', 0, 0, 0, 1, 'paper', 0, 0)`;
+  const child = wrapSqlite(new DatabaseSync(":memory:"));
+  await applyLedgerSchema(child);
+  await child.prepare(agentRow).run(ACCT, ACCT, ACCT);
+  await child.prepare("INSERT INTO paper_book (agent_id, cash_usdg, vault_usdg, hwm_usdg, shares) VALUES (?, 100, 0, 100, '{}')").run(ACCT);
+  // A paper perp book: its checkpoint needs the column.
+  await child.prepare("INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro, nonce_high_water) VALUES (?, 'paper', '1000000', '5')").run(ACCT);
+  const sharedRaw = new DatabaseSync(":memory:");
+  const inner = wrapSqlite(sharedRaw);
+  await applyLedgerSchema(inner);
+  await inner.exec(PAPER_CHECKPOINT_SCHEMA);
+  await inner.prepare(agentRow).run(ACCT, ACCT, ACCT);
+  const shared = {
+    prepare: (sql: string) => inner.prepare(sql),
+    tx: (fn: never) => inner.tx(fn),
+    async exec(sql: string) {
+      // Postgres's own shape: name "error", the reason in code.
+      if (/ALTER TABLE paper_checkpoints/i.test(sql)) throw Object.assign(new Error("must be owner of table paper_checkpoints"), { name: "error", code: "42501" });
+      return inner.exec(sql);
+    },
+  } as unknown as Parameters<typeof mirrorPaperCheckpoints>[1];
+  const said: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => { said.push(a.map(String).join(" ")); };
+  try {
+    await assert.rejects(mirrorPaperCheckpoints(child, shared), /perp_json is not there yet \(42501\)/);
+    assert.ok(said.some((l) => l.startsWith("[alert]") && l.includes("42501")), said.join("\n"));
+    assert.ok(!said.some((l) => l.includes("must be owner")), "the driver's text is never logged");
+  } finally {
+    console.warn = warn;
   }
 });

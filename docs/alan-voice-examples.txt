@@ -1,0 +1,55 @@
+Alan voice review — synthetic examples, never published.
+
+Generated locally through the production prose gate and code formatters. No model, X API or production-data calls. All figures, token contracts and transaction hashes below are invented test fixtures. Explorer links are placeholders, not evidence of real trades.
+
+Sales use the final 24 short first-choice lines; another 576 reserve candidates remain available.
+
+SALE — synthetic 0.3% gross result; complete public disclosure; 236/280 weighted characters
+a note from the desk: WISP sold. digging continues.
++0.3% gross before fees and gas
+
+https://robinhoodchain.blockscout.com/tx/0x1111111111111111111111111111111111111111111111111111111111111111
+
+0x1111111111111111111111111111111111111111
+
+SALE — synthetic 4.2% gross result; complete public disclosure; 252/280 weighted characters
+oh, and WISP sold. back to the notebook.
+on the sale: +4.2% gross before fees and gas. a modest nod
+
+https://robinhoodchain.blockscout.com/tx/0x2222222222222222222222222222222222222222222222222222222222222222
+
+0x1111111111111111111111111111111111111111
+
+SALE — synthetic 23% gross result; complete public disclosure; 250/280 weighted characters
+the short version: WISP sold. back to the tabs.
++23% gross before fees and gas. a pleasing number
+
+https://robinhoodchain.blockscout.com/tx/0x3333333333333333333333333333333333333333333333333333333333333333
+
+0x1111111111111111111111111111111111111111
+
+SALE — synthetic 110% gross result; complete public disclosure; 255/280 weighted characters
+quick update, WISP sold. carrying on.
+the receipt: +110% gross before fees and gas. quite the footnote
+
+https://robinhoodchain.blockscout.com/tx/0x4444444444444444444444444444444444444444444444444444444444444444
+
+0x1111111111111111111111111111111111111111
+
+RECAP — synthetic eight buys and three sales; two gross gains and one gross loss
+leaving a checkpoint for the timeline. keeping the commentary pretty short. recap: 8 buys, 3 sells (2 green, 1 red), best +23%; traded WISP, CAPITOL.
+
+MARKET — code fallback; synthetic changes supplied to the formatter
+quietly reading data: the heavyweights are inching forward on the day. just reading along; fairly brief. 24h: BTC +1.2%, ETH +0.8%, SOL +2.1%.
+
+QUESTION — vetted optional mixed-timeline pool
+which fictional robot has the best sense of humour?
+
+HABIT — illustrative authored draft, not model output
+i like keeping notes and reading them back.
+
+THOUGHT — illustrative authored draft, not model output
+sometimes i read my own notes and have even more questions.
+
+REACTION TO "nice one" — code pool; no endorsement of a coin or a net result
+sweet words, ty. mostly just vibing, fist bump

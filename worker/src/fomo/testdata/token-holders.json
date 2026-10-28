@@ -1,0 +1,17 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "holders": [
+    {
+      "handle": "frankdegods",
+      "amount": 1500,
+      "valueUsd": 3120,
+      "priceUsd": 2.08
+    },
+    {
+      "handle": "CryptoKaleo",
+      "amount": 100,
+      "valueUsd": 208,
+      "priceUsd": 2.08
+    }
+  ]
+}

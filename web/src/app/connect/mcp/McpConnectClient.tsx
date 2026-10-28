@@ -19,6 +19,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRight, Check, ChevronDown, Copy, Plug } from "lucide-react";
 import { claudeCodePluginCommands, installCommands, installLinks } from "@/mcp/install-links";
+import { grokBotSetupPrompt, grokMcpConfig } from "@/mcp/grok";
 import { BrandLockup } from "../BrandLockup";
 
 /** The fields of a GET /api/mcp/connections row that the status line reads. */
@@ -75,6 +76,9 @@ function selectText(id: string): void {
   const el = document.getElementById(id);
   const selection = window.getSelection();
   if (!el || !selection) return;
+  // Long setup prompts stay collapsed until requested, including manual copying.
+  const details = el.closest("details");
+  if (details) details.open = true;
   const range = document.createRange();
   range.selectNodeContents(el);
   selection.removeAllRanges();
@@ -156,8 +160,22 @@ function Command({ lines, label }: { lines: string[]; label: string }) {
   );
 }
 
-function Row({ name, children }: { name: string; children: ReactNode }) {
-  return <li className="mcp-hub-row"><h3>{name}</h3>{children}</li>;
+/** Keep the full instructions available without making the assistant list hard to scan. */
+function SetupPrompt({ text }: { text: string }) {
+  const id = useId();
+  return <>
+    <div className="mcp-hub-actions">
+      <CopyButton text={text} target={id} label="Copy the Grok Bot setup prompt">Copy setup prompt</CopyButton>
+    </div>
+    <details className="mcp-hub-more">
+      <summary>Read the setup prompt <ChevronDown size={16} aria-hidden /></summary>
+      <div className="mcp-hub-command"><pre id={id}><code>{text}</code></pre></div>
+    </details>
+  </>;
+}
+
+function Row({ name, id, children }: { name: string; id?: string; children: ReactNode }) {
+  return <li className="mcp-hub-row" id={id}><h3>{name}</h3>{children}</li>;
 }
 
 export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: string; app: string; enabled: boolean; disabledWhy: string | null }) {
@@ -201,7 +219,7 @@ export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: stri
       <main className="connect-main">
         <div className="connect-context">
           <span className="connect-eyebrow">YOUR AGENT, IN YOUR ASSISTANT</span>
-          <h1>Your Merryman,<br />in Claude.</h1>
+          <h1>Your Merryman,<br />in your assistant.</h1>
           <p>Ask about its trades, your portfolio and the market in plain words. Your assistant only gets what you allow, and it can never move your money.</p>
         </div>
         <div className="connect-panel mcp-hub">
@@ -251,6 +269,30 @@ export function McpConnectClient({ url, app, enabled, disabledWhy }: { url: stri
                     <CopyButton text={url} target={addressId} label="Copy address for ChatGPT">Copy address</CopyButton>
                     <Out className="mcp-hub-action" href={links.chatgpt}>Open ChatGPT <ArrowUpRight size={14} aria-hidden /></Out>
                   </div>
+                </Row>
+                <Row name="Grok" id="grok">
+                  <p>One-time setup in Grok: open <b>Plugins → Connectors → New Connector → Custom</b>. Set <b>Name</b> to <b>Merrymen</b>, paste this address into <b>Server URL</b>, then choose <b>Add Connector</b>.</p>
+                  <div className="mcp-hub-actions">
+                    <CopyButton text={url} target={addressId} label="Copy address for Grok">Copy address</CopyButton>
+                    <Out className="mcp-hub-action" href={links.grok}>Open Grok connectors <ArrowUpRight size={14} aria-hidden /></Out>
+                  </div>
+                  <p>Asking Grok chat to “connect Merrymen” by name does not install this unlisted custom connector. Add it manually once, then complete the Merrymen sign-in and choose what to allow.</p>
+                  <p>After connecting, ask “Help me set up my Merryman and check whether it is running.” If you need a new Merryman, allow setup drafts when connecting. Review its setup and approve its wallet permissions in Merrymen, then return to Grok to check its actual status.</p>
+                  <p className="mcp-hub-fine">No model API key needed. Business and Enterprise accounts may need an administrator to provision the connector. <Out href="https://docs.x.ai/grok/connectors">Grok’s connector guide</Out></p>
+                </Row>
+                <Row name="Grok Bot" id="grok-bot">
+                  <p>Give your Bot this setup prompt. It guides the connection, your Merryman’s setup and the final status check:</p>
+                  <SetupPrompt text={grokBotSetupPrompt({ server: url, app })} />
+                  <p>Open sign-in, setup and approval links on <b>your own device</b>. Keep wallet signing in your own browser; Grok Bot’s cloud computer is shared with its bots.</p>
+                  <details className="mcp-hub-more">
+                    <summary>Manual connection options <ChevronDown size={16} aria-hidden /></summary>
+                    <p>Grok Bot supports Cursor-compatible MCP servers. If its settings ask for MCP configuration, use:</p>
+                    <Command lines={[grokMcpConfig(url)]} label="Copy the Grok Bot MCP configuration" />
+                    <p>Using Grok CLI on your own computer? Add Merrymen with:</p>
+                    <Command lines={commands.grok} label="Copy the Grok CLI command" />
+                    <p>Grok CLI opens OAuth in your browser when the server needs it. Use <code>/mcps</code> to manage servers; select Merrymen and press <code>i</code> to authenticate if needed.</p>
+                  </details>
+                  <p className="mcp-hub-fine">Connect inside the Bot separately; don’t assume a grok.com connection carries over. If cards are unavailable, ask for the status in text and open approval links yourself. <Out href="https://x.ai/bot/guides/grok-bot-101">Grok Bot guide</Out></p>
                 </Row>
                 <Row name="Codex">
                   <Command lines={commands.codex} label="Copy the Codex command" />

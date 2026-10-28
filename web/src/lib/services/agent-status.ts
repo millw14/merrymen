@@ -49,6 +49,9 @@ export interface AgentStatusView {
   account: string;
   name: string | null;
   chain_id: number | null;
+  /** Permission reported in the SAME worker row as this status and heartbeat. */
+  granted_at: number | null;
+  expires_at: number | null;
   status: AgentStatusWord;
   mode: ModeWord;
   live_blocker: { rule: string; text: string; owner_can_fix: boolean; is_fault: boolean } | null;
@@ -107,6 +110,8 @@ export async function readAgentStatus(db: Db, account: string, settings: Setting
     account: account.toLowerCase(),
     name: row?.name ?? settings?.agentName ?? null,
     chain_id: row?.chain_id ?? null,
+    granted_at: row?.granted_at ?? null,
+    expires_at: row?.expires_at ?? null,
     status: row?.status && STATUS.has(row.status) ? (row.status as AgentStatusWord) : "unknown",
     mode: row?.mode && MODES.has(row.mode) ? (row.mode as ModeWord) : "unknown",
     live_blocker: blockerView(row?.live_blocker ?? null),

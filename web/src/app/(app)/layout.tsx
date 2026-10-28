@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { App } from "@/terminal/App";
 import { Providers } from "@/terminal/Providers";
 import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from "@/lib/locale";
+import { solanaEnabled } from "@/lib/solana-enabled";
 
 // The whole terminal mounts here and nowhere else, so this is the one place a
 // provider has to sit for every screen to be inside it. Still a SERVER
@@ -37,8 +38,8 @@ export default async function AppLayout() {
   const jar = await cookies();
   const locale = normalizeLocale(jar.get(LOCALE_COOKIE)?.value) ?? DEFAULT_LOCALE;
   return (
-    <Providers locale={locale}>
-      <App />
+    <Providers locale={locale} solana={solanaEnabled()}>
+      <App solana={solanaEnabled()} />
     </Providers>
   );
 }

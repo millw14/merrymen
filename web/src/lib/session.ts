@@ -57,6 +57,11 @@ import {
   energyBuyFits,
   GRANT_ENERGY,
   ENERGY_ROUTE_V1,
+  perpFits,
+  grantPerp,
+  validatePerpPubKey,
+  GRANT_PERP_LIGHTER,
+  LIGHTER_ROUTE_V1,
   chainForId,
   officialCoinTokens,
   ponsAdapterForSigning,
@@ -79,6 +84,8 @@ import {
   type CustomToken,
   type GrantCaps,
   type StoredGrant,
+  type PerpRecoveryReference,
+  readPerpRecoveryReference,
 } from "@merrymen/core";
 import { findInjectedProvider, requestAccount } from "./wallet";
 
@@ -206,6 +213,294 @@ export type OwnerSigner =
       did: string;
     };
 
+// ── PERPETUALS: WHAT A SIGNATURE MAY SEAL, AND WHAT IT MAY NEVER DROP ───────
+//
+// docs/perps.md rules 3 and 5. The perps permission is the one opt-in in this
+// wall that CANNOT be silently dropped the way the energy buy is. A Lighter API
+// key, once the worker has registered it, stays valid at the venue whatever any
+// later grant says — dropping the perp block revokes nothing there, it only
+// takes the key away from the one process that can close the positions it
+// opened. So a re-sign carries the previous grant's PUBLIC key forward by
+// default, and anything that would leave a live venue account without its key
+// is a refusal with a name, never a quieter wall.
+//
+// THE SIGNER ONLY EVER SEES THE PUBLIC HALF. `POST /api/perps/keygen` returns
+// the public key (plus, hosted, `apiKeySealed`: the private key under a DEK the
+// browser never holds). There is no field below a private key fits in, and the
+// hosted server re-attaches the sealed key from its stored grant by equal public
+// key — which is why carrying the public key alone is a complete carry-forward.
+
+/** A venue key to seal into this signature: the PUBLIC half, and at most a sealed blob of the private one. */
+export interface PerpSealRequest {
+  apiPublicKey: `0x${string}`;
+  /** Hosted only: AES-256-GCM of the private key, opaque to every signer. */
+  apiKeySealed?: string;
+}
+
+/**
+ * Why a signature carrying (or dropping) perps was refused. A CODE as well as
+ * a sentence, so a caller (or a test) can tell WHICH rule refused without
+ * matching prose: "does not fit" is fixed at the token list, "not flat" at the
+ * desk, "other account" on the agent that still holds the key. The sentence
+ * names the remedy for whoever only shows `e.message`.
+ */
+export type PerpRefusalCode =
+  | "perp-off-mainnet"
+  | "perp-does-not-fit"
+  | "perp-drop-not-flat"
+  | "perp-drop-and-seal"
+  | "perp-key-invalid"
+  | "perp-key-changed"
+  | "perp-prior-unreadable"
+  | "perp-other-account";
+
+/**
+ * The named refusal. A subclass of Error so every existing catch that shows
+ * `e.message` still shows the sentence, and `instanceof` lets a caller that
+ * cares tell it apart from an RPC failure.
+ */
+export class PerpSigningRefusal extends Error {
+  readonly code: PerpRefusalCode;
+  constructor(code: PerpRefusalCode, message: string) {
+    super(message);
+    this.name = "PerpSigningRefusal";
+    this.code = code;
+  }
+}
+
+/**
+ * What the PREVIOUS grant for one account said about perps.
+ *
+ *   none        it carried no `perp-lighter-v1` marker: nothing to carry.
+ *   carried     marker + a block `grantPerp` reads (chain 4663, the route's
+ *               key index, a canonical key): carry this key forward.
+ *   unreadable  the marker is there but the block is not one the worker would
+ *               honour. NOT "none": a grant that claims perps and cannot say
+ *               which key is exactly the grant whose key we can least afford to
+ *               lose track of, so it refuses until the owner drops it on
+ *               purpose (flat venue) — fail closed, never through.
+ */
+export type PriorPerp =
+  | { state: "none" }
+  | { state: "carried"; apiPublicKey: `0x${string}`; apiKeySealed?: string; from: "server" | "local" }
+  | { state: "unreadable"; from: "server" | "local" };
+
+/**
+ * The browser's own copies of grants: the armed one (`merrymen.grant.v1`) and
+ * every archived account's last one. Read by `mintGrant` BEFORE signing and
+ * handed to the preparation core as DATA, so the core itself stays free of
+ * storage (prepare-agent-grant.test.ts pins that).
+ */
+export interface LocalGrants {
+  current?: unknown;
+  archived?: readonly unknown[];
+}
+
+const sameAccount = (g: unknown, account: string): g is Record<string, unknown> =>
+  typeof g === "object" &&
+  g !== null &&
+  typeof (g as Record<string, unknown>).smartAccount === "string" &&
+  ((g as Record<string, unknown>).smartAccount as string).toLowerCase() === account.toLowerCase();
+
+/**
+ * One grant's perp block, read the way the WORKER reads it.
+ *
+ * Through `grantPerp` and nothing else, so "carried" here means exactly "the
+ * worker would have armed this key" — a looser reader would carry blocks the
+ * worker never honoured, a stricter one would drop blocks it did.
+ *
+ * `apiKeySealed` rides along when the copy has it — in practice only this
+ * browser's own (or the iOS engine's) stored grant, because a server response
+ * is built by `publicGrantView`, an allowlist that drops it. Carrying it is
+ * harmless either way: it is that server's own AES-GCM blob, bound by its AAD
+ * to tenant, account, public key and index, and useless to anyone else. It
+ * matters after a kill, when the server no longer has a stored grant to join
+ * the key from and the carried blob is the only way back to it.
+ */
+function perpOf(g: Record<string, unknown>, from: "server" | "local"): PriorPerp {
+  const features = Array.isArray(g.grantFeatures) ? g.grantFeatures : [];
+  if (!features.includes(GRANT_PERP_LIGHTER)) return { state: "none" };
+  const read = grantPerp({
+    grantFeatures: features.filter((f): f is string => typeof f === "string"),
+    chainId: typeof g.chainId === "number" ? g.chainId : Number.NaN,
+    perp: g.perp,
+  });
+  if (!read) return { state: "unreadable", from };
+  return {
+    state: "carried",
+    apiPublicKey: read.apiPublicKey,
+    ...(read.apiKeySealed ? { apiKeySealed: read.apiKeySealed } : {}),
+    from,
+  };
+}
+
+/**
+ * THE PREVIOUS GRANT FOR THIS ACCOUNT, AND THE GRANT ARMED ON SOME OTHER ONE.
+ *
+ * Two sources, and the order between them is a decision:
+ *
+ *   the SERVER'S projection (GET /api/grants, `publicGrantView`) — the grant
+ *   the worker actually runs, so when it names THIS account it wins. Its "no
+ *   perps" is trustworthy because the server refuses any grant that would drop
+ *   a key from a venue account that is not flat (once the custody intake
+ *   lands, a 409; until then POST /api/grants refuses every perps grant with
+ *   403, so no server grant carries one); its "perps" is the key the worker
+ *   registered.
+ *
+ *   the BROWSER'S copies — the armed one first, then the archive for this
+ *   account. Used when the server's answer is unknown (not passed, fetch
+ *   failed) or names another account. A key sealed in THIS browser that the
+ *   server never saw was never registered, so the server-wins rule cannot
+ *   strand anything.
+ *
+ * And the ARMED grant — the server's if known (null = the server holds none),
+ * else this browser's current one — may be for a DIFFERENT account: signing
+ * a new agent while the armed one holds a Lighter key would replace the only
+ * grant that key lives in (rule 5, "or re-signing for another account").
+ */
+export function priorPerpFor(
+  account: string,
+  sources: { server?: unknown; local?: LocalGrants },
+): { same: PriorPerp; otherArmed: { smartAccount: string; perp: PriorPerp } | null } {
+  const { server, local } = sources;
+  const same: PriorPerp = sameAccount(server, account)
+    ? perpOf(server, "server")
+    : sameAccount(local?.current, account)
+      ? perpOf(local.current, "local")
+      : (() => {
+          const archived = (local?.archived ?? []).find((g) => sameAccount(g, account));
+          return archived ? perpOf(archived as Record<string, unknown>, "local") : ({ state: "none" } as const);
+        })();
+  // `undefined` = the caller does not know what the server holds; `null` (or
+  // `{exists:false}` flattened to null by the caller) = it holds nothing.
+  const armed = server !== undefined ? server : local?.current;
+  let otherArmed: { smartAccount: string; perp: PriorPerp } | null = null;
+  if (typeof armed === "object" && armed !== null && !sameAccount(armed, account)) {
+    const a = armed as Record<string, unknown>;
+    if (typeof a.smartAccount === "string") {
+      otherArmed = { smartAccount: a.smartAccount, perp: perpOf(a, server !== undefined ? "server" : "local") };
+    }
+  }
+  return { same, otherArmed };
+}
+
+/**
+ * DECIDE THE PERP BLOCK FOR ONE SIGNATURE — once, before any other wall
+ * decision, and by refusal rather than by omission.
+ *
+ * Pure (no chain, no storage) so every branch is testable without a signer.
+ * `prepareGrantCore` calls it after it knows the account and before it asks
+ * whether perps FIT; the answer becomes `wallOpts.perpLighter` and nothing
+ * else sets that field.
+ *
+ *   - A previous grant with perps CARRIES FORWARD by default, same key.
+ *   - Dropping it needs `drop` AND `venueFlat === true` — the caller's word
+ *     that every account under this L1 address is provably flat (the UI reads
+ *     GET /api/perps/flat; once the custody intake lands the server re-checks
+ *     and answers 409 anyway).
+ *     Anything else — false, null, absent — is "not provably flat": refused.
+ *   - A new opt-in is taken as given, after the key is shape-checked.
+ *   - Off chain 4663 there is no Lighter; perps requested or carried there are
+ *     refused, never quietly left out.
+ */
+export function decidePerpSeal(a: {
+  chainId: number;
+  requested: PerpSealRequest | null | undefined;
+  prior: ReturnType<typeof priorPerpFor>;
+  drop: boolean;
+  venueFlat: boolean | null | undefined;
+  recovery?: PerpRecoveryReference;
+  smartAccount?: string;
+}): PerpSealRequest | null {
+  let requested: PerpSealRequest | null = null;
+  if (a.requested != null) {
+    const key = typeof a.requested.apiPublicKey === "string" ? validatePerpPubKey(a.requested.apiPublicKey) : null;
+    const sealed = a.requested.apiKeySealed;
+    // The refusal never echoes the value: a caller that passed the wrong half
+    // of a key pair must not have it printed into an error banner or a log.
+    if (!key || (sealed !== undefined && (typeof sealed !== "string" || sealed === ""))) {
+      throw new PerpSigningRefusal(
+        "perp-key-invalid",
+        "refusing to sign: the Lighter API key this signature would seal is not a canonical public key. Nothing was signed.",
+      );
+    }
+    requested = { apiPublicKey: key, ...(sealed ? { apiKeySealed: sealed } : {}) };
+  }
+
+  // ANOTHER ACCOUNT'S KEY FIRST: nothing this signature does for its own
+  // account can make up for replacing the grant a live venue key lives in.
+  const other = a.prior.otherArmed;
+  if (other && other.perp.state !== "none") {
+    throw new PerpSigningRefusal(
+      "perp-other-account",
+      `refusing to sign: your agent at ${short(other.smartAccount)} holds a perpetuals permission, and arming a ` +
+        `different account would leave its Lighter key without a worker. Close its Lighter positions, turn ` +
+        `perpetuals off on that agent's re-sign (it checks the venue is flat), then try again.`,
+    );
+  }
+
+  const prior = a.prior.same;
+  if (a.drop) {
+    if (requested) {
+      throw new PerpSigningRefusal(
+        "perp-drop-and-seal",
+        "refusing to sign: this signature was asked both to seal a Lighter key and to remove perpetuals. Nothing was signed.",
+      );
+    }
+    if (prior.state === "none") return null;
+    if (a.venueFlat !== true) {
+      throw new PerpSigningRefusal(
+        "perp-drop-not-flat",
+        "refusing to remove the perpetuals permission: Lighter is not provably flat for this account (positions, " +
+          "orders, collateral or a withdrawal in transit — or it could not be read). The key stays registered at " +
+          "the venue whatever the grant says, so it stays with your agent until everything there is closed. Your " +
+          "current key has not been replaced.",
+      );
+    }
+    return null;
+  }
+
+  let seal: PerpSealRequest | null;
+  if (prior.state === "unreadable") {
+    throw new PerpSigningRefusal(
+      "perp-prior-unreadable",
+      "refusing to sign: this agent's current permission claims perpetuals but its Lighter key cannot be read, so " +
+        "it cannot be carried forward. Close any Lighter positions, then turn perpetuals off here (that checks the " +
+        "venue is flat) and sign again. Your current key has not been replaced.",
+    );
+  } else if (prior.state === "carried") {
+    const recovery = readPerpRecoveryReference(a.recovery);
+    const recovering = requested !== null && recovery !== null && a.venueFlat === true && recovery.smartAccount === a.smartAccount?.toLowerCase() && recovery.chainId === a.chainId && recovery.oldPublicKey === prior.apiPublicKey && recovery.newPublicKey === requested.apiPublicKey && Date.now() < recovery.notAfterMs;
+    if (requested && requested.apiPublicKey !== prior.apiPublicKey && !recovering) {
+      throw new PerpSigningRefusal(
+        "perp-key-changed",
+        "refusing to sign: this agent already has a Lighter key sealed, and a re-sign carries that same key " +
+          "forward. Rotating it is done with your owner key (merrymen recover), not here. Nothing was signed.",
+      );
+    }
+    // The fresher blob when the caller passed one for the SAME key, else the
+    // browser's own copy of the last one. Hosted, the server can also join it
+    // from its stored grant by equal public key, so absence is not a loss.
+    const blob = requested?.apiKeySealed ?? prior.apiKeySealed;
+    seal = recovering ? requested : { apiPublicKey: prior.apiPublicKey, ...(blob ? { apiKeySealed: blob } : {}) };
+  } else {
+    seal = requested;
+  }
+
+  if (seal && a.chainId !== LIGHTER_ROUTE_V1.chainId) {
+    throw new PerpSigningRefusal(
+      "perp-off-mainnet",
+      prior.state === "carried"
+        ? "refusing to sign: this agent's perpetuals permission lives on Robinhood Chain mainnet, and a key signed " +
+            "for another chain would leave its Lighter key without a worker. Sign on mainnet, or close its Lighter " +
+            "positions and turn perpetuals off first. Your current key has not been replaced."
+        : "refusing to sign: perpetuals exist only on Robinhood Chain mainnet — there is no Lighter on the test " +
+            "network. Leave perpetuals off to sign for this chain.",
+    );
+  }
+  return seal;
+}
+
 async function prepareGrantCore(
   ownerSigner: OwnerSigner | { account: LocalAccount; binding: "external-owner" },
   caps: GrantCaps,
@@ -274,6 +569,14 @@ async function prepareGrantCore(
   trencherFactory?: `0x${string}`,
   preflightOnly = false,
   minimumValidationNonce?: number,
+  /**
+   * PERPETUALS — a new opt-in, the previous grants to carry a key forward
+   * from, and an explicit drop. An OBJECT, appended at the end, for the reason
+   * the comment on MintOptions records: one more positional parameter here is
+   * one more chance to shift a key into a slot meant for something else.
+   * Decided by `decidePerpSeal`; see the block after the deployment read.
+   */
+  perpIn: PerpSigningInput = {},
 ): Promise<Grant | null> {
   if (minimumValidationNonce !== undefined &&
       (!expectAccount || !Number.isInteger(minimumValidationNonce) ||
@@ -557,6 +860,43 @@ async function prepareGrantCore(
     alreadyDeployed = false;
   }
 
+  // ── PERPETUALS: DECIDED ONCE, HERE, BEFORE ANYTHING THAT MAY GIVE WAY ─────
+  //
+  // After the account is known (the previous grant is matched by it) and after
+  // the deployment read (whether perps fit depends on it), and BEFORE the
+  // energy buy and the signability check — because of what each does when
+  // the wall is full. The energy buy is DROPPED when it does not fit, and the
+  // agent is funded another way. Perps are REFUSED (docs/perps.md rule 3): a
+  // registered Lighter key outlives any grant, so a re-sign that quietly lost
+  // the block would leave a live venue account with no worker holding its key.
+  // So perps claim their room first, and energy — the capability that can
+  // give way — is asked about the wall that already carries them. Stage 1
+  // measured perps at ~2.5M bounded first-enable gas, twice the energy buy.
+  //
+  // `decidePerpSeal` refuses by name (carried key changed, drop without a flat
+  // venue, off mainnet, another account's key armed); the fit check below is
+  // the last refusal. Its answer is the ONE value that sets
+  // `wallOpts.perpLighter`, mints GRANT_PERP_LIGHTER and writes `grant.perp`
+  // (signer-lockstep.test.ts pins all three to it).
+  const perpPrior = priorPerpFor(sudoOnlyAccount.address, {
+    server: perpIn.previousGrant,
+    local: perpIn.localGrants,
+  });
+  const sealedPerp = decidePerpSeal({
+    chainId: chain.id,
+    requested: perpIn.perp,
+    prior: perpPrior,
+    drop: perpIn.perpDrop === true,
+    venueFlat: perpIn.venueFlat,
+    recovery: perpIn.recovery,
+    smartAccount: sudoOnlyAccount.address,
+  });
+  // The ROUTE'S key index, never a caller's: `perp-lighter-v1` names index 16
+  // forever and the wall pins it EQUAL, so it is not an input to this call.
+  const perpLighter = sealedPerp
+    ? { apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: sealedPerp.apiPublicKey }
+    : undefined;
+
   const wallOpts = {
     ...trenchScope,
     extraTokens: sealedTokens,
@@ -575,7 +915,27 @@ async function prepareGrantCore(
     ponsClassVaultFactoryAddress: sealedClassFactory,
     // Decided just below, by energyBuyFits, and nowhere else.
     energyBuy: false as boolean,
+    // Decided just above, by decidePerpSeal, and nowhere else — never
+    // reassigned below, so the wall, the marker and grant.perp describe one
+    // decision.
+    perpLighter,
   };
+  // DOES THE WALL HOLD PERPS? The same policy `wallSignable` applies, one
+  // question earlier, over the options that will be signed (energy still
+  // closed). A NAMED refusal with the remedy, never a silent drop: the owner
+  // chooses what gives way, not this function.
+  if (wallOpts.perpLighter && !perpFits(caps, sudoOnlyAccount.address, chain.id, !alreadyDeployed, wallOpts)) {
+    throw new PerpSigningRefusal(
+      "perp-does-not-fit",
+      perpPrior.same.state === "carried"
+        ? "refusing to sign: this permission has no room left for the perpetuals your agent already holds, and " +
+            "they cannot be dropped silently — its Lighter key stays registered at the venue. Remove some tokens " +
+            "from this signature, or close the Lighter positions and turn perpetuals off first. Your current key " +
+            "has not been replaced."
+        : "refusing to sign: this permission has no room for perpetuals as well. Remove some tokens (or another " +
+            "opt-in) from this signature, or leave perpetuals off.",
+    );
+  }
   // ── THE ENERGY BUY: SEALED ONLY WHERE IT EXISTS AND ONLY WHEN IT FITS ─────
   //
   // USDG into $MERRYMEN over the frozen v2 route, into this account, and
@@ -793,7 +1153,29 @@ async function prepareGrantCore(
       // From the field that scoped the wall above. Without it the server and
       // the executor rebuild the UNSCOPED wall, which is not what was signed.
       ...(wallOpts.scopedSpenders ? [GRANT_SCOPED_SPENDERS] : []),
+      // From the SAME value that put the proxy into the USDG approve and pinned
+      // the key into changePubKey — never from `perpIn.perp` (the request) or
+      // the chain. A marker without that permission sends the worker planning
+      // an onboarding the chain refuses; the permission without the marker is a
+      // key the worker would never arm.
+      ...(wallOpts.perpLighter ? [GRANT_PERP_LIGHTER] : []),
     ],
+    // THE SEALED KEY, from that same value: PUBLIC key (lowercase, the bytes the
+    // wall pinned), the route's index, and at most the hosted sealed blob of
+    // the private key. There is no field here a plaintext private key fits in —
+    // this object goes to localStorage, the server and back out of GET
+    // /api/grants (through publicGrantView, which drops even the blob).
+    ...(perpIn.recovery && wallOpts.perpLighter ? { perpRecovery: perpIn.recovery } : {}),
+    ...(wallOpts.perpLighter
+      ? {
+          perp: {
+            route: GRANT_PERP_LIGHTER,
+            apiKeyIndex: wallOpts.perpLighter.apiKeyIndex,
+            apiPublicKey: wallOpts.perpLighter.apiPublicKey.toLowerCase() as `0x${string}`,
+            ...(sealedPerp?.apiKeySealed ? { apiKeySealed: sealedPerp.apiKeySealed } : {}),
+          },
+        }
+      : {}),
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
     ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
     ...(ponsClassVaultAddress
@@ -842,12 +1224,22 @@ async function mintGrant(
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
   minimumValidationNonce?: number,
+  perpIn: PerpSigningInput = {},
 ): Promise<MintedGrant> {
   const previousLocal = localStorage.getItem(STORAGE_KEY);
+  // THE BROWSER'S OWN PREVIOUS GRANTS, read BEFORE signing and handed over as
+  // data. Every dashboard mint — create, restore, Privy re-sign — goes through
+  // here, so no caller can forget to carry a Lighter key forward: the grant
+  // this browser armed for this account is consulted whether or not the page
+  // also passed the server's projection. (The preparation core stays free of
+  // storage; prepare-agent-grant.test.ts pins that.)
   const grant = await prepareGrantCore(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
     ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
     false, minimumValidationNonce,
+    // A snapshot the caller already took (a renewal hands the SAME one to its
+    // preflight) wins; otherwise this mint reads storage itself.
+    { ...perpIn, localGrants: perpIn.localGrants ?? localGrantsSnapshot() },
   );
   if (!grant) throw new Error("Grant preparation returned no signed permission.");
 
@@ -1067,6 +1459,42 @@ export function listSavedWallets(): SavedWallet[] {
 }
 
 /**
+ * Every grant this browser holds, as DATA: the armed one and each archived
+ * account's last. What `priorPerpFor` reads to carry a Lighter key forward.
+ *
+ * Silent on failure like its neighbours — an unreadable store must not stop
+ * somebody signing — and that is safe here only because it is not the last
+ * line: the server's projection (when the page passes it) outranks this copy,
+ * and POST /api/grants refuses a grant that would drop a key from a venue
+ * account that is not flat (a 409 once the custody intake lands; until then it
+ * refuses every perps grant with 403). The objects returned carry keys;
+ * nothing but the public fields is ever read from them.
+ */
+export function localGrantsSnapshot(): LocalGrants {
+  const parse = (raw: string | null): unknown => {
+    if (!raw) return undefined;
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      return undefined;
+    }
+  };
+  try {
+    const current = parse(localStorage.getItem(STORAGE_KEY));
+    const archived: unknown[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith(ARCHIVE_PREFIX)) continue;
+      const g = parse(localStorage.getItem(k));
+      if (g !== undefined) archived.push(g);
+    }
+    return { current, archived };
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Copy the grant currently in localStorage aside before it is overwritten.
  *
  * Fail closed: if archiving fails, the caller must not overwrite or remove the
@@ -1182,6 +1610,72 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
   }
 }
 
+export interface GrantRetryProof {
+  ownerSigner: OwnerSigner;
+  tenant: Address;
+  /** Recheck the current login and replacement journal after wallet approval. */
+  beforeSubmit: () => Promise<void>;
+}
+
+/** The stable permission metadata returned by owner-authenticated grant status. */
+export type GrantPermissionView = Partial<Omit<Grant, "owner" | "smartAccount" | "sessionKeyAddress" | "caps" | "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">> & {
+  owner?: string; smartAccount?: string; sessionKeyAddress?: string;
+  caps?: Partial<GrantCaps>;
+};
+
+/** A matching session key alone does not establish matching signed bounds. */
+export function sameGrantPermission(a: GrantPermissionView | undefined, b: GrantPermissionView): boolean {
+  if (!a) return false;
+  const address = (value: unknown): value is string => typeof value === "string" && /^0x[0-9a-f]{40}$/i.test(value);
+  for (const key of ["owner", "smartAccount", "sessionKeyAddress"] as const) {
+    if (!address(a[key]) || !address(b[key]) || a[key].toLowerCase() !== b[key].toLowerCase()) return false;
+  }
+  for (const key of ["chainId", "grantedAt", "expiresAt"] as const) {
+    if (!Number.isFinite(a[key]) || !Number.isFinite(b[key]) || a[key] !== b[key]) return false;
+  }
+  for (const key of ["perTradeUsdg", "dailyUsdg", "expiryDays", "maxDrawdownPct", "maxOpsPerDay"] as const) {
+    if (!Number.isFinite(a.caps?.[key]) || !Number.isFinite(b.caps?.[key]) || a.caps?.[key] !== b.caps?.[key]) return false;
+  }
+  for (const key of ["grantFeatures", "grantTokens"] as const) {
+    const x = a[key], y = b[key];
+    if (x === undefined || y === undefined) { if (x !== y) return false; continue; }
+    if (!Array.isArray(x) || !Array.isArray(y) || x.some(value => typeof value !== "string") || y.some(value => typeof value !== "string")) return false;
+    const normalize = (values: string[]) => [...values].map(value => key === "grantTokens" ? value.toLowerCase() : value).sort();
+    if (JSON.stringify(normalize(x)) !== JSON.stringify(normalize(y))) return false;
+  }
+  for (const key of ["v4AdapterAddress", "ponsAdapterAddress", "ponsClassVaultAddress", "ponsClassVaultFactoryAddress", "trencherVaultAddress", "trencherFactoryAddress"] as const) {
+    const x = a[key], y = b[key];
+    if (x === undefined || y === undefined) { if (x !== y) return false; continue; }
+    if (!address(x) || !address(y) || x.toLowerCase() !== y.toLowerCase()) return false;
+  }
+  // Account-link nonces/signatures refresh at intake; ownership model and DID do not.
+  if (!a.binding || !b.binding) return a.binding === b.binding;
+  return (a.binding.version ?? "legacy-wallet-owner-v1") === (b.binding.version ?? "legacy-wallet-owner-v1") && a.binding.did === b.binding.did;
+}
+
+/**
+ * Retry the saved permission, refreshing only its one-time account-link proof.
+ * Intake consumes that proof before later chain/store work, so even a failed
+ * handoff may have spent it. The trading permission, key and limits stay exact;
+ * the owner confirms a fresh link instead of making a nonce replayable.
+ */
+export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): Promise<GrantHandoff> {
+  if (!grant.binding && !proof) return postGrant(grant);
+  if (!proof) return { ok: false, error: "Confirm this wallet's account link again before retrying activation." };
+  const { ownerSigner, tenant } = proof;
+  const version = grant.binding?.version ?? "legacy-wallet-owner-v1";
+  if (ownerSigner.binding !== version || ownerSigner.account.address.toLowerCase() !== grant.owner.toLowerCase()
+    || (ownerSigner.binding === "privy-did-owner-v1" && (grant.binding?.did !== ownerSigner.did || grant.owner.toLowerCase() !== tenant.toLowerCase()))) {
+    return { ok: false, error: "Your signing wallet changed. Return to the account that owns this saved wallet before retrying activation." };
+  }
+  const binding = await signBinding({ owner: grant.owner, smartAccount: grant.smartAccount, chainId: grant.chainId, ownerSigner, tenant });
+  await proof.beforeSubmit();
+  // Historical local binding evidence stays intact. Only the fresh intake
+  // claim changes, and an owner key must never accompany that hosted request.
+  const { demoOwnerPrivateKey: _ownerKey, ...publicGrant } = grant;
+  return postGrant({ ...publicGrant, binding });
+}
+
 /**
  * Create a BRAND-NEW agent wallet: a fresh owner key is generated in-browser
  * (this is the account's sudo signer and the root of fund custody — no external
@@ -1233,6 +1727,68 @@ export interface MintOptions {
   trencherFactory?: `0x${string}`;
   /** Selected account's confirmed revocation cutoff; signing refuses an older RPC view. */
   minimumValidationNonce?: number;
+  /**
+   * PERPETUALS ON LIGHTER — a NEW opt-in: the public key POST
+   * /api/perps/keygen just returned (and, hosted, its sealed private key).
+   * Mainnet only, and only when the wall still fits; either failing is a
+   * named refusal (`PerpSigningRefusal`), never a quieter wall.
+   *
+   * NOT NEEDED TO KEEP PERPS. A re-sign of an account whose previous grant
+   * carried them carries the same key forward by default — see
+   * `previousGrant` and `perpDrop` — so leaving this unset never drops them.
+   */
+  perp?: PerpSealRequest | null;
+  recovery?: PerpRecoveryReference;
+  /**
+   * The server's PUBLIC projection of the tenant's current grant (GET
+   * /api/grants → `grant`), or `null` when the server says it holds none, or
+   * absent when unknown. The dashboard mints also read this browser's own
+   * copies; this is what lets a second browser or device carry a key forward
+   * it never saw sealed. Only public fields are read from it.
+   */
+  previousGrant?: unknown;
+  /**
+   * Remove the perpetuals permission the previous grant carried. Honoured ONLY
+   * with `venueFlat: true` — the caller's reading (GET /api/perps/flat) that
+   * every Lighter account under this L1 address is empty. Anything less is a
+   * refusal: a registered key stays valid at the venue whatever the grant says.
+   * Once the custody intake lands the server re-checks and answers 409
+   * regardless; until then it refuses every perps grant.
+   */
+  perpDrop?: boolean;
+  /** `true` only when the venue read provably flat; false, null or absent is "not provably flat". */
+  venueFlat?: boolean | null;
+  /**
+   * This browser's own previous grants (`localGrantsSnapshot()`), as DATA. A
+   * RENEWAL takes ONE snapshot and passes it, with `previousGrant`, in the
+   * options its preflight and its mint both get. The preflight is storage-free,
+   * so without it the preflight sees no local copy while the mint reads one,
+   * and a carried key that no longer fits would be refused only AFTER the old
+   * permission was revoked. Absent, a mint snapshots storage itself.
+   */
+  localGrants?: LocalGrants;
+}
+
+/** What the preparation core takes about perpetuals; built from MintOptions by `perpInput`. */
+export interface PerpSigningInput {
+  recovery?: PerpRecoveryReference;
+  perp?: PerpSealRequest | null;
+  previousGrant?: unknown;
+  /** The browser's own copies: the caller's snapshot (`MintOptions.localGrants`), else `mintGrant` takes one. */
+  localGrants?: LocalGrants;
+  perpDrop?: boolean;
+  venueFlat?: boolean | null;
+}
+
+/**
+ * The perps fields of a mint, NAMED, for every entry point. One helper so a
+ * new entry point cannot thread three of the four and forget the drop guard.
+ */
+function perpInput(o: Omit<MintOptions, "hostedAs">): PerpSigningInput {
+  return {
+    perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant,
+    perpDrop: o.perpDrop, venueFlat: o.venueFlat, localGrants: o.localGrants,
+  };
 }
 
 /**
@@ -1254,6 +1810,12 @@ export async function preflightAgentGrant(owner: LocalAccount, o: MintOptions): 
     o.caps, o.onStatus, o.chainId ?? robinhoodChain.id, o.extraTokens ?? [],
     o.v4AdapterAddress, o.ponsAdapterAddress, undefined, o.expectAccount,
     o.ponsClassVaultFactory, o.trencherFactory, true, o.minimumValidationNonce,
+    // THE SAME PERPS DECISION THE MINT WILL MAKE, before anything is revoked:
+    // a carried Lighter key that no longer fits must refuse here, not after.
+    // Storage-free like the rest of the preflight, so the caller passes the
+    // server's projection (`previousGrant`) and one `localGrantsSnapshot()`
+    // (`localGrants`) to BOTH this and the mint.
+    perpInput(o),
   );
 }
 
@@ -1275,6 +1837,10 @@ export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOpti
     o.trencherFactory,
     false,
     o.minimumValidationNonce,
+    // NO BROWSER STORAGE ON THIS PATH (see the docstring): the previous grant
+    // is whatever the caller passes as `previousGrant` — the iOS engine hands
+    // over its own stored copy, a partner its server's projection.
+    perpInput(o),
   );
   if (!grant) throw new Error("Grant preparation returned no signed permission.");
   return grant;
@@ -1302,6 +1868,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.ponsClassVaultFactory,
     o.trencherFactory,
     o.minimumValidationNonce,
+    perpInput(o),
   );
 }
 
@@ -1338,6 +1905,7 @@ export async function createPrivyOwnedWallet(
     o.ponsClassVaultFactory,
     o.trencherFactory,
     o.minimumValidationNonce,
+    perpInput(o),
   );
 }
 
@@ -1374,6 +1942,7 @@ export async function restoreAgentWallet(
     o.ponsClassVaultFactory,
     o.trencherFactory,
     o.minimumValidationNonce,
+    perpInput(o),
   );
 }
 

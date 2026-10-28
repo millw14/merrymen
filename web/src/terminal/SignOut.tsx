@@ -33,71 +33,98 @@ async function clearServerSession(): Promise<void> {
   await requestJson("/api/auth/logout", { method: "POST" });
 }
 
+interface SignOutProps {
+  after: () => void;
+  className?: string;
+  label?: string;
+  disabled?: boolean;
+  onStart?: () => void;
+  /** Account switching requires complete logout: report failure instead of calling after. */
+  onError?: (message: string) => void;
+}
+
 function Button({
   onClick,
   busy,
   className,
+  label = "Sign out",
+  disabled = false,
 }: {
   onClick: () => void;
   busy: boolean;
   className?: string;
+  label?: string;
+  disabled?: boolean;
 }) {
   return (
-    <button className={className} onClick={onClick} disabled={busy}>
-      {busy ? "Signing out…" : "Sign out"}
+    <button className={className} onClick={onClick} disabled={busy || disabled}>
+      {busy ? "Signing out…" : label}
     </button>
   );
 }
 
-function SignOutWithPrivy({ after, className }: { after: () => void; className?: string }) {
+function SignOutWithPrivy({ after, className, label, disabled, onStart, onError }: SignOutProps) {
   const { logout } = usePrivy();
   const [busy, setBusy] = useState(false);
   return (
     <Button
       className={className}
+      label={label}
+      disabled={disabled}
       busy={busy}
       onClick={() => {
         setBusy(true);
+        onStart?.();
         void (async () => {
+          let failed = false;
           try {
             // FIRST. This is what stops the prove-on-authenticated effect.
             await logout();
           } catch {
-            /* best effort — the server session still gets cleared below */
+            failed = true;
           }
           try {
+            // Still clear the server even if the browser logout failed.
             await clearServerSession();
-          } finally {
-            setBusy(false);
-            after();
+          } catch {
+            failed = true;
           }
+          setBusy(false);
+          if (failed && onError) onError("Sign-out did not finish. Retry to end both sessions before using another account.");
+          else after();
         })();
       }}
     />
   );
 }
 
-function SignOutServerOnly({ after, className }: { after: () => void; className?: string }) {
+function SignOutServerOnly({ after, className, label, disabled, onStart, onError }: SignOutProps) {
   const [busy, setBusy] = useState(false);
   return (
     <Button
       className={className}
+      label={label}
+      disabled={disabled}
       busy={busy}
       onClick={() => {
         setBusy(true);
-        void clearServerSession().finally(() => {
+        onStart?.();
+        void (async () => {
+          let failed = false;
+          try { await clearServerSession(); } catch { failed = true; }
           setBusy(false);
-          after();
-        });
+          if (failed && onError) onError("Sign-out did not finish. Retry before using another account.");
+          else after();
+        })();
       }}
     />
   );
 }
 
-export function SignOut({ after, className }: { after: () => void; className?: string }) {
+export function SignOut(props: SignOutProps) {
   return privyEnabled() ? (
-    <SignOutWithPrivy after={after} className={className} />
+    <SignOutWithPrivy {...props} />
   ) : (
-    <SignOutServerOnly after={after} className={className} />
+    <SignOutServerOnly {...props} />
   );
 }

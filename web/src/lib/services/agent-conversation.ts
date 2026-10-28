@@ -77,11 +77,14 @@ export interface AgentStateSnapshot {
   slug: string | null;
   /** JSON object text, already fitted to the chat budget. */
   state: string;
+  /** Saved owner preferences captured with this tenant's server-built state. */
+  agentBrief?: string;
 }
 
 export interface ModelInput {
   message: string;
   state: string;
+  agentBrief?: string;
   history: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
@@ -131,16 +134,18 @@ export function partnerDeps(seams: { runtime?: RuntimeOverrides; chat?: ChatSeam
       // and no second copy of its field selection. The runtime's own fallback
       // sentence is discarded; only the snapshot is kept.
       let captured: string | null = null;
+      let agentBrief: string | undefined;
       const runtime = createPartnerRuntime({
         ...seams.runtime,
-        reply: async (body) => {
+        reply: async (body, options) => {
           captured = typeof body.state === "string" ? body.state : null;
+          agentBrief = options?.agentBrief;
           return { reply: null, why: "empty" };
         },
       });
       const out = await runtime.replyToPartner(tenant, { message: "state" });
       if (!captured) throw new Error("state unavailable");
-      return { slug: out.runtime.slug, state: captured };
+      return { slug: out.runtime.slug, state: captured, agentBrief };
     },
     async reply(input) {
       const [{ generateAgentReply }, { llmText }] = await Promise.all([
@@ -153,6 +158,7 @@ export function partnerDeps(seams: { runtime?: RuntimeOverrides; chat?: ChatSeam
         { message: input.message, state: input.state, history: input.history },
         {
           surface: "partner",
+          agentBrief: input.agentBrief,
           ...(seams.chat?.credentials ? { credentials: seams.chat.credentials } : {}),
           // generateAgentReply scrubs markers itself and drops an incomplete
           // proposal silently; look at the raw text so the owner is still told
@@ -454,7 +460,7 @@ export async function sendMessage(db: Db, input: SendInput, d: ConversationDeps)
     thrown = new Error("model_timeout");
   } else {
     try {
-      answer = await withTimeout(d.reply({ message, state, history }), d.replyTimeoutMs, "model_timeout");
+      answer = await withTimeout(d.reply({ message, state, history, agentBrief: snapshot.agentBrief }), d.replyTimeoutMs, "model_timeout");
     } catch (e) {
       thrown = e;
     }

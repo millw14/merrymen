@@ -65,6 +65,21 @@ describe("announcements scroll with the chat", () => {
     assert.ok(src.indexOf('className="desk-notice"') > conv);
   });
 
+  it("and so does the recovery card, WHILE ITS PILL STAYS PINNED", () => {
+    // Pinned as the page's first child, its four parts were the tallest thing
+    // on a phone's Chat tab: at 390x750 the conversation got sixty-nine pixels.
+    // The state itself must not scroll away, so the header's RECOVERING pill
+    // stays above the conversation where it always was.
+    const src = read("./screens/Agent.tsx");
+    const conv = src.indexOf('className="desk-conversation"');
+    const card = src.indexOf("<RecoveryNotice recovery={recovery}/>");
+    assert.ok(conv > 0 && card > conv, "the recovery card renders inside the conversation");
+    assert.ok(card < src.indexOf('className="chat-divider"'), "at the top of it, above the thread");
+    assert.equal(src.split("<RecoveryNotice").length, 2, "and only there — not pinned as well");
+    const pill = src.indexOf('recovery ? "RECOVERING"');
+    assert.ok(pill > 0 && pill < conv, "the RECOVERING pill stays in the pinned header");
+  });
+
   it("BUT THE BLOCKER STAYS PINNED, because it must not be scrolled past", () => {
     // `liveBlocker` is the resolved answer to "why can't it trade for real".
     // It is short, and it is the one thing on this screen an owner must see.

@@ -22,7 +22,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, beforeEach, describe, it, mock } from "node:test";
@@ -31,7 +31,8 @@ import { DatabaseSync } from "node:sqlite";
 import type { StoredGrant } from "../../packages/core/src/index";
 import { wrapSqlite, type Db } from "./db";
 
-const FLEET = mkdtempSync(path.join(os.tmpdir(), "merrymen-restore-hold-"));
+// The real cache-erasure guard requires plain ancestors; macOS /var is a symlink.
+const FLEET = realpathSync(mkdtempSync(path.join(os.tmpdir(), "merrymen-restore-hold-")));
 process.env.MERRYMEN_HOME = FLEET;
 process.env.MERRYMEN_HOSTED = "1";
 delete process.env.DATABASE_URL;
@@ -51,6 +52,8 @@ const {
   hasLeaseForTest,
   honourFleetHalt,
   setHeldResetDbForTest,
+  setPersistentHomeVerifierForTest,
+  setRetirementMemoryStoreForTest,
 } = await import("./orchestrator");
 const { applyLedgerSchema } = await import("./store");
 const { PAPER_CHECKPOINT_SCHEMA, restorePaperCheckpoint } = await import("./paper-checkpoint");
@@ -74,7 +77,8 @@ const grant = (): StoredGrant =>
     smartAccount: ACCOUNT,
     owner: "0x00000000000000000000000000000000000000b8",
     sessionKeyAddress: "0x00000000000000000000000000000000000000d8",
-    serialized: "eyJ-a-zerodev-blob-restore-hold",
+    // Only a disposable session key appears in the serialized fixture.
+    serialized: Buffer.from(JSON.stringify({ key: "0x" + "cd".repeat(32) })).toString("base64"),
     chainId: 4663,
     grantedAt: Math.floor(Date.now() / 1000) - 3600,
     expiresAt: Math.floor(Date.now() / 1000) + 7 * 86_400,
@@ -178,7 +182,7 @@ after(() => {
   rmSync(FLEET, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-const store = getGrantStore();
+const store = getGrantStore("spot");
 const settle = async (n = 20) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
 };
@@ -217,6 +221,40 @@ const paperWithBot = { paperTradingEnabled: true, telegramEnabled: true, telegra
 const readSettings = (t: string) =>
   JSON.parse(readFileSync(path.join(childHome(t), "settings.json"), "utf8")) as { telegramBotToken?: string };
 
+/** Real local accounting and personal data, kept apart at the writer-exit boundary. */
+async function seedRetainedHome() {
+  const home = childHome(TENANT), file = path.join(home, "merrymen.db"), raw = new DatabaseSync(file);
+  try {
+    await applyLedgerSchema(wrapSqlite(raw));
+    raw.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,hwm_usdg) VALUES(?,?,?,4663,'{}',1,9999999999,120)")
+      .run(ACCOUNT, grant().owner, grant().sessionKeyAddress);
+    raw.prepare("INSERT INTO events(id,agent_id,message,created_at) VALUES(8765,?,'original accounting witness',1)").run(ACCOUNT);
+    raw.prepare("INSERT INTO chat_turns(chat_id,role,content,at) VALUES(4242,'user','private owner memory',1)").run();
+  } finally { raw.close(); }
+  mkdirSync(path.join(home, "soul"), { recursive: true });
+  writeFileSync(path.join(home, "soul", "OWNER.md"), "private owner notes");
+  const barriers = ["restore-blocked.json", "ledger-source-blocked.json", "ledger-import.pending.json"]
+    .filter(name => existsSync(path.join(home, name)))
+    .map(name => ({ name, bytes: readFileSync(path.join(home, name)) }));
+  return { home, file, inode: lstatSync(file, { bigint: true }).ino, barriers };
+}
+type RetainedHome = Awaited<ReturnType<typeof seedRetainedHome>>;
+function assertOriginalHomeKept(saved: RetainedHome) {
+  assert.equal(lstatSync(saved.file, { bigint: true }).ino, saved.inode, "the actual original accounting file stays");
+  const raw = new DatabaseSync(saved.file, { readOnly: true });
+  try {
+    assert.equal(raw.prepare("SELECT message FROM events WHERE id=8765").get()?.message, "original accounting witness");
+    assert.equal(raw.prepare("SELECT hwm_usdg FROM agents WHERE smart_account=?").get(ACCOUNT)?.hwm_usdg, 120);
+  } finally { raw.close(); }
+  for (const barrier of saved.barriers) assert.deepEqual(readFileSync(path.join(saved.home, barrier.name)), barrier.bytes, `${barrier.name} is retained`);
+}
+function assertPrivateMemory(saved: RetainedHome, present: boolean) {
+  assert.equal(existsSync(path.join(saved.home, "soul", "OWNER.md")), present);
+  const raw = new DatabaseSync(saved.file, { readOnly: true });
+  try { assert.equal(raw.prepare("SELECT count(*) AS n FROM chat_turns WHERE chat_id=4242").get()?.n, present ? 1 : 0); }
+  finally { raw.close(); }
+}
+
 beforeEach(async () => {
   // A hold process an earlier test left stuck, gone now, so the stand-down
   // below is not left waiting on it.
@@ -228,7 +266,7 @@ beforeEach(async () => {
   await settle();
   rmSync(childHome(TENANT), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   rmSync(childHome(OTHER), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-  await getSettingsStore().put(TENANT, paperWithBot as never);
+  await getSettingsStore("spot").put(TENANT, paperWithBot as never);
   restoreSays = { ok: false, reason: NEWER };
   ledger = null;
   setHeldResetDbForTest(null);
@@ -268,7 +306,7 @@ describe("a paper book that will not restore holds the tenant", () => {
   });
 
   it("A TENANT WITH NO BOT IS HELD TOO, WITH NO PROCESS, AND STILL NOT RETRIED EVERY PASS", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
@@ -281,7 +319,7 @@ describe("a paper book that will not restore holds the tenant", () => {
       assert.equal(restores, 1);
       assert.equal(notices.length, 1, "the notice is tried even with no hold process");
       // The owner switches Telegram on: the next pass answers the bot.
-      await getSettingsStore().put(TENANT, paperWithBot as never);
+      await getSettingsStore("spot").put(TENANT, paperWithBot as never);
       await reconcile();
       assert.equal(holds().length, 1, `the hold process starts from the refresh:\n${said.join("\n")}`);
       assert.equal(restores, 1, "without another restore");
@@ -289,7 +327,7 @@ describe("a paper book that will not restore holds the tenant", () => {
   });
 
   it("A LIVE OR UNFLAGGED BOOK IS NOT HELD: THE WORKER STARTS AS IT ALWAYS DID", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await reconcile();
     assert.equal(workers().length, 1);
@@ -441,7 +479,7 @@ describe("when the restore takes, trading comes back", () => {
       hold.slowExit = true;
       // The restore still fails: the book is as broken as it was. What changed
       // is that the gate no longer holds a tenant for it.
-      await getSettingsStore().put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
+      await getSettingsStore("spot").put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
       mock.timers.tick(15_000);
       const pass = reconcile();
       await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
@@ -536,6 +574,7 @@ describe("when the restore takes, trading comes back", () => {
     await store.put(TENANT, grant());
     await withClock(async () => {
       const hold = await stuckHandover();
+      const retained = await seedRetainedHome();
       assert.equal(workers().length, 0);
       await store.remove(TENANT);
       for (let i = 0; i < 2; i++) {
@@ -544,7 +583,8 @@ describe("when the restore takes, trading comes back", () => {
       }
       await settle();
       assert.equal(spawned.length, 1, `nothing started for a revoked tenant:\n${said.join("\n")}`);
-      assert.equal(existsSync(childHome(TENANT)), false, "its home wiped, as for any stand-down");
+      assertOriginalHomeKept(retained);
+      assertPrivateMemory(retained, true);
       assert.equal(said.filter((l) => l.includes(`${TENANT} grant removed — standing its hold down`)).length, 1, "stood down once, not every pass");
       assert.ok(isHeldForTest(TENANT), "and still counted until its process is seen to go");
       // Signed again before the old process has gone: still nothing beside it.
@@ -595,7 +635,7 @@ describe("when the restore takes, trading comes back", () => {
       const hold = holds()[0]!;
       hold.deaf = true;
       // The restore still fails; the gate no longer holds a live owner for it.
-      await getSettingsStore().put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
+      await getSettingsStore("spot").put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
       mock.timers.tick(15_000);
       const pass = reconcile();
       await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
@@ -656,16 +696,24 @@ describe("when the restore takes, trading comes back", () => {
 });
 
 describe("a held tenant is stood down like any other", () => {
-  it("ITS GRANT GOES: THE HOLD PROCESS IS STOPPED AND THE HOME WIPED", async () => {
+  it("ITS GRANT GOES: THE HOLD PROCESS EXITS BEFORE PRIVATE MEMORY IS CLEARED AND ORIGINAL ACCOUNTING STAYS", async () => {
     await store.put(TENANT, grant());
     await reconcile();
     const hold = holds()[0]!;
+    hold.deaf = true;
+    const retained = await seedRetainedHome();
     await store.remove(TENANT);
     await reconcile();
     await settle();
     assert.equal(hold.signals[0], "SIGTERM");
+    assert.ok(isHeldForTest(TENANT), "the still-running holder remains counted");
+    assertOriginalHomeKept(retained); assertPrivateMemory(retained, true);
+    assert.ok(existsSync(path.join(retained.home, "grant.json")), "a live writer's key cache is untouched");
+    hold.die(null, "SIGKILL"); await reconcile(); await settle();
     assert.ok(!isHeldForTest(TENANT));
-    assert.equal(existsSync(childHome(TENANT)), false, "the revoked session key and the bot token go with it");
+    assertOriginalHomeKept(retained); assertPrivateMemory(retained, false);
+    assert.equal(existsSync(path.join(retained.home, "grant.json")), false, "the revoked key cache is cleared after exit");
+    assert.equal(existsSync(path.join(retained.home, "settings.json")), false, "the bot token is cleared after exit");
     assert.equal(workers().length, 0);
   });
 
@@ -694,7 +742,7 @@ describe("a held tenant is stood down like any other", () => {
 
   it("A HELD TENANT'S BOT IS STILL ITS OWN: THE DE-DUPLICATION SEES IT, AND FIRST", async () => {
     // The same bot saved under a second, trading login: the incident's shape.
-    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
     await reconcile();
@@ -706,8 +754,8 @@ describe("a held tenant is stood down like any other", () => {
   });
 
   it("A HELD TENANT WITH TELEGRAM OFF CLAIMS NO BOT: A TRADING LOGIN ON THE SAME TOKEN KEEPS IT", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: true, telegramEnabled: false, telegramBotToken: "111:a" } as never);
-    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true, telegramEnabled: false, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
     await reconcile();
@@ -720,17 +768,20 @@ describe("a held tenant is stood down like any other", () => {
   });
 
   it("A HELD TENANT REVOKED IN THE PASS ITS OWNER SWITCHES TELEGRAM ON GETS NO HOLD PROCESS", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await reconcile();
     assert.ok(isHeldForTest(TENANT));
-    await getSettingsStore().put(TENANT, paperWithBot as never);
+    const retained = await seedRetainedHome();
+    await getSettingsStore("spot").put(TENANT, paperWithBot as never);
     await store.remove(TENANT);
     await reconcile();
     await settle();
-    assert.equal(spawned.length, 0, "no process started to poll a revoked tenant's bot, only to be killed in a wiped home");
+    assert.equal(spawned.length, 0, "a revoked tenant never gets a bot process");
     assert.ok(!isHeldForTest(TENANT));
-    assert.equal(existsSync(childHome(TENANT)), false);
+    assertOriginalHomeKept(retained); assertPrivateMemory(retained, false);
+    assert.equal(existsSync(path.join(retained.home, "grant.json")), false);
+    assert.equal(existsSync(path.join(retained.home, "settings.json")), false);
   });
 
   /**
@@ -748,11 +799,12 @@ describe("a held tenant is stood down like any other", () => {
       await reconcile();
       const hold = holds()[0]!;
       hold.deaf = true;
+      const retained = await seedRetainedHome();
       await store.remove(TENANT);
       mock.timers.tick(15_000);
       await reconcile();
       assert.equal(hold.signals[0], "SIGTERM");
-      assert.equal(existsSync(childHome(TENANT)), false, "its home wiped, as for any stand-down");
+      assertOriginalHomeKept(retained); assertPrivateMemory(retained, true);
       assert.ok(isHeldForTest(TENANT), "still counted until its process is seen to go");
       assert.ok(hasLeaseForTest(TENANT), "and its lease kept, so no other replica starts one beside it either");
       // Signed again, with a book that restores now: still nothing beside it.
@@ -855,7 +907,7 @@ describe("a held tenant is stood down like any other", () => {
   it("A STOOD-DOWN HOLD PROCESS THAT WILL NOT EXIT STILL COUNTS FOR ITS BOT: ANOTHER LOGIN ON THE SAME TOKEN IS NOT HANDED IT MEANWHILE", async () => {
     // The incident's shape: the same bot under a second, trading login. No
     // claims can be read here, so the pass's own record is the only guard.
-    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
     await withClock(async () => {
@@ -1028,7 +1080,7 @@ describe("a practice reset its owner asks for while held", () => {
 
   it("A LIVE OWNER'S RESET IS NOT HONOURED, AND ONE PRESS BRINGS ONE RETRY FORWARD, NOT ONE EVERY PASS", async () => {
     const db = await useLedger();
-    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
@@ -1077,7 +1129,7 @@ describe("a practice reset its owner asks for while held", () => {
 
   it("A LIVE OWNER'S RESET WAITING AT SPAWN IS LOOKED AT THERE, AND NOT AGAIN LATER IN THE SAME PASS", async () => {
     const db = await useLedger();
-    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
     await ask(db, "r1", Date.now() - 60 * 60_000);
     await store.put(TENANT, grant());
     await withClock(async () => {
@@ -1115,16 +1167,49 @@ describe("a practice reset its owner asks for while held", () => {
     });
   });
 
+  for (const source of ["ledger-source-blocked.json", "ledger-import.pending.json", "unconfirmed-root"] as const) {
+    it(`a legacy holder cannot retry or reset across ${source} before a health report exists`, async () => {
+      const db=await useLedger();await store.put(TENANT,grant());
+      await withClock(async()=>{
+        await reconcile();assert.ok(isHeldForTest(TENANT));assert.equal(restores,1);
+        await ask(db,"preserved-reset",Date.now());
+        await db.exec("CREATE TABLE mirror_state(tenant TEXT,table_name TEXT,last_id INTEGER,last_stamp INTEGER,updated_at INTEGER)");
+        await db.prepare("INSERT INTO mirror_state VALUES(?,'trades',1,11,11)").run(TENANT);
+        assert.equal(shared!.raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='fleet_recovery_health'").get()!.n,0);
+        const tables=["agents","trades","equity","positions","cost_basis","position_floors","flows","fee_accruals","paper_checkpoints","mirror_state","agent_commands"];
+        const before=tables.map(name=>JSON.stringify(shared!.raw.prepare(`SELECT * FROM ${name}`).all()));
+        const file=source === "unconfirmed-root" ? null : path.join(childHome(TENANT),source);
+        if(file) writeFileSync(file,"preserved source fence");
+        else setPersistentHomeVerifierForTest(()=>{throw new Error("unconfirmed original volume");});
+        // Metadata publication is permitted with this unchanged chat-only holder;
+        // it cannot clear the source or restore/reset the financial source.
+        setRetirementMemoryStoreForTest({shared:db,dek:Buffer.alloc(32,9),dialect:"sqlite"});
+        try {
+          mock.timers.tick(15_000);await reconcile();
+          assert.equal(restores,1,"source refused before the restore writes");
+          assert.equal(workers().length,0);assert.ok(isHeldForTest(TENANT));
+          assert.deepEqual(tables.map(name=>JSON.stringify(shared!.raw.prepare(`SELECT * FROM ${name}`).all())),before);
+          assert.deepEqual(await commandRow(db,"preserved-reset"),{claimed_at:null,done_at:null,result:null});
+          assert.equal(Number(shared!.raw.prepare("SELECT held FROM fleet_recovery_health WHERE tenant=?").get(TENANT)!.held),1);
+          if(file) assert.equal(readFileSync(file,"utf8"),"preserved source fence");
+        } finally {
+          setRetirementMemoryStoreForTest(null);setPersistentHomeVerifierForTest(null);
+          if(file) rmSync(file,{force:true});
+        }
+      });
+    });
+  }
+
   it("THE RESET IS OFFERED ONLY WHERE IT WOULD BE HONOURED, AND THE OFFER FOLLOWS THE SETTINGS", async () => {
     await useLedger();
-    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
       assert.ok(isHeldForTest(TENANT));
       assert.equal(readRestoreBlocked(childHome(TENANT))?.resettable, false, "live switched on beside practice: it would be refused");
       assert.deepEqual(offered, [false], "and the notice does not send them round the loop either");
-      await getSettingsStore().put(TENANT, paperWithBot as never);
+      await getSettingsStore("spot").put(TENANT, paperWithBot as never);
       mock.timers.tick(15_000);
       await reconcile();
       assert.equal(readRestoreBlocked(childHome(TENANT))?.resettable, true, "switched off: the hold process offers it from the next reply");

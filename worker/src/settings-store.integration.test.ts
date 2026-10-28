@@ -31,7 +31,7 @@ const BOB = "0x00000000000000000000000000000000000000b2" as const;
 const BOT_TOKEN = "123456:AAHsecretBotToken_do_not_leak";
 
 describe("FileSettingsStore", () => {
-  const store = new FileSettingsStore();
+  const store = new FileSettingsStore("spot");
 
   it("round-trips a tenant's settings", async () => {
     const s: MerrymenSettings = { strategy: "trencher", basketSymbols: ["AAPL", "TSLA"], slippageBps: 300 };

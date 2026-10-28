@@ -380,7 +380,7 @@ function aboutLine(e: TgDeskEvidence): string {
       const url = new URL(lore.url);
       const publicSource = url.hostname === "www.geckoterminal.com"
         ? /^\/(?:robinhood|robinhood-chain)\/tokens\/0x[0-9a-f]{40}\/?$/iu.test(url.pathname)
-        : url.hostname === "explorer.robinhood.com" && /^\/address\/0x[0-9a-f]{40}\/?$/iu.test(url.pathname);
+        : url.hostname === "robinhoodchain.blockscout.com" && /^\/token\/0x[0-9a-f]{40}\/?$/iu.test(url.pathname);
       if (url.protocol === "https:" && !url.username && !url.password && !url.port && !url.search && !url.hash && publicSource) {
         label = `<a href="${esc(url.href)}">Source</a>`;
       }

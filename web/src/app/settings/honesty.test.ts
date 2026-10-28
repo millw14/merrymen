@@ -177,7 +177,11 @@ describe("every control survives the restyle", () => {
     // groups" and "Look at coins people post". Both default ON, so — like the
     // platform coin list — the control is what makes OFF reachable, and both
     // are dashboard-only: the chat refuses them and points here.
-    assert.equal(count(/type="checkbox"/g), 19, "checkboxes");
+    // 22 since FOMO RESEARCH (docs/fomo.md): three separate permissions —
+    // answering Fomo questions (defaults ON, so the control is what makes OFF
+    // reachable), the trader cohort, and acting on research. Dashboard-only;
+    // the chat refuses all three (DASHBOARD_ONLY.fomo).
+    assert.equal(count(/type="checkbox"/g), 25, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -219,10 +223,10 @@ describe("every control survives the restyle", () => {
     // over what is watched: a class switched off stays priced and sellable.
     // 7 since how chatty it is in Telegram groups (quiet / normal / chatty),
     // the third Telegram groups control beside the two switches above.
-    assert.equal(count(/<select/g), 7, "selects");
+    assert.equal(count(/<select/g), 9, "selects");
   });
 
-  it("sends exactly the 26 fields save() guards", () => {
+  it("sends exactly the 32 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -250,7 +254,10 @@ describe("every control survives the restyle", () => {
     // unguarded they would write whatever the form held for every owner who
     // saved anything — silently taking a bot out of its groups, or switching
     // coin-looking off, by visiting a page.
-    assert.equal((code.match(/if \(\w+ !== null\) body\.\w+ = \w+;/g) ?? []).length, 26);
+    // 29 since the three Fomo research permissions (docs/fomo.md). One of them
+    // (fomoDataAccess) defaults ON, so unguarded it would silently switch an
+    // owner's lookups off by visiting the page.
+    assert.equal((code.match(/if \(\w+ !== null\) body\.\w+ = \w+;/g) ?? []).length, 32);
   });
 });
 
@@ -360,7 +367,7 @@ describe("nothing is left behind after a save", () => {
     assert.ok(refetch > 0 && saved > refetch && resetEnd > saved, "saved values must be read back before clearing the draft");
     const reset = save.slice(saved, resetEnd);
     const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);
-    assert.equal(guarded.length, 26, "every guard has the `if (x !== null) body.key = x;` shape");
+    assert.equal(guarded.length, 32, "every guard has the `if (x !== null) body.key = x;` shape");
     const left = guarded.filter((name) => !reset.includes(`set${name[0]!.toUpperCase()}${name.slice(1)}(null)`));
     assert.deepEqual(left, [], "sent by save() but not reset after it");
   });
@@ -388,7 +395,14 @@ describe("Telegram groups (docs/tg-groups.md)", () => {
   it("they live inside the Telegram section, not under Advanced", () => {
     const telegram = SRC.indexOf('id="telegram"');
     const block = SRC.indexOf('t("settings.section.telegramGroups")');
-    const end = SRC.indexOf("</details>", telegram);
+    // The secondary existing-bot path is its own expandable drawer. Match
+    // the outer section's close, rather than the first nested drawer's close.
+    const start = SRC.lastIndexOf("<details", telegram);
+    let depth = 0, end = -1;
+    for (const tag of SRC.slice(start).matchAll(/<\/?details\b[^>]*>/g)) {
+      depth += tag[0].startsWith("</") ? -1 : 1;
+      if (depth === 0) { end = start + tag.index!; break; }
+    }
     assert.ok(telegram > 0 && block > telegram && block < end, "the Telegram groups block is not inside <details id=\"telegram\">");
   });
 
@@ -416,5 +430,42 @@ describe("Telegram groups (docs/tg-groups.md)", () => {
     assert.match(code, /tg\?\.canReadAllGroupMessages === true \? \(\s*t\("settings\.text\.privacyModeOff"\)/);
     assert.match(code, /tg\?\.canReadAllGroupMessages === false \? t\("settings\.text\.privacyModeOn"\) : t\("settings\.text\.privacyModeUnknown"\)\}\{" "\}\s*\{t\("settings\.text\.privacyModeSteps"\)\}/);
     assert.match(code, /tg\?\.canJoinGroups === false && /);
+  });
+});
+
+describe("Fomo monitoring and following say they are hosted only where they cannot run", () => {
+  // Cohort monitoring and research-led following are produced only by the
+  // hosted orchestrator's fleet pass (the stream, the cohort, the child's
+  // fomo.json). A self-hosted install builds a lookup broker and nothing
+  // else, so on it these two switches stored a value and did nothing while
+  // the page said "researches what the watched traders do". The census above
+  // is unchanged: the checkboxes stay on the page, disabled and labelled.
+  const fomo = code.slice(code.indexOf('t("settings.label.fomoMonitoring")'), code.indexOf('t("settings.hint.fomoFollow")'));
+
+  it("the flag is a RESOLVED self-hosted answer, never the unresolved one", () => {
+    assert.match(code, /const fomoFleetOnly = hosted === false;/);
+  });
+
+  it("both switches are disabled, shown off and labelled hosted-only there", () => {
+    assert.ok(fomo.length > 0, "the Fomo monitoring and follow controls were not found");
+    for (const [val, setter] of [["fomoMonitoringVal", "setFomoMonitoring"], ["fomoFollowVal", "setFomoFollow"]] as const) {
+      const at = fomo.indexOf(`onChange={(e) => ${setter}(e.target.checked)}`);
+      assert.ok(at > 0, `${setter} lost its binding`);
+      const tag = fomo.slice(fomo.lastIndexOf("<input", at), fomo.indexOf("/>", at));
+      assert.match(tag, new RegExp(`checked=\\{fomoFleetOnly \\? false : ${val}\\}`), `${val} reads as on where nothing runs`);
+      assert.match(tag, /disabled=\{fomoFleetOnly\}/, `${setter} can be changed where it does nothing`);
+    }
+    assert.equal((fomo.match(/fomoFleetOnly\s*\?\s*"hosted only — not available on this install"/g) ?? []).length, 2);
+  });
+
+  it("the data-access switch is NOT gated: lookups work on every install", () => {
+    const data = code.slice(code.indexOf('t("settings.label.fomoDataAccess")'), code.indexOf('t("settings.label.fomoMonitoring")'));
+    assert.ok(data.includes("onChange={(e) => setFomoData(e.target.checked)}"));
+    assert.doesNotMatch(data, /fomoFleetOnly/);
+  });
+
+  it("the page says why, in plain words, only where it applies", () => {
+    assert.match(code, /\{fomoFleetOnly && <p className="mm-hint">\{t\("settings\.hint\.fomoHostedOnly"\)\}<\/p>\}/);
+    assert.match(EN["settings.hint.fomoHostedOnly"], /only on the hosted service/);
   });
 });

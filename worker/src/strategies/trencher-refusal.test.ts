@@ -36,7 +36,7 @@ import {
 } from "./trencher";
 
 type Source = PriceQuote["source"];
-type Quote = { stale: boolean; price8: bigint; source: Source };
+type Quote = { stale: boolean; price8: bigint; source: Source; sampled?: { readings: number; spanSec: number; ready: boolean } };
 
 /**
  * Every `PriceQuote.source`, BOUND TO THE UNION rather than copied from it.
@@ -48,7 +48,7 @@ type Quote = { stale: boolean; price8: bigint; source: Source };
  * that guarantee are the `satisfies` below (this list omits nothing) and the
  * `never` in the classifier's default arm (that list omits nothing either).
  */
-const SOURCES = ["chainlink", "pool", "broker", "curve", "v4"] as const satisfies readonly Source[];
+const SOURCES = ["chainlink", "pool", "broker", "curve", "v4", "sampled"] as const satisfies readonly Source[];
 
 /** Fails to compile if a source exists that `SOURCES` does not name. */
 const _EVERY_SOURCE_LISTED: (typeof SOURCES)[number] extends Source
@@ -95,6 +95,8 @@ const ALL_CAUSES = [
   "zero-price",
   "curve-priced",
   "v4-priced",
+  "sampled-priced",
+  "sampling",
   "feed-priced",
   "unknown-source",
   "not-watched",
@@ -183,6 +185,39 @@ describe("the verdict and its reason are built together", () => {
   });
 });
 
+describe("a sampled price opens only what its caller accepts", () => {
+  const sampled = (ready: boolean, over: Partial<Quote> = {}) =>
+    ({ stale: false, price8: 100_000_000n, source: "sampled" as const, sampled: { readings: ready ? 6 : 1, spanSec: ready ? 240 : 0, ready }, ...over });
+
+  it("is refused by a caller that accepts pool quotes only", () => {
+    assert.equal(unpriceableCause(sampled(true), true), "sampled-priced");
+    assert.equal(priceability(sampled(true), true).priceable, false);
+  });
+
+  it("opens a vault entry only once the series is ready", () => {
+    assert.equal(unpriceableCause(sampled(true), true, { sampled: true }), null);
+    assert.equal(unpriceableCause(sampled(false), true, { sampled: true }), "sampling");
+    // A sampled quote that somehow lost its series description is not ready.
+    assert.equal(unpriceableCause({ stale: false, price8: 1n, source: "sampled" }, true, { sampled: true }), "sampling");
+  });
+
+  it("still reports the first thing wrong ahead of the source", () => {
+    assert.equal(unpriceableCause(sampled(true, { stale: true }), true, { sampled: true }), "stale-price");
+    assert.equal(unpriceableCause(sampled(true, { price8: 0n }), true, { sampled: true }), "zero-price");
+  });
+
+  it("is a price like any other where no pool is required", () => {
+    assert.equal(unpriceableCause(sampled(false), false), null);
+  });
+
+  it("widens nothing else: every other source answers as it did", () => {
+    for (const q of QUOTES) {
+      if (q?.source === "sampled") continue;
+      assert.equal(unpriceableCause(q, true, { sampled: true }), unpriceableCause(q, true));
+    }
+  });
+});
+
 describe("a cause names what actually happened", () => {
   it("reports the FIRST thing wrong, not the last", () => {
     // The equivalence proof cannot see this: a zero-priced curve quote is
@@ -229,7 +264,7 @@ describe("a cause names what actually happened", () => {
     // wording that denies the price exists is the original bug in new clothes,
     // so this matches the CLAIM rather than one phrasing of it.
     const DENIES_A_PRICE = /can't be priced|couldn't be priced|no price|unpriceable|no venue|not priced/i;
-    for (const cause of ["curve-priced", "v4-priced", "feed-priced"] as const) {
+    for (const cause of ["curve-priced", "v4-priced", "sampled-priced", "sampling", "feed-priced"] as const) {
       assert.doesNotMatch(whyOf(cause), DENIES_A_PRICE, `"${cause}" must not deny a price it has`);
     }
   });
@@ -306,8 +341,11 @@ describe("what each site can and cannot say", () => {
     const produced = new Set<UnpriceableCause>();
     for (const q of QUOTES) {
       for (const requirePool of [true, false]) {
-        const c = unpriceableCause(q, requirePool);
-        if (c) produced.add(c);
+        // Both entry policies: `sampling` exists only where a sampled price is accepted.
+        for (const accept of [{}, { sampled: true }]) {
+          const c = unpriceableCause(q, requirePool, accept);
+          if (c) produced.add(c);
+        }
       }
     }
     for (const cause of ALL_CAUSES) {
@@ -356,7 +394,9 @@ describe("both build sites ask for the verdict rather than recomputing it", () =
     // valuation one — `lastUnpriceable` states the rule at length and the
     // legacy site used to contradict it. A site that asks `false` here would
     // let a v4 or curve mark, which no oracle checked, authorise a buy.
-    const entry = INDEX.match(/\.\.\.\(?\s*sameToken \? priceability\(quote, (\w+)\)|\.\.\.priceability\(quote, (\w+)\)/g) ?? [];
+    // A third argument is what the site ACCEPTS beyond a pool quote (a ready
+    // sampled series for a vault entry); the second must still be `true`.
+    const entry = INDEX.match(/\.\.\.\(?\s*sameToken \? priceability\(quote, (\w+)\)|\.\.\.priceability\(quote, (\w+)[,)]/g) ?? [];
     assert.ok(entry.length >= 2, `expected both build sites, found ${entry.length}`);
     assert.deepEqual(
       INDEX.match(/priceability\(quote, false\)/g),

@@ -19,9 +19,22 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isGrantPurpose, type GrantPurpose } from "../../packages/core/src/grant";
 
 export function merrymenHome(): string {
   return process.env.MERRYMEN_HOME ?? path.join(os.homedir(), ".merrymen");
+}
+
+/**
+ * A wallet's own home on a self-hosted install. Spot's is the home itself,
+ * where grant.json has always been. A Perps wallet's is `accounts/perps`
+ * inside it: a complete home of its own (grant.json, its archive, its pause
+ * marker, later its settings and ledger), so nothing it writes can land in a
+ * Spot file. No default, like the stores: a caller names the wallet it means.
+ */
+export function purposeHome(wallet: GrantPurpose): string {
+  if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
+  return wallet === "perps" ? path.join(merrymenHome(), "accounts", "perps") : merrymenHome();
 }
 
 export const homePaths = {
@@ -92,10 +105,11 @@ export const KILL_PAUSE_NOTE = "paused by a kill that could not archive the owne
 /**
  * Pause for a kill that kept the grant. A pause already in place — the owner's,
  * or an earlier kill's — is left exactly as it is. Returns whether trading is
- * paused now.
+ * paused now. `home` is another wallet's home (purposeHome); the default is
+ * this process's own.
  */
-export function pauseForKeptGrant(): boolean {
-  const file = homePaths.paused();
+export function pauseForKeptGrant(home?: string): boolean {
+  const file = home === undefined ? homePaths.paused() : path.join(home, "paused");
   if (existsSync(file)) return true;
   try {
     writeFileSync(file, KILL_PAUSE_NOTE, "utf8");
@@ -110,8 +124,8 @@ export function pauseForKeptGrant(): boolean {
  * only that one. Otherwise it outlived the grant it stood in for, and the next
  * grant armed paused with nothing saying why.
  */
-export function liftKillPause(): void {
-  const file = homePaths.paused();
+export function liftKillPause(home?: string): void {
+  const file = home === undefined ? homePaths.paused() : path.join(home, "paused");
   try {
     if (readFileSync(file, "utf8") === KILL_PAUSE_NOTE) rmSync(file, { force: true });
   } catch {

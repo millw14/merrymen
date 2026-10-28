@@ -8,7 +8,10 @@ import dev.merrymen.app.net.HowItTrades
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.OwnBook
 import dev.merrymen.app.net.ProfileTrade
-import dev.merrymen.app.net.agentProfile
+import dev.merrymen.app.net.agentSummary
+import dev.merrymen.app.net.agentActivity
+import dev.merrymen.app.net.agentDetails
+import dev.merrymen.app.net.ThesesPage
 import dev.merrymen.app.net.ownSlugOf
 import dev.merrymen.app.ui.feed.Beat
 import dev.merrymen.app.ui.feed.MINUS
@@ -228,6 +231,9 @@ fun sizeText(t: ProfileTrade, showMoney: Boolean): String? =
  * carries no dollar figure at all, and the sentence stays true without it.
  */
 fun gasLine(p: AgentProfile, showMoney: Boolean): String? {
+  // Modern performance carries its own gas provenance. Legacy gas and return
+  // fields can describe a different book or a return now withheld for review.
+  if (p.performance != null) return null
   if (p.mode == "paper") return null
   val shown = p.pnlBps ?: return null
   if (!shown.isFinite()) return null
@@ -253,9 +259,16 @@ fun unrankedSentence(why: String?): String = when (why) {
 }
 
 /** The headline figure: a paper book's own return, labelled Paper; a live one's ranked return. */
-data class ReturnView(val label: String, val bps: Double?, val note: String?)
+data class ReturnView(val label: String, val bps: Double?, val note: String?, val state: String? = null, val estimated: Boolean = false)
 
 fun returnOf(p: AgentProfile): ReturnView {
+  if (p.performance != null) {
+    val view = publicPerformance(p.performance, p.mode, p.pnlBps, p.paperPnlBps)
+    return ReturnView(
+      if (view.book == "paper") "Paper return" else "Measured return",
+      view.bps, view.note, view.state ?: if (view.bps == null) "Return unavailable" else null, view.estimated,
+    )
+  }
   val paper = p.mode == "paper"
   val bps = (if (paper) p.paperPnlBps else p.pnlBps)?.takeIf { it.isFinite() }
   val note = when {
@@ -275,6 +288,7 @@ fun returnOf(p: AgentProfile): ReturnView {
  * unranked book, and a paper book's index is not the one it was measured on.
  */
 fun drawdownLine(p: AgentProfile): String? {
+  if (p.performance?.let { it.underReview || it.pnlEstimated || it.book != "live" || it.pnlBps?.isFinite() != true } == true) return null
   if (p.mode == "paper") return null
   if (p.pnlBps?.takeIf { it.isFinite() } == null) return null
   val bps = p.maxDdBps?.takeIf { it.isFinite() && it >= 0 } ?: return null
@@ -379,11 +393,30 @@ suspend fun ownAgentOf(identityKnown: Boolean, signedIn: String?, feed: suspend 
 class ProfileReads(private val api: MerrymenApi, val slug: String, private val now: () -> Long = System::currentTimeMillis) {
   private val _profile = MutableStateFlow(Slot<AgentProfile>())
   val profile: StateFlow<Slot<AgentProfile>> = _profile.asStateFlow()
+  private val _summary = MutableStateFlow(Slot<AgentProfile>())
+  val summary: StateFlow<Slot<AgentProfile>> = _summary.asStateFlow()
+  private val _activity = MutableStateFlow(Slot<ThesesPage>())
+  val activity: StateFlow<Slot<ThesesPage>> = _activity.asStateFlow()
+
+  val summaryLoop = ReadLoop(PROFILE_EVERY_MS) {
+    _summary.value = _summary.value.after(api.agentSummary(slug), now())
+    _summary.value.fresh
+  }
+  val activityLoop = ReadLoop(PROFILE_EVERY_MS) {
+    _activity.value = _activity.value.after(api.agentActivity(slug), now()) {
+      it.source == "none" || it.thesesRead == false
+    }
+    _activity.value.fresh
+  }
 
   val loop = ReadLoop(PROFILE_EVERY_MS) {
-    _profile.value = _profile.value.after(api.agentProfile(slug), now())
+    _profile.value = _profile.value.after(api.agentDetails(slug), now())
     _profile.value.fresh
   }
+
+  /** Historical performance is an explicit expansion, never a prerequisite for the page. */
+  fun loops(detailsRequested: Boolean): List<ReadLoop> =
+    listOf(summaryLoop, activityLoop) + if (detailsRequested) listOf(loop) else emptyList()
 }
 
 /**

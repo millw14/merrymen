@@ -62,7 +62,7 @@ class FakeProc extends EventEmitter {
 }
 
 it("signals immediately and does not reacquire before the old child exits", async () => {
-  await getGrantStore().put(TENANT, grant);
+  await getGrantStore("spot").put(TENANT, grant);
   let healthy = true;
   let releases = 0;
   const lease: TenantLease = {
@@ -96,13 +96,13 @@ it("signals immediately and does not reacquire before the old child exits", asyn
   assert.equal(spawned.length, 1, "this replica may re-arm only after the old child exits");
   assert.equal(hasLeaseForTest(TENANT), true);
 
-  await getGrantStore().remove(TENANT);
+  await getGrantStore("spot").remove(TENANT);
   await reconcile();
   spawned[0]!.emit("exit", 0, "SIGTERM");
 });
 
 it("also waits for a watchdog-killed child already removed from the active map", async () => {
-  await getGrantStore().put(WATCHDOG_TENANT, { ...grant, smartAccount: WATCHDOG_ACCOUNT });
+  await getGrantStore("spot").put(WATCHDOG_TENANT, { ...grant, smartAccount: WATCHDOG_ACCOUNT });
   let healthy = true;
   const lease: TenantLease = {
     tenant: WATCHDOG_TENANT,
@@ -135,7 +135,7 @@ it("also waits for a watchdog-killed child already removed from the active map",
   old.emit("exit", 0, "SIGKILL");
   await reconcile();
   assert.equal(spawned.length, 1, "re-arm follows the old process exit");
-  await getGrantStore().remove(WATCHDOG_TENANT);
+  await getGrantStore("spot").remove(WATCHDOG_TENANT);
   await reconcile();
   spawned[0]!.emit("exit", 0, "SIGTERM");
 });
@@ -170,7 +170,7 @@ it("retries lease-loss shutdown before an unavailable grant-store read", async (
     healthy: () => false,
     async release() {},
   });
-  const store = getGrantStore();
+  const store = getGrantStore("spot");
   const fail = async () => {
     assert.deepEqual(old.signals, ["SIGTERM"], "shutdown happened before entering the database await");
     throw new Error("simulated grant-store outage");

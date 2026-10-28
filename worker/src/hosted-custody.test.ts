@@ -12,7 +12,8 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertNoOwnerKeysAtRest, carriesOwnerKey } from "../../packages/core/src/index";
+import { ed25519 } from "@noble/curves/ed25519";
+import { assertNoOwnerKeysAtRest, base58Encode, carriesOwnerKey, SOLANA_USDG_MINT } from "../../packages/core/src/index";
 
 const KEY = "0x" + "ab".repeat(32); // a 32-byte private key
 const sessionOnlyGrant = {
@@ -75,6 +76,62 @@ test("assertNoOwnerKeysAtRest REFUSES to boot in hosted mode on a dirty grant", 
       /refuses to start/,
       "one dirty grant halts the whole boot",
     );
+  } finally {
+    delete process.env.MERRYMEN_HOSTED;
+  }
+});
+
+// ── Solana secret keys ──────────────────────────────────────────────────────
+// The real signer's grants are checked in web/src/lib/grant-owner-key.test.ts.
+
+/** A real Solana keypair: its base58 secret, the id.json byte array, and a real signature by it. */
+function solanaKeypair(seedByte: number) {
+  const seed = new Uint8Array(32).fill(seedByte);
+  const pub = ed25519.getPublicKey(seed);
+  const secret = new Uint8Array([...seed, ...pub]);
+  const sig = ed25519.sign(new TextEncoder().encode("merrymen"), seed);
+  return { b58: base58Encode(secret), bytes: [...secret], pub: base58Encode(pub), sig: base58Encode(sig) };
+}
+const SOL = solanaKeypair(7);
+const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64");
+
+test("a Solana secret key is caught as base58 or as a byte array, wherever it hides", () => {
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, solanaOwner: SOL.b58 }), true, "renamed field, base58");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, meta: { backup: { k: SOL.bytes } } }), true, "nested id.json array");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, note: `export ${JSON.stringify(SOL.bytes, null, 2)}` }), true, "pretty-printed in prose");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, grantTokens: [SOL.b58] }), true, "inside an array");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, demoSessionPrivateKey: SOL.b58 }), true, "the session-key field exempts only a 0x key");
+  assert.equal(carriesOwnerKey(SOL.b58), true, "a bare string");
+});
+
+test("the serialized blob is scanned for what it holds, not exempted", () => {
+  const blob = (extra: Record<string, unknown>) => b64({ permissionParams: { policies: [] }, privateKey: KEY, ...extra });
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, serialized: blob({}) }), false, "a clean ZeroDev-shaped blob");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, serialized: blob({ ownerSecret: SOL.b58 }) }), true, "base58 inside the blob");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, serialized: blob({ k: SOL.bytes }) }), true, "a byte array inside the blob");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, serialized: blob({ note: JSON.stringify(SOL.bytes, null, 2) }) }), true, "a pasted id.json inside the blob");
+  // Base58 is a subset of base64's alphabet: a raw key passes the base64 test,
+  // but it is not a ZeroDev blob, so it is scanned as written.
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, serialized: SOL.b58 }), true, "a raw key in place of the blob");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, serialized: b64(SOL.bytes) }), true, "a byte array base64'd in place of the blob");
+  assert.equal(carriesOwnerKey({ ...sessionOnlyGrant, inner: { serialized: SOL.b58 } }), true, "only the grant's own field is decoded");
+});
+
+test("Solana public ids are never a secret: a signature, a public key, a mint", () => {
+  const grant = {
+    ...sessionOnlyGrant,
+    binding: { nonce: SOL.sig, ownerSignature: SOL.sig, did: `did:privy:${SOL.pub}` },
+    grantTokens: [SOL.pub, SOLANA_USDG_MINT],
+    serialized: b64({ permissionParams: { sig: SOL.sig, pub: SOL.pub }, privateKey: KEY }),
+    random: Array.from({ length: 64 }, (_, i) => (i * 37 + 11) % 256),
+  };
+  assert.equal(carriesOwnerKey(grant), false);
+});
+
+test("a stored grant with a Solana secret halts the hosted boot", () => {
+  process.env.MERRYMEN_HOSTED = "1";
+  try {
+    assert.throws(() => assertNoOwnerKeysAtRest([sessionOnlyGrant, { ...sessionOnlyGrant, solana: SOL.b58 }]), /refuses to start/);
   } finally {
     delete process.env.MERRYMEN_HOSTED;
   }

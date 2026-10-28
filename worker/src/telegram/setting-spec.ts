@@ -30,7 +30,9 @@
  *   - anything remote-execution, secret, house-owned, the allowlist, transfers,
  *     or Telegram's own on/off switches;
  *   - how it behaves in Telegram groups (DASHBOARD_ONLY.telegramGroups), since
- *     a group is a chat anyone in it can type into.
+ *     a group is a chat anyone in it can type into;
+ *   - anything about perpetuals (DASHBOARD_ONLY.perps) — the switches, the
+ *     live consent, and every limit, because each one is leverage or its size.
  * Those answer with a button to the dashboard instead (DASHBOARD_ONLY).
  *
  * The limits SEALED in the signed permission — per-trade cap, daily cap,
@@ -166,6 +168,36 @@ export const DASHBOARD_ONLY: Readonly<Record<string, string>> = Object.freeze({
    */
   telegramGroups:
     "Telegram groups are switched in Settings → Telegram on the dashboard (or Settings in the app): whether I hang out in groups, whether I look at coins people post there, and how chatty I am. Anyone in a group can talk to me, so none of that changes by text.",
+  /**
+   * FOMO RESEARCH, never by text (docs/fomo.md). The three Fomo permissions —
+   * answering Fomo questions, letting the trader cohort route research here,
+   * and letting that research nominate entries — are dashboard switches. The
+   * last one can lead to real money, and a chat reached by a link code is not
+   * where that is decided. Watching ONE coin for a while is a different thing
+   * and is offered in chat (bounded and expiring).
+   */
+  fomo:
+    "Fomo research has three switches, all in Settings → Fomo research on the dashboard: answering Fomo questions, letting the watched-trader cohort send research here, and letting that research suggest coins to the memecoin review. I can't change any of them from chat. Asking me about a trader or coin never changes them either. The watched-trader cohort and acting on research run only on the hosted service; a self-hosted install answers questions and does nothing more.",
+  /**
+   * PERPETUALS, never by text (docs/perps.md rule 1) — ONE pseudo-key for every
+   * `perps*` setting (core PERPS_SETTING_KEYS): the paper switch, the
+   * real-money consent and its record, the driver, the markets and every limit.
+   *
+   * THE LIMITS TOO, NOT ONLY THE SWITCHES. Leverage, position size, collateral,
+   * stop distance and slippage are each a risk WIDENING when raised — the reason
+   * `safetyFloors` is here — and the real-money switch is a consent that has to
+   * show the owner what leverage, liquidation and the venue mean, which a chat
+   * reached by a bearer link code cannot do. None is in SETTING_SPECS
+   * (chat-settings.test.ts pins them as forbidden).
+   *
+   * ONE REPLY FOR ON, OFF AND "LOWER MY LEVERAGE" ALIKE, and it says what OFF
+   * does, because the owner most likely to text "turn perps off" is one
+   * watching a position go against them: switching perps off in Settings only
+   * stops new positions. (/close and /flatten arrive with Telegram's perps
+   * commands; until then the reply names only what exists.)
+   */
+  perps:
+    "Perpetuals (leveraged long and short positions on Lighter) are switched on and off, and all of their limits set, only in Settings → Perpetuals on the dashboard, so nobody who gets into this chat can start leveraged trading or loosen its limits. Switching them off there stops new positions; positions already open keep their stops and close on their own rules.",
 });
 
 /** Limits sealed in the signed permission — a signature is the only way to change them. */

@@ -1,0 +1,47 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "handle": "CryptoKaleo",
+  "userHandle": "CryptoKaleo",
+  "userId": "1f08e6ab-5c73-5443-9225-bfc496cde51f",
+  "displayName": "K A L E O",
+  "pnlUsd": 151383,
+  "pnl": {
+    "24h": 8231,
+    "7d": 54120,
+    "30d": 142900,
+    "all": 151383
+  },
+  "volumeUsd": 119165,
+  "trades": 73,
+  "followers": 19967,
+  "holdings": 4,
+  "wallets": {
+    "solana": "5AhfPStn66hRYoNNDfJHSDgCH7fBbwMQZUECRrhTo62F",
+    "evm": "0x7b4d16237683fe1765e727eadf99c6f02adf0b59"
+  },
+  "profile": {
+    "followers": 19967,
+    "averageHoldTimeSeconds": 63613,
+    "fomoCreatedAt": "2025-09-03T23:25:33.441Z",
+    "accountAgeDays": 360
+  },
+  "numTrades": 73,
+  "swapCount": 184,
+  "totalVolume": 119165.42,
+  "following": 91,
+  "averageHoldTimeSeconds": 63613,
+  "createdAt": "2025-09-03T23:25:33.441Z",
+  "accountAgeDays": 360,
+  "description": "trader bio",
+  "clan": {
+    "id": "659b",
+    "name": "Ender",
+    "icon": "...",
+    "role": "member"
+  },
+  "activated": false,
+  "private": false,
+  "isRestricted": false,
+  "isReferred": true,
+  "verified": false
+}

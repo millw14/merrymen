@@ -1,0 +1,136 @@
+{
+  "about": "The mainnet USDG mint account, byte for byte as one read-only getAccountInfo (base64, finalized) returned it from the public endpoint below; no key or signature was involved. custody.rs runs a buy and an exit through the compiled vault against these bytes, and against each variant below (the read bytes changed by its ops, in order: op set writes hex at byte offset at, op append adds hex at the end), expecting the vault verdict given. worker/src/solana-usdg-mint.test.ts runs the worker's mint screen on the same bytes. Written by a one-off script from the saved RPC answers; refresh it only by a new read, never by hand.",
+  "address": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH",
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "method": "getAccountInfo",
+  "commitment": "finalized",
+  "slot": 459259885,
+  "readAtUtc": "2026-10-20T14:16:26Z",
+  "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+  "lamports": 564301469,
+  "executable": false,
+  "rentEpoch": "18446744073709551615",
+  "space": 866,
+  "dataBase64": "AQAAABhfYuvgAXOwgprIsQ6TwRGWJmshKTAnPwJxcQMSa7gLg6fnZww/AgAGAQEAAAAXhTJh72q4Uypn8FOGWq0xKT/PB88SCrW5oVcGVI3AKwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQMAIAAXhTJh72q4Uypn8FOGWq0xKT/PB88SCrW5oVcGVI3AKwwAIAAXhTJh72q4Uypn8FOGWq0xKT/PB88SCrW5oVcGVI3AKwEAbAAXhTJh72q4Uypn8FOGWq0xKT/PB88SCrW5oVcGVI3AKxeFMmHvarhTKmfwU4ZarTEpP88HzxIKtbmhVwZUjcArAAAAAAAAAADSAgAAAAAAAAAAAAAAAAAAAADSAgAAAAAAAAAAAAAAAAAAAAAEAEEAF4UyYe9quFMqZ/BThlqtMSk/zwfPEgq1uaFXBlSNwCsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAIEAF4UyYe9quFMqZ/BThlqtMSk/zwfPEgq1uaFXBlSNwCsm0cx6nT0Kf+Fu2TflaERKcxbP98dKRVQu4LCksu7ubQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgBAABeFMmHvarhTKmfwU4ZarTEpP88HzxIKtbmhVwZUjcArAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASAEAAF4UyYe9quFMqZ/BThlqtMSk/zwfPEgq1uaFXBlSNwCscLuZ/Ek327fKp0r9eOlM8dwG1j42qlXIQoeWwYYzSvhMArgAXhTJh72q4Uypn8FOGWq0xKT/PB88SCrW5oVcGVI3AKxwu5n8STfbt8qnSv146Uzx3AbWPjaqVchCh5bBhjNK+DQAAAEdsb2JhbCBEb2xsYXIEAAAAVVNER00AAABodHRwczovL3Rva2VuLW1ldGFkYXRhLnBheG9zLmNvbS91c2RnX21ldGFkYXRhL3Byb2Qvc29sYW5hL3VzZGdfbWV0YWRhdGEuanNvbgAAAAA=",
+  "dataSha256": "c0e6e5fa47178e3b87dcf6508bd8af0012cfaf8ceef8780f49f47634e321eaee",
+  "decoded": {
+    "mintAuthority": "2e99QgqSDtiJSi5omGRVeZJuqNFRZdpy2YgG3mBd1AB4",
+    "supply": "632272468813699",
+    "decimals": 6,
+    "isInitialized": true,
+    "freezeAuthority": "2apBGMsS6ti9RyF5TwQTDswXBWskiJP2LD4cUEDqYJjk",
+    "extensions": [
+      "MintCloseAuthority",
+      "PermanentDelegate",
+      "TransferFeeConfig",
+      "ConfidentialTransferMint",
+      "ConfidentialTransferFeeConfig",
+      "TransferHook",
+      "MetadataPointer",
+      "TokenMetadata"
+    ],
+    "issuerAuthority": "2apBGMsS6ti9RyF5TwQTDswXBWskiJP2LD4cUEDqYJjk",
+    "transferFee": {
+      "olderBps": 0,
+      "newerBps": 0,
+      "newerMaximumFee": "0",
+      "newerEpoch": 722
+    },
+    "transferHookProgram": null
+  },
+  "token2022": {
+    "program": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "programData": "DoU57AYuPFu2QU514RktNPG22QhApEjnKxnBcu4BHDTY",
+    "slot": 459260723,
+    "readAtUtc": "2026-10-20T14:19:30Z",
+    "lastDeploySlot": 427147035,
+    "upgradeAuthority": "AeLmXCbPaQHGWRLr2saFsEVfmMNuKnxRAbWCT9P5twgz",
+    "sourceRelease": "program@v11.0.0",
+    "programDataBytes": 1382061,
+    "programDataRegionSha256": "0999dbf708971e723b08d1caafc988826a59c6001ed6dc02260da07defbe1469",
+    "note": "Mainnet runs Token-2022 program@v11.0.0 (its security.txt), upgradeable; the runtime tests run solana-program-test 2.3.13's bundled Token-2022 and the vault parses mints with spl-token-2022 8.0.1, which knows every extension this mint carries."
+  },
+  "variants": [
+    {
+      "name": "as read",
+      "vault": "accepts",
+      "ops": [],
+      "sha256": "c0e6e5fa47178e3b87dcf6508bd8af0012cfaf8ceef8780f49f47634e321eaee"
+    },
+    {
+      "name": "a newer transfer fee of 25 bps with no maximum",
+      "vault": "refuses",
+      "ops": [
+        {
+          "op": "set",
+          "at": 348,
+          "hex": "1900"
+        }
+      ],
+      "sha256": "1f3e98a25c9d4bb7ca299ec141352903e64c10e9709aeca5f324d90aae9f798a"
+    },
+    {
+      "name": "a newer transfer fee of 25 bps with the largest maximum",
+      "vault": "refuses",
+      "ops": [
+        {
+          "op": "set",
+          "at": 340,
+          "hex": "ffffffffffffffff"
+        },
+        {
+          "op": "set",
+          "at": 348,
+          "hex": "1900"
+        }
+      ],
+      "sha256": "66066cb6de2e9828b34a5588d48087a9ea83d94d1a9550779625b4d33f667f24"
+    },
+    {
+      "name": "a transfer hook program (the Memo program)",
+      "vault": "refuses",
+      "ops": [
+        {
+          "op": "set",
+          "at": 588,
+          "hex": "054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d"
+        }
+      ],
+      "sha256": "f3b4ce4401443a7bb918f6af0bab7e0daa625f6fe3dc67196000e0f27a3ac86a"
+    },
+    {
+      "name": "DefaultAccountState Initialized appended",
+      "vault": "refuses",
+      "ops": [
+        {
+          "op": "append",
+          "hex": "0600010001"
+        }
+      ],
+      "sha256": "abbfe1863fa2bfb230304b6badcbd25e2a735c1779b4a5dd8655c341bb98f651"
+    },
+    {
+      "name": "GroupPointer appended (the issuer as authority, the mint as group)",
+      "vault": "refuses",
+      "ops": [
+        {
+          "op": "append",
+          "hex": "1400400017853261ef6ab8532a67f053865aad31293fcf07cf120ab5b9a15706548dc02b1c2ee67f124df6edf2a9d2bf5e3a533c7701b58f8daa957210a1e5b0618cd2be"
+        }
+      ],
+      "sha256": "d3c66cf1df8d002b123432097f0a828d7814fc2572fb7be7640c9e5ef4468c7c"
+    },
+    {
+      "name": "9 decimals",
+      "vault": "refuses",
+      "ops": [
+        {
+          "op": "set",
+          "at": 44,
+          "hex": "09"
+        }
+      ],
+      "sha256": "5f5513b109aad4cc794d7218e56768ee5b360849f7cce40a3fe39ce5b08c9539"
+    }
+  ]
+}

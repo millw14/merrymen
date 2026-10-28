@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/terminal/Link";
 import type { PublicThesis } from "@/lib/thesis";
 import { badgeOf, hasTrade, inFlightOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";

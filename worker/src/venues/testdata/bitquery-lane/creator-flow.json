@@ -1,0 +1,11 @@
+{
+  "_note": "Recorded-SHAPE fixture, written from Bitquery's documented Trading.Trades and EVM Transfers aggregate shapes. Not captured from the live API.",
+  "data": {
+    "Trading": {
+      "creatorSells": [{ "sells": "2", "sellUsd": "830.5" }]
+    },
+    "EVM": {
+      "creatorOut": [{ "transfers": "3", "usd": 1210.75 }]
+    }
+  }
+}

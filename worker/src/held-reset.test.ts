@@ -9,7 +9,7 @@
  * restore-hold.integration.test.ts drives all of it through reconcile().
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -31,6 +31,8 @@ import {
 import { PAPER_CHECKPOINT_SCHEMA, restorePaperCheckpoint } from "./paper-checkpoint";
 import { ferryForChild } from "./orchestrator";
 import { applyLedgerSchema } from "./store";
+import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerified } from "./fleet-recovery";
+import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 
 const NOW = Date.parse("2026-09-28T12:00:00Z");
 const HOUR = 3_600_000;
@@ -110,6 +112,8 @@ describe("decideHeldReset", () => {
     no({ settings: { paperTradingEnabled: false } }, /practice mode is not on/);
     no({ agent: null }, /no agent row/);
     no({ agent: { epoch: Number.NaN, mode: "paper" } }, /epoch is unreadable/);
+    no({ ask: { id: "future", created_at: NOW + 1, claimed_at: null } }, /time is unreadable or in the future/);
+    no({ ask: { id: "bad", created_at: Number.NaN, claimed_at: null } }, /time is unreadable/);
   });
 });
 
@@ -162,7 +166,7 @@ describe("applyHeldReset: the claim and the reset are one transaction", () => {
       const won = both.filter((o) => o.applied);
       assert.equal(won.length, 1, JSON.stringify(both));
       const lost = both.find((o) => !o.applied)!;
-      assert.ok(!lost.applied && /claimed the reset/.test(lost.why), JSON.stringify(lost));
+      assert.ok(!lost.applied && /claimed the reset|no practice reset is waiting/.test(lost.why), JSON.stringify(lost));
       assert.deepEqual(won[0], { applied: true, id: "r1", from: 1, epoch: 2 });
       assert.equal(await epochOf(db), 2, "the book was started over once, not twice");
       // And the agent's feed says so, once, as the worker's own reset would.
@@ -256,7 +260,11 @@ describe("applyHeldReset: the claim and the reset are one transaction", () => {
       assert.equal((await row(db, "r1")).claimed_at, null);
       // A press that lands between the read and the write (mayWrite runs in
       // that window) is fresh consent, and is left for the next attempt.
-      const out = await applyHeldReset(db, ACCOUNT, opts({ mayWrite: () => (raw.exec(`INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES ('fresh', '${ACCOUNT}', 'paper-reset', ${NOW})`), null) }));
+      let inserted = false;
+      const out = await applyHeldReset(db, ACCOUNT, opts({ mayWrite: () => {
+        if (!inserted) { inserted = true; raw.exec(`INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES ('fresh', '${ACCOUNT}', 'paper-reset', ${NOW})`); }
+        return null;
+      } }));
       assert.ok(!out.applied && out.id === "r1");
       assert.equal((await row(db, "r1")).result, HELD_RESET_EXPIRED);
       assert.deepEqual(await row(db, "fresh"), { claimed_at: null, done_at: null, result: null });
@@ -318,6 +326,167 @@ describe("applyHeldReset: the claim and the reset are one transaction", () => {
       assert.deepEqual(await applyHeldReset(db, ACCOUNT, opts()), { applied: false, id: null, why: "no practice reset is waiting", transient: false });
     } finally {
       raw.close();
+    }
+  });
+});
+
+describe("held resets respect the recovery command boundary", () => {
+  const scope = { tenant: TENANT, smartAccount: ACCOUNT, chainId: 4663 };
+  const holdAt = Math.floor((NOW - HOUR) / 1000);
+  const untouched = { claimed_at: null, done_at: null, result: null };
+  const book = (raw: DatabaseSync) => ({
+    agent: raw.prepare("SELECT * FROM agents").all(),
+    positions: raw.prepare("SELECT * FROM positions").all(),
+    basis: raw.prepare("SELECT * FROM cost_basis").all(),
+    floors: raw.prepare("SELECT * FROM position_floors").all(),
+    checkpoints: raw.prepare("SELECT * FROM paper_checkpoints").all(),
+    trades: raw.prepare("SELECT * FROM trades").all(),
+    equity: raw.prepare("SELECT * FROM equity").all(),
+    events: raw.prepare("SELECT * FROM events").all(),
+  });
+
+  it("a source-held recent or expired ask is never claimed, closed or used to reset the book", async () => {
+    for (const createdAt of [NOW - HOUR, NOW - 8 * DAY]) {
+      const { raw, db } = await heldLedger();
+      try {
+        await ask(db, "held", createdAt);
+        await recordFleetRecoveryHold(db, scope, "source-continuity", holdAt, () => true);
+        const before = book(raw);
+        const out = await applyHeldReset(db, ACCOUNT, opts());
+        assert.ok(!out.applied && /source recovery/.test(out.why));
+        assert.deepEqual(await row(db, "held"), untouched);
+        assert.deepEqual(book(raw), before);
+      } finally { raw.close(); }
+    }
+  });
+
+  it("after verification, old and equal-boundary asks remain untouched while a fresh reset can run", async () => {
+    const { raw, db } = await heldLedger();
+    try {
+      await recordFleetRecoveryHold(db, scope, "source-barrier", holdAt - 1, () => true);
+      await recordFleetSourceVerified(db, scope, holdAt, () => true);
+      const cutoff = (holdAt + 1) * 1000;
+      await ask(db, "old", cutoff - 1);
+      await ask(db, "equal", cutoff);
+      assert.equal((await applyHeldReset(db, ACCOUNT, opts())).applied, false);
+      await ask(db, "fresh", cutoff + 1);
+      assert.equal((await applyHeldReset(db, ACCOUNT, opts())).applied, true);
+      assert.deepEqual(await row(db, "old"), untouched);
+      assert.deepEqual(await row(db, "equal"), untouched);
+      assert.equal((await row(db, "fresh")).result, HELD_RESET_DONE);
+      assert.equal(await epochOf(db), 2);
+    } finally { raw.close(); }
+  });
+
+  it("the selected ask is checked against the real durable home barrier before claim", async () => {
+    const { raw, db } = await heldLedger();
+    const home = realpathSync(mkdtempSync(path.join(tmpdir(), "merry-held-boundary-")));
+    homes.push(home);
+    try {
+      const localScope = { smartAccount: ACCOUNT, chainId: 4663 };
+      writeRecoveryCommandBarrier(home, localScope, NOW - HOUR);
+      await ask(db, "equal", NOW - HOUR);
+      const commandRefused: NonNullable<Parameters<typeof applyHeldReset>[2]["commandRefused"]> = cmd =>
+        recoveryCommandRefused(home, localScope, cmd);
+      const before = book(raw);
+      assert.equal((await applyHeldReset(db, ACCOUNT, opts({ commandRefused }))).applied, false);
+      assert.deepEqual(await row(db, "equal"), untouched);
+      assert.deepEqual(book(raw), before);
+      await ask(db, "fresh", NOW - HOUR + 1);
+      assert.equal((await applyHeldReset(db, ACCOUNT, opts({ commandRefused }))).applied, true);
+      assert.deepEqual(await row(db, "equal"), untouched, "fresh reset never closes a refused old intent");
+    } finally { raw.close(); }
+  });
+
+  it("late local refusal and read failure preserve the row and every financial table", async () => {
+    for (const throws of [false, true]) {
+      const { raw, db } = await heldLedger();
+      try {
+        await ask(db, "late", NOW - HOUR);
+        const before = book(raw);
+        let stopped = false;
+        const out = await applyHeldReset(db, ACCOUNT, opts({
+          mayWrite: () => { stopped = true; return null; },
+          commandRefused: () => { if (stopped && throws) throw new Error("private read failure"); return stopped; },
+        }));
+        assert.ok(!out.applied && /source recovery/.test(out.why));
+        assert.doesNotMatch(JSON.stringify(out), /private read failure/);
+        assert.deepEqual(await row(db, "late"), untouched);
+        assert.deepEqual(book(raw), before);
+      } finally { raw.close(); }
+    }
+  });
+
+  it("a lease lost at transaction entry refuses before claim", async () => {
+    const { raw, db } = await heldLedger();
+    try {
+      await ask(db, "lease", NOW - HOUR);
+      const before = book(raw);
+      let checks = 0;
+      const out = await applyHeldReset(db, ACCOUNT, opts({ mayWrite: () => ++checks === 1 ? null : "lease lost" }));
+      assert.ok(!out.applied && out.transient && out.why === "lease lost");
+      assert.deepEqual(await row(db, "lease"), untouched);
+      assert.deepEqual(book(raw), before);
+    } finally { raw.close(); }
+  });
+
+  it("a local boundary or lease lost after reset mutations rolls the entire claim and book back", async () => {
+    for (const loss of ["local", "lease"] as const) {
+      const { raw, db } = await heldLedger();
+      try {
+        await ask(db, "rollback", NOW - HOUR);
+        const before = book(raw);
+        let mutated = false;
+        const injected: Db = {
+          prepare: sql => db.prepare(sql), exec: sql => db.exec(sql),
+          tx: fn => db.tx(tx => fn({
+            exec: sql => tx.exec(sql), tx: nested => tx.tx(nested),
+            prepare: sql => {
+              const stmt = tx.prepare(sql);
+              return {
+                get: (...args) => stmt.get(...args), all: (...args) => stmt.all(...args),
+                run: async (...args) => {
+                  const result = await stmt.run(...args);
+                  if (sql.startsWith("INSERT INTO events")) mutated = true;
+                  return result;
+                },
+              };
+            },
+          })),
+        };
+        const out = await applyHeldReset(injected, ACCOUNT, opts({
+          mayWrite: () => loss === "lease" && mutated ? "lease lost" : null,
+          commandRefused: () => loss === "local" && mutated,
+        }));
+        assert.equal(mutated, true, "the test reached actual reset mutations inside the transaction");
+        assert.ok(!out.applied, JSON.stringify(out));
+        assert.deepEqual(await row(db, "rollback"), untouched);
+        assert.deepEqual(book(raw), before);
+      } finally { raw.close(); }
+    }
+  });
+
+  it("a recovery read error and a bounded-queue overflow never claim anything", async () => {
+    for (const overflow of [false, true]) {
+      const { raw, db } = await heldLedger();
+      try {
+        await ask(db, "new", NOW - HOUR);
+        if (overflow) {
+          raw.exec("BEGIN");
+          const insert = raw.prepare("INSERT INTO agent_commands(id,agent_id,kind,created_at) VALUES(?,?,'paper-reset',?)");
+          for (let i = 0; i < 1024; i++) insert.run(`old-${i}`, ACCOUNT, NOW - HOUR - 1);
+          raw.exec("COMMIT");
+          const before = book(raw);
+          const out = await applyHeldReset(db, ACCOUNT, opts());
+          assert.ok(!out.applied && out.transient && /too large/.test(out.why));
+          assert.deepEqual(book(raw), before);
+        } else {
+          await db.exec(FLEET_RECOVERY_SCHEMA);
+          raw.exec("DROP TABLE fleet_recovery_health; CREATE TABLE fleet_recovery_health(wrong TEXT)");
+          await assert.rejects(applyHeldReset(db, ACCOUNT, opts()), /no such column/);
+        }
+        assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM agent_commands WHERE claimed_at IS NOT NULL").get()!.n, 0);
+      } finally { raw.close(); }
     }
   });
 });

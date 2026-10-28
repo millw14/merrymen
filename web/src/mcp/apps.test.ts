@@ -5,7 +5,7 @@
  * ui/initialize handshake, tool results for every mapped tool (fixtures are
  * validated against the tools' real output schemas first), hostile
  * third-party text, forged messages from other windows, the approval link,
- * and the rule that a view never calls a tool.
+ * passive views that never call a tool, and the home's scoped user actions.
  *
  * Nothing here touches a network, a chain or a real host; the "host" is a
  * plain object standing in for window.parent.
@@ -15,7 +15,7 @@ import { afterEach, test } from "node:test";
 import vm from "node:vm";
 import { JSDOM } from "jsdom";
 import {
-  APPS_PROTOCOL_VERSION, APP_RESOURCES, APP_RESOURCE_META, APP_TOOL_META, APP_VIEW_OF_TOOL, APP_VIEW_URI, LEGACY_RESOURCE_URI_META_KEY,
+  APPS_PROTOCOL_VERSION, APP_CALLABLE_TOOLS, APP_RESOURCES, APP_RESOURCE_META, APP_TOOL_META, APP_VIEW_OF_TOOL, APP_VIEW_URI, LEGACY_RESOURCE_URI_META_KEY,
   MCP_APP_MIME, appHtml, withAppMeta, type AppView,
 } from "./apps";
 import { createMcpHandler } from "@modelcontextprotocol/server";
@@ -23,6 +23,10 @@ import { makeContext, type ToolDef } from "./tool";
 import { PORTFOLIO_TOOLS } from "./tools/portfolio";
 import { DECISIONS_TOOLS } from "./tools/decisions";
 import { MARKET_TOOLS } from "./tools/market";
+import { AGENT_TOOLS } from "./tools/agents";
+import { AGENT_SETTINGS_TOOLS } from "./tools/agent-settings";
+import { NOTIFICATIONS_TOOLS } from "./tools/notifications";
+import { ONBOARDING_TOOLS } from "./tools/onboarding";
 import { PROPOSAL_TOOLS } from "./tools/proposals";
 import { ALL_RESOURCES } from "./resources-catalog";
 import { buildServer, principalOf } from "./server";
@@ -33,9 +37,9 @@ import type { Principal } from "./oauth/server";
 // The proposal view is built with the configured issuer, as in production.
 process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.test";
 
-const VIEWS: AppView[] = ["portfolio", "decision", "token", "proposal"];
+const VIEWS: AppView[] = ["home", "portfolio", "decision", "token", "proposal"];
 const ISSUER = "https://app.test";
-const FAMILY_TOOLS = [...PORTFOLIO_TOOLS, ...DECISIONS_TOOLS, ...MARKET_TOOLS, ...PROPOSAL_TOOLS] as unknown as ToolDef[];
+const FAMILY_TOOLS = [...PORTFOLIO_TOOLS, ...DECISIONS_TOOLS, ...MARKET_TOOLS, ...PROPOSAL_TOOLS, ...ONBOARDING_TOOLS, ...AGENT_TOOLS, ...AGENT_SETTINGS_TOOLS, ...NOTIFICATIONS_TOOLS] as unknown as ToolDef[];
 const toolNamed = (name: string) => {
   const t = FAMILY_TOOLS.find((x) => x.name === name);
   assert.ok(t, `tool ${name} exists`);
@@ -298,7 +302,7 @@ function assertNoInjectedMarkup(m: Mounted) {
 // ── wiring ──────────────────────────────────────────────────────────────────
 
 test("every mapped tool exists and names a view through both the current and the legacy _meta key", () => {
-  const expected = ["get_portfolio", "get_performance", "explain_agent_inactivity", "get_decision", "get_token", "check_token_eligibility", "search_tokens", "quote_trade", "propose_trade", "get_proposal"];
+  const expected = ["get_merryman_setup", "create_merryman", "create_agent_draft", "propose_settings_change", "get_portfolio", "get_performance", "explain_agent_inactivity", "get_decision", "get_token", "check_token_eligibility", "search_tokens", "quote_trade", "propose_trade", "get_proposal"];
   assert.deepEqual(Object.keys(APP_TOOL_META).sort(), [...expected].sort());
   const uris = new Set(APP_RESOURCES.map((r) => r.uri));
   for (const [name, meta] of Object.entries(APP_TOOL_META)) {
@@ -311,7 +315,7 @@ test("every mapped tool exists and names a view through both the current and the
     assert.equal(ui.resourceUri, APP_VIEW_URI[APP_VIEW_OF_TOOL[name]!]);
     assert.ok(!("csp" in ui) && !("permissions" in ui), "CSP and permissions belong on the resource, not the tool");
     // No view calls a tool, so a view may not ask the host to call this one (the spec default would allow it).
-    assert.deepEqual(ui.visibility, ["model"], `${name}: model-only visibility`);
+    assert.deepEqual(ui.visibility, APP_CALLABLE_TOOLS.has(name) ? ["model", "app"] : ["model"], `${name}: explicit app visibility`);
   }
   assert.equal(LEGACY_RESOURCE_URI_META_KEY, "ui/resourceUri");
 });
@@ -334,7 +338,7 @@ test("withAppMeta attaches views without mutating the tools or dropping their ow
   assert.deepEqual(out.find((t) => t.name === "get_token")!.meta, {
     ui: { visibility: ["model"], resourceUri: APP_VIEW_URI.token }, [LEGACY_RESOURCE_URI_META_KEY]: APP_VIEW_URI.token,
   });
-  assert.equal(out.find((t) => t.name === "get_trades"), trades, "a tool without a view is passed through untouched");
+  assert.deepEqual(out.find((t) => t.name === "get_trades")!.meta, { ui: { visibility: ["model", "app"] } }, "a safe home read is callable without attaching a different view");
   // Only the map's own keys count: a tool named like an Object.prototype member gets nothing.
   const odd = { ...trades, name: "constructor" };
   assert.equal(withAppMeta([odd])[0], odd);
@@ -400,10 +404,10 @@ for (const era of ["legacy", "modern"] as Era[]) {
     for (const name of ["get_portfolio", "get_performance", "explain_agent_inactivity", "get_decision", "get_token", "search_tokens"]) {
       const meta = byName.get(name)?._meta;
       assert.ok(meta, `${name} is listed with _meta`);
-      assert.deepEqual(meta.ui, { visibility: ["model"], resourceUri: APP_VIEW_URI[APP_VIEW_OF_TOOL[name]!] });
+      assert.deepEqual(meta.ui, { visibility: APP_CALLABLE_TOOLS.has(name) ? ["model", "app"] : ["model"], resourceUri: APP_VIEW_URI[APP_VIEW_OF_TOOL[name]!] });
       assert.equal(meta[LEGACY_RESOURCE_URI_META_KEY], APP_VIEW_URI[APP_VIEW_OF_TOOL[name]!]);
     }
-    assert.equal(byName.get("get_trades")?._meta, undefined, "tools without a view carry no view");
+    assert.deepEqual(byName.get("get_trades")?._meta?.ui, { visibility: ["model", "app"] }, "safe tool calls have app visibility without a view");
     const listed = (await send("resources/list")).result?.resources as Array<{ uri: string; mimeType?: string }>;
     for (const uri of Object.values(APP_VIEW_URI)) assert.equal(listed.find((r) => r.uri === uri)?.mimeType, MCP_APP_MIME, uri);
     const pageA = new Map<string, string>();
@@ -430,6 +434,46 @@ for (const era of ["legacy", "modern"] as Era[]) {
 
 // ── static safety ───────────────────────────────────────────────────────────
 
+test("management app calls traverse OAuth, scoped tools and durable configuration proposals without applying settings", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  restore = installFixtures(d, { settings: { [OWNER_A]: { agentName: "Robin", strategistStopLossBps: 500, openaiApiKey: "never-show-this" } } });
+  const { tokens } = await connectAs(deps, OWNER_A, { scopes: ["agents:read", "drafts:write"], agents: [SLUG_A] });
+  const handler = createMcpHandler(
+    ({ authInfo }) => buildServer(principalOf(authInfo), { tools: withAppMeta(FAMILY_TOOLS), resources: APP_RESOURCES, deps: { now: deps.now } }),
+    { legacy: "stateless", responseMode: "auto" },
+  );
+  const send = async (method: string, params: Record<string, unknown>, token = tokens.access_token) => {
+    const rpc = await rpcResult(await handleMcpRequest(mcpRequest(token, method, params), {
+      cfg: testConfig(), now: deps.now, fetch: (req, auth) => handler.fetch(req, { authInfo: auth }),
+    }));
+    assert.equal(rpc.error, undefined, rpc.error?.message);
+    return rpc.result!;
+  };
+  const listed = (await send("tools/list", {})).tools as Array<{ name: string; _meta?: { ui?: { visibility?: string[] } } }>;
+  for (const name of ["get_agent_settings", "propose_settings_change", "get_proposal", "list_proposals", "cancel_proposal"]) {
+    assert.ok(listed.find(t => t.name === name)?._meta?.ui?.visibility?.includes("app"), `${name} callable from the app`);
+  }
+  assert.ok(!listed.some(t => t.name === "propose_trade"));
+  const read = await send("tools/call", { name: "get_agent_settings", arguments: { agent: SLUG_A } });
+  assert.equal(read.isError, undefined);
+  assert.equal((read.structuredContent as { configured_name: string }).configured_name, "Robin");
+  assert.ok(!JSON.stringify(read).includes("never-show-this"));
+  const proposed = await send("tools/call", { name: "propose_settings_change", arguments: { agent: SLUG_A, changes: { strategistStopLossBps: 400 }, idempotency_key: "app_settings_retry" } });
+  assert.equal(proposed.isError, undefined, JSON.stringify(proposed.content));
+  const proposal = proposed.structuredContent as { proposal_id: string; status: string };
+  assert.equal(proposal.status, "awaiting_approval");
+  const status = await send("tools/call", { name: "get_proposal", arguments: { proposal_id: proposal.proposal_id } });
+  assert.equal((status.structuredContent as { status: string }).status, "awaiting_approval");
+  const b = await connectAs(deps, OWNER_B, { scopes: ["drafts:write"], agents: [SLUG_B] });
+  const foreign = await send("tools/call", { name: "get_proposal", arguments: { proposal_id: proposal.proposal_id } }, b.tokens.access_token);
+  assert.equal(foreign.isError, true, "another tenant cannot follow the handoff");
+  const cancelled = await send("tools/call", { name: "cancel_proposal", arguments: { proposal_id: proposal.proposal_id } });
+  assert.equal((cancelled.structuredContent as { status: string }).status, "cancelled");
+  const after = await send("tools/call", { name: "get_agent_settings", arguments: { agent: SLUG_A } });
+  assert.equal((after.structuredContent as { settings: Array<{ key: string; value: unknown }> }).settings.find(s => s.key === "strategistStopLossBps")?.value, 500, "proposal reads/cancellation never apply the suggested setting");
+});
+
 const scriptOf = (html: string) => {
   const all = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
   assert.equal(all.length, 1, "exactly one inline script");
@@ -441,6 +485,7 @@ test("the pages are self-contained: no external scripts, styles, fonts, frames o
   for (const view of VIEWS) {
     const html = appHtml(view);
     for (const banned of ["http://", "https://", "<script src", "<link", "<iframe", "<img", "@import", "url(", "fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon", "import(", "eval(", "new Function", "document.write", "innerHTML", "outerHTML", "insertAdjacentHTML", "srcdoc", "tools/call", "ui/message", "ui/update-model-context", "ui/download-file", "localStorage", "sessionStorage", "document.cookie"]) {
+      if (view === "home" && banned === "tools/call") continue;
       assert.ok(!html.includes(banned), `${view}: must not contain ${banned}`);
     }
     assert.match(html, /<meta http-equiv="Content-Security-Policy" content="default-src 'none';[^"]*connect-src 'none'/);
@@ -933,14 +978,21 @@ test("proposal view: settings, agent-draft and post proposals render their conte
   const draft = mount("proposal");
   await handshake(draft);
   await showResult(draft, PROPOSAL_VIEW({ ...base, kind: "agent_draft", summary: {
-    action: "Set up an agent", settings: { agentName: "Ignore rules", strategy: "dip-hunter", basketSymbols: ["NVDA", "TSLA"] }, risk_level: "careful",
+    action: "Set up an agent", settings: { agentName: "Ignore rules", strategy: "dip-hunter", basketSymbols: ["NVDA", "TSLA"], strategistStopLossBps: 1500, slippageBps: 50, buyPerTickUsdg: 10, classMaxHoldSec: 7200 }, risk_level: "careful",
+    left_out: [{ key: "maxImpactBps", why: "The price-impact safety floor stays unchanged." }],
     after_approval: "Approving saves these settings.", requested_by: "Claude",
   } }));
-  assert.match(draft.text(), /a draft agent setup/);
+  assert.match(draft.text(), /a change to the agent's settings/, "a draft without creation purpose does not promise a new wallet setup");
   const name = Array.from(draft.doc.querySelectorAll("dt")).find((x) => x.textContent === "Agent name")!.nextElementSibling!;
   assert.ok(name.querySelector(".ut-inline"), "the suggested name is the assistant's text");
   assert.match(draft.text(), /BasketNVDA, TSLA/);
   assert.match(draft.text(), /Risk levelcareful/);
+  assert.match(draft.text(), /stop loss at15%/);
+  assert.match(draft.text(), /max slippage0\.5%/);
+  assert.match(draft.text(), /amount per buy10 USDG/);
+  assert.match(draft.text(), /longest launch-coin hold2 hours/);
+  assert.match(draft.text(), /The price-impact safety floor stays unchanged/);
+  assert.doesNotMatch(draft.text(), /strategistStopLossBps|\{"key"/);
   assertNoInjectedMarkup(draft);
 });
 
@@ -999,4 +1051,132 @@ test("outside a host the page shows a harmless notice and sends nothing", async 
   await m.tick();
   assert.equal(m.sent.length, 0);
   assert.match(m.text(), /There is nothing to show here/);
+});
+
+// ── interactive home, driven by real tool schemas ───────────────────────────
+
+const HOME = (over: Record<string, unknown> = {}) => sample("get_merryman_setup", {
+  phase: "no_shared_agent", summary: "No agent is visible to this connection. That does not mean the owner has no agent.",
+  connection: { id: "test-home-connection", profile: "full", can_read_agents: true, can_create_draft: true, can_propose_settings: false, shared_agent_count: 0,
+    available_tools: ["get_merryman_setup", "list_agents", "create_merryman"] },
+  agent: null, next_steps: [
+    { action: "share_agent", label: "Check connected-app access", detail: "Share an existing agent if you have one.", url: `${ISSUER}/connect/apps`, tool: null, owner_action_required: true },
+    { action: "review_funding", label: "Review funding", detail: "Owner funding stays in Merrymen.", url: `${ISSUER}/deposit`, tool: null, owner_action_required: true },
+  ],
+  links: { create: `${ISSUER}/create`, wallet: `${ISSUER}/grant`, settings: `${ISSUER}/settings`, funding: `${ISSUER}/deposit`, connected_apps: `${ISSUER}/connect/apps` },
+  runtime: { hosted: true, keep_chat_open: false, explanation: "Merrymen's hosted worker runs after owner signing and activation. You can close the chat." },
+  controls: [], observed_at: T0, ...over,
+});
+const HOME_AGENT_DETAILS = { id: SLUG_A, name: "Robin", account: ADDR, chain_id: 8453, status: "active", mode: "paper", strategy: "trencher", permission_expires_at: FUTURE, heartbeat_at: T0, worker_fresh: true, live_blocker: null, energy: null };
+const HOME_AGENT = (over: Record<string, unknown> = {}) => HOME({
+  phase: "paper", summary: "The worker has a fresh paper-mode report. Practice balances are simulated.",
+  connection: { id: "test-home-connection", profile: "full", can_read_agents: true, can_create_draft: true, can_propose_settings: true, shared_agent_count: 1,
+    available_tools: ["get_merryman_setup", "get_portfolio", "get_trades", "list_decisions", "get_agent_controls", "create_agent_draft", "list_notification_channels", "list_subscriptions", "subscribe", "unsubscribe"] },
+  agent: HOME_AGENT_DETAILS,
+  next_steps: [], ...over,
+});
+const clickText = (m: Mounted, label: string) => {
+  const button = Array.from(m.doc.querySelectorAll("button")).find(b => b.textContent === label);
+  assert.ok(button, `button ${label} exists`); assert.equal(button.disabled, false, `${label} enabled`); button.click();
+};
+const lastToolCall = (m: Mounted, name: string) => {
+  const calls = m.sent.filter(s => s.method === "tools/call"); const call = calls[calls.length - 1];
+  assert.equal(call?.params?.name, name); return call!;
+};
+async function answer(m: Mounted, call: Msg, data: unknown) {
+  m.deliver({ jsonrpc: "2.0", id: call.id, result: { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data } }); await m.tick();
+}
+
+test("home: genuine owner paths work, hostile paths and ungranted controls never appear, rendering never calls a tool", async () => {
+  const m = mount("home"); await handshake(m, { hostCapabilities: { serverTools: {}, openLinks: {} } });
+  await showResult(m, HOME());
+  assert.match(m.text(), /Meet your next Merryman/);
+  assert.ok(m.doc.querySelector('input[aria-label="Name"]'));
+  assert.ok(m.doc.querySelector('select[aria-label="Strategy"]'));
+  assert.ok(m.doc.querySelector('select[aria-label="Risk settings"]'));
+  assert.ok(m.doc.querySelector('a[href="https://app.test/grant"]'));
+  assert.ok(m.doc.querySelector('a[href="https://app.test/deposit"]'));
+  assert.ok(m.doc.querySelector('a[href="https://app.test/connect/apps"]'));
+  assert.equal(m.doc.querySelectorAll('[role="tab"]').length, 1);
+  assert.equal(m.sent.filter(s => s.method === "tools/call").length, 0);
+  const readonly = HOME({ connection: { id: "test-readonly-connection", profile: "directory", can_read_agents: false, can_create_draft: false, can_propose_settings: false, shared_agent_count: 0, available_tools: ["get_merryman_setup"] }, links: { ...HOME().links, wallet: "https://evil.example/grant", connected_apps: "https://app.test/connect/apps?token=secret" } });
+  await showResult(m, readonly);
+  assert.equal(m.doc.querySelector("form"), null);
+  assert.equal(m.doc.querySelector('a[href^="https://evil"]'), null);
+  assert.equal(m.doc.querySelector('a[href*="token="]'), null);
+  assert.equal(m.sent.filter(s => s.method === "tools/call").length, 0);
+  const unsupported = mount("home"); await handshake(unsupported); await showResult(unsupported, HOME());
+  assert.match(unsupported.text(), /Ask in chat/);
+  assert.ok(unsupported.doc.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled);
+});
+
+test("home: create submits exact user selections once, reuses idempotency on failure, and presents owner approval without signing", async () => {
+  const m = mount("home"); await handshake(m, { hostCapabilities: { serverTools: {}, openLinks: {} } }); await showResult(m, HOME());
+  m.doc.querySelector<HTMLInputElement>('input[name="name"]')!.value = "Night Owl";
+  m.doc.querySelector<HTMLSelectElement>('select[name="strategy"]')!.value = "steady-basket";
+  m.doc.querySelector<HTMLSelectElement>('select[name="risk_level"]')!.value = "balanced";
+  const submit = () => m.doc.querySelector("form")!.dispatchEvent(new m.w.Event("submit", { bubbles: true, cancelable: true }));
+  submit(); const call = lastToolCall(m, "create_merryman");
+  const args = call.params!.arguments as Record<string, unknown>;
+  assert.equal(args.name, "Night Owl"); assert.equal(args.strategy, "steady-basket"); assert.equal(args.risk_level, "balanced");
+  assert.ok(toolNamed("create_merryman").input.safeParse(args).success);
+  submit(); assert.equal(m.sent.filter(s => s.method === "tools/call").length, 1, "double submit suppressed");
+  m.deliver({ jsonrpc: "2.0", id: call.id, error: { code: -32000, message: "Temporary host failure" } }); await m.tick();
+  assert.match(m.text(), /Temporary host failure/); submit();
+  const retry = lastToolCall(m, "create_merryman"); assert.deepEqual(retry.params!.arguments, args);
+  const proposal = sample("create_merryman", { proposal_id: PROPOSAL_ID, kind: "agent_draft", status: "awaiting_approval", approval_url: `${ISSUER}/connect/approve/${PROPOSAL_ID}`, expires_at: FUTURE, binding_hash: "ab".repeat(32), summary: { action: "Create a new Merryman", purpose: "create", settings: { agentName: "Night Owl", strategy: "steady-basket" }, after_approval: "Owner signing remains required." }, next_steps: "Owner reviews and signs.", created: true, risk_profile: null, left_out: [], diff: null });
+  await answer(m, retry, proposal);
+  assert.ok(m.doc.querySelector(`a[href="${ISSUER}/connect/approve/${PROPOSAL_ID}"]`));
+  assert.match(m.text(), /Check activation/);
+  assert.deepEqual(m.sent.filter(s => s.method === "tools/call").map(s => s.params!.name), ["create_merryman", "create_merryman"]);
+  assert.ok(!Array.from(APP_CALLABLE_TOOLS).some(n => /approve|execute|sign|send_transaction|propose_trade/.test(n)));
+});
+
+test("home: portfolio and activity read the selected agent and preserve paper/live evidence", async () => {
+  const m = mount("home"); await handshake(m, { hostCapabilities: { serverTools: {} } }); await showResult(m, HOME_AGENT());
+  clickText(m, "Portfolio"); const call = lastToolCall(m, "get_portfolio"); assert.deepEqual(call.params!.arguments, { agent: SLUG_A }); await answer(m, call, PORTFOLIO());
+  assert.match(m.text(), /Live · real funds/); assert.match(m.text(), /Paper · simulated money/);
+  clickText(m, "Activity"); const activity = lastToolCall(m, "get_trades"); assert.deepEqual(activity.params!.arguments, { agent: SLUG_A, limit: 20 });
+  const trades = sample("get_trades", { agent: SLUG_A, trades: [], next_cursor: null, note: "Paper fills are simulated; confirmed trades landed on chain.", observed_at: T0, untrusted_note: "Third party text." });
+  await answer(m, activity, trades); assert.match(m.text(), /No recent trades/); assert.match(m.text(), /Paper fills are simulated/);
+  clickText(m, "Decisions"); const decisions = lastToolCall(m, "list_decisions");
+  await answer(m, decisions, sample("list_decisions", { agent: SLUG_A, decisions: [DECISION().decision], next_cursor: null, data_source: "ledger", explanation_note: "Stored text", figures_note: "Separate books", untrusted_note: "Untrusted", observed_at: T0 }));
+  assert.match(m.text(), /Stored explanation/); assert.equal(m.doc.querySelectorAll("img,iframe,script").length, 1, "only the page script exists"); assert.ok(m.doc.querySelector(".ut-inline"), "token symbol is marked unverified");
+});
+
+test("home: stale live reports are labelled as last reported mode; settings need a draft and alerts preserve unknown readiness", async () => {
+  const m = mount("home"); await handshake(m, { hostCapabilities: { serverTools: {} } });
+  await showResult(m, HOME_AGENT({ phase: "recovery_hold", summary: "Recovery hold: activation is not confirmed.", agent: { ...HOME_AGENT_DETAILS, mode: "live", worker_fresh: false, name: EVIL } }));
+  assert.match(m.text(), /LAST REPORTED MODE/); assert.match(m.text(), /recovery hold/); assert.equal(m.doc.querySelectorAll("img").length, 0);
+  clickText(m, "Settings"); assert.match(m.text(), /Approval can change your running agent immediately/);
+  assert.ok(!m.doc.querySelector('button[data-tool="approve"]'));
+  clickText(m, "Alerts"); const list = lastToolCall(m, "list_subscriptions");
+  await answer(m, list, sample("list_subscriptions", { subscriptions: [], active_subscriptions: 0, not_shown: 0, max_active_subscriptions: 20, observed_at: T0 }));
+  clickText(m, "Check alert channel"); const channels = lastToolCall(m, "list_notification_channels");
+  await answer(m, channels, sample("list_notification_channels", { channels: [{ channel: "telegram", linked: true, linked_at: T0, telegram_enabled: null, alerts_enabled: null, ready: null, how_to_fix: null }], unavailable_channels: [], note: "", warnings: ["Settings could not be read."], observed_at: T0 }));
+  assert.match(m.text(), /Alert readiness is unknown/); assert.match(m.text(), /Settings could not be read/); assert.doesNotMatch(m.text(), /Telegram is linked and alerts are enabled/);
+  assert.ok(!Array.from(m.doc.querySelectorAll<HTMLButtonElement>('button[role="tab"]')).some(b => b.disabled), "successful action restores navigation");
+  assert.doesNotMatch(m.doc.querySelector(".home-status")?.textContent ?? "", /Working/);
+});
+
+test("creation-only approved setup stays distinct from settings applied or a running agent", async () => {
+  const m = mount("proposal"); await handshake(m, { hostCapabilities: { openLinks: {} } });
+  await showResult(m, PROPOSAL_VIEW({ kind: "agent_draft", status: "applied", expires_at: FUTURE,
+    summary: { action: "Create a new Merryman", purpose: "create", settings: { agentName: "Robin" } },
+    result: { setup_only: true, setup_url: "https://evil.example/steal", note: "Owner signing remains required." },
+  }));
+  assert.match(m.text(), /Setup approved/); assert.match(m.text(), /Owner wallet creation, permission signing and activation are still required/);
+  assert.match(m.text(), /Setup expires/); assert.doesNotMatch(m.text(), /Only matters while it waits for approval/);
+  assert.ok(m.doc.querySelector(`a[href="${ISSUER}/connect/setup/${PROPOSAL_ID}"]`));
+  assert.ok(!m.doc.querySelector('a[href^="https://evil"]'), "continuation is derived from the validated id, never returned data");
+  assertOnlyAllowedOutbound(m);
+});
+
+test("home: approved shared-agent selection uses real list_agents ids and restores actions", async () => {
+  const m = mount("home"); await handshake(m, { hostCapabilities: { serverTools: {} } });
+  await showResult(m, HOME({ phase: "select_agent", connection: { ...HOME().connection, shared_agent_count: 2, available_tools: ["get_merryman_setup", "list_agents"] } }));
+  clickText(m, "Choose a shared Merryman"); const call = lastToolCall(m, "list_agents");
+  await answer(m, call, sample("list_agents", { agents: [{ agent: SLUG_A, name: "Robin", account: ADDR, chain_id: 4663, status: "active", mode: "paper", live_blocker: null, permission_expires_at: FUTURE }, { agent: SLUG_B, name: "Marian", account: ADDR2, chain_id: 4663, status: "active", mode: "paper", live_blocker: null, permission_expires_at: FUTURE }], observed_at: T0 }));
+  clickText(m, "Robin"); const selected = lastToolCall(m, "get_merryman_setup"); assert.deepEqual(selected.params!.arguments, { agent: SLUG_A });
+  await answer(m, selected, HOME_AGENT()); assert.match(m.text(), /Robin/);
 });

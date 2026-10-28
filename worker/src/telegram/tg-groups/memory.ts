@@ -30,6 +30,7 @@
  * NAMING: never write the web room's name (group + chat, joined or separated)
  * in code here. See types.ts.
  */
+import { secretScanBudget } from "../../../../packages/core/src/ids";
 import { containsSecret, redactSecrets } from "../agent";
 import { callText, type TgModel, type TgModelGate } from "./model";
 import { TG_LIMITS, type TgGroupsStore } from "./store";
@@ -59,7 +60,7 @@ const PASS_LINE_CHARS = 240;
 // ── making text safe to put in a prompt ────────────────────────────────────
 
 /** Invisible and direction-changing characters: a quote with none of them reads as it looks. */
-const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180e\u2800\u3164\uffa0\ufe00-\ufe0f]/gu;
+export const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180e\u2800\u3164\uffa0\ufe00-\ufe0f]/gu;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 
@@ -92,7 +93,10 @@ export function promptSafe(text: unknown, max: number): string {
   if (!(cap > 0) || typeof text !== "string") return "";
   let s = text.slice(0, cap * 8 + 64).normalize("NFKC").replace(INVISIBLE, "").replace(CONTROL, " ");
   // Secrets first, whole: a key's prefix ("sk-proj-") must not survive its body.
-  s = redactSecrets(s, []).replace(/\[redacted\]/g, "(a code)");
+  // Exact candidates only, no glued-key windows (secretScanBudget({ windows: false })):
+  // encodedRuns below turns every run a glued key could hide in into "(a code)", and
+  // the windows cost tens of ms of CPU on each new 400-character base58 line.
+  s = redactSecrets(s, [], secretScanBudget({ windows: false })).replace(/\[redacted\]/g, "(a code)");
   s = s.replace(ADDRESS, "(an address)").replace(LONG_HEX, "(a code)").replace(EMAIL, "(an email)").replace(LINK, "(a link)");
   s = encodedRuns(s);
   s = s.replace(LONG_NUMBER, "(a long number)");

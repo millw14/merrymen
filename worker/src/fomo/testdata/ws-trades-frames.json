@@ -1,0 +1,81 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "frames": [
+    {
+      "type": "trade",
+      "chain": "robinhood",
+      "chainId": 4663,
+      "side": "buy",
+      "trader": {
+        "wallet": "0x7b4d16237683fe1765e727eadf99c6f02adf0b59",
+        "handle": "cosekant"
+      },
+      "token": {
+        "address": "0x7Fe9950000000000000000000000000000000ca5",
+        "symbol": "CACHE",
+        "mcap": 1234567
+      },
+      "usdValue": 3871.2,
+      "amountToken": 12345.6,
+      "txHash": "0xabababababababababababababababababababababababababababababababab",
+      "block": 52795900,
+      "blockTs": 1788378000000,
+      "seenAt": 1788378001100,
+      "latencyMs": 1100,
+      "source": "onchain",
+      "verified": "relay"
+    },
+    {
+      "type": "trade",
+      "chain": "robinhood",
+      "chainId": 4663,
+      "side": "sell",
+      "trader": {
+        "wallet": "0x7b4d16237683fe1765e727eadf99c6f02adf0b59",
+        "handle": "cosekant"
+      },
+      "token": {
+        "address": "0x7Fe9950000000000000000000000000000000ca5",
+        "symbol": "CACHE",
+        "mcap": 1234567
+      },
+      "usdValue": 1200,
+      "amountToken": 4000,
+      "txHash": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "block": 52795910,
+      "blockTs": 1788378020000,
+      "seenAt": 1788378021300,
+      "latencyMs": 1300,
+      "source": "onchain",
+      "verified": "db"
+    },
+    {
+      "type": "trade",
+      "chain": "solana",
+      "chainId": 1399811149,
+      "side": "buy",
+      "trader": {
+        "wallet": "5AhfPStn66hRYoNNDfJHSDgCH7fBbwMQZUECRrhTo62F",
+        "handle": null
+      },
+      "token": {
+        "address": "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump",
+        "symbol": "FU2O",
+        "mcap": 89000
+      },
+      "usdValue": 25,
+      "amountToken": 8000,
+      "txHash": "5555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+      "block": 371000000,
+      "blockTs": 1788378030000,
+      "seenAt": 1788378031370,
+      "latencyMs": 1370,
+      "source": "onchain",
+      "verified": "code"
+    },
+    {
+      "type": "retract",
+      "id": "e0000000-0000-4000-8000-0000000000ff"
+    }
+  ]
+}

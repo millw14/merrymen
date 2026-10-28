@@ -78,6 +78,24 @@ export const KILL_DONE_TEXT =
   "Your funds stay in your smart account. Sign a new grant on the dashboard to ride again.";
 
 /**
+ * Added to KILL_DONE_TEXT when the kill also revoked the owner's Perps wallet.
+ * It says what is true of the grant and nothing about where that wallet's money
+ * is: that is the stand-down's to say, once it exists (slices 3 and 4).
+ */
+export const KILL_DONE_PERPS_TEXT =
+  "Your Perps wallet's stored trading grant is deleted too, so it can no longer sign anything either.";
+
+/**
+ * The ✅ for a kill sent to the bot a login's PERPS worker runs (it runs the
+ * login's bot when there is no Spot grant to run it, orchestrator.ts bot
+ * seat). Its grant is the Perps wallet's; a Spot grant from before the kill
+ * went with it. Silent about where any money is, as KILL_DONE_PERPS_TEXT is.
+ */
+export const KILL_DONE_PERPS_HOME_TEXT =
+  "✅ Kill switch done: your Perps wallet's stored trading grant is deleted, so its agent can no longer sign anything, " +
+  "and any Spot wallet grant from before the kill is deleted too. Sign a new grant on the dashboard to ride again.";
+
+/**
  * Which signed permission a grant is. It hashes `serialized`, the signed
  * permission itself, and not `smartAccount:grantedAt`. A re-sign keeps the
  * account, and `grantedAt` is whole seconds.
@@ -333,23 +351,83 @@ export function hostedKillFromChat(
  */
 export const KILL_CLOCK_SLACK_SEC = 5;
 
+/**
+ * Left in the home by the call whose DELETE removed a grant (the Robinhood
+ * one, or the Perps wallet's) while another half of the kill failed: the
+ * owner's ✅ is owed to the pass that finishes the kill. It says whether a
+ * Perps grant was among what was removed, so that ✅ can say so too. Not a
+ * request (no KILL_REQUEST_PREFIX), so it latches nothing. Taken by deleting
+ * it, so of two passes that both finish the kill exactly one reports
+ * `removed`. A child writing one itself can only bring a ✅ forward to a pass
+ * that found its grant gone and every other half done, which is then true.
+ */
+export const KILL_CONFIRM_OWED = "kill-confirm-owed";
+const OWED_PERPS = "perps";
+
+function oweKillConfirm(home: string, perps: boolean): void {
+  const file = path.join(home, KILL_CONFIRM_OWED);
+  // Best effort: lost, the owner gets no ✅ and was told what to do then (killHosted's reply).
+  // Never rewritten without the Perps note an earlier pass left in it.
+  let owedPerps = perps;
+  try { owedPerps = owedPerps || readFileSync(file, "utf8").includes(OWED_PERPS); } catch { /* none owed yet */ }
+  try { writeFileSync(file, owedPerps ? OWED_PERPS : "", { mode: 0o600 }); } catch { /* see above */ }
+}
+
+function takeKillConfirm(home: string): { perps: boolean } | null {
+  const file = path.join(home, KILL_CONFIRM_OWED);
+  let perps = false;
+  try { perps = readFileSync(file, "utf8").includes(OWED_PERPS); } catch { /* unreadable: still taken below if it is there */ }
+  try {
+    rmSync(file);
+    return { perps };
+  } catch {
+    return null;
+  }
+}
+
 export type KillOutcome =
   /** No pending request in this home. */
   | { outcome: "none" }
   /**
    * The stored grant is gone. Stand the child down. `removed` is true only for
-   * the one call whose DELETE removed it. That call confirms to the owner. A
+   * the one call whose DELETE removed a grant (the Robinhood one or the Perps
+   * wallet's) or, when another half of that call failed, the one that then
+   * finished the kill (KILL_CONFIRM_OWED). That call confirms to the owner, and
+   * `perps` says whether a Perps grant was among what this kill removed. A
    * later pass finds it already absent.
    */
-  | { outcome: "revoked"; request: KillRequest; removed: boolean }
+  | { outcome: "revoked"; request: KillRequest; removed: boolean; perps: boolean }
   /**
    * The stored grant was signed AFTER the kill. The request is marked
    * superseded: that grant is handed over and arms. The killed one is still
-   * refused.
+   * refused. `perps`: this pass still removed a Perps grant the kill covered.
    */
-  | { outcome: "superseded"; request: KillRequest }
+  | { outcome: "superseded"; request: KillRequest; perps: boolean }
   /** Could not be carried out this pass. The request stays pending, so nothing arms, and the next pass retries. */
   | { outcome: "failed"; request: KillRequest; error: string };
+
+/**
+ * The halves of a kill beyond the Robinhood grant, run after its conditional
+ * DELETE on every pass that finds a readable request. Each throws when it
+ * could not do its part.
+ */
+export interface KillHalves {
+  /**
+   * Revoke the tenant's SPOT grant by the same cutoff, for a request whose
+   * home is a Perps worker's: there the store judged first is the Perps one,
+   * and the Spot grant is one more half. True when one was revoked by this
+   * call. Absent for a Spot home's request, whose store is Spot's.
+   */
+  spot?: (coveredSec: number) => Promise<boolean>;
+  /** Turn the tenant's Solana strategy off (solana-kill.ts). */
+  solana?: () => Promise<unknown>;
+  /**
+   * Revoke the tenant's Perps grant if it was stored at or before
+   * `coveredSec`, the same second the Robinhood grant was judged by
+   * (perps-kill.ts). True when one was revoked by this call.
+   */
+  perps?: (coveredSec: number) => Promise<boolean>;
+}
 
 /**
  * The orchestrator's side: carry out a pending request against the store.
@@ -362,12 +440,31 @@ export type KillOutcome =
  * the whole home, and until then it keeps the child latched. If the wipe
  * fails, the leftover request is harmless: the next grant the owner signs is
  * stored after it, comes back `newer`, and supersedes it.
+ *
+ * THE ROBINHOOD GRANT GOES FIRST. `halves` stop what that grant does not
+ * cover: the tenant's Solana strategy, and its Perps wallet, whose grant is
+ * judged by the same cutoff as the Robinhood one, so a Perps grant signed
+ * after the kill stays. They run on every pass that finds a readable request,
+ * after the conditional DELETE, so nothing on their side can keep a killed
+ * Robinhood grant stored (the web's DELETE /api/grants removes it first too).
+ * And each runs whatever the others did, that DELETE failing included: no half
+ * failing ever skips another, so a Robinhood store that cannot be read never
+ * keeps the Perps key stored across every retry. A kill is still never
+ * reported done while a half failed: the outcome is
+ * `failed`, the request stays pending (the reconcile keeps a home whose kill
+ * is not carried out), and the next pass finds the grant absent and retries.
+ * The ✅ is owed by the call whose DELETE removed a grant: when a half fails,
+ * it leaves KILL_CONFIRM_OWED in the home, and the pass that then finishes
+ * takes it and reports `removed`, so the owner is told exactly once, when
+ * all are done. The halves also run when the request turns out superseded;
+ * stopping is the safe direction, and the newer grant arms once they succeed.
  */
 export async function honourKillRequest(
   store: Pick<GrantStore, "removeUnlessNewer">,
   tenant: `0x${string}`,
   home: string,
   nowSec: number,
+  halves: KillHalves = {},
 ): Promise<KillOutcome> {
   const request = readKillRequest(home, nowSec);
   if (!request) return { outcome: "none" };
@@ -378,13 +475,50 @@ export async function honourKillRequest(
       error: "the kill state in this home cannot be read; nothing arms until it can",
     };
   }
-  let result: "removed" | "absent" | "newer";
+  const coveredSec = request.killedAt + KILL_CLOCK_SLACK_SEC;
+  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  // FIRST, BUT NOT ALONE. A Robinhood removal that fails (a store that cannot
+  // be read, a broken grant file) is recorded, and the other halves still run:
+  // otherwise the same fault on every retry would keep the Perps key stored and
+  // the Solana strategy on for as long as it lasted. The kill is then `failed`
+  // and stays pending, and the next pass tries every half again.
+  let result: "removed" | "absent" | "newer" | { failed: string };
   try {
-    result = await store.removeUnlessNewer(tenant, request.killedAt + KILL_CLOCK_SLACK_SEC);
+    result = await store.removeUnlessNewer(tenant, coveredSec);
   } catch (e) {
-    return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
+    result = { failed: message(e) };
   }
-  if (result !== "newer") return { outcome: "revoked", request, removed: result === "removed" };
+  const failures: string[] = [];
+  let perpsRemoved = false;
+  let spotRemoved = false;
+  if (halves.spot) {
+    try { spotRemoved = await halves.spot(coveredSec); } catch (e) { failures.push(`the Spot wallet could not be stopped: ${message(e)}`); }
+  }
+  if (halves.solana) {
+    try { await halves.solana(); } catch (e) { failures.push(`the Solana strategy could not be stopped: ${message(e)}`); }
+  }
+  if (halves.perps) {
+    try { perpsRemoved = await halves.perps(coveredSec); } catch (e) {
+      // A Perps half that revoked the grant and then failed (its paper strategy,
+      // perps-kill.ts PerpsPaperNotStopped) did remove one: owed in the ✅ the
+      // finishing pass sends, though this pass is a failure.
+      if ((e as { perpsRemoved?: unknown } | null)?.perpsRemoved === true) perpsRemoved = true;
+      failures.push(`the Perps wallet could not be stopped: ${message(e)}`);
+    }
+  }
+  if (typeof result === "object" || failures.length > 0) {
+    // Owed by this call alone: the DELETE that removed a grant happens once.
+    if (result === "removed" || perpsRemoved || spotRemoved) oweKillConfirm(home, perpsRemoved);
+    if (typeof result === "object") {
+      return { outcome: "failed", request, error: [result.failed, ...failures].join(", and ") };
+    }
+    const grant = result === "newer" ? "a grant signed after the kill is kept" : "the Robinhood grant is removed";
+    return { outcome: "failed", request, error: `${grant}, but ${failures.join(", and ")}` };
+  }
+  if (result !== "newer") {
+    const owed = takeKillConfirm(home);
+    return { outcome: "revoked", request, removed: result === "removed" || perpsRemoved || spotRemoved || owed !== null, perps: perpsRemoved || owed?.perps === true };
+  }
   // SUPERSEDED, NOT DELETED: each killed grant's identity stays in this home.
   // Only the files this call read are renamed. A request the child wrote since
   // is one this rename never names, so it stays pending for the next pass.
@@ -400,5 +534,9 @@ export async function honourKillRequest(
       return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
     }
   }
-  return { outcome: "superseded", request };
+  // A SUPERSEDED KILL CONFIRMS NOTHING: the owner signed again after it. A ✅
+  // an earlier pass of this kill owed is dropped here, so it can never ride on a
+  // later, unrelated kill (nor tell that one it deleted a Perps grant).
+  takeKillConfirm(home);
+  return { outcome: "superseded", request, perps: perpsRemoved };
 }

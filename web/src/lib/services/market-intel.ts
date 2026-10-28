@@ -39,7 +39,7 @@ import {
 } from "@merrymen/core";
 import type { Db } from "../../../../worker/src/db";
 import { screenPools, type GeckoPool } from "../../../../worker/src/venues/geckoterminal";
-import { readPoolEvidence, summarizeEvidence, type PoolEvidence } from "../../../../worker/src/venues/pool-evidence";
+import { FIVE_MINUTE_EVIDENCE_CAVEAT, readPoolEvidence, summarizeEvidence, type PoolEvidence } from "../../../../worker/src/venues/pool-evidence";
 import { ACTIVITY_GATE } from "../../../../worker/src/venues/pons-activity";
 import { tokenLabelSync } from "../../../../worker/src/token-label";
 import { usdFixed } from "@/lib/format";
@@ -996,7 +996,9 @@ export async function poolActivity(o: { address: string; poolId?: string; reader
     recent_trades: e.trades.failed ? [] : e.trades.data.slice(0, 25).map((t) => ({
       tx: t.tx, time: new Date(t.time * 1000).toISOString(), side: t.side, usd: t.usd, price_usd: t.priceUsd,
     })),
-    caveat: s.caveat,
+    // The legacy five-minute view: its own caveat, not the full summary's,
+    // which describes trade windows and candle volume this view does not carry.
+    caveat: FIVE_MINUTE_EVIDENCE_CAVEAT,
   };
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import Link from "@/terminal/Link";
 import { useWired } from "@/components/WiredProvider";
 
 /**

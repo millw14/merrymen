@@ -200,7 +200,7 @@ describe("one click is at most one trade", () => {
     assert.deepEqual(readCommandState(h, "stamped"), { state: "queued", expiresAt: T + WINDOW_MS }, "self-hosted stamps it");
     // And it is the CALLER's tick, not this container's — the same lesson the
     // ceiling below had to learn.
-    assert.match(CODE, /\(await getSettingsStore\(\)\.get\(tenant\)\)\?\.tickSeconds/);
+    assert.match(CODE, /\(await getSettingsStore\("spot"\)\.get\(tenant\)\)\?\.tickSeconds/);
   });
 });
 

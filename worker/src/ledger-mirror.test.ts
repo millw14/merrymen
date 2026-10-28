@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { wrapSqlite } from "./db";
 import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import { ENERGY_DAYS_SCHEMA } from "./energy-days";
+import { readOwnOutcomeLearning } from "./own-outcome-learning";
 
 /**
  * THE HOLE THIS FILLS, and why exactly-once is the whole point.
@@ -556,6 +557,116 @@ describe("the ledger mirror", () => {
     assert.equal(await count(shared, "trades"), 6, "and nothing was duplicated");
   });
 
+  for (const fee of [0.1, 0, null]) {
+    it(`carries recorded trade fee ${fee} on initial copy and submitted resolution`, async () => {
+      const child = mem(SRC), shared = mem(DEST);
+      await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      const now = 1_800_000_000;
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, trade_fee_usdg, created_at)
+        VALUES ('0xagent', 'swap', '0xinitial', 'landed', ?, ?)`).run(fee, now);
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, created_at)
+        VALUES ('0xagent', 'swap', '0xpending', 'submitted', ?)`).run(now);
+      const first = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+      assert.equal(first.failed?.trades, undefined);
+      assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades WHERE user_op_hash = '0xinitial'").get() as Record<string, unknown>).trade_fee_usdg, fee);
+      await child.prepare("UPDATE trades SET status = 'landed', trade_fee_usdg = ? WHERE user_op_hash = '0xpending'").run(fee);
+      const second = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+      assert.equal(second.failed?.trades_resolved, undefined);
+      assert.equal(second.copied.trades_resolved, 1);
+      const landed = await shared.prepare("SELECT status, trade_fee_usdg FROM trades WHERE user_op_hash = '0xpending'").get() as Record<string, unknown>;
+      assert.deepEqual({ ...landed }, { status: "landed", trade_fee_usdg: fee });
+      // A later copy is not permission to rewrite a settled operation's costs.
+      await child.prepare("UPDATE trades SET trade_fee_usdg = 99 WHERE user_op_hash = '0xpending'").run();
+      assert.equal((await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now })).copied.trades_resolved, undefined);
+      assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades WHERE user_op_hash = '0xpending'").get() as Record<string, unknown>).trade_fee_usdg, fee);
+      assert.equal(await count(shared, "trades"), 2);
+    });
+  }
+
+  it("keeps a known placeholder fee when settlement supplies no new fee evidence", async () => {
+    const child = mem(SRC), shared = mem(DEST);
+    await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const now = 1_800_000_000;
+    await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, trade_fee_usdg, created_at)
+      VALUES ('0xagent', 'swap', '0xpending', 'submitted', 0.2, ?)`).run(now);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    await child.prepare("UPDATE trades SET status = 'landed', trade_fee_usdg = NULL").run();
+    const result = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(result.copied.trades_resolved, 1);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, 0.2);
+  });
+
+  it("mirrors legacy children without inventing a fee on copy or settlement", async () => {
+    const child = mem(SRC), shared = mem(DEST);
+    await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const now = 1_800_000_000;
+    await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, created_at)
+      VALUES ('0xagent', 'swap', '0xlegacy', 'submitted', ?)`).run(now);
+    const first = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(first.failed?.trades, undefined);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, null);
+    await child.prepare("UPDATE trades SET status = 'landed'").run();
+    const second = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(second.failed?.trades_resolved, undefined);
+    assert.equal(second.copied.trades_resolved, 1);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, null);
+  });
+
+  it("does not advance the trade cursor if the destination cannot retain a supplied fee", async () => {
+    const child = mem(SRC), shared = mem(DEST);
+    await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const now = 1_800_000_000;
+    await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, trade_fee_usdg, created_at)
+      VALUES ('0xagent', 'swap', '0xfee', 'landed', 0.1, ?)`).run(now);
+    const first = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.match(first.failed?.trades ?? "", /trade_fee_usdg/);
+    assert.equal(await count(shared, "trades"), 0);
+    assert.equal(await shared.prepare("SELECT last_id FROM mirror_state WHERE table_name = 'trades'").get(), undefined);
+    await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+    const retry = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(retry.failed?.trades, undefined);
+    assert.equal(retry.copied.trades, 1);
+    assert.equal((await shared.prepare("SELECT trade_fee_usdg FROM trades").get() as Record<string, unknown>).trade_fee_usdg, 0.1);
+  });
+
+  for (const fee of [0.1, 0, null]) {
+    it(`makes a mirrored closed cycle usable by learning only with recorded fee evidence (${fee})`, async () => {
+      const child = mem(SRC), shared = mem(DEST);
+      await child.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      await shared.exec("ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL");
+      const account = `0x${"a".repeat(40)}`, token = `0x${"b".repeat(40)}`, cash = `0x${"c".repeat(40)}`;
+      const hash = (n: number) => `0x${n.toString(16).padStart(64, "0")}`;
+      const now = 1_800_000_000;
+      await child.prepare("INSERT INTO agents (smart_account, chain_id, epoch, mode) VALUES (?, 4663, 1, 'live')").run(account);
+      // The entry is already landed on the first mirror. The exit is copied
+      // submitted and then resolved in place, exercising both production paths.
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, tx_hash, status, epoch, created_at,
+        fill_side, buy_token, sell_token, fill_qty_raw, fill_cash_usdg, basis_source, realized_pnl_usdg, gas_wei, gas_usdg, trade_fee_usdg)
+        VALUES (?, 'swap', ?, ?, 'landed', 1, ?, 'buy', ?, ?, '100', 10, 'receipt', 0, '1', 0.1, ?)`)
+        .run(account, hash(1), hash(101), now - 2, token, cash, fee);
+      await child.prepare(`INSERT INTO trades (agent_id, kind, user_op_hash, status, epoch, created_at, sell_token, buy_token)
+        VALUES (?, 'swap', ?, 'submitted', 1, ?, ?, ?)`).run(account, hash(2), now - 1, token, cash);
+      const first = await mirrorTenant({ tenant: account, child, shared, nowSec: now });
+      assert.equal(first.failed?.trades, undefined);
+      assert.equal(first.failed?.snapshots, undefined);
+      assert.equal((await readOwnOutcomeLearning(shared, account, 4663, now)).closed, 0);
+      await child.prepare(`UPDATE trades SET status = 'landed', tx_hash = ?, fill_side = 'sell', fill_qty_raw = '100',
+        fill_cash_usdg = 12, basis_source = 'receipt', realized_pnl_usdg = 2, gas_wei = '1', gas_usdg = 0.1, trade_fee_usdg = ?
+        WHERE user_op_hash = ?`).run(hash(102), fee, hash(2));
+      const second = await mirrorTenant({ tenant: account, child, shared, nowSec: now });
+      assert.equal(second.failed?.trades_resolved, undefined);
+      assert.equal(second.copied.trades_resolved, 1);
+      const learned = await readOwnOutcomeLearning(shared, account, 4663, now);
+      assert.equal(learned.status, "ready");
+      assert.equal(learned.closed, fee === null ? 0 : 1);
+      assert.equal(learned.excluded, fee === null ? 1 : 0);
+      assert.equal(learned.returnPct, fee === null ? null : fee === 0 ? 18 : 16);
+      assert.equal(learned.costDragPct, fee === null ? null : fee === 0 ? 2 : 4);
+    });
+  }
+
   it("mirrors a late settlement with its fresh budget timestamp and original submission time", async () => {
     const child = seedChild();
     const shared = mem(DEST);
@@ -835,6 +946,135 @@ describe("an empty child is not a flat book", () => {
     };
     assert.equal(String(b.qty_raw), "2", "the newer reading wins");
     assert.equal(String(b.cost_usdg), "7.0");
+  });
+});
+
+/**
+ * WHAT HAPPENS TO A STALE SHARED BASIS ONCE A TENANT IS ADMITTED ON A NEW
+ * BOOK (chain-gap-booking.ts staleBasisVerdict rests on this). Registration
+ * (ledger-import.ts registerAttestedGapSource) archives and DELETES the
+ * tenant's mirror_state rows and leaves the snapshot tables as they were; the
+ * new book starts empty and gets only what the seeds put in. So the first
+ * pass with nothing to compare a cursor against cannot read the book as
+ * rebuilt, and once the worker has armed (its agents row) that pass replaces
+ * the account's cost_basis with the book's own — a basis the book never had
+ * is gone. A pass before the worker arms deletes nothing; it only upserts the
+ * new book's own seeded rows, so the stale row is untouched.
+ *
+ * THE ACCOUNT IN ANY LETTER-CASE. The worker registers under the grant's
+ * spelling as it stands at spawn (store.ts ensureAgent), and an owner can
+ * re-sign under another letter-case of the same account between the booking
+ * and that spawn. Both seeds read the account in any letter-case, so a row
+ * the delete missed for its case would still be this account's to the next
+ * seed. The delete takes every spelling of the account, and only this
+ * account: an equality on both sides lowered, never a pattern.
+ */
+describe("a stale shared basis after an attested registration", () => {
+  const STALE = "INSERT INTO cost_basis VALUES (?, 'live', 'TSLA', '23370235163310797', '8332500', 1790028733)";
+  /** Shogun's account as the grant spelt it when the booking was applied, and two other letter-cases of the same account. */
+  const APPLIED = "0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487";
+  const RESIGNED = "0x05A198A677FBCD8F5C168D397FA7EF5EB6D65487";
+  const MIXED = "0x05a198A677fbcd8F5c168d397fa7EF5eb6d65487";
+  /**
+   * Other accounts, none of them this one: one sharing all but the last
+   * nibble, in two letter-cases, and two strings this one is a prefix of, or
+   * that are a prefix of it.
+   */
+  const OTHERS = ["0x05a198a677fbcd8f5c168d397fa7ef5eb6d65488", "0x05A198A677FBCD8F5C168D397FA7EF5EB6D65488", `${APPLIED}ff`, APPLIED.slice(0, -1)];
+  const SNAPSHOTS = ["positions", "cost_basis", "position_floors", "class_positions"] as const;
+  /** A new, empty book: no rows at all until its worker arms and writes its agents row. */
+  const newBook = () => {
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(SRC);
+    return raw;
+  };
+  /** One row in each snapshot table under `account`, named `symbol` (and, in the class book, token `0x<symbol>`). */
+  const holding = async (db: ReturnType<typeof mem>, account: string, symbol: string) => {
+    await db.prepare("INSERT INTO positions VALUES (?, ?, ?, '1', '1', 2.0, 0, 'pool', 2.0, 9)").run(account, symbol, `0x${symbol}`);
+    await db.prepare("INSERT INTO cost_basis VALUES (?, 'live', ?, '1', '1000000', 9)").run(account, symbol);
+    await db.prepare("INSERT INTO position_floors VALUES (?, 'live', ?, 1500, 0, 'entry', 9)").run(account, symbol);
+    await db.prepare("INSERT INTO class_positions (agent_id, token, symbol, state) VALUES (?, ?, ?, 'open')").run(account, `0x${symbol}`, symbol);
+  };
+  /** Each snapshot table's rows, as "account symbol", in a fixed order. */
+  const held = async (db: ReturnType<typeof mem>) => {
+    const out: Record<string, string[]> = {};
+    for (const table of SNAPSHOTS) {
+      out[table] = ((await db.prepare(`SELECT agent_id, symbol FROM ${table}`).all()) as Array<{ agent_id: string; symbol: string }>)
+        .map((r) => `${r.agent_id} ${r.symbol}`).sort();
+    }
+    return out;
+  };
+  const inEvery = (rows: string[]) => Object.fromEntries(SNAPSHOTS.map((t) => [t, [...rows].sort()]));
+
+  it("THE FIRST PASS AFTER THE WORKER ARMS DELETES IT: no cursor survived registration, so the book is not read as rebuilt", async () => {
+    const shared = mem(DEST);
+    await shared.prepare(STALE).run("0xagent");
+    const book = newBook();
+    // Before its worker arms there is no agents row: the pass deletes nothing; it only upserts the new book's own seeded rows (none here), so the stale row is untouched.
+    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(await count(shared, "cost_basis"), 1, "untouched before the worker arms");
+    book.exec("INSERT INTO agents (smart_account, name, epoch) VALUES ('0xagent', 'Shogun', 1)");
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(r.restarted, undefined, "nothing to rewind: registration removed the cursors");
+    assert.equal(r.failed, undefined);
+    assert.equal(await count(shared, "cost_basis"), 0, "the basis the new book never had is gone");
+  });
+
+  it("A GRANT RE-SIGNED UNDER ANOTHER LETTER-CASE BEFORE THE WORKER ARMS: the first pass after it arms, under the new spelling, still deletes the basis", async () => {
+    const shared = mem(DEST);
+    // The row as the booking left it, spelled as the grant spelt the account then.
+    await shared.prepare(STALE).run(APPLIED);
+    const book = newBook();
+    await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(await count(shared, "cost_basis"), 1, "untouched before the worker arms");
+    // The owner re-signed; the orchestrator read the grant again, and the worker registered under its new spelling.
+    book.exec(`INSERT INTO agents (smart_account, name, epoch) VALUES ('${RESIGNED}', 'Shogun', 1)`);
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.equal(r.restarted, undefined, "not a rebuilt pass");
+    assert.equal(r.failed, undefined);
+    assert.equal(await count(shared, "cost_basis"), 0, "the basis the new book never had is gone, whatever letter-case it was left under");
+    // What a later seed reads for the account, in any letter-case as both seeds do: nothing.
+    assert.deepEqual(await shared.prepare("SELECT symbol FROM cost_basis WHERE lower(agent_id) = lower(?)").all(RESIGNED), []);
+  });
+
+  it("EVERY LETTER-CASE OF THE ACCOUNT IS REPLACED on an ordinary pass, in all four snapshot tables, and no other account's rows are touched", async () => {
+    const shared = mem(DEST);
+    for (const spelling of [APPLIED, RESIGNED, MIXED]) await holding(shared, spelling, "OLD");
+    for (const other of OTHERS) await holding(shared, other, "THEIRS");
+    const raw = newBook();
+    raw.exec(`INSERT INTO agents (smart_account, name, epoch) VALUES ('${RESIGNED}', 'Shogun', 1)`);
+    const book = wrapSqlite(raw);
+    await holding(book as ReturnType<typeof mem>, RESIGNED, "NEW");
+    const r = await mirrorTenant({ tenant: "0xten", child: book, shared });
+    assert.equal(r.restarted, undefined);
+    assert.equal(r.failed, undefined, JSON.stringify(r.failed));
+    assert.deepEqual(await held(shared), inEvery([`${RESIGNED} NEW`, ...OTHERS.map((o) => `${o} THEIRS`)]),
+      "the account holds exactly the book's own rows; the neighbours and the prefixes keep theirs");
+  });
+
+  it("A REBUILT PASS STILL DELETES NOTHING, in any letter-case; positions keep their own guard, unchanged", async () => {
+    const shared = mem(DEST);
+    for (const spelling of [APPLIED, MIXED]) await holding(shared, spelling, "OLD");
+    for (const other of OTHERS) await holding(shared, other, "THEIRS");
+    // A lost book's cursor that registration did not remove, past the new book's ids.
+    const cursor = "INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES ('0xten', 'trades', 9, 100, 100) " +
+      "ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = 9, last_stamp = 100";
+    await shared.prepare(cursor).run();
+    const book = newBook();
+    book.exec(`INSERT INTO agents (smart_account, name, epoch) VALUES ('${RESIGNED}', 'Shogun', 1)`);
+    const before = await held(shared);
+    const r = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.ok(r.restarted, "a lost book's cursor past the new book's ids reads as a rebuild");
+    assert.deepEqual(await held(shared), before, "a rebuilt book with nothing to say deletes nothing, under any spelling");
+
+    // A rebuilt child that does hold a position replaces the account's positions, in any letter-case; the three history tables stay as they were.
+    await shared.prepare(cursor).run();
+    book.exec(`INSERT INTO positions VALUES ('${RESIGNED}', 'NEW', '0xNEW', '1', '1', 2.0, 0, 'pool', 2.0, 9)`);
+    const again = await mirrorTenant({ tenant: "0xten", child: wrapSqlite(book), shared });
+    assert.ok(again.restarted, "still read as a rebuild");
+    const after = await held(shared);
+    assert.deepEqual(after.positions, [`${RESIGNED} NEW`, ...OTHERS.map((o) => `${o} THEIRS`)].sort());
+    for (const table of ["cost_basis", "position_floors", "class_positions"] as const) assert.deepEqual(after[table], before[table], `${table}: kept on a rebuilt pass`);
   });
 });
 

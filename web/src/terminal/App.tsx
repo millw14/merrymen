@@ -1,6 +1,6 @@
 "use client";
 import { performanceFromWire } from "./agent-performance";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
 import {
@@ -22,8 +22,12 @@ import {
   useSyncExternalStore,
 } from "react";
 import { autonomyOf } from "@merrymen/core";
+import { pausedRecovery, recoveryAutonomy, recoveryFunds } from "./recovery-view";
+import { workerSilentSince } from "./worker-stale";
 import { chatKeyFor } from "./chat-store";
 import { useChatController } from "./chat-controller";
+import { workerHeardFromOf } from "./chat-payload";
+import { agentDownOf } from "./agent-status";
 import { chatTape } from "./chat-thread";
 import "./chat.css";
 import {
@@ -48,11 +52,14 @@ import { Home } from "./screens/Home";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
 import Wallet from "./screens/Wallet";
+import dynamic from "next/dynamic";
+import "./SolanaNavigation.css";
 
 import { Profile } from "./screens/Profile";
 import { glanceOfHow, thesisOfHow, type ProfileAgent } from "./profile-view";
 import "./profile.css";
 import { Search } from "./screens/Search";
+import { SearchDialog } from "./SearchDialog";
 import { Token } from "./screens/Token";
 import { You } from "./screens/You";
 import { TabIcon } from "./ui";
@@ -69,14 +76,18 @@ import {
 } from "./account-read";
 import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
 import { LoadFailure } from "./LoadFailure";
+import { ServiceNotice } from "./ServiceNotice";
+import "./service-notice.css";
 import { SkeletonRows } from "./Skeleton";
 import "./skeleton.css";
 import { useLiveNews, useSoundPref } from "./live-news";
 import { SoundToggle } from "./SoundToggle";
 import { ticksOf } from "./ticker";
+import { goTo } from "./navigate";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
 
+const SolanaScreen = dynamic(() => import("./SolanaScreen").then((module) => module.SolanaScreen));
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
 function subscribeDesktop(onChange: () => void) {
@@ -85,7 +96,7 @@ function subscribeDesktop(onChange: () => void) {
   return () => media.removeEventListener("change", onChange);
 }
 
-export function App() {
+export function App({ solana = false }: { solana?: boolean }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   /**
    * THE LATEST ANSWER OF EVERY READ, and the screens drawn from them.
@@ -97,10 +108,10 @@ export function App() {
    */
   const [sources, setSources] = useState<LiveSources>(seedSources);
   const live = useMemo(() => liveOf(sources), [sources]);
-  const router = useRouter();
   const pathname = usePathname() ?? "/";
-  const requestedScreen = useMemo(()=>screenForPath(pathname),[pathname]);
-  const setScreen = (next: Screen) => router.push(pathForScreen(next));
+  const requestedScreen = useMemo(()=>screenForPath(pathname, solana),[pathname, solana]);
+  // In place, never a round trip — see navigate.ts.
+  const setScreen = (next: Screen) => goTo(pathForScreen(next));
   const [account, setAccount] = useState<AccountState|null>(null);
   /** Last complete account read, used to spot a cookie changed in another tab. */
   const confirmedSession = useRef<AccountState["session"] | null>(null);
@@ -314,12 +325,19 @@ export function App() {
   const [soundOn, toggleSound] = useSoundPref();
   useLiveNews({ theses: live.theses, read: live.reads.theses, soundOn });
 
+  // SEARCH OPENS OVER THE PAGE, not instead of it (SearchDialog). The /search
+  // route still renders the full screen for a link that arrives there.
+  const [searchOpen, setSearchOpen] = useState(false);
   const openScreen = (next: Screen) => {
+    if (next.kind === "search") {
+      setSearchOpen(true);
+      return;
+    }
     // There is nothing to fund before an agent exists, and the deposit panel
     // reads `account.status.grant` — so the guard stays, and it sends people to
     // the screen that can actually create one.
     if ((next.kind === "deposit" || next.kind === "withdraw") && !account?.status.exists) {
-      router.push("/you");
+      goTo("/you");
       return;
     }
     setScreen(next);
@@ -377,7 +395,7 @@ export function App() {
       // that published none stays unpublished rather than guessed.
       // The rest past `glance` is the profile's own: the chart's timestamps and
       // whether they reach the whole period, TOP TRADES, and the stats line.
-      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,performance:p.performance === undefined ? undefined : performanceFromWire(p.performance),unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:thesisOfHow(p.how),glance:{...glanceOfHow(p.how),legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined},
+      setProfile({mode:p.mode,recentTrades:p.recentTrades,activityRead:p.activityRead,slug:p.slug,name:p.name,handle:p.handle,owner:p.handle,pnlBps:p.pnlBps,paperPnlBps:p.paperPnlBps,performance:p.performance === undefined ? undefined : performanceFromWire(p.performance),unrankedWhy:p.unrankedWhy,gas:p.gas,holdingsRead:p.holdingsRead,curve:p.growth.map(v=>v.g),curveKind:"growth" as const,contributionsEvidenced:p.contributionsEvidenced,landed:p.landed,filledPaper:p.filledPaper,paperFills:p.paperFills,last:null,publicBook:p.publicBook,holdingsUsd:p.publicBook && p.holdingsRead ? p.holdings.reduce((sum,h)=>sum+h.valueUsdg,0) : null,thesis:thesisOfHow(p.how),glance:{...glanceOfHow(p.how),legs:p.publicBook ? p.holdings.map(h=>({symbol:h.symbol,weight:(h.shareBps??0)/100})) : undefined},
         growthPoints:p.growth,growthComplete:p.growthComplete,topTrades:p.topTrades,topTradesRead:p.topTradesRead,tradeCount:p.tradeCount,tradeCountFloor:p.tradeCountFloor,avgHoldSec:p.avgHoldSec,joinedAt:p.joinedAt,gasless:p.gasless});
     }).catch(e=>{if(alive)setProfileError(e.message);});
     void refresh();
@@ -413,7 +431,27 @@ export function App() {
    * /api/grants — NOT `glance.cashUsd`, which is the book and is exactly the
    * figure that must not be trusted to say whether money exists.
    */
-  const autonomy = autonomyOf({
+  const recovery = pausedRecovery(account?.status.recovery);
+  /**
+   * IS THE BLOCKER OLDER THAN THE SIGNATURE?
+   *
+   * Both halves come from this one response: `grantedAt` from the grant store
+   * the POST wrote synchronously, `workerAliveAt` from the mirrored `agents`
+   * row that also carries `liveBlocker` — so the comparison is between two
+   * facts that arrived together, not a race between sources.
+   *
+   * Both must be present. A missing timestamp is not a fresh signature, and
+   * defaulting either way would turn "we don't know" into a claim.
+   *
+   * NAMED, because the desk needs the fact itself and not the verdict's word
+   * for it. It used to be handed `autonomy.state === "checking"`, which stopped
+   * meaning this once a silent worker could answer NOT RUNNING instead.
+   */
+  const blockerPredatesGrant =
+    account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
+      ? account.status.grant.grantedAt > account.status.workerAliveAt
+      : false;
+  const autonomy = recoveryAutonomy(autonomyOf({
     mode: account?.status.mode ?? null,
     liveBlocker: account?.status.liveBlocker ?? null,
     expired:
@@ -424,23 +462,37 @@ export function App() {
     // the one value `autonomyOf` answers with "Add funds" — to a funded owner,
     // whenever the node was slow. See realCashOf.
     realCashUsd: realCashOf(account),
+    blockerPredatesGrant,
     /**
-     * IS THE BLOCKER OLDER THAN THE SIGNATURE?
-     *
-     * Both halves come from this one response: `grantedAt` from the grant store
-     * the POST wrote synchronously, `workerAliveAt` from the mirrored `agents`
-     * row that also carries `liveBlocker` — so the comparison is between two
-     * facts that arrived together, not a race between sources.
-     *
-     * Both must be present. A missing timestamp is not a fresh signature, and
-     * defaulting either way would turn "we don't know" into a claim.
+     * HAS THE WORKER STOPPED? The SERVER's answer (`workerStale` on the same
+     * response), read back as the beat it went quiet at — never this browser's
+     * clock against a server timestamp. An older server sends no answer, and
+     * the agent is described as it describes itself. See worker-stale.ts.
      */
-    blockerPredatesGrant:
-      account?.status.grant?.grantedAt !== undefined && account?.status.workerAliveAt
-        ? account.status.grant.grantedAt > account.status.workerAliveAt
-        : false,
-  });
-  const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy} : null;
+    workerSilentSince: workerSilentSince(account?.status),
+    // Whole days left on the key, counted up; `autonomyOf` keeps the window.
+    expiresSoonDays:
+      account?.status.grant?.expiresAt !== undefined
+        ? Math.ceil((account.status.grant.expiresAt * 1000 - Date.now()) / 86_400_000)
+        : null,
+  }), recovery);
+  // `recoveryFunds` from the same `account` as `recovery`, so the notice never
+  // pairs one tenant's hold with another read's account or cash.
+  // `workerHeardFrom` from the same answer as the verdict: whether ANY beat
+  // ever landed, which IDLE alone cannot say — a never-started agent and one
+  // before its first pass both wear it. The chat needs the difference.
+  // See workerHeardFromOf: only an explicit null is "never", absent is unknown.
+  // `agentDown` from the same answer too, for the Telegram link-code wait on
+  // Home and in Settings. A recovery hold is its own reason: the held tenant
+  // is not admitted, nothing runs its worker, and the recovery listener links
+  // no new chat (agent-status.ts AgentDown).
+  // Settings can open before a portfolio exists or its feed answers. Its
+  // Telegram wait depends on the authoritative grants read alone.
+  const agentDown = recovery ? "recovery" as const : agentDownOf(account?.status, Date.now());
+  const mine = account?.status.exists && ownerFeedReady && live.mine ? {...live.mine, statusLabel: autonomy.label, autonomy, recovery,
+    workerHeardFrom: workerHeardFromOf(account.status),
+    agentDown,
+    ...(recovery ? { chg24: null, recoveryFunds: recoveryFunds(account.status) } : {})} : null;
   /**
    * Where the re-sign button goes — and, for wrong-chain, on WHICH network.
    *
@@ -481,11 +533,12 @@ export function App() {
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader hasAgent={!!mine} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
+      {desktop && <DesktopHeader hasAgent={!!mine} hideBalances={screen.kind === "solana"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
       {desktop && (
         <DesktopSidebar
           reads={live.reads}
           retired={live.retired}
+          retiredAgents={live.retiredAgents}
           mine={displayMine}
           hasAgent={!!mine}
           tokens={live.tokens}
@@ -503,6 +556,11 @@ export function App() {
         className={screen.kind === "token" ? "body token-body" : "body"}
       >
         {banner && <LoadFailure nextAt={banner.nextAt} lastOkAt={banner.lastOkAt} inFlight={banner.inFlight} failed={banner.failed} unreachable={banner.unreachable} onRetry={clockShell.retryFailing}/>}
+        {/* THE OPERATOR'S FLEET-WIDE NOTICE, on every screen and to every
+            visitor, signed in or not. It takes no props on purpose: it reads
+            nothing of the account, and nothing here reads it. */}
+        <ServiceNotice />
+        {solana && <nav aria-label="Trading networks" className="solana-network-nav"><a href="/home" aria-current={screen.kind !== "solana" ? "page" : undefined}>Robinhood Chain</a><a href="/solana" aria-current={screen.kind === "solana" ? "page" : undefined}>Solana</a></nav>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -510,12 +568,12 @@ export function App() {
             it is true on every screen, and handed `exists` straight from the
             server so it cannot flash for an owner whose account is still
             loading. It navigates to the one signing control; it never signs. */}
-        <ResignPrompt
+        {!recovery && screen.kind !== "solana" && <ResignPrompt
           exists={account ? account.status.exists : null}
           grantedAt={account?.status.grant?.grantedAt ?? null}
           tenant={account?.session.hosted ? account.session.address : null}
           href={resignHref}
-        />
+        />}
         <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
           if (desktop && next.kind === "tab" && ["home", "agent", "feed"].includes(next.tab)) {
             // Desktop tabs live in the rail/dock, not the phone's routes.
@@ -528,9 +586,10 @@ export function App() {
             openScreen(next);
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>
-        {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
+        {!mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "solana" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
+        {screen.kind === "solana" && <SolanaScreen key={epoch}/>}
         {screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
-        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings}/>}
+        {screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings} agentDown={agentDown}/>}
         {screen.kind === "grant" && <Wallet key={epoch}/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
@@ -539,6 +598,7 @@ export function App() {
             theses={live.theses}
             read={live.reads.board}
             retired={live.retired}
+            retiredAgents={live.retiredAgents}
             mine={mine}
             tokenTab={tokenTab}
             onTokenTab={setTokenTab}
@@ -564,6 +624,8 @@ export function App() {
         )}
         {screen.kind === "tab" && screen.tab === "agent" && mine && (
           <Agent
+            followTradeLinks
+            routePath={pathname}
             mine={mine}
             tokens={live.tokens}
             stopped={stopped}
@@ -577,8 +639,8 @@ export function App() {
             onResign={() => {window.location.href=resignHref;}}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
-            staleBlocker={autonomy.state === "checking"}
-            energy={account?.status.energy}
+            staleBlocker={blockerPredatesGrant}
+            energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}
           />
@@ -732,12 +794,21 @@ export function App() {
             onProfile={(slug) => openScreen({ kind: "profile", slug })}
           />
         )}
+        {searchOpen && (
+          <SearchDialog
+            tokens={live.tokens}
+            agents={live.agents}
+            onClose={() => setSearchOpen(false)}
+            onToken={(id) => { setSearchOpen(false); openScreen({ kind: "token", id }); }}
+            onProfile={(slug) => { setSearchOpen(false); openScreen({ kind: "profile", slug }); }}
+          />
+        )}
         {screen.kind === "limits" && (
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
         {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
       </div>
-      {desktop && money ? (
+      {desktop && screen.kind === "solana" ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Solana account</h2><p>Solana balances, permissions and trading limits are shown in this workspace.</p><p>Use the network selector to return to Robinhood Chain.</p></section></aside> : desktop && money ? (
         <aside
           className="desktop-money-panel"
           aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
@@ -787,13 +858,13 @@ export function App() {
       {/* THE UNREAD DOT, ON DESKTOP. The tab bar that carries it is hidden at
           this width, so an answer that landed while the dock was closed would
           otherwise be told to nobody. One tap opens the dock on it. */}
-      {desktop && !chatDocked && mine && chat.unread && (
+      {desktop && !(screen.kind === "tab" && screen.tab === "agent") && !chatDocked && mine && chat.unread && (
         <button type="button" className="chat-unread-pill" onClick={() => setChatDocked(true)}>
           <i className="tab-unread" aria-hidden="true" />
           New from {mine.name}
         </button>
       )}
-      {desktop && chatDocked && mine && (
+      {desktop && !(screen.kind === "tab" && screen.tab === "agent") && chatDocked && mine && (
         <ChatDock title={mine.name} onClose={() => setChatDocked(false)}>
           <Agent
             mine={mine}
@@ -811,8 +882,8 @@ export function App() {
             }}
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
-            staleBlocker={autonomy.state === "checking"}
-            energy={account?.status.energy}
+            staleBlocker={blockerPredatesGrant}
+            energy={recovery ? null : account?.status.energy}
             account={account?.status.grant?.smartAccount ?? null}
             chainId={account?.status.grant?.chainId ?? null}
           />
@@ -825,10 +896,12 @@ export function App() {
       {ticks.length > 0 && (
         <TickerStrip
           className="terminal-tape"
+          loop
           items={ticks.map((t) => ({
             key: t.id,
             href: pathForScreen({ kind: "token", id: t.id }),
             symbol: t.symbol,
+            logo: t.logo,
             priceUsd: t.priceUsd,
             volume24hUsd: t.volume24hUsd,
             halted: t.halted,

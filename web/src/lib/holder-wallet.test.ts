@@ -44,7 +44,7 @@ after(() => {
 });
 
 const link = async (tenant: `0x${string}`, wallet: string) =>
-  getSettingsStore().put(tenant, { holderProof: { address: wallet, at: 1 } });
+  getSettingsStore("spot").put(tenant, { holderProof: { address: wallet, at: 1 } });
 
 describe("holderWalletFor — whose wallet counts", () => {
   it("signed out: nobody", async () => {
@@ -56,13 +56,13 @@ describe("holderWalletFor — whose wallet counts", () => {
   });
 
   it("A LINKED WALLET WHOSE CLAIM NAMES THIS ACCOUNT: that wallet", async () => {
-    await getSettingsStore().claimHolder(W, A);
+    await getSettingsStore("spot").claimHolder(W, A);
     await link(A, W);
     assert.deepEqual(await holderWalletFor(A), { address: W, source: "linked" });
   });
 
   it("A LINKED WALLET ANOTHER ACCOUNT HOLDS: not here — the login wallet instead", async () => {
-    await getSettingsStore().claimHolder(W, B);
+    await getSettingsStore("spot").claimHolder(W, B);
     await link(A, W);
     await link(B, W);
     assert.deepEqual(await holderWalletFor(A), { address: A, source: "login" });
@@ -75,19 +75,19 @@ describe("holderWalletFor — whose wallet counts", () => {
   });
 
   it("A LOGIN WALLET LINKED INTO ANOTHER ACCOUNT COUNTS THERE, NOT HERE: no wallet", async () => {
-    await getSettingsStore().claimHolder(A, B);
+    await getSettingsStore("spot").claimHolder(A, B);
     await link(B, A);
     assert.deepEqual(await holderWalletFor(A), { address: null, source: null });
     assert.deepEqual(await holderWalletFor(B), { address: A, source: "linked" });
   });
 
   it("settings.holderAddress is never read, whatever it names", async () => {
-    await getSettingsStore().put(A, { holderAddress: W });
+    await getSettingsStore("spot").put(A, { holderAddress: W });
     assert.deepEqual(await holderWalletFor(A), { address: A, source: "login" });
   });
 
   it("AN UNREADABLE CLAIMS STORE THROWS — it used to fall back to the login wallet, which may be another account's now", async () => {
-    await getSettingsStore().claimHolder(A, B);
+    await getSettingsStore("spot").claimHolder(A, B);
     const dir = path.join(process.env.MERRYMEN_HOME!, "holder-claims");
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, `${A}.json`), "{ torn");

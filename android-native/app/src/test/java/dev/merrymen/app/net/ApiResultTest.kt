@@ -109,6 +109,23 @@ class ApiResultTest {
     assertFalse(sentBody().containsKey("owner"))
   }
 
+  @Test fun theKillSwitchNamesItsPurposeAndTheWalletThatTapped() = runBlocking {
+    // Hosted refuses a DELETE /api/grants that does not name its purpose (400,
+    // nothing deleted), and the `{}` this used to send stopped nothing there.
+    server.answer("""{"ok":true}""")
+    assertTrue(api.revokeGrant(expectedTenant = "0xabc") is ApiResult.Ok)
+    val sent = server.takeRequest()
+    assertEquals("DELETE /api/grants", sent.method + " " + sent.path)
+    assertEquals(
+      JsonObject(mapOf("purpose" to JsonPrimitive("delete-agent"), "expectedTenant" to JsonPrimitive("0xabc"))),
+      api.json.parseToJsonElement(sent.body.readUtf8()).jsonObject,
+    )
+    // Self-hosted has no session to name; the purpose still goes.
+    server.answer("""{"ok":true}""")
+    api.revokeGrant(expectedTenant = null)
+    assertEquals(JsonObject(mapOf("purpose" to JsonPrimitive("delete-agent"))), sentBody())
+  }
+
   @Test fun aSnipeCarriesItsOwner() = runBlocking {
     server.answer("""{"outcome":"ambiguous","candidates":[],"total":0}""")
     api.snipe("chump", 2.0, owner = "0xabc")

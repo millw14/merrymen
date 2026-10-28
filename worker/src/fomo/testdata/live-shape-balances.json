@@ -1,0 +1,117 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "key": "c0ffee00-1111-4222-8333-444444444444",
+  "kind": "balances",
+  "capturedAt": "2026-10-04T15:58:00.000Z",
+  "source": "live-fomo",
+  "holdings": [
+    {
+      "token": {
+        "symbol": "FHOOD",
+        "address": "0xAA00000000000000000000000000000000000A0A",
+        "networkId": 4663
+      },
+      "amount": 1000,
+      "priceUsd": 2.5,
+      "valueUsd": 2500,
+      "change24h": 3.2,
+      "chain": "robinhood"
+    },
+    {
+      "token": {
+        "symbol": "FETH",
+        "address": "0xEE00000000000000000000000000000000000E0E",
+        "networkId": 1
+      },
+      "amount": 10,
+      "priceUsd": 100,
+      "valueUsd": 1000,
+      "change24h": -1,
+      "chain": "ethereum"
+    },
+    {
+      "token": {
+        "symbol": "FSOL",
+        "address": "FakeHo1dMint5555555555555555555555555555555",
+        "networkId": 1399811149
+      },
+      "amount": 5,
+      "priceUsd": 20,
+      "valueUsd": 100,
+      "change24h": 0.5,
+      "chain": "solana"
+    },
+    {
+      "token": {
+        "symbol": "FBASE",
+        "address": "0xBA5E000000000000000000000000000000000BA5",
+        "networkId": 8453
+      },
+      "amount": 3000000,
+      "priceUsd": 0,
+      "valueUsd": 0,
+      "change24h": 4.4,
+      "chain": "base",
+      "includeInEquity": false
+    },
+    {
+      "token": {
+        "symbol": "FBNB",
+        "address": "0xBB00000000000000000000000000000000000B0B",
+        "networkId": 56
+      },
+      "amount": 1,
+      "priceUsd": 0.000001,
+      "valueUsd": 0,
+      "change24h": 0,
+      "chain": "bsc"
+    }
+  ],
+  "count": 5,
+  "totalValueUsd": 3600,
+  "upstreamRows": 5,
+  "truncated": false,
+  "complete": true,
+  "completeness": "fabricated completeness note",
+  "otherPnl": 12.5,
+  "otherPnlV2": 13.5,
+  "otherEquity": 40.25,
+  "livePerpPnl": -7.5,
+  "hyperliquidPerps": {
+    "marginSummary": {
+      "accountValue": null,
+      "totalNtlPos": null,
+      "totalRawUsd": null,
+      "totalMarginUsed": "0.0"
+    },
+    "withdrawable": null,
+    "availableUsdc": "0.0",
+    "perpUsdBalance": "0.0",
+    "quoteBalance": "0.0",
+    "positions": []
+  },
+  "nativeEvmBalances": [],
+  "byChain": {
+    "robinhood": {
+      "holdings": 1,
+      "valueUsd": 2500
+    },
+    "ethereum": {
+      "holdings": 1,
+      "valueUsd": 1000
+    },
+    "solana": {
+      "holdings": 1,
+      "valueUsd": 100
+    },
+    "base": {
+      "holdings": 1,
+      "valueUsd": 0
+    },
+    "bsc": {
+      "holdings": 1,
+      "valueUsd": 0
+    }
+  },
+  "totalValueUsdIncludes": "fabricated note on what the total excludes"
+}

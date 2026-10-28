@@ -191,12 +191,17 @@ test("changing the connection discards cached evidence and a discovery already i
     new Promise(resolve => pending.push({ cache: opts.cache, resolve }));
   const worker = new Function("discoverTrencherUniverse", "TrencherPoolCache", "CoalescedRefresh", `
     let active = { agentId: "agent", grant: { grantedAt: 1 } };
+    const cfg = { discoveryFocus: "balanced" };
     let autoTrench = null, autoTrenchContext = "", autoTrenchNext = 0;
     let trenchPoolCache = new TrencherPoolCache(), names = 0;
     const grantTrencher = () => true, mainnetClient = () => ({}), freshTrenchTape = () => [];
     const tgNominated = new Set(), coinNames = {}, poolPrices = { reset() {} };
     const warmHeldNames = () => { names++; }, trenchNotice = () => {};
     const wakeQualifiedNominations = () => {};
+    // The early-candidate book (early-candidates.ts) and its funnel filing.
+    const earlyBook = { addresses: () => new Set() }, noteEarlyDiscovery = () => {};
+    // ...and the follow path's verification-only asks beside it (fomo-child.ts).
+    const earlyDiscoverySet = () => new Set();
     ${refresh}
     return {
       tick: refreshAutoTrench,

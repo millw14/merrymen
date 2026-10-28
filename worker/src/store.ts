@@ -19,18 +19,63 @@ import {
 } from "./energy-days";
 import type { EnergyCounters, LastGood } from "./energy";
 import { energyDayUnrestored } from "./energy-seed";
+import { initialCapitalHistoryEmpty } from "./initial-capital-history";
+import { BUDGET_SEED_SCHEMA, budgetUnrestored } from "./budget-seed";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import {
   CASH,
   ENERGY_RESERVE_TOKENS,
+  PERP_COI_MAX,
+  PERP_LEG,
   officialCoinCurve,
   officialCoinsFor,
+  perpCoi,
+  perpMarketById,
   robinhoodChain,
 } from "../../packages/core/src/index";
+import type { PerpSide } from "../../packages/core/src/index";
+// The perp ledger's vocabulary and which way each status may move — shared
+// with ledger-mirror.ts and paper-checkpoint.ts so the three cannot disagree.
+import {
+  PERP_ATTRIBUTIONS,
+  PERP_LEG_RANK,
+  PERP_LEG_ROLES,
+  PERP_LEG_STATUSES,
+  PERP_OPS_ORDER_STATUSES,
+  PERP_OPS_WITHDRAW_STATES,
+  PERP_ORDER_RANK,
+  PERP_ORDER_TERMINAL,
+  PERP_TRADE_TYPES,
+  PERP_TRANSFER_DIRECTIONS,
+  PERP_TRANSFER_INITIATORS,
+  PERP_TRANSFER_RANK,
+  PERP_TRANSFER_STATES,
+  PERP_UNRESOLVED_ORDER_STATUSES,
+  intText,
+  isPerpLegRole,
+  isPerpLegStatus,
+  isPerpMode,
+  isPerpOrderEffect,
+  isPerpOrderStatus,
+  perpTransferMovesMoney,
+  perpTransferStateFits,
+  textInt,
+  type PerpAttribution,
+  type PerpLegRole,
+  type PerpLegStatus,
+  type PerpMode,
+  type PerpOrderEffect,
+  type PerpOrderStatus,
+  type PerpTradeType,
+  type PerpTransferDirection,
+  type PerpTransferInitiator,
+  type PerpTransferState,
+} from "./perp-ledger-rules";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
+import { applyLedgerMigrations } from "./ledger-migrations";
 import { paperBrainCapital } from "./paper-brain-capital";
 export const getPaperBrainCapital = (agentId: string, epoch: number) => paperBrainCapital(getDb(), agentId, epoch);
 import { readDecisionLifecycle, type DecisionLifecycle } from "./decision-lifecycle";
@@ -38,6 +83,7 @@ export type { DecisionLifecycle } from "./decision-lifecycle";
 // The one definition of a flow's identity. Imported rather than restated so
 // the reader and the writer cannot disagree about what makes a flow unique.
 import { flowKey } from "./deposit-log";
+import { OWNER_OPERATION_COLUMNS, type OwnerOperationRow } from "./owner-operations";
 // The paper/live boundary. A rule rather than a convention, enforced at the one
 // function every flow writer passes through — see addFlow.
 import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-boundary";
@@ -46,10 +92,14 @@ import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-bound
 import { DERIVED_ID } from "./thesis-policy";
 // The coin's name a fill is stored with — see fillSymbolOfRow.
 import { fillSymbolFor, nonCashLeg } from "./token-label";
+import { redactUrls } from "./redact-urls";
+import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
 
 let driver: Db | null = null;
-/** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
- *  the file; a running worker never closes its ledger. */
+/** The sqlite handle behind `driver`. Kept so closeStoreForTest() can release
+ *  the file, and closeStore() on a drained worker's way out — a running worker
+ *  never closes its ledger — and so a cap reader can tell it is reading a sqlite
+ *  ledger, the only kind ever seeded (withBudgetSeed). */
 let ledgerFile: DatabaseSync | null = null;
 
 /**
@@ -361,7 +411,432 @@ const SQLITE_SCHEMA = `
       entry_sec INTEGER NOT NULL DEFAULT (unixepoch()),
       PRIMARY KEY (agent_id, mode, symbol)
     );
+    -- AN OPERATION THE OWNER'S OWN KEY SIGNED, which is not an agent trade.
+    --
+    -- The in-flight reconciler finds every successful operation of the account
+    -- the ledger has no row for. One signed by the ROOT validator (the owner's
+    -- sudo key, proved from the nonce the EntryPoint's own event carries) is a
+    -- withdrawal, a revocation or a vault sweep the owner chose, and recording
+    -- it in trades made it an agent trade: counted toward the caps, shown on
+    -- every tape, journaled as a fill, and its USDG leg hidden from the deposit
+    -- scanner. It is recorded here instead (owner-operations.ts says what each
+    -- column means), and nowhere else: never trades, flows, positions,
+    -- cost_basis, the journal or a peak. Its USDG capital legs stay the
+    -- deposit scanner's flows.
+    --
+    -- APPEND-ONLY AND IDEMPOTENT BY IDENTITY, PER ACCOUNT: (chain_id,
+    -- LOWER(agent_id), user_op_hash) is unique, the child inserts ON CONFLICT
+    -- DO NOTHING, and so does the mirror (ledger-mirror.ts), which copies by
+    -- that identity. The account is in it because Postgres holds every
+    -- tenant's records in one table: keyed on the hash alone, another
+    -- tenant's child could record this tenant's operation hash under its own
+    -- account first, and the genuine record would then never land (first row
+    -- wins). The tenant column is NULL in a child and stamped by the mirror
+    -- from its own grant, never from the child. Admission lets a row answer an
+    -- operation only for the tenant's own account, and only after re-deriving
+    -- it from the receipt (ledger-resume.ts).
+    CREATE TABLE IF NOT EXISTS owner_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant TEXT,
+      agent_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      user_op_hash TEXT NOT NULL,
+      tx_hash TEXT NOT NULL,
+      block_number INTEGER NOT NULL,
+      block_time INTEGER NOT NULL,
+      log_index INTEGER NOT NULL,
+      nonce TEXT NOT NULL,
+      validator TEXT NOT NULL CHECK (validator = 'root'),
+      disposition TEXT NOT NULL CHECK (disposition IN ('acknowledged', 'review')),
+      review_reason TEXT,
+      usdg_legs_json TEXT NOT NULL,
+      covers_logs_json TEXT NOT NULL,
+      token_moves_json TEXT NOT NULL,
+      paymaster TEXT NOT NULL,
+      gas_wei TEXT,
+      source TEXT NOT NULL,
+      recorded_epoch INTEGER NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      CHECK ((disposition = 'acknowledged' AND review_reason IS NULL) OR (disposition = 'review' AND review_reason IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS owner_operations_account_identity ON owner_operations (chain_id, LOWER(agent_id), user_op_hash);
+    CREATE INDEX IF NOT EXISTS owner_operations_agent_time ON owner_operations (agent_id, created_at DESC);
 `;
+
+/**
+ * AN EVM TRANSACTION HASH, AND THE ONLY KIND OF HASH THE LEDGER CASE-FOLDS.
+ *
+ * 0x and 64 hex digits, either case, exactly as bookInitialCapital admits one
+ * (bookCapitalFlow admits the same with a lowercase x only). An EVM hash is
+ * case-insensitive, so it is kept lowercased: 0xAB… and 0xab… are one log to
+ * `flows_chain_identity`. Anything else is kept EXACTLY AS WRITTEN. A Solana
+ * signature is base58 and case-sensitive (packages/core/src/ids.ts), so a
+ * lowercased one names a signature that does not exist; and base58 has no "0",
+ * so no Solana id can ever take this shape.
+ *
+ * Every hash on the books today has this shape, so the rule changes nothing
+ * that is there: each one is still folded, to the same string as before.
+ *
+ * The SQL is the same test for the migration. Nothing engine-specific (no GLOB,
+ * no regex), so it reads the same on SQLite and Postgres; and no LOWER() inside
+ * the test, so no collation's folding can admit a character the JavaScript one
+ * refuses.
+ */
+const EVM_TX_HASH = /^0x[0-9a-f]{64}$/i;
+const EVM_TX_HASH_SQL =
+  "LENGTH(tx_hash) = 66 AND SUBSTR(tx_hash, 1, 2) IN ('0x', '0X') AND LTRIM(SUBSTR(tx_hash, 3), '0123456789abcdefABCDEF') = ''";
+
+/** A tx hash as the ledger keeps it: an EVM hash lowercased, anything else exactly as written. */
+function ledgerTxHash(raw: string): string {
+  return EVM_TX_HASH.test(raw) ? raw.toLowerCase() : raw;
+}
+
+/**
+ * THE PERP LEDGER'S SCHEMA (docs/perps.md, "Ledger"), applied before
+ * SQLITE_ALTERS as required objects (execPerpLedger; initSqlite) — each
+ * statement on its own, in order, each index after its table. It touches
+ * only the perp tables, so nothing in it waits on a column migration, and the
+ * migrations can then reach the perp tables too (PERP_LEDGER_ALTERS). A failure stops
+ * setup rather than being skipped. Exported so a test can run every statement
+ * through translateSchema.
+ */
+export const PERP_LEDGER_DDL: readonly string[] = [
+  // ── PERPETUALS (docs/perps.md, "Ledger") ──────────────────────────────────
+  //
+  // THE TRADES BOUNDARY. Nothing that happens on Lighter's L2 — an order, a
+  // fill, funding, a fee, an L2 withdrawal request — is a `trades` row. The
+  // tape, the audit's grossBuyNotional, verify's receipt check, ledgerWrites
+  // and the scoreboard all read `trades` as "an on-chain operation of ours",
+  // and a Lighter hash is not one (verify would report it FAILED). Only the
+  // on-chain legs — `perp-deposit`, `perp-key`, `perp-claim` — are trades
+  // rows, through the UserOp rail that is already their crash safety.
+  //
+  // THE RULES EVERY TABLE BELOW KEEPS:
+  //   money is TEXT integer micro-USDG — never REAL (a float is the rounding
+  //     rule 11 forbids) and never INTEGER in a sum (Postgres INTEGER is int4
+  //     and overflows at 2,147 USDG); aggregated in application BigInt.
+  //   venue base and price amounts are TEXT integers in the market's own
+  //     decimals, exactly as signed or read.
+  //   every row carries `mode`, and every row that is history carries `epoch`.
+  //   agent_id is lowercased on write — the mirror has already met an account
+  //     arriving EIP-55 from one incarnation and lowercase from the next.
+  //   no CHECK constraints: the mirror copies these into a shared database
+  //     whose rows must never be refused for a vocabulary a newer child speaks.
+  //   the vocabulary and its order live in perp-ledger-rules.ts.
+  //
+  // Not in SQLITE_SCHEMA, so each statement runs on its own: the schema batch
+  // is one implicit Postgres transaction that two booting services race on
+  // (execSchemaBatch). Each index follows its table.
+  //
+  // ONE ROW PER SIGNED VENUE TX (rule 9: persist before send). Written
+  // `submitted` BEFORE sendTx with the exact signed bytes — `tx_info`, which
+  // carries a Schnorr signature and is therefore the one column the mirror
+  // never copies — its hash, type, account, key index, nonce and the ExpiredAt
+  // parsed from those bytes (ms). A failed write sends nothing. For a grouped
+  // open (tx 28) the money columns describe the ENTRY leg: the SL/TP children
+  // are reduce-only with base 0 and sized by the venue to the executed entry.
+  //
+  // `worst_notional_micro` is the entry's base × its worst price, fixed at
+  // signing: what the daily cap holds against the order until its fills are
+  // known (`filled_quote_micro`, NULL until then — unknown, never zero).
+  // Non-order txs (leverage, cancel, withdraw) carry '0'.
+  //
+  // `updated_at` is what the mirror's cursor reads: an order row is rewritten
+  // in place exactly once, from submitted to its outcome, and a cursor on
+  // `created_at` alone would copy the `submitted` and never the answer — the
+  // bug the trades resolution pass exists to patch.
+  `CREATE TABLE IF NOT EXISTS perp_orders (
+     id TEXT PRIMARY KEY,
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     epoch INTEGER NOT NULL,
+     account_index INTEGER,
+     api_key_index INTEGER,
+     nonce INTEGER,
+     tx_hash TEXT,
+     tx_type INTEGER,
+     tx_info TEXT,
+     expired_at INTEGER,
+     status TEXT NOT NULL,
+     effect TEXT NOT NULL,
+     reduce_only INTEGER NOT NULL,
+     market_id INTEGER,
+     worst_notional_micro TEXT NOT NULL,
+     filled_base TEXT,
+     filled_quote_micro TEXT,
+     decision_id TEXT,
+     reason TEXT,
+     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     resolved_at INTEGER,
+     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+   )`,
+  // ONE NONCE, ONE ROW. The venue executes a signed nonce at most once and a
+  // later one kills every earlier pending tx on the key, so two rows naming
+  // one nonce would be two claims about one tx — and the second write is
+  // refused here, before anything is sent. Not scoped by mode: a nonce belongs
+  // to (account, key), and paper rows carry no account (NULLs are distinct).
+  "CREATE UNIQUE INDEX IF NOT EXISTS perp_orders_nonce ON perp_orders (agent_id, account_index, api_key_index, nonce)",
+  "CREATE INDEX IF NOT EXISTS perp_orders_budget ON perp_orders (agent_id, mode, created_at)",
+  "CREATE INDEX IF NOT EXISTS perp_orders_tx ON perp_orders (agent_id, tx_hash)",
+  "CREATE INDEX IF NOT EXISTS perp_orders_open ON perp_orders (agent_id, mode, status)",
+  "CREATE INDEX IF NOT EXISTS perp_orders_updated ON perp_orders (updated_at)",
+  // EVERY CLIENT ORDER INDEX INSIDE A SIGNED TX (entry, stop, take, close),
+  // each its own row because a grouped open carries up to three and one
+  // column cannot hold them. The primary key is the uniqueness rule 9 relies
+  // on: COI = nonce × 8 + leg never repeats across restarts or a wiped ledger,
+  // and this is where a repeat would be caught. `venue_order_index` is TEXT
+  // because the venue's order ids pass 2^53.
+  `CREATE TABLE IF NOT EXISTS perp_order_legs (
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     order_id TEXT NOT NULL,
+     role TEXT NOT NULL,
+     client_order_index INTEGER NOT NULL,
+     venue_order_index TEXT,
+     status TEXT NOT NULL,
+     venue_status TEXT,
+     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     PRIMARY KEY (agent_id, mode, client_order_index)
+   )`,
+  "CREATE INDEX IF NOT EXISTS perp_order_legs_order ON perp_order_legs (order_id)",
+  "CREATE INDEX IF NOT EXISTS perp_order_legs_updated ON perp_order_legs (updated_at)",
+  // A FILL, BY THE VENUE'S OWN IDENTITY (rule 10). The trade id alone is not
+  // one: a self-trade — our close hitting our own resting take-profit — is ONE
+  // trade id with our account on BOTH sides, so `side_role` (ask | bid, the
+  // side of the trade that was ours) completes the key and books it twice, as
+  // it happened. Append-only; a re-read of the same trade inserts nothing.
+  //
+  // `side` is the POSITION side the fill trades — long for an opening bid AND
+  // for the ask that closes that long — never "sell" (rule 15). `realized_micro`
+  // is NULL until derived; `position_before` (signed base) and
+  // `entry_quote_before_micro` are kept so it can be re-derived by anyone.
+  // `venue_ts_ms` is the venue's trade timestamp in MILLISECONDS.
+  `CREATE TABLE IF NOT EXISTS perp_fills (
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     epoch INTEGER NOT NULL,
+     venue_trade_id TEXT NOT NULL,
+     side_role TEXT NOT NULL,
+     market_id INTEGER NOT NULL,
+     side TEXT NOT NULL,
+     role TEXT,
+     base TEXT NOT NULL,
+     price TEXT NOT NULL,
+     quote_micro TEXT NOT NULL,
+     fee_micro TEXT NOT NULL,
+     realized_micro TEXT,
+     position_before TEXT,
+     entry_quote_before_micro TEXT,
+     trade_type TEXT NOT NULL,
+     attribution TEXT NOT NULL,
+     order_id TEXT,
+     venue_order_index TEXT,
+     client_order_index INTEGER,
+     venue_tx_hash TEXT,
+     venue_ts_ms INTEGER NOT NULL,
+     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     PRIMARY KEY (agent_id, mode, venue_trade_id, side_role)
+   )`,
+  "CREATE INDEX IF NOT EXISTS perp_fills_time ON perp_fills (agent_id, mode, venue_ts_ms)",
+  "CREATE INDEX IF NOT EXISTS perp_fills_created ON perp_fills (created_at)",
+  // A FUNDING PAYMENT, keyed by the venue's funding id AND, separately, by the
+  // hour: funding is hourly, so two rows for one (market, hour) is one payment
+  // booked twice — whichever id the second carries (a paper replay and a
+  // venue read, say). `payment_micro` is signed: + received, − paid.
+  // `funding_hour` is unix SECONDS on the hour; `rate_ppm` is the venue's
+  // percent-per-hour rate as parts per million, exact.
+  `CREATE TABLE IF NOT EXISTS perp_funding (
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     epoch INTEGER NOT NULL,
+     market_id INTEGER NOT NULL,
+     funding_id TEXT NOT NULL,
+     funding_hour INTEGER NOT NULL,
+     payment_micro TEXT NOT NULL,
+     rate_ppm INTEGER,
+     position_base TEXT,
+     position_side TEXT,
+     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     PRIMARY KEY (agent_id, mode, market_id, funding_id)
+   )`,
+  "CREATE UNIQUE INDEX IF NOT EXISTS perp_funding_hour ON perp_funding (agent_id, mode, market_id, funding_hour)",
+  "CREATE INDEX IF NOT EXISTS perp_funding_created ON perp_funding (created_at)",
+  // MARGIN MOVING BETWEEN THE ACCOUNT AND LIGHTER — never capital (rule 12).
+  // Written before it is sent, like every other venue move, including the
+  // ones a stand-down or the owner's recover makes. `state` only moves forward
+  // (perp-ledger-rules.ts); money is in transit while a deposit is `landed` or
+  // a withdrawal `executed`, and each step that moves it is journaled `margin`
+  // in the same transaction as the step.
+  //
+  // IDENTITY, WHERE THERE IS ONE, IS UNIQUE: the chain log that proves it
+  // (chain id, tx, log index — a tx hash is only unique within a chain, and
+  // this schema serves 4663 and 46630), the L2 Withdraw's venue hash, or our
+  // own UserOp. `paid_tx_hash`/`paid_log_index` record which payout covered a
+  // withdrawal and are NOT unique: the relayer pays a pending balance out in
+  // one log, so one payout can settle several requests. `order_id` is the
+  // rule-9 row of the L2 Withdraw that requested it, when there is one — the
+  // link that keeps one request from counting as two ops (perpOpsSince).
+  `CREATE TABLE IF NOT EXISTS perp_transfers (
+     id TEXT PRIMARY KEY,
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     epoch INTEGER NOT NULL,
+     direction TEXT NOT NULL,
+     amount_micro TEXT NOT NULL,
+     initiator TEXT NOT NULL,
+     state TEXT NOT NULL,
+     chain_id INTEGER,
+     tx_hash TEXT,
+     log_index INTEGER,
+     user_op_hash TEXT,
+     venue_tx_hash TEXT,
+     paid_tx_hash TEXT,
+     paid_log_index INTEGER,
+     order_id TEXT,
+     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS perp_transfers_chain ON perp_transfers (chain_id, agent_id, tx_hash, log_index)
+     WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS perp_transfers_venue ON perp_transfers (agent_id, mode, venue_tx_hash)
+     WHERE venue_tx_hash IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS perp_transfers_userop ON perp_transfers (agent_id, mode, user_op_hash)
+     WHERE user_op_hash IS NOT NULL`,
+  "CREATE INDEX IF NOT EXISTS perp_transfers_open ON perp_transfers (agent_id, mode, state)",
+  "CREATE INDEX IF NOT EXISTS perp_transfers_updated ON perp_transfers (updated_at)",
+  // THE POSITIONS: the venue-authoritative CACHE on the live rail (re-read at
+  // every arm, never seeded from shared storage — the contract's "Hosted"
+  // paragraph) and THE BOOK itself on paper. Never an equity input: rule 12
+  // takes C, M and U from one venue snapshot, and a cache mixed with a fresh
+  // read counts a close twice.
+  //
+  // A flat market keeps its row (`side` NULL, `base` '0'), because leverage is
+  // per-(account, market) venue state that outlives a position — the paper
+  // book needs its `imf_bp` and margin mode exactly as the venue keeps them.
+  // Prices are the market's integer price units; `funding_hour_applied` is the
+  // last hour a paper position was charged (unix seconds).
+  `CREATE TABLE IF NOT EXISTS perp_positions (
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     market_id INTEGER NOT NULL,
+     side TEXT,
+     base TEXT NOT NULL,
+     entry_price TEXT,
+     allocated_margin_micro TEXT NOT NULL,
+     imf_bp INTEGER,
+     margin_mode TEXT,
+     realized_micro TEXT,
+     funding_micro TEXT,
+     stop_trigger TEXT,
+     stop_price TEXT,
+     -- stop_* above is the RESTING stop child; this is the level the
+     -- position is protected at, kept when that child ends without closing
+     -- it (paper.ts PaperPerpPosition.recordedStop). NULL with no stop
+     -- recorded. Also in PERP_LEDGER_ALTERS, for a book built before it.
+     recorded_stop_trigger TEXT,
+     recorded_stop_price TEXT,
+     take_trigger TEXT,
+     take_price TEXT,
+     funding_hour_applied INTEGER,
+     opened_at INTEGER,
+     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     source TEXT NOT NULL,
+     PRIMARY KEY (agent_id, mode, market_id)
+   )`,
+  // ONE ROW PER (agent, mode): the venue account index; the public key we
+  // registered and every key retired from it (a retired key is never
+  // registered again); the nonce HIGH-WATER — TEXT, committed BEFORE signing
+  // and only ever raised (bumpNonceHighWater), so no nonce is signed twice
+  // across a restart; the paper book's cross collateral (NULL on live, where
+  // the venue holds it); the durable incident flag of rule 16 (`incident_json`,
+  // NULL when clear) and the entries halt; and when the venue was last read,
+  // with the snapshot's `transaction_time` in MICROSECONDS.
+  `CREATE TABLE IF NOT EXISTS perp_accounts (
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     account_index INTEGER,
+     registered_pubkey TEXT,
+     retired_pubkeys TEXT NOT NULL DEFAULT '[]',
+     nonce_high_water TEXT,
+     paper_collateral_micro TEXT,
+     incident_json TEXT,
+     entries_halted INTEGER NOT NULL DEFAULT 0,
+     last_venue_read_at INTEGER,
+     last_snapshot_time INTEGER,
+     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     PRIMARY KEY (agent_id, mode)
+   )`,
+  // AN OPEN POSITION CARRIED ACROSS AN EPOCH BOUNDARY, at mark. openNextEpoch
+  // carries closing equity — unrealized P&L included — into the new epoch as
+  // its opening balance, so a later close measured from the ORIGINAL entry
+  // would count that P&L a second time. The carry is the new epoch's entry for
+  // the position (`entry_quote_micro` = mark × size), and the key makes it one
+  // carry per position per epoch however often it is retried.
+  `CREATE TABLE IF NOT EXISTS perp_carries (
+     agent_id TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     epoch INTEGER NOT NULL,
+     market_id INTEGER NOT NULL,
+     side TEXT NOT NULL,
+     base TEXT NOT NULL,
+     mark_price TEXT NOT NULL,
+     entry_quote_micro TEXT NOT NULL,
+     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+     PRIMARY KEY (agent_id, mode, epoch, market_id)
+   )`,
+  "CREATE INDEX IF NOT EXISTS perp_carries_created ON perp_carries (created_at)",
+];
+
+/**
+ * COLUMNS A PERP TABLE GAINED AFTER ITS FIRST BUILD, in SQLITE_ALTERS, which
+ * runs after PERP_LEDGER_DDL. A book an earlier build made — the perps
+ * branch's paper runs — has the table without them, and CREATE TABLE IF NOT
+ * EXISTS never adds a column to a table that is there; on a fresh book the
+ * table already has them and the runner skips each.
+ */
+export const PERP_LEDGER_ALTERS: readonly string[] = [
+  // The level a paper position is protected at (paper.ts PaperPerpPosition.recordedStop).
+  "ALTER TABLE perp_positions ADD COLUMN recorded_stop_trigger TEXT",
+  "ALTER TABLE perp_positions ADD COLUMN recorded_stop_price TEXT",
+];
+
+/**
+ * THE VENUE'S TERMS ON AN EQUITY ROW (rule 12), one of the perp ledger's
+ * migrations, in SQLITE_ALTERS after PERP_LEDGER_DDL. Its own list so a test
+ * can name exactly what the change adds to `equity`.
+ */
+export const PERP_EQUITY_ALTERS: readonly string[] = [
+  // ── THE VENUE IN EQUITY (rule 12) ─────────────────────────────────────────
+  //
+  // perpAccountUsdg = C + ΣM_iso + ΣU + T, each term recorded beside the total
+  // so the identity closes, exactly as quarantinedCostUsdg did for the fourth
+  // spot term. C, ΣM and ΣU come from ONE /account response — its
+  // transaction_time (µs) is `perp_snapshot_time`. `perp_unrealized_gain_micro`
+  // is Σ max(0, U_i) PER POSITION, what every peak subtracts (peakBasis).
+  // `perp_in_transit_micro` is T_in + T_out. `cash_read_block` is the block
+  // the cash was read at, which payouts are folded against.
+  //
+  // NULLABLE WITH NO DEFAULT, the house rule: every row before this one never
+  // asked the question, and '0' would be a claim that it had and found none.
+  // A reader treats NULL as "this mark carried no perp term".
+  //
+  // `equity` IS ONE OF THE SHARED LEDGER'S HOTTEST TABLES, and an ADD COLUMN
+  // there takes an AccessExclusiveLock. Each runs once per database (the
+  // runner skips a column the catalog already has), and the runner waits a
+  // bounded time for that lock and retries rather than queueing every reader
+  // behind a long one (ledger-migrations.ts ADD_COLUMN_LOCK). On the shared
+  // ledger the mirror writes them, as columns it copies only when the child
+  // has them (ledger-mirror.ts LOG_TABLES, the equity entry's `optional`).
+  "ALTER TABLE equity ADD COLUMN perp_collateral_micro TEXT",
+  "ALTER TABLE equity ADD COLUMN perp_isolated_margin_micro TEXT",
+  "ALTER TABLE equity ADD COLUMN perp_unrealized_micro TEXT",
+  "ALTER TABLE equity ADD COLUMN perp_unrealized_gain_micro TEXT",
+  "ALTER TABLE equity ADD COLUMN perp_in_transit_micro TEXT",
+  "ALTER TABLE equity ADD COLUMN perp_snapshot_time INTEGER",
+  "ALTER TABLE equity ADD COLUMN cash_read_block INTEGER",
+];
 
 /**
  * Additive migrations, applied after the CREATE block on every open. Each is
@@ -670,6 +1145,16 @@ const SQLITE_ALTERS: string[] = [
     // NULLABLE, and null means "not said yet" — never "no energy". The mirror
     // keeps the last non-null value for the same reason it does for `mode`.
     "ALTER TABLE agents ADD COLUMN energy TEXT",
+    // ── THE AGENT'S PERPS, AS THE WORKER REPORTS THEM (docs/perps.md) ─────
+    //
+    // A JSON PerpsReport (core perps.ts; parsePerpsReport is the one reader),
+    // written by setAgentPerps from the perp lane (perps/lane.ts) — the
+    // `energy` precedent above, for the same reason: a standing condition (a
+    // leveraged position, an unread venue) cannot ride a log line forty newer
+    // events push out of view, and the mobile banner keys on it. NULLABLE,
+    // and null means "not said yet" — never "no positions": a reader shows
+    // unknown, and the mirror keeps the last non-null value.
+    "ALTER TABLE agents ADD COLUMN perps TEXT",
     // THE DAY'S HANDED-BACK ENTRY CLAIMS, a counter of their own that only
     // rises — so a refund survives the mirror's larger-wins copy up and the
     // seed's copy back down (energy-days.ts). Here for both the child's sqlite
@@ -800,7 +1285,12 @@ const SQLITE_ALTERS: string[] = [
     //
     // The chain comes from the agent's own grant rather than from config,
     // because that is the chain the transaction was actually on.
-    "UPDATE flows SET tx_hash = LOWER(tx_hash) WHERE tx_hash IS NOT NULL AND tx_hash <> LOWER(tx_hash)",
+    //
+    // ONLY AN EVM HASH IS FOLDED (EVM_TX_HASH above). This runs on every open,
+    // so a Solana signature booked as written would otherwise be lowercased on
+    // the next one, out from under its own row and its journal entry.
+    `UPDATE flows SET tx_hash = LOWER(tx_hash)
+       WHERE tx_hash IS NOT NULL AND tx_hash <> LOWER(tx_hash) AND ${EVM_TX_HASH_SQL}`,
     `UPDATE flows SET chain_id = (SELECT a.chain_id FROM agents a WHERE a.smart_account = flows.agent_id)
        WHERE chain_id IS NULL AND tx_hash IS NOT NULL`,
     // PARTIAL — AND NOT FOR THE REASON AN EARLIER DRAFT OF THIS COMMENT GAVE.
@@ -971,6 +1461,23 @@ const SQLITE_ALTERS: string[] = [
   // amounts since the class ledger shipped, and then dropped them on the floor.
   // This is where they land, so the difference survives the fold.
   "ALTER TABLE class_positions ADD COLUMN swept_raw TEXT",
+  // ── OWNER RECORDS ARE UNIQUE PER ACCOUNT, NOT ACROSS THE FLEET ─────────
+  //
+  // The first cut of owner_operations made (chain_id, user_op_hash) unique.
+  // In the shared Postgres that let one tenant's child pre-empt another
+  // tenant's genuine record by recording the same hash under its own account
+  // first. SQLITE_SCHEMA now builds owner_operations_account_identity on
+  // (chain_id, LOWER(agent_id), user_op_hash), and this drops the old index
+  // wherever an earlier build made it. Safe on a populated table: every row
+  // set the old index admitted, the per-account one admits too (it is a
+  // strictly weaker constraint), so the new index has already built by the
+  // time this runs; and IF EXISTS makes it a no-op everywhere else.
+  "DROP INDEX IF EXISTS owner_operations_identity",
+  // THE VENUE'S COLUMNS ON EQUITY (PERP_EQUITY_ALTERS), and the perp tables'
+  // later columns (PERP_LEDGER_ALTERS). The perp tables themselves are
+  // required objects, built BEFORE these (execPerpLedger), not best-effort.
+  ...PERP_EQUITY_ALTERS,
+  ...PERP_LEDGER_ALTERS,
 ];
 
 // Financial readers treat account casing as one account and scope every read
@@ -983,6 +1490,27 @@ const LEDGER_READ_INDEXES = [
   "CREATE INDEX IF NOT EXISTS flows_agent_run_normalized ON flows (LOWER(agent_id), epoch, at, id)",
   "CREATE INDEX IF NOT EXISTS trades_agent_run_normalized ON trades (LOWER(agent_id), epoch, created_at, id)",
 ];
+
+/**
+ * THE PERP TABLES ARE REQUIRED, NOT BEST-EFFORT. Every worker's budget readers
+ * (getOpsToday, getSpentTodayUsdg) and its paper reset read them, Spot's
+ * included, so a table that failed to build must stop setup, as a missing
+ * read index does, rather than be skipped with a warning and fail every tick
+ * after. Each statement on its own: IF NOT EXISTS makes a re-run nothing, and
+ * a second process building the same table at once (23505, 42P07, 42710 on
+ * Postgres) is retried until it reads as there.
+ */
+async function execPerpLedger(db: Db): Promise<void> {
+  for (const ddl of PERP_LEDGER_DDL) {
+    for (let run = 1; ; run++) {
+      try { await db.exec(ddl); break; }
+      catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (run >= 3 || (code !== "23505" && code !== "42P07" && code !== "42710")) throw error;
+      }
+    }
+  }
+}
 
 /** Each index is a standalone build; catalog races retry, other errors surface. */
 async function execReadIndexes(db: Db): Promise<void> {
@@ -1007,6 +1535,16 @@ function initSqlite(): Db {
   const db = new DatabaseSync(DB_FILE);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SQLITE_SCHEMA);
+  // HERE AND NOT IN SQLITE_SCHEMA: the seed lives only in a child's own sqlite
+  // (budget-seed.ts), and that batch is also the shared ledger's migration —
+  // applyLedgerSchema and initPostgres run it — where nothing would ever write
+  // or read the table.
+  db.exec(BUDGET_SEED_SCHEMA);
+  // Unlike ADD COLUMN compatibility, a failed build must not be swallowed:
+  // the perp tables (execPerpLedger), before the ALTERs that reach them, and
+  // the read indexes, after the ALTERs they need.
+  try { for (const ddl of PERP_LEDGER_DDL) db.exec(ddl); }
+  catch (error) { db.close(); throw error; }
   for (const ddl of SQLITE_ALTERS) {
     try {
       db.exec(ddl);
@@ -1014,7 +1552,6 @@ function initSqlite(): Db {
       // column already exists
     }
   }
-  // Unlike ADD COLUMN compatibility, a failed build must not be swallowed.
   try { for (const ddl of LEDGER_READ_INDEXES) db.exec(ddl); }
   catch (error) { db.close(); throw error; }
   // stderr, not stdout: `merrymen export` writes the audit journal to stdout,
@@ -1036,18 +1573,14 @@ function initSqlite(): Db {
  * schema would silently break the mirror's INSERT — caught, logged once,
  * invisible.
  *
- * Idempotent: CREATE TABLE IF NOT EXISTS, and each ALTER swallowed the way
- * initSqlite and initPostgres already swallow it.
+ * Existing columns are checked before issuing ALTER: PostgreSQL still takes
+ * an exclusive table lock for ADD COLUMN IF NOT EXISTS. Missing-column
+ * failures stop setup rather than leaving a partly migrated financial ledger.
  */
 export async function applyLedgerSchema(db: Db): Promise<void> {
   await execSchemaBatch(db);
-  for (const ddl of SQLITE_ALTERS) {
-    try {
-      await db.exec(ddl);
-    } catch {
-      // column already exists — the same no-op the two init paths rely on
-    }
-  }
+  await execPerpLedger(db);
+  await applyLedgerMigrations(db, SQLITE_ALTERS);
   await execReadIndexes(db);
 }
 
@@ -1086,16 +1619,7 @@ async function execSchemaBatch(db: Db): Promise<void> {
  *  Postgres dialect. Selected by DATABASE_URL, mirroring the grant store. */
 async function initPostgres(url: string): Promise<Db> {
   const d = await makePgDb(url);
-  await execSchemaBatch(d);
-  for (const ddl of SQLITE_ALTERS) {
-    try {
-      await d.exec(ddl);
-    } catch {
-      // ADD COLUMN IF NOT EXISTS makes a re-run a no-op; a genuine error still
-      // surfaces on the first real query rather than being masked here.
-    }
-  }
-  await execReadIndexes(d);
+  await applyLedgerSchema(d);
   console.error("[store] postgres ledger");
   return d;
 }
@@ -1129,6 +1653,30 @@ function getDb(): Db {
  * call it without knowing whether the store was ever touched.
  */
 export function closeStoreForTest(): void {
+  const open = ledgerFile;
+  ledgerFile = null;
+  driver = null;
+  open?.close();
+}
+
+/**
+ * Close the ledger ON THE WAY OUT: a worker that drained on SIGTERM (index.ts),
+ * after its intent chain emptied or its drain budget ran out.
+ *
+ * The sqlite file is closed, which checkpoints the write-ahead log into it, so
+ * whoever opens it next — the orchestrator's mirror, the next process — finds
+ * the database file whole by itself. WAL is crash-safe either way; this is a
+ * clean exit being clean, not the thing that makes an unclean one safe.
+ *
+ * The Postgres pool is left to the process exit: nothing is buffered in it, and
+ * a statement the exit cuts off is rolled back by the server, as for any
+ * dropped connection.
+ *
+ * NOTHING MAY BE WRITTEN AFTER THIS. Its one caller exits on the next line, in
+ * the same turn of the event loop, so no queued statement ever runs against the
+ * closed handle.
+ */
+export function closeStore(): void {
   const open = ledgerFile;
   ledgerFile = null;
   driver = null;
@@ -1357,8 +1905,10 @@ export async function addDecision(row: DecisionRow): Promise<void> {
         row.symbol ?? null,
         row.action ?? null,
         row.size_usdg ?? null,
-        row.reason ?? null,
-        row.dropped_rule ?? null,
+        // Free text that can be a caught error's (`no decision (…): <error>`),
+        // and the decision feed is public. See redact-urls.ts.
+        row.reason == null ? null : redactUrls(row.reason),
+        row.dropped_rule == null ? null : redactUrls(row.dropped_rule),
         row.signals_json ?? null,
         row.hold_kind ?? null,
         row.evidence_json ?? null,
@@ -1699,7 +2249,19 @@ export function journalHash(prevHash: string, payloadJson: string): string {
   return createHash("sha256").update(prevHash).update(payloadJson).digest("hex");
 }
 
-export type JournalKind = "fill" | "flow" | "mark" | "fee";
+/**
+ * The facts the chain records. The four perp kinds (docs/perps.md, "Ledger")
+ * are venue facts, never spot ones, so none of them is a `fill`:
+ *   perp-fill   a Lighter trade on our account (insertPerpFill);
+ *   funding     an hourly funding payment (insertPerpFunding);
+ *   margin      margin moving between the account and the venue — a step of
+ *               a perp_transfers row that moved money (upsertPerpTransfer);
+ *   perp-carry  an open position carried across an epoch boundary at mark.
+ * The contract's verifier refuses a kind it does not know rather than skipping
+ * it (docs/perps.md, "Verify"), so each of these must be taught to audit.ts's
+ * reconstruct before an agent that writes it is verified.
+ */
+export type JournalKind = "fill" | "flow" | "mark" | "fee" | "perp-fill" | "funding" | "margin" | "perp-carry";
 
 export interface JournalEntry {
   seq: number;
@@ -1889,7 +2451,28 @@ export async function hasEpochOneHistory(agentId: string): Promise<boolean> {
  * a source with real inference made every agent that crossed a boundary
  * permanently unable to evidence its contributions, with no recovery possible.
  */
-export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number): Promise<number> {
+export async function openNextEpoch(
+  agentId: string,
+  openingBalanceUsdg?: number,
+  /**
+   * EVERY PERP POSITION OPEN AT THE BOUNDARY, at mark (epoch-boundary-open-perps).
+   *
+   * The opening balance above is closing equity, and closing equity includes
+   * each open position's unrealized P&L. A later close would book realized P&L
+   * from the ORIGINAL entry and count that unrealized part a second time in
+   * the new epoch, and verify would read the double as contributions the
+   * record cannot support. So each position is carried in at mark, as the new
+   * epoch's entry for it — one `perp-carry` entry per position, in THIS
+   * transaction, so the boundary and its carries land together or not at all.
+   *
+   * Omitted or empty is byte-identical to before. The caller reads the marks;
+   * a position it cannot mark must stop the boundary, never be left out.
+   */
+  perpCarries: readonly PerpCarryInput[] = [],
+): Promise<number> {
+  // Checked before the transaction opens: a malformed carry must refuse the
+  // boundary without having bumped anything.
+  const carries = perpCarries.map(validPerpCarry);
   return getDb().tx(async (db) => {
     // Increment under the transaction's row lock rather than reading and then
     // assigning: concurrent PostgreSQL callers must not open the same epoch.
@@ -1915,6 +2498,10 @@ export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number
         await insertFlowWithJournal(db, flow, account.epoch, account.chain_id);
       }
     }
+    // Journaled under the same spelling as the opening balance above, into the
+    // epoch just opened. The same market twice in one list is one carry: the
+    // key admits the first and the second journals nothing.
+    for (const carry of carries) await writePerpCarry(db, agentId, account.epoch, carry);
     return account.epoch;
   });
 }
@@ -1970,7 +2557,9 @@ interface FlowAccount {
  */
 async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chainId: number | null): Promise<boolean> {
   const amount = Math.abs(flow.amountUsdg);
-  const txHash = flow.txHash ? flow.txHash.toLowerCase() : null;
+  // The row and its journal entry carry the one spelling: an EVM hash
+  // lowercased, any other exactly as written (ledgerTxHash).
+  const txHash = flow.txHash ? ledgerTxHash(flow.txHash) : null;
   const inserted = await db
     .prepare(
       `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
@@ -2136,6 +2725,73 @@ export async function bookCapitalFlow(
 }
 
 /**
+ * The first real funding of a positively identified untouched hosted live book.
+ * Explicit paper history belongs to its separate book and is retained. The complete
+ * receipt set, audit facts and capital peaks commit together: a crash cannot
+ * leave half an opening balance for the next bootstrap to mistake for history.
+ * An existing book is never reconstructed here, even when its net is zero.
+ */
+export async function bookInitialCapital(
+  agentId: string,
+  capital: import("./initial-capital").InitialCapital,
+): Promise<CapitalBooking> {
+  const refuse = (): CapitalBooking => ({ kind: "refused", why: "initial capital requires an untouched epoch-one live book and complete matching receipts" });
+  if (capital.account !== agentId.toLowerCase() || !Number.isSafeInteger(capital.chainId) || capital.chainId <= 0
+    || capital.cashUsdg6 <= 0n || capital.cashUsdg6 > BigInt(Number.MAX_SAFE_INTEGER)
+    || !capital.deposits.length || capital.deposits.length > 64 || !/^0x[0-9a-f]{64}$/i.test(capital.blockHash)) return refuse();
+  const keys = new Set<string>();
+  for (const d of capital.deposits) {
+    const key = `${d.txHash.toLowerCase()}:${d.logIndex}`;
+    if (!/^0x[0-9a-f]{64}$/i.test(d.txHash) || !Number.isSafeInteger(d.blockNumber) || d.blockNumber < 0
+      || BigInt(d.blockNumber) > capital.blockNumber || !Number.isSafeInteger(d.logIndex) || d.logIndex < 0
+      || !Number.isSafeInteger(d.at) || d.at <= 0 || d.amountUsdg6 <= 0n || keys.has(key)) return refuse();
+    keys.add(key);
+  }
+  if (capital.deposits.reduce((sum, d) => sum + d.amountUsdg6, 0n) !== capital.cashUsdg6) return refuse();
+  if (capital.deposits.some(d => BigInt(Math.round((Number(d.amountUsdg6) / 1e6) * 1e6)) !== d.amountUsdg6)
+    || BigInt(Math.round(capital.deposits.reduce((sum, d) => sum + Number(d.amountUsdg6) / 1e6, 0) * 1e6)) !== capital.cashUsdg6) return refuse();
+  return getDb().tx(async (db): Promise<CapitalBooking> => {
+    const account = await db.prepare(`UPDATE agents SET epoch = epoch WHERE smart_account = ?
+      RETURNING epoch, chain_id, mode, hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg`).get(agentId) as
+      (FlowAccount & { hwm_usdg: number; hwm_withdrawn_usdg: number; accrued_fee_usdg: number }) | undefined;
+    if (!account || account.epoch !== 1 || account.chain_id !== capital.chainId || account.mode !== "live"
+      || Number(account.hwm_withdrawn_usdg) !== 0 || Number(account.accrued_fee_usdg) !== 0) return refuse();
+    const prior = await db.prepare(`SELECT direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id
+      FROM flows WHERE LOWER(agent_id) = LOWER(?)`).all(agentId) as Array<{
+        direction: string; amount_usdg: number; tx_hash: string | null; block_number: number | null;
+        log_index: number | null; source: string; epoch: number; chain_id: number | null;
+      }>;
+    if (prior.length) {
+      // Only a complete, exact retry is idempotent. Partial or inferred history
+      // needs the separate maintenance path, never a top-up of this batch.
+      if (prior.length !== capital.deposits.length || Number(account.hwm_usdg) !== Number(capital.cashUsdg6) / 1e6
+        || prior.some(p => !capital.deposits.some(d => p.tx_hash?.toLowerCase() === d.txHash.toLowerCase()
+          && p.log_index === d.logIndex && p.block_number === d.blockNumber && p.amount_usdg === Number(d.amountUsdg6) / 1e6
+          && p.direction === "in" && p.source === "chain-log" && p.epoch === 1 && p.chain_id === capital.chainId))) return refuse();
+      if (!await initialCapitalHistoryEmpty(db, agentId, { ignoreFlows: true, bookedCashUsdg: Number(capital.cashUsdg6) / 1e6 })) return refuse();
+      return { kind: "already" };
+    }
+    if (Number(account.hwm_usdg) !== 0) return refuse();
+    if (!await initialCapitalHistoryEmpty(db, agentId, { ignoreFlows: true, heldCashUsdg: Number(capital.cashUsdg6) / 1e6 })) return refuse();
+    if (await db.prepare("SELECT 1 FROM journal WHERE LOWER(agent_id) = LOWER(?) AND kind = 'flow' LIMIT 1").get(agentId)) return refuse();
+    for (const d of capital.deposits) {
+      const inserted = await insertFlowWithJournal(db, { agentId, direction: "in", amountUsdg: Number(d.amountUsdg6) / 1e6,
+        source: "chain-log", txHash: d.txHash, blockNumber: d.blockNumber, logIndex: d.logIndex,
+        mode: "live", chainId: capital.chainId }, 1, capital.chainId);
+      if (!inserted) throw new Error("Initial capital receipt identity changed during booking");
+    }
+    await applyHwmDelta(db, agentId, Number(capital.cashUsdg6) / 1e6);
+    await appendJournalRow(db, agentId, 1, "mark", { initialCapital: {
+      chainId: capital.chainId, blockNumber: capital.blockNumber.toString(), blockHash: capital.blockHash,
+      cashUsdg6: capital.cashUsdg6.toString(), receipts: capital.deposits.map(d => ({
+        txHash: d.txHash.toLowerCase(), logIndex: d.logIndex, blockNumber: d.blockNumber, at: d.at, amountUsdg6: d.amountUsdg6.toString(),
+      })),
+    } });
+    return { kind: "booked", epoch: 1 };
+  });
+}
+
+/**
  * Has this exact chain log already been booked as a flow?
  *
  * `addFlow` CANNOT ANSWER THIS. It inserts `ON CONFLICT DO NOTHING` and then
@@ -2161,7 +2817,9 @@ export async function hasChainFlow(
   try {
     const row = await getDb()
       .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? AND log_index = ? LIMIT 1")
-      .get(agentId, txHash.toLowerCase(), logIndex);
+      // The spelling insertFlowWithJournal wrote it under (ledgerTxHash): a
+      // plain toLowerCase() would miss a signature booked as written.
+      .get(agentId, ledgerTxHash(txHash), logIndex);
     return row !== undefined && row !== null;
   } catch (e) {
     console.error("[store] flow lookup failed:", e);
@@ -2182,7 +2840,10 @@ export async function hasFlowForTx(agentId: string, txHash: string): Promise<boo
   try {
     const row = await getDb()
       .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? LIMIT 1")
-      .get(agentId, txHash.toLowerCase());
+      // The spelling insertFlowWithJournal wrote it under (ledgerTxHash). A
+      // plain toLowerCase() misses a signature booked as written, and the
+      // resolver would then book the same transfer a second time.
+      .get(agentId, ledgerTxHash(txHash));
     return row !== undefined && row !== null;
   } catch (e) {
     console.error("[store] flow-for-tx lookup failed:", e);
@@ -2400,6 +3061,30 @@ export async function lastChainLogBlock(agentId: string): Promise<number | null>
 }
 
 /**
+ * WOULD A SCAN RESUMING FROM THIS MARK READ MONEY INFERENCE ALREADY BOOKED?
+ *
+ * The deposit scan resumes from its last chain-log block (above) and tells a
+ * booked log by its identity, tx#logIndex. An inferred flow has none, so a scan
+ * resuming below one would book the same deposit again — contributions twice,
+ * and both peaks raised twice for good. True when any inferred flow was booked
+ * at or after the receipts at `markBlock` were, less `slackSec` for a receipt
+ * booked late after its block: the scan then opens at the head instead
+ * (index.ts scanChainFlows). Over every epoch, as the mark is.
+ */
+export async function inferredFlowSinceChainLog(agentId: string, markBlock: number, slackSec = 3600): Promise<boolean> {
+  const row = await getDb()
+    .prepare(
+      `SELECT 1 AS n FROM flows
+        WHERE agent_id = ? AND source = 'inferred'
+          AND at >= (SELECT COALESCE(MAX(at), 0) FROM flows
+                      WHERE agent_id = ? AND source = 'chain-log' AND block_number = ?) - ?
+        LIMIT 1`,
+    )
+    .get(agentId, agentId, markBlock, slackSec);
+  return row !== undefined && row !== null;
+}
+
+/**
  * Flow keys already recorded from block `fromBlock` onward.
  *
  * The scan re-reads its last block every pass — a block can carry several
@@ -2440,6 +3125,30 @@ export async function recentTradeTxHashes(agentId: string, limit = 2000): Promis
     )
     .all(agentId, limit)) as { tx_hash: string }[];
   return new Set(rows.map((r) => r.tx_hash.toLowerCase()));
+}
+
+/**
+ * THE OPERATIONS THE LEDGER'S TRADE ROWS IN ONE TRANSACTION ARE: their
+ * user-operation hashes, lowercased — or null when any row in it carries none,
+ * since such a row could be any operation of the transaction. Every row of the
+ * transaction, whatever its status or age (no recency bound: a misbooked
+ * root-key 'swap' row must be found however many rows came after it).
+ *
+ * The deposit scanner asks this only of a trade's transaction whose receipt
+ * shows the owner's own root operation moving USDG of the account
+ * (deposit-log.ts findTransferFlows, `tradeOpsInTx`), so it is rare and never
+ * on the trading path.
+ */
+export async function tradeOpsInTx(agentId: string, txHash: string): Promise<Set<string> | null> {
+  const rows = (await getDb()
+    .prepare(`SELECT user_op_hash FROM trades WHERE agent_id = ? AND LOWER(tx_hash) = ?`)
+    .all(agentId, txHash.toLowerCase())) as { user_op_hash: string | null }[];
+  const ops = new Set<string>();
+  for (const r of rows) {
+    if (!r.user_op_hash) return null;
+    ops.add(r.user_op_hash.toLowerCase());
+  }
+  return ops;
 }
 
 /**
@@ -2562,6 +3271,33 @@ export async function lastKnownCashReading(agentId: string): Promise<{ cashUsdg:
       )
       .get(agentId, epoch) as { cash_usdg: number; read_at: number } | undefined;
     return row ? { cashUsdg: Number(row.cash_usdg), at: Number(row.read_at) } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE BLOCK THAT SAME READING'S CASH WAS READ AT — the payout cursor's start
+ * (docs/perps.md rule 12: payouts are folded against block-pinned reads). The
+ * very row lastKnownCashReading returns, so the cash and its block are one
+ * observation. A separate function rather than a third field on that one,
+ * whose shape a dozen restart tests pin.
+ *
+ * NULL is "not known", for three different reasons a caller must treat alike:
+ * no reading, a reading from before the column existed, or a failed read. A
+ * payout fold with no block infers nothing (rule 11).
+ */
+export async function lastKnownCashReadBlock(agentId: string): Promise<number | null> {
+  try {
+    const epoch = await epochOf(agentId);
+    const row = (await getDb()
+      .prepare(
+        `SELECT cash_read_block FROM equity
+          WHERE agent_id = ? AND epoch = ? AND COALESCE(flows_held, 0) = 0
+          ORDER BY at DESC, id DESC LIMIT 1`,
+      )
+      .get(agentId, epoch)) as { cash_read_block: number | null } | undefined;
+    return row && row.cash_read_block !== null && row.cash_read_block !== undefined ? Number(row.cash_read_block) : null;
   } catch {
     return null;
   }
@@ -2704,7 +3440,9 @@ export async function finishCommand(id: string, result: string): Promise<void> {
   try {
     await getDb()
       .prepare("UPDATE agent_commands SET done_at = unixepoch(), result = ? WHERE id = ?")
-      .run(result.slice(0, 500), id);
+      // The owner's receipt for a command, and a failed one is an error's text.
+      // Redacted before the cut, so no half of a key is left (redact-urls.ts).
+      .run(redactUrls(result).slice(0, 500), id);
   } catch {
     /* the command ran; losing its receipt must not re-run it */
   }
@@ -2787,6 +3525,20 @@ export async function setAgentEnergy(agentId: string, json: string | null): Prom
     await getDb().prepare("UPDATE agents SET energy = ? WHERE smart_account = ?").run(json, agentId);
   } catch {
     /* the next tick reports again */
+  }
+}
+
+/**
+ * Publish the worker's perps report (core PerpsReport, as JSON) on the agents
+ * row — setAgentEnergy's twin, best-effort for the same reason: a report that
+ * fails to write must never take a tick or a protective pass down, and the
+ * next one writes a fresh one.
+ */
+export async function setAgentPerps(agentId: string, json: string | null): Promise<void> {
+  try {
+    await getDb().prepare("UPDATE agents SET perps = ? WHERE smart_account = ?").run(json, agentId);
+  } catch {
+    /* the next pass reports again */
   }
 }
 
@@ -3027,9 +3779,12 @@ export async function addEvent(
   message: string,
 ): Promise<void> {
   try {
+    // An event is the owner's dashboard and the mirror's copy of it, and its
+    // message is often a caught error's text — which names the RPC URL, key
+    // and all, whenever viem raised it (redact-urls.ts).
     await getDb()
       .prepare("INSERT INTO events (agent_id, level, message) VALUES (?, ?, ?)")
-      .run(agentId, level, message);
+      .run(agentId, level, redactUrls(message));
   } catch (e) {
     console.error("[store] event insert failed:", e);
   }
@@ -3116,6 +3871,10 @@ async function fillSymbolOfRow(row: TradeRow): Promise<string | null> {
  * the reservation release drop it.
  */
 export async function addTrade(row: TradeRow): Promise<boolean> {
+  // reject_rule is free text on the `couldn't submit: <error>` path, and the
+  // error is viem's, URL and key included. Redacted before anything reads the
+  // row, so the hash chain and both writes below see the same value.
+  if (row.reject_rule) row = { ...row, reject_rule: redactUrls(row.reject_rule) };
   try {
     const epoch = await epochOf(row.agent_id);
     // Before any write, and outside the journal's transaction: two reads at most.
@@ -3150,6 +3909,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
                     gas_wei = ?, sponsored_gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?,
+                    trade_fee_usdg = ?,
                     fill_symbol = COALESCE(?, fill_symbol),
                     budget_settled_at = CASE WHEN ? IN ('landed', 'reverted') THEN unixepoch() ELSE budget_settled_at END
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
@@ -3181,6 +3941,10 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
             row.fill_cash_usdg ?? null,
             row.gas_usdg ?? null,
             row.gas_units ?? null,
+            // This is the normal live path: assessment arrives with settlement,
+            // after the submitted placeholder. Missing remains unassessed, not
+            // free, just as on the no-placeholder INSERT path below.
+            row.trade_fee_usdg ?? null,
             // COALESCE: a resolution that knows no name (a stranded op resolved
             // from its receipt) keeps the one the placeholder was written with.
             fillSymbol,
@@ -3355,10 +4119,51 @@ export async function addEquity(
      * own `at` is the insert, which a mid-tick op can precede.
      */
     cashReadAt?: number;
+    /**
+     * THE VENUE'S TERMS OF THE COMPOSITION (rule 12), written beside the total
+     * for the same reason as quarantinedCostUsdg: so the identity closes.
+     * perpAccountUsdg = collateral + isolatedMargin + unrealized + inTransit,
+     * all integer micro-USDG, C/M/U from ONE /account response whose
+     * transaction_time (µs) is `snapshotTime`. `unrealizedGainMicro` is
+     * Σ max(0, U_i) per position — what every peak subtracts (peakBasis), and
+     * what a checkpoint's HWM rebuild takes back off.
+     *
+     * Absent means this mark carried no perp term, and then nothing is
+     * written: the columns stay NULL and the journal payload is byte-identical
+     * to every mark before perps existed. A KNOWN zero (an agent with no perps
+     * marker, rule 11) is passed as zeros and recorded as zeros.
+     */
+    perp?: {
+      collateralMicro: bigint;
+      isolatedMarginMicro: bigint;
+      unrealizedMicro: bigint;
+      unrealizedGainMicro: bigint;
+      inTransitMicro: bigint;
+      snapshotTime: number | null;
+    };
+    /**
+     * The block the cash was read AT (inclusive): the Multicall getBlockNumber
+     * read in the same aggregate as balanceOf. Payouts (WithdrawPending to this
+     * account) are folded against it, so it is recorded with the reading.
+     */
+    cashReadBlock?: bigint | number;
   },
 ): Promise<void> {
   try {
     const epoch = await epochOf(agentId);
+    // Canonical text, validated BEFORE the transaction: a malformed term is no
+    // equity row at all (rule 11), never a row whose terms do not add up.
+    const perp = b.perp
+      ? {
+          collateralMicro: intText(b.perp.collateralMicro, "perp collateral"),
+          isolatedMarginMicro: intText(b.perp.isolatedMarginMicro, "perp isolated margin", { min: 0n }),
+          unrealizedMicro: intText(b.perp.unrealizedMicro, "perp unrealized"),
+          unrealizedGainMicro: intText(b.perp.unrealizedGainMicro, "perp unrealized gain", { min: 0n }),
+          inTransitMicro: intText(b.perp.inTransitMicro, "perp in transit", { min: 0n }),
+          snapshotTime: b.perp.snapshotTime === null ? null : Number(intText(b.perp.snapshotTime, "perp snapshot time", { min: 0n })),
+        }
+      : null;
+    const cashReadBlock = b.cashReadBlock === undefined ? null : Number(intText(b.cashReadBlock, "cash read block", { min: 0n }));
     await journaled(
       agentId,
       epoch,
@@ -3386,23 +4191,57 @@ export async function addEquity(
         // which is exactly the distinction we want on the wire.
         quarantinedCostUsdg: b.quarantinedCostUsdg,
         vaultUsdg: b.vaultUsdg,
+        // Only when the caller passed them — undefined is dropped, so a mark
+        // with no perp term hashes exactly as it did before perps existed.
+        // Strings, because the terms are micro-USDG integers and a verifier
+        // must not meet them as floats.
+        cashReadBlock: cashReadBlock ?? undefined,
+        perpCollateralMicro: perp?.collateralMicro,
+        perpInTransitMicro: perp?.inTransitMicro,
+        perpIsolatedMarginMicro: perp?.isolatedMarginMicro,
+        perpSnapshotTime: perp ? perp.snapshotTime : undefined,
+        perpUnrealizedGainMicro: perp?.unrealizedGainMicro,
+        perpUnrealizedMicro: perp?.unrealizedMicro,
       },
       async (db: Db) => {
+        const spot = [
+          agentId,
+          b.ethWei.toString(),
+          b.cashUsdg,
+          b.vaultUsdg,
+          b.positionsUsdg,
+          b.equityUsdg,
+          epoch,
+          b.mode,
+          b.flowsHeld === true ? 1 : 0,
+          b.cashReadAt ?? null,
+        ];
+        // THE VENUE'S COLUMNS ONLY WHEN THERE IS A VENUE TERM. An agent with no
+        // perps writes exactly the row it always wrote (PERP_EQUITY_ALTERS).
+        if (perp === undefined && cashReadBlock === null) {
+          await db
+            .prepare(
+              "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(...spot);
+          return;
+        }
         await db
           .prepare(
-            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at,
+                                 perp_collateral_micro, perp_isolated_margin_micro, perp_unrealized_micro,
+                                 perp_unrealized_gain_micro, perp_in_transit_micro, perp_snapshot_time, cash_read_block)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
-            agentId,
-            b.ethWei.toString(),
-            b.cashUsdg,
-            b.vaultUsdg,
-            b.positionsUsdg,
-            b.equityUsdg,
-            epoch,
-            b.mode,
-            b.flowsHeld === true ? 1 : 0,
-            b.cashReadAt ?? null,
+            ...spot,
+            perp?.collateralMicro ?? null,
+            perp?.isolatedMarginMicro ?? null,
+            perp?.unrealizedMicro ?? null,
+            perp?.unrealizedGainMicro ?? null,
+            perp?.inTransitMicro ?? null,
+            perp?.snapshotTime ?? null,
+            cashReadBlock,
           );
       },
     );
@@ -3504,20 +4343,135 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
 }
 
 /**
+ * A CAP READER'S SUM, WITH THE TRAILING DAY A REBUILT CHILD WAS GIVEN BACK
+ * (budget-seed.ts) — in ONE statement, so the child's rows and the seed are
+ * read from one snapshot, and an operation written between two reads can be
+ * neither counted twice nor missed.
+ *
+ *   figure      what one ledger row adds to this cap: `amount_usdg`, or 1 for an op
+ *   where       the reader's own predicate on a ledger row, its window included
+ *   seedFigure  the same figure on a seed row
+ *
+ * Per seed row STILL INSIDE THE SEED'S OWN WINDOW (pending, or settled within
+ * 24h), keyed by operation hash:
+ *   - the child's ledger holds no row for it → the seed's figure;
+ *   - it holds one that has stopped counting — reverted, dropped, settled more
+ *     than 24h ago → nothing: the child's row is the later word;
+ *   - it holds one that still counts → what the seed says ABOVE the child's
+ *     own figure for it, never below zero. The reconciler's bare copy of a
+ *     transfer is a swap, so for the transfer allowance this is the whole
+ *     transfer; for spend and ops it is nothing when the two agree.
+ * A seed row past its window adds nothing in any case: that is where the cap
+ * before the rebuild let it go, and the child's own copy, while it still
+ * counts, keeps counting through `own`.
+ *
+ * WHAT THIS COSTS, because it is paid on every refreshBudget — every tick,
+ * after every recordTrade — and node:sqlite is synchronous, so it is paid by
+ * the child's whole event loop: a stop-loss, Telegram, the heartbeat. Three
+ * subqueries per seed row, each an equality SEEK on trades_agent_userop
+ * (agent_id, user_op_hash). Not lower(user_op_hash): an expression no index
+ * serves range-scanned every hashed row the agent ever wrote, per subquery per
+ * seed row — measured at 0.4-0.9 s a refresh at 20k rows and 48 seeds, a year
+ * of trading. Both hashes are written lowercase — viem hands the executor and
+ * the reconciler lowercase hex, and readBudgetSeed lowers the shared side — so
+ * the plain match finds every copy the child wrote. One spelt otherwise is not
+ * found, and the seed then counts in full beside it: over, never under. And
+ * only seed rows still in their window are visited — the ones that have aged
+ * out stay in the table until the next seed replaces it, and must not cost.
+ *
+ * The seed is the LIVE rail's (a paper fill has no hash to count it once by),
+ * so only a live reader adds it — and only on a sqlite ledger, the only kind
+ * the orchestrator seeds and the only kind with the table (initSqlite). A
+ * store on the shared Postgres reads exactly what it read before.
+ * `own + seeded` is the cap's settled half.
+ *
+ * Exported for its query-plan test (budget-seed.test.ts), not for use.
+ */
+export function withBudgetSeed(q: {
+  agentId: string;
+  rail: BudgetRail;
+  figure: string;
+  where: string;
+  params: readonly unknown[];
+  seedFigure: string;
+  seedParams?: readonly unknown[];
+}): { sql: string; params: unknown[] } {
+  const own = `SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE agent_id = ? AND ${q.where}`;
+  getDb(); // opened first, so `ledgerFile` says which backend this is
+  if (q.rail !== "live" || !ledgerFile) return { sql: `SELECT (${own}) AS own, 0 AS seeded`, params: [q.agentId, ...q.params] };
+  const live = railFilter("live");
+  const sameOp = "agent_id = ? AND user_op_hash = s.op_hash";
+  return {
+    sql: `SELECT (${own}) AS own,
+      (SELECT COALESCE(SUM(CASE WHEN k.known = 0 THEN k.x
+                                WHEN k.counting = 0 THEN 0
+                                WHEN k.x > k.own_x THEN k.x - k.own_x
+                                ELSE 0 END), 0)
+         FROM (SELECT ${q.seedFigure} AS x,
+                      (SELECT COUNT(*) FROM trades WHERE ${sameOp}) AS known,
+                      (SELECT COUNT(*) FROM trades WHERE ${sameOp} AND status IN (${live.sql})
+                         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)) AS counting,
+                      (SELECT COALESCE(SUM(${q.figure}), 0) FROM trades WHERE ${sameOp} AND ${q.where}) AS own_x
+                 FROM budget_seed s
+                WHERE lower(s.agent_id) = lower(?)
+                  AND (s.pending = 1 OR s.settled_at > unixepoch() - 86400)) k) AS seeded`,
+    params: [
+      q.agentId, ...q.params,
+      ...(q.seedParams ?? []),
+      q.agentId,
+      q.agentId, ...live.params,
+      q.agentId, ...q.params,
+      q.agentId,
+    ],
+  };
+}
+
+/** Run a withBudgetSeed reader: the two halves, as numbers whatever the backend returned them as. */
+async function seededSum(q: { sql: string; params: unknown[] }): Promise<number> {
+  const row = (await getDb().prepare(q.sql).get(...q.params)) as { own?: unknown; seeded?: unknown } | undefined;
+  return Number(row?.own ?? 0) + Number(row?.seeded ?? 0);
+}
+
+/**
+ * Is the trailing day from before this ledger was rebuilt still missing
+ * (budget-seed.ts)? The orchestrator's seed has not put it back, so no cap
+ * here can be read as complete: refreshBudget reads the day as spent, and
+ * getTransferredTodayUsdg refuses to answer.
+ */
+export function budgetDayUnrestored(): boolean {
+  return budgetUnrestored(merrymenHome());
+}
+
+/**
  * Settled-op count in the trailing 24h, plus every unresolved live operation.
  * A pending operation never releases its slot merely because it is old; when
  * it lands, its 24h window starts at observed settlement, not submission.
+ * Plus, on the live rail, the seeded operations this ledger does not already
+ * count (withBudgetSeed).
+ *
+ * PERP ORDERS COUNT HERE, AND ONLY HERE (docs/perps.md, "Budgets"). An L2 order
+ * is never a `trades` row (the trades boundary), so a count of `trades` alone
+ * forgot every perp order at the next refreshBudget and at every restart: the
+ * in-flight reservation covers an op only until its row is written. The perp
+ * part is added INSIDE this function rather than by the caller because
+ * refreshBudget already calls this, and one sum in one place cannot be
+ * counted twice or forgotten by a second call site. perpOpsSince is exported
+ * for readers that want the perp part alone — never add it to this. It keeps
+ * the same clock as the trades half: unresolved counts whatever its age.
  */
 export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): Promise<number> {
   const { sql, params } = railFilter(rail);
-  const row = await getDb()
-    .prepare(
-      `SELECT COUNT(*) AS n FROM trades
-       WHERE agent_id = ? AND status IN (${sql})
-         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId, ...params) as { n: number } | undefined;
-  return row?.n ?? 0;
+  const trades = await seededSum(
+    withBudgetSeed({
+      agentId,
+      rail,
+      figure: "1",
+      where: `status IN (${sql}) AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
+      params,
+      seedFigure: "1",
+    }),
+  );
+  return trades + (await perpOpsSince(agentId, rail, Math.floor(Date.now() / 1000) - 86_400));
 }
 
 /** Rename the agent — the user-given merryman name (shown on the dashboard). */
@@ -3554,22 +4508,53 @@ export async function setAgentName(agentId: string, name: string): Promise<void>
   }
 }
 
-/** Pending transfers reserve allowance until resolved; settled spend rolls for 24h. */
+/**
+ * Pending transfers reserve allowance until resolved; settled spend rolls for 24h.
+ *
+ * THROWS while the trailing day from before a rebuild is not back
+ * (budgetDayUnrestored): the transfers it holds are somewhere this ledger
+ * cannot see, and an allowance nobody can read never authorizes a send — the
+ * caller reads the throw as unreadable (transfer-budget.ts).
+ */
 export async function getTransferredTodayUsdg(agentId: string): Promise<number> {
-  const row = await getDb()
-    .prepare(
-      `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN ('landed', 'submitted') AND kind = 'transfer'
+  if (budgetDayUnrestored()) {
+    throw new Error("the trailing day's transfers from before this ledger was rebuilt are not restored yet");
+  }
+  return seededSum(
+    withBudgetSeed({
+      agentId,
+      rail: "live",
+      figure: "amount_usdg",
+      where: `status IN ('landed', 'submitted') AND kind = 'transfer'
          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId) as { spent: number } | undefined;
-  return row?.spent ?? 0;
+      params: [],
+      seedFigure: "s.transfer_usdg",
+    }),
+  );
 }
 
 /**
  * Settled spend in the trailing 24h plus unresolved live reservations.
  * Same rail split as getOpsToday, and for the same reason: simulated spend must
  * not consume a real allowance.
+ *
+ * PERPS, BOTH HALVES (docs/perps.md, "Budgets"; rule 6):
+ *
+ *   the on-chain legs are trades rows. `perp-deposit` COUNTS, exactly as
+ *   `vault-deposit` does: it is USDG leaving through the wall, the money rule
+ *   4 says can be lost, and exempting it would relax the daily cap to make a
+ *   perp trade fit — which is not this function's call to make. `perp-claim`
+ *   is money coming HOME and is excluded beside `vault-withdraw`; `perp-key`
+ *   (the changePubKey registration) moves no USDG and is excluded too. Both
+ *   still count as ops (getOpsToday).
+ *
+ *   the day's opening notional is not in `trades` at all (the trades
+ *   boundary), so it is added from perp_orders HERE — the same one place, for
+ *   the same reason, as getOpsToday's perp count: refreshBudget already calls
+ *   this, and a second call site is how a sum is counted twice or not at all.
+ *   Summed as integer micro-USDG and converted once, at the boundary of this
+ *   function's number. perpOpenNotionalSince is exported for readers that want
+ *   the perp part alone — never add it to this.
  */
 export async function getSpentTodayUsdg(
   agentId: string,
@@ -3585,14 +4570,26 @@ export async function getSpentTodayUsdg(
   const sells = cashToken
     ? ` AND NOT (kind IN ('swap', 'curve-trade') AND LOWER(COALESCE(buy_token, '')) = ?)`
     : "";
-  const row = await getDb()
-    .prepare(
-      `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'${sells}
+  const trades = await seededSum(
+    withBudgetSeed({
+      agentId,
+      rail,
+      figure: "amount_usdg",
+      where: `status IN (${sql}) AND kind NOT IN ('vault-withdraw', 'perp-claim', 'perp-key')${sells}
          AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
-    )
-    .get(agentId, ...params, ...(cashToken ? [cashToken.toLowerCase()] : [])) as { spent: number } | undefined;
-  return row?.spent ?? 0;
+      params: [...params, ...(cashToken ? [cashToken.toLowerCase()] : [])],
+      // THE SAME EXEMPTION ON THE SEED: its net spend where it was read for
+      // this cash token, its gross otherwise — never less than this reader
+      // would have counted had the rows been its own.
+      seedFigure: "CASE WHEN s.cash_token = ? THEN s.spend_usdg ELSE s.gross_usdg END",
+      seedParams: [cashToken ? cashToken.toLowerCase() : null],
+    }),
+  );
+  // The perp opens (the PERPS paragraph above), on the same clock as the trades half.
+  const perpMicro = await perpOpenNotionalSince(agentId, rail, Math.floor(Date.now() / 1000) - 86_400);
+  // Exact below 2^53 micro-USDG (nine billion USDG); the caller converts the
+  // whole back to micro with usdg().
+  return trades + Number(perpMicro) / 1e6;
 }
 
 /**
@@ -3631,7 +4628,45 @@ export async function listOpHashes(agentId: string): Promise<Set<string>> {
     .all(agentId)) as { user_op_hash: string | null }[];
   const set = new Set<string>();
   for (const r of rows) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
+  // AND EVERY OWNER OPERATION ALREADY RECORDED (recordOwnerOperation), so a
+  // later arm does not find it again. Best effort: a read that fails leaves
+  // the op to be found and recorded again, which its unique identity makes a
+  // no-op — never a trades row (index.ts reconcileInFlightAtArm).
+  try {
+    const owner = (await getDb()
+      .prepare(`SELECT user_op_hash FROM owner_operations WHERE agent_id = ?`)
+      .all(agentId)) as { user_op_hash: string | null }[];
+    for (const r of owner) if (r.user_op_hash) set.add(r.user_op_hash.toLowerCase());
+  } catch {
+    // an older ledger without the table records no owner operation yet
+  }
   return set;
+}
+
+/**
+ * RECORD AN OPERATION THE OWNER'S OWN KEY SIGNED — never as a trade.
+ *
+ * One INSERT with a unique identity, (chain_id, LOWER(agent_id), user_op_hash), ON CONFLICT DO
+ * NOTHING: 'inserted' the first time, 'present' after, so a crash on either
+ * side of it leaves nothing to replay (the record moves no money, and a
+ * second insert changes nothing). 'failed' on any error, and NEVER a fallback
+ * to a trades row: an owner operation left unrecorded is found again at the
+ * next arm, and is still never booked as the agent's.
+ */
+export async function recordOwnerOperation(row: OwnerOperationRow): Promise<"inserted" | "present" | "failed"> {
+  try {
+    const cols = OWNER_OPERATION_COLUMNS;
+    const res = await getDb()
+      .prepare(
+        `INSERT INTO owner_operations (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
+         ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) DO NOTHING`,
+      )
+      .run(...cols.map((c) => row[c]));
+    return Number(res.changes) > 0 ? "inserted" : "present";
+  } catch (e) {
+    console.error("[store] owner operation not recorded:", e instanceof Error ? e.message : String(e));
+    return "failed";
+  }
 }
 
 /**
@@ -3933,10 +4968,15 @@ export async function lastChatTurnAt(chatId: number): Promise<number | null> {
 /** Forget one chat's conversation — what /forget must actually do now that
  * turns persist to disk rather than dying with the process. */
 export async function clearChatTurns(chatId: number): Promise<void> {
+  // DM turns are the personal ferry's scope. Legacy group rows stay local;
+  // current group privacy is handled by its own memory/forget journal.
+  const request = chatId > 0 ? recordPersonalMemoryForget({ kind: "chat", chatId }) : null;
   try {
     await getDb().prepare("DELETE FROM chat_turns WHERE chat_id = ?").run(chatId);
-  } catch (e) {
-    console.error("[store] chat turn clear failed:", e);
+    if (request) completePersonalMemoryForget(request);
+  } catch {
+    console.error("[store] chat turn clear failed; durable forget will be retried");
+    throw new Error("conversation could not yet be forgotten");
   }
 }
 
@@ -4152,6 +5192,20 @@ export async function getPaperBook(agentId: string, startUsdg: number): Promise<
  *
  * The caller checks its current execution rail; this store also requires the
  * durable agent to report paper before clearing any derived position cache.
+ *
+ * PAPER PERPS GO WITH IT, in the same transaction:
+ *   perp_positions  — scoped `mode = 'paper'`: on paper these rows ARE the
+ *                     book (there is no venue behind them), so deleting them is
+ *                     closing every simulated position. The live cache is a
+ *                     different key and is never touched.
+ *   perp_accounts   — the paper cross collateral goes to '0'. The nonce
+ *                     high-water does NOT: it only ever rises, so no client
+ *                     order index is reused after a reset either.
+ *   open paper legs and orders — cancelled, so no simulated stop outlives the
+ *                     position it protected. Fills and funding stay, behind the
+ *                     epoch like the trade rows.
+ * One transaction because a reset that cleared the cash but not the collateral
+ * (or the reverse) is a book that no longer adds up.
  */
 export async function resetPaperLedger(agentId: string, startUsdg: number): Promise<number> {
   if (!Number.isFinite(startUsdg) || startUsdg < 0) throw new Error("paper opening cash must be finite and non-negative");
@@ -4170,6 +5224,27 @@ export async function resetPaperLedger(agentId: string, startUsdg: number): Prom
     await db.prepare("DELETE FROM positions WHERE LOWER(agent_id) = LOWER(?)").run(account.smart_account);
     await db.prepare("DELETE FROM cost_basis WHERE LOWER(agent_id) = LOWER(?) AND mode = 'paper'").run(account.smart_account);
     await db.prepare("DELETE FROM position_floors WHERE LOWER(agent_id) = LOWER(?) AND mode = 'paper'").run(account.smart_account);
+    const perpAccount = account.smart_account.toLowerCase();
+    await db.prepare("DELETE FROM perp_positions WHERE agent_id = ? AND mode = 'paper'").run(perpAccount);
+    await db
+      .prepare(
+        `UPDATE perp_accounts SET paper_collateral_micro = '0', updated_at = unixepoch()
+          WHERE agent_id = ? AND mode = 'paper'`,
+      )
+      .run(perpAccount);
+    await db
+      .prepare(
+        `UPDATE perp_order_legs SET status = 'cancelled', venue_status = 'paper-reset', updated_at = unixepoch()
+          WHERE agent_id = ? AND mode = 'paper' AND status IN ('submitted', 'pending', 'open')`,
+      )
+      .run(perpAccount);
+    await db
+      .prepare(
+        `UPDATE perp_orders SET status = 'cancelled', reason = COALESCE(reason, 'paper-reset'),
+                resolved_at = unixepoch(), updated_at = unixepoch()
+          WHERE agent_id = ? AND mode = 'paper' AND status IN ('submitted', 'executed')`,
+      )
+      .run(perpAccount);
     const epoch = Number(account.epoch);
     await writePaperOpening(db, account.smart_account, epoch, startUsdg);
     return epoch;
@@ -5242,4 +6317,2205 @@ export async function setClassFirstSeen(
   } catch (e) {
     console.error("[store] class first_seen update failed:", e);
   }
+}
+
+// ══ PERPETUALS: THE LEDGER (docs/perps.md, "Ledger", rules 9, 10 and 12) ══════
+//
+// Three kinds of writer live here, and they fail differently on purpose.
+//
+//   JOURNALED FACTS — insertPerpFill, insertPerpFunding, upsertPerpTransfer,
+//   recordPerpCarry. The venue is authoritative for what happened and the
+//   ledger records it ONCE (rule 10): each inserts its row and appends its
+//   hash-chained journal entry in one transaction, and appends ONLY when the
+//   insert actually inserted — insertFlowWithJournal's `changes === 1` gate,
+//   not journaled()'s unconditional append, because an ingest re-reads the
+//   same trades on every reconcile and a re-read must not journal a fill
+//   twice. They THROW on a failed write: an ingest cursor must not move past
+//   a fact that was not booked.
+//
+//   OPERATIONAL ROWS — the rule-9 order rows, their legs, the nonce
+//   high-water, positions and the account row. Not money facts, so not
+//   journaled; they are what makes a signed transaction impossible to replay
+//   after a crash. insertPerpOrderSubmitted throws PerpNotRecorded on ANY
+//   failure, and the caller sends nothing.
+//
+//   BUDGET READS — perpOpenNotionalSince and perpOpsSince, already inside
+//   getSpentTodayUsdg and getOpsToday. They throw rather than answer zero.
+//
+// Every perp row's agent_id is the account LOWERCASED; the journal is keyed by
+// the agents row's own spelling (perpBookingOf). Every input is validated
+// before the first write, so a malformed fact refuses the whole transaction
+// rather than landing half-checked.
+
+export type {
+  PerpAttribution,
+  PerpLegRole,
+  PerpLegStatus,
+  PerpMode,
+  PerpOrderEffect,
+  PerpOrderStatus,
+  PerpTradeType,
+  PerpTransferDirection,
+  PerpTransferInitiator,
+  PerpTransferState,
+} from "./perp-ledger-rules";
+
+/** A perp row's agent id, as every perp table stores it. */
+function perpAgent(agentId: string): string {
+  if (typeof agentId !== "string" || agentId.trim() === "") throw new RangeError("perp ledger: an agent id is required");
+  return agentId.toLowerCase();
+}
+
+function perpMode(mode: unknown): PerpMode {
+  if (!isPerpMode(mode)) throw new RangeError(`perp ledger: mode ${String(mode)} is neither 'paper' nor 'live'`);
+  return mode;
+}
+
+function safeInt(v: unknown, what: string, min = 0, max = Number.MAX_SAFE_INTEGER): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < min || v > max) {
+    throw new RangeError(`perp ledger: ${what} ${String(v)} is not an integer in [${min}, ${max}]`);
+  }
+  return v;
+}
+
+function optSafeInt(v: unknown, what: string, min = 0, max = Number.MAX_SAFE_INTEGER): number | null {
+  return v === null || v === undefined ? null : safeInt(v, what, min, max);
+}
+
+function optInt(v: bigint | null | undefined, what: string, opts: { min?: bigint } = {}): string | null {
+  return v === null || v === undefined ? null : intText(v, what, opts);
+}
+
+function oneOf<T extends string>(v: unknown, allowed: readonly T[], what: string): T {
+  if (typeof v !== "string" || !(allowed as readonly string[]).includes(v)) {
+    throw new RangeError(`perp ledger: ${what} ${String(v)} is not one of ${allowed.join(", ")}`);
+  }
+  return v as T;
+}
+
+/** A hash as stored: lowercase hex, `0x`-prefixed or not by kind. `hexLen` pins the length when the kind has one. */
+function hashText(v: unknown, what: string, opts: { prefixed: boolean; hexLen?: number }): string {
+  if (typeof v !== "string") throw new RangeError(`perp ledger: ${what} is not a string`);
+  const s = v.toLowerCase();
+  const body = opts.prefixed ? (s.startsWith("0x") ? s.slice(2) : null) : s.replace(/^0x/, "");
+  if (body === null || !/^[0-9a-f]+$/.test(body) || (opts.hexLen !== undefined && body.length !== opts.hexLen)) {
+    throw new RangeError(`perp ledger: ${what} ${JSON.stringify(v)} is not a ${opts.hexLen ?? ""}-hex hash`);
+  }
+  return opts.prefixed ? `0x${body}` : body;
+}
+
+/** An identifier the venue or the paper engine gave a fact: short, printable, never empty. */
+function idText(v: unknown, what: string): string {
+  if (typeof v !== "string" || !/^[A-Za-z0-9:._-]{1,128}$/.test(v)) {
+    throw new RangeError(`perp ledger: ${what} ${JSON.stringify(v)} is not a usable identifier`);
+  }
+  return v;
+}
+
+/** The market's key for the journal ("BTC-PERP"), or null for a market we never trade (still booked). */
+function marketKeyOf(marketId: number): string | null {
+  return perpMarketById(marketId)?.key ?? null;
+}
+
+/**
+ * THE EPOCH TO BOOK INTO AND THE SPELLING TO JOURNAL UNDER, read inside the
+ * writer's own transaction.
+ *
+ * The no-op UPDATE is addFlow's device: on Postgres it holds this agent's row
+ * until commit, so a fact cannot be booked into an epoch openNextEpoch is
+ * closing at the same instant; sqlite serialises the transaction anyway.
+ *
+ * THE JOURNAL IS KEYED BY THE AGENTS ROW'S SPELLING, not by the lowercased id
+ * the perp tables use. Every other writer journals under grant.smartAccount —
+ * EIP-55 as often as not — and a perp fact chained under the lowercase
+ * spelling would start a second hash chain beside the agent's real one, which
+ * a verifier reads as a hole in the first. With no agents row (a ledger that
+ * has not armed) the fact is booked into epoch 1 under the id as given —
+ * addFlow's fallback.
+ */
+async function perpBookingOf(db: Db, agentId: string): Promise<{ epoch: number; journalAs: string }> {
+  const row = (await db
+    .prepare(
+      `UPDATE agents SET epoch = epoch WHERE LOWER(smart_account) = LOWER(?)
+       RETURNING epoch, smart_account`,
+    )
+    .get(agentId)) as { epoch: number; smart_account: string } | undefined;
+  return row ? { epoch: Number(row.epoch), journalAs: row.smart_account } : { epoch: 1, journalAs: agentId };
+}
+
+/**
+ * One transaction: the booking read, the domain write, and — only when the
+ * write says something happened — its journal entry. journaled()'s gated twin:
+ * that function takes the epoch before its transaction and appends whatever
+ * the write did, which is right for a mark and wrong for an idempotent ingest.
+ */
+async function perpJournaled<T>(
+  agentId: string,
+  kind: JournalKind,
+  write: (db: Db, epoch: number) => Promise<{ result: T; payload: unknown | null }>,
+): Promise<T> {
+  return getDb().tx(async (db) => {
+    const { epoch, journalAs } = await perpBookingOf(db, agentId);
+    const { result, payload } = await write(db, epoch);
+    if (payload !== null) await appendJournalRow(db, journalAs, epoch, kind, payload);
+    return result;
+  });
+}
+
+/**
+ * Extra writes that must land with a fact or not at all — the paper book's
+ * collateral and position moving with its own fill, say. Called inside the
+ * fact's transaction, and ONLY when the fact was actually booked, so a re-read
+ * of a fill can never move the paper book twice. Anything it throws rolls the
+ * fact back with it.
+ */
+export type PerpWith = (db: Db) => Promise<void>;
+
+// ── fills ────────────────────────────────────────────────────────────────────
+
+export interface PerpFillInput {
+  agentId: string;
+  mode: PerpMode;
+  /** `trade_id_str` on the venue; the paper engine's own id on paper. */
+  venueTradeId: string;
+  /** Which side of the trade was OURS — a self-trade is two fills, one each. */
+  sideRole: "ask" | "bid";
+  marketId: number;
+  /** The POSITION side this fill trades (long for an opening bid AND its closing ask) — never "sell". */
+  side: PerpSide;
+  role?: "maker" | "taker" | null;
+  /** Venue base units, > 0. */
+  base: bigint;
+  /** Venue price units, > 0. */
+  price: bigint;
+  /** The venue's usd_amount, micro-USDG. */
+  quoteMicro: bigint;
+  /** Signed: a maker rebate is negative. */
+  feeMicro: bigint;
+  /** Null until derived — unknown, never zero. */
+  realizedMicro?: bigint | null;
+  /** Signed base before this fill, so realized can be re-derived. */
+  positionBefore?: bigint | null;
+  entryQuoteBeforeMicro?: bigint | null;
+  tradeType: PerpTradeType;
+  attribution: PerpAttribution;
+  /** Our perp_orders row, when the fill is ours by intent. */
+  orderId?: string | null;
+  venueOrderIndex?: string | null;
+  clientOrderIndex?: number | null;
+  /** The venue tx that produced the trade (80 hex, no 0x). */
+  venueTxHash?: string | null;
+  /** The venue's trade timestamp, MILLISECONDS. */
+  venueTsMs: number;
+}
+
+/**
+ * What an idempotent insert did. `duplicate` is the ordinary re-read — the
+ * same fact, already booked, nothing written. `mismatch` is the same identity
+ * with DIFFERENT venue facts: nothing is overwritten (the first booking
+ * stands), and the caller must treat it as a book gap, because either the
+ * venue changed its story or our parse did.
+ */
+export type PerpInsertOutcome = "inserted" | "duplicate" | "mismatch";
+
+/**
+ * BOOK A FILL, by the venue's identity, with its `perp-fill` journal entry —
+ * once. See the section header for the contract; `opts.with` for the writes
+ * that must move with it.
+ */
+export async function insertPerpFill(fill: PerpFillInput, opts: { with?: PerpWith } = {}): Promise<PerpInsertOutcome> {
+  const agent = perpAgent(fill.agentId);
+  const mode = perpMode(fill.mode);
+  const venueTradeId = idText(fill.venueTradeId, "venue trade id");
+  const sideRole = oneOf(fill.sideRole, ["ask", "bid"] as const, "side role");
+  const marketId = safeInt(fill.marketId, "market id", 0, 65_535);
+  const side = oneOf(fill.side, ["long", "short"] as const, "side");
+  const role = fill.role === null || fill.role === undefined ? null : oneOf(fill.role, ["maker", "taker"] as const, "role");
+  const base = intText(fill.base, "fill base", { min: 1n });
+  const price = intText(fill.price, "fill price", { min: 1n });
+  const quote = intText(fill.quoteMicro, "fill quote", { min: 0n });
+  const fee = intText(fill.feeMicro, "fill fee");
+  const realized = optInt(fill.realizedMicro, "realized");
+  const positionBefore = optInt(fill.positionBefore, "position before");
+  const entryQuoteBefore = optInt(fill.entryQuoteBeforeMicro, "entry quote before");
+  const tradeType = oneOf(fill.tradeType, PERP_TRADE_TYPES, "trade type");
+  const attribution = oneOf(fill.attribution, PERP_ATTRIBUTIONS, "attribution");
+  const orderId = fill.orderId === null || fill.orderId === undefined ? null : idText(fill.orderId, "order id");
+  const venueOrderIndex = fill.venueOrderIndex === null || fill.venueOrderIndex === undefined ? null : intText(fill.venueOrderIndex, "venue order index", { min: 0n });
+  const coi = optSafeInt(fill.clientOrderIndex, "client order index", 0, Number(PERP_COI_MAX));
+  const venueTxHash = fill.venueTxHash === null || fill.venueTxHash === undefined ? null : hashText(fill.venueTxHash, "venue tx hash", { prefixed: false });
+  const venueTsMs = safeInt(fill.venueTsMs, "venue timestamp (ms)", 1);
+
+  return perpJournaled(fill.agentId, "perp-fill", async (db, epoch) => {
+    const res = await db
+      .prepare(
+        `INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, role, base, price,
+                                 quote_micro, fee_micro, realized_micro, position_before, entry_quote_before_micro,
+                                 trade_type, attribution, order_id, venue_order_index, client_order_index,
+                                 venue_tx_hash, venue_ts_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`,
+      )
+      .run(agent, mode, epoch, venueTradeId, sideRole, marketId, side, role, base, price, quote, fee, realized,
+        positionBefore, entryQuoteBefore, tradeType, attribution, orderId, venueOrderIndex, coi, venueTxHash, venueTsMs);
+    if (Number(res.changes) === 0) {
+      const held = (await db
+        .prepare(
+          `SELECT market_id, side, base, price, quote_micro, fee_micro, trade_type FROM perp_fills
+            WHERE agent_id = ? AND mode = ? AND venue_trade_id = ? AND side_role = ?`,
+        )
+        .get(agent, mode, venueTradeId, sideRole)) as Record<string, unknown> | undefined;
+      // The venue facts only: realized and attribution are OUR derivations and
+      // may legitimately differ on a re-read that knows more.
+      const same =
+        held !== undefined &&
+        Number(held.market_id) === marketId &&
+        held.side === side &&
+        held.base === base &&
+        held.price === price &&
+        held.quote_micro === quote &&
+        held.fee_micro === fee &&
+        held.trade_type === tradeType;
+      return { result: same ? "duplicate" : "mismatch", payload: null };
+    }
+    if (opts.with) await opts.with(db);
+    return {
+      result: "inserted",
+      payload: {
+        attribution,
+        base,
+        clientOrderIndex: coi,
+        entryQuoteBeforeMicro: entryQuoteBefore,
+        feeMicro: fee,
+        market: marketKeyOf(marketId),
+        marketId,
+        mode,
+        orderId,
+        positionBefore,
+        price,
+        quoteMicro: quote,
+        realizedMicro: realized,
+        role,
+        side,
+        sideRole,
+        tradeType,
+        venueOrderIndex,
+        venueTradeId,
+        venueTsMs,
+        venueTxHash,
+      },
+    };
+  });
+}
+
+// ── funding ──────────────────────────────────────────────────────────────────
+
+export interface PerpFundingInput {
+  agentId: string;
+  mode: PerpMode;
+  marketId: number;
+  /** The venue's funding_id; the paper engine's own id on paper. */
+  fundingId: string;
+  /** Unix SECONDS, on the hour. */
+  fundingHour: number;
+  /** Signed: + received, − paid. */
+  paymentMicro: bigint;
+  ratePpm?: number | null;
+  positionBase?: bigint | null;
+  positionSide?: PerpSide | null;
+}
+
+/** `hour-conflict`: that (market, hour) is already booked under ANOTHER funding id — one payment, never two. */
+export type PerpFundingOutcome = PerpInsertOutcome | "hour-conflict";
+
+/** BOOK A FUNDING PAYMENT with its `funding` journal entry — once per id, and once per market-hour. */
+export async function insertPerpFunding(f: PerpFundingInput, opts: { with?: PerpWith } = {}): Promise<PerpFundingOutcome> {
+  const agent = perpAgent(f.agentId);
+  const mode = perpMode(f.mode);
+  const marketId = safeInt(f.marketId, "market id", 0, 65_535);
+  const fundingId = idText(f.fundingId, "funding id");
+  const fundingHour = safeInt(f.fundingHour, "funding hour", 0);
+  if (fundingHour % 3600 !== 0) throw new RangeError(`perp ledger: funding hour ${fundingHour} is not on the hour`);
+  const payment = intText(f.paymentMicro, "funding payment");
+  const ratePpm = optSafeInt(f.ratePpm, "funding rate (ppm)", -1_000_000, 1_000_000);
+  const positionBase = optInt(f.positionBase, "funding position base", { min: 0n });
+  const positionSide =
+    f.positionSide === null || f.positionSide === undefined ? null : oneOf(f.positionSide, ["long", "short"] as const, "position side");
+
+  return perpJournaled(f.agentId, "funding", async (db, epoch) => {
+    const res = await db
+      .prepare(
+        `INSERT INTO perp_funding (agent_id, mode, epoch, market_id, funding_id, funding_hour, payment_micro,
+                                   rate_ppm, position_base, position_side)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`,
+      )
+      .run(agent, mode, epoch, marketId, fundingId, fundingHour, payment, ratePpm, positionBase, positionSide);
+    if (Number(res.changes) === 0) {
+      const held = (await db
+        .prepare(`SELECT funding_hour, payment_micro FROM perp_funding WHERE agent_id = ? AND mode = ? AND market_id = ? AND funding_id = ?`)
+        .get(agent, mode, marketId, fundingId)) as { funding_hour: number; payment_micro: string } | undefined;
+      if (held === undefined) return { result: "hour-conflict", payload: null };
+      const same = Number(held.funding_hour) === fundingHour && held.payment_micro === payment;
+      return { result: same ? "duplicate" : "mismatch", payload: null };
+    }
+    if (opts.with) await opts.with(db);
+    return {
+      result: "inserted",
+      payload: {
+        fundingHour,
+        fundingId,
+        market: marketKeyOf(marketId),
+        marketId,
+        mode,
+        paymentMicro: payment,
+        positionBase,
+        positionSide,
+        ratePpm,
+      },
+    };
+  });
+}
+
+// ── transfers ────────────────────────────────────────────────────────────────
+
+export interface PerpTransferInput {
+  agentId: string;
+  mode: PerpMode;
+  /** Omit to have one made; pass it to address a row you already hold. */
+  id?: string;
+  direction: PerpTransferDirection;
+  /** > 0, micro-USDG. Immutable once written. */
+  amountMicro: bigint;
+  initiator: PerpTransferInitiator;
+  state: PerpTransferState;
+  /** The chain log that proves the row (a Deposit, or an unrequested payout's WithdrawPending). */
+  chainId?: number | null;
+  txHash?: string | null;
+  logIndex?: number | null;
+  /** Our own UserOp (a deposit's). */
+  userOpHash?: string | null;
+  /** Our L2 Withdraw's tx hash (80 hex, no 0x). */
+  venueTxHash?: string | null;
+  /** The payout that covered a withdrawal — not an identity (one payout can cover several). */
+  paidTxHash?: string | null;
+  paidLogIndex?: number | null;
+}
+
+export type PerpTransferOutcome =
+  /** A new row; `journaled` when it was born already carrying money (landed, executed, paid…). */
+  | { outcome: "inserted"; id: string; state: PerpTransferState; journaled: boolean }
+  /** An existing row moved forward; `journaled` when the step moved money. */
+  | { outcome: "advanced"; id: string; from: PerpTransferState; state: PerpTransferState; journaled: boolean }
+  /** Already at or past that state: nothing moved (a missing identity column may have been filled). */
+  | { outcome: "unchanged"; id: string; state: PerpTransferState }
+  /** The input contradicts the row it names — another direction, amount or identity. Nothing written. */
+  | { outcome: "refused"; id: string | null; why: string };
+
+interface TransferRowDb {
+  id: string;
+  direction: string;
+  amount_micro: string;
+  initiator: string;
+  state: string;
+  chain_id: number | null;
+  tx_hash: string | null;
+  log_index: number | null;
+  user_op_hash: string | null;
+  venue_tx_hash: string | null;
+  paid_tx_hash: string | null;
+  paid_log_index: number | null;
+}
+
+/**
+ * WRITE OR ADVANCE ONE MARGIN TRANSFER, and journal `margin` on every step
+ * that moved money (perp-ledger-rules.ts perpTransferMovesMoney).
+ *
+ * THE ROW IS FOUND BY ANY IDENTITY IT HAS — its id, its chain log, our L2
+ * Withdraw's hash, our UserOp — so the same deposit learned first from the
+ * UserOp rail and later from the proxy's log is one row, not two, and a re-read
+ * after a crash advances the row it already wrote. Two identities that name
+ * two different rows is a contradiction and is refused.
+ *
+ * STATES ONLY MOVE FORWARD. A lower or equal rank is `unchanged` — the venue
+ * history is allowed to lag and must never walk a paid withdrawal back into
+ * transit (the margin-in-transit amendment: "the venue history only ever
+ * moves a row forward"). Identity columns are filled when empty and never
+ * overwritten. Paper transfers are instantaneous: write them straight into
+ * their final state.
+ */
+export async function upsertPerpTransfer(
+  t: PerpTransferInput,
+  opts: { with?: PerpWith } = {},
+): Promise<PerpTransferOutcome> {
+  const agent = perpAgent(t.agentId);
+  const mode = perpMode(t.mode);
+  const direction = oneOf(t.direction, PERP_TRANSFER_DIRECTIONS, "transfer direction");
+  const state = oneOf(t.state, PERP_TRANSFER_STATES, "transfer state");
+  if (!perpTransferStateFits(direction, state)) throw new RangeError(`perp ledger: a ${direction} is never '${state}'`);
+  const amount = intText(t.amountMicro, "transfer amount", { min: 1n });
+  const initiator = oneOf(t.initiator, PERP_TRANSFER_INITIATORS, "initiator");
+  const id = t.id === undefined ? null : idText(t.id, "transfer id");
+  const chainId = optSafeInt(t.chainId, "chain id", 1);
+  const txHash = t.txHash === null || t.txHash === undefined ? null : hashText(t.txHash, "tx hash", { prefixed: true, hexLen: 64 });
+  const logIndex = optSafeInt(t.logIndex, "log index");
+  // A tx hash is unique only within a chain: an identity without its chain is
+  // no identity, and NULLs are distinct in the unique index, which would then
+  // admit the same log twice.
+  if (txHash !== null && chainId === null) throw new RangeError("perp ledger: a transfer's tx hash needs its chain id");
+  const userOpHash = t.userOpHash === null || t.userOpHash === undefined ? null : hashText(t.userOpHash, "user op hash", { prefixed: true, hexLen: 64 });
+  const venueTxHash = t.venueTxHash === null || t.venueTxHash === undefined ? null : hashText(t.venueTxHash, "venue tx hash", { prefixed: false });
+  const paidTxHash = t.paidTxHash === null || t.paidTxHash === undefined ? null : hashText(t.paidTxHash, "paid tx hash", { prefixed: true, hexLen: 64 });
+  const paidLogIndex = optSafeInt(t.paidLogIndex, "paid log index");
+
+  const payloadOf = (rowId: string, from: PerpTransferState | null, to: PerpTransferState, row: Partial<TransferRowDb>) => ({
+    amountMicro: amount,
+    chainId: row.chain_id ?? chainId,
+    direction,
+    from,
+    initiator: row.initiator ?? initiator,
+    logIndex: row.log_index ?? logIndex,
+    mode,
+    paidLogIndex: row.paid_log_index ?? paidLogIndex,
+    paidTxHash: row.paid_tx_hash ?? paidTxHash,
+    to,
+    transferId: rowId,
+    txHash: row.tx_hash ?? txHash,
+    userOpHash: row.user_op_hash ?? userOpHash,
+    venueTxHash: row.venue_tx_hash ?? venueTxHash,
+  });
+
+  try {
+    return await perpJournaled<PerpTransferOutcome>(t.agentId, "margin", async (db, epoch) => {
+      const cols = `id, direction, amount_micro, initiator, state, chain_id, tx_hash, log_index, user_op_hash,
+                    venue_tx_hash, paid_tx_hash, paid_log_index`;
+      const found = new Map<string, TransferRowDb>();
+      const look = async (sql: string, ...args: unknown[]) => {
+        const r = (await db.prepare(`SELECT ${cols} FROM perp_transfers WHERE agent_id = ? AND mode = ? AND ${sql}`).get(agent, mode, ...args)) as
+          | TransferRowDb
+          | undefined;
+        if (r) found.set(r.id, r);
+      };
+      if (id !== null) {
+        const any = (await db.prepare(`SELECT agent_id, mode FROM perp_transfers WHERE id = ?`).get(id)) as
+          | { agent_id: string; mode: string }
+          | undefined;
+        if (any && (any.agent_id !== agent || any.mode !== mode)) {
+          return { result: { outcome: "refused", id, why: "that id belongs to another agent or rail" }, payload: null };
+        }
+        await look("id = ?", id);
+      }
+      if (chainId !== null && txHash !== null && logIndex !== null) await look("chain_id = ? AND tx_hash = ? AND log_index = ?", chainId, txHash, logIndex);
+      if (venueTxHash !== null) await look("venue_tx_hash = ?", venueTxHash);
+      if (userOpHash !== null) await look("user_op_hash = ?", userOpHash);
+      if (found.size > 1) {
+        return { result: { outcome: "refused", id, why: `its identities name ${found.size} different rows` }, payload: null };
+      }
+      const held = [...found.values()][0];
+
+      if (held === undefined) {
+        const rowId = id ?? randomUUID();
+        await db
+          .prepare(
+            `INSERT INTO perp_transfers (id, agent_id, mode, epoch, direction, amount_micro, initiator, state, chain_id,
+                                         tx_hash, log_index, user_op_hash, venue_tx_hash, paid_tx_hash, paid_log_index)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(rowId, agent, mode, epoch, direction, amount, initiator, state, chainId, txHash, logIndex, userOpHash,
+            venueTxHash, paidTxHash, paidLogIndex);
+        const moved = perpTransferMovesMoney(null, state);
+        if (opts.with) await opts.with(db);
+        return {
+          result: { outcome: "inserted", id: rowId, state, journaled: moved },
+          payload: moved ? payloadOf(rowId, null, state, {}) : null,
+        };
+      }
+
+      // The row it names must be the row described: a different direction or
+      // amount is not a later state of this transfer, it is another transfer.
+      if (held.direction !== direction) return { result: { outcome: "refused", id: held.id, why: `it is a ${held.direction}` }, payload: null };
+      if (held.amount_micro !== amount) {
+        return { result: { outcome: "refused", id: held.id, why: `its amount is ${held.amount_micro}, not ${amount}` }, payload: null };
+      }
+      // An identity, once written, is the row's for good: filled when empty,
+      // never replaced. A different value is a different transfer.
+      let learns = false;
+      for (const [name, a, b] of [
+        ["chain id", held.chain_id, chainId],
+        ["tx hash", held.tx_hash, txHash],
+        ["log index", held.log_index, logIndex],
+        ["user op", held.user_op_hash, userOpHash],
+        ["venue tx", held.venue_tx_hash, venueTxHash],
+        ["paid tx", held.paid_tx_hash, paidTxHash],
+        ["paid log index", held.paid_log_index, paidLogIndex],
+      ] as const) {
+        if (b === null) continue;
+        if (a === null || a === undefined) {
+          learns = true;
+          continue;
+        }
+        if (String(a) !== String(b)) {
+          return { result: { outcome: "refused", id: held.id, why: `its ${name} is ${String(a)}, not ${String(b)}` }, payload: null };
+        }
+      }
+      const from = held.state as PerpTransferState;
+      const forward = PERP_TRANSFER_RANK[state] > (PERP_TRANSFER_RANK[from] ?? Number.POSITIVE_INFINITY);
+      // A re-read that adds nothing writes nothing — not even updated_at, which
+      // the mirror's cursor reads.
+      if (!forward && !learns) return { result: { outcome: "unchanged", id: held.id, state: from }, payload: null };
+      const res = await db
+        .prepare(
+          `UPDATE perp_transfers
+              SET state = ?, chain_id = COALESCE(chain_id, ?), tx_hash = COALESCE(tx_hash, ?),
+                  log_index = COALESCE(log_index, ?), user_op_hash = COALESCE(user_op_hash, ?),
+                  venue_tx_hash = COALESCE(venue_tx_hash, ?), paid_tx_hash = COALESCE(paid_tx_hash, ?),
+                  paid_log_index = COALESCE(paid_log_index, ?), updated_at = unixepoch()
+            WHERE id = ? AND state = ?`,
+        )
+        .run(forward ? state : from, chainId, txHash, logIndex, userOpHash, venueTxHash, paidTxHash, paidLogIndex, held.id, from);
+      if (!forward || Number(res.changes) === 0) {
+        return { result: { outcome: "unchanged", id: held.id, state: from }, payload: null };
+      }
+      const moved = perpTransferMovesMoney(from, state);
+      if (opts.with) await opts.with(db);
+      return {
+        result: { outcome: "advanced", id: held.id, from, state, journaled: moved },
+        payload: moved ? payloadOf(held.id, from, state, held) : null,
+      };
+    });
+  } catch (e) {
+    // The one write failure that is an ANSWER rather than a fault: an identity
+    // this row was about to take is already another row's. Everything else is
+    // a failed write, and throws.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/UNIQUE constraint|duplicate key value/i.test(msg) || (e as { code?: unknown }).code === "23505") {
+      return { outcome: "refused", id, why: "an identity it names is already another transfer's" };
+    }
+    throw e;
+  }
+}
+
+/**
+ * Every transfer still moving, oldest first: not yet `credited`, `paid`,
+ * `failed` or `refunded`. What holds the ratchets (rule 12c: while money is in
+ * transit no peak moves) and what a restart must find.
+ */
+export async function listOpenPerpTransfers(agentId: string, mode: PerpMode): Promise<PerpTransferRow[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT * FROM perp_transfers WHERE agent_id = ? AND mode = ? AND state IN ('submitted', 'landed', 'executed')
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .all(perpAgent(agentId), perpMode(mode))) as Record<string, unknown>[];
+  return rows.map(transferRowOf);
+}
+
+export interface PerpTransferRow {
+  id: string;
+  agentId: string;
+  mode: PerpMode;
+  epoch: number;
+  direction: PerpTransferDirection;
+  amountMicro: bigint;
+  initiator: PerpTransferInitiator;
+  state: PerpTransferState;
+  chainId: number | null;
+  txHash: string | null;
+  logIndex: number | null;
+  userOpHash: string | null;
+  venueTxHash: string | null;
+  paidTxHash: string | null;
+  paidLogIndex: number | null;
+  /** The rule-9 row of the L2 Withdraw that requested it, when there is one. */
+  orderId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+function nullableNum(v: unknown): number | null {
+  return v === null || v === undefined ? null : Number(v);
+}
+
+function transferRowOf(r: Record<string, unknown>): PerpTransferRow {
+  const amount = textInt(r.amount_micro);
+  if (amount === null) throw new Error(`perp_transfers ${String(r.id)}: amount ${String(r.amount_micro)} is unreadable`);
+  return {
+    id: String(r.id),
+    agentId: String(r.agent_id),
+    mode: r.mode as PerpMode,
+    epoch: Number(r.epoch),
+    direction: r.direction as PerpTransferDirection,
+    amountMicro: amount,
+    initiator: r.initiator as PerpTransferInitiator,
+    state: r.state as PerpTransferState,
+    chainId: nullableNum(r.chain_id),
+    txHash: (r.tx_hash as string | null) ?? null,
+    logIndex: nullableNum(r.log_index),
+    userOpHash: (r.user_op_hash as string | null) ?? null,
+    venueTxHash: (r.venue_tx_hash as string | null) ?? null,
+    paidTxHash: (r.paid_tx_hash as string | null) ?? null,
+    paidLogIndex: nullableNum(r.paid_log_index),
+    orderId: (r.order_id as string | null) ?? null,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  };
+}
+
+// ── carries across an epoch boundary ─────────────────────────────────────────
+
+export interface PerpCarryInput {
+  mode: PerpMode;
+  marketId: number;
+  side: PerpSide;
+  /** |position|, venue base units, > 0. */
+  base: bigint;
+  /** The mark the position is carried at, venue price units. */
+  markPrice: bigint;
+  /** mark × size, micro-USDG: the position's entry quote in the new epoch. */
+  entryQuoteMicro: bigint;
+}
+
+interface ValidCarry {
+  mode: PerpMode;
+  marketId: number;
+  side: PerpSide;
+  base: string;
+  markPrice: string;
+  entryQuoteMicro: string;
+}
+
+function validPerpCarry(c: PerpCarryInput): ValidCarry {
+  return {
+    mode: perpMode(c.mode),
+    marketId: safeInt(c.marketId, "market id", 0, 65_535),
+    side: oneOf(c.side, ["long", "short"] as const, "carry side"),
+    base: intText(c.base, "carry base", { min: 1n }),
+    markPrice: intText(c.markPrice, "carry mark", { min: 1n }),
+    entryQuoteMicro: intText(c.entryQuoteMicro, "carry entry quote", { min: 0n }),
+  };
+}
+
+/** Insert one carry into an open transaction and journal it — only if it was not already there. */
+async function writePerpCarry(db: Db, journalAs: string, epoch: number, c: ValidCarry): Promise<boolean> {
+  const res = await db
+    .prepare(
+      `INSERT INTO perp_carries (agent_id, mode, epoch, market_id, side, base, mark_price, entry_quote_micro)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+    )
+    .run(perpAgent(journalAs), c.mode, epoch, c.marketId, c.side, c.base, c.markPrice, c.entryQuoteMicro);
+  if (Number(res.changes) === 0) return false;
+  await appendJournalRow(db, journalAs, epoch, "perp-carry", {
+    base: c.base,
+    entryQuoteMicro: c.entryQuoteMicro,
+    market: marketKeyOf(c.marketId),
+    marketId: c.marketId,
+    markPrice: c.markPrice,
+    mode: c.mode,
+    side: c.side,
+  });
+  return true;
+}
+
+/**
+ * Carry one open position into the agent's CURRENT epoch at mark — for a
+ * boundary that was opened without its carries. openNextEpoch's `perpCarries`
+ * is the atomic path and the one to use. True when this booked it; false when
+ * the epoch already held a carry for that market.
+ */
+export async function recordPerpCarry(agentId: string, carry: PerpCarryInput): Promise<boolean> {
+  const c = validPerpCarry(carry);
+  perpAgent(agentId);
+  return getDb().tx(async (db) => {
+    const { epoch, journalAs } = await perpBookingOf(db, agentId);
+    return writePerpCarry(db, journalAs, epoch, c);
+  });
+}
+
+// ── rule 9: persist before send ──────────────────────────────────────────────
+
+/**
+ * REFUSING TO SEND UNTRACKED — executor.ts NotRecorded's venue twin, named
+ * apart so both can be imported beside each other.
+ *
+ * The `submitted` row carrying the exact signed bytes could not be written,
+ * so this transaction would leave with nothing able to resolve it after a
+ * crash, and nothing to stop a second nonce being signed for the same intent
+ * while the first could still execute. Nothing was sent; the caller must not
+ * send. `reason` is a fixed phrase, never the signed bytes.
+ */
+export class PerpNotRecorded extends Error {
+  constructor(
+    readonly reason: string,
+    readonly txHash: string | null,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `refusing to send ${txHash ?? "a perp order"}: its rule-9 row could not be written (${reason}), ` +
+        `so nothing could reconcile it. Nothing was sent.`,
+      options,
+    );
+    this.name = "PerpNotRecorded";
+  }
+}
+
+/** The signer's output, as much of it as the row keeps. perps/signer.ts SignedLighterTx fits it as is. */
+export interface PerpSignedTx {
+  txType: number;
+  /** The exact string the signer returned, signature included. The only bytes ever re-sent. */
+  txInfo: string;
+  /** 80 lowercase hex, no 0x — known before sending. */
+  txHash: string;
+  accountIndex: number;
+  apiKeyIndex: number;
+  nonce: number;
+  /** ms, parsed from txInfo by the signer — never computed here. */
+  expiredAt: number;
+  clientOrderIndexes: readonly { role: PerpLegRole; clientOrderIndex: number }[];
+}
+
+export interface PerpOrderSubmission {
+  agentId: string;
+  mode: PerpMode;
+  effect: PerpOrderEffect;
+  /** The flag actually signed. */
+  reduceOnly: boolean;
+  marketId: number | null;
+  /** Entry base × worst price, micro-USDG; '0' for a tx that is not an order. */
+  worstNotionalMicro: bigint;
+  decisionId?: string | null;
+  reason?: string | null;
+  /** REQUIRED on live: the signed tx. Absent on paper, which signs nothing. */
+  signed?: PerpSignedTx | null;
+  /** Paper only — live legs come from `signed.clientOrderIndexes`, never a second list. */
+  legs?: readonly { role: PerpLegRole; clientOrderIndex: number }[];
+  /** An L2 Withdraw's money, written as its perp_transfers row in the same transaction (rule 12a). */
+  withdraw?: { transferId?: string; amountMicro: bigint; initiator: PerpTransferInitiator } | null;
+  /** Omit to have one made. */
+  id?: string;
+}
+
+/**
+ * WRITE THE RULE-9 ROW, THEN — AND ONLY THEN — MAY THE CALLER SEND. Returns the
+ * row id. Throws PerpNotRecorded on ANY failure, validation included: a
+ * malformed row is still no row, and a transaction with no row must not leave.
+ *
+ * What it proves before writing, each a way the replay guarantee could break:
+ *   the nonce was RESERVED — the live high-water is at or past it, so it was
+ *     committed before signing (bumpNonceHighWater) and a restart cannot hand
+ *     it out again;
+ *   every client order index is nonce × 8 + leg for its role (rule 9), so none
+ *     repeats across restarts or a wiped ledger;
+ *   the order is one rule 8 admits: an open is never reduce-only, a reduce or
+ *     close always is, and nothing but an open carries notional that is not
+ *     reduce-only.
+ * The nonce and the client order indexes are UNIQUE in the schema as well, so
+ * a second row for either is refused by the database even if every check
+ * here were wrong.
+ *
+ * The row, its legs and (for a withdrawal) its perp_transfers row commit
+ * together — a withdrawal whose request row exists without its transfer row
+ * is money the in-transit sum would never see.
+ */
+export async function insertPerpOrderSubmitted(s: PerpOrderSubmission): Promise<string> {
+  const txHashHint = typeof s.signed?.txHash === "string" ? s.signed.txHash.toLowerCase().replace(/^0x/, "") : null;
+  try {
+    const agent = perpAgent(s.agentId);
+    const mode = perpMode(s.mode);
+    if (!isPerpOrderEffect(s.effect)) throw new RangeError(`effect ${String(s.effect)}`);
+    const effect = s.effect;
+    if (typeof s.reduceOnly !== "boolean") throw new RangeError("reduceOnly must be a boolean");
+    const notional = intText(s.worstNotionalMicro, "worst notional", { min: 0n });
+    const marketId = s.marketId === null ? null : safeInt(s.marketId, "market id", 0, 65_535);
+    // Rule 8's discriminated union, enforced where it is written down.
+    if (effect === "open" && s.reduceOnly) throw new RangeError("an open is never reduce-only");
+    if ((effect === "reduce" || effect === "close") && !s.reduceOnly) throw new RangeError(`a ${effect} is always reduce-only`);
+    if (effect !== "open" && !s.reduceOnly && notional !== "0") throw new RangeError(`only an open may carry notional that is not reduce-only`);
+    if ((effect === "open" || effect === "reduce" || effect === "close") && marketId === null) throw new RangeError(`a ${effect} names its market`);
+    if (effect === "withdraw" && !s.withdraw) throw new RangeError("a withdrawal is written with its transfer");
+    if (effect !== "withdraw" && s.withdraw) throw new RangeError("only a withdrawal carries a transfer");
+    const withdrawAmount = s.withdraw ? intText(s.withdraw.amountMicro, "withdraw amount", { min: 1n }) : null;
+    const withdrawInitiator = s.withdraw ? oneOf(s.withdraw.initiator, PERP_TRANSFER_INITIATORS, "initiator") : null;
+    const withdrawId = s.withdraw?.transferId === undefined ? null : idText(s.withdraw.transferId, "transfer id");
+    const decisionId = s.decisionId ?? null;
+    const reason = s.reason ?? null;
+
+    let signed: {
+      txType: number; txInfo: string; txHash: string; accountIndex: number; apiKeyIndex: number; nonce: number; expiredAt: number;
+    } | null = null;
+    let legs: { role: PerpLegRole; clientOrderIndex: number }[];
+    if (mode === "live") {
+      const sg = s.signed;
+      if (!sg) throw new RangeError("a live order is written with the signed tx it will send");
+      if (s.legs !== undefined) throw new RangeError("live legs come from the signed tx alone");
+      if (typeof sg.txInfo !== "string" || sg.txInfo.length === 0) throw new RangeError("tx_info is empty");
+      signed = {
+        txType: safeInt(sg.txType, "tx type", 0, 255),
+        txInfo: sg.txInfo,
+        txHash: hashText(sg.txHash, "tx hash", { prefixed: false, hexLen: 80 }),
+        accountIndex: safeInt(sg.accountIndex, "account index", 0),
+        apiKeyIndex: safeInt(sg.apiKeyIndex, "api key index", 0, 254),
+        nonce: safeInt(sg.nonce, "nonce", 1),
+        expiredAt: safeInt(sg.expiredAt, "expired at (ms)", 1),
+      };
+      legs = sg.clientOrderIndexes.map((l) => ({ role: l.role, clientOrderIndex: l.clientOrderIndex }));
+    } else {
+      if (s.signed) throw new RangeError("a paper order signs nothing");
+      legs = (s.legs ?? []).map((l) => ({ role: l.role, clientOrderIndex: l.clientOrderIndex }));
+    }
+    const seen = new Set<number>();
+    for (const l of legs) {
+      if (!isPerpLegRole(l.role)) throw new RangeError(`leg role ${String(l.role)}`);
+      safeInt(l.clientOrderIndex, "client order index", 1, Number(PERP_COI_MAX));
+      if (seen.has(l.clientOrderIndex)) throw new RangeError(`client order index ${l.clientOrderIndex} appears twice`);
+      seen.add(l.clientOrderIndex);
+      // Rule 9's derivation, checked on the live rail where the venue will
+      // hold us to it. perpCoi throws on a nonce whose indexes would pass 2^48.
+      if (signed && BigInt(l.clientOrderIndex) !== perpCoi(BigInt(signed.nonce), PERP_LEG[l.role])) {
+        throw new RangeError(`client order index ${l.clientOrderIndex} is not nonce × 8 + ${PERP_LEG[l.role]} for its ${l.role} leg`);
+      }
+    }
+    const id = s.id === undefined ? randomUUID() : idText(s.id, "order id");
+
+    await getDb().tx(async (db) => {
+      const { epoch } = await perpBookingOf(db, s.agentId);
+      if (signed) {
+        const hw = (await db
+          .prepare(`SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'`)
+          .get(agent)) as { nonce_high_water: string | null } | undefined;
+        const high = textInt(hw?.nonce_high_water);
+        if (high === null || high < BigInt(signed.nonce)) {
+          throw new PerpNotRecorded("its nonce was never reserved against the high-water", signed.txHash);
+        }
+      }
+      await db
+        .prepare(
+          `INSERT INTO perp_orders (id, agent_id, mode, epoch, account_index, api_key_index, nonce, tx_hash, tx_type, tx_info,
+                                    expired_at, status, effect, reduce_only, market_id, worst_notional_micro, decision_id, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, agent, mode, epoch, signed?.accountIndex ?? null, signed?.apiKeyIndex ?? null, signed?.nonce ?? null,
+          signed?.txHash ?? null, signed?.txType ?? null, signed?.txInfo ?? null, signed?.expiredAt ?? null,
+          effect, s.reduceOnly ? 1 : 0, marketId, notional, decisionId, reason);
+      for (const l of legs) {
+        await db
+          .prepare(
+            `INSERT INTO perp_order_legs (agent_id, mode, order_id, role, client_order_index, status)
+             VALUES (?, ?, ?, ?, ?, 'submitted')`,
+          )
+          .run(agent, mode, id, l.role, l.clientOrderIndex);
+      }
+      if (withdrawAmount !== null && withdrawInitiator !== null) {
+        // `submitted`: nothing has moved, so nothing is journaled (rule 12a).
+        await db
+          .prepare(
+            `INSERT INTO perp_transfers (id, agent_id, mode, epoch, direction, amount_micro, initiator, state, venue_tx_hash, order_id)
+             VALUES (?, ?, ?, ?, 'withdraw', ?, ?, 'submitted', ?, ?)`,
+          )
+          .run(withdrawId ?? randomUUID(), agent, mode, epoch, withdrawAmount, withdrawInitiator, signed?.txHash ?? null, id);
+      }
+    });
+    return id;
+  } catch (e) {
+    if (e instanceof PerpNotRecorded) throw e;
+    const why = e instanceof RangeError ? e.message.replace(/^perp ledger: /, "") : "the ledger refused the write";
+    throw new PerpNotRecorded(why, txHashHint, { cause: e });
+  }
+}
+
+export interface PerpOrderResolution {
+  agentId: string;
+  mode: PerpMode;
+  /** The row, by id or by its tx hash — one of the two. */
+  id?: string;
+  txHash?: string;
+  status: Exclude<PerpOrderStatus, "submitted">;
+  filledBase?: bigint | null;
+  filledQuoteMicro?: bigint | null;
+  reason?: string | null;
+}
+
+/**
+ * RESOLVE A RULE-9 ROW — forward only, and a final answer exactly once.
+ *
+ * The guard is in the UPDATE itself: the row must currently hold a status of
+ * LOWER rank than the new one (perp-ledger-rules.ts). So `submitted` may become
+ * `executed` or anything final, `executed` may become final, and a final row is
+ * never rewritten — by a late duplicate resolver, by a reconcile racing a
+ * restart, by anything. True when this call moved the row.
+ *
+ * `rejected` and `expired` never executed, so their fills are '0' unless said
+ * otherwise. Every other outcome keeps its amounts NULL until told them, and a
+ * NULL amount counts the worst notional against the daily cap (the budget
+ * reads fail toward under-spending).
+ */
+export async function resolvePerpOrder(r: PerpOrderResolution): Promise<boolean> {
+  const agent = perpAgent(r.agentId);
+  const mode = perpMode(r.mode);
+  // Checked at run time as well as by the type: a status read off the wire
+  // arrives as a string, and `submitted` is not a resolution.
+  const asked: unknown = r.status;
+  if (!isPerpOrderStatus(asked) || asked === "submitted") throw new RangeError(`perp ledger: cannot resolve to ${String(asked)}`);
+  const target = asked;
+  if ((r.id === undefined) === (r.txHash === undefined)) throw new RangeError("perp ledger: resolve by id or by tx hash, exactly one");
+  const unexecuted = target === "rejected" || target === "expired";
+  const filledBase = r.filledBase === undefined || r.filledBase === null ? (unexecuted ? "0" : null) : intText(r.filledBase, "filled base", { min: 0n });
+  const filledQuote =
+    r.filledQuoteMicro === undefined || r.filledQuoteMicro === null ? (unexecuted ? "0" : null) : intText(r.filledQuoteMicro, "filled quote", { min: 0n });
+  const below = (Object.keys(PERP_ORDER_RANK) as PerpOrderStatus[]).filter((s) => PERP_ORDER_RANK[s] < PERP_ORDER_RANK[target]);
+  const terminal = PERP_ORDER_TERMINAL.has(target);
+  const key = r.id !== undefined ? { sql: "id = ?", arg: idText(r.id, "order id") } : { sql: "tx_hash = ?", arg: hashText(r.txHash, "tx hash", { prefixed: false }) };
+  const res = await getDb()
+    .prepare(
+      `UPDATE perp_orders
+          SET status = ?, filled_base = COALESCE(?, filled_base), filled_quote_micro = COALESCE(?, filled_quote_micro),
+              reason = COALESCE(?, reason), resolved_at = ${terminal ? "unixepoch()" : "resolved_at"}, updated_at = unixepoch()
+        WHERE agent_id = ? AND mode = ? AND ${key.sql} AND status IN (${below.map(() => "?").join(", ")})`,
+    )
+    .run(target, filledBase, filledQuote, r.reason ?? null, agent, mode, key.arg, ...below);
+  return Number(res.changes) > 0;
+}
+
+/**
+ * Add legs to an order already written — a leg the venue revealed later, say.
+ * Idempotent: a client order index this agent and rail already hold is not
+ * written again. Returns how many were new. Throws if the order is not ours.
+ */
+export async function insertPerpOrderLegs(
+  agentId: string,
+  mode: PerpMode,
+  orderId: string,
+  legs: readonly { role: PerpLegRole; clientOrderIndex: number; status?: PerpLegStatus; venueOrderIndex?: string | null }[],
+): Promise<number> {
+  const agent = perpAgent(agentId);
+  const m = perpMode(mode);
+  const oid = idText(orderId, "order id");
+  const rows = legs.map((l) => ({
+    role: oneOf(l.role, PERP_LEG_ROLES, "leg role"),
+    coi: safeInt(l.clientOrderIndex, "client order index", 1, Number(PERP_COI_MAX)),
+    status: l.status === undefined ? "submitted" : oneOf(l.status, PERP_LEG_STATUSES, "leg status"),
+    venueOrderIndex: l.venueOrderIndex === null || l.venueOrderIndex === undefined ? null : intText(l.venueOrderIndex, "venue order index", { min: 0n }),
+  }));
+  return getDb().tx(async (db) => {
+    const owner = await db.prepare(`SELECT 1 AS ok FROM perp_orders WHERE id = ? AND agent_id = ? AND mode = ?`).get(oid, agent, m);
+    if (!owner) throw new RangeError(`perp ledger: order ${oid} is not this agent's on the ${m} rail`);
+    let n = 0;
+    for (const l of rows) {
+      const res = await db
+        .prepare(
+          `INSERT INTO perp_order_legs (agent_id, mode, order_id, role, client_order_index, venue_order_index, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+        )
+        .run(agent, m, oid, l.role, l.coi, l.venueOrderIndex, l.status);
+      n += Number(res.changes);
+    }
+    return n;
+  });
+}
+
+/**
+ * Move one leg forward, by its client order index. Forward only (a resting
+ * stop the venue reports `open` can never walk back to `submitted`), and a
+ * final leg is never rewritten. At the same non-final status it may still
+ * learn its venue order index or the venue's own status word. The venue order
+ * index, once known, is never overwritten. True when anything changed.
+ */
+export async function updatePerpLegStatus(u: {
+  agentId: string;
+  mode: PerpMode;
+  clientOrderIndex: number;
+  status: PerpLegStatus;
+  venueOrderIndex?: string | null;
+  venueStatus?: string | null;
+}): Promise<boolean> {
+  const agent = perpAgent(u.agentId);
+  const mode = perpMode(u.mode);
+  const coi = safeInt(u.clientOrderIndex, "client order index", 1, Number(PERP_COI_MAX));
+  if (!isPerpLegStatus(u.status)) throw new RangeError(`perp ledger: leg status ${String(u.status)}`);
+  const status = u.status;
+  const venueOrderIndex = u.venueOrderIndex === null || u.venueOrderIndex === undefined ? null : intText(u.venueOrderIndex, "venue order index", { min: 0n });
+  const venueStatus = u.venueStatus === null || u.venueStatus === undefined ? null : idText(u.venueStatus, "venue status");
+  return getDb().tx(async (db) => {
+    const held = (await db
+      .prepare(`SELECT status, venue_order_index, venue_status FROM perp_order_legs WHERE agent_id = ? AND mode = ? AND client_order_index = ?`)
+      .get(agent, mode, coi)) as { status: string; venue_order_index: string | null; venue_status: string | null } | undefined;
+    if (!held || !isPerpLegStatus(held.status)) return false;
+    const from = held.status;
+    const forward = PERP_LEG_RANK[status] > PERP_LEG_RANK[from];
+    // At the same, non-final status a leg may still learn what it did not
+    // know. A final leg learns nothing more, and a lower status is ignored.
+    const sameOpen = status === from && PERP_LEG_RANK[from] < 3;
+    const learnsIndex = held.venue_order_index === null && venueOrderIndex !== null;
+    const learnsStatus = venueStatus !== null && venueStatus !== held.venue_status;
+    if (!forward && !(sameOpen && (learnsIndex || learnsStatus))) return false;
+    // Guarded on the status just read, so a concurrent writer that moved the
+    // leg first wins and this one changes nothing.
+    const res = await db
+      .prepare(
+        `UPDATE perp_order_legs
+            SET status = ?, venue_order_index = COALESCE(venue_order_index, ?), venue_status = COALESCE(?, venue_status),
+                updated_at = unixepoch()
+          WHERE agent_id = ? AND mode = ? AND client_order_index = ? AND status = ?`,
+      )
+      .run(forward ? status : from, venueOrderIndex, venueStatus, agent, mode, coi, from);
+    return Number(res.changes) > 0;
+  });
+}
+
+// ── the nonce high-water ─────────────────────────────────────────────────────
+
+/** The largest nonce that keeps every client order index (nonce × 8 + 3) under the venue's 2^48. */
+const PERP_NONCE_MAX = (PERP_COI_MAX - 3n) / 8n;
+
+/**
+ * RESERVE THE NEXT NONCE, and commit it BEFORE anything is signed (rule 9).
+ *
+ * Commits and returns max(floor, high-water + 1): the caller passes
+ * max(now_ms, the venue's nextNonce) as `floor`, and signs with exactly the
+ * value returned — never with the floor. Strictly increasing across every
+ * caller, concurrent ones included: the no-op UPDATE takes the row lock on
+ * Postgres, sqlite serialises the transaction, so two reservations can never
+ * read the same high-water. A nonce is handed out once for the life of the
+ * ledger; a crash after this and before the send leaves a gap, which SkipNonce
+ * allows, never a repeat.
+ *
+ * Per (agent, mode): the account and our key index are fixed per agent, and a
+ * high-water that only rises is valid for any account the agent moves to.
+ */
+export async function bumpNonceHighWater(agentId: string, mode: PerpMode, floor: bigint | number): Promise<bigint> {
+  const agent = perpAgent(agentId);
+  const m = perpMode(mode);
+  const f = BigInt(intText(floor, "nonce floor", { min: 1n }));
+  return getDb().tx(async (db) => {
+    await db.prepare(`INSERT INTO perp_accounts (agent_id, mode) VALUES (?, ?) ON CONFLICT DO NOTHING`).run(agent, m);
+    const row = (await db
+      .prepare(
+        `UPDATE perp_accounts SET nonce_high_water = nonce_high_water WHERE agent_id = ? AND mode = ?
+         RETURNING nonce_high_water`,
+      )
+      .get(agent, m)) as { nonce_high_water: string | null } | undefined;
+    if (!row) throw new Error("perp ledger: the account row vanished inside its own transaction");
+    const high = row.nonce_high_water === null ? null : textInt(row.nonce_high_water);
+    // An unreadable high-water is not a zero one: refuse rather than restart
+    // the sequence under nonces that may already be spent.
+    if (row.nonce_high_water !== null && high === null) throw new Error(`perp ledger: nonce high-water ${row.nonce_high_water} is unreadable`);
+    const next = high === null || f > high ? f : high + 1n;
+    if (next > PERP_NONCE_MAX) throw new RangeError(`perp ledger: nonce ${next} would put a client order index past 2^48`);
+    await db
+      .prepare(`UPDATE perp_accounts SET nonce_high_water = ?, updated_at = unixepoch() WHERE agent_id = ? AND mode = ?`)
+      .run(next.toString(), agent, m);
+    return next;
+  });
+}
+
+/** The committed high-water, or null when none was ever reserved. Throws on a read failure or an unreadable value. */
+export async function getNonceHighWater(agentId: string, mode: PerpMode): Promise<bigint | null> {
+  const row = (await getDb()
+    .prepare(`SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
+    .get(perpAgent(agentId), perpMode(mode))) as { nonce_high_water: string | null } | undefined;
+  if (!row || row.nonce_high_water === null) return null;
+  const v = textInt(row.nonce_high_water);
+  if (v === null) throw new Error(`perp ledger: nonce high-water ${row.nonce_high_water} is unreadable`);
+  return v;
+}
+
+// ── reading orders back ──────────────────────────────────────────────────────
+
+export interface PerpLegRow {
+  orderId: string;
+  role: PerpLegRole;
+  clientOrderIndex: number;
+  venueOrderIndex: string | null;
+  status: PerpLegStatus;
+  venueStatus: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PerpOrderRow {
+  id: string;
+  agentId: string;
+  mode: PerpMode;
+  epoch: number;
+  accountIndex: number | null;
+  apiKeyIndex: number | null;
+  nonce: number | null;
+  txHash: string | null;
+  txType: number | null;
+  /** The signed bytes — for re-sending only, and never before logging's redactor. */
+  txInfo: string | null;
+  /** ms */
+  expiredAt: number | null;
+  status: PerpOrderStatus;
+  effect: PerpOrderEffect;
+  reduceOnly: boolean;
+  marketId: number | null;
+  worstNotionalMicro: bigint;
+  filledBase: bigint | null;
+  filledQuoteMicro: bigint | null;
+  decisionId: string | null;
+  reason: string | null;
+  createdAt: number;
+  resolvedAt: number | null;
+  updatedAt: number;
+  legs: PerpLegRow[];
+}
+
+function legRowOf(r: Record<string, unknown>): PerpLegRow {
+  return {
+    orderId: String(r.order_id),
+    role: r.role as PerpLegRole,
+    clientOrderIndex: Number(r.client_order_index),
+    venueOrderIndex: (r.venue_order_index as string | null) ?? null,
+    status: r.status as PerpLegStatus,
+    venueStatus: (r.venue_status as string | null) ?? null,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  };
+}
+
+async function ordersWithLegs(db: Db, rows: Record<string, unknown>[]): Promise<PerpOrderRow[]> {
+  const out: PerpOrderRow[] = [];
+  for (const r of rows) {
+    const worst = textInt(r.worst_notional_micro);
+    if (worst === null) throw new Error(`perp_orders ${String(r.id)}: worst notional ${String(r.worst_notional_micro)} is unreadable`);
+    const legs = (await db
+      .prepare(`SELECT * FROM perp_order_legs WHERE order_id = ? ORDER BY client_order_index ASC`)
+      .all(r.id)) as Record<string, unknown>[];
+    out.push({
+      id: String(r.id),
+      agentId: String(r.agent_id),
+      mode: r.mode as PerpMode,
+      epoch: Number(r.epoch),
+      accountIndex: nullableNum(r.account_index),
+      apiKeyIndex: nullableNum(r.api_key_index),
+      nonce: nullableNum(r.nonce),
+      txHash: (r.tx_hash as string | null) ?? null,
+      txType: nullableNum(r.tx_type),
+      txInfo: (r.tx_info as string | null) ?? null,
+      expiredAt: nullableNum(r.expired_at),
+      status: r.status as PerpOrderStatus,
+      effect: r.effect as PerpOrderEffect,
+      reduceOnly: Number(r.reduce_only) === 1,
+      marketId: nullableNum(r.market_id),
+      worstNotionalMicro: worst,
+      filledBase: r.filled_base === null || r.filled_base === undefined ? null : textInt(r.filled_base),
+      filledQuoteMicro: r.filled_quote_micro === null || r.filled_quote_micro === undefined ? null : textInt(r.filled_quote_micro),
+      decisionId: (r.decision_id as string | null) ?? null,
+      reason: (r.reason as string | null) ?? null,
+      createdAt: Number(r.created_at),
+      resolvedAt: nullableNum(r.resolved_at),
+      updatedAt: Number(r.updated_at),
+      legs: legs.map(legRowOf),
+    });
+  }
+  return out;
+}
+
+/**
+ * EVERY ROW STILL WAITING ON THE VENUE — `submitted` (sent or not, outcome
+ * unknown) and `executed` (ran; its fills not yet booked) — oldest nonce
+ * first, with the signed bytes for a re-send before ExpiredAt. What reconcile
+ * resolves at arm and every tick, and what keeps a second nonce from being
+ * signed for an intent while its row is ambiguous.
+ */
+export async function listSubmittedPerpOrders(agentId: string, mode: PerpMode): Promise<PerpOrderRow[]> {
+  const db = getDb();
+  const rows = (await db
+    .prepare(
+      `SELECT * FROM perp_orders WHERE agent_id = ? AND mode = ? AND status IN ('submitted', 'executed')
+        ORDER BY created_at ASC, nonce ASC, id ASC`,
+    )
+    .all(perpAgent(agentId), perpMode(mode))) as Record<string, unknown>[];
+  return ordersWithLegs(db, rows);
+}
+
+/** One rule-9 row by its venue tx hash (80 hex), or null. */
+export async function perpOrderByTxHash(agentId: string, mode: PerpMode, txHash: string): Promise<PerpOrderRow | null> {
+  const db = getDb();
+  const rows = (await db
+    .prepare(`SELECT * FROM perp_orders WHERE agent_id = ? AND mode = ? AND tx_hash = ?`)
+    .all(perpAgent(agentId), perpMode(mode), hashText(txHash, "tx hash", { prefixed: false }))) as Record<string, unknown>[];
+  return (await ordersWithLegs(db, rows))[0] ?? null;
+}
+
+/** One rule-9 row by its id, or null. */
+export async function getPerpOrder(agentId: string, mode: PerpMode, id: string): Promise<PerpOrderRow | null> {
+  const db = getDb();
+  const rows = (await db
+    .prepare(`SELECT * FROM perp_orders WHERE agent_id = ? AND mode = ? AND id = ?`)
+    .all(perpAgent(agentId), perpMode(mode), idText(id, "order id"))) as Record<string, unknown>[];
+  return (await ordersWithLegs(db, rows))[0] ?? null;
+}
+
+/** The order and the leg a client order index belongs to — how a venue order or fill is matched to ours. */
+export async function perpOrderByCoi(
+  agentId: string,
+  mode: PerpMode,
+  clientOrderIndex: number | bigint,
+): Promise<{ order: PerpOrderRow; leg: PerpLegRow } | null> {
+  const coi = typeof clientOrderIndex === "bigint" ? Number(intText(clientOrderIndex, "client order index", { min: 0n })) : clientOrderIndex;
+  safeInt(coi, "client order index", 0, Number(PERP_COI_MAX));
+  const db = getDb();
+  const leg = (await db
+    .prepare(`SELECT * FROM perp_order_legs WHERE agent_id = ? AND mode = ? AND client_order_index = ?`)
+    .get(perpAgent(agentId), perpMode(mode), coi)) as Record<string, unknown> | undefined;
+  if (!leg) return null;
+  const rows = (await db.prepare(`SELECT * FROM perp_orders WHERE id = ?`).all(leg.order_id)) as Record<string, unknown>[];
+  const order = (await ordersWithLegs(db, rows))[0];
+  return order ? { order, leg: legRowOf(leg) } : null;
+}
+
+// ── budgets (docs/perps.md, "Budgets") ───────────────────────────────────────
+
+/**
+ * THE OPENING NOTIONAL THIS RAIL HAS COMMITTED SINCE `sinceSec`, integer
+ * micro-USDG — rule 6's "counts against the signed dailyUsdg".
+ *
+ * Every perp_orders row with reduce_only = 0: the signed flag, never the
+ * model's `effect` label — any order that is not reduce-only can open or flip
+ * a position, whatever it was called. Reduce-only rows count nothing: an exit
+ * is never spend (rule 8).
+ *
+ * A row whose outcome is not yet known — `submitted`, `executed`, or any row
+ * whose filled amount is still NULL — counts its WORST notional; a resolved
+ * row counts what it actually filled, whatever its final status, so an IOC
+ * that part-filled and was then cancelled counts its fill and one that filled
+ * nothing counts nothing. Summed in BigInt: the column is TEXT precisely so
+ * no sum passes through a float.
+ *
+ * MAIN'S CLOCK (getSpentTodayUsdg's trades half): a row whose outcome is not
+ * known counts WHATEVER ITS AGE, since a pending op never releases its slot by
+ * growing old; a resolved one counts for 24 h from when it resolved.
+ *
+ * ALREADY INSIDE getSpentTodayUsdg. Do not add it to that function's result.
+ */
+export async function perpOpenNotionalSince(agentId: string, mode: PerpMode, sinceSec: number): Promise<bigint> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT id, status, worst_notional_micro, filled_quote_micro FROM perp_orders
+        WHERE agent_id = ? AND mode = ? AND reduce_only = 0
+          AND (status IN (${PERP_UNRESOLVED_ORDER_STATUSES.map(() => "?").join(", ")}) OR COALESCE(resolved_at, created_at) > ?)`,
+    )
+    .all(perpAgent(agentId), perpMode(mode), ...PERP_UNRESOLVED_ORDER_STATUSES, Math.floor(sinceSec))) as {
+    id: string;
+    status: string;
+    worst_notional_micro: string;
+    filled_quote_micro: string | null;
+  }[];
+  let sum = 0n;
+  for (const r of rows) {
+    const unresolved = (PERP_UNRESOLVED_ORDER_STATUSES as readonly string[]).includes(r.status) || r.filled_quote_micro === null;
+    const v = textInt(unresolved ? r.worst_notional_micro : r.filled_quote_micro);
+    // An unreadable amount is not a zero one: the budget must not be seeded
+    // from a sum that silently skipped a row.
+    if (v === null) throw new Error(`perp_orders ${r.id}: an amount is unreadable`);
+    sum += v;
+  }
+  return sum;
+}
+
+/**
+ * THE PERP OPS THIS RAIL HAS SPENT SINCE `sinceSec` — every signed venue tx in
+ * an ALLOW-LISTED status (perp-ledger-rules.ts PERP_OPS_ORDER_STATUSES; a new
+ * status counts toward no cap until someone says it should), reduce-only
+ * exits included: an exit is COUNTED as an op, as a spot sell is, and never
+ * BLOCKED by the count (rule 8).
+ *
+ * On main's clock, as getOpsToday's trades half is: an order whose outcome is
+ * not known counts whatever its age, a resolved one for 24 h from resolving.
+ *
+ * Withdrawal requests: an L2 Withdraw is itself a perp_orders row (rule 9) and
+ * counts there. A perp_transfers withdrawal counts only when it has NO order
+ * row behind it — never both, which would charge one request twice.
+ *
+ * ALREADY INSIDE getOpsToday. Do not add it to that function's result.
+ */
+export async function perpOpsSince(agentId: string, mode: PerpMode, sinceSec: number): Promise<number> {
+  const agent = perpAgent(agentId);
+  const m = perpMode(mode);
+  const since = Math.floor(sinceSec);
+  const orderMarks = PERP_OPS_ORDER_STATUSES.map(() => "?").join(", ");
+  const unresolvedMarks = PERP_UNRESOLVED_ORDER_STATUSES.map(() => "?").join(", ");
+  const withdrawMarks = PERP_OPS_WITHDRAW_STATES.map(() => "?").join(", ");
+  const orders = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM perp_orders WHERE agent_id = ? AND mode = ? AND status IN (${orderMarks})
+         AND (status IN (${unresolvedMarks}) OR COALESCE(resolved_at, created_at) > ?)`,
+    )
+    .get(agent, m, ...PERP_OPS_ORDER_STATUSES, ...PERP_UNRESOLVED_ORDER_STATUSES, since)) as { n: number } | undefined;
+  const withdrawals = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM perp_transfers t
+        WHERE t.agent_id = ? AND t.mode = ? AND t.direction = 'withdraw' AND t.created_at > ? AND t.state IN (${withdrawMarks})
+          AND NOT EXISTS (SELECT 1 FROM perp_orders o
+                           WHERE o.agent_id = t.agent_id AND o.mode = t.mode
+                             AND ((t.order_id IS NOT NULL AND o.id = t.order_id)
+                                  OR (t.venue_tx_hash IS NOT NULL AND o.tx_hash = t.venue_tx_hash)))`,
+    )
+    .get(agent, m, since, ...PERP_OPS_WITHDRAW_STATES)) as { n: number } | undefined;
+  return Number(orders?.n ?? 0) + Number(withdrawals?.n ?? 0);
+}
+
+// ── positions ────────────────────────────────────────────────────────────────
+
+export interface PerpPositionInput {
+  agentId: string;
+  mode: PerpMode;
+  marketId: number;
+  /** null exactly when flat. */
+  side: PerpSide | null;
+  /** |position|, venue base units; 0 when flat. */
+  base: bigint;
+  /** Venue price units. */
+  entryPrice?: bigint | null;
+  allocatedMarginMicro: bigint;
+  imfBp?: number | null;
+  marginMode?: "isolated" | "cross" | null;
+  realizedMicro?: bigint | null;
+  fundingMicro?: bigint | null;
+  stopTrigger?: bigint | null;
+  stopPrice?: bigint | null;
+  /** The level the position is protected at; survives its resting stop ending without closing it. */
+  recordedStopTrigger?: bigint | null;
+  recordedStopPrice?: bigint | null;
+  takeTrigger?: bigint | null;
+  takePrice?: bigint | null;
+  /** Paper: the last funding hour charged, unix seconds. */
+  fundingHourApplied?: number | null;
+  /** Unix seconds. */
+  openedAt?: number | null;
+  /** 'venue' on live (a cache of the venue), 'paper' on paper (the book). Never crossed. */
+  source: "venue" | "paper";
+}
+
+export interface PerpPositionRow {
+  agentId: string;
+  mode: PerpMode;
+  marketId: number;
+  side: PerpSide | null;
+  base: bigint;
+  entryPrice: bigint | null;
+  allocatedMarginMicro: bigint;
+  imfBp: number | null;
+  marginMode: "isolated" | "cross" | null;
+  realizedMicro: bigint | null;
+  fundingMicro: bigint | null;
+  stopTrigger: bigint | null;
+  stopPrice: bigint | null;
+  recordedStopTrigger: bigint | null;
+  recordedStopPrice: bigint | null;
+  takeTrigger: bigint | null;
+  takePrice: bigint | null;
+  fundingHourApplied: number | null;
+  openedAt: number | null;
+  updatedAt: number;
+  source: "venue" | "paper";
+}
+
+/**
+ * Write one position row inside a caller's transaction — the `with` hook of a
+ * paper fill, so the book and the fact that moved it commit together.
+ * Validated here as well: a flat row has no side and a held one has one, and
+ * a paper position is never written as the venue's or the reverse (rule 14's
+ * "never a paper perps book beside its live book").
+ */
+export async function putPerpPosition(db: Db, p: PerpPositionInput): Promise<void> {
+  const agent = perpAgent(p.agentId);
+  const mode = perpMode(p.mode);
+  const source = oneOf(p.source, ["venue", "paper"] as const, "position source");
+  if ((mode === "paper") !== (source === "paper")) throw new RangeError(`perp ledger: a ${mode} position is never sourced '${source}'`);
+  const marketId = safeInt(p.marketId, "market id", 0, 65_535);
+  const base = intText(p.base, "position base", { min: 0n });
+  const side = p.side === null ? null : oneOf(p.side, ["long", "short"] as const, "position side");
+  if ((side === null) !== (base === "0")) throw new RangeError("perp ledger: a position has a side exactly when it has a size");
+  const margin = intText(p.allocatedMarginMicro, "allocated margin", { min: 0n });
+  const imf = optSafeInt(p.imfBp, "imf (bp)", 1, 10_000);
+  const marginMode = p.marginMode === null || p.marginMode === undefined ? null : oneOf(p.marginMode, ["isolated", "cross"] as const, "margin mode");
+  const recordedTrigger = optInt(p.recordedStopTrigger, "recorded stop trigger", { min: 0n });
+  const recordedPrice = optInt(p.recordedStopPrice, "recorded stop price", { min: 0n });
+  if ((recordedTrigger === null) !== (recordedPrice === null)) throw new RangeError("perp ledger: a recorded stop has a trigger exactly when it has a bound");
+  await db
+    .prepare(
+      `INSERT INTO perp_positions (agent_id, mode, market_id, side, base, entry_price, allocated_margin_micro, imf_bp, margin_mode,
+                                   realized_micro, funding_micro, stop_trigger, stop_price, take_trigger, take_price,
+                                   funding_hour_applied, opened_at, updated_at, source, recorded_stop_trigger, recorded_stop_price)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), ?, ?, ?)
+       ON CONFLICT(agent_id, mode, market_id) DO UPDATE SET
+         side = excluded.side, base = excluded.base, entry_price = excluded.entry_price,
+         allocated_margin_micro = excluded.allocated_margin_micro, imf_bp = excluded.imf_bp,
+         margin_mode = excluded.margin_mode, realized_micro = excluded.realized_micro,
+         funding_micro = excluded.funding_micro, stop_trigger = excluded.stop_trigger,
+         stop_price = excluded.stop_price, take_trigger = excluded.take_trigger, take_price = excluded.take_price,
+         funding_hour_applied = excluded.funding_hour_applied, opened_at = excluded.opened_at,
+         updated_at = excluded.updated_at, source = excluded.source,
+         recorded_stop_trigger = excluded.recorded_stop_trigger, recorded_stop_price = excluded.recorded_stop_price`,
+    )
+    .run(agent, mode, marketId, side, base, optInt(p.entryPrice, "entry price", { min: 0n }), margin, imf, marginMode,
+      optInt(p.realizedMicro, "position realized"), optInt(p.fundingMicro, "position funding"),
+      optInt(p.stopTrigger, "stop trigger", { min: 0n }), optInt(p.stopPrice, "stop price", { min: 0n }),
+      optInt(p.takeTrigger, "take trigger", { min: 0n }), optInt(p.takePrice, "take price", { min: 0n }),
+      optSafeInt(p.fundingHourApplied, "funding hour applied"), optSafeInt(p.openedAt, "opened at"), source,
+      recordedTrigger, recordedPrice);
+}
+
+/** Write one position row. Throws on a failed or malformed write. */
+export async function upsertPerpPosition(p: PerpPositionInput): Promise<void> {
+  await putPerpPosition(getDb(), p);
+}
+
+/**
+ * REPLACE THE WHOLE LIVE CACHE (or paper book) FROM ONE READ, atomically: every
+ * row given is written, and every market this rail held that the read does not
+ * show goes FLAT — its row stays, keeping the market's leverage state, with no
+ * side and no size. One transaction, so a reader never sees half of one venue
+ * snapshot beside half of the last.
+ */
+export async function setPerpPositions(
+  agentId: string,
+  mode: PerpMode,
+  source: "venue" | "paper",
+  rows: readonly Omit<PerpPositionInput, "agentId" | "mode" | "source">[],
+): Promise<void> {
+  const agent = perpAgent(agentId);
+  const m = perpMode(mode);
+  const markets = new Set<number>();
+  for (const r of rows) {
+    if (markets.has(r.marketId)) throw new RangeError(`perp ledger: market ${r.marketId} appears twice in one snapshot`);
+    markets.add(r.marketId);
+  }
+  await getDb().tx(async (db) => {
+    for (const r of rows) await putPerpPosition(db, { ...r, agentId, mode: m, source });
+    const held = [...markets];
+    await db
+      .prepare(
+        `UPDATE perp_positions SET side = NULL, base = '0', allocated_margin_micro = '0', entry_price = NULL,
+                stop_trigger = NULL, stop_price = NULL, take_trigger = NULL, take_price = NULL,
+                recorded_stop_trigger = NULL, recorded_stop_price = NULL,
+                opened_at = NULL, updated_at = unixepoch()
+          WHERE agent_id = ? AND mode = ? AND base <> '0'${held.length ? ` AND market_id NOT IN (${held.map(() => "?").join(", ")})` : ""}`,
+      )
+      .run(agent, m, ...held);
+  });
+}
+
+function positionRowOf(r: Record<string, unknown>): PerpPositionRow {
+  const base = textInt(r.base);
+  const margin = textInt(r.allocated_margin_micro);
+  if (base === null || margin === null) throw new Error(`perp_positions ${String(r.market_id)}: an amount is unreadable`);
+  const opt = (v: unknown) => (v === null || v === undefined ? null : textInt(v));
+  return {
+    agentId: String(r.agent_id),
+    mode: r.mode as PerpMode,
+    marketId: Number(r.market_id),
+    side: (r.side as PerpSide | null) ?? null,
+    base,
+    entryPrice: opt(r.entry_price),
+    allocatedMarginMicro: margin,
+    imfBp: nullableNum(r.imf_bp),
+    marginMode: (r.margin_mode as "isolated" | "cross" | null) ?? null,
+    realizedMicro: opt(r.realized_micro),
+    fundingMicro: opt(r.funding_micro),
+    stopTrigger: opt(r.stop_trigger),
+    stopPrice: opt(r.stop_price),
+    recordedStopTrigger: opt(r.recorded_stop_trigger),
+    recordedStopPrice: opt(r.recorded_stop_price),
+    takeTrigger: opt(r.take_trigger),
+    takePrice: opt(r.take_price),
+    fundingHourApplied: nullableNum(r.funding_hour_applied),
+    openedAt: nullableNum(r.opened_at),
+    updatedAt: Number(r.updated_at),
+    source: r.source as "venue" | "paper",
+  };
+}
+
+/** This rail's positions, open ones only unless asked. Throws on a read failure — never an empty book. */
+export async function getPerpPositions(
+  agentId: string,
+  mode: PerpMode,
+  opts: { includeFlat?: boolean } = {},
+): Promise<PerpPositionRow[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT * FROM perp_positions WHERE agent_id = ? AND mode = ?${opts.includeFlat ? "" : " AND base <> '0'"}
+        ORDER BY market_id ASC`,
+    )
+    .all(perpAgent(agentId), perpMode(mode))) as Record<string, unknown>[];
+  return rows.map(positionRowOf);
+}
+
+// ── the account row ──────────────────────────────────────────────────────────
+
+/** Rule 16's durable flag. `kind` is a short slug; `detail` stays in the child (the mirror carries kind and time only). */
+export interface PerpIncident {
+  kind: string;
+  /** Unix seconds. */
+  at: number;
+  detail?: unknown;
+}
+
+export interface PerpAccountRow {
+  agentId: string;
+  mode: PerpMode;
+  accountIndex: number | null;
+  /** 0x + 80 hex, lowercase. */
+  registeredPubkey: string | null;
+  retiredPubkeys: string[];
+  nonceHighWater: bigint | null;
+  paperCollateralMicro: bigint | null;
+  incident: PerpIncident | null;
+  entriesHalted: boolean;
+  lastVenueReadAt: number | null;
+  /** The venue snapshot's transaction_time, µs. */
+  lastSnapshotTime: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * A change to the account row. Absent keys are left alone; `null` clears.
+ * The nonce high-water is not here — it moves only through bumpNonceHighWater.
+ */
+export interface PerpAccountPatch {
+  accountIndex?: number | null;
+  registeredPubkey?: string | null;
+  /** Added to the retired set, which only grows: a retired key is never registered again. */
+  retirePubkeys?: readonly string[];
+  /** Paper rail only. */
+  paperCollateralMicro?: bigint | null;
+  incident?: PerpIncident | null;
+  entriesHalted?: boolean;
+  lastVenueReadAt?: number | null;
+  /**
+   * µs. Only ever RAISED: an older snapshot never replaces a newer one's time,
+   * because rule 12 refuses a snapshot older than the last one used, and a
+   * time that could be written down would let a stale read pass that check.
+   */
+  lastSnapshotTime?: number;
+}
+
+function pubkeyText(v: unknown): string {
+  return hashText(v, "public key", { prefixed: true, hexLen: 80 });
+}
+
+/** The paper book's cross collateral, inside a caller's transaction (a paper fill's or transfer's `with`). */
+export async function putPaperCollateral(db: Db, agentId: string, collateralMicro: bigint): Promise<void> {
+  const agent = perpAgent(agentId);
+  const c = intText(collateralMicro, "paper collateral", { min: 0n });
+  await db.prepare(`INSERT INTO perp_accounts (agent_id, mode) VALUES (?, 'paper') ON CONFLICT DO NOTHING`).run(agent);
+  await db
+    .prepare(`UPDATE perp_accounts SET paper_collateral_micro = ?, updated_at = unixepoch() WHERE agent_id = ? AND mode = 'paper'`)
+    .run(c, agent);
+}
+
+/** Apply a patch to this rail's account row, creating it if needed. One transaction; throws on refusal or failure. */
+export async function patchPerpAccount(agentId: string, mode: PerpMode, patch: PerpAccountPatch): Promise<void> {
+  const agent = perpAgent(agentId);
+  const m = perpMode(mode);
+  const sets: string[] = [];
+  const args: unknown[] = [];
+  const set = (col: string, v: unknown) => {
+    sets.push(`${col} = ?`);
+    args.push(v);
+  };
+  if (patch.accountIndex !== undefined) set("account_index", optSafeInt(patch.accountIndex, "account index"));
+  const registering = patch.registeredPubkey === undefined || patch.registeredPubkey === null ? null : pubkeyText(patch.registeredPubkey);
+  if (patch.registeredPubkey !== undefined) set("registered_pubkey", registering);
+  const retiring = (patch.retirePubkeys ?? []).map(pubkeyText);
+  if (patch.paperCollateralMicro !== undefined) {
+    if (m !== "paper") throw new RangeError("perp ledger: only the paper book holds its own collateral");
+    set("paper_collateral_micro", optInt(patch.paperCollateralMicro, "paper collateral", { min: 0n }));
+  }
+  if (patch.incident !== undefined) {
+    if (patch.incident === null) set("incident_json", null);
+    else {
+      const kind = idText(patch.incident.kind, "incident kind");
+      const at = safeInt(patch.incident.at, "incident time");
+      set("incident_json", JSON.stringify({ kind, at, detail: patch.incident.detail ?? null }));
+    }
+  }
+  if (patch.entriesHalted !== undefined) set("entries_halted", patch.entriesHalted ? 1 : 0);
+  if (patch.lastVenueReadAt !== undefined) set("last_venue_read_at", optSafeInt(patch.lastVenueReadAt, "last venue read"));
+  const snapshot = patch.lastSnapshotTime === undefined ? null : safeInt(patch.lastSnapshotTime, "snapshot time");
+  await getDb().tx(async (db) => {
+    await db.prepare(`INSERT INTO perp_accounts (agent_id, mode) VALUES (?, ?) ON CONFLICT DO NOTHING`).run(agent, m);
+    const row = (await db
+      .prepare(`SELECT retired_pubkeys FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
+      .get(agent, m)) as { retired_pubkeys: string } | undefined;
+    let retired: string[];
+    try {
+      const parsed = JSON.parse(row?.retired_pubkeys ?? "[]") as unknown;
+      if (!Array.isArray(parsed) || !parsed.every((k) => typeof k === "string")) throw new Error("not a list of keys");
+      retired = parsed as string[];
+    } catch {
+      // A retired set we cannot read is not an empty one: registering against
+      // it could re-admit a key the owner rotated away.
+      throw new Error("perp ledger: the retired key set is unreadable");
+    }
+    const union = [...new Set([...retired, ...retiring])].sort();
+    if (registering !== null && union.includes(registering)) {
+      throw new RangeError("perp ledger: that public key was retired and is never registered again");
+    }
+    const allSets = [...sets];
+    const allArgs = [...args];
+    if (retiring.length) {
+      allSets.push("retired_pubkeys = ?");
+      allArgs.push(JSON.stringify(union));
+    }
+    if (snapshot !== null) {
+      allSets.push("last_snapshot_time = CASE WHEN last_snapshot_time IS NULL OR last_snapshot_time < ? THEN ? ELSE last_snapshot_time END");
+      allArgs.push(snapshot, snapshot);
+    }
+    if (!allSets.length) return;
+    await db
+      .prepare(`UPDATE perp_accounts SET ${allSets.join(", ")}, updated_at = unixepoch() WHERE agent_id = ? AND mode = ?`)
+      .run(...allArgs, agent, m);
+  });
+}
+
+/** This rail's account row, or null when there is none. Throws on a read failure or an unreadable row. */
+export async function getPerpAccount(agentId: string, mode: PerpMode): Promise<PerpAccountRow | null> {
+  const r = (await getDb()
+    .prepare(`SELECT * FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
+    .get(perpAgent(agentId), perpMode(mode))) as Record<string, unknown> | undefined;
+  if (!r) return null;
+  const retired = JSON.parse(String(r.retired_pubkeys ?? "[]")) as unknown;
+  if (!Array.isArray(retired)) throw new Error("perp ledger: the retired key set is unreadable");
+  const high = r.nonce_high_water === null || r.nonce_high_water === undefined ? null : textInt(r.nonce_high_water);
+  const collateral = r.paper_collateral_micro === null || r.paper_collateral_micro === undefined ? null : textInt(r.paper_collateral_micro);
+  if ((r.nonce_high_water != null && high === null) || (r.paper_collateral_micro != null && collateral === null)) {
+    throw new Error("perp ledger: an amount on the account row is unreadable");
+  }
+  let incident: PerpIncident | null = null;
+  if (typeof r.incident_json === "string") {
+    // An incident whose detail cannot be parsed is STILL an incident: the
+    // flag is what refuses opens (rule 16), and a parse error must not clear it.
+    try {
+      const j = JSON.parse(r.incident_json) as { kind?: unknown; at?: unknown; detail?: unknown };
+      incident = { kind: typeof j.kind === "string" ? j.kind : "unreadable", at: Number(j.at ?? 0), detail: j.detail ?? null };
+    } catch {
+      incident = { kind: "unreadable", at: 0, detail: null };
+    }
+  }
+  return {
+    agentId: String(r.agent_id),
+    mode: r.mode as PerpMode,
+    accountIndex: nullableNum(r.account_index),
+    registeredPubkey: (r.registered_pubkey as string | null) ?? null,
+    retiredPubkeys: retired.map(String),
+    nonceHighWater: high,
+    paperCollateralMicro: collateral,
+    incident,
+    entriesHalted: Number(r.entries_halted) === 1,
+    lastVenueReadAt: nullableNum(r.last_venue_read_at),
+    lastSnapshotTime: nullableNum(r.last_snapshot_time),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  };
+}
+
+// ── the paper venue's bookings (perps/paper.ts, perps/executor.ts) ───────────
+
+/**
+ * ONE PAPER PERP ACTION — an open, a reduce or close, a funding hour, a stop,
+ * take-profit or liquidation the paper venue ran, or a leverage change —
+ * booked WHOLE: its rule-9 order row and legs, every fill and funding payment
+ * with its hash-chained journal entry, the resting children it ends, every
+ * position row it moves and the paper_book cash it draws or returns, in ONE
+ * transaction (docs/perps.md rule 14; accounting.md paper-perp-checkpoint-and-
+ * restore: "the paper perp margin move from paper cash … is one db.tx with its
+ * journal entry").
+ *
+ * WHY ITS OWN WRITER AND NOT insertPerpFill's `with` HOOK. A paper action is
+ * more than one fact: an open is an order row, up to three legs, a fill and a
+ * position; a zero-fill IOC is an order row and no fact at all. Transactions do
+ * not nest (db.ts), and a crash between a fill and the cash it moved is a paper
+ * book whose margin is in two places or none — the checkpoint would carry that
+ * into shared storage. So the whole action is one function, validated before
+ * the first write like every other perp writer, and journaled in the SAME
+ * payload shapes insertPerpFill and insertPerpFunding use, so audit.ts reads a
+ * paper fill exactly as it reads one from the venue.
+ *
+ * THREE GUARDS, each refusing the whole transaction:
+ *   identity    every fill and funding carries the paper venue's own id. All
+ *               already booked is the ordinary re-run — `duplicate`, nothing
+ *               moves; some booked and some not is a mismatch and throws.
+ *   the book    `expect` names every market the action moves and what its row
+ *               held when the engine computed it. A row that has moved since
+ *               (a concurrent tick, a reset) refuses the booking: a paper
+ *               engine applying a delta to a book it did not read is exactly a
+ *               double close. A position may only be written for a market it
+ *               names.
+ *   the epoch   the action was computed in `epoch`; if a paper reset opened
+ *               the next one in between, it books nothing.
+ *
+ * THE CASH. paper_book.cash_usdg is REAL USDG (the spot paper book's own
+ * column); the delta is exact micro-USDG converted once, here. A debit the
+ * cash cannot cover refuses — margin is never drawn into a negative book. The
+ * row is matched case-insensitively (the perp tables are lowercased, paper_book
+ * keeps the spelling index.ts seeded it with) and must be exactly one.
+ */
+export interface PaperPerpExpect {
+  marketId: number;
+  /** What the row held; null = flat (no row, or a row with no size). */
+  held: {
+    side: PerpSide;
+    base: bigint;
+    entryPrice: bigint;
+    allocatedMarginMicro: bigint;
+    stopTrigger: bigint | null;
+    takeTrigger: bigint | null;
+    fundingHourApplied: number | null;
+  } | null;
+  /** When set, the row must hold this market ISOLATED at exactly this IMF (an open rides the leverage it was judged at). */
+  isolatedImfBp?: number;
+}
+
+export interface PaperPerpFillBooking {
+  venueTradeId: string;
+  marketId: number;
+  side: PerpSide;
+  sideRole: "ask" | "bid";
+  base: bigint;
+  price: bigint;
+  quoteMicro: bigint;
+  feeMicro: bigint;
+  /** The paper engine always derives it — never null here. */
+  realizedMicro: bigint;
+  positionBefore: bigint;
+  entryQuoteBeforeMicro: bigint;
+  tradeType: PerpTradeType;
+  attribution: PerpAttribution;
+  /** This action's own leg, or the market's resting child it executes; null for a venue-forced fill. */
+  leg: { own: PerpLegRole } | { resting: "sl" | "tp" } | null;
+  venueTsMs: number;
+}
+
+export interface PaperPerpBooking {
+  agentId: string;
+  epoch: number;
+  expect: readonly PaperPerpExpect[];
+  order?: {
+    id?: string;
+    nonce: bigint;
+    effect: "open" | "reduce" | "close";
+    reduceOnly: boolean;
+    marketId: number;
+    status: "filled" | "partial" | "cancelled";
+    worstNotionalMicro: bigint;
+    filledBase: bigint;
+    filledQuoteMicro: bigint;
+    decisionId?: string | null;
+    reason?: string | null;
+    legs: readonly { role: PerpLegRole; clientOrderIndex: number; status: PerpLegStatus }[];
+  } | null;
+  fills?: readonly PaperPerpFillBooking[];
+  funding?: {
+    fundingId: string;
+    marketId: number;
+    fundingHour: number;
+    paymentMicro: bigint;
+    ratePpm: number | null;
+    positionBase: bigint;
+    positionSide: PerpSide;
+  } | null;
+  /** Resting children (sl/tp) of a market that end with this action. */
+  restingEnd?: readonly { marketId: number; role: "sl" | "tp"; status: PerpLegStatus; venueStatus: string }[];
+  positions: readonly Omit<PerpPositionInput, "agentId" | "mode" | "source">[];
+  cashDeltaMicro: bigint;
+}
+
+export async function bookPaperPerp(b: PaperPerpBooking): Promise<"booked" | "duplicate"> {
+  const agent = perpAgent(b.agentId);
+  const epochWanted = safeInt(b.epoch, "epoch", 1);
+  const cashDelta = BigInt(intText(b.cashDeltaMicro, "paper cash delta"));
+  const expected = new Map<number, PaperPerpExpect>();
+  for (const e of b.expect) {
+    const id = safeInt(e.marketId, "market id", 0, 65_535);
+    if (expected.has(id)) throw new RangeError(`perp ledger: market ${id} is expected twice`);
+    if (e.held) {
+      oneOf(e.held.side, ["long", "short"] as const, "expected side");
+      intText(e.held.base, "expected base", { min: 1n });
+    }
+    if (e.isolatedImfBp !== undefined) safeInt(e.isolatedImfBp, "expected imf (bp)", 1, 10_000);
+    expected.set(id, e);
+  }
+  for (const p of b.positions) {
+    if (!expected.has(p.marketId)) throw new RangeError(`perp ledger: a paper position for market ${p.marketId} was written without reading it`);
+  }
+  const o = b.order ?? null;
+  const order = o === null ? null : {
+    id: o.id === undefined ? randomUUID() : idText(o.id, "order id"),
+    nonce: safeInt(Number(intText(o.nonce, "nonce", { min: 1n })), "nonce", 1),
+    effect: oneOf(o.effect, ["open", "reduce", "close"] as const, "effect"),
+    marketId: safeInt(o.marketId, "market id", 0, 65_535),
+    status: oneOf(o.status, ["filled", "partial", "cancelled"] as const, "paper order status"),
+    worst: intText(o.worstNotionalMicro, "worst notional", { min: 0n }),
+    filledBase: intText(o.filledBase, "filled base", { min: 0n }),
+    filledQuote: intText(o.filledQuoteMicro, "filled quote", { min: 0n }),
+    decisionId: o.decisionId ?? null,
+    reason: o.reason ?? null,
+    legs: o.legs.map((l) => ({
+      role: oneOf(l.role, PERP_LEG_ROLES, "leg role"),
+      coi: safeInt(l.clientOrderIndex, "client order index", 1, Number(PERP_COI_MAX)),
+      status: oneOf(l.status, PERP_LEG_STATUSES, "leg status"),
+    })),
+    reduceOnly: o.reduceOnly,
+  };
+  if (order) {
+    if (typeof order.reduceOnly !== "boolean") throw new RangeError("perp ledger: reduceOnly must be a boolean");
+    if ((order.effect === "open") === order.reduceOnly) throw new RangeError(`perp ledger: a paper ${order.effect} is reduce-only exactly when it is an exit`);
+    if (!expected.has(order.marketId)) throw new RangeError("perp ledger: a paper order names a market it did not read");
+    for (const l of order.legs) {
+      // Rule 9's derivation holds on paper too: nonce × 8 + leg, so a paper
+      // client order index never repeats across restarts or a reset either.
+      if (BigInt(l.coi) !== perpCoi(BigInt(order.nonce), PERP_LEG[l.role])) {
+        throw new RangeError(`perp ledger: client order index ${l.coi} is not nonce × 8 + ${PERP_LEG[l.role]} for its ${l.role} leg`);
+      }
+    }
+  }
+  const fills = (b.fills ?? []).map((f) => {
+    const leg = f.leg;
+    if (leg !== null && "own" in leg && (!order || !order.legs.some((l) => l.role === leg.own))) {
+      throw new RangeError(`perp ledger: a fill names this action's ${leg.own} leg, which it does not carry`);
+    }
+    return {
+      venueTradeId: idText(f.venueTradeId, "venue trade id"),
+      marketId: safeInt(f.marketId, "market id", 0, 65_535),
+      side: oneOf(f.side, ["long", "short"] as const, "side"),
+      sideRole: oneOf(f.sideRole, ["ask", "bid"] as const, "side role"),
+      base: intText(f.base, "fill base", { min: 1n }),
+      price: intText(f.price, "fill price", { min: 1n }),
+      quote: intText(f.quoteMicro, "fill quote", { min: 0n }),
+      fee: intText(f.feeMicro, "fill fee"),
+      realized: intText(f.realizedMicro, "realized"),
+      positionBefore: intText(f.positionBefore, "position before"),
+      entryQuoteBefore: intText(f.entryQuoteBeforeMicro, "entry quote before"),
+      tradeType: oneOf(f.tradeType, PERP_TRADE_TYPES, "trade type"),
+      attribution: oneOf(f.attribution, PERP_ATTRIBUTIONS, "attribution"),
+      leg,
+      venueTsMs: safeInt(f.venueTsMs, "venue timestamp (ms)", 1),
+    };
+  });
+  for (const f of fills) if (!expected.has(f.marketId)) throw new RangeError(`perp ledger: a paper fill in market ${f.marketId} was booked without reading it`);
+  const fu = b.funding ?? null;
+  const funding = fu === null ? null : {
+    fundingId: idText(fu.fundingId, "funding id"),
+    marketId: safeInt(fu.marketId, "market id", 0, 65_535),
+    fundingHour: safeInt(fu.fundingHour, "funding hour", 0),
+    payment: intText(fu.paymentMicro, "funding payment"),
+    ratePpm: optSafeInt(fu.ratePpm, "funding rate (ppm)", -1_000_000, 1_000_000),
+    positionBase: intText(fu.positionBase, "funding position base", { min: 0n }),
+    positionSide: oneOf(fu.positionSide, ["long", "short"] as const, "position side"),
+  };
+  if (funding && funding.fundingHour % 3600 !== 0) throw new RangeError(`perp ledger: funding hour ${funding.fundingHour} is not on the hour`);
+  if (funding && !expected.has(funding.marketId)) throw new RangeError("perp ledger: a paper funding names a market it did not read");
+  const ends = (b.restingEnd ?? []).map((r) => ({
+    marketId: safeInt(r.marketId, "market id", 0, 65_535),
+    role: oneOf(r.role, ["sl", "tp"] as const, "resting leg role"),
+    status: oneOf(r.status, PERP_LEG_STATUSES, "leg status"),
+    venueStatus: idText(r.venueStatus, "venue status"),
+  }));
+  const cashUsdg = Number(cashDelta) / 1e6;
+
+  return getDb().tx(async (db) => {
+    const { epoch, journalAs } = await perpBookingOf(db, b.agentId);
+    if (epoch !== epochWanted) throw new RangeError(`perp ledger: the paper book is in epoch ${epoch}, not the ${epochWanted} this action was computed in`);
+
+    // Identity first: a re-run of an action already booked moves nothing.
+    const ids = fills.length + (funding ? 1 : 0);
+    if (ids > 0) {
+      let held = 0;
+      for (const f of fills) {
+        const r = await db
+          .prepare(`SELECT 1 AS ok FROM perp_fills WHERE agent_id = ? AND mode = 'paper' AND venue_trade_id = ? AND side_role = ?`)
+          .get(agent, f.venueTradeId, f.sideRole);
+        if (r) held += 1;
+      }
+      if (funding) {
+        const r = await db
+          .prepare(`SELECT 1 AS ok FROM perp_funding WHERE agent_id = ? AND mode = 'paper' AND market_id = ? AND (funding_id = ? OR funding_hour = ?)`)
+          .get(agent, funding.marketId, funding.fundingId, funding.fundingHour);
+        if (r) held += 1;
+      }
+      if (held === ids) return "duplicate";
+      if (held > 0) throw new RangeError("perp ledger: part of this paper action is already booked and part is not");
+    }
+
+    for (const [marketId, e] of expected) {
+      const r = (await db
+        .prepare(
+          `SELECT side, base, entry_price, allocated_margin_micro, stop_trigger, take_trigger, funding_hour_applied, imf_bp, margin_mode
+             FROM perp_positions WHERE agent_id = ? AND mode = 'paper' AND market_id = ?`,
+        )
+        .get(agent, marketId)) as Record<string, unknown> | undefined;
+      const flat = r === undefined || r.base === "0";
+      const moved = (why: string) => new RangeError(`perp ledger: the paper book moved under this action (market ${marketId}: ${why})`);
+      if (e.held === null) {
+        if (!flat) throw moved("it holds a position");
+      } else {
+        if (flat || r === undefined) throw moved("it is flat");
+        const opt = (v: unknown) => (v === null || v === undefined ? null : textInt(v));
+        const hourHeld = r.funding_hour_applied === null || r.funding_hour_applied === undefined ? null : Number(r.funding_hour_applied);
+        if (
+          r.side !== e.held.side ||
+          textInt(r.base) !== e.held.base ||
+          opt(r.entry_price) !== e.held.entryPrice ||
+          textInt(r.allocated_margin_micro) !== e.held.allocatedMarginMicro ||
+          opt(r.stop_trigger) !== e.held.stopTrigger ||
+          opt(r.take_trigger) !== e.held.takeTrigger ||
+          hourHeld !== e.held.fundingHourApplied
+        ) {
+          throw moved("its position changed");
+        }
+      }
+      if (e.isolatedImfBp !== undefined && (r === undefined || Number(r.imf_bp) !== e.isolatedImfBp || r.margin_mode !== "isolated")) {
+        throw moved(`it is not isolated at ${e.isolatedImfBp} bp`);
+      }
+    }
+
+    // The resting children the fills execute, read before any leg is ended.
+    const restingOf = async (marketId: number, role: "sl" | "tp") =>
+      (await db
+        .prepare(
+          `SELECT l.order_id AS order_id, l.client_order_index AS coi FROM perp_order_legs l
+             JOIN perp_orders o ON o.id = l.order_id
+            WHERE l.agent_id = ? AND l.mode = 'paper' AND l.role = ? AND l.status IN ('submitted', 'pending', 'open')
+              AND o.agent_id = l.agent_id AND o.mode = 'paper' AND o.market_id = ?
+            ORDER BY l.client_order_index DESC LIMIT 1`,
+        )
+        .get(agent, role, marketId)) as { order_id: string; coi: number } | undefined;
+
+    if (order) {
+      await db
+        .prepare(
+          `INSERT INTO perp_orders (id, agent_id, mode, epoch, nonce, status, effect, reduce_only, market_id, worst_notional_micro,
+                                    filled_base, filled_quote_micro, decision_id, reason, resolved_at)
+           VALUES (?, ?, 'paper', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+        )
+        .run(order.id, agent, epoch, order.nonce, order.status, order.effect, order.reduceOnly ? 1 : 0, order.marketId, order.worst,
+          order.filledBase, order.filledQuote, order.decisionId, order.reason);
+      for (const l of order.legs) {
+        await db
+          .prepare(
+            `INSERT INTO perp_order_legs (agent_id, mode, order_id, role, client_order_index, status, venue_status)
+             VALUES (?, 'paper', ?, ?, ?, ?, 'paper')`,
+          )
+          .run(agent, order.id, l.role, l.coi, l.status);
+      }
+    }
+
+    for (const f of fills) {
+      let orderId: string | null = null;
+      let coi: number | null = null;
+      if (f.leg !== null && "own" in f.leg && order) {
+        const own = f.leg.own;
+        orderId = order.id;
+        coi = order.legs.find((l) => l.role === own)?.coi ?? null;
+      } else if (f.leg !== null && "resting" in f.leg) {
+        const r = await restingOf(f.marketId, f.leg.resting);
+        orderId = r?.order_id ?? null;
+        coi = r === undefined ? null : Number(r.coi);
+      }
+      await db
+        .prepare(
+          `INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, role, base, price,
+                                   quote_micro, fee_micro, realized_micro, position_before, entry_quote_before_micro,
+                                   trade_type, attribution, order_id, client_order_index, venue_ts_ms)
+           VALUES (?, 'paper', ?, ?, ?, ?, ?, 'taker', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(agent, epoch, f.venueTradeId, f.sideRole, f.marketId, f.side, f.base, f.price, f.quote, f.fee, f.realized,
+          f.positionBefore, f.entryQuoteBefore, f.tradeType, f.attribution, orderId, coi, f.venueTsMs);
+      // insertPerpFill's payload, key for key: audit.ts reads one shape.
+      await appendJournalRow(db, journalAs, epoch, "perp-fill", {
+        attribution: f.attribution,
+        base: f.base,
+        clientOrderIndex: coi,
+        entryQuoteBeforeMicro: f.entryQuoteBefore,
+        feeMicro: f.fee,
+        market: marketKeyOf(f.marketId),
+        marketId: f.marketId,
+        mode: "paper",
+        orderId,
+        positionBefore: f.positionBefore,
+        price: f.price,
+        quoteMicro: f.quote,
+        realizedMicro: f.realized,
+        role: "taker",
+        side: f.side,
+        sideRole: f.sideRole,
+        tradeType: f.tradeType,
+        venueOrderIndex: null,
+        venueTradeId: f.venueTradeId,
+        venueTsMs: f.venueTsMs,
+        venueTxHash: null,
+      });
+    }
+
+    if (funding) {
+      await db
+        .prepare(
+          `INSERT INTO perp_funding (agent_id, mode, epoch, market_id, funding_id, funding_hour, payment_micro,
+                                     rate_ppm, position_base, position_side)
+           VALUES (?, 'paper', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(agent, epoch, funding.marketId, funding.fundingId, funding.fundingHour, funding.payment, funding.ratePpm,
+          funding.positionBase, funding.positionSide);
+      // insertPerpFunding's payload, key for key.
+      await appendJournalRow(db, journalAs, epoch, "funding", {
+        fundingHour: funding.fundingHour,
+        fundingId: funding.fundingId,
+        market: marketKeyOf(funding.marketId),
+        marketId: funding.marketId,
+        mode: "paper",
+        paymentMicro: funding.payment,
+        positionBase: funding.positionBase,
+        positionSide: funding.positionSide,
+        ratePpm: funding.ratePpm,
+      });
+    }
+
+    for (const r of ends) {
+      await db
+        .prepare(
+          `UPDATE perp_order_legs SET status = ?, venue_status = ?, updated_at = unixepoch()
+            WHERE agent_id = ? AND mode = 'paper' AND role = ? AND status IN ('submitted', 'pending', 'open')
+              AND order_id IN (SELECT id FROM perp_orders WHERE agent_id = ? AND mode = 'paper' AND market_id = ?)
+              ${order ? "AND order_id <> ?" : ""}`,
+        )
+        .run(r.status, r.venueStatus, agent, r.role, agent, r.marketId, ...(order ? [order.id] : []));
+    }
+
+    // THE PAPER BOOK'S CROSS COLLATERAL IS A READ ZERO, NOT AN ABSENT ONE.
+    // This engine draws margin straight from paper cash (ΣM lives on the
+    // rows), so its C is 0 by construction — but the account row it books
+    // under was created by bumpNonceHighWater with the column NULL, and
+    // paper-checkpoint.ts reads NULL collateral beside open positions as a
+    // torn book and refuses the WHOLE checkpoint row: spot cash, shares and
+    // basis with it. A hosted redeploy then restored the checkpoint from
+    // before the open (the position gone, its margin back in cash) or, with
+    // none for the epoch, refused to start the agent (the review's
+    // R3-PAPER-CKPT-NULL-COLLATERAL). Seeded here, in the booking's own
+    // transaction, so no committed paper position exists without it; a value
+    // already there (a restored checkpoint's) is never overwritten, and a
+    // genuinely torn book still reads as one.
+    await db
+      .prepare(
+        `INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro) VALUES (?, 'paper', '0')
+         ON CONFLICT(agent_id, mode) DO UPDATE SET paper_collateral_micro = COALESCE(perp_accounts.paper_collateral_micro, '0')`,
+      )
+      .run(agent);
+
+    for (const p of b.positions) await putPerpPosition(db, { ...p, agentId: b.agentId, mode: "paper", source: "paper" });
+
+    if (cashDelta !== 0n) {
+      const res = await db
+        .prepare(
+          `UPDATE paper_book SET cash_usdg = cash_usdg + ?, updated_at = unixepoch()
+            WHERE LOWER(agent_id) = LOWER(?)${cashDelta < 0n ? " AND cash_usdg >= ?" : ""}`,
+        )
+        .run(cashUsdg, b.agentId, ...(cashDelta < 0n ? [-cashUsdg] : []));
+      if (Number(res.changes) !== 1) {
+        throw new RangeError(
+          cashDelta < 0n
+            ? `perp ledger: the paper book cannot fund ${-cashUsdg} USDG of margin and fees`
+            : "perp ledger: there is no single paper book to return the cash to",
+        );
+      }
+    }
+    return "booked";
+  });
+}
+
+// ── the perp lane's own reads (perps/lane.ts) ────────────────────────────────
+
+/**
+ * WHAT THE PERPS VIEW NEEDS FROM THE LEDGER THAT NO OTHER READ ALREADY GIVES —
+ * the day's opens, the last exit per market and what caused it (the cooldown
+ * clock perp-trend reads), and the last open per market (the candle it was
+ * taken on). One call, so the lane builds its view from one moment of the
+ * ledger rather than three.
+ *
+ *   opensToday   perp_orders rows that are NOT reduce-only, created in the
+ *                trailing window, in an ops-counting status — the count
+ *                perpsMaxOpensPerDay judges. The signed flag, never `effect`:
+ *                an order that is not reduce-only can open, whatever it was
+ *                called (perpOpenNotionalSince's rule).
+ *   lastExits    per market, the newest fill that REDUCED a position (a long's
+ *                ask, a short's bid), and why: a forced fill (liquidation,
+ *                deleverage, settlement) is `forced`; our resting child is
+ *                `stop` or `take` by its leg (or, on paper, the event id the
+ *                engine minted); an order of ours is `risk` when its decision
+ *                was a hard risk exit (protect.ts, a venue stop) and
+ *                `strategy` otherwise. Anything else is `unknown`, which
+ *                perp-trend cools down for longest. Newer than `sinceSec`.
+ *   lastOpenAt   per market, the newest open order's created_at (unix s).
+ *
+ * THROWS on a read failure — never an empty map: an unreadable cooldown is
+ * not "no cooldown", and the lane then builds no view (unread).
+ */
+export async function perpLaneLedgerFacts(
+  agentId: string,
+  mode: PerpMode,
+  sinceSec: number,
+): Promise<{
+  opensToday: number;
+  lastExits: Map<number, { atSec: number; cause: "strategy" | "stop" | "take" | "risk" | "forced" | "unknown" }>;
+  lastOpenAt: Map<number, number>;
+}> {
+  const agent = perpAgent(agentId);
+  const m = perpMode(mode);
+  const since = Math.floor(sinceSec);
+  const db = getDb();
+  const statuses = PERP_OPS_ORDER_STATUSES.map(() => "?").join(", ");
+  const opens = (await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM perp_orders
+        WHERE agent_id = ? AND mode = ? AND reduce_only = 0 AND effect = 'open' AND created_at > ? AND status IN (${statuses})`,
+    )
+    .get(agent, m, since, ...PERP_OPS_ORDER_STATUSES)) as { n: number } | undefined;
+  const lastOpenRows = (await db
+    .prepare(
+      `SELECT market_id, MAX(created_at) AS at FROM perp_orders
+        WHERE agent_id = ? AND mode = ? AND reduce_only = 0 AND effect = 'open' AND market_id IS NOT NULL AND created_at > ?
+        GROUP BY market_id`,
+    )
+    .all(agent, m, since)) as { market_id: number; at: number }[];
+  const lastOpenAt = new Map<number, number>();
+  for (const r of lastOpenRows) lastOpenAt.set(Number(r.market_id), Number(r.at));
+
+  const exitRows = (await db
+    .prepare(
+      `SELECT f.market_id AS market_id, f.venue_ts_ms AS ts, f.trade_type AS trade_type, f.attribution AS attribution,
+              f.venue_trade_id AS trade_id, l.role AS leg_role, d.provenance AS provenance
+         FROM perp_fills f
+         LEFT JOIN perp_order_legs l
+           ON l.agent_id = f.agent_id AND l.mode = f.mode AND l.client_order_index = f.client_order_index
+         LEFT JOIN perp_orders o ON o.id = f.order_id
+         LEFT JOIN decisions d ON d.id = o.decision_id
+        WHERE f.agent_id = ? AND f.mode = ? AND f.venue_ts_ms > ?
+          AND ((f.side = 'long' AND f.side_role = 'ask') OR (f.side = 'short' AND f.side_role = 'bid'))
+        ORDER BY f.venue_ts_ms DESC`,
+    )
+    .all(agent, m, since * 1000)) as {
+    market_id: number;
+    ts: number;
+    trade_type: string;
+    attribution: string;
+    trade_id: string;
+    leg_role: string | null;
+    provenance: string | null;
+  }[];
+  const lastExits = new Map<number, { atSec: number; cause: "strategy" | "stop" | "take" | "risk" | "forced" | "unknown" }>();
+  for (const r of exitRows) {
+    const market = Number(r.market_id);
+    if (lastExits.has(market)) continue; // newest first: the first row per market is the last exit
+    let cause: "strategy" | "stop" | "take" | "risk" | "forced" | "unknown";
+    if (r.attribution === "venue-forced" || r.trade_type !== "trade") cause = "forced";
+    else if (r.attribution === "venue-stop") {
+      cause = r.leg_role === "tp" || (r.leg_role === null && r.trade_id.startsWith("paper:tp:")) ? "take" : "stop";
+    } else if (r.attribution === "intent") cause = r.provenance === "hard-risk-exit" ? "risk" : "strategy";
+    else cause = "unknown";
+    lastExits.set(market, { atSec: Math.floor(Number(r.ts) / 1000), cause });
+  }
+  return { opensToday: Number(opens?.n ?? 0), lastExits, lastOpenAt };
 }

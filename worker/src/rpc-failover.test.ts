@@ -17,7 +17,7 @@
  *   - the API key in the house URL never reaches a log line or a file name.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createPublicClient, defineChain } from "viem";
@@ -26,7 +26,8 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 process.env.MERRYMEN_HOME = mkdtempSync(path.join(tmpdir(), "merrymen-rpc-failover-"));
 delete process.env.MERRYMEN_FLEET_HOME;
 
-const { chainRead, resetGovernorForTest, resetRpcMeters, resetRpcMetersForTest, rpcSummaryLines } = await import("./rpc-meter");
+const { chainRead, chainReadRpc, resetGovernorForTest, resetRpcMeters, resetRpcMetersForTest, rpcSummaryLines } = await import("./rpc-meter");
+const { classifyRpcError: sweepRefusal } = await import("./chain-capital");
 const { classifyRpcError } = await import("./rpc-error");
 const { DOWN_HOLD_MS, ERROR_HOLD_MS, endpointKey, failoverEndpoints, holdFor, verdictFor } = await import("./rpc-failover");
 
@@ -43,7 +44,7 @@ const otherChain = defineChain({
 });
 const MONTHLY = "Monthly capacity limit exceeded. Visit https://dashboard.alchemy.com/settings/billing to upgrade your scaling policy for continued service.";
 
-type Behaviour = "ok" | "quota" | "429" | "401" | "500" | "400" | "dead" | "hang" | "endless-quota" | "500-unreadable";
+type Behaviour = "ok" | "quota" | "429" | "401" | "500" | "400" | "dead" | "hang" | "endless-quota" | "500-unreadable" | "too-many";
 /** What happened to the bodies of the two streaming behaviours. */
 const stream = { pulls: 0, cancelled: 0 };
 const behaviour = new Map<string, Behaviour>();
@@ -83,6 +84,12 @@ beforeEach(() => {
     if (b === "401") return err(401, "Must be authenticated!");
     if (b === "500") return new Response("upstream exploded", { status: 500 });
     if (b === "400") return err(400, "invalid request");
+    if (b === "too-many") {
+      // A served answer that is an error: the node found more logs than it returns.
+      const body = JSON.parse(String(init?.body ?? "{}")) as { id: number } | { id: number }[];
+      const one = (c: { id: number }) => ({ jsonrpc: "2.0", id: c.id, error: { code: -32005, message: "query returned more than 10000 results" } });
+      return new Response(JSON.stringify(Array.isArray(body) ? body.map(one) : one(body)), { headers: { "content-type": "application/json" } });
+    }
     if (b === "dead") throw new TypeError("fetch failed");
     if (b === "endless-quota" || b === "500-unreadable") {
       // A body that never ends: the quota JSON, then filler forever. Reading
@@ -369,5 +376,57 @@ describe("what failover must never do", () => {
     assert.ok(files.some((f) => f.startsWith("rpc-cooldown-")), `the fallback's breaker was published: ${files.join(", ")}`);
     for (const f of files) assert.ok(!f.includes("SECRET"), f);
     for (const w of [...warnings, ...rpcSummaryLines()]) assert.ok(!w.includes("SECRET"), w);
+  });
+});
+
+describe("chainReadRpc — the orchestrator's accounting tools read the same way the fleet does", () => {
+  it("a spent house quota moves the call to the chain's public RPC, each endpoint asked once, the result as served", async () => {
+    // The reconstruction's fetch went to the house endpoint alone, so a spent
+    // quota left every window it read unread and the repair blocked.
+    behaviour.set(HOUSE, "quota");
+    const rpc = chainReadRpc(HOUSE, chain, { label: "recon" });
+    assert.equal(await rpc("eth_blockNumber", []), "0x10");
+    assert.deepEqual(sent, [HOUSE, PUBLIC]);
+    assert.equal(await rpc("eth_getCode", ["0x0000000000000000000000000000000000000001", "latest"]), "0x");
+    assert.deepEqual(sent, [HOUSE, PUBLIC, PUBLIC], "the house endpoint is left alone while it is down");
+  });
+
+  it("with no house endpoint configured it is the chain's own endpoint alone", async () => {
+    const rpc = chainReadRpc(undefined, chain);
+    assert.equal(await rpc("eth_blockNumber", []), "0x10");
+    assert.deepEqual(sent, [PUBLIC]);
+  });
+
+  it("a refusal nothing can route around still reads as a rate limit to the sweep's own classifier, so it backs off rather than reading short", async () => {
+    behaviour.set(HOUSE, "quota");
+    behaviour.set(PUBLIC, "429");
+    const rpc = chainReadRpc(HOUSE, chain);
+    await assert.rejects(rpc("eth_getLogs", [{}]), (e: unknown) => sweepRefusal(e) === "rate-limited");
+  });
+
+  it("a node that found more logs than it returns keeps its words, so the sweep still splits the range", async () => {
+    behaviour.set(HOUSE, "too-many");
+    const rpc = chainReadRpc(HOUSE, chain);
+    await assert.rejects(rpc("eth_getLogs", [{}]), (e: unknown) => sweepRefusal(e) === "too-many-results");
+    assert.deepEqual(sent, [HOUSE], "a question too big for one endpoint is too big for the other: not shopped around");
+  });
+
+  it("the caller's timeout is the request's deadline", async () => {
+    behaviour.set(PUBLIC, "hang");
+    const rpc = chainReadRpc(undefined, chain, { timeoutMs: 50 });
+    const started = realNow();
+    await assert.rejects(rpc("eth_blockNumber", []));
+    assert.ok(realNow() - started < 5_000, "viem's default would have waited ten seconds");
+  });
+
+  it("the reconstruction scan and receipt attestation read through it, on mainnet's chain, never by a bare fetch", () => {
+    const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+    for (const [fn, label] of [["runReconstructionDryRunIfAsked", "recon"], ["runReceiptAttestationIfAsked", "receipt-attestation"]] as const) {
+      const at = src.indexOf(`async function ${fn}(`);
+      assert.ok(at > 0, fn);
+      const body = src.slice(at, src.indexOf("\n}\n", at));
+      assert.match(body, new RegExp(`chainReadRpc\\(rpcUrl, robinhoodChain, \\{ label: "${label}", timeoutMs: \\d[\\d_]*`), fn);
+      assert.doesNotMatch(body, /fetch\(rpcUrl/, `${fn} posts to the configured endpoint alone`);
+    }
   });
 });

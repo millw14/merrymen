@@ -116,10 +116,10 @@ describe("one bot, one tenant, from the first spawn", () => {
     // The incident's shape: the same bot, re-saved under a second login (here
     // with a re-issued secret, which the old string compare took for a
     // different bot).
-    await getSettingsStore().put(A, withBot("111:AAA-first-secret") as never);
-    await getSettingsStore().put(B, withBot("111:BBB-reissued-secret") as never);
-    await getGrantStore().put(A, grant(1));
-    await getGrantStore().put(B, grant(2));
+    await getSettingsStore("spot").put(A, withBot("111:AAA-first-secret") as never);
+    await getSettingsStore("spot").put(B, withBot("111:BBB-reissued-secret") as never);
+    await getGrantStore("spot").put(A, grant(1));
+    await getGrantStore("spot").put(B, grant(2));
     await reconcile();
     assert.equal(spawnedWith.get(A), "111:AAA-first-secret", "the claim's holder starts with its bot");
     assert.ok(spawnedWith.has(B), "the other login trades");
@@ -129,7 +129,7 @@ describe("one bot, one tenant, from the first spawn", () => {
     const refused = said.filter((l) => l.includes(`${B}: telegram bot token already claimed by another tenant`));
     assert.equal(refused.length, 1, `said once, not every write:\n${said.join("\n")}`);
     assert.ok(!said.some((l) => l.includes("BBB-reissued") || l.includes("AAA-first")), "no token in the log");
-    assert.equal((await getSettingsStore().get(B))?.telegramBotToken, "111:BBB-reissued-secret", "the owner's saved settings are untouched");
+    assert.equal((await getSettingsStore("spot").get(B))?.telegramBotToken, "111:BBB-reissued-secret", "the owner's saved settings are untouched");
   });
 
   it("A MOVE HANDS THE BOT OVER ON THE NEXT PASS, and takes it from the account it left", async () => {
@@ -148,10 +148,10 @@ describe("a bot nobody has claimed yet", () => {
     // orchestrator judges claims it, first one wins, and keeps it.
     const C = tenant(0xc1);
     const D = tenant(0xd1);
-    await getSettingsStore().put(C, withBot("222:CCC-secret") as never);
-    await getSettingsStore().put(D, withBot("222:DDD-secret") as never);
-    await getGrantStore().put(C, grant(3));
-    await getGrantStore().put(D, grant(4));
+    await getSettingsStore("spot").put(C, withBot("222:CCC-secret") as never);
+    await getSettingsStore("spot").put(D, withBot("222:DDD-secret") as never);
+    await getGrantStore("spot").put(C, grant(3));
+    await getGrantStore("spot").put(D, grant(4));
     await reconcile();
     const holder = (await readBotClaims(claimsDb)).get("222");
     assert.ok(holder === C || holder === D, "claimed for one of them");
@@ -173,10 +173,10 @@ describe("a bot nobody has claimed yet", () => {
     // The stranger sorts first, so the pass meets it before the owner.
     const STRANGER = tenant(0x01);
     const OWNER = tenant(0x02);
-    await getSettingsStore().put(OWNER, { telegramEnabled: false, telegramBotToken: "444:the-real-secret" } as never);
-    await getSettingsStore().put(STRANGER, withBot("444:fake-guessed-secret") as never);
-    await getGrantStore().put(OWNER, grant(7));
-    await getGrantStore().put(STRANGER, grant(8));
+    await getSettingsStore("spot").put(OWNER, { telegramEnabled: false, telegramBotToken: "444:the-real-secret" } as never);
+    await getSettingsStore("spot").put(STRANGER, withBot("444:fake-guessed-secret") as never);
+    await getGrantStore("spot").put(OWNER, grant(7));
+    await getGrantStore("spot").put(STRANGER, grant(8));
     getMeAsked.length = 0;
     await reconcile();
     await reconcile();
@@ -185,7 +185,7 @@ describe("a bot nobody has claimed yet", () => {
     assert.ok(said.some((l) => l.includes(`${STRANGER}: Telegram refused the token for telegram bot 444`)), said.join("\n"));
     // The owner switches Telegram on: their confirmed claim decides, whoever
     // the pass meets first.
-    await getSettingsStore().put(OWNER, withBot("444:the-real-secret") as never);
+    await getSettingsStore("spot").put(OWNER, withBot("444:the-real-secret") as never);
     await reconcile();
     assert.equal((await readBotClaims(claimsDb)).get("444"), OWNER);
     assert.equal(tokenInFile(OWNER), "444:the-real-secret", "the owner's child polls its bot");
@@ -205,10 +205,10 @@ describe("a bot nobody has claimed yet", () => {
       { unlinked: tenant(0x34), linked: tenant(0x33), token: "556:one-token-two-logins" },
     ];
     for (const p of pairs) {
-      await getSettingsStore().put(p.unlinked, { telegramEnabled: true, telegramBotToken: p.token } as never);
-      await getSettingsStore().put(p.linked, withBot(p.token) as never);
-      await getGrantStore().put(p.unlinked, grant(0x31 + pairs.indexOf(p) * 2));
-      await getGrantStore().put(p.linked, grant(0x32 + pairs.indexOf(p) * 2));
+      await getSettingsStore("spot").put(p.unlinked, { telegramEnabled: true, telegramBotToken: p.token } as never);
+      await getSettingsStore("spot").put(p.linked, withBot(p.token) as never);
+      await getGrantStore("spot").put(p.unlinked, grant(0x31 + pairs.indexOf(p) * 2));
+      await getGrantStore("spot").put(p.linked, grant(0x32 + pairs.indexOf(p) * 2));
     }
     await reconcile();
     for (const p of pairs) {
@@ -226,8 +226,8 @@ describe("a bot nobody has claimed yet", () => {
     // from the spawn to the refresh that follows it: it must be able to poll
     // to be linked at all.
     const LONE = tenant(0x41);
-    await getSettingsStore().put(LONE, { telegramEnabled: true, telegramBotToken: "666:lone-login-secret" } as never);
-    await getGrantStore().put(LONE, grant(0x41));
+    await getSettingsStore("spot").put(LONE, { telegramEnabled: true, telegramBotToken: "666:lone-login-secret" } as never);
+    await getGrantStore("spot").put(LONE, grant(0x41));
     await reconcile();
     assert.equal(spawnedWith.get(LONE), undefined, "started without it");
     assert.ok(said.some((l) => l.includes(`${LONE}: telegram bot 666 is not claimed yet and no chat is linked here`)), said.join("\n"));
@@ -256,14 +256,14 @@ describe("a bot nobody has claimed yet", () => {
     try {
       // The victim's Telegram is off at first, so the attacker's token is the
       // only one on the bot: nothing of the victim's is there to win first.
-      await getSettingsStore().put(VICTIM, { telegramEnabled: false, telegramBotToken: "777:the-victims-live-secret" } as never);
-      await getSettingsStore().put(ATTACKER, withBot(crafted) as never);
-      await getGrantStore().put(ATTACKER, grant(0x51));
-      await getGrantStore().put(VICTIM, grant(0x52));
+      await getSettingsStore("spot").put(VICTIM, { telegramEnabled: false, telegramBotToken: "777:the-victims-live-secret" } as never);
+      await getSettingsStore("spot").put(ATTACKER, withBot(crafted) as never);
+      await getGrantStore("spot").put(ATTACKER, grant(0x51));
+      await getGrantStore("spot").put(VICTIM, grant(0x52));
       await reconcile();
       assert.equal(sent.length, 0, `nothing was sent for the crafted token:\n${sent.join("\n")}`);
       assert.equal((await readBotClaims(claimsDb)).get("777"), undefined, "and it claimed nothing");
-      await getSettingsStore().put(VICTIM, withBot("777:the-victims-live-secret") as never);
+      await getSettingsStore("spot").put(VICTIM, withBot("777:the-victims-live-secret") as never);
       await reconcile();
     } finally {
       globalThis.fetch = realFetch;
@@ -277,10 +277,10 @@ describe("a bot nobody has claimed yet", () => {
   it("A TENANT WITH TELEGRAM OFF CLAIMS NOTHING, so the one that polls keeps the bot", async () => {
     const E = tenant(0xe1);
     const F = tenant(0xf1);
-    await getSettingsStore().put(E, { telegramEnabled: false, telegramBotToken: "333:EEE-secret" } as never);
-    await getSettingsStore().put(F, withBot("333:FFF-secret") as never);
-    await getGrantStore().put(E, grant(5));
-    await getGrantStore().put(F, grant(6));
+    await getSettingsStore("spot").put(E, { telegramEnabled: false, telegramBotToken: "333:EEE-secret" } as never);
+    await getSettingsStore("spot").put(F, withBot("333:FFF-secret") as never);
+    await getGrantStore("spot").put(E, grant(5));
+    await getGrantStore("spot").put(F, grant(6));
     await reconcile();
     assert.equal((await readBotClaims(claimsDb)).get("333"), F);
     assert.equal(spawnedWith.get(F), "333:FFF-secret");
@@ -317,10 +317,10 @@ describe("a bot nobody has claimed yet", () => {
     });
     try {
       for (const [i, p] of pairs.entries()) {
-        await getSettingsStore().put(p.unlinked, { telegramEnabled: true, telegramBotToken: p.token } as never);
-        await getSettingsStore().put(p.linked, withBot(p.token) as never);
-        await getGrantStore().put(p.unlinked, grant(0x61 + i * 3));
-        await getGrantStore().put(p.linked, grant(0x62 + i * 3));
+        await getSettingsStore("spot").put(p.unlinked, { telegramEnabled: true, telegramBotToken: p.token } as never);
+        await getSettingsStore("spot").put(p.linked, withBot(p.token) as never);
+        await getGrantStore("spot").put(p.unlinked, grant(0x61 + i * 3));
+        await getGrantStore("spot").put(p.linked, grant(0x62 + i * 3));
       }
       getMeAsked.length = 0;
       await reconcile();
@@ -363,10 +363,10 @@ describe("a bot nobody has claimed yet", () => {
       return NO_ANSWER;
     });
     try {
-      await getSettingsStore().put(LINKED, withBot(deaf) as never);
-      await getSettingsStore().put(UNLINKED, { telegramEnabled: true, telegramBotToken: "883:unlinked-live-secret" } as never);
-      await getGrantStore().put(LINKED, grant(0x67));
-      await getGrantStore().put(UNLINKED, grant(0x68));
+      await getSettingsStore("spot").put(LINKED, withBot(deaf) as never);
+      await getSettingsStore("spot").put(UNLINKED, { telegramEnabled: true, telegramBotToken: "883:unlinked-live-secret" } as never);
+      await getGrantStore("spot").put(LINKED, grant(0x67));
+      await getGrantStore("spot").put(UNLINKED, grant(0x68));
       await reconcile();
       assert.equal((await readBotClaims(claimsDb)).get("883"), undefined);
       assert.equal(tokenInFile(UNLINKED), undefined, "waits while the linked token could still be a blip");

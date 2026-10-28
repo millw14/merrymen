@@ -36,10 +36,14 @@ let preflightCalls = 0;
 type RevocationWallet = { ownerKey?: string; smartAccount: string; chainId: number };
 let revoke: (wallet: RevocationWallet) => Promise<unknown>;
 let revokeWallets: RevocationWallet[] = [];
+let fundingCheck: (wallet: RevocationWallet) => Promise<void>;
+let fundingChecks: RevocationWallet[] = [];
 let restoredKeys: unknown[] = [];
 let previewOwner: (key: string, chainId: number) => Promise<{ smartAccount: string; owner: string }>;
 let stop: (expectedTenant?: string | null) => Promise<void>;
 let stopCalls = 0;
+let replacementStops: Array<{ tenant?: string | null; account: string; session?: string }> = [];
+let destructiveStops = 0;
 let revokeCalls = 0;
 let mintCalls = 0;
 let activeGrant = grant;
@@ -69,8 +73,16 @@ before(async () => {
       if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => privyOwner };
       if (id === "@/lib/trencher-permission") return { TRENCHER_FACTORY: trencherFactory };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
-      if (id === "@/lib/revoke-client") return { revokeFromBrowser: async (wallet: RevocationWallet) => { revokeCalls++; revokeWallets.push(wallet); return revoke(wallet); } };
-      if (id === "@/lib/stop-agent") return { stopAgent: (expectedTenant?: string | null) => { stopCalls++; return stop(expectedTenant); } };
+      if (id === "@/lib/revoke-client") return {
+        revokeFromBrowser: async (wallet: RevocationWallet) => { revokeCalls++; revokeWallets.push(wallet); return revoke(wallet); },
+        assertRevocationFunded: async (wallet: RevocationWallet) => { fundingChecks.push(wallet); return fundingCheck(wallet); },
+      };
+      if (id === "@/lib/stop-agent") return {
+        deleteAgent: (expectedTenant?: string | null) => { stopCalls++; destructiveStops++; return stop(expectedTenant); },
+        stopAgentForReplacement: (tenant: string | null | undefined, account: string, session?: string) => {
+          stopCalls++; replacementStops.push({ tenant, account, session }); return stop(tenant);
+        },
+      };
       if (id === "@/lib/session") return {
         FAUCET_URL: "https://faucet.testnet.chain.robinhood.com",
         loadGrant: () => storedGrantAvailable ? activeGrant : null,
@@ -100,10 +112,14 @@ beforeEach(() => {
   privyOwner = null;
   revokeCalls = 0;
   revokeWallets = [];
+  fundingChecks = [];
+  fundingCheck = async () => {};
   restoredKeys = [];
   mintCalls = 0;
   preflightCalls = 0;
   stopCalls = 0;
+  replacementStops = [];
+  destructiveStops = 0;
   revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 });
   previewOwner = async () => ({ smartAccount: address, owner: address });
   stop = async () => {};
@@ -626,6 +642,8 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     assert.equal(revokeCalls, 1);
+    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.equal(destructiveStops, 0, "renewal never deletes the agent's memory");
     assert.equal(mintCalls, 0);
     await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
     assert.equal(mintCalls, 1);
@@ -642,12 +660,48 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     assert.equal(mintCalls, 0);
+    assert.equal(replacementStops.length, 1);
+    assert.equal(destructiveStops, 0, "a failed renewal preserves agent memory too");
     assert.match(ui.container.textContent!, /receipt unconfirmed/);
     assert.doesNotMatch(ui.container.textContent!, /Permission renewed/);
     await ui.click("review and renew permission");
     assert.equal(needsPermissionReplacement(activeGrant), true);
     assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "re-arm this wallet"), false);
     assert.equal(activeGrant.demoOwnerPrivateKey, grant.demoOwnerPrivateKey);
+  });
+
+  it("an account with no ETH for the revocation fee is refused before the agent is stopped", async () => {
+    activeGrant = { ...grant, chainId: 46630 };
+    ui.dom.window.history.replaceState({}, "", "/grant?chain=4663");
+    fundingCheck = async wallet => {
+      if (wallet.chainId === 4663) throw new Error(`Revoking earlier permissions needs ETH for the network fee on Robinhood Chain (4663), and account ${wallet.smartAccount} has none. Send ETH to that address on Robinhood Chain (4663), then try again. Nothing was stopped or signed.`);
+    };
+    await ui.render(React.createElement(Wallet));
+    const before = storageSnapshot();
+    await acknowledge("I authorize revoking");
+    await acknowledge("I understand — real funds");
+    await ui.click("move to Robinhood Chain & re-sign");
+    assert.deepEqual(fundingChecks, [{ smartAccount: address, chainId: 46630 }, { smartAccount: address, chainId: 4663 }], "both networks are checked before anything changes");
+    assert.equal(preflightCalls, 0, "no replacement is prepared for a revocation that cannot run");
+    assertExistingPermissionKept(before);
+    assert.match(ui.container.textContent!, new RegExp(`kept your existing permission unchanged\\. Revoking earlier permissions needs ETH .*${address} has none\\..*Nothing was stopped or signed`));
+  });
+
+  it("restoring an account with no ETH for revocation stops nothing and signs nothing", async () => {
+    fundingCheck = async () => { throw new Error("Revoking earlier permissions needs ETH for the network fee. Nothing was stopped or signed."); };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(fundingChecks, [{ smartAccount: address, chainId: 4663 }]);
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.equal(needsPermissionReplacement(activeGrant), false);
+    assert.match(ui.container.textContent!, /needs ETH for the network fee\. Nothing was stopped or signed/);
   });
 
   it("on-chain revocation remains available when the service stop fails", async () => {
@@ -739,6 +793,8 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I understand restore first stops");
     await ui.click("Restore & arm 0x1111…1111");
     assert.deepEqual(revokeWallets.map(w => w.chainId), [46630]);
+    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.equal(destructiveStops, 0, "cross-network restore never uses destructive deletion");
     assert.equal(mintCalls, 0);
     assert.equal(input.matches(":disabled"), true);
     await act(async () => { source.resolve({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 12 }); });
@@ -922,6 +978,8 @@ describe("the funded wallet's re-sign control", () => {
     // Stop alone must remain usable and leave a renewal route after refresh.
     stop = async () => { exists = false; };
     await ui.click("Stop agent now");
+    assert.deepEqual(replacementStops, [{ tenant: owner.address, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.equal(destructiveStops, 0, "stopping permission never deletes agent memory");
     await ui.remount(React.createElement(Wallet));
     assert.ok(ui.container.querySelector("#resign"));
     assert.equal(revokeCalls, 0);

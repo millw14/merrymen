@@ -229,11 +229,27 @@ export function appliedText(key: string, value: unknown, hosted: boolean): strin
   return `✅ Done — ${esc(label)} is now ${esc(shown)}. ${when}`;
 }
 
+/** Explain the active playbook before a long list of saved settings. */
+export function strategySettingsSummary(current: Record<string, unknown>): string {
+  if (current.strategy !== "trencher") return "";
+  return [
+    "Trencher looks for eligible memecoins and manages its existing positions. The saved stock basket does not choose its entries.",
+    current.trencherFastEnabled === true
+      ? "Fast Trencher is on: entries require Brain review. A trade still needs a qualifying pool, permission, funding and every risk check."
+      : "Fast Trencher is off: selecting the strategy alone does not enable the Brain-reviewed Trencher setup.",
+  ].join("\n");
+}
+
 /** `/settings`: every changeable setting with its current value. */
-export function settingsListText(current: Record<string, unknown>): string {
-  const rows = SETTING_SPECS.map((s) => `• ${esc(s.label)}: <b>${esc(formatSettingValue(s, current[s.key]))}</b>`);
+export function settingsListText(current: Record<string, unknown>, opts: { includeStrategySummary?: boolean } = {}): string {
+  const trencher = current.strategy === "trencher";
+  const rows = SETTING_SPECS.map((s) => {
+    const label = trencher && s.key === "basketSymbols" ? "saved stock basket (not used by Trencher)" : s.label;
+    return `• ${esc(label)}: <b>${esc(formatSettingValue(s, current[s.key]))}</b>`;
+  });
   return [
     "⚙️ <b>your settings</b> — tell me any of these in plain words to change it (e.g. “make each buy $20”):",
+    ...(trencher && opts.includeStrategySummary !== false ? [strategySettingsSummary(current)] : []),
     ...rows,
     "",
     "You can ask for several at once, or just describe how I should work (“be more careful”, “only trade stocks”, “message me less”) — I'll show you the changes to approve. Anything only the dashboard changes comes with a button that opens it ready to approve.",

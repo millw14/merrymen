@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -29,6 +30,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
@@ -36,24 +40,24 @@ import dev.merrymen.app.data.toLoaded
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.ServerBound
-import dev.merrymen.app.net.TelegramStatus
+import dev.merrymen.app.net.TelegramConnection
 import dev.merrymen.app.net.TelegramTest
+import dev.merrymen.app.net.connectionMessage
 import dev.merrymen.app.net.said
+import dev.merrymen.app.net.sessionIsStill
+import dev.merrymen.app.net.telegramChatUrl
+import dev.merrymen.app.net.telegramConnection
 import dev.merrymen.app.ui.LoadedBlock
 import dev.merrymen.app.ui.LocalBottomInset
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.Routes
-import dev.merrymen.app.ui.TelegramRow
 import dev.merrymen.app.ui.currentFormOwner
 import dev.merrymen.app.ui.sans
-import dev.merrymen.app.ui.telegramRowOf
-import dev.merrymen.app.ui.telegramStartUrl
-import dev.merrymen.app.ui.telegramStripValue
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-/** `.rv` — forms.css:85: `font-size: 14px; overflow-wrap: anywhere`. */
 private val ValueText = TextStyle(
   fontFamily = sans(14.sp),
   fontSize = 14.sp,
@@ -61,52 +65,30 @@ private val ValueText = TextStyle(
   lineHeight = 20.sp,
 )
 
-/**
- * What "Test the bot" answered, in the web's own words (Settings.tsx
- * testTelegram): "✓ connected as @name" or "✗ " and the route's reason.
- */
+/** getMe verifies a token, not whether any worker is receiving its messages. */
 internal fun telegramTestLine(r: ApiResult<TelegramTest>): String = when (r) {
   is ApiResult.Ok ->
-    if (r.value.ok) "✓ connected as @" + (r.value.username ?: "your bot")
+    if (r.value.ok) "✓ Token verified for " + (r.value.username?.let { "@$it" } ?: "your bot")
     else "✗ " + (r.value.reason?.takeIf { it.isNotBlank() } ?: "failed")
   is ApiResult.Refused -> if (r.status == 401) "Sign in to test your bot." else "✗ " + r.message
   is ApiResult.Unreachable -> r.said
 }
 
-/**
- * READ THE OWNER'S BOT, AFTER ASKING WHO THE OWNER IS.
- *
- * GET /api/telegram answers an ended session from the house defaults — "no
- * token", with a 200 — and, unlike the feed's `source` or the settings'
- * `owner`, nothing in that answer says it is nobody's. So while this app holds
- * an address on a server that has sessions, the session route is asked first
- * ([askWhoIsSignedIn]); a session that ended turns repo.signedIn to null, and
- * the screen draws its sign-in notice instead of "not set up" over a bot that
- * may well exist.
- */
+/** Refresh identity first; owner-scoped reads refuse a session that changes in between. */
 internal suspend fun readTelegramFor(
   api: MerrymenApi,
   signedIn: String?,
   hosted: Boolean?,
   askWhoIsSignedIn: suspend () -> Unit,
-): Loaded<TelegramStatus> {
+): Loaded<TelegramConnection> {
   if (signedIn != null && hosted != false) askWhoIsSignedIn()
-  return api.telegram().toLoaded()
+  return api.telegramConnection(if (hosted == false) null else signedIn).toLoaded()
 }
 
 /**
- * AN ANDROID-ONLY SCREEN, styled from the form vocabulary rather than invented.
- *
- * The web keeps the bot inside the settings form, and its link code used to
- * live in a different closed drawer from the instruction that needs it — two
- * beta testers stopped exactly there. So this page puts the status, the code,
- * an "Open Telegram" that carries the code into the chat, and a test of the
- * SAVED token in one place. Its words are agent-status.ts's: an unread bridge
- * is "checking…", never "not connected".
- *
- * ONLY A SIGNED-IN OWNER'S BOT. Signed out, the route answers from the house
- * defaults — "no token" — which is nobody's bot; it is not drawn as the
- * reader's.
+ * Quick native status and chat access. Bot creation and connection settings use
+ * the signed-in web flow, including its durable setup and confirmation checks.
+ * No managed token or creation challenge is persisted in the Android UI.
  */
 @Composable
 fun TelegramScreen(nav: NavHostController) {
@@ -115,18 +97,46 @@ fun TelegramScreen(nav: NavHostController) {
   val hosted by c.repo.hosted.collectAsState()
   val identityKnown by c.repo.identityKnown.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
-  // Keyed on the server as well as the wallet (currentFormOwner): two
-  // self-hosted servers are both "signed out", and one bot's status or test
-  // line is not the other's.
   val form = currentFormOwner(c.repo)
-  var state by remember(form) { mutableStateOf<Loaded<TelegramStatus>>(Loaded.Loading) }
+  var state by remember(form) { mutableStateOf<Loaded<TelegramConnection>>(Loaded.Loading) }
   var test by remember(form) { mutableStateOf<String?>(null) }
-  var testing by remember { mutableStateOf(false) }
+  var testing by remember(form) { mutableStateOf(false) }
+  var refreshing by remember(form) { mutableStateOf(false) }
+  var openError by remember(form) { mutableStateOf<String?>(null) }
   val scope = rememberCoroutineScope()
   val uri = LocalUriHandler.current
+  val lifecycle = LocalLifecycleOwner.current.lifecycle
+  var resumed by remember(lifecycle) { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
   val mayRead = signedIn != null || hosted == false
-  suspend fun load() { state = readTelegramFor(c.api, signedIn, c.repo.hosted.value) { c.repo.refreshIdentity() } }
-  LaunchedEffect(form, mayRead) { if (mayRead) load() }
+
+  suspend fun load() {
+    if (!mayRead || refreshing) return
+    refreshing = true
+    try {
+      state = withContext(ServerBound(form.serverTurn)) {
+        readTelegramFor(c.api, signedIn, hosted) { c.repo.refreshIdentity() }
+      }
+    } finally {
+      refreshing = false
+    }
+  }
+
+  // Returning from Telegram or connection settings immediately reconciles the
+  // native view. A paused screen does not poll or consume mobile data.
+  DisposableEffect(lifecycle) {
+    val observer = LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_RESUME) resumed = true
+      if (event == Lifecycle.Event.ON_PAUSE) resumed = false
+    }
+    lifecycle.addObserver(observer)
+    onDispose { lifecycle.removeObserver(observer) }
+  }
+  LaunchedEffect(form, mayRead, resumed) { if (mayRead && resumed) load() }
+
+  fun settings() { nav.navigate(Routes.web("/settings#telegram", "Telegram setup")) }
+  fun openChat(url: String) {
+    openError = if (runCatching { uri.openUri(url) }.isFailure) "Couldn't open Telegram. Install Telegram or try again." else null
+  }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
     Header("Telegram", nav)
@@ -138,8 +148,8 @@ fun TelegramScreen(nav: NavHostController) {
           NoteLine("Checking who you are.")
         } else {
           Notice(
-            title = "Sign in to see your bot",
-            body = "Your Telegram bot belongs to your agent, so it shows once you are signed in.",
+            title = "Sign in to connect Telegram",
+            body = "Set up your agent's bot and keep the conversation with you.",
             actionLabel = if (canOfferSignIn) "Sign in" else null,
             onAction = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
           )
@@ -151,62 +161,73 @@ fun TelegramScreen(nav: NavHostController) {
         onSignIn = if (canOfferSignIn) ({ nav.navigate(Routes.SIGN_IN) }) else null,
         onRetry = { scope.launch { load() } },
       ) { t ->
-        val row = telegramRowOf(t)
-        PanelSectionHeading("Connection")
-        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-          Text(
-            text = telegramStripValue(row).replaceFirstChar { it.uppercase() },
-            style = ValueText,
-            color = MerryColors.tx,
-          )
-          // The state sentence, kept verbatim. Every on/off control in the web's
-          // settings carries one of these beside it (forms.css:45).
-          HintLine(if (t.enabled) "The bot is listening" else "Telegram is off")
-          if (!t.control) HintLine("Control commands are turned off for this bot.")
+        val message = t.connectionMessage()
+        val chatUrl = if (t.hasToken && !t.botElsewhere) {
+          if (t.ownerId != null) telegramChatUrl(t.botUsername)
+          else t.linkCode?.let { telegramChatUrl(t.botUsername, it) }
+        } else null
+        Spacer(Modifier.height(20.dp))
+        Notice(
+          title = message.title,
+          body = message.detail,
+          actionLabel = if (chatUrl != null) "Open my bot" else if (t.hasToken) "Manage connection" else "Set up Telegram",
+          onAction = { if (chatUrl != null) openChat(chatUrl) else settings() },
+        )
+        if (t.hasToken) {
+          t.botUsername?.let { Text("@$it", style = ValueText, color = MerryColors.tx, modifier = Modifier.padding(top = 16.dp)) }
+          if (chatUrl != null) TelegramAction("Manage connection") { settings() }
+          if (!t.control) HintLine("Your bot can answer questions. Control commands are turned off.")
+        } else {
+          HintLine("Guided setup keeps the bot token private. Existing bots can be connected in the same screen.")
+        }
+        openError?.let { HintLine(it) }
+
+        if (t.tradingHeld != null && t.listening?.state != "held") {
+          Spacer(Modifier.height(16.dp))
+          Notice(title = "Trading paused for recovery", body = "Your agent reports: ${t.tradingHeld}. Check Home for its current status.")
         }
 
-        PanelSectionHeading("Claim your bot")
-        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-          when {
-            t.linkCode != null -> {
-              Text("Send this to your bot:", style = KeyText, color = MerryColors.tx2)
-              Text("/link ${t.linkCode}", style = ValueText, color = MerryColors.tx)
-              telegramStartUrl(t.botUsername, t.linkCode)?.let { url ->
-                TelegramAction("Open Telegram →") { runCatching { uri.openUri(url) } }
+        // Show a credential only when this unlinked bot actually needs it.
+        // The primary action carries it privately into Telegram's Start link.
+        if (t.hasToken && !t.botElsewhere && t.ownerId == null && t.linkCode != null) {
+          PanelSectionHeading("Link your chat")
+          HintLine("Tap Start after opening your bot. If needed, send this in your private chat:")
+          Text("/link ${t.linkCode}", style = ValueText, color = MerryColors.tx, modifier = Modifier.padding(vertical = 8.dp))
+          HintLine("Keep this code private. It gives access to your agent's Telegram commands.")
+        }
+
+        if (t.hasToken && t.ownerId != null && !t.botElsewhere) {
+          PanelSectionHeading("Group conversations")
+          HintLine(when {
+            t.canJoinGroups == false -> "Groups are disabled for this bot. Enable groups in @BotFather to add it to a group."
+            t.canReadAllGroupMessages == true -> "Your bot can hear group messages. Manage allowed chats in connection settings."
+            t.canReadAllGroupMessages == false -> "Your bot hears commands and replies in groups. Change privacy mode in @BotFather to let it follow the whole conversation."
+            else -> "Manage allowed chats in connection settings. Group privacy settings are controlled in @BotFather."
+          })
+        }
+
+        PanelSectionHeading("Connection check")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          TelegramAction(if (refreshing) "Refreshing…" else "Refresh status", enabled = !refreshing) {
+            scope.launch { load() }
+          }
+          if (t.hasToken) {
+            TelegramAction(if (testing) "Checking token…" else "Check saved token", enabled = !testing) {
+              testing = true
+              test = null
+              scope.launch(ServerBound(form.serverTurn)) {
+                try {
+                  val problem = if (hosted == false) null else c.api.sessionIsStill(signedIn, "Telegram connection")
+                  test = problem ?: telegramTestLine(c.api.telegramTest(null))
+                  load()
+                } finally {
+                  testing = false
+                }
               }
-              HintLine("Anyone who has this code can control your agent — do not share or screenshot it.")
             }
-            !t.hasToken -> {
-              HintLine("Create a bot with @BotFather and add its token on the web. Your link code appears here once a token is saved.")
-              TelegramAction("Add the token on the web →") { nav.navigate(Routes.web("/settings#telegram", "Settings")) }
-            }
-            // A WAIT, not an absence: the worker mints the code on its next
-            // pass with this token set.
-            else -> HintLine("No link code yet. Your agent mints one on its next pass with this token set — check back shortly.")
+            test?.let { Text(it, style = ValueText, color = if (it.startsWith("✓")) MerryColors.up else MerryColors.tx2) }
+            HintLine("A valid token confirms the bot exists. The listening status above comes from your agent.")
           }
-        }
-
-        if (row is TelegramRow.Linked || t.ownerId != null) {
-          PanelSectionHeading("Linked")
-          Text("Owner chat ${t.ownerId}", style = ValueText, color = MerryColors.tx)
-        }
-
-        // TESTS THE SAVED TOKEN: no token is sent, so the route asks Telegram
-        // about the one this owner saved (and says "no token set" if none).
-        PanelSectionHeading("Test")
-        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-          TelegramAction(if (testing) "Testing…" else "Test the bot") {
-            if (testing) return@TelegramAction
-            testing = true
-            test = null
-            // The bot of the server this page was read from, or none.
-            scope.launch(ServerBound(form.serverTurn)) {
-              test = telegramTestLine(c.api.telegramTest(null))
-              testing = false
-              load()
-            }
-          }
-          test?.let { Text(it, style = ValueText, color = if (it.startsWith("✓")) MerryColors.up else MerryColors.tx2) }
         }
       }
     }
@@ -215,8 +236,11 @@ fun TelegramScreen(nav: NavHostController) {
 }
 
 @Composable
-private fun TelegramAction(label: String, onClick: () -> Unit) {
-  Box(Modifier.heightIn(min = 44.dp).clickable(role = Role.Button, onClick = onClick), contentAlignment = Alignment.CenterStart) {
-    Text(label, style = TextStyle(fontFamily = sans(14.sp, FontWeight.W600), fontSize = 14.sp, fontWeight = FontWeight.W600), color = MerryColors.tx)
+private fun TelegramAction(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+  Box(
+    Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+    contentAlignment = Alignment.CenterStart,
+  ) {
+    Text(label, style = TextStyle(fontFamily = sans(14.sp, FontWeight.W600), fontSize = 14.sp, fontWeight = FontWeight.W600), color = if (enabled) MerryColors.tx else MerryColors.tx2)
   }
 }

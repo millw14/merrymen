@@ -1,0 +1,24 @@
+{
+ "code": 200,
+ "withdraws": [
+  {
+   "id": "w-1",
+   "amount": "25.000000",
+   "timestamp": 1790690000,
+   "status": "claimable",
+   "type": "secure",
+   "l1_tx_hash": "",
+   "asset_id": 3
+  },
+  {
+   "id": "w-0",
+   "amount": "10.000000",
+   "timestamp": 1790600000,
+   "status": "completed",
+   "type": "secure",
+   "l1_tx_hash": "0x0f82c5190000000000000000000000000000000000000000000000000000abcd",
+   "asset_id": 3
+  }
+ ],
+ "cursor": ""
+}

@@ -6,6 +6,7 @@ import { CASH, STOCK_TOKENS } from "../../packages/core/src/index";
 import { loadTradeViews, renderTradeList, tradeViewLine } from "./telegram/trade-rows";
 import {
   clearTokenLabelCacheForTest,
+  fillSymbolFor,
   isRestartCopy,
   labelText,
   nonCashLeg,
@@ -120,6 +121,18 @@ describe("tokenLabelSync — local sources, trusted first", () => {
     const l = tokenLabelSync(db, AGENT, FAKE_USDG);
     assert.equal(l.clash, true);
     assert.match(labelText(l), /USDG \(0x1111…1111, not the real USDG\)/);
+  });
+
+  it("a Solana key is never a name or a ticker, as a 0x one is not (Solana P0)", () => {
+    const SYSTEM = "1".repeat(32);
+    // Not an EVM address, so it would have been echoed back as a ticker.
+    assert.equal(tokenLabelSync(null, AGENT, SYSTEM).ticker, null);
+    assert.equal(tokenLabelSync(null, AGENT, "PEPE").ticker, "PEPE");
+    const db = ledger();
+    db.prepare("INSERT INTO discovered_pools (address, symbol) VALUES (?, ?)").run(CASHCAT, SYSTEM);
+    assert.equal(tokenLabelSync(db, AGENT, CASHCAT).source, "none");
+    assert.equal(fillSymbolFor(CASHCAT, [SYSTEM, "CASHCAT"]), "CASHCAT");
+    assert.equal(fillSymbolFor(CASHCAT, [SYSTEM]), null);
   });
 });
 

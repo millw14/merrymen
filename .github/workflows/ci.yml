@@ -122,12 +122,352 @@ jobs:
           MERRYMEN_SKIP_BUILD: "1"
 
       - name: Test
-        # The same file set as `npm test` (package.json), one shard of it.
-        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs"
+        # The same file set as `npm test` (package.json), one shard of it;
+        # scripts/ci/solana-ci.test.mjs holds the two equal. site/app tests
+        # resolve `next` from the root install; the site has no CI job of its
+        # own, so they run here or nowhere. The CI script tests run here on
+        # every pull request, so a change to a file they read outside
+        # solana · paths' list (.github/kaka/gate.cjs, package.json) still runs them.
+        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs" "scripts/ci/*.test.mjs" "site/app/**/*.test.ts"
+
+  app-postgres:
+    name: app · Postgres suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Production's stores are Postgres, and their locks, caps, list ordering,
+    # migrations and crash barriers exist only on that dialect. The app-test
+    # shards have no database, so every suite that reads MERRYMEN_TEST_PG_URL
+    # runs here. They are FOUND, not listed: a hand-kept list ran three of
+    # twenty-three, and two of the others had been failing unseen since early October.
+    services:
+      postgres:
+        # By digest, like the actions above: a moved tag is a supply-chain rewrite.
+        image: postgres:17@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # pg is deliberately not in package.json; the Dockerfile adds it the same way.
+      - name: Install
+        run: npm ci && npm install --no-save --ignore-scripts pg@8
+        env:
+          MERRYMEN_SKIP_BUILD: "1"
+
+      - name: Test
+        # Each suite gets a database of its own, so no suite sees another's
+        # schema or rows. A suite skips itself without a database URL, and a
+        # skipped suite is green: each must report no skips and some passes.
+        # --test-force-exit because some suites leave a pool open. Every suite
+        # runs even after one fails, so one failure cannot hide another.
+        run: |
+          set -uo pipefail
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(git grep -lE 'MERRYMEN_TEST_(PG|POSTGRES)_URL' -- '*.test.ts' '*.test.mjs')
+          test "${#files[@]}" -gt 0
+          failed=()
+          for i in "${!files[@]}"; do
+            f="${files[$i]}"
+            out="$RUNNER_TEMP/suite_$i.out"
+            echo "::group::$f"
+            docker exec "$PG_CONTAINER" createdb -U postgres "suite_$i"
+            url="postgres://postgres:postgres@127.0.0.1:5432/suite_$i"
+            status=0
+            MERRYMEN_TEST_PG_URL="$url" MERRYMEN_TEST_POSTGRES_URL="$url" \
+              npx tsx --test --test-force-exit --test-reporter=spec "$f" 2>&1 | tee "$out" || status=$?
+            echo "::endgroup::"
+            if [ "$status" -ne 0 ] || ! grep -q '^ℹ skipped 0$' "$out" || ! grep -q '^ℹ pass [1-9]' "$out"; then
+              echo "::error file=$f::failed, or did not run its Postgres cases"
+              failed+=("$f")
+            fi
+          done
+          echo "${#files[@]} Postgres suites, ${#failed[@]} failed"
+          test "${#failed[@]}" -eq 0
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+
+  # THE SOLANA VAULT PROGRAM. contracts/solana is the custody: owner-only
+  # withdrawals, session caps, sequence replay protection and the Jupiter
+  # CPI's signer exclusion. Until these jobs, its native tests, SBF build and
+  # custody runtime tests ran only when someone ran test.sh by hand, so a change
+  # that broke them merged green and a release hash could come from an artifact
+  # nothing had tested. Both jobs feed `app`, the required check.
+  #
+  # The toolchain is pinned in scripts/ci/solana-toolchain.env, and every
+  # download is checked against a size and SHA-256 before it is unpacked.
+  # platform-tools go where cargo-build-sbf looks for them, because its own
+  # download of them is not checked against anything.
+  #
+  # ONLY WHEN THE VAULT COULD CHANGE. A pull request that lands nothing the
+  # vault jobs read (solana-paths.mjs: contracts/solana, scripts/ci, this file,
+  # the Solana worker and core sources, and cargo, rustup or git attribute
+  # files at the repository root or in contracts/) skips the toolchain
+  # download (about 1.6 GB across the two jobs) and the build. The jobs are
+  # not skipped: every step is, except a notice, so each still concludes
+  # `success`. A skipped job would fail the Kaka gate, which needs every job
+  # of the run to succeed (.github/kaka/gate.cjs greenJobs), and with it the
+  # docs-only automatic lane.
+  # `app` accepts a run without vault hashes only on solana · paths' decision.
+  # Pushes to main and manual runs always build.
+  solana-paths:
+    name: solana · paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.paths.outputs.run }}
+    steps:
+      # The test merge commit and both its parents: the base and the PR head.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Solana-relevant changes
+        id: paths
+        run: node scripts/ci/solana-paths.mjs
+
+  solana-test:
+    name: solana · test
+    needs: [solana-paths]
+    # The release artifact comes from this job, so the image is a fixed
+    # release rather than ubuntu-latest. A hosted runner has no digest to pin:
+    # the Runner image step, before anything is built, and the build record
+    # name its ImageOS and ImageVersion (solana-program-record.mjs
+    # runnerImage), so a manifest mismatch after an image update can be
+    # traced to it, even in a run that fails in the Test step.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      sha256: ${{ steps.record.outputs.sha256 }}
+      # For solana · release, which runs after app: the upload's label and name.
+      release: ${{ steps.linux-manifest.outputs.release }}
+      artifact: ${{ steps.linux-manifest.outputs.artifact }}
+    steps:
+      - name: Not needed for this change
+        if: needs.solana-paths.outputs.run != 'true'
+        run: echo "solana · paths found no Solana-relevant change, so the vault is not built or tested in this run."
+
+      # HEAD and its first parent (a pull request's base, or the commit before
+      # a push): the Linux manifest comparison below fails when HEAD deleted a
+      # manifest the parent has, and refuses a checkout without the parent.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: needs.solana-paths.outputs.run == 'true'
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: needs.solana-paths.outputs.run == 'true'
+        with:
+          node-version: 22
+
+      # Before anything is built: build.sh fails the Test step on a committed
+      # manifest with this source digest but another artifact ("same source,
+      # different artifact"), before the build record exists, and an image
+      # update is one cause. This puts the image in the log and step summary.
+      - name: Runner image
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node scripts/ci/solana-program-record.mjs --runner-image
+
+      # The scripts below, and the shape of these jobs, have tests of their own.
+      # app · tests runs them on every pull request too (they are in npm test);
+      # here they run first, so a broken script fails before the 1.6 GB download.
+      - name: CI script tests
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node --test scripts/ci/solana-ci.test.mjs
+
+      - name: Install the verified toolchain
+        if: needs.solana-paths.outputs.run == 'true'
+        run: scripts/ci/solana-toolchain.sh install "$RUNNER_TEMP/solana-toolchain"
+
+      # A canonical path: under a symlinked CARGO_HOME rustc cannot shorten
+      # registry paths, and the binary embeds them and stops reproducing.
+      - name: Cargo home
+        if: needs.solana-paths.outputs.run == 'true'
+        run: echo "CARGO_HOME=$(realpath -m "$RUNNER_TEMP/cargo-home")" >> "$GITHUB_ENV"
+
+      # Crates and the host test build only. The SBF build always starts from
+      # source, so the artifact is never assembled from a cached object.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: needs.solana-paths.outputs.run == 'true'
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            contracts/solana/target/debug
+          key: solana-cargo-${{ runner.os }}-${{ hashFiles('scripts/ci/solana-toolchain.env') }}-${{ hashFiles('contracts/solana/Cargo.lock', 'contracts/solana/runtime-tests/Cargo.lock') }}
+          restore-keys: solana-cargo-${{ runner.os }}-${{ hashFiles('scripts/ci/solana-toolchain.env') }}-
+
+      # Native unit tests, the SBF build, then the custody and recovery runtime
+      # tests against that exact .so. test.sh is the one recipe, so whatever it
+      # gains, CI runs; it passes cargo-build-sbf exactly the pinned flags.
+      # CARGO_INCREMENTAL shrinks the cached host build; the release profile the
+      # SBF artifact is built with is never incremental anyway. No CARGO_PROFILE_*,
+      # CARGO_TARGET_* or RUSTFLAGS here: build.sh refuses them, because they
+      # would change the artifact without changing the reviewed source.
+      - name: Test
+        if: needs.solana-paths.outputs.run == 'true'
+        run: |
+          set -o pipefail
+          contracts/solana/test.sh 2>&1 | tee "$RUNNER_TEMP/solana-test.log"
+        env:
+          CARGO_INCREMENTAL: "0"
+
+      # "test result: ok" also prints when nothing ran. Every runtime target
+      # (custody.rs, each tests/*.rs) must have run once and passed exactly as
+      # many tests as its source declares, none ignored or filtered out, so a
+      # dropped #[ignore], an unnamed test file or a filter cannot pass quietly.
+      - name: Every runtime test ran
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node scripts/ci/solana-runtime-tests.mjs "$RUNNER_TEMP/solana-test.log" contracts/solana/runtime-tests
+
+      # The .so must carry the 32 bytes of the program ID lib.rs declares and
+      # Anchor.toml configures (solana-program-record.mjs refuses it otherwise),
+      # and the record names the run that built it. Its release stays
+      # not-a-release until the Linux manifest comparison below decides it.
+      - name: Program ID and hash
+        id: record
+        if: needs.solana-paths.outputs.run == 'true'
+        run: |
+          sha=$(node scripts/ci/solana-program-record.mjs contracts/solana contracts/solana/target/deploy/merrymen_vault.so contracts/solana/target/deploy/merrymen_vault.build.json)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      # THE RELEASE MANIFEST. build.sh --record builds the source once more
+      # from a copy in another directory (about one more SBF build of time),
+      # requires identical bytes, and writes build-manifests/Linux-x86_64.json
+      # for this pinned Linux build; the upload below carries it. verify fails
+      # unless that manifest is for the artifact the tests ran against and the
+      # .so on disk is still that artifact. The comparison with a committed
+      # manifest names the artifact before the upload, and fails the job in
+      # its last step.
+      - name: Linux build manifest
+        if: needs.solana-paths.outputs.run == 'true'
+        run: |
+          contracts/solana/build.sh --record
+          node scripts/ci/solana-linux-manifest.mjs verify contracts/solana "$VAULT_TESTED_SHA256"
+        env:
+          CARGO_INCREMENTAL: "0"
+          VAULT_TESTED_SHA256: ${{ steps.record.outputs.sha256 }}
+
+      # After every cargo-build-sbf run of this job, --record's included.
+      - name: Nothing unverified was fetched
+        if: needs.solana-paths.outputs.run == 'true'
+        run: scripts/ci/solana-toolchain.sh check
+
+      # Before the upload, so the artifact's name says what the comparison
+      # found: candidate-unconfirmed only for a run on main whose pinned Linux
+      # build matches the committed manifest, not-a-release for every other
+      # run and for bytes that differ from it, a deleted manifest or none
+      # committed. Never "release": app has not compared the rebuild's hash
+      # yet, and the rest of the run can still fail or be cancelled, so the
+      # verdict is solana · release's, after app passed. Writes the outcome
+      # and the decision into the record. Fails only on an error; the last
+      # step fails on the outcome.
+      - name: Linux manifest and release label
+        id: linux-manifest
+        if: needs.solana-paths.outputs.run == 'true'
+        run: |
+          release=$(node scripts/ci/solana-linux-manifest.mjs report contracts/solana contracts/solana/target/deploy/merrymen_vault.build.json)
+          case "$release" in candidate-unconfirmed|not-a-release) ;; *) echo "::error::the comparison gave no release label"; exit 1 ;; esac
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "artifact=merrymen-vault-sbf-$release-$GITHUB_SHA-run$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      # A release takes its bytes from here, never from a laptop, and only
+      # from a run on refs/heads/main (a push to main or a manual run on main)
+      # whose build matches the committed Linux manifest and whose app check
+      # passed. This workflow never runs on a tag push, and a manual run on a
+      # tag or another branch is not a release. The name says
+      # candidate-unconfirmed only for such a run on main, not-a-release on
+      # every other run (every pull request run included), and always the
+      # commit and run that built it; solana · release's record, uploaded only
+      # after app passed, is what makes it a release. Only named files:
+      # target/deploy also holds a throwaway program keypair. The archive
+      # keeps the paths below contracts/solana/, so the manifest is
+      # build-manifests/Linux-x86_64.json inside it.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: needs.solana-paths.outputs.run == 'true'
+        with:
+          name: ${{ steps.linux-manifest.outputs.artifact }}
+          path: |
+            contracts/solana/target/deploy/merrymen_vault.so
+            contracts/solana/target/deploy/merrymen_vault.build.json
+            contracts/solana/build-manifests/Linux-x86_64.json
+          if-no-files-found: error
+
+      # Last, so a run whose manifest differs has still uploaded it for the
+      # owner, as not-a-release. Fails when a committed Linux manifest exists
+      # and differs from this pinned Linux build, and when HEAD deleted the
+      # manifest its first parent has. With none committed on either side it
+      # passes: the owner reviews the uploaded manifest and commits it, which
+      # turns this comparison on. A committed manifest with this build's
+      # source digest but another artifact never gets this far: build.sh
+      # fails the Test step on it, before anything is uploaded, because the
+      # toolchain or environment changed and nothing should be committed.
+      - name: Linux manifest matches the committed one
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node scripts/ci/solana-linux-manifest.mjs compare contracts/solana
+
+  # The same program built again on another runner, from `git archive` at
+  # another path, with a fresh CARGO_HOME. `app` requires the two hashes to be
+  # equal, so the tested artifact is shown to come from the source and the
+  # pinned toolchain alone. In parallel, not after: it adds no wall time.
+  solana-rebuild:
+    name: solana · rebuild
+    needs: [solana-paths]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      sha256: ${{ steps.record.outputs.sha256 }}
+    steps:
+      - name: Not needed for this change
+        if: needs.solana-paths.outputs.run != 'true'
+        run: echo "solana · paths found no Solana-relevant change, so the vault is not rebuilt in this run."
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: needs.solana-paths.outputs.run == 'true'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: needs.solana-paths.outputs.run == 'true'
+        with:
+          node-version: 22
+
+      # As in solana · test: named before anything is built, so a failed
+      # rebuild still says which image it ran on.
+      - name: Runner image
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node scripts/ci/solana-program-record.mjs --runner-image
+
+      - name: Install the verified toolchain
+        if: needs.solana-paths.outputs.run == 'true'
+        run: scripts/ci/solana-toolchain.sh install "$RUNNER_TEMP/solana-toolchain"
+
+      - name: Rebuild elsewhere
+        id: record
+        if: needs.solana-paths.outputs.run == 'true'
+        run: |
+          so=$(scripts/ci/solana-rebuild.sh "$RUNNER_TEMP/solana-rebuild")
+          sha=$(node scripts/ci/solana-program-record.mjs "$RUNNER_TEMP/solana-rebuild/src/contracts/solana" "$so" "$RUNNER_TEMP/merrymen_vault.build.json")
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Nothing unverified was fetched
+        if: needs.solana-paths.outputs.run == 'true'
+        run: scripts/ci/solana-toolchain.sh check
 
   app:
     name: app
-    needs: [app-typecheck, app-build, app-test]
+    needs: [app-typecheck, app-build, app-test, app-postgres, solana-paths, solana-test, solana-rebuild, brain]
     # Runs even when a part failed, so the required check reports a failure
     # rather than being skipped (a skipped required check never passes).
     if: always()
@@ -135,11 +475,89 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Every part passed
+        # Through env, not interpolated into the script: they are job outputs.
+        env:
+          SOLANA_BUILD: ${{ needs.solana-paths.outputs.run }}
+          VAULT_TESTED_SHA256: ${{ needs.solana-test.outputs.sha256 }}
+          VAULT_REBUILT_SHA256: ${{ needs.solana-rebuild.outputs.sha256 }}
         run: |
-          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}"
+          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}, solana paths: ${{ needs.solana-paths.result }} (build: $SOLANA_BUILD), solana test: ${{ needs.solana-test.result }}, solana rebuild: ${{ needs.solana-rebuild.result }}, brain: ${{ needs.brain.result }}"
+          # Before the checks below: a program change fails them until its new
+          # Linux manifest is committed, and the owner checks that manifest
+          # against these two hashes.
+          echo "vault artifact: tested ${VAULT_TESTED_SHA256:-(none)}, rebuilt ${VAULT_REBUILT_SHA256:-(none)}"
           test "${{ needs.app-typecheck.result }}" = success
           test "${{ needs.app-build.result }}" = success
           test "${{ needs.app-test.result }}" = success
+          test "${{ needs.app-postgres.result }}" = success
+          test "${{ needs.solana-paths.result }}" = success
+          test "${{ needs.solana-test.result }}" = success
+          test "${{ needs.solana-rebuild.result }}" = success
+          test "${{ needs.brain.result }}" = success
+          case "$SOLANA_BUILD" in
+            true)
+              # The vault binary that passed the custody tests is the one the
+              # independent rebuild produced, byte for byte.
+              [[ "$VAULT_TESTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no vault artifact hash from solana · test"; exit 1; }
+              test "$VAULT_TESTED_SHA256" = "$VAULT_REBUILT_SHA256" || { echo "::error::the rebuilt vault artifact differs from the tested one"; exit 1; }
+              ;;
+            false)
+              # No Solana-relevant change: neither job built, so neither has a hash.
+              test -z "$VAULT_TESTED_SHA256$VAULT_REBUILT_SHA256" || { echo "::error::a vault hash from a run solana · paths said needed no build"; exit 1; }
+              echo "no Solana-relevant change: the vault was not built in this run"
+              ;;
+            *)
+              echo "::error::solana · paths gave no decision ($SOLANA_BUILD)"; exit 1
+              ;;
+          esac
+
+  # THE RELEASE VERDICT, AFTER app. solana · test uploads the vault before app
+  # has compared its hash with solana · rebuild's, before app · tests and the
+  # Postgres suites have finished, and before a newer push to main can cancel
+  # the run, so its name says at most candidate-unconfirmed. This job needs
+  # app and so runs only when app passed. For a candidate (a run on main whose
+  # pinned Linux build matched the committed manifest) it uploads
+  # merrymen-vault-release-<commit>-run<id>.<attempt>, a record naming the
+  # candidate artifact and the SHA-256 solana · test tested and solana ·
+  # rebuild reproduced (scripts/ci/solana-release.mjs, which refuses anything
+  # else). No other job uploads a name that says release. Like the vault
+  # jobs, it has no job-level if: on every other run, every pull request's
+  # included, only the notice runs and the job concludes success, so the Kaka
+  # docs-only lane, which needs every job of the run to succeed, stays open.
+  solana-release:
+    name: solana · release
+    needs: [app, solana-test, solana-rebuild]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Not a release
+        if: needs.solana-test.outputs.release != 'candidate-unconfirmed'
+        run: echo "solana · test uploaded no release candidate in this run (a pull request, a run off main, no vault build, or a Linux build that did not match the committed manifest), so there is no release to confirm."
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+        with:
+          node-version: 22
+
+      # Through env, not interpolated into the script: they are job outputs.
+      - name: Release record
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+        run: node scripts/ci/solana-release.mjs "$RUNNER_TEMP/merrymen_vault.release.json"
+        env:
+          VAULT_RELEASE_LABEL: ${{ needs.solana-test.outputs.release }}
+          VAULT_ARTIFACT: ${{ needs.solana-test.outputs.artifact }}
+          VAULT_TESTED_SHA256: ${{ needs.solana-test.outputs.sha256 }}
+          VAULT_REBUILT_SHA256: ${{ needs.solana-rebuild.outputs.sha256 }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+        with:
+          name: merrymen-vault-release-${{ github.sha }}-run${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/merrymen_vault.release.json
+          if-no-files-found: error
 
   contracts:
     name: contracts
@@ -202,3 +620,32 @@ jobs:
       - name: Test
         working-directory: gateway
         run: npm test
+
+  brain:
+    name: brain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Brain is Python, and no job ran it: its suite ran only when someone ran
+    # pytest by hand. That suite holds the Python half of the shared on-chain
+    # id cases (services/brain/tests/data/onchain_ids.json); the app tests hold
+    # the ids.ts half. Without this job, ids.ts and the fixture could change
+    # together, CI stay green, and Brain's mirror drift unseen. Python 3.12 as
+    # in Dockerfile.brain; the deps are pyproject's, dev extras included, each
+    # capped below its next major (services/brain/requirements-ci.txt). A
+    # required part of app: a red brain blocks the merge, as it already closed
+    # the Kaka lane (gate.cjs greenJobs).
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install --disable-pip-version-check -r services/brain/requirements-ci.txt
+
+      # `python -m` puts services/brain on the path, which is how the tests
+      # import `brain`.
+      - name: Test
+        working-directory: services/brain
+        run: python -m pytest -q

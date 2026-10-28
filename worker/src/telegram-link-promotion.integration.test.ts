@@ -65,10 +65,10 @@ async function tenantWith(childState: string) {
       writeFileSync(path.join(home, "telegram.json"), JSON.stringify({ linkCode: "K7M2QX", linkedChats, ...(linkedChatAt ? { linkedChatAt } : {}) })),
     /** The owner saves the allowlist on the dashboard. */
     store: async (allowlist: number[]) => {
-      const stored = (await getSettingsStore().get(tenant)) ?? {};
-      await getSettingsStore().put(tenant, { ...stored, telegramAllowlist: allowlist });
+      const stored = (await getSettingsStore("spot").get(tenant)) ?? {};
+      await getSettingsStore("spot").put(tenant, { ...stored, telegramAllowlist: allowlist });
     },
-    allowlist: async () => [...((await getSettingsStore().get(tenant))?.telegramAllowlist ?? [])].sort((a, b) => a - b),
+    allowlist: async () => [...((await getSettingsStore("spot").get(tenant))?.telegramAllowlist ?? [])].sort((a, b) => a - b),
     pass: () => publishChildTelegramForTest(tenant, db, childState),
     home,
   };

@@ -64,6 +64,21 @@ class HomeStateTest {
 
   @After fun stop() = server.shutdown()
 
+  // Concurrent endpoint reads must be answered by path, not by whichever
+  // socket happened to reach MockWebServer first.
+  private fun homeAnswers(feed: MockResponse, grants: MockResponse) {
+    server.dispatcher = object : Dispatcher() {
+      override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+        "/api/feed" -> feed
+        "/api/grants" -> grants
+        else -> MockResponse().setResponseCode(404)
+      }
+    }
+  }
+
+  private fun json(body: String, code: Int = 200) = MockResponse()
+    .setResponseCode(code).setHeader("content-type", "application/json").setBody(body)
+
   private fun signedOutFeed(): Loaded<Feed> = runBlocking {
     server.answer(Fixtures.text("probe-feed-signedout.json"))
     api.feed().toLoaded()
@@ -151,14 +166,18 @@ class HomeStateTest {
 
   @Test fun aRefreshThatGetsNoAnswerKeepsTheBookAndSaysSo() = runBlocking {
     val reads = OwnReads()
-    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
-    server.answer("""{"exists":true,"mode":"live"}""")
+    homeAnswers(
+      json("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}"""),
+      json("""{"exists":true,"mode":"live"}"""),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
     assertEquals(120.5, (reads.feed as Loaded.Value).value.equityNow!!, 1e-9)
     assertEquals("0xabc", reads.readFor)
 
-    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
-    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    homeAnswers(
+      MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST),
+      MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L }, askWhoIsSignedIn = {})
     // The figures stay — with their age said — rather than flapping to an error.
     assertEquals(120.5, (reads.feed as Loaded.Value).value.equityNow!!, 1e-9)
@@ -176,16 +195,20 @@ class HomeStateTest {
    */
   @Test fun aStatusReadThatFailedIsSaidWhereTheBlockerGoes() = runBlocking {
     val reads = OwnReads()
-    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
-    server.answer("""{"error":"store down"}""", code = 503)
+    homeAnswers(
+      json("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}"""),
+      json("""{"error":"store down"}""", code = 503),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
     val line = accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 1_000L)!!
     assertTrue(line.retry)
     assertTrue(line.text, line.text.startsWith("Couldn't read your agent's status just now"))
 
     // No answer at all is said the same way.
-    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
-    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    homeAnswers(
+      json("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}"""),
+      MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST),
+    )
     val fresh = OwnReads()
     fresh.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
     assertTrue(accountStatusLine(fresh.grants, fresh.grantsFailure, fresh.grantsAtMs, 1_000L)!!.retry)
@@ -193,14 +216,18 @@ class HomeStateTest {
 
   @Test fun aStatusKeptFromAnEarlierReadSaysHowOldItIs() = runBlocking {
     val reads = OwnReads()
-    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
-    server.answer("""{"exists":true,"mode":"live","liveBlocker":"no-gas"}""")
+    homeAnswers(
+      json("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}"""),
+      json("""{"exists":true,"mode":"live","liveBlocker":"no-gas"}"""),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
     assertNull(accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 1_000L))
 
     // A 5xx on the refresh keeps the blocker on screen now, and says its age.
-    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
-    server.answer("""{"error":"store down"}""", code = 503)
+    homeAnswers(
+      json("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}"""),
+      json("""{"error":"store down"}""", code = 503),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 181_000L }, askWhoIsSignedIn = {})
     assertEquals("no-gas", (reads.grants as Loaded.Value).value.liveBlocker)
     val kept = accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 181_000L)!!
@@ -208,8 +235,10 @@ class HomeStateTest {
     assertTrue(kept.text, kept.text.endsWith("What is shown was read 3m ago."))
 
     // A good read clears the caption.
-    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
-    server.answer("""{"exists":true,"mode":"live"}""")
+    homeAnswers(
+      json("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}"""),
+      json("""{"exists":true,"mode":"live"}"""),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 200_000L }, askWhoIsSignedIn = {})
     assertNull(accountStatusLine(reads.grants, reads.grantsFailure, reads.grantsAtMs, 200_000L))
   }
@@ -221,11 +250,15 @@ class HomeStateTest {
 
   @Test fun aRefreshTheServerRefusesReplacesTheBook() = runBlocking {
     val reads = OwnReads()
-    server.answer("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}""")
-    server.answer("""{"exists":true}""")
+    homeAnswers(
+      json("""{"source":"sqlite","equity":[{"equity_usdg":120.5}]}"""),
+      json("""{"exists":true}"""),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 1_000L }, askWhoIsSignedIn = {})
-    server.answer("""{"error":"not signed in"}""", code = 401)
-    server.answer("""{"exists":false}""")
+    homeAnswers(
+      json("""{"error":"not signed in"}""", code = 401),
+      json("""{"exists":false}"""),
+    )
     reads.load(api, "0xabc", true, withStrip = false, nowMs = { 2_000L }, askWhoIsSignedIn = {})
     // A session that ended does not keep a book on screen the server would no
     // longer send.

@@ -6,6 +6,13 @@
  */
 
 import type { PriceQuote } from "../../../packages/core/src/index";
+import type { EntryGates } from "../entry-gates";
+import type {
+  PerpBlocker,
+  PerpKey,
+  PerpMarketClass,
+  PerpMarketSpec,
+} from "../../../packages/core/src/perps";
 import type { TradeIntent } from "../policy";
 import type { TokenDepth } from "../venues/depth-cache";
 import type { Why } from "./reasons";
@@ -167,6 +174,23 @@ export interface Snapshot {
    * a fixture. That is not zero and must not be treated as zero.
    */
   energy?: { entriesLeft: number } | null;
+  /**
+   * WHAT THE WALL WILL REFUSE TO BUY, read before anything is proposed: the
+   * allowed and sellable lists checkPolicy judges `asset-allowlist` and
+   * `no-exit` against, built by `entryGatesOf` from the same limits. Ask it
+   * through `entryGateFor` (entry-gates.ts), never by reading the sets.
+   *
+   * A HINT EXACTLY LIKE `opsHeadroom`. A leg the key cannot sell back used to
+   * be proposed, and refused, once a tick for the life of the grant; a
+   * strategy that reads this skips it instead. It only ever SHRINKS what is
+   * proposed — checkPolicy remains the rule — and it never binds an exit:
+   * the gate is asked about what is being BOUGHT, and a sell is never asked.
+   *
+   * Absent or NULL means NOT READ — a fixture, a backtest. That gates nothing,
+   * and a strategy that went quiet on it would be inventing a refusal nobody
+   * made.
+   */
+  entryGates?: EntryGates | null;
   /** The grant's per-trade cap (6dp) — the ceiling for a single swap. Deposits are
    * capped at the DAILY limit instead (see policy.ts), hence the separate figure. */
   perTradeCapUsdg: bigint;
@@ -182,7 +206,151 @@ export interface Snapshot {
    * wrong input — the wall is what decides, and the wall never sees this.
    */
   depth?: ReadonlyMap<string, TokenDepth>;
+  /**
+   * THE AGENT'S PERPETUALS AT LIGHTER, as the perps route sees them.
+   *
+   * THREE STATES, AND TWO OF THEM ARE THE POINT (docs/perps.md rule 11):
+   *
+   *   ABSENT — perps are OFF for this agent. Nothing to propose, nothing to
+   *            say; a spot strategy reads the snapshot exactly as before.
+   *   NULL   — perps are ON and Lighter could NOT be read this tick. No open
+   *            may be proposed on it; exits belong to protect.ts and the
+   *            reconcile, which read the venue themselves. An idle reason
+   *            (`perp-signal-unread`) says so rather than going quiet.
+   *   a view — read.
+   *
+   * Collapsing absent into null would tell a perps-off owner their venue is
+   * unreadable; collapsing null into an empty view would tell a strategy the
+   * book is flat when it is merely unseen — the "No positions" over open
+   * leverage the mobile banner exists to prevent.
+   *
+   * NEVER IN `holdings`, `prices` OR `lastPrices`. Those are keyed by bare
+   * symbol, many perp symbols equal stock tickers (TSLA, SPY…), and every spot
+   * loop — the strategist's floor and ceiling, steady-basket's take-profit —
+   * turns each Holding into a swap sell. A perp position lives here, keyed
+   * `BTC-PERP`, and nowhere else.
+   *
+   * A HINT, LIKE EVERY FIGURE HERE: checkPolicy's perp branch is the rule.
+   */
+  perps?: PerpsView | null;
 }
+
+/**
+ * ONE PERP MARKET, as read this tick — the venue's terms, its mark, the
+ * account's leverage state for it, and the closed candles a signal is built
+ * from. Integers throughout: prices in the market's own price decimals, money
+ * in micro-USDG, fractions in bp. `null` is UNREAD, never zero.
+ */
+export type PerpMarketView = {
+  key: PerpKey;
+  /** Lighter market_id — for code; never shown to a model. */
+  marketId: number;
+  cls: PerpMarketClass;
+  /** `status` with market_config.force_reduce_only folded in. */
+  status: "active" | "reduce-only" | "inactive";
+  spec: PerpMarketSpec;
+  markPrice: bigint;
+  indexPrice: bigint | null;
+  /** Signed: positive means longs pay. Parts per million of notional per hour. */
+  fundingPpmPerHour: number | null;
+  /** The last SETTLED hourly funding, signed as above. */
+  lastFunding: { ppmPerHour: number; atSec: number } | null;
+  /** max(min_quote, min_base × mark), micro-USDG — effectiveMinNotionalMicro. */
+  effMinNotionalMicro: bigint;
+  /** L_m: the leverage merrymen sets on this market (never model-chosen). */
+  leverage: number;
+  /** IMF_m = ceil(10000 / L_m), bp. */
+  imfBp: number;
+  /** What the venue reads for this account and market; null = no entry = unset. */
+  venueImfBp: number | null;
+  venueMarginMode: "isolated" | "cross" | null;
+  bestBid: bigint | null;
+  bestAsk: bigint | null;
+  observedAtSec: number;
+  /**
+   * CLOSED 4 h mark candles, oldest first — the one in progress is never here
+   * (a signal read off an unclosed bar is a signal from the future). null =
+   * not read, which is not "no history". `t` is the candle's OPEN time in MS,
+   * the venue's own `t` (feed-reader.ts `closed4h`).
+   */
+  closed4h: readonly { t: number; o: bigint; h: bigint; l: bigint; c: bigint }[] | null;
+  /**
+   * The last EIGHT settled hourly fundings, oldest first, signed as
+   * `fundingPpmPerHour` (positive: longs pay) — feed-reader's `funding8h`.
+   * perp-trend refuses to open against a side paying more than its limit on
+   * average over these. Absent or null = UNREAD, and nothing opens on unread
+   * funding; it is never "no funding".
+   */
+  funding8h?: readonly { atSec: number; ppmPerHour: number }[] | null;
+};
+
+/** ONE POSITION the venue holds (or the paper book, on paper). */
+export type PerpPositionView = {
+  key: PerpKey;
+  marketId: number;
+  /** The side HELD. */
+  side: "long" | "short";
+  /** Venue base units, unsigned — the side carries the sign. */
+  baseAmount: bigint;
+  entryPrice: bigint;
+  markPrice: bigint;
+  /** At mark, micro-USDG. */
+  notionalMicro: bigint;
+  /** Signed, micro-USDG. */
+  unrealizedMicro: bigint;
+  allocatedMarginMicro: bigint;
+  imfBp: number;
+  /** The venue's own liquidation price; null = none (a 1x long) or unread. */
+  liqPrice: bigint | null;
+  /** The resting venue stop; null = NO stop is resting — protect.ts's P3. */
+  stop: { trigger: bigint; price: bigint; expiresAtSec: number | null; resting: boolean } | null;
+  take: { trigger: bigint; price: bigint; expiresAtSec: number | null; resting: boolean } | null;
+  openedAtSec: number;
+  /** Funding since open, signed from the holder's view, micro-USDG. */
+  fundingMicro: bigint;
+};
+
+/** Everything a perps producer reads. See Snapshot.perps for what absent and null mean. */
+export type PerpsView = {
+  /** perpsModeOf's rail this tick — never the account's mode reused as a label. */
+  mode: "paper" | "live";
+  readAtSec: number;
+  account: {
+    /** Cross collateral C. */
+    collateralMicro: bigint;
+    freeCollateralMicro: bigint;
+    /** C + ΣM + ΣU + T — rule 12's perpAccountUsdg. */
+    accountValueMicro: bigint;
+    inTransitMicro: bigint;
+  };
+  positions: ReadonlyMap<PerpKey, PerpPositionView>;
+  /**
+   * The owner's allowed markets read this tick, PLUS every market a position
+   * is held in (read fresh) — a held market the owner un-ticked is here for
+   * its EXITS (its mark bounds the close, its candles drive the trend exit).
+   * Never a licence to open: every open path gates on `perpsMarkets` itself.
+   */
+  markets: ReadonlyMap<PerpKey, PerpMarketView>;
+  /** Markets with a signed order whose outcome is not final — no open there. */
+  unresolved: ReadonlySet<PerpKey>;
+  /**
+   * What the caps still allow, so a producer SIZES to them instead of proposing
+   * what the wall will refuse every tick. Hints only; checkPolicy is the rule.
+   */
+  headroom: {
+    perTradeNotionalMicro: bigint;
+    openNotionalLeftMicro: bigint;
+    collateralLeftMicro: bigint;
+    opensLeftToday: number;
+  };
+  /** Why opens cannot happen at all right now, or null. */
+  opensBlocked: PerpBlocker | null;
+  /** The last exit per market and what caused it — the cooldown clock. */
+  lastExit: ReadonlyMap<PerpKey, { atSec: number; cause: "strategy" | "stop" | "take" | "risk" | "forced" | "unknown" }>;
+  /** The candle (its open time, MS — the same `t` as closed4h) of the last entry per market — one entry per signal bar. */
+  lastEntryCandleT: ReadonlyMap<PerpKey, number>;
+  grantExpiresAtSec: number | null;
+};
 
 /**
  * What a strategy proposed, and why — the reasons paired positionally with the

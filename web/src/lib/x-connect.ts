@@ -35,6 +35,7 @@ import type { Db } from "../../../worker/src/db";
 import { canonicalTz } from "../../../worker/src/groupchat/clock";
 import { storeDek } from "../../../worker/src/store-crypto";
 import { xAppFromEnv, type FetchLike, type XApp } from "../../../worker/src/xpost/client";
+import { activeTenantsOf, repliesAllowedFor, repliesScopeOf } from "../../../worker/src/xpost/scope";
 import {
   DEFAULT_PREFS,
   OWNER_PER_DAY_MAX,
@@ -112,9 +113,30 @@ export function xpostAvailable(hosted: boolean): boolean {
   return app !== null && app.redirectUri !== null;
 }
 
-/** Reply consent is available only after the operator has enabled this feature. */
-export function xpostRepliesAvailable(hosted: boolean): boolean {
-  return xpostAvailable(hosted) && (seam?.env ?? process.env).MERRYMEN_XPOST_REPLIES_APPROVED === "1";
+/**
+ * MAY THIS OWNER TURN REPLIES ON? Only after the operator has enabled the
+ * feature (MERRYMEN_XPOST_REPLIES_APPROVED), and only within its scope: "1" is
+ * every owner, "active" only the owners MERRYMEN_XPOST_ACTIVE_TENANTS names.
+ * Read with the orchestrator's own parser (worker/src/xpost/scope.ts), so the
+ * switch is offered to exactly the owners it will poll and answer for.
+ */
+export function xpostRepliesAvailable(hosted: boolean, tenant: string): boolean {
+  if (!xpostAvailable(hosted)) return false;
+  const env = seam?.env ?? process.env;
+  const { scope } = repliesScopeOf(env.MERRYMEN_XPOST_REPLIES_APPROVED);
+  return repliesAllowedFor(scope, activeTenantsOf(env.MERRYMEN_XPOST_ACTIVE_TENANTS).tenants, tenant);
+}
+
+/**
+ * IS THIS OWNER'S AGENT ONE THE OPERATOR MADE ACTIVE (MERRYMEN_XPOST_ACTIVE_TENANTS)?
+ * Read with the orchestrator's own parser (worker/src/xpost/scope.ts), because
+ * the reply warning must say what the orchestrator will do: an active agent
+ * also answers posts that tag it, right away, in a lane of its own. The
+ * variable has to be set on the web too, with the same value, or the warning
+ * describes comment replies only.
+ */
+export function xpostActiveAgent(tenant: string): boolean {
+  return activeTenantsOf((seam?.env ?? process.env).MERRYMEN_XPOST_ACTIVE_TENANTS).tenants.has(String(tenant).trim().toLowerCase());
 }
 
 /**
@@ -282,6 +304,14 @@ export interface XAccountBody {
   perDayMax: number;
   replyEnabled: boolean;
   repliesAvailable: boolean;
+  /**
+   * The operator made this owner's agent active (xpostActiveAgent): it posts
+   * on the active cadence, which the posting warning states, and with
+   * replies on, it answers posts that tag it — comments on its own posts
+   * included — right away, not after ten minutes under Coming up. The reply
+   * warning says so; false is comment replies on its coin posts only.
+   */
+  repliesActive: boolean;
   upcoming: XUpcomingPost[];
   recent: XRecentPost[];
 }
@@ -305,7 +335,12 @@ const TWEET_ID = /^\d{1,25}$/;
  * stop); "Posted" is only `posted` with an id X gave, linked through a handle
  * that passes X's own rule — anything else is left out rather than linked.
  */
-export function accountBody(available: boolean, account: XAccount | null, posts: readonly XPost[], replies: { enabled: boolean; available: boolean } = { enabled: false, available: false }): XAccountBody {
+export function accountBody(
+  available: boolean,
+  account: XAccount | null,
+  posts: readonly XPost[],
+  replies: { enabled: boolean; available: boolean; active?: boolean } = { enabled: false, available: false },
+): XAccountBody {
   if (!account) {
     return {
       available,
@@ -318,6 +353,7 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
       perDayMax: OWNER_PER_DAY_MAX,
       replyEnabled: false,
       repliesAvailable: replies.available,
+      repliesActive: replies.active === true,
       upcoming: [],
       recent: [],
     };
@@ -327,7 +363,8 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
   // A kind the owner turned off is not coming up, even a draft planned in the
   // instant they changed it: the send-time check cancels it (planner.ts
   // sendDecision `kind-off`), so it never goes out.
-  const allowed = (k: XPostKind) => (k === "buy" ? account.prefs.buys : k === "casual" ? account.prefs.casual : true);
+  // A recap names the coins it bought: shown only while buy posts are on.
+  const allowed = (k: XPostKind) => (k === "buy" || k === "recap" ? account.prefs.buys : k === "casual" ? account.prefs.casual : true);
   const upcoming = mine
     .filter((p) => p.status === "scheduled" && allowed(p.kind))
     .sort((a, b) => a.dueAtMs - b.dueAtMs || a.id - b.id)
@@ -358,6 +395,7 @@ export function accountBody(available: boolean, account: XAccount | null, posts:
     perDayMax: OWNER_PER_DAY_MAX,
     replyEnabled: account.posting && replies.enabled,
     repliesAvailable: replies.available,
+    repliesActive: replies.active === true,
     upcoming,
     recent,
   };

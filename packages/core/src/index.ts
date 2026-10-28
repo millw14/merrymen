@@ -1,4 +1,8 @@
 export * from "./chain";
+export * from "./ids";
+// NOT ./solana or ./solana-live. The phone bundles this barrel through Metro
+// (mobile/metro.config.js), which does not tree-shake, and an EAS build has no
+// @solana/kit; the worker and web import those two files by path.
 export * from "./settings";
 export * from "./llm-providers";
 export * from "./tokens";
@@ -71,3 +75,13 @@ export * from "./grant-installable";
 export * from "./wall-release";
 
 export * from "./chat-math";
+
+// "TAIL UNIPCS FOR THE NEXT 3 HOURS" — the trader and the hours of a tail,
+// read by code from the owner's words (her DM and her addressed group line).
+// Parsing starts nothing: only her press on the confirm card in her DM does.
+export * from "./tail-request";
+// PERPETUALS ON LIGHTER — the frozen venue route, the market table, the API-key
+// shape the wall seals, and the integer arithmetic every perp risk check is made
+// of. docs/perps.md is the contract.
+export * from "./perps";
+export * from "./perps-styles";

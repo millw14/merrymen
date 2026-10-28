@@ -84,6 +84,7 @@ const W = {
   AGENT: "Settings → Agent settings",
   BASKET: "Settings → Trading basket",
   DISCOVERY: "Settings → Custom tokens & discovery",
+  FOMO: "Settings → Fomo research",
   TELEGRAM: "Settings → Telegram",
   TELEGRAM_CONTROLS: "Settings → Advanced settings → Telegram controls",
   COMPUTER: "Settings → Advanced settings → Computer access",
@@ -137,6 +138,9 @@ export const SETTINGS_CATALOG: readonly CatalogEntry[] = Object.freeze([
   // ── discovery, scout, launchpad ───────────────────────────────────────────
   e({ key: "discoveryEnabled", label: "new-coin scanning", words: ["discovery", "scanning", "new coin scanning", "watch for new pairs", "find new coins", "look for new coins"], where: W.DISCOVERY, kind: "bool", route: "chat", help: "look for newly launched coins" }),
   e({ key: "discoveryIntervalMin", label: "minutes between new-coin scans", words: ["scan interval", "discovery interval", "scan every"], where: W.DISCOVERY, kind: "minutes", min: 1, max: 1_440, route: "chat", help: "how often to scan for new coins" }),
+  e({ key: "fomoDataAccess", label: "answer Fomo questions", words: ["fomo", "fomo research", "fomo lookups", "fomo data", "answer fomo questions"], where: W.FOMO, kind: "bool", route: "dashboard", help: "look up traders, coins and theses on Fomo when you ask" }),
+  e({ key: "fomoMonitoringEnabled", label: "watch the Fomo trader cohort", words: ["fomo monitoring", "fomo cohort", "watch fomo traders", "trader cohort"], where: W.FOMO, kind: "bool", route: "dashboard", help: "let the watched traders and coins send research to this agent; never trades by itself" }),
+  e({ key: "fomoFollowEnabled", label: "act on Fomo research", words: ["selective following", "fomo following", "follow fomo traders", "act on fomo research"], where: W.FOMO, kind: "bool", route: "dashboard", risk: "real-money", help: "let Fomo research suggest coins to the memecoin review, inside your scout budget" }),
   e({ key: "deskEnabled", label: "research before deciding", words: ["research before deciding", "desk", "research mode", "think harder"], where: W.DISCOVERY, kind: "bool", route: "dashboard", help: "let the AI research before each decision (more model calls)" }),
   e({ key: "deskMaxSteps", label: "research steps per decision", words: ["research steps", "desk steps"], where: W.DISCOVERY, kind: "int", min: 1, max: 12, route: "dashboard", help: "how many research calls one decision may make" }),
   e({ key: "scoutEnabled", label: "scout mode", words: ["scout", "scout mode", "unpriced coins", "buy unpriced coins"], where: W.DISCOVERY, kind: "bool", route: "dashboard", risk: "real-money", help: "buy tokens with no reliable price, within the scout budget" }),

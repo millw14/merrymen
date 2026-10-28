@@ -26,11 +26,47 @@ const VAULT_READS = parseAbi([
   "function convertToAssets(uint256 shares) view returns (uint256)",
 ]);
 
-let mainnet = createPublicClient({ chain: robinhoodChain, transport: chainRead(undefined) });
+/**
+ * ── POOL READS, PACKED INTO ONE eth_call ─────────────────────────────────────
+ *
+ * Measured 2026-10-13 across 25 hosted children: ~105 read calls a second,
+ * day and night, 98% of them eth_call — and the bulk of those are the pool
+ * pricer's getPool / balanceOf / token0 / slot0 / liquidity / observe, about
+ * 26 per token per refresh. The transport already sends them twenty to an HTTP
+ * request, but a JSON-RPC batch saves nothing on a metered provider: Alchemy
+ * bills every call inside a batch at that call's own price (26 CU per eth_call).
+ *
+ * Multicall3's aggregate3 is ONE eth_call however many reads ride in it. With
+ * this option viem gathers every plain readContract issued in the same moment
+ * into one, so a pass over twenty tokens costs a call per stage — getPool,
+ * balanceOf, the pool reads, observe — instead of one per read.
+ *
+ * ONLY FOR READS OF CONTRACTS WE CHOSE. A read in an aggregate shares the
+ * aggregate's gas: a contract that burns it all fails every read packed beside
+ * it, where a lone eth_call would have failed only itself. So this client is
+ * for the Uniswap factory, USDG, WETH and factory-deployed pools — the pool
+ * pricer and the depth reader — and never for a probe of an arbitrary token
+ * (discovery's symbol/decimals). Those stay on `mainnetClient()`.
+ *
+ * A revert still reaches its caller as that call's own revert: aggregate3 runs
+ * with allowFailure, and viem raises a failed slot as the contract error it was
+ * — the "OLD" a new pool's observe() answers included (pool-price.test.ts).
+ *
+ * batchSize is calldata BYTES, not calls: 4096 is ~30 observe() or ~40 getPool
+ * per aggregate, a few million gas at most. One refused aggregate fails every
+ * read in it, which is what a refused twenty-call JSON-RPC batch already did.
+ */
+export const POOL_READ_BATCH = { multicall: { batchSize: 4096, wait: 10 } } as const;
+
+let read = chainRead(undefined);
+let mainnet = createPublicClient({ chain: robinhoodChain, transport: read });
+let pooled = createPublicClient({ chain: robinhoodChain, transport: read, batch: POOL_READ_BATCH });
 
 /** Point safety reads at a custom mainnet RPC (settings/env); undefined = chain default. */
 export function setMainnetRpc(url?: string): void {
-  mainnet = createPublicClient({ chain: robinhoodChain, transport: chainRead(url) });
+  read = chainRead(url);
+  mainnet = createPublicClient({ chain: robinhoodChain, transport: read });
+  pooled = createPublicClient({ chain: robinhoodChain, transport: read, batch: POOL_READ_BATCH });
 }
 
 /**
@@ -41,6 +77,14 @@ export function setMainnetRpc(url?: string): void {
  */
 export function mainnetClient(): PublicClient {
   return mainnet as PublicClient;
+}
+
+/**
+ * The same endpoint, with concurrent reads packed into one aggregate3 call.
+ * For pool and depth reads only — see POOL_READ_BATCH for why not everything.
+ */
+export function mainnetPoolClient(): PublicClient {
+  return pooled as PublicClient;
 }
 
 export interface MarketSafety {

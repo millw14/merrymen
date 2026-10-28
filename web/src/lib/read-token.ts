@@ -108,7 +108,7 @@ export const readToken = cache(async function readToken(
   const publicBook = new Map<string, boolean>();
   const store = (() => {
     try {
-      return getSettingsStore();
+      return getSettingsStore("spot");
     } catch {
       return null;
     }

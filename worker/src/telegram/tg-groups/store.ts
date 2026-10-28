@@ -40,6 +40,7 @@
 
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { onchainIdIn } from "../../../../packages/core/src/ids";
 import {
   TG_GROUPS_FORGET_FILE,
   appendForget,
@@ -239,6 +240,7 @@ function parseLine(v: unknown): TgLine | null {
   };
   if (isInt(v.replyTo)) line.replyTo = v.replyTo;
   if (v.own === true) line.own = true;
+  if (line.own && v.fomo === true) line.fomo = true;
   if (isInt(v.threadId) && v.threadId > 0) line.threadId = v.threadId;
   // Only our own research answers carry this reference. Disk metadata is
   // still untrusted: validate its closed shape and bounded lookup key.
@@ -289,9 +291,10 @@ function parseCoin(v: unknown): TgCoinMemo | null {
     verdict: v.verdict as CoinVerdict,
   };
   // A display name is never address-shaped (types.ts); one that is would put
-  // an address back into a line the writer might repeat.
+  // an address back into a line the writer might repeat. A Solana key too,
+  // checked before the clip as the hex run is.
   const name = label(v.name, TG_LIMITS.nameChars);
-  if (name && typeof v.name === "string" && !HEX_RUN.test(v.name)) memo.name = name;
+  if (name && typeof v.name === "string" && !HEX_RUN.test(v.name) && !onchainIdIn(v.name)) memo.name = name;
   const decisionId = label(v.decisionId, DECISION_ID_CHARS);
   if (decisionId) memo.decisionId = decisionId;
   if (v.paper === true) memo.paper = true;

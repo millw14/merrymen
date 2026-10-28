@@ -251,6 +251,30 @@ describe("createPoolPriceReader — cache holds reads, never verdicts", () => {
     assert.equal(after.quotes.has("CATE"), true, "age is measured from the last GOOD read");
   });
 
+  it("a failed refresh is retried once a TTL, not on every tick in between", async () => {
+    // Production, 2026-10-13: a failed refresh left fetchedAt where it was —
+    // correctly, that is what ages the route — but staleness was read off
+    // fetchedAt alone, so the token paid a full routed read (~26 calls) on every
+    // 15s tick until it recovered, and on every tick after it was retired.
+    const reader = createPoolPriceReader({ ttlSec: 60 });
+    await reader.read({ client, tokens: [CATE], guard: GUARD, nowSec: 1_000 });
+    let attempts = 0;
+    const counting = { readContract: async () => { attempts++; throw new Error("rpc down"); } } as unknown as PublicClient;
+    const at = async (nowSec: number) => {
+      attempts = 0;
+      const r = await reader.read({ client: counting, tokens: [CATE], guard: GUARD, nowSec });
+      return { asked: attempts > 0, priced: r.quotes.has("CATE") };
+    };
+    assert.deepEqual(await at(1_060), { asked: true, priced: true }, "the TTL is up: ask, fail, keep the route");
+    assert.deepEqual(await at(1_075), { asked: false, priced: true }, "a tick later: not asked again");
+    assert.deepEqual(await at(1_105), { asked: false, priced: true });
+    assert.deepEqual(await at(1_120), { asked: true, priced: true }, "a TTL after the failure: asked again");
+    // The route still ages from its last GOOD read, so retirement is unchanged.
+    const late = await at(1_700);
+    assert.equal(late.priced, false, "and it is still retired past MAX_ROUTE_AGE_SEC");
+    assert.deepEqual(await at(1_715), { asked: false, priced: false }, "a retired route is not re-read every tick either");
+  });
+
   it("handles several tokens independently — one refusal doesn't poison the rest", async () => {
     const reader = createPoolPriceReader();
     const mixed = stubClient({
@@ -331,6 +355,27 @@ describe("createPoolPriceReader — the depth floor survives the WETH hop", () =
     });
 
   const oneWeth = 10n ** 18n;
+
+  it("reads the WETH/USDG leg ONCE per pass, however many tokens route through it", async () => {
+    // It is the same pool for every token. Read per token it was about half of
+    // every routed read — the largest single line in the production meter.
+    const inner = twoHop(oneWeth * 100n);
+    let wethUsdgSearches = 0;
+    const counting = {
+      async readContract(args: { functionName: string; args?: readonly unknown[] }) {
+        if (args.functionName === "getPool") {
+          const [a, b] = (args.args as [string, string, number]).slice(0, 2).map((x) => String(x).toLowerCase());
+          if ([a, b].sort().join("/") === [WETH, USDG].sort().join("/")) wethUsdgSearches++;
+        }
+        return (inner.readContract as (a: unknown) => Promise<unknown>)(args);
+      },
+    } as unknown as PublicClient;
+    const reader = createPoolPriceReader();
+    const r = await reader.read({ client: counting, tokens: [CATE, KITTY], guard: GUARD, nowSec: 1_000 });
+    assert.equal(r.quotes.has("CATE"), true, `the shared leg still prices the route: ${JSON.stringify(r.refused)}`);
+    // One search across the fee tiers, for the pass — not one per token.
+    assert.equal(wethUsdgSearches, 4);
+  });
 
   it("REFUSES a memecoin whose WETH pool holds pocket change, however deep WETH/USDG is", async () => {
     // 0.1 WETH ≈ $300 of real depth, behind a $5,000,000 WETH/USDG pool.

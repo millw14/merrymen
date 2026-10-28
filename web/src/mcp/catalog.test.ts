@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import * as z from "zod";
-import { ADVERTISED_SCOPES, SCOPES, scopeFor, type Capability, type McpProfile } from "./scopes";
+import { ADVERTISED_SCOPES, SCOPES, capabilityAllowedIn, scopeFor, type Capability, type McpProfile } from "./scopes";
 import { ALL_TOOLS } from "./tools";
 import { ALL_RESOURCES } from "./resources-catalog";
 import { ERROR_CODES } from "./errors";
@@ -48,8 +48,17 @@ test("every tool is well-formed and annotated consistently with its capability",
     assert.ok(t.title.length > 2 && t.description.length > 20, t.name);
     assert.ok(CAPABILITIES.includes(t.capability), t.name);
     assert.ok(t.input && t.output, `${t.name} declares input and output schemas`);
+    if (t.directoryAnyOf !== undefined) {
+      assert.equal(t.annotations.readOnlyHint, true, `${t.name}: only read-only tools can declare directory alternatives`);
+      assert.ok(t.directoryAnyOf.length > 0, t.name);
+      for (const c of t.directoryAnyOf) {
+        assert.ok(t.anyOf?.includes(c), `${t.name}: directory alternatives must be a subset`);
+        assert.ok(capabilityAllowedIn("directory", c), `${t.name}: directory alternative must be allowed`);
+      }
+    }
     assert.equal(typeof t.annotations.readOnlyHint, "boolean", t.name);
     assert.equal(typeof t.annotations.openWorldHint, "boolean", t.name);
+    if (t.annotations.readOnlyHint) assert.notEqual(t.annotations.destructiveHint, true, `${t.name} cannot be read-only and destructive`);
     if (READ_ONLY_CAPABILITIES.has(t.capability) && !t.anyOf) {
       assert.equal(t.annotations.readOnlyHint, true, `${t.name} uses a read capability and must be read-only`);
     }
@@ -57,6 +66,16 @@ test("every tool is well-formed and annotated consistently with its capability",
     if (t.name.startsWith("staff_")) assert.equal(t.capability, "staff.diagnostics", t.name);
     if (t.capability === "staff.diagnostics") assert.ok(t.name.startsWith("staff_"), `${t.name}: staff tools are named staff_*`);
   }
+});
+
+test("directory alternatives fail closed unless explicit, read-only, allowed and a subset", () => {
+  const setup = ALL_TOOLS.find(t => t.name === "get_merryman_setup")!;
+  assert.equal(toolInProfile(setup, "directory"), true);
+  assert.equal(toolInProfile({ ...setup, directoryAnyOf: undefined }, "directory"), false);
+  assert.equal(toolInProfile({ ...setup, directoryAnyOf: [] }, "directory"), false);
+  assert.equal(toolInProfile({ ...setup, directoryAnyOf: ["portfolio.read"] }, "directory"), false);
+  assert.equal(toolInProfile({ ...setup, directoryAnyOf: ["drafts.write"] }, "directory"), false);
+  assert.equal(toolInProfile({ ...setup, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } }, "directory"), false);
 });
 
 /**

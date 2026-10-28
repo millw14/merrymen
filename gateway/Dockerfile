@@ -34,8 +34,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-# App source (thin http server + shared core in lib/ + the offline selftest).
-COPY server.mjs selftest.mjs partners-cli.mjs ./
+# App source (thin http server + shared core in lib/ + the offline selftest),
+# and the operator CLIs, which are run INSIDE this image on the gateway's volume
+# (`railway ssh`): partners-cli revokes keys, billing-cli comps plans and
+# corrects credit. image.test.mjs fails if a top-level entry point is missing here.
+COPY server.mjs selftest.mjs partners-cli.mjs billing-cli.mjs ./
 COPY lib ./lib
 
 # Fail the image build if the security-critical logic (token scheme + single-use

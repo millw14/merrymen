@@ -111,6 +111,14 @@ describe("the create screen", () => {
     assert.doesNotMatch(html, /id="agent-name"|Set trading limits/);
   });
 
+  it("keeps an explicit assistant review loading without requiring a signer first", async () => {
+    const account: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
+    const html = await create({ account, assistantProposalId: `prp_${"f".repeat(32)}` });
+    assert.match(html, /aria-busy="true"/);
+    assert.doesNotMatch(text(html), /Use a protected signing wallet|Approve and create/);
+    assert.doesNotMatch(html, /id="agent-name"|Set trading limits/);
+  });
+
   it("does not offer creation from a stale no-agent result", async () => {
     const stale: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
     const html = await create({ account: stale, accountFailed: true });

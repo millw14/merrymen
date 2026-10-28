@@ -55,6 +55,35 @@ export function explorerFor(chainId: number): string {
   return chainForId(chainId).blockExplorers!.default.url;
 }
 
+/** One of the two chain ids this product runs on. */
+export type RobinhoodChainId = typeof robinhoodChain.id | typeof robinhoodTestnet.id;
+
+/** Exactly 4663 or 46630, as a number: a numeric string, a float or a missing id is neither. */
+export function isRobinhoodChainId(id: unknown): id is RobinhoodChainId {
+  return id === robinhoodChain.id || id === robinhoodTestnet.id;
+}
+
+/**
+ * STRICT VARIANTS, FOR NEW CODE. chainForId and explorerFor above map every id
+ * but the testnet to mainnet, which is what lets a Solana grant, a typo or a
+ * missing id read as Robinhood Chain. These throw on anything that is not one
+ * of the two Robinhood chain ids instead, as ids.ts requireChain does.
+ *
+ * The lenient pair stays as it is: flipping it would change what existing
+ * callers do with whatever ids prod already holds, and that needs a read of
+ * prod first.
+ */
+export function chainForIdStrict(id: unknown): typeof robinhoodChain | typeof robinhoodTestnet {
+  if (id === robinhoodChain.id) return robinhoodChain;
+  if (id === robinhoodTestnet.id) return robinhoodTestnet;
+  throw new Error(`unknown chain id: ${String(id).slice(0, 80)}`);
+}
+
+/** As explorerFor, but an unknown chain id throws (chainForIdStrict). */
+export function explorerForStrict(chainId: unknown): string {
+  return chainForIdStrict(chainId).blockExplorers!.default.url;
+}
+
 /**
  * Build the Pimlico bundler RPC for a chain from just an API key. The chain id
  * is stamped from the grant itself, so the URL can never point at the wrong

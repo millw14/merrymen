@@ -87,7 +87,15 @@ const isAddress = (v: unknown): v is string => typeof v === "string" && /^0x[0-9
  * Never throws: the caller decides what a `failed` archive means.
  */
 export function archiveCurrentGrant(): GrantArchive {
-  const file = grantFilePath();
+  return archiveGrantFile(grantFilePath(), homePaths.grantsArchive());
+}
+
+/**
+ * archiveCurrentGrant for any wallet's grant file: copied into `archiveDir`
+ * under its account before anything deletes it (a Perps wallet's kill,
+ * perps-kill.ts, keeps its owner key in its own home's archive). Never throws.
+ */
+export function archiveGrantFile(file: string, archiveDir: string): GrantArchive {
   let raw: string;
   try {
     raw = readFileSync(file, "utf8");
@@ -105,7 +113,7 @@ export function archiveCurrentGrant(): GrantArchive {
   // A grant that names an account this cannot file it under is still a grant.
   if (!isAddress(account)) return { kind: "failed", why: "its smartAccount is not an address, so no archive can be named for it" };
   try {
-    const dir = homePaths.grantsArchive();
+    const dir = archiveDir;
     // mkdirSync returns the first directory it had to create, or undefined.
     if (mkdirSync(dir, { recursive: true, mode: 0o700 }) !== undefined) fsyncDirSync(path.dirname(dir));
     // The archived file carries a plaintext owner key — owner-only (0600),

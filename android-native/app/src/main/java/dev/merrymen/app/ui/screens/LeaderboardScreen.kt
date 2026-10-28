@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -70,6 +71,8 @@ import dev.merrymen.app.ui.feed.pollWhileResumed
 import dev.merrymen.app.ui.feed.staleLine
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.sans
+import dev.merrymen.app.ui.publicPerformance
+import dev.merrymen.app.ui.valuationTime
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -108,15 +111,16 @@ internal fun boardUnrankedLong(why: String?): String = when (why) {
  * `tradeLine` (Board.tsx): WHAT THIS AGENT HAS ACTUALLY DONE. Landed and paper
  * stay apart — a simulated fill is a real thing to have done, and it is not a
  * trade. A count the board did not send is not printed as a zero: the web
- * writes `filledPaper ?? 0`, which would say "0 paper trades" about a number
- * nobody read, so here an unsent count leaves the line out.
+ * sends distinct `paperFills` and `liveFills`. `landed`/`filledPaper` count
+ * operations, including vault moves, and cannot substitute for trades. An
+ * older server's unsent distinct count leaves the line out.
  */
 internal fun boardTradeLine(row: LeaderRow): String? {
   fun plural(n: Int, word: String) = "$n $word${if (n == 1) "" else "s"}"
-  if (row.mode == "paper") return row.filledPaper?.let { plural(it, "paper trade") }
-  val landed = row.landed
+  if (row.mode == "paper") return row.paperFills?.let { plural(it, "paper trade") }
+  val landed = row.liveFills
   if (landed != null && landed > 0) return plural(landed, "trade")
-  val paper = row.filledPaper
+  val paper = row.paperFills
   if (paper != null && paper > 0) return "$paper on paper"
   return if (landed == 0) "No trades yet" else null
 }
@@ -135,6 +139,8 @@ data class BoardLine(
   val stamp: String?,
   val trades: String?,
   val you: Boolean,
+  val value: String? = null,
+  val note: String? = null,
 )
 
 /**
@@ -147,12 +153,22 @@ data class BoardLine(
  * likes or follows.
  */
 fun boardLines(board: Leaderboard, mine: String?): List<BoardLine> {
-  val ranked = board.agents.withIndex()
-    .sortedWith(compareByDescending<IndexedValue<LeaderRow>> { it.value.pnlBps != null }.thenByDescending { it.value.pnlBps ?: Int.MIN_VALUE })
-  return ranked.mapIndexed { place, (_, row) ->
-    val paper = row.mode == "paper"
-    val shown = if (paper) row.paperPnlBps else row.pnlBps
-    val figure = shown?.let { pctBps(it.toDouble()) } ?: boardUnranked(row.unrankedWhy)
+  val views = board.agents.map { row ->
+    val view = publicPerformance(row.performance, row.mode, row.pnlBps?.toDouble(), row.paperPnlBps?.toDouble(), row.notRunning)
+    val rank = row.pnlBps?.takeIf {
+      view.bps != null && view.state == null && row.mode != "paper" && row.mode != "idle" && !view.estimated && row.performance?.underReview != true &&
+        (row.performance == null || row.performance.book == "live") && row.performance?.gasComplete != false
+    }
+    val shown = view.bps.takeIf { view.state == null }
+    Triple(row, view, rank) to (if (rank != null) 0 else if (shown != null) 1 else 2)
+  }.sortedWith(compareBy<Pair<Triple<LeaderRow, dev.merrymen.app.ui.PublicPerformanceView, Int?>, Int>> { it.second }
+    .thenByDescending { (row, _) -> row.third?.toDouble() ?: row.second.bps?.takeIf { row.second.state == null } ?: Double.NEGATIVE_INFINITY })
+  var place = 0
+  return views.map { (entry, _) ->
+    val (row, view, ranked) = entry
+    val shown = view.bps.takeIf { view.state == null }
+    val figure = view.state ?: shown?.let { (if (view.estimated) "≈ " else "") + pctBps(it) }
+      ?: if (row.performance != null) "Return unavailable" else boardUnranked(row.unrankedWhy)
     // The colour follows the PRINTED figure: "0.0%" is flat, not a gain.
     val tone = when {
       shown == null -> BoardTone.FAINT
@@ -162,16 +178,19 @@ fun boardLines(board: Leaderboard, mine: String?): List<BoardLine> {
     }
     BoardLine(
       row = row,
-      rank = if (row.pnlBps == null) null else place + 1,
+      rank = if (ranked == null) null else ++place,
       figure = figure,
       tone = tone,
       stamp = when {
+        row.notRunning -> "Not running"
+        view.book == "paper" -> "Paper"
         row.mode == null || row.mode == "live" -> null
-        paper -> "Paper"
         else -> "Inactive"
       },
       trades = boardTradeLine(row),
       you = mine != null && row.slug != null && row.slug.equals(mine, ignoreCase = true),
+      value = view.value,
+      note = view.note,
     )
   }
 }
@@ -196,30 +215,48 @@ private class BoardReads(private val api: MerrymenApi) {
 @Composable
 fun LeaderboardScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  val reads = remember(c.api) { BoardReads(c.api) }
-  val slot by reads.board.collectAsState()
+  val serverTurn by c.repo.serverTurn.collectAsState()
+  val identityKnown by c.repo.identityKnown.collectAsState()
+  var ranking by rememberSaveable { mutableStateOf(false) }
+  var showRetired by rememberSaveable { mutableStateOf(false) }
+  val directoryReads = remember(c.publicDirectory, serverTurn) { c.publicDirectory.forTurn(serverTurn) }
+  val rankingReads = remember(c.api, serverTurn) { BoardReads(c.api) }
+  val loop = if (ranking) rankingReads.loop else directoryReads.loop
+  val slot by (if (ranking) rankingReads.board else directoryReads.board).collectAsState()
   val signedIn by c.repo.signedIn.collectAsState()
   val scope = rememberCoroutineScope()
   val lifecycle = LocalLifecycleOwner.current.lifecycle
-  LaunchedEffect(lifecycle, reads) { lifecycle.pollWhileResumed(listOf(reads.loop)) }
+  LaunchedEffect(lifecycle, loop) {
+    if (c.api.servers.holds(serverTurn)) lifecycle.pollWhileResumed(listOf(loop))
+  }
   // What the reader's agent reads, for the wire rings on the faces. Throttled.
-  LaunchedEffect(Unit) { c.social.refreshWired() }
+  LaunchedEffect(identityKnown, serverTurn) {
+    if (identityKnown && c.api.servers.holds(serverTurn)) c.social.refreshWired()
+  }
   // THE READER'S OWN ROW, marked "you" — from their own feed's slug. A feed
   // that could not be read marks nobody: "you" is never a guess.
-  val mine by produceState<String?>(null, signedIn) {
+  val mine by produceState<String?>(null, signedIn, identityKnown, serverTurn) {
     // Cleared first: the state outlives the key, and the last wallet's agent
     // must not stay marked "you" while the new wallet's feed is on its way.
     value = null
-    value = if (signedIn == null) null else ownSlugOf(c.api.feed().valueOrNull())
+    value = if (!identityKnown || signedIn == null || !c.api.servers.holds(serverTurn)) null else ownSlugOf(c.api.feed().valueOrNull())
   }
-  val retry: () -> Unit = { scope.launch { reads.loop.readNow(System.currentTimeMillis()) } }
+  val retry: () -> Unit = { scope.launch { loop.readNow(System.currentTimeMillis()) } }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-    Header("Leaderboard", nav)
+    Header(if (ranking) "Leaderboard" else "Agents", nav)
     Spacer(Modifier.height(PageGap))
     Column(Modifier.fillMaxWidth().padding(horizontal = PagePadH)) {
-      MeasuredHow()
-      staleLine(slot, "the board", System.currentTimeMillis())?.let {
+      Text(
+        if (ranking) "Back to agents" else "Load performance rankings",
+        Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { ranking = !ranking }.padding(vertical = 14.dp),
+        style = TextStyle(fontFamily = sans(14.sp), fontSize = 14.sp), color = MerryColors.up,
+      )
+      if (ranking) MeasuredHow()
+      val now = System.currentTimeMillis()
+      val freshness = staleLine(slot, if (ranking) "the board" else "agents", now)
+        ?: slot.okAtMs?.takeIf { !ranking && now - it >= BOARD_EVERY_MS }?.let { "Showing the last loaded agents while we refresh." }
+      freshness?.let {
         Text(it, Modifier.padding(bottom = 10.dp), style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp), color = MerryColors.tx2)
       }
       val board = slot.body
@@ -239,6 +276,13 @@ fun LeaderboardScreen(nav: NavHostController) {
           body = "",
           kind = EmptyKind.Board,
         )
+        !ranking -> {
+          board.agents.forEachIndexed { i, row ->
+            DirectoryRow(row, last = i == board.agents.lastIndex) {
+              row.slug?.let { nav.navigate(Routes.agent(it)) }
+            }
+          }
+        }
         else -> {
           val lines = boardLines(board, mine)
           lines.forEachIndexed { i, line ->
@@ -264,9 +308,47 @@ fun LeaderboardScreen(nav: NavHostController) {
             )
           }
         }
+        if (ranking && b.retiredAgents.isNotEmpty()) {
+          Text(
+            if (showRetired) "Hide retired accounts" else "View retired accounts",
+            Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { showRetired = !showRetired }.padding(vertical = 14.dp),
+            style = TextStyle(fontFamily = sans(13.sp), fontSize = 13.sp), color = MerryColors.up,
+          )
+          if (showRetired) b.retiredAgents.forEach { retired ->
+            Column(Modifier.fillMaxWidth().clickable(enabled = retired.slug != null) { retired.slug?.let { nav.navigate(Routes.agent(it)) } }.padding(vertical = 10.dp)) {
+              Text(retired.name ?: "Agent", style = TextStyle(fontFamily = sans(14.sp, FontWeight.W600), fontSize = 14.sp), color = MerryColors.tx)
+              val returnText = retired.pnlBps?.takeIf { it.isFinite() }?.let { (if (retired.estimated) "≈ " else "") + pctBps(it) } ?: "Return unavailable"
+              Text(listOfNotNull(retired.book?.replaceFirstChar { it.uppercase() }, "Final return $returnText", retired.trades?.let { "$it trades" }).joinToString(" · "), style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp), color = MerryColors.tx2)
+              valuationTime(retired.lastValuedAt)?.let { Text("Last valued $it", style = TextStyle(fontFamily = sans(11.sp), fontSize = 11.sp), color = MerryColors.faint) }
+            }
+          }
+        }
       }
     }
     Spacer(Modifier.height(LocalBottomInset.current))
+  }
+}
+
+/** Identity and lifecycle stay useful while historical returns are a separate read. */
+@Composable
+private fun DirectoryRow(row: LeaderRow, last: Boolean, onOpen: () -> Unit) {
+  val name = row.name ?: row.handle ?: "agent"
+  Column(Modifier.fillMaxWidth().clickable(enabled = row.slug != null, onClick = onOpen)) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
+      AgentFace(slug = row.slug, name = name, size = 36.dp)
+      Column(Modifier.weight(1f)) {
+        NameBlock(title = name, owner = row.handle?.takeIf { row.handleVerified }, verified = row.handleVerified)
+      }
+      val status = when {
+        row.notRunning -> "Not running"
+        row.mode == "paper" -> "Paper"
+        row.mode == "live" -> "Live"
+        row.mode != null -> "Inactive"
+        else -> null
+      }
+      status?.let { BoardStamp(it) }
+    }
+    if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(MerryColors.line))
   }
 }
 
@@ -361,11 +443,13 @@ private fun RankRow(line: BoardLine, last: Boolean, modifier: Modifier = Modifie
           line.stamp?.let { BoardStamp(it) }
         }
       }
+      Column(Modifier.widthIn(max = 160.dp), horizontalAlignment = Alignment.End) {
+        line.value?.let { Text(it, style = TextStyle(fontFamily = sans(11.sp), fontSize = 11.sp), color = MerryColors.tx2) }
       Text(
         text = line.figure,
-        maxLines = 1,
+        maxLines = 2,
         modifier = Modifier.semantics {
-          if (line.tone == BoardTone.FAINT) contentDescription = boardUnrankedLong(row.unrankedWhy)
+          if (line.tone == BoardTone.FAINT) contentDescription = line.figure
         },
         style = TextStyle(
           fontFamily = if (line.tone == BoardTone.FAINT) sans(12.sp, FontWeight.W600) else numerals(FontWeight.W600),
@@ -380,7 +464,9 @@ private fun RankRow(line: BoardLine, last: Boolean, modifier: Modifier = Modifie
           BoardTone.FAINT -> MerryColors.faint
         },
       )
+      }
     }
+    line.note?.let { Text(it, Modifier.padding(bottom = 10.dp), style = TextStyle(fontFamily = sans(11.sp), fontSize = 11.sp), color = MerryColors.tx2) }
     if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(MerryColors.line))
   }
 }

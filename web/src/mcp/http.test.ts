@@ -23,7 +23,8 @@ import { ALL_RESOURCES } from "./resources-catalog";
 import { hasCapability, requireCapability } from "./policy";
 import type { Principal } from "./oauth/server";
 import type { ResourceDef } from "./resources";
-import { defineTool, runTool } from "./tool";
+import { defineTool, runTool, type ToolDef } from "./tool";
+import { hostedFomoEnabled } from "@/lib/fomo-switch";
 
 let restore: (() => void) | null = null;
 afterEach(() => { restore?.(); restore = null; resetMetricsForTest(); });
@@ -134,20 +135,33 @@ test("every client request to /mcp still meets the Host, Origin and bearer check
   assert.equal((await handleMcpRequest(pageLoad("mcp.test"), { cfg: testConfig({ enabled: false, disabledWhy: "off" }) })).status, 404);
 });
 
-test("serverInfo offers the current SVG mark, a file the app serves", async () => {
+for (const era of ["legacy", "modern"] as Era[]) test(`${era}: serverInfo offers a description and current PNG and SVG connector marks`, async () => {
   const { a } = await setup();
   // buildServer reads the issuer from the environment, which these tests leave unset.
   const saved = process.env.MERRYMEN_PUBLIC_ORIGIN;
   process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.test";
   try {
-    const res = await rpcResult(await call(mcpRequest(a.tokens.access_token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } })));
-    const icons = (res.result?.serverInfo as { icons?: Array<{ src: string; mimeType: string; sizes: string[] }> } | undefined)?.icons ?? [];
+    const res = era === "legacy"
+      ? await rpcResult(await call(mcpRequest(a.tokens.access_token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "1" } })))
+      : await rpcResult(await call(mcpRequest(a.tokens.access_token, "server/discover", {}, { era })));
+    const info = (era === "legacy" ? res.result?.serverInfo : (res.result?._meta as Record<string, unknown>)?.["io.modelcontextprotocol/serverInfo"]) as {
+      title?: string; description?: string; websiteUrl?: string; icons?: Array<{ src: string; mimeType: string; sizes: string[] }>;
+    } | undefined;
+    assert.equal(info?.title, "Merrymen");
+    assert.equal(info?.websiteUrl, "https://merrymen.dev");
+    assert.match(info?.description ?? "", /trading agent, portfolio, trade receipts and decisions/);
+    const icons = info?.icons ?? [];
     assert.deepEqual(icons.map((i) => [i.src, i.mimeType, i.sizes.join(" ")]), [
+      ["https://app.test/mcp-icon-512.png", "image/png", "512x512"],
       ["https://app.test/mcp-icon.svg", "image/svg+xml", "any"],
     ]);
-    // Only the SVG: the PNG app icons still carry the old mark until PR #166 regenerates them.
+    // Check the published types and dimensions against actual public files.
     for (const icon of icons) {
-      assert.match(readFileSync(new URL(`../../public${new URL(icon.src).pathname}`, import.meta.url), "utf8"), /<svg/, icon.src);
+      const bytes = readFileSync(new URL(`../../public${new URL(icon.src).pathname}`, import.meta.url));
+      if (icon.mimeType === "image/png") {
+        assert.deepEqual([...bytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], icon.src);
+        assert.deepEqual([bytes.readUInt32BE(16), bytes.readUInt32BE(20)], [512, 512], icon.src);
+      } else assert.match(bytes.toString("utf8"), /<svg/, icon.src);
     }
   } finally {
     if (saved === undefined) delete process.env.MERRYMEN_PUBLIC_ORIGIN;
@@ -439,7 +453,7 @@ test("audit rows record the call without argument text", async () => {
 
 /** Every tool reachable with trade:propose, drafts:write or social:write (see scopes.ts and tools/). */
 const DIRECTORY_EXCLUDED_TOOLS = [
-  "cancel_proposal", "create_agent_draft", "draft_post", "follow_agent", "get_proposal", "list_proposals",
+  "cancel_proposal", "create_agent_draft", "create_merryman", "draft_post", "follow_agent", "get_proposal", "list_proposals",
   "propose_settings_change", "propose_trade", "quote_trade", "unfollow_agent",
 ];
 const DIR_PATH = "/mcp/directory";
@@ -461,15 +475,23 @@ function forceAllScopes(d: Awaited<ReturnType<typeof setup>>["d"], connectionId:
   d.raw.prepare("UPDATE mcp_tokens SET scopes = ? WHERE connection_id = ?").run(all, connectionId);
 }
 
-test("the excluded tools are exactly those reachable with a sensitive scope, and none exists on the directory profile", () => {
+test("sensitive tools stay excluded unless a read-only tool explicitly declares safe directory alternatives", () => {
   const isStaff = (t: (typeof ALL_TOOLS)[number]) => t.capability === "staff.diagnostics";
   const excluded = ALL_TOOLS.filter((t) => !isStaff(t) && !toolInProfile(t, "directory")).map((t) => t.name).sort();
   assert.deepEqual(excluded, DIRECTORY_EXCLUDED_TOOLS);
   for (const t of ALL_TOOLS) {
-    const outside = [t.capability, ...(t.anyOf ?? [])].some((c) => ["trade:propose", "drafts:write", "social:write", "staff:diagnostics"].includes(scopeFor(c)));
+    const outside = [t.capability, ...(t.directoryAnyOf ?? t.anyOf ?? [])].some((c) => ["trade:propose", "drafts:write", "social:write", "staff:diagnostics"].includes(scopeFor(c)));
     assert.equal(toolInProfile(t, "directory"), !outside, t.name);
     assert.equal(toolInProfile(t, "full"), true, `${t.name} on the full server`);
   }
+});
+
+test("a drafts-only full connection lists setup guidance without private agent tools", async () => {
+  const { a } = await setup(["drafts:write"]);
+  const names = await listNames(await call(mcpRequest(a.tokens.access_token, "tools/list")));
+  assert.ok(names.includes("get_merryman_setup"));
+  assert.ok(names.includes("create_merryman"));
+  for (const name of ["list_agents", "get_agent_status", "get_agent_controls", "get_portfolio"]) assert.ok(!names.includes(name), name);
 });
 
 test("directory endpoint: no token → 401 whose challenge names the directory's own metadata and only the scopes it can grant", async () => {
@@ -558,7 +580,8 @@ test("tools/list on the directory endpoint names no other tool and instructs not
     return others.length ? `names ${others.join(", ")}` : OTHER_TOOLS.test(text) ? "points at other tools" : MODEL_INSTRUCTION.test(text) ? "instructs the model" : null;
   };
   type Listed = { name: string; title?: string; description?: string; inputSchema?: unknown; outputSchema?: unknown };
-  const expected = ALL_TOOLS.filter((t) => toolInProfile(t, "directory")).map((t) => t.name).sort();
+  // Fomo tools are listed only where the deployment opted in (server.ts, fomo-switch.ts).
+  const expected = ALL_TOOLS.filter((t) => toolInProfile(t, "directory") && (hostedFomoEnabled() || !t.name.startsWith("fomo_"))).map((t) => t.name).sort();
   for (const era of ["legacy", "modern"] as const) {
     const tools = (await rpcResult(await callDir(dirRequest(dir.tokens.access_token, "tools/list", {}, { era })))).result?.tools as Listed[];
     assert.deepEqual(tools.map((t) => t.name).sort(), expected, era);
@@ -579,11 +602,66 @@ test("tools/list on the directory endpoint names no other tool and instructs not
   }
   // The full server serves the full descriptions, pointers included.
   const fullTools = (await rpcResult(await call(mcpRequest(full.tokens.access_token, "tools/list")))).result?.tools as Listed[];
-  for (const def of ALL_TOOLS.filter((t) => t.directoryDescription !== undefined)) {
+  for (const def of ALL_TOOLS.filter((t) => t.directoryDescription !== undefined && (hostedFomoEnabled() || !t.name.startsWith("fomo_")))) {
     const served = fullTools.find((t) => t.name === def.name);
     assert.equal(served?.description, def.description, def.name);
   }
   assert.match(fullTools.find((t) => t.name === "run_backtest")!.description!, /Poll get_job/);
+});
+
+test("tools/list serves explicit safety hints and per-tool OAuth metadata on both profiles and protocol eras", async () => {
+  const { full, dir } = await setupBoth();
+  for (const era of ["legacy", "modern"] as const) {
+    for (const profile of ["full", "directory"] as const) {
+      const response = profile === "full"
+        ? await call(mcpRequest(full.tokens.access_token, "tools/list", {}, { era }))
+        : await callDir(dirRequest(dir.tokens.access_token, "tools/list", {}, { era }));
+      const listed = (await rpcResult(response)).result?.tools as Array<{
+        name: string; annotations: Record<string, unknown>; _meta: Record<string, unknown>;
+      }>;
+      assert.ok(listed.length > 0);
+      for (const tool of listed) {
+        const source = ALL_TOOLS.find(t => t.name === tool.name)!;
+        assert.equal(tool.annotations.readOnlyHint, source.annotations.readOnlyHint, tool.name);
+        assert.equal(tool.annotations.openWorldHint, source.annotations.openWorldHint, tool.name);
+        assert.equal(tool.annotations.destructiveHint, source.annotations.destructiveHint ?? false, tool.name);
+        const alternatives = profile === "directory" && source.directoryAnyOf ? source.directoryAnyOf : source.anyOf?.length ? source.anyOf : [source.capability];
+        assert.deepEqual(tool._meta.securitySchemes, [...new Set(alternatives.map(scopeFor))]
+          .map(scope => ({ type: "oauth2", scopes: [scope] })), tool.name);
+        for (const [key, value] of Object.entries(source.meta ?? {})) assert.deepEqual(tool._meta[key], value, `${tool.name}: ${key}`);
+      }
+    }
+  }
+});
+
+test("a tool cannot register with missing or contradictory safety annotations", async () => {
+  const { full } = await setupBoth();
+  const proposal = ALL_TOOLS.find(t => t.name === "propose_trade")!;
+  const unclassified = { ...proposal, annotations: { ...proposal.annotations, destructiveHint: undefined } } as unknown as ToolDef;
+  assert.throws(() => buildServer(full.principal, { tools: [unclassified] }), /propose_trade: invalid MCP tool safety annotations/);
+  const listAgents = ALL_TOOLS.find(t => t.name === "list_agents")!;
+  const contradictory = { ...listAgents, annotations: { ...listAgents.annotations, destructiveHint: true } } as unknown as ToolDef;
+  assert.throws(() => buildServer(full.principal, { tools: [contradictory] }), /list_agents: invalid MCP tool safety annotations/);
+});
+
+test("tool permission errors carry an OAuth challenge only for scopes this connection can request", async () => {
+  const { d, a } = await setup(["market:read"]);
+  const def = ALL_TOOLS.find(t => t.name === "get_agent_status")!;
+  const result = await runTool(def, {}, a.principal, "scope-challenge", { mcp: async () => d, config: testConfig() });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent, undefined);
+  const challenges = (result._meta as Record<string, unknown>)["mcp/www_authenticate"] as string[];
+  assert.equal(challenges.length, 1);
+  assert.match(challenges[0], /resource_metadata="https:\/\/app\.test\/\.well-known\/oauth-protected-resource\/mcp"/);
+  assert.match(challenges[0], /scope="agents:read"/);
+  assert.match(challenges[0], /error="insufficient_scope"/);
+  assert.match(challenges[0], /error_description="[^\"]+"/);
+  const proposal = ALL_TOOLS.find(t => t.name === "propose_trade")!;
+  const directoryResult = await runTool(proposal, {}, { ...a.principal, profile: "directory" }, "scope-directory", { mcp: async () => d, config: testConfig() });
+  assert.equal((directoryResult._meta as Record<string, unknown>)["mcp/www_authenticate"], undefined, "directory cannot grant trade proposals");
+  const privateObject = defineTool({ ...def, capability: "market.read", handler: async () => { throw new McpError("forbidden"); } });
+  const forbidden = await runTool(privateObject, {}, a.principal, "scope-owner", { mcp: async () => d, config: testConfig() });
+  assert.equal((forbidden._meta as Record<string, unknown>)["mcp/www_authenticate"], undefined, "more scopes never fix cross-owner access");
 });
 
 test("resourceInProfile: only the proposal view among the views is left off the directory, and every resource stays on the full server", () => {

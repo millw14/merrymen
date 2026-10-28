@@ -45,14 +45,23 @@
  * sender spent the token first: only a refusal at the version still stored
  * marks the account revoked, and the owner is asked to reconnect.
  *
+ * A SALE MAY CARRY ITS PROFIT CARD (deps.saleCard). It is drawn and uploaded
+ * after the claim and the send-time checks, right before the post, at most
+ * once per send and within CARD_BUDGET_MS. Every way it can fail — no
+ * media.write on the grant, a slow draw, an upload X refuses or may not have
+ * taken — leaves the same post, without the picture. Nothing about a card
+ * changes whether, or how often, the post itself is sent.
+ *
  * NOTHING SECRET LEAVES. No token and no post body is logged, thrown or
  * returned: the answer is one short outcome code for the pass summary.
  */
 import type { Db } from "../db";
-import { createPost, readMentions, refreshTokens, type FetchLike, type XApp, type XReplyBatch, type XResult } from "./client";
+import { createPost, grantHolds, readMentions, refreshTokens, uploadImage, X_MEDIA_SCOPE, type FetchLike, type XApp, type XReplyBatch, type XResult } from "./client";
+import { hasPublicWallet } from "./public-wallet";
 import {
   cancelDisabledKind,
   claimPost,
+  getAccount,
   markFailed,
   markPosted,
   markRevoked,
@@ -103,7 +112,36 @@ export interface SendDeps {
   nowMs: number;
   sinceId?: string;
   startTimeMs?: number;
+  /** Fresh grant identity, disclosure consent and receipt proof, checked before each X write. */
+  validateBeforeSend?: (post: XPost) => Promise<boolean>;
+  /**
+   * THE PROFIT CARD this sale carries, as PNG bytes, or null for none
+   * (docs/x-posting.md "Sale posts"). Asked only for a sale, only once
+   * validateBeforeSend has passed, at most once per send, and told whether the
+   * stored grant holds media.write: without it no card is uploaded, and the
+   * caller says so to the operator. Whatever it does, the sale posts.
+   */
+  saleCard?: (post: XPost, grant: { mediaWrite: boolean }) => Promise<Uint8Array | null>;
+  /** What became of the card, for the pass's counts. Never a body, never a token. */
+  onCard?: (outcome: CardOutcome) => void;
+  /** The card's whole budget, drawing and uploading, in ms. Default CARD_BUDGET_MS. */
+  cardBudgetMs?: number;
 }
+
+/**
+ * A card has this long, from asking for it to X's media id, or the sale posts
+ * without it. Its share of SEND_BUDGET_MS, and well under a send's own pace.
+ */
+export const CARD_BUDGET_MS = 8_000;
+/** An upload with less than this left of the budget is not started. */
+const MIN_UPLOAD_MS = 1_000;
+
+/**
+ * attached: the post names X's media id. none: no card for this sale (not a
+ * profit, not the operator's agent, no media.write). Every other outcome is a
+ * card that was wanted and is not on the post, which posts without it.
+ */
+export type CardOutcome = "attached" | "none" | "timeout" | "draw-failed" | "upload-failed";
 
 type Unsent = "revoked" | "retry" | "app";
 type Fresh = { ok: true; tokens: StoredTokens } | { ok: false; outcome: Unsent };
@@ -244,18 +282,33 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
     if (!first.ok) return settleUnsent(db, post, first.outcome, now);
 
     let tokens = first.tokens;
+    let refusal = "reply-ineligible";
+    // The card is asked for, drawn and uploaded AT MOST ONCE for this send:
+    // a 401 retry posts with what the first attempt got, or without one.
+    let media: Promise<string[]> | null = null;
     // Targets are read from storage, never trusted from the in-memory queue.
     // Recheck after refresh too: an owner or recipient may opt out in flight.
     const postNow = async () => {
       if (await cancelDisabledKind(db, post.id, now)) return null;
-      const target = post.kind === "reply" ? await replyTargetFor(db, post) : null;
-      if (post.kind === "reply" && !target) return null;
+      const account = await getAccount(db, post.tenant);
+      const sensitive = hasPublicWallet(post.body) || post.kind === "sell";
+      if (!account?.posting || account.xUserId !== post.xUserId
+        || (sensitive && (account.consentAtMs === null || account.consentAtMs > post.createdAtMs))
+        || !(deps.validateBeforeSend ? await deps.validateBeforeSend(post) : !sensitive)) {
+        refusal = "context-changed";
+        return null;
+      }
+      const replying = post.kind === "reply" || post.kind === "answer";
+      const target = replying ? await replyTargetFor(db, post) : null;
+      if (replying && !target) return null;
+      const mediaIds = post.kind === "sell" && deps.saleCard ? await (media ??= cardMedia(post, account.scope, tokens.accessToken, deps)) : [];
       return createPost(tokens.accessToken, post.body, { fetch: deps.fetch, nowMs: now,
-        ...(target ? { replyToTweetId: target.replyToTweetId } : {}) });
+        ...(target ? { replyToTweetId: target.replyToTweetId } : {}),
+        ...(mediaIds.length ? { mediaIds } : {}) });
     };
     let answer = await postNow();
     if (!answer) {
-      await markFailed(db, post.id, "reply-ineligible", now);
+      await markFailed(db, post.id, refusal, now);
       return "cancelled";
     }
     if (!answer.ok && answer.failure === "auth") {
@@ -265,7 +318,7 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
       tokens = again.tokens;
       answer = await postNow();
       if (!answer) {
-        await markFailed(db, post.id, "reply-ineligible", now);
+        await markFailed(db, post.id, refusal, now);
         return "cancelled";
       }
       if (!answer.ok && answer.failure === "auth") {
@@ -315,6 +368,59 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
       }
     }
     return "fault";
+  }
+}
+
+/**
+ * THE CARD, AS X'S MEDIA ID — or none, and the sale posts as text. Never
+ * throws, never retries, and never runs past the budget: drawing and the
+ * upload together get `cardBudgetMs`, and a draw still running when it ends is
+ * left to finish unread. An upload is not a post (client.ts uploadImage), so
+ * any failure, `uncertain` included, costs only the picture.
+ */
+async function cardMedia(post: XPost, scope: string, accessToken: string, deps: SendDeps): Promise<string[]> {
+  const said = (outcome: CardOutcome) => {
+    try {
+      deps.onCard?.(outcome);
+    } catch {
+      /* a counter cannot cost a post */
+    }
+  };
+  const budget = deps.cardBudgetMs ?? CARD_BUDGET_MS;
+  const started = performance.now();
+  const mediaWrite = grantHolds(scope, X_MEDIA_SCOPE);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const asked = Promise.resolve()
+      .then(() => deps.saleCard!(post, { mediaWrite }))
+      .then((png): { png: Uint8Array | null } | "failed" => ({ png }), () => "failed" as const);
+    const timedOut = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), Math.max(0, budget));
+      timer.unref?.();
+    });
+    const drawn = await Promise.race([asked, timedOut]);
+    if (drawn === "timeout" || drawn === "failed") {
+      said(drawn === "timeout" ? "timeout" : "draw-failed");
+      return [];
+    }
+    // No media.write, no upload, whatever was handed back: X would refuse it.
+    if (!drawn.png || !mediaWrite) {
+      said("none");
+      return [];
+    }
+    const left = budget - (performance.now() - started);
+    if (left < MIN_UPLOAD_MS) {
+      said("timeout");
+      return [];
+    }
+    const up = await uploadImage(accessToken, drawn.png, { fetch: deps.fetch, nowMs: deps.nowMs, timeoutMs: left });
+    said(up.ok ? "attached" : "upload-failed");
+    return up.ok ? [up.value.id] : [];
+  } catch {
+    said("draw-failed");
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

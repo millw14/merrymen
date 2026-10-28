@@ -73,8 +73,8 @@ before(async () => {
   delete process.env.MERRYMEN_STORE_DEK;
   resetGrantStoreForTest();
   resetIdentityStoreForTest();
-  await getGrantStore().put(A, grantFor(SA_A));
-  await getGrantStore().put(B, grantFor(SA_B));
+  await getGrantStore("spot").put(A, grantFor(SA_A));
+  await getGrantStore("spot").put(B, grantFor(SA_B));
   slugA = (await getIdentityStore().ensure(A, SA_A)).slug;
   slugB = (await getIdentityStore().ensure(B, SA_B)).slug;
 });
@@ -422,7 +422,7 @@ describe("POST: who may post", () => {
   });
 
   it("503, not 403, when the grant store cannot be read", async () => {
-    mock.method(getGrantStore(), "get", async () => {
+    mock.method(getGrantStore("spot"), "get", async () => {
       throw new Error("Connection terminated unexpectedly");
     });
     const res = await post(A, { body: "hi" });

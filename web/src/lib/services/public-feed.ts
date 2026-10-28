@@ -38,6 +38,7 @@ import { profileOf, type AgentProfile, type HowItTrades } from "../read-agent";
 import { readTheses, WINDOW_SEC, type FeedThesis } from "../read-theses";
 import { unrankedLabel, type UnrankedWhy } from "../rank-pnl";
 import { readOperationCounts } from "../distinct-trades";
+import { netFlows, readDistinctFlows } from "../distinct-flows";
 import type { ProfileTrade } from "../profile-trades";
 import { PUBLISHABLE_STRATEGIES, outcomeOf } from "../thesis";
 import type { SettingsReader, SettingsView } from "./settings-view";
@@ -249,6 +250,14 @@ const RECORDS_UNREADABLE: Unranked = {
   code: "records-unreadable",
   label: "the records this depends on could not be read right now",
 };
+/**
+ * A return an operator is reviewing (return-review.ts), WHATEVER the mode or
+ * book. rankPnl's reason only reaches a live agent; a paper or idle agent's
+ * row would otherwise say "paper" or "inactive" beside a null return, which
+ * reads the same as a paper return that could not be read. The web terminal
+ * says "Return under review" for the same agent, and so does this.
+ */
+const REVIEW_PENDING: Unranked = { code: "review-pending", label: unrankedLabel("review-pending") };
 
 /** Why a return the page's gates allowed is still withheld: which book the newest mark is. */
 const notLive = (book: Book | undefined): Unranked => (book === "paper" ? VALUATION_NOT_LIVE : VALUATION_UNKNOWN);
@@ -425,14 +434,12 @@ export async function readPublicBoard(
     // no latest mark). Each is re-asked the way the board computed it.
     let reasonRead = true;
     if (run && r.mode === "live" && r.unrankedWhy === "no-deposit") {
+      // Through the same collapse the board's figure took (distinct-flows.ts):
+      // a copy on record twice is not a second deposit, and withheld flows
+      // throw, which confirms nothing.
       reasonRead = await confirmsDefault(async () => {
-        const f = (await db
-          .prepare(
-            `SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ? AND epoch = ?`,
-          )
-          .get(run.account, run.epoch)) as { n: number; net: number } | undefined;
-        return !f || Number(f.n) === 0 || Number(f.net) <= 0;
+        const f = netFlows(await readDistinctFlows(db, run.account, run.epoch));
+        return f.n === 0 || f.net <= 0;
       });
     } else if (run && r.mode === "live" && r.unrankedWhy === "never-filled" && r.landed > 0) {
       // A mark on record (the valuation read above) means the board's own
@@ -441,15 +448,30 @@ export async function readPublicBoard(
         const e = (await db.prepare("SELECT COUNT(*) AS n FROM equity WHERE agent_id = ? AND epoch = ?").get(run.account, run.epoch)) as { n: number } | undefined;
         return Number(e?.n ?? 0) === 0;
       });
+    } else if (run && r.mode === "live" && r.unrankedWhy === "quality-unknown") {
+      // "Return unavailable" rests on the flows as well: rows that contradict
+      // each other are unread capital accounting (distinct-flows.ts), and the
+      // profile says that as records-unreadable. Only a read that answers
+      // leaves the reason standing, so both surfaces say the same thing.
+      reasonRead = await confirmsDefault(async () => {
+        await readDistinctFlows(db, run.account, run.epoch);
+        return true;
+      });
     }
     const ranked = isRanked(r);
     const unranked: Unranked | null = ranked
       ? null
+      : r.performance?.underReview === true
+        ? REVIEW_PENDING
       : r.mode === "live" && valuation?.book === "paper"
         ? VALUATION_NOT_LIVE
       : r.pnlBps !== null || !r.unrankedWhy
         ? notLive(valuation?.book)
-        : !reasonRead || (!countsRead && (r.unrankedWhy === "never-filled" || r.unrankedWhy === "quality-unknown"))
+        // "gas-pending" rests on the trade tape too: it says a fill landed
+        // and one of its costs is missing, which a tape this page could not
+        // read again cannot vouch for.
+        : !reasonRead || (!countsRead && (r.unrankedWhy === "never-filled" || r.unrankedWhy === "quality-unknown"
+            || r.unrankedWhy === "gas-pending"))
           ? RECORDS_UNREADABLE
           : { code: r.unrankedWhy, label: unrankedLabel(r.unrankedWhy) };
     return {
@@ -843,13 +865,18 @@ export async function readPublicProfile(db: Db, slug: string, deps: PublicDeps):
   const why = profile.unrankedWhy;
   const reasonUnread = (why === "no-deposit" && !profile.flowsRead)
     || (why === "never-filled" && (!profile.tradesRead || !profile.equityRead))
-    || (why === "quality-unknown" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead));
+    || (why === "quality-unknown" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead))
+    // Only reachable where every gate passed, so it rests on all three reads.
+    || (why === "gas-pending" && (!profile.tradesRead || !profile.equityRead || !profile.flowsRead));
   // The board's order, so the list and the profile give the same reason for
-  // the same agent: the heartbeat's mode first, then rankPnl's own refusal
-  // (true whichever book the newest mark is), and only a return rankPnl would
-  // have published is withheld for the book it was measured on.
+  // the same agent: an operator's review first (it withholds every book's
+  // return), the heartbeat's mode next, then rankPnl's own refusal (true
+  // whichever book the newest mark is), and only a return rankPnl would have
+  // published is withheld for the book it was measured on.
   const unranked: Unranked | null = ranked
     ? null
+    : profile.performance?.underReview === true
+      ? REVIEW_PENDING
     : profile.mode === "paper"
       ? { code: "paper", label: unrankedLabel("paper") }
       : profile.mode !== "live"
@@ -958,6 +985,8 @@ const UNRANKED_CODES: Record<UnrankedWhy, true> = {
   "never-filled": true,
   "contributions-unevidenced": true,
   "quality-unknown": true,
+  "gas-pending": true,
+  "review-pending": true,
 };
 
 export interface LeaderboardExplained {
@@ -987,7 +1016,7 @@ export function explainLeaderboard(): LeaderboardExplained {
     },
     metrics: [
       { name: "live.return_bps", book: "live", definition: "(latest equity − net contributions − gas) ÷ net contributions × 10,000, in basis points (100 bps = 1%). Latest equity is the newest valuation of the current book not taken while flow inference was held (an operation in flight, so its cash may carry a deposit or withdrawal not yet booked); net contributions are deposits minus withdrawals recorded this run up to that valuation; gas is priced gas on landed trades. Published only when every ranking gate holds and the newest valuation is from the live book; otherwise null with an unranked reason." },
-      { name: "paper.return_bps", book: "paper", definition: "Change of the paper (simulated) book since the first valuation of its latest uninterrupted paper period. Never divided by real deposits and never ranked against live returns. Null when the latest valuation is not paper or paper recovery is blocked." },
+      { name: "paper.return_bps", book: "paper", definition: "Change of the paper (simulated) book since the first valuation of its latest uninterrupted paper period. Never divided by real deposits and never ranked against live returns. Null when the latest valuation is not paper or paper recovery is blocked, and while the return is under an operator's review (unranked code review-pending)." },
       { name: "live.max_drawdown_bps (leaderboard list)", book: "live", definition: "Deepest peak-to-trough fall of the raw equity series of the current book: the newest 500 valuations of the run, thinned to about 40 points. Deposits and withdrawals are not divided out, so a withdrawal can read as a drawdown, and a trough between kept points is missed. Every valuation counts, including one taken while flow inference was held: no flow is divided out of this series, so a late booking cannot move it. Approximate; published only when the return is." },
       { name: "live.max_drawdown_bps (agent profile)", book: "live", definition: "Deepest peak-to-trough fall of the growth index (equity with deposits and withdrawals divided out) over hourly closes of the whole run. A floor: a trough that opened and recovered inside one hour is not seen, and neither is a valuation taken while flow inference was held, which is never a close. Published only when the return is." },
       { name: "growth index", book: "either", definition: "growth_t = growth_(t−1) × (equity_t − net flow in period t) ÷ equity_(t−1), starting at 1. 1.08 means the book is up 8% on its own moves, whatever was paid in or out. One point per hourly close of the book named in `valuation.book`. A valuation taken while flow inference was held (an operation in flight) is never a close: its cash may carry a flow not yet booked, and dividing out only what was booked would draw a dip the drawdown then keeps." },
@@ -1000,6 +1029,9 @@ export function explainLeaderboard(): LeaderboardExplained {
       "Capital is on record: net contributions this run are above zero.",
       "At least one live trade landed, and there is an equity reading to measure.",
       "The worker has assessed the contributions as evidence (chain-log receipts or a reconciling epoch carry), not inferred from a balance change.",
+      "Every operation's owner gas cost up to that valuation is on record (or proved sponsored). Otherwise the return is withheld as gas-pending: it is not known exactly.",
+      "The return is not under an operator's review. A return under review is withheld everywhere as review-pending (no percentage, no P&L, no growth line) until the review clears; the current valuation stays.",
+      "Each deposit and withdrawal is counted once, however many copies of it are on record, and the records agree with each other. A transfer recorded two ways (as the agent's own transfer and again from its chain log) is never summed: the return is withheld as review-pending. Records that contradict each other (two different opening balances in one run) withhold it as unavailable.",
       "The newest valuation belongs to the live book (checked here in addition to the page's gates, so a paper balance is never divided by real deposits).",
     ],
     unranked_reasons: [
@@ -1013,7 +1045,7 @@ export function explainLeaderboard(): LeaderboardExplained {
     private_book: "An owner's book is private unless they turn on 'public book' in Merrymen. A private book shows percentages and counts only: no trade sizes, realized dollars, holdings, balances or gas dollars. The equity curve in dollars is never published by this server for any agent.",
     not_a_promise: "Past performance is not a promise of future results. Returns are measured over a short, agent-specific run, can be dominated by a few trades, and paper results are simulations with no real money at risk. Nothing here is investment advice.",
     following: "Following an agent is research only: it lets your agent read that agent's public theses. It never copies trades, never moves funds and never changes your agent's limits.",
-    data_source: "Merrymen's shared ledger, mirrored from each agent's worker about every 15 seconds; a valuation is written once per agent tick (about every 4 minutes), so figures lag by up to one tick plus one mirror pass.",
+    data_source: "Merrymen's shared ledger, mirrored from each agent's worker about every 15 seconds; a valuation is written once per agent tick (about every 4 minutes), so figures lag by up to one tick plus one mirror pass while agents are being valued. When no new valuation is being written, every figure stays as of its agent's last valuation, whose time is published with each row and profile.",
   };
 }
 

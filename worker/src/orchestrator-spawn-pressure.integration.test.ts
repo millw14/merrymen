@@ -63,7 +63,7 @@ after(() => {
 });
 
 it("backs off EAGAIN, tolerates error plus exit, and starts one replacement", async () => {
-  await getGrantStore().put(tenant, grant);
+  await getGrantStore("spot").put(tenant, grant);
   await reconcile();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(spawned.length, 1);
@@ -84,7 +84,7 @@ it("backs off EAGAIN, tolerates error plus exit, and starts one replacement", as
   assert.equal(spawned.length, 2, "the retry reaches a healthy process after backoff");
   assert.equal(spawned[1]!.pid, 41_000);
 
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   await new Promise<void>((resolve) => setImmediate(resolve));
 });
@@ -105,7 +105,7 @@ it("reserves process slots for unexpired grants and counts a held process", asyn
   const activeTenants = Array.from({ length: 48 }, (_, i) => address(0xf01 + i));
   const expiredTenants = [address(0xf80), address(0xf81)];
   for (const [i, t] of [heldTenant, ...activeTenants, ...expiredTenants].entries()) {
-    await getGrantStore().put(t, {
+    await getGrantStore("spot").put(t, {
       ...grant,
       smartAccount: address(0x1000 + i),
       expiresAt: expiredTenants.includes(t) ? now - 1 : now + 86_400,
@@ -121,9 +121,9 @@ it("reserves process slots for unexpired grants and counts a held process", asyn
   assert.ok(said.some((line) => line.includes("49 unexpired, 2 expired")), "expiry is reflected in the fleet roster");
   assert.ok(said.some((line) => line.includes("1 unexpired grants deferred")), "capacity loss is an explicit alert");
   assert.ok(existsSync(marker), "an expired grant is not treated as revoked or wiped");
-  for (const t of expiredTenants) assert.ok(await getGrantStore().get(t), "the signed grant stays stored for re-sign and recovery");
+  for (const t of expiredTenants) assert.ok(await getGrantStore("spot").get(t), "the signed grant stays stored for re-sign and recovery");
 
-  for (const t of [heldTenant, ...activeTenants, ...expiredTenants]) await getGrantStore().remove(t);
+  for (const t of [heldTenant, ...activeTenants, ...expiredTenants]) await getGrantStore("spot").remove(t);
   await reconcile();
   await new Promise<void>((resolve) => setImmediate(resolve));
 });

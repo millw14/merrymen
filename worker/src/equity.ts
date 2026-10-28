@@ -8,6 +8,53 @@
  * because no unit test could see the arithmetic.
  */
 
+/**
+ * THE VENUE'S SIDE OF THE BOOK (docs/perps.md rule 12): what this account holds
+ * at Lighter, as five terms, every one integer micro-USDG — the SAME unit as
+ * every other BookParts field (6dp USDG as bigint), so no term is converted on
+ * its way into the sum.
+ *
+ * C, ΣM and ΣU come from ONE /api/v1/account response, the one whose
+ * `transaction_time` is `snapshotTime`: opening an isolated position moves
+ * margin from C into M atomically and funding debits M between reads, so terms
+ * taken from two responses can count a margin twice or not at all.
+ *
+ * Kept as terms rather than one pre-summed figure because two readers need
+ * more than the total: every PEAK subtracts `unrealizedGainMicro` (peakBasis),
+ * and the breaker's held observation subtracts `inTransitMicro` (rule 12c).
+ */
+export interface PerpBookPart {
+  /** C — the account's cross collateral (`collateral`). Excludes isolated margin. */
+  collateralMicro: bigint;
+  /** ΣM — `allocated_margin` over the isolated positions. Never negative. */
+  isolatedMarginMicro: bigint;
+  /** ΣU — every position's `unrealized_pnl` at mark, signed. */
+  unrealizedMicro: bigint;
+  /**
+   * Σ max(0, Uᵢ), PER POSITION — never max(0, ΣU). A wick gain on one market
+   * netted against a real loss on another would otherwise lift a peak on the
+   * wick (the accounting finding peak-basis-not-applied-to-all-peaks).
+   */
+  unrealizedGainMicro: bigint;
+  /** T_in + T_out — our deposits landed and not credited, our withdrawals executed and not paid. Never negative. */
+  inTransitMicro: bigint;
+  /** The snapshot's `transaction_time` (µs); null only on paper, where there is no venue response. */
+  snapshotTime: number | null;
+}
+
+/**
+ * The venue term as a tick knows it:
+ *
+ *   undefined       — this agent has NO perps (no marker and no venue account):
+ *                     a KNOWN zero, and Lighter is never read (rule 11). Every
+ *                     path is byte-identical to before perps existed.
+ *   "unread"        — the agent has perps and this tick could not read them:
+ *                     the book cannot be totalled (bookGaps), and unknown is
+ *                     never zero.
+ *   a PerpBookPart  — read, from one snapshot.
+ */
+export type PerpBookTerm = PerpBookPart | "unread" | undefined;
+
 /** Everything that counts toward the book's value, in 6dp USDG units. */
 export interface BookParts {
   cashUsdg: bigint;
@@ -20,6 +67,14 @@ export interface BookParts {
    * value of the holding.
    */
   quarantinedCostUsdg: bigint;
+  /** The venue's side of the book — see PerpBookTerm. Absent is the known zero of an agent with no perps. */
+  perp?: PerpBookTerm;
+}
+
+/** perpAccountUsdg = C + ΣM + ΣU + T (rule 12), micro-USDG; 0n for an agent with no perps. */
+export function perpAccountUsdg(perp: PerpBookPart | undefined): bigint {
+  if (perp === undefined) return 0n;
+  return perp.collateralMicro + perp.isolatedMarginMicro + perp.unrealizedMicro + perp.inTransitMicro;
 }
 
 /**
@@ -59,9 +114,60 @@ export interface BookParts {
  * are told to send $MERRYMEN directly instead), and a redeploy during the
  * purchase's receipt wait leaves it unbooked until hwm-repair / reconstruction
  * restore it — the audit's envelope floor is the detector.
+ *
+ * PRESENT, AND NOT FUEL: THE PERP VENUE (docs/perps.md rule 12). Margin posted
+ * to Lighter is the owner's USDG in an account keyed on this one, and every
+ * withdrawal from it can only come back here — so it is the book, and leaving
+ * it out would read every deposit as a loss of its whole size and trip the
+ * breaker on money that merely moved. It enters as C + ΣM + ΣU + T. The
+ * unrealized term is in EQUITY (the breaker sees every unrealized loss) but
+ * never in a PEAK — see peakBasisUsdg.
+ *
+ * AN UNREAD VENUE THROWS rather than composing without it. Callers stop at
+ * bookGaps first; a total that silently dropped the venue would be the partial
+ * sum this function exists to prevent, and the drawdown it implied would be
+ * arithmetic, not loss.
  */
 export function composeEquityUsdg(parts: BookParts): bigint {
-  return parts.cashUsdg + parts.vaultUsdg + parts.positionsUsdg + parts.quarantinedCostUsdg;
+  const spot = parts.cashUsdg + parts.vaultUsdg + parts.positionsUsdg + parts.quarantinedCostUsdg;
+  // Absent is the pre-perps sum, byte for byte — not `spot + 0n` through a
+  // second path a later edit could make differ.
+  if (parts.perp === undefined) return spot;
+  if (parts.perp === "unread") {
+    throw new RangeError("composeEquityUsdg: the perp venue was not read this tick — the book is a gap, not a total");
+  }
+  return spot + perpAccountUsdg(parts.perp);
+}
+
+/**
+ * THE EQUITY EVERY PEAK RATCHETS ON (rule 12): equity − Σ max(0, Uᵢ).
+ *
+ * An open perp winner is not yet money. The lifetime high-water mark (and the
+ * performance fee charged above it), the risk-period peak, the paper peak and
+ * the held-look breaker lift are all one-way ratchets; lifted on a gain that can
+ * still evaporate, each would charge a fee on — or measure a drawdown from — a
+ * number the account never realised, and nothing walks a ratchet back. Losers
+ * stay IN: a loss is real until it recovers, and subtracting it would lower a
+ * peak the owner is owed.
+ *
+ * The breaker's CURRENT figure stays full equity (AgentState.equityUsdg), so
+ * every unrealized loss is still judged. What that trades away, said out loud
+ * as the contract requires: giving back an unrealized perp gain is never
+ * counted as drawdown — only a fall below realized equity is. The venue stop
+ * (rule 7) and protect.ts bound the give-back instead.
+ *
+ * Realizing a gain G raises the basis by exactly G (U becomes R), so the fee
+ * is charged on G once, at the close. With no perps — `perp` undefined — the
+ * basis IS equity and every ratchet behaves exactly as before.
+ */
+export function peakBasisUsdg(equityUsdg: bigint, perp: PerpBookPart | undefined): bigint {
+  if (perp === undefined) return equityUsdg;
+  if (perp.unrealizedGainMicro < 0n) {
+    // Σ max(0, Uᵢ) is non-negative by construction; a negative figure would
+    // RAISE every peak above equity. A parse that produced one is not read.
+    throw new RangeError("peakBasisUsdg: the unrealized gain term cannot be negative");
+  }
+  return equityUsdg - perp.unrealizedGainMicro;
 }
 
 /**
@@ -135,9 +241,19 @@ export function bookGaps(args: {
   positionsReadFailed: boolean;
   /** Held symbols with a configured feed that did not price this tick. */
   missingPrice: readonly string[];
+  /**
+   * The venue term (rule 11). "unread" is a gap exactly like an unread
+   * balance — the holding is there and its size is unknown. Absent or read is
+   * no gap: an agent with no perps is a known zero, never a question.
+   */
+  perp?: PerpBookTerm;
 }): string[] {
   const gaps: string[] = [...args.unreadBalances];
   if (args.positionsReadFailed) gaps.push("positions");
   gaps.push(...args.missingPrice);
+  if (args.perp === "unread") gaps.push(PERP_VENUE_GAP);
   return gaps;
 }
+
+/** How an unread venue is named among the gaps — what the owner reads in "couldn't read …". */
+export const PERP_VENUE_GAP = "Lighter";

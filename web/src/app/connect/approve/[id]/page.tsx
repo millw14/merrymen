@@ -4,6 +4,7 @@ import { DEFAULT_LOCALE } from "@/lib/locale";
 import { ApproveClient } from "./ApproveClient";
 import "../../connect.css";
 import "../../mcp-connect.css";
+import "../../setup/[id]/setup.css";
 
 export const metadata: Metadata = {
   title: "Approve a request · merrymen",

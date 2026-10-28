@@ -2,7 +2,7 @@
 import type { Db } from "./db";
 import { distinctTrades } from "./distinct-trades";
 import { OP_KEY, readEvidencedSells } from "./trade-evidence";
-import { CASH, STOCK_TOKENS } from "../../packages/core/src/index";
+import { CASH, onchainIdIn, STOCK_TOKENS } from "../../packages/core/src/index";
 
 /** Execution metadata only; a proposed decision action never supplies a side. */
 export function inferredTradeSide(row:{fill_side?:unknown;buy_token?:unknown;sell_token?:unknown}):"buy"|"sell"|null {
@@ -53,11 +53,13 @@ export interface TradeFactsOptions {
 }
 export interface TradeFacts { trades: ChatTradeFact[]; complete: boolean }
 const finite = (v: unknown): number | null => typeof v === "number" && Number.isFinite(v) ? v : null;
+// A name is never an address: 0x, or a Solana key or signature (core's onchainIdIn).
+// A display name with a whole 0x address inside it ("PEPE 0x…") is refused too.
 function label(v: unknown): string | null {
-  return typeof v === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(v.trim()) && !/^0x/i.test(v.trim()) && !/^T[0-9A-F]{11}$/i.test(v.trim()) ? v.trim() : null;
+  return typeof v === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(v.trim()) && !/^0x/i.test(v.trim()) && !onchainIdIn(v) && !/^T[0-9A-F]{11}$/i.test(v.trim()) ? v.trim() : null;
 }
 function display(v: unknown): string | null {
-  return typeof v === "string" && v.trim().length > 0 && v.trim().length <= 64 && !/[\u0000-\u001f\u007f]/.test(v) && !/^0x/i.test(v.trim()) ? v.trim() : null;
+  return typeof v === "string" && v.trim().length > 0 && v.trim().length <= 64 && !/[\u0000-\u001f\u007f]/.test(v) && !/^0x/i.test(v.trim()) && !onchainIdIn(v) ? v.trim() : null;
 }
 
 /** Throws on an unreadable tape; an unavailable history must never become "no trades". */

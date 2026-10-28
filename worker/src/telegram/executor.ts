@@ -47,7 +47,29 @@ export type PendingAction =
    * proposeManyChanges). Every one is a chat-route key whose value the chat's
    * own spec accepts; all are checked again, and applied all-or-none.
    */
-  | { kind: "settings"; changes: { key: string; value: unknown }[]; expiresAt: number };
+  | { kind: "settings"; changes: { key: string; value: unknown }[]; expiresAt: number }
+  /**
+   * A Fomo tail the owner asked for, its trader already resolved (read-only)
+   * to one provider user id. Nothing is stored until she presses a button on
+   * the card (service.ts tailCard): "Tell me only", or "+ consider their
+   * buys", offered only when following could act when the card was made
+   * (`considerOffered`) and checked again at the press. Owner-bound: the
+   * slot is keyed by her chat and id, and the press re-checks that she is
+   * still the linked owner in her own DM.
+   */
+  | {
+      kind: "fomo-tail";
+      userId: string;
+      handle: string;
+      hours: number;
+      considerOffered: boolean;
+      expiresAt: number;
+    };
+
+/** What anyone but the linked owner, in her own DM, hears for /tail, /untail and /tails. */
+export const TAIL_OWNER_ONLY_TEXT = "Only my owner can set up a tail.";
+/** A tail's confirm card waits this long for a press: ten minutes, like a settings question. */
+export const TAIL_CONFIRM_TTL_SEC = 600;
 
 /**
  * What a kill actually did, so the reply can say exactly that. Defined with
@@ -105,7 +127,7 @@ export interface CommandDeps {
    * `archived` names the account kept. Hosted it queues the store removal
    * (`revocation`).
    */
-  kill(): KillResult;
+  kill(): KillResult | Promise<KillResult>;
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
@@ -123,7 +145,7 @@ export interface CommandDeps {
   setName(name: string): { ok: boolean; name?: string; reason?: string };
   remember(fact: string): boolean;
   soulInfo(): string;
-  forgetOwner(): void;
+  forgetOwner(): void | Promise<void>;
   // ── PC control (all gated: master switch + per-capability) ───────────────
   pcControlEnabled: boolean;
   capabilities: Set<string>;
@@ -139,6 +161,23 @@ export interface CommandDeps {
   listWatchers(): string;
   removeWatcher(id: number): string;
   help(): string;
+  /**
+   * FOMO TAILS (docs/fomo.md "Tailing a trader"), the service's. `owner`:
+   * this sender is the linked owner in her own DM (chatId === fromId ===
+   * ownerId), decided from trusted ids, never from what was said. Absent: a
+   * host without them, where nobody can tail.
+   */
+  fomoTails?: {
+    owner: boolean;
+    /** Resolve the trader read-only and park a "fomo-tail" (setPending); the card's text. */
+    propose(cmd: Extract<Command, { kind: "tail" }>): Promise<string>;
+    /** Store the parked tail. `consider`: what was pressed, re-checked against followReadiness now. */
+    start(p: Extract<PendingAction, { kind: "fomo-tail" }>, consider: boolean): Promise<string>;
+    /** Stop one tail, or every one (null). Only ever reduces what I do. */
+    stop(handle: string | null): Promise<string>;
+    /** /tails. `which`: she asked to stop one without saying which; the list asks, and nothing stops. */
+    list(which?: boolean): Promise<string>;
+  };
   now?: () => number;
 }
 
@@ -292,6 +331,13 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 control was turned off before you confirmed — nothing changed.";
         }
+      } else if (p.kind === "fomo-tail") {
+        // Hers only, in her own DM, and still hers at the press: ownership
+        // can move in the ten minutes a card waits.
+        if (!deps.fomoTails?.owner) {
+          deps.clearPending();
+          return TAIL_OWNER_ONLY_TEXT;
+        }
       } else if (p.kind === "kill") {
         // Kill is a control command, not a PC capability — re-vet the control
         // switch rather than running it through pcRefusal, which knows nothing
@@ -328,7 +374,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         case "kill":
           // What THIS agent did, in the words the hold process uses too
           // (kill-confirm.ts).
-          return killDoneText(deps.kill());
+          return killDoneText(await deps.kill());
+        case "fomo-tail":
+          // A typed /confirm, or "Tell me only", is tell-only; only the
+          // consider button asks for more, and the service checks it again.
+          return await deps.fomoTails!.start(p, cmd.consider === true);
       }
     }
     case "set":
@@ -361,7 +411,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "soul":
       return deps.soulInfo();
     case "forget":
-      deps.forgetOwner();
+      try {
+        await deps.forgetOwner();
+      } catch {
+        return "I couldn't confirm the memory wipe. Please try /forget again.";
+      }
       return "🍂 done — I've let go of what I knew about you. We start fresh from here.";
     // ── PC control: direct (already capability-gated above) ──────────────────
     case "screenshot":
@@ -427,6 +481,17 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.listWatchers();
     case "unwatch":
       return deps.removeWatcher(cmd.id);
+    // ── Fomo tails: the linked owner in her own DM, and nobody else ─────────
+    case "tail":
+    case "untail":
+    case "tails": {
+      const t = deps.fomoTails;
+      if (!t) return "Tailing a Fomo trader isn't available here.";
+      if (!t.owner) return TAIL_OWNER_ONLY_TEXT;
+      if (cmd.kind === "tail") return await t.propose(cmd);
+      if (cmd.kind === "untail") return await t.stop(cmd.handle);
+      return await t.list(cmd.which === true);
+    }
     case "kill": {
       deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC });
       return killPromptText(deps.hosted === true, CONFIRM_TTL_SEC);

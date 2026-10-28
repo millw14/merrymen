@@ -33,7 +33,7 @@ class ChatTurnTest {
 
   /**
    * A COLD START THAT REACHED NOTHING KEEPS ASKING. bootstrap asks who is
-   * signed in once, and only after the version read answered; before
+   * signed in once, independently of the version read; before
    * askUntilKnown, a start in airplane mode never asked again, so the chat
    * never learned its key and a kept order was never followed.
    */
@@ -58,7 +58,7 @@ class ChatTurnTest {
     assertEquals(true, rig.repo.hosted.value)
     assertEquals(A, rig.repo.signedIn.value)
     assertEquals("asked again after each wait, longer each time", listOf(3_000L, 6_000L), waits)
-    assertEquals(2, rig.seen.count { it.path.startsWith("/api/auth/session") })
+    assertEquals("startup plus two foreground retries", 3, rig.seen.count { it.path.startsWith("/api/auth/session") })
     waitFor("the chat learns whose thread it is") { chat.thread.value.key == A }
   }
 

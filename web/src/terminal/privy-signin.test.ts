@@ -29,6 +29,9 @@ let respond: (call: Call) => Promise<Response>;
 let creations: number;
 let tokens: number;
 let logins: number;
+let loginOptions: unknown[];
+let oauthOptions: unknown[];
+let oauthStart: () => Promise<void>;
 let logouts: number;
 let completed: number;
 let requests: Call[];
@@ -38,7 +41,7 @@ let loginError: (error: string) => void;
 const originalFetch = globalThis.fetch;
 const getAccessToken = () => { tokens++; return accessToken(); };
 const createWallet = () => { creations++; return create(); };
-const login = () => { logins++; };
+const login = (options: unknown) => { logins++; loginOptions.push(options); };
 const logout = async () => { logouts++; authenticated = false; };
 const onDone = () => { completed++; };
 const never = () => new Promise<never>(() => undefined);
@@ -83,6 +86,7 @@ before(() => {
           loginError = callbacks?.onError ?? (() => undefined);
           return { login };
         },
+        useLoginWithOAuth: () => ({ initOAuth: (options: unknown) => { oauthOptions.push(options); return oauthStart(); } }),
         useModalStatus: () => ({ isOpen: modalOpen }),
         getEmbeddedConnectedWallet: (list: Wallet[]) => list.find((item) => item.walletClientType === "privy") ?? null,
       };
@@ -109,6 +113,9 @@ beforeEach(() => {
   };
   creations = tokens = logins = logouts = completed = 0;
   requests = [];
+  loginOptions = [];
+  oauthOptions = [];
+  oauthStart = async () => {};
   signatures = [];
   create = never;
   accessToken = async () => "verified-owner-token";
@@ -336,15 +343,73 @@ describe("Privy sign-in wallet provisioning and proof", () => {
     assert.equal(completed, 1);
   });
 
-  it("returns to an enabled action when login is cancelled or refused", async () => {
+  for (const [label, method] of [["Continue with email", "email"], ["Continue with X", "twitter"]]) {
+    it(`opens the standard Privy modal for ${method} without creating or proving a wallet early`, async () => {
+      authenticated = false;
+      await render();
+      assert.equal(ui.container.querySelector('[role="group"]')?.getAttribute("aria-label"), "Sign-in options");
+      await ui.click(label);
+      assert.deepEqual(loginOptions, [{ loginMethods: [method] }]);
+      assert.equal(primary().disabled, true);
+      assert.match(ui.container.querySelector('[role="status"]')?.textContent ?? "", /Complete verification/);
+      assert.equal(creations, 0);
+      assert.equal(requests.length, 0);
+    });
+  }
+
+  it("returns to both method choices when login is cancelled or refused", async () => {
     authenticated = false;
     await render();
-    await ui.click("Continue with X");
+    await ui.click("Continue with email");
     assert.equal(logins, 1);
+    assert.equal(primary().textContent, "Waiting for sign-in…");
     await act(async () => { loginError("exited_auth_flow"); });
     assert.equal(primary().disabled, false);
     assert.equal(creations, 0);
     assert.equal(requests.length, 0);
+    await ui.click("Continue with X");
+    assert.deepEqual(loginOptions, [{ loginMethods: ["email"] }, { loginMethods: ["twitter"] }]);
+  });
+
+  it("starts Android X directly and still requires the existing owner proof after authentication", async () => {
+    authenticated = false;
+    await ui.render(React.createElement(PrivySignIn, { onDone, directX: true }));
+    await ui.click("Continue with X");
+    assert.deepEqual(oauthOptions, [{ provider: "twitter" }]);
+    assert.deepEqual(loginOptions, [], "no redundant provider-choice modal");
+    assert.equal(creations, 0);
+    assert.equal(requests.length, 0);
+    assert.equal(completed, 0);
+    authenticated = true;
+    connectOwner();
+    await ui.render(React.createElement(PrivySignIn, { onDone, directX: true }));
+    await drain();
+    assert.equal(signatures.length, 1);
+    assert.equal(posts().length, 1);
+    assert.equal(completed, 1);
+  });
+
+  it("keeps email in the standard modal on Android and recovers failed direct X initialization", async () => {
+    authenticated = false;
+    oauthStart = async () => { throw new Error("provider unavailable"); };
+    await ui.render(React.createElement(PrivySignIn, { onDone, directX: true }));
+    await ui.click("Continue with X");
+    await drain();
+    assert.match(ui.container.textContent ?? "", /Sign-in didn't finish/);
+    await ui.click("Continue with email");
+    assert.deepEqual(loginOptions, [{ loginMethods: ["email"] }]);
+    assert.equal(requests.length, 0);
+    assert.equal(creations, 0);
+  });
+
+  it("explains the ownership signature without implying a trading permission", async () => {
+    connectOwner();
+    sign = never;
+    await render();
+    await drain();
+    assert.equal(primary().textContent, "Verifying account ownership…");
+    assert.match(ui.container.querySelector('[role="status"]')?.textContent ?? "", /sign-in signature.*does not allow trading/);
+    assert.equal(posts().length, 0);
   });
 
   it("can start over while wallet creation is still pending", async () => {

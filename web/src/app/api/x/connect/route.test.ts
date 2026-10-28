@@ -126,7 +126,7 @@ describe("start", () => {
     assert.equal(url.searchParams.get("client_id"), "test-client-id");
     assert.equal(url.searchParams.get("redirect_uri"), "https://app.merrymen.test/connect/x");
     assert.equal(url.searchParams.get("code_challenge_method"), "S256");
-    assert.equal(url.searchParams.get("scope"), "tweet.read tweet.write users.read offline.access");
+    assert.equal(url.searchParams.get("scope"), "tweet.read tweet.write users.read offline.access media.write");
     assert.match(state, /^w\.[A-Za-z0-9_-]{32}$/);
 
     const rows = pendingRows();

@@ -139,6 +139,30 @@ test("a token with no mappable pool is absent rather than zero", () => {
   })();
 });
 
+test("an empty or failed read waits out the TTL, so it cannot starve the rest", () => {
+  return (async () => {
+    // Production, 2026-10-13: memecoins with no USDG pool came back null, left
+    // no trace, sorted first again, and were searched every tick — a factory
+    // call per fee tier each, forever, while the tokens that DO have a depth
+    // map never got a turn. Budget 2, two dead tokens first in the list.
+    const h = harness({ budget: 2, empty: new Set(["AAA"]), fail: new Set(["BBB"]) });
+    await h.reader.read(ALL);
+    assert.deepEqual(h.drain(), ["AAA", "BBB"], "the cold start asks the first two, as before");
+
+    await h.reader.read(ALL);
+    assert.deepEqual(h.drain(), ["CCC", "DDD"], "the next tick moves ON instead of asking them again");
+    await h.reader.read(ALL);
+    assert.deepEqual(h.drain(), ["EEE", "FFF"]);
+
+    await h.reader.read(ALL);
+    assert.deepEqual(h.drain(), [], "and nobody is re-asked inside the TTL, answered or not");
+
+    h.advance(300);
+    await h.reader.read(ALL);
+    assert.deepEqual(h.drain(), ["AAA", "BBB"], "past the TTL the unanswered are asked again, oldest first");
+  })();
+});
+
 test("a previously-good entry survives a later failure", () => {
   return (async () => {
     const fail = new Set<string>();

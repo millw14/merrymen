@@ -113,6 +113,8 @@ export interface DraftBinding {
   v: 1;
   kind: "agent_draft";
   tenant: string;
+  /** Creation-only setup: approval records review; it never writes settings or signs a grant. */
+  purpose?: "create";
   /** Only chat-settable keys (SETTING_SPECS) plus a validated agentName. */
   settings: Record<string, unknown>;
   /** Each drafted key's value when it was drafted (null = not set). Approval refuses when any has changed since. */
@@ -138,6 +140,15 @@ export interface PostBinding {
   expires_at: number;
 }
 export type Binding = TradeBinding | SettingsBinding | DraftBinding | PostBinding;
+
+/** A reviewed setup is a handoff to the owner's signing flow, never an activated agent. */
+export function creationSetupResult(proposalId: string): Record<string, unknown> {
+  return {
+    setup_only: true,
+    setup_url: `/connect/setup/${encodeURIComponent(proposalId)}`,
+    note: "Setup approved. No agent, trading permission, settings or trades were created. Continue in Merrymen to review limits and sign with your own wallet.",
+  };
+}
 
 export interface ProposalRow {
   id: string;
@@ -201,6 +212,17 @@ export async function listProposalRows(db: Db, tenant: string, o: { status?: Pro
   }
   if (o.status) return await db.prepare(`${SELECT} WHERE tenant = ? AND status = ? ORDER BY created_at DESC LIMIT ?`).all(t, o.status, o.limit) as ProposalRow[];
   return await db.prepare(`${SELECT} WHERE tenant = ? ORDER BY created_at DESC LIMIT ?`).all(t, o.limit) as ProposalRow[];
+}
+
+/**
+ * Proposals still waiting for the owner and not lapsed, newest first. Lapsed
+ * rows keep 'awaiting_approval' until someone opens them, so the expiry is
+ * filtered before the limit; creation refuses more than MAX_OPEN_PROPOSALS
+ * live ones, so a page of twice that holds them all.
+ */
+export async function liveAwaitingRows(db: Db, tenant: string, now: number, limit = 2 * MAX_OPEN_PROPOSALS): Promise<ProposalRow[]> {
+  return await db.prepare(`${SELECT} WHERE tenant = ? AND status = 'awaiting_approval' AND expires_at > ? ORDER BY created_at DESC LIMIT ?`)
+    .all(tenant.toLowerCase(), now, limit) as ProposalRow[];
 }
 
 /** The binding minus fields that legitimately differ between two submissions of the same request. */
@@ -848,6 +870,10 @@ export async function resumeStranded(mcp: Db, row: ProposalRow, now: number, pro
       const orderId = orderIdFor(row.id);
       const queued = await probe.orderQueued(orderId, binding.order_agent_id);
       done = queued === null ? null : queued ? { status: "submitted", order_id: orderId, result: { recovered: true, note } } : "not_done";
+    } else if (binding.kind === "agent_draft" && binding.purpose === "create") {
+      // The durable approved transition IS the owner's review. There was no
+      // settings write to probe and no action to replay after a crash.
+      done = { status: "applied", result: { ...creationSetupResult(row.id), recovered: true } };
     } else if (binding.kind === "settings" || binding.kind === "agent_draft") {
       const changes = binding.kind === "settings" ? binding.changes : binding.settings;
       const keys = Object.keys(changes);

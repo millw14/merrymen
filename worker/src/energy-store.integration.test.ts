@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
+import { claimCap, energyExemptAccountsOf, energyModeForAccount, energyPlan } from "./energy";
 
 const scratch = mkdtempSync(path.join(os.tmpdir(), "merrymen-energy-store-"));
 const isolatedCwd = path.join(scratch, "cwd");
@@ -41,6 +42,33 @@ const agent = () => `${AGENT.slice(0, -4)}${String(++n).padStart(4, "0")}`;
 const DAY = "2026-09-27";
 
 describe("a claim respects its cap", () => {
+  it("an exact account exemption keeps counting, isolates neighbors and survives revocation", async () => {
+    const exempt = agent();
+    const neighbor = agent();
+    const allowed = energyExemptAccountsOf(exempt);
+    const now = Math.floor(Date.parse(`${DAY}T12:00:00Z`) / 1000);
+    const plan = async (account: string, accounts: readonly string[]) => energyPlan({
+      mode: energyModeForAccount("enforce", account, accounts),
+      level: "low",
+      counters: await store.getEnergyDay(account, DAY),
+      reviewsAllowed: 5,
+      entriesAllowed: 2,
+      nowSec: now,
+    });
+    for (const account of [exempt, neighbor]) {
+      assert.equal(await store.claimEnergy(account, DAY, "entries", 2), true);
+      assert.equal(await store.claimEnergy(account, DAY, "entries", 2), true);
+    }
+    assert.equal(await store.claimEnergy(exempt, DAY, "entries", claimCap(await plan(exempt, allowed), "entries", now)!), true);
+    assert.equal(await store.claimEnergy(neighbor, DAY, "entries", claimCap(await plan(neighbor, allowed), "entries", now)!), false);
+    assert.equal((await store.getEnergyDay(exempt, DAY))?.entries, 3, "the exemption did not skip the durable write");
+    assert.equal((await store.getEnergyDay(neighbor, DAY))?.entries, 2);
+    const revoked = await plan(exempt, []);
+    assert.equal(revoked.entries.used, 3);
+    assert.equal(revoked.entries.open, false);
+    assert.equal(await store.claimEnergy(exempt, DAY, "entries", claimCap(revoked, "entries", now)!), false);
+  });
+
   it("three under a cap of three, then refused", async () => {
     const a = agent();
     assert.equal(await store.claimEnergy(a, DAY, "entries", 3), true);

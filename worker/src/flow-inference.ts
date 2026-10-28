@@ -43,6 +43,9 @@
  *   3. When the hold ends: a ledger write in the interval still explains it
  *      (the known limitation for trade intervals — a fill's cash leg is a
  *      pre-trade bound, not a receipt); otherwise the residual is booked.
+ *   4. The residual is booked as its RECEIPT when the chain holds exactly one
+ *      transfer that is it, and by inference only when it does not (RULE 4,
+ *      below `wroteSince`).
  *
  * WHICH SETTLEMENTS A BASELINE MAY TAKE — `since`. A settlement shifts a
  * baseline only when the op was created at or after the moment that baseline's
@@ -244,14 +247,32 @@ export function expectedCashUsdg(
  * raised — which is the direction the breaker's reference already errs in when
  * it is frozen, never a deposit counted into a peak twice once it is booked.
  * With no baseline at all, every dollar of cash is treated as possibly unbooked.
+ *
+ * `equityUsdg` IS THE PEAK BASIS, never raw equity (docs/perps.md rule 12):
+ * this figure feeds the breaker's PEAKS — the risk period's and the lift above
+ * the lifetime mark — and a peak ratchets on equity less every open perp gain
+ * (equity.ts peakBasisUsdg). Handed raw equity, a held tick would lift the
+ * breaker's peak by an unrealized gain the unheld ticks around it exclude, and
+ * `breakerLift` would be comparing two different units. With no perps the two
+ * are the same number.
+ *
+ * `inTransitUsdg` IS MARGIN MOVING BETWEEN THE ACCOUNT AND THE VENUE (rule
+ * 12c): T_in + T_out, already inside the equity figure. It is the one term a
+ * double count can inflate — money read at the venue AND at home around a
+ * payout, or in transit AND credited around a deposit — so while any of it is
+ * moving the peak observation leaves all of it out. Downward only, like the
+ * cash rule above: transit can never raise a peak. Absent or 0n is exactly the
+ * figure before perps existed.
  */
 export function heldBreakerObservationUsdg(a: {
   equityUsdg: bigint;
   cashUsdg: bigint;
   expectedCashUsdg: bigint | null;
+  inTransitUsdg?: bigint;
 }): bigint {
   const unexplained = a.cashUsdg - (a.expectedCashUsdg ?? 0n);
-  const observed = a.equityUsdg - (unexplained > 0n ? unexplained : 0n);
+  const transit = a.inTransitUsdg !== undefined && a.inTransitUsdg > 0n ? a.inTransitUsdg : 0n;
+  const observed = a.equityUsdg - (unexplained > 0n ? unexplained : 0n) - transit;
   return observed > 0n ? observed : 0n;
 }
 
@@ -266,4 +287,121 @@ export function heldBreakerObservationUsdg(a: {
  */
 export function wroteSince(earlierLanded: readonly (string | null)[], settledHere: ReadonlySet<string>): boolean {
   return earlierLanded.some((h) => h === null || !settledHere.has(h));
+}
+
+/**
+ * RULE 4: A RECEIPT BEFORE AN OPINION.
+ *
+ * An inferred flow names no transaction, so the hosted anchor counts it as
+ * unevidenced for good (bootstrap-source.ts): from the next restart the agent's
+ * contributions read unknown, the fee stops, and the Brain opens nothing until
+ * an operator repairs the row. Alan's 10-18 top-up of 59.954460 USDG sat that
+ * way for six days, its transaction plainly on chain.
+ *
+ * So the residual a look would infer is first looked for on the chain, through
+ * the worker's own read client (rpc-meter.ts chainRead, which fails over to the
+ * chain's public RPC), and booked as its receipt — through bookCapitalFlow,
+ * which moves the same two peaks inference does (deposit-scan.ts
+ * bookInferredReceipt) — only when ALL of these hold:
+ *
+ *   - the window (`receiptWindow`) starts above every block an inferred flow
+ *     may stand for, so nothing inference already booked is read again (THE
+ *     FLOOR, below);
+ *   - the deposit scanner's own reader classifies the window's transfers from
+ *     their receipts (deposit-log.ts findTransferFlows), and every transfer
+ *     already on the books, by identity or by transaction, is left out;
+ *   - exactly ONE capital transfer is left, and its signed amount is the
+ *     residual to the micro-USDG (`matchInferredDelta`).
+ *
+ * Anything else — a chain that will not answer, two transfers, a different
+ * amount, a booking the store refuses — books by inference exactly as before,
+ * and says so. The receipt is never guessed at, and the total booked is the
+ * residual either way. Nor does the interval hold for it: held open, the next
+ * trade would explain the deposit away entirely, under an unmoved peak.
+ *
+ * THE FLOOR. An inferred row names no block, so nothing can recognise its
+ * movement on the chain again. A look that books one raises the floor to its
+ * own head — read after its cash — plus a skew allowance for an endpoint that
+ * served the head behind the one that served the cash (`receiptFloorAfter`).
+ * A process starts with no floor and takes its first look's head, which lies
+ * above anything an earlier process inferred. No window reaches down to it.
+ * Without the floor, a later window could book a receipt for money already
+ * booked by inference: contributions twice, and the high-water mark — a
+ * one-way ratchet — raised twice for good.
+ *
+ * THE MARGIN. Each look reads its head after its cash, so a movement between
+ * the two is in the NEXT look's residual but below this look's head. The
+ * window reaches RECEIPT_MARGIN_BLOCKS below the baseline's head (never below
+ * the floor) to take it in. Whatever else the margin takes in is either on the
+ * books with an identity, and left out, or a transfer no flow row names, which
+ * the one-transfer rule has to account for like any other.
+ */
+
+/** Blocks below the baseline's head a window reaches: the cash-to-head gap of a slow tick, at ~10 blocks a second. */
+export const RECEIPT_MARGIN_BLOCKS = 3_000n;
+/** Blocks above an inferring look's head the floor goes: a lagging endpoint's skew, at ~10 blocks a second. */
+export const RECEIPT_FLOOR_SKEW_BLOCKS = 120n;
+/**
+ * The widest window one look reads — an hour at ~10 blocks a second. Wider
+ * (a long hold, a stalled tick) books by inference: the read is on the tick's
+ * path, and a receipt read for every trade of a long window is not.
+ */
+export const RECEIPT_MAX_WINDOW_BLOCKS = 36_000n;
+
+/** The blocks a look's receipt is looked for in, or why there are none. */
+export type ReceiptWindow = { fromBlock: bigint; toBlock: bigint } | { none: string };
+
+/**
+ * WHERE THIS LOOK'S RECEIPT CAN BE — rule 4's window, pure.
+ *
+ * `head` is this look's, read after its cash; `baselineHead` the look's that
+ * set the baseline; `floor` the lowest block any window may never reach.
+ */
+export function receiptWindow(a: { baselineHead: bigint | null; floor: bigint | null; head: bigint | null }): ReceiptWindow {
+  if (a.head === null) return { none: "the chain head could not be read" };
+  if (a.floor === null) return { none: "no look has yet placed where earlier inference ends" };
+  if (a.baselineHead === null) return { none: "the baseline's block is not known" };
+  const margin = a.baselineHead + 1n - RECEIPT_MARGIN_BLOCKS;
+  const fromBlock = a.floor + 1n > margin ? a.floor + 1n : margin;
+  if (fromBlock > a.head) return { none: "the change is too close to a start or to a flow booked by inference" };
+  if (a.head - fromBlock + 1n > RECEIPT_MAX_WINDOW_BLOCKS) {
+    return { none: `blocks ${fromBlock}..${a.head} are wider than one look reads` };
+  }
+  return { fromBlock, toBlock: a.head };
+}
+
+/**
+ * THE FLOOR AFTER A LOOK THAT BOOKS BY INFERENCE, or a process's first — pure.
+ *
+ * Raised to `head` plus the skew allowance, never lowered. With no head the
+ * floor is UNKNOWN (null): no window opens until a later look places it again.
+ */
+export function receiptFloorAfter(floor: bigint | null, head: bigint | null): bigint | null {
+  if (head === null) return null;
+  const raised = head + RECEIPT_FLOOR_SKEW_BLOCKS;
+  return floor !== null && floor > raised ? floor : raised;
+}
+
+/**
+ * IS ONE OF THESE TRANSFERS THE RESIDUAL? — rule 4's match, pure.
+ *
+ * `flows` are the window's capital transfers that no flow row names. Exactly
+ * one, signed by direction and equal to `deltaUsdg6` to the micro-USDG, or
+ * none: two transfers that sum to the residual cannot be told from one that is
+ * it beside one that is something else, and an amount that differs is a
+ * different movement.
+ */
+export function matchInferredDelta<F extends { direction: "in" | "out"; amountUsdg6: bigint }>(
+  flows: readonly F[],
+  deltaUsdg6: bigint,
+): { match: F } | { none: string } {
+  if (deltaUsdg6 === 0n) return { none: "there is no change to explain" };
+  if (flows.length === 0) return { none: "no capital transfer is in the window" };
+  if (flows.length > 1) return { none: `${flows.length} capital transfers are in the window, and one change cannot be told from another` };
+  const only = flows[0]!;
+  const signed = only.direction === "in" ? only.amountUsdg6 : -only.amountUsdg6;
+  if (signed !== deltaUsdg6) {
+    return { none: `the one capital transfer moved ${signed} micro-USDG, not this change's ${deltaUsdg6}` };
+  }
+  return { match: only };
 }

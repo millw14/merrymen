@@ -1,0 +1,44 @@
+/*
+ * What a missing or flat return means, and how old a figure is — see
+ * agent-performance.ts performanceOf and staleSince.
+ *
+ * Its own file, imported once by the root layout and never by a component,
+ * because the test runner renders components under node and node cannot
+ * import CSS. Kept out of terminal.css so the board's other open changes to
+ * that sheet do not collide with this one. Every rule sits under
+ * `.terminal-host` and uses the terminal's own tokens.
+ */
+
+/* A STATE IS WORDS IN A NUMBER'S PLACE, so it is set as words: the figure's
+   weight and colour would read "No trades yet" as a result. */
+:where(.terminal-host) .performance-state {
+  color: var(--tx-2);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* The as-of time and the "awaiting valuation" note are visible text, not a
+   tooltip — sized like the book label beside them. */
+:where(.terminal-host) .performance-asof,
+:where(.terminal-host) .performance-note {
+  font-size: 10px;
+  color: var(--tx-2);
+  white-space: nowrap;
+}
+
+/* Search's figure column, which held one span and now holds its notes. */
+:where(.terminal-host) .performance-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* The board's one line about time: staleness only, never a cause. */
+:where(.terminal-host) .performance-banner {
+  margin: 0 0 12px;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.5;
+}

@@ -1,0 +1,50 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "theses": [
+    {
+      "avatar": null,
+      "tokenImage": null,
+      "links": [],
+      "isDev": false,
+      "id": "149318d0-70af-4acb-a607-b126dd4db4a3",
+      "tradeId": "a323b5ca-c769-4b07-a422-833c4cafbe1f",
+      "text": "PONS is the biggest thesis on robinhood today",
+      "handle": "frankdegods",
+      "name": "frank",
+      "userId": "6dcf7c78-2537-522a-8307-3f9970c081be",
+      "equity": 40000,
+      "tradeUsd": 4000,
+      "ts": 1788378000000,
+      "likes": null,
+      "replies": 2,
+      "token": {
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D"
+      },
+      "networkId": 4663,
+      "chain": "robinhood"
+    },
+    {
+      "avatar": null,
+      "tokenImage": null,
+      "links": [],
+      "isDev": false,
+      "id": "th-0010",
+      "tradeId": null,
+      "text": "FU2O community is growing",
+      "handle": "CryptoKaleo",
+      "name": "K A L E O",
+      "userId": "1f08e6ab-5c73-5443-9225-bfc496cde51f",
+      "equity": 899,
+      "tradeUsd": 100,
+      "ts": 1788377940000,
+      "replies": 0,
+      "token": {
+        "symbol": "FU2O",
+        "address": "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump"
+      },
+      "networkId": 1399811149,
+      "chain": "solana"
+    }
+  ]
+}

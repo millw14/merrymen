@@ -11,6 +11,8 @@ import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { hostedAgentFor } from "@/lib/agent-for";
 import { readMeasuredMark } from "@/lib/held-marks";
+import { CapitalFlowsWithheld, netFlows, readDistinctFlows } from "@/lib/distinct-flows";
+import { distinctTrades } from "@/lib/distinct-trades";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +34,13 @@ export interface ScoreboardAgent {
   equity: ScoreboardEquityPoint[];
   /** Equity − contributions − gas. Null when contributions are unknown. */
   pnl_usdg: number | null;
-  /** Gas charged against that figure, and fills whose gas could not be priced. */
+  /**
+   * Why that P&L is null when flows are on record but cannot be summed
+   * (distinct-flows.ts): "review" for one transfer booked two ways, "unread"
+   * for records that contradict each other. Null otherwise.
+   */
+  contributions_withheld: "review" | "unread" | null;
+  /** Gas charged against that figure, and settled operations (landed or reverted) whose gas could not be priced. */
   gas_usdg: number;
   gas_unpriced_trades: number;
   /**
@@ -162,30 +170,48 @@ export async function GET(req: Request) {
       // AS OF THE MEASURED MARK: a flow booked after it — an owner transfer
       // that landed during a hold — is not in its cash, and subtracting it
       // publishes the transfer as profit.
+      //
+      // EACH MOVEMENT ONCE (distinct-flows.ts), collapsed before the cutoff:
+      // a carry or a log on record twice is one deposit. Rows that contradict
+      // each other throw, and the P&L is null rather than one of them, with
+      // the reason said.
+      //
+      // A DELIBERATE CORRECTION, besides: under EVERY spelling of the account
+      // (LOWER(agent_id)), as the public board and the profile read it. This
+      // read `agent_id = ?`, exact, so a deposit booked under the checksummed
+      // spelling was in the book's cash and missing from what was subtracted
+      // from it — the owner's own money published as profit. The equity reads
+      // beside it are unchanged.
       let contributed: number | null = null;
+      let contributionsWithheld: ScoreboardAgent["contributions_withheld"] = null;
       try {
-        const row = (await db
-          .prepare(
-            `SELECT COUNT(*) AS n,
-                    COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ?${epochWhere}${latestAt === null ? "" : " AND at <= ?"}`,
-          )
-          .get(account, ...epochArg, ...(latestAt === null ? [] : [latestAt]))) as { n: number; net: number } | undefined;
-        contributed = !row || row.n === 0 ? null : row.net;
-      } catch {
-        /* flows arrives with a worker migration */
+        const flows = await readDistinctFlows(db, account, epochArg.length ? epochArg[0]! : null);
+        const { n, net } = netFlows(flows, latestAt ?? undefined);
+        contributed = n === 0 ? null : net;
+      } catch (error) {
+        // Flows arrives with a worker migration, or its rows are withheld.
+        if (error instanceof CapitalFlowsWithheld) contributionsWithheld = error.verdict;
       }
       // Gas priced in USDG when it was burned, and how much could not be
       // priced — the count is what stops "net of gas" being a claim we can't
       // back on a public page.
+      //
+      // A DELIBERATE CORRECTION: one row per OPERATION (distinctTrades), and
+      // reverted operations as well as landed ones. This summed raw landed
+      // rows, so a redeploy's re-recorded copy of a paid op — the same op under
+      // another spelling of the account — charged its gas twice, and a revert,
+      // which burns gas too, was never charged at all. It now counts what the
+      // profile and the board charge (readOperationCounts, gasAt), over the
+      // whole run as before.
       let gasUsdg = 0;
       let gasUnpriced = 0;
       try {
         const row = (await db
           .prepare(
-            `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
-                    SUM(CASE WHEN gas_wei IS NOT NULL AND gas_usdg IS NULL THEN 1 ELSE 0 END) AS unpriced
-               FROM trades WHERE agent_id = ?${epochWhere} AND status = 'landed'`,
+            `SELECT COALESCE(SUM(t.gas_usdg), 0) AS usdg,
+                    COUNT(CASE WHEN t.gas_wei IS NOT NULL AND t.gas_usdg IS NULL THEN 1 END) AS unpriced
+               FROM ${distinctTrades(`LOWER(t.agent_id) = LOWER(?)${epochWhere}`)}
+              WHERE t.status IN ('landed', 'reverted')`,
           )
           .get(account, ...epochArg)) as { usdg: number; unpriced: number | null } | undefined;
         gasUsdg = row?.usdg ?? 0;
@@ -290,6 +316,7 @@ export async function GET(req: Request) {
         // overstates performance by the whole trading cost.
         pnl_usdg:
           latestEquity === null || contributed === null ? null : latestEquity - contributed - gasUsdg,
+        contributions_withheld: contributionsWithheld,
         gas_usdg: gasUsdg,
         gas_unpriced_trades: gasUnpriced,
         max_drawdown_bps: maxDdBps,

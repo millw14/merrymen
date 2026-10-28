@@ -201,10 +201,10 @@ internal fun AccountPositions(lines: List<PositionLine>, modifier: Modifier = Mo
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        dev.merrymen.app.ui.Coin(p.symbol, size = 40.dp)
+        dev.merrymen.app.ui.Coin(p.label, size = 40.dp)
         Column(Modifier.weight(1f)) {
           Text(
-            text = p.symbol,
+            text = p.label,
             maxLines = 1,
             style = TextStyle(fontFamily = sans(16.sp, FontWeight.W700), fontSize = 16.sp, fontWeight = FontWeight.W700),
             color = MerryColors.tx,

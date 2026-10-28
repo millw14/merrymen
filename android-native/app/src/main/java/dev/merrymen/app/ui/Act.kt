@@ -390,7 +390,7 @@ fun chipsFor(snapshot: ChatSnapshot?, lines: List<ChatLine>, ceiling: Double?): 
 
 // ── a reply that did not arrive, in the agent's voice ───────────────────────
 
-private val LLM_KINDS = setOf("key-rejected", "rate-limited", "provider-down", "unreachable", "model-missing", "other")
+private val LLM_KINDS = setOf("key-rejected", "rate-limited", "provider-down", "unreachable", "model-missing", "billing", "other")
 private val PROVIDER = Regex("^[A-Za-z0-9][\\w .-]{0,39}$")
 
 /** A kind this build does not know is "other" — said as a reason it does not recognise, which is true. */
@@ -402,7 +402,8 @@ fun providerOf(provider: String?): String? = provider?.takeIf { PROVIDER.matches
 /**
  * IS ASKING AGAIN WORTH A RETRY? Yes for everything that passes — a network, a
  * timeout, a stream cut short, a server that did not answer. Not for a model
- * failure that will fail the same way until somebody changes something, and
+ * failure that will fail the same way until somebody changes something — a
+ * refused key, a missing model, an account on hold until a bill is paid — and
  * not for an address that is not an address: a button that cannot work, beside
  * a sentence telling the owner it might, is worse than none.
  */
@@ -418,8 +419,18 @@ fun retryHelps(failure: String, kind: String?): Boolean = when (failure) {
  * redacted debug text the server marks never-rendered, and the phone used to
  * print it after the raw `why` ("llm-error — groq 401 …"). A model failure is
  * said by its kind, and "try again" only where trying again can work.
+ *
+ * WHOSE KEY FAILED DECIDES WHO CAN FIX IT. On 2026-10-09 the house Groq account
+ * was put on hold over an unpaid bill, and every hosted agent running on it told
+ * its owner it failed "for a reason I don't recognise" and that "its setup needs
+ * a look" — sending them to a Settings screen where nothing was wrong. [house]
+ * is the route's word that the key was the deployment's own (never the key);
+ * then a hold, a refused key or a missing model is said as ours to fix. The
+ * house line never says "billing": the operator's bill is not a tenant's
+ * business. Absent — an older server — is the owner's own key, as these
+ * sentences always assumed.
  */
-fun failureLine(failure: String, status: Int? = null, kind: String? = null, provider: String? = null): String {
+fun failureLine(failure: String, status: Int? = null, kind: String? = null, provider: String? = null, house: Boolean = false): String {
   when (failure) {
     "signed-out" -> return "I can't hear you — your sign-in has lapsed. Sign in again and ask me once more."
     "no-llm" -> return "I've no brain connected yet, so I can't answer in my own words. Connect an AI provider in Settings, then ask me again."
@@ -435,7 +446,16 @@ fun failureLine(failure: String, status: Int? = null, kind: String? = null, prov
   val who = providerOf(provider)
   val whose = who ?: "its provider"
   val aside = if (who != null) ", $who," else ""
-  return when (llmKindOf(kind)) {
+  val said = llmKindOf(kind)
+  if (house) {
+    when (said) {
+      "billing" -> return "My brain's provider$aside has paused the house account I run on, so I can't answer in my own words right now. That's ours to fix, not yours — nothing in your Settings will change it."
+      "key-rejected" -> return "My brain couldn't answer: $whose refused the house key I run on. That's ours to fix, not yours — nothing in your Settings will change it."
+      "model-missing" -> return "My brain couldn't answer: $whose says the house model I run on isn't available. That's ours to fix, not yours — nothing in your Settings will change it."
+    }
+  }
+  return when (said) {
+    "billing" -> "My brain couldn't answer: $whose has put the account behind its API key on hold over billing. Asking again won't help until that's settled, or another provider is chosen in Settings."
     "key-rejected" -> "My brain couldn't answer: $whose refused the API key it's set up with. Asking again won't help until that key is replaced."
     "model-missing" -> "My brain couldn't answer: $whose says the model it's set to use isn't available. Asking again won't help until the model is changed."
     "rate-limited" -> "My brain is being rate-limited by $whose right now. Give it a moment and try again."

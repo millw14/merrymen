@@ -1,12 +1,16 @@
 /**
  * What a trade's gas actually cost, in the currency the book is kept in.
  *
- * Gas leaves the account in ETH; the book is denominated in USDG; and there is
- * no Chainlink ETH/USD feed on this chain. So every P&L figure merrymen has
- * ever produced has been GROSS OF GAS — which at the 6.25 USDG trade size in
- * the July ledger was ~55 bps of an ~89 bps round trip, i.e. most of the cost.
+ * Gas leaves the account in ETH; the book is denominated in USDG; and before
+ * this the worker had no ETH price at all. So every P&L figure merrymen had
+ * produced was GROSS OF GAS — which at the 6.25 USDG trade size in the July
+ * ledger was ~55 bps of an ~89 bps round trip, i.e. most of the cost.
  *
- * The price comes from the WETH/USDG pool's TWAP, through the same guarded
+ * (There IS a Chainlink ETH/USD feed on this chain, CASH_FEEDS.ETH_USD. The
+ * worker reads it as the fallback when the pool below is refused, and to price
+ * gas settled after the fact at the round then in force — eth-feed.ts.)
+ *
+ * The price comes first from the WETH/USDG pool's TWAP, through the same guarded
  * reader that values feedless holdings (venues/pool-price.ts): time-averaged so
  * moving it means holding the price away from the market for the whole window,
  * with a liquidity floor and a spot-vs-TWAP divergence band. A refusal is a

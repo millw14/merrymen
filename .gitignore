@@ -22,3 +22,9 @@ web/public/sdk/
 # Sampling scratch from incident work — never committed.
 *.log
 worker/src/tmp-*.ts
+
+# Third-party program copies for the Jupiter fork test. No licence lets this public
+# repository publish them, so they are supplied out of band through
+# MERRYMEN_JUPITER_FORK_PROGRAMS (contracts/solana/runtime-tests/fixtures/jupiter/NOTICE.md).
+contracts/solana/runtime-tests/fixtures/jupiter/jupiter_v6.so
+contracts/solana/runtime-tests/fixtures/jupiter/whirlpool.so

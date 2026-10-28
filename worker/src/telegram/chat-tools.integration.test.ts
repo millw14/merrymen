@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import type { ToolContext } from "./chat-tools";
 
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-tools-"));
 process.env.MERRYMEN_HOME = HOME;
@@ -19,6 +20,7 @@ process.env.MERRYMEN_HOSTED = "1";
 
 const { closeStoreForTest, initStore, addTrade, addEvent, addDecision, newDecisionId, addEquity } = await import("../store");
 const { toolByName, answerTradeQuestion } = await import("./chat-tools");
+const { readStatus } = await import("./reads");
 const { CASH } = await import("../../../packages/core/src/index");
 const { DatabaseSync } = await import("node:sqlite");
 const { homePaths } = await import("../home");
@@ -92,6 +94,39 @@ describe("the lookups answer with names, and truthfully", () => {
     assert.match(out, /pause button is off/);
     assert.match(out, /launchpad coins is switched off in settings/);
     assert.match(out, /not the pause button/);
+  });
+
+  for (const [level, expected] of [
+    ["observe", /Service observation hold:.*buys and sells are blocked/],
+    ["exits-only", /Service exit-only hold: new buys are blocked/],
+  ] as const) {
+    it(`shows the current ${level} service hold before any rejected order exists`, async () => {
+      const context = ctx(SHOGUN) as ToolContext;
+      context.status.admission = { level, draining: false };
+      for (const out of [readStatus(context.status), await toolByName("agent_status")!.run({}, context)]) {
+        assert.match(out, expected);
+        assert.match(out, /service operator controls this hold/);
+        assert.doesNotMatch(out, /OTHER_SECRET|0x0000000000000000000000000000000000000b0b|MERRYMEN_/);
+      }
+      const settings = await toolByName("settings")!.run({}, context);
+      assert.match(settings, expected);
+      assert.doesNotMatch(settings, /nothing I can see is stopping it/);
+    });
+  }
+
+  it("reports a current restart and never turns trade admission into a readiness claim", async () => {
+    const context = ctx(SHOGUN) as ToolContext;
+    context.status.admission = { level: "trade", draining: true };
+    assert.match(readStatus(context.status), /Service restart:.*sends no new orders/);
+    assert.match(await toolByName("agent_status")!.run({}, context), /Service restart:.*sends no new orders/);
+    context.status.admission.draining = false;
+    const out = await toolByName("agent_status")!.run({}, context);
+    assert.doesNotMatch(out, /Service .*hold|Service restart/);
+    assert.match(out, /setting alone does not establish that orders can run/);
+  });
+
+  it("keeps old status callers compatible without inventing an admission level", () => {
+    assert.doesNotMatch(readStatus((ctx(SHOGUN) as ToolContext).status), /Service .*hold|Service restart/);
   });
 
   it("recent_activity labels the launch-scan line so it can't be misread", async () => {

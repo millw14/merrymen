@@ -80,9 +80,9 @@ describe("GET /api/settings leaves the energy reserve out of customTokens", () =
 
   it("HOSTED: the tenant's reserve entries are not served; the stored settings keep them", async () => {
     process.env.MERRYMEN_HOSTED = "1";
-    await getSettingsStore().put(TENANT, { customTokens: STORED });
+    await getSettingsStore("spot").put(TENANT, { customTokens: STORED });
     assert.deepEqual(await served(TENANT), [CATE, NAMESAKE]);
-    assert.deepEqual((await getSettingsStore().get(TENANT))?.customTokens, STORED);
+    assert.deepEqual((await getSettingsStore("spot").get(TENANT))?.customTokens, STORED);
   });
 
   it("no list stays no list, and a list without the reserve is served as stored", async () => {

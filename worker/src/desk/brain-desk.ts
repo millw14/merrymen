@@ -11,6 +11,7 @@
  * (tg-groups/desk.ts): every figure in it must be one the brief contained.
  */
 import { randomUUID } from "node:crypto";
+import { onchainIdIn } from "../../../packages/core/src/ids";
 import type { TgDeskStance, TgDeskThinkRequest, TgDeskThought } from "../telegram/tg-groups/types";
 
 export interface BrainDeskConfig {
@@ -22,7 +23,16 @@ export interface BrainDeskConfig {
 
 const MAX_BYTES = 64 * 1024;
 const STANCES: ReadonlySet<string> = new Set(["constructive", "neutral", "cautious", "avoid"]);
-const FORBIDDEN = /0x[0-9a-fA-F]{16,}|https?:\/\/|www\.|t\.me\//i;
+/**
+ * What Brain's DeskAnalysis validator refuses in any field
+ * (services/brain/brain/schemas.py): a 0x hex blob, a link in any form a chat
+ * renders clickable (`http` anywhere, `www.`, `t.me/`) and a cashtag (`$`
+ * before a letter; `$` before a digit is a price). Checked again here, with
+ * Brain's 40-character floor on the read, so a read an older or a different
+ * Brain build lets through is refused in the same place.
+ */
+const FORBIDDEN = /0x[0-9a-fA-F]{16,}|http|www\.|t\.me\/|\$[A-Za-z]/i;
+const READ_MIN_CHARS = 40;
 
 async function readBounded(res: Response, max: number): Promise<string> {
   const reader = res.body?.getReader();
@@ -42,8 +52,16 @@ async function readBounded(res: Response, max: number): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/**
+ * FORBIDDEN, plus a Solana key or signature (core's onchainIdIn), which has no
+ * 0x for it to see. The glued scan, as Brain's DeskAnalysis validator reads it
+ * (services/brain/brain/schemas.py `_reject_executable`, glued=True): "CA<mint>"
+ * or "<mint>is" is an id too (audit regressions F3), so a read an older or a
+ * different Brain build lets through is refused here in the same place.
+ */
+const GLUED = { glued: true } as const;
 const text = (v: unknown, max: number): string | null =>
-  typeof v === "string" && v.trim().length <= max && !FORBIDDEN.test(v) ? v.replace(/\s+/g, " ").trim() : null;
+  typeof v === "string" && v.trim().length <= max && !FORBIDDEN.test(v) && !onchainIdIn(v, GLUED) ? v.replace(/\s+/g, " ").trim() : null;
 
 /** Brain's analysis, shape-checked. Null for anything that is not one. */
 export function parseDeskAnalysis(raw: unknown): TgDeskThought | null {
@@ -51,7 +69,9 @@ export function parseDeskAnalysis(raw: unknown): TgDeskThought | null {
   const read = text(a.read, 900);
   const watch = text(a.watch ?? "", 260);
   const invalidation = text(a.invalidation ?? "", 260);
-  if (!read || read.length < 20 || watch === null || invalidation === null) return null;
+  // Counted in characters (code points), as Python's len() counts Brain's min_length: in UTF-16
+  // units an emoji is two, so 39 of them passed here although Brain refuses them.
+  if (!read || [...read].length < READ_MIN_CHARS || watch === null || invalidation === null) return null;
   if (typeof a.stance !== "string" || !STANCES.has(a.stance)) return null;
   const confidence = typeof a.confidence === "number" && Number.isFinite(a.confidence) ? Math.min(1, Math.max(0, a.confidence)) : undefined;
   return { read, stance: a.stance as TgDeskStance, watch, invalidation, ...(confidence !== undefined ? { confidence } : {}) };

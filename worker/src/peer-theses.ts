@@ -233,7 +233,7 @@ export async function peerThesesForSlugs(
   shared: Db,
   slugs: readonly string[],
   identity: Pick<IdentityStore, "bySlug"> = getIdentityStore(),
-  settings: (tenant: `0x${string}`) => Promise<unknown> = (tenant) => getSettingsStore().get(tenant),
+  settings: (tenant: `0x${string}`) => Promise<unknown> = (tenant) => getSettingsStore("spot").get(tenant),
 ): Promise<PublicThesis[]> {
   const peers = await resolvePeers(slugs, identity);
   // WHOSE BOOK IS PUBLIC, read per owner the way read-theses reads it: only an

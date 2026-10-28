@@ -5,11 +5,12 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { getActionSelector } from "@zerodev/sdk";
-import { buildWallPolicies, derivationOf, type MerrymenSettings, type StoredGrant } from "@merrymen/core";
+import { buildWallPolicies, derivationOf, PONS_CLASS_VAULT_FACTORY, type MerrymenSettings, type StoredGrant } from "@merrymen/core";
 import { partnerGrantDigest } from "../../../packages/core/src/partner-enrollment";
 import { createPartnerEnrollmentService, PARTNER_ENROLLMENT_TTL_MS, type PartnerEnrollmentDependencies } from "./partner-enrollment";
-import { FilePartnerStore, type PartnerConnection } from "./partner-store";
+import { FilePartnerStore, PartnerStoreError, type PartnerConnection } from "./partner-store";
 import { PartnerError, type PartnerPrincipal } from "./partner-bridge";
+import { checkCanonicalWall } from "./canonical-wall";
 
 const SECRET = "test-partner-enrollment-secret-at-least-32-characters";
 const ACCOUNT = "0x1111111111111111111111111111111111111111" as const;
@@ -24,7 +25,8 @@ const errorCode = (code: string) => (error: unknown) => error instanceof Partner
 async function fixture(overrides: Partial<PartnerEnrollmentDependencies> = {}) {
   let now = 1_800_000_000_000;
   const home = mkdtempSync(join(tmpdir(), "merrymen-enrollment-"));
-  const store = new FilePartnerStore(home, () => Math.floor(now / 1000), () => SECRET);
+  // Short lock waits: a contention test should not sit out the production bound.
+  const store = new FilePartnerStore(home, () => Math.floor(now / 1000), () => SECRET, { conversation: 100, enrollment: 100 });
   fixtures.push({ store, home });
   const ownerKey = generatePrivateKey();
   const owner = privateKeyToAccount(ownerKey);
@@ -51,6 +53,7 @@ async function fixture(overrides: Partial<PartnerEnrollmentDependencies> = {}) {
     store, now: () => now, secret: () => SECRET,
     recover: async args => (await import("viem")).recoverMessageAddress(args),
     derive: async () => derivationOf(ACCOUNT),
+    classVault: async () => { throw new Error("this grant seals no class vault"); },
     grants: {
       get: async tenant => savedGrants.get(tenant) ?? null,
       tenantForAccount: async account => [...savedGrants].find(([, g]) => g.smartAccount.toLowerCase() === account.toLowerCase())?.[0] as `0x${string}` ?? null,
@@ -106,11 +109,91 @@ test("live consent enables trading only after the signed grant was stored", asyn
   assert.equal(f.savedSettings.get(f.owner.address.toLowerCase())?.liveTradingEnabled, true);
 });
 
-test("a consumed owner authorization cannot activate again", async () => {
+test("re-presenting a completed activation answers with the current connection and applies nothing again", async () => {
+  const f = await fixture();
+  const tenant = f.owner.address.toLowerCase();
+  const activation = await f.activationFor(f.grant, { ...settings, live_trading_enabled: true });
+  const first = await f.service.activate(principal, f.connection, activation);
+  assert.equal(first.replayed, false);
+  const applied = [...f.events];
+  // The owner turns live trading off afterwards; a lost-response retry must not turn it back on.
+  f.savedSettings.set(tenant, { ...f.savedSettings.get(tenant)!, liveTradingEnabled: false });
+  const again = await f.service.activate(principal, f.connection, activation);
+  assert.equal(again.replayed, true);
+  assert.deepEqual(again.connection, first.connection);
+  assert.equal(again.smartAccount, ACCOUNT);
+  assert.deepEqual(f.events, applied, "no grant, settings or identity write on a retry");
+  assert.equal(f.savedSettings.get(tenant)?.liveTradingEnabled, false);
+  // The same token with a changed grant, or a signature by anyone else, is still refused.
+  await assert.rejects(f.service.activate(principal, f.connection, { ...activation, grant: { ...f.grant, caps: { ...f.grant.caps, dailyUsdg: 40 } } }), errorCode("grant_digest_mismatch"));
+  const stranger = await privateKeyToAccount(generatePrivateKey()).signMessage({ message: (await f.challengeFor()).message });
+  await assert.rejects(f.service.activate(principal, f.connection, { ...activation, signature: stranger }), errorCode("wrong_owner"));
+  assert.deepEqual(f.events, applied);
+});
+
+test("only the latest completed activation is answered again; an earlier or unfinished one stays used", async () => {
+  const f = await fixture();
+  const original = await f.activationFor();
+  const initial = await f.service.activate(principal, f.connection, original);
+  const renewal = await f.activationFor(f.grant, settings, initial.connection);
+  await f.service.activate(principal, initial.connection, renewal);
+  await assert.rejects(f.service.activate(principal, initial.connection, original), errorCode("challenge_used"));
+  assert.equal((await f.service.activate(principal, initial.connection, renewal)).replayed, true);
+  // Bound and paper-installed, but live trading failed: not complete, so not answerable as a success.
+  let failLive = true;
+  const g = await fixture({ settings: { get: async () => null, put: async (_tenant, s) => { if (s.liveTradingEnabled && failLive) throw new Error("settings database unavailable"); } } });
+  const live = await g.activationFor(g.grant, { ...settings, live_trading_enabled: true });
+  await assert.rejects(g.service.activate(principal, g.connection, live), errorCode("enrollment_storage_failed"));
+  failLive = false;
+  await assert.rejects(g.service.activate(principal, g.connection, live), errorCode("challenge_used"));
+});
+
+test("an activation whose every effect committed is a success even when its retry proof cannot be recorded", async t => {
+  const logged = t.mock.method(console, "error", () => {});
+  const f = await fixture();
+  const tenant = f.owner.address.toLowerCase();
+  const recordActivation = f.store.recordActivation.bind(f.store);
+  f.store.recordActivation = async () => { throw new Error("connection reset"); };
+  const activation = await f.activationFor(f.grant, { ...settings, live_trading_enabled: true });
+  const done = await f.service.activate(principal, f.connection, activation);
+  assert.equal(done.replayed, false);
+  assert.equal(done.connection.status, "linked");
+  assert.equal(done.connection.tenant, tenant);
+  assert.equal(done.connection.activation, undefined);
+  assert.deepEqual(f.events, ["settings-paper", "identity", "grant", "settings-live"]);
+  assert.equal(f.savedSettings.get(tenant)?.liveTradingEnabled, true, "live trading is on, and the answer says the activation succeeded");
+  assert.equal(logged.mock.callCount(), 1);
+  assert.doesNotMatch(JSON.stringify(logged.mock.calls[0].arguments), /connection reset/, "only the error's name is logged");
+  // With no recorded proof a lost-response retry gets the old answer, and nothing is applied twice.
+  f.store.recordActivation = recordActivation;
+  await assert.rejects(f.service.activate(principal, f.connection, activation), errorCode("challenge_used"));
+  assert.deepEqual(f.events, ["settings-paper", "identity", "grant", "settings-live"]);
+  // A connection revoked meanwhile is still an answer, not a success.
+  const g = await fixture();
+  const record = g.store.recordActivation.bind(g.store);
+  g.store.recordActivation = async (id, partnerId, owner, proof) => { await g.store.revoke(partnerId, id); return record(id, partnerId, owner, proof); };
+  await assert.rejects(g.service.activate(principal, g.connection, await g.activationFor()), (e: unknown) => e instanceof PartnerStoreError && e.code === "connection_changed");
+  assert.equal((await g.store.byId(principal.app_id, g.connection.id))?.status, "revoked");
+});
+
+test("contention for the owner's enrollment lock leaves the signature usable for a retry", async () => {
   const f = await fixture();
   const activation = await f.activationFor();
-  await f.service.activate(principal, f.connection, activation);
-  await assert.rejects(f.service.activate(principal, f.connection, activation), errorCode("challenge_used"));
+  let entered!: () => void, free!: () => void;
+  const inside = new Promise<void>(resolve => { entered = resolve; });
+  const freed = new Promise<void>(resolve => { free = resolve; });
+  // Another activation for the same owner, still in progress past the wait.
+  const holder = f.store.withEnrollmentLock(f.owner.address, async () => { entered(); await freed; });
+  await inside;
+  try {
+    await assert.rejects(f.service.activate(principal, f.connection, activation),
+      (e: unknown) => e instanceof PartnerStoreError && e.status === 409 && e.code === "enrollment_busy" && e.retryAfter! > 0);
+  } finally { free(); }
+  await holder;
+  assert.equal(f.events.length, 0);
+  // The same owner signature still works: busy never spent its nonce.
+  const result = await f.service.activate(principal, f.connection, activation);
+  assert.equal(result.connection.status, "linked");
   assert.equal(f.events.filter(e => e === "grant").length, 1);
 });
 
@@ -187,6 +270,73 @@ test("metadata cannot advertise a narrower wall than its actual serialized permi
   const understatedCap = { ...f.grant, caps: { ...f.grant.caps, perTradeUsdg: 1 } };
   await assert.rejects(f.service.activate(principal, f.connection, await f.activationFor(understatedCap)), errorCode("invalid_wall"));
   assert.equal(f.events.length, 0);
+});
+
+test("a partner cannot seal its own adapter, vault, route or token, even inside a matching wall", async () => {
+  const f = await fixture();
+  let spent = 0;
+  const consume = f.store.consumeNonce.bind(f.store);
+  f.store.consumeNonce = async (...args) => { spent++; return consume(...args); };
+  const FOREIGN = "0x00000000000000000000000000000000badbad01" as const;
+  // A permission that genuinely implements what the grant declares, so the
+  // canonical wall alone accepts it; the worker would then trade through FOREIGN.
+  const sealed = (extra: Partial<StoredGrant>, wallOptions: Parameters<typeof buildWallPolicies>[0] extends infer O ? Partial<O> : never) => {
+    const wall = buildWallPolicies({ caps: f.grant.caps, smartAccount: ACCOUNT, now: f.grant.grantedAt, ...wallOptions });
+    const params = decode(f.grant);
+    params.permissionParams = { policies: wall.policies.map(policy => ({ policyParams: policy.policyParams })) };
+    return { ...f.grant, ...extra, serialized: encode(params) } as StoredGrant;
+  };
+  const pons = sealed({ grantFeatures: ["tradeable-v2", "pons-adapter"], ponsAdapterAddress: FOREIGN }, { ponsAdapterAddress: FOREIGN });
+  assert.deepEqual(checkCanonicalWall(pons as unknown as Record<string, unknown>), { ok: true }, "the wall check alone would accept this grant");
+  const refused = [
+    pons,
+    sealed({ grantFeatures: ["tradeable-v2", "v4-adapter"], v4AdapterAddress: FOREIGN }, { v4AdapterAddress: FOREIGN }),
+    { ...f.grant, grantFeatures: ["tradeable-v2", "v4"] },
+    { ...f.grant, grantFeatures: ["tradeable-v2", "rialto"] },
+    { ...f.grant, grantFeatures: "tradeable-v2" as unknown as string[] },
+    { ...f.grant, grantTokens: [FOREIGN] },
+  ];
+  for (const grant of refused) {
+    await assert.rejects(f.service.activate(principal, f.connection, await f.activationFor(grant)), errorCode("unsupported_permission"));
+  }
+  assert.equal(spent, 0, "refused before the single-use nonce");
+  assert.equal(f.events.length, 0);
+  // What prepareMerryman mints from owner, caps and chain alone still activates.
+  const plain = await f.service.activate(principal, f.connection, await f.activationFor({ ...f.grant, grantTokens: [] }));
+  assert.equal(plain.connection.status, "linked");
+});
+
+test("a class vault is accepted only from the platform factory, as the vault it answers for this account", async () => {
+  const PLATFORM = (PONS_CLASS_VAULT_FACTORY[4663] ?? "").toLowerCase() as `0x${string}`;
+  const VAULT = "0x00000000000000000000000000000000000c1a55" as const;
+  const FOREIGN = "0x00000000000000000000000000000000badbad01" as const;
+  let answer: () => Promise<`0x${string}`> = async () => VAULT;
+  const reads: string[] = [];
+  const f = await fixture({ classVault: async (factory, account) => { reads.push(`${factory}:${account}`); return answer(); } });
+  let spent = 0;
+  const consume = f.store.consumeNonce.bind(f.store);
+  f.store.consumeNonce = async (...args) => { spent++; return consume(...args); };
+  const classGrant = (vault: `0x${string}`, factory: `0x${string}`) => {
+    const wall = buildWallPolicies({ caps: f.grant.caps, smartAccount: ACCOUNT, now: f.grant.grantedAt, ponsClassVaultAddress: vault, ponsClassVaultFactoryAddress: factory });
+    const params = decode(f.grant);
+    params.permissionParams = { policies: wall.policies.map(policy => ({ policyParams: policy.policyParams })) };
+    return { ...f.grant, grantFeatures: ["tradeable-v2", "pons-class"], ponsClassVaultAddress: vault, ponsClassVaultFactoryAddress: factory, serialized: encode(params) } as StoredGrant;
+  };
+  // Another factory: refused without a chain read.
+  await assert.rejects(f.service.activate(principal, f.connection, await f.activationFor(classGrant(VAULT, FOREIGN))), errorCode("unsupported_permission"));
+  assert.equal(reads.length, 0);
+  // The platform factory beside a vault it does not answer for this account.
+  await assert.rejects(f.service.activate(principal, f.connection, await f.activationFor(classGrant(FOREIGN, PLATFORM))), errorCode("unsupported_permission"));
+  // An unreadable chain is retryable: the same signed authorization works once it answers.
+  answer = async () => { throw new Error("rpc down"); };
+  const retry = await f.activationFor(classGrant(VAULT, PLATFORM));
+  await assert.rejects(f.service.activate(principal, f.connection, retry), errorCode("class_vault_unavailable"));
+  assert.equal(spent, 0, "no refusal above spent the single-use nonce");
+  assert.equal(f.events.length, 0);
+  answer = async () => VAULT;
+  const linked = await f.service.activate(principal, f.connection, retry);
+  assert.equal(linked.connection.status, "linked");
+  assert.equal([...f.savedGrants.values()][0]?.ponsClassVaultAddress, VAULT);
 });
 
 test("invalid caps and a mismatch between serialized expiry and metadata cannot arm a worker", async () => {

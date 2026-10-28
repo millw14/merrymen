@@ -161,7 +161,9 @@ private val TrenchBadgeEdge = Color(0xFFB7913F)
 @Composable
 fun FeedScreen(nav: NavHostController) {
   val c = LocalContainer.current
-  val reads = remember(c.api) { FeedReads(c.api) }
+  val identityKnown by c.repo.identityKnown.collectAsState()
+  val serverTurn by c.repo.serverTurn.collectAsState()
+  val reads = remember(c.api, serverTurn) { FeedReads(c.api) }
   val theses by reads.theses.collectAsState()
   val market by reads.market.collectAsState()
   val discoveries by reads.discoveries.collectAsState()
@@ -176,12 +178,18 @@ fun FeedScreen(nav: NavHostController) {
   val scope = rememberCoroutineScope()
   val lifecycle = LocalLifecycleOwner.current.lifecycle
 
-  LaunchedEffect(lifecycle, reads) { lifecycle.pollWhileResumed(reads.loops) }
+  LaunchedEffect(lifecycle, reads) {
+    if (c.api.servers.holds(serverTurn)) lifecycle.pollWhileResumed(reads.loops)
+  }
   // The counts and this reader's own likes travel on separate routes, both
   // throttled inside Social — coming back to this tab does not re-poll them.
   // And what the reader's agent reads, for the wire rings — throttled too.
-  LaunchedEffect(Unit) {
-    c.social.refresh()
+  LaunchedEffect(serverTurn) {
+    if (c.api.servers.holds(serverTurn)) c.social.refreshCounts()
+  }
+  LaunchedEffect(identityKnown, serverTurn) {
+    if (!identityKnown || !c.api.servers.holds(serverTurn)) return@LaunchedEffect
+    c.social.refreshMine()
     c.social.refreshWired()
   }
 

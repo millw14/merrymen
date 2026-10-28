@@ -155,7 +155,7 @@ export async function GET(req: Request) {
 
   let grant;
   try {
-    grant = await getGrantStore().get(tenant);
+    grant = await getGrantStore("spot").get(tenant);
   } catch {
     // An unreadable store is not an owner with no agent.
     return answer("unreadable");
@@ -169,7 +169,7 @@ export async function GET(req: Request) {
   // approve action has to know which, and so does the sentence next to it.
   const watched = new Set<string>();
   try {
-    const settings = (await getSettingsStore().get(tenant)) ?? {};
+    const settings = (await getSettingsStore("spot").get(tenant)) ?? {};
     for (const t of settings.customTokens ?? []) {
       if (typeof t?.address === "string") watched.add(t.address.toLowerCase());
     }

@@ -69,6 +69,7 @@
  * NEVER A TRADING INPUT. The row is read only to restore the child's file.
  * Nothing on a trading path reads `tenant_tg_groups`.
  */
+import { readReplyPrivacy, eraseLegacyReplyMemory, type ReplyPrivacyOp } from "./recovery-reply-state";
 import { randomBytes } from "node:crypto";
 import { constants as fsc, lstatSync, readdirSync, rmSync, type Stats } from "node:fs";
 import { link, lstat, open, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
@@ -444,6 +445,11 @@ function logOnce(memo: PublishMemo, log: TgGroupsLog, tenant: string, what: stri
  *   failed    — not a plain file, not version 1 JSON, or the read, seal or
  *               upsert failed; logged, the stored copy stands
  */
+function applyRecoveryPrivacy(text: string, tenant: string, dek: Buffer, ops: readonly ReplyPrivacyOp[]): string {
+  if (!ops.some(op => op.kind === "group" || op.kind === "person")) return text;
+  const row = eraseLegacyReplyMemory("group", tenant, sealSecret(envelope(tenant, text), dek), dek, ops);
+  return unwrap(tenant, openSecret(row.sealed, dek))!;
+}
 export async function publishTgGroups(o: {
   tenant: string;
   home: string;
@@ -476,7 +482,10 @@ export async function publishTgGroups(o: {
       return "failed";
     }
     const fp = fingerprint(st);
-    const forgetsAt = await forgetsVersion(o.home);
+    const recoveryOps = await readReplyPrivacy(o.shared, tenant, o.dek);
+    const privacyTag = JSON.stringify(recoveryOps);
+    const localForgetsAt = await forgetsVersion(o.home);
+    const forgetsAt = `${localForgetsAt}|${privacyTag}`;
     if (o.seen.get(tenant) === `${fp}|${forgetsAt}`) return "unchanged";
     const refused = memo.refused.get(tenant);
     if (refused === `too-big:${fp}`) return "too-big";
@@ -528,7 +537,7 @@ export async function publishTgGroups(o: {
     // THE FORGET REQUESTS, applied to what is sealed. An unreadable forget
     // file changes nothing here: the child did the forget in its own memory
     // too, so its file is published as written, and the file is never cleared.
-    const forgets = forgetsAt === NO_FORGETS ? null : await readForgets(o.home);
+    const forgets = localForgetsAt === NO_FORGETS ? null : await readForgets(o.home);
     let reflected = true;
     if (forgets === "failed") {
       logOnce(memo, log, tenant, `forgets:${forgetsAt}`, `tg-groups: ${tenant} forget requests unreadable — memory published as the child wrote it`);
@@ -539,6 +548,7 @@ export async function publishTgGroups(o: {
         reflected = false;
       }
     }
+    text = applyRecoveryPrivacy(text, tenant, o.dek, recoveryOps);
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > TG_GROUPS_MAX_BYTES) return "too-big";
 
@@ -554,7 +564,7 @@ export async function publishTgGroups(o: {
       memo.stored.set(tenant, forgets.fp);
       // Cleared only once the child's own file reflected them: until then its
       // memory still holds what they erase, and a crash restart would open it.
-      if (reflected && (await clearForgets(o.home, forgets, log, tenant))) o.seen.set(tenant, `${readFp}|${NO_FORGETS}`);
+      if (reflected && (await clearForgets(o.home, forgets, log, tenant))) o.seen.set(tenant, `${readFp}|${NO_FORGETS}|${privacyTag}`);
     }
     return "published";
   } catch (e) {
@@ -616,10 +626,13 @@ export async function forgetStoredTgGroups(o: {
     }
     const row = (await o.shared.prepare(SELECT_SQL).get(tenant)) as { sealed?: unknown } | undefined;
     const text = row ? openRow(tenant, row.sealed, o.dek) : null;
-    if (!row || text === null) {
-      if (row) logOnce(memo, log, tenant, "forget-unreadable", `tg-groups: ${tenant} stored memory is unreadable — no forget requests to apply to it`);
+    if (!row) {
       memo.stored.set(tenant, read.fp);
       return "none";
+    }
+    if (text === null) {
+      logOnce(memo, log, tenant, "forget-unreadable", `tg-groups: ${tenant} stored memory is unreadable — forget requests retained for retry`);
+      return "failed";
     }
     const next = forgotten(text, read.ops);
     if (next === null) {
@@ -668,7 +681,7 @@ export async function forgetStoredTgGroups(o: {
  *   none       — no stored copy; nothing written
  *   unreadable — a stored copy that will not open under this DEK for this
  *                tenant, or opens to something that is not version 1 JSON;
- *                nothing written, and the child's next publish replaces it
+ *                nothing written; its group writer must remain held off
  *   failed     — the home had no file and the read or the write failed,
  *                or its forget requests could not be read; nothing written
  */
@@ -686,11 +699,36 @@ export async function restoreTgGroups(o: {
     return "failed";
   }
   const file = path.join(o.home, TG_GROUPS_FILE_NAME);
-  if (await exists(file, log, tenant)) return "present";
+  let recoveryOps: ReplyPrivacyOp[];
+  let shared: Db;
+  try {
+    shared = typeof o.shared === "function" ? await o.shared() : o.shared;
+    recoveryOps = await readReplyPrivacy(shared, tenant, o.dek);
+    if (await exists(file, log, tenant)) {
+      if (recoveryOps.some(op => op.kind === "group" || op.kind === "person")) {
+        const fh = await open(file, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+        let text: string;
+        try {
+          const st = await fh.stat();
+          if (!st.isFile() || st.size > TG_GROUPS_MAX_BYTES) return "failed";
+          text = (await readCapped(fh, TG_GROUPS_MAX_BYTES + 1)).toString("utf8");
+        } finally {
+          await fh.close();
+        }
+        if (!isTgGroupsText(text) || Buffer.byteLength(text) > TG_GROUPS_MAX_BYTES) return "failed";
+        // Existing stale files are never admitted for group reads. The normal
+        // caller holds groups off until deliberate local privacy reconciliation.
+        if (JSON.stringify(JSON.parse(applyRecoveryPrivacy(text, tenant, o.dek, recoveryOps))) !== JSON.stringify(JSON.parse(text))) return "failed";
+      }
+      return "present";
+    }
+  } catch {
+    log(`tg-groups: ${tenant} current privacy proof could not be read — memory remains held`);
+    return "failed";
+  }
 
   let sealed: unknown;
   try {
-    const shared = typeof o.shared === "function" ? await o.shared() : o.shared;
     const row = (await shared.prepare(SELECT_SQL).get(tenant)) as { sealed?: unknown } | undefined;
     if (!row) return "none";
     sealed = row.sealed;
@@ -700,6 +738,10 @@ export async function restoreTgGroups(o: {
   }
 
   let text = openRow(tenant, sealed, o.dek);
+  if (text !== null) {
+    try { text = applyRecoveryPrivacy(text, tenant, o.dek, recoveryOps); }
+    catch { return "failed"; }
+  }
   if (text === null) {
     log(`tg-groups: ${tenant} stored memory is unreadable (tampered, another key or another tenant's) — not restored`);
     return "unreadable";
@@ -835,11 +877,12 @@ async function exists(file: string, log: TgGroupsLog, tenant: string): Promise<b
  * exists to protect. It stays held until a spawn finds the home without it —
  * the next redeploy at the latest — and restores the row.
  *
- * Anything else lets go: restored and none leave nothing to protect, and
- * unreadable is a row the child's next publish is meant to replace.
+ * Restored and none leave nothing to protect. An unreadable row is retained
+ * too: a fresh empty writer cannot replace
+ * memory that may become readable once its correct DEK is available.
  */
 export function tgGroupsHeldOff(r: TgGroupsRestore, heldBefore: boolean): boolean {
-  if (r === "failed") return true;
+  if (r === "failed" || r === "unreadable") return true;
   if (r === "present") return heldBefore;
   return false;
 }

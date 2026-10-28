@@ -13,6 +13,7 @@ import dev.merrymen.app.ui.AccountControls
 import dev.merrymen.app.ui.SignInPage
 import dev.merrymen.app.ui.accountControlsOf
 import dev.merrymen.app.ui.signInPageOf
+import dev.merrymen.app.ui.stopArmedNote
 import dev.merrymen.app.ui.welcomeOffersSignIn
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
@@ -87,6 +88,15 @@ class AccountControlsTest {
     assertEquals(AccountControls(signInBanner = false, stop = true, signOut = false), controls(repo))
     assertEquals(SignInPage.NoSignIn, signInPageOf(originRead = true, hosted = repo.hosted.value, asked = true))
     assertFalse(welcomeOffersSignIn(repo.hosted.value))
+  }
+
+  @Test fun theArmedStopWarnsOfDeletedMemoryOnlyWhereTheStopDeletesIt() {
+    // Hosted, removing the grant deletes the agent's memory, and re-signing
+    // does not bring it back. The self-hosted worker only halts.
+    val hosted = repoAfter("""{"hosted":true,"address":"0xabc0000000000000000000000000000000000001"}""")
+    assertTrue(stopArmedNote(hosted.signedIn.value).contains("deletes its memory, which re-signing does not bring back"))
+    val selfHosted = repoAfter("""{"hosted":false,"address":null}""")
+    assertFalse(stopArmedNote(selfHosted.signedIn.value).contains("memory"))
   }
 
   @Test fun aServerThatHasNotSaidOpensNothing() {

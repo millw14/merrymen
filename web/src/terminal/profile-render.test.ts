@@ -69,7 +69,7 @@ it("explicitly unavailable and private profile figures never fall back to legacy
     assert.equal(ui.container.querySelector(".public-return")!.textContent, "—");
     assert.equal(ui.container.querySelector(".profile-current-value strong")!.textContent, "Private");
     assert.equal(ui.container.querySelector(".profile-pnl"), null);
-    assert.match(text(), /Gas accounting is incomplete; exact P&L is unavailable/);
+    assert.match(text(), /Some gas costs are not on record yet/);
     assert.doesNotMatch(text(), /9876|5432|99\.0%|\$0\.00/);
   }
   await render(agent({ performance: { ...performance, publicBook: true, equityUsdg: null, pnlUsdg: null, gasComplete: null } }));

@@ -171,7 +171,7 @@ export async function POST(req: Request) {
   }
 
   const wallet = holder.toLowerCase();
-  const store = getSettingsStore();
+  const store = getSettingsStore("spot");
 
   /**
    * CLAIMED — OR MOVED HERE — BEFORE THE PROOF IS STORED, and only now:
@@ -279,7 +279,7 @@ export async function DELETE(req: Request) {
       { status: isHostedMode() ? 401 : 400 },
     );
   }
-  const store = getSettingsStore();
+  const store = getSettingsStore("spot");
   try {
     const stored = (await store.get(tenant)) ?? {};
     const { holderProof: _gone, ...rest } = stored;
@@ -326,7 +326,7 @@ export async function DELETE(req: Request) {
 export async function PATCH(req: Request) {
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ linked: null, reads: null, proof: null });
-  const store = getSettingsStore();
+  const store = getSettingsStore("spot");
   let stored: Awaited<ReturnType<typeof store.get>>;
   try {
     stored = await store.get(tenant);

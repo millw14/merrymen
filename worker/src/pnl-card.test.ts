@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { describe, it } from "node:test";
 
+import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import {
   formatRoi,
   formatUsdg,
+  liveSellCard,
   measure,
   pnlCaption,
+  printableCoinName,
+  type LiveSellRow,
   pnlCardFromFill,
   pnlCardSvg,
   roiPercent,
@@ -226,6 +230,39 @@ describe("a trade row becomes a card only when it closed something knowable", ()
     assert.equal(pnlCardFromFill({ ...sell, target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d" }, "0x020b…18b4"), null);
   });
 
+  it("NEVER prints a Solana key as the coin either, as the target or as the name (Solana P0)", () => {
+    // A Solana row's target would be a program or a vault: base58, no 0x.
+    assert.equal(pnlCardFromFill({ ...sell, target: TOKEN_2022_PROGRAM }), null);
+    assert.equal(pnlCardFromFill({ ...sell, target: TOKEN_2022_PROGRAM }, SOLANA_USDG_MINT), null);
+    assert.equal(pnlCardFromFill({ ...sell, target: TOKEN_2022_PROGRAM }, "musebook")?.symbol, "musebook");
+    assert.equal(printableCoinName(SOLANA_USDG_MINT), null);
+    assert.equal(printableCoinName("musebook"), "musebook");
+  });
+
+  it("NEVER prints a Solana key glued to the words around it as the coin (audit regressions F3)", () => {
+    const letters = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT";
+    for (const name of [`CA${SOLANA_USDG_MINT}`, `buy${SOLANA_USDG_MINT}now`, `${letters}pump`]) {
+      assert.ok(name.length <= 64, name);
+      assert.equal(printableCoinName(name), null, name);
+      assert.equal(pnlCardFromFill({ ...sell, target: TOKEN_2022_PROGRAM }, name), null, name);
+      // Refused as the name, the card falls back to the target, a ticker here; as the target, it draws nothing.
+      assert.equal(pnlCardFromFill(sell, name)?.symbol, "DOGGOS", name);
+      assert.equal(pnlCardFromFill({ ...sell, target: name }), null, name);
+    }
+    for (const name of ["musebook", "PEPE 2", "BONKpump", "dogwifhat", "SuperLongCoinNameWithNoBreaks"]) assert.equal(printableCoinName(name), name);
+  });
+
+  it("NEVER prints a name with a whole 0x address inside it (tightened in Solana P0)", () => {
+    // Before, only a leading 0x was refused, so this was drawn as the coin.
+    const named = "PEPE 0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d";
+    assert.equal(printableCoinName(named), null);
+    assert.equal(printableCoinName(`PEPE 0x${"ab".repeat(32)}`), null);
+    // The name is refused and the card falls back to the target, a ticker here.
+    assert.equal(pnlCardFromFill(sell, named)?.symbol, "DOGGOS");
+    assert.equal(pnlCardFromFill({ ...sell, target: named }), null);
+    assert.equal(printableCoinName("PEPE 2"), "PEPE 2");
+  });
+
   it("treats a realised zero as a real close, not as absent", () => {
     // Breaking exactly even is a closed trade with a P&L of 0.00, and `0` is
     // falsy — the reason this is checked against null/undefined and not truth.
@@ -233,5 +270,48 @@ describe("a trade row becomes a card only when it closed something knowable", ()
     assert.ok(card, "an even close must still produce a card");
     assert.equal(formatUsdg(card.realisedUsdg, true), "+0.00");
     assert.equal(formatUsdg(card.investedUsdg), "5.00");
+  });
+});
+
+describe("a live sale's card follows one rule, wherever it is shown", () => {
+  const live: LiveSellRow = {
+    status: "landed", fill_side: "sell", kind: "swap", sell_token: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d",
+    fill_cash_usdg: 17.39, realized_pnl_usdg: 12.39, coin_symbol: "DOGGOS", display_name: "Doggos", target: "0x0000000000000000000000000000000000000001",
+  };
+  const vouched = async () => true;
+
+  it("draws a completed, evidenced live sell under its coin's name, never the row's target", async () => {
+    const r = await liveSellCard(live, vouched);
+    assert.deepEqual(r, { kind: "card", card: { symbol: "DOGGOS", investedUsdg: 5_000_000n, proceedsUsdg: 17_390_000n, realisedUsdg: 12_390_000n } });
+  });
+
+  it("refuses paper, a buy, a pending attempt and any other kind, before evidence is read", async () => {
+    let asked = 0;
+    const counting = async () => { asked++; return true; };
+    for (const row of [{ ...live, status: "paper" }, { ...live, status: "pending" }, { ...live, fill_side: "buy" }, { ...live, kind: "perp" }]) {
+      assert.equal((await liveSellCard(row, counting)).kind, "ineligible", JSON.stringify(row));
+    }
+    for (const row of [{ ...live, realized_pnl_usdg: null }, { ...live, fill_cash_usdg: -1 }, { ...live, sell_token: null }, { ...live, fill_cash_usdg: Number.NaN }]) {
+      assert.equal((await liveSellCard(row, counting)).kind, "ineligible", JSON.stringify(row));
+    }
+    assert.equal(asked, 0, "the ledger replay is asked only for a sale that could be drawn");
+  });
+
+  it("refuses a sale whose proceeds and cost basis are not both vouched for", async () => {
+    assert.deepEqual(await liveSellCard(live, async () => false), { kind: "ineligible", reason: "The trade's proceeds and cost basis could not both be verified." });
+  });
+
+  it("prints a human name, falling back to the decision's, and never an address or token id", async () => {
+    assert.equal(printableCoinName("0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d"), null);
+    assert.equal(printableCoinName("T0123456789A"), null);
+    assert.equal(printableCoinName("x".repeat(65)), null);
+    assert.equal(printableCoinName("DOG‮GOS"), null);
+    const r = await liveSellCard({ ...live, coin_symbol: "T0123456789A" }, vouched);
+    assert.equal(r.kind === "card" ? r.card.symbol : r.reason, "Doggos");
+    assert.equal((await liveSellCard({ ...live, coin_symbol: "0xabc", display_name: null }, vouched)).kind, "ineligible");
+  });
+
+  it("refuses dust through pnlCardFromFill", async () => {
+    assert.equal((await liveSellCard({ ...live, fill_cash_usdg: 0.004, realized_pnl_usdg: 0.001 }, vouched)).kind, "ineligible");
   });
 });

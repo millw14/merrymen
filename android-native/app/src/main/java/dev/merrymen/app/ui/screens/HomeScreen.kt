@@ -80,8 +80,12 @@ import dev.merrymen.app.ui.pnlLineOf
 import dev.merrymen.app.ui.positionLinesOf
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.sessionNeedsAsking
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /** lucide `Search`, size 22 on Home's heading row (`terminal.css:742-748`). */
 @Composable
@@ -160,51 +164,94 @@ internal class OwnReads {
   var settings by mutableStateOf<SettingsEnvelope?>(null)
   var readFor by mutableStateOf<String?>(null)
 
+  // A pull, a retry and the foreground poll can arrive together. Join the
+  // current read instead of sending another set or letting a slower answer
+  // overwrite a newer one. Cancellation always releases the gate.
+  private val loading = Mutex()
+
   suspend fun load(
     api: MerrymenApi,
     signedIn: String?,
     hosted: Boolean?,
     withStrip: Boolean,
     nowMs: () -> Long,
-    // No default, on purpose: a screen that forgot to pass the repository's
-    // refreshIdentity would still compile, and an ended session would go back
-    // to "Couldn't read your book" with no Sign in. Every caller says how.
+    afterChange: Boolean = false,
+    isCurrent: () -> Boolean = { true },
+    // Every screen supplies the repository's identity refresh, so an ended
+    // session becomes Sign in rather than a claim about a broken ledger.
     askWhoIsSignedIn: suspend () -> Unit,
   ) {
-    val f = api.feed()
-    if (sessionNeedsAsking(f, (f as? ApiResult.Ok)?.value?.source == "none", signedIn, hosted)) askWhoIsSignedIn()
-    val keep = feed is Loaded.Value && (f is ApiResult.Unreachable || (f is ApiResult.Refused && f.status >= 500))
-    if (keep) {
-      feedFailure = f
-    } else {
-      feed = f.toLoaded()
-      feedFailure = null
-      if (f is ApiResult.Ok) {
-        feedAtMs = nowMs()
-        readFor = signedIn
+    if (!loading.tryLock()) {
+      if (!afterChange) {
+        loading.withLock { }
+        return
       }
+      // A completed edit needs evidence read after that edit, even if a poll
+      // is still out. Wait for it, then read again instead of joining it.
+      loading.lock()
     }
-    // THE ACCOUNT STATUS KEEPS THE FEED'S RULE: a refresh with no answer, or a
-    // 5xx, keeps the last good read and records that it failed, so the page can
-    // say how old it is (accountStatusLine); a refusal replaces it. It used to
-    // keep the old read in silence, and a first read that failed took the
-    // blocker, the mode and the balances off the page without a word — an
-    // agent that could not trade looked like one with nothing wrong.
-    val g = api.grants()
-    val keepG = grants is Loaded.Value && (g is ApiResult.Unreachable || (g is ApiResult.Refused && g.status >= 500))
-    if (keepG) {
-      grantsFailure = g
-    } else {
-      grants = g.toLoaded()
-      grantsFailure = null
-      if (g is ApiResult.Ok) grantsAtMs = nowMs()
-    }
-    // THE STRIP ONLY FOR AN AGENT THAT EXISTS: no bot to connect and no
-    // strategy to run otherwise. Best effort — a failed read stays "checking…".
-    val exists = (grants as? Loaded.Value)?.value?.exists == true
-    if (withStrip && exists) {
-      (api.telegram() as? ApiResult.Ok)?.value?.let { telegram = it }
-      (api.settings() as? ApiResult.Ok)?.value?.let { settings = it }
+    try {
+      val binding = api.boundHere()
+      fun stillCurrent() = api.servers.holds(binding.turn) && isCurrent()
+      if (!stillCurrent()) return
+      // Every child stays on the server this refresh began on. Re-keying the
+      // screen drops its values immediately; this guard also drops late work.
+      withContext(binding) {
+        coroutineScope {
+          launch {
+            val f = api.feed()
+            if (!stillCurrent()) return@launch
+            if (sessionNeedsAsking(f, (f as? ApiResult.Ok)?.value?.source == "none", signedIn, hosted)) {
+              askWhoIsSignedIn()
+            }
+            if (!stillCurrent()) return@launch
+            val keep = feed is Loaded.Value && (f is ApiResult.Unreachable || (f is ApiResult.Refused && f.status >= 500))
+            if (keep) {
+              feedFailure = f
+            } else {
+              feed = f.toLoaded()
+              feedFailure = null
+              if (f is ApiResult.Ok) {
+                feedAtMs = nowMs()
+                readFor = signedIn
+              }
+            }
+          }
+          // The account status does not depend on the feed. A slow ledger
+          // must not delay its blocker, and a slow status must not hide a book
+          // that has already arrived. Both keep their last good read on 5xx
+          // or a lost connection, with the existing stale caption.
+          launch {
+            val g = api.grants()
+            if (!stillCurrent()) return@launch
+            val keep = grants is Loaded.Value && (g is ApiResult.Unreachable || (g is ApiResult.Refused && g.status >= 500))
+            if (keep) {
+              grantsFailure = g
+            } else {
+              grants = g.toLoaded()
+              grantsFailure = null
+              if (g is ApiResult.Ok) grantsAtMs = nowMs()
+            }
+            // Only a fresh answer establishing an agent starts these optional
+            // reads. Keep the last strip on a failed refresh; do not add two
+            // more requests to a server whose account read is failing.
+            if (withStrip && g is ApiResult.Ok && g.value.exists) {
+              coroutineScope {
+                launch {
+                  val t = api.telegram()
+                  if (stillCurrent() && t is ApiResult.Ok) telegram = t.value
+                }
+                launch {
+                  val s = api.settings()
+                  if (stillCurrent() && s is ApiResult.Ok) settings = s.value
+                }
+              }
+            }
+          }
+        }
+      }
+    } finally {
+      loading.unlock()
     }
   }
 }
@@ -229,9 +276,9 @@ private const val ACCOUNT_REFRESH_MS = 60_000L
  *
  * THE READS: /api/feed and /api/grants on open, every 60 seconds while this
  * screen is RESUMED, and on a pull; /api/tier once; /api/telegram and
- * /api/settings for the strip when there is an agent. All of it is keyed on
- * repo.signedIn, so a wallet switch starts from nothing rather than showing
- * one wallet's book under another's session.
+ * /api/settings for the strip when there is an agent. Independent reads run
+ * together. All state is keyed on both wallet and server, so a change starts
+ * from nothing rather than showing another account's book.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -239,26 +286,36 @@ fun HomeScreen(nav: NavHostController) {
   val c = LocalContainer.current
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
+  val identityKnown by c.repo.identityKnown.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
-  val reads = remember(signedIn) { OwnReads() }
-  var tier by remember(signedIn) { mutableStateOf<Loaded<TierView>>(Loaded.Loading) }
+  val serverTurn by c.repo.serverTurn.collectAsState()
+  val reads = remember(signedIn, serverTurn) { OwnReads() }
+  var tier by remember(signedIn, serverTurn) { mutableStateOf<Loaded<TierView>>(Loaded.Loading) }
   var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-  var refreshing by remember { mutableStateOf(false) }
+  var refreshing by remember(signedIn, serverTurn) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val lifecycle = LocalLifecycleOwner.current.lifecycle
 
-  suspend fun load() {
-    reads.load(c.api, signedIn, c.repo.hosted.value, withStrip = true, nowMs = { System.currentTimeMillis() }) {
-      c.repo.refreshIdentity()
-    }
+  suspend fun load(afterChange: Boolean = false) {
+    if (!c.repo.identityKnown.value || !c.api.servers.holds(serverTurn)) return
+    reads.load(
+      c.api, signedIn, c.repo.hosted.value, withStrip = true,
+      nowMs = { System.currentTimeMillis() },
+      afterChange = afterChange,
+      isCurrent = { c.repo.signedIn.value == signedIn && c.repo.serverTurn.value == serverTurn },
+    ) { c.repo.refreshIdentity() }
     nowMs = System.currentTimeMillis()
   }
 
-  LaunchedEffect(signedIn) { tier = c.api.tier().toLoaded() }
+  LaunchedEffect(signedIn, serverTurn, identityKnown) {
+    if (!identityKnown || !c.api.servers.holds(serverTurn)) return@LaunchedEffect
+    tier = c.api.tier().toLoaded()
+  }
   // EVERY 60s WHILE IN FRONT, and never in the background: repeatOnLifecycle
   // stops the loop when the screen is paused and starts it (with a read) when
   // it is back.
-  LaunchedEffect(signedIn, lifecycle) {
+  LaunchedEffect(signedIn, serverTurn, identityKnown, lifecycle) {
+    if (!identityKnown || !c.api.servers.holds(serverTurn)) return@LaunchedEffect
     lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
       while (true) {
         load()
@@ -274,8 +331,11 @@ fun HomeScreen(nav: NavHostController) {
     onRefresh = {
       scope.launch {
         refreshing = true
-        load()
-        refreshing = false
+        try {
+          load()
+        } finally {
+          refreshing = false
+        }
       }
     },
     state = pull,
@@ -330,10 +390,13 @@ fun HomeScreen(nav: NavHostController) {
         }
       }
 
+      HomeDiscovery(nav)
       SignedInNotice(Modifier.padding(bottom = 20.dp))
       CircleLockBanner(tier, nav)
 
-      when (book) {
+      if (!identityKnown) {
+        Prose("Checking your account… You can explore agents and activity above.", 14.sp, 20.sp, MerryColors.tx2)
+      } else when (book) {
         OwnBook.Loading -> LoadedBlock(Loaded.Loading) { _: Unit -> }
         is OwnBook.Failed -> LoadedBlock(
           book.state,
@@ -341,8 +404,8 @@ fun HomeScreen(nav: NavHostController) {
           onRetry = { scope.launch { load() } },
         ) { _: Unit -> }
         is OwnBook.SignedOut -> NoBookHero(
-          title = "Your agent starts here",
-          body = "Sign in to see your agent's balance, positions and trades here.",
+          title = "Your agent",
+          body = "Sign in to create an agent or see its portfolio.",
           action = if (book.canSignIn) "Sign in" else null,
           onAction = { nav.navigate(Routes.SIGN_IN) },
         )
@@ -366,7 +429,11 @@ fun HomeScreen(nav: NavHostController) {
               onAction = { nav.navigate(Routes.web("/create", "Create an agent")) },
             )
           } else {
-            OwnHome(book.feed, reads, nowMs, hosted, nav) { scope.launch { load() } }
+            OwnHome(
+              book.feed, reads, nowMs, hosted, nav,
+              onChanged = { scope.launch { load() } },
+              onNamed = { scope.launch { load(afterChange = true) } },
+            )
           }
         }
       }
@@ -383,7 +450,6 @@ fun HomeScreen(nav: NavHostController) {
 @Composable
 private fun NoBookHero(title: String, body: String, action: String?, onAction: () -> Unit) {
   Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-    Prose(text = "This one trades.", size = 22.sp, lineHeight = 26.4.sp, color = MerryColors.tx, weight = FontWeight.W700)
     Notice(title = title, body = body, actionLabel = action, onAction = if (action != null) onAction else null)
   }
 }
@@ -402,7 +468,15 @@ internal fun fixRoute(fix: BlockerFix): String = when (fix) {
  * on chain, and everything it did.
  */
 @Composable
-private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, nav: NavHostController, onChanged: () -> Unit) {
+private fun OwnHome(
+  feed: Feed,
+  reads: OwnReads,
+  nowMs: Long,
+  hosted: Boolean?,
+  nav: NavHostController,
+  onChanged: () -> Unit,
+  onNamed: () -> Unit,
+) {
   val c = LocalContainer.current
   val agent = feed.agent
   val g = (reads.grants as? Loaded.Value)?.value
@@ -441,7 +515,7 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
         AccountModeLine(reads.grants, nowMs, Modifier.padding(top = 6.dp))
       }
     }
-    AccountNameChip(c.api, agent, reads.readFor, hosted, onNamed = onChanged, modifier = Modifier.padding(top = 12.dp))
+    AccountNameChip(c.api, agent, reads.readFor, hosted, onNamed = onNamed, modifier = Modifier.padding(top = 12.dp))
 
     // `.home-balance-label` — polish.css:68: 14px `--tx-2`, 20px above, 8px below.
     Prose(
@@ -511,14 +585,7 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
 @Composable
 private fun HomeGo(nav: NavHostController) {
   Column(Modifier.fillMaxWidth().padding(top = 28.dp)) {
-    TabSectionHeading("Go", Modifier.padding(bottom = 12.dp))
-    // Two rows of two rather than a flow, so the wrap point is authored rather
-    // than left to whatever the longest label happens to be.
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      LinkChip("Markets", Modifier.weight(1f)) { nav.navigate(Routes.MARKETS) }
-      LinkChip("Leaderboard", Modifier.weight(1f)) { nav.navigate(Routes.LEADERBOARD) }
-    }
-    Spacer(Modifier.height(8.dp))
+    TabSectionHeading("Account & app", Modifier.padding(bottom = 12.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       LinkChip("Trade", Modifier.weight(1f)) { nav.navigate(Routes.TRADE) }
       LinkChip("Settings", Modifier.weight(1f)) { nav.navigate(Routes.SETTINGS) }
@@ -527,7 +594,7 @@ private fun HomeGo(nav: NavHostController) {
 }
 
 @Composable
-private fun LinkChip(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+internal fun LinkChip(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
   val shape = RoundedCornerShape(12.dp)
   Box(
     modifier

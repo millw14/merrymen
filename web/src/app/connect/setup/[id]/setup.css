@@ -1,0 +1,27 @@
+.mcp-wallet-setup .connect-header { max-width: 680px; min-height: 76px; }
+.mcp-wallet-setup .connect-brand { text-decoration: none; }
+.mcp-wallet-setup .connect-brand .mcp-wordmark { color: var(--tx); }
+.mcp-wallet-setup .mcp-setup-main { max-width: 680px; margin: 30px auto 40px; }
+.mcp-wallet-setup .connect-panel { padding: 28px; }
+.mcp-wallet-setup .connect-panel > h1 { font-size: 30px; line-height: 1.15; letter-spacing: -.04em; }
+.mcp-wallet-setup .create-heading { margin-bottom: 12px; }
+.mcp-wallet-setup .create-intro { margin: 18px 0; }
+.mcp-wallet-setup .create-intro h1 { font-size: 26px; }
+.mcp-wallet-setup .create-intro p { margin: 8px 0; }
+.mcp-wallet-setup .create-agent .create-example { margin: 12px 0 16px; padding: 16px; }
+.mcp-wallet-setup .create-example h2 { margin: 8px 0; }
+.mcp-wallet-setup .create-example p { margin: 8px 0; }
+.mcp-wallet-setup .create-example summary { cursor: pointer; font-size: 13px; padding-block: 5px; }
+.mcp-wallet-setup .fund-breakdown { margin: 12px 0; }
+.mcp-wallet-setup .fund-breakdown > div { padding: 9px 0; }
+.mcp-wallet-setup .create-mode { margin: 18px 0 10px; }
+.mcp-wallet-setup .create-agent .flow-primary { margin-top: 18px; }
+.mcp-wallet-setup .create-steps { margin: 18px 0; gap: 22px; }
+.mcp-wallet-setup .create-steps li { font-size: 12px; }
+.mcp-wallet-setup .mcp-setup-note { margin: 20px 14px 0; color: var(--tx-2); font-size: 12px; line-height: 1.7; }
+.mcp-wallet-setup .mcp-setup-prompt { padding: 14px; border: 1px solid var(--line); border-radius: 10px; margin-top: 16px; user-select: all; }
+.mcp-wallet-setup .connect-footer { max-width: 680px; }
+@media (max-width: 560px) {
+  .mcp-wallet-setup .connect-header-label { font-size: 10px; }
+  .mcp-wallet-setup .connect-panel { padding: 20px; }
+}

@@ -218,7 +218,7 @@ export function announcementConfirmation(
 export async function resolveRecipients(
   client: PgClientLike,
   out: Omit<AnnounceOutcome, "sent" | "failed" | "dryRun">,
-  store: SettingsReader = getSettingsStore(),
+  store: SettingsReader = getSettingsStore("spot"),
 ): Promise<AnnounceRecipient[]> {
   const tenants = await store.listTenants();
   out.considered = tenants.length;
@@ -437,7 +437,7 @@ export async function runAnnouncement(opts: {
   );
   for (const r of attempts.rows) attempted.add(String(r.tenant).toLowerCase());
 
-  const store = opts.store ?? getSettingsStore();
+  const store = opts.store ?? getSettingsStore("spot");
   const recipients = await resolveRecipients(opts.client, out, store);
   const send = opts.send ?? sendMessage;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));

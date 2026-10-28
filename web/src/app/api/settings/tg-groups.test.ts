@@ -48,7 +48,7 @@ after(() => {
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 beforeEach(async () => {
-  await getSettingsStore().put(TENANT, { strategy: "trencher" });
+  await getSettingsStore("spot").put(TENANT, { strategy: "trencher" });
 });
 
 const cookie = () => `mm_session=${mintSession(TENANT)}`;
@@ -61,7 +61,7 @@ async function put(body: Record<string, unknown>) {
   }));
   return { status: res.status, body: (await res.json()) as { ok?: boolean; errors?: string[]; ignored?: string[] } };
 }
-const stored = async () => ((await getSettingsStore().get(TENANT)) ?? {}) as Record<string, unknown>;
+const stored = async () => ((await getSettingsStore("spot").get(TENANT)) ?? {}) as Record<string, unknown>;
 
 describe("PUT /api/settings — the two Telegram groups switches", () => {
   for (const key of ["telegramGroupsEnabled", "telegramGroupCoinsEnabled"] as const) {

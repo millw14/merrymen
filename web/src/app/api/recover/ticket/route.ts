@@ -98,7 +98,7 @@ export async function POST(req: Request) {
   // relay's `sender === ticket.smartAccount` check would even pass for it.
   let smartAccount: `0x${string}`;
   try {
-    const derived = await deriveKernelAccountAddress(owner, chainId);
+    const derived = await deriveKernelAccountAddress(owner, chainId, "spot");
     if (!derived.ok) return NextResponse.json({ error: derived.why }, { status: 502 });
     smartAccount = derived.address;
   } catch {

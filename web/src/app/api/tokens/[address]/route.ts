@@ -1,4 +1,4 @@
-import { readPoolEvidence } from "../../../../../../worker/src/venues/pool-evidence";
+import { publicEvidence, readPoolEvidence } from "../../../../../../worker/src/venues/pool-evidence";
 import { NextResponse } from "next/server";
 import { readToken } from "@/lib/read-token";
 import { readTokenMarket } from "@/lib/read-token-market";
@@ -13,8 +13,10 @@ export async function GET(req:Request,{params}:{params:Promise<{address:string}>
   const window=requested==="15m" || requested==="4h" || requested==="1d" ? requested : "1h";
   const [candles, evidence] = await Promise.all([
     market.coin ? readCandles(market.coin.poolId,address,window) : null,
+    // Trade senders are read only to be counted; publicEvidence strips them
+    // so no list of wallet addresses ships to a browser or a phone.
     market.coin && new URL(req.url).searchParams.get("activity") === "1"
-      ? readPoolEvidence(market.coin.poolId,address).catch(() => null) : null,
+      ? readPoolEvidence(market.coin.poolId,address).then(publicEvidence).catch(() => null) : null,
   ]);
   return NextResponse.json({ledger,market,candles,evidence});
 }

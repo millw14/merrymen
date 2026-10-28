@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": [".", "../packages/core/src/safe-url.ts"]
+  "include": [".", "../packages/core/src/safe-url.ts", "../packages/core/src/site-scan.ts", "../packages/core/src/server/public-network.ts"]
 }

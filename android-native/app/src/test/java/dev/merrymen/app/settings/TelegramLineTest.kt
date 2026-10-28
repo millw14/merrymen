@@ -10,10 +10,11 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** P05: "Test the bot" says what the route said, in the web's words (Settings.tsx testTelegram). */
+/** Token validation must never imply that a worker is listening to the bot. */
 class TelegramLineTest {
   @Test fun theTelegramTestSaysWhatTheRouteSaid() {
-    assertEquals("✓ connected as @merrybot", telegramTestLine(ApiResult.Ok(TelegramTest(ok = true, username = "merrybot"))))
+    assertEquals("✓ Token verified for @merrybot", telegramTestLine(ApiResult.Ok(TelegramTest(ok = true, username = "merrybot"))))
+    assertEquals("✓ Token verified for your bot", telegramTestLine(ApiResult.Ok(TelegramTest(ok = true))))
     assertEquals("✗ no token set", telegramTestLine(ApiResult.Ok(TelegramTest(ok = false, reason = "no token set"))))
     assertEquals("✗ failed", telegramTestLine(ApiResult.Ok(TelegramTest(ok = false))))
     assertEquals("Sign in to test your bot.", telegramTestLine(ApiResult.Refused(401, "not signed in")))

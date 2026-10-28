@@ -4,13 +4,15 @@ import { toAccount } from "viem/accounts";
 import { createKernelAccount } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
-import { chainForId, derivationOf, type Derivation } from "@merrymen/core";
+import { accountIndexForPurpose, chainForId, derivationOf, type Derivation, type GrantPurpose } from "@merrymen/core";
 
 /**
  * Recompute the ERC-4337 smart-account address a given OWNER controls, from the
  * owner ADDRESS alone — the identical derivation the browser does in
  * lib/session.ts (createKernelAccount with the sudo ECDSA validator, KERNEL_V3_3,
- * entryPoint 0.7, default index).
+ * entryPoint 0.7), at the wallet's index: Spot is Kernel's default 0, which
+ * every existing account was made at, and Perps is 1 (accountIndexForPurpose).
+ * The wallet is required, so no caller can derive Spot's address by omission.
  *
  * The Kernel address derives from the SUDO validator alone — the session-key
  * permission plugin is enabled at UserOp time and doesn't move it (session.ts
@@ -26,7 +28,7 @@ import { chainForId, derivationOf, type Derivation } from "@merrymen/core";
  * smart_account, so an unverified address lets one tenant write under another's
  * partition.
  */
-export async function deriveKernelAccountAddress(owner: Address, chainId: number): Promise<Derivation> {
+export async function deriveKernelAccountAddress(owner: Address, chainId: number, wallet: GrantPurpose): Promise<Derivation> {
   // A malformed owner cannot derive anything, and letting it through would ask
   // the SDK to build enable-data out of it. Refuse here rather than downstream.
   const o = derivationOf(owner);
@@ -56,6 +58,7 @@ export async function deriveKernelAccountAddress(owner: Address, chainId: number
   });
 
   const account = await createKernelAccount(publicClient, {
+    index: accountIndexForPurpose(wallet),
     entryPoint: getEntryPoint("0.7"),
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },

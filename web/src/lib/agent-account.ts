@@ -56,7 +56,7 @@ export async function agentAccountFor(req: Request, hosted: boolean): Promise<Ag
     const tenant = tenantOf(req);
     if (!tenant) return null;
     // Deliberately NOT caught — see the header.
-    return accountOfGrant(await getGrantStore().get(tenant));
+    return accountOfGrant(await getGrantStore("spot").get(tenant));
   }
   try {
     return accountOfGrant(JSON.parse(await readFile(homePaths.grant(), "utf8")));

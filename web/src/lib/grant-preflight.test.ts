@@ -202,3 +202,57 @@ describe("read-only grant renewal preflight", () => {
     assert.equal(signer.calls(), 0);
   });
 });
+
+describe("the renewal preflight decides perps exactly as the mint will", () => {
+  const KEY = `0x${"1a".repeat(40)}` as `0x${string}`;
+  const carried = {
+    smartAccount: ACCOUNT, chainId: 4663, grantFeatures: ["tradeable-v2", "perp-lighter-v1"],
+    perp: { route: "perp-lighter-v1", apiKeyIndex: 16, apiPublicKey: KEY },
+  };
+  const coins = (n: number) => Array.from({ length: n }, (_, i) => ({
+    symbol: `C${i}`, address: `0x${(0xc0e000 + i).toString(16).padStart(40, "0")}` as `0x${string}`, decimals: 18,
+  }));
+  it("a carried Lighter key that no longer fits refuses BEFORE revocation, with no signature and no storage", async () => {
+    const { preflightAgentGrant, PerpSigningRefusal } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    await withStubChain(ACCOUNT, () => assert.rejects(
+      preflightAgentGrant(signer.owner, { ...options, previousGrant: carried, extraTokens: coins(5) }),
+      (e: unknown) => e instanceof PerpSigningRefusal && e.code === "perp-does-not-fit",
+    ), { currentNonce: 8 });
+    assert.equal(signer.calls(), 0);
+  });
+  it("given ONE browser snapshot, the preflight and the mint reach the same verdict", async () => {
+    // The renewal case the preflight exists for: the server answers that it
+    // holds no grant (a kill, a wiped row) while this browser still holds the
+    // armed grant that carries a Lighter key. The preflight is storage-free, so
+    // the snapshot rides in the options BOTH calls get. Before it did, the
+    // preflight passed and the mint refused, after the old permission had
+    // already been revoked.
+    const { preflightAgentGrant, restoreAgentWallet, PerpSigningRefusal } = await import("./session");
+    const shared = { ...options, previousGrant: null, localGrants: { current: carried }, extraTokens: coins(5) };
+    const signer = ownerThatMustNotSign();
+    const refused = (e: unknown) => e instanceof PerpSigningRefusal && e.code === "perp-does-not-fit";
+    await withStubChain(ACCOUNT, () => assert.rejects(preflightAgentGrant(signer.owner, shared), refused), { currentNonce: 8 });
+    assert.equal(signer.calls(), 0);
+    // The mint decides from the snapshot it is handed: this browser's store is
+    // EMPTY, so a mint that read storage instead would carry no key and could
+    // not refuse for it.
+    const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, get() {
+      return { getItem: () => null, setItem: () => {}, removeItem: () => {}, key: () => null, length: 0 };
+    } });
+    try {
+      await withStubChain(ACCOUNT, () => assert.rejects(restoreAgentWallet(ownerKey, shared), refused), { currentNonce: 8 });
+    } finally {
+      if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+      else Reflect.deleteProperty(globalThis, "localStorage");
+    }
+  });
+  it("and one that fits passes the preflight", async () => {
+    const { preflightAgentGrant } = await import("./session");
+    const signer = ownerThatMustNotSign();
+    const result = await withStubChain(ACCOUNT, () => preflightAgentGrant(signer.owner, { ...options, previousGrant: carried }), { currentNonce: 8 });
+    assert.equal(result, undefined);
+    assert.equal(signer.calls(), 0);
+  });
+});

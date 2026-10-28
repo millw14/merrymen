@@ -182,7 +182,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const store = getSettingsStore();
+  const store = getSettingsStore("spot");
   const stored = (await store.get(tenant)) ?? {};
   await store.put(tenant, {
     ...stored,
@@ -196,7 +196,7 @@ export async function POST(req: Request) {
 export async function DELETE(req: Request) {
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-  const store = getSettingsStore();
+  const store = getSettingsStore("spot");
   const stored = (await store.get(tenant)) ?? {};
   const { xProof: _gone, ...rest } = stored;
   await store.put(tenant, { ...rest, xHandle: undefined });
@@ -207,7 +207,7 @@ export async function DELETE(req: Request) {
 export async function PATCH(req: Request) {
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ handle: null, at: null });
-  const stored = (await getSettingsStore().get(tenant)) ?? {};
+  const stored = (await getSettingsStore("spot").get(tenant)) ?? {};
   const proof = stored.xProof;
   const handle = normaliseXHandle(proof?.handle ?? null);
   return NextResponse.json({ handle, at: handle ? (proof?.at ?? null) : null });

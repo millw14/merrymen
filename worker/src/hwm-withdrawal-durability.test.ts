@@ -268,7 +268,8 @@ describe("a peak lowered by a withdrawal survives the redeploy that follows it",
  * already says this, and the check that replaces it.
  */
 describe("a chain-log flow can be recognised as already booked", () => {
-  const SWEEP_TX = "0x06cd8dba8f0000000000000000000000000000000000000000000000000000abcd";
+  // A whole 0x + 64 hex hash: the lookups fold only that shape (store.ts ledgerTxHash).
+  const SWEEP_TX = "0x06cd8dba8f00000000000000000000000000000000000000000000000000abcd";
 
   it("addFlow's TRUE does not mean it inserted — this is the trap", async () => {
     const { addFlow, hasChainFlow } = await import("./store");

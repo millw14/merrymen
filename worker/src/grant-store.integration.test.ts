@@ -35,9 +35,11 @@ after(() => {
 });
 
 const SESSION = ("0x" + "cd".repeat(32)) as `0x${string}`;
+// Each tenant's agent account is its own, as it is in production: the store
+// refuses a second login's claim on an account (tested below).
 const grantFor = (owner: string): never =>
   ({
-    smartAccount: "0x00000000000000000000000000000000000000a1",
+    smartAccount: `0x${"0".repeat(38)}${owner.slice(-2)}`,
     owner,
     serialized: "eyJ-a-zerodev-blob",
     chainId: 4663,
@@ -66,7 +68,7 @@ describe("store-crypto", () => {
 });
 
 describe("FileGrantStore", () => {
-  const store = new FileGrantStore();
+  const store = new FileGrantStore("spot");
   const ALICE = "0x00000000000000000000000000000000000000a1" as const;
   const BOB = "0x00000000000000000000000000000000000000b2" as const;
 
@@ -134,6 +136,13 @@ describe("FileGrantStore", () => {
     assert.equal(await store.tenantForAccount("0x00000000000000000000000000000000000000ff"), null);
   });
 
+  it("REFUSES a second login's claim on an account another login holds, decided under the writer lock", async () => {
+    await store.put(ALICE, grantFor(ALICE));
+    const squat = { ...(grantFor(BOB) as object), smartAccount: "0x00000000000000000000000000000000000000a1" } as never;
+    await assert.rejects(() => store.put(BOB, squat), /already linked to a different login/);
+    assert.equal(await store.tenantForAccount("0x00000000000000000000000000000000000000a1"), ALICE, "the first claim stands");
+  });
+
   it("remove forgets exactly one tenant", async () => {
     await store.put(ALICE, grantFor(ALICE));
     await store.put(BOB, grantFor(BOB));
@@ -148,7 +157,7 @@ describe("FileGrantStore", () => {
 });
 
 describe("FileGrantStore writers are serialized (a kill racing a new signature)", () => {
-  const store = new FileGrantStore();
+  const store = new FileGrantStore("spot");
   const DAVE = "0x00000000000000000000000000000000000000d4" as const;
   const dir = path.join(HOME, "tenants");
   const file = path.join(dir, `${DAVE}.json`);

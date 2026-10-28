@@ -1,0 +1,94 @@
+/**
+ * THE KILL'S PAPER STAND-DOWN ON THE SHARED POSTGRES (perps-kill.ts,
+ * settings-store.ts PgSettingsStore.disablePerpsForKill).
+ *
+ * Opt-in, disposable LOCAL PostgreSQL only (MERRYMEN_TEST_PG_URL). Never reads
+ * DATABASE_URL. Pins the three things a hosted kill needs of the Perps
+ * settings: an owner with no Perps wallet costs one catalog look and makes no
+ * table; perps on are turned off with every other setting kept, sealed under
+ * the DEK; and an owner's save racing the kill is never lost, nor is the kill.
+ */
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
+import { test } from "node:test";
+import type { MerrymenSettings } from "../../packages/core/src/index";
+
+const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
+interface Client {
+  connect(): Promise<void>;
+  query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  end(): Promise<void>;
+}
+
+test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing else", { skip: !url, timeout: 60_000 }, async (t) => {
+  const target = new URL(url!);
+  assert.ok(["localhost", "127.0.0.1", "[::1]"].includes(target.hostname), "only a disposable local PostgreSQL is allowed");
+  process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 7).toString("base64");
+  const pg = createRequire(import.meta.url)("pg") as { Client: new (config: { connectionString: string }) => Client };
+  const schema = `mm_perps_kill_${randomBytes(8).toString("hex")}`;
+  const admin = new pg.Client({ connectionString: target.toString() });
+  await admin.connect();
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  const scoped = new URL(target);
+  scoped.searchParams.set("options", `-c search_path=${schema} -c statement_timeout=5000`);
+  scoped.searchParams.set("application_name", "perps-kill-settings-test");
+  const scopedUrl = scoped.toString();
+  const { PgSettingsStore, disablePaperPerpsForKill } = await import("./settings-store");
+  const T = "0x00000000000000000000000000000000000000a1" as const;
+  const OWNER: MerrymenSettings = { perpsEnabled: true, perpsMarkets: ["BTC-PERP"], perpsMaxLeverage: 2, agentName: "Little John" };
+  const tables = async () =>
+    (await admin.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`, [schema])).rows.map((r) => String(r.table_name));
+  try {
+    await t.test("an owner with no Perps wallet: one catalog look, no table made", async () => {
+      const store = new PgSettingsStore(scopedUrl, "perps");
+      assert.equal(await disablePaperPerpsForKill(T, store), "none");
+      assert.deepEqual(await tables(), [], "the kill wrote no perps schema");
+    });
+
+    await t.test("perps on: switched off, every other setting kept, still sealed", async () => {
+      const store = new PgSettingsStore(scopedUrl, "perps");
+      await store.put(T, OWNER);
+      const sealedBefore = String((await admin.query(`SELECT sealed FROM ${schema}.perps_tenant_settings WHERE tenant = $1`, [T])).rows[0]?.sealed);
+      assert.doesNotMatch(sealedBefore, /perpsEnabled/, "sealed under the DEK");
+      assert.equal(await disablePaperPerpsForKill(T, store), "disabled");
+      assert.deepEqual(await store.get(T), { ...OWNER, perpsEnabled: false });
+      const sealedAfter = String((await admin.query(`SELECT sealed FROM ${schema}.perps_tenant_settings WHERE tenant = $1`, [T])).rows[0]?.sealed);
+      assert.doesNotMatch(sealedAfter, /perpsEnabled|Little John/, "written back sealed");
+      // A retry finds them off.
+      assert.equal(await disablePaperPerpsForKill(T, store), "none");
+    });
+
+    await t.test("an owner's save racing the kill: neither is lost", async () => {
+      const store = new PgSettingsStore(scopedUrl, "perps");
+      await store.put(T, OWNER);
+      // The kill reads, then the owner saves a new market list before the
+      // kill writes: the compare-and-swap misses, reads again, and turns
+      // perps off on the owner's NEW settings.
+      const racing = new PgSettingsStore(scopedUrl, "perps", async (u) => {
+        const c = new pg.Client({ connectionString: u });
+        await c.connect();
+        let raced = false;
+        return {
+          async query(sql: string, params?: unknown[]) {
+            if (!raced && /^UPDATE/.test(sql)) {
+              raced = true;
+              await store.put(T, { ...OWNER, perpsMarkets: ["ETH-PERP"] });
+            }
+            return c.query(sql, params);
+          },
+          end: () => c.end(),
+        } as unknown as Client;
+      });
+      assert.equal(await disablePaperPerpsForKill(T, racing), "disabled");
+      assert.deepEqual(await store.get(T), { ...OWNER, perpsMarkets: ["ETH-PERP"], perpsEnabled: false });
+    });
+
+    await t.test("the Spot wallet's store refuses: perps live only in the Perps wallet's settings", async () => {
+      await assert.rejects(disablePaperPerpsForKill(T, new PgSettingsStore(scopedUrl, "spot")), /Only the Perps wallet's settings hold perps/);
+    });
+  } finally {
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+    await admin.end();
+  }
+});

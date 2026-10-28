@@ -218,7 +218,7 @@ class WriteOnceTest {
       "PUT /api/settings" to { api ->
         api.patchSettings(buildJsonObject { put("assetMode", JsonPrimitive("crypto")) }, "0xabc")
       },
-      "DELETE /api/grants" to { api -> api.revokeGrant() },
+      "DELETE /api/grants" to { api -> api.revokeGrant(expectedTenant = null) },
       "POST /api/chat" to { api -> api.chat(ChatBody(message = "buy nvda")) },
       // An upload's shape, and a Wire file's own DELETE, both through callAt.
       "PUT /api/agent-image/me/avatar" to { api -> api.callAt("/api/agent-image/me/avatar") { put(png) } },

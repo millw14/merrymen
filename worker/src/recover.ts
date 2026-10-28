@@ -45,6 +45,7 @@ import {
   shortAddress,
 } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
+import { errorText } from "./redact-urls";
 
 /** Shares are an ERC-4626 position: priced, never counted. Same reads snapshot.ts uses. */
 const VAULT_READS = parseAbi(["function convertToAssets(uint256 shares) view returns (uint256)"]);
@@ -655,7 +656,9 @@ export async function planRecovery(opts: {
       // could not be asked, and an owner reading it would not know whether the
       // empty list they are looking at covers one vault or none.
       unreadable.push(`class vault factory ${u.factory}`);
-      classNote = `the class vault factory at ${u.factory} could not be read (${u.why}), so this list may be short`;
+      // This failure was returned by findClassVaults, so it never reaches the
+      // catch below. The note also leaves through the recovery route's JSON.
+      classNote = `the class vault factory at ${u.factory} could not be read (${errorText(u.why)}), so this list may be short`;
     }
     for (const candidate of lookup.candidates) {
       const head = await publicClient.getBlockNumber();
@@ -753,7 +756,7 @@ export async function planRecovery(opts: {
       classNote = primary.note ?? classNote;
     }
   } catch (e) {
-    classNote = `could not check the class vault: ${e instanceof Error ? e.message : String(e)}`;
+    classNote = `could not check the class vault: ${errorText(e)}`;
     unreadable.push("class vault");
   }
 
@@ -1148,7 +1151,7 @@ export async function recoverFunds(opts: {
           }
         }
       } catch (e) {
-        const why = e instanceof Error ? e.message : String(e);
+        const why = errorText(e);
         // FATAL WHEN IT WAS APPROVED. Continuing here is what produced an
         // operation that moved the USDG and the ETH, left 1,063,408 DOGGOS in
         // the vault, and reported success — the owner having approved a
@@ -1182,7 +1185,9 @@ export async function recoverFunds(opts: {
       });
       movable.push(b);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      // Redacted: these reasons reach the CLI's output and the web route's JSON,
+      // and a viem error names the RPC or bundler URL with its key (redact-urls.ts).
+      const msg = errorText(e);
       // NOT EVERY REVERT IS A TOKEN REFUSING TO MOVE.
       //
       // This regex was written when every leg was `token.transfer(...)`, where a

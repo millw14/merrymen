@@ -120,7 +120,7 @@ export async function runTgGroupRecoveryNotice(opts: {
   const env = opts.env ?? process.env;
   if (env.MERRYMEN_TG_GROUPS?.trim() === "0") return refuse("operator group switch is off");
 
-  const settingsReader = opts.settings ?? getSettingsStore();
+  const settingsReader = opts.settings ?? getSettingsStore("spot");
   const settings = await settingsReader.get(SHOGUN_TENANT);
   if (!settings?.telegramBotToken) return refuse("Shogun has no stored bot token");
   const resolved = mergeSettings(settings, env);

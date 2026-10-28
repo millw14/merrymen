@@ -55,7 +55,7 @@ function publishedProfile(meta: TokenMeta | undefined, token: `0x${string}`, obs
   return {
     token, chainId: LORE_CHAIN_ID, description,
     source: "token-published metadata",
-    url: `https://explorer.robinhood.com/address/${token}`,
+    url: `https://robinhoodchain.blockscout.com/token/${token}`,
     observedAtMs,
     ...(website ? { website } : {}), ...(twitter ? { twitter } : {}),
   };

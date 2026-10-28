@@ -1,14 +1,27 @@
+import { parseFleetId, unsupportedFleetIdLabel } from "./fleet-id";
+
 /** Operator-only process hold. It never edits a grant, settings or the ledger. */
 export const ACCOUNTING_HOLD_ENV = "MERRYMEN_ACCOUNTING_HOLD_TENANTS";
 
+/**
+ * The tenants held, or a throw: a hold that dropped one entry would leave
+ * that tenant running. An id that is not 0x and 40 hex (a Solana one, say)
+ * refuses the same way, with its own reason: this build cannot hold what it
+ * cannot name, and holding the rest would be the partial hold.
+ */
 export function accountingHoldTenants(env: Record<string, string | undefined>): ReadonlySet<string> {
   const raw = env[ACCOUNTING_HOLD_ENV]?.trim();
   if (!raw) return new Set();
-  const entries = raw.split(",").map((value) => value.trim().toLowerCase());
-  if (entries.some((value) => !/^0x[0-9a-f]{40}$/.test(value))) {
-    throw new Error(`${ACCOUNTING_HOLD_ENV} must contain only complete, comma-separated tenant addresses; refusing a partial hold`);
+  const held = new Set<string>();
+  for (const value of raw.split(",").map((entry) => entry.trim().toLowerCase())) {
+    const id = parseFleetId(value);
+    if (!id) throw new Error(`${ACCOUNTING_HOLD_ENV} must contain only complete, comma-separated tenant addresses; refusing a partial hold`);
+    if (id.kind !== "evm") {
+      throw new Error(`${ACCOUNTING_HOLD_ENV} names a tenant that is not a complete Robinhood Chain address (0x and 40 hex), and this build cannot hold another chain's; refusing a partial hold`);
+    }
+    held.add(id.id);
   }
-  return new Set(entries);
+  return held;
 }
 
 export function accountingTenantHeld(tenant: string, env: Record<string, string | undefined> = process.env): boolean {
@@ -43,13 +56,19 @@ export function accountingCommitRefusal(args: {
 }): string | null {
   if (args.mode !== "commit") return null;
   const holds = accountingHoldTenants(args.env);
-  if (!args.accounts.length || args.accounts.some((account) => !/^0x[0-9a-fA-F]{40}$/.test(account))) {
-    return "commit requires complete, explicitly selected smart-account addresses";
+  if (!args.accounts.length) return "commit requires complete, explicitly selected smart-account addresses";
+  for (const account of args.accounts) {
+    const id = parseFleetId(account);
+    if (!id) return "commit requires complete, explicitly selected smart-account addresses";
+    if (id.kind !== "evm") return "commit names an account that is not a complete Robinhood Chain address (0x and 40 hex); this build repairs no other chain's";
   }
   for (const account of new Set(args.accounts.map((value) => value.toLowerCase()))) {
     const matches = args.plans.filter((plan) => plan.smartAccount.toLowerCase() === account);
     if (matches.length !== 1 || !matches[0]!.tenant) return `${account}: selected account must resolve to exactly one tenant`;
     const tenant = matches[0]!.tenant!.toLowerCase();
+    // Never held, because no hold can name it: said as what it is.
+    const owner = parseFleetId(tenant);
+    if (owner?.kind !== "evm") return `${account}: resolves to a tenant that is not a Robinhood Chain address (${unsupportedFleetIdLabel(matches[0]!.tenant!)}); this build repairs no other chain's`;
     if (!holds.has(tenant)) return `${account}: tenant ${tenant} must be explicitly held by ${ACCOUNTING_HOLD_ENV}`;
     const local = args.localState(tenant);
     if (local.processPresent) return `${account}: a local process, spawn, restart or exit is still present`;

@@ -65,12 +65,12 @@ describe("PUT /api/settings from a chat card", () => {
     const other = await put(OTHER, { liveTradingEnabled: true, owner: TENANT });
     assert.equal(other.status, 409);
     assert.match(other.body.errors?.join(" ") ?? "", /different wallet now than the one that confirmed this, so nothing was changed/);
-    assert.equal(await getSettingsStore().get(OTHER), null, "the other wallet's agent was not turned live");
+    assert.equal(await getSettingsStore("spot").get(OTHER), null, "the other wallet's agent was not turned live");
     // Before validation: a refusal about a field would be about a change that
     // was never the other wallet's to make.
     assert.equal((await put(OTHER, { buyPerTickUsdg: -5, owner: TENANT })).status, 409);
     assert.equal((await put(OTHER, { liveTradingEnabled: true, owner: 42 })).status, 409, "a claim that is not an address is nobody's");
-    assert.equal(await getSettingsStore().get(OTHER), null);
+    assert.equal(await getSettingsStore("spot").get(OTHER), null);
   });
 
   it("the owner who confirmed is saved as before, however the address is cased — and `owner` is not a setting", async () => {
@@ -79,7 +79,7 @@ describe("PUT /api/settings from a chat card", () => {
       const own = await put(TENANT, { liveTradingEnabled: true, owner });
       assert.equal(own.status, 200, JSON.stringify(own.body));
       assert.equal(own.body.ignored, undefined, "not reported as an unknown key");
-      const stored = (await getSettingsStore().get(TENANT)) as Record<string, unknown>;
+      const stored = (await getSettingsStore("spot").get(TENANT)) as Record<string, unknown>;
       assert.equal(stored.liveTradingEnabled, true);
       assert.equal("owner" in stored, false, "and never stored");
     }
@@ -89,7 +89,7 @@ describe("PUT /api/settings from a chat card", () => {
     process.env.MERRYMEN_HOSTED = "1";
     const own = await put(TENANT, { liveTradingEnabled: false });
     assert.equal(own.status, 200, JSON.stringify(own.body));
-    assert.equal((await getSettingsStore().get(TENANT))?.liveTradingEnabled, false);
+    assert.equal((await getSettingsStore("spot").get(TENANT))?.liveTradingEnabled, false);
     assert.equal((await put(null, { liveTradingEnabled: true, owner: TENANT })).status, 401, "signed out is still signed out");
   });
 
@@ -132,7 +132,7 @@ describe("the Settings form, read by GET and saved by PUT", () => {
     assert.equal(view.owner?.toLowerCase(), TENANT);
     const saved = await put(OTHER, formBody(view, { liveTradingEnabled: true }));
     assert.equal(saved.status, 409);
-    assert.equal(await getSettingsStore().get(OTHER), null);
+    assert.equal(await getSettingsStore("spot").get(OTHER), null);
   });
 
   it("READ SIGNED OUT, SAVED ONCE A WALLET SIGNED IN: refused — a form that showed nobody's values writes to nobody", async () => {
@@ -144,7 +144,7 @@ describe("the Settings form, read by GET and saved by PUT", () => {
     assert.equal(view.owner, "", "hosted and signed out names an owner no session is");
     const saved = await put(OTHER, formBody(view, { liveTradingEnabled: true }));
     assert.equal(saved.status, 409);
-    assert.equal(await getSettingsStore().get(OTHER), null, "the wallet that signed in was not turned live");
+    assert.equal(await getSettingsStore("spot").get(OTHER), null, "the wallet that signed in was not turned live");
   });
 
   it("self-hosted the form names nobody, and saves", async () => {

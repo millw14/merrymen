@@ -20,7 +20,7 @@ after(() => rmSync(HOME, { recursive: true, force: true }));
 let n = 0;
 const freshStore = () => {
   process.env.MERRYMEN_HOME = path.join(HOME, `run-${++n}`);
-  return new FileSettingsStore();
+  return new FileSettingsStore("spot");
 };
 
 const t = (i: number) => `0x${i.toString(16).padStart(40, "0")}` as `0x${string}`;
@@ -396,7 +396,7 @@ describe("the orchestrator wiring", () => {
     assert.match(run, /acquireTenantLease\(HOLDER_BACKFILL_LEASE\)/);
     assert.match(run, /if \(!lease\) \{/);
     const done = run.indexOf("if (out.done) holderClaimsBackfilled = true;");
-    const call = run.indexOf("await backfillHolderClaims(getSettingsStore(), log);");
+    const call = run.indexOf('await backfillHolderClaims(getSettingsStore("spot"), log);');
     assert.ok(call > 0 && done > call, "marked done only once a run read every tenant");
     assert.match(run, /else holderBackfillRetryAt = Date\.now\(\) \+ HOLDER_BACKFILL_RETRY_MS;/, "unread tenants are retried, not every pass");
     assert.ok(!/holderClaimsBackfilled = true;\n/.test(run.replace("if (out.done) holderClaimsBackfilled = true;", "")), "and never unconditionally");
@@ -422,7 +422,7 @@ describe("the orchestrator wiring", () => {
     assert.ok(decide > 0 && kept > decide && firstWrite > kept, "the holder is decided before any write");
     assert.ok(!/if \(!claims\) return/.test(fn), "an unread claims table never stops the file being written");
     const reader = body("async function readHolderClaims(");
-    assert.match(reader, /return await getSettingsStore\(\)\.holderClaims\(\);/);
+    assert.match(reader, /return await getSettingsStore\("spot"\)\.holderClaims\(\);/);
     assert.match(reader, /return null;/);
   });
 });

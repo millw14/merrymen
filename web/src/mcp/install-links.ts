@@ -44,6 +44,8 @@ export interface InstallLinks {
   goose: string;
   /** ChatGPT has no install link; this is where developer-mode apps are created. */
   chatgpt: string;
+  /** Grok's connector settings; no documented pre-filled install link. */
+  grok: string;
 }
 
 /**
@@ -81,6 +83,8 @@ export interface InstallCommands {
   gemini: string[];
   /** Devin's CLI, which Windsurf also uses. */
   devin: string[];
+  /** Grok Build CLI: OAuth opens on first use; /mcps manages authentication. */
+  grok: string[];
 }
 
 const enc = encodeURIComponent;
@@ -110,6 +114,7 @@ export function installLinks(serverUrl: string): InstallLinks {
     lmstudio: `lmstudio://add_mcp?name=${SERVER_KEY}&config=${enc(base64(JSON.stringify({ url: serverUrl })))}`,
     goose: `goose://extension?url=${url}&type=streamable_http&id=${SERVER_KEY}&name=${enc(CONNECTOR_NAME)}&description=${enc(DESCRIPTION)}&timeout=300`,
     chatgpt: "https://chatgpt.com/plugins",
+    grok: "https://grok.com/connectors",
   };
 }
 
@@ -130,5 +135,6 @@ export function installCommands(serverUrl: string): InstallCommands {
     codex: [`codex mcp add ${SERVER_KEY} --url ${url}`],
     gemini: [`gemini mcp add -s user -t http ${SERVER_KEY} ${url}`],
     devin: [`devin mcp add -s user ${SERVER_KEY} ${url}`, `devin mcp login ${SERVER_KEY}`],
+    grok: [`grok mcp add --transport http ${SERVER_KEY} ${url}`],
   };
 }

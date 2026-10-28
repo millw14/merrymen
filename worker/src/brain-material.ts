@@ -258,6 +258,25 @@ export function memoryLines(
     });
 }
 
+/** Memory lines the Brain reads (graph.py `req.memory[:6]`); anything past them is cut. */
+export const MEMORY_LINES_READ = 6;
+
+/**
+ * ONE LINE PUT FIRST IN MEMORY, inside the lines the Brain actually reads.
+ *
+ * For the Trencher's hold memory (trencher-brain.ts HoldBackoff.memoryLine):
+ * the one hold that IS worth remembering, because it carries what moved
+ * since. It takes the first line, the rest keep their order, and the total
+ * stays within MEMORY_LINES_READ. `keepLast` protects the final line — the
+ * paper-ledger notice — so a newer line can never push a fact about the
+ * ledger out of what the Brain reads.
+ */
+export function leadMemory(memory: readonly string[], line: string, keepLast = false): string[] {
+  const last = keepLast ? memory.slice(-1) : [];
+  const body = memory.slice(0, memory.length - last.length);
+  return [line, ...body.slice(0, Math.max(0, MEMORY_LINES_READ - 1 - last.length)), ...last];
+}
+
 /**
  * What a landed trade came to, in the figures the gate published — or nothing.
  *
@@ -268,7 +287,7 @@ function endingOf(t: PublicThesis): string {
   if (t.outcome !== "landed") return "";
   const pct = t.realizedPct;
   if (t.action === "sell" && typeof pct === "number" && Number.isFinite(pct)) {
-    return `, ${pct >= 0 ? "+" : "-"}${Math.abs(pct).toFixed(1)}% realized`;
+    return `, ${pct >= 0 ? "+" : "-"}${Math.abs(pct).toFixed(1)}% gross realized (before gas and fees)`;
   }
   const entry = t.entryPriceUsd;
   if (t.action === "buy" && typeof entry === "number" && Number.isFinite(entry) && entry > 0) {

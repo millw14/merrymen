@@ -14,9 +14,13 @@
  *           placeless one never refuses the consent.
  *           {action:"disable", owner} — always works, cancels every draft.
  *           {action:"enable-replies"|"disable-replies", xUserId, owner} —
- *           separate consent for selected comment replies, bound to the shown
- *           X account. Enabling also requires posting and operator approval;
- *           disabling cancels waiting replies even while unavailable.
+ *           separate consent for selected comment replies (and, for an agent
+ *           the operator made active, answers to posts that tag it: GET says
+ *           which, as `repliesActive`), bound to the shown X account.
+ *           Enabling also requires posting and operator approval for this
+ *           owner (lib/x-connect.ts xpostRepliesAvailable: "1" approves every
+ *           owner, "active" only the active ones); disabling cancels waiting
+ *           replies even while unavailable.
  *           {action:"skip", id, owner} — the owner's Skip on one draft; only
  *           their own, only while it is still scheduled (a post already
  *           claimed for sending cannot be half-skipped).
@@ -54,6 +58,7 @@ import {
   readXBody,
   withXpostDb,
   xpostApp,
+  xpostActiveAgent,
   xpostAvailable,
   xpostRepliesAvailable,
   xpostDek,
@@ -98,7 +103,11 @@ export async function GET(req: Request) {
       const account = await getAccount(db, tenant);
       const posts = account ? await postsOf(db, tenant, xpostNow() - X_POSTS_WINDOW_MS, 200) : [];
       const enabled = account ? await repliesEnabledFor(db, tenant, account.xUserId) : false;
-      return accountBody(available, account, posts, { enabled, available: xpostRepliesAvailable(isHostedMode()) });
+      // `active` is what the reply warning must disclose: an active agent also
+      // answers posts that tag it, right away (lib/x-connect.ts xpostActiveAgent).
+      return accountBody(available, account, posts, {
+        enabled, available: xpostRepliesAvailable(isHostedMode(), tenant), active: xpostActiveAgent(tenant),
+      });
     });
     return json(body);
   } catch {
@@ -133,7 +142,7 @@ export async function POST(req: Request) {
       const enabled = input.action === "enable-replies";
       const xUserId = input.xUserId;
       if (typeof xUserId !== "string" || !X_USER_ID.test(xUserId)) return refuse(400, "Say which X account the warning named.");
-      if (enabled && !xpostRepliesAvailable(isHostedMode())) return refuse(503, X_COPY.repliesUnavailable);
+      if (enabled && !xpostRepliesAvailable(isHostedMode(), tenant)) return refuse(503, X_COPY.repliesUnavailable);
       const result = await withXpostDb(async (db) => {
         if (!db) return null;
         const account = await getAccount(db, tenant);

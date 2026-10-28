@@ -67,14 +67,17 @@ class LeaderboardTest {
   }
 
   @Test fun tradeCountsKeepLandedAndPaperApart() {
-    assertEquals("55 trades", lines.single { it.row.name == "shogun" }.trades)
-    assertEquals("4250 paper trades", lines.single { it.row.slug == "04gecqs9sk41edaf" }.trades)
-    assertEquals("1 paper trade", lines.single { it.row.name == "glucagon" }.trades)
-    assertEquals("2 on paper", lines.single { it.row.unrankedWhy == "never-filled" }.trades)
+    // The old captured response only counted operations. It cannot tell us
+    // how many swaps happened, so none of those counts is called a trade.
+    assertTrue(lines.all { it.trades == null })
+    assertEquals("1 trade", boardTradeLine(LeaderRow(mode = "live", landed = 2, liveFills = 1)))
+    assertEquals("1 paper trade", boardTradeLine(LeaderRow(mode = "paper", filledPaper = 2, paperFills = 1)))
+    assertEquals("2 on paper", boardTradeLine(LeaderRow(mode = "live", liveFills = 0, paperFills = 2)))
     // A count the board did not send is not printed as a zero.
     assertNull(boardTradeLine(LeaderRow(mode = "paper", filledPaper = null)))
     assertNull(boardTradeLine(LeaderRow(mode = "live", landed = null, filledPaper = null)))
-    assertEquals("No trades yet", boardTradeLine(LeaderRow(mode = "live", landed = 0, filledPaper = 0)))
+    assertNull(boardTradeLine(LeaderRow(mode = "live", landed = 2, filledPaper = 0)))
+    assertEquals("No trades yet", boardTradeLine(LeaderRow(mode = "live", liveFills = 0, paperFills = 0)))
   }
 
   @Test fun theRetiredCountIsSaidOnlyWhenTheServerSentOne() {

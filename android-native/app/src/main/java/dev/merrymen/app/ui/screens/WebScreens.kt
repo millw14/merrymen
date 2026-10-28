@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -15,8 +17,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -25,6 +29,10 @@ import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.net.WebAuth
 import dev.merrymen.app.net.WebFlow
+import dev.merrymen.app.net.ANDROID_AUTH_URL
+import dev.merrymen.app.net.androidOAuthAvailability
+import dev.merrymen.app.net.hasVerifiedAndroidAuthLink
+import dev.merrymen.app.net.valueOrNull
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.PagePadH
@@ -37,6 +45,7 @@ import dev.merrymen.app.ui.signInPageOf
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The compact header for a screen whose body is the WEB APP ITSELF.
@@ -142,14 +151,27 @@ internal fun signInLanded(before: String?, now: String?): Boolean =
 @Composable
 fun SignInScreen(nav: NavHostController) {
   val c = LocalContainer.current
+  val context = LocalContext.current
+  val openedAt = rememberSaveable { c.repo.serverTurn.value }
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
-  val before = remember { c.repo.signedIn.value }
-  var origin by remember { mutableStateOf<String?>(null) }
+  val before by rememberSaveable { mutableStateOf(c.repo.signedIn.value) }
+  var origin by rememberSaveable { mutableStateOf<String?>(null) }
+  var externalOAuth by rememberSaveable { mutableStateOf(false) }
   var asked by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   LaunchedEffect(Unit) {
-    origin = c.repo.originNow()
+    if (origin == null) {
+      val readOrigin = c.repo.originNow()
+      // Keep this choice over rotation: another capability read must not send
+      // an in-progress external approval back to the old /home entry point.
+      if (hasVerifiedAndroidAuthLink(context, readOrigin)) {
+        externalOAuth = withTimeoutOrNull(1_500) {
+          c.api.androidOAuthAvailability().valueOrNull()?.enabled == true
+        } == true
+      }
+      origin = readOrigin
+    }
     if (c.repo.hosted.value == null) c.repo.refreshIdentity()
     asked = true
   }
@@ -171,7 +193,7 @@ fun SignInScreen(nav: NavHostController) {
     }
   }
 
-  Column(Modifier.fillMaxSize()) {
+  Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
     WebHeader("Sign in", nav)
     val o = origin
     val pad = Modifier.padding(horizontal = PagePadH, vertical = 12.dp)
@@ -194,11 +216,12 @@ fun SignInScreen(nav: NavHostController) {
       )
       SignInPage.Open -> if (o != null) {
         WebFlow(
-          url = WebAuth.signInUrl(o),
+          url = if (externalOAuth) ANDROID_AUTH_URL else WebAuth.signInUrl(o),
           origin = o,
-          jar = c.cookieJar,
           seed = { c.repo.seedWebView(o) },
-          onCookies = { scope.launch { c.repo.adoptWebSession() } },
+          onCookies = { c.repo.adoptWebSession(o, openedAt) },
+          externalOAuth = externalOAuth,
+          authContextCurrent = { c.repo.serverTurn.value == openedAt && c.repo.signedIn.value == before },
           modifier = Modifier.fillMaxSize(),
         )
       }
@@ -209,20 +232,20 @@ fun SignInScreen(nav: NavHostController) {
 @Composable
 fun WebFlowScreen(nav: NavHostController, path: String, title: String) {
   val c = LocalContainer.current
+  val openedAt = remember { c.repo.serverTurn.value }
   var origin by remember { mutableStateOf<String?>(null) }
   val scope = rememberCoroutineScope()
   LaunchedEffect(Unit) { origin = c.repo.originNow() }
 
-  Column(Modifier.fillMaxSize()) {
+  Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
     WebHeader(title.ifBlank { "merrymen" }, nav)
     val o = origin
     if (o != null) {
       WebFlow(
         url = o + path,
         origin = o,
-        jar = c.cookieJar,
         seed = { c.repo.seedWebView(o) },
-        onCookies = { scope.launch { c.repo.adoptWebSession() } },
+        onCookies = { c.repo.adoptWebSession(o, openedAt) },
         modifier = Modifier.fillMaxSize(),
       )
     }

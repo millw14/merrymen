@@ -116,8 +116,13 @@ footer.foot { background: var(--bg-2); padding-top: 58px; }
 .fx-ready [data-reveal] { opacity: 1; transform: none; clip-path: none; }
 
 /* Site visual system. Dark forest is the default so the first paint
-   matches dark mode. Light paper applies only after an explicit choice. */
-body {
+   matches dark mode. Keep the mobile preview and shaded artwork dark
+   so their text and demo disclosures stay readable in either theme. */
+body,
+.app-hero,
+.app-phone,
+.app-camp,
+.app-honest-card {
   color-scheme: dark;
   --bg: #142018;
   --bg-1: #18271d;
@@ -132,9 +137,9 @@ body {
   --text-faint: #89968b;
   --lime: #a6ca58;
   --lime-2: #b8d875;
-  background: var(--bg);
   color: var(--text);
 }
+body { background: var(--bg); }
 body .nav,
 body .nav.scrolled {
   background: color-mix(in srgb, var(--bg) 94%, transparent);

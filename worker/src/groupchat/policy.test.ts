@@ -392,6 +392,9 @@ describe("clause 6 — secret shapes", () => {
       "1:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
       `0x${"ab12".repeat(16)}`,
       "ab12".repeat(16),
+      // A Lighter API private key is 80 hex (docs/perps.md rule 5): bare, 0x, either case.
+      "a1b2c3d4".repeat(10),
+      `0x${"A1B2C3D4".repeat(10)}`,
       "-----BEGIN EC PRIVATE KEY-----",
       `[${Array.from({ length: 32 }, (_, i) => (i * 37) % 256).join(",")}]`,
     ]) {

@@ -28,7 +28,7 @@
 
 import { erc20Abi, type PublicClient } from "viem";
 
-import { CASH, STOCK_TOKENS, isEnergyReserveToken, officialCoinByAddress, type CustomToken } from "../../packages/core/src/index";
+import { CASH, STOCK_TOKENS, isEnergyReserveToken, officialCoinByAddress, onchainIdIn, type CustomToken } from "../../packages/core/src/index";
 import { netTokenDeltas, type ReceiptLog } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
 
@@ -95,10 +95,10 @@ function trustedTickers(custom: readonly CustomToken[]): Map<string, string> {
   return m;
 }
 
-/** Is this a usable name, not an address in disguise or a placeholder? */
+/** Is this a usable name, not an address in disguise (0x, or a Solana key: core's onchainIdIn) or a placeholder? */
 function usable(s: string | null | undefined): string | null {
   const v = (s ?? "").trim();
-  if (!v || v === "?" || /^0x/i.test(v) || v.includes("…") || TID_RE.test(v)) return null;
+  if (!v || v === "?" || /^0x/i.test(v) || onchainIdIn(v) || v.includes("…") || TID_RE.test(v)) return null;
   if (!SAFE_SYMBOL_RE.test(v)) return null;
   return v;
 }
@@ -131,7 +131,7 @@ export function fillSymbolFor(
 ): string | null {
   const a = (coin ?? "").trim().toLowerCase();
   if (!ADDR_RE.test(a) || a === USDG || a === WETH) return null;
-  const ok = (s: string) => FILL_SYMBOL_RE.test(s) && !/^0x/i.test(s) && !TID_RE.test(s);
+  const ok = (s: string) => FILL_SYMBOL_RE.test(s) && !/^0x/i.test(s) && !onchainIdIn(s) && !TID_RE.test(s);
   const known = tokenLabelSync(null, null, a, { customTokens: custom });
   if (known.trusted && known.ticker) return ok(known.ticker) ? known.ticker : null;
   const guard = trustedTickers(custom);

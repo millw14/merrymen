@@ -159,4 +159,14 @@ class IdentityTest {
     id.answered(ok(true, "0xBBB"), id.turn)
     assertEquals("an answer from this turn still lands", "0xBBB", id.signedIn.value)
   }
+
+  @Test fun theLatestReadWinsEvenWithinTheSameSessionTurn() = runBlocking {
+    val id = Identity()
+    val old = id.beginRead()!!
+    val latest = id.beginRead()!!
+    assertTrue(id.answered(ok(true, "0xBBB"), latest.turn, latest.sequence))
+    assertFalse(id.answered(ok(true, "0xAAA"), old.turn, old.sequence))
+    assertFalse(id.answered(ApiResult.Refused(401, "signed out"), old.turn, old.sequence))
+    assertEquals("0xBBB", id.signedIn.value)
+  }
 }

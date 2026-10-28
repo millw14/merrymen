@@ -140,8 +140,15 @@ export function approvable(v: Pick<View, "kind" | "status" | "binding" | "settin
 
 /** The page's headline for a decided proposal. */
 export function headline(v: Pick<View, "status" | "result">): string {
+  if (v.status === "applied" && v.result?.setup_only === true) return "Ready for wallet setup";
   if (v.status === "applied" && v.result?.partial === true) return "Approved, but only some of it was applied — see the result";
   return STATUS_TEXT[v.status] ?? v.status;
+}
+
+/** Never navigate to a URL supplied in an assistant's proposal or result. */
+export function walletSetupUrl(v: Pick<View, "id" | "kind" | "status" | "binding" | "result" | "expires_at">, nowMs=Date.now()): string | null {
+  return v.kind === "agent_draft" && v.binding.purpose === "create" && v.status === "applied" && v.result?.setup_only === true && /^prp_[0-9a-f]{32}$/.test(v.id) && v.expires_at * 1000 > nowMs
+    ? `/connect/setup/${v.id}` : null;
 }
 
 /**

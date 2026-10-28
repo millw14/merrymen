@@ -44,6 +44,13 @@ describe("clean desk presentation", () => {
     assert.ok(text.length <= CAPTION_MAX);
   });
 
+  it("links a token-published story to the token's explorer page", () => {
+    const token = "0xe07119cdd031e8a2043c3c9c4f9c56f34e54a81e";
+    const lore = { ...evidence.lore!, source: "token-published metadata", url: `https://robinhoodchain.blockscout.com/token/${token}` };
+    const html = deskCaption({ ...evidence, lore }, floor);
+    assert.ok(html.includes(`· <a href="https://robinhoodchain.blockscout.com/token/${token}">Source</a>`));
+  });
+
   it("does not infer a coin's story from the ticker or fabricate candles when the bio or chart is absent", () => {
     const text = captionText(deskCaption({ ...evidence, lore: undefined }, floor));
     assert.match(text, /I couldn't verify the story behind this coin yet\./);

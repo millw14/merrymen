@@ -20,6 +20,7 @@ import {
   describeTenant,
   type TenantFacts,
 } from "./inspect-tenant";
+import { fleetIdTarget } from "./fleet-id";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -218,8 +219,15 @@ describe("IT CANNOT PRINT A SECRET", () => {
 
   it("and refuses a tenant value that is not an address", () => {
     const orch = readFileSync(path.join(__dirname, "orchestrator.ts"), "utf8");
-    assert.match(orch, /\^0x\[0-9a-f\]\{40\}\$/, "the env value is validated before any read");
-    assert.match(orch, /refusing to guess/);
+    // The one fleet-id parser validates it (fleet-id.ts), before any read.
+    const at = orch.search(/^async function runTenantInspectIfAsked\(/m);
+    const body = orch.slice(at, at + orch.slice(at).search(/^}/m));
+    assert.match(body, /fleetIdTarget\("MERRYMEN_INSPECT_TENANT", process\.env\.MERRYMEN_INSPECT_TENANT\)/, "the env value is validated before any read");
+    assert.ok(body.indexOf("fleetIdTarget(") < body.indexOf("DATABASE_URL"));
+    for (const value of ["0x123", "sol:9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", "everyone"]) {
+      const target = fleetIdTarget("MERRYMEN_INSPECT_TENANT", value);
+      assert.ok(target && "refused" in target && /refusing to guess/.test(target.refused), value);
+    }
   });
 
   it("and runs once per process, not once per pass", () => {

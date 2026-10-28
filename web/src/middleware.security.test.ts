@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer, type IncomingHttpHeaders } from "node:http";
+import type { AddressInfo } from "node:net";
 import { before, test } from "node:test";
 import { NextRequest } from "next/server";
 import { unstable_doesMiddlewareMatch } from "next/experimental/testing/server";
@@ -51,6 +53,45 @@ test("non-browser clients still reach route authorization and DNS-rebinding host
     assert.equal(middleware(request("http://localhost:3100/api/partner/agents", headers)).headers.get("x-middleware-next"), "1");
   }
   assert.equal(middleware(request("http://attacker.example:3100/api/recover")).status, 403);
+});
+
+/** What Node's own fetch (undici, the gateway bridge's transport) sends — captured, not assumed. */
+async function nodeFetchHeaders(method: string): Promise<Record<string, string>> {
+  const seen = new Promise<IncomingHttpHeaders>(resolve => {
+    const server = createServer((req, res) => { resolve(req.headers); res.end("{}"); server.close(); });
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      void fetch(`http://127.0.0.1:${port}/api/partner/agents`, { method, headers: { "content-type": "application/json" }, ...(method === "POST" ? { body: "{}" } : {}) });
+    });
+  });
+  const headers = await seen;
+  delete headers.host;
+  return Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, String(v)]));
+}
+
+test("the gateway's signed partner bridge reaches route authorization with Node fetch's real headers", async () => {
+  for (const method of ["POST", "DELETE", "GET"]) {
+    const headers = await nodeFetchHeaders(method);
+    // The shape that was refused: Fetch Metadata present, no Origin to check it against.
+    assert.equal(headers["sec-fetch-mode"], "cors");
+    assert.equal(headers.origin, undefined);
+    for (const path of ["/api/partner/agents", "/api/partner/agents/pa_0123456789abcdef/connection"]) {
+      assert.equal(middleware(request(`http://localhost:3100${path}`, headers, method)).headers.get("x-middleware-next"), "1", `${method} ${path}`);
+    }
+  }
+});
+
+test("the partner exemption is the exact prefix: cookie-authenticated neighbours keep the cross-site block", async () => {
+  const headers = await nodeFetchHeaders("POST");
+  for (const path of ["/api/partner-connect", "/api/partners", "/api/partnerx/agents", "/api/recover"]) {
+    assert.equal(middleware(request(`http://localhost:3100${path}`, headers)).status, 403, path);
+    assert.equal(middleware(request(`http://localhost:3100${path}`, { origin: "https://attacker.example" })).status, 403, path);
+  }
+  // Dot segments normalize before matching, so the prefix cannot be used to reach another route.
+  assert.equal(middleware(request("http://localhost:3100/api/partner/../recover", headers)).status, 403);
+  assert.equal(middleware(request("http://localhost:3100/api/partner/%2e%2e/recover", headers)).status, 403);
+  // The DNS-rebinding host check still applies to the partner bridge on a self-hosted install.
+  assert.equal(middleware(request("http://attacker.example:3100/api/partner/agents", headers)).status, 403);
 });
 
 test("document nonces are fresh, override supplied values and agree in request and response policy", () => {

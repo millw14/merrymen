@@ -48,7 +48,8 @@ const NOTE = z.string().max(280).refine(noControls, NO_CONTROLS);
 const IDEMPOTENCY = z.string().regex(/^[A-Za-z0-9_-]{8,128}$/, "8-128 letters, digits, _ or -")
   .describe("A key you choose for this request. Resending the same key returns the same proposal instead of creating another.");
 
-function approvalUrl(id: string): string {
+/** The Merrymen page where the owner approves or declines one proposal. */
+export function approvalUrl(id: string): string {
   return `${mcpConfig().issuer}/connect/approve/${id}`;
 }
 
@@ -397,10 +398,12 @@ function profileSettings(level: keyof typeof RISK_PROFILES): { settings: Record<
   return { settings, leftOut };
 }
 
-const createDraft = defineTool({
-  name: "create_agent_draft",
-  title: "Draft an agent setup",
-  description: "Draft a name, strategy, basket, asset mode and risk level for the owner's agent. The owner reviews it in Merrymen and approving saves it to their settings. If they already run an agent, the approval page shows a before/after comparison and the changes apply to that running agent immediately; if not, they still choose limits and sign the trading permission themselves, and a draft never creates trading authority. A risk level carries only settings that can be changed by conversation (stop loss, take profit, amount per buy, max per AI trade, slippage); the price-impact safety floor is left out and stays a dashboard setting. Basket symbols beyond the stock tokens are checked against the owner's added tokens here only when an agent is shared with this connection; otherwise they are checked when the owner approves.",
+function agentDraftTool(creationOnly: boolean) { return defineTool({
+  name: creationOnly ? "create_merryman" : "create_agent_draft",
+  title: creationOnly ? "Set up a new Merryman" : "Draft an agent setup",
+  description: creationOnly
+    ? "Prepare a new Merryman for the owner to review and create through one Merrymen setup link. Accepts a name, strategy, basket, asset mode and risk level; defaults to a Trencher named My Merryman. Crypto-only mode with another strategy requires an explicit basket containing a coin the owner added in Settings; stock-only baskets cannot trade in that mode. This only creates a setup proposal: approval does not change any existing agent or settings. The owner continues to choose limits, choose practice or live, and sign the trading permission with their own wallet. No keys, funding, trades or live-trading consent are accepted here. An existing agent must be managed instead."
+    : "Draft a name, strategy, basket, asset mode and risk level for the owner's agent. The owner reviews it in Merrymen and approving saves it to their settings. If they already run an agent, the approval page shows a before/after comparison and the changes apply to that running agent immediately; if not, they still choose limits and sign the trading permission themselves, and a draft never creates trading authority. A risk level carries only settings that can be changed by conversation (stop loss, take profit, amount per buy, max per AI trade, slippage); the price-impact safety floor is left out and stays a dashboard setting. Basket symbols beyond the stock tokens are checked against the owner's added tokens here only when an agent is shared with this connection; otherwise they are checked when the owner approves.",
   capability: "drafts.write",
   input: z.object({
     name: z.string().max(24).refine(noControls, NO_CONTROLS).optional(),
@@ -421,10 +424,24 @@ const createDraft = defineTool({
   async handler(args, ctx) {
     const now = ctx.now();
     const tenant = ctx.principal.tenant;
+    // A compact creation handoff skips market selection. Never silently pair
+    // its stock basket default with a mode that excludes every stock. This
+    // check uses only the request and public registry; owner-added symbols
+    // still undergo the existing owner-side approval validation.
+    if (creationOnly && (args.strategy ?? "trencher") !== "trencher" && args.asset_mode === "crypto"
+      && !args.basket?.some(symbol => !STOCK_TOKENS.some(token => token.symbol.toLowerCase() === symbol.toLowerCase()))) {
+      throw new McpError("invalid_input", "Crypto-only setup needs a basket containing at least one coin you added in Merrymen Settings. Choose Trencher for automatic coin discovery, or choose Stocks only or Stocks and crypto for a stock basket.");
+    }
     // A connection the owner shared no agent with may draft, but may not learn
     // the owner's settings — not their added tokens, not their current values.
-    const shared = (await ctx.agents()).length > 0;
-    const settings: Record<string, unknown> = {};
+    const agents = await ctx.agents();
+    // Only inspect agents this connection may already see. The owner's own
+    // approval page checks unshared accounts without revealing them here.
+    if (creationOnly && agents.some((a) => a.account !== null)) {
+      throw new McpError("conflict", "A Merryman is already shared with this connection. Manage that agent instead of creating another.");
+    }
+    const shared = agents.length > 0;
+    const settings: Record<string, unknown> = creationOnly ? { agentName: "My Merryman", strategy: "trencher" } : {};
     if (args.name !== undefined) {
       const name = normalizeAgentName(args.name);
       if (!AGENT_NAME_RE.test(name)) throw new McpError("invalid_input", "name: 1-24 characters, starting with a letter or number and containing at least one letter.");
@@ -457,7 +474,8 @@ const createDraft = defineTool({
     const leftOut = carried.leftOut.map((key) => ({ key, why: key === "maxImpactBps" ? "the price-impact safety floor is changed only in Settings on the dashboard" : "not a setting that can be changed from here" }));
     const binding: Binding = {
       v: 1, kind: "agent_draft", tenant, settings,
-      before: await currentValues(tenant, Object.keys(settings)),
+      ...(creationOnly ? { purpose: "create" as const } : {}),
+      before: creationOnly ? {} : await currentValues(tenant, Object.keys(settings)),
       risk_level: args.risk_level ?? null,
       left_out: carried.leftOut,
       salt: randomBytes(16).toString("hex"),
@@ -467,11 +485,14 @@ const createDraft = defineTool({
     // only, never the owner's current values (those live in the binding, which
     // only the owner's approval page reads).
     const summary = {
-      action: "Set up the agent",
+      purpose: creationOnly ? "create" : "settings",
+      action: creationOnly ? "Create a new Merryman" : "Set up the agent",
       settings,
       risk_level: args.risk_level ?? null,
       left_out: leftOut,
-      after_approval: "Approving saves these settings. If the owner already runs an agent, they apply to it immediately; the approval page shows each one before and after. If not, the owner then chooses the agent's limits and signs its trading permission in Merrymen, and until then it cannot trade.",
+      after_approval: creationOnly
+        ? "Approving records this setup for the owner to finish in Merrymen. It does not change settings or create an agent. The owner reviews the setup and limits, chooses practice or live, and signs with their own wallet."
+        : "Approving saves these settings. If the owner already runs an agent, they apply to it immediately; the approval page shows each one before and after. If not, the owner then chooses the agent's limits and signs its trading permission in Merrymen, and until then it cannot trade.",
       requested_by: ctx.principal.clientName ?? "an AI assistant",
     };
     const d = await ctx.mcp();
@@ -482,15 +503,20 @@ const createDraft = defineTool({
     const stored = JSON.parse(row.binding_json) as { settings: Record<string, unknown>; before?: Record<string, unknown> };
     return {
       data: {
-        ...proposalOut(row, created, "Send the owner approval_url. Approving saves these settings (at once, to an agent the owner already runs); signing a trading permission stays with the owner."),
+        ...proposalOut(row, created, creationOnly
+          ? "Send the owner approval_url. They review the setup there, then continue to choose limits and sign. This proposal has not created an agent or enabled trading."
+          : "Send the owner approval_url. Approving saves these settings (at once, to an agent the owner already runs); signing a trading permission stays with the owner."),
         risk_profile: profile ? { level: profile.level, name: profile.name, blurb: profile.blurb, settings: carried.settings } : null,
         left_out: leftOut,
-        diff: shared ? Object.keys(stored.settings).map((k) => changeRow(k, stored.before?.[k] ?? null, stored.settings[k])) : null,
+        diff: shared && !creationOnly ? Object.keys(stored.settings).map((k) => changeRow(k, stored.before?.[k] ?? null, stored.settings[k])) : null,
       },
       summary: leftOut.length ? `Draft ${row.id} is waiting for the owner's approval. Left out: ${leftOut.map((x) => x.key).join(", ")} (${leftOut[0]!.why}).` : `Draft ${row.id} is waiting for the owner's approval at ${approvalUrl(row.id)}.`,
     };
   },
-});
+}); }
+
+const createDraft = agentDraftTool(false);
+const createMerryman = agentDraftTool(true);
 
 const draftPost = defineTool({
   name: "draft_post",
@@ -561,11 +587,17 @@ async function viewOf(ctx: ToolContext, row: ProposalRow) {
   if (r.kind === "trade") r = await ctx.ledger((ledger) => followTrade(d.db, ledger, r, ctx.now()));
   const summary = JSON.parse(r.summary_json) as Record<string, unknown>;
   const result = resultView(r.result_json);
+  const binding = JSON.parse(r.binding_json) as Binding;
+  const creation = binding.kind === "agent_draft" && binding.purpose === "create";
   return {
     proposal_id: r.id,
     kind: r.kind,
     status: r.status,
-    status_explained: r.status === "applied" && result?.partial === true
+    status_explained: creation && r.status === "applied"
+      ? "Setup approved only. The owner still needs to review limits and sign in Merrymen; no agent or trading permission was created by this approval."
+      : creation && r.status === "approved"
+        ? "The owner's setup review was recorded; the continuation is being prepared. No agent has been created."
+      : r.status === "applied" && result?.partial === true
       ? "Approved, but only some of the changes were applied: see result.not_applied for the ones Merrymen did not accept."
       : r.status === "cancelled" && result?.requester_withdrawn === true && typeof result.why === "string" ? `Cancelled because ${result.why}. Nothing was sent.` : EXPLAIN[r.status] ?? r.status,
     terminal: TERMINAL.has(r.status),
@@ -663,4 +695,4 @@ const cancel = defineTool({
   },
 });
 
-export const PROPOSAL_TOOLS = [quoteTradeTool, proposeTrade, proposeSettings, createDraft, draftPost, getProposal, listProposals, cancel];
+export const PROPOSAL_TOOLS = [quoteTradeTool, proposeTrade, proposeSettings, createDraft, createMerryman, draftPost, getProposal, listProposals, cancel];

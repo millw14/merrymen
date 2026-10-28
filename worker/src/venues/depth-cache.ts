@@ -99,7 +99,8 @@ interface Entry {
 }
 
 export function createDepthReader(args: {
-  client: PublicClient;
+  /** A getter follows an RPC change made after the reader was built. */
+  client: PublicClient | (() => PublicClient);
   /** The watch set — resolved the same way trades resolve a symbol. */
   tokens: () => readonly StockToken[];
   cash: `0x${string}`;
@@ -115,20 +116,32 @@ export function createDepthReader(args: {
   readOne?: (token: StockToken, atSec: number) => Promise<TokenDepth | null>;
 }): DepthReader {
   const cache = new Map<string, Entry>();
+  /**
+   * When each symbol was last ASKED for, answered or not.
+   *
+   * A read that came back empty or threw used to leave no trace, and an
+   * unread symbol sorts first — so the same few memecoins with no USDG pool
+   * were searched again every tick (a factory call per fee tier each), forever,
+   * and took the whole budget from the tokens that do have a depth map. Now an
+   * unanswered symbol waits out the TTL like an answered one. What is SERVED is
+   * unchanged: still the last good entry, or nothing.
+   */
+  const tried = new Map<string, number>();
   const now = args.now ?? Date.now;
+  const client = (): PublicClient => (typeof args.client === "function" ? args.client() : args.client);
   const ttl = args.ttlSec ?? DEFAULT_DEPTH_TTL_SEC;
   const budget = args.maxRefreshPerTick ?? DEFAULT_MAX_REFRESH_PER_TICK;
 
   const refresh = args.readOne ?? defaultRefresh;
 
   async function defaultRefresh(token: StockToken, atSec: number): Promise<TokenDepth | null> {
-    const best = await bestCashPool(args.client, {
+    const best = await bestCashPool(client(), {
       token: token.address as `0x${string}`,
       cash: args.cash,
     });
     if (!best) return null;
 
-    const d = await readPoolDepth(args.client, {
+    const d = await readPoolDepth(client(), {
       pool: best.pool,
       token: token.address as `0x${string}`,
       // Stock tokens are 18dp and the registry omits the field for them. Passing
@@ -158,15 +171,21 @@ export function createDepthReader(args: {
 
       // Oldest first, unread before read — so a cold start converges over a few
       // ticks instead of starving whichever symbol happens to sort last.
+      const asked = (symbol: string): number | undefined => {
+        const e = cache.get(symbol)?.atSec;
+        const t = tried.get(symbol);
+        return e === undefined ? t : t === undefined ? e : Math.max(e, t);
+      };
       const stale = known
         .filter((t) => {
-          const e = cache.get(t.symbol);
-          return !e || atSec - e.atSec >= ttl;
+          const a = asked(t.symbol);
+          return a === undefined || atSec - a >= ttl;
         })
-        .sort((a, b) => (cache.get(a.symbol)?.atSec ?? 0) - (cache.get(b.symbol)?.atSec ?? 0))
+        .sort((a, b) => (asked(a.symbol) ?? 0) - (asked(b.symbol) ?? 0))
         .slice(0, budget);
 
       for (const token of stale) {
+        tried.set(token.symbol, atSec);
         try {
           const depth = await refresh(token, atSec);
           if (depth) cache.set(token.symbol, { depth, atSec });
@@ -188,6 +207,7 @@ export function createDepthReader(args: {
     },
     reset() {
       cache.clear();
+      tried.clear();
     },
   };
 }

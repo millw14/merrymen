@@ -148,8 +148,11 @@ test("an operation that WENT OUT is never booked as a failure beside itself", ()
   const said = INDEX.indexOf("was submitted, and then something after it failed");
   assert.ok(said > 0, "the submitted-then-threw branch must exist");
   assert.ok(said < classifierAt, "and must be handled before the terminal classification");
-  const branchAt = INDEX.lastIndexOf("if (submittedRow) {", said);
+  const guard = "if (submittedRow && !(e instanceof UserOpReverted && e.gasProof)) {";
+  const branchAt = INDEX.lastIndexOf(guard, said);
   assert.ok(branchAt > 0, "its guard must sit above its message");
+  // ...and is the LAST guard before it, so it is this branch's own.
+  assert.ok(!INDEX.slice(branchAt + guard.length, said).includes("if (submittedRow"), "no other submittedRow guard between");
   // It must settle the charge and RETURN. Falling through would release the
   // reservation for an operation that is in flight — under-counting the day's
   // spend by exactly that notional — and then write a terminal row for it.

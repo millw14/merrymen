@@ -1,7 +1,38 @@
 package dev.merrymen.app.net
 
 import android.annotation.SuppressLint
+import android.content.Intent
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.os.Message
+import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
+import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalContext
+import java.util.UUID
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.dp
+import dev.merrymen.app.ui.MerryColors
+import dev.merrymen.app.ui.Notice
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,7 +45,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.HttpUrl
@@ -221,6 +257,9 @@ interface CookieStores {
   /** Copy the WebView's cookies for [origin] into the jar, as after a sign-in. */
   suspend fun harvest(origin: String)
 
+  /** False when the platform could not read its store; do not acknowledge that snapshot. */
+  suspend fun harvestChecked(origin: String): Boolean { harvest(origin); return true }
+
   /** Forget cookie [name] in the jar, whichever host set it. No platform call: cheap on every start. */
   suspend fun dropFromJar(name: String)
 
@@ -253,11 +292,16 @@ interface CookieStores {
  * nothing reads. A refusal is reported as not done, so it is tried again.
  */
 class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
-  override suspend fun harvest(origin: String) {
-    val url = origin.toHttpUrlOrNull() ?: return
-    val raw = web("read") { CookieManager.getInstance().getCookie(origin) } ?: return
-    val cookies = WebAuth.webCookies(raw, url)
-    if (cookies.isNotEmpty()) withContext(Dispatchers.IO) { jar.saveFromResponse(url, cookies) }
+  override suspend fun harvest(origin: String) { harvestChecked(origin) }
+
+  override suspend fun harvestChecked(origin: String): Boolean {
+    val url = origin.toHttpUrlOrNull() ?: return false
+    // Wrap a successful read: null cookies means signed out, while a null
+    // wrapper means the platform failed and cannot vouch for any deletion.
+    val snapshot = web("read") { WebCookieSnapshot(CookieManager.getInstance().getCookie(origin)) } ?: return false
+    val cookies = harvestedWebCookies(snapshot.raw, url)
+    withContext(Dispatchers.IO) { jar.saveFromResponse(url, cookies) }
+    return true
   }
 
   override suspend fun dropFromJar(name: String) {
@@ -293,6 +337,35 @@ class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
   }
 }
 
+private data class WebCookieSnapshot(val raw: String?)
+
+/** A successful browser logout expires only this host's native session copy. */
+internal fun harvestedWebCookies(raw: String?, url: HttpUrl): List<Cookie> {
+  val read = WebAuth.webCookies(raw.orEmpty(), url)
+  if (read.any { it.name == "mm_session" && it.value.isNotEmpty() }) return read
+  return read.filterNot { it.name == "mm_session" } + Cookie.Builder()
+    .name("mm_session").value("").hostOnlyDomain(url.host).path("/").expiresAt(1).build()
+}
+
+private class PopupWebView(val view: WebView) {
+  private var released = false
+  fun release() {
+    if (released) return
+    released = true
+    (view.parent as? ViewGroup)?.removeView(view)
+    view.stopLoading()
+    view.webViewClient = WebViewClient()
+    view.webChromeClient = WebChromeClient()
+    view.destroy()
+  }
+}
+
+private fun Context.hostActivity(): Activity? = when (this) {
+  is Activity -> this
+  is ContextWrapper -> baseContext.takeUnless { it === this }?.hostActivity()
+  else -> null
+}
+
 /**
  * The delegated-signature surface: the real web app, in a WebView, with its
  * cookies handed back to the native client on every page settle.
@@ -310,10 +383,11 @@ class DeviceCookies(private val jar: PersistentCookieJar) : CookieStores {
 fun WebFlow(
   url: String,
   origin: String,
-  jar: PersistentCookieJar,
   seed: suspend () -> Unit,
-  onCookies: () -> Unit,
+  onCookies: suspend () -> Boolean,
   modifier: Modifier = Modifier,
+  externalOAuth: Boolean = false,
+  authContextCurrent: () -> Boolean = { true },
 ) {
   // AN ADDRESS THAT IS NOT ONE gets a sentence, not a WebView error page. An
   // older build could store a Server with no scheme; loading "app.merrymen.dev/home"
@@ -327,41 +401,250 @@ fun WebFlow(
     )
     return
   }
-  DisposableEffect(Unit) {
-    CookieManager.getInstance().setAcceptCookie(true)
-    onDispose { CookieManager.getInstance().flush() }
-  }
-  // Hand the WebView the session the app already holds, httpOnly as the
-  // server set it, so a handoff page opens signed in as the same wallet the
-  // app is (WebAuth.seedLines). THE PAGE WAITS FOR IT. The seed reads a
-  // stored flag first (Repository.seedWebView), and a page loaded alongside
-  // it could run its scripts while an older build's copy, the one a script
-  // can read, was still in the store.
   var seeded by remember(origin) { mutableStateOf(false) }
+  val authFlowId = rememberSaveable(origin, url) { UUID.randomUUID().toString() }
+  val hostActivity = LocalContext.current.hostActivity()
+  val currentAuthContext by rememberUpdatedState(authContextCurrent)
+  DisposableEffect(authFlowId) {
+    onDispose {
+      // Rotation recreates the view but retains the flow id and Privy's DOM
+      // storage. Leaving the screen abandons its pending external approval.
+      if (hostActivity?.isChangingConfigurations != true) AndroidOAuthReturns.cancelFlow(authFlowId)
+    }
+  }
+  val currentOnCookies by rememberUpdatedState(onCookies)
+  val lifecycle = LocalLifecycleOwner.current.lifecycle
   LaunchedEffect(origin) {
     seed()
     seeded = true
   }
-  if (!seeded) return
-  AndroidView(
-    modifier = modifier.fillMaxSize(),
-    factory = { ctx ->
-      WebView(ctx).apply {
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.databaseEnabled = true
-        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-        webViewClient = object : WebViewClient() {
-          override fun onPageFinished(view: WebView?, finishedUrl: String?) {
-            super.onPageFinished(view, finishedUrl)
-            CookieManager.getInstance().flush()
-            WebAuth.harvest(origin, jar)
-            onCookies()
+  // Privy sets mm_session from fetch(), without a document navigation. Read
+  // only this entry's original origin, only while visible, and await adoption
+  // so no two snapshots race each other. No cookie value is logged or sent to
+  // JavaScript. Disposal stops observation; an adoption already changing
+  // credentials finishes its bounded identity check in Repository.
+  LaunchedEffect(origin, seeded, lifecycle) {
+    if (!seeded) return@LaunchedEffect
+    val changes = WebSessionChanges()
+    lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+      while (isActive) {
+        val snapshot = runCatching { WebCookieSnapshot(CookieManager.getInstance().getCookie(origin)) }.getOrNull()
+        var retry = false
+        if (snapshot != null && changes.needsAdoption(snapshot.raw)) {
+          if (currentOnCookies()) changes.adopted(snapshot.raw) else retry = true
+        }
+        delay(if (retry) 2_000 else 750)
+      }
+    }
+  }
+  var attempt by remember(url, origin) { mutableStateOf(0) }
+  Box(modifier.fillMaxSize().background(MerryColors.bg)) {
+    if (!seeded) {
+      LinearProgressIndicator(color = MerryColors.mint, modifier = Modifier.fillMaxWidth())
+    } else key(url, origin, attempt) {
+      var loading by remember { mutableStateOf(true) }
+      var failure by remember { mutableStateOf<String?>(null) }
+      var linkNotice by remember { mutableStateOf<String?>(null) }
+      var webView by remember { mutableStateOf<WebView?>(null) }
+      var popup by remember { mutableStateOf<PopupWebView?>(null) }
+      var popupHost by remember { mutableStateOf("Opening page…") }
+      var canGoBack by remember { mutableStateOf(false) }
+      var active by remember { mutableStateOf(true) }
+      var externalUrl by rememberSaveable(authFlowId) { mutableStateOf<String?>(null) }
+      var continueEmbedded by remember { mutableStateOf(false) }
+      val returned by AndroidOAuthReturns.delivery.collectAsState()
+      LaunchedEffect(returned, webView) {
+        if (returned?.flowId != authFlowId || webView == null) return@LaunchedEffect
+        if (!active || !currentAuthContext()) {
+          AndroidOAuthReturns.cancelFlow(authFlowId)
+          return@LaunchedEffect
+        }
+        AndroidOAuthReturns.take(authFlowId)?.let { resume ->
+          externalUrl = null
+          webView?.loadUrl(resume)
+        }
+      }
+      fun closePopup() {
+        val closing = popup
+        popup = null
+        // An attached popup is released by AndroidView; one opened and handed
+        // to Telegram before the next frame has no view holder to release it.
+        if (closing?.view?.parent == null) closing?.release()
+      }
+      DisposableEffect(Unit) { onDispose { active = false; popup?.release() } }
+      BackHandler(enabled = popup != null || canGoBack) {
+        val child = popup?.view
+        if (child != null) {
+          if (child.canGoBack()) child.goBack() else closePopup()
+        } else webView?.goBack()
+      }
+
+      fun configure(view: WebView) {
+        // WebView treats WRAP_CONTENT height as a zero CSS viewport, even when
+        // Compose measures a fixed height. Declare this before attachment so
+        // viewport units and hosted sign-in dialogs use the visible height.
+        // Chromium AwLayoutSizer.updateLayoutSettings checks the raw params.
+        view.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        view.setBackgroundColor(android.graphics.Color.rgb(14, 15, 12))
+        view.settings.javaScriptEnabled = true
+        view.settings.domStorageEnabled = true
+        view.settings.userAgentString += " $ANDROID_AUTH_USER_AGENT"
+        // Keep popup-based OAuth and Telegram's about:blank placeholder from
+        // replacing the settings page that owns their pending request.
+        view.settings.setSupportMultipleWindows(true)
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
+        view.webViewClient = object : WebViewClient() {
+          override fun shouldOverrideUrlLoading(source: WebView?, request: WebResourceRequest?): Boolean {
+            if (!active || request == null) return true
+            if (externalOAuth && !continueEmbedded && request.isForMainFrame && currentAuthContext() &&
+              AndroidOAuthReturns.begin(authFlowId, source?.url, request.url.toString())
+            ) {
+              if (openExternalX(view.context, request.url.toString())) {
+                externalUrl = request.url.toString()
+                loading = false
+                return true
+              }
+              // No suitable app/browser: retain the original in-app flow.
+              AndroidOAuthReturns.cancelFlow(authFlowId)
+            }
+            return when (webLinkTarget(request.url.toString(), request.isForMainFrame)) {
+              WebLinkTarget.Embedded -> false
+              WebLinkTarget.Telegram -> {
+                val opened = runCatching {
+                  view.context.startActivity(Intent(Intent.ACTION_VIEW, request.url).addCategory(Intent.CATEGORY_BROWSABLE))
+                }.isSuccess
+                if (!opened) linkNotice = "Couldn't open Telegram. Install Telegram or a browser, then try the link again."
+                if (popup?.view === source) closePopup()
+                true
+              }
+              WebLinkTarget.Blocked -> {
+                if (request.isForMainFrame) linkNotice = "This type of link can't be opened here. Continue on this page or use a supported sign-in option."
+                true
+              }
+            }
+          }
+          override fun onPageStarted(source: WebView?, nextUrl: String?, favicon: Bitmap?) {
+            if (!active) return
+            if (popup?.view === source) {
+              popupHost = nextUrl?.toHttpUrlOrNull()?.host ?: "Opening page…"
+            } else {
+              loading = true
+              failure = null
+            }
+          }
+          override fun doUpdateVisitedHistory(source: WebView?, visitedUrl: String?, isReload: Boolean) {
+            if (active && popup?.view !== source) canGoBack = source?.canGoBack() == true
+          }
+          override fun onPageFinished(source: WebView?, finishedUrl: String?) {
+            if (active && popup?.view !== source) {
+              loading = false
+              canGoBack = source?.canGoBack() == true
+            }
+            // Cookie changes are observed independently of document loads:
+            // a fetch-based sign-in and an OAuth popup both update the same jar.
+          }
+          override fun onReceivedError(source: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+            if (!active || request?.isForMainFrame != true) return
+            if (popup?.view === source) {
+              closePopup()
+              linkNotice = "Couldn't open that page. Check your connection and try again."
+            } else {
+              loading = false
+              failure = "Check your connection, then reopen this page. If you submitted a change, check its status before submitting again."
+            }
+          }
+          override fun onReceivedHttpError(source: WebView?, request: WebResourceRequest?, response: WebResourceResponse?) {
+            if (!active || request?.isForMainFrame != true) return
+            if (popup?.view === source) {
+              closePopup()
+              linkNotice = "That page couldn't load. Close it and try again shortly."
+            } else {
+              loading = false
+              failure = "The server could not open this page. Try again shortly."
+            }
           }
         }
-        loadUrl(url)
+        view.webChromeClient = object : WebChromeClient() {
+          override fun onCreateWindow(source: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
+            if (!active || !isUserGesture || popup != null) return false
+            val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+            val child = PopupWebView(WebView(view.context))
+            configure(child.view)
+            popupHost = "Opening page…"
+            popup = child
+            transport.webView = child.view
+            resultMsg.sendToTarget()
+            return true
+          }
+          override fun onCloseWindow(window: WebView?) {
+            if (active && popup?.view === window) closePopup()
+          }
+        }
       }
-    },
-    update = { if (it.url != url) it.loadUrl(url) },
-  )
+      AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+          WebView(ctx).apply {
+            webView = this
+            configure(this)
+            // Never reset a redirect or in-page navigation on recomposition.
+            loadUrl(url)
+          }
+        },
+        onRelease = { view ->
+          active = false
+          popup?.release()
+          webView = null
+          view.stopLoading()
+          view.webViewClient = WebViewClient()
+          view.webChromeClient = WebChromeClient()
+          view.destroy()
+        },
+      )
+      popup?.let { child ->
+        key(child) {
+          Column(Modifier.fillMaxSize().background(MerryColors.bg)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+              Text(popupHost, color = MerryColors.tx2, modifier = Modifier.weight(1f), maxLines = 1)
+              TextButton(onClick = ::closePopup) { Text("Close", color = MerryColors.tx) }
+            }
+            AndroidView(factory = { child.view }, modifier = Modifier.fillMaxWidth().weight(1f), onRelease = { child.release() })
+          }
+        }
+      }
+      linkNotice?.let { message ->
+        Notice(
+          title = "Link unavailable", body = message,
+          actionLabel = "Dismiss", onAction = { linkNotice = null },
+          modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+      }
+      externalUrl?.let { authorization ->
+        Notice(
+          title = "Finish signing in",
+          body = "Approve with X or your browser, then return to Merrymen. You can also finish here.",
+          actionLabel = "Continue in Merrymen",
+          onAction = {
+            AndroidOAuthReturns.cancelFlow(authFlowId)
+            externalUrl = null
+            continueEmbedded = true
+            webView?.loadUrl(authorization)
+          },
+          modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+      }
+      if (loading) LinearProgressIndicator(
+        color = MerryColors.mint, modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+      )
+      failure?.let { message ->
+        Box(Modifier.fillMaxSize().background(MerryColors.bg).padding(24.dp), contentAlignment = Alignment.Center) {
+          Notice(
+            title = "Couldn't load the page", body = message,
+            actionLabel = "Reopen page", onAction = { attempt += 1 },
+          )
+        }
+      }
+    }
+  }
 }

@@ -1,0 +1,65 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "window": "7d",
+  "source": "fomo-live",
+  "capturedAt": "2026-10-04T12:00:00.000+00:00",
+  "count": 2,
+  "traders": [
+    {
+      "clan": null,
+      "rank": 1,
+      "avatar": "https://example.invalid/avatars/a.png",
+      "handle": "alpha_fake",
+      "pnlUsd": 12345.5,
+      "trades": 210,
+      "userId": "aaaaaaaa-1111-4222-8333-444444444444",
+      "twitter": null,
+      "wallets": {
+        "solana": "FakeWa11et3333333333333333333333333333333",
+        "evm": "0x1234567890abcdef1234567890abcdef12345678",
+        "verified": true,
+        "evidence": { "solana": "onchain-holdings", "evm": "onchain-holdings" }
+      },
+      "holdings": 7,
+      "verified": false,
+      "createdAt": "2025-03-01T10:00:00.000Z",
+      "followers": 120,
+      "following": 15,
+      "topTokens": [
+        { "pnl": 500.25, "price": 0.0012, "value": 2400.5, "imageUrl": "https://example.invalid/t/1.png", "networkId": 4663, "humanAmount": 2000000, "tokenAddress": "0xFA0E00000000000000000000000000000000F00D" },
+        { "pnl": -20, "price": 1.5, "value": 300, "imageUrl": "https://example.invalid/t/2.png", "networkId": 1, "humanAmount": 200, "tokenAddress": "0xFA0E00000000000000000000000000000000F00D" },
+        { "pnl": 0, "price": 0.00004, "value": 80, "imageUrl": "https://example.invalid/t/3.png", "networkId": 1399811149, "humanAmount": 2000000, "tokenAddress": "FakeCoinMint1111111111111111111111111pump" },
+        { "pnl": 1, "price": 1, "value": 1, "imageUrl": "https://example.invalid/t/4.png", "networkId": 4663, "humanAmount": 1, "tokenAddress": "FakeCoinMint1111111111111111111111111pump" }
+      ],
+      "volumeUsd": 99000,
+      "description": "fabricated profile text",
+      "displayName": "Alpha Fake"
+    },
+    {
+      "clan": null,
+      "rank": 2,
+      "avatar": "https://example.invalid/avatars/b.png",
+      "handle": "bravo_fake",
+      "pnlUsd": -300.75,
+      "trades": 12,
+      "userId": "bbbbbbbb-1111-4222-8333-444444444444",
+      "twitter": null,
+      "wallets": {
+        "solana": "FakeWa11et3333333333333333333333333333333",
+        "evm": "0x2234567890abcdef1234567890abcdef12345678",
+        "verified": false,
+        "evidence": { "solana": "onchain-holdings", "evm": "provider-claimed" },
+        "note": "fabricated: the evm wallet is the provider's claim; treat it as a lead"
+      },
+      "holdings": 3,
+      "verified": true,
+      "createdAt": "2026-01-20T00:00:00.000Z",
+      "followers": 9,
+      "following": 4,
+      "topTokens": [],
+      "volumeUsd": 4500,
+      "description": "",
+      "displayName": "Bravo Fake"
+    }
+  ]
+}

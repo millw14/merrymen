@@ -64,6 +64,81 @@ describe("orchestrator env curation", () => {
   it("fleetHaltFile sits under the orchestrator home", () => {
     assert.equal(fleetHaltFile(), path.join(process.env.MERRYMEN_HOME!, "FLEET_HALT"));
   });
+
+  it("childEnv strips an owner's private key", () => {
+    process.env.MERRYMEN_RECOVER_OWNER_KEY = "0x" + "11".repeat(32);
+    try {
+      assert.equal(childEnv(T).MERRYMEN_RECOVER_OWNER_KEY, undefined, "an owner key is the root of both wallets");
+    } finally {
+      delete process.env.MERRYMEN_RECOVER_OWNER_KEY;
+    }
+  });
+
+  /**
+   * WHICH WALLET, AND WHOSE FILES. MERRYMEN_WALLET_PURPOSE decides which
+   * grant a worker arms, and MERRYMEN_GRANT_FILE / MERRYMEN_SETTINGS_FILE
+   * outrank MERRYMEN_HOME: none of the three may be inherited.
+   */
+  it("childEnv sets the wallet and pins the grant and settings files, whatever the orchestrator's env says", () => {
+    const saved = { p: process.env.MERRYMEN_WALLET_PURPOSE, g: process.env.MERRYMEN_GRANT_FILE, s: process.env.MERRYMEN_SETTINGS_FILE };
+    process.env.MERRYMEN_WALLET_PURPOSE = "perps";
+    process.env.MERRYMEN_GRANT_FILE = "/somewhere/else/grant.json";
+    process.env.MERRYMEN_SETTINGS_FILE = "/somewhere/else/settings.json";
+    try {
+      const env = childEnv(T);
+      assert.equal(env.MERRYMEN_WALLET_PURPOSE, "spot");
+      assert.equal(env.MERRYMEN_GRANT_FILE, path.join(childHome(T), "grant.json"));
+      assert.equal(env.MERRYMEN_SETTINGS_FILE, path.join(childHome(T), "settings.json"));
+    } finally {
+      for (const [k, v] of [["MERRYMEN_WALLET_PURPOSE", saved.p], ["MERRYMEN_GRANT_FILE", saved.g], ["MERRYMEN_SETTINGS_FILE", saved.s]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+});
+
+describe("a login's Perps worker (worker-key.ts)", () => {
+  const P = `${T.toLowerCase()}:perps`;
+
+  it("lives under children-perps/<owner>, and the Spot home does not move", () => {
+    assert.equal(childHome(P), path.join(process.env.MERRYMEN_HOME!, "children-perps", T.toLowerCase()));
+    assert.equal(childHome(T), path.join(process.env.MERRYMEN_HOME!, "children", T.toLowerCase()));
+  });
+
+  it("is told it is the Perps wallet's, in its own home, as its owner", () => {
+    const env = childEnv(P);
+    assert.equal(env.MERRYMEN_WALLET_PURPOSE, "perps");
+    assert.equal(env.MERRYMEN_HOME, childHome(P));
+    assert.equal(env.MERRYMEN_GRANT_FILE, path.join(childHome(P), "grant.json"));
+    assert.equal(env.MERRYMEN_SETTINGS_FILE, path.join(childHome(P), "settings.json"));
+    assert.equal(env.MERRYMEN_TENANT, T.toLowerCase());
+    assert.equal(env.MERRYMEN_STORE_DEK, undefined);
+    assert.equal(env.DATABASE_URL, undefined);
+  });
+
+  it("gets no Telegram groups, no Brain and no flow broker, whatever the fleet sets", () => {
+    const saved = { g: process.env.MERRYMEN_TG_GROUPS, l: process.env.MERRYMEN_BRAIN_LIVE, s: process.env.MERRYMEN_BRAIN_SHADOW };
+    process.env.MERRYMEN_TG_GROUPS = "1";
+    process.env.MERRYMEN_BRAIN_LIVE = "all";
+    process.env.MERRYMEN_BRAIN_SHADOW = "all";
+    try {
+      const env = childEnv(P, { flowBroker: true });
+      assert.equal(env.MERRYMEN_TG_GROUPS, "0");
+      assert.equal(env.MERRYMEN_BRAIN_LIVE, undefined);
+      assert.equal(env.MERRYMEN_BRAIN_SHADOW, undefined);
+      assert.equal(env.MERRYMEN_FLOW_BROKER, undefined);
+      // And the Spot worker beside it keeps what it always had.
+      const spot = childEnv(T);
+      assert.equal(spot.MERRYMEN_TG_GROUPS, "1");
+      assert.equal(spot.MERRYMEN_BRAIN_LIVE, "all");
+    } finally {
+      for (const [k, v] of [["MERRYMEN_TG_GROUPS", saved.g], ["MERRYMEN_BRAIN_LIVE", saved.l], ["MERRYMEN_BRAIN_SHADOW", saved.s]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
 });
 
 /**

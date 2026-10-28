@@ -4,11 +4,14 @@ import { test } from "node:test";
 import ts from "typescript";
 import { NextResponse } from "next/server";
 import type { LeaderboardRead, LeaderRow } from "@/lib/read-leaderboard";
+import type { AgentDirectory } from "@/lib/agent-directory";
 
 const PRIVATE_DIRECTORY_CACHE = "public, s-maxage=60, stale-while-revalidate=120";
 
 /** Execute the saved GET handler; only the database read is replaced. */
-function handler(readLeaderboard: () => Promise<LeaderboardRead>) {
+function handler(readLeaderboard: () => Promise<LeaderboardRead>, readAgentDirectory: () => Promise<AgentDirectory> = async () => {
+  throw new Error("Directory was not requested");
+}) {
   const source = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
   const javascript = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -17,6 +20,7 @@ function handler(readLeaderboard: () => Promise<LeaderboardRead>) {
   const require = (name: string) => {
     if (name === "next/server") return { NextResponse };
     if (name === "@/lib/read-leaderboard") return { readLeaderboard };
+    if (name === "@/lib/agent-directory") return { readAgentDirectory };
     throw new Error(`Unexpected route dependency: ${name}`);
   };
   new Function("require", "module", "exports", javascript)(require, { exports }, exports);
@@ -28,20 +32,21 @@ function handler(readLeaderboard: () => Promise<LeaderboardRead>) {
 function row(publicBook: boolean, equityUsdg: number | null = 1000.25, pnlUsdg: number | null = 12.5): LeaderRow {
   return {
     slug: "desk", name: "Desk", handle: null, handleVerified: false, unrankedWhy: null,
-    pnlBps: 125, mode: "live", filledPaper: 0, landed: 3, refused: 0, maxDdBps: 0, curve: [1, 1.0125],
+    pnlBps: 125, mode: "live", filledPaper: 0, landed: 3, refused: 0, paperFills: 0, liveFills: 3, maxDdBps: 0, curve: [1, 1.0125],
     performance: { book: "live", equityUsdg: publicBook ? equityUsdg : null,
       equityAt: 100, pnlUsdg: publicBook ? pnlUsdg : null, pnlBps: 125, pnlAt: 100,
-      publicBook, gasComplete: true, held: false },
+      publicBook, gasComplete: true, held: false, fills: 3, fillsAtMark: 3, lastFillAt: 90, funded: true,
+      valuation: "current", gasOps: { sponsored: 3, priced: 0, unpriced: 0, unrecorded: 0 }, underReview: false },
   };
 }
-const board = (agents: LeaderRow[]): LeaderboardRead => ({ source: "sqlite", retired: 0, agents });
+const board = (agents: LeaderRow[]): LeaderboardRead => ({ source: "sqlite", retired: 0, retiredAgents: [], agents });
 
 /** Small shared-cache model honoring the response's actual Cache-Control. */
-function cdn(origin: () => Promise<Response>) {
+function cdn(origin: (request: Request) => Promise<Response>) {
   let stored: Response | null = null;
   return async () => {
     if (stored) return stored.clone();
-    const response = await origin();
+    const response = await origin(new Request("https://example.test/api/leaderboard"));
     const control = response.headers.get("cache-control") ?? "";
     if (!/(?:^|,)\s*no-store\s*(?:,|$)/i.test(control) && /\bpublic\b/i.test(control) && /\bs-maxage=60\b/.test(control)) {
       stored = response.clone();
@@ -69,10 +74,26 @@ test("a compliant shared cache cannot replay published leaderboard dollars after
   assert.doesNotMatch(JSON.stringify(body), /1000\.25|12\.5/);
 });
 
+test("directory requests never run financial reads and never cache an unread directory", async () => {
+  let fullReads = 0;
+  let source: AgentDirectory["source"] = "sqlite";
+  const GET = handler(async () => { fullReads++; return board([]); }, async () => ({
+    source, directory: true, fetchedAt: 123000, retired: null, agents: [],
+  }));
+  const req = new Request("https://example.test/api/leaderboard?view=directory");
+  const response = await GET(req);
+  assert.equal(fullReads, 0);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=5, s-maxage=15");
+  assert.equal((await response.json()).directory, true);
+  source = "none";
+  assert.equal((await GET(req)).headers.get("cache-control"), "no-store");
+  assert.equal(fullReads, 0);
+});
+
 test("any public-book row disables storage even when its current dollars are zero or unavailable", async () => {
   for (const amount of [0, null]) {
     const GET = handler(async () => board([row(false), row(true, amount, amount)]));
-    const response = await GET();
+    const response = await GET(new Request("https://app.merrymen.dev/api/leaderboard"));
     assert.equal(response.headers.get("cache-control"), "no-store");
     const body = await response.json();
     assert.equal(body.agents[1].performance.equityUsdg, amount);

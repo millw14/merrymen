@@ -2,7 +2,7 @@
 
 Merrymen has a **Model Context Protocol (MCP) server**, so you can use your
 Merryman from whichever AI assistant you already use: Claude (web, desktop,
-mobile, Claude Code), Codex, ChatGPT's developer mode, or any other client that
+mobile, Claude Code), Codex, ChatGPT's developer mode, Grok, or any other client that
 speaks MCP over Streamable HTTP with OAuth.
 
 **Connect in one click:** <https://app.merrymen.dev/connect/mcp>
@@ -14,10 +14,13 @@ address if it does not find them); the same steps for people are at
 
 **In Claude Code:** `/plugin marketplace add https://github.com/millw14/merrymen.git`, then
 `/plugin install merrymen@merrymen` (run one at a time), for the server plus
-`/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio` and more. See
+`/merrymen:brief`, `/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio` and more. See
 [Claude Code](clients.md#claude-code).
 
 **Server address:** `https://mcp.merrymen.dev/mcp`
+
+**Grok and Grok Bot:** see the [Grok setup guide](grok.md) for the custom
+connector, packaged setup/monitoring skills, and native-client testing status.
 
 Merrymen stays the source of truth for your identity, your agent, your limits,
 your accounting and every trade. The assistant is a window onto it, with only
@@ -104,6 +107,7 @@ before/after on the approval page.
 ## More
 
 - [clients.md](clients.md) — setup for each client, and what was verified
+- [grok.md](grok.md) — Grok chat, Grok Bot package and Grok Build setup
 - [tools.md](tools.md) — every tool and resource, and the scope it needs
 - [oauth.md](oauth.md) — OAuth, tokens, revocation, personal access tokens
 - [errors.md](errors.md) — error codes and retries

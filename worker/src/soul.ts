@@ -18,7 +18,8 @@
  * smuggle a transfer recipient or credential back into a prompt.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsc, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { merrymenHome } from "./home";
 import { renderMemories, selectMemories, type MemoryItem } from "./memory/retrieve";
@@ -29,7 +30,12 @@ import {
   STORED_AGENT_NAME_RE,
   normalizeAgentName,
 } from "../../packages/core/src/agent-name";
+import { onchainIdIn, redactSolanaIds } from "../../packages/core/src/ids";
 import type { NameSeat } from "./name-reconcile";
+import { completePersonalMemoryForget, recordPersonalMemoryForget } from "./personal-memory-ferry";
+
+/** The glued scan (audit regressions F3): an id written against a word ("CA<mint>") is an id too. */
+const GLUED = { glued: true } as const;
 
 /** The stock name, defined once in core — the Agent screen's name chip compares against it. */
 export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
@@ -233,6 +239,12 @@ export function sanitizeMemory(raw: string): string | null {
   if (!fact || fact.length < 3) return null;
   if (fact.length > MAX_FACT_CHARS) return null;
   if (/0x[0-9a-fA-F]{6,}/.test(fact)) return null; // addresses / keys / calldata
+  // Solana keys, signatures, explorer links, glued to a word or not. Belt and
+  // braces: every glued hit is a base58 run of 32 or more characters, which the
+  // 30-character blob rule below refuses as well, so no test can tell the two
+  // apart today. It stays so a fact keeps refusing a glued id if that floor is
+  // ever raised to sanitizeNote's 40, where the glued scan is what refuses one.
+  if (onchainIdIn(fact, GLUED)) return null;
   if (/[A-Za-z0-9_-]{30,}/.test(fact)) return null; // token/secret-shaped blobs
   if (/<[^>]*>/.test(fact)) return null; // no markup into prompts
   return fact;
@@ -349,6 +361,7 @@ export function sanitizeNote(raw: string): string | null {
   if (!note || note.length < 3) return null;
   if (note.length > MAX_NOTE_CHARS) return null;
   if (/0x[0-9a-fA-F]{6,}/.test(note)) return null; // addresses / keys / calldata
+  if (onchainIdIn(note, GLUED)) return null; // Solana keys (some under the blob floor), signatures, links, glued or not
   if (/[A-Za-z0-9_-]{40,}/.test(note)) return null; // token/secret-shaped blobs
   if (/<[^>]*>/.test(note)) return null; // no markup into prompts
   return note;
@@ -369,18 +382,36 @@ export function notesTail(max = 25): string {
 }
 
 export function forgetOwner(): void {
+  // Write-ahead privacy request survives a crash before either local wipe.
+  // Unlike ordinary flavor writes, forgetting must throw rather than claim
+  // success when the file or durable completion record could not be written.
+  const request = recordPersonalMemoryForget({ kind: "owner" });
   ensureSoul();
-  writeSafe(
-    ownerFile(),
-    [
+  const replacement = [
       `# What I know about my owner`,
       ``,
       `<!-- written by your merryman as it gets to know you; edit freely, it reads this -->`,
       ``,
       `- (${today()}) They asked me to forget what I knew. A fresh start.`,
       ``,
-    ].join("\n"),
-  );
+    ].join("\n");
+  const erase = (file: string, text: string) => {
+    if (!lstatSync(soulDir()).isDirectory()) throw new Error("soul directory unavailable");
+    const tmp = `${file}.${randomUUID()}.forget.tmp`;
+    const fd = openSync(tmp, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | (fsc.O_NOFOLLOW ?? 0), 0o600);
+    try {
+      try { writeFileSync(fd, text, "utf8"); fsyncSync(fd); }
+      finally { closeSync(fd); }
+      renameSync(tmp, file);
+      const dir = openSync(soulDir(), "r");
+      try { fsyncSync(dir); } finally { closeSync(dir); }
+    } finally { rmSync(tmp, { force: true }); }
+  };
+  erase(ownerFile(), replacement);
+  // Evicted owner facts and notes share ARCHIVE.md. Keeping it would let
+  // retrieval bring forgotten facts back; conservatively clear that archive.
+  erase(archiveFile(), "# Archive\n\n<!-- Cleared when my owner asked me to forget. -->\n");
+  completePersonalMemoryForget(request);
 }
 
 // ── journal ─────────────────────────────────────────────────────────────────
@@ -410,8 +441,14 @@ export function appendJournal(entry: string, nowSec?: number): void {
  * write-side strip doesn't cover anything typed in afterwards.
  */
 function scrubProse(text: string): string {
-  return text
-    .replace(/<[^>]*>/g, "") // no markup into prompts
+  const unmarked = text.replace(/<[^>]*>/g, ""); // no markup into prompts
+  // A Solana key can be 32-39 characters, under the blob floor, alone or glued to a word ("CA<key>").
+  // Longest value first (core's redactSolanaIds): a glued run can end in a key that also stands alone.
+  // Solana before the 0x rule, on the text as written: that rule takes "0x" and every hex digit after
+  // it, so run first on "0x<key>" it ate a key's leading hex and, for a key that begins with 5 or more
+  // hex digits, left a tail under the blob floor that no longer decodes (review GE, round 2). The
+  // glued scan skips a run that is "0x" then hex alone, so an address is still the 0x rule's.
+  return redactSolanaIds(unmarked, () => "[redacted]")
     .replace(/0x[0-9a-fA-F]{6,}/g, "[redacted]") // addresses / keys / calldata
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]"); // token/secret-shaped blobs
 }

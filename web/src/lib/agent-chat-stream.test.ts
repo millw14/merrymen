@@ -12,9 +12,9 @@
  * stream reader.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, beforeEach, describe, it, mock } from "node:test";
 
-import { agentReplyResponse, type AgentChatOptions } from "./agent-chat";
+import { agentReplyResponse, generateAgentReply, onHouseKey, type AgentChatOptions } from "./agent-chat";
 import { readReplyStream } from "./chat-stream";
 import Anthropic from "@anthropic-ai/sdk";
 import type { LlmCreds } from "../../../worker/src/llm";
@@ -103,8 +103,8 @@ describe("when there is nothing to stream", () => {
     const { out } = await streamed("sell?", failing);
     // Classified here, where the error is: the browser says the kind in its
     // own words and never pastes the provider's. An unknown provider id is
-    // not named.
-    assert.deepEqual(out, { reply: null, why: "llm-error", kind: "rate-limited", detail: "groq 429 — rate limited" });
+    // not named. Not hosted, so no key is the house's.
+    assert.deepEqual(out, { reply: null, why: "llm-error", kind: "rate-limited", detail: "groq 429 — rate limited", house: false });
   });
 });
 
@@ -218,6 +218,156 @@ describe("a model call that failed is classified where the error is", () => {
     const { out } = await streamed("hi", failWith(new Error("fetch failed")), { credentials: as("custom") });
     assert.equal(out.kind, "unreachable");
     assert.equal(out.provider, undefined);
+  });
+});
+
+/**
+ * WHOSE KEY A FAILED CALL RAN ON. 2026-10-09: the house Groq account was held
+ * over an unpaid bill, and a new hosted agent sent its tester to "its setup" —
+ * while /api/chat logged nothing at all. The kind, the house flag and the log
+ * line are decided here, where the error and the creds are.
+ */
+describe("a failed call on the house's key", () => {
+  const HOUSE = "gsk_house_fleet_key_0123456789abcdef";
+  const SAVED = "gsk_owner_saved_key_fedcba9876543210";
+  const HELD =
+    "groq 400 — organization_delinquent: Organization has been restricted because of overdue payment(s). " +
+    "Please update the payment method at https://console.groq.com/settings/billing/manage and then contact support.";
+  const ENV = ["GROQ_API_KEY", "MERRYMEN_LLM_API_KEY", "ANTHROPIC_API_KEY"] as const;
+  const saved = new Map(ENV.map((k) => [k, process.env[k]]));
+  const groq = (apiKey: string) => (): LlmCreds => ({ provider: "groq", transport: "openai", baseUrl: "https://api.groq.com/openai/v1", model: "m", apiKey, vision: false });
+  const failWith = (e: unknown): AgentChatOptions["stream"] => async () => {
+    throw e;
+  };
+  let warned: string[] = [];
+
+  before(() => {
+    // As the deployment sets it — with the stray whitespace an env file carries.
+    process.env.GROQ_API_KEY = ` ${HOUSE}\n`;
+    delete process.env.MERRYMEN_LLM_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    mock.method(console, "warn", (...args: unknown[]) => {
+      warned.push(args.map(String).join(" "));
+    });
+  });
+  beforeEach(() => {
+    warned = [];
+  });
+  after(() => {
+    mock.restoreAll();
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it("HOSTED, ON THE DEPLOYMENT'S OWN KEY: billing, and house — streamed and not", async () => {
+    const { out } = await streamed("hi", failWith(new Error(HELD)), { credentials: groq(HOUSE), hosted: true });
+    assert.equal(out.why, "llm-error");
+    assert.equal(out.kind, "billing", "not 'a reason I don't recognise'");
+    assert.equal(out.house, true);
+    assert.equal(out.provider, "Groq");
+    const res = await agentReplyResponse({ message: "hi" }, { stream: false }, {
+      credentials: groq(HOUSE),
+      hosted: true,
+      complete: async () => {
+        throw new Error(HELD);
+      },
+    });
+    const body = (await res.json()) as { kind?: string; house?: unknown };
+    assert.equal(body.kind, "billing");
+    assert.equal(body.house, true, "the JSON answer carries it too");
+  });
+
+  it("A KEY THE OWNER SAVED IS THEIRS: house is false, hosted or not", async () => {
+    assert.equal((await streamed("hi", failWith(new Error(HELD)), { credentials: groq(SAVED), hosted: true })).out.house, false);
+    // Self-hosted the env is the owner's own machine: its key is theirs too.
+    assert.equal((await streamed("hi", failWith(new Error(HELD)), { credentials: groq(HOUSE), hosted: false })).out.house, false);
+    assert.equal((await streamed("hi", failWith(new Error(HELD)), { credentials: groq(HOUSE) })).out.house, false, "unsaid is not hosted");
+  });
+
+  it("THE HOLDER GATEWAY'S UPSTREAM IS THE HOUSE'S: its hold and its model are ours, hosted or not; an expired claim is the holder's", async () => {
+    // gateway/lib/core.mjs relays its upstream's status and body untouched,
+    // so the house Groq account's hold reached holders as "merrymen 400 — …",
+    // and a holder token is no env key: by value it was the holder's bill.
+    const holder = (): LlmCreds => ({ provider: "merrymen", transport: "openai", baseUrl: "https://gateway.example/v1", model: "merrymen-fast", apiKey: "mm_holder_claim_token_0123456789", vision: false });
+    const said = async (line: string, hosted?: boolean) =>
+      (await streamed("hi", failWith(new Error(line)), { credentials: holder, ...(hosted === undefined ? {} : { hosted }) })).out;
+    for (const hosted of [undefined, false, true]) {
+      const held = await said(HELD.replace(/^groq /, "merrymen "), hosted);
+      assert.equal(held.kind, "billing");
+      assert.equal(held.house, true, `hosted: ${hosted}`);
+      assert.equal(held.provider, "Merrymen AI");
+      const gone = await said("merrymen 404 — model_not_found: The model `merrymen-fast` does not exist or you do not have access to it.", hosted);
+      assert.equal(gone.kind, "model-missing");
+      assert.equal(gone.house, true, `the gateway forces its model (hosted: ${hosted})`);
+    }
+    const expired = await said("merrymen 401 — invalid or expired Merrymen AI token — re-claim at /claim");
+    assert.equal(expired.kind, "key-rejected");
+    assert.equal(expired.house, false, "the gateway's own 401 is the holder's claim to renew");
+    assert.match(warned.find((l) => l.includes("(billing")) ?? "", /^\[chat\] model call failed \(billing, house\): merrymen 400/);
+  });
+
+  it("onHouseKey: by value, against each of the deployment's three key variables, and only hosted", () => {
+    const env = { GROQ_API_KEY: "g-house-key-1", MERRYMEN_LLM_API_KEY: " l-house-key-2 ", ANTHROPIC_API_KEY: "a-house-key-3" };
+    for (const key of ["g-house-key-1", "l-house-key-2", "a-house-key-3", " g-house-key-1 "]) {
+      assert.equal(onHouseKey(key, true, env), true, key);
+      assert.equal(onHouseKey(key, false, env), false, `self-hosted: ${key}`);
+    }
+    assert.equal(onHouseKey("an-owner-key", true, env), false);
+    assert.equal(onHouseKey("", true, { GROQ_API_KEY: "" }), false, "a keyless brain (Ollama) is nobody's house key");
+    assert.equal(onHouseKey("g-house-key", true, env), false, "a prefix is not the key");
+  });
+
+  it("ONLY THE BOOLEAN LEAVES — never the key, nor any part of it", async () => {
+    // A provider that echoes the key back, in the worst place it could.
+    const echo = new Error(`groq 400 — organization_delinquent: overdue payment(s) on ${HOUSE}`);
+    const res = await agentReplyResponse({ message: "hi" }, { stream: true }, { credentials: groq(HOUSE), hosted: true, stream: failWith(echo) });
+    const raw = await res.text();
+    assert.match(raw, /"house":true/);
+    assert.ok(!raw.includes(HOUSE.slice(0, 12)), raw);
+    assert.ok(warned.length === 1 && !warned[0]!.includes(HOUSE.slice(0, 12)), warned.join("\n"));
+  });
+
+  it("THE FAILURE IS LOGGED, which /api/chat never did: kind, whose key, and the redacted line", async () => {
+    await streamed("hi", failWith(new Error(HELD)), { credentials: groq(HOUSE), hosted: true });
+    assert.deepEqual(warned, [`[chat] model call failed (billing, house): ${HELD}`]);
+    warned = [];
+    await generateAgentReply({ message: "hi" }, {
+      credentials: groq(SAVED),
+      hosted: true,
+      complete: async () => {
+        throw new Error("groq 401 — invalid_api_key: Invalid API Key");
+      },
+    });
+    assert.deepEqual(warned, ["[chat] model call failed (key-rejected, own): groq 401 — invalid_api_key: Invalid API Key"]);
+  });
+
+  it("the partner surface logs it too, and answers exactly as before", async () => {
+    const out = await generateAgentReply({ message: "hi" }, {
+      surface: "partner",
+      credentials: groq(HOUSE),
+      hosted: true,
+      complete: async () => {
+        throw new Error(HELD);
+      },
+    });
+    assert.deepEqual(out, { reply: null, why: "llm-error" }, "no kind, no house, no detail for a partner");
+    assert.equal(warned.length, 1);
+    assert.match(warned[0]!, /^\[chat\] model call failed \(billing, partner\): groq 400 — organization_delinquent/);
+  });
+
+  it("a request the owner walked away from is not logged as the model failing", async () => {
+    const gone = new AbortController();
+    gone.abort();
+    await generateAgentReply({ message: "hi" }, {
+      credentials: groq(HOUSE),
+      hosted: true,
+      complete: async () => {
+        throw new Error("This operation was aborted");
+      },
+    }, gone.signal);
+    assert.deepEqual(warned, []);
   });
 });
 

@@ -30,6 +30,7 @@
 import type { Db } from "./db";
 import { bigintToMicro, type BootstrapAccounting } from "./bootstrap-state";
 import { reconcileEpochCarry } from "./accounting-scope";
+import { initialCapitalHistoryEmpty } from "./initial-capital-history";
 
 /**
  * USDG REAL (as the ledger stores it) to micro-USDG bigint.
@@ -47,6 +48,7 @@ export function usdgRealToMicro(v: number): bigint {
 
 interface AgentRow {
   hwm_usdg: number | string | null;
+  accrued_fee_usdg?: number | string | null;
   /**
    * Σ withdrawals that have already taken the peak down (store.ts).
    *
@@ -162,7 +164,7 @@ export async function deriveBootstrapAccounting(
   const agentId = smartAccount.toLowerCase();
   try {
     const agent = (await shared
-      .prepare("SELECT hwm_usdg, hwm_withdrawn_usdg, epoch FROM agents WHERE LOWER(smart_account) = ?")
+      .prepare("SELECT hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg, epoch FROM agents WHERE LOWER(smart_account) = ?")
       .get(agentId)) as AgentRow | undefined;
 
     // Direction carries the sign and `amount_usdg` is always positive, so the
@@ -291,8 +293,19 @@ export async function deriveBootstrapAccounting(
       }
     }
 
+    // Zero or held cash observations remain established history. The additive
+    // fact below permits receipt verification after a pre-funding restart or a
+    // failed first scan; it never licenses inference or resets a baseline.
+    const initialCapitalEligible = hasEquity && Number(agent?.epoch) === 1
+      && agent?.hwm_usdg !== null && Number(agent?.hwm_usdg) === 0
+      && agent?.hwm_withdrawn_usdg !== null && Number(agent?.hwm_withdrawn_usdg) === 0
+      && agent?.accrued_fee_usdg !== null && Number(agent?.accrued_fee_usdg) === 0
+      && (!hasCashReading || Number(equity?.cash_usdg) === 0) && flowCount === 0 && accrualCount === 0
+      && await initialCapitalHistoryEmpty(shared, agentId, { allowHeldCash: true });
+
     return {
       kind: "established",
+      ...(initialCapitalEligible ? { initialCapitalEligible: true } : {}),
       // GROSS, with the withdrawn total beside it rather than folded in. The
       // child needs both halves to keep contributing to a ratchet it did not
       // start; a single pre-netted figure cannot be added to.

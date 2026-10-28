@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { heldNotice, telegramLabel, telegramRow, trencherRow } from "./agent-status";
+import { agentDownOf, heldNotice, telegramLabel, telegramRow, trencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
 const tg = (over: Partial<TelegramStatus> = {}): TelegramStatus => ({
@@ -293,5 +293,36 @@ describe("the short label the settings field shows", () => {
 
   it("does not print 'undefined' when the bot name is missing", () => {
     assert.equal(telegramLabel(telegramRow(tg({ botUsername: null }))), "✓ connected");
+  });
+});
+
+/**
+ * IS NOTHING GOING TO MINT THE LINK CODE? Read from /api/grants, so Home and
+ * Settings stop telling an owner whose agent the fleet holds (or whose key
+ * expired) to "check back shortly" for a pass no process will make.
+ */
+describe("agentDownOf: whether the agent that would mint a link code is running", () => {
+  const NOW = 1_800_000_000_000;
+  const future = NOW / 1000 + 86_400;
+  it("an expired session key, first: nothing runs until it is renewed", () => {
+    assert.equal(agentDownOf({ grant: { expiresAt: NOW / 1000 - 1 }, workerAliveAt: NOW / 1000 - 30, workerStale: false }, NOW), "expired");
+    assert.equal(agentDownOf({ grant: { expiresAt: NOW / 1000 - 1 }, workerAliveAt: null }, NOW), "expired");
+  });
+  it("a worker the server calls stale is stopped", () => {
+    assert.equal(agentDownOf({ grant: { expiresAt: future }, workerAliveAt: NOW / 1000 - 86_400, workerStale: true }, NOW), "stopped");
+  });
+  it("never heard from, when a source answered, has not started", () => {
+    assert.equal(agentDownOf({ grant: { expiresAt: future }, workerAliveAt: null, workerStale: null }, NOW), "not-started");
+  });
+  it("claims nothing it could not read", () => {
+    // Neither heartbeat source answered: unknown, not "never".
+    assert.equal(agentDownOf({ grant: { expiresAt: future }, workerAliveAt: null, workerStale: null, heartbeatUnread: true }, NOW), null);
+    // An older server that never said.
+    assert.equal(agentDownOf({ grant: { expiresAt: future } }, NOW), null);
+    assert.equal(agentDownOf(null, NOW), null);
+    assert.equal(agentDownOf(undefined, NOW), null);
+  });
+  it("a fresh worker is running", () => {
+    assert.equal(agentDownOf({ grant: { expiresAt: future }, workerAliveAt: NOW / 1000 - 30, workerStale: false }, NOW), null);
   });
 });

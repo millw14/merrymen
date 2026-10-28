@@ -158,8 +158,8 @@ class MerrymenApi(
   private val origins: OriginSource,
   /**
    * Whether a READ on [http] may be asked again when its connection turns out
-   * stale ([readHttp]). The app says yes (AppGraph). Anything else gets
-   * exactly the client it passed: a test that built a client with no retry
+   * stale ([readHttp]). The app says yes (AppGraph). Anything else keeps
+   * its client's retry policy: a test that built a client with no retry
    * means "a dropped connection is that call's answer", and a read that
    * quietly took the next queued answer would make it lie.
    */
@@ -207,7 +207,16 @@ class MerrymenApi(
    * would still hold one).
    */
   private val readHttp: OkHttpClient by lazy {
-    if (recoverReads) http.newBuilder().retryOnConnectionFailure(true).build() else http
+    // Socket timeouts restart for each connection/read. Put one ceiling over
+    // the whole read, including connection recovery and a trickling response,
+    // so one screen cannot spin for minutes. Keep a caller's shorter budget.
+    // Writes and explicitly timed operations (such as chat) keep their own
+    // client: an uncertain write is never made faster by silently retrying it.
+    val budgetMs = http.callTimeoutMillis.takeIf { it > 0 }?.coerceAtMost(30_000) ?: 30_000
+    http.newBuilder()
+      .callTimeout(budgetMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+      .apply { if (recoverReads) retryOnConnectionFailure(true) }
+      .build()
   }
 
   // ── plumbing ──────────────────────────────────────────────────────────────
@@ -635,7 +644,9 @@ class MerrymenApi(
    * THE KILL SWITCH. Removes the grant, which stands the worker down.
    *
    * Kept beside the reads rather than hidden, because a stop control that is
-   * hard to find is not a stop control.
+   * hard to find is not a stop control. [expectedTenant] is the wallet on
+   * screen when Stop was tapped, null where there is no session; see [StopBody].
    */
-  suspend fun revokeGrant(): ApiResult<JsonElement> = sendJson("/api/grants", "DELETE", null)
+  suspend fun revokeGrant(expectedTenant: String?): ApiResult<JsonElement> =
+    sendJson("/api/grants", "DELETE", json.encodeToString(StopBody.serializer(), StopBody("delete-agent", expectedTenant)))
 }

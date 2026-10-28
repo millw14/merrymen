@@ -13,10 +13,9 @@
  * gone through a store the other side polls; this is that pattern, not a new
  * transport.
  *
- * WHAT IT IS NOT. Not an order path. The only `kind` written here is a literal,
- * so a compromised session cannot use this to make the agent trade. When chat
- * orders land they go through the same channel with their own validation and
- * their own wall check — the channel is deliberately dumb.
+ * The only `kind` written here is the fixed pipeline probe, with no order
+ * arguments accepted from the caller. That probe can transact, so hosted
+ * admission observes the same source recovery hold as financial commands.
  */
 import { NextResponse } from "next/server";
 import { merrymenHome } from "@merrymen/home";
@@ -24,6 +23,7 @@ import { isHostedMode } from "@merrymen/core";
 import { writeCommand } from "@merrymen/command-files";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { queueRecoveryCheckedCommand } from "@/lib/recovery-commands";
 
 export const dynamic = "force-dynamic";
 
@@ -58,21 +58,13 @@ export async function POST(req: Request) {
 
   // Hosted: the orchestrator is the only process that can reach both the
   // shared database and a child's home, so it ferries. See command-files.ts.
-  const ok = await withReadDb(async (db) => {
-    if (!db) return false;
-    try {
-      await db
-        .prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, ?, ?)")
-        // Milliseconds — see the schema note. The column has no default, so
-        // forgetting it is a write error rather than a silently-wrong unit.
-        .run(id, agent, "selftest", Date.now());
-      return true;
-    } catch {
-      return false;
-    }
-  });
+  const admitted = await withReadDb(db => queueRecoveryCheckedCommand(db,
+    { id, agent, kind: "selftest", at: Date.now() })).catch(() => ({ ok: false, why: "unreachable" } as const));
 
-  if (!ok) {
+  if (!admitted.ok) {
+    if (admitted.why === "recovery") return NextResponse.json({
+      error: "transaction probe is paused while the original financial book is checked. No probe was queued.",
+    }, { status: 409 });
     return NextResponse.json(
       {
         error:

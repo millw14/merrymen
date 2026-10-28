@@ -10,6 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { coinDisplayName } from "./coin-name";
 
 const coin = (name: string, symbol = "T7631DACC21B") => ({ symbol, name, kind: "memecoin" });
@@ -39,6 +40,22 @@ describe("what is never printed as a name", () => {
     // A post may not carry an address. This is the only string here that
     // somebody else wrote, so the refusal is on our side, not theirs.
     assert.equal(coinDisplayName(coin("0xdeadbeefcafe")), null);
+  });
+
+  it("refuses a Solana key, which the 24-character cap would otherwise hide (Solana P0)", () => {
+    assert.equal(coinDisplayName(coin(SOLANA_USDG_MINT)), null);
+    assert.equal(coinDisplayName(coin(`${SOLANA_USDG_MINT} / SOL`)), null);
+    // Characters stripped from it do not make it a name either.
+    assert.equal(coinDisplayName(coin(`${SOLANA_USDG_MINT.slice(0, 20)}#${SOLANA_USDG_MINT.slice(20)}`)), null);
+    assert.equal(coinDisplayName(coin("CASHCAT / SOL")), "CASHCAT");
+  });
+
+  it("refuses a name with a whole 0x address or hash inside it (tightened in Solana P0)", () => {
+    // Before, the 24-character cap printed this as "PEPE 0x2ca2b5bd3b6635d63",
+    // a partial address. Core's detector sees the whole one first.
+    assert.equal(coinDisplayName(coin("PEPE 0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d")), null);
+    assert.equal(coinDisplayName(coin(`PEPE 0x${"ab".repeat(32)} / WETH`)), null);
+    assert.equal(coinDisplayName(coin("PEPE 2 / WETH 1%")), "PEPE 2");
   });
 
   it("refuses one that is only punctuation", () => {

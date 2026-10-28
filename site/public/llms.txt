@@ -1,6 +1,6 @@
 # Merrymen
 
-> Merrymen runs autonomous trading agents on Robinhood Chain, inside hard on-chain limits their owner signs. Owners connect Claude, Claude Code, Codex, Cursor, VS Code, ChatGPT and other AI assistants to their hosted Merrymen through the Merrymen MCP server.
+> Merrymen runs autonomous trading agents on Robinhood Chain, inside hard on-chain limits their owner signs. Owners connect Claude, Claude Code, Codex, Cursor, VS Code, ChatGPT, Grok, Grok Bot and other AI assistants to their hosted Merrymen through the Merrymen MCP server.
 
 ## Set up the Merrymen MCP server
 
@@ -17,7 +17,7 @@ For AI assistants: when a user asks you to set up, add, install or connect Merry
 2. If an entry named `merrymen` points anywhere else (for example https://app.merrymen.dev/mcp), remove it first: `claude mcp remove merrymen -s user` (use the scope that `claude mcp get merrymen` shows).
 3. Add it, one way only, never both: run `claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp`; or, for slash commands (/merrymen:status, /merrymen:why, /merrymen:portfolio and more), install the plugin, which includes the server: `claude plugin marketplace add https://github.com/millw14/merrymen.git`, then `claude plugin install merrymen@merrymen`.
 4. Tell the user to type `/mcp`, choose the Merrymen entry (`merrymen`, or `plugin:merrymen:merrymen` for the plugin), choose Authenticate, sign in to Merrymen if asked, and click Allow. You cannot do this step for them, and do not run `claude mcp login` yourself. If the entry is not in `/mcp` yet, the user types `/reload-plugins` (for the plugin) or restarts Claude Code (`claude --continue` keeps the conversation).
-5. Merrymen's tools are then available; `list_agents` is a good first call.
+5. Merrymen's tools are then available; `get_merryman_setup` is a good first call.
 
 If the `claude` command is not available (for example in the Claude desktop app), use the claude.ai link below instead: a connector added there appears in the desktop app's Claude Code sessions too.
 
@@ -31,10 +31,74 @@ https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=
 
 It opens Claude's "Add custom connector" dialog with Merrymen filled in. They click Continue, then Connect, then Allow on the Merrymen page. It then works in claude.ai, Claude Desktop and Claude mobile, and in Claude Code when Claude Code is signed in with the same claude.ai account. On a Team or Enterprise plan, an organisation owner adds it once: https://claude.ai/admin-settings/connectors?modal=add-custom-connector&connectorName=Merrymen&connectorUrl=https%3A%2F%2Fmcp.merrymen.dev%2Fmcp
 
+### In ChatGPT and dots
+
+Add https://mcp.merrymen.dev/mcp as an OAuth MCP server in ChatGPT's plugin setup, then connect your Merrymen account and enable the plugin for the chat. Availability depends on your ChatGPT workspace. No local terminal or worker is needed.
+A dot can use supported plugins installed and enabled for its account. Confirm Merrymen is available to the dot; installing a Claude Code plugin does not install a ChatGPT plugin. Do not claim a public directory listing or dot access until that host actually offers it.
+Official setup: https://developers.openai.com/plugins/build/auth and https://learn.chatgpt.com/docs/dots/computers-and-apps.
+
+### In Grok (web or mobile)
+
+Open Plugins → Connectors → New Connector → Custom in Grok, or start at https://grok.com/connectors. Set Name to Merrymen and Server URL to https://mcp.merrymen.dev/mcp, then choose Add Connector, complete OAuth in Merrymen, and enable the connector for the conversation. This is a one-time manual setup; asking chat to connect Merrymen by name may only search the catalog and cannot install this unlisted custom connector. The URL is a settings link, not a pre-filled install or automatic connection. Business and Enterprise workspaces may need an admin to provision the connector first.
+The owner signs in or creates their Merrymen account in their own browser and chooses access. To prepare a new Merryman in chat, enable the optional permission to suggest setting changes (drafts:write); it is off by default. Share the intended agent for private status and portfolio access. Never ask for a wallet key or an xAI API key.
+Verify by calling `get_merryman_setup`, then use the setup flow below. If rich MCP App views are unavailable, return the same tool results and owner approval links as text. Do not claim support for an interactive view without observing it in the host.
+Official custom connector setup: https://docs.x.ai/grok/connectors.
+
+### In Grok Bot
+
+Grok Bot is a separate product from Grok chat and Grok Build CLI. Its documentation supports Cursor-compatible MCP servers, plugins and skills. Do not assume connectors added in Grok chat automatically appear in a Bot, and do not use a Cursor install link as an undocumented Grok Bot deep link. If the Bot supports custom MCP configuration, the credential-free configuration is:
+
+```json
+{
+  "mcpServers": {
+    "merrymen": {
+      "url": "https://mcp.merrymen.dev/mcp"
+    }
+  }
+}
+```
+
+The owner can give the Bot this setup request:
+
+Help me connect Merrymen to this Grok Bot and set up or check my hosted Merryman.
+
+Read the setup instructions at https://merrymen.dev/llms.txt. Use only this remote MCP server: https://mcp.merrymen.dev/mcp.
+
+Check this Bot's installed MCP connections first. Reuse a working connection at that exact address; do not assume a Grok chat connector is installed in this Bot. If unavailable, guide me through adding the remote server using the supported connection settings. Do not claim it is connected until a tool call succeeds.
+
+Use OAuth. Send sign-in and consent links to me to open in the browser on my own device. Do not sign in to Merrymen, approve proposals, create wallets or sign permissions through the Bot's shared cloud computer. Never request keys, recovery phrases, passwords or bearer tokens in chat.
+
+For a requested setup, call get_merryman_setup before acting and use only the available tools and their schemas. Reuse the selected agent and saved wallet; an empty list is not evidence that no wallet exists. A status question does not authorize a new draft.
+Use preferences already supplied without asking again. Before creating, inspect a known proposal with get_proposal, or list_proposals with status=all when available, and resume the matching setup, including an approved draft awaiting signing. Ask only when the intended agent/proposal is ambiguous or supplied choices conflict. Do not replace an existing agent or alter its settings just to complete setup.
+For a requested new setup with no strategy, asset or basket preference and no live-mode request, disclose this practice starter before preparing the draft: {"name":"My Merryman","strategy":"steady-basket","asset_mode":"stocks","risk_level":"careful"}. Preserve any supplied name/risk choice. Leave the basket to Merrymen's owner-review defaults unless the owner supplied one. Otherwise preserve the owner's configuration and omit unspecified optional fields; ask only for a missing choice required to make it valid. These defaults never change an existing agent. Mode is an owner choice, not a create_merryman argument: do not send mode, wallet, signing or limit fields.
+Use create_merryman only if that tool is granted. Choose one idempotency_key per distinct draft and retain it with the proposal ID. After an uncertain result, inspect that proposal or recent proposals; do not create another draft with a fresh key. If drafting is unavailable, offer the returned owner creation link and explain optional drafting access without automatically expanding scopes.
+Return one approval_url with a short summary of the prepared choices and intended mode. The owner reviews and continues through account/wallet setup, mode selection and signing on their own device; never perform signup, consent or signing on a shared cloud computer. After the owner returns, call get_merryman_setup again and get_agent_status if available. Report practice active only when setup reports phase=paper with a fresh worker report; otherwise state the actual phase and blocker. Signing or approval alone is not activation.
+
+Use text and links if this host cannot render MCP Apps. Merrymen's hosted worker runs the agent; this Bot and chat do not need to stay open. Do not start a second worker or set up a trading loop here.
+
+For later requests, use only tools this connection grants. Keep practice and live results separate. Never weaken signed limits or retry a financial action whose outcome is unknown. A proposal or submitted order is not a confirmed trade.
+
+Do not create a monitoring routine unless I ask. If I do, use read-only status, portfolio and decision tools; notify me only of meaningful changes or required action. Do not create drafts, propose or approve trades, change settings or retry orders in a routine.
+
+Official Bot compatibility: https://x.ai/bot/guides/grok-bot-101. A packaged plugin is not proof of a public marketplace listing or an authenticated connection; verify tools in the actual Bot.
+
+### In Grok Build CLI
+
+Run `grok mcp list` first and reuse an entry at https://mcp.merrymen.dev/mcp. Otherwise run `grok mcp add --transport http merrymen https://mcp.merrymen.dev/mcp`. OAuth opens in the browser on first use; `/mcps` manages connections and authentication. `grok mcp doctor merrymen` diagnoses connectivity. Then call `get_merryman_setup`. These CLI commands are not Grok Bot installation commands.
+Official CLI setup: https://docs.x.ai/build/features/mcp-servers.
+
+### Create or manage a Merryman after connecting
+
+Call `get_merryman_setup` first, including for a new owner. It reports the next step and distinguishes a missing trading permission from an agent this connection cannot see. An empty list is not proof that no wallet exists.
+For an owner who wants a new agent, use `create_merryman` with their name, strategy, basket and risk choice when the connection permits drafting. Open the returned approval link: the owner reviews the setup and continues through a focused secure handoff for wallet creation and permission signing in Merrymen. The approved name and strategy are carried forward. A prepared or approved draft is not a running agent; return to the same chat and read setup again after signing and activation.
+When the host supports MCP Apps, setup opens an interactive home with naming, strategy, basket and risk choices, readiness, Portfolio, Activity, Settings, Approvals and Alerts. Only permitted actions appear. A host without rich views uses the same text answers and tools; research, trade proposals, reports and community continue in chat when allowed.
+For an existing agent, read its status, portfolio and `get_agent_settings` before preparing requested changes with `create_agent_draft` or `propose_settings_change`. Settings reads contain allowlisted configuration and input metadata, never secrets; saved configuration is not proof of worker adoption. Changes require owner approval. Use proposal status to follow a handoff, and cancel only when the user asks. If a tool is unavailable, explain the missing permission and the reconnect step; do not substitute a different account.
+Merrymen's hosted worker runs the agent after activation. The assistant chat, browser and local terminal do not need to stay open. Permission expiry, service health, funding and trading rules still apply.
+
 ### Other assistants
 
 - Codex: `codex mcp add merrymen --url https://mcp.merrymen.dev/mcp` (it opens the sign-in by itself).
-- Cursor, VS Code, Kiro, LM Studio, Goose, Gemini CLI, Windsurf and ChatGPT: one-click links and steps at https://app.merrymen.dev/connect/mcp
+- Cursor, VS Code, Kiro, LM Studio, Goose, Gemini CLI, Windsurf, ChatGPT, Grok and Grok Bot: links and steps at https://app.merrymen.dev/connect/mcp
 
 ## What the connection can and cannot do
 
@@ -42,7 +106,7 @@ It sees only the agent and the permissions the owner allows when signing in, and
 
 ## Links
 
-- [Connect an AI assistant](https://app.merrymen.dev/connect/mcp): every client, one click each
+- [Connect an AI assistant](https://app.merrymen.dev/connect/mcp): setup links and instructions for each client
 - [MCP documentation](https://github.com/millw14/merrymen/blob/main/docs/mcp/README.md)
 - [Client setup details](https://github.com/millw14/merrymen/blob/main/docs/mcp/clients.md)
 - [Source code](https://github.com/millw14/merrymen)

@@ -1,10 +1,11 @@
 "use client";
 
-import Link from "next/link";
+import Link from "../Link";
 import { useEffect, useRef, useState } from "react";
-import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
 import { XPosting } from "../XPosting";
+import { TelegramCreateBot } from "../TelegramCreateBot";
+import { requestJson } from "../request-json";
 import { AgentImageField } from "../AgentImageField";
 import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
@@ -14,7 +15,7 @@ import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, TELEGRAM_GROUPS_CHATTINESS, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant, type TelegramGroupsChattiness } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
-import { telegramLabel, telegramRow, type TelegramRow } from "../agent-status";
+import { telegramLabel, telegramRow, type AgentDown, type TelegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
 import { SettingsProposal } from "../SettingsProposal";
 import { count, shortDateTime } from "@/lib/format";
@@ -54,7 +55,10 @@ function Field(props: {
       </span>
       <span className="mm-input">{props.children}</span>
     </label>
-    {props.hint && <details className="setting-help"><summary aria-label={`About ${props.label}`}><CircleHelp size={15}/></summary><div className="mm-hint">{props.hint}</div></details>}
+    {/* THE EXPLANATION IS ALWAYS ON THE PAGE, under the control it is about.
+        It sat behind a "?" that opened a floating card; the page is meant to
+        explain itself, and a hint nobody opens explains nothing. */}
+    {props.hint && <p className="mm-hint setting-hint">{props.hint}</p>}
     </div>
   );
 }
@@ -94,7 +98,9 @@ function TelegramListeningNote({ row }: { row: TelegramRow }) {
 }
 
 /** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
-export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; slug: string | null; onSaved?: () => void}) {
+export default function SettingsPage({onFund, slug, onSaved, agentDown = null}:{onFund:()=>void; slug: string | null; onSaved?: () => void;
+  /** Why nothing will mint a Telegram link code now, from /api/grants (App.tsx, agent-status.ts agentDownOf). */
+  agentDown?: AgentDown | null}) {
   const t = useT();
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -103,6 +109,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const [symbols, setSymbols] = useState<string[] | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const saveInFlight = useRef(false);
+  const telegramCreateActive = useRef(false);
+  const [telegramCreating, setTelegramCreating] = useState(false);
+  /** Null until the create endpoint has answered; false opens "Connect an existing bot". */
+  const [telegramCreateAvailable, setTelegramCreateAvailable] = useState<boolean | null>(null);
+  const settingsOwner = useRef(view?.owner);
+  settingsOwner.current = view?.owner;
   const [trencherPrepared, setTrencherPrepared] = useState(false);
   const [settingsVerified, setSettingsVerified] = useState(false);
   // The "saved" note clears itself after a few seconds; the timer is dropped
@@ -130,11 +142,20 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
    * they are yours to set.
    */
   const [hosted, setHosted] = useState<boolean | null>(null);
+  // Whether this deployment runs Fomo research at all (hosted Fomo is opt-in):
+  // the Fomo section is shown only once the answer is yes.
+  const [fomoOn, setFomoOn] = useState<boolean | null>(null);
   useEffect(() => {
     fetch("/api/auth/session")
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setHosted(!!d?.hosted))
-      .catch(() => setHosted(false));
+      .then((d) => {
+        setHosted(!!d?.hosted);
+        setFomoOn(d?.fomo === true);
+      })
+      .catch(() => {
+        setHosted(false);
+        setFomoOn(false);
+      });
   }, []);
   const [tg, setTg] = useState<TelegramStatus | null>(null);
   const [tgEnabled, setTgEnabled] = useState<boolean | null>(null);
@@ -150,6 +171,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
+  const [xPublicWalletIntro, setXPublicWalletIntro] = useState<boolean | null>(null);
+  const [xTokenAddresses, setXTokenAddresses] = useState<boolean | null>(null);
+  const [xTradeResults, setXTradeResults] = useState<boolean | null>(null);
   const [scoutEnabled, setScoutEnabled] = useState<boolean | null>(null);
   const [classSnipe, setClassSnipe] = useState<boolean | null>(null);
   /** The owner's consent to spend real money. Null = untouched this session. */
@@ -157,11 +181,17 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   /** Which kinds of thing the agent may BUY. Null = untouched this session. */
   const [assetMode, setAssetMode] = useState<"all" | "stocks" | "crypto" | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
+  /** Fomo research: three separate permissions (docs/fomo.md). Null = untouched. */
+  const [fomoData, setFomoData] = useState<boolean | null>(null);
+  const [fomoMonitoring, setFomoMonitoring] = useState<boolean | null>(null);
+  const [fomoFollow, setFomoFollow] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
   const [trencherFast, setTrencherFast] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
+  const [telegramLaunch, setTelegramLaunch] = useState<{ owner: string; botUsername: string } | null>(null);
+  const [telegramLaunchNote, setTelegramLaunchNote] = useState<{ owner: string; text: string } | null>(null);
   // PC control: master + capability set + string allowlists (also can't ride `draft`).
   const [pcEnabled, setPcEnabled] = useState<boolean | null>(null);
   const [caps, setCaps] = useState<string[] | null>(null);
@@ -234,6 +264,70 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       .then((r) => (r.ok ? (r.json() as Promise<TelegramStatus>) : null))
       .then((s) => s && setTg(s))
       .catch(() => {});
+
+  async function refreshTelegramCreation(owner: string, signal: AbortSignal, botUsername: string | null, requireConnected: boolean) {
+    const sameOwner = () => settingsOwner.current?.toLowerCase() === owner;
+    if (!sameOwner() || signal.aborted) throw new Error("Settings owner changed");
+    const [freshSettings, freshTelegram] = await Promise.all([
+      requestJson<SettingsView>("/api/settings", { signal }),
+      requestJson<TelegramStatus>(`/api/telegram?owner=${encodeURIComponent(owner)}`, { signal }),
+    ]);
+    if (signal.aborted || !sameOwner() || freshSettings.owner?.toLowerCase() !== owner) throw new Error("Settings owner changed");
+    if (requireConnected && (!freshSettings.telegramBotToken.set || freshSettings.values.telegramEnabled !== true)) throw new Error("Telegram settings not confirmed");
+    if (freshSettings.telegramBotToken.set && botUsername && freshTelegram.botUsername && freshTelegram.botUsername !== botUsername) throw new Error("Telegram bot changed");
+    const verifiedBot = freshSettings.telegramBotToken.set ? botUsername ?? (/^[A-Za-z0-9_]{2,29}bot$/i.test(freshTelegram.botUsername ?? "") ? freshTelegram.botUsername : null) : null;
+    setView(freshSettings);
+    setTg(verifiedBot && freshTelegram.botUsername === verifiedBot && !freshTelegram.botElsewhere ? freshTelegram : { ...freshTelegram, linkCode: null });
+    setTelegramLaunch(verifiedBot && freshSettings.values.telegramEnabled === true ? { owner, botUsername: verifiedBot } : null);
+    setTelegramLaunchNote(null);
+    if (freshSettings.telegramBotToken.set) {
+      // Preserve every unrelated edit, including the newer research controls.
+      // A committed bot must not be overwritten by an older manual token draft.
+      setDraft(({ telegramBotToken: _oldToken, ...rest }) => rest);
+      setTgEnabled(null); setTgTest(null);
+      setBotClaimed(null); setBotMoved(false);
+    }
+    if (requireConnected) onSaved?.();
+  }
+
+  useEffect(() => {
+    if (!telegramLaunch) return;
+    const { owner, botUsername } = telegramLaunch;
+    const scopeMatches = () => settingsOwner.current?.toLowerCase() === owner;
+    if (!scopeMatches()) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    const ready = (status: TelegramStatus) => !status.botElsewhere && status.botUsername === botUsername && /^[A-Za-z0-9_-]{1,64}$/.test(status.linkCode ?? "");
+    if (tg && ready(tg)) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    if (tg?.botElsewhere) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    // NOTHING WILL MAKE THE LINK while the agent is down (held, paused for
+    // recovery, never started, an expired key): the hint below says so, and
+    // a minute of "waiting for your agent" would say the opposite.
+    if (agentDown !== null) { setTelegramLaunch(null); setTelegramLaunchNote(null); return; }
+    const ctl = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (text: string | null) => {
+      if (!scopeMatches() || ctl.signal.aborted) return;
+      ctl.abort(); clearTimeout(timer);
+      setTelegramLaunch(null);
+      setTelegramLaunchNote(text ? { owner, text } : null);
+    };
+    // SAVED IS NOT LISTENING. Only this agent's running worker picks the bot
+    // up and mints its link code, and a brand-new agent may not be running
+    // yet; a minute of waiting here proves nothing about the bot either way.
+    setTelegramLaunchNote({ owner, text: "Your bot is saved. Waiting for your agent to pick it up and make its link…" });
+    const expiry = setTimeout(() => stop("Your bot is saved. Its link appears here once your agent is running and has picked it up. Refresh Settings to check again."), 60_000);
+    const poll = async () => {
+      try {
+        const status = await requestJson<TelegramStatus>(`/api/telegram?owner=${encodeURIComponent(owner)}`, { signal: ctl.signal });
+        if (ctl.signal.aborted || !scopeMatches()) return;
+        if (status.botUsername && status.botUsername !== botUsername) { stop("Your Telegram connection changed. Reload Settings before opening the bot."); return; }
+        setTg(status.botUsername === botUsername && !status.botElsewhere ? status : { ...status, linkCode: null });
+        if (status.botElsewhere || ready(status)) { stop(null); return; }
+        timer = setTimeout(poll, 3000);
+      } catch { stop("Couldn't check the Telegram launch link. Refresh Settings to check again."); }
+    };
+    timer = setTimeout(poll, 3000);
+    return () => { ctl.abort(); clearTimeout(timer); clearTimeout(expiry); };
+  }, [telegramLaunch, view?.owner, agentDown]);
 
   useEffect(() => {
     try {
@@ -339,7 +433,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     return () => { clearTimeout(timer); controller.abort(); };
   }, [view, draft.llmProvider, draft.groqApiKey, draft.anthropicApiKey, draft.llmApiKey, draft.llmBaseUrl]);
 
-  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setDraft((d) => ({ ...d, [k]: e.target.value }));
 
   /**
@@ -447,8 +541,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   }
 
   /** `moveBot`: the owner answered "Move it here" to a bot another agent holds. */
-  async function save(opts: { moveBot?: boolean } = {}) {
-    if (saveInFlight.current) return;
+  async function save(opts: { moveBot?: boolean; startTrencher?: boolean } = {}) {
+    if (saveInFlight.current || telegramCreateActive.current) return;
     if (statusTimer.current) clearTimeout(statusTimer.current);
     setSettingsVerified(false);
     setStatus("saving…");
@@ -457,7 +551,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     setBotMoved(false);
     // An unreadable field would be sent as typed and rejected, or — worse, if
     // it were ever blanked first — sent as "" and read as "clear to default".
-    const unreadable = Object.entries(numError);
+    const unreadable = Object.entries(numError).filter(([key]) => !opts.startTrencher || key !== "tickSeconds");
     if (unreadable.length > 0) {
       setStatus(null);
       setErrors(unreadable.map(([k, why]) => `${k}: ${why}`));
@@ -478,11 +572,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     if (tgChattiness !== null) body.telegramGroupsChattiness = tgChattiness;
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
+    if (xPublicWalletIntro !== null) body.xPublicWalletIntro = xPublicWalletIntro;
+    if (xTokenAddresses !== null) body.xTokenAddresses = xTokenAddresses;
+    if (xTradeResults !== null) body.xTradeResults = xTradeResults;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
     if (classSnipe !== null) body.classSnipeEnabled = classSnipe;
     if (liveTrading !== null) body.liveTradingEnabled = liveTrading;
     if (assetMode !== null) body.assetMode = assetMode;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
+    // Guarded like the rest: fomoDataAccess defaults ON, so an unguarded send
+    // would write the form's value for every owner who saved anything at all.
+    if (fomoData !== null) body.fomoDataAccess = fomoData;
+    if (fomoMonitoring !== null) body.fomoMonitoringEnabled = fomoMonitoring;
+    if (fomoFollow !== null) body.fomoFollowEnabled = fomoFollow;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
     if (trencherFast !== null) body.trencherFastEnabled = trencherFast;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
@@ -494,6 +596,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     if (agentEnabled !== null) body.telegramAgentEnabled = agentEnabled;
     if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
     if (opts.moveBot) body.moveBot = true;
+    // One explicit real-money action supplies the complete preset. Do not
+    // depend on React committing a series of toggles before the save starts.
+    if (opts.startTrencher) Object.assign(body, {
+      strategy: "trencher", assetMode: "crypto", tickSeconds: "15",
+      officialCoinsEnabled: true, discoveryEnabled: true,
+      trencherFastEnabled: true, liveTradingEnabled: true, trencherLiveEnabled: true,
+    });
     // Secrets: only send when the user typed something or hit clear ("").
     saveInFlight.current = true;
     let accepted = false;
@@ -527,6 +636,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       if (!fresh.ok) throw new Error("Settings readback unavailable");
       const savedView = (await fresh.json()) as SettingsView;
       if (savedView.owner !== view?.owner) throw new Error("Settings owner changed");
+      if (opts.startTrencher && (savedView.values.strategy !== "trencher"
+        || savedView.values.assetMode !== "crypto" || Number(savedView.values.tickSeconds) !== 15
+        || savedView.values.officialCoinsEnabled !== true || savedView.values.discoveryEnabled !== true
+        || savedView.values.trencherFastEnabled !== true || savedView.values.liveTradingEnabled !== true
+        || savedView.values.trencherLiveEnabled !== true)) throw new Error("Trencher settings were not confirmed");
       setView(savedView);
       setStatus("Changes saved");
       setSettingsVerified(true);
@@ -534,6 +648,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setBotMoved(json.botMoved === true);
       onSaved?.();
       setDraft({});
+      if (opts.startTrencher) setNumError(({ tickSeconds: _replaced, ...rest }) => rest);
       setSymbols(null);
       setTgEnabled(null);
       setTgControl(null);
@@ -548,6 +663,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setVirtualsEnabled(null);
       setScoutEnabled(null);
       setDiscoveryEnabled(null);
+      setFomoData(null);
+      setFomoMonitoring(null);
+      setFomoFollow(null);
       setAllowlist(null);
       setPcEnabled(null);
       setCaps(null);
@@ -571,6 +689,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setLiveTrading(null);
       setAssetMode(null);
       setDeskEnabled(null);
+      setXPublicWalletIntro(null);
+      setXTokenAddresses(null);
+      setXTradeResults(null);
       setClassSnipe(null);
       setOfficialCoins(null);
       void loadTelegram();
@@ -578,7 +699,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       statusTimer.current = setTimeout(() => setStatus(null), 4000);
     } catch {
       setErrors([accepted
-        ? "Your save was accepted, but the saved settings could not be checked. Your edits are still shown. Reload Settings to confirm before renewing permission."
+        ? opts.startTrencher
+          ? "Your save was accepted, but the saved settings could not be checked. Live Trencher may already be enabled. Reload Settings to confirm; the switches shown here may be out of date."
+          : "Your save was accepted, but the saved settings could not be checked. Your edits are still shown. Reload Settings to confirm before renewing permission."
         : "could not reach the settings API"]);
       setStatus(null);
     } finally {
@@ -601,7 +724,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const hasUnsavedChanges = Object.keys(draft).length > 0 || [
     symbols, tokens, tgEnabled, tgControl, tgTransfer, tgNotify, tgGroups,
     tgGroupCoins, tgChattiness, virtualsEnabled, deskEnabled, scoutEnabled,
-    classSnipe, liveTrading, assetMode, discoveryEnabled, trencherLive,
+    classSnipe, liveTrading, assetMode, discoveryEnabled, fomoData, fomoMonitoring, fomoFollow, trencherLive,
     trencherFast, officialCoins, allowlist, pcEnabled, caps, shellList,
     appList, agentEnabled, agentAutoShell,
   ].some(value => value !== null);
@@ -663,6 +786,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const liveTradingVal = liveTrading ?? view.values.liveTradingEnabled ?? d.liveTradingEnabled;
   const assetModeVal = assetMode ?? view.values.assetMode ?? d.assetMode;
   const discoveryEnabledVal = discoveryEnabled ?? view.values.discoveryEnabled ?? d.discoveryEnabled;
+  // `?? true` for the same reason as officialCoinsEnabled: reading defaults ON,
+  // so an owner who never saved it has no stored value and must not see "off".
+  const fomoDataVal = fomoData ?? view.values.fomoDataAccess ?? d.fomoDataAccess ?? true;
+  const fomoMonitoringVal = fomoMonitoring ?? view.values.fomoMonitoringEnabled ?? d.fomoMonitoringEnabled ?? false;
+  const fomoFollowVal = fomoFollow ?? view.values.fomoFollowEnabled ?? d.fomoFollowEnabled ?? false;
+  // COHORT MONITORING AND RESEARCH-LED FOLLOWING ARE HOSTED ONLY. Both are
+  // produced by the hosted orchestrator's fleet pass (the stream, the cohort,
+  // the child's fomo.json), which a self-hosted install never runs: there the
+  // two switches would store a value and change nothing while this page said
+  // "researches what the watched traders do". So, on a RESOLVED self-hosted
+  // answer only, they show off, cannot be changed, and say why. Untouched,
+  // their save guards send nothing, so a stored value is left as it was.
+  const fomoFleetOnly = hosted === false;
   const trencherLiveVal = trencherLive ?? view.values.trencherLiveEnabled ?? d.trencherLiveEnabled;
   // `?? d.officialCoinsEnabled` is doing real work here, not defensive padding:
   // this is the one setting whose default is ON, so an owner who has never saved
@@ -732,6 +868,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           owner={view.owner}
           symbols={[...view.knownSymbols, ...(view.values.customTokens ?? []).map((tk) => tk.symbol.toUpperCase())]}
           hosted={view.owner !== null}
+          fomo={fomoOn}
           onApplied={() => setLoadAttempt((x) => x + 1)}
         />
       </div>
@@ -832,10 +969,23 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <div className="mm-section">{t("settings.section.whatItTrades")}</div>
           <div id="trencher-setup" className="mm-hint" aria-labelledby="trencher-mode">
             <b id="trencher-mode">Trencher mode · fast memecoin setup</b>
+            <p>Find coins automatically and trade with your existing wallet. Entries are $2.50, within your signed limits. This enables real-money trading, coin discovery and fast exits together.</p>
+            <button type="button" className="mm-btn primary" disabled={status === "saving…" || telegramCreating}
+              onClick={() => void save({ startTrencher: true })}>Enable live Trencher</button>
+            <p>No new key is created. Saves your changes on this page. If your wallet already has current, unexpired Autonomous Trencher permission, you do not need to sign again.</p>
+            {agentDown ? <p role="status">{agentDown === "recovery"
+              ? "The service is still restoring this agent. Settings can be saved now; wallet signatures will not remove that hold."
+              : "Your agent still needs attention before trading. Check its status on Home after saving."}</p> : null}
+            {status === "saving…" && <p role="status">Saving settings…</p>}
+            {settingsVerified && !hasUnsavedChanges && <p role="status">Settings saved. <Link href="/grant#resign">Review trading permission</Link> if Autonomous Trencher is not already enabled. Re-signing is only needed when permission is missing, expired or outdated.</p>}
+            {errors.length > 0 && <div className="mm-danger" role="alert">{errors.map((error, i) => <div key={i}>{error}</div>)}</div>}
+            {botClaimed && <p className="mm-danger" role="alert">{botClaimed} Nothing has been saved. Resolve the bot choice at the bottom of this page, then save again.</p>}
+            {telegramCreating ? <p className="mm-hint" role="status">Finish or cancel Telegram setup before saving other settings.</p> : null}
+            <details><summary>Customise Trencher settings</summary>
             <p>Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells.
               Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds.
               New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.</p>
-            <p>Entries remain $5, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
+            <p>Entries are $2.50, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
               With Autonomous Trencher permission, it finds verified pool tokens itself; no custom-token list is required. Existing positions remain monitored for exits.</p>
             <button type="button" className="mm-btn" disabled={status === "saving…"} onClick={() => {
               setAssetMode("crypto");
@@ -895,15 +1045,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
               You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
             </p>}
-            <button type="button" className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>Save settings</button>
+            <button type="button" className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…" || telegramCreating}>Save settings</button>
             <p className="mm-hint">Saves all changes on this page. Preparing settings does not turn on real-money trading or change your signed limits.</p>
-            {status === "saving…" && <p role="status">Saving settings…</p>}
-            {settingsVerified && !hasUnsavedChanges && <p role="status">Settings saved. <Link href="/grant#resign">Review trading permission</Link> to check Autonomous Trencher access.</p>}
-            {errors.length > 0 && <div className="mm-danger" role="alert">{errors.map((error, i) => <div key={i}>{error}</div>)}</div>}
-            {botClaimed && <p className="mm-danger" role="alert">{botClaimed} Nothing has been saved. Resolve the bot choice at the bottom of this page, then save again.</p>}
-            <p>After saving, review your trading permission and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
+            <p>Autonomous Trencher permission is available after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
               Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
             <p>Already saved and renewed? Preparation does not force a trade. The agent still waits for an eligible pool and fresh Brain approval within your limits. Check your agent’s status for a pause, expired permission or accounting blocker.</p>
+            </details>
           </div>
           <div className="mm-grid">
             <label className="mm-field">
@@ -1066,6 +1213,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 value={draft.agentName ?? ""}
                 onChange={set("agentName")}
               />
+            </Field>
+            <Field
+              label="Research and conversation brief"
+              hint="Used as private chat preferences. Trading research receives fixed evidence guidance and a casual or dry voice, never the text of this brief. This does not change trading limits or model."
+            >
+              <textarea rows={6} maxLength={1600} value={v("agentBrief")} onChange={set("agentBrief")}
+                placeholder="Explain the evidence, the strongest counterargument, costs, and what would change your mind. Keep it casual and admit uncertainty." />
+            </Field>
+            <Field label="Discovery focus" hint="New projects gives fresh qualifying pools priority in the Trencher scanner. Liquidity, contract checks and trading permissions still apply.">
+              <select value={v("discoveryFocus") || "balanced"} onChange={set("discoveryFocus")}>
+                <option value="balanced">Balanced</option>
+                <option value="new-projects">New projects first</option>
+              </select>
             </Field>
             <AgentImageField
               kind="avatar"
@@ -1457,6 +1617,75 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             )}
           </div>
 
+          {/* ── FOMO RESEARCH ───────────────────────────────────────────────
+              Three permissions, deliberately not one switch (docs/fomo.md):
+              reading, being sent research, and letting research suggest
+              entries. The last sits beside scout mode because the scout budget
+              above is the allocation it spends inside — there is no second,
+              hidden allowance. */}
+          {fomoOn === true && (<>
+          <div className="mm-subtle mono">fomo research · traders, coins and theses</div>
+          <p className="mm-hint" style={{ marginTop: 0 }}>
+            Data comes from FOMO API (fomoapi.io), an independent service that is not affiliated with fomo.family. Lookups only read; nothing here buys or posts on its own.
+          </p>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.fomoDataAccess")}</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={fomoDataVal}
+                  onChange={(e) => setFomoData(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {fomoDataVal ? "looks traders and coins up when you ask" : "off — Fomo questions are refused"}
+                </span>
+              </span>
+            </label>
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.fomoMonitoring")}</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={fomoFleetOnly ? false : fomoMonitoringVal}
+                  disabled={fomoFleetOnly}
+                  onChange={(e) => setFomoMonitoring(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {fomoFleetOnly
+                    ? "hosted only — not available on this install"
+                    : fomoMonitoringVal
+                      ? "researches what the watched traders do"
+                      : "off — research only when asked"}
+                </span>
+              </span>
+            </label>
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.fomoFollow")}</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={fomoFleetOnly ? false : fomoFollowVal}
+                  disabled={fomoFleetOnly}
+                  onChange={(e) => setFomoFollow(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {fomoFleetOnly
+                    ? "hosted only — not available on this install"
+                    : fomoFollowVal
+                      ? "may suggest coins to the memecoin review"
+                      : "off — research never leads to a trade"}
+                </span>
+              </span>
+              <span className="mm-hint">{t("settings.hint.fomoFollow")}</span>
+            </label>
+          </div>
+          {fomoFleetOnly && <p className="mm-hint">{t("settings.hint.fomoHostedOnly")}</p>}
+          </>)}
+
           {/* ── THE CLASS ROUTE ────────────────────────────────────────────
               Four settings that had a type, a PUT-allowlist entry and a worker
               read, and NO control — so the only way to configure the route was
@@ -1545,6 +1774,16 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
           </details>
           <details className="settings-group" id="telegram"><summary>Telegram</summary>
+          {hosted === true ? <TelegramCreateBot
+            owner={view.owner}
+            hasBot={view.telegramBotToken.set}
+            disabled={status === "saving…"}
+            onActiveChange={active => { telegramCreateActive.current = active; setTelegramCreating(active); }}
+            onAvailableChange={setTelegramCreateAvailable}
+            onConnected={(owner, signal, botUsername) => refreshTelegramCreation(owner, signal, botUsername, true)}
+            onIntentMissing={(owner, signal, botUsername) => refreshTelegramCreation(owner, signal, botUsername, false)}
+          /> : null}
+          {telegramLaunchNote && telegramLaunchNote.owner === view.owner?.toLowerCase() ? <p className="mm-hint" role="status">{telegramLaunchNote.text}</p> : null}
           {/* THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT.
 
               These were in two different collapsed drawers: this sentence
@@ -1557,14 +1796,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               A missing code is a WAIT, not an absence: the agent mints one on
               its next pass after a token is saved, so the copy says that
               rather than claiming there is no code. */}
-          <p className="mm-hint" style={{ marginTop: 0 }}>
-            Create a bot with @BotFather and add its token below.
-          </p>
           <TelegramListeningNote row={telegramRow(tg)} />
           {tg?.linkCode ? (
             <p className="mm-hint">{t("settings.hint.thenSend")}<code>/link {tg.linkCode}</code> to your bot to connect it.{" "}
-              {tg.botUsername ? (
-                <a href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noreferrer">Open Telegram →</a>
+              {tg.botUsername && /^[A-Za-z0-9_]{2,29}bot$/i.test(tg.botUsername) && /^[A-Za-z0-9_-]{1,64}$/.test(tg.linkCode) ? (
+                <a className="mm-btn primary" href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noopener noreferrer">Open my bot →</a>
               ) : null}
               <br />
               {/* A BEARER CREDENTIAL. `/link <code>` is accepted from ANY chat,
@@ -1580,13 +1816,31 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   (lib/telegram-listening.ts). Neither is "check back". */}
               {tg?.botElsewhere
                 ? t("settings.tg.elsewhere")
+                : agentDown !== null && view.telegramBotToken.set
+                ? <>
+                    {/* NOR "CHECK BACK" WHEN NOTHING WILL MINT ONE: an agent
+                        the fleet holds (a recovery hold among them), never
+                        started, or with an expired key has no worker and no
+                        hold process (agent-status.ts AgentDown). */}
+                    {agentDown === "recovery"
+                      ? t("settings.tg.recovery", { bot: tg?.botUsername ? `@${tg.botUsername}` : "your bot" })
+                      : t(agentDown === "expired" ? "settings.tg.expired" : agentDown === "stopped" ? "settings.tg.notRunning" : "settings.tg.notStarted")}
+                    {agentDown === "expired" ? <>{" "}<Link href="/grant#resign">{t("settings.tg.renew")}</Link></> : null}
+                  </>
                 : tg?.linkPending && tg.enabled
                 ? t("settings.tg.pickingUp")
                 : view.telegramBotToken.set
-                  ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
-                  : "Your link code appears here once a token is saved."}
+                  ? "No link code yet. Your agent makes one once it is running with this token set — check back shortly."
+                  : "Your link code appears here once a bot is connected."}
             </p>
           )}
+          {/* THE MANUAL PATH, OPEN WHEN IT IS THE ONLY ONE. Collapsed, it hid
+              behind "Bot creation isn't available right now" with nothing to
+              click: open it whenever creation can't start here, so the
+              @BotFather route is on screen. */}
+          <details className="settings-group" open={view.telegramBotToken.set || hosted === false || telegramCreateAvailable === false}>
+          <summary>Connect an existing bot</summary>
+          <p className="mm-hint">Already have a bot? Get its token from <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> and add it here.</p>
           <div className="mm-grid">
             <Field
               label={t("settings.label.botToken")}
@@ -1594,18 +1848,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             >
               <input
                 type="password"
+                disabled={telegramCreating}
                 placeholder={secretPlaceholder(view.telegramBotToken)}
                 value={draft.telegramBotToken ?? ""}
                 onChange={set("telegramBotToken")}
               />
               {view.telegramBotToken.set && (
-                <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
+                <button type="button" className="mm-btn danger sm" disabled={telegramCreating} onClick={() => setDraft((x) => ({ ...x, telegramBotToken: "" }))}>
                   clear
                 </button>
               )}
             </Field>
             <Field label={t("settings.label.connection")}>
-              <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
+              <button type="button" className="mm-tag" disabled={telegramCreating} style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
                 test connection
               </button>
               {/* AN UNREAD BRIDGE IS NOT A MISSING TOKEN.
@@ -1619,6 +1874,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   it and the home strip shares the same words. */}
               <span className="mm-unit">{tgTest ?? telegramLabel(telegramRow(tg))}</span>
             </Field>
+          </div>
+          </details>
+          <div className="mm-grid">
             <label className="mm-field">
               <span className="mm-label">{t("settings.label.enableTelegram")}</span>
               <span className="mm-input">
@@ -1688,13 +1946,37 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           </details>
           {/* POSTING ON X — hosted only, and only on a RESOLVED `hosted`, so a
               self-hosted page never flashes a section it cannot use. The whole
-              section is its own component (terminal/XPosting.tsx): it reads
-              and writes /api/x/*, never this form's `draft`, and nothing here
-              is saved by "Save changes". The owner it sends is the one this
+              connection component reads and writes /api/x/* immediately;
+              the editorial and disclosure preferences use this form's save.
+              The owner each path sends is the one this
               form was read for (SettingsView.owner). */}
           {hosted === true && (
             <details className="settings-group" id="x-posting"><summary>Posting on X</summary>
               <XPosting owner={view.owner} hosted={hosted} />
+              <Field label="X writing style" hint="Applies only to this agent's posts. Dry adds occasional light sarcasm while keeping its AI identity clear.">
+                <select value={v("xVoice") || "default"} onChange={set("xVoice")}>
+                  <option value="default">Default</option>
+                  <option value="dry">Casual and dry</option>
+                </select>
+              </Field>
+              <label className="mm-check">
+                <input type="checkbox"
+                  checked={xPublicWalletIntro ?? view.values.xPublicWalletIntro === true}
+                  onChange={(e) => setXPublicWalletIntro(e.target.checked)} />
+                Include my agent's public wallet and network in its X introduction
+              </label>
+              <p className="mm-hint">Anyone reading the post can track this wallet's on-chain activity. Save before enabling posting. This affects a future introduction; it does not repost one already sent or remove an existing public post.</p>
+              <label className="mm-check">
+                <input type="checkbox" checked={xTokenAddresses ?? view.values.xTokenAddresses === true}
+                  onChange={(e) => setXTokenAddresses(e.target.checked)} />
+                Include the verified token contract and network in trade posts
+              </label>
+              <label className="mm-check">
+                <input type="checkbox" checked={xTradeResults ?? view.values.xTradeResults === true}
+                  onChange={(e) => setXTradeResults(e.target.checked)} />
+                Post about completed sales and verified results
+              </label>
+              <p className="mm-hint">Reactions follow confirmed sales. Gross results are labelled before fees and gas; missing cost basis cannot become a claimed win.</p>
             </details>
           )}
 
@@ -1774,6 +2056,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               </>
             ) : tg?.botElsewhere ? (
               t("settings.tg.elsewhereShort")
+            ) : agentDown !== null && view.telegramBotToken.set ? (
+              t(agentDown === "recovery" ? "settings.tg.recoveryShort" : "settings.tg.notRunningShort")
             ) : tg?.linkPending && tg.enabled ? (
               t("settings.tg.pickingUp")
             ) : (
@@ -2204,14 +2488,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
 
           </details>
 
-          <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
+          <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…" || telegramCreating}>
             {hasUnsavedChanges && status === "Changes saved" ? "Save changes" : status ?? "Save changes"}
           </button>
           {botClaimed && (
             <div className="mm-note" role="alert">
               <p style={{ marginTop: 0 }}>{botClaimed}</p>
               <p className="mm-hint">Nothing has been saved yet.</p>
-              <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…"}>
+              <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…" || telegramCreating}>
                 Move it here
               </button>{" "}
               {/* KEEPING IT THERE TAKES THE TOKEN OUT OF THE FORM. Left in the

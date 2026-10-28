@@ -20,21 +20,32 @@ import {
   derivationUnreachable,
   duplicateWallPermissions,
   isHostedMode,
+  isRobinhoodChainId,
   type Derivation,
   type EnergyStatus,
   type StoredGrant,
+  GRANT_PERP_LIGHTER,
+  grantPurpose,
+  type GrantPurpose,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
 import { readAgentEnergy } from "@/lib/agent-energy";
-import { getGrantStore } from "@merrymen/grant-store";
+import { getGrantStore, GrantReplacementConflict, GrantWalletConflict } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
+import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
+import { perpsHalf, stopLocalPerpsForKill, stopLocalPerpsGrantForRenewal, stopPerpsForKill, type PerpsHalf } from "../../../../../worker/src/perps-kill";
+import { readWalletParam, WALLET_PARAM } from "@/lib/wallet-param";
+import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
+import { resolveConfig } from "../../../../../worker/src/settings";
+import { errorText } from "../../../../../worker/src/redact-urls";
+import { workerStale as workerStaleOf } from "@/terminal/worker-stale";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -44,14 +55,78 @@ const HEARTBEAT_FILE = homePaths.heartbeat();
  * copy of this check, since it builds a filename from the address. */
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
 
+/**
+ * BODY LIMITS. A grant is a serialized permission plus a few fields; partner
+ * activation (lib/partner-enrollment.ts) carries the same grant in at most
+ * 256 KiB, with the permission itself capped at 240,000 characters. Nothing a
+ * signer makes comes close. The kill switch's body is a few named fields.
+ * Every check below parses or scans the whole payload, so it is bounded first.
+ */
+const GRANT_BODY_MAX_BYTES = 256 * 1024;
+const GRANT_DELETE_BODY_MAX_BYTES = 8 * 1024;
+
+/**
+ * The body as text, or null when it is larger than `limit` bytes. Counted
+ * while it streams, so an oversized body is never held in memory whole; the
+ * declared length is refused first as the cheap case.
+ */
+async function readGrantBody(req: Request, limit: number): Promise<string | null> {
+  const declared = req.headers.get("content-length");
+  if (declared !== null && !(Number(declared) <= limit)) return null;
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, size).toString("utf8");
+}
+const tooLarge = () => NextResponse.json({ error: "That request is too large. Nothing was saved." }, { status: 413 });
+
 export interface AgentStatus {
   exists: boolean;
+  /** Authenticated owner's source hold; independent of saved balances or old worker status. */
+  recovery?: FleetRecoveryView | null;
   /** Hosted GET only: the authenticated tenant this status was read for. */
   tenant?: `0x${string}` | null;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
   /** Decimal strings as read from the chain; null for any read that failed. */
   balances?: GrantBalances;
   workerAliveAt?: number | null;
+  /**
+   * TRUE WHEN NEITHER HEARTBEAT SOURCE COULD BE READ — no file and the ledger
+   * read failed or there is no database. `workerAliveAt` is null then too, but
+   * it means "could not tell", not "never heard from", and the chat must not
+   * tell an owner whose agent may be trading that it has not started.
+   * Absent whenever a source answered.
+   */
+  heartbeatUnread?: true;
+  /**
+   * HAS THE WORKER STOPPED REPORTING? `workerAliveAt` older than the watchdog's
+   * window for this owner's tick — never shorter than one order's run, which
+   * the mirrored row can lag the file by — plus a margin for the mirror.
+   *
+   * DECIDED HERE, by this server's clock — never by the browser's, which would
+   * judge a server timestamp by however wrong that laptop's clock is — and by
+   * the one rule the MCP tools already state (terminal/worker-stale.ts).
+   *
+   * NULL IS "NEVER HEARD FROM", which is not stale and not fresh: a new agent
+   * waiting for its first tick has not stopped. Absent on an older server, and
+   * a client reads that as null.
+   */
+  workerStale?: boolean | null;
   /** "paper" (simulated fills), "live" (signing), or "idle" — from the heartbeat. */
   mode?: "paper" | "live" | "idle" | null;
   /**
@@ -101,7 +176,13 @@ export interface AgentStatus {
 }
 
 export async function POST(req: Request) {
-  const grant = (await req.json()) as StoredGrant;
+  let text: string | null;
+  try { text = await readGrantBody(req, GRANT_BODY_MAX_BYTES); }
+  catch { return NextResponse.json({ error: "not a grant" }, { status: 400 }); }
+  if (text === null) return tooLarge();
+  let grant: StoredGrant;
+  try { grant = JSON.parse(text) as StoredGrant; }
+  catch { return NextResponse.json({ error: "not a grant" }, { status: 400 }); }
   if (!grant?.serialized || !isAddr(grant?.smartAccount)) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
   }
@@ -136,6 +217,77 @@ export async function POST(req: Request) {
         duplicates,
       },
       { status: 400 },
+    );
+  }
+
+  // ── A GRANT FOR A CHAIN THIS PRODUCT DOES NOT RUN ON ─────────────────────
+  //
+  // Nothing checked chainId before, and what reads it downstream (chainForId,
+  // the derivation, the balance reads) turns any id but the testnet into
+  // mainnet: a grant naming chain 1, a Solana grant or one with no chainId at
+  // all was accepted and read as Robinhood Chain. Every grant our signers make
+  // carries 4663 or 46630 (chain.id), so this refuses only what they never
+  // send. For every mode, before the hosted checks read the id, and pure, so
+  // it burns no nonce.
+  if (!isRobinhoodChainId(grant.chainId)) {
+    const named = grant.chainId === undefined ? "names no chain" : `is for chain ${JSON.stringify(grant.chainId).slice(0, 64)}`;
+    return NextResponse.json(
+      {
+        error: `this grant ${named}, and Merrymen only runs on Robinhood Chain (4663) and its testnet (46630). Nothing was saved.`,
+        code: "unsupported_chain",
+      },
+      { status: 400 },
+    );
+  }
+
+  // A FEATURE LIST THAT IS NOT A LIST is refused by name before anything reads
+  // it. The perps refusal below asks `.includes`, which a number or an object
+  // does not have (a 500) and a string answers by substring; neither is a
+  // grant a signer mints.
+  if (
+    grant.grantFeatures != null &&
+    (!Array.isArray(grant.grantFeatures) || grant.grantFeatures.some((f) => typeof f !== "string"))
+  ) {
+    return NextResponse.json({ error: "grant features must be a list of names" }, { status: 400 });
+  }
+
+  // WHICH WALLET (?wallet=; absent is Spot), AND THE GRANT MUST AGREE. Pure,
+  // every mode, before anything is read or stored: a grant only ever lands
+  // in the wallet it names (grantPurpose: absent is Spot).
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was saved.");
+  let named: GrantPurpose;
+  try { named = grantPurpose(grant); }
+  catch { return NextResponse.json({ error: "this grant names a wallet this server does not know. Nothing was saved." }, { status: 400 }); }
+  if (named !== wallet) {
+    return NextResponse.json(
+      { error: `this grant is for your ${named} wallet, but the request is for your ${wallet} wallet. Nothing was saved.`, code: "wallet-mismatch" },
+      { status: 400 },
+    );
+  }
+  // NO PERPS WALLET IS MADE OR RENEWED HERE YET (perps slice 2). The stores
+  // can hold one and every kill reaches one; making one waits for slice 5.
+  if (wallet === "perps") return perpsWalletNotOffered("Nothing was saved.");
+
+  // PERPETUALS ARE NOT TAKEN BY THIS SERVER YET (perps slice 1). The signers can
+  // carry a Lighter key and the canonical wall can rebuild one, but nothing here
+  // can mint, seal, hold or stand down a key, so a grant naming one is refused
+  // exactly as a perps-off server refuses a new opt-in. Every mode, before
+  // anything is read or stored. Replaced by perp-custody's acceptIncomingPerp
+  // when keygen lands.
+  if (
+    grant.grantFeatures?.includes(GRANT_PERP_LIGHTER) ||
+    grant.perp !== undefined ||
+    grant.perpRecovery !== undefined
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "perpetuals are not offered for this agent on this server yet, so no new Lighter key can be made or sealed. Sign again without perpetuals.",
+        code: "perp-not-offered",
+        ownerFacing: true,
+      },
+      { status: 403 },
     );
   }
 
@@ -311,7 +463,7 @@ export async function POST(req: Request) {
     // not a security boundary so much as a collision guard, and it fails safe:
     // an unreadable store refuses rather than allowing a possible collision.
     try {
-      const holder = await getGrantStore().tenantForAccount(grant.smartAccount);
+      const holder = await getGrantStore("spot").tenantForAccount(grant.smartAccount);
       if (holder && holder !== tenant) {
         return NextResponse.json(
           { error: "this agent account is already linked to a different login" },
@@ -346,9 +498,10 @@ export async function POST(req: Request) {
     // derivation before any equality is computed. See packages/core/derivation.
     let derived: Derivation;
     try {
-      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId);
+      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId, "spot");
     } catch (e) {
-      derived = derivationUnreachable(e instanceof Error ? e.message : String(e));
+      // A live eth_call: its error is viem's, and names the RPC URL with its key.
+      derived = derivationUnreachable(errorText(e));
     }
     if (!derived.ok) {
       // `zero` and `malformed` are the chain answering wrongly, not the client
@@ -365,8 +518,12 @@ export async function POST(req: Request) {
     // store seals the session key at rest and refuses (again, defence in depth)
     // any grant carrying an owner key or whose owner isn't this tenant.
     try {
-      await getGrantStore().put(tenant, grant);
+      await getGrantStore("spot").put(tenant, grant);
     } catch (e) {
+      if (e instanceof GrantReplacementConflict) return NextResponse.json({ error: e.message, ownerFacing: true }, { status: 409 });
+      // The other wallet's owner, or another login's claim on this account,
+      // decided inside the write (grant-store.ts). Nothing was stored.
+      if (e instanceof GrantWalletConflict) return NextResponse.json({ error: e.message, code: e.code, ownerFacing: true }, { status: 409 });
       return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
     }
 
@@ -397,8 +554,8 @@ export async function POST(req: Request) {
       account: grant.smartAccount,
       identities: () => getIdentityStore(),
       settings: {
-        get: () => getSettingsStore().get(tenant),
-        put: (s) => getSettingsStore().put(tenant, s),
+        get: () => getSettingsStore("spot").get(tenant),
+        put: (s) => getSettingsStore("spot").put(tenant, s),
       },
       ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
     });
@@ -428,6 +585,12 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  // WHICH WALLET a permission replacement stops (?wallet=; absent is Spot). A
+  // kill names none: it stops every wallet, and a request that names one for
+  // it is refused as ambiguous, as an unqualified DELETE is (below).
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was deleted.");
+  const walletNamed = new URL(req.url).searchParams.has(WALLET_PARAM);
   if (isHostedMode()) {
     // The kill switch is per-tenant and authenticated. It forgets the server's
     // session key; the wallet and its funds stay reachable via the owner key
@@ -436,31 +599,183 @@ export async function DELETE(req: Request) {
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
     // A tab can switch logins while the owner's stop request is in flight.
-    const body = await req.json().catch(() => null) as { expectedTenant?: unknown } | null;
+    const text = await readGrantBody(req, GRANT_DELETE_BODY_MAX_BYTES).catch(() => "");
+    if (text === null) return NextResponse.json({ error: "That request is too large. Nothing was deleted." }, { status: 413 });
+    let body: { expectedTenant?: unknown; purpose?: unknown; expectedAccount?: unknown; expectedSession?: unknown } | null;
+    try { body = JSON.parse(text) as typeof body; } catch { body = null; }
     if (body?.expectedTenant !== undefined &&
         (typeof body.expectedTenant !== "string" || body.expectedTenant.toLowerCase() !== tenant.toLowerCase())) {
       return NextResponse.json({ error: "The signed-in account changed. Check the account before stopping it." }, { status: 409 });
     }
-    await getGrantStore().remove(tenant);
-    return NextResponse.json({ ok: true });
+    // Old renewal tabs used an unqualified DELETE. Refuse that ambiguous
+    // request instead of silently treating a permission update as a discard.
+    if (body?.purpose !== "permission-replacement" && body?.purpose !== "delete-agent") {
+      return NextResponse.json({ error: "Reload your wallet before stopping or renewing. Nothing was deleted.", ownerFacing: true }, { status: 400 });
+    }
+    if (body?.purpose === "permission-replacement") {
+      if (!isAddr(body.expectedAccount) || (body.expectedSession !== undefined && !isAddr(body.expectedSession))) {
+        return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
+      }
+      try {
+        const state = await getGrantStore(wallet).stopForReplacement(tenant, body.expectedAccount, body.expectedSession);
+        if (state === "changed") return NextResponse.json({ error: "Your permission changed in another tab. Reload your wallet before replacing it." }, { status: 409 });
+        return NextResponse.json({ ok: true, replacement: true, state });
+      } catch {
+        return NextResponse.json({ error: "The service could not confirm the replacement stop. Your wallet was kept; try again.", ownerFacing: true }, { status: 503 });
+      }
+    }
+    if (walletNamed) return killNamesWallet();
+    // The Solana strategy and the Perps wallet are stopped whatever happens to the Robinhood
+    // grant: a store that throws here still leaves the owner's autonomous Solana trading off and
+    // their Perps grant revoked. Neither half waits on the other.
+    let removal: unknown = null;
+    try { await getGrantStore("spot").remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
+    const solana = await solanaStopped(() => stopSolanaForKill(tenant));
+    const perps = await perpsHalf(() => stopPerpsForKill(tenant));
+    if (removal !== null) throw removal;
+    return killed(solana, perps);
   }
+  // A SELF-HOSTED RENEWAL STOPS THE WALLET IT NAMES, NOT THE OTHER ONE. Every
+  // self-hosted DELETE has always removed grant.json, renewals too (the new grant
+  // is posted straight after), so the body was never read. It is now, only so a
+  // renewal leaves the other wallet's grant alone: neither wallet's authority
+  // reaches the other. Anything but a readable permission replacement, an
+  // unreadable or oversized body included, is the kill it always was. Read before
+  // the wallet is judged: a renewal may name its wallet, as it may hosted, and
+  // only a kill that names one is refused.
+  let renewal = false;
+  try {
+    const text = await readGrantBody(req, GRANT_DELETE_BODY_MAX_BYTES);
+    renewal = text !== null && (JSON.parse(text) as { purpose?: unknown } | null)?.purpose === "permission-replacement";
+  } catch { /* a kill */ }
+  if (walletNamed && !renewal) return killNamesWallet();
+  if (renewal && wallet === "perps") return selfHostedPerpsRenewalStop();
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
+  // The local Solana strategy and the local Perps wallet are stopped first, whatever happens to
+  // the Robinhood grant: an archive it cannot write keeps grant.json (and pauses trading
+  // instead), and must never leave autonomous Solana trading or a Perps grant behind a
+  // "paused" answer.
+  const solana = await solanaStopped(() => stopLocalSolanaForKill());
+  const perps: PerpsHalf = renewal ? { state: "none" } : await perpsHalf(() => stopLocalPerpsForKill());
   try {
     await removeSelfHostedGrant();
   } catch (e) {
-    if (e instanceof GrantArchiveError) return NextResponse.json({ error: e.message, paused: e.paused }, { status: 409 });
+    if (e instanceof GrantArchiveError) {
+      return NextResponse.json({ error: `${e.message}${solana ? " Your Solana strategy was stopped." : " Your Solana strategy could not be stopped either: try the kill again."}${perpsAfterKeptGrant(perps)}`,
+        paused: e.paused, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 409 });
+    }
     throw e;
   }
-  return NextResponse.json({ ok: true });
+  return killed(solana, perps);
+}
+
+/** A `?wallet=` that names no wallet, or more than one. */
+function walletUnknown(nothing: string): NextResponse {
+  return NextResponse.json({ error: `That request names a wallet this server does not know (${WALLET_PARAM}=spot or ${WALLET_PARAM}=perps). ${nothing}` }, { status: 400 });
+}
+/** Perps wallets exist in the stores and every kill reaches one, but none is made, renewed or shown here yet. */
+function perpsWalletNotOffered(nothing: string): NextResponse {
+  return NextResponse.json(
+    { error: `Perps wallets are not offered on this server yet. ${nothing}`, code: "perps-wallet-not-offered", ownerFacing: true },
+    { status: 403 },
+  );
+}
+/**
+ * A self-hosted Perps renewal's first step, as hosted's stopForReplacement of the
+ * Perps grant: the Perps home's grant.json archived, then removed. Nothing of the
+ * Spot wallet's, or Solana's, is touched. (No new Perps grant can be posted until
+ * slice 5, so no client sends this yet.)
+ */
+async function selfHostedPerpsRenewalStop(): Promise<NextResponse> {
+  // The grant alone: a renewal keeps the wallet trading, so its paper strategy stays as the owner set it.
+  const perps = await perpsHalf(() => stopLocalPerpsGrantForRenewal());
+  if (perps.state === "not-stopped") {
+    return NextResponse.json(
+      { error: `Your Perps wallet's permission could not be stopped for renewal.${perps.why ? ` ${perps.why}` : ""} Nothing else was changed; try again.`, ownerFacing: true },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json({ ok: true, replacement: true, state: perps.state === "stopped" ? "stopped" : "absent" });
+}
+
+/** "Kill all agents" stops every wallet; a kill naming one is a client that means something else. */
+function killNamesWallet(): NextResponse {
+  return NextResponse.json(
+    { error: "Kill all agents stops every wallet and cannot be aimed at one. Reload and try again. Nothing was deleted.", ownerFacing: true },
+    { status: 400 },
+  );
+}
+
+/**
+ * "Kill all agents" stops autonomous Solana trading too: the strategy is turned
+ * off with a revision bump that fences any admission already in flight. True
+ * when it is off (or there was none), false when it could not be stopped.
+ */
+async function solanaStopped(stop: () => Promise<unknown>): Promise<boolean> {
+  try { await stop(); return true; } catch { return false; }
+}
+/** What the Perps half did, said after a Robinhood grant the kill had to keep. */
+function perpsAfterKeptGrant(perps: PerpsHalf): string {
+  if (perps.state === "stopped") return " Your Perps wallet's grant was revoked.";
+  if (perps.state === "not-stopped" && perps.left === "paper") return " Your Perps wallet's practice perpetuals could not be switched off: try the kill again.";
+  if (perps.state === "not-stopped") return " Your Perps wallet's grant could not be revoked either: try the kill again.";
+  return "";
+}
+
+/** What a failed Perps half left undone, as the kill's sentence names it. */
+function perpsLeft(perps: PerpsHalf): string {
+  return perps.left === "paper"
+    ? "your Perps wallet's practice perpetuals could not be switched off yet"
+    : "your Perps wallet's grant could not be revoked yet";
+}
+/**
+ * A kill that could not stop the Solana strategy or revoke the Perps grant is reported
+ * incomplete, never as done. A retry is safe. An owner with neither sees exactly what
+ * they always saw.
+ */
+function killed(solana: boolean, perps: PerpsHalf): NextResponse {
+  const perpsDown = perps.state === "not-stopped";
+  if (!solana || perpsDown) {
+    const what = !solana && perpsDown ? `your Solana strategy could not be stopped and ${perpsLeft(perps)}`
+      : !solana ? "your Solana strategy could not be stopped yet" : perpsLeft(perps);
+    return NextResponse.json({ error: `Kill incomplete: your Robinhood Chain agent is stopped, but ${what}.${perps.why ? ` ${perps.why}` : ""} Try the kill again.`,
+      ownerFacing: true, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 503 });
+  }
+  return NextResponse.json(perps.state === "stopped" ? { ok: true, perps: "stopped" } : { ok: true });
+}
+
+/**
+ * The tick this owner's worker runs on, which sets how long a silence has to
+ * be before it means "stopped"; null when it cannot be read, and `freshWithin`
+ * answers null with the default tick.
+ *
+ * READ FOR THE CALLER, as the orders route reads it: hosted, this container's
+ * own settings are the house's and say nothing about this tenant's cadence;
+ * self-hosted they are the worker's own. A failed read is the default, never
+ * the house's tick — a shorter window from the wrong owner would call a healthy
+ * agent stopped.
+ */
+async function tickSecondsFor(hostedTenant: `0x${string}` | null | undefined): Promise<number | null> {
+  try {
+    const tick = hostedTenant ? (await getSettingsStore("spot").get(hostedTenant))?.tickSeconds : resolveConfig().tickSeconds;
+    return typeof tick === "number" && Number.isFinite(tick) && tick > 0 ? tick : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function GET(req: Request) {
+  // Spot's status, and only Spot's: a ?wallet=perps read is refused, never
+  // answered with the Spot wallet's status (the Perps desk lands in slice 5).
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was read.");
+  if (wallet === "perps") return perpsWalletNotOffered("Nothing was read.");
   let grant: StoredGrant;
   const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
   if (hostedTenant !== undefined) {
     if (!hostedTenant) return NextResponse.json({ exists: false, tenant: null } satisfies AgentStatus);
-    const g = await getGrantStore().get(hostedTenant);
+    const g = await getGrantStore("spot").get(hostedTenant);
     if (!g) return NextResponse.json({ exists: false, tenant: hostedTenant } satisfies AgentStatus);
     grant = g;
   } else {
@@ -484,13 +799,17 @@ export async function GET(req: Request) {
   let mode: AgentStatus["mode"] = null;
   let gasSponsored: boolean | null = null;
   let liveBlocker: string | null = null;
+  let heartbeatRead = false;
   try {
+    // Hosted status must come from this authenticated account, never a web-service file.
+    if (hostedTenant !== undefined) throw new Error("Hosted heartbeat is account-scoped.");
     const hb = JSON.parse(await readFile(HEARTBEAT_FILE, "utf8")) as {
       at: number;
       mode?: AgentStatus["mode"];
       sponsorGas?: boolean;
     };
     workerAliveAt = hb.at;
+    heartbeatRead = true;
     mode = hb.mode ?? null;
     // Absent on a heartbeat written before this field existed — unknown, not no.
     gasSponsored = hb.sponsorGas ?? null;
@@ -521,8 +840,10 @@ export async function GET(req: Request) {
                   live_blocker?: string | null;
                 }
               | undefined)
-          : undefined,
+          : null,
       );
+      // undefined is a ledger that answered with no row; null is no ledger.
+      if (row !== null) heartbeatRead = true;
       if (row?.beat_at) {
         workerAliveAt = Number(row.beat_at);
         mode = (row.mode as AgentStatus["mode"]) ?? null;
@@ -543,6 +864,25 @@ export async function GET(req: Request) {
   // deployments. Best effort: an unreadable report is null, never an error.
   const energy = await readAgentEnergy(grant.smartAccount);
 
+  // AFTER BOTH HEARTBEAT SOURCES, so it judges whichever one answered: the
+  // file self-hosted, the mirrored row hosted. See terminal/worker-stale.ts.
+  // Never heard from is null whatever the tick, so that costs no settings read.
+  const workerStale = workerAliveAt === null ? null
+    : workerStaleOf(workerAliveAt, Math.floor(Date.now() / 1000), await tickSecondsFor(hostedTenant));
+
+  let recovery: FleetRecoveryView | null = null;
+  if (hostedTenant) {
+    try {
+      recovery = await withReadDb(db => {
+        if (!db) throw new Error("Hosted recovery ledger is unavailable.");
+        return readFleetRecoveryView(db,
+          { tenant: hostedTenant, smartAccount: grant.smartAccount, chainId: grant.chainId }, workerAliveAt);
+      });
+    } catch {
+      return NextResponse.json({ error: "Couldn't confirm this agent's recovery status. Please try again.", ownerFacing: true }, { status: 503 });
+    }
+  }
+
   // Never echo key material to the browser: the serialized session account, the
   // session key, AND the generated owner key (which custodies the funds).
   const { serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, ...publicGrant } = grant;
@@ -554,10 +894,13 @@ export async function GET(req: Request) {
     grant: publicGrant,
     balances,
     workerAliveAt,
+    ...(heartbeatRead ? {} : { heartbeatUnread: true as const }),
+    workerStale,
     mode,
     gasSponsored,
     liveBlocker,
     energy,
+    ...(hostedTenant ? { recovery } : {}),
   };
   return NextResponse.json(status);
 }

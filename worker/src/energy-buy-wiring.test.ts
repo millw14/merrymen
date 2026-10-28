@@ -264,7 +264,9 @@ describe("THE EXECUTOR", () => {
     const settle = r.indexOf("await settleEnergyLanding(");
     assert.ok(r.indexOf("noteEnergyLanded(r.blockNumber);") > settle);
     // The arm seeds it from the ledger AFTER the stranded resolver ran, and before the budget.
-    const reconcile = CODE.indexOf("if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);");
+    // The owner's book (custody and chain) rides along since owner operations
+    // stopped being booked as trades (owner-operations.ts); the order is what this pins.
+    const reconcile = CODE.indexOf("if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`, { custody: custodyAddressesOf(grant), chainId: grant.chainId });");
     const seeded = CODE.indexOf("await energyLandedBlockAtArm({", reconcile);
     assert.ok(reconcile > 0 && seeded > reconcile && seeded < CODE.indexOf("await refreshBudget(agentId);", reconcile));
     assert.match(CODE.slice(seeded, seeded + 300), /newest: \(\) => newestLandedEnergyBuy\(agentId\),/);
@@ -354,10 +356,10 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(steady, /baselineUsdg: lastCashUsdg,\s*since: baselineSince,\s*unattributed: baselineUnattributed,\s*settled: takeSettlements\(\),\s*cashUsdg,\s*opsInFlight,\s*writesInInterval: ledgerWrites !== ledgerWritesAtSnapshot,/);
     const fold = steady.indexOf("lastCashUsdg = l.baselineUsdg;");
     const hold = steady.indexOf('if (l.verdict.action === "hold") {');
-    const infer = steady.indexOf('if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "no trade explains this");');
+    const infer = steady.indexOf('if (l.verdict.action === "infer") await bookInferredChange(l.verdict.deltaUsdg, receiptHead, scan);');
     assert.ok(fold > 0 && hold > fold && infer > hold);
     assert.match(steady.slice(hold, infer), /return "held";/);
-    assert.match(f, /lastCashUsdg = cashUsdg;\s*baselineSince = listedAt;\s*baselineUnattributed = false;\s*ledgerWritesAtSnapshot = ledgerWrites;/);
+    assert.match(f, /lastCashUsdg = cashUsdg;\s*baselineSince = listedAt;\s*baselineUnattributed = false;\s*ledgerWritesAtSnapshot = ledgerWrites;\s*baselineHead = receiptHead \?\? baselineHead;\s*receiptsInInterval = 0n;/);
     // The resolver never moves the write count; it queues, once per op, BEFORE the row is written.
     const r = arrow("resolveStrandedOps");
     assert.doesNotMatch(r, /ledgerWrites\s*\+?=/);
@@ -369,13 +371,21 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     // The tick: a held look (or an aborted one) accrues no fee and moves no
     // lifetime peak — but the breaker observes the held figure, never the raw
     // equity, and the valuation is written flagged.
+    //
+    // (Perps, docs/perps.md rule 12: the held figure is built on the PEAK
+    // BASIS — equity less open perp gains, identical to equity with no perps —
+    // and perp margin in transit holds the ratchets the same way, with the
+    // transit taken out of the observation. A held FLOW look still takes the
+    // expected cash from heldCashBaseline and still flags its row; a
+    // transit-only hold has explained its cash and flags nothing.)
     const t = body("tick");
     assert.match(t, /const flows = await reconcileFlowsOrRetry\(/);
     assert.match(
       t,
-      /if \(flows === "held"\) \{\s*ratchet = tickRatchets\(plan, \{\s*incomplete: bookIncomplete,\s*curveMarked: curveMarked\.length,\s*held: true,\s*breakerObservationUsdg: heldBreakerObservationUsdg\(\{\s*equityUsdg,\s*cashUsdg: balances\.cashUsdg,\s*expectedCashUsdg: await heldCashBaseline\(agentId\),\s*\}\),\s*\}\);\s*\}/,
+      /if \(flows === "held" \|\| transitHeld\) \{\s*ratchet = tickRatchets\(plan, \{\s*incomplete: bookIncomplete,\s*curveMarked: curveMarked\.length,\s*held: flows === "held",\s*transitHeld,\s*breakerObservationUsdg: heldBreakerObservationUsdg\(\{\s*(?:\/\/[^\n]*\n\s*)*equityUsdg: peakBasis,\s*cashUsdg: balances\.cashUsdg,\s*(?:\/\/[^\n]*\n\s*)*expectedCashUsdg: flows === "held" \? await heldCashBaseline\(agentId\) : balances\.cashUsdg,\s*inTransitUsdg: perpRead\?\.inTransitMicro \?\? 0n,\s*\}\),\s*\}\);\s*\}/,
     );
-    assert.ok(t.indexOf('if (flows === "held") {') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
+    assert.ok(t.indexOf('if (flows === "held" || transitHeld) {') > 0);
+    assert.ok(t.indexOf('if (flows === "held" || transitHeld) {') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
     // The breaker's lift moves after the mark, from the mark on either side of the accrual.
     const accrue = t.indexOf("highWaterMarkUsdg = await ratchet.accrue(accrual, highWaterMarkUsdg, async () => {");
     assert.ok(t.indexOf("const markBeforeAccrual = highWaterMarkUsdg;") < accrue);
@@ -428,6 +438,43 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(t, /await ratchet\.equityRow\(\(\{ flowsHeld \}\) =>\s*addEquity\(agentId, \{[\s\S]{0,400}cashReadAt: cashReadAtSec,/);
   });
 
+  it("(5d) A RECEIPT BEFORE AN OPINION: a change no trade explains is booked as its one matching receipt, inference only when there is none, and nothing twice (flow-inference.ts RULE 4)", () => {
+    // Alan's 10-18 top-up was inferred with no transaction, and from the next
+    // restart the anchor read contributions as unknown for six days.
+    const f = arrow("reconcileFlows");
+    // The head is read after the scan's branch and before the ledger read, only
+    // where a receipt could be looked for; the first look places the floor.
+    const head = f.indexOf("const receiptHead = !covered && scan?.head && !paperActive() ? await scan.head().catch(() => null) : null;");
+    assert.ok(head > f.indexOf("covered = await scanChainFlows(scan);") && head < f.indexOf("const listedAt = Math.floor(Date.now() / 1000);"));
+    assert.match(f.slice(head), /^const receiptHead = [^\n]*\n\s*if \(receiptFloor === null\) receiptFloor = receiptFloorAfter\(null, receiptHead\);/);
+    // The booking: the residual after what this interval's receipts explain;
+    // paper only through record(); the window from the baseline's head and the floor.
+    const at = f.indexOf("const bookInferredChange = async (");
+    const g = f.slice(at, f.indexOf("\n    };\n", at));
+    assert.match(g, /const residual = deltaUsdg - receiptsInInterval;\s*if \(residual === 0n\) return;/);
+    assert.match(g, /if \(paperActive\(\)\) return record\(residual, "no trade explains this"\);/);
+    assert.match(g, /const window = receiptWindow\(\{ baselineHead, floor: receiptFloor, head \}\);/);
+    assert.match(g, /await bookInferredReceipt\(read, \{\s*agentId,\s*mode: "live",\s*deltaUsdg6: residual,\s*flowBookedForTx: \(txHash\) => hasFlowForTx\(agentId, txHash\),/);
+    // A booked receipt counts BEFORE anything after it can throw, and a failed
+    // refresh leaves the next tick to re-read both peaks.
+    const counted = g.indexOf("receiptsInInterval += residual;");
+    assert.ok(counted > g.indexOf('if (found && found.kind !== "unmatched") {') && counted < g.indexOf("highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);"));
+    assert.match(g, /\} catch \(e\) \{\s*capitalPeakDirty = true;\s*throw e;\s*\}/);
+    // No receipt: the floor rises BEFORE the inferred booking, which is the old one.
+    const floor = g.indexOf("receiptFloor = receiptFloorAfter(receiptFloor, head);");
+    assert.ok(floor > counted && floor < g.indexOf('await record(residual, "no trade explains this");'));
+    assert.doesNotMatch(g, /addFlow\(|adjustAgentHwm\(/, "every inferred booking still goes through record()");
+    // The scan never resumes across a flow booked by inference.
+    const scan = f.slice(f.indexOf("const scanChainFlows = async"), f.indexOf("// EXACT BEFORE INFERRED."));
+    const guard = scan.indexOf("if (await inferredFlowSinceChainLog(agentId, mark)) {");
+    assert.ok(guard > scan.indexOf("if (at > BigInt(mark)) {") && guard < scan.indexOf("chainScanCursor = at;"));
+    assert.match(scan.slice(guard), /^if \(await inferredFlowSinceChainLog\(agentId, mark\)\) \{[\s\S]*?chainScanCursor = head;\s*return false;\s*\}\s*chainScanCursor = at;/);
+    // A covered look's baseline is the block the scan read through.
+    assert.match(f, /takeSettlements\(\);\s*baselineHead = chainScanCursor;/);
+    // Every live tick hands the seam over, with an uncached head.
+    assert.match(body("tick"), /head: \(\) => client\.getBlockNumber\(\{ cacheTime: 0 \}\),/);
+  });
+
   it("(5d) A STRANDED TRANSFER HOME is booked by the resolver BEFORE its row is settled, and left 'submitted' when it cannot be", () => {
     const r = arrow("resolveStrandedOps");
     const branch = r.indexOf('} else if (row.kind === "transfer" && r.success) {');
@@ -466,6 +513,25 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.doesNotMatch(orphans, /bookCapitalFlow|bookEnergyPurchase|settleEnergyLanding|energySettleDeps/);
     // And the resolver that DOES book runs before it, so a hash is settled once.
     assert.ok(arm.indexOf("await resolveStrandedOps(") < arm.indexOf("const orphans = await findOrphanOps({"));
+  });
+
+  it("(6b) the owner's own key is never booked as the agent's: the root branch comes first, records, and continues — no trade, fill, basis or flow", () => {
+    const arm = arrow("reconcileInFlightAtArm");
+    const loop = arm.slice(arm.indexOf("for (const o of orphans) {"));
+    const root = loop.indexOf(`if (o.validator === "root") {`);
+    const trade = loop.indexOf("const wrote = await addTrade({");
+    assert.ok(root > 0 && trade > root, "the root branch is decided before any trades row");
+    // Its body: from the `if` to its own closing brace, at the loop body's indentation.
+    const close = loop.indexOf("\n        }\n", root);
+    assert.ok(close > root && close < trade);
+    const branch = loop.slice(root, close + "\n        }".length);
+    assert.match(branch, /await recordOwnerOperation\(ownerOperationRow\(o\.owner, \{/);
+    assert.match(branch, /continue;\s*\}$/, "and it always continues past the trade path");
+    assert.doesNotMatch(branch, /addTrade|bookFill|setBasis|bookCapitalFlow|addFlow|adjustAgentHwm|setAgentHwm/, "it writes nothing but the record");
+    // Every path out of it continues: a root op with no reading, too shallow, or with no block is left for the next arm.
+    assert.equal(count(branch, "continue;"), 4, "unread, shallow, blockless, recorded — each continues");
+    // The arm passes the grant's custody and chain, so the record is read over the same book the scanner classifies with.
+    assert.match(arm, /owner: ownerBook,/);
   });
 
   it("(7) energy intents are built only in the command drain's path (see WHO CAN REACH THE BUY)", () => {
@@ -529,8 +595,16 @@ describe("THE EXCLUSIONS", () => {
     assert.match(CODE, /const discovered = autoTrench\.tokens\.filter\([^;]*&&!isEnergyReserveToken\(t\.address\)\);/);
   });
   it("the deposit scan is told the grant's chain (which reserve tokens make a purchase reserve-out)", () => {
-    const at = CODE.indexOf("await scanAndBookDepositWindow({");
-    assert.match(CODE.slice(at, at + 1200), /\.\.\.\(s\.grant \? \{ chainId: s\.grant\.chainId \} : \{\}\),/);
+    // One builder for the scan's window and an inferred change's receipt, so
+    // the two cannot judge the same transfer by different inputs.
+    const at = CODE.indexOf("const transferScan = async (");
+    assert.ok(at > 0);
+    const builder = CODE.slice(at, CODE.indexOf("\n    });\n", at));
+    assert.match(builder, /\.\.\.\(s\.grant \? \{ chainId: s\.grant\.chainId \} : \{\}\),/);
+    assert.match(builder, /custodyAddresses: custodyAddressesOf\(s\.grant\),/);
+    assert.match(builder, /tradeOpsInTx: \(txHash\) => tradeOpsInTx\(agentId, txHash\),/);
+    assert.match(CODE, /await scanAndBookDepositWindow\(await transferScan\(s, from, head\), \{/);
+    assert.match(CODE, /read = await transferScan\(s, window\.fromBlock, window\.toBlock\);/);
   });
 });
 

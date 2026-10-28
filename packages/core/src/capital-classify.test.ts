@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyUsdgMovement, totalCapital, type TransferLeg } from "./capital-classify";
+import {
+  classifyAssetMovement,
+  classifyUsdgMovement,
+  NATIVE_ASSET,
+  totalCapital,
+  type AssetClassifyInput,
+  type OperationProvenance,
+  type TransferLeg,
+} from "./capital-classify";
 
 /**
  * THE CANARY IS THE REFERENCE FIXTURE, and it is the case a naive rule gets
@@ -486,5 +494,360 @@ describe("the energy reserve purchase", () => {
     const t = totalCapital([]);
     assert.equal(t.grossReservePurchasesRaw, "0");
     assert.equal(t.reservePurchases, 0);
+  });
+});
+
+/**
+ * IN KIND: WHO SIGNED DECIDES WHETHER IT CAN BE CAPITAL AT ALL.
+ *
+ * The four shapes the in-kind preview exists for, each built the way the chain
+ * actually records it. The provenance on every fixture is what the EntryPoint's
+ * own UserOperationEvent nonce says — never whether a trades row exists, which
+ * is the input the Shogun case proved cannot be trusted.
+ */
+describe("in-kind movements", () => {
+  const ME = "0x00000000000000000000000000000000000000a1";
+  const OWNER_KEY = "0x00000000000000000000000000000000000000a2";
+  const TENANT_WALLET = "0x00000000000000000000000000000000000000a3";
+  const VAULT = "0x00000000000000000000000000000000000000c0";
+  const CURVE = "0x00000000000000000000000000000000000000c3";
+  const POOL = "0x00000000000000000000000000000000000000b1";
+  const STRANGER = "0x00000000000000000000000000000000000000f1";
+  const BUNDLER = "0x00000000000000000000000000000000000000e1";
+  const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+  const TSLA = "0x322f0929c4625ed5bad873c95208d54e1c003b2d";
+  const PEPE = "0x0000000000000000000000000000000000000ee0";
+  const MERRYMEN = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const HASH = "0x" + "11".repeat(32);
+
+  const root: OperationProvenance = { source: "user-op", validator: "root", userOpHash: HASH, nonce: "0" };
+  const sessionKey: OperationProvenance = { source: "user-op", validator: "permission", userOpHash: HASH, nonce: "1" };
+  const nobody = (...actors: string[]): OperationProvenance => ({ source: "none", actors });
+
+  const classify = (
+    l: TransferLeg,
+    provenance: OperationProvenance,
+    extra: Partial<AssetClassifyInput> = {},
+  ) =>
+    classifyAssetMovement({
+      account: ME,
+      leg: l,
+      opLegs: [l],
+      nativeLegs: [],
+      provenance,
+      usdgToken: USDG,
+      ownerAddresses: [OWNER_KEY, TENANT_WALLET],
+      reserveTokens: [MERRYMEN],
+      ...extra,
+    });
+
+  describe("an owner sudo sweep is asset-out", () => {
+    it("the root key sending a position home with nothing back is a candidate", () => {
+      const sweep = leg(TSLA, ME, TENANT_WALLET, "13000000000000000000");
+      const v = classify(sweep, root);
+      assert.equal(v.kind, "asset-out");
+      assert.equal(v.capitalCandidate, true);
+      assert.equal(v.evidence.rule, "owner-operation");
+      assert.equal(v.evidence.provenance, "root");
+      assert.equal(v.evidence.direction, "out");
+      assert.match(v.why, /sweep/);
+    });
+
+    it("a batch sweeping several tokens AND cash home leaves every token leg unpaired", () => {
+      // Nothing comes IN, so no leg can be the other half of a swap. The USDG
+      // leg in the same batch is classifyUsdgMovement's — and it says
+      // capital-out, so the two rules agree on the same operation.
+      const legs = [
+        leg(TSLA, ME, TENANT_WALLET, "13000000000000000000"),
+        leg(PEPE, ME, TENANT_WALLET, "400000000000000000000"),
+        leg(USDG, ME, TENANT_WALLET, "5000000"),
+      ];
+      for (const l of legs.slice(0, 2)) {
+        assert.equal(classify(l, root, { opLegs: legs }).kind, "asset-out");
+      }
+      assert.equal(
+        classifyUsdgMovement({ account: ME, usdg: legs[2]!, txLegs: legs, usdgToken: USDG }).kind,
+        "capital-out",
+      );
+    });
+
+    it("native ETH sent home by the root key is fuel — outside the book, so never a candidate", () => {
+      // equity.ts counts cash, vault, positions and quarantined cost, and no
+      // ETH: a gas top-up sent back home steps no equity, and booking it as a
+      // withdrawal would record money that never left the book.
+      const eth = leg(NATIVE_ASSET, ME, TENANT_WALLET, "50000000000000000");
+      for (const p of [root, sessionKey, nobody(TENANT_WALLET)]) {
+        const v = classify(eth, p, { opLegs: [], nativeLegs: [eth] });
+        assert.equal(v.kind, "fuel");
+        assert.equal(v.evidence.rule, "native-fuel");
+        assert.equal(v.capitalCandidate, false);
+      }
+    });
+
+    it("a root-key sale whose ETH proceeds are invisible still lowers the book — and says what it could not see", () => {
+      const v = classify(leg(PEPE, ME, CURVE, "400000000000000000000"), root, { nativeLegs: [] });
+      assert.equal(v.kind, "asset-out");
+      assert.match(v.why, /nothing visible came back/);
+      assert.match(v.why, /not observable/);
+    });
+
+    it("the same sweep signed by a SESSION KEY is never a candidate", () => {
+      // The wall cannot admit this call; if a chain ever shows one, it is a
+      // question for a human, not owner capital.
+      const v = classify(leg(TSLA, ME, TENANT_WALLET, "13000000000000000000"), sessionKey);
+      assert.equal(v.capitalCandidate, false);
+      assert.equal(v.kind, "ambiguous");
+    });
+
+    it("the root key to a known venue with nothing back refuses rather than guesses", () => {
+      const v = classify(leg(TSLA, ME, POOL, "13000000000000000000"), root, { protocolAddresses: [POOL] });
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.evidence.rule, "venue-without-pair");
+      assert.equal(v.capitalCandidate, false);
+    });
+  });
+
+  describe("the Shogun case: a session-key swap whose trades row is missing", () => {
+    // There is no trades-row input to this function, on purpose. These are
+    // the legs a missing row leaves behind, and the verdict must come from the
+    // operation that produced them.
+    it("with its USDG half visible, the token arriving is a trade leg", () => {
+      const legs = [leg(USDG, ME, POOL, "25000000"), leg(PEPE, POOL, ME, "400000000000000000000")];
+      const v = classify(legs[1]!, sessionKey, { opLegs: legs });
+      assert.equal(v.kind, "trade-leg");
+      assert.equal(v.pairedAsset, USDG);
+      assert.equal(v.evidence.rule, "paired-movement");
+      assert.equal(v.capitalCandidate, false);
+    });
+
+    it("with NOTHING visible on the other side, it is ambiguous — never asset-in", () => {
+      const v = classify(leg(PEPE, POOL, ME, "400000000000000000000"), sessionKey);
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.evidence.rule, "session-key-without-pair");
+      assert.equal(v.capitalCandidate, false);
+      assert.match(v.why, /cannot be the owner's capital/);
+    });
+
+    it("even arriving straight from the owner's wallet, a session key's op stays non-capital", () => {
+      // The owner-wallet door is only open when THIS account did not act.
+      const v = classify(leg(PEPE, TENANT_WALLET, ME, "400000000000000000000"), sessionKey);
+      assert.equal(v.capitalCandidate, false);
+    });
+  });
+
+  describe("a native-ETH curve buy is a trade leg", () => {
+    it("ETH sent by the execution pairs with the token arriving", () => {
+      // No ERC-20 leaves the account: the curve was paid in native value,
+      // which only the execution's `value` shows. Without it this token would
+      // be "arriving from nowhere".
+      const token = leg(PEPE, CURVE, ME, "400000000000000000000");
+      const eth = leg(NATIVE_ASSET, ME, CURVE, "10000000000000000");
+      const v = classify(token, sessionKey, { opLegs: [token], nativeLegs: [eth] });
+      assert.equal(v.kind, "trade-leg");
+      assert.equal(v.pairedAsset, NATIVE_ASSET);
+      assert.match(v.why, /native ETH/);
+    });
+
+    it("and the ETH leg itself is fuel, outside the book — the token's verdict carries the trade", () => {
+      const token = leg(PEPE, CURVE, ME, "400000000000000000000");
+      const eth = leg(NATIVE_ASSET, ME, CURVE, "10000000000000000");
+      const v = classify(eth, sessionKey, { opLegs: [token], nativeLegs: [eth] });
+      assert.equal(v.kind, "fuel");
+      assert.equal(v.capitalCandidate, false);
+    });
+
+    it("an owner's own curve buy paid in ETH is AMBIGUOUS for review — the book paid nothing for the position", () => {
+      // ETH is fuel outside the book, so this position arrived with nothing
+      // leaving the book and equity stepped by its value. Read as a trade leg
+      // it would never reach a reviewer; read as a deposit it would decide
+      // what only a reviewer can.
+      const token = leg(PEPE, CURVE, ME, "400000000000000000000");
+      const eth = leg(NATIVE_ASSET, ME, CURVE, "10000000000000000");
+      for (const p of [root, { source: "user-op", validator: "secondary", userOpHash: HASH, nonce: "2" } as const]) {
+        const v = classify(token, p, { opLegs: [token], nativeLegs: [eth] });
+        assert.equal(v.kind, "ambiguous");
+        assert.equal(v.evidence.rule, "paid-with-fuel");
+        assert.equal(v.pairedAsset, NATIVE_ASSET);
+        assert.equal(v.capitalCandidate, false);
+        assert.match(v.why, /fuel outside the book/);
+      }
+    });
+
+    it("a root-key buy the BOOK paid for is an ordinary trade leg, whatever ETH also went out", () => {
+      const legs = [leg(USDG, ME, CURVE, "25000000"), leg(PEPE, CURVE, ME, "400000000000000000000")];
+      const eth = leg(NATIVE_ASSET, ME, CURVE, "10000000000000000");
+      const v = classify(legs[1]!, root, { opLegs: legs, nativeLegs: [eth] });
+      assert.equal(v.kind, "trade-leg");
+      assert.equal(v.pairedAsset, USDG);
+    });
+
+    it("UNREAD executions never let an unpaired token become a candidate", () => {
+      // nativeLegs null is "unread", not "none": the ETH that paid for this
+      // may simply be invisible. A session key's op is non-capital either way;
+      // the owner's own curve buy must not read as a deposit for want of it.
+      const token = leg(PEPE, CURVE, ME, "400000000000000000000");
+      const agent = classify(token, sessionKey, { opLegs: [token], nativeLegs: null });
+      assert.equal(agent.capitalCandidate, false);
+      const owner = classify(token, root, { opLegs: [token], nativeLegs: null });
+      assert.equal(owner.kind, "ambiguous");
+      assert.equal(owner.evidence.rule, "executions-unread");
+      assert.equal(owner.capitalCandidate, false);
+    });
+  });
+
+  describe("reserve and custody legs are excluded", () => {
+    it("the energy reserve arriving is `reserve`, whoever bought it", () => {
+      const legs = [leg(USDG, ME, POOL, "42000000"), leg(MERRYMEN, POOL, ME, "98000000000000000000000")];
+      for (const p of [sessionKey, root]) {
+        const v = classify(legs[1]!, p, { opLegs: legs });
+        assert.equal(v.kind, "reserve");
+        assert.equal(v.capitalCandidate, false);
+      }
+    });
+
+    it("the owner sweeping the reserve home is still `reserve`, not a sweep of the book", () => {
+      const v = classify(leg(MERRYMEN, ME, TENANT_WALLET, "98000000000000000000000"), root);
+      assert.equal(v.kind, "reserve");
+      assert.equal(v.evidence.rule, "reserve-token");
+    });
+
+    it("the reserve list is compared without regard to case", () => {
+      const v = classify(leg(MERRYMEN, ME, TENANT_WALLET, "1"), root, { reserveTokens: [MERRYMEN.toUpperCase().replace("0X", "0x")] });
+      assert.equal(v.kind, "reserve");
+    });
+
+    it("the owner sweeping a position back from the class vault is `custody`", () => {
+      const v = classify(leg(PEPE, VAULT, ME, "400000000000000000000"), root, { custodyAddresses: [VAULT] });
+      assert.equal(v.kind, "custody");
+      assert.equal(v.evidence.rule, "custody-transfer");
+      assert.equal(v.capitalCandidate, false);
+    });
+
+    it("WITHOUT the vault named, the same sweep would read as a deposit — the reason custody is an input", () => {
+      assert.equal(classify(leg(PEPE, VAULT, ME, "400000000000000000000"), root).kind, "asset-in");
+    });
+
+    it("a class buy — token curve→vault against cash vault→curve — is a trade leg", () => {
+      const legs = [
+        leg(USDG, ME, VAULT, "25000000"),
+        leg(USDG, VAULT, CURVE, "25000000"),
+        leg(PEPE, CURVE, VAULT, "400000000000000000000"),
+      ];
+      const v = classify(legs[2]!, sessionKey, { opLegs: legs, custodyAddresses: [VAULT] });
+      assert.equal(v.kind, "trade-leg");
+      assert.equal(v.pairedAsset, USDG);
+    });
+
+    it("the owner sweeping the vault's position out to the wallet IS a sweep of the book", () => {
+      // The vault is part of the book; leaving it for the owner's wallet
+      // crosses the book's edge exactly as leaving the account would.
+      const v = classify(leg(PEPE, VAULT, TENANT_WALLET, "400000000000000000000"), root, { custodyAddresses: [VAULT] });
+      assert.equal(v.kind, "asset-out");
+    });
+  });
+
+  describe("when this account did not act", () => {
+    it("the owner's wallet sending a token in is asset-in", () => {
+      const v = classify(leg(TSLA, TENANT_WALLET, ME, "13000000000000000000"), nobody(TENANT_WALLET));
+      assert.equal(v.kind, "asset-in");
+      assert.equal(v.evidence.rule, "owner-wallet");
+      assert.equal(v.capitalCandidate, true);
+    });
+
+    it("the owner swapping on a DEX with the account as recipient is asset-in", () => {
+      // The Transfer comes from the pool; the TRANSACTION came from the owner.
+      const v = classify(leg(PEPE, POOL, ME, "400000000000000000000"), nobody(TENANT_WALLET), { protocolAddresses: [POOL] });
+      assert.equal(v.kind, "asset-in");
+    });
+
+    it("a Transfer log NAMING the owner, in a transaction the owner did not send, is not a deposit", () => {
+      // Address poisoning: a worthless contract logs Transfer(owner → account)
+      // in a stranger's transaction. The log's `from` is the contract's word;
+      // only the transaction's sender and the operation's sender are the chain's.
+      const FAKE = "0x0000000000000000000000000000000000000fa6";
+      for (const owner of [OWNER_KEY, TENANT_WALLET]) {
+        const v = classify(leg(FAKE, owner, ME, "1000000000000000000"), nobody(STRANGER));
+        assert.equal(v.kind, "ambiguous");
+        assert.equal(v.evidence.rule, "owner-named-only-by-log");
+        assert.equal(v.capitalCandidate, false);
+        assert.match(v.why, /did not send the transaction/);
+      }
+    });
+
+    it("the owner's wallet named by the log AND sending the transaction is still asset-in", () => {
+      const v = classify(leg(TSLA, OWNER_KEY, ME, "13000000000000000000"), nobody(OWNER_KEY));
+      assert.equal(v.kind, "asset-in");
+      assert.equal(v.evidence.rule, "owner-wallet");
+    });
+
+    it("a stranger's token arriving unasked is ambiguous, not a deposit", () => {
+      const v = classify(leg(PEPE, STRANGER, ME, "400000000000000000000"), nobody(BUNDLER));
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.evidence.rule, "unsolicited-inbound");
+      assert.equal(v.capitalCandidate, false);
+    });
+
+    it("a token LEAVING with no operation of this account is an allowance spent, not a withdrawal", () => {
+      const v = classify(leg(TSLA, ME, STRANGER, "13000000000000000000"), nobody(TENANT_WALLET));
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.evidence.rule, "moved-without-account-operation");
+    });
+  });
+
+  describe("it refuses rather than guesses", () => {
+    it("an unread signer is ambiguous before any pair is trusted", () => {
+      // A bundle can hold an owner sweep beside an agent swap. Pairing across
+      // them would turn the sweep into half of a trade.
+      const legs = [leg(TSLA, ME, TENANT_WALLET, "13000000000000000000"), leg(PEPE, POOL, ME, "1")];
+      const v = classify(legs[0]!, { source: "unknown", why: "two operations of this account in one bundle" }, { opLegs: legs });
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.evidence.rule, "provenance-unread");
+      assert.match(v.why, /two operations/);
+    });
+
+    it("a secondary validator with nothing paired is ambiguous", () => {
+      const v = classify(leg(TSLA, ME, STRANGER, "1"), { source: "user-op", validator: "secondary", userOpHash: HASH, nonce: "2" });
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.capitalCandidate, false);
+    });
+
+    it("USDG is not this rule's to decide", () => {
+      const v = classify(leg(USDG, ME, TENANT_WALLET, "5000000"), root);
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.evidence.rule, "cash-leg");
+    });
+
+    it("a zero-amount transfer — address poisoning — moves nothing", () => {
+      const v = classify(leg(TSLA, ME, STRANGER, "0"), root);
+      assert.equal(v.kind, "ambiguous");
+      assert.equal(v.evidence.rule, "zero-amount");
+    });
+
+    it("a self-transfer and a stranger's movement are not this account's", () => {
+      assert.equal(classify(leg(TSLA, ME, ME, "1"), root).evidence.rule, "not-this-account");
+      assert.equal(classify(leg(TSLA, STRANGER, POOL, "1"), root).evidence.rule, "not-this-account");
+    });
+
+    it("another hosted account and chain infrastructure are not capital", () => {
+      const other = "0x47bab4113ba596dc84e5654a400074d7e0ae2f3d";
+      assert.equal(classify(leg(TSLA, ME, other, "1"), root, { knownAccounts: [other] }).kind, "internal");
+      const ep = "0x0000000071727de22e5e9d8baf0edac6f37da032";
+      assert.equal(classify(leg(TSLA, ME, ep, "1"), root, { systemAddresses: [ep] }).kind, "protocol");
+    });
+
+    it("only asset-in and asset-out are ever candidates", () => {
+      const verdicts = [
+        classify(leg(TSLA, ME, TENANT_WALLET, "1"), root),
+        classify(leg(TSLA, TENANT_WALLET, ME, "1"), nobody(TENANT_WALLET)),
+        classify(leg(PEPE, POOL, ME, "1"), sessionKey),
+        classify(leg(MERRYMEN, POOL, ME, "1"), root),
+        classify(leg(PEPE, VAULT, ME, "1"), root, { custodyAddresses: [VAULT] }),
+        classify(leg(NATIVE_ASSET, ME, TENANT_WALLET, "1"), root),
+        classify(leg(PEPE, CURVE, ME, "1"), root, { nativeLegs: [leg(NATIVE_ASSET, ME, CURVE, "1")] }),
+      ];
+      for (const v of verdicts) {
+        assert.equal(v.capitalCandidate, v.kind === "asset-in" || v.kind === "asset-out", `${v.kind} / ${v.evidence.rule}`);
+      }
+    });
   });
 });

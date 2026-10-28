@@ -54,6 +54,8 @@
  * by then the next plan pass has drafted the hello, which is due ten minutes
  * after the consent. A list read once and left open would show "Nothing
  * waiting" while the hello was queued, and a Skip on a post that already went.
+ * The one exception is an active agent's answers to posts that tag it: they
+ * go out right away, and the reply warning that turns them on says so.
  *
  * ── WHAT IT POSTS IS THE OWNER'S CHOICE, NOT A PROMISE OF MORE ───────────
  *
@@ -80,7 +82,10 @@ import { Switch } from "./ui";
 
 const COPY = {
   blurb:
-    "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. No trade alerts, no error messages, no numbers.",
+    "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
+  /** The same, for an agent merrymen made active (`repliesActive`): it posts on the active cadence. */
+  blurbActive:
+    "Let your Merryman post on X in its own words — a hello when it starts, a few reads on the market a day, and most coins it buys and why. Optional settings below add public addresses and completed sale results. No trade alerts, error messages or return promises.",
   connect: "Connect X account",
   reconnect: "Reconnect X account",
   caption:
@@ -107,6 +112,7 @@ const COPY = {
   trencher: "Trencher mode",
   casual: "The odd passing thought",
   casualHint: "A short line in its own words, most days.",
+  casualHintActive: "Short lines in its own words, a few times a day.",
   perDay: "Posts a day, at most",
   perDayUsual: "Usual",
   perDayHint: "The hello counts. Usual is merrymen's own number, and merrymen may allow fewer than you pick.",
@@ -123,20 +129,69 @@ const warningTitle = (handle: string) => `Post on X as ${handle}?`;
 const warningLead = (handle: string) =>
   `Your Merryman will post from whichever X account is connected — right now that's ${handle}.`;
 const WARNING_BODY = [
-  "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
+  "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts. Your saved options can add public wallet or token addresses and completed sale results.",
   "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
   "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
 ] as const;
+/**
+ * AN ACTIVE AGENT POSTS MORE, AND ITS WARNING SAYS SO. An agent merrymen made
+ * active (`repliesActive`, MERRYMEN_XPOST_ACTIVE_TENANTS) posts on the active
+ * cadence (worker/src/xpost/planner.ts ACTIVE_CADENCE): up to twelve a day,
+ * passing thoughts through the day and a post for most coins it buys, with
+ * no coin fold, seventy-five minutes apart. "A few a day at most" would
+ * understate that. And its answers may carry market figures Merrymen renders
+ * from public data (worker/src/xpost/figures.ts), so "never prices or
+ * amounts" would overstate what it leaves out (2026-10-12); and its casual
+ * slots are reads on the market with those figures since 2026-10-13
+ * (worker/src/orchestrator-xpost.ts readInsight), so "passing thoughts" would
+ * too. Every other owner's sentence is unchanged. Pinned by x-posting.test.ts and iOS
+ * XPostingTests.
+ */
+const ACTIVE_WARNING_BODY = [
+  "It writes its own posts: a hello first, then a few reads on the market a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its market reads and answers may carry market figures built from public data. Your saved options can add public wallet or token addresses and completed sale results.",
+  "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
+  WARNING_BODY[2],
+] as const;
 const warningYes = (handle: string) => `Let it post as ${handle}`;
+/**
+ * THE REPLY WARNING SAYS EXACTLY WHAT IT TURNS ON, and that depends on the
+ * agent. Most owners' replies are comments on its coin posts, inside the
+ * posting cadence and the ten-minute review. An agent merrymen made active
+ * (`repliesActive`, MERRYMEN_XPOST_ACTIVE_TENANTS) answers posts that tag it,
+ * reply to it or quote it instead — comments on its own posts arrive the same
+ * way — right away, in a lane of its own, so its warning promises no review
+ * window it would not keep. Replying to it or quoting it is asking (the
+ * owner's decision, 2026-10-12): its answers carry no opt-out line, and it
+ * never answers someone who asked it to stop.
+ * Every sentence of both is pinned by x-posting.test.ts and iOS XPostingTests.
+ */
 const replyWarningTitle = (handle: string) => `Reply to comments as ${handle}?`;
-const replyWarningLead = (handle: string) => `Your Merryman will reply as ${handle} to selected comments on its coin posts.`;
+const replyWarningLead = (handle: string, active: boolean) => active
+  ? `Your Merryman will reply as ${handle} to selected posts that tag it, reply to it or quote it.`
+  : `Your Merryman will reply as ${handle} to selected comments on its coin posts.`;
 const REPLY_WARNING_BODY = [
   "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
   "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies.",
 ] as const;
+/**
+ * AN ACTIVE AGENT'S ANSWERS MAY CARRY MARKET FIGURES (2026-10-12): a coin's
+ * rank, price, market cap, volume or recent change, rendered by Merrymen from
+ * public data (CoinGecko, GeckoTerminal, Fomo, Bitquery) after the answer's
+ * own words, which still never hold a number (worker/src/xpost/figures.ts).
+ * So its warning says so; every other owner's is unchanged. Pinned by
+ * x-posting.test.ts and iOS XPostingTests.
+ */
+const ANSWER_WARNING_BODY = [
+  "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
+  "It answers questions about the market, coins, how it trades and what it can do, and a hello, a thanks or a bit of chat in a short line of its own, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+  "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice.",
+] as const;
 const replyWarningYes = (handle: string) => `Let it reply as ${handle}`;
+const replyHint = (handle: string, active: boolean) => active
+  ? `Selected posts that tag your Merryman, reply to it or quote it, answered as ${handle} right away, up to 60 a day on top of its posts.`
+  : `Selected comments on your Merryman’s coin posts, answered as ${handle}. Replies share the post limit and ten-minute review window.`;
 
-const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", reply: "Comment reply" };
+const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post", sell: "Sale post", reply: "Comment reply", answer: "Answer to a tag", recap: "Trade recap" };
 const commentUrl = (post: XUpcomingPost | XRecentPost) => /^\d{1,25}$/.test(post.replyToTweetId ?? "")
   ? `https://x.com/i/status/${post.replyToTweetId}` : null;
 
@@ -208,6 +263,7 @@ function accountOf(data: unknown): Shown | null {
     perDayMax: typeof d.perDayMax === "number" && Number.isSafeInteger(d.perDayMax) && d.perDayMax >= 1 && d.perDayMax <= 10 ? d.perDayMax : 3,
     replyEnabled: d.replyEnabled === true,
     repliesAvailable: d.repliesAvailable === true,
+    repliesActive: d.repliesActive === true,
     upcoming: d.upcoming.filter(
       (p): p is XUpcomingPost => !!p && typeof p.id === "number" && typeof p.body === "string" && typeof p.dueAt === "number",
     ),
@@ -285,8 +341,12 @@ export function XPosting({
   const [read, setRead] = useState<Read>({ kind: "checking" });
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; alert: boolean } | null>(null);
-  /** The account the open warning names, captured when the switch was pressed. */
-  const [asking, setAsking] = useState<{ xUserId: string; handle: string; owner: string; replies?: boolean } | null>(null);
+  /**
+   * The account the open warning names, captured when the switch was pressed —
+   * and which warning it showed (`active`, for posting and for replies), so
+   * the confirm agrees to the words the owner read.
+   */
+  const [asking, setAsking] = useState<{ xUserId: string; handle: string; owner: string; replies?: boolean; active?: boolean } | null>(null);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   /** Whether the Settings group this sits in is open (true when it sits in none). */
   const [open, setOpen] = useState(false);
@@ -436,7 +496,7 @@ export function XPosting({
         return;
       }
       // NOTHING IS SENT HERE. The warning names the account; its button writes.
-      setAsking({ xUserId: account.xUserId, handle, owner });
+      setAsking({ xUserId: account.xUserId, handle, owner, active: account.repliesActive });
       return;
     }
     void (async () => {
@@ -458,14 +518,14 @@ export function XPosting({
     if (next) {
       if (!account.repliesAvailable) { setNote({ text: COPY.repliesUnavailable, alert: true }); return; }
       if (!account.postingEnabled || account.status !== "ok") { setNote({ text: "Turn posting on before enabling comment replies.", alert: true }); return; }
-      setAsking({ xUserId: account.xUserId, handle, owner, replies: true });
+      setAsking({ xUserId: account.xUserId, handle, owner, replies: true, active: account.repliesActive });
       return;
     }
     void (async () => {
       setBusy(true);
       const r = await send("POST", "/api/x/account", { action: "disable-replies", xUserId: account.xUserId, owner });
       setBusy(false);
-      if (r.ok && r.data.replyEnabled === false) patch({ replyEnabled: false, upcoming: account.upcoming.filter((p) => p.kind !== "reply") });
+      if (r.ok && r.data.replyEnabled === false) patch({ replyEnabled: false, upcoming: account.upcoming.filter((p) => p.kind !== "reply" && p.kind !== "answer") });
       else setNote({ text: r.ok ? "merrymen didn't confirm that, so replies may still be on." : r.message, alert: true });
       void load(true);
     })();
@@ -589,7 +649,7 @@ export function XPosting({
     }
     return (
       <div className="xpost" ref={root}>
-        <p className="mm-hint" style={{ marginTop: 0 }}>{COPY.blurb}</p>
+        <p className="mm-hint" style={{ marginTop: 0 }}>{account.repliesActive ? COPY.blurbActive : COPY.blurb}</p>
         {connectButton(COPY.connect)}
         {noteLine}
       </div>
@@ -642,7 +702,7 @@ export function XPosting({
           <div>
             <strong>{COPY.replyToggle}</strong>
             <small className="mm-hint">{account.postingEnabled
-              ? `Selected comments on your Merryman’s coin posts, answered as ${handle}. Replies share the post limit and ten-minute review window.`
+              ? replyHint(handle, account.repliesActive)
               : "Turn posting on to allow selected comment replies."}</small>
           </div>
           <Switch on={account.replyEnabled} onChange={onReplySwitch} label={COPY.replyToggle} />
@@ -667,7 +727,7 @@ export function XPosting({
           <div className="xpost-switch">
             <div>
               <strong>{COPY.casual}</strong>
-              <small className="mm-hint">{COPY.casualHint}</small>
+              <small className="mm-hint">{account.repliesActive ? COPY.casualHintActive : COPY.casualHint}</small>
             </div>
             <Switch on={account.prefs.casual} onChange={(next) => void savePrefs({ casual: next })} label={COPY.casual} />
           </div>
@@ -730,7 +790,7 @@ export function XPosting({
                 <p>{p.body}</p>
                 {commentUrl(p) && <a href={commentUrl(p)!} target="_blank" rel="noreferrer noopener">View comment</a>}
                 <div className="xpost-meta">
-                  <span>{p.kind === "reply" ? "Comment reply · " : ""}{shortDateTime(p.sentAt)}</span>
+                  <span>{p.kind === "reply" ? "Comment reply · " : p.kind === "answer" ? "Answer to a tag · " : ""}{shortDateTime(p.sentAt)}</span>
                   {STATUS_URL.test(p.url) && (
                     <a href={p.url} target="_blank" rel="noreferrer noopener">{COPY.viewOnX}</a>
                   )}
@@ -757,9 +817,9 @@ export function XPosting({
           </div>
           <div className="portfolio-body">
             <p id="xpost-warning-lead" ref={lead} tabIndex={-1}>
-              <strong>{asking.replies ? replyWarningLead(asking.handle) : warningLead(asking.handle)}</strong>
+              <strong>{asking.replies ? replyWarningLead(asking.handle, asking.active === true) : warningLead(asking.handle)}</strong>
             </p>
-            {(asking.replies ? REPLY_WARNING_BODY : WARNING_BODY).map((line) => <p key={line}>{line}</p>)}
+            {(asking.replies ? (asking.active ? ANSWER_WARNING_BODY : REPLY_WARNING_BODY) : asking.active ? ACTIVE_WARNING_BODY : WARNING_BODY).map((line) => <p key={line}>{line}</p>)}
             <div className="resign-actions">
               <button type="button" className="mm-btn primary" disabled={busy} onClick={() => void confirmWarning()}>
                 {asking.replies ? replyWarningYes(asking.handle) : warningYes(asking.handle)}

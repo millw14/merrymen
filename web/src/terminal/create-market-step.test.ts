@@ -30,24 +30,7 @@ const SRC = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), 
 /** Comments stripped — this file explains its own reasoning at length. */
 const code = SRC.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 
-describe("the wizard asks what to trade", () => {
-  it("THERE IS A MARKET STEP, between naming it and setting limits", () => {
-    assert.match(code, /"agent"\|"market"\|"limits"\|"backup"\|"fund"/);
-    assert.match(code, /\["agent","market","limits","backup","fund"\]\.indexOf\(step\)/);
-  });
-
-  it("and the progress list counts it, so the owner is not surprised by a fifth screen", () => {
-    assert.match(code, /\["Agent","Market","Limits","Backup","Ready"\]/);
-  });
-
-  it("BACK GOES BACK THROUGH IT, rather than skipping a step the owner just filled in", () => {
-    assert.match(code, /step==="limits"\?setStep\("market"\):step==="market"\?setStep\("agent"\):onBack\(\)/);
-  });
-
-  it("and the agent step leads into it", () => {
-    assert.match(code, /setStep\("market"\)/);
-  });
-});
+// The optional market journey is exercised through the rendered screen in create-trencher.test.ts.
 
 describe("a coin named in the wizard is covered by the first signature", () => {
   it("THE MINT MERGES WIZARD TOKENS LOCALLY — it does not re-read settings", () => {
@@ -71,7 +54,7 @@ describe("a coin named in the wizard is covered by the first signature", () => {
     const put = code.slice(at, code.indexOf("});", at));
     assert.match(put, /customTokens:\[/);
     assert.match(put, /wizardTokens/);
-    assert.match(put, /basketSymbols:basket/, "and what to trade");
+    assert.match(put, /basketSymbols:strategy==="trencher"\?\[\]:basket/, "and what to trade");
     assert.match(put, /assetMode/, "and which markets");
   });
 

@@ -134,11 +134,68 @@ async function type(input: HTMLInputElement, value: string) {
 }
 
 async function prepare() {
+  const options = region().querySelector("details")!;
+  if (!options.open) await act(async () => { options.querySelector("summary")!.click(); });
+  assert.equal(options.open, true);
   await ui.click("Prepare Trencher mode");
   assert.match(regionText(), /Trencher settings prepared\. Save settings to apply them\./);
 }
 
 describe("Trencher setup through the actual Settings screen", () => {
+  it("enables the complete live preset in one owner-bound save without changing limits or keys", async () => {
+    await mount();
+    assert.equal(writes.length, 0, "loading does not consent to live trading");
+    await ui.click("Enable live Trencher");
+    assert.deepEqual(writes, [{
+      owner: OWNER, strategy: "trencher", assetMode: "crypto", tickSeconds: "15",
+      officialCoinsEnabled: true, discoveryEnabled: true, trencherFastEnabled: true,
+      liveTradingEnabled: true, trencherLiveEnabled: true,
+    }]);
+    assert.equal(savedCalls, 1);
+    assert.equal(field(/^Live trading$/i).checked, true);
+    assert.equal(field(/^Let trencher trade for real$/i).checked, true);
+    assert.equal(server.values.slippageBps, 100);
+    assert.equal(server.values.llmMaxActionUsdg, 10);
+    assert.deepEqual(server.values.basketSymbols, ["AAPL"], "existing token selection is preserved");
+    assert.match(regionText(), /Settings saved/);
+    const feedback = permissionLink()?.closest('[role="status"]');
+    assert.ok(feedback && !feedback.closest("details"), "save feedback remains visible outside advanced options");
+  });
+
+  it("does not report live setup when a successful response returns unchanged settings", async () => {
+    writeResponse = () => json({ ok: true });
+    await mount();
+    await ui.click("Enable live Trencher");
+    assert.equal(writes.length, 1);
+    assert.equal(savedCalls, 0);
+    assert.equal(permissionLink(), null);
+    assert.match(regionText(), /save was accepted, but the saved settings could not be checked/);
+    assert.match(regionText(), /Live Trencher may already be enabled/);
+    const alert = region().querySelector('[role="alert"]');
+    assert.ok(alert && !alert.closest("details"), "failure is visible without opening advanced options");
+  });
+
+  it("retries a rejected quick setup without creating a wallet or replacing permission", async () => {
+    writeResponse = () => json({ errors: ["Settings are busy. Try again."] }, 503);
+    await mount();
+    await ui.click("Enable live Trencher");
+    assert.equal(savedCalls, 0);
+    assert.match(regionText(), /Settings are busy/);
+    writeResponse = undefined;
+    await ui.click("Enable live Trencher");
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[0], writes[1]);
+    assert.equal(savedCalls, 1);
+  });
+
+  it("keeps a confirmed service hold visible after saving the live preset", async () => {
+    await ui.render(React.createElement(Settings, { onFund: () => {}, slug: null, agentDown: "recovery" }));
+    await ui.click("Enable live Trencher");
+    assert.match(regionText(), /service is still restoring this agent/);
+    assert.match(regionText(), /wallet signatures will not remove that hold/);
+    assert.match(regionText(), /Settings saved/);
+  });
+
   it("acknowledges preparation and repeated clicks without saving or granting live consent", async () => {
     await mount();
     await prepare();

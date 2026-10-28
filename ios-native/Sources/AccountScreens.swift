@@ -3,6 +3,7 @@ import PhotosUI
 import CoreImage.CIFilterBuiltins
 import UIKit
 import ImageIO
+import MerrymenPolicy
 
 struct AccountScreen: View {
     @EnvironmentObject var store: AppStore
@@ -165,7 +166,7 @@ struct PermissionsScreen: View {
                             Text("Paper cash goes back to the starting stake and simulated positions are cleared. Earlier paper trades stay on file but no longer count.").font(.caption).foregroundStyle(.secondary)
                         }
                         Button("Stand down agent", role: .destructive) { stop = true }.disabled(busy)
-                        Text("Stand-down removes the service's active grant. It does not withdraw assets or invalidate the existing permission on-chain.").font(.caption).foregroundStyle(.secondary)
+                        Text("Stand-down removes the service's active grant and deletes the agent's memory, which re-signing does not restore. It does not withdraw assets or invalidate the existing permission on-chain.").font(.caption).foregroundStyle(.secondary)
                     } else {
                         InactiveWalletPanel(status: status) { revision += 1 }
                         Text("No active trading permission."); NavigationLink("Create agent", value: Route.create)
@@ -177,11 +178,12 @@ struct PermissionsScreen: View {
             Button("Stand down", role: .destructive) {
                 guard !busy else { return }; busy = true; let owner = store.owner
                 Task { defer { busy = false }; do {
-                    _ = try await store.perform("/api/grants", method: "DELETE", body: .object([:]), expectedOwner: owner)
+                    guard let owner, let body = StandDown.body(owner: owner) else { throw APIError(status: 401, message: "Sign in again before confirming this action.") }
+                    _ = try await store.perform("/api/grants", method: "DELETE", body: body, expectedOwner: owner)
                     revision += 1; store.notice = "Stand-down request accepted. Existing assets remain in the smart account."
                 } catch { store.notice = error.localizedDescription } }
             }
-        } message: { Text("The agent will stop managing positions. This does not sell them or revoke permissions on-chain.") }
+        } message: { Text("The agent will stop managing positions, and its memory will be deleted. Re-signing later does not bring that memory back. This does not sell positions or revoke permissions on-chain.") }
         // The worker refuses this on the live rail, so it can only ever touch
         // the paper book; the button is also shown only for paper agents.
         .confirmationDialog("Restart the paper book?", isPresented: $resetPaper, titleVisibility: .visible) {

@@ -9,11 +9,14 @@ import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { assertDerivedAccount, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import { userOpGasConfig } from "../../../worker/src/gas";
 import { getRecoveryTicket, relayUrl, redact, type BrowserWallet } from "./recover-client";
-import { invalidatePermissions, KERNEL_REVOCATION_ABI, readConfirmedRevocationCutoff, type PendingRevocation } from "./permission-revocation";
+import { invalidatePermissions, isRevocationFeeShortfall, KERNEL_REVOCATION_ABI, readConfirmedRevocationCutoff, revocationFeeMessage, type PendingRevocation } from "./permission-revocation";
 import { readRevocationRecord } from "./revocation-journal";
 
+const revocationChain = (chainId: number) =>
+  chainId === robinhoodChain.id ? robinhoodChain : chainId === robinhoodTestnet.id ? robinhoodTestnet : null;
+
 /** The signed operation is public, contains no private key, and survives reloads. */
-function pendingStore(w: BrowserWallet) {
+function pendingStore(w: Pick<BrowserWallet, "chainId" | "smartAccount">) {
   const key = `merrymen.permission-revocation.v1.${w.chainId}.${w.smartAccount.toLowerCase()}`;
   return {
     pending(): PendingRevocation | null {
@@ -26,9 +29,43 @@ function pendingStore(w: BrowserWallet) {
   };
 }
 
+/**
+ * An account with no ETH and no EntryPoint deposit cannot pay for a revocation,
+ * and the relay sponsors none. Renewal and restore ask this BEFORE stopping the
+ * service, so an empty account is not stopped for a revocation that cannot run.
+ *
+ * Only a definite zero refuses. A saved operation may already be mined and need
+ * no further fee, and an unreadable balance is not an empty one: both are left
+ * to revokeFromBrowser, which reports its own outcome. A saved record that
+ * cannot be verified is NOT left to it: revokeFromBrowser refuses that record
+ * before any network call, so letting it pass here only moves the same refusal
+ * to after the stop.
+ */
+export async function assertRevocationFunded(w: Pick<BrowserWallet, "chainId" | "smartAccount">): Promise<void> {
+  const chain = revocationChain(w.chainId);
+  if (!chain) return;
+  if (pendingStore(w).pending()) return;
+  const publicClient = createPublicClient({ chain, transport: http() });
+  let funds: bigint;
+  try {
+    const [balance, deposit] = await Promise.all([
+      publicClient.getBalance({ address: w.smartAccount }),
+      publicClient.readContract({
+        address: getEntryPoint("0.7").address,
+        abi: [{ type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] }],
+        functionName: "balanceOf", args: [w.smartAccount],
+      }),
+    ]);
+    funds = balance + deposit;
+  } catch {
+    return;
+  }
+  if (funds === 0n) throw new Error(`${revocationFeeMessage(w.smartAccount, chain, true)} Nothing was stopped or signed.`);
+}
+
 /** Owner signature stays in the browser; the relay cannot spend or sign for it. */
 export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: string) => void) {
-  const chain = w.chainId === robinhoodChain.id ? robinhoodChain : w.chainId === robinhoodTestnet.id ? robinhoodTestnet : null;
+  const chain = revocationChain(w.chainId);
   if (!chain) throw new Error("Unknown account network; refusing to revoke on another chain.");
   const signer = w.ownerAccount ?? (w.ownerKey ? privateKeyToAccount(w.ownerKey) : null);
   if (!signer) throw new Error("Sign in as this wallet's owner, or unlock its recovery key, to revoke permissions on-chain.");
@@ -115,6 +152,11 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
       }),
     });
   } catch (error) {
+    // The raw AA21 error is several hundred characters of calldata and factory
+    // bytes, and it never says which address to fund or on which network.
+    if (isRevocationFeeShortfall(error)) {
+      throw new Error(`${revocationFeeMessage(w.smartAccount, chain, false)} Earlier permissions are not confirmed revoked. Your wallet and recovery access were kept.`);
+    }
     throw new Error(`${redact(error, w.ownerKey)} Earlier permissions are not confirmed revoked. Your wallet and recovery access were kept; retry checks saved receipts and can refresh fees for the same revocation.`);
   }
 }

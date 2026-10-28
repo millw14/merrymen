@@ -7,6 +7,7 @@
  */
 import { chatPositionsOf } from "./account";
 import type { LiveMine } from "./live";
+import { pausedRecovery } from "./recovery-view";
 
 /**
  * How many recent moves the agent is shown.
@@ -58,6 +59,32 @@ export const tapeFor = (moves: LiveMine["moves"]) =>
       outcomeText: m.outcomeText,
     }));
 
+/**
+ * HAS ANY HEARTBEAT OF THIS AGENT EVER REACHED US, from one /api/grants answer.
+ *
+ * Three answers, and only one of them is "never":
+ *   - a heartbeat time → true;
+ *   - an explicit null → false: the route read both heartbeat sources and
+ *     found no beat (route.ts sends null for "never heard from");
+ *   - absent, or anything that is not a number → null, unknown. An older
+ *     server, or a status the browser assembled itself, never said — and
+ *     reading that as "never started" would have the chat tell an owner whose
+ *     agent may be trading that it has not begun.
+ *
+ * A null the route marks `heartbeatUnread` is also unknown: neither source
+ * could be read, so it cannot mean "never".
+ *
+ * `!= null` used to do this and folded the third answer into the second.
+ */
+export function workerHeardFromOf(
+  status: { workerAliveAt?: unknown; heartbeatUnread?: unknown } | null | undefined,
+): boolean | null {
+  if (!status || !("workerAliveAt" in status)) return null;
+  const at = status.workerAliveAt;
+  if (at === null) return status.heartbeatUnread === true ? null : false;
+  return typeof at === "number" && Number.isFinite(at) && at > 0 ? true : null;
+}
+
 /** /api/settings as the screen reads it: the owner's values over the defaults. */
 export interface ChatSettings {
   values?: Record<string, unknown> | null;
@@ -88,28 +115,56 @@ export function chatStateOf(args: {
     const v = pick(k);
     return typeof v === "number" ? v : null;
   };
-  return {
-    name: mine.name,
+  const recovery = pausedRecovery(mine.recovery);
+  const recorded = {
     equity: mine.equity,
-    strategy: pick("strategy") ?? mine.glance.id,
-    basketSymbols: (pick("basketSymbols") ?? null) as string[] | null,
-    paperTradingEnabled: pick("paperTradingEnabled") ?? null,
-    liveTradingEnabled: pick("liveTradingEnabled") ?? null,
-    workerStatus: mine.statusLabel ?? "Unknown",
-    liveBlocker: liveBlocker ?? null,
-    positions: chatPositionsOf(mine),
+    positions: mine.positions ? chatPositionsOf(mine) : null,
     cashUsd: mine.glance.cashUsd ?? null,
     vaultUsd: mine.glance.vaultUsd ?? null,
+    paperTradingEnabled: pick("paperTradingEnabled") ?? null,
+    liveTradingEnabled: pick("liveTradingEnabled") ?? null,
+    stopLossBps: num("strategistStopLossBps"),
+    takeProfitBps: num("takeProfitBps"),
+  };
+  return {
+    name: mine.name,
+    equity: recovery ? null : recorded.equity,
+    strategy: pick("strategy") ?? mine.glance.id,
+    basketSymbols: (pick("basketSymbols") ?? null) as string[] | null,
+    paperTradingEnabled: recovery ? null : recorded.paperTradingEnabled,
+    liveTradingEnabled: recovery ? null : recorded.liveTradingEnabled,
+    workerStatus: recovery ? "Trading paused for recovery" : mine.statusLabel ?? "Unknown",
+    /**
+     * HAS THIS AGENT EVER STARTED — the fact `stopped` cannot carry. IDLE is
+     * what a never-spawned agent shows, and also what a beating worker shows
+     * before its first pass or with nothing to trade; a tester's new agent,
+     * handed only `stopped: true`, told him the flag was "just a record".
+     * Whether any heartbeat ever reached us (App.tsx, workerHeardFromOf on
+     * `workerAliveAt`) tells the two apart. Null is a screen or a server that
+     * never said, and the prompt then claims neither way.
+     *
+     * `workerReason` is the desk's own sentence for why it is not trading, so
+     * the chat names the cause the screen names and invents none. Both give
+     * way to a hold, like everything above.
+     */
+    workerHeardFrom: recovery || typeof mine.workerHeardFrom !== "boolean" ? null : mine.workerHeardFrom,
+    workerReason: recovery || typeof mine.autonomy?.reason !== "string" ? null : mine.autonomy.reason.slice(0, 400) || null,
+    liveBlocker: recovery ? null : liveBlocker ?? null,
+    positions: recovery ? null : chatPositionsOf(mine),
+    cashUsd: recovery ? null : recorded.cashUsd,
+    vaultUsd: recovery ? null : recorded.vaultUsd,
+    // Displayed records remain useful history, never proof of the current book.
+    ...(recovery ? { recovery, lastRecorded: recorded } : {}),
     // The two rules that answer "what would make you get out" — the levels
     // that sell WITHOUT asking the model. Null means none is armed, which
     // is a different answer from a level at zero.
-    stopLossBps: num("strategistStopLossBps"),
-    takeProfitBps: num("takeProfitBps"),
+    stopLossBps: recovery ? null : recorded.stopLossBps,
+    takeProfitBps: recovery ? null : recorded.takeProfitBps,
     moves: tapeFor(mine.moves),
     movesShown: Math.min(mine.moves.length, TAPE_SHOWN),
     movesTotal: mine.moves.length,
     perTrade,
     perDay,
-    stopped,
+    stopped: recovery ? true : stopped,
   };
 }

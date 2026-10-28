@@ -44,6 +44,7 @@ export function Footer() {
             <Link href="/docs">Getting started</Link>
             <Link href="/api">API & SDK</Link>
             <Link href="/claude">Use it in Claude</Link>
+            <Link href="/grok">Use it in Grok</Link>
             <Link href="/docs#wallet">Create a wallet</Link>
             <Link href="/docs#telegram">Set up Telegram</Link>
             <Link href="/docs#pc-control">PC control</Link>

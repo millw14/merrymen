@@ -1,0 +1,50 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "token": "0x39DBED3A00000000000000000000000000000C0D",
+  "networkId": 4663,
+  "chain": "robinhood",
+  "holders": 1234,
+  "top10HoldersPercent": 41.5,
+  "lowFees": false,
+  "windows": {
+    "5m": {
+      "uniqueBuyers": 3,
+      "uniqueSellers": 0,
+      "buys": 3,
+      "sells": 0,
+      "buyVolumeUsd": "1520.50",
+      "sellVolumeUsd": "0",
+      "netVolumeUsd": "1520.50",
+      "buySellRatio": null
+    },
+    "1h": {
+      "uniqueBuyers": 3,
+      "uniqueSellers": 2,
+      "buys": 12,
+      "sells": 4,
+      "buyVolumeUsd": "8000.25",
+      "sellVolumeUsd": "2000.25",
+      "netVolumeUsd": "6000",
+      "buySellRatio": 3
+    },
+    "4h": {
+      "uniqueBuyers": 3,
+      "uniqueSellers": 2,
+      "buys": 30,
+      "sells": 20,
+      "buyVolumeUsd": "20000",
+      "sellVolumeUsd": "18000",
+      "netVolumeUsd": "2000"
+    },
+    "24h": {
+      "uniqueBuyers": 3,
+      "uniqueSellers": 2,
+      "buys": 90,
+      "sells": 100,
+      "buyVolumeUsd": "50000",
+      "sellVolumeUsd": "61000.75",
+      "netVolumeUsd": "-11000.75",
+      "buySellRatio": 0.9
+    }
+  }
+}

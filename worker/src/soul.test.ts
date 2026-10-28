@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { ageDays, journalTail, notes, ownerFacts, relationship, sanitizeMemory, sanitizeNote } from "./soul";
+import { base58Decode, base58Encode, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
+
+/** A real-shaped 32-byte Solana key under 40 characters: twenty leading zero bytes, each one a "1". */
+const SHORT_KEY = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i < 20 ? 0 : i * 7)));
 
 describe("sanitizeMemory — memory is context, never capability", () => {
   it("keeps a normal owner fact, whitespace-normalized", () => {
@@ -48,6 +52,26 @@ describe("sanitizeNote — agent memory is context, never capability", () => {
     assert.equal(sanitizeNote("token sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), null);
     assert.equal(sanitizeNote("uses <script>alert(1)</script>"), null);
     assert.equal(sanitizeNote("x".repeat(400)), null);
+  });
+
+  it("refuses a Solana key too, even one under the 40-character blob floor (Solana P0)", () => {
+    assert.ok(SHORT_KEY.length < 40);
+    for (const id of [SOLANA_USDG_MINT, SHORT_KEY, "1".repeat(32)]) {
+      assert.equal(sanitizeNote(`send it to ${id} later`), null, id);
+      assert.equal(sanitizeMemory(`send it to ${id} later`), null, id);
+    }
+  });
+
+  it("refuses a Solana key glued to a word, under the 40-character blob floor (audit regressions F3)", () => {
+    // "CA" + a 37-character key is 39 characters: under the blob floor, and read as no id by the default scan.
+    assert.ok(`CA${SHORT_KEY}`.length < 40);
+    for (const glued of [`CA${SHORT_KEY}`, `${SHORT_KEY}ok`, `ca:x${SHORT_KEY}`]) {
+      assert.equal(sanitizeNote(`send it to ${glued} later`), null, glued);
+      assert.equal(sanitizeMemory(`send it to ${glued} later`), null, glued);
+    }
+    // Ordinary notes and facts still pass.
+    assert.equal(sanitizeNote("the Sakura-ios repo builds with Xcode 26 and node 22.13"), "the Sakura-ios repo builds with Xcode 26 and node 22.13");
+    assert.equal(sanitizeMemory("likes $SOL and $BONK, hates #BuyTheDip"), "likes $SOL and $BONK, hates #BuyTheDip");
   });
 });
 
@@ -177,6 +201,52 @@ describe("soul files are re-sanitized on READ, not just on write", () => {
       assert.ok(tail.includes("A fine day."), "the prose survives");
       assert.ok(!tail.includes("0xd76257"), "the address is redacted");
       assert.ok(!tail.includes("<img"), "the markup is stripped");
+    });
+  });
+
+  it("a Solana key in JOURNAL.md is redacted in place, a short one included (Solana P0)", () => {
+    withHome((home) => {
+      writeFileSync(
+        path.join(home, "soul", "JOURNAL.md"),
+        `# Journal\n\n## 2026-07-02\n\nA fine day. Send to ${SHORT_KEY} or ${SOLANA_USDG_MINT} tomorrow.\n`,
+        "utf8",
+      );
+      const tail = journalTail();
+      assert.ok(tail.includes("A fine day."), "the prose survives");
+      assert.ok(!tail.includes(SHORT_KEY) && !tail.includes(SOLANA_USDG_MINT), tail);
+      assert.match(tail, /Send to \[redacted\] or \[redacted\] tomorrow/);
+    });
+  });
+
+  it("a Solana key glued to a word in JOURNAL.md is redacted in place too (audit regressions F3)", () => {
+    withHome((home) => {
+      writeFileSync(
+        path.join(home, "soul", "JOURNAL.md"),
+        `# Journal\n\n## 2026-07-02\n\nA fine day. Send to CA${SHORT_KEY} or ${SOLANA_USDG_MINT}is tomorrow. ${SHORT_KEY} then X${SOLANA_USDG_MINT}${SHORT_KEY}Y.\n`,
+        "utf8",
+      );
+      const tail = journalTail();
+      assert.ok(tail.includes("A fine day."), "the prose survives");
+      assert.ok(!tail.includes(SHORT_KEY) && !tail.includes(SOLANA_USDG_MINT), tail);
+      assert.match(tail, /Send to \[redacted\] or \[redacted\] tomorrow\. \[redacted\] then \[redacted\]\./);
+    });
+  });
+
+  it("a key written as 0x<key> in JOURNAL.md is redacted whole, one that begins with hex included (review GE, round 2)", () => {
+    // The 0x rule ran first and took "0x373Fb1"; the 38-character tail was under the blob floor and no longer decoded.
+    const key = "373Fb1kTbyVQaYJBCTcojzXWx5hm4jWKbLkcUFenass8";
+    assert.equal(base58Decode(key)?.length, 32, "the fixture is a key");
+    assert.match(key, /^[0-9a-fA-F]{6}[^0-9a-fA-F]/, "the fixture begins with six hex digits");
+    withHome((home) => {
+      writeFileSync(
+        path.join(home, "soul", "JOURNAL.md"),
+        `# Journal\n\n## 2026-07-02\n\nA fine day. Aped 0x${key} and sent to 0xd76257aee404f1243831A9235dEcB5bb339A45cb tomorrow.\n`,
+        "utf8",
+      );
+      const tail = journalTail();
+      assert.ok(tail.includes("A fine day."), "the prose survives");
+      assert.ok(!tail.includes("kTbyVQaYJBCTcojzXWx5") && !tail.includes("0xd76257"), tail);
+      assert.match(tail, /Aped 0\[redacted\] and sent to \[redacted\] tomorrow\./);
     });
   });
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { CASH, STOCK_TOKENS } from "../../packages/core/src/index";
+import { CASH, SOLANA_USDG_MINT, STOCK_TOKENS } from "../../packages/core/src/index";
 import { currentTradeEpochSync, readOnlyFactsDb, readTradeFacts } from "./chat-trades";
 import { readDeskTrades } from "../../web/src/lib/desk-trades";
 const OWNER="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",OTHER="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",COIN="0xcccccccccccccccccccccccccccccccccccccccc";
@@ -94,4 +94,30 @@ test("retained epoch-one fills without modern agent metadata cannot be called th
   d.close();
   const legacy=new DatabaseSync(":memory:");legacy.exec("CREATE TABLE trades(id INTEGER PRIMARY KEY,agent_id TEXT)");
   assert.equal(currentTradeEpochSync(legacy,OWNER),null,"a schema predating runs retains its explicit legacy exception");legacy.close();
+});
+
+test("a Solana key is never a coin's label or name in chat facts, as a 0x one is not (Solana P0)",async()=> {
+  const {d,add}=db();
+  d.prepare("INSERT INTO decisions VALUES ('sol',?,?,'PRISM',?,'buy','why','brain')").run(OWNER,DAY+1,SOLANA_USDG_MINT);
+  add(1,2,"buy",DAY+1,"0xsolname","landed",5,"100","receipt",null,"sol");
+  add(2,2,"buy",DAY+2,"0xplain","landed",5,"100","receipt",null,"buy");
+  d.prepare("UPDATE trades SET fill_symbol=? WHERE id=1").run("1".repeat(32));
+  const facts=await readTradeFacts(readOnlyFactsDb(d),{account:OWNER,epoch:2,since:DAY,until:NOW});
+  const sol=facts.trades.find(t=>t.id===1),plain=facts.trades.find(t=>t.id===2);
+  assert.equal(sol?.label,"an unnamed coin");assert.equal(sol?.displayName,null);
+  assert.equal(plain?.label,"PRISM");assert.equal(plain?.displayName,"Prism");
+  d.close();
+});
+
+test("a display name with a whole 0x address inside it is refused in chat facts (tightened in Solana P0)",async()=> {
+  // Before, only a leading 0x was refused, so this reached the chat model as the coin's name.
+  const {d,add}=db();
+  d.prepare("INSERT INTO decisions VALUES ('evm',?,?,'PRISM',?,'buy','why','brain')").run(OWNER,DAY+1,"PEPE 0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d");
+  add(1,2,"buy",DAY+1,"0xevmname","landed",5,"100","receipt",null,"evm");
+  add(2,2,"buy",DAY+2,"0xplain","landed",5,"100","receipt",null,"buy");
+  const facts=await readTradeFacts(readOnlyFactsDb(d),{account:OWNER,epoch:2,since:DAY,until:NOW});
+  const evm=facts.trades.find(t=>t.id===1),plain=facts.trades.find(t=>t.id===2);
+  assert.equal(evm?.label,"PRISM");assert.equal(evm?.displayName,null);
+  assert.equal(plain?.displayName,"Prism");
+  d.close();
 });

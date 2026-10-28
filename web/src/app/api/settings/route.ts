@@ -27,8 +27,10 @@ import {
   robinhoodChain,
   type LlmProviderInfo,
   type MerrymenSettings,
+  type SecretSettingKey,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { fomoEnabledFor } from "@/lib/fomo-switch";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
@@ -67,8 +69,16 @@ export interface SettingsView {
   virtualsApiKey: SecretView;
   bitqueryApiKey: SecretView;
   merrymenToken: SecretView;
-  // everything else, verbatim (undefined = using env/default)
-  values: Omit<MerrymenSettings, "bundlerApiKey" | "groqApiKey" | "anthropicApiKey" | "llmApiKey" | "rialtoApiKey" | "telegramBotToken" | "telegramTranscribeKey" | "virtualsApiKey" | "bitqueryApiKey" | "merrymenToken">;
+  /**
+   * The Fomo data provider key (self-hosted settings `fomoApiKey`), masked like
+   * every other secret. GET always sends it; it is optional in the type only
+   * because client fixtures written before the key existed do not name it.
+   */
+  fomoApiKey?: SecretView;
+  // everything else, verbatim (undefined = using env/default). The Omit is the
+  // shared SECRET_SETTING_KEYS list, not a hand-written one: a hand-written
+  // list here is how fomoApiKey came back in plaintext under `values`.
+  values: Omit<MerrymenSettings, SecretSettingKey>;
   defaults: typeof SETTINGS_DEFAULTS;
   knownSymbols: string[];
   /**
@@ -136,7 +146,7 @@ type StoredRead = { ok: true; settings: MerrymenSettings } | { ok: false; why: s
 async function readStoredStrict(tenant?: `0x${string}` | null): Promise<StoredRead> {
   // Hosted: a tenant's settings live in the per-tenant store, not the global
   // settings.json (which the child workers each have their own copy of).
-  if (tenant) return { ok: true, settings: (await getSettingsStore().get(tenant)) ?? {} };
+  if (tenant) return { ok: true, settings: (await getSettingsStore("spot").get(tenant)) ?? {} };
   let raw: string;
   try {
     raw = await readFile(SETTINGS_FILE, "utf8");
@@ -165,6 +175,27 @@ function mask(value: string | undefined): SecretView {
   return { set: true, hint: value.length > 4 ? value.slice(-4) : "••••" };
 }
 
+/**
+ * Every SECRET_SETTING_KEYS member masked, and the stored settings without any
+ * of them.
+ *
+ * DERIVED FROM THE SHARED LIST, NOT A DESTRUCTURE OF NAMES. GET used to pull
+ * ten secrets out by name and return the rest verbatim, so `fomoApiKey` — added
+ * to SECRET_SETTING_KEYS, and so accepted and stored by PUT — went back to the
+ * browser in clear under `values`. Iterating the list means the next secret
+ * added to core is masked here the day it is added.
+ */
+function splitSecrets(stored: MerrymenSettings): { secrets: Record<SecretSettingKey, SecretView>; values: Omit<MerrymenSettings, SecretSettingKey> } {
+  const values: Record<string, unknown> = { ...stored };
+  const secrets = {} as Record<SecretSettingKey, SecretView>;
+  for (const key of SECRET_SETTING_KEYS) {
+    const raw: unknown = stored[key];
+    secrets[key] = mask(typeof raw === "string" ? raw : undefined);
+    delete values[key];
+  }
+  return { secrets, values: values as Omit<MerrymenSettings, SecretSettingKey> };
+}
+
 /** ASCII sentinel that cannot appear in a real URL path — encoding-robust
  * (a unicode marker can get mangled across clients and defeat the keep-guard). */
 const REDACT_MARK = "[key hidden]";
@@ -190,7 +221,7 @@ export async function GET(req: Request) {
   // defaults — nothing personal, no secrets). Self-hosted: the single file.
   const tenant = isHostedMode() ? tenantOf(req) : null;
   const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant);
-  const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, bitqueryApiKey, merrymenToken, ...values } = stored;
+  const { secrets, values } = splitSecrets(stored);
   const servedTokens = withoutEnergyReserve(values.customTokens);
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
@@ -208,16 +239,7 @@ export async function GET(req: Request) {
     basketSymbols: withoutReserveBasket(values.basketSymbols, values.customTokens, selectableSymbols(servedTokens)),
   };
   const view: SettingsView = {
-    bundlerApiKey: mask(bundlerApiKey),
-    groqApiKey: mask(groqApiKey),
-    anthropicApiKey: mask(anthropicApiKey),
-    llmApiKey: mask(llmApiKey),
-    rialtoApiKey: mask(rialtoApiKey),
-    telegramBotToken: mask(telegramBotToken),
-    telegramTranscribeKey: mask(telegramTranscribeKey),
-    virtualsApiKey: mask(virtualsApiKey),
-    bitqueryApiKey: mask(bitqueryApiKey),
-    merrymenToken: mask(merrymenToken),
+    ...secrets,
     values: safeValues,
     defaults: SETTINGS_DEFAULTS,
     knownSymbols: STOCK_TOKENS.map((t) => t.symbol),
@@ -332,6 +354,9 @@ const BOOL_FIELDS = [
   // model calls per window instead of one, and the scout consumed a day's
   // shared token allowance on 2026-08-31 doing exactly this kind of loop.
   "deskEnabled",
+  "xPublicWalletIntro",
+  "xTokenAddresses",
+  "xTradeResults",
   "telegramEnabled",
   "telegramControlEnabled",
   "telegramTransferEnabled",
@@ -355,6 +380,13 @@ const BOOL_FIELDS = [
   // MerrymenSettings.officialCoinsEnabled.
   "officialCoinsEnabled",
   "discoveryEnabled",
+  // FOMO RESEARCH (docs/fomo.md): three separate permissions. fomoDataAccess
+  // defaults ON, so — like the two opt-outs around it — this entry is what
+  // makes OFF reachable; the other two are opt-ins. Dashboard-only (the chat
+  // refuses them, DASHBOARD_ONLY.fomo).
+  "fomoDataAccess",
+  "fomoMonitoringEnabled",
+  "fomoFollowEnabled",
   // TELEGRAM GROUPS (docs/tg-groups.md "Settings"). Both default ON, so — like
   // officialCoinsEnabled above — this entry is what makes OFF reachable: missing
   // here, an owner's "stop looking at coins people post" would come back
@@ -553,6 +585,28 @@ async function saveSettings(
   }
 
   // ── enums ───────────────────────────────────────────────────────────────
+  if ("agentBrief" in body) {
+    const value = body.agentBrief;
+    if (value === null || value === undefined || value === "") {
+      setOrClear("agentBrief", undefined);
+    } else if (typeof value !== "string" || value.length > 1600 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) {
+      errors.push("agentBrief: use plain text, up to 1600 characters");
+    } else {
+      setOrClear("agentBrief", value.trim() || undefined);
+    }
+  }
+  if ("xVoice" in body) {
+    const value = body.xVoice;
+    if (value === null || value === undefined || value === "") setOrClear("xVoice", undefined);
+    else if (value === "default" || value === "dry") setOrClear("xVoice", value);
+    else errors.push("xVoice: choose default or dry");
+  }
+  if ("discoveryFocus" in body) {
+    const value = body.discoveryFocus;
+    if (value === null || value === undefined || value === "") setOrClear("discoveryFocus", undefined);
+    else if (value === "balanced" || value === "new-projects") setOrClear("discoveryFocus", value);
+    else errors.push("discoveryFocus: choose balanced or new-projects");
+  }
   if ("agentName" in body) {
     // The rule, the normalisation and the grandfathering of a stored "007"
     // live in lib/settings-agent-name.ts, where a test runs them. `stored` is
@@ -778,8 +832,15 @@ async function saveSettings(
   }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────
+  // THE FOMO SWITCHES ONLY WHERE THIS DEPLOYMENT RUNS FOMO (fomo-switch.ts).
+  // Elsewhere they would be stored and do nothing — until an operator turned
+  // Fomo on, when a consent given to a switch nobody could see (the real-money
+  // "act on Fomo research" among them) would quietly take effect. Not saved,
+  // and reported back in `ignored` like any key this deployment does not take.
+  const fomoHere = fomoEnabledFor(isHostedMode());
   for (const key of BOOL_FIELDS) {
     if (!(key in body)) continue;
+    if (!fomoHere && /^fomo/.test(key)) continue;
     const v = body[key];
     if (v === null || v === undefined) setOrClear(key, undefined);
     else if (typeof v === "boolean") setOrClear(key, v as never);
@@ -899,7 +960,7 @@ async function saveSettings(
     touched: touched.has("telegramBotToken"),
     next,
     moveBot,
-    settings: { before: stored, read: (t) => getSettingsStore().get(t) },
+    settings: { before: stored, read: (t) => getSettingsStore("spot").get(t) },
     claims,
   });
   if (botClaim && !botClaim.ok) return NextResponse.json(botClaim.body, { status: botClaim.status });
@@ -909,7 +970,7 @@ async function saveSettings(
     // rest), and the orchestrator hands the child worker a settings.json from it
     // within a reconcile tick.
     try {
-      await getSettingsStore().put(tenant, next);
+      await getSettingsStore("spot").put(tenant, next);
     } catch (e) {
       await botClaim?.undo().catch((u) => console.warn(`[settings] telegram bot claim not undone: ${u instanceof Error ? u.message : String(u)}`));
       throw e;

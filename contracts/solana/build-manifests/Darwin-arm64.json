@@ -1,0 +1,28 @@
+{
+  "about": "Reviewed SBF build of merrymen_vault. Written by contracts/solana/build.sh --record; checked by packages/core/src/solana-live.test.ts.",
+  "source": {
+    "digest": "1d02ff3e871249ce7451752d3b71b8ea4373634814c2101e50ca3f049064527b",
+    "rule": "sha256 of the sorted lines <sha256>  <path> for Cargo.toml, Cargo.lock, build.sh, programs/merrymen-vault/Cargo.toml and programs/merrymen-vault/src/**/*.rs, relative to contracts/solana"
+  },
+  "program": {
+    "declaredId": "EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU"
+  },
+  "toolchain": {
+    "agave": "2.3.13",
+    "cargoBuildSbf": "solana-cargo-build-sbf 2.3.13",
+    "platformTools": "v1.48",
+    "rustc": "rustc 1.84.1-dev",
+    "llvm": "19.1.7",
+    "rustSourceCommit": "293a1b6c60a0b8d92593843c373539e21e3ba087",
+    "arch": "v0",
+    "command": "cargo-build-sbf --tools-version v1.48 --arch v0 -- --locked",
+    "lto": "none (crate-type cdylib+lib)",
+    "host": "Darwin-arm64"
+  },
+  "artifact": {
+    "file": "target/deploy/merrymen_vault.so",
+    "bytes": 410472,
+    "sha256": "ce7d25446d5a4b06da0830cffe5fa5f0eb3c4f2fe346d3aa01ae87edcdb71f75",
+    "reproduced": "a second build from a copy in another directory, identical bytes"
+  }
+}

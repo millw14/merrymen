@@ -105,6 +105,27 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
   private var owner: String? = null
 
   @Volatile private var turns = 0L
+  private var readSequence = 0L
+
+  internal data class Read(val turn: Long, val sequence: Long)
+
+  /** A later session question supersedes older in-flight answers. */
+  internal suspend fun beginRead(expectedTurn: Long? = null): Read? = locked {
+    if (expectedTurn != null && expectedTurn != turns) null else Read(turns, ++readSequence)
+  }
+
+  /**
+   * Cookies have been adopted but their owner is not known yet. Keep the last
+   * owner internally so a different confirmed wallet still runs forget hooks.
+   */
+  internal suspend fun credentialsAdopted(expectedTurn: Long): Read? = locked {
+    if (expectedTurn != turns) return@locked null
+    turns++
+    _signedIn.value = null
+    _identityKnown.value = false
+    recompute()
+    Read(turns, ++readSequence)
+  }
 
   /** How many turns have ended. Take it BEFORE asking the session route; see the class note. */
   val turn: Long get() = turns
@@ -123,8 +144,8 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
    * on a flaky train. A 401 is a real "signed out" — the route was reached and
    * said so — but it says nothing about hosting, so [hosted] keeps what it had.
    */
-  suspend fun answered(r: ApiResult<SessionView>, asOf: Long = turn) = locked {
-    if (asOf != turns) return@locked
+  suspend fun answered(r: ApiResult<SessionView>, asOf: Long = turn, read: Long? = null): Boolean = locked {
+    if (asOf != turns || (read != null && read != readSequence)) return@locked false
     when (r) {
       is ApiResult.Ok -> {
         val address = r.value.address
@@ -145,6 +166,7 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
       is ApiResult.Unreachable -> Unit
     }
     recompute()
+    r is ApiResult.Ok || (r is ApiResult.Refused && r.status == 401)
   }
 
   /** The app signed out: every hook runs, and no wallet's state is held any more. */
@@ -217,7 +239,7 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
   }
 
   private fun recompute() {
-    _canOfferSignIn.value = _hosted.value == true && _signedIn.value == null
+    _canOfferSignIn.value = _identityKnown.value && _hosted.value == true && _signedIn.value == null
   }
 
   /** Marks the coroutine that is running forget hooks; see [locked]. */

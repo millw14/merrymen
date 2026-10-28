@@ -4,7 +4,9 @@ import {
   CASH,
   ENERGY_ROUTE_V1,
   GRANT_ENERGY,
+  GRANT_PERP_LIGHTER,
   GRANT_V4,
+  LIGHTER_ROUTE_V1,
   GRANT_PONS_CLASS,
   STOCK_TOKENS,
   TRADEABLE_V2,
@@ -185,5 +187,80 @@ describe("runWallBattery", () => {
       false,
       "selecting AAPL must not pretend a legacy signature can sell it",
     );
+  });
+});
+
+/**
+ * FOR PERPETUALS THE BATTERY IS THE ORDER WALL ITSELF (docs/perps.md rule 4):
+ * the chain bounds only the deposit, so every order rule an owner is shown
+ * here is one checkPolicy enforces alone. Each case is pinned to its rule, and
+ * the approved half proves no brake ever holds a close or a withdrawal shut.
+ */
+describe("runWallBattery — the perp cases", () => {
+  /** A canonical Lighter API public key: five LE limbs, each < p, not all zero. */
+  const PUB = `0x01${"00".repeat(39)}` as `0x${string}`;
+  const perpGrant = (perTradeUsdg = 25, dailyUsdg = 100): StoredGrant => {
+    const g = grant([TRADEABLE_V2, GRANT_PERP_LIGHTER]);
+    return {
+      ...g,
+      caps: { ...g.caps, perTradeUsdg, dailyUsdg },
+      chainId: 4663,
+      perp: { route: GRANT_PERP_LIGHTER, apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: PUB },
+    };
+  };
+  const PERP_RULES = [
+    "approved", // the honest open
+    "perp-leverage-mismatch", // 20x
+    "perp-per-trade-cap",
+    "perp-stop-required",
+    "perp-stop-inside-liquidation", // 10x, stop past liquidation
+    "perp-market-not-allowed",
+    "drawdown-breaker",
+    "perp-open-notional-cap",
+    "perp-close-in-flight",
+    "perp-not-granted", // the same open on a signature without the marker
+    "perp-venue-incident",
+    "target-allowlist", // a deposit aimed off the sealed proxy
+    "approved", // close under the breaker
+    "approved", // close at the daily cap
+    "approved", // close at the ops cap
+    "approved", // close after the session key expired
+    "approved", // withdrawal under the breaker
+  ];
+
+  it("holds every exact rule, and the doors stay open", () => {
+    const result = runWallBattery(perpGrant(), NOW);
+    for (const c of result.cases) assert.equal(c.held, true, `${c.attempt}: ${c.rule ?? "approved"} ${c.detail ?? ""}`);
+    assert.equal(result.allHeld, true);
+    assert.deepEqual(
+      result.cases.slice(-PERP_RULES.length).map((entry) => entry.rule ?? "approved"),
+      PERP_RULES,
+    );
+  });
+
+  it("holds on every per-trade cap a signer can seal — a small cap is not a false breach", () => {
+    for (const perTrade of [1, 10, 25, 1000]) {
+      const result = runWallBattery(perpGrant(perTrade, Math.max(100, perTrade)), NOW);
+      assert.equal(result.allHeld, true, `per-trade ${perTrade}`);
+      assert.deepEqual(result.cases.slice(-PERP_RULES.length).map((c) => c.rule ?? "approved"), PERP_RULES, `per-trade ${perTrade}`);
+    }
+  });
+
+  it("the mirror is sourced from the grant: the proxy is the perp limit's and NOT an allowed target", () => {
+    const limits = limitsFromGrant(perpGrant());
+    assert.equal(limits.perp?.proxy, LIGHTER_ROUTE_V1.proxy);
+    assert.equal(limits.perp?.apiKeyIndex, LIGHTER_ROUTE_V1.apiKeyIndex);
+    assert.equal(limits.perp?.apiPublicKey, PUB);
+    assert.ok(!limits.allowedTargets.map((a) => a.toLowerCase()).includes(LIGHTER_ROUTE_V1.proxy));
+    // No private-key material rides the limits, sealed or otherwise.
+    assert.ok(!("apiKeySealed" in (limits.perp ?? {})));
+  });
+
+  it("no perp cases for a signature that did not seal the route — marker absent, or the wrong chain", () => {
+    const plain = runWallBattery(grant([TRADEABLE_V2, "multihop"]), NOW);
+    assert.ok(!plain.cases.some((c) => /perp|Lighter/.test(c.attempt)));
+    const offChain = runWallBattery({ ...perpGrant(), chainId: 46630 }, NOW);
+    assert.ok(!offChain.cases.some((c) => /perp|Lighter/.test(c.attempt)), "grantPerp refuses a perp block off 4663");
+    assert.equal(limitsFromGrant({ ...perpGrant(), chainId: 46630 }).perp, undefined);
   });
 });

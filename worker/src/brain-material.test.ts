@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
-import { memoryLines, sentimentLine, technicalLine } from "./brain-material";
+import { leadMemory, memoryLines, MEMORY_LINES_READ, sentimentLine, technicalLine } from "./brain-material";
 import { publishableThesis, type PublicThesis } from "./thesis-policy";
 
 const post = (over: Partial<PublicThesis> = {}): PublicThesis => ({
@@ -247,5 +247,20 @@ describe("this module renders; it never sources", () => {
     assert.equal(dropped, null);
     const gated: PublicThesis[] = dropped === null ? [] : [dropped];
     assert.deepEqual(memoryLines(gated, 1), [], "nothing to render, because nothing got through");
+  });
+});
+
+describe("a line put first in memory stays inside what the Brain reads", () => {
+  const six = ["m1", "m2", "m3", "m4", "m5", "m6"];
+  it("leads, keeps the order of the rest, and never passes the six lines read", () => {
+    assert.equal(MEMORY_LINES_READ, 6);
+    assert.deepEqual(leadMemory(six, "hold"), ["hold", "m1", "m2", "m3", "m4", "m5"]);
+    assert.deepEqual(leadMemory(["m1"], "hold"), ["hold", "m1"]);
+    assert.deepEqual(leadMemory([], "hold"), ["hold"]);
+  });
+  it("THE PAPER NOTICE KEEPS ITS PLACE: the last line is protected when asked", () => {
+    assert.deepEqual(leadMemory([...six, "paper"], "hold", true), ["hold", "m1", "m2", "m3", "m4", "paper"]);
+    assert.deepEqual(leadMemory(["paper"], "hold", true), ["hold", "paper"]);
+    assert.deepEqual(leadMemory([], "hold", true), ["hold"]);
   });
 });

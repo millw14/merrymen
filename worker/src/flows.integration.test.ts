@@ -276,7 +276,8 @@ describe("the identity of a chain-derived flow", () => {
       direction: "in",
       amountUsdg: 10,
       source: "chain-log",
-      txHash: "0xAbCdEf0123",
+      // A whole 0x + 64 hex hash in mixed case: the only shape the store folds.
+      txHash: `0x${"AbCdEf01".repeat(8)}`,
       blockNumber: 100,
       logIndex: 0,
     });
@@ -286,7 +287,7 @@ describe("the identity of a chain-derived flow", () => {
       .get(D) as { chain_id: number; tx_hash: string };
     db.close();
     assert.equal(Number(row.chain_id), 46630, "read from agents.chain_id, which ensureAgent wrote from the grant");
-    assert.equal(row.tx_hash, "0xabcdef0123", "normalised, so two writers cannot disagree about the same hash");
+    assert.equal(row.tx_hash, `0x${"abcdef01".repeat(8)}`, "normalised, so two writers cannot disagree about the same hash");
   });
 
   it("writes an identity a unique index can be built over", async () => {

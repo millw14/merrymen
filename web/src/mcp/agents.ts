@@ -69,8 +69,9 @@ interface GrantProjection {
 
 /** Only these JSON paths are read from a grant; `serialized` and key fields never leave the database. */
 export async function readGrantProjection(db: Db, tenant: `0x${string}`): Promise<GrantProjection | null> {
-  try {
-    return (await db.prepare(`SELECT chain_id,
+  // Only a successful empty query means no permission. A missing table,
+  // unreadable JSON or unavailable database must not offer wallet creation.
+  const row = (await db.prepare(`SELECT chain_id,
         grant_json->>'smartAccount' AS smart_account,
         grant_json->>'grantedAt' AS granted_at,
         grant_json->>'expiresAt' AS expires_at,
@@ -78,10 +79,10 @@ export async function readGrantProjection(db: Db, tenant: `0x${string}`): Promis
         grant_json->>'grantFeatures' AS features,
         grant_json->>'grantTokens' AS tokens
       FROM grants WHERE tenant = ?`).get(tenant) as GrantProjection | undefined) ?? null;
-  } catch {
-    // No grants table yet (a fresh database) is "no agent", not an outage.
-    return null;
+  if (row !== null && (!addr(row.smart_account) || num(row.chain_id) === null || num(row.granted_at) === null || num(row.expires_at) === null)) {
+    throw new Error("Stored grant projection is unreadable.");
   }
+  return row;
 }
 
 function parseList(raw: string | null): unknown[] {

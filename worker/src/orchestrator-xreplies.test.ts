@@ -59,10 +59,12 @@ async function world(t: TestContext, consent = true) {
     return { status: sendStatus, headers: { get: () => null }, text: async () => JSON.stringify({ data: { id: "100000000000000010" } }) };
   };
   let elapsed = 0;
-  const poster = (over: { approved?: boolean; llmPerDay?: number; polls?: number; missingFill?: boolean; answer?: string; draftMs?: number } = {}) => makeXPoster({
+  const poster = (over: { approved?: boolean; llmPerDay?: number; polls?: number; missingFill?: boolean; answer?: string; draftMs?: number;
+    /** The operator's variables, read as the orchestrator reads them, instead of `approved`. */
+    env?: Record<string, string> } = {}) => makeXPoster({
     app: { clientId: "client", clientSecret: "secret", redirectUri: "https://app.test/connect/x" }, dek,
     creds: { provider: "groq", transport: "openai", model: "test", apiKey: "private-model", baseUrl: "https://model.test/v1", vision: false },
-    knobs: { ...xpostEnv({}), repliesApproved: over.approved ?? true, replyPollsPerDay: over.polls, llmPerDay: over.llmPerDay },
+    knobs: { ...(over.env ? xpostEnv(over.env) : { ...xpostEnv({}), repliesApproved: over.approved ?? true }), replyPollsPerDay: over.polls, llmPerDay: over.llmPerDay },
     deps: { dialect: "sqlite", fetch, monotonic: () => elapsed, member: async () => ({ tz: null }),
       facts: async (_db, _roster, _profiles, _now, options) => {
         if (options?.callWindowSec) assert.equal(options.callWindowSec, 4 * DAY / 1000);
@@ -233,10 +235,78 @@ test("a model PASS spends the comment's decision once", async (t) => {
   assert.equal(w.sends.length, 0);
 });
 
+test("a comment an active owner on the same X account already answered gets no second reply", async (t) => {
+  const w = await world(t);
+  // Owner A, active, answered this comment on owner B's buy post first (planPass visits A first in tenant order).
+  assert.notEqual(await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "answer", dedupeKey: `answer:111:${COMMENT}`,
+    body: "the early curve caught my eye on paper. Say stop to opt out.", nowMs: NOW - 30_000, dueAtMs: NOW - 30_000,
+    replyToTweetId: COMMENT, replyRootTweetId: COMMENT, replyAuthorId: "222" }), null);
+  await w.step(w.poster());
+  assert.equal(w.prompts.length, 0, "no draft for a comment already answered");
+  assert.equal((await w.replies()).length, 0);
+});
+
+test("a drafted comment reply that names sherwood is never posted, however it puts it", async (t) => {
+  for (const answer of ["sherwood-1 picks my coins on paper now. Say stop to opt out.", "the new sherwood-1 is still cooking, i bought this one on paper. Say stop to opt out."]) {
+    const w = await world(t);
+    await w.step(w.poster({ answer }));
+    const [reply] = await w.replies();
+    assert.equal(reply!.status, "skipped", answer);
+    assert.equal(reply!.reason, "gate:sherwood-drafted", answer);
+  }
+});
+
 test("approval is explicit and unreadable polling budgets fail closed", () => {
   assert.equal(xpostEnv({}).repliesApproved, undefined);
   assert.equal(xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: "true" }).repliesApproved, undefined);
   assert.equal(xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: " 1 " }).repliesApproved, undefined);
   assert.equal(xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: "1" }).repliesApproved, true);
   assert.equal(xpostEnv({ MERRYMEN_XPOST_REPLY_POLLS_PER_DAY: "many" }).replyPollsPerDay, 0);
+});
+
+test("the replies scope: 1 is every consenting owner, active only the active owners, anything else off and said by name", () => {
+  const all = xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: "1" });
+  assert.equal(all.repliesApproved, true);
+  assert.equal(all.repliesActiveOnly, undefined);
+  const active = xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: "active", MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT });
+  assert.equal(active.repliesApproved, true);
+  assert.equal(active.repliesActiveOnly, true);
+  assert.deepEqual(active.notes, []);
+  for (const value of ["true", "yes", "Active", " 1 ", "sk-not-a-scope"]) {
+    const off = xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: value });
+    assert.equal(off.repliesApproved, undefined, value);
+    assert.equal(off.repliesActiveOnly, undefined, value);
+    assert.ok(off.notes.some((n) => n.includes("MERRYMEN_XPOST_REPLIES_APPROVED")), `${value} is named as unreadable`);
+  }
+  assert.ok(!xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: "sk-not-a-scope" }).notes.some((n) => n.includes("sk-not-a-scope")), "the variable is named, never its value");
+  assert.deepEqual(xpostEnv({ MERRYMEN_XPOST_REPLIES_APPROVED: "" }).notes, [], "set-but-empty is unset");
+});
+
+test("scope active: an owner the operator did not make active is not polled, drafts nothing, and a waiting reply is cancelled", async (t) => {
+  const w = await world(t);
+  // Drafted while replies were open to every consenting owner.
+  await w.step(w.poster());
+  assert.equal((await w.replies())[0]?.status, "scheduled");
+  const reads = w.reads, prompts = w.prompts.length;
+  w.setInbox([comment({ id: "100000000000000003" })]);
+  const scoped = w.poster({ env: { MERRYMEN_XPOST_REPLIES_APPROVED: "active" } });
+  await w.step(scoped, NOW + 30 * MIN);
+  assert.equal(w.reads, reads, "not polled");
+  assert.equal(w.prompts.length, prompts, "nothing drafted");
+  assert.equal(w.sends.length, 0);
+  const [reply] = await w.replies();
+  assert.equal(reply!.status, "cancelled");
+  assert.equal(reply!.reason, "replies-off");
+});
+
+test("scope active: the owners it names are still polled and answered", async (t) => {
+  const w = await world(t);
+  // A comment the answer lane answers under its own buy post: chat off the banter allowlist ("why did you choose
+  // this coin?") is answered by nothing there since the red-team review of a964a74c, and nothing is drafted under
+  // its own buy post since that of daaae961, and a greeting gets nothing since 2026-10-13: so how it trades, which gets code's own line.
+  w.setInbox([comment({ text: "how do you pick your coins?" })]);
+  await w.step(w.poster({ env: { MERRYMEN_XPOST_REPLIES_APPROVED: "active", MERRYMEN_XPOST_ACTIVE_TENANTS: TENANT } }));
+  assert.equal(w.reads, 1);
+  const answers = (await store.postsOf(w.db, TENANT, 0)).filter((p) => p.kind === "answer");
+  assert.equal(answers.length, 1, "an active owner's comment comes through the answer lane");
 });

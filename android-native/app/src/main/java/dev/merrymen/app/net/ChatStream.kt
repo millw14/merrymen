@@ -9,6 +9,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
@@ -68,6 +69,8 @@ data class StreamedReply(
   val provider: String? = null,
   /** The provider's redacted debug line. Carried so nothing downstream mistakes its absence; NEVER rendered. */
   val detail: String? = null,
+  /** The failed key was the deployment's house key ([Asked.Failed.house]). */
+  val house: Boolean = false,
 )
 
 /**
@@ -147,6 +150,7 @@ class SseReplyReader(private val onText: (String) -> Unit) {
         kind = payload.text("kind")?.takeIf { it.isNotEmpty() },
         provider = payload.text("provider")?.takeIf { it.isNotEmpty() },
         detail = payload.text("detail")?.takeIf { it.isNotEmpty() },
+        house = payload.isTrue("house"),
       )
       else -> null
     }
@@ -177,6 +181,14 @@ private fun commandOf(v: JsonElement?): ChatCommand? {
   return ChatCommand(id, args)
 }
 
+/**
+ * A flag that is the JSON literal `true`. Absent, null, false, or a string that
+ * merely says "true" are all false: an older server never sends `house`, and
+ * the owner's-own-key sentences are the ones every reply was said with before.
+ */
+private fun JsonObject.isTrue(key: String): Boolean =
+  (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull == true
+
 /** A whole JSON answer (no-llm, an empty message, an older server), read into the same shape. */
 private fun replyOf(o: JsonObject) = StreamedReply(
   reply = o.text("reply")?.takeIf { it.isNotBlank() },
@@ -185,6 +197,7 @@ private fun replyOf(o: JsonObject) = StreamedReply(
   kind = o.text("kind"),
   provider = o.text("provider"),
   detail = o.text("detail"),
+  house = o.isTrue("house"),
 )
 
 /**
@@ -197,7 +210,8 @@ private fun replyOf(o: JsonObject) = StreamedReply(
  * sent), which only a phone can have.
  * The sentence for each is the thread's to choose (ui/Act.kt failureLine);
  * [Failed.kind] and [Failed.provider] are the route's classification of a
- * model failure, never the provider's own words.
+ * model failure, never the provider's own words; [Failed.house] is its word
+ * that the key which failed was the deployment's own, so ours to fix.
  */
 sealed interface Asked {
   data class Replied(val reply: String, val command: ChatCommand?) : Asked
@@ -206,6 +220,7 @@ sealed interface Asked {
     val status: Int? = null,
     val kind: String? = null,
     val provider: String? = null,
+    val house: Boolean = false,
   ) : Asked
 }
 
@@ -316,7 +331,7 @@ private suspend fun MerrymenApi.readReply(call: okhttp3.Call, turn: Long, onText
         !reply.isNullOrBlank() -> Asked.Replied(reply, out.command)
         out.why == "no-llm" -> Asked.Failed("no-llm")
         out.why == "cut-off" -> Asked.Failed("cut-off")
-        out.why == "llm-error" -> Asked.Failed("llm-error", kind = out.kind, provider = out.provider)
+        out.why == "llm-error" -> Asked.Failed("llm-error", kind = out.kind, provider = out.provider, house = out.house)
         else -> Asked.Failed("unreadable")
       }
     }

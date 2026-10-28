@@ -66,8 +66,8 @@ before(async () => {
   delete process.env.MERRYMEN_STORE_DEK;
   resetGrantStoreForTest();
   resetIdentityStoreForTest();
-  await getGrantStore().put(A, grantFor(SA_A));
-  await getGrantStore().put(D, grantFor(SA_D));
+  await getGrantStore("spot").put(A, grantFor(SA_A));
+  await getGrantStore("spot").put(D, grantFor(SA_D));
   slugA = (await getIdentityStore().ensure(A, SA_A)).slug;
   slugD = (await getIdentityStore().ensure(D, SA_D)).slug;
 });

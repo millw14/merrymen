@@ -131,8 +131,22 @@ function translatedPostgres(code: string, failures: number) {
   const statements: string[] = [];
   const failure = Object.assign(new Error("index installation failed"), { code });
   let attempts = 0;
+  let catalogReads = 0;
   const db: Db = {
-    prepare() { throw new Error("unexpected query in schema installation"); },
+    prepare(sql) {
+      assert.match(sql, /FROM pg_catalog\.pg_attribute a JOIN pg_catalog\.pg_class c/);
+      assert.match(sql, /pg_table_is_visible\(c\.oid\)/);
+      return {
+        async all() {
+          catalogReads += 1;
+          // A legacy ledger has account columns but no epoch columns. The
+          // catalog read must therefore leave the required ALTERs enabled.
+          return indexes.map(index => ({ table_name: index.table, column_name: "agent_id" }));
+        },
+        async get() { throw new Error("unexpected single-row schema query"); },
+        async run() { throw new Error("unexpected schema query write"); },
+      };
+    },
     tx: fn => fn(db),
     async exec(ddl) {
       const sql = translateSchema(ddl);
@@ -143,13 +157,14 @@ function translatedPostgres(code: string, failures: number) {
       }
     },
   };
-  return { db, statements, failure, attempts: () => attempts };
+  return { db, statements, failure, attempts: () => attempts, catalogReads: () => catalogReads };
 }
 
 test("translated PostgreSQL index creation retries catalog races after the required column ALTERs", async () => {
   for (const code of ["23505", "42P07", "42710"]) {
     const mock = translatedPostgres(code, 2);
     await applyLedgerSchema(mock.db);
+    assert.equal(mock.catalogReads(), 1, "read the actual column catalog before applying upgrades");
     assert.equal(mock.attempts(), 3, `${code}: the third index attempt succeeds`);
     for (const index of indexes) {
       const alter = mock.statements.findIndex(sql => new RegExp(`ALTER TABLE ${index.table} ADD COLUMN IF NOT EXISTS epoch BIGINT`, "i").test(sql));
@@ -165,6 +180,7 @@ test("persistent index catalog races stop after three attempts and unrelated fai
   for (const [code, attempts] of [["23505", 3], ["42501", 1], ["42601", 1]] as const) {
     const mock = translatedPostgres(code, 10);
     await assert.rejects(applyLedgerSchema(mock.db), error => error === mock.failure);
+    assert.equal(mock.catalogReads(), 1, "index failure must occur after the required column check");
     assert.equal(mock.attempts(), attempts, code);
   }
 });

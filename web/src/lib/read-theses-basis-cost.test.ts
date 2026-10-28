@@ -214,3 +214,31 @@ describe("the view lane never reads the basis scope", () => {
   });
 });
 
+
+it("activity-only reads keep publication, outcomes and stable post IDs without walking fill-basis history", async (t) => {
+  const { raw, db, count } = await ledger({ history: HISTORY, sells: 40, holds: 3 });
+  try {
+    // Also test opted-in amounts: omitting enrichment must not change the
+    // published size, head or post ID, and a private book stays private.
+    for (const published of [false, true]) {
+      const settings = (async () => ({ publicBook: published })) as never;
+      count.visits = 0;
+      const fullStart = performance.now();
+      const full = await readTheses({}, fn => fn(db), identities, settings);
+      const fullMs = performance.now() - fullStart;
+      const fullVisits = count.visits;
+      count.visits = 0;
+      const leanStart = performance.now();
+      const activity = await readTheses({ figures: false }, fn => fn(db), identities, settings);
+      const leanMs = performance.now() - leanStart;
+      const leanVisits = count.visits;
+      const withoutFigures = (rows: typeof full.theses) => rows.map(({ entryPriceUsd, realizedPct, realizedUsd, ...post }) => post);
+      assert.deepEqual(withoutFigures(activity.theses), withoutFigures(full.theses), "same gate, outcome, head, counts and post IDs");
+      assert.equal(activity.tradesComplete, full.tradesComplete);
+      assert.ok(activity.theses.every(p => p.entryPriceUsd == null && p.realizedPct == null && p.realizedUsd == null));
+      assert.ok(full.theses.some(p => p.realizedPct === 25));
+      assert.ok(leanVisits < fullVisits / 2, `activity visited ${leanVisits} trade rows; full feed visited ${fullVisits}`);
+      t.diagnostic(`${published ? "Published" : "Private"} 6k-history fixture: activity ${leanMs.toFixed(2)}ms / ${leanVisits} trade visits; full ${fullMs.toFixed(2)}ms / ${fullVisits} visits. Local SQLite timings are not production latency.`);
+    }
+  } finally { raw.close(); }
+});

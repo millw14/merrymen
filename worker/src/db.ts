@@ -117,6 +117,25 @@ export function wrapSqlite(raw: DatabaseSync): Db {
   return db;
 }
 
+/**
+ * IS THIS TABLE IN THE DATABASE? Asked of the catalogue, never learned from a
+ * failed statement: in a Postgres transaction a failed read aborts the rest
+ * (the chain-gap booking tool's snapshot is one), and on the first boot after
+ * a deploy the shared DDL may not have run yet. to_regclass answers NULL for
+ * an absent table on Postgres; SQLite has no such function, and its own
+ * catalogue is asked instead. `name` is a plain identifier, never input.
+ */
+export async function tablePresent(db: Pick<Db, "prepare">, name: string): Promise<boolean> {
+  if (!/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error(`not a table name: ${name}`);
+  try {
+    const row = (await db.prepare(`SELECT to_regclass('${name}') AS t`).get()) as { t?: unknown } | undefined;
+    return row?.t !== null && row?.t !== undefined;
+  } catch (e) {
+    if (!/no such function: to_regclass/i.test(String((e as Error)?.message ?? ""))) throw e;
+    return !!(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+  }
+}
+
 // ── sqlite → postgres translation ────────────────────────────────────────────
 //
 // The store writes SQL in the sqlite dialect (that is the self-hosted default and
@@ -205,10 +224,12 @@ function coerceParams(params: unknown[]): unknown[] {
 }
 
 class PgDb implements Db {
+  private lockedTransactionRunning = false;
   constructor(
     private q: PgQueryable,
     /** For a connection pinned from a pool (sessionLock), the pool's own Db: see rootDb. */
     readonly root?: PgDb,
+    private readonly transactionScoped = false,
   ) {}
   prepare(sql: string): Stmt {
     const text = translateQuery(sql);
@@ -235,14 +256,33 @@ class PgDb implements Db {
     await this.q.query(translateSchema(sql));
   }
   async tx<T>(fn: (db: Db) => Promise<T>): Promise<T> {
+    if (this.transactionScoped) throw new Error("nested transactions are not supported");
     // Pin the transaction to ONE checked-out connection. A pool.query-per-statement
     // transaction would scatter BEGIN/…/COMMIT across connections and never commit
     // as a unit — the reason the seam routes transactions through tx() at all.
     const pool = this.q as PgPoolLike;
+    if (this.root) {
+      // A session-lock callback already owns this connection. Do not check
+      // out a second connection while holding it (a full pool would deadlock).
+      // Transaction-scoped handles have no root and cannot nest transactions.
+      if (this.lockedTransactionRunning) throw new Error("nested or concurrent transactions are not supported");
+      this.lockedTransactionRunning = true;
+      try {
+        await this.q.query("BEGIN");
+        const out = await fn(new PgDb(this.q, undefined, true));
+        await this.q.query("COMMIT");
+        return out;
+      } catch (error) {
+        try { await this.q.query("ROLLBACK"); } catch { /* original error wins */ }
+        throw error;
+      } finally {
+        this.lockedTransactionRunning = false;
+      }
+    }
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const out = await fn(new PgDb(client));
+      const out = await fn(new PgDb(client, undefined, true));
       await client.query("COMMIT");
       return out;
     } catch (e) {
@@ -259,7 +299,8 @@ class PgDb implements Db {
   /** withAdvisoryLock's Postgres half: see there. */
   async sessionLock<T>(cls: number, key: number, deadline: number, fn: (db: Db) => Promise<T>, held: () => void): Promise<T> {
     const pool = this.q as PgPoolLike;
-    if (typeof pool.connect !== "function") throw new Error("an advisory session lock is taken on a pool, not inside a transaction");
+    if (this.root || this.transactionScoped || typeof pool.connect !== "function")
+      throw new Error("an advisory session lock is taken on a pool, not inside a transaction or session lock");
     for (let pause = 20; ; pause = Math.min(pause * 2, 250)) {
       const client = await pool.connect();
       let got = false;
@@ -310,6 +351,35 @@ export class LockBusyError extends Error {
     super("the lock is held elsewhere; try again");
     this.name = "LockBusyError";
   }
+}
+
+/**
+ * A DATABASE FAILURE THAT IS WEATHER, NOT A DECISION: the same statement may
+ * well succeed if it is simply asked again.
+ *
+ * 57014 is a statement timeout (PostgreSQL logged one at 11:01:01 on
+ * 2026-10-05, "canceling statement due to statement timeout"); 55P03 is
+ * lock_not_available (a `NOWAIT` or a lock_timeout); the 08 class and the
+ * 57P0x codes are a dropped or restarting server; 53xxx is the server out of
+ * connections, memory or disk; 40001/40P01 are serialization and deadlock
+ * aborts. The node codes and pg/pg-pool messages are the client side of the
+ * same events: a reset socket, a pool that could not hand out a connection in
+ * time, a connection that ended under a query.
+ *
+ * Deliberately NOT transient: any other SQLSTATE — above all 23505, a
+ * uniqueness the table enforces, and the 42 class, schema drift — and
+ * anything that is not an Error. Those are answers, and asking again gets the
+ * same one. Callers that have refusals of their own exclude them first
+ * (recovery-reply-isolation.ts isTransientReplyDbError).
+ */
+const TRANSIENT_SQLSTATE = /^(?:08[0-9A-Z]{3}|53[0-9A-Z]{3}|57014|57P0[1-4]|55P03|40001|40P01)$/;
+const TRANSIENT_NODE = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "ENOTFOUND"]);
+const TRANSIENT_MESSAGE = /^(?:Connection terminated|Client has encountered a connection error|Client was closed and is not queryable|timeout exceeded when trying to connect|Query read timeout|timeout expired)/;
+export function isTransientDbError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const code = (e as { code?: unknown }).code;
+  if (typeof code === "string" && (TRANSIENT_SQLSTATE.test(code) || TRANSIENT_NODE.has(code))) return true;
+  return TRANSIENT_MESSAGE.test(e.message);
 }
 
 /** Per Db, per lock: the tail of this process's queue for it. */

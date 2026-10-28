@@ -68,8 +68,8 @@ describe("the shadow path cannot reach execution", () => {
     const raw = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(
       raw,
-      /if \(\(fastTrencher \|\| shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\) && cfg\.brainUrl && cfg\.brainToken && !bookIncomplete/,
-      "Brain requires enrollment or explicit Trencher opt-in, configuration and complete accounting",
+      /if \(cfg\.workerWallet !== "perps" && \(fastTrencher \|\| shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\) && cfg\.brainUrl && cfg\.brainToken && !bookIncomplete/,
+      "Brain requires enrollment or explicit Trencher opt-in, configuration and complete accounting — and never runs on a Perps wallet's worker",
     );
     assert.match(raw, /const fastTrencher = cfg\.strategy === "trencher" && cfg\.trencherFastEnabled/);
   });

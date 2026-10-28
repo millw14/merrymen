@@ -102,7 +102,7 @@ const claim = (bot: string, tenant: string) =>
   db.prepare("INSERT INTO telegram_bot_claims (bot_id, tenant, claimed_at) VALUES (?, ?, ?)").run(bot, tenant, Date.now());
 const heard = (botId: string) => ({ okAt: NOW - 20, err: null, errAt: null, botId });
 const save = (tenant: `0x${string}`, token: string) =>
-  getSettingsStore().put(tenant, { telegramBotToken: token, telegramEnabled: true });
+  getSettingsStore("spot").put(tenant, { telegramBotToken: token, telegramEnabled: true });
 async function status(tenant: `0x${string}`): Promise<TelegramStatus> {
   const res = await GET(new Request("https://app.example.test/api/telegram", { headers: { cookie: `mm_session=${mintSession(tenant)}` } }));
   return (await res.json()) as TelegramStatus;
@@ -169,7 +169,7 @@ describe("GET /api/telegram — botElsewhere", () => {
 
   it("hosted, the web container's MERRYMEN_TELEGRAM_BOT_TOKEN is nobody's token", async () => {
     // No token saved: no token, whatever the environment holds.
-    await getSettingsStore().put(OWNER, { telegramEnabled: true });
+    await getSettingsStore("spot").put(OWNER, { telegramEnabled: true });
     const s = await status(OWNER);
     assert.equal(s.hasToken, false);
     assert.equal(s.connected, false);

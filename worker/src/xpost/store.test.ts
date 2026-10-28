@@ -13,6 +13,11 @@ import {
   OWNER_PER_DAY_MAX,
   XPOST_ALTERS,
   XPOST_SCHEMA,
+  ANSWER_LOOKED_UP,
+  answerAuthorKey,
+  answerAuthorSpent,
+  ANSWERS_PER_AUTHOR,
+  repliesOffKey,
   cancelPost,
   cancelDisabledKind,
   cancelScheduled,
@@ -31,7 +36,14 @@ import {
   markPosted,
   markRevoked,
   ownerCancel,
+  ownRecentBodies,
+  ownThreadTweets,
+  ANSWER_PLAIN_THREAD,
+  ANSWER_THREAD_DONE,
+  fleetXUserIds,
   ownerSendTimesSince,
+  tradeSendTimesSince,
+  recapPostsOf,
   postingAccounts,
   postsOf,
   postsOfXUser,
@@ -44,6 +56,7 @@ import {
   reschedulePost,
   returnAllowance,
   schedulePost,
+  smalltalkBodiesToAuthor,
   setPosting,
   setPrefs,
   setReplying,
@@ -418,7 +431,52 @@ test("recent bodies: one account's, or the fleet's, never the ones that did not 
   assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["one"]);
   assert.deepEqual(await recentBodies(db, { tenant: null, sinceMs: 0, limit: 10 }), ["two", "one"]);
   assert.deepEqual(await recentBodies(db, { tenant: null, sinceMs: 15, limit: 10 }), ["two"]);
+  // What it SAID is only what X published: a draft still waiting is not.
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, posted: true }), []);
+  const out = (await schedulePost(db, post({ dedupeKey: "a4", body: "five", nowMs: 42 })))!;
+  await claimPost(db, out, 43);
+  await markPosted(db, out, "900", 44);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, posted: true }), ["five"]);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["five", "one"]);
   assert.equal(await cancelScheduled(db, OWNER_B, 50, "turned-off"), 1);
+});
+
+test("an answer marked as handed research is never handed on, only gated against", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setReplying(db, OWNER_A, true, "111", 3);
+  const answer = (id: string, body: string, nowMs: number, coin: string | null): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${id}`, body, coin,
+    replyToTweetId: id, replyRootTweetId: id, replyAuthorId: `9${id}`, nowMs, dueAtMs: nowMs });
+  await schedulePost(db, post({ dedupeKey: "casual:a", body: "soup weather", nowMs: 10 }));
+  await schedulePost(db, answer("701", "thin liquidity and holders bunched up", 20, ANSWER_LOOKED_UP));
+  await schedulePost(db, answer("702", "patience mostly", 30, null));
+  // The mark is an answer's: any other kind with a coin is a coin post, handed on as ever.
+  await schedulePost(db, post({ kind: "buy", dedupeKey: "buy:x", body: "grabbed some frog", coin: ANSWER_LOOKED_UP, nowMs: 40 }));
+  assert.deepEqual(await ownRecentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), {
+    all: ["grabbed some frog", "patience mostly", "thin liquidity and holders bunched up", "soup weather"],
+    shown: ["grabbed some frog", "patience mostly", "soup weather"],
+    timeline: [{ body: "grabbed some frog", kind: "buy" }, { body: "soup weather", kind: "casual" }],
+  });
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10, exceptLookedUp: true }), ["grabbed some frog", "patience mostly", "soup weather"]);
+  assert.deepEqual(await recentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 10 }), ["grabbed some frog", "patience mostly", "thin liquidity and holders bunched up", "soup weather"]);
+});
+
+test("timeline memory survives two hundred newer answers without widening repeat or tenant memory", async (t) => {
+  const { db, raw } = await open(t);
+  for (let i = 0; i < 12; i++) await schedulePost(db, post({ kind: "casual", dedupeKey: `timeline:${i}`, body: `older timeline ${i}`, nowMs: 10 + i }));
+  await schedulePost(db, post({ kind: "casual", tenant: OWNER_B, dedupeKey: "other-owner", body: "another owner's timeline", nowMs: 50 }));
+  await schedulePost(db, post({ kind: "casual", dedupeKey: "never-posted", body: "a skipped timeline", status: "skipped", nowMs: 50 }));
+  raw.exec(`WITH RECURSIVE newer(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM newer WHERE n < 220)
+    INSERT INTO xpost_posts (tenant, x_user_id, kind, dedupe_key, body, status, due_at_ms, created_at_ms, updated_at_ms)
+    SELECT '${OWNER_A.toLowerCase()}', '111', 'answer', 'new-answer:' || n, 'newer answer ' || n, 'posted', 100, 100, 100 FROM newer`);
+  const history = await ownRecentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 200 });
+  assert.equal(history.all.length, 200);
+  assert.ok(history.all.every((body) => body.startsWith("newer answer")));
+  assert.deepEqual(history.timeline, Array.from({ length: 12 }, (_, i) => ({ body: `older timeline ${11 - i}`, kind: "casual" })));
+  const bounded = await ownRecentBodies(db, { tenant: OWNER_A, sinceMs: 15, limit: 3 });
+  assert.equal(bounded.all.length, 3);
+  assert.deepEqual(bounded.timeline.map((p) => p.body), ["older timeline 11", "older timeline 10", "older timeline 9"]);
 });
 
 test("an allowance is taken atomically and stops at its limit", async (t) => {
@@ -438,6 +496,28 @@ test("an allowance is taken atomically and stops at its limit", async (t) => {
   await writeMeta(db, "pause", "123", 6);
   await writeMeta(db, "pause", "456", 7);
   assert.equal((await readMeta(db, "pause"))?.v, "456");
+});
+
+test("new allowances seed durable history without discarding concurrent reservations", async (t) => {
+  const { db } = await open(t);
+  assert.equal(await takeAllowance(db, "already-spent", 2, 1, 2), false);
+  assert.equal(await readMeta(db, "already-spent"), null);
+  const claims = await Promise.all([
+    takeAllowance(db, "one-left", 2, 2, 1),
+    takeAllowance(db, "one-left", 2, 2, 1),
+  ]);
+  assert.deepEqual(claims.sort(), [false, true]);
+  assert.equal((await readMeta(db, "one-left"))?.n, 2);
+  assert.equal(await takeAllowance(db, "one-left", 2, 3, 0), false, "a stale history read cannot lower reservations");
+  await returnAllowance(db, "one-left", 4);
+  assert.equal((await readMeta(db, "one-left"))?.n, 1, "return only the reservation, keeping history counted");
+  assert.equal(await takeAllowance(db, "one-left", 2, 5, 1), true);
+  assert.equal(await takeAllowance(db, "rising-history", 5, 6), true);
+  assert.equal(await takeAllowance(db, "rising-history", 5, 7, 3), true);
+  assert.equal((await readMeta(db, "rising-history"))?.n, 4);
+  for (const bad of [NaN, Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(await takeAllowance(db, "bad-seed", 5, 8, bad), false);
+  }
 });
 
 // ── what Postgres would receive ─────────────────────────────────────────────
@@ -500,16 +580,19 @@ test("every statement the store sends translates to Postgres with matching, bind
   await deferPost(db, id, 21.5, 21.5);
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
+  await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5, posted: true });
   await returnAllowance(db, "k", 14.7);
   await takeAllowance(db, "k", 3.5, 14.5);
   await takeOwnerAllowance(db, OWNER_A, "owner-day", 3.5, 14.5);
   await ownerSendTimesSince(db, OWNER_A, 0.5);
+  await tradeSendTimesSince(db, "222", 0.5);
   const span = await claimSpan(db, "gap:111", 20.5, 10.5);
   await claimSpan(db, "gap:111", 21.5, 10.5);
   if (span.ok) await releaseSpan(db, "gap:111", 20.5, span.prev, 22.5);
   await releaseSpan(db, "gap:111", 20.5, 7.5, 22.5);
   await readMeta(db, "k");
   await writeMeta(db, "k", "v", 15.5);
+  await setReplying(db, OWNER_A, true, "222", 15.3, { house: true });
   await setReplying(db, OWNER_A, true, "222", 15.5);
   await repliesEnabledFor(db, OWNER_A, "222");
   const parent = (await schedulePost(db, post({ xUserId: "222", kind: "buy", dedupeKey: "buy:reply-root", nowMs: 20.5 })))!;
@@ -518,6 +601,8 @@ test("every statement the store sends translates to Postgres with matching, bind
   const reply = (await schedulePost(db, post({ xUserId: "222", kind: "reply", dedupeKey: "reply:222:701", nowMs: 23.5,
     replyToTweetId: "701", replyRootTweetId: "700", replyAuthorId: "333" })))!;
   await replyTargetFor(db, { id: reply, tenant: OWNER_A, xUserId: "222" });
+  await schedulePost(db, post({ xUserId: "222", kind: "answer", dedupeKey: "answer:222:801", nowMs: 23.7,
+    replyToTweetId: "801", replyRootTweetId: "801", replyAuthorId: "333" }));
   await replyConsentAt(db, OWNER_A, "222");
   await firstReplyConsentAt(db, "222");
   await repliesOptedOut(db, "222", "333");
@@ -544,7 +629,7 @@ test("every statement the store sends translates to Postgres with matching, bind
       const assignments = pg.split(/DO UPDATE SET/i)[1]!.split(/\bWHERE\b(?![^()]*\))|\bRETURNING\b/i)[0]!;
       for (const part of assignments.split(/,(?![^()]*\))/)) {
         const rhs = part.split("=").slice(1).join("=").trim();
-        assert.ok(/^(excluded\.|CASE WHEN xpost_(?:accounts|reply_accounts)\.|xpost_meta\.)/.test(rhs), `bare right-hand side in an upsert: ${part.trim()}`);
+        assert.ok(/^(excluded\.|CASE WHEN xpost_(?:accounts|reply_accounts|meta)\.|xpost_meta\.)/.test(rhs), `bare right-hand side in an upsert: ${part.trim()}`);
       }
     }
     for (const p of params) {
@@ -748,6 +833,246 @@ test("reply targets survive queue reads and cannot reference another tenant, acc
   assert.equal(await schedulePost(db, { ...p, dedupeKey: "reply:111:702", replyToTweetId: "702" }), null);
 });
 
+test("an owner's replies off is remembered, and a house consent never overrides it", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 2, { house: true }), false, "posting is off");
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 3);
+  assert.equal(await setReplying(db, OWNER_A, true, "999", 4, { house: true }), false, "only for the X account posting consent names");
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 5, { house: true }), true);
+  assert.equal(await replyConsentAt(db, OWNER_A, "111"), 5);
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 6, { house: true }), false, "recorded once");
+  assert.equal(await replyConsentAt(db, OWNER_A, "111"), 5);
+
+  // The owner turns replies off: the mark stays, and the house consent is refused for good.
+  assert.equal(await setReplying(db, OWNER_A, false, "111", 7), true);
+  assert.deepEqual(await readMeta(db, repliesOffKey(OWNER_A)), { n: 0, v: "owner" });
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 8, { house: true }), false);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), false);
+  // Posting off and on again, or a reconnect, does not clear it.
+  await setPosting(db, OWNER_A, { enabled: false }, 9);
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 10);
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 11, { house: true }), false);
+  assert.ok(await readMeta(db, repliesOffKey(OWNER_A)));
+
+  // Only the owner's own on clears it.
+  assert.equal(await setReplying(db, OWNER_A, true, "111", 12), true);
+  assert.equal(await readMeta(db, repliesOffKey(OWNER_A)), null);
+  assert.equal(await repliesEnabledFor(db, OWNER_A, "111"), true);
+  assert.equal(await readMeta(db, repliesOffKey(OWNER_B)), null, "the mark is per owner");
+});
+
+test("two owners on one X account answer one person at most ANSWERS_PER_AUTHOR times a day between them, counted under one lock", async (t) => {
+  const { db: base } = await open(t);
+  for (const tenant of [OWNER_A, OWNER_B]) {
+    await upsertAccount(base, DEK, { tenant, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+    await setPosting(base, tenant, { enabled: true, xUserId: "111" }, 2);
+    await setReplying(base, tenant, true, "111", 3);
+  }
+  const answer = (tenant: string, id: string, nowMs = 800): NewPost => post({ tenant, kind: "answer", dedupeKey: `answer:111:${id}`,
+    replyToTweetId: id, replyRootTweetId: id, replyAuthorId: "333", nowMs, dueAtMs: nowMs });
+  const sent: Sent[] = [];
+  const db = recording(base, sent);
+  assert.ok(await schedulePost(db, answer(OWNER_A, "701")));
+
+  // THE ORDER IS THE LOCK: the owner's account row, consent and opt-out, then
+  // the X account and person's row, and only then the count it serialises.
+  const order = sent.map(({ sql }) => sql.replace(/\s+/g, " ").trim().slice(0, 40));
+  const at = (re: RegExp) => order.findIndex((s) => re.test(s));
+  const lock = at(/^INSERT INTO xpost_meta/);
+  assert.ok(at(/^UPDATE xpost_accounts SET updated_at_ms/) >= 0 && at(/^UPDATE xpost_accounts SET updated_at_ms/) < lock, "the owner's row first");
+  assert.ok(lock >= 0 && lock < at(/^SELECT COUNT\(\*\) AS n/), "the author lock before the count");
+  assert.ok(at(/^SELECT COUNT\(\*\) AS n/) < at(/^INSERT INTO xpost_posts/), "the count before the write");
+  const locked = sent.find(({ sql }) => /^\s*INSERT INTO xpost_meta/.test(sql))!;
+  assert.equal(locked.params[0], answerAuthorKey("111", "333"));
+  assert.match(locked.sql, /ON CONFLICT \(k\) DO UPDATE SET updated_at_ms = excluded\.updated_at_ms/, "an upsert that always takes the row");
+  assert.ok(await readMeta(base, answerAuthorKey("111", "333")));
+
+  // Six a person a day (2026-10-12, up from two): all but the last, from either owner.
+  assert.equal(ANSWERS_PER_AUTHOR, 6);
+  for (let i = 2; i < ANSWERS_PER_AUTHOR; i++) assert.ok(await schedulePost(base, answer(i % 2 ? OWNER_B : OWNER_A, `71${i}`, 850 + i)), `answer ${i}`);
+  // Two owners at once, one answer left: one of them writes it.
+  const raced = await Promise.all([schedulePost(base, answer(OWNER_A, "702", 900)), schedulePost(base, answer(OWNER_B, "703", 900))]);
+  assert.equal(raced.filter((id) => id !== null).length, 1, "the X account's last answer to the person, from either owner");
+  assert.equal(await schedulePost(base, answer(OWNER_B, "704", 950)), null, "one more is refused whichever owner writes it");
+  assert.ok(await schedulePost(base, { ...answer(OWNER_B, "705", 960), replyAuthorId: "444" }), "another person is counted on their own");
+  // The answer path's unlocked read says the same, before it spends anything on a draft.
+  assert.equal(await answerAuthorSpent(base, "111", "333", 970), true);
+  assert.equal(await answerAuthorSpent(base, "111", "444", 970), false);
+  assert.equal(await answerAuthorSpent(base, "111", "333", 900 + 24 * 60 * 60_000), false, "a rolling day later they may ask again");
+});
+
+test("small-talk words cannot race twice to one person across owners sharing X", async (t) => {
+  const { db: base } = await open(t);
+  for (const tenant of [OWNER_A, OWNER_B]) {
+    await upsertAccount(base, DEK, { tenant, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+    await setPosting(base, tenant, { enabled: true, xUserId: "111" }, 2);
+    await setReplying(base, tenant, true, "111", 3);
+  }
+  const answer = (tenant: string, tag: string, over: Partial<NewPost> = {}): NewPost => post({ tenant, kind: "answer",
+    dedupeKey: `answer:111:${tag}`, replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: "333",
+    body: "hey, happy to chat. keeping things simple over here.", smalltalk: true, ...over });
+  const sent: Sent[] = [];
+  const raced = await Promise.all([schedulePost(recording(base, sent), answer(OWNER_A, "701")), schedulePost(base, answer(OWNER_B, "702"))]);
+  assert.equal(raced.filter(Boolean).length, 1);
+  const lock = sent.findIndex(({ sql }) => /^\s*INSERT INTO xpost_meta/.test(sql));
+  const duplicate = sent.findIndex(({ sql }) => /LOWER\(TRIM\(sent.body\)\)/.test(sql));
+  const insert = sent.findIndex(({ sql }) => /^\s*INSERT INTO xpost_posts/.test(sql));
+  assert.ok(lock >= 0 && duplicate > lock && (insert < 0 || insert > duplicate), "the uncapped duplicate query runs under the shared author lock");
+  assert.equal(await schedulePost(base, answer(OWNER_B, "703", { body: " HEY, HAPPY TO CHAT. KEEPING THINGS SIMPLE OVER HERE. " })), null);
+  assert.ok(await schedulePost(base, answer(OWNER_B, "704", { replyAuthorId: "444" })), "a different person has their own history");
+  assert.ok(await schedulePost(base, answer(OWNER_B, "705", { smalltalk: false })), "factual answer routing is unchanged");
+  assert.deepEqual(await smalltalkBodiesToAuthor(base, "222", "333", 600), []);
+});
+
+test("small-talk history includes possible sends for seven days but ignores canceled and skipped lines", async (t) => {
+  const day = 24 * 60 * 60_000;
+  for (const state of ["scheduled", "sending", "posted", "failed", "cancelled", "skipped"] as const) {
+    const { db, raw } = await open(t);
+    await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+    await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+    await setReplying(db, OWNER_A, true, "111", 3);
+    const answer = (tag: string, nowMs: number): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
+      body: "hello, glad for the conversation.", replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: "333", smalltalk: true, nowMs, dueAtMs: nowMs });
+    const id = (await schedulePost(db, answer("701", day)))!;
+    assert.ok(id);
+    raw.prepare("UPDATE xpost_posts SET status = ?, sent_at_ms = ? WHERE id = ?").run(state, state === "posted" ? 2 * day : null, id);
+    const possible = !["cancelled", "skipped"].includes(state);
+    assert.deepEqual(await smalltalkBodiesToAuthor(db, "111", "333", 6 * day), possible ? ["hello, glad for the conversation."] : [], state);
+    assert.equal((await schedulePost(db, answer("702", 6 * day))) === null, possible, state);
+    if (possible) {
+      const boundary = (state === "posted" ? 2 * day : day) + 7 * day;
+      assert.equal(await schedulePost(db, answer("703", boundary)), null, `${state} includes the exact seven-day boundary`);
+      assert.ok(await schedulePost(db, answer("704", boundary + 1)), `${state} becomes reusable after seven days`);
+    }
+  }
+});
+
+test("small-talk author history survives the account's latest 200 posts and its exact guard is uncapped", async (t) => {
+  const { db, raw } = await open(t);
+  const day = 24 * 60 * 60_000;
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setReplying(db, OWNER_A, true, "111", 3);
+  const answer = (tag: string, nowMs: number): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
+    body: "hello, glad for the conversation.", replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: "333", smalltalk: true, nowMs, dueAtMs: nowMs });
+  const id = (await schedulePost(db, answer("701", day)))!;
+  raw.prepare("UPDATE xpost_posts SET status = 'posted', sent_at_ms = ? WHERE id = ?").run(day, id);
+  raw.exec(`WITH RECURSIVE newer(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM newer WHERE n < 300)
+    INSERT INTO xpost_posts (tenant, x_user_id, kind, dedupe_key, body, status, due_at_ms, created_at_ms, updated_at_ms)
+    SELECT '${OWNER_A.toLowerCase()}', '111', 'casual', 'newer:' || n, 'newer casual ' || n, 'posted', ${2 * day}, ${2 * day}, ${2 * day} FROM newer`);
+  assert.ok(!(await ownRecentBodies(db, { tenant: OWNER_A, sinceMs: 0, limit: 200 })).all.includes("hello, glad for the conversation."));
+  assert.deepEqual(await smalltalkBodiesToAuthor(db, "111", "333", 4 * day), ["hello, glad for the conversation."]);
+  // Even corrupted/imported history beyond the reader's bound cannot weaken the locked exact check.
+  raw.exec(`WITH RECURSIVE newer(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM newer WHERE n < 300)
+    INSERT INTO xpost_posts (tenant, x_user_id, kind, dedupe_key, body, status, due_at_ms, created_at_ms, updated_at_ms)
+    SELECT '${OWNER_A.toLowerCase()}', '111', 'answer', 'legacy:' || n, 'another answer ' || n, 'posted', ${2 * day}, ${2 * day}, ${2 * day} FROM newer`);
+  raw.exec("INSERT INTO xpost_reply_targets (post_id, reply_to_tweet_id, root_tweet_id, author_id) SELECT id, '800', '800', '333' FROM xpost_posts WHERE dedupe_key LIKE 'legacy:%'");
+  assert.equal((await smalltalkBodiesToAuthor(db, "111", "333", 4 * day)).length, 256);
+  assert.ok(!(await smalltalkBodiesToAuthor(db, "111", "333", 4 * day)).includes("hello, glad for the conversation."));
+  assert.equal(await schedulePost(db, answer("702", 4 * day)), null);
+});
+
+test("the conversations an X account is in: its posted top-level posts and answers, and who each answer replied to, posted rows only, newest first (2026-10-12)", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  await setReplying(db, OWNER_A, true, "111", 3);
+  const sent = async (p: NewPost, tweet: string) => {
+    const id = (await schedulePost(db, p))!;
+    assert.ok(id, p.dedupeKey);
+    await claimPost(db, id, p.nowMs + 1);
+    await markPosted(db, id, tweet, p.nowMs + 2);
+  };
+  const answer = (tag: string, author: string, nowMs: number, over: Partial<NewPost> = {}): NewPost => post({ kind: "answer", dedupeKey: `answer:111:${tag}`,
+    body: `an answer to ${tag}`, replyToTweetId: tag, replyRootTweetId: tag, replyAuthorId: author, nowMs, dueAtMs: nowMs, ...over });
+  const none = { roots: new Set(), posts: new Set(), answered: new Map(), plain: new Set(), trade: new Set(), done: new Set(), small: new Map() };
+  assert.deepEqual(await ownThreadTweets(db, "111"), none, "nothing posted yet");
+
+  await sent(post({ kind: "intro", dedupeKey: "intro:a:111", body: "hello", nowMs: 10, dueAtMs: 10 }), "9001");
+  await sent(answer("500", "333", 20), "9501");
+  await sent(answer("510", "444", 30), "9511");
+  // Never posted: drafted and waiting, skipped, or failed. None of them is under anyone's post.
+  assert.ok(await schedulePost(db, answer("520", "555", 40)));
+  assert.ok(await schedulePost(db, answer("530", "666", 50, { status: "skipped", reason: "gate:hype" })));
+  const failed = (await schedulePost(db, answer("540", "777", 60)))!;
+  await claimPost(db, failed, 61);
+  await markFailed(db, failed, "uncertain", 62);
+
+  const own = await ownThreadTweets(db, "111");
+  assert.deepEqual([...own.roots], ["9001"], "its own top-level posts");
+  assert.deepEqual([...own.posts].sort(), ["9001", "9501", "9511"], "and its posted answers");
+  assert.deepEqual([...own.answered.entries()].sort(), [["500", "333"], ["510", "444"]], "each answered post, by its author");
+  // Another X account's are not its own.
+  assert.deepEqual(await ownThreadTweets(db, "222"), none);
+  // Bounded, newest first: with room for one answer, only the newest is known.
+  const one = await ownThreadTweets(db, "111", 1);
+  assert.deepEqual([...one.posts].sort(), ["9001", "9511"]);
+  assert.deepEqual([...one.answered.keys()], ["510"]);
+  // A post the caller's screen shuts (red-team review of 1ed46625: its own sherwood-1 line) is in none of them, nor the tag it answered.
+  const shut = await ownThreadTweets(db, "111", undefined, (body) => /\b510\b|hello/.test(body));
+  assert.deepEqual([...shut.roots], []);
+  assert.deepEqual([...shut.posts], ["9501"]);
+  assert.deepEqual([...shut.answered.entries()], [["500", "333"]]);
+  // What a follow-up sits under (red-team review of 1ed46625): its intro is plain chat, a buy post its own trade, an answer only when marked plain.
+  assert.deepEqual([...own.plain], ["9001"], "no answer marked plain yet: each closes its thread to all but a greeting");
+  assert.deepEqual([...own.trade], []);
+  await sent(post({ kind: "buy", dedupeKey: "buy:a:1", body: "grabbed some pepe", coin: "pepe", nowMs: 70, dueAtMs: 70 }), "9002");
+  await sent(answer("550", "888", 80, { coin: ANSWER_PLAIN_THREAD }), "9551");
+  await sent(answer("560", "999", 90, { coin: ANSWER_LOOKED_UP }), "9561");
+  const marked = await ownThreadTweets(db, "111");
+  assert.deepEqual([...marked.plain].sort(), ["550", "9001", "9551"], "the plain answer and the tag it answered");
+  // Its own plain-thread answer, by its tweet, to the tag it answered (2026-10-19): only its answers, never the tags or its posts.
+  assert.deepEqual([...marked.small.entries()], [["9551", "550"]]);
+  assert.deepEqual([...marked.trade], ["9002"]);
+  assert.ok(marked.posts.has("9561") && !marked.plain.has("9561") && !marked.plain.has("560"), "a looked-up answer is its own post, never plain");
+  // A casual post the caller's trade screen reads as about a coin it bought sits with its buy posts (red-team review of daaae961:
+  // "still sitting in some pepe from earlier this week, fun ride so far" counted as plain, and a major's line went up under it).
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:pepe", body: "still sitting in some pepe from earlier this week, fun ride so far", nowMs: 100, dueAtMs: 100 }), "9003");
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:owls", body: "owls are underrated night shift workers", nowMs: 110, dueAtMs: 110 }), "9004");
+  const traded = await ownThreadTweets(db, "111", undefined, undefined, (body) => /\bpepe\b/.test(body));
+  assert.deepEqual([...traded.trade].sort(), ["9002", "9003"]);
+  assert.ok(traded.plain.has("9004") && !traded.plain.has("9003"), "the other casual post is still plain");
+  assert.ok(traded.roots.has("9003") && traded.posts.has("9003"), "and still its own post");
+  // And a casual post the caller's closed screen reads as coin or market talk is in neither: closed (red-team review of daaae961).
+  await sent(post({ kind: "casual", dedupeKey: "casual:a:chain", body: "picked up some pepe on robinhood chain lately, the curve looked early to me", nowMs: 120, dueAtMs: 120 }), "9005");
+  const closed = await ownThreadTweets(db, "111", undefined, undefined, (body) => /\bpepe\b/.test(body), (body) => /\bchain\b/.test(body));
+  assert.ok(!closed.plain.has("9005") && !closed.trade.has("9005"), "closed, more closed than its trade");
+  assert.ok(closed.roots.has("9005") && closed.posts.has("9005"), "and still its own post");
+  assert.ok(closed.trade.has("9003") && closed.plain.has("9004") && closed.plain.has("9001"), "the rest as they were, its hello plain");
+  // SMALL TALK THAT ENDED ITS THREAD (2026-10-18): the answer and the tag it answered, in `done` alone; never plain.
+  assert.deepEqual([...closed.done], [], "nothing has ended its thread yet");
+  await sent(answer("570", "321", 130, { coin: ANSWER_THREAD_DONE }), "9571");
+  assert.ok(await schedulePost(db, answer("580", "322", 140, { coin: ANSWER_THREAD_DONE })), "drafted, never posted");
+  const done = await ownThreadTweets(db, "111");
+  assert.deepEqual([...done.done].sort(), ["570", "9571"]);
+  assert.ok(done.posts.has("9571") && !done.plain.has("9571") && !done.plain.has("570"), "its own post, never plain");
+  assert.ok(!done.done.has("580"), "posted rows only");
+});
+
+test("every X account the fleet posts from, whatever its status: what an active agent never answers (2026-10-18)", async (t) => {
+  const { db } = await open(t);
+  assert.deepEqual(await fleetXUserIds(db), new Set());
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "a", tokens: TOKENS, nowMs: 1 });
+  await upsertAccount(db, DEK, { tenant: OWNER_B, xUserId: "222", username: "b", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
+  // Posting off, never consented: still one of the fleet's.
+  assert.deepEqual([...(await fleetXUserIds(db))].sort(), ["111", "222"]);
+});
+
+test("fleet membership checks candidate IDs beyond the old account cap, including prior consent", async (t) => {
+  const { db } = await open(t);
+  await db.prepare(`WITH RECURSIVE accounts(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM accounts WHERE n < 5001)
+    INSERT INTO xpost_accounts (tenant, x_user_id, username, sealed_access, access_expires_at_ms, scope, connected_at_ms, updated_at_ms)
+    SELECT 'fleet-' || n, CAST(n AS TEXT), 'fleet', 'unused', 1, 'tweet.read', 1, 1 FROM accounts`).run();
+  await db.prepare("UPDATE xpost_accounts SET consent_x_user_id = '90001' WHERE x_user_id = '5001'").run();
+  assert.deepEqual(await fleetXUserIds(db, []), new Set());
+  const candidates = Array.from({ length: 250 }, (_, i) => String(80000 + i));
+  candidates.push("90001");
+  assert.deepEqual(await fleetXUserIds(db, candidates), new Set(["5001", "90001"]));
+  assert.deepEqual(await fleetXUserIds(db, ["5001", "does-not-exist"]), new Set(["5001", "90001"]));
+});
+
 test("turning replies off cancels only replies and opt-outs are durable across tenants sharing an account", async (t) => {
   const { db } = await open(t);
   const p = await replySetup(db);
@@ -838,7 +1163,8 @@ test("turning a kind off while sending permanently prevents its refused send bei
   const { db } = await open(t);
   await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
   await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 2);
-  for (const [kind, field] of [["buy", "buys"], ["casual", "casual"]] as const) {
+  // A recap is a buy post's kind for the switch (it names the coins it bought).
+  for (const [kind, field] of [["buy", "buys"], ["recap", "buys"], ["casual", "casual"]] as const) {
     const id = (await schedulePost(db, post({ kind, dedupeKey: `${kind}:off-during-send` })))!;
     assert.equal(await claimPost(db, id, 1000), true);
     await setPrefs(db, OWNER_A, { [field]: false }, 1001);
@@ -858,7 +1184,7 @@ test("claiming a draft created after a concurrent kind-off save checks the curre
   const { db } = await open(t);
   await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
   await setPrefs(db, OWNER_A, { buys: false, casual: false }, 2);
-  for (const kind of ["buy", "casual"] as const) {
+  for (const kind of ["buy", "recap", "casual"] as const) {
     const id = (await schedulePost(db, post({ kind, dedupeKey: `${kind}:stale-plan` })))!;
     assert.equal(await claimPost(db, id, 1000), false);
   }
@@ -886,4 +1212,55 @@ test("a new owner counter includes earlier send history, including old drafts se
   await setPrefs(db, OWNER_A, { perDay: 3 }, 2008);
   assert.equal(await takeOwnerAllowance(db, OWNER_A, key, 3, 2009, 99), true, "a later seed never overwrites the live count");
   assert.equal((await readMeta(db, key))?.n, 3);
+});
+
+
+test("trade allowance history counts all owners of an X account without reading queued rows as sends", async (t) => {
+  const { db } = await open(t);
+  const cases = [
+    { kind: "buy", status: "posted", sent: 2001, updated: 3000, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "posted", sent: 2002, updated: 3000, reason: null, owner: OWNER_B, x: "111" },
+    { kind: "buy", status: "sending", sent: null, updated: 2003, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "failed", sent: null, updated: 2004, reason: "uncertain", owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "failed", sent: null, updated: 2005, reason: "interrupted", owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "failed", sent: null, updated: 2006, reason: "fault", owner: OWNER_A, x: "111" },
+    { kind: "sell", status: "failed", sent: null, updated: 2007, reason: "forbidden", owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "scheduled", sent: null, updated: 2008, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "casual", status: "posted", sent: 2009, updated: 3000, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "posted", sent: 999, updated: 3000, reason: null, owner: OWNER_A, x: "111" },
+    { kind: "buy", status: "posted", sent: 2010, updated: 3000, reason: null, owner: OWNER_A, x: "222" },
+  ];
+  for (const [i, row] of cases.entries()) {
+    await db.prepare(`INSERT INTO xpost_posts (tenant,x_user_id,kind,dedupe_key,body,due_at_ms,status,reason,sent_at_ms,created_at_ms,updated_at_ms)
+      VALUES (?,?,?,?,?,0,?,?,?,1,?)`).run(row.owner.toLowerCase(), row.x, row.kind, `trade-history:${i}`, "sold token", row.status, row.reason, row.sent, row.updated);
+  }
+  assert.deepEqual((await tradeSendTimesSince(db, "111", 1000)).sort(), [2001, 2002, 2003, 2004, 2005, 2006]);
+  assert.deepEqual(await tradeSendTimesSince(db, "222", 1000), [2010]);
+  assert.deepEqual(await tradeSendTimesSince(db, "333", 1000), []);
+});
+
+test("a recap row (2026-10-14): read back as a recap with its cover, a thread root and a trade post, a trade send, and cancelled with buy posts", async (t) => {
+  const { db, raw } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "r", tokens: TOKENS, nowMs: 1 });
+  const covers = "buy:d1 buy:d2 buy:d3";
+  const sent = (await schedulePost(db, post({ kind: "recap", dedupeKey: `recap:${OWNER_A.toLowerCase()}:100`, coin: covers, body: "the tally, no spin. recap: 3 buys." })))!;
+  const waiting = (await schedulePost(db, post({ kind: "recap", dedupeKey: `recap:${OWNER_A.toLowerCase()}:200`, coin: "buy:d4 buy:d5 buy:d6", body: "the rundown, no spin. recap: 3 buys." })))!;
+  const theirs = (await schedulePost(db, post({ tenant: OWNER_B, kind: "recap", dedupeKey: `recap:${OWNER_B}:100`, coin: "buy:x1 buy:x2 buy:x3", body: "a look back. recap: 3 buys." })))!;
+  // Read back whole, by its own query, this owner's only.
+  const rows = await recapPostsOf(db, OWNER_A, 0);
+  assert.deepEqual(rows.map((r) => [r.kind, r.coin]).sort(), [["recap", covers], ["recap", "buy:d4 buy:d5 buy:d6"]].sort());
+  assert.ok((await postsOfXUser(db, "111", 0)).every((p) => p.kind === "recap"), "never read back as a casual post");
+  // Posted: a root of its own threads, with the trade posts, and a trade send.
+  assert.ok(await claimPost(db, sent, 1_500));
+  await markPosted(db, sent, "777", 1_600);
+  const threads = await ownThreadTweets(db, "111");
+  assert.ok(threads.roots.has("777"));
+  assert.ok(threads.trade.has("777"));
+  assert.ok(!threads.plain.has("777"));
+  assert.deepEqual(await tradeSendTimesSince(db, "111", 0), [1_600]);
+  // Buy posts off: the waiting recap goes with them, another owner's stays.
+  await setPrefs(db, OWNER_A, { buys: false }, 2_000);
+  const status = (id: number) => raw.prepare("SELECT status, reason FROM xpost_posts WHERE id = ?").get(id) as { status: string; reason: string | null };
+  assert.deepEqual({ ...status(waiting) }, { status: "cancelled", reason: "kind-off" });
+  assert.equal(status(theirs).status, "scheduled");
 });

@@ -13,7 +13,8 @@ THREE RULES THIS FILE ENFORCES, none of them stylistic:
      TypeScript resolves those to a canonical allowlisted address. A model that
      can emit an 0x… string can emit one nobody allowlisted, and it would travel
      toward the executor. The validator below rejects the shape outright rather
-     than trusting a prompt to have discouraged it.
+     than trusting a prompt to have discouraged it, and the base58 shapes of a
+     Solana key or signature with it (onchain_ids.py).
   2. NO FLOATING-POINT MONEY. Sizes cross the service boundary as integer
      micro-USDG. A JSON float is not a quantity of money.
   3. EVERY DECISION CARRIES ITS COST. Not as telemetry bolted on afterwards —
@@ -27,6 +28,8 @@ import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from .onchain_ids import onchain_ids_in
 
 SCHEMA_VERSION = "1.0.0"
 
@@ -53,6 +56,25 @@ LENS_KEYS = frozenset(
         # provenance of the TEAM, and an analyst handed them together cannot
         # weigh one against the other because they answer different questions.
         "builder",
+        # WHAT TRACKED TRADERS DID AND SAID ABOUT THIS COIN, as reported by a
+        # third party. Its own lens rather than a paragraph inside `social`,
+        # because `social` is what the tape shows anonymous wallets doing and
+        # this is what a followed cohort did and claimed: identity and stated
+        # reasoning the tape cannot carry, and a crowd that can be wrong
+        # together. Handed to one analyst alongside the tape, the two would be
+        # read as corroborating each other when they are partly one signal.
+        #
+        # The name is neutral on purpose. Brain weighs the KIND of source, and
+        # a brand in a prompt invites the model to recall whatever it believes
+        # about that brand instead.
+        "trader-flow",
+        # AN INDEXER'S COUNT OF THE DEX TRADES IN THIS COIN: buys and sells over
+        # 5/15/60 minutes, distinct addresses, the largest sells, whether the
+        # launch record's address sold. Not an analyst's lens — no desk asks for
+        # it, so it costs no model call and displaces no market analyst. The
+        # manager reads it directly (graph.py ONCHAIN_FLOW), beside the measured
+        # market input, as the same trades counted by another indexer.
+        "onchain-flow",
         "peg",
         "reserve",
     }
@@ -66,6 +88,33 @@ LENS_KEYS = frozenset(
 #: catch an oversized block until the call carrying it has already been made.
 MAX_LENS_CHARS = 8_000
 MAX_SIGNALS_CHARS = 24_000
+
+#: Ceilings on the desk-policy channel (`DecideRequest.strategy_terms` and
+#: `.horizon`), in characters.
+#:
+#: 2,500 is ~625 tokens, and the terms go to every node, so a pulse run (three
+#: analysts and the manager) pays for them four times out of a 30,000-token
+#: allowance, and a full committee five times more. Sized for a strategy's
+#: horizon, exits and definitions — not for a second persona.
+MAX_STRATEGY_TERMS_CHARS = 2_500
+#: A horizon is a phrase ("up to 30 minutes", "3-5 days"), not a paragraph. It is
+#: also interpolated into the manager's JSON example, so it is held to a closed
+#: alphabet: no quote, brace, angle bracket or newline can reach that template.
+MAX_HORIZON_CHARS = 40
+_HORIZON = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .,()/+-]*")
+
+#: OPTIONAL DECIDE FIELDS THIS BUILD UNDERSTANDS, by capability name, as /health
+#: advertises them. `DecideRequest` forbids unknown keys, so a worker that sends
+#: `strategy_terms` to an older build gets a 422 and loses the whole decision;
+#: it reads this first, exactly as it reads `lens_keys` before a new lens.
+#: A test pins every name here to fields the request model actually accepts.
+DECIDE_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "strategy-terms": ("strategy_terms", "horizon"),
+}
+#: Either half of a fence tag. Trusted text is rendered OUTSIDE every fence, so
+#: text able to open or close one could make untrusted material read as policy
+#: or policy read as untrusted.
+_FENCE_TAG = re.compile(r"<\s*/?\s*untrusted", re.IGNORECASE)
 
 # An 0x-prefixed 20-byte address, in any case. Deliberately broad: the point is
 # to catch anything address-SHAPED, not to validate a real address.
@@ -89,6 +138,9 @@ def _reject_executable(text: str, field: str) -> str:
     Applied to every free-text field a model writes, because the thesis is
     PUBLISHED and the evidence is PERSISTED — an address that reaches either has
     escaped the boundary just as surely as one in a size field.
+
+    The worker re-checks the same shapes on arrival (worker/src/brain-client.ts),
+    with the shared detector in packages/core/src/ids.ts.
     """
     if _ADDRESS.search(text):
         raise ValueError(
@@ -97,6 +149,21 @@ def _reject_executable(text: str, field: str) -> str:
         )
     if _HEXBLOB.search(text):
         raise ValueError(f"{field} contains a hex blob that could be calldata")
+    # SOLANA IDS ARE BASE58, which the two patterns above never see. Checked
+    # after them, so a text they refuse is refused in the same words as before.
+    # The glued scan (audit regressions F3): "CA<mint>" or "<mint>is" is an id
+    # too, as the worker's re-check reads it.
+    for hit in onchain_ids_in(text, glued=True):
+        if hit.family != "solana":
+            continue
+        if hit.shape == "address":
+            raise ValueError(
+                f"{field} contains a Solana address-shaped string. Brain names instruments, "
+                f"never addresses — trusted code resolves instrument_id to an address."
+            )
+        if hit.shape == "hash":
+            raise ValueError(f"{field} contains a Solana signature- or key-shaped string")
+        raise ValueError(f"{field} contains a Solana explorer link")
     return text
 
 
@@ -293,6 +360,23 @@ class BrainDecision(BaseModel):
     gate_caveat_count: int | None = None
     #: THE ONE FIELD THIS EXISTS FOR. Null when the action is not a hold.
     hold_kind: Literal["MODEL_HOLD", "GATE_FORCED_HOLD"] | None = None
+    #: WHAT THE MODEL PROPOSED, before the gate had its say.
+    #:
+    #: `hold_kind` says a hold was forced; it cannot say what it was forced
+    #: FROM. A GATE_FORCED_HOLD over a model that wanted to buy and one over a
+    #: model that would have held anyway are different findings — the first is
+    #: a trade the book's state prevented, the second is a gate that cost
+    #: nothing — and following decisions are measured on exactly that
+    #: difference. So the model's own action is kept beside the gated one.
+    #:
+    #: The delta has been through the same cash and holding clamps as the real
+    #: one, so it is what trusted code WOULD have sized with the gate open, not
+    #: a raw model number. It is a record, never an instruction: nothing reads
+    #: it to size, and the worker must not execute it. Null when the model
+    #: produced no recognisable action. Equal to `action` and
+    #: `suggested_delta_usdg` whenever the gate was open.
+    proposed_action: Action | None = None
+    proposed_delta_usdg: int | None = None
     cost: Cost
     models: list[ModelUse] = Field(default_factory=list)
 
@@ -326,6 +410,16 @@ class BrainDecision(BaseModel):
             raise ValueError("action 'sell' must carry a negative delta")
         if not self.thesis.strip():
             raise ValueError("a decision without a thesis is not publishable")
+        # The record of what the model proposed has to agree with itself too,
+        # or a "buy" with a negative size lands in the following measurements.
+        if (self.proposed_action is None) != (self.proposed_delta_usdg is None):
+            raise ValueError("proposed_action and proposed_delta_usdg are recorded together or not at all")
+        if self.proposed_action == "hold" and self.proposed_delta_usdg != 0:
+            raise ValueError("a proposed 'hold' must carry a zero delta")
+        if self.proposed_action == "buy" and (self.proposed_delta_usdg or 0) <= 0:
+            raise ValueError("a proposed 'buy' must carry a positive delta")
+        if self.proposed_action == "sell" and (self.proposed_delta_usdg or 0) >= 0:
+            raise ValueError("a proposed 'sell' must carry a negative delta")
         return self
 
 
@@ -471,6 +565,35 @@ class DecideRequest(BaseModel):
     persona: str = ""
     risk_appetite: Literal["conservative", "balanced", "aggressive"] = "balanced"
 
+    # ── DESK POLICY: the operator's terms, the one TRUSTED strategy text ───
+    #
+    # WHY A SECOND CHANNEL. `persona` is fenced as an untrusted strategy brief,
+    # rightly: it is the slot owner-adjacent text travels in, and HOUSE_RULES
+    # tell every node never to obey fenced material. But a strategy's own
+    # mechanics — a minutes-long horizon, exits code enforces at -10%/+20%/30
+    # minutes, what "continuation" means on this desk — then arrive with the
+    # authority of a stranger's opinion, beside an equity example and a JSON
+    # template that says "3-5 days". The manager reasons about a book it is not
+    # running.
+    #
+    # WHAT "TRUSTED" MEANS HERE. A contract with the worker, not something this
+    # service can verify: the worker fills these from repo code only
+    # (worker/src/strategy-terms.ts), never from owner or market text. What this
+    # side CAN enforce is below — bounded, no fence tags, no addresses, and a
+    # horizon from a closed alphabet.
+    #
+    # WHAT IT CANNOT DO. It is rendered as policy about how this desk trades. It
+    # does not reach the gate, the sizing clamps, escalation, budgets or the
+    # economics verdict — none of those read it — and the prompt says it never
+    # obliges a trade.
+    #
+    # ABSENT IS TODAY. None (or blank) renders every prompt byte-for-byte as it
+    # was before the field existed; tests/test_prompt_snapshot.py holds that.
+    strategy_terms: str | None = Field(default=None, max_length=MAX_STRATEGY_TERMS_CHARS)
+    #: The decision horizon in a few words ("up to 30 minutes"). Also becomes the
+    #: manager's `time_horizon` example, replacing "3-5 days".
+    horizon: str | None = Field(default=None, max_length=MAX_HORIZON_CHARS)
+
     # Prior theses with realised outcomes, for continuity and reflection.
     memory: list[str] = Field(default_factory=list)
 
@@ -486,6 +609,34 @@ class DecideRequest(BaseModel):
     # the situation gives an adversarial pass something to work with. The three
     # fixed depths remain, for ablation.
     stages: Literal["adaptive", "analysts", "analysts+debate", "full"] = "adaptive"
+
+    @field_validator("strategy_terms", "horizon", mode="before")
+    @classmethod
+    def _blank_is_absent(cls, v: object) -> object:
+        # BLANK IS ABSENT, so "" cannot render an empty DESK POLICY heading and
+        # break the byte-for-byte promise for a caller that sent nothing.
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
+
+    @field_validator("strategy_terms")
+    @classmethod
+    def _terms_stay_outside_fences(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if _FENCE_TAG.search(v):
+            raise ValueError("strategy_terms may not contain an <untrusted> fence tag")
+        return _reject_executable(v, "strategy_terms")
+
+    @field_validator("horizon")
+    @classmethod
+    def _horizon_is_a_phrase(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _HORIZON.fullmatch(v):
+            raise ValueError("horizon must be a short phrase of letters, digits, spaces and .,()/+-")
+        return _reject_executable(v, "horizon")
 
 
 class Refusal(BaseModel):

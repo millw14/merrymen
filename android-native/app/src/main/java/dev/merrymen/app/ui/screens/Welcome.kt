@@ -7,6 +7,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,6 +22,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -76,13 +79,8 @@ import kotlinx.coroutines.launch
  * removed (46c852d1) — and an introduction that stopped you every launch would
  * put a wall back in a nicer coat.
  *
- * THE THREE DOORS. "Continue with X" and "Continue with wallet" both open the
- * web sign-in — that is where the owner key and Privy live, and this app never
- * holds a key (see WebAuth). The choice between X, email and wallet is the
- * Privy modal's to present; the two buttons are the same door dressed for the
- * two audiences the mockup names. "Continue as guest" simply goes in — the whole
- * product is readable without a wallet, and pretending otherwise at the door
- * would turn away the person still deciding.
+ * One sign-in door offers the provider choices supported by the current web
+ * flow. Guests can explore first without creating an account.
  */
 @Composable
 fun WelcomeScreen(nav: NavHostController) {
@@ -108,18 +106,19 @@ fun WelcomeScreen(nav: NavHostController) {
     }
   }
 
-  Box(
+  BoxWithConstraints(
     Modifier
       .fillMaxSize()
       .background(MerryColors.bg)
       .windowInsetsPadding(WindowInsets.safeDrawing),
   ) {
+    val artHeight = (maxHeight * 0.40f).coerceIn(180.dp, 320.dp)
     StarfieldGlow(Modifier.fillMaxSize())
 
-    Column(Modifier.fillMaxSize()) {
-      Constellation(Modifier.fillMaxWidth().height(392.dp))
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+      Constellation(Modifier.fillMaxWidth().height(artHeight))
 
-      Spacer(Modifier.weight(1f))
+      Spacer(Modifier.height(16.dp))
 
       Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
         Text(
@@ -136,57 +135,40 @@ fun WelcomeScreen(nav: NavHostController) {
         )
         Spacer(Modifier.height(12.dp))
         Text(
-          "Create your account. Meet your agent.",
+          "Meet your trading agent. Start in practice mode and stay in control.",
           style = TextStyle(fontFamily = sans(16.sp), fontSize = 16.sp),
           color = MerryColors.tx2,
         )
 
         Spacer(Modifier.height(24.dp))
 
-        // PRIMARY — the mint pill, dark ink text, the X mark drawn rather than
-        // pulled from an icon set that does not carry it.
         if (doors) PillButton(
           background = MerryColors.mint,
           content = MerryColors.ink,
           border = null,
           onClick = ::signIn,
         ) { col ->
-          XGlyph(col, Modifier.size(20.dp))
-          Spacer(Modifier.width(12.dp))
-          Text("Continue with X", style = pillLabel, color = col)
-        }
-
-        Spacer(Modifier.height(12.dp))
-
-        // SECONDARY — transparent over a hairline, the wallet drawn as a stroke.
-        if (doors) PillButton(
-          background = Color.Transparent,
-          content = MerryColors.tx,
-          border = MerryColors.line,
-          onClick = ::signIn,
-        ) { col ->
-          WalletGlyph(col, Modifier.size(20.dp))
-          Spacer(Modifier.width(12.dp))
-          Text("Continue with wallet", style = pillLabel, color = col)
+          Text("Get started · Sign in", style = pillLabel, color = col)
         }
 
         Spacer(Modifier.height(20.dp))
 
         Text(
-          if (doors) "Continue as guest  →" else "Continue  →",
+          if (doors) "Explore first  →" else "Continue  →",
           style = TextStyle(fontFamily = sans(16.sp, FontWeight.Medium), fontSize = 16.sp, textAlign = TextAlign.Center),
           color = MerryColors.mint,
-          modifier = Modifier.fillMaxWidth().clickable(onClick = ::guest).padding(vertical = 8.dp),
+          modifier = Modifier.fillMaxWidth().clickable(onClick = ::guest).padding(vertical = 14.dp),
         )
 
         Spacer(Modifier.height(16.dp))
 
         Text(
-          "By continuing, you agree to our Terms and Privacy Policy.",
+          "By continuing, you agree to our Terms of Use. Read how we handle your data in our Privacy Policy.",
           style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp, textAlign = TextAlign.Center),
           color = MerryColors.faint,
           modifier = Modifier.fillMaxWidth(),
         )
+        PolicyLinks()
         Spacer(Modifier.height(20.dp))
       }
     }
@@ -233,12 +215,13 @@ private fun PillButton(
  */
 @Composable
 private fun Constellation(modifier: Modifier) {
-  Box(modifier) {
-    Mark(R.drawable.logo_nvidia, 108.dp, x = 4.dp, y = 44.dp, rot = -8f, Alignment.TopStart)
-    Mark(R.drawable.logo_amd, 60.dp, x = 0.dp, y = 6.dp, rot = 0f, Alignment.TopCenter)
-    Mark(R.drawable.logo_apple, 92.dp, x = (-8).dp, y = 26.dp, rot = 7f, Alignment.TopEnd)
-    Mark(R.drawable.logo_microsoft, 92.dp, x = 22.dp, y = 214.dp, rot = -4f, Alignment.TopStart)
-    Mark(R.drawable.logo_tesla, 104.dp, x = (-16).dp, y = 196.dp, rot = 9f, Alignment.TopEnd)
+  BoxWithConstraints(modifier) {
+    val artScale = maxHeight.value / 392f
+    Mark(R.drawable.logo_nvidia, (108 * artScale).dp, x = 4.dp, y = (44 * artScale).dp, rot = -8f, Alignment.TopStart)
+    Mark(R.drawable.logo_amd, (60 * artScale).dp, x = 0.dp, y = (6 * artScale).dp, rot = 0f, Alignment.TopCenter)
+    Mark(R.drawable.logo_apple, (92 * artScale).dp, x = (-8).dp, y = (26 * artScale).dp, rot = 7f, Alignment.TopEnd)
+    Mark(R.drawable.logo_microsoft, (92 * artScale).dp, x = 22.dp, y = (214 * artScale).dp, rot = -4f, Alignment.TopStart)
+    Mark(R.drawable.logo_tesla, (104 * artScale).dp, x = (-16).dp, y = (196 * artScale).dp, rot = 9f, Alignment.TopEnd)
 
     Text(
       "Merrymen",

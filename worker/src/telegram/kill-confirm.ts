@@ -27,6 +27,37 @@ export interface KillResult {
   revocation?: "queued" | "failed";
   /** The owner key could not be archived: keep the grant and pause instead. */
   archiveFailed?: { why: string; paused: boolean };
+  /**
+   * SELF-HOSTED only: what the kill did to the local Solana strategy, which it
+   * stops whatever happens to the grant. Absent when there was none to stop.
+   */
+  solana?: "stopped" | "not-stopped";
+  /**
+   * SELF-HOSTED only: what the kill did to the local Perps wallet, whose grant
+   * it revokes whatever happens to the Spot one (perps-kill.ts). Absent when
+   * there is no Perps wallet. Hosted, the orchestrator's ✅ says it instead.
+   */
+  perps?: "stopped" | "not-stopped" | "paper-not-stopped";
+}
+
+/** The kill's Solana line, after the rest of the answer. */
+function solanaLine(r: KillResult): string {
+  if (r.solana === "not-stopped") return `
+⚠️ Kill incomplete: your Solana strategy could not be stopped and may still trade. /kill again.`;
+  if (r.solana === "stopped") return `
+Your Solana strategy is stopped too.`;
+  return "";
+}
+
+/** The kill's Perps line, after the Solana one. */
+function perpsLine(r: KillResult): string {
+  if (r.perps === "not-stopped") return `
+⚠️ Kill incomplete: your Perps wallet's grant could not be revoked and it may still sign. /kill again.`;
+  if (r.perps === "paper-not-stopped") return `
+⚠️ Kill incomplete: your Perps wallet has no grant left, so nothing trades on it, but its practice perpetuals could not be switched off. Switch them off in Settings → Perpetuals before you sign a new permission, or /kill again.`;
+  if (r.perps === "stopped") return `
+Your Perps wallet's grant is revoked too: it can no longer sign anything.`;
+  return "";
 }
 
 /** The question /kill asks before anything happens. */
@@ -50,6 +81,9 @@ export function killPromptText(hosted: boolean, ttlSec = CONFIRM_TTL_SEC): strin
 
 /** The answer once /confirm has run the kill. */
 export function killDoneText(r: KillResult): string {
+  return robinhoodKillText(r) + solanaLine(r) + perpsLine(r);
+}
+function robinhoodKillText(r: KillResult): string {
   // Before the `!r.ok` line: this is not "nothing to kill". There was a
   // grant, and it was deliberately left alone.
   if (r.archiveFailed) {

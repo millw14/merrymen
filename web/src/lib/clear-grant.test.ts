@@ -141,8 +141,13 @@ test("AN ABSENT KEY IS NOT AN UNREADABLE KEY — the screens tell each truth", (
   );
 
   // And the privy backup step must not ask somebody to confirm they saved
-  // something that does not exist.
-  const privyStep = create.slice(create.indexOf("isPrivyOwned(grant)"), create.indexOf("!isPrivyOwned(grant)"));
+  // something that does not exist. Anchor on the backup branches, since
+  // signer checks earlier in the component also call isPrivyOwned(grant).
+  const privyBackupAt = create.indexOf('{step==="backup"&&grant&&isPrivyOwned(grant)');
+  assert.notEqual(privyBackupAt, -1, "the Privy backup branch must exist");
+  const legacyBackupAt = create.indexOf('{step==="backup"&&grant&&!isPrivyOwned(grant)', privyBackupAt);
+  assert.ok(legacyBackupAt > privyBackupAt, "the legacy backup branch must follow the Privy branch");
+  const privyStep = create.slice(privyBackupAt, legacyBackupAt);
   assert.ok(!/saved my recovery key/.test(privyStep), "nothing was shown, so nothing can be saved");
   assert.match(privyStep, /merrymen cannot recover these funds/, "the real trade-off must be stated instead");
 });

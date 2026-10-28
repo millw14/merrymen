@@ -268,6 +268,10 @@ data class Thesis(
 @Serializable
 data class ThesesPage(
   val theses: List<Thesis> = emptyList(),
+  /** Older profile routes ignore ?view=activity and use this flag instead of source. */
+  val thesesRead: Boolean? = null,
+  /** False for the activity read, which omits historical fill-return enrichment. */
+  val figuresIncluded: Boolean? = null,
   /** "sqlite" or "none" — and "none" means the ledger could NOT BE READ, not that nobody posted. */
   val source: String? = null,
   /**
@@ -304,6 +308,10 @@ data class Position(
   @SerialName("stop_floor_bps") val stopFloorBps: Int? = null,
   /** The sentence that stop was graded for, written at entry. */
   @SerialName("stop_floor_why") val stopFloorWhy: String? = null,
+  /** Display identity only; [symbol] remains the ledger and order key. */
+  val token: String? = null,
+  /** Older feeds omit this field; explicit null means no verified display label. */
+  @SerialName("display_symbol") val displaySymbol: String? = symbol,
 ) {
   val priceStale: Boolean get() = priceStaleRaw != 0
 }
@@ -515,6 +523,7 @@ data class TokensPage(
  */
 @Serializable
 data class LeaderRow(
+  val performance: BookPerformance? = null,
   val slug: String? = null,
   val name: String? = null,
   val handle: String? = null,
@@ -537,11 +546,20 @@ data class LeaderRow(
   val paperPnlBps: Int? = null,
   /** Paper fills, the paper counterpart of [landed]. */
   val filledPaper: Int? = null,
+  /** Distinct swaps/curve trades, excluding vault moves and other operations. */
+  val paperFills: Int? = null,
+  val liveFills: Int? = null,
+  /** The public lifecycle read retained an agent whose worker is not running. */
+  val notRunning: Boolean = false,
 )
 
 @Serializable
 data class Leaderboard(
   val agents: List<LeaderRow> = emptyList(),
+  /** Identity/lifecycle only: returns and trade counts were not requested. */
+  val directory: Boolean = false,
+  /** When the server completed this directory selection, epoch milliseconds. */
+  val fetchedAt: Long? = null,
   /**
    * "sqlite" or "none", and "none" means THE LEDGER COULD NOT BE READ — not
    * that nobody has traded. The route answers `{source, agents}`; this type
@@ -552,6 +570,7 @@ data class Leaderboard(
   val source: String? = null,
   /** How many retired, quiet or expired accounts were folded out. Null when not counted. */
   val retired: Int? = null,
+  val retiredAgents: List<RetiredAgent> = emptyList(),
 )
 
 /**
@@ -709,13 +728,19 @@ data class ChatReply(
   val command: ChatCommand? = null,
   /**
    * The server's classification of a model failure: key-rejected |
-   * rate-limited | provider-down | unreachable | model-missing | other. It is
-   * what the owner is told, in the agent's voice ("your Groq key was
-   * rejected"), instead of a provider's raw text.
+   * rate-limited | provider-down | unreachable | model-missing | billing |
+   * other. It is what the owner is told, in the agent's voice ("your Groq key
+   * was rejected"), instead of a provider's raw text.
    */
   val kind: String? = null,
   /** Whose model failed, e.g. "Groq", for that sentence. */
   val provider: String? = null,
+  /**
+   * True when the key that failed was the deployment's own house key, not one
+   * the owner saved — a flag, never the key. Null (an older server) and false
+   * both mean the owner's own; nullable so a stray null cannot fail the decode.
+   */
+  val house: Boolean? = null,
 )
 
 /**
@@ -726,6 +751,21 @@ data class ChatReply(
  */
 @Serializable
 data class OrderBody(val side: String, val symbol: String, val usdgAmount: Double, val owner: String? = null)
+
+/**
+ * THE KILL SWITCH'S BODY, the web's own (web/src/lib/stop-agent.ts). Hosted
+ * refuses a DELETE /api/grants that does not name its `purpose` with 400 and
+ * deletes nothing, so an old renewal tab cannot discard a grant by accident;
+ * the `{}` this app sent was refused that way. `expectedTenant` is the wallet
+ * that tapped Stop: hosted, a session that has become another wallet since is
+ * refused 409 and nothing is removed. Null omits the key (explicitNulls =
+ * false); self-hosted has no session, and its DELETE reads no body.
+ *
+ * NO DEFAULT FOR `purpose`: this Json does not encode defaults, so a
+ * defaulted "delete-agent" would leave the phone as `{}` again.
+ */
+@Serializable
+data class StopBody(val purpose: String, val expectedTenant: String? = null)
 
 @Serializable
 data class OrderResult(

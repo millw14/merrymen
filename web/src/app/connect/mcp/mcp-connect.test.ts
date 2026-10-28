@@ -39,7 +39,7 @@ test("the primary action is the pre-filled claude.ai link, in a new tab without 
 test("every other assistant's action is on the page, and app links open the app, not a tab", () => {
   const html = unescape(render(true));
   const l = installLinks(URL_);
-  for (const link of [l.claudeOrg, l.cursor, l.vscode, l.vscodeInsiders, l.kiro, l.chatgpt]) {
+  for (const link of [l.claudeOrg, l.cursor, l.vscode, l.vscodeInsiders, l.kiro, l.chatgpt, l.grok]) {
     assert.ok(html.includes(`href="${link}" target="_blank" rel="noopener noreferrer"`), link);
   }
   for (const link of [l.lmstudio, l.goose]) {
@@ -50,6 +50,41 @@ test("every other assistant's action is on the page, and app links open the app,
     assert.ok(html.includes(command), command);
   }
   assert.ok(html.includes(`<code id=`) && html.includes(`>${URL_}</code>`), "the server address is shown");
+});
+
+test("Grok and Grok Bot have separate visible connection routes and owner handoffs", () => {
+  const html = unescape(render(true));
+  const grok = html.slice(html.indexOf('<li class="mcp-hub-row" id="grok">'), html.indexOf('<h3>Codex</h3>'));
+  assert.match(grok, /<h3>Grok<\/h3>/);
+  assert.match(grok, /Plugins → Connectors → New Connector → Custom/);
+  assert.match(grok, /Set <b>Name<\/b> to <b>Merrymen<\/b>/);
+  assert.match(grok, /<b>Server URL<\/b>, then choose <b>Add Connector<\/b>/);
+  assert.match(grok, /does not install this unlisted custom connector/);
+  assert.match(grok, /aria-label="Copy address for Grok"/);
+  assert.match(grok, /<h3>Grok Bot<\/h3>/);
+  assert.match(grok, /aria-label="Copy the Grok Bot setup prompt"/);
+  assert.match(grok, /<summary>Read the setup prompt/);
+  assert.match(grok, /browser on my own device/);
+  assert.match(grok, /Do not sign in to Merrymen, approve proposals, create wallets or sign permissions/);
+  assert.match(grok, /call get_merryman_setup before acting/);
+  assert.match(grok, /After the owner returns, call get_merryman_setup again/);
+  assert.match(grok, /Report practice active only when setup reports phase=paper with a fresh worker report/);
+  assert.match(grok, /Signing or approval alone is not activation/);
+  assert.match(grok, /do not assume a Grok chat connector is installed in this Bot/);
+  assert.match(grok, /Use text and links if this host cannot render MCP Apps/);
+  assert.match(grok, /<code>\/mcps<\/code>/);
+  assert.ok(html.indexOf('id="grok-bot"') < html.indexOf("<summary>More apps"), "both routes precede the extra apps list");
+});
+
+test("Grok Bot setup and manual configuration preserve this server's address", () => {
+  const html = renderOther();
+  const grok = html.slice(html.indexOf('<li class="mcp-hub-row" id="grok-bot">'), html.indexOf('<h3>Codex</h3>'));
+  assert.match(grok, /https:\/\/app\.staging\.example\/llms\.txt/);
+  assert.match(grok, /Use only this remote MCP server: https:\/\/mcp\.staging\.example\/mcp/);
+  assert.match(grok, /grok mcp add --transport http merrymen https:\/\/mcp\.staging\.example\/mcp/);
+  assert.match(grok, /&quot;url&quot;: &quot;https:\/\/mcp\.staging\.example\/mcp&quot;/);
+  assert.ok(!grok.includes("mcp.merrymen.dev"), "no production install on another server");
+  assert.ok(!grok.includes("merrymen.dev/llms.txt"), "instructions come from this server");
 });
 
 test("every control has an accessible name, and every copy announces itself", () => {
@@ -117,6 +152,8 @@ test("when connections are off, the page says so and offers nothing to install",
   assert.match(html, /Assistant connections are switched off on this server/);
   assert.match(html, /MCP is available on hosted Merrymen only/);
   assert.ok(!html.includes("claude.ai"), "no Add to Claude");
+  assert.ok(!html.includes("grok.com"), "no Grok connection link");
+  assert.ok(!html.includes("Grok Bot"), "no Bot setup prompt");
   assert.ok(!html.includes("<button"), "no Copy buttons");
   assert.ok(!html.includes(URL_), "no address to paste into an assistant");
   for (const s of ["llms.txt", "Or just tell Claude Code", "For AI assistants", "Accepting connections", "claude mcp add"]) assert.ok(!html.includes(s), `no ${s}`);

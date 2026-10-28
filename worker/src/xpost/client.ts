@@ -39,13 +39,31 @@ export const X_TOKEN_URL = "https://api.x.com/2/oauth2/token";
 export const X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke";
 export const X_ME_URL = "https://api.x.com/2/users/me";
 export const X_POSTS_URL = "https://api.x.com/2/tweets";
+export const X_MEDIA_UPLOAD_URL = "https://api.x.com/2/media/upload";
+
+/** X's ceiling for one image upload (docs.x.com, media: images up to 5 MB). */
+export const X_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** X's media id: a decimal of at most nineteen digits (POST /2/tweets `media.media_ids`). */
+const MEDIA_ID = /^\d{1,19}$/;
 
 /**
  * What posting needs, and nothing more. POST /2/tweets declares all three of
  * tweet.write, tweet.read and users.read; offline.access is what makes X issue
  * a refresh token at all, without which the connection dies in two hours.
+ * media.write is POST /2/media/upload's, for the profit card an active owner's
+ * sale carries (docs/x-posting.md "Sale posts"). A grant made before it was
+ * asked for lacks it: those sales post without the card, as they always did,
+ * until the owner reconnects X.
  */
-export const X_SCOPES = ["tweet.read", "tweet.write", "users.read", "offline.access"] as const;
+export const X_SCOPES = ["tweet.read", "tweet.write", "users.read", "offline.access", "media.write"] as const;
+
+/** The scope a card upload needs. */
+export const X_MEDIA_SCOPE = "media.write";
+
+/** Whether a stored grant's scope string (space-separated, as X answers it) holds `scope`. */
+export function grantHolds(granted: string | null | undefined, scope: string): boolean {
+  return typeof granted === "string" && granted.split(/\s+/).includes(scope);
+}
 
 /** A request to X that has not answered in this long is an answer: uncertain. */
 const TIMEOUT_MS = 10_000;
@@ -175,9 +193,10 @@ const realFetch: FetchLike = (url, init) => fetch(url, init);
 
 type Response = Awaited<ReturnType<FetchLike>>;
 
-async function call(fetchImpl: FetchLike, url: string, init: Parameters<FetchLike>[1]): Promise<Response | null> {
+async function call(fetchImpl: FetchLike, url: string, init: Parameters<FetchLike>[1], timeoutMs = TIMEOUT_MS): Promise<Response | null> {
   try {
-    return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const ms = Number.isFinite(timeoutMs) ? Math.min(TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs))) : TIMEOUT_MS;
+    return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(ms) });
   } catch {
     return null;
   }
@@ -248,7 +267,10 @@ async function tokenCall(app: XApp, form: Record<string, string>, fetchImpl: Fet
       refreshToken: typeof refresh === "string" && refresh.length >= 8 ? refresh : null,
       // A missing or absurd lifetime is read as X's documented two hours.
       accessExpiresAtMs: nowMs + (Number.isFinite(expiresIn) && expiresIn > 0 && expiresIn < 30 * 86_400 ? expiresIn : 7200) * 1000,
-      scope: typeof body?.scope === "string" ? body.scope : X_SCOPES.join(" "),
+      // A grant X does not name is read WITHOUT media.write: a token issued
+      // before it was asked for would otherwise be stored as holding it, and
+      // its owner never told to reconnect. Posting needs nothing it adds.
+      scope: typeof body?.scope === "string" ? body.scope : X_SCOPES.filter((s) => s !== X_MEDIA_SCOPE).join(" "),
     },
   };
 }
@@ -337,13 +359,20 @@ export async function fetchMe(accessToken: string, opts: { fetch?: FetchLike; no
 export async function createPost(
   accessToken: string,
   text: string,
-  opts: { fetch?: FetchLike; nowMs?: number; replyToTweetId?: string } = {},
+  opts: { fetch?: FetchLike; nowMs?: number; replyToTweetId?: string; mediaIds?: readonly string[] } = {},
 ): Promise<XResult<{ id: string }>> {
   if (opts.replyToTweetId !== undefined && !ID.test(opts.replyToTweetId)) return fail("invalid", null);
+  // Only ids X itself handed back from an upload (uploadImage), at most X's four.
+  const media = opts.mediaIds ?? [];
+  if (media.length > 4 || media.some((id) => typeof id !== "string" || !MEDIA_ID.test(id))) return fail("invalid", null);
   const res = await call(opts.fetch ?? realFetch, X_POSTS_URL, {
     method: "POST",
     headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ text, ...(opts.replyToTweetId ? { reply: { in_reply_to_tweet_id: opts.replyToTweetId } } : {}) }),
+    body: JSON.stringify({
+      text,
+      ...(opts.replyToTweetId ? { reply: { in_reply_to_tweet_id: opts.replyToTweetId } } : {}),
+      ...(media.length ? { media: { media_ids: [...media] } } : {}),
+    }),
   });
   if (!res) return fail("uncertain", null);
   const read = await classify(res, opts.nowMs ?? Date.now());
@@ -355,6 +384,42 @@ export async function createPost(
   return { ok: true, value: { id } };
 }
 
+/**
+ * UPLOAD ONE IMAGE for a post, as the owner (OAuth 2.0 user token holding
+ * media.write): POST /2/media/upload with the image base64-encoded in a JSON
+ * body and `media_category: "tweet_image"`, answered with `data.id`, the id
+ * POST /2/tweets takes in `media.media_ids`. One image, one request: X's
+ * single-request upload takes an image whole, under its 5 MB image limit.
+ *
+ * AN UPLOAD IS NOT A POST. Nothing appears on anybody's timeline until a post
+ * names the id, and an id no post names expires at X. So every failure here,
+ * `uncertain` included, costs only the picture: the caller posts the text on
+ * its own and never uploads again for that post. The answers are sorted by the
+ * same `classify` as a post (401 auth, 403 forbidden, 429 rate, 5xx uncertain).
+ *
+ * `timeoutMs` bounds the call below the client's own ten seconds, so a slow
+ * upload cannot hold the post it was for past the caller's budget.
+ */
+export async function uploadImage(
+  accessToken: string,
+  image: Uint8Array,
+  opts: { fetch?: FetchLike; nowMs?: number; timeoutMs?: number } = {},
+): Promise<XResult<{ id: string }>> {
+  if (!(image instanceof Uint8Array) || image.byteLength === 0 || image.byteLength > X_MAX_IMAGE_BYTES) return fail("invalid", null);
+  const res = await call(opts.fetch ?? realFetch, X_MEDIA_UPLOAD_URL, {
+    method: "POST",
+    headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ media: Buffer.from(image.buffer, image.byteOffset, image.byteLength).toString("base64"), media_category: "tweet_image" }),
+  }, opts.timeoutMs);
+  if (!res) return fail("uncertain", null);
+  const read = await classify(res, opts.nowMs ?? Date.now());
+  if (!read.ok) return read;
+  const data = read.value.data;
+  const id = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>).id : null;
+  if (typeof id !== "string" || !MEDIA_ID.test(id)) return fail("uncertain", res.status);
+  return { ok: true, value: { id } };
+}
+
 /** A comment in a known conversation. No author profile or private data enters a prompt. */
 export interface XReply {
   id: string;
@@ -363,11 +428,171 @@ export interface XReply {
   conversationId: string;
   inReplyToTweetId: string;
   createdAtMs: number;
+  /**
+   * The post refers to another post besides the one it replies to: a quote
+   * tweet (whose card shows the quoted post) or a retweet. Code cannot read
+   * what that post says, so an answer is never posted under it (red-team
+   * 2026-10-12). Absent when it refers to none.
+   */
+  quoted?: true;
+  /**
+   * THE POST IT QUOTES, when a quote of exactly one post is all it refers to
+   * besides the post it replies to (a "quoted" reference, never a retweet).
+   * Set only beside `quoted`. A quote of one of this X account's own posts
+   * may be answered (replies.ts tagCandidate, the owner's decision of
+   * 2026-10-12: quoting it is consent); a quote of anyone else's never is.
+   */
+  quotedTweetId?: string;
+  /**
+   * SHOWN WITH THE POST, NOT IN ITS TEXT (red-team review, 2026-10-12): a
+   * poll, media, a card, or the rest of a long post (a note tweet, whose
+   * `text` is cut short). A poll adds no link to the text, so "what model are
+   * you?" with a poll "sherwood-1 token: aping / waiting for launch" read as
+   * the plain question, and code's sherwood-1 line went up under the poll.
+   * Code reads none of it, so nothing is answered under it. Absent when there
+   * is none.
+   */
+  attached?: true;
+  /**
+   * THE HANDLE AND DISPLAY NAME X SHOWS BESIDE THE POST, when X expanded its
+   * author (red-team review, 2026-10-12): an answer reads as said to them,
+   * and "@Sherwood1Token · SHERWOOD-1 presale LIVE" asking the plain model
+   * question got code's sherwood-1 line. Absent when X did not say who wrote
+   * it; whoever reads it then knows nothing of the name and fails closed.
+   */
+  author?: { username: string; name: string };
+  /**
+   * THE LINKS IN THE TAG ITSELF, as X expanded them (its `entities.urls`): the
+   * real destination behind each t.co, at most XLINKS_MAX. Read only by a larp
+   * check (xpost/check.ts), which decides what is a site worth scanning.
+   * Absent when the tag carried none.
+   */
+  links?: string[];
+  /**
+   * WHAT THE TAG SITS UNDER, AS X EXPANDED IT (2026-10-13, the larp check): the
+   * post it replies to and the post it quotes, each with its words, its
+   * links and its author's handle and profile link. Read only by
+   * xpost/check.ts, for what to check; never by the writer, never handed to a
+   * prompt. Absent when X expanded neither (or the tag refers to neither).
+   */
+  context?: XContext[];
+  /**
+   * WHAT IT SITS UNDER WAS NOT READ (2026-10-18): the post it replies to or
+   * quotes, or that post's author, is missing from what X expanded — deleted,
+   * protected, or from a suspended account, which X reports as an error
+   * beside the page (readMentions). Read only by tagCandidate: no larp check
+   * is taken of such a tag, since a check speaks about what it sits under and
+   * screens that post and its author first. Every other screen reads it as
+   * before. Absent when everything it refers to was read, or it refers to none.
+   */
+  contextUnread?: true;
+}
+
+/** A post a tag replies to or quotes, as X expanded it. Untrusted: a stranger wrote every field. */
+export interface XContext {
+  id: string;
+  relation: "replied_to" | "quoted";
+  /** Its words, the whole of a long post when X sent it, at most CONTEXT_TEXT_MAX. */
+  text: string;
+  links: string[];
+  authorId: string;
+  author?: { username: string; name: string; url?: string };
 }
 
 export interface XReplyBatch { replies: XReply[]; newestId: string | null }
 
-function parsedReply(item: unknown, now: number, excludeAuthorId: string): XReply | null {
+/** Links read from one post, and the longest one kept. */
+export const XLINKS_MAX = 5;
+const XLINK_CHARS = 300;
+/** The most of a post a tag sits under that is read. */
+const CONTEXT_TEXT_MAX = 4000;
+
+/** The real destinations of a post's links (X's `entities.urls`), http(s) only, deduplicated, at most XLINKS_MAX. Malformed: none. */
+function linksOf(entities: unknown): string[] {
+  const urls = entities !== null && typeof entities === "object" && !Array.isArray(entities) ? (entities as Record<string, unknown>).urls : null;
+  if (!Array.isArray(urls)) return [];
+  const out: string[] = [];
+  for (const u of urls) {
+    if (!u || typeof u !== "object" || Array.isArray(u)) continue;
+    const r = u as Record<string, unknown>;
+    const href = [r.unwound_url, r.expanded_url].find((v): v is string => typeof v === "string" && /^https?:\/\/\S+$/i.test(v) && v.length <= XLINK_CHARS);
+    if (href && !out.includes(href)) out.push(href);
+    if (out.length >= XLINKS_MAX) break;
+  }
+  return out;
+}
+
+/** The profile link each expanded author shows (`url`, expanded through `entities.url`), by id. */
+function profileLinksOf(includes: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  const users = includes !== null && typeof includes === "object" && !Array.isArray(includes) ? (includes as Record<string, unknown>).users : null;
+  if (!Array.isArray(users)) return out;
+  for (const u of users) {
+    if (!u || typeof u !== "object" || Array.isArray(u)) continue;
+    const r = u as Record<string, unknown>;
+    if (typeof r.id !== "string" || !ID.test(r.id)) continue;
+    const e = r.entities !== null && typeof r.entities === "object" ? (r.entities as Record<string, unknown>).url : null;
+    const link = linksOf(e)[0];
+    if (link) out.set(r.id, link);
+  }
+  return out;
+}
+
+/** The posts X expanded beside a page (`includes.tweets`), by id: words, links, author. A malformed one is left out. */
+function referencedOf(includes: unknown): Map<string, { text: string; links: string[]; authorId: string }> {
+  const out = new Map<string, { text: string; links: string[]; authorId: string }>();
+  const tweets = includes !== null && typeof includes === "object" && !Array.isArray(includes) ? (includes as Record<string, unknown>).tweets : null;
+  if (!Array.isArray(tweets)) return out;
+  for (const t of tweets) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) continue;
+    const r = t as Record<string, unknown>;
+    if (typeof r.id !== "string" || !ID.test(r.id) || typeof r.author_id !== "string" || !ID.test(r.author_id) || typeof r.text !== "string") continue;
+    // A long post's whole text and links, when X sent them; else what the post shows.
+    const note = r.note_tweet !== null && typeof r.note_tweet === "object" ? r.note_tweet as Record<string, unknown> : null;
+    const text = typeof note?.text === "string" && note.text.trim() ? note.text : r.text;
+    const links = [...linksOf(r.entities), ...linksOf(note?.entities)].filter((l, i, all) => all.indexOf(l) === i).slice(0, XLINKS_MAX);
+    out.set(r.id, { text: text.slice(0, CONTEXT_TEXT_MAX), links, authorId: r.author_id });
+  }
+  return out;
+}
+
+/** The longest handle or display name read: X's own limits, with room. A longer one is no name code can vouch for. */
+const AUTHOR_FIELD_MAX = 100;
+
+/** The authors X expanded on a page (`includes.users`), by id. A malformed entry is left out: its author is then unknown. */
+function authorsOf(includes: unknown): Map<string, { username: string; name: string }> {
+  const out = new Map<string, { username: string; name: string }>();
+  const users = includes !== null && typeof includes === "object" && !Array.isArray(includes) ? (includes as Record<string, unknown>).users : null;
+  if (!Array.isArray(users)) return out;
+  for (const u of users) {
+    if (!u || typeof u !== "object" || Array.isArray(u)) continue;
+    const r = u as Record<string, unknown>;
+    if (typeof r.id !== "string" || !ID.test(r.id) || typeof r.username !== "string" || typeof r.name !== "string") continue;
+    if (r.username.length > AUTHOR_FIELD_MAX || r.name.length > AUTHOR_FIELD_MAX) continue;
+    out.set(r.id, { username: r.username, name: r.name });
+  }
+  return out;
+}
+
+/** Anything shown with the post that its text does not carry: attachments of any kind, a card, a long post's rest. */
+function attachedTo(d: Record<string, unknown>): boolean {
+  const a = d.attachments;
+  const attachments = a !== undefined && a !== null
+    && !(typeof a === "object" && !Array.isArray(a) && Object.values(a as Record<string, unknown>).every((v) => Array.isArray(v) && v.length === 0));
+  const card = d.card_uri !== undefined && d.card_uri !== null && d.card_uri !== "";
+  const note = d.note_tweet !== undefined && d.note_tweet !== null;
+  return attachments || card || note;
+}
+
+interface Expanded {
+  authors: ReadonlyMap<string, { username: string; name: string }>;
+  profiles: ReadonlyMap<string, string>;
+  tweets: ReadonlyMap<string, { text: string; links: string[]; authorId: string }>;
+}
+const NOTHING_EXPANDED: Expanded = { authors: new Map(), profiles: new Map(), tweets: new Map() };
+
+function parsedReply(item: unknown, now: number, excludeAuthorId: string, expanded: Expanded = NOTHING_EXPANDED): XReply | null {
+  const authors = expanded.authors;
   if (!item || typeof item !== "object" || Array.isArray(item)) return null;
   const d = item as Record<string, unknown>;
   const refs = Array.isArray(d.referenced_tweets) ? d.referenced_tweets : [];
@@ -380,15 +605,87 @@ function parsedReply(item: unknown, now: number, excludeAuthorId: string): XRepl
       typeof d.text !== "string" || !d.text.trim() || d.text.length > 4000 ||
       !Number.isFinite(createdAtMs) || createdAtMs <= 0 || createdAtMs > now) return null;
   if (parents.length && (typeof d.conversation_id !== "string" || d.id === d.conversation_id)) return null;
+  const besides = refs.filter((r) => r === null || typeof r !== "object" || r.type !== "replied_to");
+  const quoted = besides.length > 0;
+  // Which post it quotes: only one reference besides its parent, of type "quoted", with an id X could have sent.
+  const only = besides.length === 1 ? besides[0] as Record<string, unknown> | null : null;
+  const quotedTweetId = only !== null && typeof only === "object" && only.type === "quoted" && typeof only.id === "string" && ID.test(only.id) ? only.id : null;
+  const author = authors.get(d.author_id);
+  const links = linksOf(d.entities);
+  // What it sits under, parent first: each post X expanded, with its author's handle and profile link when X sent them.
+  const context: XContext[] = [];
+  // Any of them, or its author, X did not hand over: what it sits under is unread (XReply.contextUnread).
+  let unread = false;
+  for (const r of [...parents, ...besides.filter((b) => b !== null && typeof b === "object" && b.type === "quoted")]) {
+    const ref = r as Record<string, unknown>;
+    const t = typeof ref.id === "string" ? expanded.tweets.get(ref.id) : undefined;
+    if (!t) {
+      unread = true;
+      continue;
+    }
+    const who = authors.get(t.authorId);
+    if (!who) unread = true;
+    const url = expanded.profiles.get(t.authorId);
+    context.push({ id: ref.id as string, relation: ref.type === "quoted" ? "quoted" : "replied_to", text: t.text, links: t.links, authorId: t.authorId,
+      ...(who || url ? { author: { username: who?.username ?? "", name: who?.name ?? "", ...(url ? { url } : {}) } } : {}) });
+  }
   return { id: d.id, text: d.text, authorId: d.author_id, conversationId: typeof d.conversation_id === "string" ? d.conversation_id : d.id,
-    inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs };
+    inReplyToTweetId: parents.length ? parents[0]!.id as string : "", createdAtMs, ...(quoted ? { quoted: true as const } : {}),
+    ...(quotedTweetId ? { quotedTweetId } : {}),
+    ...(attachedTo(d) ? { attached: true as const } : {}), ...(author ? { author: { ...author } } : {}),
+    ...(links.length ? { links } : {}), ...(context.length ? { context } : {}), ...(unread ? { contextUnread: true as const } : {}) };
+}
+
+/**
+ * WHAT X COULD NOT EXPAND, AND NOTHING ELSE (2026-10-18). Mentions expand the
+ * posts a tag refers to and their authors (the larp check, 2026-10-13), and X
+ * answers a page with one of them deleted, protected or suspended with the
+ * page whole and an `errors` entry beside it. Read as a failed page, one such
+ * tag held every answer and every STOP behind it: the cursor stayed, and the
+ * same page failed every thirty minutes. Only these are read past: each
+ * entry's `parameter` is an expansion this read asks for, its `resource_type`
+ * the kind that expansion names, its `resource_id` (and `value`, when sent) an
+ * id, never one of the page's own mentions, and a missing post one a mention
+ * on the page refers to. Any other error, or any entry off this shape, still
+ * fails the page.
+ */
+const EXPANSION_MISSES: ReadonlyMap<string, "tweet" | "user"> = new Map([
+  ["referenced_tweets.id", "tweet"],
+  ["referenced_tweets.id.author_id", "user"],
+  ["author_id", "user"],
+]);
+
+function onlyExpansionMisses(errors: unknown, data: readonly unknown[]): boolean {
+  if (!Array.isArray(errors) || errors.length === 0) return false;
+  const mentions = new Set<string>();
+  const referred = new Set<string>();
+  for (const item of data) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const d = item as Record<string, unknown>;
+    if (typeof d.id === "string") mentions.add(d.id);
+    for (const r of Array.isArray(d.referenced_tweets) ? d.referenced_tweets : []) {
+      const id = r !== null && typeof r === "object" ? (r as Record<string, unknown>).id : undefined;
+      if (typeof id === "string") referred.add(id);
+    }
+  }
+  return errors.every((e) => {
+    if (!e || typeof e !== "object" || Array.isArray(e)) return false;
+    const r = e as Record<string, unknown>;
+    const kind = typeof r.parameter === "string" ? EXPANSION_MISSES.get(r.parameter) : undefined;
+    const id = r.resource_id;
+    return kind !== undefined && r.resource_type === kind && typeof id === "string" && ID.test(id) && (r.value === undefined || r.value === id)
+      && !mentions.has(id) && (kind !== "tweet" || referred.has(id));
+  });
 }
 
 /**
  * Read the authenticated account's mentions, including replies in old threads,
  * so a STOP on a previous bot reply is seen before choosing any new reply.
  * A partial batch is never success: a failed page, repeated cursor, malformed
- * reply or more than the endpoint's eight hundred mentions fails closed.
+ * reply or more than the endpoint's eight hundred mentions fails closed. A
+ * page whose only errors are posts or authors X could not expand is whole:
+ * its tags are all there, and a tag that lost what it sits under says so
+ * (XReply.contextUnread, onlyExpansionMisses).
  */
 export async function readMentions(
   accessToken: string,
@@ -405,7 +702,14 @@ export async function readMentions(
   let cursor: string | undefined;
   let newestId: string | null = null;
   for (let page = 0; page < 8; page++) {
-    const query = new URLSearchParams({ max_results: "100", "tweet.fields": "author_id,conversation_id,referenced_tweets,created_at" });
+    // Attachments, cards and long posts, and the author's handle and display name: what X shows with a tag (XReply.attached, XReply.author).
+    // AND WHAT IT SITS UNDER (2026-10-13, the larp check): the links behind each
+    // t.co (entities), the posts it replies to and quotes, their authors and
+    // those authors' profile links (XReply.links, XReply.context).
+    const query = new URLSearchParams({
+      max_results: "100", "tweet.fields": "author_id,conversation_id,referenced_tweets,created_at,attachments,card_uri,note_tweet,entities",
+      expansions: "author_id,referenced_tweets.id,referenced_tweets.id.author_id", "user.fields": "username,name,url,entities",
+    });
     if (opts.sinceId) query.set("since_id", opts.sinceId);
     else if (opts.startTimeMs !== undefined) query.set("start_time", new Date(Math.floor(opts.startTimeMs / 1000) * 1000).toISOString());
     if (cursor) query.set("pagination_token", cursor);
@@ -419,7 +723,10 @@ export async function readMentions(
     if (!meta || typeof meta !== "object" || Array.isArray(meta)) return fail("invalid", res.status);
     const m = meta as Record<string, unknown>;
     const data = read.value.data === undefined && m.result_count === 0 ? [] : read.value.data;
-    if (!Array.isArray(data) || data.length > 100 || m.result_count !== data.length || Array.isArray(read.value.errors)) return fail("invalid", res.status);
+    if (!Array.isArray(data) || data.length > 100 || m.result_count !== data.length) return fail("invalid", res.status);
+    // A partial page fails, unless all X could not do was expand what a tag refers to (onlyExpansionMisses).
+    if (read.value.errors !== undefined && !onlyExpansionMisses(read.value.errors, data)) return fail("invalid", res.status);
+    const expanded: Expanded = { authors: authorsOf(read.value.includes), profiles: profileLinksOf(read.value.includes), tweets: referencedOf(read.value.includes) };
     for (const item of data) {
       if (!item || typeof item !== "object" || Array.isArray(item)) return fail("invalid", res.status);
       const d = item as Record<string, unknown>;
@@ -431,7 +738,7 @@ export async function readMentions(
       // target makes them ineligible for a generated response in the planner.
       if (d.author_id === xUserId) continue;
       const arrivedAtMs = now + Math.max(0, performance.now() - started) + MENTION_CLOCK_SKEW_MS;
-      const reply = parsedReply(d, arrivedAtMs, xUserId);
+      const reply = parsedReply(d, arrivedAtMs, xUserId, expanded);
       if (!reply) return fail("invalid", res.status);
       replies.push(reply);
     }
@@ -464,6 +771,11 @@ async function classify(res: Response, nowMs: number, maxBytes = MAX_BODY_BYTES)
       .join(" ");
     if (/duplicate/i.test(said)) return fail("duplicate", 403);
     if (/credit/i.test(said)) return fail("credits", 403);
+    // WHY X SAID NO, for the operator: a bare "forbidden" hid that a market
+    // answer had more than one cashtag (2026-10-13). X's own words only, plain
+    // characters, bounded; they carry no token and no post text.
+    const why = said.replace(/[^A-Za-z0-9 .,:;'()/_-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+    if (why) console.warn(`[xpost] X refused the request (403): ${why}`);
     return fail("forbidden", 403);
   }
   if (res.status >= 500) return fail("uncertain", res.status);

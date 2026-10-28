@@ -165,4 +165,15 @@ describe("the settings tool says where launchpad buying is", () => {
     assert.match(out, /launchpad buying still needs, before it buys anything: .*re-sign/);
     assert.match(out, /memecoin strategy with real money/);
   });
+
+  it("preserves Trencher's actual playbook when the settings evidence is cut to size", async () => {
+    const out = await settings(theOwner({ strategy: "trencher", trencherFastEnabled: true,
+      liveTradingEnabled: false, assetMode: "stocks", discoveryEnabled: false, classPerEntryUsdg: 50, scoutBudgetUsdg: 10 }));
+    assert.ok(out.length <= TOOL_OUTPUT_MAX);
+    assert.match(out, /^Trencher looks for eligible memecoins/);
+    assert.match(out, /saved stock basket does not choose its entries/);
+    assert.match(out, /entries require Brain review/);
+    assert.match(out, /permission, funding and every risk check/);
+    assert.equal(out.match(/saved stock basket does not choose its entries/g)?.length, 1);
+  });
 });

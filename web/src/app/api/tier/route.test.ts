@@ -472,7 +472,7 @@ describe("/api/tier GET, run", () => {
       "../../../../../worker/src/settings-store.ts",
     ) as typeof import("../../../../../worker/src/settings-store");
     resetSettingsStoreForTest();
-    const store = getSettingsStore();
+    const store = getSettingsStore("spot");
     store.holderClaims = async () => {
       throw new Error("holder_claims unreadable");
     };
@@ -494,7 +494,7 @@ describe("/api/tier GET, run", () => {
       "../../../../../worker/src/grant-store.ts",
     ) as typeof import("../../../../../worker/src/grant-store");
     resetGrantStoreForTest();
-    getGrantStore().get = async () => {
+    getGrantStore("spot").get = async () => {
       throw new Error("grant store unreadable");
     };
     try {

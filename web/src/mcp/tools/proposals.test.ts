@@ -92,6 +92,61 @@ test("the strategy list matches the worker's registry", () => {
   assert.deepEqual([...KNOWN_STRATEGIES].sort(), [...BUILTIN_STRATEGIES].sort());
 });
 
+test("create_merryman prepares an idempotent creation-only setup without granting authority", async () => {
+  const { d, run } = await setup({ directory: fixtureDirectory({ [OWNER_A]: [] }) });
+  const args = { name: "Robin", strategy: "steady-basket", basket: ["NVDA"], risk_level: "careful", idempotency_key: "new-merryman-01" };
+  const first = data(await run("create_merryman", args));
+  const again = data(await run("create_merryman", args));
+  assert.equal(first.proposal_id, again.proposal_id);
+  assert.equal(again.created, false);
+  assert.equal(first.diff, null);
+  assert.equal((first.summary as Record<string, unknown>).purpose, "create");
+  assert.equal((again.summary as Record<string, unknown>).purpose, "create");
+  const row = await proposalRow(d.db, OWNER_A, first.proposal_id as string);
+  const binding = JSON.parse(row!.binding_json) as DraftBinding;
+  assert.equal(binding.purpose, "create");
+  assert.deepEqual(binding.before, {});
+  assert.equal(binding.settings.agentName, "Robin");
+  for (const key of ["liveTradingEnabled", "trencherLiveEnabled", "maxImpactBps", "serialized", "demoSessionPrivateKey"]) {
+    assert.equal(key in binding.settings, false);
+  }
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM grants").get() as { n: number }).n, 0);
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 0);
+  assert.equal(code(await run("create_merryman", { ...args, live_trading: true })), "invalid_input");
+  // The old draft means applying settings, so it cannot reuse this binding.
+  assert.equal(code(await run("create_agent_draft", args)), "conflict");
+  const legacy = data(await run("create_agent_draft", { ...args, idempotency_key: "legacy-settings-01" }));
+  assert.equal((legacy.summary as Record<string, unknown>).purpose, "settings");
+});
+
+test("create_merryman refuses a visible existing agent but never probes an unshared one", async () => {
+  const { deps, run } = await setup();
+  assert.equal(code(await run("create_merryman", { idempotency_key: "new-visible-01" })), "conflict");
+  const unshared = await connectAs(deps, OWNER_A, { scopes: ["drafts:write"], agents: [] });
+  const hidden = await run("create_merryman", { idempotency_key: "new-unshared-01" }, unshared.principal);
+  assert.equal(hidden.isError, undefined, JSON.stringify(hidden));
+  assert.equal(data(hidden).diff, null);
+  const noScope = await connectAs(deps, OWNER_B, { scopes: ["market:read"], agents: [] });
+  assert.equal(code(await run("create_merryman", { idempotency_key: "new-noscope-01" }, noScope.principal)), "insufficient_scope");
+});
+
+test("crypto-only creation requires a coin basket before preparing the compact handoff", async () => {
+  const { d, run } = await setup({ directory: fixtureDirectory({ [OWNER_A]: [] }) });
+  for (const [index, basket] of [undefined, ["NVDA", "TSLA"], ["qqq", "nvda"]].entries()) {
+    const result = await run("create_merryman", { strategy: "steady-basket", asset_mode: "crypto", ...(basket ? { basket } : {}), idempotency_key: `crypto-empty-${index}` });
+    assert.equal(code(result), "invalid_input");
+    assert.match(errorOf(result).message, /basket containing at least one coin/);
+  }
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM mcp_proposals").get() as { n: number }).n, 0);
+  const coin = data(await run("create_merryman", { strategy: "llm-strategist", asset_mode: "crypto", basket: ["MYCOIN"], idempotency_key: "crypto-explicit-coin" }));
+  assert.equal(coin.status, "awaiting_approval", "owner-side custom token validation still remains");
+  const binding = JSON.parse((await proposalRow(d.db, OWNER_A, coin.proposal_id as string))!.binding_json) as DraftBinding;
+  assert.deepEqual(binding.settings.basketSymbols, ["MYCOIN"]);
+  const trencher = data(await run("create_merryman", { strategy: "trencher", asset_mode: "crypto", idempotency_key: "crypto-trencher" }));
+  assert.equal(trencher.status, "awaiting_approval", "Trencher discovery does not need a basket");
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM grants").get() as { n: number }).n, 0);
+});
+
 test("quote_trade: expected, minimum at the agent's slippage, impact, route and caveats — and places nothing", async () => {
   const { d, run } = await setup();
   const r = await run("quote_trade", { side: "buy", token: NVDA, amount_usdg: 10 });

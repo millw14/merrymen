@@ -1,4 +1,6 @@
-import { geckoSource } from "../../../worker/src/venues/geckoterminal";
+import { proPacingSet } from "../../../worker/src/venues/coingecko-pacing";
+import { cachedGeckoDetail, geckoRefusal, geckoSource, type GeckoSource } from "../../../worker/src/venues/geckoterminal";
+import type { FeedResult } from "../../../worker/src/venues/fleet-feed-cache";
 /**
  * CANDLES, FROM THE INDEX THAT ALREADY DESCRIBES THESE POOLS.
  *
@@ -269,44 +271,124 @@ export function __resetCandleCacheForTest(opts?: { keepLastRead?: boolean; age?:
   for (const [k, v] of cache) cache.set(k, { ...v, at: v.at - back });
 }
 
+/** How long one chart read may take, including any wait for the Pro lane. */
+const READ_BUDGET_MS = 8000;
+
+/**
+ * One request's outcome in the shape the shared gecko lane caches: the read
+ * when the index answered, a safe failure code when it did not.
+ */
+type CandleFetch = FeedResult & { read?: CandleRead };
+
+/**
+ * A lane outcome as the screen's refusal vocabulary.
+ *
+ * A 429 — ours, or the lane's shared cooldown that a 429 elsewhere in this
+ * process set — is evidence about the bucket and gets the long hold. A shape
+ * we cannot parse is `unreadable`. Everything else, including a lane too busy
+ * to answer inside the budget and a plan-latched endpoint (which costs nothing
+ * to re-ask), is `unreachable` and gets the short one.
+ */
+function candleReadOf(r: CandleFetch): CandleRead {
+  if (!r.failed && r.read) return r.read;
+  if (r.failure === "http-429" || r.failure === "provider-cooldown") return refused("rate-limited");
+  if (r.failure === "invalid-body" || r.failure === "invalid-shape") return refused("unreadable");
+  return refused("unreachable");
+}
+
+/**
+ * THE PRO KEY IS A METERED BUDGET, SO ITS CHART READS ARE PACED.
+ *
+ * Everything above about arrangement buying nothing is true of the free
+ * public bucket, and that path is unchanged: no key, no queue. But with
+ * MERRYMEN_COINGECKO_PRO_API_KEY set, every chart read spends a monthly
+ * credit, and this was the one Pro caller in the web process outside the
+ * process-local lane every other web read already shares (the discovery
+ * feeds, pool evidence). So a burst of chart views was unpaced, and a 429
+ * here held back only this one pool's key while every other pool kept asking.
+ *
+ * On Pro the read now goes through that lane (venues/geckoterminal.ts):
+ * the same MERRYMEN_COINGECKO_PRO_SPACING_MS knob and monthly-credit ceiling
+ * (20% share for a process-local lane), one 429 cooldown for the whole
+ * process, the one-hour plan-refusal latch, and the public fallback the other
+ * reads use on a Pro outage.
+ *
+ * ONLY ONCE THE OPERATOR SET A PACING KNOB ON WEB (coingecko-pacing.ts
+ * proPacingSet). With neither set the chart read is the unpaced Pro fetch it
+ * always was: at the lane's 3000 ms default, a cold token page claims three
+ * slots (its chart and two evidence legs), and a second cold page opened
+ * within seconds waited past its chart's 8 s budget and showed the chart as
+ * unreachable — on deploy, before anyone had chosen a pace. Setting either
+ * knob is the operator choosing to pace charts too.
+ *
+ * IT TAKES THE DEFAULT ROW, NOT THE EVIDENCE ROW. The token page asks for its
+ * chart and its pool evidence together (app/api/tokens/[address]/route.ts),
+ * chart first. On the evidence row the chart claimed the first slot, so the
+ * two evidence legs started one and two spacings later — at the 3000 ms
+ * default the second began at 6 s, past its 5 s budget, and every cold page
+ * load lost half its activity panel and still paid for it. The chart can wait
+ * where those legs cannot: it has an 8 s budget, a TTL of minutes, and a kept
+ * stale series to draw if it misses. The legs have 5 s and nothing to fall
+ * back on.
+ */
 async function fetchCandles(
   poolId: string,
   token: string,
   window: CandleWindow,
 ): Promise<CandleRead> {
-  const { timeframe, aggregate, seconds, label } = SPEC[window];
-  const source = geckoSource();
-  const url =
-    `${source.base}/networks/robinhood/pools/${poolId}/ohlcv/${timeframe}` +
-    // `token` is sent as well as checked below. A mis-resolved address comes
-    // back as a 400 enumerating the allowed values, which is a far better
-    // failure than a plausible chart of the wrong asset.
+  const { timeframe, aggregate } = SPEC[window];
+  // `token` is sent as well as checked below. A mis-resolved address comes
+  // back as a 400 enumerating the allowed values, which is a far better
+  // failure than a plausible chart of the wrong asset.
+  const route =
+    `/networks/robinhood/pools/${poolId}/ohlcv/${timeframe}` +
     `?aggregate=${aggregate}&limit=${LIMIT}&currency=usd&token=${token}`;
+  const source = geckoSource();
+  if (source.id !== "coingecko-pro" || !proPacingSet()) return candleReadOf(await requestCandles(source, route, token, window, READ_BUDGET_MS));
+  return candleReadOf(
+    await cachedGeckoDetail<CandleFetch>(
+      `candles:${poolId.toLowerCase()}:${token.toLowerCase()}:${window}`,
+      (lane, remainingMs) => requestCandles(lane, route, token, window, Math.min(READ_BUDGET_MS, remainingMs)),
+      (failure) => ({ failed: true, failure }),
+      { route, budgetMs: READ_BUDGET_MS },
+    ).catch((): CandleFetch => ({ failed: true, failure: "unavailable" })),
+  );
+}
 
+async function requestCandles(
+  source: GeckoSource,
+  route: string,
+  token: string,
+  window: CandleWindow,
+  timeoutMs: number,
+): Promise<CandleFetch> {
+  const { seconds, label } = SPEC[window];
+  const observedAt = Date.now();
+  const answered = (read: CandleRead): CandleFetch => ({ failed: false, observedAt, read });
   try {
-    const res = await fetch(url, {
+    const res = await fetch(`${source.base}${route}`, {
       headers: source.headers,
       redirect: "error",
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
       next: { revalidate: 60 },
     });
     // 429 is the common one, and it is the only refusal that is EVIDENCE about
     // the bucket — so it is the only one cached for the full window.
-    if (!res.ok) return refused(res.status === 429 ? "rate-limited" : "unreachable");
+    if (!res.ok) return { failed: true, ...(await geckoRefusal(res)) };
     const j = (await res.json()) as {
       data?: { attributes?: { ohlcv_list?: unknown[][] } };
       meta?: { base?: { address?: string; symbol?: string }; quote?: { symbol?: string } };
     };
 
     const list = j.data?.attributes?.ohlcv_list;
-    if (!Array.isArray(list)) return refused("unreadable"); // a shape we cannot read is a refusal
+    if (!Array.isArray(list)) return { failed: true, failure: "invalid-body" }; // a shape we cannot read is a refusal
 
     // THE GUARD FAILS CLOSED. It used to read `if (base && base !== token)`, so
     // a response that named no base at all skipped the check entirely and
     // charted an unverified series — the exact outcome the check exists to
     // prevent. Not being told what the bars are about is a refusal.
     const base = (j.meta?.base?.address ?? "").toLowerCase();
-    if (!base) return refused("unreadable");
+    if (!base) return { failed: true, failure: "invalid-body" };
 
     const quoteSymbol = j.meta?.quote?.symbol ?? null;
 
@@ -314,7 +396,7 @@ async function fetchCandles(
     // these bars are a price history of the other asset — which is a different
     // fact from the pool having no bars, and gets its own state.
     if (base !== token.toLowerCase()) {
-      return {
+      return answered({
         state: "mismatch",
         reason: null,
         candles: [],
@@ -324,7 +406,7 @@ async function fetchCandles(
         label,
         gaps: 0,
         lastBarAgeSec: null,
-      };
+      });
     }
 
     const candles: Candle[] = [];
@@ -347,7 +429,7 @@ async function fetchCandles(
     candles.sort((a, b) => a.t - b.t);
 
     if (!candles.length) {
-      return {
+      return answered({
         state: "none",
         reason: null,
         candles: [],
@@ -357,7 +439,7 @@ async function fetchCandles(
         label,
         gaps: 0,
         lastBarAgeSec: null,
-      };
+      });
     }
 
     // How much of the range has no bar at all. Measured on one real pool: 47%.
@@ -366,7 +448,7 @@ async function fetchCandles(
     const slots = Math.floor((last - first) / seconds) + 1;
     const gaps = Math.max(0, slots - candles.length);
 
-    return {
+    return answered({
       state: "ok",
       reason: null,
       candles,
@@ -376,10 +458,10 @@ async function fetchCandles(
       label,
       gaps,
       lastBarAgeSec: Math.max(0, Math.floor(Date.now() / 1000) - last),
-    };
+    });
   } catch {
     // A throw: network, abort, or the client timeout. Says nothing about the
     // bucket, so it gets the short backoff rather than the full window.
-    return refused("unreachable");
+    return { failed: true, failure: "network" };
   }
 }

@@ -7,11 +7,12 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { after } from "node:test";
 import { wrapSqlite, type Db } from "../db";
 import type { FetchLike, XApp } from "./client";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, RETRY_AFTER_MS, sendOne, readReplyComments } from "./sender";
 import {
+
   ensureXpostSchema,
   getAccount,
   keyStatus,
@@ -28,6 +29,13 @@ import {
   type TokenSetPlain,
   type XPost,
 } from "./store";
+
+// The card's draw and upload budgets are unref'd timers (they must never hold the
+// orchestrator open). A test whose fake draw hangs leaves nothing else pending, so
+// on Node 22 the loop empties and the runner cancels the rest of this file. One
+// ref'd timer for the file's life keeps it running; cleared when the file ends.
+const keepAlive = setInterval(() => {}, 1_000);
+after(() => clearInterval(keepAlive));
 
 const OWNER = `0x${"cd".repeat(20)}`;
 const DEK = randomBytes(32);
@@ -100,6 +108,35 @@ test("a post somebody else claimed is not sent", async (t) => {
   const seen: Seen[] = [];
   assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([created()], seen), nowMs: NOW + 1 }), "lost");
   assert.equal(seen.length, 0, "X is never called for a post this sender did not claim");
+});
+
+test("wallet-bearing posts fail closed without a current disclosure validator", async (t) => {
+  const { db, post } = await setup(t);
+  const seen: Seen[] = [];
+  const pending = { ...post, kind: "intro" as const, body: `hello from alan, an AI trading agent. Wallet (Robinhood Chain): ${OWNER}` };
+  assert.equal(await sendOne(db, DEK, APP, pending, { fetch: scripted([created()], seen), nowMs: NOW }), "cancelled");
+  assert.equal(seen.length, 0);
+});
+
+test("current disclosure and X consent are checked after refresh and before an auth retry", async (t) => {
+  const { db, post } = await setup(t, EXPIRING);
+  const seen: Seen[] = [];
+  let checks = 0;
+  const fetch = scripted([token("access-two", "refresh-two"), { status: 401 }, token("access-three", "refresh-three"), created()], seen);
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch, nowMs: NOW, validateBeforeSend: async () => ++checks === 1 }), "cancelled");
+  assert.equal(checks, 2);
+  assert.equal(seen.filter((call) => call.url.endsWith("/tweets")).length, 1, "no retry after the disclosure was revoked during refresh");
+});
+
+test("turning posting off during token refresh prevents the first post call", async (t) => {
+  const { db, post } = await setup(t, EXPIRING);
+  const seen: Seen[] = [];
+  const fetch = scripted([async () => {
+    await setPosting(db, OWNER, { enabled: false }, NOW);
+    return token("access-two", "refresh-two");
+  }, created()], seen);
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch, nowMs: NOW }), "cancelled");
+  assert.equal(seen.filter((call) => call.url.endsWith("/tweets")).length, 0);
 });
 
 test("a token about to expire is refreshed, and the new pair is stored BEFORE it is used", async (t) => {
@@ -510,6 +547,179 @@ test("a kind-off change preserves an in-flight successful post as sent, never re
   assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([accepted]), nowMs: NOW }), "posted");
   assert.equal((await row(db)).status, "posted");
   assert.equal((await row(db)).reason, null);
+});
+
+// ── the profit card (2026-10-13) ────────────────────────────────────────────
+
+const SALE = "brief note here: sold pepe. back to digging around.\n+40% gross before fees and gas. a welcome surprise";
+const CARD_PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7]);
+const MEDIA_SCOPE = "tweet.read tweet.write users.read offline.access media.write";
+const uploaded = (id = "1880028106020515840"): Reply => ({ status: 200, body: { data: { id, media_key: `3_${id}` } } });
+
+async function sale(t: { after(fn: () => void): void }, scope = MEDIA_SCOPE, tokens: TokenSetPlain = FRESH): Promise<{ db: Db; post: XPost }> {
+  const raw = new DatabaseSync(":memory:");
+  t.after(() => raw.close());
+  const db = wrapSqlite(raw);
+  await ensureXpostSchema(db, "sqlite");
+  await upsertAccount(db, DEK, { tenant: OWNER, xUserId: "111", username: "robin_trades", tokens: { ...tokens, scope }, nowMs: NOW - 1000 });
+  await setPosting(db, OWNER, { enabled: true, xUserId: "111" }, NOW - 900);
+  await schedulePost(db, { tenant: OWNER, xUserId: "111", kind: "sell", dedupeKey: "sell:d1", body: SALE, coin: "pepe", decisionId: "d1", dueAtMs: NOW - 1, nowMs: NOW - 100 });
+  const [post] = await postsOf(db, OWNER, 0);
+  return { db, post: post! };
+}
+
+test("a profitable sale uploads its card right before the post and the post names X's media id", async (t) => {
+  const { db, post } = await sale(t);
+  const seen: Seen[] = [];
+  const order: string[] = [];
+  const outcomes: string[] = [];
+  const out = await sendOne(db, DEK, APP, post, {
+    fetch: scripted([uploaded(), created()], seen), nowMs: NOW,
+    validateBeforeSend: async () => { order.push("validated"); return true; },
+    saleCard: async (p, grant) => { order.push(`card:${p.id}:${grant.mediaWrite}`); return CARD_PNG; },
+    onCard: (o) => outcomes.push(o),
+  });
+  assert.equal(out, "posted");
+  assert.deepEqual(order, [`validated`, `card:${post.id}:true`], "the card is asked for only after the send-time checks passed");
+  assert.deepEqual(seen.map((s) => s.url), ["https://api.x.com/2/media/upload", "https://api.x.com/2/tweets"]);
+  assert.equal(seen[0]?.auth, "Bearer access-one", "uploaded as the owner");
+  const upload = JSON.parse(seen[0]!.body!);
+  assert.equal(upload.media_category, "tweet_image");
+  assert.deepEqual([...Buffer.from(upload.media, "base64")], [...CARD_PNG]);
+  assert.deepEqual(JSON.parse(seen[1]!.body!), { text: SALE, media: { media_ids: ["1880028106020515840"] } });
+  assert.deepEqual(outcomes, ["attached"]);
+  assert.equal((await row(db)).status, "posted");
+});
+
+test("a grant without media.write posts the sale as text, exactly as before, and nothing is uploaded", async (t) => {
+  const { db, post } = await sale(t, "tweet.read tweet.write users.read offline.access");
+  const seen: Seen[] = [];
+  const grants: boolean[] = [];
+  const out = await sendOne(db, DEK, APP, post, {
+    fetch: scripted([created()], seen), nowMs: NOW, validateBeforeSend: async () => true,
+    // A caller that hands back bytes anyway still gets no upload.
+    saleCard: async (_p, grant) => { grants.push(grant.mediaWrite); return CARD_PNG; },
+  });
+  assert.equal(out, "posted");
+  assert.deepEqual(grants, [false], "the caller is told, so it can ask the owner to reconnect");
+  assert.deepEqual(seen.map((s) => s.url), ["https://api.x.com/2/tweets"]);
+  assert.deepEqual(JSON.parse(seen[0]!.body!), { text: SALE });
+});
+
+test("no card for this sale is a plain post", async (t) => {
+  const { db, post } = await sale(t);
+  const seen: Seen[] = [];
+  const outcomes: string[] = [];
+  assert.equal(await sendOne(db, DEK, APP, post, {
+    fetch: scripted([created()], seen), nowMs: NOW, validateBeforeSend: async () => true, saleCard: async () => null, onCard: (o) => outcomes.push(o),
+  }), "posted");
+  assert.deepEqual(JSON.parse(seen[0]!.body!), { text: SALE });
+  assert.deepEqual(outcomes, ["none"]);
+});
+
+for (const [name, reply] of [
+  ["401", { status: 401, body: { title: "Unauthorized" } }],
+  ["403", { status: 403, body: { title: "Forbidden", detail: "Missing scope" } }],
+  ["429", { status: 429, body: {} }],
+  ["500", { status: 500, body: "" }],
+  ["503", { status: 503, body: "" }],
+  ["a network error", "throw"],
+  ["an unreadable 200", { status: 200, body: "not json" }],
+] as [string, Reply][]) {
+  test(`an upload answered ${name} costs only the picture: the sale posts once, as text, and the upload is not retried`, async (t) => {
+    const { db, post } = await sale(t);
+    const seen: Seen[] = [];
+    const outcomes: string[] = [];
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      assert.equal(await sendOne(db, DEK, APP, post, {
+        fetch: scripted([reply, created()], seen), nowMs: NOW, validateBeforeSend: async () => true, saleCard: async () => CARD_PNG, onCard: (o) => outcomes.push(o),
+      }), "posted");
+    } finally {
+      console.warn = warn;
+    }
+    assert.deepEqual(seen.map((s) => s.url), ["https://api.x.com/2/media/upload", "https://api.x.com/2/tweets"]);
+    assert.deepEqual(JSON.parse(seen[1]!.body!), { text: SALE });
+    assert.deepEqual(outcomes, ["upload-failed"]);
+    assert.equal((await row(db)).status, "posted");
+  });
+}
+
+test("a card that cannot be drawn, or not in time, is a plain post with no upload", async (t) => {
+  for (const [what, saleCard, want] of [
+    ["throws", async () => { throw new Error("sharp would not load"); }, "draw-failed"],
+    ["hangs", () => new Promise<Uint8Array | null>(() => {}), "timeout"],
+  ] as const) {
+    const { db, post } = await sale(t);
+    const seen: Seen[] = [];
+    const outcomes: string[] = [];
+    const started = Date.now();
+    assert.equal(await sendOne(db, DEK, APP, post, {
+      fetch: scripted([created()], seen), nowMs: NOW, validateBeforeSend: async () => true, saleCard, onCard: (o) => outcomes.push(o), cardBudgetMs: 50,
+    }), "posted", what);
+    assert.ok(Date.now() - started < 2_000, `${what}: bounded by the budget`);
+    assert.deepEqual(seen.map((s) => s.url), ["https://api.x.com/2/tweets"], what);
+    assert.deepEqual(JSON.parse(seen[0]!.body!), { text: SALE }, what);
+    assert.deepEqual(outcomes, [want], what);
+  }
+});
+
+test("a draw that leaves no time for the upload skips it rather than overrun", async (t) => {
+  const { db, post } = await sale(t);
+  const seen: Seen[] = [];
+  const outcomes: string[] = [];
+  assert.equal(await sendOne(db, DEK, APP, post, {
+    fetch: scripted([created()], seen), nowMs: NOW, validateBeforeSend: async () => true,
+    saleCard: () => new Promise((resolve) => setTimeout(() => resolve(CARD_PNG), 20)), onCard: (o) => outcomes.push(o), cardBudgetMs: 900,
+  }), "posted");
+  assert.deepEqual(seen.map((s) => s.url), ["https://api.x.com/2/tweets"]);
+  assert.deepEqual(outcomes, ["timeout"]);
+});
+
+test("a 401 on the post retries the post once with the card already uploaded: drawn and uploaded once", async (t) => {
+  const { db, post } = await sale(t);
+  const seen: Seen[] = [];
+  let draws = 0;
+  assert.equal(await sendOne(db, DEK, APP, post, {
+    fetch: scripted([uploaded(), { status: 401 }, token("access-two", "refresh-two"), created()], seen), nowMs: NOW,
+    validateBeforeSend: async () => true, saleCard: async () => { draws++; return CARD_PNG; },
+  }), "posted");
+  assert.equal(draws, 1);
+  assert.deepEqual(seen.map((s) => s.url), ["https://api.x.com/2/media/upload", "https://api.x.com/2/tweets", "https://api.x.com/2/oauth2/token", "https://api.x.com/2/tweets"]);
+  assert.deepEqual(JSON.parse(seen[3]!.body!), { text: SALE, media: { media_ids: ["1880028106020515840"] } });
+  assert.equal(seen[3]?.auth, "Bearer access-two");
+});
+
+test("a 401 on the upload is not a second upload: the retried post goes as text", async (t) => {
+  const { db, post } = await sale(t);
+  const seen: Seen[] = [];
+  let draws = 0;
+  assert.equal(await sendOne(db, DEK, APP, post, {
+    fetch: scripted([{ status: 401 }, { status: 401 }, token("access-two", "refresh-two"), created()], seen), nowMs: NOW,
+    validateBeforeSend: async () => true, saleCard: async () => { draws++; return CARD_PNG; },
+  }), "posted");
+  assert.equal(draws, 1);
+  assert.equal(seen.filter((s) => s.url.endsWith("/media/upload")).length, 1);
+  assert.deepEqual(JSON.parse(seen[3]!.body!), { text: SALE });
+});
+
+test("a sale whose send-time checks fail is never drawn, and only a sale ever asks for a card", async (t) => {
+  const failing = await sale(t);
+  let asked = 0;
+  const seen: Seen[] = [];
+  assert.equal(await sendOne(failing.db, DEK, APP, failing.post, {
+    fetch: scripted([], seen), nowMs: NOW, validateBeforeSend: async () => false, saleCard: async () => { asked++; return CARD_PNG; },
+  }), "cancelled");
+  assert.equal(asked, 0);
+  assert.equal(seen.length, 0);
+
+  const buy = await setup(t);
+  assert.equal(await sendOne(buy.db, DEK, APP, buy.post, {
+    fetch: scripted([created()], seen), nowMs: NOW, saleCard: async () => { asked++; return CARD_PNG; },
+  }), "posted");
+  assert.equal(asked, 0, "a buy never carries a card");
+  assert.deepEqual(JSON.parse(seen[0]!.body!), { text: BODY });
 });
 
 test("a successful refresh cannot retry a buy across a kind-off transition", async (t) => {

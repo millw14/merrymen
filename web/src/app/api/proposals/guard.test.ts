@@ -81,7 +81,7 @@ describe("it proposes, and decides nothing", () => {
     assert.match(CODE, /export const dynamic = "force-dynamic"/);
     assert.match(CODE, /"Cache-Control": "private, no-store"/);
     const tenantAt = CODE.indexOf("tenantOf(req)");
-    const storeAt = CODE.indexOf("getGrantStore()");
+    const storeAt = CODE.indexOf('getGrantStore("spot")');
     assert.ok(tenantAt > 0 && storeAt > tenantAt, "the session is read before any store");
   });
 
@@ -108,7 +108,7 @@ describe("four different nothings", () => {
   });
 
   it("an unreadable store is not an owner with no agent", () => {
-    const at = CODE.indexOf("getGrantStore().get(tenant)");
+    const at = CODE.indexOf('getGrantStore("spot").get(tenant)');
     const around = CODE.slice(at, at + 260);
     assert.match(around, /catch \{[\s\S]*?return answer\("unreadable"\)/);
     assert.match(around, /if \(!grant\) return answer\("no-grant"\)/);

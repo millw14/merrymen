@@ -27,13 +27,29 @@
  */
 
 import { PrivyProvider } from "@privy-io/react-auth";
+import { defaultSolanaRpcsPlugin } from "@privy-io/react-auth/solana";
 import { robinhoodChain } from "@merrymen/core";
 import type { ReactNode } from "react";
 import { PRIVY_APP_ID, privyEnabled } from "@/lib/privy-client";
 import { LocaleProvider } from "@/lib/i18n";
 import type { LocaleTag } from "@/lib/locale";
 import { OwnerClock } from "./OwnerClock";
-export function Providers({ locale, children }: { locale: LocaleTag; children: ReactNode }) {
+/**
+ * SOLANA IS THE SERVER'S CALL (solanaEnabled, MERRYMEN_SOLANA=1), passed down
+ * by `(app)/layout.tsx` as a plain boolean. Off, Privy is configured exactly as
+ * before Solana existed: Ethereum wallets only and no Solana RPC. Every other
+ * mount (/connect, /auth/android) leaves it off.
+ *
+ * On, Privy's embedded Solana wallet must be able to open its own signing
+ * screen. That screen reads balances and accounts through a Solana RPC while it
+ * renders, and with none configured react-auth throws "No RPC configuration
+ * found for chain solana:mainnet" before the owner can approve. The fix is
+ * Privy's own `defaultSolanaRpcsPlugin()` (react-auth 3.20+): Privy-hosted
+ * endpoints keyed only by the public app id. Merrymen's server RPC URL, which
+ * carries a provider key, never reaches the browser, and there is no proxy for
+ * anyone to abuse. The CSP already allows https:/wss: connections.
+ */
+export function Providers({ locale, solana = false, children }: { locale: LocaleTag; solana?: boolean; children: ReactNode }) {
   // THE LOCALE WRAPS EVERYTHING, including the no-Privy path. It comes from the
   // server so that the copy the server renders and the copy the client hydrates
   // are the same words — see i18n.tsx for why reading the DOM is not enough for
@@ -79,7 +95,7 @@ export function Providers({ locale, children }: { locale: LocaleTag; children: R
         appearance: {
           theme: "dark",
           accentColor: "#c8ff00",
-          walletChainType: "ethereum-only",
+          walletChainType: solana ? "ethereum-and-solana" : "ethereum-only",
           // AN ABSOLUTE URL TO A FILE THAT EXISTS, AND ONE THE GATE LETS
           // THROUGH. The modal renders in an auth.privy.io iframe, so a
           // relative path resolves against THEIR origin, and the gate cookie is
@@ -89,6 +105,7 @@ export function Providers({ locale, children }: { locale: LocaleTag; children: R
           // Three separate reasons for one broken image.
           logo: "https://app.merrymen.dev/icon-192.png",
         },
+        ...(solana ? { plugins: [defaultSolanaRpcsPlugin()] } : {}),
       }}
     >
       <LocaleProvider locale={locale}><OwnerClock />{children}</LocaleProvider>

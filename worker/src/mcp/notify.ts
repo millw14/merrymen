@@ -435,7 +435,8 @@ function bookTag(mode: string | null): string {
 }
 const bookOf = (mode: string | null): Candidate["book"] => (mode === "live" ? "live" : mode === "paper" ? "paper" : "unknown");
 
-function spellings(account: string): string[] {
+/** An account as stored, lowercase and EIP-55: the spellings `agent_id = ?` can meet, so an IN list over them uses the (agent_id, …) indexes. */
+export function spellings(account: string): string[] {
   const lower = account.toLowerCase();
   const out = new Set([account, lower]);
   if (isAddress(lower, { strict: false })) out.add(getAddress(lower));
@@ -930,11 +931,23 @@ const PROVIDER: ReadonlyArray<[RegExp, "market" | "brain" | "model"]> = [
   [/^brain (unreachable|malformed):/, "brain"],
   [/^strategist driver failed:/, "model"],
 ];
-const PROVIDER_TEXT = {
+export const PROVIDER_TEXT = {
   market: "Market data could not be read, so nothing was traded. This is about our data sources, not about prices; it is retried every tick.",
   brain: "The decision service could not be reached (or answered with something unusable), so no decision was made.",
   model: "The AI model provider behind the strategy failed, so no trade was proposed.",
 } as const;
+
+/**
+ * Which alert an event line would raise, by the patterns evalEvents reads, for
+ * a reader that summarises the same events (web attention.ts) and must not
+ * disagree with the alert the owner got. Null for every other line.
+ */
+export function classifyAlertEvent(message: string): "kill" | "breaker" | "market" | "brain" | "model" | null {
+  const head = headOf(message);
+  if (KILL.test(head)) return "kill";
+  if (BREAKER.test(head)) return "breaker";
+  return PROVIDER.find(([re]) => re.test(head))?.[1] ?? null;
+}
 
 /**
  * Kill switch, breaker trips and provider failures, read from the agent's
@@ -1628,7 +1641,7 @@ async function settingsOf(store: SettingsGetter, tenant: string): Promise<Record
  * recipient is tenant_telegram.owner_id — the chat that proved the /link code —
  * and nothing a client supplied.
  */
-export function hostedRecipient(shared: Db, store: SettingsGetter = getSettingsStore()): NotifyDeps["recipient"] {
+export function hostedRecipient(shared: Db, store: SettingsGetter = getSettingsStore("spot")): NotifyDeps["recipient"] {
   return async (tenant) => {
     const link = await readTenantTelegram(shared, tenant);
     if (!link || link.ownerId === null) return null;
@@ -1640,7 +1653,7 @@ export function hostedRecipient(shared: Db, store: SettingsGetter = getSettingsS
 }
 
 /** The tick the orchestrator runs the tenant's child at: its own setting, else the fleet's. */
-export function hostedTickSeconds(store: SettingsGetter = getSettingsStore()): NonNullable<NotifyDeps["tickSeconds"]> {
+export function hostedTickSeconds(store: SettingsGetter = getSettingsStore("spot")): NonNullable<NotifyDeps["tickSeconds"]> {
   return async (tenant) => {
     const s = await settingsOf(store, tenant);
     if (typeof s?.tickSeconds === "number" && s.tickSeconds > 0) return s.tickSeconds;
@@ -1690,7 +1703,7 @@ export function chainlinkPriceReader(client: FeedClient): PriceReader {
 
 /** Everything the orchestrator needs for runNotifyPass on the hosted fleet. */
 export function hostedNotifyDeps(shared: Db, o: { store?: SettingsGetter; price?: PriceReader; fetchFn?: FetchLike; log?: (line: string) => void; maxMs?: number } = {}): NotifyDeps {
-  const store = o.store ?? getSettingsStore();
+  const store = o.store ?? getSettingsStore("spot");
   return {
     now: () => Math.floor(Date.now() / 1000),
     send: telegramSend({ fetchFn: o.fetchFn }),

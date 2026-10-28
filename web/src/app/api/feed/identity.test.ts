@@ -19,7 +19,7 @@ import { AGENT_NAME_RE, STORED_AGENT_NAME_RE, normalizeAgentName } from "@/lib/a
  * concluded the save was broken. It never was.
  *
  * Hosted, a tenant's settings are written to the per-tenant sealed store
- * (`getSettingsStore().put(tenant, …)` in api/settings). The web container's own
+ * (`getSettingsStore("spot").put(tenant, …)` in api/settings). The web container's own
  * `~/.merrymen/settings.json` is written by nothing, and could not hold a
  * particular tenant's settings even if it existed — it is one file per
  * container, shared by every tenant. /api/feed read exactly that file, so the

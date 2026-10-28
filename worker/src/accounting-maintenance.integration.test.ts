@@ -46,7 +46,7 @@ setSpawnForTest((_command, args, options) => {
 });
 setSpawnPacingForTest(0, 0);
 setPaperRestoreForTest(async () => ({ ok: true, line: "isolated test restore" }));
-const store = getGrantStore();
+const store = getGrantStore("spot");
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise<void>((resolve) => setImmediate(resolve)); };
 const output: string[] = [];
 const originalLog = console.log;
@@ -70,7 +70,7 @@ after(() => { console.log = originalLog; rmSync(fleet, { recursive: true, force:
 it("mixed roster: only the named tenant stays absent, including a second reconcile", async () => {
   await store.put(TENANT, grant());
   await store.put(OTHER, grant(OTHER));
-  await getSettingsStore().put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
+  await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
   const before = await store.get(TENANT);
   process.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS = TENANT;
   await reconcile();
@@ -132,7 +132,7 @@ it("a restart scheduled before maintenance cannot start the target afterward", a
 
 it("maintenance introduced during spawn preparation blocks the holder path", async () => {
   await store.put(TENANT, grant());
-  await getSettingsStore().put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
+  await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
   setPaperRestoreForTest(async () => {
     process.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS = TENANT;
     return { ok: false, reason: "paper fills are newer than the recoverable valuation" };
@@ -193,5 +193,27 @@ it("the actual commit entry point refuses missing hold and retained local state 
   mkdirSync(childHome(TENANT), { recursive: true });
   await runAccountingRepairForTest(db, plans);
   assert.match(output.join("\n"), /fresh container/);
+  assert.equal(accesses, 0);
+});
+
+it("the repair entry point refuses an account scope naming an id that is not 0x, whole, before its preview (fleet-id.ts)", async () => {
+  const plans = planReconstruction({ agents: [{ smart_account: ACCOUNT, epoch: 1, mode: "live" }], flows: [],
+    equityByAccountEpoch: new Map(), chain: new Map(), onchainCash: new Map(), tenantByAccount: new Map([[ACCOUNT, TENANT]]) });
+  let accesses = 0;
+  const forbidden = () => { accesses++; throw new Error("a refused scope must not touch this database"); };
+  const db = { prepare: forbidden, exec: forbidden, tx: forbidden } as unknown as Db;
+  process.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS = TENANT;
+  // Alone, it was dropped and the scope read as every account; beside a 0x one, the commit ran short of it.
+  for (const scope of ["sol:2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH", `${ACCOUNT},2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH`]) {
+    for (const mode of ["dry-run", "commit"]) {
+      output.length = 0;
+      process.env.MERRYMEN_REPAIR = mode;
+      process.env.MERRYMEN_REPAIR_ACCOUNT = scope;
+      await runAccountingRepairForTest(db, plans);
+      assert.match(output.join("\n"), /repair\| refusing: MERRYMEN_REPAIR_ACCOUNT entry \d is not a Robinhood Chain address .*refusing the whole list/, `${mode} ${scope}`);
+      assert.doesNotMatch(output.join("\n"), /preview\|/, "no preview of every account");
+      assert.doesNotMatch(output.join("\n"), /2u1tsz/, "the value is not echoed");
+    }
+  }
   assert.equal(accesses, 0);
 });

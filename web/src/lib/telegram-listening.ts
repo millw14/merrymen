@@ -71,13 +71,14 @@
 import { botIdOf } from "../../../worker/src/telegram/state";
 import { pollErrKind } from "../../../worker/src/telegram/poll-rules";
 import { pollFailingNow } from "../../../worker/src/telegram-liveness";
+import { LIVE_WITHIN_SEC } from "./telegram-poll-window";
 
 /**
  * A bot heard this recently is live. The polling process records a good poll
  * at most every 30s and each long poll takes up to 25s; the orchestrator
  * publishes every 15s. Three minutes is comfortably past all of that together.
  */
-export const LIVE_WITHIN_SEC = 180;
+export { LIVE_WITHIN_SEC } from "./telegram-poll-window";
 
 export type ListeningState = "live" | "held" | "not-listening" | "conflict" | "revoked" | "unknown";
 

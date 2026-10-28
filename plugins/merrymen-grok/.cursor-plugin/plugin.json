@@ -1,0 +1,11 @@
+{
+  "name": "merrymen-grok",
+  "version": "1.0.0",
+  "description": "Connect to hosted Merrymen, prepare owner-reviewed setup, and inspect your Merryman with an optional read-only monitoring workflow.",
+  "author": { "name": "Merrymen" },
+  "homepage": "https://merrymen.dev/grok",
+  "repository": "https://github.com/millw14/merrymen",
+  "license": "MIT",
+  "logo": "assets/logo.png",
+  "keywords": ["merrymen", "grok", "mcp", "portfolio", "monitoring"]
+}

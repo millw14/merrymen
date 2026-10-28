@@ -41,6 +41,7 @@ import {
   type TgForgetOp,
 } from "./store";
 import type { TgCoinMemo, TgGroupsState, TgLine, TgRoom } from "./types";
+import { SOLANA_USDG_MINT } from "../../../../packages/core/src/ids";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -275,6 +276,15 @@ describe("parseTgGroupsState", () => {
     assert.equal(out.shushedUntilMs, undefined);
     assert.equal(out.ambient, undefined);
     assert.equal(out.isForum, undefined);
+  });
+
+  it("a stored coin name holding a Solana key is dropped as a 0x one is, before the clip (Solana P0)", () => {
+    const room = validRoom() as unknown as Record<string, unknown>;
+    // 44 characters: clipped to the 40-character name cap it would no longer read as a key.
+    room.coins = [memo(addr(4), { name: SOLANA_USDG_MINT }), memo(addr(5), { name: "FROG" })];
+    const out = parseTgGroupsState({ version: 1, rooms: { [String(CHAT)]: room } }).rooms[String(CHAT)]!;
+    assert.equal(out.coins.find((c) => c.address === addr(4))!.name, undefined);
+    assert.equal(out.coins.find((c) => c.address === addr(5))!.name, "FROG");
   });
 
   it("clips every string to its limit without splitting a surrogate pair", () => {

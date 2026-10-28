@@ -1,0 +1,72 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "key": "c0ffee00-1111-4222-8333-444444444444",
+  "kind": "swaps",
+  "userId": "c0ffee00-1111-4222-8333-444444444444",
+  "source": "live-fomo",
+  "count": 3,
+  "swaps": [
+    {
+      "swapId": "5a5a5a5a-1111-4222-8333-000000000001",
+      "chainId": 1399811149,
+      "tokenIn": {
+        "address": "FakeCashMint2222222222222222222222222222Usd",
+        "amount": 50,
+        "usd": 50
+      },
+      "tokenOut": {
+        "address": "FakeHo1dMint5555555555555555555555555555555",
+        "amount": 2.5,
+        "usd": 49.9
+      },
+      "tradeIdIn": null,
+      "tradeIdOut": "7a7a7a7a-1111-4222-8333-000000000001",
+      "at": "2026-10-04T15:00:00.000Z",
+      "chain": "solana"
+    },
+    {
+      "swapId": "5a5a5a5a-1111-4222-8333-000000000002",
+      "chainId": 4663,
+      "tokenIn": {
+        "address": "FakeCashMint2222222222222222222222222222Usd",
+        "amount": 300,
+        "usd": 300
+      },
+      "tokenOut": {
+        "address": "0xAA00000000000000000000000000000000000A0A",
+        "amount": 120,
+        "usd": 294.1
+      },
+      "tradeIdIn": null,
+      "tradeIdOut": "7a7a7a7a-1111-4222-8333-000000000002",
+      "at": "2026-10-04T14:00:00.000Z",
+      "chain": "robinhood"
+    },
+    {
+      "swapId": "5a5a5a5a-1111-4222-8333-000000000003",
+      "chainId": 56,
+      "tokenIn": {
+        "address": "0xBB00000000000000000000000000000000000B0B",
+        "amount": 1000,
+        "usd": 75.5
+      },
+      "tokenOut": {
+        "address": "FakeCashMint2222222222222222222222222222Usd",
+        "amount": 74,
+        "usd": 74
+      },
+      "tradeIdIn": "7a7a7a7a-1111-4222-8333-000000000003",
+      "tradeIdOut": null,
+      "at": "2026-10-04T13:00:00.000Z",
+      "chain": "bsc"
+    }
+  ],
+  "nextCursor": "5a5a5a5a-1111-4222-8333-000000000003",
+  "held": 3,
+  "upstreamCalls": 1,
+  "upstreamAttempted": 1,
+  "partial": false,
+  "complete": false,
+  "sourceCapped": false,
+  "note": "fabricated note: only a recent window of swaps is served per trader"
+}

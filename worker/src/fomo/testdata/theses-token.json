@@ -1,0 +1,75 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "threshold": 0,
+  "capturedAt": "2026-10-04T16:00:00Z",
+  "totalAvailable": 25,
+  "source": "live-fomo",
+  "theses": [
+    {
+      "avatar": null,
+      "tokenImage": null,
+      "links": [],
+      "isDev": false,
+      "id": "th-0001",
+      "tradeId": "a323b5ca-c769-4b07-a422-833c4cafbe1f",
+      "text": "PONS to the moon! https://x.com/a/status/1",
+      "handle": "frankdegods",
+      "name": "frank",
+      "userId": "6dcf7c78-2537-522a-8307-3f9970c081be",
+      "tradeUsd": 3000,
+      "ts": "2026-10-04T15:00:00Z",
+      "likes": 12,
+      "replies": 3,
+      "token": {
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D"
+      },
+      "networkId": 4663,
+      "chain": "robinhood"
+    },
+    {
+      "avatar": null,
+      "tokenImage": null,
+      "links": [],
+      "isDev": false,
+      "id": "th-0002",
+      "tradeId": null,
+      "text": "pons to the moon https://t.co/xyz",
+      "handle": "CryptoKaleo",
+      "name": "K A L E O",
+      "userId": "1f08e6ab-5c73-5443-9225-bfc496cde51f",
+      "tradeUsd": 500,
+      "ts": "2026-10-04T15:05:00Z",
+      "likes": 1,
+      "replies": 0,
+      "token": {
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D"
+      },
+      "networkId": 4663,
+      "chain": "robinhood"
+    },
+    {
+      "avatar": null,
+      "tokenImage": null,
+      "links": [],
+      "isDev": true,
+      "id": "th-0003",
+      "tradeId": "094dd0b3-22ff-41ba-b676-f093c8293f01",
+      "text": "Dev wallet still holding, liquidity locked.",
+      "handle": "0xdetweiler",
+      "name": "det",
+      "userId": "254245a7-575a-51be-9bc3-090a924789eb",
+      "tradeUsd": 899,
+      "ts": "2026-10-04T15:10:00Z",
+      "likes": 5,
+      "replies": 1,
+      "token": {
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D"
+      },
+      "networkId": 4663,
+      "chain": "robinhood"
+    }
+  ]
+}

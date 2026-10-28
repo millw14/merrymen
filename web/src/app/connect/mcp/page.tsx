@@ -6,7 +6,7 @@ import { McpConnectClient } from "./McpConnectClient";
 
 export const metadata: Metadata = {
   title: "Connect Merrymen to your AI assistant · merrymen",
-  description: "Add your Merrymen agent to Claude in one click, or to ChatGPT, Codex, Cursor and other assistants.",
+  description: "Connect your Merrymen agent to Claude, ChatGPT, Grok, Grok Bot, Codex, Cursor and other assistants.",
   referrer: "no-referrer",
 };
 

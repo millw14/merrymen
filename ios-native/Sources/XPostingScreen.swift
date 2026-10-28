@@ -44,9 +44,10 @@ struct XPostingScreen: View {
     @State private var busy = false
     @State private var connecting = false
     @State private var skipping: Int?
-    /// The account the open warning names; enabling sends exactly this id.
-    @State private var consent: XPostingAccount.Identity?
-    @State private var replyConsent: (identity: XPostingAccount.Identity, owner: String)?
+    /// The account the open warning names, and which warning it showed (`active`); enabling sends exactly this id.
+    @State private var consent: (identity: XPostingAccount.Identity, active: Bool)?
+    /// The reply warning open now, and which one it showed (`active`): the confirm agrees to the words read.
+    @State private var replyConsent: (identity: XPostingAccount.Identity, owner: String, active: Bool)?
     @State private var confirmDisconnect = false
     private let policy = NavigationPolicy()
 
@@ -72,14 +73,14 @@ struct XPostingScreen: View {
             } while !Task.isCancelled
         }
         .refreshable { await load() }
-        .alert(Text(verbatim: "Post on X as @\(consent?.handle ?? "")?"), isPresented: Binding(get: { consent != nil }, set: { if !$0 { consent = nil } }), presenting: consent) { identity in
-            Button { enable(identity) } label: { Text(verbatim: "Let it post as @\(identity.handle)") }
+        .alert(Text(verbatim: "Post on X as @\(consent?.identity.handle ?? "")?"), isPresented: Binding(get: { consent != nil }, set: { if !$0 { consent = nil } }), presenting: consent) { consent in
+            Button { enable(consent.identity) } label: { Text(verbatim: "Let it post as @\(consent.identity.handle)") }
             Button("Not now", role: .cancel) {}
-        } message: { identity in Text(verbatim: XPostingAccount.warning(identity.handle)) }
+        } message: { consent in Text(verbatim: XPostingAccount.warning(consent.identity.handle, active: consent.active)) }
         .alert(Text(verbatim: "Reply to comments as @\(replyConsent?.identity.handle ?? "")?"), isPresented: Binding(get: { replyConsent != nil }, set: { if !$0 { replyConsent = nil } }), presenting: replyConsent) { consent in
             Button { write(XPostingAccount.replyFields(consent.identity, enabled: true), confirmedOwner: consent.owner) } label: { Text(verbatim: "Let it reply as @\(consent.identity.handle)") }
             Button("Not now", role: .cancel) {}
-        } message: { consent in Text(verbatim: XPostingAccount.replyWarning(consent.identity.handle)) }
+        } message: { consent in Text(verbatim: XPostingAccount.replyWarning(consent.identity.handle, active: consent.active)) }
         .confirmationDialog(Text(verbatim: account?.identity.map { "Disconnect @\($0.handle)?" } ?? "Disconnect X?"), isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { write([:], method: "DELETE") }
         } message: { Text("Your Merryman stops posting and anything waiting to go out is cancelled.") }
@@ -89,7 +90,9 @@ struct XPostingScreen: View {
         if !account.connected {
             Card(hero: true) {
                 Text("Posting on X").font(.title2.bold())
-                Text("Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. No trade alerts, no error messages, no numbers.").foregroundStyle(.secondary)
+                Text(account.repliesActive
+                     ? "Let your Merryman post on X in its own words — a hello when it starts, a few reads on the market a day, and most coins it buys and why. No trade alerts, no error messages."
+                     : "Let your Merryman post on X in its own words — a hello when it starts, the odd casual thought, and now and then a coin it bought and why. No trade alerts, no error messages, no numbers.").foregroundStyle(.secondary)
                 if account.available { connectButton("Connect X account") }
                 else { Label("Posting on X isn't available right now.", systemImage: "exclamationmark.circle").font(.subheadline).foregroundStyle(.secondary) }
             }
@@ -108,7 +111,7 @@ struct XPostingScreen: View {
                 Toggle("Let my Merryman post on X", isOn: Binding(get: { account.postingEnabled }, set: { on in
                     guard !busy else { return }
                     // Never a write: turning it on only opens the warning.
-                    if on { consent = account.identity } else { write(["action": .string("disable")]) }
+                    if on { consent = account.identity.map { ($0, account.repliesActive) } } else { write(["action": .string("disable")]) }
                 }))
                 .disabled(busy || (!account.postingEnabled && (account.identity == nil || account.revoked)))
                 if account.postingEnabled, let identity = account.identity {
@@ -117,12 +120,12 @@ struct XPostingScreen: View {
                 if account.repliesAvailable || account.replyEnabled {
                     Toggle("Reply to comments", isOn: Binding(get: { account.replyEnabled }, set: { on in
                         guard !busy, let identity = account.identity, let owner = store.owner else { return }
-                        if on { replyConsent = (identity, owner) }
+                        if on { replyConsent = (identity, owner, account.repliesActive) }
                         else { write(XPostingAccount.replyFields(identity, enabled: false)) }
                     }))
                     .disabled(busy || account.identity == nil || (!account.replyEnabled && (!account.repliesAvailable || !account.postingEnabled || account.revoked)))
                     if let identity = account.identity {
-                        Text(verbatim: "Selected comments on your Merryman’s coin posts, answered as @\(identity.handle). Replies share the post limit and ten-minute review window.").font(.caption).foregroundStyle(.secondary)
+                        Text(verbatim: XPostingAccount.replyHint(identity.handle, active: account.repliesActive)).font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 if !account.repliesAvailable { Text("Comment replies aren’t available yet.").font(.caption).foregroundStyle(.secondary) }
@@ -309,6 +312,11 @@ struct XPostingAccount: Equatable {
     let postingEnabled: Bool
     let replyEnabled: Bool
     let repliesAvailable: Bool
+    /// The operator made this agent active: it posts on the active cadence, so
+    /// the posting warning says how much, and with replies on it answers posts
+    /// that tag it right away, and the reply warning says so. An older server
+    /// that sends no such field is not active.
+    let repliesActive: Bool
     let upcoming: [Post]
     let recent: [Post]
 
@@ -321,6 +329,7 @@ struct XPostingAccount: Equatable {
         postingEnabled = connected && posting == true
         replyEnabled = postingEnabled && v["replyEnabled"].bool == true
         repliesAvailable = v["repliesAvailable"].bool == true
+        repliesActive = v["repliesActive"].bool == true
         revoked = connected && v["status"].string == "revoked"
         if connected, let handle = v["username"].string, handle.wholeMatch(of: #/[A-Za-z0-9_]{1,15}/#) != nil,
            let id = v["xUserId"].string, id.wholeMatch(of: #/[0-9]{1,25}/#) != nil {
@@ -353,12 +362,38 @@ struct XPostingAccount: Equatable {
         ["action": .string(enabled ? "enable-replies" : "disable-replies"), "xUserId": .string(identity.xUserId)]
     }
 
-    static func replyWarning(_ handle: String) -> String {
-        [
+    /// THE REPLY WARNING SAYS EXACTLY WHAT IT TURNS ON, in the web's words
+    /// (web/src/terminal/XPosting.tsx). Most agents reply to comments on their
+    /// coin posts, inside the posting limit and the ten-minute review. An agent
+    /// the operator made active answers posts that tag it, reply to it or quote
+    /// it instead — comments on its own posts arrive the same way — right away,
+    /// in a lane of its own, so its warning promises no review window. Replying
+    /// or quoting is asking (2026-10-12): its answers carry no opt-out line, and
+    /// it never answers someone who asked it to stop. Its answers may carry
+    /// market figures Merrymen renders from public data (worker/src/xpost/
+    /// figures.ts), and its warning says that too; every other owner's is
+    /// unchanged.
+    static func replyWarning(_ handle: String, active: Bool) -> String {
+        if active {
+            return [
+                "Your Merryman will reply as @\(handle) to selected posts that tag it, reply to it or quote it.",
+                "It chooses which posts to answer; it won’t answer every one. Answers go out right away: they don’t wait under Coming up, so you can’t skip one first.",
+                "It answers questions about the market, coins, how it trades and what it can do, and a hello, a thanks or a bit of chat in a short line of its own, from people who tag it, reply to it or quote it, a few times a day each: up to 60 answers a day on top of its posts, and at most six to one person a day. Answers carry no opt-out line, and it never answers someone who asked it to stop. Turn replies off at any time to stop answering.",
+                "Answers may include market figures from public data (CoinGecko, GeckoTerminal, Fomo and Bitquery), such as a coin’s price, market cap, volume or recent change. Merrymen adds them as the data showed them; they are never advice."
+            ].joined(separator: "\n\n")
+        }
+        return [
             "Your Merryman will reply as @\(handle) to selected comments on its coin posts.",
             "It chooses which comments to answer; it won’t reply to every comment. Replies share the same daily limit as posts.",
             "Each reply waits under Coming up for at least ten minutes first, with a link to the comment, and you can skip it there. Turn replies off at any time to cancel waiting replies."
         ].joined(separator: "\n\n")
+    }
+
+    /// The line under the reply switch, in the web's words.
+    static func replyHint(_ handle: String, active: Bool) -> String {
+        active
+            ? "Selected posts that tag your Merryman, reply to it or quote it, answered as @\(handle) right away, up to 60 a day on top of its posts."
+            : "Selected comments on your Merryman’s coin posts, answered as @\(handle). Replies share the post limit and ten-minute review window."
     }
 
     private static func post(_ row: J, time: String, link: URL?) -> Post? {
@@ -367,7 +402,7 @@ struct XPostingAccount: Equatable {
         let comment = row["replyToTweetId"].string.flatMap { id in
             id.wholeMatch(of: #/[0-9]{1,25}/#) != nil ? URL(string: "https://x.com/i/status/\(id)") : nil
         }
-        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link, isReply: row["kind"].string == "reply", commentLink: comment)
+        return Post(id: Int(id), body: body, at: Date(timeIntervalSince1970: ms / 1000), link: link, isReply: ["reply", "answer"].contains(row["kind"].string ?? ""), commentLink: comment)
     }
 
     /// The warning the owner confirms, in the words the web uses. It names the
@@ -378,11 +413,21 @@ struct XPostingAccount: Equatable {
     /// planner.ts), and this screen re-reads every minute while it is open —
     /// so "at least ten minutes" is a promise the code keeps, where "you'll see
     /// each one" was not: nothing tells the owner to look.
-    static func warning(_ handle: String) -> String {
+    ///
+    /// AN ACTIVE AGENT POSTS MORE, AND ITS WARNING SAYS SO (worker/src/xpost/
+    /// planner.ts ACTIVE_CADENCE): up to twelve a day, a post for most coins
+    /// it buys, at least an hour apart — never "a few a day at most"; and its
+    /// answers may carry market figures built from public data, so never "no
+    /// prices or amounts" (2026-10-12).
+    static func warning(_ handle: String, active: Bool) -> String {
         [
             "Your Merryman will post from whichever X account is connected — right now that's @\(handle).",
-            "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
-            "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
+            active
+                ? "It writes its own posts: a hello first, then a few reads on the market a day and a post for most coins it buys, and why. It never posts trade alerts or error messages, and its market reads and answers may carry market figures built from public data."
+                : "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
+            active
+                ? "Posts go out on their own, up to 12 a day and at least an hour apart. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time."
+                : "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n")
     }

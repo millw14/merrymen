@@ -72,6 +72,30 @@ export async function readConfirmedRevocationCutoff(receipt: RevocationReceipt, 
   return io.validNonceFrom(head);
 }
 
+/**
+ * EntryPoint AA21: the account cannot prefund its own gas. The relay refuses
+ * paymasters by construction, so only ETH sent to the account clears it.
+ *
+ * Checked by viem's error name and by the bundler's own words, through the
+ * cause chain. AA21 is word-bounded and case-sensitive, as in
+ * worker/src/revert.ts: calldata and checksummed addresses can spell "aa21".
+ */
+export function isRevocationFeeShortfall(error: unknown): boolean {
+  let e = error;
+  for (let depth = 0; e instanceof Error && depth < 8; depth++, e = e.cause) {
+    if (e.name === "InsufficientPrefundError" || /\bAA21\b/.test(e.message) ||
+        /didn'?t pay prefund|insufficient funds for gas/i.test(e.message)) return true;
+  }
+  return false;
+}
+
+/** Names the account and network that need ETH, never the raw operation. */
+export function revocationFeeMessage(account: string, chain: { id: number; name: string; testnet?: boolean }, empty: boolean): string {
+  const network = `${chain.name} (${chain.id})`;
+  return `Revoking earlier permissions needs ETH for the network fee on ${network}, and account ${account} ` +
+    `${empty ? "has none" : "does not have enough"}. Send ${chain.testnet ? "testnet ETH" : "ETH"} to that address on ${network}, then try again.`;
+}
+
 export function nextRevocationNonce(current: number): number {
   if (!Number.isInteger(current) || current < 0 || current >= 0xffff_fffe) {
     throw new Error("The account's permission nonce cannot be safely advanced. Contact support; no permission was replaced.");

@@ -10,7 +10,7 @@ import {
   type LocalAccount,
 } from "viem";
 import { privateKeyToAccount, toAccount } from "viem/accounts";
-import { robinhoodChain } from "../../packages/core/src/index";
+import { PONS_CLASS_VAULT_FACTORY, PONS_CLASS_VAULT_FACTORY_V2, robinhoodChain } from "../../packages/core/src/index";
 import { ownerFromPrivateKey, ownerFromSigner, planRecovery, recoverFunds } from "./recover";
 
 /**
@@ -119,7 +119,7 @@ function sentOp(): Record<string, unknown> {
  * out of the revert, so reverting with `SenderAddressResult(x)` IS a chain
  * whose factory deploys to x.
  */
-function stubNode() {
+function stubNode(rejectedAddresses: ReadonlySet<string> = new Set()) {
   const seen: string[] = [];
   const server = createServer((req, res) => {
     let body = "";
@@ -131,6 +131,12 @@ function stubNode() {
         method: string;
         params: unknown[];
       }[];
+      if (batch.some(({ method, params }) => method === "eth_call" &&
+        rejectedAddresses.has(String((params[0] as { to?: string })?.to ?? "").toLowerCase()))) {
+        res.statusCode = 403;
+        res.end("RPC quota exceeded");
+        return;
+      }
       const out = batch.map(({ id, method, params }) => {
         seen.push(method);
         const ok = (result: unknown) => ({ jsonrpc: "2.0", id, result });
@@ -280,6 +286,31 @@ describe("a keyless owner can PLAN", () => {
       }),
     ]);
     assert.equal(keyless.smartAccount, keyed.smartAccount);
+  });
+
+  it("redacts RPC credentials in a returned class-factory failure", async () => {
+    const factories = [PONS_CLASS_VAULT_FACTORY_V2[robinhoodChain.id], PONS_CLASS_VAULT_FACTORY[robinhoodChain.id]]
+      .filter((address): address is Address => typeof address === "string")
+      .map((address) => address.toLowerCase());
+    assert.ok(factories.length > 0, "this chain has class factories to check");
+    const { server: failing } = stubNode(new Set(factories));
+    const endpoint = await listen(failing);
+    const key = "FakeKey7Base62Secret9abcdefghijklmnop";
+    try {
+      const plan = await planRecovery({
+        chain: robinhoodChain,
+        owner: ownerFromSigner(privyShapedAccount(noCalls())),
+        rpcUrl: `${endpoint}/?apikey=${key}`,
+      });
+      assert.ok(plan.unreadable.some((entry) => entry.startsWith("class vault factory ")));
+      assert.match(plan.classNote ?? "", /could not be read/);
+      assert.ok(plan.classNote?.includes(endpoint), "the provider remains identifiable");
+      assert.ok(plan.classNote?.includes("[redacted]"));
+      assert.ok(!JSON.stringify(plan, (_name, value) => typeof value === "bigint" ? value.toString() : value).includes(key),
+        "the plan serialized for the browser must not carry the RPC key");
+    } finally {
+      await new Promise<void>((resolve, reject) => failing.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("it carries no key material — the property that made it unrecoverable", () => {

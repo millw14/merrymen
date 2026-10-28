@@ -66,6 +66,7 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.accountControlsOf
+import dev.merrymen.app.ui.stopArmedNote
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.ownAgentName
@@ -141,19 +142,24 @@ fun ProfileScreen(nav: NavHostController) {
   val signedIn by c.repo.signedIn.collectAsState()
   val hosted by c.repo.hosted.collectAsState()
   val canOfferSignIn by c.repo.canOfferSignIn.collectAsState()
-  val reads = remember(signedIn) { OwnReads() }
+  val serverTurn by c.repo.serverTurn.collectAsState()
+  val reads = remember(signedIn, serverTurn) { OwnReads() }
   var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-  var refreshing by remember { mutableStateOf(false) }
+  var refreshing by remember(signedIn, serverTurn) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val lifecycle = LocalLifecycleOwner.current.lifecycle
 
-  suspend fun load() {
-    reads.load(c.api, signedIn, c.repo.hosted.value, withStrip = false, nowMs = { System.currentTimeMillis() }) {
-      c.repo.refreshIdentity()
-    }
+  suspend fun load(afterChange: Boolean = false) {
+    reads.load(
+      c.api, signedIn, c.repo.hosted.value, withStrip = false,
+      nowMs = { System.currentTimeMillis() },
+      afterChange = afterChange,
+      isCurrent = { c.repo.signedIn.value == signedIn && c.repo.serverTurn.value == serverTurn },
+    ) { c.repo.refreshIdentity() }
     nowMs = System.currentTimeMillis()
   }
-  LaunchedEffect(signedIn, lifecycle) {
+  LaunchedEffect(signedIn, serverTurn, lifecycle) {
+    if (!c.api.servers.holds(serverTurn)) return@LaunchedEffect
     lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
       while (true) {
         load()
@@ -170,8 +176,11 @@ fun ProfileScreen(nav: NavHostController) {
     onRefresh = {
       scope.launch {
         refreshing = true
-        load()
-        refreshing = false
+        try {
+          load()
+        } finally {
+          refreshing = false
+        }
       }
     },
     state = pull,
@@ -239,7 +248,7 @@ fun ProfileScreen(nav: NavHostController) {
             AccountPerson(signedIn, g)
             AccountBalance(book.feed, g, nav)
             YourAgent(book.feed, g, nav)
-            AccountNameChip(c.api, book.feed.agent, reads.readFor, hosted, onNamed = { scope.launch { load() } })
+            AccountNameChip(c.api, book.feed.agent, reads.readFor, hosted, onNamed = { scope.launch { load(afterChange = true) } })
             // PICTURES ARE HOSTED-ONLY and belong to an agent that exists: the
             // route answers 404 self-hosted, and a picture needs a slug to
             // belong to. The owner they are for is the one this page was read for.
@@ -272,6 +281,14 @@ fun ProfileScreen(nav: NavHostController) {
           }
           AccountRow("Settings") { nav.navigate(Routes.SETTINGS) }
           AccountRow("Telegram") { nav.navigate(Routes.TELEGRAM) }
+          if (hosted == true) {
+            AccountRow("Connect to Claude") {
+              nav.navigate(Routes.web("/connect/mcp", "Connect to Claude"))
+            }
+          }
+          if (book is OwnBook.Mine && (reads.grants as? Loaded.Value)?.value?.exists == true) {
+            AccountRow("Trades & P&L") { nav.navigate(Routes.web("/agent#trades", "Trades & P&L")) }
+          }
           AccountRow("The Merry Circle") { nav.navigate(Routes.CIRCLE) }
           AccountRow("Create an agent") {
             nav.navigate(Routes.web("/create", "Create an agent"))
@@ -293,7 +310,7 @@ fun ProfileScreen(nav: NavHostController) {
       // THE KILL SWITCH, for whoever this server acts for: a signed-in owner
       // hosted, or the one operator of a self-hosted box (which has no session
       // at all, and whose DELETE /api/grants needs none). See accountControlsOf.
-      if (controls.stop) StopControl()
+      if (controls.stop) StopControl(signedIn)
 
       // SIGN OUT ONLY WHERE THERE IS A SESSION TO END. `.profile-session-actions
       // button` — polish.css:75-76: #f47777, min-height 44px, 15px.
@@ -325,9 +342,12 @@ fun ProfileScreen(nav: NavHostController) {
  * A LOST ANSWER IS NOT "it didn't stop". The grant may be gone. So the status
  * route is asked, and the owner is told what it says — stopped, or still
  * armed and theirs to stop again — rather than a failure that may be false.
+ *
+ * [signedIn] is the wallet this page shows, sent as the stop's expected
+ * tenant: hosted refuses (409) to stop a different one that signed in since.
  */
 @Composable
-private fun StopControl() {
+private fun StopControl(signedIn: String?) {
   val c = LocalContainer.current
   val scope = rememberCoroutineScope()
   var armed by remember { mutableStateOf(false) }
@@ -339,12 +359,12 @@ private fun StopControl() {
         .clickable(role = Role.Button) {
           if (!armed) {
             armed = true
-            stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
+            stopNote = stopArmedNote(signedIn)
           } else {
             armed = false
             // The stop goes to the server this page shows, or nowhere (ServerBound).
             scope.launch(c.api.boundHere()) {
-              stopNote = when (val r = c.api.revokeGrant()) {
+              stopNote = when (val r = c.api.revokeGrant(expectedTenant = signedIn)) {
                 is ApiResult.Ok ->
                   "Stopped. Your agent will not trade again until you re-sign its permission."
                 is ApiResult.Refused ->

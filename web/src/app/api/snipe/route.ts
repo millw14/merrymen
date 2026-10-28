@@ -73,7 +73,7 @@ async function candidatesFor(tenant: `0x${string}` | null): Promise<SnipeCandida
   let custom: CustomToken[] = [];
   if (tenant) {
     try {
-      const s = await getSettingsStore().get(tenant);
+      const s = await getSettingsStore("spot").get(tenant);
       custom = ((s?.customTokens ?? []) as unknown[]).filter(isCustomToken);
     } catch {
       /* no settings yet — the registry and the scout can still answer */

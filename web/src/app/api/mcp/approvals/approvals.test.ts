@@ -16,7 +16,7 @@ import { STOCK_TOKENS } from "@merrymen/core";
 import { getSettingsStore, resetSettingsStoreForTest } from "@merrymen/settings-store";
 import { mintSession } from "@/lib/auth";
 import { setQuoteClientForTest } from "@/lib/services/trade-quote";
-import { createProposal } from "@/lib/services/proposals";
+import { APPROVED_STALE_SEC, createProposal } from "@/lib/services/proposals";
 import { runTool, type ToolDef } from "@/mcp/tool";
 import { PROPOSAL_TOOLS } from "@/mcp/tools/proposals";
 import type { AgentDirectory } from "@/mcp/agents";
@@ -213,6 +213,68 @@ test("a draft for an owner with no signed permission says it applies to nothing 
   assert.equal((await page(id)).settings_check.applies_to_running_agent, false);
 });
 
+const noCreatedAgent = () => fixtureDirectory({ [OWNER_A]: [] });
+
+test("new Merryman approval reviews setup without writing settings, a grant or an order", async () => {
+  const { d, settings, run, a } = await base({ directory: noCreatedAgent(), settings: { agentName: "Kept", strategy: "steady-basket" }, scopes: ["drafts:write"] });
+  const { id, hash } = await run("create_merryman", { name: "Robin", strategy: "trencher", idempotency_key: "new-approval-01" });
+  assert.equal((await GET(req(id, { method: "GET", owner: OWNER_B }), params(id))).status, 404);
+  assert.equal((await POST(req(id, { owner: null, body: { decision: "approve", hash } }), params(id))).status, 401);
+  assert.equal((await POST(req(id, { body: { decision: "approve", hash: "a".repeat(64) } }), params(id))).status, 409);
+  const res = await POST(req(id, { body: { decision: "approve", hash } }), params(id));
+  assert.equal(res.status, 200, await res.clone().text());
+  const approved = await res.json() as { status: string; result: Record<string, unknown> };
+  assert.equal(approved.status, "applied");
+  assert.equal(approved.result.setup_only, true);
+  assert.equal(approved.result.setup_url, `/connect/setup/${id}`);
+  assert.equal(settings.agentName, "Kept");
+  assert.equal(settings.strategy, "steady-basket");
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM grants").get() as { n: number }).n, 0);
+  assert.equal((d.raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 0);
+  assert.equal((await page(id)).binding.purpose, "create");
+  const status = await runTool(tool("get_proposal"), { proposal_id: id }, a.principal, "t");
+  assert.match((status.structuredContent as { status_explained: string }).status_explained, /Setup approved only.*no agent or trading permission was created/);
+});
+
+test("creation approval refuses an agent created after the proposal, and a failed grant read", async () => {
+  const { d, run } = await base({ directory: noCreatedAgent(), scopes: ["drafts:write"] });
+  const { id, hash } = await run("create_merryman", { idempotency_key: "new-raced-01" });
+  d.raw.prepare("INSERT INTO grants VALUES (?, 4663, '{}', 'not-read', 1)").run(OWNER_A);
+  let res = await POST(req(id, { body: { decision: "approve", hash } }), params(id));
+  assert.equal(res.status, 409);
+  assert.match((await res.json() as { error_description: string }).error_description, /already have a Merryman/);
+  assert.equal(statusOf(d, id), "awaiting_approval");
+  d.raw.exec("DROP TABLE grants");
+  res = await POST(req(id, { body: { decision: "approve", hash } }), params(id));
+  assert.equal(res.status, 503);
+  assert.match((await res.json() as { error_description: string }).error_description, /Could not check/);
+  assert.equal(statusOf(d, id), "awaiting_approval");
+});
+
+test("approved creation hydration refuses a revoked connection and expires after its original deadline", async () => {
+  const { d, run, a } = await base({ directory: noCreatedAgent(), scopes: ["drafts:write"] });
+  const { id, hash } = await run("create_merryman", { idempotency_key: "new-revoked-01" });
+  assert.equal((await POST(req(id, { body: { decision: "approve", hash } }), params(id))).status, 200);
+  d.raw.prepare("UPDATE mcp_connections SET status = 'revoked' WHERE id = ?").run(a.principal.connectionId);
+  assert.equal((await GET(req(id, { method: "GET" }), params(id))).status, 403);
+  d.raw.prepare("UPDATE mcp_connections SET status = 'active' WHERE id = ?").run(a.principal.connectionId);
+  d.raw.prepare("UPDATE mcp_proposals SET expires_at = 1 WHERE id = ?").run(id);
+  assert.equal((await GET(req(id, { method: "GET" }), params(id))).status, 410);
+});
+
+test("interrupted creation review resumes without probing or writing settings", async () => {
+  const { d, settings, run } = await base({ directory: noCreatedAgent(), settings: { agentName: "Kept" }, scopes: ["drafts:write"] });
+  const { id } = await run("create_merryman", { name: "Robin", idempotency_key: "new-resume-01" });
+  d.raw.prepare("UPDATE mcp_proposals SET status = 'approved', decided_at = ? WHERE id = ?").run(Math.floor(Date.now() / 1000) - APPROVED_STALE_SEC - 1, id);
+  const res = await GET(req(id, { method: "GET" }), params(id));
+  assert.equal(res.status, 200);
+  const approved = await res.json() as { status: string; result: Record<string, unknown> };
+  assert.equal(approved.status, "applied");
+  assert.equal(approved.result.setup_only, true);
+  assert.equal(approved.result.recovered, true);
+  assert.equal(settings.agentName, "Kept");
+});
+
 test("an approval never applies a safety floor, whatever a stored draft carries", async () => {
   const { d, a } = await base({ scopes: ["agents:read", "drafts:write"] });
   const now = Math.floor(Date.now() / 1000);
@@ -331,7 +393,7 @@ test("an approved classExitAtGraduationPct change is saved and reported applied,
   process.env.MERRYMEN_HOME = home;
   delete process.env.DATABASE_URL;
   resetSettingsStoreForTest();
-  getSettingsStore();
+  getSettingsStore("spot");
   process.env.DATABASE_URL = saved.db;
   try {
     const { run } = await base({ scopes: ["agents:read", "drafts:write"] });
@@ -342,7 +404,7 @@ test("an approved classExitAtGraduationPct change is saved and reported applied,
     assert.equal(body.status, "applied", JSON.stringify(body.result));
     assert.deepEqual(body.result?.applied, ["classExitAtGraduationPct"]);
     assert.equal(body.result?.not_applied, undefined);
-    assert.equal(((await getSettingsStore().get(OWNER_A)) as unknown as Record<string, unknown>).classExitAtGraduationPct, 50);
+    assert.equal(((await getSettingsStore("spot").get(OWNER_A)) as unknown as Record<string, unknown>).classExitAtGraduationPct, 50);
   } finally {
     resetSettingsStoreForTest();
     if (saved.home === undefined) delete process.env.MERRYMEN_HOME;

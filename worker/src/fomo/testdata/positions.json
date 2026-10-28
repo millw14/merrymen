@@ -1,0 +1,91 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "key": "254245a7-575a-51be-9bc3-090a924789eb",
+  "kind": "positions",
+  "count": 3,
+  "openCount": 2,
+  "closedCount": 1,
+  "truncated": false,
+  "nextCursor": "094dd0b3-22ff-41ba-b676-f093c8293f01",
+  "trades": [
+    {
+      "tradeId": "a323b5ca-c769-4b07-a422-833c4cafbe1f",
+      "userId": "254245a7-575a-51be-9bc3-090a924789eb",
+      "token": {
+        "symbol": "PONS",
+        "address": "0x39DBED3A00000000000000000000000000000C0D"
+      },
+      "chainId": 4663,
+      "chain": "robinhood",
+      "status": "open",
+      "amount": 1500,
+      "avgEntryPrice": 2,
+      "avgExitPrice": null,
+      "realizedPnlUsd": 0,
+      "unrealizedPnlUsd": 120.5,
+      "costBasisUsd": 3000,
+      "boughtAmount": 1500,
+      "soldAmount": 0,
+      "transferredInAmount": 0,
+      "transferredOutAmount": 0,
+      "avgTransferInPrice": null,
+      "avgTransferOutPrice": null,
+      "priceUsd": 2.08,
+      "source": "captured",
+      "createdAt": "2026-09-20T10:00:00Z",
+      "closedAt": null
+    },
+    {
+      "tradeId": "5c1d2e3f-0000-4000-8000-000000000001",
+      "userId": "254245a7-575a-51be-9bc3-090a924789eb",
+      "token": {
+        "symbol": "FU2O",
+        "address": "Fu2oZoGxFtCDp29NKA4A89xcn255khq9xbxG7Mmtpump"
+      },
+      "chainId": 1399811149,
+      "chain": "solana",
+      "status": "open",
+      "amount": 5000,
+      "avgEntryPrice": null,
+      "avgExitPrice": null,
+      "realizedPnlUsd": 0,
+      "unrealizedPnlUsd": null,
+      "costBasisUsd": 12.5,
+      "boughtAmount": 0,
+      "soldAmount": 0,
+      "transferredInAmount": 5000,
+      "transferredOutAmount": 0,
+      "avgTransferInPrice": 0.0025,
+      "avgTransferOutPrice": null,
+      "priceUsd": 0.003,
+      "source": "captured",
+      "createdAt": "2026-09-21T08:30:00Z",
+      "closedAt": null
+    },
+    {
+      "tradeId": "094dd0b3-22ff-41ba-b676-f093c8293f01",
+      "userId": "254245a7-575a-51be-9bc3-090a924789eb",
+      "token": {
+        "symbol": "plumber",
+        "address": "0x51fb760000000000000000000000000000000b0b"
+      },
+      "chainId": 4663,
+      "chain": "robinhood",
+      "status": "closed",
+      "amount": 0,
+      "avgEntryPrice": 0.5,
+      "avgExitPrice": 0.31,
+      "realizedPnlUsd": -10856.33,
+      "unrealizedPnlUsd": 0,
+      "costBasisUsd": 28000,
+      "boughtAmount": 56000,
+      "soldAmount": 56000,
+      "transferredInAmount": 0,
+      "transferredOutAmount": 0,
+      "priceUsd": 0.3,
+      "source": "feed",
+      "createdAt": "2026-09-10T12:00:00Z",
+      "closedAt": "2026-09-29T15:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "_fixture": "shape mirrored from a live response observed 2026-10-04; values fabricated",
+  "query": "alpha_fake",
+  "type": "traders",
+  "count": 3,
+  "results": [
+    {
+      "type": "trader",
+      "clan": null,
+      "rank": 4,
+      "avatar": "https://example.invalid/avatars/a.png",
+      "handle": "alpha_fake",
+      "pnlUsd": 777.7,
+      "trades": 210,
+      "userId": "aaaaaaaa-1111-4222-8333-444444444444",
+      "twitter": null,
+      "wallets": {
+        "solana": "FakeWa11et3333333333333333333333333333333",
+        "evm": "0x1234567890abcdef1234567890abcdef12345678",
+        "verified": true,
+        "evidence": { "solana": "onchain-holdings", "evm": "onchain-holdings" }
+      },
+      "holdings": 7,
+      "verified": false,
+      "createdAt": "2025-03-01T10:00:00.000Z",
+      "followers": 120,
+      "following": 15,
+      "topTokens": [],
+      "volumeUsd": 99000,
+      "description": "fabricated profile text",
+      "displayName": "Alpha Fake",
+      "source": "leaderboard"
+    },
+    {
+      "type": "trader",
+      "handle": "alpha_fake_two",
+      "displayName": "Alpha Two",
+      "avatar": "https://example.invalid/avatars/c.png",
+      "userId": "cccccccc-1111-4222-8333-444444444444",
+      "wallets": { "solana": null, "evm": null, "status": "resolving" },
+      "source": "directory"
+    },
+    {
+      "type": "trader",
+      "handle": "alpha_fake_three",
+      "displayName": "Alpha Three",
+      "avatar": null,
+      "userId": "dddddddd-1111-4222-8333-444444444444",
+      "wallets": { "solana": null, "evm": null, "status": "resolving" },
+      "source": "directory"
+    }
+  ]
+}

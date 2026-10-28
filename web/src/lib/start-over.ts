@@ -43,6 +43,7 @@
 import { writeCommand } from "../../../worker/src/command-files";
 import { merrymenHome } from "../../../worker/src/home";
 import { withReadDb } from "@/lib/ledger";
+import { queueRecoveryCheckedCommand, type CommandAdmission } from "./recovery-commands";
 
 /** What became of the reset half of a Start over. */
 export type StartOverReset = "queued" | "no-agent" | "failed";
@@ -80,7 +81,7 @@ export async function startOver(deps: StartOverDeps): Promise<StartOverReset> {
 }
 
 /** A queued reset, or why it could not be queued, in the words /api/paper-reset answers with. */
-export type QueuedReset = { ok: true; id: string } | { ok: false; error: string };
+export type QueuedReset = { ok: true; id: string } | { ok: false; error: string; status?: 409 | 503 };
 
 /**
  * QUEUE A PRACTICE RESET for `agent`, the one command the worker (or, while its
@@ -104,21 +105,16 @@ export async function queuePaperReset(hosted: boolean, agent: string): Promise<Q
       return { ok: false, error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` };
     }
   }
-  let ok = false;
+  let admitted: CommandAdmission = { ok: false, why: "unreachable" };
   try {
-    ok = await withReadDb(async (db) => {
-      if (!db) return false;
-      await db
-        .prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, ?, ?)")
-        .run(id, agent, "paper-reset", Date.now());
-      return true;
-    });
-  } catch {
-    ok = false;
-  }
-  if (!ok) {
+    admitted = await withReadDb(db => queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at: Date.now() }));
+  } catch { /* unreadable is a refusal */ }
+  if (!admitted.ok) {
+    if (admitted.why === "recovery") return { ok: false, status: 409,
+      error: "practice reset is paused while the original financial book is checked. No reset was queued." };
     return {
       ok: false,
+      status: 503,
       error: "couldn't queue it — the ledger is unreachable, which usually means this agent's worker has never run",
     };
   }

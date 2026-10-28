@@ -13,9 +13,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const dir = await mkdtemp(path.join(tmpdir(), "merrymen-cross-"));
 process.env.MERRYMEN_DATA_DIR = dir;
@@ -162,6 +165,40 @@ test("a valid partner key gets its own metadata, and scope is enforced", async (
   assert.ok(secret, "the minted key must parse — otherwise this asserts nothing");
   assert.equal(JSON.stringify(meta.json).includes(secret), false);
   assert.ok(store.hits.some((h) => h.startsWith("p:")), "an authenticated call should meter");
+});
+
+test("a refusal the server answers before the partner API still carries a request_id, and arrives", async () => {
+  // The 413 for an oversized body is answered by server.mjs's plumbing, not by
+  // partner-api.mjs, so only the real entrypoint can show what a partner gets.
+  // It used to be the one partner error with no request_id, and it never
+  // arrived at all: the socket was destroyed before it was written.
+  const port = await new Promise((resolve) => { const probe = createServer().listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
+  const child = spawn(process.execPath, [fileURLToPath(new URL("./server.mjs", import.meta.url))], { stdio: ["ignore", "pipe", "pipe"],
+    env: { PATH: process.env.PATH, PORT: String(port), MERRYMEN_DATA_DIR: dir, MERRYMEN_GATEWAY_UPSTREAM_KEY: "unused", MERRYMEN_GATEWAY_SECRET: SECRET, MERRYMEN_GATEWAY_RPC: "http://127.0.0.1:9" } });
+  let errors = "";
+  child.stderr.on("data", (chunk) => { errors += chunk; });
+  try {
+    await new Promise((resolve, reject) => {
+      let out = "";
+      child.stdout.on("data", (chunk) => { out += chunk; if (out.includes("listening")) resolve(); });
+      child.on("exit", (code) => reject(new Error(`gateway exited ${code}: ${out}${errors}`)));
+    });
+    // Past the gateway's read cap, and past the runtime's own 32 KiB limit, which
+    // is refused here too, before the key is checked or anything is metered.
+    for (const [path, size] of [["/agents", 256 * 1024 + 1], ["/agents", 1024 * 1024], ["/agents/pa_0123456789abcdef/messages", 40 * 1024]]) {
+      const r = await fetch(`http://127.0.0.1:${port}/partner/v1${path}`, { method: "POST", body: "x".repeat(size), headers: { authorization: "Bearer mmp_x" } });
+      assert.equal(r.status, 413, `${size} bytes to ${path}`);
+      const { error } = await r.json();
+      assert.equal(error.code, "bad_request");
+      assert.match(error.request_id, /^req_[0-9a-f]{12}$/);
+    }
+    // An activation carries a grant and may be up to 256 KiB: 40 KiB reaches the
+    // key check (an unparsable key is a 404), not a size refusal.
+    const grant = await fetch(`http://127.0.0.1:${port}/partner/v1/agents/pa_0123456789abcdef/activate`, { method: "POST", body: "x".repeat(40 * 1024), headers: { authorization: "Bearer mmp_x" } });
+    assert.equal(grant.status, 404);
+    // Started without a bridge secret, it says so at boot rather than at a partner's first 503.
+    assert.match(errors, /MERRYMEN_PARTNER_BRIDGE_SECRET is unset/);
+  } finally { child.kill(); }
 });
 
 test("partner routes are not matched under the OpenAI prefix", async () => {

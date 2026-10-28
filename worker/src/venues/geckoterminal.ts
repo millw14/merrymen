@@ -28,18 +28,205 @@
  * its own — never in the trading tick.
  */
 
-import { readBoundedJson } from "../bounded-read";
-import { FleetFeedCache, type FeedResult } from "./fleet-feed-cache";
+import { readBounded, readBoundedJson } from "../bounded-read";
+import { FleetFeedCache, LocalFeedCache, REAL_FEED_CLOCK, credentialFingerprint, type FeedCache, type FeedClock, type FeedLane, type FeedResult } from "./fleet-feed-cache";
+import { proPacing } from "./coingecko-pacing";
 import path from "node:path";
 
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
 
 /** Credentials go only to CoinGecko's fixed server-side origin, in headers. */
-export function geckoSource(env: NodeJS.ProcessEnv = process.env) {
+export function geckoSource(
+  env: { MERRYMEN_COINGECKO_PRO_API_KEY?: string } = {
+    MERRYMEN_COINGECKO_PRO_API_KEY: process.env.MERRYMEN_COINGECKO_PRO_API_KEY,
+  },
+): { id: NonNullable<FeedResult["provider"]>; base: string; headers: Record<string, string> } {
   const key = env.MERRYMEN_COINGECKO_PRO_API_KEY?.trim();
   return key
     ? { id: "coingecko-pro", base: "https://pro-api.coingecko.com/api/v3/onchain", headers: { accept: "application/json", "x-cg-pro-api-key": key } as Record<string, string> }
     : { id: "geckoterminal-public", base: GECKO_BASE, headers: { accept: "application/json" } as Record<string, string> };
+}
+export type GeckoSource = ReturnType<typeof geckoSource>;
+
+const feedCaches = new Map<string, FeedCache>();
+let feedClock = REAL_FEED_CLOCK;
+
+/** Test seam: real production clocks and persistent cache files are unchanged. */
+export function resetGeckoFeedsForTest(clock: FeedClock = REAL_FEED_CLOCK): void {
+  for (const cache of feedCaches.values()) cache.close();
+  feedCaches.clear(); tokenPoolsMemo.clear(); tokenPoolsPending.clear();
+  feedClock = clock;
+}
+
+/** Each operator note once per process, however many lanes are rebuilt. */
+const saidNotes = new Set<string>();
+function sayOnce(line: string): void {
+  if (saidNotes.has(line)) return;
+  saidNotes.add(line);
+  console.warn(`[gecko] ${line}`);
+}
+
+/**
+ * The pace a source's lane runs at.
+ *
+ * Public swagger documents approximately 10/min (the older FAQ says 30), so
+ * the public lane keeps the stricter bound and is not configurable: there is
+ * no plan to buy more of it. Pro is the operator's plan, so its pace is the
+ * operator's knob, clamped to the monthly credit ceiling (coingecko-pacing.ts).
+ * A fleet home means the shared worker lane; anything else is process-local
+ * (the web service, a self-hosted worker) and gets the smaller share.
+ */
+export function laneSpacingMs(source: GeckoSource, fleet: boolean, env: Parameters<typeof proPacing>[0] = process.env): number {
+  if (source.id === "geckoterminal-public") return 6500;
+  const pacing = proPacing(env, fleet ? "fleet" : "local");
+  for (const note of pacing.notes) sayOnce(note);
+  return pacing.spacingMs;
+}
+
+/**
+ * WHICH LANE A READ SPENDS: the fleet's, named explicitly. A child inherits
+ * MERRYMEN_FLEET_HOME from the orchestrator, which never sets it on itself
+ * (the variable is the children's). So a read made IN the orchestrator — an
+ * X answer's coin facts — passes the fleet home here and shares the
+ * children's spacing slot, cooldowns and plan latch, instead of a private
+ * lane that would coordinate with nobody. Absent: the environment's, as before.
+ */
+export interface GeckoLane {
+  fleetHome?: string;
+}
+
+function cacheFor(source: GeckoSource, lane?: GeckoLane): FeedCache {
+  const home = (lane?.fleetHome ?? process.env.MERRYMEN_FLEET_HOME)?.trim();
+  const pro = source.id === "coingecko-pro";
+  // Which key this lane sends, as a fingerprint only (never the key): a plan
+  // latch belongs to the credential that was refused, so a fixed or rotated
+  // key starts clean — in this process, and in the fleet's persistent file.
+  const credential = pro ? credentialFingerprint(source.headers["x-cg-pro-api-key"] ?? "") : "";
+  const key = `${home ? path.resolve(home) : "local"}:${source.id}:${credential}`;
+  let cache = feedCaches.get(key);
+  if (!cache) {
+    const spacing = laneSpacingMs(source, Boolean(home));
+    // Only the credit-metered lane latches plan refusals; the public lane has
+    // no plan, and a 401 there would be a different fact. And only that lane
+    // has the evidence row: the public lane's 6.5 s spacing is its whole
+    // defence against a ~10/min limit, so every public request, whoever
+    // asked, keeps to it (fleet-feed-cache.ts FeedLane).
+    const options = { latchRefusals: pro, priorityRow: pro, credential };
+    cache = home ? new FleetFeedCache(path.join(home, source.id), spacing, feedClock, options) : new LocalFeedCache(spacing, feedClock, options);
+    feedCaches.set(key, cache);
+  }
+  return cache;
+}
+
+/** How one read wants to be queued; every field is optional and defaults to the old behaviour. */
+export interface GeckoReadOptions {
+  /**
+   * Pacing row (fleet-feed-cache.ts FeedLane). Omitted: the default row.
+   * Honoured on the Pro lane only; a public read (keyless, or the fallback
+   * during a Pro outage) always takes the public lane's one row.
+   */
+  lane?: FeedLane;
+  /**
+   * The provider route asked for, path and query, as spliced after the base.
+   * Its template keys the Pro lane's one-hour plan-refusal latch. Omitted: no
+   * latch for this read.
+   */
+  route?: string;
+  /**
+   * The whole read's budget across both sources, at most the shared 30 s.
+   * For a caller somebody is waiting on (a page request, a Brain evidence
+   * leg), so a busy lane answers `request-budget` WITHOUT claiming a slot
+   * rather than holding the caller open or spending a credit nobody waits for.
+   */
+  budgetMs?: number;
+  /** The fleet lane named explicitly (GeckoLane); omitted, the environment's. */
+  fleet?: GeckoLane;
+}
+
+/** A separately offered public source, never a retry with another credential.
+ * No fallback on rejected authority (401/403, a latched plan refusal), bad
+ * requests, or broken cache. Both sources retain their own pacing, observation
+ * age and 429 cooldowns. */
+async function readGecko<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T, opts: GeckoReadOptions = {}): Promise<T> {
+  const budget = Math.min(30_000, Math.max(0, opts.budgetMs ?? 30_000));
+  const primary = geckoSource(), deadline = feedClock.now() + budget;
+  const read = async (source: GeckoSource): Promise<T> => {
+    try {
+      return await cacheFor(source, opts.fleet).get(`${GECKO_NETWORK}:${key}`, async () => {
+        const remaining = deadline - feedClock.now();
+        const result = remaining > 0 ? await request(source, remaining) : unavailable("request-budget");
+        return { ...result, provider: source.id };
+      }, failure => ({ ...unavailable(failure), provider: source.id }), deadline, { lane: opts.lane, route: opts.route });
+    } catch { return { ...unavailable("cache-unavailable"), provider: source.id }; }
+  };
+  const result = await read(primary);
+  if (primary.id !== "coingecko-pro" || !result.failed ||
+    !/^(?:http-(?:429|408|5\d\d)|provider-cooldown|network|timeout|unavailable)$/.test(result.failure ?? "")) return result;
+  return { ...await read(geckoSource({})), primaryFailure: result.failure };
+}
+
+/** CoinGecko's MAIN API (coins, search, trending), on the Pro key's own fixed origin. */
+export const COINGECKO_PRO_MAIN = "https://pro-api.coingecko.com/api/v3";
+
+/**
+ * ONE READ OF COINGECKO'S MAIN API — a coin by name or ticker, its market,
+ * the trending list — on the Pro lane: the same spacing slot (and evidence
+ * row), 429 cooldown, plan latch and monthly credit ceiling as every onchain
+ * read, its pages kept apart (`coins:`). `route` names the endpoint for the
+ * latch ("search", "coins/markets", "search/trending").
+ *
+ * ONLY WITH A PRO KEY, AND NEVER A FALLBACK. The keyless public GeckoTerminal
+ * source has no such endpoints, and the key never goes anywhere but this
+ * origin: keyless is `no-pro-key`, and nothing is asked. `budgetMs` bounds
+ * the whole read, slot wait included, so a caller with seconds to spare is
+ * told `request-budget` rather than kept waiting or charged for an answer
+ * nobody hears.
+ */
+export async function cachedCoinGecko<T extends FeedResult>(
+  key: string,
+  request: (headers: Readonly<Record<string, string>>, base: string, remainingMs: number) => Promise<T>,
+  unavailable: (reason: string) => T,
+  opts: GeckoReadOptions = {},
+): Promise<T> {
+  const source = geckoSource();
+  if (source.id !== "coingecko-pro") return unavailable("no-pro-key");
+  const deadline = feedClock.now() + Math.min(30_000, Math.max(0, opts.budgetMs ?? 30_000));
+  try {
+    return await cacheFor(source, opts.fleet).get(`coins:${key}`, async () => {
+      const remaining = deadline - feedClock.now();
+      const result = remaining > 0 ? await request(source.headers, COINGECKO_PRO_MAIN, remaining) : unavailable("request-budget");
+      return { ...result, provider: source.id };
+    }, failure => ({ ...unavailable(failure), provider: source.id }), deadline, { lane: opts.lane, route: opts.route });
+  } catch { return { ...unavailable("cache-unavailable"), provider: source.id }; }
+}
+
+/**
+ * A refused response, reduced to a safe failure code and a Retry-After.
+ *
+ * ONE COPY, because four readers each parsed Retry-After by hand. And one
+ * place to recognise CoinGecko's plan refusal: error_code 10005 ("you may not
+ * have access to this endpoint") becomes `plan-restricted`, which the Pro lane
+ * latches for an hour. The body is peeked only for a client refusal (never a
+ * 429 or 5xx), bounded to 4 KB, and never returned — provider text stays out
+ * of every result and log.
+ */
+export async function geckoRefusal(res: Pick<Response, "status"> & Partial<Pick<Response, "headers" | "body" | "text">>): Promise<{ failure: string; retryAfterMs: number }> {
+  let retryAfterMs = 0;
+  try {
+    const retry = res.headers?.get("retry-after") ?? null;
+    const parsed = retry === null ? 0 : /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+    retryAfterMs = Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+  } catch { /* an unreadable header is no Retry-After */ }
+  let failure = `http-${res.status}`;
+  if (res.status >= 400 && res.status < 500 && res.status !== 429 && typeof res.text === "function" && res.headers) {
+    try {
+      const peek = await readBounded(res as Response, 4096);
+      if (peek.ok && /"error_code"\s*:\s*10005\b/.test(peek.text)) failure = "plan-restricted";
+    } catch { /* unreadable is not a plan refusal */ }
+  }
+  // Already drained by the peek, or a test double without a stream: either way nothing to release.
+  try { await res.body?.cancel(); } catch { /* released or never there */ }
+  return { failure, retryAfterMs };
 }
 
 /** The network slug for Robinhood Chain (4663) in GeckoTerminal's namespace. */
@@ -253,7 +440,7 @@ export function parseGeckoPool(raw: unknown): GeckoPool | null {
 }
 
 /** A pool list, and whether the index could actually be asked. */
-export interface GeckoFetch {
+export interface GeckoFetch extends FeedResult {
   pools: GeckoPool[];
   /**
    * True when the request failed — a rate limit, an outage, a changed shape.
@@ -279,50 +466,38 @@ export interface GeckoFetch {
  */
 export async function fetchGeckoPoolsResult(
   feed: PoolFeed,
-  opts: { timeoutMs?: number; page?: number } = {},
+  opts: { timeoutMs?: number; page?: number } & Pick<GeckoReadOptions, "budgetMs" | "fleet" | "lane"> = {},
 ): Promise<GeckoFetch> {
-  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
-  if (!home) return requestGeckoPools(feed, opts);
-  try {
-    // Separate quota/cooldown state: the public provider's cooldown must not
-    // suppress a newly configured authenticated subscription.
-    if (!fleetCache) fleetCache = new FleetFeedCache(path.join(home, geckoSource().id));
-    return await fleetCache.get(`${GECKO_NETWORK}:${feed}:${opts.page ?? 1}`,
-      () => requestGeckoPools(feed, opts), failure => ({ pools: [], failed: true, failure }));
-  } catch {
-    // A broken coordination store must not fan out into an unbounded fleet retry.
-    return { pools: [], failed: true, failure: "cache-unavailable" };
-  }
-}
-let fleetCache: FleetFeedCache | undefined;
-
-/** Detail reads spend the same fleet quota as discovery, including cooldowns. */
-export async function cachedGeckoDetail<T extends FeedResult>(key: string, request: () => Promise<T>, unavailable: (reason: string) => T): Promise<T> {
-  const home = process.env.MERRYMEN_FLEET_HOME?.trim();
-  if (!home) return request();
-  try {
-    if (!fleetCache) fleetCache = new FleetFeedCache(path.join(home, geckoSource().id));
-    return await fleetCache.get(`${GECKO_NETWORK}:detail:${key}`, request, unavailable);
-  } catch { return unavailable("cache-unavailable"); }
+  return readGecko(`${feed}:${opts.page ?? 1}`,
+    (source, remainingMs) => requestGeckoPools(feed, { timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs), ...(opts.page !== undefined ? { page: opts.page } : {}) }, source),
+    failure => ({ pools: [], failed: true, failure }),
+    // A caller someone is waiting on (an X answer) names its budget, its row
+    // and the fleet lane; the tape names none and reads as it always did.
+    { route: poolsRoute(feed, opts.page), ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}), ...(opts.fleet ? { fleet: opts.fleet } : {}), ...(opts.lane ? { lane: opts.lane } : {}) });
 }
 
-async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }): Promise<GeckoFetch> {
+const poolsRoute = (feed: PoolFeed, page = 1) => `/networks/${GECKO_NETWORK}/${feed}?page=${page}`;
+
+/**
+ * Detail reads spend the same fleet quota as discovery, including cooldowns.
+ * `options` opts a read into the evidence row, names its route for the plan
+ * latch, or bounds it for a waiting page — see GeckoReadOptions.
+ */
+export async function cachedGeckoDetail<T extends FeedResult>(key: string, request: (source: GeckoSource, remainingMs: number) => Promise<T>, unavailable: (reason: string) => T, options: GeckoReadOptions = {}): Promise<T> {
+  return readGecko(`detail:${key}`, request, unavailable, options);
+}
+
+async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; page?: number }, source: GeckoSource): Promise<GeckoFetch> {
   const observedAt = Date.now();
-  const source = geckoSource();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {
-    const res = await fetch(`${source.base}/networks/${GECKO_NETWORK}/${feed}?page=${opts.page ?? 1}`, {
+    const res = await fetch(`${source.base}${poolsRoute(feed, opts.page)}`, {
       headers: source.headers,
       redirect: "error",
       signal: controller.signal,
     });
-    if (!res.ok) {
-      const retry = res.headers.get("retry-after");
-      const parsed = retry === null ? 0 : /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
-      await res.body?.cancel().catch(() => {});
-      return { pools: [], failed: true, failure: `http-${res.status}`, retryAfterMs: Number.isFinite(parsed) ? Math.max(0, parsed) : 0 };
-    }
+    if (!res.ok) return { pools: [], failed: true, ...await geckoRefusal(res) };
     // Bounded: an unbounded read hands a third party this worker's memory
     // ceiling. A refusal reads as `failed`, which is already the "we could not
     // learn anything" branch — never as an empty market.
@@ -371,7 +546,7 @@ async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; pag
  * spacing slot and one cooldown for every tenant on the host) and through a
  * small in-process memo on top, so a coin looked at and then kept on the tape
  * costs one request a minute rather than one per caller. Self-hosted has no
- * fleet cache and the memo is the whole of the saving.
+ * fleet cache and uses a process-local pacing/cache lane instead.
  */
 export async function readTokenPoolsResult(address: string, opts: { timeoutMs?: number } = {}): Promise<GeckoFetch> {
   const token = typeof address === "string" ? address.toLowerCase() : "";
@@ -385,7 +560,8 @@ export async function readTokenPoolsResult(address: string, opts: { timeoutMs?: 
   const inFlight = tokenPoolsPending.get(memoKey);
   if (inFlight) return inFlight;
   const unavailable = (failure: string): GeckoFetch => ({ pools: [], failed: true, failure });
-  const job = cachedGeckoDetail(`tokenpools:${token}`, () => requestTokenPools(token, opts), unavailable)
+  const job = cachedGeckoDetail(`tokenpools:${token}`, (source, remainingMs) => requestTokenPools(token, { ...opts, timeoutMs: Math.min(opts.timeoutMs ?? 10_000, remainingMs) }, source), unavailable,
+    { route: tokenPoolsRoute(token) })
     .catch(() => unavailable("unavailable"))
     .then((value) => {
       if (tokenPoolsMemo.size >= 256) tokenPoolsMemo.delete(tokenPoolsMemo.keys().next().value!);
@@ -408,14 +584,14 @@ export async function readTokenPools(address: string): Promise<GeckoPool[] | nul
 
 const tokenPoolsMemo = new Map<string, { until: number; value: GeckoFetch }>();
 const tokenPoolsPending = new Map<string, Promise<GeckoFetch>>();
+const tokenPoolsRoute = (token: string) => `/networks/${GECKO_NETWORK}/tokens/${token}/pools?page=1`;
 
-async function requestTokenPools(token: string, opts: { timeoutMs?: number }): Promise<GeckoFetch> {
+async function requestTokenPools(token: string, opts: { timeoutMs?: number }, source: GeckoSource): Promise<GeckoFetch> {
   const observedAt = Date.now();
-  const source = geckoSource();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {
-    const res = await fetch(`${source.base}/networks/${GECKO_NETWORK}/tokens/${token}/pools?page=1`, {
+    const res = await fetch(`${source.base}${tokenPoolsRoute(token)}`, {
       headers: source.headers,
       redirect: "error",
       signal: controller.signal,
@@ -424,12 +600,7 @@ async function requestTokenPools(token: string, opts: { timeoutMs?: number }): P
       await res.body?.cancel().catch(() => {});
       return { pools: [], failed: false, observedAt };
     }
-    if (!res.ok) {
-      const retry = res.headers.get("retry-after");
-      const parsed = retry === null ? 0 : /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
-      await res.body?.cancel().catch(() => {});
-      return { pools: [], failed: true, failure: `http-${res.status}`, retryAfterMs: Number.isFinite(parsed) ? Math.max(0, parsed) : 0 };
-    }
+    if (!res.ok) return { pools: [], failed: true, ...await geckoRefusal(res) };
     const read = await readBoundedJson<{ data?: unknown[] }>(res);
     if (!read.ok) return { pools: [], failed: true, failure: "invalid-body" };
     if (!Array.isArray(read.value?.data)) return { pools: [], failed: true, failure: "invalid-shape" };
@@ -487,6 +658,21 @@ export interface ScreenLimits {
    */
   minFdvUsd?: number;
 }
+
+/**
+ * THE DISCOVERY SCREEN: what a trending coin has to clear before the scout is
+ * even asked about it (index.ts discoverTrending) — at least $25k in the pool
+ * (the Trencher's own price floor, strategies/trencher.ts minLiquidityUsd),
+ * $50k of volume and a hundred distinct buyers in a day. Measured against live
+ * data it keeps roughly 32 of 56 distinct pools: a cheapness filter, not a
+ * judgement. Exported so an X answer's "what's hot" shows only coins the
+ * fleet's own discovery would look at (orchestrator-xpost-research.ts).
+ */
+export const DISCOVERY_SCREEN: Readonly<ScreenLimits> = Object.freeze({
+  minReserveUsd: 25_000,
+  minVolume24hUsd: 50_000,
+  minBuyers24h: 100,
+});
 
 /**
  * Drop pools not worth considering, and say why for the ones dropped.

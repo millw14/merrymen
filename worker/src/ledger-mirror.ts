@@ -36,12 +36,17 @@ import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { getAddress, isAddress } from "viem";
-import type { Db } from "./db";
+import { tablePresent, type Db } from "./db";
 import { mergeRiskPeriod, type RiskPeriod } from "./risk-period";
 import { wrapSqlite } from "./db";
 import { mirrorPaperCheckpoints } from "./paper-checkpoint";
 import { mergeEnergyDayRow } from "./energy-days";
 import { energyDayRowOf, utcDay } from "./energy";
+import { OWNER_OPERATION_COLUMNS } from "./owner-operations";
+// Which way each perp status may move — the same table store.ts writes by, so
+// the copy can never disagree with the source about what "forward" means.
+import { PERP_LEG_RANK, PERP_ORDER_RANK, PERP_TRANSFER_RANK, rankCaseSql, textInt } from "./perp-ledger-rules";
+import { parseWorkerKey } from "./worker-key";
 
 /** Rows per table per pass. Bounded so one busy tenant cannot starve the rest. */
 export const MIRROR_BATCH = 500;
@@ -95,6 +100,7 @@ const LOG_TABLES = [
       // every base-fee move as if it were extra work done.
       "gas_units",
       "fill_cash_usdg",
+      "trade_fee_usdg",
       // WHICH RUN this row belongs to. Everything below depends on it; see the
       // note on the agents upsert.
       "epoch",
@@ -122,9 +128,36 @@ const LOG_TABLES = [
   // Left behind in the child, every mirrored held mark would land here as an
   // ordinary one and become the anchor. And `cash_read_at`, when that cash was
   // read, which is the anchor's `since` for the hosted resume.
+  //
+  // AND THE VENUE'S TERMS (docs/perps.md rule 12; store.ts PERP_EQUITY_ALTERS),
+  // the same omission a third time if left out: an equity row whose total
+  // includes a perp book but whose perp columns arrive NULL is a row whose
+  // identity no longer closes on the shared side — cash + vault + positions
+  // falls short of the total by the whole perp book — and the hosted P&L and
+  // peak would read "no perp term" for a book that had one. The paper
+  // restore's upgrade path checks exactly that identity (paper-checkpoint.ts),
+  // so these columns and its perp term land together. `cash_read_block` is
+  // the block the cash was read at.
+  //
+  // OPTIONAL, unlike the columns above: copied when the child has them. A
+  // child ledger opened before its own worker ran the ALTER (a rolling deploy;
+  // a persistent home the previous release wrote, read by the new
+  // orchestrator's final pass before its child has run) would otherwise fail
+  // this table's SELECT and stall the equity curve — every tenant's, while
+  // nobody trades perps. Absent from the child means absent from the copy,
+  // never a failed pass. A Spot child writes them NULL (store.ts addEquity).
   {
     table: "equity", probe: true, stamp: "at",
     cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "flows_held", "cash_read_at", "at"],
+    optional: [
+      "perp_collateral_micro",
+      "perp_isolated_margin_micro",
+      "perp_unrealized_micro",
+      "perp_unrealized_gain_micro",
+      "perp_in_transit_micro",
+      "perp_snapshot_time",
+      "cash_read_block",
+    ],
   },
   // THE FLOW TERM. Without it equity is a bare balance reading and a deposit is
   // arithmetically indistinguishable from a gain — the bug that once reported
@@ -254,7 +287,11 @@ export interface MirrorReport {
    * exactly how it went unnoticed.
    */
   failed?: Record<string, string>;
-  /** An ID-cursored source still has rows beyond this pass's batch. */
+  /**
+   * An ID-cursored source still has rows beyond this pass's batch — or a perp
+   * keyset table filled the last page a pass may read (mirrorPerpLedger), so
+   * its tape may run on past what was copied.
+   */
   hasMore?: boolean;
   /** Set when the child's ledger could not be opened at all. */
   skipped?: string;
@@ -262,6 +299,12 @@ export interface MirrorReport {
 
 /** The `copied` keys that count rows read and deliberately NOT inserted. */
 const NOT_COPIED = "_already_mirrored";
+/**
+ * The `copied` keys that count rows a child offered and this pass refused or
+ * could not place (mirrorOwnerOperations, mirrorPerpLedger). `_conflict` is a
+ * perp transfer that contradicts the shared ledger and was not merged.
+ */
+const NOT_COPIED_FOR_CAUSE = ["_foreign", "_invalid", "_unattributed", "_conflict"] as const;
 
 /**
  * An account id as EIP-55 spells it, or the lowercase id back when it is not
@@ -300,7 +343,8 @@ function spellingsOf(r: Record<string, unknown>): string[] {
  */
 export function mirrorCountsLine(tenant: string, r: Pick<MirrorReport, "copied" | "failed">): string | null {
   const entries = Object.entries(r.copied);
-  const arrived = entries.filter(([k]) => !k.endsWith(NOT_COPIED));
+  const held = (k: string) => NOT_COPIED_FOR_CAUSE.some((suffix) => k.endsWith(suffix));
+  const arrived = entries.filter(([k]) => !k.endsWith(NOT_COPIED) && !held(k));
   const refused = entries.filter(([k]) => k.endsWith(NOT_COPIED));
   const n = arrived.reduce((a, [, v]) => a + v, 0);
   const s = refused.reduce((a, [, v]) => a + v, 0);
@@ -308,11 +352,20 @@ export function mirrorCountsLine(tenant: string, r: Pick<MirrorReport, "copied" 
     s > 0
       ? `skipped ${s} already mirrored (${refused.map(([k, v]) => `${k.slice(0, -NOT_COPIED.length)} ${v}`).join(", ")})`
       : null;
+  // ROWS A CHILD OFFERED THAT WERE NOT ITS TO OFFER, or that this pass could
+  // not place: an owner operation under another account, one that is not a
+  // full root record, or one with no agreed account to name it by
+  // (mirrorOwnerOperations). Never among the arrivals.
+  const kept = entries.filter(([k, v]) => held(k) && v > 0);
+  const keptSaid = kept.length
+    ? `not copied ${kept.reduce((a, [, v]) => a + v, 0)} (${kept.map(([k, v]) => `${k.replace(/_([a-z]+)$/, " $1")} ${v}`).join(", ")})`
+    : null;
+  const tail = [skip, keptSaid].filter((x): x is string => x !== null).join(" · ");
   if (n > 0) {
     const detail = arrived.map(([k, v]) => `${k} ${v}`).join(", ");
-    return `ledger mirror: ${tenant} +${n} rows (${detail})${skip ? ` · ${skip}` : ""}`;
+    return `ledger mirror: ${tenant} +${n} rows (${detail})${tail ? ` · ${tail}` : ""}`;
   }
-  if (skip) return `ledger mirror: ${tenant} no new rows · ${skip}`;
+  if (tail) return `ledger mirror: ${tenant} no new rows · ${tail}`;
   // Says "read, nothing new" rather than saying nothing at all, so the absence
   // of this line means the pass itself did not run.
   return r.failed ? null : `ledger mirror: ${tenant} idle`;
@@ -373,6 +426,269 @@ export function missingMarkColumn(e: unknown): boolean {
 }
 
 /**
+ * IS THIS THE ERROR A CHILD LEDGER FROM BEFORE owner_operations GIVES — AND
+ * ONLY THAT? SQLite's "no such table: owner_operations", or Postgres's
+ * undefined_table (42P01) naming it. Such a ledger has recorded no owner
+ * operation, which is zero rows, not a failed pass. Anything else is a failure,
+ * recorded and retried like every other table's.
+ */
+export function missingOwnerOperationsTable(e: unknown): boolean {
+  if (!(e instanceof Error) || !/\bowner_operations\b/.test(e.message)) return false;
+  return /no such table/i.test(e.message) || (e as { code?: unknown }).code === "42P01";
+}
+
+const OWNER_OP_HASH = /^0x[0-9a-f]{64}$/;
+
+/**
+ * THE TENANT'S SMART ACCOUNT AS ITS OWN GRANT NAMES IT: the orchestrator's
+ * `grants` table, which only the orchestrator and the grant store write, never
+ * the child. Exactly one grant row for the tenant, naming a full address;
+ * anything else (no table, no row, two rows, a value that is not an address,
+ * a read that fails) is null. The table is asked of the catalogue first
+ * (db.ts tablePresent), so a database without it answers null, not an aborted
+ * statement.
+ *
+ * The mirror copies an owner record only under this account
+ * (mirrorOwnerOperations), and admission loads one only for it
+ * (ledger-resume.ts knownChainFacts): one authority for both. The perp
+ * ledger is copied only under it too (mirrorPerpLedger).
+ *
+ * A PERPS WORKER'S KEY NAMES ITS OWN WALLET'S GRANT. `0x<owner>:perps`
+ * (worker-key.ts) is the Perps wallet's worker, whose grant is the owner's row
+ * in `perps_grants`, never in `grants`: asked of `grants`, the key matches no
+ * row, and every owner operation its arm-time reconciler records would be
+ * unattributed on every pass, so its final mirror would never complete. Only
+ * the exact key shape counts; anything else is asked of `grants` as before,
+ * where a key that is not a tenant finds nothing. `perps_grants` is created by
+ * the first Perps put and by nothing else (grant-store.ts PgGrantStore), so
+ * its absence is asked of the catalogue too, never left to an aborted
+ * statement inside the caller's transaction.
+ */
+export async function tenantGrantAccount(db: Pick<Db, "prepare">, tenant: string): Promise<string | null> {
+  try {
+    const worker = parseWorkerKey(tenant);
+    const perps = worker?.purpose === "perps";
+    const table = perps ? "perps_grants" : "grants";
+    if (!(await tablePresent(db, table))) return null;
+    const rows = (await db.prepare(`SELECT grant_json->>'smartAccount' AS account FROM ${table} WHERE LOWER(tenant) = ?`)
+      .all(perps ? worker!.owner : tenant.toLowerCase())) as Array<{ account?: unknown }>;
+    if (rows.length !== 1) return null;
+    const a = String(rows[0]!.account ?? "").toLowerCase();
+    return /^0x[0-9a-f]{40}$/.test(a) ? a : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE ACCOUNT A PASS MAY COPY UNDER: the grant's (`granted`), unless the
+ * caller names one (`given`), which must then agree with the grant wherever
+ * the grant names one. Null when there is none to agree on — no grant and no
+ * caller's, the caller's null, or the two disagree. One rule for the owner
+ * operations and the perp ledger, so the two can never be copied under
+ * different accounts on one pass.
+ */
+function agreedAccount(granted: string | null, given: string | null | undefined): string | null {
+  const named = given === undefined ? undefined : given ? given.toLowerCase() : null;
+  return named === undefined ? granted : named !== null && (granted === null || granted === named) ? named : null;
+}
+
+/** Write the owner-operations cursor: the child id last settled, its created_at as the witness, and when the book was last written. */
+async function setOwnerOperationsMark(db: Db, tenant: string, lastId: number, stamp: number | null, updatedAt: number): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (tenant, table_name) DO UPDATE SET last_id = excluded.last_id, last_stamp = excluded.last_stamp, updated_at = excluded.updated_at`,
+    )
+    .run(tenant, "owner_operations", lastId, stamp, updatedAt);
+}
+
+/**
+ * COPY THE CHILD'S OWNER OPERATIONS UP, BY THEIR IDENTITY.
+ *
+ * NOT A LOG TABLE, deliberately. A child ledger written before this table
+ * existed would fail a LOG_TABLES read with "no such table", and any `failed`
+ * entry withholds an anchor, a drain, a retirement and the fleet checkpoint
+ * (orchestrator.ts finalMirrorBeforeAnchor, drainContinuousBook;
+ * ledger-safeguard.ts): here that ledger is zero rows. And a LOG_TABLES
+ * cursor is in the continuity proof (ledger-safeguard.ts
+ * assertLedgerSourceContinuity) and the handover's final cursor, which the
+ * persistent-home import, rebuilding a book from ledger-import.ts SPECS
+ * alone, could not satisfy. This cursor is in neither, because a rewind of it
+ * can neither duplicate nor lose a record: every insert is ON CONFLICT DO
+ * NOTHING on the record's identity, (chain_id, LOWER(agent_id), user_op_hash).
+ *
+ * THE CURSOR IS THE CHILD'S OWN id, WITH A WITNESS, AND NO CLOCK IN IT.
+ * mirror_state.last_id is the child id of the last row a pass settled, and
+ * last_stamp that row's created_at (the LOG_TABLES convention). A child's
+ * AUTOINCREMENT id only grows within one ledger, whatever its clock does, so a
+ * record written after the clock stepped back is still after the cursor. (A
+ * created_at watermark with a 300-second overlap, the first cut, skipped for
+ * good every record a clock stepped back by more than that wrote.) A rebuilt
+ * or imported child is told apart by the witness: when the row at last_id is
+ * gone or carries another created_at, the pass reads from id 0 again. That
+ * re-read is free (see above), so it is not reported as `restarted` and holds
+ * no drain, anchor or checkpoint. A cursor with no witness (an earlier
+ * build's) is not trusted either: read from 0.
+ *
+ * THE BOUND, stated. A rebuilt child that already holds a row at exactly
+ * last_id, created in exactly the witnessed second, is taken for the old
+ * ledger, and its rows at lower ids are not re-read. That needs a new ledger
+ * to record as many owner operations as the old one before the mirror's first
+ * pass over it (orchestrator.ts mirrors every RECONCILE_MS, 15 seconds; an
+ * imported book starts with none), the last in the same second. A record so missed is absent from
+ * Postgres, so admission names its operation and holds the tenant: fail
+ * closed, and nothing is booked from it.
+ *
+ * THE TENANT IS THE MIRROR'S, NOT THE CHILD'S. The account is the tenant's
+ * grant (tenantGrantAccount). A caller that names one (the fleet checkpoint,
+ * its roster's) must agree with the grant wherever there is one. Each row read
+ * is then exactly one of:
+ *
+ *  - copied, or already there: stamped with this pass's tenant;
+ *  - foreign: a full record under ANOTHER account. Never copied under this
+ *    tenant (it could otherwise answer, or block, that account's operation),
+ *    and settled: the cursor passes it and it is counted on the pass that
+ *    passes it (`owner_operations_foreign`) — once, unless a rewind re-reads
+ *    the ledger from id 0 and counts it again. Foreign is decided against
+ *    the grant's account alone, which no child writes, and a tenant keeps its
+ *    account across a grant replacement, so no later pass would copy it;
+ *  - invalid: not a full lowercase hash pair, or not root. No account could
+ *    copy it; settled and counted like a foreign one (`owner_operations_invalid`).
+ *
+ * With no account to check against (no grant, or the caller's and the
+ * grant's disagree), nothing is copied. A row Postgres already holds under
+ * this tenant, or an invalid one, has nothing left to copy; if every row read
+ * is one of those, they are settled as above. Otherwise the cursor does not
+ * move, every other row is counted on every such pass
+ * (`owner_operations_unattributed`), and the pass reports owner_operations
+ * FAILED, so no caller takes it for a finished copy: the first pass that can
+ * name the account copies them. Never skipped.
+ *
+ * Bounded like every table: more than a batch after the cursor sets hasMore.
+ * The cursor's updated_at says when the tenant's book was last written
+ * (ledger-resume.ts lastMirrorPassAt). It never moves on a pass that read
+ * nothing. On a trusted cursor it moves whenever a pass settles rows (they
+ * are rows no pass had passed). After a rewind it moves only when the pass
+ * inserts a record: the re-read cannot tell which of a rebuilt ledger's rows
+ * an earlier pass passed, so a re-read that copies nothing new (already
+ * there, foreign or invalid) leaves it as it was.
+ */
+export async function mirrorOwnerOperations(o: {
+  tenant: string; child: Db; shared: Db; batch: number; nowSec: number; account?: string | null;
+}): Promise<{ copied: Record<string, number>; hasMore: boolean; failed?: string }> {
+  const copied: Record<string, number> = {};
+  const tenant = o.tenant.toLowerCase();
+  const cols = OWNER_OPERATION_COLUMNS;
+  const mark = (await o.shared
+    .prepare(`SELECT last_id, last_stamp, updated_at FROM mirror_state WHERE tenant = ? AND table_name = ?`)
+    .get(o.tenant, "owner_operations")) as { last_id: unknown; last_stamp: unknown; updated_at: unknown } | undefined;
+  let from = 0;
+  let rewound = false;
+  let fetched: Record<string, unknown>[];
+  try {
+    if (mark) {
+      const at = Number(mark.last_id);
+      const stamp = mark.last_stamp === null || mark.last_stamp === undefined ? null : String(mark.last_stamp);
+      if (Number.isSafeInteger(at) && at > 0 && stamp !== null) {
+        const witness = (await o.child.prepare(`SELECT created_at FROM owner_operations WHERE id = ?`).get(at)) as { created_at?: unknown } | undefined;
+        if (witness && String(witness.created_at) === stamp) from = at;
+        else rewound = true;
+      } else if (at !== 0) rewound = true;
+    }
+    fetched = (await o.child
+      .prepare(`SELECT id, ${cols.join(", ")}, created_at FROM owner_operations WHERE id > ? ORDER BY id ASC LIMIT ?`)
+      .all(from, o.batch + 1)) as Record<string, unknown>[];
+  } catch (e) {
+    // A ledger from before this table: it recorded none. No cursor row is
+    // written for it, so a tenant with no owner operation has no trace here.
+    if (missingOwnerOperationsTable(e)) {
+      copied.owner_operations = 0;
+      return { copied, hasMore: false };
+    }
+    throw e;
+  }
+  const rows = fetched.slice(0, o.batch);
+  const kept = Number(mark?.updated_at ?? 0);
+  if (!rows.length) {
+    copied.owner_operations = 0;
+    // A rebuilt child with no record yet: forget the cursor it no longer
+    // holds, so the next pass does not ask the witness again. Nothing new was
+    // written, so updated_at keeps what it said.
+    if (rewound) await setOwnerOperationsMark(o.shared, o.tenant, 0, null, kept);
+    return { copied, hasMore: false };
+  }
+  const account = agreedAccount(await tenantGrantAccount(o.shared, tenant), o.account);
+  /** Not a full lowercase hash pair, or not root: no account could copy it. */
+  const invalidRecord = (r: Record<string, unknown>) =>
+    !OWNER_OP_HASH.test(String(r.user_op_hash ?? "")) || !OWNER_OP_HASH.test(String(r.tx_hash ?? "")) || r.validator !== "root";
+  if (!account) {
+    // NO ACCOUNT TO NAME THEM BY, AND THIS LEDGER MAY BE THEIR ONLY COPY. A
+    // removed tenant's final pass (orchestrator.ts finalMirrorBeforeAnchor,
+    // after its grant row is gone) reads a home a redeploy can take, so a
+    // record it cannot place is NOT a finished copy: the pass reports
+    // owner_operations failed, and a final copy, a drain, a retirement and the
+    // fleet checkpoint are each withheld — the lease and the home kept — until
+    // a pass can name the account. Only a row with nothing left to copy is
+    // settled without one: a record Postgres already holds under this tenant
+    // (an earlier pass with an account placed it; a rebuilt child's re-read
+    // finds these), or one no account could copy (invalid). Then the cursor
+    // passes them as any pass would.
+    let unplaced = 0;
+    for (const r of rows) {
+      if (invalidRecord(r)) continue;
+      const held = await o.shared
+        .prepare(`SELECT 1 AS held FROM owner_operations WHERE tenant = ? AND chain_id = ? AND LOWER(agent_id) = ? AND user_op_hash = ?`)
+        .get(tenant, r.chain_id, String(r.agent_id ?? "").toLowerCase(), r.user_op_hash);
+      if (!held) unplaced++;
+    }
+    if (unplaced > 0) {
+      copied.owner_operations = 0;
+      copied.owner_operations_unattributed = unplaced;
+      return {
+        copied, hasMore: false,
+        failed: `${unplaced} owner operation record(s) have no account to be copied under (no single grant names one, or the caller's disagrees with it); ` +
+          "the child's ledger is their only copy, so it is kept until a pass can name the account",
+      };
+    }
+  }
+  let inserted = 0, already = 0, foreign = 0, invalid = 0;
+  const last = rows[rows.length - 1]!;
+  await o.shared.tx(async (db) => {
+    const ins = db.prepare(
+      `INSERT INTO owner_operations (tenant, ${cols.join(", ")}, created_at) VALUES (?, ${cols.map(() => "?").join(", ")}, ?)
+       ON CONFLICT (chain_id, LOWER(agent_id), user_op_hash) DO NOTHING`,
+    );
+    for (const r of rows) {
+      if (invalidRecord(r)) {
+        invalid++;
+        continue;
+      }
+      // With no account, every row left is one Postgres holds under this tenant (checked above).
+      if (!account) {
+        already++;
+        continue;
+      }
+      if (String(r.agent_id ?? "").toLowerCase() !== account) {
+        foreign++;
+        continue;
+      }
+      const res = await ins.run(tenant, ...cols.map((c) => r[c] ?? null), r.created_at);
+      if (Number(res.changes) > 0) inserted++;
+      else already++;
+    }
+    // Same transaction as the rows: a crash between the two re-reads rows
+    // that ON CONFLICT absorbs, and a cursor never moves without its rows.
+    await setOwnerOperationsMark(db, o.tenant, Number(last.id), Number(last.created_at), inserted > 0 || !rewound ? o.nowSec : kept);
+  });
+  copied.owner_operations = inserted;
+  if (already > 0) copied[`owner_operations${NOT_COPIED}`] = already;
+  if (foreign > 0) copied.owner_operations_foreign = foreign;
+  if (invalid > 0) copied.owner_operations_invalid = invalid;
+  return { copied, hasMore: fetched.length > o.batch };
+}
+
+/**
  * Copy one tenant's ledger forward.
  *
  * Never throws: a tenant whose ledger is mid-write, corrupt, or simply absent
@@ -385,6 +701,17 @@ export async function mirrorTenant(args: {
   shared: Db;
   batch?: number;
   nowSec?: number;
+  /**
+   * The tenant's smart account as the ORCHESTRATOR knows it, never as the
+   * child says: an owner_operations row is copied only under it (see
+   * mirrorOwnerOperations), and so is every perp row (mirrorPerpLedger). It
+   * must agree with the shared grants table — `perps_grants` for a Perps
+   * worker's key (tenantGrantAccount) — which only the orchestrator and the
+   * grant store write, wherever that names one; absent, the grant alone names
+   * it. A final pass after the grant is gone (a kill, an expiry) names it here
+   * or copies neither.
+   */
+  account?: string | null;
 }): Promise<MirrorReport> {
   const { tenant, child, shared } = args;
   const batch = args.batch ?? MIRROR_BATCH;
@@ -409,12 +736,41 @@ export async function mirrorTenant(args: {
       throw e;
     }
   };
+  let tradeFeeColumn: boolean | undefined;
+  const hasTradeFee = async () => {
+    if (tradeFeeColumn !== undefined) return tradeFeeColumn;
+    try {
+      await child.prepare("SELECT trade_fee_usdg FROM trades LIMIT 0").all();
+      return (tradeFeeColumn = true);
+    } catch (e) {
+      // Legacy children have no fee evidence. Omit that source column rather
+      // than inventing zero; other read failures must remain visible/retryable.
+      if (e instanceof Error && /\btrade_fee_usdg\b/.test(e.message) &&
+          (/no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703")) {
+        return (tradeFeeColumn = false);
+      }
+      throw e;
+    }
+  };
 
   // ── append-only tables ────────────────────────────────────────────────────
-  for (const { table, cols: declaredCols, stamp, probe } of LOG_TABLES) {
+  for (const entry of LOG_TABLES) {
+    const { table, cols: declaredCols, stamp, probe } = entry;
     try {
-      const cols = table === "trades" && !await hasBudgetSettlement()
-        ? declaredCols.filter((column) => column !== "budget_settled_at") : declaredCols;
+      let cols: readonly string[] = declaredCols;
+      if (table === "trades") {
+        if (!await hasBudgetSettlement()) cols = cols.filter((column) => column !== "budget_settled_at");
+        if (!await hasTradeFee()) cols = cols.filter((column) => column !== "trade_fee_usdg");
+      }
+      // The optional columns this child actually has — see the equity entry.
+      // Asked of the child alone, by name.
+      const optional: readonly string[] = "optional" in entry ? entry.optional : [];
+      if (optional.length) {
+        const present = new Set(
+          ((await child.prepare(`SELECT name FROM pragma_table_info('${table}')`).all()) as { name: string }[]).map((c) => String(c.name)),
+        );
+        cols = [...cols, ...optional.filter((c) => present.has(c))];
+      }
       const mark = (await shared
         .prepare(`SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = ?`)
         .get(tenant, table)) as { last_id: number; last_stamp: number | null } | undefined;
@@ -731,11 +1087,12 @@ export async function mirrorTenant(args: {
   // and only ever from `submitted`.
   try {
     const hasSettlement = await hasBudgetSettlement();
+    const hasFee = await hasTradeFee();
     const resolved = (await child
       .prepare(
         `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
                 fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol${hasSettlement ? ", budget_settled_at" : ""}
+                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol${hasFee ? ", trade_fee_usdg" : ""}${hasSettlement ? ", budget_settled_at" : ""}
            FROM trades
           WHERE user_op_hash IS NOT NULL AND status <> 'submitted'
             AND (created_at > ?${hasSettlement ? " OR budget_settled_at > ?" : ""})
@@ -755,7 +1112,7 @@ export async function mirrorTenant(args: {
                              sponsored_gas_wei = COALESCE(?, sponsored_gas_wei),
                              gas_usdg = COALESCE(?, gas_usdg), gas_units = COALESCE(?, gas_units),
                              fill_cash_usdg = COALESCE(?, fill_cash_usdg),
-                             fill_symbol = COALESCE(?, fill_symbol)${hasSettlement ? ", budget_settled_at = COALESCE(?, budget_settled_at)" : ""}
+                             fill_symbol = COALESCE(?, fill_symbol)${hasFee ? ", trade_fee_usdg = COALESCE(?, trade_fee_usdg)" : ""}${hasSettlement ? ", budget_settled_at = COALESCE(?, budget_settled_at)" : ""}
             WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) AND status = 'submitted'`,
         );
         for (const r of resolved) {
@@ -765,6 +1122,7 @@ export async function mirrorTenant(args: {
             r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
             r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
             r.fill_symbol ?? null,
+            ...(hasFee ? [r.trade_fee_usdg ?? null] : []),
             ...(hasSettlement ? [r.budget_settled_at ?? null] : []),
             ...spellingsOf(r),
           );
@@ -878,6 +1236,30 @@ export async function mirrorTenant(args: {
     }
   } catch (e) {
     failed.decisions = e instanceof Error ? e.message : String(e);
+  }
+
+  // ── owner operations: by identity, never by a child id ────────────────────
+  try {
+    const r = await mirrorOwnerOperations({ tenant, child, shared, batch, nowSec, account: args.account });
+    Object.assign(copied, r.copied);
+    if (r.hasMore) hasMore = true;
+    // Records with no account to copy them under: not a finished copy.
+    if (r.failed) failed.owner_operations = r.failed;
+  } catch (e) {
+    failed.owner_operations = e instanceof Error ? e.message : String(e);
+  }
+
+  // ── perpetuals (docs/perps.md, "Hosted") ──────────────────────────────────
+  // Every perp_* table, each under its own try so one table's failure is one
+  // table's lag, and only for a child that holds a perp row at all — see
+  // mirrorPerpLedger for why none of them rides the id cursor above, and why
+  // a Spot child's pass never reaches a shared perp table.
+  try {
+    const r = await mirrorPerpLedger({ child, shared, tenant, nowSec, batch, copied, failed, account: args.account });
+    if (r.hasMore) hasMore = true;
+  } catch (e) {
+    // mirrorPerpLedger records its own failures; this is only a last net.
+    failed.perp = e instanceof Error ? e.message : String(e);
   }
 
   // ── snapshot tables: upsert by their own key ──────────────────────────────
@@ -1065,7 +1447,47 @@ export async function mirrorTenant(args: {
       } catch (e) {
         failed.energy_days = e instanceof Error ? e.message : String(e);
       }
-      copied.paper_checkpoints = await mirrorPaperCheckpoints(child, shared);
+
+      // ── THE WORKER'S PERPS REPORT (agents.perps), carried up beside energy ──
+      //
+      // Its OWN statement and its own try, never a column on the agents
+      // INSERT above: a child (or a shared schema) from before the column must
+      // still copy every other agents field — a failed column here is one
+      // missing report, not a fleet whose rows stopped moving. Probed on the
+      // child by name; a child without it has said nothing and sends nothing.
+      //
+      // NULL IS "NOT YET", the rule mode, beat_at and energy follow: a rebuilt
+      // child that has not reported leaves the last report standing, and the
+      // lane writes a fresh one on its first pass. So only reports are read,
+      // and with none — every Spot child, whose lane never arms — nothing is
+      // written, no shared transaction is opened, and nothing is counted.
+      try {
+        const cols = (await child.prepare("PRAGMA table_info(agents)").all()) as { name?: unknown }[];
+        if (cols.some((c) => c.name === "perps")) {
+          const reports = (await child
+            .prepare("SELECT smart_account, perps FROM agents WHERE perps IS NOT NULL")
+            .all()) as { smart_account: string; perps: string }[];
+          if (reports.length) {
+            await shared.tx(async (db) => {
+              const up = db.prepare("UPDATE agents SET perps = ? WHERE smart_account = ?");
+              for (const r of reports) await up.run(r.perps, r.smart_account);
+            });
+            copied.agent_perps = reports.length;
+          }
+        }
+      } catch (e) {
+        failed.agent_perps = e instanceof Error ? e.message : String(e);
+      }
+
+      // ITS OWN try, like energy: a checkpoint that cannot be written (a
+      // shared column that failed to add, a lock that timed out) is one
+      // missing restore point, and must not stop the positions, basis, floors
+      // and class book below from copying for this tenant — Spot's included.
+      try {
+        copied.paper_checkpoints = await mirrorPaperCheckpoints(child, shared);
+      } catch (e) {
+        failed.paper_checkpoints = e instanceof Error ? e.message : String(e);
+      }
 
       const positions = (await child
         .prepare(
@@ -1095,9 +1517,34 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         // Replace rather than merge: a closed position is GONE at the source,
         // and an upsert alone would leave it on the dashboard forever.
+        //
+        // THE ACCOUNT IN ANY LETTER-CASE, here and in the three snapshot
+        // deletes below. The child registers under the grant's spelling as it
+        // stands at spawn (store.ts ensureAgent), and an owner who re-signs
+        // can change that spelling without changing the account. The seeds
+        // read the basis and the held positions in any case (orchestrator.ts
+        // seedBasisForChild and ledger-resume.ts planAttestedSeed:
+        // `lower(agent_id) = lower(?)`), so a delete that matched only the new
+        // spelling left the old rows to be read as this account's for ever: a
+        // closed position the seeds read as held, and with it a basis the book
+        // no longer has (chain-gap-booking.ts staleBasisVerdict rests on this
+        // pass removing one).
+        // An equality on both sides lowered, never a pattern, so another
+        // account is never matched, whatever it shares with this one. Only the
+        // rows deleted change; each rebuilt-child guard is exactly as it was.
+        //
+        // NOT INDEXED, ON PURPOSE. No index serves lower(agent_id) on these
+        // four tables, so each delete reads the whole table; they hold a few
+        // rows per agent, and at today's fleet that is well under a
+        // millisecond. An index would have to be installed by applyLedgerSchema,
+        // which runs on this file's own fifteen-second clock, and CREATE INDEX
+        // IF NOT EXISTS takes a ShareLock on its table before it finds the
+        // index already there: every cycle, on the four tables every tenant's
+        // pass writes, queued behind any open writer and queueing every writer
+        // behind it (mcp/schema.ts describes the same hazard).
         for (const a of agents) {
           if (rebuiltChild && positions.length === 0) continue;
-          await db.prepare(`DELETE FROM positions WHERE agent_id = ?`).run(a.smart_account);
+          await db.prepare(`DELETE FROM positions WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         const ins = db.prepare(
           `INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd,
@@ -1156,7 +1603,11 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         for (const a of agents) {
           if (rebuilt) continue;
-          await db.prepare(`DELETE FROM cost_basis WHERE agent_id = ?`).run(a.smart_account);
+          // Any letter-case of the account, as positions above: a basis left
+          // under a spelling the grant no longer uses is still this account's
+          // to every seed, which would hand it to a later book once the symbol
+          // is held again.
+          await db.prepare(`DELETE FROM cost_basis WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         // UPSERT, because the delete above is now conditional. Without the
         // delete a rebuilt child re-inserting the rows it does still have would
@@ -1187,7 +1638,7 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         for (const a of agents) {
           if (rebuilt) continue;
-          await db.prepare(`DELETE FROM position_floors WHERE agent_id = ?`).run(a.smart_account);
+          await db.prepare(`DELETE FROM position_floors WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         const ins = db.prepare(
           `INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why, at)
@@ -1231,7 +1682,7 @@ export async function mirrorTenant(args: {
       await shared.tx(async (db) => {
         for (const a of agents) {
           if (rebuilt) continue;
-          await db.prepare(`DELETE FROM class_positions WHERE agent_id = ?`).run(a.smart_account);
+          await db.prepare(`DELETE FROM class_positions WHERE lower(agent_id) = lower(?)`).run(a.smart_account);
         }
         const ins = db.prepare(
           `INSERT INTO class_positions
@@ -1318,4 +1769,797 @@ export async function mirrorTenant(args: {
     ...(Object.keys(restarted).length ? { restarted } : {}),
     ...(Object.keys(failed).length ? { failed } : {}),
   };
+}
+
+// ══ THE PERP LEDGER (docs/perps.md, "Ledger" → "Hosted") ═══════════════════════
+//
+// A HOSTED PAPER PERPS BOOK IS DURABLE ONLY HERE. Its child lives on a home a
+// redeploy can take, and the shared database is the one copy that survives
+// it; the restore point beside this (paper-checkpoint.ts perp_json) is checked
+// against the tape copied here, so a restore can never reopen a position the
+// tape shows closed.
+//
+// WHY NOT THE ID CURSOR. None of these tables has an autoincrement id: their
+// keys are identities — the venue's trade id and our side of it, a funding
+// id, a client order index, a transfer's chain log — and that is what makes
+// them safe to copy MORE than once. A rebuilt child needs no rewind detection
+// either: its rows carry wall-clock stamps, not a restarted id space. (Which
+// is also why neither the continuity proof nor the handover's final cursor
+// names a perp table: both read only LOG_TABLES, by id.)
+//
+// A KEYSET CURSOR, (stamp, child rowid), NOT A BARE TIME. Each table is read
+// in two parts per pass:
+//   forward   rows strictly AFTER the cursor in (stamp, rowid) order, page by
+//             page, each page resuming from the last row of the one before;
+//             the cursor then moves to the last row read. Every pass that
+//             finds rows moves it, so a burst of any size drains at up to
+//             PERP_MAX_PAGES × batch rows a pass — and a pass that filled its
+//             last page says so (MirrorReport.hasMore), so no caller takes a
+//             tape that runs on past it for a finished copy.
+//   lookback  rows AT OR BEFORE the cursor within PERP_LOOKBACK_SEC, newest
+//             first — the decisions pattern, for what a keyset alone misses:
+//             an in-place UPDATE landing in the cursor's own second on a row
+//             it already passed, or a stamp computed before a slower commit.
+//             Re-copying is free (ON CONFLICT DO NOTHING / the rank guard).
+// A bare time that reopened LOOKBACK behind the newest stamp read re-read the
+// same first pages for ever once more than PERP_MAX_PAGES × batch rows shared
+// one lookback span — a rebuilt child re-ingesting a year of hourly funding in
+// seconds — and nothing after them was ever copied (the perps branch's review:
+// mirror-perp-page-cap-permanent-skip). The rowid is the child's own (every
+// perp table is a rowid table); it only breaks ties within one stamp, so a
+// rebuilt child's restarted rowids cost at most the lookback's re-read. The
+// cursor moves in the SAME shared transaction as its rows: a cursor that moved
+// without them would skip them for ever.
+//
+// THE UPDATED TABLES ARE COPIED BY `updated_at`, and each row goes through a
+// RANK GUARD (perp-ledger-rules.ts): an UPDATE that only moves the shared row
+// FORWARD, then — if it matched nothing — an INSERT … ON CONFLICT DO NOTHING.
+// So a stale child, or a slow pass racing a fresh one, can never turn a
+// `filled` order back into `submitted` or a `paid` withdrawal back into
+// transit. DO NOTHING absorbs a conflict on ANY unique index for an INSERT;
+// an UPDATE that FILLS identity columns (perp_transfers only) has no such
+// clause, so a transfer row resolves ONE shared target first and fills only
+// identities no other shared row holds, under a savepoint — one contradictory
+// row is a counted conflict, never an error that rolls back the batch and
+// stalls the table for good (the trades-tape failure recorded above).
+//
+// ONLY THE WORKER'S OWN ACCOUNT. LOG_TABLES can only insert; these paths can
+// change rows that are already there — an order matched by its global id, a
+// transfer resolved through global identities, a position flattened, an
+// account row merged. A child that could name another account's agent_id
+// could advance or flatten that account's shared book. So, as owner
+// operations are (mirrorOwnerOperations), every perp row is copied only under
+// the account the tenant's grant names (tenantGrantAccount: `perps_grants` for
+// a Perps worker's key), and a row under any other is counted
+// (`perp_<table>_foreign`) and never copied. With no account to name, nothing
+// is copied and the pass says so in `failed`, so no caller takes it for a
+// finished copy.
+//
+// INERT FOR A CHILD THAT HOLDS NO PERP ROW. Every child ledger has had every
+// perp table since slice 3 (store.ts execPerpLedger), Spot's included, and
+// almost none of them holds a row. One child-only probe comes first; with no
+// row there, no shared perp table — no cursor, no grant, no snapshot — is
+// read or written, and nothing is added to `copied` or `failed`. Without it a
+// shared-side perp fault (a lock timeout, a missing table) would be a
+// `failed.perp_*` on every Spot tenant's pass, and any `failed` entry
+// withholds that tenant's anchor, drain, retirement and fleet checkpoint.
+//
+// NEVER COPIED: perp_orders.tx_info. It is the exact signed transaction,
+// signature included — bytes that could be re-sent to the venue — and the
+// shared database has no use for them: live orders are re-read from the venue
+// at arm, never seeded from shared storage. Nor an incident's detail: the
+// shared row learns that there IS an incident, its kind and when.
+
+/** How far each perp cursor re-reads behind itself, seconds (the lookback part of a pass). */
+const PERP_LOOKBACK_SEC = 300;
+/**
+ * Pages read per table per pass, forward and lookback each. A bound on one
+ * pass's work, never on what is eventually copied: the keyset cursor resumes
+ * after the last row read, so whatever did not fit arrives next pass.
+ */
+const PERP_MAX_PAGES = 20;
+
+/** Every perp table a child ledger can hold (store.ts PERP_LEDGER_DDL). */
+const PERP_TABLES = [
+  "perp_orders", "perp_order_legs", "perp_fills", "perp_funding", "perp_transfers", "perp_positions", "perp_accounts", "perp_carries",
+] as const;
+
+const PERP_FILL_COLS = [
+  "agent_id", "mode", "epoch", "venue_trade_id", "side_role", "market_id", "side", "role", "base", "price",
+  "quote_micro", "fee_micro", "realized_micro", "position_before", "entry_quote_before_micro", "trade_type",
+  "attribution", "order_id", "venue_order_index", "client_order_index", "venue_tx_hash", "venue_ts_ms", "created_at",
+] as const;
+const PERP_FUNDING_COLS = [
+  "agent_id", "mode", "epoch", "market_id", "funding_id", "funding_hour", "payment_micro", "rate_ppm",
+  "position_base", "position_side", "created_at",
+] as const;
+const PERP_CARRY_COLS = ["agent_id", "mode", "epoch", "market_id", "side", "base", "mark_price", "entry_quote_micro", "created_at"] as const;
+/** Every perp_orders column EXCEPT tx_info — see the note above. */
+const PERP_ORDER_COLS = [
+  "id", "agent_id", "mode", "epoch", "account_index", "api_key_index", "nonce", "tx_hash", "tx_type", "expired_at",
+  "status", "effect", "reduce_only", "market_id", "worst_notional_micro", "filled_base", "filled_quote_micro",
+  "decision_id", "reason", "created_at", "resolved_at", "updated_at",
+] as const;
+const PERP_LEG_COLS = [
+  "agent_id", "mode", "order_id", "role", "client_order_index", "venue_order_index", "status", "venue_status",
+  "created_at", "updated_at",
+] as const;
+const PERP_TRANSFER_COLS = [
+  "id", "agent_id", "mode", "epoch", "direction", "amount_micro", "initiator", "state", "chain_id", "tx_hash",
+  "log_index", "user_op_hash", "venue_tx_hash", "paid_tx_hash", "paid_log_index", "order_id", "created_at", "updated_at",
+] as const;
+/**
+ * The position row, with the level it is PROTECTED at (`recorded_stop_*`,
+ * paper.ts PaperPerpPosition.recordedStop) beside its resting stop child: a
+ * gapped stop leaves the child gone and the level standing, and a shared book
+ * without it would say a position was protected at the settings ceiling.
+ */
+const PERP_POSITION_COLS = [
+  "agent_id", "mode", "market_id", "side", "base", "entry_price", "allocated_margin_micro", "imf_bp", "margin_mode",
+  "realized_micro", "funding_micro", "stop_trigger", "stop_price", "recorded_stop_trigger", "recorded_stop_price",
+  "take_trigger", "take_price", "funding_hour_applied", "opened_at", "updated_at", "source",
+] as const;
+const PERP_ACCOUNT_COLS = [
+  "agent_id", "mode", "account_index", "registered_pubkey", "retired_pubkeys", "nonce_high_water",
+  "paper_collateral_micro", "incident_json", "entries_halted", "last_venue_read_at", "last_snapshot_time",
+  "created_at", "updated_at",
+] as const;
+
+type Row = Record<string, unknown>;
+
+/** The row's values for `cols`, agent_id lowercased — the perp tables' rule, applied again at the copy. */
+function valuesOf(r: Row, cols: readonly string[]): unknown[] {
+  return cols.map((c) => (c === "agent_id" ? String(r.agent_id ?? "").toLowerCase() : (r[c] ?? null)));
+}
+
+function insertSql(table: string, cols: readonly string[]): string {
+  return `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`;
+}
+
+/**
+ * WHERE A PERP TABLE'S COPY HAS GOT TO: the stamp (`created_at` or
+ * `updated_at`, unix seconds) and the child rowid of the last row copied, in
+ * that order. Kept in mirror_state's own two integers — `last_id` the stamp
+ * and `last_stamp` the rowid tie-break — so no shared schema moves. For the
+ * perp rows `last_stamp` is therefore NOT the id-cursor witness
+ * MIRROR_STATE_DDL describes; nothing reads it as one (the witness
+ * reconciliation walks LOG_TABLES only). The tenant is the worker's key, so a
+ * login's Spot and Perps workers, whose children are two ledgers with two
+ * rowid spaces, never share a cursor.
+ */
+interface PerpCursor {
+  stamp: number;
+  rowid: number;
+}
+
+/** The rowid alias every keyset read selects beside the copied columns (never itself copied: valuesOf picks by name). */
+const ROWID = "mirror_rowid";
+
+async function perpCursorOf(shared: Db, tenant: string, key: string): Promise<PerpCursor> {
+  const m = (await shared
+    .prepare(`SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = ?`)
+    .get(tenant, key)) as { last_id: number; last_stamp: number | null } | undefined;
+  // A cursor with a stamp and no rowid (a bare-time one): resume AT that
+  // stamp, ties included — a re-read is free, a skipped row is not.
+  return { stamp: Number(m?.last_id ?? 0), rowid: m?.last_stamp === null || m?.last_stamp === undefined ? -1 : Number(m.last_stamp) };
+}
+
+/**
+ * Moves only forward, in (stamp, rowid) order: a pass that read nothing past
+ * the cursor leaves it where it was. Both CASEs read the OLD row (SQL
+ * evaluates every SET expression against it), so their order is immaterial,
+ * and every existing-row column is qualified, as Postgres requires inside DO
+ * UPDATE SET (see class_positions above).
+ */
+async function advancePerpCursor(db: Db, tenant: string, key: string, to: PerpCursor, nowSec: number): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO mirror_state (tenant, table_name, last_id, last_stamp, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (tenant, table_name) DO UPDATE SET
+         last_stamp = CASE WHEN excluded.last_id > mirror_state.last_id
+                             OR (excluded.last_id = mirror_state.last_id AND excluded.last_stamp > COALESCE(mirror_state.last_stamp, -1))
+                           THEN excluded.last_stamp ELSE mirror_state.last_stamp END,
+         last_id = CASE WHEN excluded.last_id > mirror_state.last_id THEN excluded.last_id ELSE mirror_state.last_id END,
+         updated_at = excluded.updated_at`,
+    )
+    .run(tenant, key, to.stamp, to.rowid, nowSec);
+}
+
+function cursorOfRow(r: Row, stamp: string): PerpCursor {
+  return { stamp: Number(r[stamp] ?? 0), rowid: Number(r[ROWID] ?? -1) };
+}
+
+/**
+ * The FORWARD part of a pass: child rows strictly after `after` in (stamp,
+ * rowid) order, at most PERP_MAX_PAGES pages. Each page resumes from the last
+ * row of the one before — never by OFFSET, which a worker writing between two
+ * pages would shift under the read. `more` is the honest answer to "is that
+ * all?": the last page this pass may read came back full, so rows may follow
+ * it that this pass did not reach.
+ */
+async function readAfter(
+  child: Db, table: string, cols: readonly string[], stamp: string, after: PerpCursor, batch: number,
+): Promise<{ rows: Row[]; more: boolean }> {
+  const out: Row[] = [];
+  let at = after;
+  for (let page = 0; page < PERP_MAX_PAGES; page++) {
+    const rows = (await child
+      .prepare(
+        `SELECT rowid AS ${ROWID}, ${cols.join(", ")} FROM ${table}
+          WHERE ${stamp} > ? OR (${stamp} = ? AND rowid > ?)
+          ORDER BY ${stamp} ASC, rowid ASC LIMIT ?`,
+      )
+      .all(at.stamp, at.stamp, at.rowid, batch)) as Row[];
+    out.push(...rows);
+    const last = rows[rows.length - 1];
+    if (rows.length < batch || !last) return { rows: out, more: false };
+    at = cursorOfRow(last, stamp);
+  }
+  return { rows: out, more: true };
+}
+
+/**
+ * The LOOKBACK part: child rows AT OR BEFORE `cursor`, no older than
+ * PERP_LOOKBACK_SEC behind it, newest first (the stragglers it exists for sit
+ * right behind the cursor), at most PERP_MAX_PAGES pages. Nothing before the
+ * first copy: the forward part covers everything then. Never a reason for
+ * hasMore: these rows were all passed once, and a capped re-read that said
+ * "more" would keep a drain asking the same question for ever.
+ */
+async function readLookback(child: Db, table: string, cols: readonly string[], stamp: string, cursor: PerpCursor, batch: number): Promise<Row[]> {
+  if (cursor.stamp <= 0) return [];
+  const floor = Math.max(0, cursor.stamp - PERP_LOOKBACK_SEC);
+  const out: Row[] = [];
+  let at = { stamp: cursor.stamp, rowid: cursor.rowid, inclusive: true };
+  for (let page = 0; page < PERP_MAX_PAGES; page++) {
+    const rows = (await child
+      .prepare(
+        `SELECT rowid AS ${ROWID}, ${cols.join(", ")} FROM ${table}
+          WHERE ${stamp} >= ? AND (${stamp} < ? OR (${stamp} = ? AND rowid ${at.inclusive ? "<=" : "<"} ?))
+          ORDER BY ${stamp} DESC, rowid DESC LIMIT ?`,
+      )
+      .all(floor, at.stamp, at.stamp, at.rowid, batch)) as Row[];
+    out.push(...rows);
+    const last = rows[rows.length - 1];
+    if (rows.length < batch || !last) break;
+    at = { ...cursorOfRow(last, stamp), inclusive: false };
+  }
+  return out;
+}
+
+/** SQLSTATE 23505 (Postgres) or SQLITE_CONSTRAINT_UNIQUE / _PRIMARYKEY (node:sqlite) — matched on codes first, the message last. */
+function isUniqueViolation(e: unknown): boolean {
+  const x = e as { code?: unknown; errcode?: unknown; message?: unknown } | null;
+  if (x?.code === "23505" || x?.errcode === 2067 || x?.errcode === 1555) return true;
+  return typeof x?.message === "string" && /UNIQUE constraint failed|duplicate key value violates unique constraint/.test(x.message);
+}
+
+/**
+ * THE INCIDENT AS THE SHARED DATABASE MAY HOLD IT — an allowlist, like
+ * publicGrantView, not a denylist: its kind and its time, nothing else.
+ * Unparseable is still an incident, never none.
+ */
+function sharedIncident(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  try {
+    const j = JSON.parse(String(raw)) as { kind?: unknown; at?: unknown };
+    const kind = typeof j.kind === "string" && /^[A-Za-z0-9:._-]{1,64}$/.test(j.kind) ? j.kind : "unreadable";
+    const at = typeof j.at === "number" && Number.isSafeInteger(j.at) ? j.at : 0;
+    return JSON.stringify({ at, kind });
+  } catch {
+    return JSON.stringify({ at: 0, kind: "unreadable" });
+  }
+}
+
+function retiredOf(raw: unknown): string[] {
+  try {
+    const v = JSON.parse(String(raw ?? "[]")) as unknown;
+    return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The perp transfers already said to contradict the shared ledger, per
+ * tenant, so each is logged once per process rather than once per pass for as
+ * long as it sits inside the lookback. Bounded: a contradiction is rare, and
+ * forgetting the set only means saying one again.
+ */
+const saidTransferConflicts = new Set<string>();
+
+/**
+ * Copy one tenant's perp ledger up. Never throws: each table records its own
+ * failure and leaves its cursor where it was, so the next pass retries.
+ *
+ * Counts are recorded only when something arrived. Most tenants never trade
+ * perps, and eight zeros on every tenant's line every fifteen seconds would
+ * bury the line; a failure is still always recorded — for a child that holds
+ * a perp row. One that holds none adds nothing at all (see the note above).
+ */
+export async function mirrorPerpLedger(args: {
+  child: Db;
+  shared: Db;
+  tenant: string;
+  nowSec: number;
+  batch: number;
+  copied: Record<string, number>;
+  failed: Record<string, string>;
+  /** The account the caller names, held to the grant's exactly as mirrorTenant's `account` (agreedAccount). */
+  account?: string | null;
+}): Promise<{ hasMore: boolean }> {
+  const { child, shared, tenant, nowSec, batch, copied, failed } = args;
+  let hasMore = false;
+
+  // ── THE INERT GATE: the child, and only the child, first ──────────────────
+  // Which perp tables this ledger has (one from before perps has none), then
+  // whether any of them holds a row. No shared statement before this answer.
+  let present: Set<string>;
+  try {
+    const tables = (await child
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${PERP_TABLES.map(() => "?").join(", ")})`)
+      .all(...PERP_TABLES)) as { name: string }[];
+    present = new Set(tables.map((t) => String(t.name)));
+    if (!present.size) return { hasMore };
+    const any = (await child
+      .prepare(`SELECT ${[...present].map((t) => `EXISTS (SELECT 1 FROM ${t})`).join(" OR ")} AS held`)
+      .get()) as { held?: unknown } | undefined;
+    if (Number(any?.held ?? 0) !== 1) return { hasMore };
+  } catch (e) {
+    // The child itself could not be read: not a finished copy, and not a
+    // shared fault either — nothing on the shared side was asked.
+    failed.perp = e instanceof Error ? e.message : String(e);
+    return { hasMore };
+  }
+  const has = (t: string) => present.has(t);
+
+  // ── WHOSE ROWS THESE MAY BE ───────────────────────────────────────────────
+  let account: string | null;
+  try {
+    account = agreedAccount(await tenantGrantAccount(shared, tenant), args.account);
+  } catch (e) {
+    failed.perp = e instanceof Error ? e.message : String(e);
+    return { hasMore };
+  }
+  if (!account) {
+    // NO ACCOUNT TO COPY UNDER, AND THIS LEDGER MAY BE THE BOOK'S ONLY COPY —
+    // a paper book has no venue behind it to re-read. Nothing is copied and
+    // no cursor moves, so the first pass that can name the account (a grant,
+    // or a final pass's caller naming the worker's own) copies everything.
+    failed.perp =
+      "perp rows have no account to be copied under (no single grant names one, or the caller's disagrees with it); " +
+      "the child's ledger is their only copy, so it is kept until a pass can name the account";
+    return { hasMore };
+  }
+  const own = (r: Row) => String(r.agent_id ?? "").toLowerCase() === account;
+
+  const step = async (key: string, run: () => Promise<number>) => {
+    try {
+      const n = await run();
+      if (n > 0) copied[key] = n;
+    } catch (e) {
+      failed[key] = e instanceof Error ? e.message : String(e);
+    }
+  };
+
+  /**
+   * One table, one pass: the lookback and the forward part (see the section
+   * header), applied in ONE shared transaction with the cursor move. The
+   * cursor moves to the last FORWARD row, past foreign rows too — they are
+   * settled, counted on the pass that passes them and never copied; a pass
+   * that found nothing past it leaves it alone.
+   */
+  const copyTable = async (table: string, cols: readonly string[], stamp: "created_at" | "updated_at", apply: (db: Db, r: Row) => Promise<number>) => {
+    const cursor = await perpCursorOf(shared, tenant, table);
+    const behind = await readLookback(child, table, cols, stamp, cursor, batch);
+    const ahead = await readAfter(child, table, cols, stamp, cursor, batch);
+    if (ahead.more) hasMore = true;
+    if (!behind.length && !ahead.rows.length) return 0;
+    const foreign = ahead.rows.filter((r) => !own(r)).length;
+    let n = 0;
+    await shared.tx(async (db) => {
+      for (const r of behind) if (own(r)) n += await apply(db, r);
+      for (const r of ahead.rows) if (own(r)) n += await apply(db, r);
+      const last = ahead.rows[ahead.rows.length - 1];
+      if (last) await advancePerpCursor(db, tenant, table, cursorOfRow(last, stamp), nowSec);
+    });
+    if (foreign > 0) copied[`${table}_foreign`] = foreign;
+    return n;
+  };
+
+  // ── append-only: fills, funding, carries ──────────────────────────────────
+  const appendOnly = (table: string, cols: readonly string[]) => {
+    const sql = insertSql(table, cols);
+    return copyTable(table, cols, "created_at", async (db, r) => Number((await db.prepare(sql).run(...valuesOf(r, cols))).changes));
+  };
+  if (has("perp_fills")) await step("perp_fills", () => appendOnly("perp_fills", PERP_FILL_COLS));
+  if (has("perp_funding")) await step("perp_funding", () => appendOnly("perp_funding", PERP_FUNDING_COLS));
+  if (has("perp_carries")) await step("perp_carries", () => appendOnly("perp_carries", PERP_CARRY_COLS));
+
+  // ── rank-guarded: orders, legs, transfers ─────────────────────────────────
+  const updated = (table: string, cols: readonly string[], apply: (db: Db, r: Row) => Promise<number>) =>
+    copyTable(table, cols, "updated_at", apply);
+
+  const orderRank = rankCaseSql("perp_orders.status", PERP_ORDER_RANK);
+  if (has("perp_orders")) await step("perp_orders", () =>
+    updated("perp_orders", PERP_ORDER_COLS, async (db, r) => {
+      const status = String(r.status);
+      const rank = PERP_ORDER_RANK[status as keyof typeof PERP_ORDER_RANK] ?? -1;
+      // Matched by id OR by the nonce it was signed with: a row a rebuilt
+      // child re-adopted under a new id is still the same signed tx, and the
+      // row already here is the one to advance. Never another account's: the
+      // account is in the match, and the row was checked to be this one's.
+      const res = await db
+        .prepare(
+          `UPDATE perp_orders
+              SET status = ?, filled_base = COALESCE(?, filled_base), filled_quote_micro = COALESCE(?, filled_quote_micro),
+                  reason = COALESCE(?, reason), resolved_at = COALESCE(?, resolved_at),
+                  updated_at = ?
+            WHERE agent_id = ? AND mode = ?
+              AND (id = ? OR (nonce IS NOT NULL AND account_index = ? AND api_key_index = ? AND nonce = ?))
+              AND (${orderRank} < ? OR (perp_orders.status = ? AND perp_orders.updated_at < ?))`,
+        )
+        .run(
+          status, r.filled_base ?? null, r.filled_quote_micro ?? null, r.reason ?? null, r.resolved_at ?? null, r.updated_at,
+          String(r.agent_id ?? "").toLowerCase(), r.mode, r.id, r.account_index ?? null, r.api_key_index ?? null, r.nonce ?? null,
+          rank, status, r.updated_at,
+        );
+      if (Number(res.changes) > 0) return Number(res.changes);
+      return Number((await db.prepare(insertSql("perp_orders", PERP_ORDER_COLS)).run(...valuesOf(r, PERP_ORDER_COLS))).changes);
+    }),
+  );
+
+  const legRank = rankCaseSql("perp_order_legs.status", PERP_LEG_RANK);
+  if (has("perp_order_legs")) await step("perp_order_legs", () =>
+    updated("perp_order_legs", PERP_LEG_COLS, async (db, r) => {
+      const status = String(r.status);
+      const rank = PERP_LEG_RANK[status as keyof typeof PERP_LEG_RANK] ?? -1;
+      const res = await db
+        .prepare(
+          `UPDATE perp_order_legs
+              SET status = ?, venue_order_index = COALESCE(venue_order_index, ?), venue_status = COALESCE(?, venue_status),
+                  updated_at = ?
+            WHERE agent_id = ? AND mode = ? AND client_order_index = ?
+              AND (${legRank} < ? OR (perp_order_legs.status = ? AND perp_order_legs.updated_at < ?))`,
+        )
+        .run(
+          status, r.venue_order_index ?? null, r.venue_status ?? null, r.updated_at,
+          String(r.agent_id ?? "").toLowerCase(), r.mode, r.client_order_index, rank, status, r.updated_at,
+        );
+      if (Number(res.changes) > 0) return Number(res.changes);
+      return Number((await db.prepare(insertSql("perp_order_legs", PERP_LEG_COLS)).run(...valuesOf(r, PERP_LEG_COLS))).changes);
+    }),
+  );
+
+  const transferRank = rankCaseSql("perp_transfers.state", PERP_TRANSFER_RANK);
+  // Child transfers that contradict the shared ledger this pass, by child id.
+  // Counted, never merged, and the cursor moves past them.
+  const transferConflicts = new Set<string>();
+  const applyTransfer = async (db: Db, r: Row): Promise<number> => {
+    const state = String(r.state);
+    const rank = PERP_TRANSFER_RANK[state as keyof typeof PERP_TRANSFER_RANK] ?? -1;
+    const agent = String(r.agent_id ?? "").toLowerCase();
+    const id = String(r.id ?? "");
+    // WHO ALREADY HOLDS THIS TRANSFER — by its id or by any identity it
+    // carries, each looked up in EXACTLY the scope of the unique index that
+    // guards it (store.ts: the primary key is global; chain log is per
+    // (chain, agent); UserOp and venue hash per (agent, mode)). So no identity
+    // filled below can collide with a row this read did not see.
+    const holders = (await db
+      .prepare(
+        `SELECT id, agent_id, mode, direction, amount_micro, chain_id, tx_hash, log_index, user_op_hash, venue_tx_hash
+           FROM perp_transfers
+          WHERE id = ?
+             OR (agent_id = ? AND mode = ? AND venue_tx_hash IS NOT NULL AND venue_tx_hash = ?)
+             OR (agent_id = ? AND mode = ? AND user_op_hash IS NOT NULL AND user_op_hash = ?)
+             OR (agent_id = ? AND tx_hash IS NOT NULL AND log_index IS NOT NULL AND chain_id = ? AND tx_hash = ? AND log_index = ?)`,
+      )
+      .all(
+        id,
+        agent, r.mode, r.venue_tx_hash ?? null,
+        agent, r.mode, r.user_op_hash ?? null,
+        agent, r.chain_id ?? null, r.tx_hash ?? null, r.log_index ?? null,
+      )) as Row[];
+    if (!holders.length) {
+      return Number((await db.prepare(insertSql("perp_transfers", PERP_TRANSFER_COLS)).run(...valuesOf(r, PERP_TRANSFER_COLS))).changes);
+    }
+    // ONE TARGET: the row with this child row's own id, else the only holder
+    // (a transfer a rebuilt child re-derived under a new id is the row already
+    // here, not a second one). Several holders and none of them this id is
+    // ambiguous — which one is "this" transfer is not the mirror's to guess.
+    // A holder under another account is never this one's (the id is global).
+    const target = holders.find((h) => h.id === id) ?? (holders.length === 1 ? holders[0] : undefined);
+    const amount = textInt(r.amount_micro);
+    const same =
+      target !== undefined &&
+      String(target.agent_id ?? "").toLowerCase() === agent &&
+      target.mode === r.mode &&
+      target.direction === r.direction &&
+      amount !== null &&
+      textInt(target.amount_micro) === amount;
+    if (!target || !same) {
+      transferConflicts.add(id);
+      return 0;
+    }
+    // Another shared row ALSO holds one of these identities: two shared rows
+    // claim one transfer (a rebuilt child booked it before it could know the
+    // identity that ties them). The target still moves forward — it is the
+    // child's own row, or the only candidate — but it takes no identity the
+    // other row holds, and the conflict is counted for a person to settle.
+    const others = holders.filter((h) => h.id !== target.id);
+    if (others.length) transferConflicts.add(id);
+    const heldElsewhere = (col: "venue_tx_hash" | "user_op_hash") =>
+      r[col] !== null && r[col] !== undefined && others.some((h) => h[col] === r[col]);
+    const chainKnown = r.chain_id !== null && r.chain_id !== undefined && r.tx_hash !== null && r.tx_hash !== undefined && r.log_index !== null && r.log_index !== undefined;
+    // The chain log moves as ONE identity — all three columns from the child,
+    // only onto a target with none, and never a chain id that disagrees — so
+    // the triple written is exactly the triple looked up above.
+    const fillChain =
+      chainKnown &&
+      (target.tx_hash === null || target.tx_hash === undefined) &&
+      (target.log_index === null || target.log_index === undefined) &&
+      (target.chain_id === null || target.chain_id === undefined || Number(target.chain_id) === Number(r.chain_id)) &&
+      !others.some((h) => Number(h.chain_id) === Number(r.chain_id) && h.tx_hash === r.tx_hash && Number(h.log_index) === Number(r.log_index));
+    const res = await db
+      .prepare(
+        `UPDATE perp_transfers
+            SET state = ?,
+                chain_id = CASE WHEN ? = 1 THEN ? ELSE chain_id END,
+                tx_hash = CASE WHEN ? = 1 THEN ? ELSE tx_hash END,
+                log_index = CASE WHEN ? = 1 THEN ? ELSE log_index END,
+                user_op_hash = COALESCE(user_op_hash, ?), venue_tx_hash = COALESCE(venue_tx_hash, ?),
+                paid_tx_hash = COALESCE(paid_tx_hash, ?), paid_log_index = COALESCE(paid_log_index, ?),
+                order_id = COALESCE(order_id, ?), updated_at = ?
+          WHERE id = ?
+            AND (${transferRank} < ? OR (perp_transfers.state = ? AND perp_transfers.updated_at < ?))`,
+      )
+      .run(
+        state,
+        fillChain ? 1 : 0, r.chain_id ?? null,
+        fillChain ? 1 : 0, r.tx_hash ?? null,
+        fillChain ? 1 : 0, r.log_index ?? null,
+        heldElsewhere("user_op_hash") ? null : (r.user_op_hash ?? null),
+        heldElsewhere("venue_tx_hash") ? null : (r.venue_tx_hash ?? null),
+        r.paid_tx_hash ?? null, r.paid_log_index ?? null, r.order_id ?? null, r.updated_at,
+        target.id, rank, state, r.updated_at,
+      );
+    return Number(res.changes);
+  };
+  if (has("perp_transfers")) await step("perp_transfers", async () => {
+    const n = await updated("perp_transfers", PERP_TRANSFER_COLS, async (db, r) => {
+      // A SAVEPOINT PER ROW, the last line under the resolution above: should
+      // any row still meet a unique index, it is rolled back ALONE and
+      // counted, and the batch — every later transfer, and the cursor —
+      // commits. Postgres aborts a whole transaction on a failed statement, so
+      // catching without a savepoint would only move the failure to COMMIT.
+      // Anything but a unique violation still fails the table, as before.
+      await db.prepare("SAVEPOINT perp_transfer_row").run();
+      try {
+        const changed = await applyTransfer(db, r);
+        await db.prepare("RELEASE SAVEPOINT perp_transfer_row").run();
+        return changed;
+      } catch (e) {
+        if (!isUniqueViolation(e)) throw e;
+        await db.prepare("ROLLBACK TO SAVEPOINT perp_transfer_row").run();
+        await db.prepare("RELEASE SAVEPOINT perp_transfer_row").run();
+        transferConflicts.add(String(r.id ?? ""));
+        return 0;
+      }
+    });
+    // INFORMATIONAL, NOT `failed`, AND ON PURPOSE. A contradiction is a child
+    // row the mirror refused to merge, so it is counted beside the copies
+    // (`perp_transfers_conflict`, never among the arrivals) and said once per
+    // process. It is NOT a failure because nothing is left uncopied that a
+    // later pass could copy: the cursor has moved, the row is still intact in
+    // the child, and every later transfer arrived. In `failed` it would hold
+    // every final pass — the anchor, the drain, the retirement, the fleet
+    // checkpoint — for exactly as long as the row sat inside the lookback, and
+    // then let them through with nothing settled: a block that proves
+    // nothing. And it can only arise from a chain identity two rows claim (a
+    // UserOp, a venue hash, a chain log), which a paper transfer never has —
+    // a hosted Perps book is paper only in this build. The live rail will need
+    // its own durable record of these before any deposit is real.
+    if (transferConflicts.size) {
+      copied.perp_transfers_conflict = transferConflicts.size;
+      const fresh = [...transferConflicts].filter((id) => !saidTransferConflicts.has(`${tenant} ${id}`));
+      if (fresh.length) {
+        if (saidTransferConflicts.size > 10_000) saidTransferConflicts.clear();
+        for (const id of fresh) saidTransferConflicts.add(`${tenant} ${id}`);
+        const ids = fresh.slice(0, 5).join(", ");
+        console.warn(
+          `[perps] ledger mirror: ${tenant} — ${fresh.length} transfer row(s) contradict the shared ledger and were not merged ` +
+            `(${ids}${fresh.length > 5 ? ", …" : ""}); later rows were copied, and the child still holds them`,
+        );
+      }
+    }
+    return n;
+  });
+
+  // ── snapshots: positions and the account row ─────────────────────────────
+  //
+  // Small (a market per row, two rails per agent) and rewritten in place, so
+  // every row is read every pass and copied when it is NEWER than the row
+  // already here — or, at the SAME stamp, when it says something different.
+  //
+  // A TIE GOES TO THE CHILD. The stamp is in seconds, and the child keeps
+  // committing while a pass reads it from another process, so one pass can
+  // copy a write and miss a second one made within the same second. For a
+  // position that second write is as often as not the CLOSE — the hour's
+  // funding booked, then the stop or a liquidation, in one executor pass,
+  // each its own commit — and a flat row is not written again until that
+  // market next trades; nor does the flatten below look at a market the
+  // child still holds a row for. Strictly-newer would leave the shared book
+  // showing the closed position open, its margin and its stop with it, for
+  // as long as the market stayed quiet. At a tie the child's row is the
+  // later word: it is what the shared row was copied from, and the shared
+  // side's own writers never race it within a second — the flatten below
+  // never touches a market the child holds, and the held reset
+  // (paper-checkpoint.ts resetBlockedPaperBookIn) runs only for a tenant
+  // with no worker, whose ledger no pass reads. A tie that says the same
+  // thing is not a copy: an unchanged row is still not rewritten (and not
+  // counted) on every pass. An OLDER child row never wins, whatever it says.
+  //
+  // BOTH FROM ONE CHILD READ. The flatten below takes its evidence from the
+  // newest write on each rail across BOTH tables, and two separate reads
+  // could pair an account row from after a close with positions from before
+  // it — evidence from two instants, which is no evidence.
+  let snap: { accounts: Row[]; positions: Row[] };
+  try {
+    snap = await child.tx(async (db) => ({
+      accounts: has("perp_accounts") ? ((await db.prepare(`SELECT ${PERP_ACCOUNT_COLS.join(", ")} FROM perp_accounts`).all()) as Row[]) : [],
+      positions: has("perp_positions") ? ((await db.prepare(`SELECT ${PERP_POSITION_COLS.join(", ")} FROM perp_positions`).all()) as Row[]) : [],
+    }));
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    if (has("perp_accounts")) failed.perp_accounts = why;
+    if (has("perp_positions")) failed.perp_positions = why;
+    return { hasMore };
+  }
+  const foreignAccounts = snap.accounts.filter((r) => !own(r)).length;
+  const foreignPositions = snap.positions.filter((r) => !own(r)).length;
+  const accounts = snap.accounts.filter(own);
+  const positions = snap.positions.filter(own);
+  if (foreignAccounts > 0) copied.perp_accounts_foreign = foreignAccounts;
+  if (foreignPositions > 0) copied.perp_positions_foreign = foreignPositions;
+
+  if (has("perp_accounts")) await step("perp_accounts", async () => {
+    if (!accounts.length) return 0;
+    let n = 0;
+    await shared.tx(async (db) => {
+      for (const r of accounts) {
+        const agent = String(r.agent_id ?? "").toLowerCase();
+        // The row's lock first, so a concurrent pass for the same rail reads
+        // the row this one writes rather than the one before it.
+        await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = ?").run(agent, r.mode);
+        const held = (await db
+          .prepare(`SELECT ${PERP_ACCOUNT_COLS.join(", ")} FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
+          .get(agent, r.mode)) as Row | undefined;
+        const incident = sharedIncident(r.incident_json);
+        if (!held) {
+          n += Number(
+            (await db.prepare(insertSql("perp_accounts", PERP_ACCOUNT_COLS)).run(...valuesOf({ ...r, incident_json: incident }, PERP_ACCOUNT_COLS))).changes,
+          );
+          continue;
+        }
+        // MONOTONIC WHATEVER THE ORDER, like the agents row's ratchets: a
+        // rebuilt child restarts both of these, and neither may go backwards
+        // here — the high-water only rises (compared as integers, never as
+        // the TEXT it is stored in, where "9" sorts above "10"), and a key
+        // once retired stays retired. Everything else follows the newer row
+        // — the CHILD'S ON A TIE, for the reason the snapshots' note above
+        // gives; `changed` below keeps a tie that says nothing new unwritten.
+        const childHigh = textInt(r.nonce_high_water);
+        const heldHigh = textInt(held.nonce_high_water);
+        const high = childHigh === null ? heldHigh : heldHigh === null || childHigh > heldHigh ? childHigh : heldHigh;
+        const retired = [...new Set([...retiredOf(held.retired_pubkeys), ...retiredOf(r.retired_pubkeys)])].sort();
+        const childWins = Number(r.updated_at ?? 0) >= Number(held.updated_at ?? 0);
+        const pick = (c: string) => (childWins ? (r[c] ?? null) : (held[c] ?? null));
+        const next: Row = {
+          account_index: r.account_index ?? held.account_index ?? null,
+          registered_pubkey: childWins ? (r.registered_pubkey ?? held.registered_pubkey ?? null) : (held.registered_pubkey ?? null),
+          retired_pubkeys: JSON.stringify(retired),
+          nonce_high_water: high === null ? null : high.toString(),
+          paper_collateral_micro: pick("paper_collateral_micro"),
+          // Kind and time only, from whichever row wins (sharedIncident).
+          incident_json: childWins ? incident : (held.incident_json ?? null),
+          entries_halted: pick("entries_halted") ?? 0,
+          last_venue_read_at: pick("last_venue_read_at"),
+          last_snapshot_time: Math.max(Number(r.last_snapshot_time ?? 0), Number(held.last_snapshot_time ?? 0)) || null,
+          updated_at: childWins ? r.updated_at : held.updated_at,
+        };
+        const changed = Object.keys(next).some((k) => String(next[k] ?? "") !== String(held[k] ?? ""));
+        if (!changed) continue;
+        n += Number(
+          (await db
+            .prepare(
+              `UPDATE perp_accounts SET account_index = ?, registered_pubkey = ?, retired_pubkeys = ?, nonce_high_water = ?,
+                      paper_collateral_micro = ?, incident_json = ?, entries_halted = ?, last_venue_read_at = ?,
+                      last_snapshot_time = ?, updated_at = ?
+                WHERE agent_id = ? AND mode = ?`,
+            )
+            .run(
+              next.account_index, next.registered_pubkey, next.retired_pubkeys, next.nonce_high_water,
+              next.paper_collateral_micro, next.incident_json, next.entries_halted, next.last_venue_read_at,
+              next.last_snapshot_time, next.updated_at, agent, r.mode,
+            )).changes,
+        );
+      }
+    });
+    return n;
+  });
+
+  if (has("perp_positions")) await step("perp_positions", async () => {
+    if (!positions.length && !accounts.length) return 0;
+    let n = 0;
+    await shared.tx(async (db) => {
+      const setCols = PERP_POSITION_COLS.filter((c) => c !== "agent_id" && c !== "mode" && c !== "market_id");
+      // What a tie is judged on: every copied column but the stamp the two
+      // rows share. IS DISTINCT FROM, so NULL against a level (a stop
+      // cleared, a recorded stop gone with the close) is a difference — and
+      // spelled the same on sqlite (3.39+) and Postgres. One guarded
+      // statement, so the judgement and the write are one row-level step.
+      const tieCols = setCols.filter((c) => c !== "updated_at");
+      for (const r of positions) {
+        const agent = String(r.agent_id ?? "").toLowerCase();
+        const res = await db
+          .prepare(
+            `UPDATE perp_positions SET ${setCols.map((c) => `${c} = ?`).join(", ")}
+              WHERE agent_id = ? AND mode = ? AND market_id = ?
+                AND (updated_at < ? OR (updated_at = ? AND (${tieCols.map((c) => `${c} IS DISTINCT FROM ?`).join(" OR ")})))`,
+          )
+          .run(
+            ...setCols.map((c) => r[c] ?? null), agent, r.mode, r.market_id, r.updated_at, r.updated_at,
+            ...tieCols.map((c) => r[c] ?? null),
+          );
+        if (Number(res.changes) > 0) {
+          n += Number(res.changes);
+          continue;
+        }
+        n += Number((await db.prepare(insertSql("perp_positions", PERP_POSITION_COLS)).run(...valuesOf(r, PERP_POSITION_COLS))).changes);
+      }
+      // A POSITION THE CHILD NO LONGER HOLDS GOES FLAT HERE TOO — but only for
+      // a rail the child can speak for. A paper reset deletes the paper rows;
+      // a rebuilt child that has re-read the venue simply lacks the market it
+      // closed while it was down. Either way the child's newest perp write for
+      // that rail is newer than the stale row here, and that is the evidence.
+      // A rebuilt child that has written nothing yet says nothing, and the
+      // last known book stands — silence is not flatness. Flat as the
+      // worker's own flatten writes it (store.ts setPerpPositions): no side,
+      // no size, no entry, no resting children, and no recorded stop either,
+      // since a flat row that claimed a protected level would be a claim
+      // about a position that is not there.
+      const newest = new Map<string, number>();
+      const held = new Map<string, Set<number>>();
+      const note = (agent: string, mode: string, at: number) => {
+        const k = `${agent} ${mode}`;
+        newest.set(k, Math.max(newest.get(k) ?? 0, at));
+        if (!held.has(k)) held.set(k, new Set());
+      };
+      for (const a of accounts) note(String(a.agent_id ?? "").toLowerCase(), String(a.mode), Number(a.updated_at ?? 0));
+      for (const r of positions) {
+        const agent = String(r.agent_id ?? "").toLowerCase();
+        note(agent, String(r.mode), Number(r.updated_at ?? 0));
+        held.get(`${agent} ${String(r.mode)}`)!.add(Number(r.market_id));
+      }
+      for (const [k, at] of newest) {
+        const [agent, mode] = k.split(" ") as [string, string];
+        const markets = [...(held.get(k) ?? new Set<number>())];
+        const res = await db
+          .prepare(
+            `UPDATE perp_positions SET side = NULL, base = '0', allocated_margin_micro = '0', entry_price = NULL,
+                    stop_trigger = NULL, stop_price = NULL, take_trigger = NULL, take_price = NULL,
+                    recorded_stop_trigger = NULL, recorded_stop_price = NULL, opened_at = NULL,
+                    updated_at = ?
+              WHERE agent_id = ? AND mode = ? AND base <> '0' AND updated_at < ?${
+                markets.length ? ` AND market_id NOT IN (${markets.map(() => "?").join(", ")})` : ""
+              }`,
+          )
+          .run(at, agent, mode, at, ...markets);
+        n += Number(res.changes);
+      }
+    });
+    return n;
+  });
+
+  return { hasMore };
 }

@@ -136,4 +136,20 @@ describe("a crash restart's anchor includes what the dead child booked since the
   it("A REDEPLOY LEAVES NO LEDGER: nothing to copy, and the anchor is derived as before", async () => {
     assert.equal(await finalMirrorBeforeAnchor(TENANT, shared(), path.join(HOME, "children", "0xnobody")), false);
   });
+
+  it("A REMOVED TENANT'S OWNER RECORD WITH NO GRANT TO NAME ITS ACCOUNT: the final copy is NOT finished, so removed-agent cleanup keeps the lease and home; once the account is named, it is", async () => {
+    // The shared database holds no grant for the tenant, as after DELETE /api/grants:
+    // the mirror has no account to copy the record under, and this sqlite is its only copy.
+    childRaw.prepare(`INSERT INTO owner_operations (agent_id, chain_id, user_op_hash, tx_hash, block_number, block_time, log_index, nonce, validator, disposition,
+        review_reason, usdg_legs_json, covers_logs_json, token_moves_json, paymaster, gas_wei, source, recorded_epoch, created_at)
+      VALUES (?, 4663, ?, ?, 10, 100, 3, '0x0', 'root', 'acknowledged', NULL, '[]', '[]', '[]', ?, '1', 'arm-reconcile', 1, ?)`)
+      .run(SMART, `0x${"0f".repeat(32)}`, `0x${"1f".repeat(32)}`, `0x${"0".repeat(40)}`, nowSec());
+    const held = () => Number((sharedRaw.prepare("SELECT COUNT(*) AS n FROM owner_operations").get() as { n: number }).n);
+    assert.equal(await finalMirrorBeforeAnchor(TENANT, shared()), false, "not a finished copy: removedLedgerPending keeps the durability barrier");
+    assert.equal(held(), 0);
+    sharedRaw.exec("CREATE TABLE grants (tenant TEXT PRIMARY KEY, grant_json TEXT NOT NULL)");
+    sharedRaw.prepare("INSERT INTO grants VALUES (?, ?)").run(TENANT, JSON.stringify({ smartAccount: SMART }));
+    assert.equal(await finalMirrorBeforeAnchor(TENANT, shared()), true);
+    assert.equal(held(), 1);
+  });
 });

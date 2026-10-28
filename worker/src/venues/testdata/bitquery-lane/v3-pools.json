@@ -1,0 +1,92 @@
+{
+  "_note": "Recorded-SHAPE fixture, written from the EVM Events shape the worker already reads for Initialize (worker/src/venues/bitquery.ts) and Bitquery's documented PoolCreated examples. Not captured from the live API. Token under test: 0x00000000000000000000000000000000000000c1. Rows 2-6 are each wrong in one way and must be dropped.",
+  "data": {
+    "EVM": {
+      "Events": [
+        {
+          "Block": { "Time": "2026-10-12T00:30:00Z" },
+          "Transaction": { "Hash": "0xaaa1" },
+          "LogHeader": { "Address": "0x1F7D7550B1B028F7571E69A784071F0205FD2EFA" },
+          "Arguments": [
+            { "Name": "token0", "Value": { "address": "0x00000000000000000000000000000000000000C1" } },
+            { "Name": "token1", "Value": { "address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73" } },
+            { "Name": "fee", "Value": { "integer": 10000 } },
+            { "Name": "tickSpacing", "Value": { "integer": 200 } },
+            { "Name": "pool", "Value": { "address": "0x00000000000000000000000000000000000000e1" } }
+          ]
+        },
+        {
+          "Block": { "Time": "2026-10-12T00:31:00Z" },
+          "Transaction": { "Hash": "0xaaa2" },
+          "LogHeader": { "Address": "0x9999999999999999999999999999999999999999" },
+          "Arguments": [
+            { "Name": "token0", "Value": { "address": "0x00000000000000000000000000000000000000c1" } },
+            { "Name": "token1", "Value": { "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168" } },
+            { "Name": "fee", "Value": { "integer": 3000 } },
+            { "Name": "tickSpacing", "Value": { "integer": 60 } },
+            { "Name": "pool", "Value": { "address": "0x00000000000000000000000000000000000000e2" } }
+          ]
+        },
+        {
+          "Block": { "Time": "2026-10-12T00:32:00Z" },
+          "Transaction": { "Hash": "0xaaa3" },
+          "LogHeader": { "Address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa" },
+          "Arguments": [
+            { "Name": "token0", "Value": { "address": "0x00000000000000000000000000000000000000d9" } },
+            { "Name": "token1", "Value": { "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168" } },
+            { "Name": "fee", "Value": { "integer": 3000 } },
+            { "Name": "tickSpacing", "Value": { "integer": 60 } },
+            { "Name": "pool", "Value": { "address": "0x00000000000000000000000000000000000000e3" } }
+          ]
+        },
+        {
+          "Block": { "Time": "2026-10-12T00:33:00Z" },
+          "Transaction": { "Hash": "0xaaa4" },
+          "LogHeader": { "Address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa" },
+          "Arguments": [
+            { "Name": "token0", "Value": { "address": "0x00000000000000000000000000000000000000c1" } },
+            { "Name": "token1", "Value": { "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168" } },
+            { "Name": "fee", "Value": { "integer": 0 } },
+            { "Name": "tickSpacing", "Value": { "integer": 1 } },
+            { "Name": "pool", "Value": { "address": "0x00000000000000000000000000000000000000e4" } }
+          ]
+        },
+        {
+          "Block": { "Time": "2026-10-12T00:34:00Z" },
+          "Transaction": { "Hash": "0xaaa5" },
+          "LogHeader": { "Address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa" },
+          "Arguments": [
+            { "Name": "token0", "Value": { "address": "0x00000000000000000000000000000000000000c1" } },
+            { "Name": "token1", "Value": { "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168" } },
+            { "Name": "fee", "Value": { "integer": 500 } },
+            { "Name": "tickSpacing", "Value": { "integer": 10 } }
+          ]
+        },
+        {
+          "Block": { "Time": "2026-10-12T00:35:00Z" },
+          "Transaction": { "Hash": "0xaaa6" },
+          "LogHeader": { "Address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa" },
+          "Arguments": [
+            { "Name": "token0", "Value": { "address": "0x00000000000000000000000000000000000000c1" } },
+            { "Name": "token1", "Value": { "address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73" } },
+            { "Name": "fee", "Value": { "bigInteger": "10000" } },
+            { "Name": "tickSpacing", "Value": { "integer": 200 } },
+            { "Name": "pool", "Value": { "address": "0x00000000000000000000000000000000000000e1" } }
+          ]
+        },
+        {
+          "Block": { "Time": "2026-10-12T00:36:00Z" },
+          "Transaction": { "Hash": "0xaaa7" },
+          "LogHeader": { "Address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa" },
+          "Arguments": [
+            { "Name": "token0", "Value": { "address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73" } },
+            { "Name": "token1", "Value": { "address": "0x00000000000000000000000000000000000000c1" } },
+            { "Name": "fee", "Value": { "bigInteger": "3000" } },
+            { "Name": "tickSpacing", "Value": { "integer": 60 } },
+            { "Name": "pool", "Value": { "address": "0x00000000000000000000000000000000000000E7" } }
+          ]
+        }
+      ]
+    }
+  }
+}

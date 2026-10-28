@@ -8,6 +8,7 @@
  * intent still clears the policy wall.
  */
 
+import { entryGateFor, lockedLegs } from "../entry-gates";
 import type { TradeIntent } from "../policy";
 import { breakerIdle, opsSpent, type Snapshot, type Strategy, type Tick } from "./types";
 
@@ -52,6 +53,10 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
       // is a claim we can back; 'the deepest' alone is not.
       let best: { token: `0x${string}`; symbol: string; dipBps: number } | null = null;
       let priced = 0;
+      // Priced legs the signed key cannot sell back. Counted apart from
+      // `priced` because they were priced — the sentence for "nothing could be
+      // bought because of the key" is not the sentence for "no price".
+      let locked = 0;
 
       for (const leg of cfg.legs) {
         const p = snap.prices.get(leg.symbol);
@@ -62,6 +67,14 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
         const prevHigh = highs.get(leg.symbol) ?? 0n;
         const high = p.price8 > prevHigh ? p.price8 : prevHigh;
         highs.set(leg.symbol, high);
+        // A LOCKED LEG KEEPS ITS ROLLING HIGH and is never the pick. After the
+        // `highs.set` for the reason the count check below sits after this
+        // loop: a peak that stopped moving while the leg was locked would
+        // measure the first dip after a re-sign against a stale high.
+        if (entryGateFor(snap.entryGates, leg.token)) {
+          locked += 1;
+          continue;
+        }
         if (high === 0n) continue;
 
         const dipBps = Number(((high - p.price8) * 10_000n) / high);
@@ -108,6 +121,16 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
          * `priced > 0` genuinely is "I looked and none were deep enough", and
          * that case stays quiet — it is the strategy working as designed.
          */
+        // EVERY LEG IT PRICED IS ONE THE KEY CANNOT SELL BACK — not "no dip
+        // deep enough", which would be a claim about the market. Whatever the
+        // dips are, there is nothing here this strategy may buy.
+        if (priced > 0 && locked === priced) {
+          return {
+            intents: [],
+            why: [],
+            idle: { code: "legs-locked", legs: cfg.legs.length, locked: lockedLegs(snap.entryGates, cfg.legs) },
+          };
+        }
         const paused = cfg.legs.filter((l) => snap.pausedTokens.has(l.token.toLowerCase())).length;
         return priced === 0 && cfg.legs.length > 0
           ? { intents: [], why: [], idle: { code: "all-legs-stale", legs: cfg.legs.length, paused } }
@@ -160,7 +183,10 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
             code: "dip",
             symbol: best.symbol,
             dipBps: best.dipBps,
-            priced,
+            // The legs it CHOSE among. A locked leg was priced and never a
+            // candidate, so counting it would claim this beat a deeper dip it
+            // was never allowed to buy.
+            priced: priced - locked,
             // THE SIZE ACTUALLY PROPOSED, not the configured one. They differ
             // whenever the signed cap or the day's headroom is the binding
             // constraint, and a reason that quotes the setting instead of the

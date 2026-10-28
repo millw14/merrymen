@@ -75,7 +75,7 @@ it("waits for an expired worker's exit and final mirror before re-sign can use i
   const marker = path.join(childHome(tenant), "keep-me");
   mkdirSync(path.dirname(marker), { recursive: true });
   writeFileSync(marker, "local history");
-  await getGrantStore().put(tenant, grantFor(account, now - 1));
+  await getGrantStore("spot").put(tenant, grantFor(account, now - 1));
   adoptChildForTest(tenant, account, old, leaseFor(tenant, releases));
   let mirrors = 0;
   setRetirementMirrorForTest(async () => { mirrors++; return true; });
@@ -88,9 +88,9 @@ it("waits for an expired worker's exit and final mirror before re-sign can use i
   assert.equal(localChildProcessCountForTest(), countBefore, "exiting process still occupies its cap slot");
   assert.equal(mirrors, 0, "sqlite cannot be read as final while its writer may still run");
   assert.ok(existsSync(marker));
-  assert.ok(await getGrantStore().get(tenant), "expiry keeps the stored grant");
+  assert.ok(await getGrantStore("spot").get(tenant), "expiry keeps the stored grant");
 
-  await getGrantStore().put(tenant, grantFor(account, now + 86_400));
+  await getGrantStore("spot").put(tenant, grantFor(account, now + 86_400));
   await reconcile();
   assert.equal(spawned.length, 0, "a fresh signature cannot arm beside the old writer");
   assert.equal(releases.n, 0);
@@ -104,7 +104,7 @@ it("waits for an expired worker's exit and final mirror before re-sign can use i
   assert.equal(spawned.length, 1, "re-signed grant starts after the barrier clears");
   assert.ok(existsSync(marker), "re-sign reuses the preserved home");
 
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   spawned[0]!.exit();
   setRetirementMirrorForTest(null);
@@ -118,7 +118,7 @@ it("keeps the lease and local barrier on mirror failure, then retries without lo
   const marker = path.join(childHome(tenant), "keep-me");
   mkdirSync(path.dirname(marker), { recursive: true });
   writeFileSync(marker, "unmirrored rows");
-  await getGrantStore().put(tenant, grantFor(account, now - 1));
+  await getGrantStore("spot").put(tenant, grantFor(account, now - 1));
   adoptChildForTest(tenant, account, old, leaseFor(tenant, releases));
   let succeeds = false;
   let mirrors = 0;
@@ -133,7 +133,7 @@ it("keeps the lease and local barrier on mirror failure, then retries without lo
   assert.equal(releases.n, 0);
   assert.ok(existsSync(marker));
 
-  await getGrantStore().put(tenant, grantFor(account, now + 86_400));
+  await getGrantStore("spot").put(tenant, grantFor(account, now + 86_400));
   await reconcile();
   assert.equal(spawned.length, 1, "re-sign remains blocked while mirror fails");
   assert.equal(hasLeaseForTest(tenant), true);
@@ -143,7 +143,7 @@ it("keeps the lease and local barrier on mirror failure, then retries without lo
   assert.equal(isRetiringExpiredForTest(tenant), false);
   assert.equal(spawned.length, 2, "retry succeeds and the re-signed worker arms");
 
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   spawned[1]!.exit();
   setRetirementMirrorForTest(null);
@@ -156,7 +156,7 @@ it("retires an expired hold only after its bot exits, without mirroring an unres
   const marker = path.join(childHome(tenant), "keep-me");
   mkdirSync(path.dirname(marker), { recursive: true });
   writeFileSync(marker, "held history");
-  await getGrantStore().put(tenant, grantFor(account, now - 1));
+  await getGrantStore("spot").put(tenant, grantFor(account, now - 1));
   await adoptHolderForTest(tenant, account, old as unknown as ChildProcess);
   let mirrors = 0;
   setRetirementMirrorForTest(async () => { mirrors++; return true; });
@@ -165,7 +165,7 @@ it("retires an expired hold only after its bot exits, without mirroring an unres
   assert.equal(old.signals[0], "SIGTERM");
   assert.equal(isHeldForTest(tenant), true);
   assert.equal(hasLeaseForTest(tenant), true);
-  await getGrantStore().put(tenant, grantFor(account, now + 86_400));
+  await getGrantStore("spot").put(tenant, grantFor(account, now + 86_400));
   await reconcile();
   assert.equal(spawned.length, 2, "new worker waits for the old bot's exit");
   old.exit();
@@ -177,7 +177,7 @@ it("retires an expired hold only after its bot exits, without mirroring an unres
   assert.equal(spawned.length, 3);
   assert.ok(existsSync(marker));
 
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   spawned[2]!.exit();
   setRetirementMirrorForTest(null);
@@ -189,16 +189,16 @@ it("recovers a process slot at the hard cap when an expired worker exits", async
   for (let i = 0; i < 47; i++) {
     const tenant = address(0xe50 + i);
     const proc = new FakeProc(46_000 + i);
-    await getGrantStore().put(tenant, grantFor(address(0xf50 + i), now + 86_400));
+    await getGrantStore("spot").put(tenant, grantFor(address(0xf50 + i), now + 86_400));
     await adoptHolderForTest(tenant, address(0xf50 + i), proc as unknown as ChildProcess);
     holders.push({ tenant, proc });
   }
   const expired = address(0xe41);
   const queued = address(0xe43);
   const old = new FakeProc(44_004);
-  await getGrantStore().put(expired, grantFor(account, now - 1));
+  await getGrantStore("spot").put(expired, grantFor(account, now - 1));
   adoptChildForTest(expired, account, old, leaseFor(expired, { n: 0 }));
-  await getGrantStore().put(queued, grantFor(address(0xe44), now + 86_400));
+  await getGrantStore("spot").put(queued, grantFor(address(0xe44), now + 86_400));
   setRetirementMirrorForTest(async () => true);
   assert.equal(localChildProcessCountForTest(), 48);
   const before = spawned.length;
@@ -211,9 +211,9 @@ it("recovers a process slot at the hard cap when an expired worker exits", async
   assert.equal(spawned.length, before + 1, "the queued signed grant receives the freed slot");
   assert.equal(localChildProcessCountForTest(), 48);
 
-  for (const { tenant } of holders) await getGrantStore().remove(tenant);
-  await getGrantStore().remove(expired);
-  await getGrantStore().remove(queued);
+  for (const { tenant } of holders) await getGrantStore("spot").remove(tenant);
+  await getGrantStore("spot").remove(expired);
+  await getGrantStore("spot").remove(queued);
   await reconcile();
   for (const { proc } of holders) proc.exit();
   spawned.at(-1)!.exit();

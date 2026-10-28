@@ -63,7 +63,7 @@ export type HolderWallet =
  */
 export async function holderWalletFor(tenant: `0x${string}` | null): Promise<HolderWallet | null> {
   if (!tenant) return null;
-  const store = getSettingsStore();
+  const store = getSettingsStore("spot");
   const proof = (await store.get(tenant))?.holderProof;
   // The two wallets that could count, and nothing else: one small read.
   const claims = await store.holderClaims(isHolderProof(proof) ? [tenant, proof.address] : [tenant]);

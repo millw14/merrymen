@@ -112,6 +112,7 @@ import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.ownAgentOf
 import dev.merrymen.app.ui.ownBookOf
 import dev.merrymen.app.ui.returnOf
+import dev.merrymen.app.ui.publicPerformance
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.showMoneyOf
 import dev.merrymen.app.ui.statsParts
@@ -167,18 +168,29 @@ private fun ArrowLeftIcon(tint: Color, size: Dp = 18.dp) {
 @Composable
 fun AgentDetailScreen(nav: NavHostController, slug: String) {
   val c = LocalContainer.current
-  val reads = remember(c.api, slug) { ProfileReads(c.api, slug) }
-  val slot by reads.profile.collectAsState()
+  val serverTurn by c.repo.serverTurn.collectAsState()
+  val reads = remember(c.api, slug, serverTurn) { ProfileReads(c.api, slug) }
+  val details by reads.profile.collectAsState()
+  val summary by reads.summary.collectAsState()
+  val activity by reads.activity.collectAsState()
+  var detailsRequested by remember(slug, serverTurn) { mutableStateOf(false) }
+  val slot = if (details.state == ReadState.OK) details else summary
   val signedIn by c.repo.signedIn.collectAsState()
   val identityKnown by c.repo.identityKnown.collectAsState()
   val lifecycle = LocalLifecycleOwner.current.lifecycle
   val scope = rememberCoroutineScope()
-  LaunchedEffect(lifecycle, reads) { lifecycle.pollWhileResumed(listOf(reads.loop)) }
-  LaunchedEffect(slug) {
+  LaunchedEffect(lifecycle, reads, detailsRequested) {
+    if (c.api.servers.holds(serverTurn)) lifecycle.pollWhileResumed(reads.loops(detailsRequested))
+  }
+  LaunchedEffect(slug, serverTurn) {
+    if (c.api.servers.holds(serverTurn)) c.social.refreshCounts()
+  }
+  LaunchedEffect(slug, serverTurn, identityKnown) {
+    if (!identityKnown || !c.api.servers.holds(serverTurn)) return@LaunchedEffect
     // What this owner's agent already reads, and this reader's own likes. Both
     // throttled — walking back and forth between desks does not re-poll.
     c.social.refreshWired()
-    c.social.refresh()
+    c.social.refreshMine()
   }
 
   // WHOSE AGENT IS THIS — asked once per wallet (ownAgentOf). Keyed on the
@@ -186,28 +198,35 @@ fun AgentDetailScreen(nav: NavHostController, slug: String) {
   // the last wallet's answer. A feed read that failed settles nothing, and is
   // asked again with the page's own read (every 30s while it is on screen)
   // until one answers; once settled it is not asked again.
-  var ownAgent by remember(signedIn, identityKnown) { mutableStateOf<OwnAgent>(OwnAgent.Asking) }
+  var ownAgent by remember(signedIn, identityKnown, serverTurn) { mutableStateOf<OwnAgent>(OwnAgent.Asking) }
   val askAgain = if (ownAgent is OwnAgent.Known) null else slot.okAtMs
-  LaunchedEffect(signedIn, identityKnown, askAgain) {
+  LaunchedEffect(signedIn, identityKnown, serverTurn, askAgain) {
+    if (!c.api.servers.holds(serverTurn)) return@LaunchedEffect
     if (ownAgent is OwnAgent.Known) return@LaunchedEffect
     ownAgent = ownAgentOf(identityKnown, signedIn) { c.api.feed() }
   }
-  val profile = slot.body.takeIf { slot.state == ReadState.OK }
+  val baseProfile = slot.body.takeIf { slot.state == ReadState.OK }
+  val profile = baseProfile?.let { p ->
+    if (activity.state == ReadState.OK) p.copy(theses = activity.body!!.theses, thesesRead = true) else p
+  }
 
   // THE OWNER'S OWN FIGURES, asked only for a private book and only while
   // signed in, re-asked whenever the public read refreshes. Held WITH the
   // wallet that asked, and dropped the moment the wallet changes: an owner's
   // dollars are never drawn for whoever holds the phone next.
-  val ownRead by produceState<Pair<String, OwnBook>?>(null, signedIn, slug, profile?.publicBook, slot.okAtMs) {
+  val ownRead by produceState<Pair<String, OwnBook>?>(null, signedIn, identityKnown, serverTurn, slug, profile?.publicBook, slot.okAtMs) {
+    value = null
     val who = signedIn
-    value = if (who != null && profile?.publicBook == false) ownBookOf(c.api.ownBook(slug))?.let { who to it } else null
+    value = if (identityKnown && c.api.servers.holds(serverTurn) && who != null && profile?.publicBook == false) ownBookOf(c.api.ownBook(slug))?.let { who to it } else null
   }
   val own = ownRead?.takeIf { it.first == signedIn }?.second
   val known = ownAgent as? OwnAgent.Known
   // A 200 from /own is the server saying this session owns the slug.
   val offerWire = wireOffered(slug, ownKnown = known != null, ownSlug = known?.slug, own = own)
   val showMoney = showMoneyOf(profile?.publicBook, own)
-  val retry: () -> Unit = { scope.launch { reads.loop.readNow(System.currentTimeMillis()) } }
+  val retry: () -> Unit = { scope.launch { reads.summaryLoop.readNow(System.currentTimeMillis()) } }
+  val retryActivity: () -> Unit = { scope.launch { reads.activityLoop.readNow(System.currentTimeMillis()) } }
+  val retryDetails: () -> Unit = { scope.launch { reads.loop.readNow(System.currentTimeMillis()) } }
 
   Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
     AgentBanner(slug)
@@ -237,12 +256,29 @@ fun AgentDetailScreen(nav: NavHostController, slug: String) {
         if (offerWire) {
           WireButton(slug, profile.name ?: slug, onSignIn = { nav.navigate(Routes.SIGN_IN) })
         }
-        Performance(profile, showMoney)
-        Strategy(profile)
-        TopTrades(profile, own, showMoney)
-        BuysAndSells(profile, own, showMoney)
-        Positions(profile)
-        Decisions(profile, showMoney, onRetry = retry)
+        if (!profile.summary) {
+          Performance(profile, showMoney)
+          Strategy(profile)
+          TopTrades(profile, own, showMoney)
+          BuysAndSells(profile, own, showMoney)
+          Positions(profile, nav)
+        } else if (detailsRequested) {
+          ProfileHeading("Performance & trade history")
+          LoadedBlock(failureOf(details) ?: Loaded.Loading, onRetry = retryDetails) { }
+        } else {
+          Text(
+            "Load performance & trade history",
+            Modifier.heightIn(min = 48.dp).clickable { detailsRequested = true }.padding(vertical = 14.dp),
+            style = TextStyle(fontFamily = sans(14.sp), fontSize = 14.sp), color = MerryColors.up,
+          )
+        }
+        staleLine(activity, "recent decisions", System.currentTimeMillis())?.let { ProfileNote(it) }
+        if (activity.state == ReadState.UNREAD && activity.failure == null && profile.thesesRead != true) {
+          ProfileHeading("Recent decisions")
+          LoadedBlock(Loaded.Loading) { }
+        } else {
+          Decisions(profile, showMoney, onRetry = retryActivity)
+        }
       }
     }
     Spacer(Modifier.height(LocalBottomInset.current))
@@ -342,10 +378,10 @@ private fun Performance(p: AgentProfile, showMoney: Boolean) {
         Text(r.label, style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp), color = MerryColors.tx2)
         val bps = r.bps
         Text(
-          pctBps(bps),
-          style = TextStyle(fontFamily = numerals(FontWeight.W600), fontSize = 30.sp, fontWeight = FontWeight.W600, letterSpacing = (-0.03).em),
+          r.state ?: (if (r.estimated) "≈ " else "") + pctBps(bps),
+          style = TextStyle(fontFamily = numerals(FontWeight.W600), fontSize = if (r.state == null) 30.sp else 19.sp, fontWeight = FontWeight.W600, letterSpacing = (-0.03).em),
           color = when {
-            bps == null -> MerryColors.faint
+            bps == null || r.state != null -> MerryColors.faint
             kotlin.math.abs(bps) < 5 -> MerryColors.tx
             bps > 0 -> MerryColors.up
             else -> MerryColors.down
@@ -358,18 +394,24 @@ private fun Performance(p: AgentProfile, showMoney: Boolean) {
       Column(horizontalAlignment = Alignment.End) {
         Text(p.landed?.let { countText(it) } ?: "—", style = TextStyle(fontFamily = numerals(FontWeight.W600), fontSize = 18.sp, fontWeight = FontWeight.W600), color = MerryColors.tx)
         Text("Completed operations", style = TextStyle(fontFamily = sans(11.sp), fontSize = 11.sp), color = MerryColors.faint)
-        p.filledPaper?.takeIf { it > 0 }?.let {
+        p.paperFills?.takeIf { it > 0 }?.let {
           Text("$it paper trades", style = TextStyle(fontFamily = sans(11.sp), fontSize = 11.sp), color = MerryColors.tx2)
         }
       }
     }
     r.note?.let { ProfileNote(it) }
+    p.performance?.let {
+      val view = publicPerformance(it.copy(publicBook = it.publicBook && p.publicBook == true), p.mode, p.pnlBps, p.paperPnlBps)
+      view.value?.let { value -> ProfileNote("Portfolio value: $value") }
+      view.pnl?.let { pnl -> ProfileNote("P&L: $pnl") }
+    }
     drawdownLine(p)?.let { ProfileNote(it) }
     gasLine(p, showMoney)?.let { ProfileNote(it) }
     // THE GATE BEFORE THE DRAW: the line must be the growth index, and the
     // flows divided out of it must have been read from the chain.
     when {
-      p.mode == "paper" -> Unit
+      p.performance?.underReview == true -> Unit
+      p.performance?.book == "paper" || p.mode == "paper" -> Unit
       p.contributionsEvidenced == false -> ProfileNote(
         "The deposits and withdrawals on record for this agent are inferred from balance changes rather than read " +
           "from the chain, so they cannot be divided out of its equity — and a growth figure computed over them would " +
@@ -605,12 +647,13 @@ private fun SwapLine(v: SwapView, nowMs: Long) {
  * private book says so; an unread one says that; neither is "no positions".
  */
 @Composable
-private fun Positions(p: AgentProfile) {
+private fun Positions(p: AgentProfile, nav: NavHostController) {
   Column {
     ProfileHeading("Positions")
     when {
       p.publicBook == true && p.holdingsRead == true && p.holdings.isNotEmpty() -> p.holdings.forEach { h ->
-        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        val token = h.token?.takeIf { Regex("^0x[0-9a-fA-F]{40}$").matches(it) }
+        Row(Modifier.fillMaxWidth().clickable(enabled = token != null) { token?.let { nav.navigate(Routes.token(it)) } }.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
           Text(h.symbol ?: "Token label unavailable", Modifier.weight(1f), style = TextStyle(fontFamily = sans(14.sp, FontWeight.W600), fontSize = 14.sp, fontWeight = FontWeight.W600), color = MerryColors.tx)
           holdingDetail(h.shareBps)?.let { Text(it, style = TextStyle(fontFamily = sans(12.sp), fontSize = 12.sp), color = MerryColors.tx2) }
         }

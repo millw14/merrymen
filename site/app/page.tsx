@@ -104,12 +104,19 @@ const STEPS: [string, string, string][] = [
 ];
 
 async function publicAgents(): Promise<PublicAgent[] | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    const response = await fetch(PUBLIC_LEADERBOARD, { next: { revalidate: 60 } });
+    const response = await fetch(PUBLIC_LEADERBOARD, {
+      next: { revalidate: 60 },
+      signal: controller.signal,
+    });
     if (!response.ok) return null;
     return readPublicAgents(await response.json());
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

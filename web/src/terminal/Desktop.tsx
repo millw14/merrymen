@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { timeOnly } from "@/lib/format";
 import { AgentStrip } from "./AgentStrip";
-import Link from "next/link";
+import Link from "./Link";
 import { useWatchlist } from "./watchlist";
 import { useGroupChatSupported } from "./groupchat";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "./assistant-connect";
@@ -11,6 +12,7 @@ import {
   SlidersHorizontal,
   ArrowDownWideNarrow,
   ChevronDown,
+  ChartNoAxesCombined,
 } from "lucide-react";
 import { Coin, Face, LogoMark, TabIcon, NameBlock, MovingFigure } from "./ui";
 import {
@@ -29,11 +31,15 @@ import {
   type LiveState,
 } from "./live";
 import { positionFigures, positionsOf } from "./account";
+import { positionLabel, tokenForPosition } from "./position-token";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
 import { Board, tradeLine } from "./screens/Board";
 import { performanceOf } from "./agent-performance";
+import { useNow } from "./clock";
+import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
+import { notRunningNote } from "./worker-stale";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -50,10 +56,25 @@ type Actions = {
 export function DesktopHeader({
   mine,
   hasAgent = true,
+  hideBalances = false,
   onScreen,
   onTab,
-}: Actions & { hasAgent?: boolean; mine: LiveMine }) {
+}: Actions & { hasAgent?: boolean; hideBalances?: boolean; mine: LiveMine }) {
+  const displayedAutonomy = recoveryAutonomy(mine.autonomy, mine.recovery);
   const accountMenu = useRef<HTMLDetailsElement>(null);
+  // "/" OPENS SEARCH, as the hint beside the word says (desktop.css). Only
+  // when nothing is being typed into: a slash in the chat composer is a slash.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, select, [contenteditable]")) return;
+      event.preventDefault();
+      onScreen({ kind: "search" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onScreen]);
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
   // The desktop's way into the group chat; hidden where the install has no room.
   const room = useGroupChatSupported();
@@ -88,18 +109,18 @@ export function DesktopHeader({
         {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
             already read "$964" as their deposit does not go on to read a
             footnote. See packages/core/src/autonomy.ts. */}
-        <span className={mine.autonomy.simulated ? "is-simulated" : undefined}>
-          <small>{mine.autonomy.moneyLabel}</small>
+        {!hideBalances && <span className={mine.autonomy.simulated ? "is-simulated" : undefined}>
+          <small>{displayedAutonomy.moneyLabel}</small>
           <strong>{money(mine.glance.cashUsd ?? null)}</strong>
-        </span>
-        <button
+        </span>}
+        {!hideBalances && <button
           className="desktop-fund"
           onClick={() => onScreen({ kind: "deposit" })}
         >
           {hasAgent ? "Add funds" : "Your account"}
-        </button>
+        </button>}
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
-          <summary><Face name={mine.name} slug={mine.slug}/><span>Account</span><ChevronDown size={14}/></summary>
+          <summary><Face name={mine.name} slug={mine.slug}/><span>{hasAgent && mine.name ? mine.name : "Account"}</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
             <Link href="/you">Portfolio</Link>
             <Link href="/settings">Settings</Link>
@@ -126,11 +147,13 @@ export function DesktopSidebar({
   onTab,
   reads,
   retired = null,
+  retiredAgents = [],
 }: Actions & {
   /** Whether each read happened — an empty list is not automatically a quiet one. */
   reads: LiveState["reads"];
   /** Accounts the board folded into a count. See Board. */
   retired?: number | null;
+  retiredAgents?: import("./live").RetiredAgent[];
   tokens: LiveToken[];
   agents: LiveAgent[];
   theses: Thesis[];
@@ -143,8 +166,10 @@ export function DesktopSidebar({
   const [filter, setFilter] = useState("all");
   const watchlist = useWatchlist();
   const [sort, setSort] = useState<"name" | "change">("name");
-  const held = new Set(positionsOf(mine).map((p) => p.symbol));
-  const list = tokens.filter((t) => filter === "held" ? held.has(t.symbol) : filter === "watch" ? watchlist.ids.includes(t.id) : true);
+  // For "as of" on a stale valuation (performanceOf); a minute is fine enough.
+  const nowSec = Math.floor(useNow(60_000) / 1000);
+  const held = new Set(positionsOf(mine).map((p) => tokenForPosition(p, tokens)?.id).filter(Boolean));
+  const list = tokens.filter((t) => filter === "held" ? held.has(t.id) : filter === "watch" ? watchlist.ids.includes(t.id) : true);
   list.sort((a, b) =>
     sort === "name"
       ? a.symbol.localeCompare(b.symbol)
@@ -198,23 +223,23 @@ export function DesktopSidebar({
         hidden={section !== "markets"}
       >
         <div className="desktop-market-heading">
-          <h2>Robinhood Chain</h2>
-          <span>{list.length} {list.length === 1 ? "token" : "tokens"}</span>
+          <h2>Robinhood Chain · {list.length}</h2>
+          <span aria-label="Price and daily change">24h</span>
         </div>
         <div className="desktop-market-tabs">
           <button
             aria-pressed={filter === "all"}
             onClick={() => setFilter("all")}
           >
-            All tokens
+            All
           </button>
           <button
             aria-pressed={filter === "held"}
             onClick={() => setFilter("held")}
           >
-            Your holdings
+            Held
           </button>
-          <button aria-pressed={filter === "watch"} onClick={() => setFilter("watch")}>Watchlist</button>
+          <button aria-pressed={filter === "watch"} onClick={() => setFilter("watch")}>Watch</button>
           <button
             className="desktop-sort"
             title={
@@ -240,16 +265,17 @@ export function DesktopSidebar({
               onClick={() => openToken(t.id)}
             >
               <Coin symbol={t.symbol} logo={t.logo} />
-              <span>
+              {/* ONE LINE PER TOKEN. The name takes whatever width is left
+                  and is cut with an ellipsis (sidebar.css), never wrapped, so
+                  the dotted rule between rows stays straight. */}
+              <span className="desktop-market-name">
                 <strong>{t.symbol}</strong>
-                <small>{t.name}</small>
+                <small title={t.name}>{t.name}</small>
               </span>
-              <span>
-                <strong title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></strong>
-                <small className={deltaClass(t.change24hPct)}>
-                  {pctPts(t.change24hPct)}
-                </small>
-              </span>
+              <strong title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></strong>
+              <small className={deltaClass(t.change24hPct)}>
+                {pctPts(t.change24hPct)}
+              </small>
             </button>
           ))}
           {/* "Markets are unavailable" is a claim about the venue; "we have not
@@ -291,7 +317,7 @@ export function DesktopSidebar({
           </span>
           <span>
             <strong>{money(mine.equity)}</strong>
-            <small>Open chat</small>
+            <small>{pausedRecovery(mine.recovery) ? "Last recorded balance" : "Open chat"}</small>
           </span>
         </button>}
         <div className="desktop-market-heading">
@@ -302,7 +328,11 @@ export function DesktopSidebar({
           {agents
             .filter((a) => a.slug !== mine.slug)
             .map((a) => {
-              const performance = performanceOf(a);
+              const performance = performanceOf(a, nowSec);
+              // The board's words in the figure's place (performanceOf), and
+              // never coloured as a gain or a loss.
+              const figure = performance.state === null ? performance.bps : null;
+              const said = performance.state ?? `${performance.estimated && performance.bps != null ? "≈ " : ""}${pctBps(performance.bps)}`;
               return (
               <button
                 className="sidebar-agent"
@@ -320,24 +350,25 @@ export function DesktopSidebar({
                   */}
                   <small>{tradeLine(a)}</small>
                 </span>
-                <span className="sidebar-agent-performance" title={performance.title} aria-label={`${performance.bookLabel} current value ${performance.value}, return ${pctBps(performance.bps)}, ${tradeLine(a)}`}>
+                <span className="sidebar-agent-performance" title={performance.title} aria-label={`${performance.bookLabel} current value ${performance.value}, return ${said}, ${tradeLine(a)}`}>
                   <strong>{performance.value}</strong>
                   {a.performance && <small>{performance.bookLabel}{performance.held ? " · Pending" : ""}</small>}
                   <strong
                     className={
-                      performance.bps == null
-                        ? ""
-                        : performance.bps < 0
+                      figure == null
+                        ? performance.state !== null ? "performance-state" : ""
+                        : figure < 0
                           ? "down"
-                          : performance.bps > 0
+                          : figure > 0
                             ? "up"
                             : ""
                     }
                   >
-                    {pctBps(performance.bps)}
+                    {said}
                   </strong>
                   {performance.pnl !== null && <small>{performance.pnl} P&L</small>}
-                  {performance.gasIncomplete && <small>Gas accounting unavailable</small>}
+                  {performance.note !== null && <small className="performance-note">{performance.note}</small>}
+                  {performance.asOf !== null && <small className="performance-asof">{performance.asOf}</small>}
                 </span>
               </button>
               );
@@ -373,6 +404,7 @@ export function DesktopSidebar({
           compact
           read={reads.board}
           retired={retired}
+          retiredAgents={retiredAgents}
           agents={agents}
           theses={theses}
           mine={mine}
@@ -380,7 +412,25 @@ export function DesktopSidebar({
           onDesk={() => onTab("agent")}
         />}
       </section>
+      <SidebarFoot live={reads.market === "ok"} />
     </aside>
+  );
+}
+
+/**
+ * The status line under the column: whether the market read answered, and the
+ * clock. The clock is client time, so the server renders a different second
+ * than the browser does a moment later — React is told to accept that for this
+ * one node rather than throw the hydration warning.
+ */
+function SidebarFoot({ live }: { live: boolean }) {
+  const now = useNow(1000);
+  const time = timeOnly(now);
+  return (
+    <div className={live ? "desktop-sidebar-foot live" : "desktop-sidebar-foot"}>
+      <span>{live ? "live" : "offline"}</span>
+      <time suppressHydrationWarning>{time}</time>
+    </div>
   );
 }
 export function DesktopPortfolio({
@@ -401,13 +451,17 @@ export function DesktopPortfolio({
   perTrade: number | null;
   perDay: number | null;
 }) {
+  const recovery = pausedRecovery(mine.recovery);
+  const displayedAutonomy = recoveryAutonomy(mine.autonomy, recovery);
+  const silence = notRunningNote(displayedAutonomy);
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
       <section>
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
-          <span className={`desktop-running ${stopped ? "paused" : ""}`}>
-            {mine.statusLabel ?? "Offline"}
+          {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
+          <span className={`desktop-running ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`}>
+            {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
           </span>
         </div>
         <button className="desktop-agent-id" onClick={() => onTab("agent")}>
@@ -418,11 +472,12 @@ export function DesktopPortfolio({
           </span>
           <ArrowUpRight size={16} />
         </button>
+        {recovery && <span className="account-label recovery-balance-label">Last recorded balance</span>}
         <div className="desktop-balance">
           <BalanceFigure value={mine.equity} />
         </div>
-        <p className={deltaClass(mine.chg24)}>
-          {mine.chg24 == null
+        <p className={recovery ? "meta" : deltaClass(mine.chg24)}>
+          {recovery ? "Reconciliation pending" : mine.chg24 == null
             ? "—"
             : `${mine.chg24 < 0 ? "−" : "+"}${money(Math.abs(mine.chg24))} today`}
         </p>
@@ -437,13 +492,13 @@ export function DesktopPortfolio({
           </button>
         </div>
         <div className={mine.autonomy.simulated ? "desktop-cash is-simulated" : "desktop-cash"}>
-          <span>{mine.autonomy.moneyLabel}</span>
+          <span>{displayedAutonomy.moneyLabel}</span>
           <strong>{money(mine.glance.cashUsd ?? null)}</strong>
         </div>
         {/* THE ONE THING THAT WOULD END IT, where the money is — not in a feed
             event nobody reads. Only ever rendered when the worker itself
             resolved a blocker the owner alone can clear. */}
-        {mine.autonomy.needsOwnerAction && mine.autonomy.action && mine.autonomy.headline && (
+        {!recovery && mine.autonomy.needsOwnerAction && mine.autonomy.action && mine.autonomy.headline && (
           <div className="desktop-blocked" role="status">
             {/* THE HEADLINE COMES FROM THE RULE, not from this file.
                 It was one hardcoded sentence — "needs a free permission
@@ -473,23 +528,30 @@ export function DesktopPortfolio({
             </button>
           </div>
         )}
-        {/* WHAT IS CONNECTED — the same two lines the phone shows on Home.
-
-            Home.tsx only renders below 1100px: above it, App swaps the home
-            and feed tabs for the desktop detail pane, so a desktop owner
-            never saw the strip at all and Telegram went back to being a
-            collapsed drawer eight blocks down the settings form.
-
-            THE SAME COMPONENT, NOT A SECOND COPY. It fetches its own two
-            readings and renders one list; a desktop-shaped duplicate would
-            be a second set of words to drift out of step with the phone's,
-            which is exactly how the settings screen ended up printing
-            "no token" for a fetch that had simply failed.
-
-            `hasAgent` is true by construction here: this component takes a
-            non-nullable `LiveMine`, and App renders it only on `desktop &&
-            mine`. The type is the gate. */}
-        <AgentStrip hasAgent />
+        {/* SINCE WHEN IT HAS BEEN QUIET: the desk's sentence, as a line. No
+            link — nothing an owner signs or sends restarts a process. */}
+        {silence && <p className="meta">{silence}</p>}
+        {/* A KEY ABOUT TO EXPIRE: a line and a link, never the banner above —
+            nothing is wrong yet. Never beside that banner either (the verdict
+            drops the chip wherever a renewal is already offered), and never
+            during a hold, which the chip itself does not know about. */}
+        {!recovery && displayedAutonomy.expiresSoon && (
+          <p className="meta">
+            <a href="/grant#resign">{displayedAutonomy.expiresSoon.label}</a>
+          </p>
+        )}
+      </section>
+      {/* Keep connections visible when Chat/Profile hides the duplicate balance. */}
+      <section className="desktop-connections" aria-label="Agent connections">
+        <div className="desktop-section-heading"><h2>Connections</h2></div>
+        <AgentStrip hasAgent recovery={mine.recovery} funds={mine.recoveryFunds} agentDown={mine.agentDown}/>
+      </section>
+      <section className="desktop-trades-entry">
+        <Link className="owner-trades-link" href="/agent#trades">
+          <ChartNoAxesCombined size={20} aria-hidden="true"/>
+          <span><strong>Trades &amp; P&amp;L</strong><small>View results and P&amp;L cards</small></span>
+          <ArrowUpRight size={16} aria-hidden="true"/>
+        </Link>
       </section>
       {selectedToken && (
         <section className="desktop-token-context">
@@ -517,32 +579,34 @@ export function DesktopPortfolio({
             </strong>
           </div>
           <div className="desktop-cash">
-            <span>Your position</span>
+            <span>{recovery ? "Saved position" : "Your position"}</span>
             <strong>
-              {positionsOf(mine).find((p) => p.symbol === selectedToken.symbol)
-                ?.detail ?? "Not held"}
+              {positionsOf(mine).find((p) => tokenForPosition(p, tokens)?.id === selectedToken.id)
+                ?.detail ?? (recovery ? "No saved position available" : "Not held")}
             </strong>
           </div>
         </section>
       )}
       <section>
         <div className="desktop-section-heading">
-          <h2>Positions</h2>
-          <span>{positionsOf(mine).length}</span>
+          <h2>{recovery ? "Saved positions" : "Positions"}</h2>
+          <span>{recovery && positionsOf(mine).length === 0 ? "—" : positionsOf(mine).length}</span>
         </div>
+        {recovery ? <p className="meta">Reconciliation pending</p> : null}
         {positionsOf(mine).map((p) => {
-          const t = tokens.find((t) => t.symbol === p.symbol);
+          const t = tokenForPosition(p, tokens);
+          const label = positionLabel(p);
           // The value AND the %, never one standing in for the other — see positionFigures.
           const f = positionFigures(p);
           return (
             <button
-              key={p.symbol}
+              key={p.token ?? p.symbol}
               className="desktop-position"
               disabled={!t}
               onClick={() => t && onScreen({ kind: "token", id: t.id })}
             >
-              <Coin symbol={p.symbol} logo={t?.logo ?? ""} />
-              <strong>{p.symbol}</strong>
+              <Coin symbol={label.replace(/^\$/, "")} logo={t?.logo ?? ""} />
+              <strong title={p.token ?? undefined}>{label}</strong>
               <span>
                 {f.value}
                 {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}

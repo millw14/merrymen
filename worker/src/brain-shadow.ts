@@ -26,6 +26,7 @@ import {
   type SnapshotPosition,
 } from "../../packages/core/src/index";
 import { decide, type BrainConfig, type BrainDecision, type BrainResult } from "./brain-client";
+import type { StrategyTerms } from "./strategy-terms";
 import {
   afterFiring,
   DEFAULT_TRIGGERS,
@@ -96,6 +97,12 @@ export interface ShadowInputs {
    */
   expectedTradeGasUsdg: number | null;
   persona?: string;
+  /**
+   * The strategy's own terms, as trusted desk policy. Rendered by
+   * strategy-terms.ts from repo code only — never from the owner's brief or
+   * market text; see DecideArgs.strategyTerms. Absent sends today's request.
+   */
+  strategyTerms?: StrategyTerms | null;
   memory?: string[];
   /** Set when a person asked. Bypasses the movement thresholds, not the budget. */
   userRequested?: boolean;
@@ -232,6 +239,35 @@ export function publishesAView(
       hold_kind: recordedHoldKind(d, market),
     }) !== null
   );
+}
+
+/**
+ * THE GATE AND WHAT IT OVERRODE, as the ledger keeps them.
+ *
+ * These were logged on the `[brain] gate` line and nowhere else, so "how many
+ * holds were the gate's, and how many of those were buys the model wanted?"
+ * was answerable only from logs that rotate. Persisted in `signals_json` (the
+ * owner's copy, never published) so the funnel reads from the ledger.
+ *
+ * VALIDATED, NOT CAST: the decision is service JSON, and a field from a build
+ * newer or older than this one must degrade to null rather than land as
+ * whatever shape it arrived in. Null means "not reported" — never "open",
+ * never zero, never "the model agreed".
+ */
+export function gateSignals(d: Partial<Pick<BrainDecision,
+  "schema_version" | "gate_verdict" | "gate_why" | "gate_caveat_count" | "proposed_action" | "proposed_delta_usdg">>) {
+  const verdict = d.gate_verdict;
+  const proposed = d.proposed_action;
+  const count = d.gate_caveat_count;
+  const delta = d.proposed_delta_usdg;
+  return {
+    schema_version: typeof d.schema_version === "string" ? d.schema_version.slice(0, 32) : null,
+    gate_verdict: verdict === "proceed" || verdict === "downgrade-to-hold" || verdict === "refuse" ? verdict : null,
+    gate_why: typeof d.gate_why === "string" ? d.gate_why.slice(0, 400) : null,
+    gate_caveat_count: typeof count === "number" && Number.isInteger(count) && count >= 0 ? count : null,
+    proposed_action: proposed === "buy" || proposed === "sell" || proposed === "hold" ? proposed : null,
+    proposed_delta_usdg: typeof delta === "number" && Number.isFinite(delta) ? delta : null,
+  };
 }
 
 /**
@@ -403,6 +439,7 @@ export async function runShadow(
       expected_trade_gas_usdg: i.expectedTradeGasUsdg,
     },
     persona: i.persona,
+    strategyTerms: i.strategyTerms,
     memory: i.memory,
     tier: options.tier ?? "research",
   });
@@ -523,6 +560,10 @@ export async function persistBrainDecision(
         snapshot_id: snapshot.snapshotId,
         trigger_id: triggerId,
         trigger_reason: trigger.reason,
+        // The refusal's own code, so a gate refusal on book quality
+        // (`portfolio-quality-insufficient`) is countable without parsing
+        // `reason`. Service text: kept only when it is code-shaped.
+        refusal_reason: result.kind === "refused" && /^[a-z0-9-]{1,48}$/.test(result.reason) ? result.reason : null,
         quality: snapshot.quality,
         cost: result.kind === "refused" ? result.cost : null,
       }),
@@ -559,17 +600,21 @@ export async function persistBrainDecision(
       `delta=${d.suggested_delta_usdg} · depth=${d.depth_used}` +
       (d.escalation_reasons.length ? ` (escalated: ${d.escalation_reasons.join(", ")})` : "") +
       ` · ${d.cost.model_calls} calls ${d.cost.tokens_in + d.cost.tokens_out} tok ` +
-      `$${d.cost.usd.toFixed(4)} ${result.seconds.toFixed(1)}s · decision ${d.decision_id}`,
+      `$${d.cost.usd.toFixed(4)} ${result.seconds.toFixed(1)}s · decision ${d.decision_id}` +
+      (result.strategyTerms ? ` · terms ${result.strategyTerms}` : ""),
   );
   if (lenses) log(`[brain] lenses ${lenses}`);
   // THE GATE, ON ITS OWN LINE, because "the model chose to hold" and "the book
   // was not allowed to be sized" are different events with different remedies
   // and they used to render identically. `may_size` is the gate's own property
   // (verdict === "proceed"), read rather than recomputed here.
+  const gate = gateSignals(d);
   log(
     `[brain] gate ${d.gate_verdict ?? "not-reported"}` +
       ` may_size=${d.gate_verdict === undefined || d.gate_verdict === null ? "unknown" : d.gate_verdict === "proceed"}` +
       ` caveats=${d.gate_caveat_count ?? "unknown"}` +
+      // What the model asked for before the gate, only when the Brain says.
+      (gate.proposed_action ? ` proposed=${gate.proposed_action}` : "") +
       (d.gate_why ? ` · ${d.gate_why}` : ""),
   );
   log(
@@ -662,6 +707,15 @@ export async function persistBrainDecision(
       // This is the pre-trade source, not evidence that anything executed.
       // Actual attempts and fills are recorded by trades.decision_id.
       execution_connected: source === "brain",
+      // THE GATE'S VERDICT AND WHAT IT OVERRODE (see gateSignals). LAST: the
+      // owner's signals view keeps the first 24 scalars (decisions.ts), and
+      // these must not push the fields above out of it.
+      ...gate,
+      // WHETHER THE DESK POLICY REACHED BRAIN: "sent", "withheld" (supplied,
+      // but this Brain did not advertise it or it failed the bounds), or null
+      // when none was supplied. After the gate for the same reason the gate is
+      // last. The terms themselves are repo text and are not copied here.
+      strategy_terms: result.strategyTerms ?? null,
     }),
   }).catch((e) => log(`[brain] decision write failed: ${e instanceof Error ? e.message : String(e)}`));
 }

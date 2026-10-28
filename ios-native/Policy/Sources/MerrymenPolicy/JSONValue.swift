@@ -65,3 +65,16 @@ public enum TradeInput {
         return .object(fields)
     }
 }
+
+/// The stand-down's body, DELETE /api/grants: the web kill switch's own
+/// (web/src/lib/stop-agent.ts). Hosted refuses a body that does not name its
+/// purpose with 400 and deletes nothing, so an old renewal tab cannot discard
+/// a grant by accident; the `{}` this app sent was refused that way.
+/// `expectedTenant` is the wallet that confirmed: a session that has become
+/// another wallet since is refused (409) instead of stopping that one.
+public enum StandDown {
+    public static func body(owner: String) -> JSONValue? {
+        guard owner.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil else { return nil }
+        return .object(["purpose": .string("delete-agent"), "expectedTenant": .string(owner)])
+    }
+}

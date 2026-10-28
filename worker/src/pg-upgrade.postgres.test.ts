@@ -61,7 +61,7 @@ import { seedEnergyDays } from "./energy-seed";
 import { RISK_PERIOD_SCHEMA, startRiskPeriod } from "./risk-period";
 import { sealSecret } from "./store-crypto";
 import { repairAccount } from "./accounting-repair";
-import type { AccountPlan } from "./accounting-reconstruction";
+import { FLOW_SNAPSHOT_COLUMNS, flowFingerprintOf, type AccountPlan } from "./accounting-reconstruction";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 
@@ -127,7 +127,7 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
   try {
     const shared = await makePgDb(scoped("orchestrator"));
     const other = await makePgDb(scoped("web"));
-    const store = (who: string) => new PgSettingsStore(scoped(who), connect);
+    const store = (who: string) => new PgSettingsStore(scoped(who), "spot", connect);
     const now = Date.now();
     const nowSec = Math.floor(now / 1000);
 
@@ -547,15 +547,22 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
         .run(A4, nowSec, nowSec + 86_400);
       await shared.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, source, epoch, chain_id) VALUES (?, 'in', 50, 'inferred', 1, 4663)").run(A4);
       const inferred = (await shared.prepare("SELECT id FROM flows WHERE agent_id = ? AND source = 'inferred'").get(A4)) as { id: number };
+      // A commit needs what the planner captures: the account's whole flow
+      // history fingerprinted, each quarantined row's identity, and a verified
+      // block time on each new receipt.
+      const before = (await shared
+        .prepare(`SELECT ${FLOW_SNAPSHOT_COLUMNS} FROM flows WHERE agent_id = ? ORDER BY id`)
+        .all(A4)) as Record<string, unknown>[];
       const plan = {
         smartAccount: A4,
         epoch: 1,
         blocked: null,
+        flowFingerprint: flowFingerprintOf(before),
         insert: [
-          { agentId: A4, direction: "in", amountUsdg: 50, txHash: "0x" + "a4".repeat(32), blockNumber: 10, logIndex: 1, epoch: 1, source: "chain-log" },
-          { agentId: A4, direction: "out", amountUsdg: 5, txHash: "0x" + "b4".repeat(32), blockNumber: 11, logIndex: 4, epoch: 1, source: "energy-buy" },
+          { agentId: A4, direction: "in", amountUsdg: 50, txHash: "0x" + "a4".repeat(32), blockNumber: 10, logIndex: 1, epoch: 1, source: "chain-log", at: nowSec - 200 },
+          { agentId: A4, direction: "out", amountUsdg: 5, txHash: "0x" + "b4".repeat(32), blockNumber: 11, logIndex: 4, epoch: 1, source: "energy-buy", at: nowSec - 100 },
         ],
-        quarantine: [{ id: inferred.id, reason: "inferred" }],
+        quarantine: [{ id: Number(inferred.id), direction: "in", amountUsdg: 50, source: "inferred", reason: "inferred" }],
         existingTotalUsdg: 50,
         contributionsAfterUsdg: 45,
         contributionsKnownBefore: false,

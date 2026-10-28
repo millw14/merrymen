@@ -366,18 +366,18 @@ let fileRun = 0;
 behavesAsAClaimsRecord("FileSettingsStore", () => {
   // A fresh home per case, so each case starts from no claims.
   process.env.MERRYMEN_HOME = path.join(HOME, `file-${++fileRun}`);
-  return new FileSettingsStore();
+  return new FileSettingsStore("spot");
 });
 
 behavesAsAClaimsRecord("PgSettingsStore (its SQL on sqlite)", () => {
   const client = sqliteClient({ yieldFirst: true });
-  return new PgSettingsStore("postgres://stand-in", async () => client);
+  return new PgSettingsStore("postgres://stand-in", "spot", async () => client);
 });
 
 describe("FileSettingsStore specifics", () => {
   it("claims live beside the settings, never among them — a wallet is not listed as a tenant", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-listing");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.put(A, { strategy: "trencher" });
     await s.claimHolder(W, A);
     assert.deepEqual(await s.listTenants(), [A]);
@@ -385,7 +385,7 @@ describe("FileSettingsStore specifics", () => {
 
   it("no temp file is left behind, won or lost", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-temps");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.claimHolder(W, A);
     await s.claimHolder(W, B);
     assert.deepEqual(readdirSync(path.join(HOME, "file-temps", "holder-claims")), [`${W}.json`]);
@@ -393,7 +393,7 @@ describe("FileSettingsStore specifics", () => {
 
   it("…nor a lock or temp file after a move, a refused move, an undo or a release", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-move-temps");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.takeHolder(W, A, 1);
     const moved = await s.takeHolder(W, B, 2);
     await s.takeHolder(W, A, 3);
@@ -405,7 +405,7 @@ describe("FileSettingsStore specifics", () => {
 
   it("A LOCK LEFT BY A PROCESS THAT DIED HOLDING IT IS BROKEN, never waited on for ever", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-stale-lock");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.takeHolder(W, A, 1);
     const lock = path.join(HOME, "file-stale-lock", "holder-claims", `.${W}.lock`);
     writeFileSync(lock, "4242");
@@ -421,7 +421,7 @@ describe("FileSettingsStore specifics", () => {
     // then removes — by whatever means — must not be that fresh lock, or both
     // are inside at once (two moves past one day's check).
     process.env.MERRYMEN_HOME = path.join(HOME, "file-stale-race");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.takeHolder(W, A, 1);
     const lock = path.join(HOME, "file-stale-race", "holder-claims", `.${W}.lock`);
     writeFileSync(lock, "4242");
@@ -468,7 +468,7 @@ describe("FileSettingsStore specifics", () => {
     // A holder that outlived CLAIM_LOCK_STALE_MS has had its lock broken and
     // taken by another process: its finally must not delete that one.
     process.env.MERRYMEN_HOME = path.join(HOME, "file-own-release");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.takeHolder(W, A, 1);
     const lock = path.join(HOME, "file-own-release", "holder-claims", `.${W}.lock`);
     await lockOf(s).withClaimLock(W as `0x${string}`, async () => {
@@ -492,7 +492,7 @@ describe("FileSettingsStore specifics", () => {
     // judged and linked it back: a lock with a fresh mtime that nobody held,
     // and every claim, move or release of the wallet 'busy' (a 503) for 30 s.
     process.env.MERRYMEN_HOME = path.join(HOME, "file-orphan");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     const dir = path.join(HOME, "file-orphan", "holder-claims");
     const C = tenantN(85);
     await s.takeHolder(W, A, 1);
@@ -549,7 +549,7 @@ describe("FileSettingsStore specifics", () => {
     // outlived CLAIM_LOCK_STALE_MS).
     for (const ending of ["link-back", "delete"] as const) {
       process.env.MERRYMEN_HOME = path.join(HOME, `file-break-${ending}`);
-      const s = new FileSettingsStore();
+      const s = new FileSettingsStore("spot");
       const dir = path.join(HOME, `file-break-${ending}`, "holder-claims");
       await s.takeHolder(W, A, 1);
       const lock = path.join(dir, `.${W}.lock`);
@@ -571,7 +571,7 @@ describe("FileSettingsStore specifics", () => {
 
   it("…but a live one is waited on, and a release waits for the move holding it", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-live-lock");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.takeHolder(W, A, 1);
     const lock = path.join(HOME, "file-live-lock", "holder-claims", `.${W}.lock`);
     writeFileSync(lock, "4242");
@@ -586,7 +586,7 @@ describe("FileSettingsStore specifics", () => {
 
   it("AN UNREADABLE CLAIM IS NOT A FREE WALLET — reading, claiming and releasing all throw", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-corrupt");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.claimHolder(W, A);
     writeFileSync(path.join(HOME, "file-corrupt", "holder-claims", `${W}.json`), "{ not json");
     await assert.rejects(s.holderClaims());
@@ -598,7 +598,7 @@ describe("FileSettingsStore specifics", () => {
 
   it("the backfill record lives beside the claims, not among them, and a torn one throws", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-backfill");
-    const s = new FileSettingsStore();
+    const s = new FileSettingsStore("spot");
     await s.saveHolderBackfill({ startedAt: 5, pending: [] });
     assert.deepEqual(readdirSync(path.join(HOME, "file-backfill")).sort(), ["holder-claims-backfill.json"], "no temp file left behind");
     assert.equal((await s.holderClaims()).size, 0);
@@ -608,14 +608,14 @@ describe("FileSettingsStore specifics", () => {
 
   it("with no claims directory yet, there are simply no claims", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-empty");
-    assert.equal((await new FileSettingsStore().holderClaims()).size, 0);
+    assert.equal((await new FileSettingsStore("spot").holderClaims()).size, 0);
   });
 });
 
 describe("PgSettingsStore specifics", () => {
   it("THE TABLE IS CREATED WITH THE STORE, keyed by wallet", async () => {
     const log: string[] = [];
-    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => sqliteClient({ log }));
     await s.holderClaims();
     assert.ok(
       log.some((q) => /^CREATE TABLE IF NOT EXISTS holder_claims \( wallet TEXT PRIMARY KEY, tenant TEXT NOT NULL, claimed_at BIGINT NOT NULL \)$/.test(q)),
@@ -625,7 +625,7 @@ describe("PgSettingsStore specifics", () => {
 
   it("THE BACKFILL RECORD HAS ITS OWN TABLE, created with the store", async () => {
     const log: string[] = [];
-    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => sqliteClient({ log }));
     await s.holderBackfill();
     assert.ok(
       log.includes("CREATE TABLE IF NOT EXISTS holder_claims_meta ( key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at BIGINT NOT NULL )"),
@@ -635,7 +635,7 @@ describe("PgSettingsStore specifics", () => {
 
   it("THE RELEASE RECORD HAS ITS OWN TABLE, created with the store — never a row a previous build would read as a claim", async () => {
     const log: string[] = [];
-    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => sqliteClient({ log }));
     await s.holderClaims();
     assert.ok(
       log.includes("CREATE TABLE IF NOT EXISTS holder_wallet_moves ( wallet TEXT PRIMARY KEY, last_tenant TEXT NOT NULL, moved_at BIGINT, moved_from TEXT )"),
@@ -656,7 +656,7 @@ describe("PgSettingsStore specifics", () => {
         return real.query(sql, params);
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     await s.takeHolder(W, A, day + HOUR);
     await s.takeHolder(W, B, day + 2 * HOUR);
     await assert.rejects(s.releaseHolderClaims(B));
@@ -701,7 +701,7 @@ describe("PgSettingsStore specifics", () => {
     // just moved there. No claim, no record: C's claim was a first-ever one,
     // C → D a second free move the same day, and again for E and F.
     const { client, db, hook } = hookedClient();
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     const day = Date.UTC(2026, 8, 28);
     const [C, D] = [tenantN(40), tenantN(41)];
     assert.deepEqual(await s.takeHolder(W, A, day - 5 * HOUR), { ok: true, fresh: true }, "A has held W since yesterday");
@@ -731,7 +731,7 @@ describe("PgSettingsStore specifics", () => {
       // B links V in one tab (take V, then release B's others but V) while
       // linking W in another.
       const { client, hook } = hookedClient();
-      const s = new PgSettingsStore("postgres://stand-in", async () => client);
+      const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
       await s.takeHolder(W, A, day - 5 * HOUR);
       await s.takeHolder(V, B, day + 1 * HOUR);
       hook(/^DELETE FROM holder_claims WHERE tenant = \$1 AND wallet <> \$2/, async () => {
@@ -746,7 +746,7 @@ describe("PgSettingsStore specifics", () => {
       // release recorded A's never-moved claim, and the claim now there is a
       // different one — stamped with today's move — that must not go with it.
       const { client, hook } = hookedClient();
-      const s = new PgSettingsStore("postgres://stand-in", async () => client);
+      const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
       await s.takeHolder(W, A, day - 5 * HOUR);
       hook(/^DELETE FROM holder_claims WHERE wallet = \$1 AND tenant = \$2/, async () => {
         assert.equal((await s.takeHolder(W, B, day + 2 * HOUR)).ok, true);
@@ -777,7 +777,7 @@ describe("PgSettingsStore specifics", () => {
         return p;
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => fifo);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => fifo);
     const day = Date.UTC(2026, 8, 28);
     const C = tenantN(43);
     await s.takeHolder(W, A, day - 5 * HOUR);
@@ -813,14 +813,14 @@ describe("PgSettingsStore specifics", () => {
         return real.query(sql, params);
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     assert.deepEqual(await s.takeHolder(W, B, day + 2 * HOUR), { ok: false, movableAt: day + HOUR + DAY, held: false });
     assert.equal((await s.holderClaims()).has(W), false);
   });
 
   it("a record it cannot parse throws, never reads as 'never ran'", async () => {
     const client = sqliteClient();
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     await s.holderBackfill();
     await client.query(`INSERT INTO holder_claims_meta (key, value, updated_at) VALUES ('backfill', '{"startedAt":"soon"}', 1)`);
     await assert.rejects(s.holderBackfill(), /unreadable/);
@@ -832,13 +832,13 @@ describe("PgSettingsStore specifics", () => {
     // The table as the first release created it: three columns, one claim.
     await client.query(`CREATE TABLE holder_claims (wallet TEXT PRIMARY KEY, tenant TEXT NOT NULL, claimed_at BIGINT NOT NULL)`);
     await client.query(`INSERT INTO holder_claims (wallet, tenant, claimed_at) VALUES ($1, $2, $3)`, [W, A, 5]);
-    const first = new PgSettingsStore("postgres://stand-in", async () => client);
+    const first = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     const moved = await first.takeHolder(W, B, Date.UTC(2026, 8, 28));
     assert.deepEqual(moved, { ok: true, fresh: true, from: A, was: { tenant: A, claimedAt: 5, movedAt: null, movedFrom: null } });
     assert.ok(log.includes("ALTER TABLE holder_claims ADD COLUMN moved_at BIGINT"), log.join("\n"));
     assert.ok(log.includes("ALTER TABLE holder_claims ADD COLUMN moved_from TEXT"), log.join("\n"));
     // The other service (or the next start) opens the same database.
-    const second = new PgSettingsStore("postgres://stand-in", async () => client);
+    const second = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     assert.deepEqual(await second.takeHolder(W, tenantN(5), Date.UTC(2026, 8, 28) + HOUR), { ok: false, movableAt: Date.UTC(2026, 8, 29), held: true });
   });
 
@@ -857,7 +857,7 @@ describe("PgSettingsStore specifics", () => {
           return real.query(sql, params);
         },
       };
-      const s = new PgSettingsStore("postgres://stand-in", async () => client);
+      const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
       if (ok) assert.deepEqual(await s.takeHolder(W, A), { ok: true, fresh: true });
       else await assert.rejects(s.takeHolder(W, A), /permission denied/);
     }
@@ -883,7 +883,7 @@ describe("PgSettingsStore specifics", () => {
         return real.query(sql, params);
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     assert.equal(await s.holderBackfill(), null);
     assert.deepEqual(await s.takeHolder(W, A), { ok: true, fresh: true });
   });
@@ -898,7 +898,7 @@ describe("PgSettingsStore specifics", () => {
    */
   it("A FAILED START IS TRIED AGAIN by the next call, not cached for the life of the process", async () => {
     let attempts = 0;
-    const s = new PgSettingsStore("postgres://stand-in", async () => {
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => {
       attempts += 1;
       if (attempts === 1) throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" });
       return sqliteClient();
@@ -912,7 +912,7 @@ describe("PgSettingsStore specifics", () => {
   it("…and a start whose tables fail CLOSES its connection, so retries cannot pile connections up", async () => {
     let opened = 0;
     let closed = 0;
-    const s = new PgSettingsStore("postgres://stand-in", async () => {
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => {
       opened += 1;
       const real = sqliteClient();
       const failing = opened <= 2;
@@ -938,7 +938,7 @@ describe("PgSettingsStore specifics", () => {
 
   it("THE MOVE IS ONE CONDITIONAL UPDATE on the holder and the last move it read", async () => {
     const log: string[] = [];
-    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => sqliteClient({ log }));
     await s.takeHolder(W, A);
     await s.takeHolder(W, B);
     assert.ok(
@@ -964,7 +964,7 @@ describe("PgSettingsStore specifics", () => {
         return real.query(sql, params);
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     await s.takeHolder(W, A, day + HOUR);
     assert.deepEqual(await s.takeHolder(W, B, day + 3 * HOUR), { ok: false, movableAt: day + 2 * HOUR + DAY, held: true });
     assert.equal((await s.holderClaims()).get(W), tenantN(7));
@@ -982,7 +982,7 @@ describe("PgSettingsStore specifics", () => {
         return real.query(sql, params);
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     assert.deepEqual(await s.claimHolder(W, A), { ok: true, fresh: true });
     assert.equal(inserts, 2);
   });
@@ -995,12 +995,12 @@ describe("PgSettingsStore specifics", () => {
         return real.query(sql, params);
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     await assert.rejects(s.claimHolder(W, A), /kept changing/);
   });
 
   it("AN UNREACHABLE DATABASE THROWS — it is never read as 'nobody claims it'", async () => {
-    const s = new PgSettingsStore("postgres://stand-in", async () => {
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => {
       throw new Error("connect ECONNREFUSED");
     });
     await assert.rejects(s.claimHolder(W, A));
@@ -1015,14 +1015,14 @@ describe("PgSettingsStore specifics", () => {
 
   it("release is one conditional DELETE on wallet AND account — and only as recorded", async () => {
     const log: string[] = [];
-    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => sqliteClient({ log }));
     await s.releaseHolder(W, A);
     assert.ok(log.includes(`DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2${AS_RECORDED}`), log.join("\n"));
   });
 
   it("an account's claims go in ONE DELETE on the account — each only as recorded", async () => {
     const log: string[] = [];
-    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => sqliteClient({ log }));
     await s.releaseHolderClaims(A, W);
     await s.releaseHolderClaims(A);
     assert.ok(log.includes(`DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2${AS_RECORDED}`), log.join("\n"));
@@ -1046,7 +1046,7 @@ describe("PgSettingsStore: two services creating the new table at once", () => {
           return real.query(sql, params);
         },
       };
-      const s = new PgSettingsStore("postgres://stand-in", async () => client);
+      const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
       assert.deepEqual(await s.claimHolder(W, A), { ok: true, fresh: true }, code);
     }
   });
@@ -1060,7 +1060,7 @@ describe("PgSettingsStore: two services creating the new table at once", () => {
         return { rows: [] };
       },
     };
-    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const s = new PgSettingsStore("postgres://stand-in", "spot", async () => client);
     await assert.rejects(s.holderClaims(), /permission denied/);
   });
 });

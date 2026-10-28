@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { beforeEach, afterEach, describe, it } from "node:test";
 import {
   parseGeckoPool,
   screenPools,
@@ -8,8 +11,18 @@ import {
   geckoSource,
   readTokenPools,
   readTokenPoolsResult,
+  resetGeckoFeedsForTest,
+  cachedGeckoDetail,
+  geckoRefusal,
   type GeckoPool,
 } from "./geckoterminal";
+import type { FeedResult } from "./fleet-feed-cache";
+
+beforeEach(() => {
+  let now = Date.now();
+  resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; } });
+});
+afterEach(() => resetGeckoFeedsForTest());
 
 describe("authenticated CoinGecko market source", () => {
   it("uses the public feed with no configured credential", () => {
@@ -486,5 +499,325 @@ describe("readTokenPools", () => {
       await readTokenPools(addr("6"));
     });
     assert.equal(calls, 1);
+  });
+});
+
+describe("bounded public fallback", () => {
+  const realFetch = globalThis.fetch;
+  let oldKey: string | undefined, oldHome: string | undefined;
+  beforeEach(() => {
+    oldKey = process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    oldHome = process.env.MERRYMEN_FLEET_HOME;
+    process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-pro-key";
+    delete process.env.MERRYMEN_FLEET_HOME;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (oldKey === undefined) delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY; else process.env.MERRYMEN_COINGECKO_PRO_API_KEY = oldKey;
+    if (oldHome === undefined) delete process.env.MERRYMEN_FLEET_HOME; else process.env.MERRYMEN_FLEET_HOME = oldHome;
+  });
+
+  it("keeps Pro refusal and public success separate, coalesces cached reads, and never sends the key publicly", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = String(input); urls.push(url);
+      assert.equal(init?.redirect, "error");
+      const pro = url.startsWith("https://pro-api.coingecko.com/");
+      assert.equal(new Headers(init?.headers).get("x-cg-pro-api-key"), pro ? "private-pro-key" : null);
+      return pro ? new Response("monthly quota exhausted", { status: 429 }) : Response.json({ data: [CHUMP] });
+    };
+    const first = await fetchGeckoPoolsResult("new_pools");
+    const second = await fetchGeckoPoolsResult("new_pools");
+    assert.equal(first.failed, false);
+    assert.equal(first.provider, "geckoterminal-public");
+    assert.equal(first.primaryFailure, "http-429");
+    assert.equal(first.pools[0]?.buyers24h, 1592);
+    assert.equal(second.observedAt, first.observedAt);
+    assert.equal(urls.length, 2);
+    assert.doesNotMatch(JSON.stringify(first), /private-pro-key|monthly quota/);
+    await fetchGeckoPoolsResult("pools", { page: 2 });
+    assert.equal(urls.length, 3, "a distinct page uses public without another Pro request during cooldown");
+    assert.ok(urls[2]?.startsWith("https://api.geckoterminal.com/"));
+  });
+
+  it("never replaces missing distinct buyers with transaction count on fallback", async () => {
+    const noBuyers = { ...CHUMP, attributes: { ...CHUMP.attributes, transactions: { h24: { buys: 999_999, sells: 999_999 } } } };
+    globalThis.fetch = async input => String(input).includes("pro-api") ? new Response("outage", { status: 503 }) : Response.json({ data: [noBuyers] });
+    const r = await fetchGeckoPoolsResult("pools");
+    assert.equal(r.failed, false);
+    assert.equal(r.pools[0]?.buyers24h, null);
+    const screened = screenPools(r.pools, { minReserveUsd: 1, minVolume24hUsd: 1, minBuyers24h: 1 });
+    assert.equal(screened.kept.length, 0);
+    assert.match(screened.dropped[0]!.why, /unknown buyers/);
+  });
+
+  it("stops after both providers refuse and keeps the public cooldown independent", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return new Response("limited", { status: 429, headers: { "retry-after": "180" } }); };
+    const first = await fetchGeckoPoolsResult("pools");
+    assert.equal(first.failed, true);
+    assert.equal(first.failure, "http-429");
+    assert.equal(first.provider, "geckoterminal-public");
+    const next = await fetchGeckoPoolsResult("new_pools");
+    assert.equal(next.failed, true);
+    assert.equal(next.failure, "provider-cooldown");
+    assert.equal(calls, 2);
+  });
+
+  it("passes only the remaining shared budget to a fallback request", async () => {
+    let now = Date.now();
+    resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; } });
+    const budgets: number[] = [];
+    const result = await cachedGeckoDetail("deadline", async (source, remainingMs) => {
+      budgets.push(remainingMs);
+      if (source.id === "coingecko-pro") { now += 29_000; return { failed: true, failure: "timeout" }; }
+      return { failed: false, observedAt: now };
+    }, failure => ({ failed: true, failure }));
+    assert.equal(result.failed, false);
+    assert.deepEqual(budgets, [30_000, 1000]);
+  });
+
+  it("does not consult public for 401/403 or retry a healthy empty market", async () => {
+    for (const status of [401, 403, 200]) {
+      resetGeckoFeedsForTest();
+      let calls = 0;
+      globalThis.fetch = async () => { calls++; return status === 200 ? Response.json({ data: [] }) : new Response("refused", { status }); };
+      const result = await fetchGeckoPoolsResult("pools");
+      assert.equal(result.provider, "coingecko-pro");
+      assert.equal(result.primaryFailure, undefined);
+      assert.equal(result.failed, status !== 200);
+      assert.equal(calls, 1);
+    }
+  });
+
+  it("keys durable lanes by provider and fleet home instead of reusing the first cache", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "gecko-source-lanes-"));
+    let calls = 0;
+    globalThis.fetch = async input => {
+      calls++;
+      return String(input).includes("pro-api") ? Response.json({ data: [CHUMP] }) : new Response("limited", { status: 429 });
+    };
+    try {
+      process.env.MERRYMEN_FLEET_HOME = path.join(home, "first");
+      delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+      assert.equal((await fetchGeckoPoolsResult("pools")).failure, "http-429");
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-pro-key";
+      assert.equal((await fetchGeckoPoolsResult("pools")).failed, false, "public cooldown does not suppress Pro");
+      process.env.MERRYMEN_FLEET_HOME = path.join(home, "second");
+      assert.equal((await fetchGeckoPoolsResult("pools")).failed, false);
+      assert.equal(calls, 3, "another home has its own coordination store");
+    } finally { resetGeckoFeedsForTest(); rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+describe("the Pro lane's pace, priority and plan latch", () => {
+  const realFetch = globalThis.fetch;
+  const KNOBS = ["MERRYMEN_COINGECKO_PRO_API_KEY", "MERRYMEN_FLEET_HOME", "MERRYMEN_COINGECKO_PRO_SPACING_MS", "MERRYMEN_COINGECKO_MONTHLY_CREDITS"] as const;
+  let saved: Record<string, string | undefined> = {};
+  let now = 0;
+  beforeEach(() => {
+    saved = Object.fromEntries(KNOBS.map(k => [k, process.env[k]]));
+    for (const k of KNOBS) delete process.env[k];
+    process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "private-pro-key";
+    now = 1_000_000;
+    resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; } });
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    resetGeckoFeedsForTest();
+    for (const k of KNOBS) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+  });
+
+  /** When each request reached the provider, on the lane's own clock. */
+  const recordStarts = (starts: number[]) => {
+    globalThis.fetch = (async () => { starts.push(now); return Response.json({ data: [CHUMP] }); }) as typeof globalThis.fetch;
+  };
+
+  it("NO KNOBS: the Pro lane is still spaced 3000 ms", async () => {
+    const starts: number[] = [];
+    recordStarts(starts);
+    await fetchGeckoPoolsResult("pools");
+    await fetchGeckoPoolsResult("new_pools");
+    assert.deepEqual(starts.map(s => s - starts[0]!), [0, 3000]);
+  });
+
+  it("the spacing knob sets the pace, and the credit ceiling clamps it fleet-wide", async () => {
+    const starts: number[] = [];
+    recordStarts(starts);
+    process.env.MERRYMEN_COINGECKO_PRO_SPACING_MS = "800";
+    await fetchGeckoPoolsResult("pools");
+    await fetchGeckoPoolsResult("new_pools");
+    assert.equal(starts[1]! - starts[0]!, 800);
+
+    const home = mkdtempSync(path.join(tmpdir(), "gecko-pace-"));
+    try {
+      resetGeckoFeedsForTest({ now: () => now, sleep: async ms => { now += ms; } });
+      process.env.MERRYMEN_FLEET_HOME = home;
+      process.env.MERRYMEN_COINGECKO_PRO_SPACING_MS = "300";
+      process.env.MERRYMEN_COINGECKO_MONTHLY_CREDITS = "5000000";
+      starts.length = 0;
+      await fetchGeckoPoolsResult("pools");
+      await fetchGeckoPoolsResult("new_pools");
+      assert.equal(starts[1]! - starts[0]!, 741, "70% of 5,000,000 credits over 30 days");
+    } finally { resetGeckoFeedsForTest(); rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it("a Brain evidence detail read is not queued behind the tape", async () => {
+    const starts: Record<string, number> = {};
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      starts[String(input).includes("/trades") ? "evidence" : "tape"] = now;
+      return Response.json({ data: [] });
+    }) as typeof globalThis.fetch;
+    const t = now;
+    await fetchGeckoPoolsResult("trending_pools");
+    // The default row's next slot is t+3000; the evidence read takes its own.
+    const route = `/networks/robinhood/pools/0x${"4".repeat(40)}/trades?token=0x${"3".repeat(40)}`;
+    await cachedGeckoDetail<FeedResult>("evidence-leg", async (source, remainingMs) => {
+      await fetch(`${source.base}${route}`, { signal: AbortSignal.timeout(remainingMs) });
+      return { failed: false, observedAt: now };
+    }, failure => ({ failed: true, failure }), { lane: "evidence", route });
+    assert.equal(starts.tape, t);
+    assert.equal(starts.evidence, t);
+  });
+
+  it("CoinGecko's 10005 body is a plan refusal; the endpoint is latched, never retried publicly, and other endpoints still read", async () => {
+    const urls: string[] = [];
+    const warn = console.warn, lines: string[] = [];
+    console.warn = (line: string) => { lines.push(String(line)); };
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input); urls.push(url);
+      if (url.includes("/trending_pools")) {
+        return new Response(JSON.stringify({ status: { error_code: 10005, error_message: "You may not have access to this endpoint" } }), { status: 401, headers: { "content-type": "application/json" } });
+      }
+      return Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    try {
+      const first = await fetchGeckoPoolsResult("trending_pools");
+      assert.equal(first.failure, "plan-restricted");
+      assert.equal(first.provider, "coingecko-pro");
+      assert.equal(first.primaryFailure, undefined, "rejected authority never falls back to public");
+      assert.doesNotMatch(JSON.stringify(first), /You may not|private-pro-key/);
+      now += 10_000;
+      const page2 = await fetchGeckoPoolsResult("trending_pools", { page: 2 });
+      assert.equal(page2.failure, "plan-restricted");
+      assert.equal(urls.filter(u => u.includes("/trending_pools")).length, 1, "the latched family spends no further requests");
+      assert.equal((await fetchGeckoPoolsResult("new_pools")).failed, false);
+      const latchLines = lines.filter(l => /refused networks\/robinhood\/trending_pools/.test(l));
+      assert.equal(latchLines.length, 1);
+      assert.ok(urls.every(u => u.startsWith("https://pro-api.coingecko.com/")));
+    } finally { console.warn = warn; }
+  });
+
+  /** A Brain-style evidence detail read of one pool's trades, on whichever source the lane picks. */
+  const evidenceRead = (n: string) => {
+    const route = `/networks/robinhood/pools/0x${n.repeat(40)}/trades?token=0x${"3".repeat(40)}`;
+    return cachedGeckoDetail<FeedResult>(`evidence-${n}`, async (source) => {
+      const res = await fetch(`${source.base}${route}`);
+      return res.ok ? { failed: false, observedAt: now } : { failed: true, failure: `http-${res.status}` };
+    }, failure => ({ failed: true, failure }), { lane: "evidence", route });
+  };
+
+  it("WITHOUT A KEY there is no evidence row: every public request stays 6.5 s from the last", async () => {
+    delete process.env.MERRYMEN_COINGECKO_PRO_API_KEY;
+    const starts: number[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      assert.ok(String(input).startsWith("https://api.geckoterminal.com/"));
+      starts.push(now);
+      return Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    await fetchGeckoPoolsResult("trending_pools");
+    await evidenceRead("4");
+    await evidenceRead("5");
+    await fetchGeckoPoolsResult("new_pools");
+    assert.deepEqual(starts.map(s => s - starts[0]!), [0, 6500, 13_000, 19_500]);
+  });
+
+  it("nor during a Pro outage: an evidence read's public fallback waits its 6.5 s turn", async () => {
+    const pub: number[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).includes("pro-api")) return new Response("down", { status: 503 });
+      pub.push(now);
+      return Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    assert.equal((await fetchGeckoPoolsResult("trending_pools")).provider, "geckoterminal-public");
+    const r = await evidenceRead("6");
+    assert.equal(r.provider, "geckoterminal-public");
+    assert.equal(r.primaryFailure, "http-503");
+    assert.deepEqual(pub.map(s => s - pub[0]!), [0, 6500]);
+  });
+
+  it("a plan latch belongs to the key: fixing the key and restarting asks again at once", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "gecko-latch-key-"));
+    const warn = console.warn;
+    console.warn = () => {};
+    const clock = () => ({ now: () => now, sleep: async (ms: number) => { now += ms; } });
+    let asked = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      asked++;
+      return new Headers(init?.headers).get("x-cg-pro-api-key") === "mistyped-pro-key"
+        ? new Response("", { status: 401 })
+        : Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    try {
+      process.env.MERRYMEN_FLEET_HOME = home;
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "mistyped-pro-key";
+      assert.equal((await fetchGeckoPoolsResult("trending_pools")).failure, "http-401");
+      // The operator fixes the key and restarts: same persistent fleet home.
+      now += 10_000;
+      resetGeckoFeedsForTest(clock());
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "fixed-pro-key";
+      const fixed = await fetchGeckoPoolsResult("trending_pools", { page: 2 });
+      assert.equal(fixed.failed, false, "not an hour of plan-restricted after the fix");
+      assert.equal(asked, 2);
+      // The refused key, back inside the hour, is still latched and asks nothing.
+      now += 10_000;
+      resetGeckoFeedsForTest(clock());
+      process.env.MERRYMEN_COINGECKO_PRO_API_KEY = "mistyped-pro-key";
+      assert.equal((await fetchGeckoPoolsResult("trending_pools", { page: 3 })).failure, "plan-restricted");
+      assert.equal(asked, 2);
+    } finally { console.warn = warn; resetGeckoFeedsForTest(); rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it("an X answer's pool read names its budget: a slot that does not come in time is skipped, never waited on or paid for", async () => {
+    const starts: number[] = [];
+    recordStarts(starts);
+    // The tape's own read took the evidence row's slot a moment ago.
+    await fetchGeckoPoolsResult("new_pools", { lane: "evidence" });
+    const t = now;
+    const late = await fetchGeckoPoolsResult("trending_pools", { timeoutMs: 1000, budgetMs: 1000, lane: "evidence" });
+    assert.equal(late.failed, true);
+    assert.match(late.failure ?? "", /^(?:request-budget|timeout)$/);
+    assert.equal(starts.length, 1, "nothing was asked, nothing spent");
+    assert.ok(now - t <= 1000, "and it waited no longer than its budget");
+    // The tape's own read, with no budget named, still reads as it always did.
+    assert.equal((await fetchGeckoPoolsResult("trending_pools")).failed, false);
+    assert.equal(starts.length, 2);
+  });
+
+  it("a 5xx or 429 on Pro is never latched", async () => {
+    let pro = 0;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).includes("pro-api")) { pro++; return new Response("{\"status\":{\"error_code\":10005}}", { status: 503 }); }
+      return Response.json({ data: [CHUMP] });
+    }) as typeof globalThis.fetch;
+    await fetchGeckoPoolsResult("pools");
+    now += 10_000;
+    await fetchGeckoPoolsResult("pools", { page: 2 });
+    assert.equal(pro, 2, "a provider outage is asked again; only a plan refusal latches");
+  });
+});
+
+describe("geckoRefusal", () => {
+  it("reads Retry-After and recognises a plan refusal only on a client error", async () => {
+    const body = JSON.stringify({ status: { error_code: 10005, error_message: "upgrade" } });
+    assert.deepEqual(await geckoRefusal(new Response(body, { status: 401 })), { failure: "plan-restricted", retryAfterMs: 0 });
+    assert.deepEqual(await geckoRefusal(new Response(body, { status: 403 })), { failure: "plan-restricted", retryAfterMs: 0 });
+    assert.deepEqual(await geckoRefusal(new Response("refused", { status: 401 })), { failure: "http-401", retryAfterMs: 0 });
+    assert.deepEqual(await geckoRefusal(new Response(body, { status: 429, headers: { "retry-after": "30" } })), { failure: "http-429", retryAfterMs: 30_000 });
+    assert.deepEqual(await geckoRefusal(new Response(body, { status: 500 })), { failure: "http-500", retryAfterMs: 0 });
+    // A huge body is not read past the bound and is not a plan refusal.
+    assert.equal((await geckoRefusal(new Response(`${"x".repeat(10_000)}${body}`, { status: 401 }))).failure, "http-401");
+    // Test doubles without headers or a body still produce a code.
+    assert.deepEqual(await geckoRefusal({ status: 429 }), { failure: "http-429", retryAfterMs: 0 });
   });
 });

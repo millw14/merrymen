@@ -25,6 +25,7 @@ import {
   TG_GROUPS_GROQ_BASE_URL,
   TG_GROUPS_GROQ_DEFAULT_MODEL,
   TgModelGate,
+  callChoice,
   callText,
   describeTgGroupsModel,
   resolveTgGroupsModel,
@@ -404,6 +405,48 @@ describe("TgModelGate: provider failures pause the model", () => {
     assert.match(logs[0] ?? "", /model-missing/);
   });
 
+  it("an account held over billing pauses ten minutes — a paid bill is back within ten, not at midnight, and never needs a restart", async () => {
+    const g = gate();
+    await g.run(
+      CHAT,
+      fail(
+        "groq 400 — organization_delinquent: Organization has been restricted because of overdue payment(s). Please update the payment method at https://console.groq.com/settings/billing/manage and then contact support.",
+      ),
+    );
+    assert.equal(store.llmPausedUntil(), clock + 10 * MIN);
+    assert.deepEqual(logs, ["[tg-groups] model call failed (billing), paused for ten minutes"]);
+    // Paid meanwhile: the next call after the pause is made, and answers.
+    clock += 10 * MIN;
+    assert.equal(g.available(CHAT), true);
+    assert.equal(await g.run(CHAT, async () => "back"), "back");
+  });
+
+  it("OpenAI's insufficient_quota is billing now, not a daily cap waiting for a midnight that changes nothing", async () => {
+    // A 429 whose code says "quota": it used to reach DAILY_CAP's "quota" and
+    // pause until UTC midnight, as if the day turning over paid the bill.
+    const g = gate();
+    await g.run(CHAT, fail("openai 429 — insufficient_quota: You exceeded your current quota, please check your plan and billing details."));
+    assert.equal(store.llmPausedUntil(), clock + 10 * MIN);
+    assert.match(logs[0] ?? "", /\(billing\)/);
+    // A 402 from an SDK, read by its status, is the same.
+    clock += 11 * MIN;
+    await g.run(CHAT, fail('402 {"error":{"message":"Insufficient credits"}}', { status: 402 }));
+    assert.equal(store.llmPausedUntil(), clock + 10 * MIN);
+    assert.match(logs[1] ?? "", /\(billing\)/);
+  });
+
+  it("Groq's daily limit, with its billing link, is still a daily cap", async () => {
+    const g = gate();
+    await g.run(
+      CHAT,
+      fail(
+        "groq 429 — rate_limit_exceeded: Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01hzq6v3kexample` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99837, Requested 1290. Please try again in 16m31.2s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+      ),
+    );
+    assert.equal(store.llmPausedUntil(), midnight);
+    assert.match(logs[0] ?? "", /daily-cap/);
+  });
+
   it("an SDK error read by its status: an Anthropic 429 pauses, its 401 pauses to midnight", async () => {
     const g = gate();
     await g.run(CHAT, fail('429 {"type":"error","error":{"type":"rate_limit_error"}}', { status: 429 }));
@@ -606,5 +649,31 @@ describe("callText", () => {
   it("throws what the provider said, for the gate to classify", async () => {
     globalThis.fetch = (async () => ({ ok: false, status: 429, text: async () => '{"error":{"code":"rate_limit_exceeded","message":"slow"}}' })) as never;
     await assert.rejects(callText(m, "sys", "go", 900), /429/);
+  });
+});
+
+describe("callChoice", () => {
+  const realFetch = globalThis.fetch;
+  const m: TgModel = { creds: { provider: "groq", transport: "openai", baseUrl: "https://llm.test/v1", apiKey: "k", model: "fake", vision: false }, label: "groq/fake", source: "dedicated" };
+  const spec = { name: "route", description: "pick one", schema: { type: "object", properties: { action: { type: "string", enum: ["a", "b"] } }, required: ["action"], additionalProperties: false } };
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("forces the one tool, with the floor under its budget, and hands back the arguments for code to judge", async () => {
+    let body: { max_tokens?: number; tools?: Array<{ function: { name: string } }>; tool_choice?: { function?: { name: string } } } = {};
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      body = JSON.parse(init.body);
+      return { ok: true, json: async () => ({ choices: [{ message: { tool_calls: [{ function: { name: "route", arguments: '{"action":"b"}' } }] } }] }) };
+    }) as never;
+    assert.deepEqual(await callChoice(m, "sys", "go", spec, 40), { action: "b" });
+    assert.ok((body.max_tokens ?? 0) >= 600);
+    assert.equal(body.tools?.[0]?.function.name, "route");
+    assert.equal(body.tool_choice?.function?.name, "route");
+  });
+
+  it("an answer in words instead of the tool is no choice at all", async () => {
+    globalThis.fetch = (async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: "i pick b" } }] }) })) as never;
+    assert.deepEqual(await callChoice(m, "sys", "go", spec, 600), {});
   });
 });

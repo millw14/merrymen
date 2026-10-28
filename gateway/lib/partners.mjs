@@ -32,7 +32,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rm, stat, utimes } from "node:fs/promises";
 import path from "node:path";
 
 /** Where the Railway volume is mounted. Same variable lib/signups.mjs uses. */
@@ -109,6 +109,19 @@ function sameHash(a, b) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/**
+ * A key's display name as the bridge signs it: at most 64 UTF-16 units, never
+ * ending in half a surrogate pair, and well-formed. The hosted runtime refuses
+ * text that is not, so a 63-character name plus an emoji, cut here, left its
+ * key unable to create a single connection.
+ */
+function displayName(name, keyId) {
+  // Control characters are refused there too; a CLI --name is written as given.
+  let cut = name.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64);
+  if (/[\ud800-\udbff]$/.test(cut)) cut = cut.slice(0, -1);
+  return cut.toWellFormed().trim() || keyId;
+}
+
 /** One registry record, normalised. Unknown scopes are dropped, not honoured. */
 function normalize(rec) {
   if (!rec || typeof rec !== "object") return null;
@@ -120,7 +133,7 @@ function normalize(rec) {
     // Stable across key rotation. Old registry rows retain their original id.
     appId: typeof rec.appId === "string" && /^[a-zA-Z0-9_-]{12,64}$/.test(rec.appId) ? rec.appId : keyId,
     owner: typeof rec.owner === "string" && /^0x[0-9a-fA-F]{40}$/.test(rec.owner) ? rec.owner.toLowerCase() : null,
-    name: typeof rec.name === "string" ? rec.name.slice(0, 64) : keyId,
+    name: typeof rec.name === "string" ? displayName(rec.name, keyId) : keyId,
     hash: typeof rec.hash === "string" ? rec.hash : "",
     scopes,
     rpm: Number.isFinite(rec.rpm) && rec.rpm > 0 ? Math.floor(rec.rpm) : null,
@@ -181,13 +194,169 @@ export async function loadRegistry() {
   return byId;
 }
 
+/**
+ * Cut a JSONL file back to its last complete line. Returns the bytes removed.
+ *
+ * A write that dies part-way (a full volume, a container killed mid-append)
+ * leaves a line with no newline. Skipping it on read is not enough: the NEXT
+ * append is glued onto the fragment, and that whole merged line, a record that
+ * was acknowledged, then fails to parse. In this registry the record lost that
+ * way is typically a revocation, and the key it revoked comes back. Shared with
+ * the billing ledger (lib/billing.mjs), which has the same failure with money.
+ */
+export async function repairTail(file) {
+  let fh;
+  try { fh = await open(file, "r+"); } catch (err) { if (err.code === "ENOENT") return 0; throw err; }
+  try {
+    const { size } = await fh.stat();
+    if (size === 0) return 0;
+    const last = Buffer.alloc(1);
+    await fh.read(last, 0, 1, size - 1);
+    if (last[0] === 0x0a) return 0;
+    let keep = 0;
+    const chunk = Buffer.alloc(64 * 1024);
+    for (let end = size; end > 0;) {
+      const start = Math.max(0, end - chunk.length);
+      const { bytesRead } = await fh.read(chunk, 0, end - start, start);
+      const nl = chunk.subarray(0, bytesRead).lastIndexOf(0x0a);
+      if (nl >= 0) { keep = start + nl + 1; break; }
+      end = start;
+    }
+    await fh.truncate(keep);
+    await fh.sync();
+    return size - keep;
+  } finally {
+    await fh.close();
+  }
+}
+
+/** withAppendLock() gave up: another writer held the file for the whole wait. Nothing was written. */
+export class FileBusy extends Error {}
+
+const LOCK_POLL_MS = 25;
+/** A lock this old belongs to a writer that died mid-append: one ≤ 4 KiB append and its flush never take this long. */
+const LOCK_STALE_MS = 10_000;
+
+/** A held lock's mtime is refreshed this often, so a live holder never looks stale. */
+const LOCK_REFRESH_MS = 2_000;
+/** A `.break` file this old belongs to a breaker that died in the middle of breaking. */
+const BREAK_STALE_MS = 60_000;
+
+/** The token written into a lock, or null when there is no lock. */
+async function lockToken(lock) {
+  try { return (await readFile(lock, "utf8")).trim(); } catch (err) { if (err.code === "ENOENT") return null; throw err; }
+}
+
+/**
+ * Break `lock` if it is stale, one breaker at a time. Breakers serialize on an
+ * exclusive `<lock>.break` file and judge the lock's age only while holding it,
+ * so the lock they remove is the one they judged: no other breaker can replace
+ * it in between, and its owner is gone (a live owner keeps its mtime fresh).
+ * Removing by path after judging it OUTSIDE such a section let one writer
+ * delete the lock a second writer had just broken and re-taken. Nothing here
+ * compares inode numbers, which Linux reuses for the next file created.
+ */
+async function breakIfStale(lock, staleMs, hooks) {
+  const breaker = `${lock}.break`;
+  let bh;
+  try {
+    bh = await open(breaker, "wx");
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    try {
+      const st = await stat(breaker);
+      if (Date.now() - st.mtimeMs > BREAK_STALE_MS) await rm(breaker, { force: true });
+    } catch (e) { if (e.code !== "ENOENT") throw e; }
+    return false;
+  }
+  await bh.close();
+  try {
+    await hooks.breaking?.();
+    let st;
+    try { st = await stat(lock); } catch (err) { if (err.code === "ENOENT") return false; throw err; }
+    const age = Date.now() - st.mtimeMs;
+    if (age <= staleMs) return false;
+    await rm(lock, { force: true });
+    console.error(`[partners] ${path.basename(lock)} was ${Math.round(age / 1000)} s old: a writer died holding it; removed it`);
+    return true;
+  } finally {
+    await rm(breaker, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Run `fn` (a repairTail() and the append after it) holding `<file>.lock`,
+ * so no OTHER PROCESS repairs or appends to `file` meanwhile. The gateway and
+ * the operator CLIs (partners-cli, billing-cli) write the same files. Without
+ * this, one could read the other's line while that write was still being
+ * copied in (a line crossing a page lands in two steps), take it for a torn
+ * tail and truncate it; the truncate waits for the write to finish, then
+ * removes a complete, acknowledged record.
+ *
+ * The lock is a file created exclusively ("wx") holding a random token. While
+ * `fn` runs its mtime is refreshed, so only a lock whose writer died goes
+ * stale, and stale locks are broken one breaker at a time (breakIfStale). On
+ * release it is removed only if it still holds this writer's token. A failed
+ * release is logged, never thrown: `fn`'s write already landed, and a lock left
+ * behind simply goes stale. The wait is bounded by a count of attempts, then
+ * FileBusy, with nothing written. `staleMs`, `refreshMs` and `hooks` exist for
+ * tests to interleave writers.
+ */
+export async function withAppendLock(file, fn, { waitMs = 5_000, staleMs = LOCK_STALE_MS, refreshMs = LOCK_REFRESH_MS, hooks = {} } = {}) {
+  const lock = `${file}.lock`;
+  await mkdir(path.dirname(file), { recursive: true });
+  const attempts = Math.max(1, Math.ceil(waitMs / LOCK_POLL_MS));
+  for (let i = 0; i < attempts; i++) {
+    let fh;
+    try {
+      fh = await open(lock, "wx");
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      let seen = null;
+      try { seen = await stat(lock); } catch (e) { if (e.code !== "ENOENT") throw e; }
+      // Broken: try again at once. Held, or another writer is breaking it: wait a
+      // poll, so a busy breaker does not use up every attempt in a few milliseconds.
+      let broken = false;
+      if (seen && Date.now() - seen.mtimeMs > staleMs) {
+        await hooks.staleSeen?.();
+        broken = await breakIfStale(lock, staleMs, hooks);
+      }
+      if (seen && !broken) await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+      continue;
+    }
+    const token = randomBytes(16).toString("hex");
+    try { await fh.writeFile(`${token}\n`); } finally { await fh.close(); }
+    const refresh = setInterval(() => { const t = new Date(); utimes(lock, t, t).catch(() => {}); }, refreshMs);
+    try {
+      return await fn();
+    } finally {
+      clearInterval(refresh);
+      try {
+        await hooks.beforeRelease?.();
+        if ((await lockToken(lock)) === token) await rm(lock, { force: true });
+      } catch (err) {
+        console.error(`[partners] could not release ${path.basename(lock)} (${err?.code ?? err?.name ?? "error"}); it goes stale in ${Math.round(staleMs / 1000)} s`);
+      }
+    }
+  }
+  throw new FileBusy(`${path.basename(file)} is locked by another writer`);
+}
+
 /** Append a record. Creating and revoking are the same operation on this file. */
 export async function writeRecord(rec) {
   await mkdir(DIR(), { recursive: true });
-  // flush:true for the same reason signups.mjs does it: a container can stop
-  // between the write and the flush, and a revocation is exactly the write that
-  // must not be the one that is lost.
-  await appendFile(FILE(), `${JSON.stringify(rec)}\n`, { encoding: "utf8", flush: true });
+  // Under the lock the CLI takes too (withAppendLock), so neither cuts a line
+  // the other is still writing.
+  await withAppendLock(FILE(), async () => {
+    // Before every append, not only the first: the CLI writes this file too, and
+    // a torn line it leaves would otherwise swallow the gateway's next record.
+    const removed = await repairTail(FILE());
+    if (removed) console.error(`[partners] partners.jsonl ended in a torn line: removed ${removed} bytes before appending`);
+    // flush:true for the same reason signups.mjs does it: a container can stop
+    // between the write and the flush, and a revocation is exactly the write that
+    // must not be the one that is lost.
+    await appendFile(FILE(), `${JSON.stringify(rec)}\n`, { encoding: "utf8", flush: true });
+  });
 }
 
 /**
@@ -244,7 +413,11 @@ export function createPartners({ secret, ttlMs = REGISTRY_TTL_MS, now = () => Da
       if (!rec.hash || !sameHash(rec.hash, hashSecret(secret, parsed.secret))) {
         return { ok: false, status: 401, code: "unauthorized" };
       }
-      return { ok: true, key: { keyId: rec.keyId, appId: rec.appId, name: rec.name, scopes: rec.scopes, rpm: rec.rpm } };
+      // owner and created_at are for metering (lib/billing.mjs): who a request
+      // counts against, and where a Free owner's usage window is anchored. An
+      // operator key has no owner and is never metered.
+      return { ok: true, key: { keyId: rec.keyId, appId: rec.appId, name: rec.name, scopes: rec.scopes, rpm: rec.rpm,
+        owner: rec.owner, created_at: rec.created_at } };
     },
 
     /** Does this verified key carry `scope`? */

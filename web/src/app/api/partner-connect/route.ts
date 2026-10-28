@@ -34,7 +34,7 @@ export async function POST(req: Request) {
     if (!["inspect", "connect"].includes(String(body.action)) || typeof body.token !== "string" || body.token.length > 512) throw new PartnerError(400, "bad_request", "Invalid connection request");
     const connection = await store.byToken(body.token);
     if (!connection) throw new PartnerError(410, "expired", "This setup link has expired or was already used. Ask your app for a new link.");
-    const grant = tenant ? await getGrantStore().get(tenant) : null;
+    const grant = tenant ? await getGrantStore("spot").get(tenant) : null;
     const active = !!grant && grant.expiresAt > Math.floor(Date.now() / 1000);
     if (body.action === "inspect") return json({ id: connection.id, partner_name: connection.partnerName,
       name: connection.name, scopes: connection.scopes, status: connection.status,

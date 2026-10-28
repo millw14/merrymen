@@ -111,7 +111,7 @@ export async function withRoom<T>(fn: (room: Room | null) => Promise<T>): Promis
  * answered as "has no agent", which would tell an owner they are not one.
  */
 export async function agentOf(tenant: `0x${string}`): Promise<string | null> {
-  const grant = await getGrantStore().get(tenant);
+  const grant = await getGrantStore("spot").get(tenant);
   const account = grant?.smartAccount;
   return typeof account === "string" && account ? account.toLowerCase() : null;
 }

@@ -135,12 +135,26 @@ export interface FocusAlternation {
  * and the gap between trades was the hold duration rather than the review
  * interval.
  */
+/**
+ * A PERP KEY IS NEVER A FOCUS (docs/perps.md rule 15: Brain does not propose
+ * perps in v1). Perp positions live in Snapshot.perps and never in holdings,
+ * so none should reach here — this is the second wall, by name, so that no
+ * future caller can hand Brain "BTC-PERP" as a holding or a candidate and
+ * have it reasoned about as a spot token of the same name.
+ */
+const isPerpSymbol = (symbol: string) => /-PERP$/i.test(symbol.trim());
+
 export function chooseFocus(args: {
   /** Stable seed for the tiebreak. Different agents, different questions. */
   agentId: string;
   positions: readonly HeldPosition[];
   universe: readonly UniverseToken[];
   prices: ReadonlyMap<string, QuotedPrice>;
+  /**
+   * LOWERCASED TOKEN ADDRESSES, as `MarketSafety.pausedTokens` fills it
+   * (snapshot.ts). It was read with the SYMBOL, which can never match an
+   * address — so a paused token was offered as a candidate all along.
+   */
   paused: ReadonlySet<string>;
   /** Opt-in. Absent = a held position wins outright, as it always has. */
   alternate?: FocusAlternation;
@@ -148,7 +162,7 @@ export function chooseFocus(args: {
   // Biggest first, and the symbol breaks a tie so two equal positions cannot
   // swap the focus between otherwise identical ticks.
   const open = [...args.positions]
-    .filter((p) => p.valueUsdg > 0)
+    .filter((p) => p.valueUsdg > 0 && !isPerpSymbol(p.symbol))
     .sort((x, y) => y.valueUsdg - x.valueUsdg || x.symbol.localeCompare(y.symbol));
   const held = open[0];
   const heldFocus = (p: HeldPosition): BrainFocus => ({
@@ -197,8 +211,9 @@ export function chooseFocus(args: {
   const eligible = args.universe
     .map((t) => ({ t, q: args.prices.get(t.symbol) }))
     .filter((x): x is { t: UniverseToken; q: QuotedPrice } => {
+      if (isPerpSymbol(x.t.symbol)) return false;
       if (!x.q || x.q.price8 <= 0n) return false;
-      if (args.paused.has(x.t.symbol)) return false;
+      if (args.paused.has(x.t.address.toLowerCase())) return false;
       return !CANNOT_OPEN_ON.has(x.q.source);
     });
   // NOTHING TO ENTER IS NOT A REASON TO REVIEW NOTHING. Reached only when a

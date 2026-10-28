@@ -1,0 +1,81 @@
+{
+ "provenance": {
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "method": "getAccountInfo (base64) of the programdata account, or of the program for loader v2",
+  "note": "file = ELF bytes; onChainLen/sha256OnChain = the bytes after the 45-byte programdata header (or the loader-v2 account data), i.e. the file followed by zero padding"
+ },
+ "programs": [
+  {
+   "name": "jupiter_v6",
+   "file": "jupiter_v6.so",
+   "program": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+   "readSlot": 459262183,
+   "readAtUtc": "2026-10-20T14:24:50+00:00",
+   "onChainLen": 2892224,
+   "sha256OnChain": "099da3a26d336aa7174960f057546f192fc1ccda8e3e9d1b4aa5c69fa8a79a5f",
+   "sha256File": "90bf963f479e220622ae0c233b715aec90ea7a3194712aeff4d98124674cf289",
+   "fileLen": 1999576,
+   "loader": "BPFLoaderUpgradeab1e11111111111111111111111",
+   "programdata": "4Ec7ZxZS6Sbdg5UGSLHbAnM7GQHp2eFd4KYWRexAipQT",
+   "deploySlot": 454465850,
+   "upgradeAuthority": "CvQZZ23qYDWF2RUpxYJ8y9K4skmuvYEEjH7fK58jtipQ"
+  },
+  {
+   "name": "whirlpool",
+   "file": "whirlpool.so",
+   "program": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+   "readSlot": 459262204,
+   "readAtUtc": "2026-10-20T14:24:53+00:00",
+   "onChainLen": 10485715,
+   "sha256OnChain": "c422b22f3eefe86dd55878a4f505b9c68c26e241dc96af1573ca032b24b8ee3f",
+   "sha256File": "94da79f11a6c57646c7483cbee37dbb135d91dbe4c2a6200e3ef24f4ca776273",
+   "fileLen": 1495896,
+   "loader": "BPFLoaderUpgradeab1e11111111111111111111111",
+   "programdata": "CtXfPzz36dH5Ws4UYKZvrQ1Xqzn42ecDW6y8NKuiN8nD",
+   "deploySlot": 457152296,
+   "upgradeAuthority": "GwH3Hiv5mACLX3ufTw1pFsrhSPon5tdw252DBs4Rx4PV"
+  },
+  {
+   "name": "spl_token",
+   "file": "spl_token.so",
+   "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+   "readSlot": 459262239,
+   "readAtUtc": "2026-10-20T14:25:01+00:00",
+   "onChainLen": 108600,
+   "sha256OnChain": "8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697",
+   "sha256File": "8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697",
+   "fileLen": 108600,
+   "loader": "BPFLoaderUpgradeab1e11111111111111111111111",
+   "programdata": "3gvYRKWyXRR9xKWe1ZjPhLY5ZJRN7KDB4rFZFGoJfFk2",
+   "deploySlot": 419472000,
+   "upgradeAuthority": null
+  },
+  {
+   "name": "spl_token_2022",
+   "file": "spl_token_2022.so",
+   "program": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+   "readSlot": 459262249,
+   "readAtUtc": "2026-10-20T14:25:04+00:00",
+   "onChainLen": 1382016,
+   "sha256OnChain": "0999dbf708971e723b08d1caafc988826a59c6001ed6dc02260da07defbe1469",
+   "sha256File": "9bbf90b30e06778ca0feca100b29f0eeb9be576ae024f6323cc207308f51a5d1",
+   "fileLen": 632560,
+   "loader": "BPFLoaderUpgradeab1e11111111111111111111111",
+   "programdata": "DoU57AYuPFu2QU514RktNPG22QhApEjnKxnBcu4BHDTY",
+   "deploySlot": 427147035,
+   "upgradeAuthority": "AeLmXCbPaQHGWRLr2saFsEVfmMNuKnxRAbWCT9P5twgz"
+  },
+  {
+   "name": "spl_ata",
+   "file": "spl_associated_token_account.so",
+   "program": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+   "readSlot": 459262266,
+   "readAtUtc": "2026-10-20T14:25:07+00:00",
+   "onChainLen": 105032,
+   "sha256OnChain": "6804554e69fd3a58caa191dc4a58f4c67223d30ca28ab8987f39fc18d2f7374d",
+   "sha256File": "6804554e69fd3a58caa191dc4a58f4c67223d30ca28ab8987f39fc18d2f7374d",
+   "fileLen": 105032,
+   "loader": "BPFLoader2111111111111111111111111111111111"
+  }
+ ]
+}

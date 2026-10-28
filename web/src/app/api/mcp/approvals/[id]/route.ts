@@ -25,7 +25,7 @@ import { readLedger as withReadDb } from "@/mcp/tool";
 import { settingsReader } from "@/lib/services/settings-view";
 import { quoteTrade } from "@/lib/services/trade-quote";
 import {
-  ProposalError, TERMINAL, approveProposal, cancelIfUnbacked, resumeStranded, changeRow, changedSince, currentValues, expireIfDue, followTrade, ownerOrderCeiling, proposalRow,
+  ProposalError, TERMINAL, approveProposal, cancelIfUnbacked, resumeStranded, changeRow, changedSince, connectionStanding, creationSetupResult, currentValues, expireIfDue, followTrade, ownerOrderCeiling, proposalRow,
   queueApprovedTrade, rejectProposal, resultView, settingsOutcome,
   type Binding, type DraftBinding, type ProposalRow, type Revalidation, type SettingsBinding, type TradeBinding,
 } from "@/lib/services/proposals";
@@ -126,6 +126,18 @@ async function revalidateTrade(tenant: `0x${string}`, b: TradeBinding, now: numb
  * refused and a fresh proposal asked for.
  */
 async function revalidateSettings(tenant: `0x${string}`, b: SettingsBinding | DraftBinding): Promise<Revalidation> {
+  if (b.kind === "agent_draft" && b.purpose === "create") {
+    // Presence only, with no grant decryption. A failed read must never mean
+    // no agent; the generic directory projection tolerates missing tables.
+    try {
+      const { db } = await mcpDb();
+      if (await db.prepare("SELECT 1 AS present FROM grants WHERE tenant = ? LIMIT 1").get(tenant)) {
+        return { ok: false, why: "You already have a Merryman. Open your agent or Wallet & permissions to manage it; this setup cannot change it." };
+      }
+    } catch {
+      throw new ProposalError("upstream_unavailable", "Could not check whether you already have an agent. Nothing was changed; try again.");
+    }
+  }
   const changes = b.kind === "settings" ? b.changes : b.settings;
   const view = await settingsReader().settingsFor(tenant);
   for (const [k, v] of Object.entries(changes)) {
@@ -142,6 +154,10 @@ async function revalidateSettings(tenant: `0x${string}`, b: SettingsBinding | Dr
       if (bad.length) return { ok: false, why: `The basket names ${bad.slice(0, 5).join(", ")}, which ${bad.length === 1 ? "is" : "are"} not a stock token or a token you added in Settings. Nothing was changed.` };
     }
   }
+  // Creation approves a requested setup, not a before/after settings change.
+  // The creation flow shows these values and checks the account again before
+  // writing settings and asking the owner to sign.
+  if (b.kind === "agent_draft" && b.purpose === "create") return { ok: true, notes: [] };
   if (!b.before || typeof b.before !== "object") return { ok: false, why: "This proposal was made before Merrymen recorded your settings with it. Ask your assistant for a fresh one." };
   const changed = changedSince(b.before, await currentValues(tenant, Object.keys(b.before), view));
   if (changed.length) {
@@ -161,6 +177,12 @@ async function runsAnAgent(tenant: `0x${string}`): Promise<boolean> {
  */
 async function settingsCheck(tenant: `0x${string}`, b: SettingsBinding | DraftBinding) {
   const changes = b.kind === "settings" ? b.changes : b.settings;
+  if (b.kind === "agent_draft" && b.purpose === "create") {
+    return {
+      rows: Object.entries(changes).map(([k, value]) => ({ ...changeRow(k, null, value), when_proposed: "not set", changed: false })),
+      changed_since: [], applies_to_running_agent: false, left_out: b.left_out ?? [],
+    };
+  }
   const before = b.before ?? {};
   const now = await currentValues(tenant, Object.keys(changes));
   const changed = new Set(changedSince(before, now));
@@ -233,7 +255,20 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
   const d = await mcpDb();
   const row = await proposalRow(d.db, tenant, id);
   if (!row) return jsonResponse({ error: "not_found" }, 404);
-  return jsonResponse(await view(row, tenant, Math.floor(Date.now() / 1000)));
+  const now = Math.floor(Date.now() / 1000);
+  const shown = await view(row, tenant, now);
+  if (shown.binding.kind === "agent_draft" && shown.binding.purpose === "create" && shown.status === "applied") {
+    // Approved creation is still only a setup handoff. Do not hydrate a
+    // signing flow from an expired setup or a revoked assistant connection.
+    if (row.expires_at <= now) return jsonResponse({ error: "expired", error_description: "This approved setup expired. Ask your assistant for a fresh setup." }, 410);
+    try {
+      const standing = await connectionStanding(d.db, row);
+      if (!standing.ok) return jsonResponse({ error: "forbidden", error_description: `This setup cannot continue because ${standing.why}. Connect your assistant again and request a fresh setup.` }, 403);
+    } catch {
+      return jsonResponse({ error: "upstream_unavailable", error_description: "Could not verify the assistant connection. Try again before continuing setup." }, 503);
+    }
+  }
+  return jsonResponse(shown);
 }
 
 export async function POST(req: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
@@ -278,7 +313,9 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
           return withReadDb((ledger) => queueApprovedTrade(ledger, binding, proposal.id, settings?.tickSeconds ?? 240, Date.now()));
         }
         if (binding.kind === "settings") return applySettings(req, tenant, binding.changes);
-        if (binding.kind === "agent_draft") return applySettings(req, tenant, binding.settings);
+        if (binding.kind === "agent_draft") return binding.purpose === "create"
+          ? { status: "applied", result: creationSetupResult(proposal.id) }
+          : applySettings(req, tenant, binding.settings);
         // A post: the group-chat route's own gate, rate limit and idempotency (clientId = the proposal id).
         const res = await groupchatPost(new Request(`${cfg.issuer}/api/groupchat`, {
           method: "POST",

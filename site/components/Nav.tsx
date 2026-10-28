@@ -8,7 +8,7 @@ import { Icon } from "./Icon";
 
 const links = [
   ["/#features", "Features"], ["/memescope", "Markets"], ["/dashboard", "Agents"],
-  ["/watch", "Activity"], ["/claude", "Claude & MCP"], ["/api", "Developers"], ["/docs", "Docs"],
+  ["/watch", "Activity"], ["/claude", "Claude"], ["/grok", "Grok"], ["/api", "Developers"], ["/docs", "Docs"],
 ];
 function ThemeToggle() {
   const [theme, setTheme] = useState<"light" | "dark">("dark");

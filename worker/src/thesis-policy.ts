@@ -20,8 +20,10 @@
  * POLICY is the worst option available: the two readers drift into different
  * ideas of what may be published, and the drift stays invisible until
  * something private appears on a page. So it moved, and web/src/lib/thesis.ts
- * is a re-export. The module has no imports at all, which is what made that
- * mechanical — it is pure, DB-free, fetch-free and env-free, as below.
+ * is a re-export. The module had no imports at all, which is what made that
+ * mechanical — it is pure, DB-free, fetch-free and env-free, as below. Its one
+ * import since is core's id detector (packages/core/src/ids.ts), which is all
+ * of those things too and which the browser already loads through core.
  *
  * This is the only gate between the decisions table and a page anybody can
  * read, and the decisions table was never built to be published. Three things
@@ -58,6 +60,7 @@
  * PURE. No database, no fetch, no environment. It takes a row and returns a
  * post or null, so the whole policy is testable as a table.
  */
+import { onchainIdIn } from "../../packages/core/src/ids";
 
 /** A joined decision + its outcome, exactly as the route selects it. */
 export interface ThesisRow {
@@ -405,6 +408,37 @@ export const TRADED_ONLY_SOURCES = ["class-route"] as const;
 const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
 
 /**
+ * THE PERPS SOURCES — NEVER PUBLISHABLE IN v1 (docs/perps.md rule 17).
+ *
+ * Every perp decision files under one of these and never under the shared
+ * `strategist`, `brain` or `brain-shadow` keys, which ARE publishable: a model
+ * that proposed "open BTC long" under `strategist` would publish it with a
+ * timestamp, and Lighter's public tape — keyed by account, carrying each
+ * fill's time, size and leverage — would turn that into the agent's venue
+ * account and its live liquidation price for anyone who looked.
+ *
+ * WITHHELD BY ABSENCE, the mechanism every other source here uses: neither key
+ * is in SOURCE_POLICY and neither strategy is in PUBLISHABLE_STRATEGIES, so
+ * `publishableThesis` drops them without being told to — and it is told to
+ * anyway, below, because an absence is only as good as the next person to
+ * tidy the map. thesis-policy.test.ts pins both, the way the strategist's own
+ * absence is pinned.
+ */
+export const WITHHELD_PERP_SOURCES = ["perp-route", "perp:strategist"] as const;
+
+/**
+ * Is this row about perpetuals at all — by its source, its market key or its
+ * action? Any one is enough: a perp decision filed under a publishable source
+ * by mistake still carries a `-PERP` symbol and an `open-long`-shaped action.
+ */
+function isPerpRow(row: Pick<ThesisRow, "source" | "symbol" | "action">): boolean {
+  if (row.source && (row.source.startsWith("perp") || row.source.startsWith("strategy:perp"))) return true;
+  if (row.symbol && /-PERP$/i.test(row.symbol)) return true;
+  if (row.action && /^(?:(?:open|reduce|close)-(?:long|short)|perp-[a-z-]+)$/.test(row.action)) return true;
+  return false;
+}
+
+/**
  * The trade statuses `outcomeOf` calls "landed" — a fill on chain, or on the
  * paper book. Exported for the SQL half of the gate below; outcomeOf keeps its
  * own two arms because the two say different sentences, and thesis-policy.test
@@ -460,8 +494,28 @@ const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULE
  * THE OWNER STILL HEARS IT: `drawdown-breaker` is in owner-refusal.ts's
  * account-wide set, so the event line fires once per change, and the trade row
  * keeps its rule for the owner's desk. Only the public post goes.
+ *
+ * AND THE SERVICE'S OWN HOLDS, which are the same thing one step further from
+ * the coin (worker-admission.ts). `rollout-hold` refuses every intent of a
+ * tenant being brought back at `observe`, and every entry at `exits-only`;
+ * `draining` refuses everything a worker on its way out for a restart was
+ * still handed. Neither is the wall, the market or the account — it is the
+ * service holding the agent back — and a fleet coming back from a hold writes
+ * one on every tick, for every producer, the Brain's re-reviews included. Left
+ * in the feed, the recovery would be the feed. The owner still hears these
+ * on their own order (sayTradeOutcome reads the trade row's rule, which keeps
+ * its sentence below), and the row stays in the ledger.
  */
-export const ACCOUNT_HALT_RULES = ["drawdown-breaker"] as const;
+export const ACCOUNT_HALT_RULES = [
+  "drawdown-breaker",
+  "rollout-hold",
+  "draining",
+  // THE BREAKER'S STAND-IN WHILE LIGHTER IS UNREAD (policy.ts, docs/perps.md
+  // rule 11): every non-exit intent is refused for the same reason, so a
+  // refusal on it says nothing about the coin — and, published, it would say
+  // the agent trades perps, which nothing public may (rule 17). Withheld below.
+  "perp-unpriced",
+] as const;
 const IS_ACCOUNT_HALT: ReadonlySet<string> = new Set<string>(ACCOUNT_HALT_RULES);
 
 /**
@@ -617,7 +671,10 @@ export function estimatedBasis(t: string): string {
  * sell is estimated exactly when that first one is at or before it, which is
  * the EXISTS this replaced. One pass over those accounts' histories, through
  * `trades_agent_time`, per statement — no index is added (the rule on
- * `trades`), and none is needed.
+ * `trades`), and none is needed. MATERIALIZED is an execution boundary here:
+ * PostgreSQL can otherwise inline basis_quote below the per-decision join and
+ * rescan the entire quote history for every decision when it expects no quotes.
+ * Both supported engines understand the hint; the rows and proof are unchanged.
  *
  * `since` is the read's own window, widened by a day so a trade written a
  * moment before its decision's clock is still in scope (and one that is not
@@ -637,7 +694,7 @@ export function basisScope(opts: { since: number; accounts?: readonly string[] |
         SELECT DISTINCT br.agent_id AS agent_id FROM trades br
          WHERE br.basis_source = 'receipt' AND COALESCE(br.fill_side, 'sell') <> 'buy' AND br.created_at > ?
            ${only}
-      ), basis_quote AS (
+      ), basis_quote AS MATERIALIZED (
         SELECT bq.agent_id AS agent_id, LOWER(bq.buy_token) AS tok, MIN(bq.created_at) AS first_at
           FROM trades bq
          WHERE bq.basis_source = 'quote' AND bq.agent_id IN (SELECT agent_id FROM basis_read)
@@ -670,8 +727,20 @@ export function markFigures(d: string): string {
  *
  * `rh:` is included because the brokerage rail's agent id embeds an account
  * number, and a reason that quoted one would publish it.
+ *
+ * A Solana key or signature has no 0x, so `addressy` also asks core's
+ * detector, which finds base58 ids and Solana explorer links. Its glued scan
+ * (audit regressions F3), as X and social takes use it: a model post ending
+ * "CA<mint>" or "<mint>is" names the mint as surely as one with a space
+ * before it. The cost is a run of 43 or more base58 characters with no break
+ * (a long camelCase hashtag, "commit<sha>", a long number glued to a word as
+ * in "<digits>tokens"), which may read as an id glued to its neighbours: the
+ * post is withheld, which is the failure this gate is allowed. Prose, tickers,
+ * URLs and short hashtags never do.
  */
 const ADDRESSY = /\b(?:0x[0-9a-fA-F]{6,}|rh:[A-Za-z0-9-]{1,64})\b/;
+const GLUED = { glued: true } as const;
+const addressy = (s: string): boolean => ADDRESSY.test(s) || onchainIdIn(s, GLUED);
 
 /** Matches the `/why` truncation point, so no surface cuts one mid-word. */
 /**
@@ -723,11 +792,11 @@ export function clip(text: string, max: number = REASON_MAX): string {
 /**
  * The public id's shape, duplicated from identity-store's SLUG_RE on purpose.
  *
- * This module has NO IMPORTS — that is what let it move out of web/src/lib and
- * be read by the orchestrator as well as the browser — and importing a store
- * that reaches for node:fs and pg would end that immediately. A 16-character
- * base32 alphabet is not going to drift, and identity-store's own tests pin the
- * generator against exactly this shape.
+ * This module imports nothing but core's pure id detector — that is what let
+ * it move out of web/src/lib and be read by the orchestrator as well as the
+ * browser — and importing a store that reaches for node:fs and pg would end
+ * that immediately. A 16-character base32 alphabet is not going to drift, and
+ * identity-store's own tests pin the generator against exactly this shape.
  */
 const SLUG_SHAPE = /^[0-9a-hjkmnp-tv-z]{16}$/;
 
@@ -863,6 +932,16 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // gas-limits.ts `checkPrefund`: the fee the network holds up front.
   "prefund-short": "the account did not hold enough to cover the network fee up front",
   "prefund-unverified": "the up-front network fee could not be checked against the account's balance",
+  // ── THE WORKER'S OWN ADMISSION, NOT THE WALL ────────────────────────────
+  //
+  // worker-admission.ts, at the top of the intent queue: a tenant being
+  // brought back after a hold one level at a time, or a worker on its way out
+  // for a restart. Neither is the owner's signature or the market — it is the
+  // service holding the agent back, and the sentence says so, so nobody goes
+  // looking through their permissions for it. No remedy: there is nothing for
+  // the owner to change.
+  "rollout-hold": "trading is on hold for this agent while the service brings agents back",
+  draining: "the agent was restarting and took no new trades",
 });
 
 /**
@@ -917,6 +996,220 @@ export function isMarketRefusal(rule: string | null | undefined): boolean {
  * catch-all — the same refusal `outcomeOf` makes one line below.
  */
 export const REJECT_RULES: readonly string[] = Object.freeze(Object.keys(R));
+
+/**
+ * RULES THE OWNER HEARS AND THE PUBLIC NEVER DOES — each with why it is
+ * withheld, the owner's sentence, and the owner's remedy.
+ *
+ * `R` above is the public register and an entry there is a publication
+ * decision: the wall band groups by it and the feed renders it. The perp rules
+ * are withheld as a CLASS (docs/perps.md rule 17 — no perp decision, order or
+ * refusal reaches the feed, theses, X or the leaderboard's trade lists in v1),
+ * and a slug like "perp-unpriced" on a public lane would say the account trades
+ * perps just as surely as a fill would. But withholding a rule from the public
+ * is not withholding it from the person who can act on it, which is the
+ * mistake `no-exit` was: every entry here carries the owner's words.
+ *
+ * wall-vocabulary.test.ts reads this map as the second half of "published or
+ * withheld WITH A REASON", and holds every entry to an owner sentence, a
+ * remedy, and no public label.
+ */
+/**
+ * Why every perp rule is withheld: one reason, stated once, because it is one
+ * decision (docs/perps.md rule 17) — not twenty-four that happen to agree.
+ */
+const PERP_WHY =
+  "a perp rule (rule 17): perps are never published in v1, and a refusal naming one would say the account trades " +
+  "perps just as surely as a fill would.";
+
+export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner: string; remedy: string }>> =
+  Object.freeze({
+    // A PERPS WALLET'S WORKER TRADES PERPETUALS AND NOTHING ELSE (index.ts
+    // processIntentLocked): a token trade asked of it — typed in a chat,
+    // queued from the app, a self-test — is refused before anything is read,
+    // and no `trades` row is written for it. Withheld as every perp rule is:
+    // its slug would say the account is a Perps wallet's.
+    "perps-wallet-spot": {
+      why: PERP_WHY,
+      owner: "this is the agent of your Perps wallet, which trades perpetuals only and never buys, sells or sends tokens",
+      remedy: "Trade tokens from your Spot wallet's agent instead; your Perps wallet trades perpetuals only.",
+    },
+    "perp-unpriced": {
+      why: PERP_WHY,
+      owner:
+        "Lighter could not be read, and money was at the venue when it last was, so nothing new is opened until it " +
+        "reads again — exits still go out",
+      remedy:
+        "Nothing to do if it clears within a few minutes. If it lasts, close your Lighter positions from the Perpetuals " +
+        "panel on the dashboard — closes are never blocked by this.",
+    },
+    // ── the perps rail (exec-mode.ts perpsModeOf) ────────────────────────────
+    "perp-not-enabled": {
+      why: PERP_WHY,
+      owner: "perpetuals are off for this agent, so nothing is opened on Lighter",
+      remedy: "Turn perpetuals on in Settings, under Perpetuals, on the dashboard — chat and Telegram cannot.",
+    },
+    "perp-live-not-enabled": {
+      why: PERP_WHY,
+      owner:
+        "this account trades for real and real-money perpetuals are not switched on, so it does not trade them — a " +
+        "live account never runs practice perps beside its real book",
+      remedy: "Switch on real perpetuals in Settings, under Perpetuals, on the dashboard, once you have read what they can lose.",
+    },
+    "perp-not-granted": {
+      why: PERP_WHY,
+      owner: "the permission you signed does not include perpetuals",
+      remedy: "Re-sign your trading permission at /grant with perpetuals included — it is free.",
+    },
+    "perp-venue-unready": {
+      why: PERP_WHY,
+      owner:
+        "the agent's Lighter account is not ready yet — its first deposit, account number or trading key is still " +
+        "being set up, or Lighter could not be reached",
+      remedy:
+        "Nothing to do if it clears within a few minutes. If it lasts, the Perpetuals panel on the dashboard shows which " +
+        "step is waiting.",
+    },
+    "perp-operator-off": {
+      why: PERP_WHY,
+      owner: "the operator of this server has perpetuals switched off here, or allows only practice ones",
+      remedy: "Nothing in your Settings changes this — it is the server operator's choice.",
+    },
+    "perp-live-not-yet": {
+      why: PERP_WHY,
+      owner:
+        "this account trades for real, and real-money perpetuals are not available in this version yet — a live " +
+        "account never runs practice perps beside its real book",
+      remedy: "Nothing to do now. Practice perpetuals run while the account is on paper; real ones arrive in a later version.",
+    },
+    // ── the market ───────────────────────────────────────────────────────────
+    "perp-market-not-allowed": {
+      why: PERP_WHY,
+      owner: "that perpetual market is not one of the markets you allowed",
+      remedy: "Add it to your perpetual markets in Settings, under Perpetuals, if you want the agent to trade it.",
+    },
+    "perp-market-inactive": {
+      why: PERP_WHY,
+      owner: "Lighter is not taking new positions on that market right now, or its terms could not be read",
+      remedy: "Nothing to do — it clears when the market is open again. Closes are never blocked by this.",
+    },
+    // ── the account-wide stops ───────────────────────────────────────────────
+    "perp-venue-incident": {
+      why: PERP_WHY,
+      owner:
+        "Lighter shows activity on the agent's account that the agent did not sign, so every open is refused and open " +
+        "positions are being closed",
+      remedy:
+        "Treat the trading key as compromised: replace it with your owner key using `merrymen recover`, then clear the " +
+        "alert on the dashboard.",
+    },
+    "perp-entries-halted": {
+      why: PERP_WHY,
+      owner: "new perpetual positions are paused — closes and stops still run",
+      remedy: "Resume them on the dashboard, under Perpetuals, when you are ready.",
+    },
+    "perp-grant-expiring": {
+      why: PERP_WHY,
+      owner: "your signed permission expires within a day, so no new perpetual positions are opened — closes and stops still run",
+      remedy: "Re-sign your trading permission at /grant.",
+    },
+    // ── what is already there ────────────────────────────────────────────────
+    "perp-add-to-position": {
+      why: PERP_WHY,
+      owner: "there is already a position on that market, and an open never adds to one or flips it",
+      remedy: "Nothing to do. Close the position from the Perpetuals panel first if you want a fresh one.",
+    },
+    "perp-close-in-flight": {
+      why: PERP_WHY,
+      owner: "an order on that market has no final answer from Lighter yet, so nothing new is signed on top of it",
+      remedy: "Nothing to do — it clears on its own as soon as Lighter answers.",
+    },
+    "perp-no-position": {
+      why: PERP_WHY,
+      owner: "there was no position on that market to close",
+      remedy: "Nothing to do — the Perpetuals panel on the dashboard shows what is open.",
+    },
+    "perp-side-mismatch": {
+      why: PERP_WHY,
+      owner: "the close named the wrong side of the position, so it was refused rather than read as a new position",
+      remedy: "Close it from the Perpetuals panel on the dashboard, which always names the side held.",
+    },
+    // ── leverage, the stop and the order's shape ─────────────────────────────
+    "perp-leverage-unset": {
+      why: PERP_WHY,
+      owner:
+        "Lighter does not yet hold that market at the leverage you set, with its margin kept separate — it is set " +
+        "only while the market has no position",
+      remedy: "Nothing to do — the agent sets it on its own the next time the market is flat.",
+    },
+    "perp-leverage-mismatch": {
+      why: PERP_WHY,
+      owner: "the leverage on that order is not the one you set, or not the one Lighter holds for the market",
+      remedy:
+        "Nothing to do — no model ever chooses leverage. A new leverage setting applies the next time the market has no " +
+        "position.",
+    },
+    "perp-stop-required": {
+      why: PERP_WHY,
+      owner: "every open carries its own stop at Lighter, and this one's stop was missing or out of place",
+      remedy:
+        "Nothing to do when the agent proposed it — it never opens without a stop. An order of your own needs a stop " +
+        "inside your stop-loss setting.",
+    },
+    "perp-stop-inside-liquidation": {
+      why: PERP_WHY,
+      owner: "at that leverage Lighter could liquidate the position before its stop fills",
+      remedy: "Lower the leverage or the stop-loss distance in Settings, under Perpetuals, so the stop sits well inside liquidation.",
+    },
+    "perp-order-malformed": {
+      why: PERP_WHY,
+      owner: "the perpetual order was not shaped as one Lighter could take safely, so it was refused before anything was signed",
+      remedy: "Nothing to do — it is a fault in how the order was built, not something you set, and nothing was sent.",
+    },
+    // ── the perp caps (rule 6: exposure, not margin) ─────────────────────────
+    "perp-below-min": {
+      why: PERP_WHY,
+      owner:
+        "that is smaller than Lighter's smallest order on the market (or its 1 USDG minimum deposit), and no cap is " +
+        "stretched to reach it",
+      remedy:
+        "Raise the per-trade cap at /grant or the perpetuals per-trade limit in Settings, or pick a market with a " +
+        "smaller minimum.",
+    },
+    "perp-per-trade-cap": {
+      why: PERP_WHY,
+      owner: "that position is bigger than the most one perpetual open may be, measured on its full size rather than its margin",
+      remedy:
+        "Raise the perpetuals per-trade limit in Settings, or the signed per-trade cap at /grant (that one needs a " +
+        "re-sign), if you want bigger positions.",
+    },
+    "perp-open-notional-cap": {
+      why: PERP_WHY,
+      owner: "that would take the total open across your perpetuals past your limit",
+      remedy: "Raise the open-positions limit in Settings, under Perpetuals, or wait for a position to close.",
+    },
+    "perp-collateral-cap": {
+      why: PERP_WHY,
+      owner: "that would put more USDG at Lighter than the most you allowed there",
+      remedy: "Raise the most-at-Lighter limit in Settings, under Perpetuals, if you mean to.",
+    },
+    "perp-max-opens": {
+      why: PERP_WHY,
+      owner: "the agent has opened as many perpetual positions in the last 24 hours as you allow",
+      remedy: "Nothing to do — it frees up as the oldest opens age out. Raise the daily opens limit in Settings to allow more.",
+    },
+  });
+
+/**
+ * The OWNER's sentence for a rule: the public one when there is one, else the
+ * withheld one. Never for a public surface — use `rejectRuleLabel` there, which
+ * returns null for everything in WITHHELD_REJECT_RULES.
+ */
+export function ownerRejectRuleLabel(rule: string | null | undefined): string | null {
+  const pub = rejectRuleLabel(rule);
+  if (pub || !rule) return pub;
+  return Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule) ? WITHHELD_REJECT_RULES[rule]!.owner : null;
+}
 
 /**
  * The same sentence `outcomeOf` would use, for a reader GROUPING by rule.
@@ -1010,7 +1303,10 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
     case "would-exhaust-contributions":
       return "Send USDG to the agent's account first, then ask for energy again — or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
     default:
-      return null;
+      // The withheld rules carry their remedy beside their owner sentence, so
+      // the two cannot be edited apart. Owner register only, like every other
+      // case here.
+      return Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule) ? WITHHELD_REJECT_RULES[rule]!.remedy : null;
   }
 }
 
@@ -1193,6 +1489,12 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   const name = (row.name ?? "").trim();
   if (!name) return null;
 
+  // ── perps ─────────────────────────────────────────────────────────────────
+  // NEVER, WHATEVER THE SOURCE SAYS (docs/perps.md rule 17). Checked before the
+  // source map so a perp row that reached a publishable key by mistake still
+  // goes nowhere; see WITHHELD_PERP_SOURCES.
+  if (isPerpRow(row)) return null;
+
   // ── source ────────────────────────────────────────────────────────────────
   const policy = row.source ? SOURCE_POLICY[row.source] : undefined;
   if (!policy) return null;
@@ -1238,7 +1540,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
     // below and it is repeated here rather than deferred, because a post that
     // names an address must cost the POST and not the whole thesis: the trade
     // and our own sentence about it are still safe to publish.
-    post = ADDRESSY.test(body) || operationalNotice(body) ? null : body;
+    post = addressy(body) || operationalNotice(body) ? null : body;
   }
   // A dropped order's classified error is useful in the owner's ledger, but
   // cannot stand in for an investment view. Keep substantive reasoning even
@@ -1374,7 +1676,7 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   // that staying true.
   const displayName = nameOf(row);
   for (const s of [name, handle, head, reason, text, row.symbol ?? null, row.slug ?? null, displayName]) {
-    if (s && ADDRESSY.test(s)) return null;
+    if (s && addressy(s)) return null;
   }
 
   const action =

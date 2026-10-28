@@ -142,7 +142,7 @@ describe("counts never ride on the cacheable public read", () => {
     );
     // And the ids come from the same session-free reader the feed serves, so
     // this route still takes no per-caller input.
-    assert.match(route, /await readTheses\(\)/);
+    assert.match(route, /await readTheses\(\{ figures: false \}\)/);
     assert.match(route, /theses\.map\(\(t\) => t\.postId\)/);
   });
 

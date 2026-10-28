@@ -2,32 +2,21 @@
 
 Jetpack Compose, Material 3, Kotlin 2.2. A native client for the merrymen API.
 
-> **It builds.** `assembleDebug` produces an 18 MB debug APK.
->
-> An earlier version of this file said the machine had no toolchain and that
-> nothing here had been compiled. That was wrong: Android Studio’s bundled JDK
-> (`jbr`, OpenJDK 25) and a full SDK were both installed, just not on `PATH`.
-> The version matrix guessed at the time — AGP 8.7.3 with Kotlin 2.0.21 — could
-> not have worked on Gradle 9.3.1 or JDK 25; it is now AGP 8.13.1 with Kotlin
-> 2.2.20 and `compileSdk` 35.
->
-> This file also had the OkHttp guidance **backwards**. It said 4.x uses
-> methods rather than properties; that describes 3.x. In 4.x those became
-> `val`s and the method forms are `DeprecationLevel.ERROR`, so `response.code()`
-> is a compile error, not a warning. Eight call sites had to move to property
-> form.
+The hosted Android app is here, not in the older Expo project at `mobile/`.
+Google Play packaging, signing and device checks are in [RELEASING.md](RELEASING.md).
 
 ## Building and testing
 
-The JDK and SDK are Android Studio’s own, and neither is on `PATH`, so set
-both first. `local.properties` is gitignored and not needed when
+Use JDK 17 and an Android SDK with platform 36 and build-tools 35.0.0.
+Set the paths for your own machine. `local.properties` is gitignored and not needed when
 `ANDROID_HOME` is set, which also means a fresh worktree builds without
 copying one in.
 
 ```bash
-# Git Bash, from android-native/
-export JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"
-export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+# macOS with Homebrew Java and the standard Android Studio SDK location:
+export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+# From android-native/; both locations must actually exist.
 ./gradlew --no-daemon --max-workers=2 assembleDebug testDebugUnitTest
 # point it somewhere else at build time:
 ./gradlew --no-daemon --max-workers=2 assembleDebug -Pmerrymen.origin=http://10.0.2.2:3100
@@ -37,8 +26,8 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
 daemons building in parallel worktrees ran it out of memory once. It costs
 about a minute a build.
 
-`minSdk 26`, `targetSdk 35`, `compileSdk 35`, version 0.2.0 (the user-agent
-says `merrymen-android/0.2.0`).
+`minSdk 26`, `targetSdk 36`, `compileSdk 36`, version 0.4.1 (code 5). The
+user-agent derives its version from `BuildConfig.VERSION_NAME`.
 
 **Tests are JVM unit tests** under `app/src/test/`, run by
 `testDebugUnitTest`. They drive the real `MerrymenApi` against a
@@ -49,8 +38,8 @@ has no route, so a new capture has to be decoded somewhere. The wiring that
 decides whose state is held — sign-out, a wallet switch, a Server change, the
 retired password at start — runs against the real `Repository` and cookie jar
 with `MemoryStore` and `MemoryCookies` (also in `TestKit.kt`) standing in for
-DataStore and the WebView's `CookieManager`. CI does not build this app yet,
-so run them before you push.
+DataStore and the WebView's `CookieManager`. The Android GitHub workflow runs
+the tests, release lint, debug assembly and release guards for Android changes.
 
 **Adding an endpoint** does not touch `MerrymenApi.kt`: write it as an
 extension in your own `net/<Area>Wire.kt` over the shared plumbing,
@@ -70,7 +59,10 @@ every write's body one-shot, so even a stray `http.newCall(POST)` or a 503
 saying `Retry-After: 0` is not re-sent behind the owner's back
 (`WriteOnceTest`). The app's reads through the API still recover from a stale
 pooled connection (`AppGraph` builds it with `recoverReads = true`); an API
-built over any other client reads exactly as that client does.
+built over another client preserves its retry policy. GET/HEAD calls have a
+30-second whole-call ceiling (or the caller’s shorter ceiling), so sequential
+connection attempts cannot keep a screen spinning for minutes. Write and chat
+stream deadlines are unchanged.
 
 **The Server field** (Settings) takes `https://…`, or plain `http://` only for
 `localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in
@@ -88,6 +80,23 @@ other host, so fixing the field to that server keeps the owner signed in, and
 typing any other server sends it nothing.
 
 ---
+
+## Startup, discovery and Android sign-in
+
+The first screen waits only for local credential migration. Version and session
+checks run in parallel; private screens still wait for verified identity. Home
+shows public Agents, Activity and Markets immediately. Directory, activity and
+profile summary requests avoid historical financial calculations; full rankings
+and profile history load when requested. A server rollout is required for those
+fast API views; an older server may still take longer despite the native deadline.
+
+Android X sign-in has a dedicated `/auth/android` page. Once the server advertises
+support and Android verifies the HTTPS App Link, authorization opens in an
+installed supporting app or browser and returns to the original WebView. That
+WebView retains Privy PKCE/state and completes the existing server-verified owner
+proof; a callback alone never establishes identity. Unsupported/unverified
+configurations keep embedded sign-in. See [RELEASING.md](RELEASING.md) for rollout
+and account/device testing requirements.
 
 ## The one architectural decision
 
@@ -130,7 +139,7 @@ ceremonies. They belong where the key is.
 | Screen | Endpoints |
 |---|---|
 | Home — the owner's book (mode chip, liveBlocker and its fix, positions, honest P&L, own tape), the Telegram/Trencher strip, Circle banner, group chat door | `/api/feed`, `/api/grants`, `/api/telegram`, `/api/settings`, `/api/tier`; `/api/auth/session` when a read answers for nobody |
-| Feed — trades vs views, the agent's own take, per-call figures, ×N since, Real money toggle, hearts, the wire ring | `/api/theses`, `/api/market`, `/api/discoveries`, `/api/likes`, `/api/like-counts`, `/api/follow` |
+| Feed — recent activity first, trades vs views, the agent's own take, per-call figures, ×N since, Real money toggle, hearts, the wire ring | `/api/theses?view=activity`, `/api/market`, `/api/discoveries`, `/api/likes`, `/api/like-counts`, `/api/follow` |
 | Chat — streamed replies, the persisted thread with receipts and the unread dot, confirm cards bound to the owner, fills landing in the thread | `/api/chat` (streamed), `/api/feed`, `/api/grants`, `/api/settings`, `/api/orders/ceiling`, `GET /api/orders?id=` |
 | Trade, Coins to consider, How much risk — confirm card inside the ceiling and the sealed cap, orders followed to their own window | `POST /api/orders`, `POST /api/snipe`, `GET /api/orders`, `/api/orders/ceiling`, `/api/proposals` (and `/api/discoveries` when it answers "nothing-vetted"), `/api/settings`, `/api/grants`, `/api/feed` |
 | Alpha — locked gate with its perks, "could not look" vs "nothing vetted", tier badge | `/api/alpha` |
@@ -138,12 +147,12 @@ ceremonies. They belong where the key is.
 | Markets — stocks, then launchpad coins; no 24h figure on a new pool | `/api/market`, `/api/discoveries` |
 | Token — chart over six spans with stale bars captioned, market activity, holders, star, share | `/api/tokens/{address}` (`&activity=1` once per visit), `/api/venue?desk=chart` |
 | Search — debounced, cancelled, retried; launchpad coins matched here, as the web matches them, since the route never returns one | `/api/search`, `/api/discoveries` |
-| Leaderboard — every agent, paper returns stamped Paper, the retired count | `/api/leaderboard`, `/api/feed` (which row is yours), `/api/follow` |
-| Agent profile — stats, top trades, fills, growth, the public book, the owner's own dollars, wire in | `/api/agents/{slug}`, `/api/agents/{slug}/own`, `/api/feed`, `/api/follow` |
+| Agents — identity directory first, optional performance rankings, paper and retired labels | `/api/leaderboard?view=directory`, `/api/leaderboard`, `/api/feed` (which row is yours), `/api/follow` |
+| Agent profile — identity and activity independently, optional performance/history, the public book, owner dollars, wire in | `/api/agents/{slug}?view=summary`, `?view=activity`, `?view=details`, `/api/agents/{slug}/own`, `/api/feed`, `/api/follow` |
 | Group chat — read, post, reply, take back, mute, time zone | `/api/groupchat` (GET, POST, DELETE), `/api/groupchat/me` (GET, POST) |
 | The Merry Circle | `/api/circle` |
-| Telegram — connection, link code, test the bot | `/api/telegram` (GET, POST) |
-| Settings — Live trading switch with its consent, the web's form bound to its owner, server origin, practice reset | `/api/settings` (GET, PUT), `/api/paper-reset`, `/api/telegram`, `/api/auth/session` |
+| Telegram — measured connection status, private chat link, token check, managed setup handoff | `/api/telegram` (owner-scoped GET, POST token check) |
+| Settings — Live trading switch with its consent, the web's form bound to its owner, server origin, practice reset | `/api/settings` (GET, PUT), `/api/paper-reset`, `/api/auth/session` |
 | Every agent face and banner | `/api/agent-image/{slug}/avatar` and `/banner` (ETag, `?v=` after an upload) |
 
 Nothing calls `/api/auth/challenge`, `/api/auth/verify`, `/api/holder`,
@@ -175,7 +184,10 @@ active, so the `Host` must be loopback or private-LAN.
 
 ## Known gaps
 
-- No offline cache, no push, no widgets.
+- No persistent offline cache, no push, no widgets. Home and Agents share a
+  server-scoped memory cache containing public identities only; stale names
+  remain visible with refresh/failure wording. No performance or owner dollars
+  are retained in that cache.
 - The **watchlist is device-local**, in DataStore, the way the web's is
   device-local in `localStorage`. Starring here does not star on the web. There
   is no server route for it and inventing one would put a per-caller read in
@@ -235,16 +247,17 @@ the watchlist, sharing and the holders table are all here now. What is not:
 - **No agent creation and no signing.** Anything that ends in a signature — the
   grant, a re-sign, a withdrawal — is a WebView handoff to the web app's own
   screen, on purpose: that is where the owner key lives.
-- The app is **verified running** on an API 35 emulator against production; see
-  "Running it on an emulator" below.
+- Version 0.2.0 was verified on an API 35 emulator against production. The
+  API 36 release still needs the device checks in [RELEASING.md](RELEASING.md).
 - **No X-handle proof flow.** The app renders a proven handle as a link and an
   unproven one as plain text, but the proof itself (post a nonce, verify it) is
   web-only.
 
 ## Running it on an emulator
 
-It runs. This section exists because an earlier session concluded it did not,
-and that conclusion was wrong in a way worth writing down.
+These are the recorded emulator instructions for version 0.2.0. An API 35
+device remains useful for compatibility testing; also test API 36 before the
+current release.
 
 ### The one thing that will waste your afternoon
 
@@ -302,8 +315,9 @@ hw.gpu.mode=swiftshader_indirect
 hw.keyboard=yes
 ```
 
-API 35 `google_apis` matches the app exactly (`compileSdk`/`targetSdk` 35,
-`minSdk` 26) and is rootable, unlike the `google_apis_playstore` images.
+The API 35 `google_apis` image is rootable, unlike the
+`google_apis_playstore` images. Use an API 36 image for the current target's
+behavior changes.
 
 ### Boot, install, drive
 
@@ -348,3 +362,20 @@ need a *Windows* path for the host side (`C:\...`), while guest paths like
 `/sdcard/ui.xml` get mangled into `C:/Program Files/Git/sdcard/...` unless you
 set `MSYS2_ARG_CONV_EXCL="*"`. Setting `MSYS_NO_PATHCONV=1` fixes the guest side
 and breaks the host side, so set neither globally — scope them per command.
+
+## October 2026 Android refresh (0.4.0)
+
+Home and You load account status alongside the portfolio and coalesce overlapping
+refreshes. Private screen state is keyed to both wallet and server. Failed reads
+retain the last good value with its existing stale-data caption.
+
+Navigation has visible labels and clears space for the keyboard. Welcome uses one
+sign-in action and a guest exploration path. Settings links to current model,
+research, Telegram-group and X-posting controls; signing stays in the protected
+web flow. Telegram uses the hosted managed-bot setup and reports measured listener
+state instead of equating a saved token with a running bot. Positions display
+verified ticker metadata without changing ledger identities. You links to the
+current Trades & P&L cards.
+
+Perpetual and Solana trading on separate, unmerged branches are not included.
+This build is based on main at `fc6758fd`, plus the prior Play release preparation.

@@ -54,6 +54,35 @@ export function energyModeOf(raw: string | undefined): EnergyMode {
   return "off";
 }
 
+const ACCOUNT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_ACCOUNT = `0x${"0".repeat(40)}`;
+
+/**
+ * Operator-only MERRYMEN_ENERGY_EXEMPT_ACCOUNTS. Exact smart-account addresses,
+ * never names, owners, prefixes or `all`. An invalid list exempts nobody.
+ */
+export function energyExemptAccountsOf(raw: string | undefined): readonly string[] {
+  if (!raw?.trim()) return [];
+  const accounts = raw.split(",").map((value) => value.trim());
+  if (accounts.some((account) => !ACCOUNT_ADDRESS.test(account) || account.toLowerCase() === ZERO_ACCOUNT)) return [];
+  return [...new Set(accounts.map((account) => account.toLowerCase()))];
+}
+
+/**
+ * Use the armed grant's verified smart account, not tenant-controlled identity
+ * metadata. Exemption means observe: keep the real holding level and durable
+ * usage counters, but withhold no work for energy. Every trading wall remains
+ * independent, and removing the exemption resumes against today's counts.
+ */
+export function energyModeForAccount(
+  mode: EnergyMode,
+  smartAccount: string,
+  exemptAccounts: readonly string[],
+): EnergyMode {
+  if (mode !== "enforce" || !ACCOUNT_ADDRESS.test(smartAccount)) return mode;
+  return exemptAccounts.includes(smartAccount.toLowerCase()) ? "observe" : mode;
+}
+
 /** The UTC calendar day of a moment, 'YYYY-MM-DD'. The allowance resets at 00:00 UTC. */
 export function utcDay(nowSec: number): string {
   return new Date(Math.floor(nowSec) * 1000).toISOString().slice(0, 10);
@@ -312,9 +341,39 @@ export function enforcedCap(plan: EnergyPlan, field: "reviews" | "entries", nowS
  * is housekeeping, reversible, and would otherwise spend a two-entry day on
  * parking cash. Nor does a curve SALE out of a leg the book holds, back into
  * that leg's own quote (`sellsHeld`, from sellsHeldLeg below).
+ *
+ * PERPS (docs/perps.md rule 8): an OPEN is an entry — it is the new risk the
+ * gate exists to ration. A reduce, a close, a withdrawal and a claim are
+ * exits by the breaker's own test and never reach the switch. A margin
+ * DEPOSIT is never an entry either, on the vault-deposit precedent: it only
+ * funds an open, and the open it funds is the entry — counting both would
+ * spend two of a low-energy day's entries on one position.
+ *
+ * A SWITCH WITH A `never` DEFAULT, so a kind added to TradeIntent does not
+ * compile until someone decides what it is to the gate.
  */
 export function countsAsEntry(kind: TradeIntent["kind"], isExit: boolean, sellsHeld = false): boolean {
-  return !isExit && !sellsHeld && kind !== "vault-deposit";
+  if (isExit || sellsHeld) return false;
+  switch (kind) {
+    case "vault-deposit":
+    case "perp-margin":
+      return false;
+    case "swap":
+    case "vault-withdraw":
+    case "transfer":
+    case "equity-order":
+    case "curve-trade":
+    case "energy-buy":
+    case "perp-order":
+      return true;
+    default: {
+      // A kind nobody has placed is claimed like an entry: the gate rations
+      // risk, and something unknown is not known to carry none.
+      const unplaced: never = kind;
+      void unplaced;
+      return true;
+    }
+  }
 }
 
 /** A curve leg the book holds: the curve it trades on and the quote it sells back into, lowercase. */

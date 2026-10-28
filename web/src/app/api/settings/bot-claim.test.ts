@@ -99,7 +99,7 @@ describe("PUT /api/settings claims the bot", () => {
     assert.equal(res.body.error, "bot_claimed");
     assert.deepEqual(res.body.errors, [BOT_CLAIMED_TEXT]);
     assert.ok(!JSON.stringify(res.body).includes(A.slice(2)), "the other account is not identified");
-    assert.equal(await getSettingsStore().get(B), null, "a refusal writes nothing");
+    assert.equal(await getSettingsStore("spot").get(B), null, "a refusal writes nothing");
     assert.deepEqual(await held(), { "111": A });
   });
 
@@ -134,10 +134,10 @@ describe("PUT /api/settings claims the bot", () => {
     }
     assert.deepEqual(getMeAsked, [], "nothing was sent to Telegram");
     assert.deepEqual(await held(), { "111": A }, "the owner keeps the bot");
-    assert.equal(await getSettingsStore().get(B), null, "and nothing was saved");
+    assert.equal(await getSettingsStore("spot").get(B), null, "and nothing was saved");
     // A real token, pasted with the spaces a copy picks up, still saves.
     assert.equal((await put(B, { telegramBotToken: "  222:AAH_dq-Tc  " })).status, 200);
-    assert.equal((await getSettingsStore().get(B))?.telegramBotToken, "222:AAH_dq-Tc");
+    assert.equal((await getSettingsStore("spot").get(B))?.telegramBotToken, "222:AAH_dq-Tc");
   });
 
   it("MOVE IT HERE: getMe must confirm the token, the claim moves, and no allowlist or owner comes with it", async () => {
@@ -150,7 +150,7 @@ describe("PUT /api/settings claims the bot", () => {
     assert.equal(unvouched.status, 409);
     assert.equal(unvouched.body.error, "bot_unconfirmed");
     assert.deepEqual(await held(), { "111": A });
-    assert.equal((await getSettingsStore().get(B))?.telegramBotToken, undefined);
+    assert.equal((await getSettingsStore("spot").get(B))?.telegramBotToken, undefined);
 
     refused.delete("111:BBB-reissued-secret");
     const moved = await put(B, { telegramBotToken: "111:BBB-reissued-secret", moveBot: true });
@@ -158,23 +158,23 @@ describe("PUT /api/settings claims the bot", () => {
     assert.equal(moved.body.botMoved, true);
     assert.equal(moved.body.ignored, undefined, "`moveBot` is not a setting, and not reported as one");
     assert.deepEqual(await held(), { "111": B });
-    const b = (await getSettingsStore().get(B)) as Record<string, unknown>;
+    const b = (await getSettingsStore("spot").get(B)) as Record<string, unknown>;
     assert.equal(b.telegramBotToken, "111:BBB-reissued-secret");
     assert.deepEqual(b.telegramAllowlist, [4242], "B's own allowlist, untouched: not A's, not merged, not cleared");
     assert.equal("moveBot" in b, false);
     assert.equal("ownerId" in b, false);
-    const a = (await getSettingsStore().get(A)) as Record<string, unknown>;
+    const a = (await getSettingsStore("spot").get(A)) as Record<string, unknown>;
     assert.equal(a.telegramBotToken, "111:AAA-first-secret", "the account it left keeps what its owner saved");
     assert.deepEqual(a.telegramAllowlist, [777]);
   });
 
   it("A SAVE THAT FAILS TAKES ITS CLAIM BACK", async () => {
-    const real = getSettingsStore();
+    const real = getSettingsStore("spot");
     const failing = Object.create(real) as typeof real;
     failing.put = async () => {
       throw new Error("store down");
     };
-    useSettingsStoreForTest(failing);
+    useSettingsStoreForTest(failing, "spot");
     await assert.rejects(put(A, { telegramBotToken: "111:AAA-first-secret" }), /store down/);
     assert.deepEqual(await held(), {}, "no claim for a token that was never stored");
   });
@@ -191,7 +191,7 @@ describe("PUT /api/settings claims the bot", () => {
 
   it("A SAVE THAT DOES NOT CARRY THE TOKEN ASKS NOTHING — even for an account whose bot is held elsewhere", async () => {
     await put(A, { telegramBotToken: "111:AAA-first-secret" });
-    await getSettingsStore().put(B, { telegramBotToken: "111:BBB-from-before-claims" });
+    await getSettingsStore("spot").put(B, { telegramBotToken: "111:BBB-from-before-claims" });
     const res = await put(B, { telegramEnabled: true, buyPerTickUsdg: 5 });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.deepEqual(await held(), { "111": A });
@@ -226,7 +226,7 @@ describe("saves for one account take turns", () => {
   type How = "write" | "fail" | "write-then-fail";
   /** A store whose n-th put arrives, then does what it is told. */
   const gatedPuts = () => {
-    const real = getSettingsStore();
+    const real = getSettingsStore("spot");
     const calls: { arrived: ReturnType<typeof deferred<void>>; how: ReturnType<typeof deferred<How>> }[] = [];
     const at = (i: number) => (calls[i] ??= { arrived: deferred(), how: deferred<How>() });
     let n = 0;
@@ -238,7 +238,7 @@ describe("saves for one account take turns", () => {
       if (how !== "fail") await real.put(tenant, settings);
       if (how !== "write") throw new Error("store down");
     };
-    useSettingsStoreForTest(store);
+    useSettingsStoreForTest(store, "spot");
     return { arrived: (i: number) => at(i).arrived.promise, go: (i: number, how: How) => at(i).how.resolve(how) };
   };
   /** Wait for a state, polled each turn; failing only after a real-time bound. */
@@ -264,7 +264,7 @@ describe("saves for one account take turns", () => {
     await g.arrived(1);
     g.go(1, "write");
     assert.equal((await allowlistSave).status, 200);
-    const a = await getSettingsStore().get(A);
+    const a = await getSettingsStore("spot").get(A);
     assert.equal(a?.telegramBotToken, TO_222, "the new token was not written back over with the old one");
     assert.deepEqual(a?.telegramAllowlist, [4242]);
     assert.deepEqual(await held(), { "222": A }, "and the account holds the bot it stores");
@@ -284,7 +284,7 @@ describe("saves for one account take turns", () => {
       await g.arrived(1);
       g.go(1, "write");
       assert.equal((await two).status, 200);
-      assert.equal((await getSettingsStore().get(A))?.telegramBotToken, second);
+      assert.equal((await getSettingsStore("spot").get(A))?.telegramBotToken, second);
       assert.deepEqual(await held(), { [botOf(second)]: A });
     });
   }
@@ -298,7 +298,7 @@ describe("saves for one account take turns", () => {
       // child was stripped of it) and re-enters it to get the bot back, the
       // re-claim path the 409 offers.
       assert.equal((await put(B, { telegramBotToken: "111:BBB-secret" })).status, 200);
-      if (firstToken === secondToken) await getSettingsStore().put(A, { telegramBotToken: firstToken });
+      if (firstToken === secondToken) await getSettingsStore("spot").put(A, { telegramBotToken: firstToken });
       const g = gatedPuts();
       const one = put(A, { telegramBotToken: firstToken, moveBot: true });
       await g.arrived(0);
@@ -313,7 +313,7 @@ describe("saves for one account take turns", () => {
       assert.equal(res.status, 200, JSON.stringify(res.body));
       assert.equal(res.body.botMoved, true, "the second click moved it itself, from B, where the first one's undo put it");
       assert.deepEqual(await held(), { "111": A }, "A stores the bot and holds it: the save that said so is true");
-      assert.equal((await getSettingsStore().get(A))?.telegramBotToken, secondToken);
+      assert.equal((await getSettingsStore("spot").get(A))?.telegramBotToken, secondToken);
     });
   }
 
@@ -324,7 +324,7 @@ describe("saves for one account take turns", () => {
     await g.arrived(0);
     g.go(0, "write-then-fail");
     await assert.rejects(save, /store down/);
-    assert.equal((await getSettingsStore().get(A))?.telegramBotToken, TO_222);
+    assert.equal((await getSettingsStore("spot").get(A))?.telegramBotToken, TO_222);
     assert.deepEqual(await held(), { "222": A }, "not 111 as well, held by an account that no longer stores it");
   });
 
@@ -336,7 +336,7 @@ describe("saves for one account take turns", () => {
     // A writer that does not take the lock or settle (the orchestrator's
     // allowlist promotion, holder, x-proof) read before the token save and
     // writes what it read back: the old token.
-    await getSettingsStore().put(A, { telegramBotToken: PRIOR, telegramAllowlist: [4242] });
+    await getSettingsStore("spot").put(A, { telegramBotToken: PRIOR, telegramAllowlist: [4242] });
     getMeAsked.length = 0;
     assert.equal((await put(A, { telegramEnabled: true })).status, 200);
     assert.deepEqual(await held(), { "333": B }, "222 is let go; 111 is not claimed on a token nobody confirmed; B's is not A's to touch");

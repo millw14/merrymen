@@ -201,6 +201,72 @@ export function noteReasoningRefusal(baseUrl: string): void {
 /** Test seam — the set is process-global and would otherwise leak between cases. */
 export function resetReasoningRefusalsForTest(): void {
   REASONING_HINT_REFUSED.clear();
+  REASONING_OFF_STEPPED.clear();
+}
+
+/**
+ * REASONING OFF, ASKED FOR BY ONE CALLER — llmText's `reasoning: "off"`.
+ *
+ * quietReasoning above is a MODEL LIST every caller shares, and it is left
+ * alone: trading, the strategist and the scout run the same Groq qwen model and
+ * must keep behaving exactly as they do. A caller that knows its own model
+ * takes the hint (the X writer, for the qwen3 family) asks for it per call
+ * instead, and only `reasoning_effort: "none"` is sent — no
+ * `include_reasoning`, one field fewer for a strict schema to refuse.
+ *
+ * KEYED BY BASE URL AND MODEL, NOT BY BASE URL ALONE. On Groq, qwen3 takes "none" and
+ * gpt-oss does not, behind the same URL (services/brain/brain/llm.py keeps its
+ * step-down the same way), so the shared REASONING_HINT_REFUSED above is
+ * neither read nor written for this: one model's refusal says nothing about
+ * another's, and trading's hint is not this caller's to switch off.
+ *
+ * Value: the effort this model stepped down to ("minimal" or "low", the
+ * cheapest its refusal named), or null when it named none and the field is
+ * left out. In-process, like the set above.
+ */
+const REASONING_OFF_STEPPED = new Map<string, string | null>();
+
+/** The efforts a refused "none" may step down to, cheapest first. Nothing above "low": "medium" is the default that spends the budget thinking. */
+const STEP_DOWN_EFFORTS = ["minimal", "low"] as const;
+
+/**
+ * THE BUDGET FLOOR WHEN "OFF" COULD NOT BE HONOURED. A caller asking for no
+ * reasoning sizes its budget for a line with no thinking in front of it; once
+ * the model has refused "none" it reasons, and that budget would be spent
+ * thinking (llmText then throws on the empty reply, or returns an unclosed
+ * <think>). The same reason tg-groups floors its budget (MIN_TOKENS). Exported
+ * so a caller's "reasoning may be on" budget is this same number.
+ */
+export const REASONING_ON_MIN_TOKENS = 700;
+
+/**
+ * The cheapest effort a refusal of "none" says the model WILL take — only
+ * quoted words are read, so "allowed" or "below" in prose never counts as
+ * "low". Groq: "`reasoning_effort` must be one of `low`, `medium`, or `high`".
+ */
+function lowestOfferedEffort(message: string): string | null {
+  const offered = new Set([...message.matchAll(/[`'"](\w+)[`'"]/g)].map((m) => m[1]!.toLowerCase()));
+  return STEP_DOWN_EFFORTS.find((e) => offered.has(e)) ?? null;
+}
+
+/** What a `reasoning: "off"` call sends for this model: "none", what it stepped down to, or nothing. */
+function reasoningOffHint(creds: LlmCreds): Record<string, unknown> {
+  const key = JSON.stringify([creds.baseUrl, creds.model]);
+  if (!REASONING_OFF_STEPPED.has(key)) return { reasoning_effort: "none" };
+  const stepped = REASONING_OFF_STEPPED.get(key);
+  return stepped ? { reasoning_effort: stepped } : {};
+}
+
+/**
+ * A refused "off" hint, stepped down ONE place and remembered: "none" goes to
+ * the cheapest effort the refusal named, or to no field when it named none;
+ * an effort already stepped down to goes to no field. Never back up, so across
+ * calls it settles, and within one call it is a single retry — no loop.
+ */
+function stepDownReasoningOff(creds: LlmCreds, sent: Record<string, unknown>, message: string): Record<string, unknown> {
+  const lower = sent.reasoning_effort === "none" ? lowestOfferedEffort(message) : null;
+  REASONING_OFF_STEPPED.set(JSON.stringify([creds.baseUrl, creds.model]), lower);
+  return lower ? { reasoning_effort: lower } : {};
 }
 
 interface AnthropicCapabilities {
@@ -554,9 +620,27 @@ function stripReasoningFromContent(content: string, reasoning?: string): string 
   return out;
 }
 
+/** llmText's sampling temperature when a caller names none (or names one out of range). */
+const TEXT_TEMPERATURE = 0.6;
+
+/** A caller's temperature, when it is one a provider takes (0 to 2); otherwise the default. */
+function temperatureOf(t: number | undefined): number {
+  return typeof t === "number" && Number.isFinite(t) && t >= 0 && t <= 2 ? t : TEXT_TEMPERATURE;
+}
+
 export async function llmText(
   creds: LlmCreds,
-  opts: { system: string; prompt: string; maxTokens?: number },
+  // `signal` bounds a caller that holds something scarce for the call's length
+  // (the partner chat holds its conversation lock); omitted, nothing changes.
+  //
+  // `temperature` and `reasoning: "off"` are ONE CALLER'S OWN SETTINGS (the X
+  // writer's); omitted, every other caller sends exactly what it sent before:
+  // temperature 0.6 and quietReasoning's model-list hint. Both apply to the
+  // OpenAI-compatible transport only. The Anthropic branch sends no
+  // temperature today and already asks for no thinking where the model allows
+  // it (anthropicThinking); a sampling field it has never sent is one a model
+  // could refuse, so it is not started here.
+  opts: { system: string; prompt: string; maxTokens?: number; signal?: AbortSignal; temperature?: number; reasoning?: "off" },
 ): Promise<string> {
   if (creds.transport === "anthropic") {
     const client = new Anthropic({ apiKey: creds.apiKey });
@@ -566,25 +650,37 @@ export async function llmText(
       ...anthropicThinking(capabilities),
       system: opts.system,
       messages: [{ role: "user", content: opts.prompt }],
-    }));
+    }, { signal: opts.signal }));
     const t = res.content.find((b) => b.type === "text");
-    return t && t.type === "text" ? t.text.trim() : "";
+    const text = t && t.type === "text" ? t.text.trim() : "";
+    if (!text && res.stop_reason === "max_tokens") {
+      throw new Error(`${creds.provider} ${creds.model} ran out of tokens before writing a reply — raise maxTokens or pick a model that does not reason`);
+    }
+    return text;
   }
 
+  const off = opts.reasoning === "off";
+  const maxTokens = opts.maxTokens ?? 400;
   const base: Record<string, unknown> = {
     model: creds.model,
-    max_tokens: opts.maxTokens ?? 400,
-    temperature: 0.6,
+    max_tokens: maxTokens,
+    temperature: temperatureOf(opts.temperature),
     messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.prompt }],
   };
+  // Reasoning asked off but not sent as "none" (stepped down, or left out):
+  // the model may think, so the budget is raised to the floor for that.
+  const budgetFor = (hint: Record<string, unknown>): number =>
+    off && hint.reasoning_effort !== "none" ? Math.max(maxTokens, REASONING_ON_MIN_TOKENS) : maxTokens;
   const send = (hint: Record<string, unknown>) =>
     fetch(chatUrl(creds), {
       method: "POST",
       headers: openaiHeaders(creds),
-      body: JSON.stringify({ ...base, ...hint }),
+      body: JSON.stringify({ ...base, max_tokens: budgetFor(hint), ...hint }),
+      signal: opts.signal,
     });
 
-  let r = await send(quietReasoning(creds));
+  const first = off ? reasoningOffHint(creds) : quietReasoning(creds);
+  let r = await send(first);
   if (!r.ok) {
     const why = await providerError(creds, r);
     // ONE RETRY, AND ONLY FOR THIS. The hint is an optimisation — it asks a
@@ -592,8 +688,23 @@ export async function llmText(
     // provider that refuses the FIELD has refused the optimisation, not the
     // work. Anything else is a real error and is thrown as one.
     if (!refusedReasoningHint(r.status, why)) throw new Error(why);
-    noteReasoningRefusal(creds.baseUrl);
-    r = await send({});
+    if (off) {
+      // Asked off and nothing was sent to refuse: the 400 is about something
+      // else, and there is no step left to take. Thrown as it came.
+      if (!("reasoning_effort" in first)) throw new Error(why);
+      const next = stepDownReasoningOff(creds, first, why);
+      r = await send(next);
+      if (!r.ok) {
+        // Refused again: the next step is remembered for the next call and
+        // never taken in this one — still a single retry.
+        const again = await providerError(creds, r);
+        if ("reasoning_effort" in next && refusedReasoningHint(r.status, again)) stepDownReasoningOff(creds, next, again);
+        throw new Error(again);
+      }
+    } else {
+      noteReasoningRefusal(creds.baseUrl);
+      r = await send({});
+    }
     if (!r.ok) throw new Error(await providerError(creds, r));
   }
   const j = (await r.json()) as {

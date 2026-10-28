@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,9 +30,84 @@ import httpx
 from .budget import RunBudget
 from .credential import Credential, CredentialRefused, resolve as resolve_credential
 
+log = logging.getLogger(__name__)
+
 
 class ProviderError(RuntimeError):
-    pass
+    """
+    A model call that did not produce an answer, and WHICH KIND of not.
+
+    `kind` is a closed alphabet so a log line or a lens note can be counted:
+    "rate-limit" (429), "server" (5xx), "invalid-json" (the provider's JSON mode
+    rejected the model's own output — on Groq, `json_validate_failed`, which is
+    also what a reasoning model that ran out of output tokens produces),
+    "bad-request" (any other 4xx), "auth" (401/403), "timeout", "network",
+    "bad-response" (a 2xx that is not JSON), "empty" (a 200 with no choices)
+    and "config" (no key).
+
+    Every one of these used to read "provider-failed" in the orchestrator log
+    and nothing more, so a 400 caused by the Brain's own payload was taken for
+    Groq rate-limiting the fleet. The kind and the status are the minimum that
+    tells those apart.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "other",
+        status: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
+        self.code = code
+
+
+def _kind_of(status: int, code: str | None) -> str:
+    if status == 429:
+        return "rate-limit"
+    if status >= 500:
+        return "server"
+    if status in (401, 403):
+        return "auth"
+    if code == "json_validate_failed":
+        return "invalid-json"
+    return "bad-request"
+
+
+#: Longest provider error message carried into a log line or a lens note.
+_MESSAGE_MAX = 160
+
+
+def _provider_error(r: httpx.Response, api_key: str) -> ProviderError:
+    """
+    The provider's own reason for refusing, bounded and with no secret in it.
+
+    Only `error.message`, `error.code` and `error.type` are read. Groq's
+    `failed_generation` — the model's raw output, which can quote the material
+    the prompt carried — is deliberately never read, logged or returned.
+    """
+    code: str | None = None
+    message = ""
+    try:
+        body = r.json()
+    except ValueError:
+        body = None
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, dict):
+        raw_code = err.get("code") or err.get("type")
+        code = str(raw_code)[:60] if raw_code else None
+        message = str(err.get("message") or "")
+    elif isinstance(err, str):
+        message = err
+    if api_key:
+        message = message.replace(api_key, "[key]")
+    message = " ".join(message.split())[:_MESSAGE_MAX]
+    kind = _kind_of(r.status_code, code)
+    text = f"{r.status_code} {kind}" + (f" {code}" if code else "") + (f": {message}" if message else "")
+    return ProviderError(text, kind=kind, status=r.status_code, code=code)
 
 
 #: Families that emit chain-of-thought unless told not to. Substring match on
@@ -58,6 +135,16 @@ _REASONING_HINT_REFUSED: set[str] = set()
 #: hint every `/v1/decide` call depends on.
 _REASONING_EFFORT_REFUSED: set[tuple[str, str]] = set()
 
+#: (base URL, model) pairs that refused "none" but named a lower effort they DO
+#: take, mapped to that effort. Per model, not per endpoint: on Groq, qwen3
+#: takes "none" and gpt-oss does not, behind the same base URL.
+_REASONING_NONE_STEP_DOWN: dict[tuple[str, str], str] = {}
+
+#: The efforts a "none" request may step down to, cheapest first. Nothing above
+#: "low": the point of "none" is an answer that does not spend the output cap on
+#: thinking, and "medium" is the very default that does.
+_STEP_DOWN_EFFORTS = ("minimal", "low")
+
 
 def _rejects_reasoning_field(body: str) -> bool:
     """
@@ -68,6 +155,23 @@ def _rejects_reasoning_field(body: str) -> bool:
     hide malformed payloads behind a second call that fails the same way.
     """
     return REASONING_FIELD in (body or "")[:4000]
+
+
+def _lowest_offered_effort(body: str) -> str | None:
+    """
+    The cheapest effort a refusal of "none" says the model WILL take.
+
+    Groq refuses "none" for gpt-oss with "`reasoning_effort` must be one of
+    `low`, `medium`, or `high`". Dropping the field there — what this module
+    did — does not mean "no reasoning"; it means the model's DEFAULT, medium,
+    which on a technical lens's material spends the whole 1,400-token cap
+    thinking. JSON mode then cannot validate a truncated answer and Groq returns
+    400 `json_validate_failed`: the lens reads "provider-failed", every time the
+    material is long enough. Only quoted words are read, so "allowed" or "below"
+    in prose never counts as "low".
+    """
+    offered = {w.lower() for w in re.findall(r"[`'\"](\w+)[`'\"]", (body or "")[:4000])}
+    return next((e for e in _STEP_DOWN_EFFORTS if e in offered), None)
 
 
 @dataclass(frozen=True)
@@ -152,7 +256,8 @@ class Llm:
         if not self.cfg.api_key:
             raise ProviderError(
                 "no model key configured — set BRAIN_LLM_API_KEY. Refusing to run "
-                "rather than silently producing an unbacked decision."
+                "rather than silently producing an unbacked decision.",
+                kind="config",
             )
 
         payload: dict[str, Any] = {
@@ -185,6 +290,11 @@ class Llm:
         # model that does not reason has no use for the field, and some
         # endpoints reject it outright.
         effort = "none" if reasoning_effort is None else reasoning_effort
+        if effort == "none":
+            # A model that has already said it takes no "none" is asked for
+            # the lowest effort it named, not for its default (see
+            # `_lowest_offered_effort`).
+            effort = _REASONING_NONE_STEP_DOWN.get((self.cfg.base_url, model), effort)
         hint_allowed = (
             self.cfg.base_url not in _REASONING_HINT_REFUSED
             if effort == "none"
@@ -194,7 +304,7 @@ class Llm:
             payload[REASONING_FIELD] = effort
 
         client = await self._http()
-        last: Exception | None = None
+        last: ProviderError | None = None
         attempt = 0
         while attempt < max_attempts:
             # EVERY ATTEMPT IS A CALL. Counting only successes is how a
@@ -207,57 +317,132 @@ class Llm:
                     headers={"Authorization": f"Bearer {self.cfg.api_key}"},
                     json=payload,
                 )
-                # THE HINT MUST NOT BE ABLE TO BREAK THE CALL IT IMPROVES.
-                #
-                # `reasoning_effort` is best effort: some providers ignore an
-                # unknown field, and some reject the request outright. If this
-                # one rejects it, sending it would turn a working lens into
-                # `provider-failed` on every single call — the fix causing a
-                # worse version of the fault it was written for. So: drop it,
-                # remember that this endpoint refuses it, and try again. The
-                # retry is free of the attempt budget because the first request
-                # never reached the model.
-                if (
-                    r.status_code == 400
-                    and REASONING_FIELD in payload
-                    and _rejects_reasoning_field(r.text)
-                ):
-                    if payload[REASONING_FIELD] == "none":
-                        _REASONING_HINT_REFUSED.add(self.cfg.base_url)
-                    else:
-                        _REASONING_EFFORT_REFUSED.add((self.cfg.base_url, payload[REASONING_FIELD]))
-                    payload.pop(REASONING_FIELD, None)
-                    continue
-                if r.status_code == 429:
-                    last = ProviderError("rate limited")
-                    # Bounded, and only if the budget still allows it.
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                    attempt += 1
-                    continue
-                r.raise_for_status()
-                body = r.json()
             except httpx.HTTPError as e:
-                last = ProviderError(f"{type(e).__name__}: {e}")
+                kind = "timeout" if isinstance(e, httpx.TimeoutException) else "network"
+                detail = " ".join(str(e).replace(self.cfg.api_key, "[key]").split())[:_MESSAGE_MAX]
+                last = ProviderError(f"{kind} {type(e).__name__}" + (f": {detail}" if detail else ""), kind=kind)
                 attempt += 1
-                if attempt >= max_attempts:
-                    break
-                await asyncio.sleep(1.0)
+                self._log_failure(node, model, attempt, max_attempts, last, None)
+                if attempt < max_attempts:
+                    await asyncio.sleep(1.0)
+                continue
+
+            # THE HINT MUST NOT BE ABLE TO BREAK THE CALL IT IMPROVES.
+            #
+            # `reasoning_effort` is best effort: some providers ignore an
+            # unknown field, and some reject the request outright. If this
+            # one rejects it, sending it would turn a working lens into
+            # `provider-failed` on every single call — the fix causing a
+            # worse version of the fault it was written for. So: step down to
+            # the cheapest effort the refusal names, or drop the field when it
+            # names none, remember which, and try again. The retry is free of
+            # the attempt budget because the first request never reached the
+            # model.
+            if (
+                r.status_code == 400
+                and REASONING_FIELD in payload
+                and _rejects_reasoning_field(r.text)
+            ):
+                refused = payload.pop(REASONING_FIELD)
+                lower = _lowest_offered_effort(r.text) if refused == "none" else None
+                if lower and (self.cfg.base_url, lower) not in _REASONING_EFFORT_REFUSED:
+                    _REASONING_NONE_STEP_DOWN[(self.cfg.base_url, model)] = lower
+                    payload[REASONING_FIELD] = lower
+                elif refused == "none":
+                    _REASONING_HINT_REFUSED.add(self.cfg.base_url)
+                else:
+                    _REASONING_EFFORT_REFUSED.add((self.cfg.base_url, refused))
+                continue
+
+            if r.status_code >= 400:
+                last = _provider_error(r, self.cfg.api_key)
+                attempt += 1
+                self._log_failure(node, model, attempt, max_attempts, last, r)
+                if attempt < max_attempts:
+                    # Bounded, only between attempts, and only if the budget
+                    # still allows the next one (checked at the loop's top).
+                    await asyncio.sleep(1.5 * attempt if r.status_code == 429 else 1.0)
+                continue
+
+            try:
+                body = r.json()
+            except ValueError:
+                last = ProviderError(f"{r.status_code} unparseable body", kind="bad-response", status=r.status_code)
+                attempt += 1
+                self._log_failure(node, model, attempt, max_attempts, last, r)
                 continue
 
             usage = body.get("usage") or {}
+            tout = int(usage.get("completion_tokens", 0))
             budget.record(
                 node=node,
                 provider=self.cfg.provider,
                 model=model,
                 tin=int(usage.get("prompt_tokens", 0)),
-                tout=int(usage.get("completion_tokens", 0)),
+                tout=tout,
             )
             choices = body.get("choices") or []
             if not choices:
-                raise ProviderError("provider returned no choices")
+                raise ProviderError("provider returned no choices", kind="empty", status=r.status_code)
+            if choices[0].get("finish_reason") == "length":
+                # The answer was cut at the output cap. Without JSON mode this
+                # arrives as a 200 with a truncated answer, so it is named here:
+                # it is the same fault as `invalid-json`, seen from the other side.
+                log.warning(
+                    "llm %s %s: output cap reached (completion_tokens=%d max_tokens=%d effort=%s)",
+                    node,
+                    model,
+                    tout,
+                    payload["max_tokens"],
+                    payload.get(REASONING_FIELD, "-"),
+                )
             return str(choices[0].get("message", {}).get("content") or "")
 
-        raise ProviderError(f"{node} failed after {max_attempts} attempts: {last}")
+        raise ProviderError(
+            f"{node} failed after {max_attempts} attempts: {last}",
+            kind=last.kind if last else "other",
+            status=last.status if last else None,
+            code=last.code if last else None,
+        )
+
+    @staticmethod
+    def _log_failure(
+        node: str,
+        model: str,
+        attempt: int,
+        max_attempts: int,
+        err: ProviderError,
+        r: httpx.Response | None,
+    ) -> None:
+        """
+        ONE BOUNDED LINE PER FAILED ATTEMPT, and nothing a reader should not see.
+
+        The kind, the status, the provider's error code and its message (already
+        bounded and key-scrubbed by `_provider_error`), and for a 429 the
+        provider's own back-off and remaining-allowance headers: what it takes
+        to tell a rate limit from a payload fault. Never the prompt, the
+        material, the model's output or a credential.
+        """
+        rate = ""
+        if r is not None and r.status_code == 429:
+            h = r.headers
+            rate = (
+                f" retry_after={h.get('retry-after', '-')[:16]}"
+                f" remaining_requests={h.get('x-ratelimit-remaining-requests', '-')[:16]}"
+                f" remaining_tokens={h.get('x-ratelimit-remaining-tokens', '-')[:16]}"
+            )
+        log.warning(
+            "llm %s %s: attempt %d/%d failed kind=%s status=%s code=%s%s (%s)",
+            node,
+            model,
+            attempt,
+            max_attempts,
+            err.kind,
+            err.status if err.status is not None else "-",
+            err.code or "-",
+            rate,
+            str(err)[:_MESSAGE_MAX + 40],
+        )
 
 
 def extract_json(text: str) -> dict[str, Any]:

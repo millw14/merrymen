@@ -360,6 +360,44 @@ describe("when the reply does not come", () => {
     assert.equal(buttons("Retry").length, 1);
   });
 
+  it("A HOUSE ACCOUNT HELD OVER BILLING IS SAID AS OURS — not 'its setup needs a look', and no Retry", async () => {
+    // 2026-10-09, end to end: the real reply builder classifying Groq's words
+    // for an unpaid bill, the real stream reader carrying `house`, the real
+    // screen. The tester read "its setup needs a look" about a setup with
+    // nothing wrong in it.
+    const HOUSE = "gsk_house_fleet_key_controller_0123456789";
+    const prior = process.env.GROQ_API_KEY;
+    process.env.GROQ_API_KEY = HOUSE;
+    const held = (apiKey: string): Handler => (_url, init) =>
+      agentReplyResponse(JSON.parse(String(init!.body)) as AgentChatBody, { stream: true }, {
+        hosted: true,
+        credentials: () => ({ provider: "groq", transport: "openai", baseUrl: "https://example.com/v1", model: "m", apiKey, vision: false }),
+        stream: async () => {
+          throw new Error(
+            "groq 400 — organization_delinquent: Organization has been restricted because of overdue payment(s). Please update the payment method at https://console.groq.com/settings/billing/manage and then contact support.",
+          );
+        },
+      });
+    try {
+      routes["POST /api/chat"] = held(HOUSE);
+      await ui.render(h());
+      await settle();
+      await typeAndSend("hello?");
+      await until(() => /Groq, has paused the house account I run on/.test(text()), "the house's hold, said as ours");
+      assert.match(text(), /That's ours to fix, not yours — nothing in your Settings will change it\./);
+      assert.doesNotMatch(text(), /recognise|setup needs a look|overdue|organization_delinquent|billing/);
+      assert.equal(buttons("Retry").length, 0, "asking again cannot pay a bill");
+      // A key the owner brought, held over billing, is theirs to settle.
+      routes["POST /api/chat"] = held("gsk_owner_saved_key_controller_987654321");
+      await typeAndSend("hello again?");
+      await until(() => /Groq has put the account behind its API key on hold over billing/.test(text()), "the owner's own hold");
+      assert.equal(buttons("Retry").length, 0);
+    } finally {
+      if (prior === undefined) delete process.env.GROQ_API_KEY;
+      else process.env.GROQ_API_KEY = prior;
+    }
+  });
+
   it("A RETRY PUTS THE QUESTION ONCE — the model does not hear it twice", async () => {
     // The failed question is already a line in the thread. Sent again with
     // that line in the history, the model read it as asked twice in a row.

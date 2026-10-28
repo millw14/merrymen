@@ -1,0 +1,16 @@
+{
+ "code": 200,
+ "position_fundings": [
+  {
+   "timestamp": 1790686800,
+   "market_id": 15,
+   "funding_id": 881234,
+   "change": "-0.012472",
+   "rate": "0.0004",
+   "position_size": "3.9685",
+   "position_side": "long",
+   "discount": "0.000000"
+  }
+ ],
+ "next_cursor": ""
+}

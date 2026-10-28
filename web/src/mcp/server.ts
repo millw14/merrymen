@@ -21,8 +21,9 @@ import { runTool, type RunDeps, type ToolDef } from "./tool";
 import { registerResources, type ResourceDef } from "./resources";
 import { registerPrompts } from "./prompts";
 import { DIRECTORY_INSTRUCTIONS, SERVER_INSTRUCTIONS, SERVER_VERSION } from "./instructions";
-import { capabilityAllowedIn, scopeAllowedIn, type Capability, type McpProfile } from "./scopes";
+import { capabilityAllowedIn, scopeAllowedIn, scopeFor, type Capability, type McpProfile } from "./scopes";
 import { ALL_TOOLS } from "./tools";
+import { hostedFomoEnabled } from "@/lib/fomo-switch";
 import { ALL_RESOURCES } from "./resources-catalog";
 import { traceId as newTraceId } from "./observe";
 
@@ -36,13 +37,31 @@ function toolCapabilities(def: ToolDef): Capability[] {
   return [def.capability, ...(def.anyOf ?? [])];
 }
 
+/** MCP clients must receive all three safety hints on every listed tool. */
+function servedAnnotations(def: ToolDef) {
+  // Widen for the runtime check: a JS caller can bypass ToolAnnotations.
+  const { readOnlyHint, openWorldHint, destructiveHint } = def.annotations as { readOnlyHint: boolean; openWorldHint: boolean; destructiveHint?: boolean };
+  if (typeof readOnlyHint !== "boolean" || typeof openWorldHint !== "boolean" || (!readOnlyHint && typeof destructiveHint !== "boolean") || (readOnlyHint && destructiveHint !== undefined && destructiveHint !== false)) {
+    throw new Error(`${def.name}: invalid MCP tool safety annotations`);
+  }
+  // A read-only tool is non-destructive. Writes must classify themselves;
+  // never let a missing destructiveHint on a write become false by default.
+  return { title: def.title, ...def.annotations, destructiveHint: readOnlyHint ? false : destructiveHint };
+}
+
 /**
  * Whether a tool may exist at all on a profile, whatever the connection holds:
  * on the directory profile a tool reachable with ANY capability outside it
  * (quote_trade, propose_*, create_agent_draft, draft_post, follow_agent, the
- * proposal tools) is not registered.
+ * proposal tools) is not registered. A read-only tool may explicitly declare
+ * a narrower, validated set of alternatives for this profile.
  */
 export function toolInProfile(def: ToolDef, profile: McpProfile): boolean {
+  if (profile === "directory" && def.directoryAnyOf !== undefined) {
+    if (!def.annotations.readOnlyHint || !def.anyOf?.length || !def.directoryAnyOf.length
+      || !def.directoryAnyOf.every(c => def.anyOf!.includes(c))) return false;
+    return [def.capability, ...def.directoryAnyOf].every(c => capabilityAllowedIn(profile, c));
+  }
   return toolCapabilities(def).every((c) => capabilityAllowedIn(profile, c));
 }
 
@@ -72,8 +91,12 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
   const server = new McpServer(
     {
       name: "merrymen", title: "Merrymen", version: SERVER_VERSION, websiteUrl: "https://merrymen.dev",
-      // The current mark (the redesigned terminal's LogoMark), served by the web app.
-      ...(issuer ? { icons: [{ src: `${issuer}/mcp-icon.svg`, mimeType: "image/svg+xml", sizes: ["any"] }] } : {}),
+      description: "Your Merrymen trading agent, portfolio, trade receipts and decisions.",
+      // Current connector assets; PNG also works in hosts that do not display SVG.
+      ...(issuer ? { icons: [
+        { src: `${issuer}/mcp-icon-512.png`, mimeType: "image/png", sizes: ["512x512"] },
+        { src: `${issuer}/mcp-icon.svg`, mimeType: "image/svg+xml", sizes: ["any"] },
+      ] } : {}),
     },
     {
       instructions: profile === "directory" ? DIRECTORY_INSTRUCTIONS : SERVER_INSTRUCTIONS,
@@ -84,9 +107,14 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
   if (!principal) return server;
   const p: Principal = principal;
   const trace = opts.trace ?? newTraceId();
+  // Fomo research is opt-in per deployment (fomo-runtime.ts hostedFomoEnabled):
+  // off, its tools are not listed at all rather than listed and refusing.
+  const fomoOn = hostedFomoEnabled();
   for (const def of opts.tools ?? ALL_TOOLS) {
     if (!toolInProfile(def, profile)) continue;
-    const usable = def.anyOf?.length ? def.anyOf.some((c) => hasCapability(p, c)) : hasCapability(p, def.capability);
+    if (!fomoOn && def.name.startsWith("fomo_")) continue;
+    const alternatives = profile === "directory" && def.directoryAnyOf ? def.directoryAnyOf : def.anyOf?.length ? def.anyOf : [def.capability];
+    const usable = alternatives.some((c) => hasCapability(p, c));
     if (!usable) continue;
     server.registerTool(def.name, {
       title: def.title,
@@ -94,8 +122,12 @@ export function buildServer(principal: Principal | null, opts: { tools?: readonl
       description: profile === "directory" ? def.directoryDescription ?? def.description : def.description,
       inputSchema: def.input,
       outputSchema: def.output,
-      annotations: { title: def.title, ...def.annotations },
-      ...(def.meta ? { _meta: def.meta } : {}),
+      annotations: servedAnnotations(def),
+      // The pinned MCP SDK preserves _meta, but does not forward a top-level
+      // securitySchemes property. ChatGPT supports this documented mirror.
+      // Each scheme is an alternative: anyOf never requires every scope.
+      _meta: { ...def.meta, securitySchemes: [...new Set(alternatives.map(scopeFor))]
+        .map(scope => ({ type: "oauth2", scopes: [scope] })) },
     }, async (args: unknown) => runTool(def, args, p, trace, opts.deps) as never);
   }
   const resources = (opts.resources ?? ALL_RESOURCES).filter((r) => resourceInProfile(r, profile));

@@ -28,6 +28,7 @@ test("every install link for the production address, exactly", () => {
   assert.equal(l.lmstudio, `lmstudio://add_mcp?name=merrymen&config=${B64_CONFIG}`);
   assert.equal(l.goose, "goose://extension?url=https%3A%2F%2Fmcp.merrymen.dev%2Fmcp&type=streamable_http&id=merrymen&name=Merrymen&description=Your%20Merrymen%20trading%20agent&timeout=300");
   assert.equal(l.chatgpt, "https://chatgpt.com/plugins");
+  assert.equal(l.grok, "https://grok.com/connectors");
 });
 
 test("the base64 configs decode to the address and nothing else", () => {
@@ -44,6 +45,7 @@ test("every command for the production address, exactly", () => {
     codex: ["codex mcp add merrymen --url https://mcp.merrymen.dev/mcp"],
     gemini: ["gemini mcp add -s user -t http merrymen https://mcp.merrymen.dev/mcp"],
     devin: ["devin mcp add -s user merrymen https://mcp.merrymen.dev/mcp", "devin mcp login merrymen"],
+    grok: ["grok mcp add --transport http merrymen https://mcp.merrymen.dev/mcp"],
   });
 });
 
@@ -62,6 +64,7 @@ test("an address with a query, a fragment or odd characters is fully encoded in 
     lmstudio: ["name", "config"],
     goose: ["url", "type", "id", "name", "description", "timeout"],
     chatgpt: [],
+    grok: [],
   };
   for (const [key, link] of Object.entries(l) as Array<[keyof typeof l, string]>) {
     assert.ok(!link.includes("#"), `${key}: no raw #`);
@@ -87,5 +90,6 @@ test("a command quotes an address a shell would act on, and leaves a plain one b
   const c = installCommands(odd);
   assert.equal(c.codex[0], `codex mcp add merrymen --url 'https://mcp.example.test/mcp?a=1&b=it'\\''s'`);
   assert.equal(c.claudeCode[0], `claude mcp add --transport http --scope user merrymen 'https://mcp.example.test/mcp?a=1&b=it'\\''s'`);
+  assert.equal(c.grok[0], `grok mcp add --transport http merrymen 'https://mcp.example.test/mcp?a=1&b=it'\\''s'`);
   assert.equal(installCommands("http://localhost:3000/mcp").codex[0], "codex mcp add merrymen --url http://localhost:3000/mcp");
 });

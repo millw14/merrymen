@@ -59,6 +59,10 @@ describe("public factual group answers", () => {
 
   it("routes trade history, safe why, website help and exact decimal arithmetic", () => {
     assert.deepEqual(publicFactRequest("Pine what did you trade today?", ["Pine"]), { kind: "trades", why: false });
+    // A word of time or habit after buy is no coin (red-team 2026-10-12).
+    assert.deepEqual(publicFactRequest("what have you bought lately?"), { kind: "trades", why: false, side: "buy" });
+    assert.deepEqual(publicFactRequest("what did you buy recently?"), { kind: "trades", why: false, side: "buy" });
+    assert.deepEqual(publicFactRequest("what did you trade lately?"), { kind: "trades", why: false });
     assert.deepEqual(publicFactRequest("@pinebot why did you buy PRISM?"), { kind: "trades", why: true, symbol: "PRISM", side: "buy" });
     assert.deepEqual(publicFactRequest("why didn't you buy PRISM?"), { kind: "site", topic: "attempts" });
     assert.deepEqual(publicFactRequest("why didn't you trade today?"), { kind: "site", topic: "attempts" });

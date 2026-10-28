@@ -11,6 +11,9 @@ import dev.merrymen.app.net.serverOf
 import dev.merrymen.app.net.ServerBound
 import dev.merrymen.app.net.ServerTurns
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +21,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * WHAT THE APP KNOWS, AND HOW SURE IT IS.
@@ -82,6 +87,8 @@ fun formOwnerOf(turn: Long, signedIn: String?): FormOwner = FormOwner(turn - tur
 /** The first wait before [Repository.askUntilKnown] asks again, and the longest it waits. */
 const val IDENTITY_RETRY_FIRST_MS = 3_000L
 const val IDENTITY_RETRY_MAX_MS = 60_000L
+/** A session read must not hold account controls indefinitely during an outage. */
+internal const val IDENTITY_READ_TIMEOUT_MS = 12_000L
 
 /**
  * THE APP'S ONE ACCOUNT OF WHO IT ACTS FOR, against which server.
@@ -215,6 +222,8 @@ class Repository(
    */
   val serverTurn: StateFlow<Long> get() = api.servers.now
 
+  private val identityReads = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
+
   /**
    * Is the server there, and who does it say we are.
    *
@@ -241,20 +250,33 @@ class Repository(
    * WebView refused (missing, mid-update) leaves no record and the next start
    * tries again. The jar's side is a map lookup, and stays on every start.
    */
-  suspend fun bootstrap(): Loaded<Unit> {
+  suspend fun bootstrap(onLocalReady: () -> Unit = {}): Loaded<Unit> {
     identity.refuseInsideHook("bootstrap")
-    session.dropRetiredGatePassword()
-    cookies.dropFromJar("mm_gate")
-    if (!session.webViewGateExpired() && cookies.expireInWebView(session.originNow(), "mm_gate")) {
-      session.markWebViewGateExpired()
-    }
-    return when (val v = api.version()) {
-      is ApiResult.Ok -> {
-        refreshIdentity()
-        Loaded.Value(Unit)
+    // Resolve legacy cookie ownership before any screen can change servers or
+    // make a request. Network availability is not part of this local gate.
+    moving.withLock {
+      session.dropRetiredGatePassword()
+      cookies.dropFromJar("mm_gate")
+      if (!session.webViewGateExpired() && cookies.expireInWebView(session.originNow(), "mm_gate")) {
+        session.markWebViewGateExpired()
       }
-      is ApiResult.Refused -> Loaded.Refused(v.status, v.message)
-      is ApiResult.Unreachable -> Loaded.Unreachable(v.cause, v.unreadable)
+    }
+    val binding = api.boundHere()
+    onLocalReady()
+    // Version and identity are independent. A stalled version endpoint must
+    // not delay sign-in, and neither read holds public browsing behind it.
+    return withContext(binding) {
+      coroutineScope {
+        val identityRead = async { refreshIdentity() }
+        val version = withTimeoutOrNull(IDENTITY_READ_TIMEOUT_MS) { api.version() }
+        identityRead.await()
+        when (version) {
+          is ApiResult.Ok -> Loaded.Value(Unit)
+          is ApiResult.Refused -> Loaded.Refused(version.status, version.message)
+          is ApiResult.Unreachable -> Loaded.Unreachable(version.cause, version.unreadable)
+          null -> Loaded.Unreachable("The server check timed out. You can keep browsing and try again.")
+        }
+      }
     }
   }
 
@@ -274,14 +296,31 @@ class Repository(
    */
   suspend fun refreshIdentity() {
     identity.refuseInsideHook("refreshIdentity")
-    val asOf = identity.turn
-    identity.answered(api.session(), asOf)
+    val turn = identity.turn
+    val done = CompletableDeferred<Unit>()
+    val existing = identityReads.putIfAbsent(turn, done)
+    if (existing != null) {
+      existing.await()
+      return
+    }
+    try {
+      // Timer, Retry and bootstrap join one read for this session turn. A
+      // server switch or adopted login can start a new read immediately.
+      val read = identity.beginRead(turn) ?: return
+      val answer = withTimeoutOrNull(IDENTITY_READ_TIMEOUT_MS) { api.session() } ?: return
+      // The timeout limits the network, never the identity transition or its
+      // forget hooks once a new owner has actually answered.
+      identity.answered(answer, read.turn, read.sequence)
+    } finally {
+      identityReads.remove(turn, done)
+      done.complete(Unit)
+    }
   }
 
   /**
    * KEEP ASKING WHO IS SIGNED IN UNTIL SOMEBODY ANSWERS.
    *
-   * [bootstrap] asks once, and only after the version read answered. A cold
+   * [bootstrap] asks once, independently of the version read. A cold
    * start whose first request failed (airplane mode, a DNS blip on wake, a
    * server restart) never asked again for the life of the process: every
    * read after the network came back worked, but identity stayed unknown, so
@@ -322,15 +361,38 @@ class Repository(
    * handoff, which costs nothing because the WebView is being opened anyway.
    */
   suspend fun seedWebView(origin: String) {
-    val first = !session.webViewSessionReseeded()
-    if (cookies.seedWebView(origin, rewriteSame = first) && first) session.markWebViewSessionReseeded()
+    identity.refuseInsideHook("seedWebView")
+    val turn = identity.turn
+    moving.withLock {
+      if (identity.turn != turn || originNow() != origin) return@withLock
+      val first = !session.webViewSessionReseeded()
+      if (cookies.seedWebView(origin, rewriteSame = first) && first) session.markWebViewSessionReseeded()
+    }
   }
 
-  /** Called after the WebView flow settles, to pick up a fresh session cookie. */
-  suspend fun adoptWebSession() {
+  /**
+   * Adopt only the session of the server that opened this WebView. False keeps
+   * a changed cookie pending so a transient identity-read failure is retried.
+   */
+  suspend fun adoptWebSession(expectedOrigin: String? = null, expectedServerTurn: Long? = null): Boolean {
     identity.refuseInsideHook("adoptWebSession")
-    cookies.harvest(session.originNow())
-    refreshIdentity()
+    val origin = expectedOrigin ?: originNow()
+    val turn = expectedServerTurn ?: serverTurn.value
+    val identityTurn = identity.turn
+    // Once a browser snapshot may change native credentials, finish its bounded
+    // identity check even if Back disposes the WebView. A failed check leaves
+    // identity unknown, which the shell retries after this screen has gone.
+    return withContext(NonCancellable) {
+      val read = moving.withLock {
+        if (serverTurn.value != turn || identity.turn != identityTurn || originNow() != origin) null
+        else if (!cookies.harvestChecked(origin)) null
+        else identity.credentialsAdopted(identityTurn)
+      } ?: return@withContext false
+      val answer = withTimeoutOrNull(30_000) { withContext(ServerBound(turn)) { api.session() } }
+        ?: ApiResult.Unreachable("the session check timed out")
+      if (serverTurn.value != turn) return@withContext false
+      identity.answered(answer, read.turn, read.sequence)
+    }
   }
 
   /**
@@ -343,10 +405,16 @@ class Repository(
   suspend fun signOut() {
     identity.refuseInsideHook("signOut")
     api.logout()
-    cookies.forgetAll()
-    session.clearSession()
-    // What this wallet liked, wired and said in chat is not the next wallet's
-    // business: every forget hook runs here.
-    identity.signedOut()
+    // A WebView snapshot read before sign-out must not land after its clear.
+    // Finish local cleanup as one turn even if its screen goes away midway.
+    withContext(NonCancellable) {
+      moving.withLock {
+        cookies.forgetAll()
+        session.clearSession()
+        // What this wallet liked, wired and said in chat is not the next wallet's
+        // business: every forget hook runs here.
+        identity.signedOut()
+      }
+    }
   }
 }

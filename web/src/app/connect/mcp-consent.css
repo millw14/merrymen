@@ -8,6 +8,9 @@
 .mcp-connect .mcp-agent-card > div { flex: 1; min-width: 0; }
 .mcp-connect .mcp-agent-card strong { display: block; font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
 .mcp-connect .mcp-agent-card div > span { display: block; margin-top: 3px; color: var(--tx-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.mcp-connect .mcp-account-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 14px; margin: -4px 0 14px; color: var(--tx-2); font-size: 12px; }
+.mcp-connect .mcp-switch-account { min-height: 44px; color: var(--tx); text-decoration: underline; text-underline-offset: 3px; }
+.mcp-connect .mcp-switch-account:disabled { opacity: .5; cursor: wait; }
 
 .mcp-connect .mcp-summary { margin: 14px 0 22px; padding: 4px 16px; border: 1px solid var(--line); border-radius: 14px; background: #ffffff04; }
 .mcp-connect .mcp-summary ul { list-style: none; margin: 0; padding: 0; }

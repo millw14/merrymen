@@ -121,6 +121,18 @@ describe("reading the stream in the browser", () => {
     assert.deepEqual(out, { reply: null, why: "llm-error", kind: "rate-limited", provider: "Groq", detail: "groq 429 — rate limited" });
   });
 
+  it("WHETHER IT WAS THE HOUSE'S KEY RIDES THROUGH — as a boolean, and only as one", async () => {
+    // The reader forwarded string fields only, so `house` never reached the
+    // sentence, and a held house account was said as the owner's to fix.
+    const read = (house: unknown) =>
+      readReplyStream(body([sseEvent("error", { why: "llm-error", kind: "billing", provider: "Groq", house })]), () => {});
+    assert.deepEqual(await read(true), { reply: null, why: "llm-error", kind: "billing", provider: "Groq", house: true });
+    assert.deepEqual(await read(false), { reply: null, why: "llm-error", kind: "billing", provider: "Groq", house: false });
+    for (const junk of ["true", 1, null, { yes: true }]) {
+      assert.equal((await read(junk)).house, undefined, JSON.stringify(junk));
+    }
+  });
+
   it("A STREAM THAT ENDS WITHOUT `done` WAS CUT OFF, and is not a reply", async () => {
     // Half an answer shown as the whole one is a sentence the agent never
     // finished — possibly the half before "but not until…".

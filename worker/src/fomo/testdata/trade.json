@@ -1,0 +1,39 @@
+{
+  "_fixture": "constructed from provider documentation fetched 2026-10-04; not a captured response",
+  "tradeId": "094dd0b3-22ff-41ba-b676-f093c8293f01",
+  "trader": "0xdetweiler",
+  "source": "live-fomo",
+  "status": "closed",
+  "isDev": false,
+  "token": {
+    "symbol": "plumber",
+    "address": "0x51fb760000000000000000000000000000000b0b"
+  },
+  "chainId": 4663,
+  "chain": "robinhood",
+  "avgEntryPrice": 0.5,
+  "avgExitPrice": 0.31,
+  "realizedPnlUsd": -10856.33,
+  "costBasisUsd": 28000,
+  "boughtAmount": 56000,
+  "soldAmount": 56000,
+  "transferredInAmount": 0,
+  "transferredOutAmount": 0,
+  "createdAt": "2026-09-10T12:00:00Z",
+  "closedAt": "2026-09-29T15:00:00Z",
+  "thesis": {
+    "text": "plumber fixes the pipes",
+    "likes": 40
+  },
+  "swaps": [
+    {
+      "humanUsdAmountIn": 3000,
+      "outTradeId": "094dd0b3-22ff-41ba-b676-f093c8293f01"
+    },
+    {
+      "humanUsdAmountIn": 2500,
+      "outTradeId": "094dd0b3-22ff-41ba-b676-f093c8293f01"
+    }
+  ],
+  "transfers": []
+}
