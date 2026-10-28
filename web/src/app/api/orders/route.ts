@@ -115,6 +115,14 @@
  *   an exit queued while it is held waits inside its window and is answered
  *   expired if the hold outlasts it. Rule 8a's "an exit is always
  *   attemptable" is a Phase 4 gate, for the live build.
+ * - HOSTED, ONLY ONTO A BOOK THAT HAS REPORTED (perps-book-reported.ts): the
+ *   Perps account's `agents` row must be in the shared database, or the exit
+ *   is refused 409 with nothing queued. An agent_commands row is ledger
+ *   history, and the orchestrator never starts a Perps worker for the first
+ *   time on an account that has any (ledger-import.ts registerLedgerSource),
+ *   so an exit queued before that first start stopped the worker starting at
+ *   all, with nothing that told the owner. A book that has not reported shows
+ *   the owner nothing to close.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
@@ -132,6 +140,7 @@ import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { ceilingFor, orderTtlFor } from "@/lib/order-ceiling";
 import { OWNER_CHANGED, OWNER_CHANGED_LOOKUP, ownerMismatch } from "@/lib/order-owner";
 import { placeRecoveryCheckedOrder } from "@/lib/recovery-orders";
+import { PERPS_EXIT_NOT_REPORTED, perpsBookReported } from "@/lib/perps-book-reported";
 import {
   LEDGER_UNREADABLE,
   SPOT_WALLET_HOLDS_NO_PERPS,
@@ -326,10 +335,16 @@ export async function POST(req: Request) {
   // against a real sqlite and real files: ONE AT A TIME, judged row by row
   // against each open order's own `expiresAt`, and only a key collision is a
   // duplicate.
+  // HOSTED, A PERPS EXIT ONLY FOR A BOOK THAT HAS REPORTED (perps-book-reported.ts):
+  // one queued before the Perps worker's first start would stop it starting.
+  // A read that fails is the queue's own 503.
   const result = isHostedMode()
-    ? await withReadDb((db) => placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now }), wallet).catch(
-        () => ({ ok: false as const, why: "unreachable" as const }),
-      )
+    ? await withReadDb(async (db) => {
+        if (wallet === "perps" && db && !(await perpsBookReported(db, agent))) {
+          return { ok: false as const, why: "perps-not-reported" as const };
+        }
+        return placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now });
+      }, wallet).catch(() => ({ ok: false as const, why: "unreachable" as const }))
     : // The web process and the worker share one MERRYMEN_HOME — no table, no
       // ferry. Each wallet's worker drains its own home (purposeHome: Spot's is
       // MERRYMEN_HOME itself, as it always was; Perps's is accounts/perps).
@@ -343,6 +358,9 @@ export async function POST(req: Request) {
         { id, args, expiresAt, now, ...(wallet === "perps" ? { account: agent } : {}) },
       );
 
+  if (!result.ok && result.why === "perps-not-reported") {
+    return NextResponse.json({ error: PERPS_EXIT_NOT_REPORTED }, { status: 409 });
+  }
   // THE DEADLINE GOES BACK WITH THE ID — and as a DURATION, so the card waits
   // out this order's own window on its own clock instead of a constant of its
   // own, or of the server's epoch read against a browser clock that may be

@@ -40,6 +40,7 @@ import { claimCommandFile, commandDir, openCommands, runTickCommand, writeComman
 import { recordFleetRecoveryHold } from "../../../../../worker/src/fleet-recovery";
 import { queueRecoveryCheckedCommand } from "@/lib/recovery-commands";
 import { placeRecoveryCheckedOrder } from "@/lib/recovery-orders";
+import { PERPS_EXIT_NOT_REPORTED } from "@/lib/perps-book-reported";
 import { GET, POST } from "./route";
 import { GET as ceiling } from "./ceiling/route";
 
@@ -403,12 +404,21 @@ describe("hosted: each wallet's orders are read for its own account, in the tabl
     return { status: res.status, body: (await res.json()) as { id?: string; state: string } };
   };
 
-  /** One ledger for both wallets, as the shared Postgres is, with `rows` in it: `[id, account, createdAt]`, each open. */
-  const sharedLedger = async (rows: readonly (readonly [string, string, number])[]) => {
+  /**
+   * One ledger for both wallets, as the shared Postgres is, with `rows` in it:
+   * `[id, account, createdAt]`, each open. `reported` are the accounts whose
+   * worker has written its agents row (perps-book-reported.ts): the Perps one
+   * unless a test says otherwise.
+   */
+  const sharedLedger = async (rows: readonly (readonly [string, string, number])[], reported: readonly string[] = [PERPS]) => {
     const file = path.join(home, "merrymen.db");
     const raw = new DatabaseSync(file);
     try {
       await applyLedgerSchema(wrapSqlite(raw));
+      for (const account of reported) {
+        raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, ?, ?, 4663, '{}', 0, 0)")
+          .run(account, A, A);
+      }
       for (const [id, account, at] of rows) {
         raw.prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, 'trade', ?, ?)")
           .run(id, account, JSON.stringify({ side: "sell", symbol: "X", usdgAmount: 0, expiresAt: Date.now() + 3_600_000 }), at);
@@ -466,6 +476,15 @@ describe("hosted: each wallet's orders are read for its own account, in the tabl
     const wrong = await POST(as(A, "orders?wallet=perps", { ...CLOSE, expectedAccount: SPOT, owner: A }));
     assert.equal(wrong.status, 409);
     assert.equal(((await wrong.json()) as { code?: string }).code, "account-changed");
+  });
+
+  it("A PERPS EXIT FOR A BOOK THAT HAS NOT REPORTED IS REFUSED 409, in its own words: queued before the Perps worker's first start, it would stop that start (perps-book-reported.ts)", async () => {
+    await sharedLedger([], []);
+    for (const exit of [CLOSE, FLATTEN]) {
+      const out = await POST(as(A, "orders?wallet=perps", { ...exit, expectedAccount: PERPS, owner: A }));
+      assert.equal(out.status, 409, exit.purpose);
+      assert.equal(((await out.json()) as { error?: string }).error, PERPS_EXIT_NOT_REPORTED, exit.purpose);
+    }
   });
 });
 

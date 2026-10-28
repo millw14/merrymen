@@ -93,6 +93,12 @@ describe("hosted, a Perps practice reset and the book the orchestrator holds", {
     scoped.searchParams.set("options", `-c search_path=${schema}`);
     shared = await makePgDb(scoped.toString());
     await applyLedgerSchema(shared);
+    // The Perps worker has reported its book: its agents row is in the shared
+    // database, or no Perps exit or reset is queued (perps-book-reported.ts).
+    await admin.query(
+      `INSERT INTO ${schema}.agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES ($1, $2, $2, 4663, '{}', 0, 0)`,
+      [PERPS, TENANT],
+    );
     process.env.DATABASE_URL = scoped.toString();
     route = await import("./route");
     cookie = `mm_session=${mintSession(TENANT)}`;

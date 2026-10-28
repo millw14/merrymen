@@ -167,6 +167,8 @@ async function rig(
     counters?: () => Promise<{ spentTodayUsdg: bigint; opsToday: number }>;
     /** Another lane over THAT rig's agent and ledger, with none of its memory: the worker restarted. */
     reuse?: Rig;
+    /** A lane no agent arms, as every Spot worker's is (index.ts arms it only for a Perps wallet's worker). */
+    unarmed?: boolean;
   } = {},
 ): Promise<Rig> {
   const hex = opts.reuse ? opts.reuse.smartAccount.slice(2) : (n++).toString(16).padStart(40, "0");
@@ -199,7 +201,7 @@ async function rig(
   } as Rig;
   r.lane = createPerpLane({
     store: { ...store, ...(opts.store ?? {}) },
-    armed: () => ({ agentId: id, smartAccount: `0x${hex}`, limits }),
+    armed: opts.unarmed ? () => null : () => ({ agentId: id, smartAccount: `0x${hex}`, limits }),
     config: () => r.cfg,
     execMode: opts.execMode ?? (() => PAPER),
     readFeed: (now) => readLighterFeed(FEED, now),
@@ -274,8 +276,10 @@ describe("small pieces", () => {
     assert.equal(resetHaltSentence(true), " New practice positions stay paused by your earlier Close all; reset again to lift that.");
     assert.equal(
       resetHaltSentence("unread"),
-      " Whether an earlier Close all still pauses new practice positions could not be read just now; if it does, reset again to lift it.",
+      " Whether new practice positions are paused by a Close all could not be read just now; if they show as paused, reset again to lift it.",
     );
+    // "unread" comes as readily to an owner who never pressed Close all.
+    assert.doesNotMatch(resetHaltSentence("unread"), /earlier|your Close all|still/);
   });
   it("usdgText rounds toward zero and signs only when asked", () => {
     assert.equal(usdgText(12_345_678n), "12.34");
@@ -600,6 +604,104 @@ describe("a paper reset", () => {
     assert.equal((await store.getPaperBook(r.id, 100)).cashUsdg, 100);
     const early = await r.lane.resetPaper(() => store.resetPaperLedger(r.id, 100), { askedAt: clock - 60_000 });
     assert.equal(early.haltKept, false, "nor does one asked for before this lane began");
+  });
+
+  it("A BOOK THAT NEVER TRADED HAS NO perp_accounts ROW, AND NO ROW IS NO PAUSE: from the lane's own read, and from the ledger asked again when that read stopped short of the account", async () => {
+    writeFeed();
+    let positionsDown = false;
+    const r = await rig({
+      store: {
+        getPerpPositions: async (...args: Parameters<typeof store.getPerpPositions>) => {
+          if (positionsDown) throw new Error("SQLITE_BUSY: database is locked");
+          return store.getPerpPositions(...args);
+        },
+      },
+    });
+    await store.setAgentMode(r.id, "paper", 1, false);
+    assert.equal(await store.getPerpAccount(r.id, "paper"), null, "set-up: nothing was ever placed, so there is no account row");
+    for (const askedAt of [clock - 60_000, undefined]) {
+      const reset = await r.lane.resetPaper(() => store.resetPaperLedger(r.id, 100), askedAt === undefined ? {} : { askedAt });
+      assert.equal(reset.haltKept, false, `the lane's own read, asked at ${askedAt}`);
+    }
+    // The lane's read fails before it reaches the account row, so the reset asks the ledger itself.
+    const asked = await r.lane.resetPaper(
+      async () => {
+        const epoch = await store.resetPaperLedger(r.id, 100);
+        positionsDown = true;
+        return epoch;
+      },
+      { askedAt: clock - 60_000 },
+    );
+    positionsDown = false;
+    assert.equal(asked.haltKept, false, "the ledger asked again: still no row, still no pause");
+    assert.equal(await store.getPerpAccount(r.id, "paper"), null, "set-up: no reset made a row either");
+  });
+
+  it("A RESET ASKED FOR BEFORE THIS LANE BEGAN ANSWERS FROM THE LANE'S OWN READ, so a ledger busy only after it never makes it \"could not be read\": no Close all is no pause, and a stored one is said to stand", async () => {
+    writeFeed();
+    for (const closedAll of [false, true]) {
+      const first = await rig();
+      await first.lane.execute(await openDraft(first), { equityUsdg: u(100), equityKnown: true });
+      if (closedAll) assert.equal((await first.lane.flatten({ askedAt: clock - 10_000 })).ok, true);
+      await first.lane.stopProtect();
+      await store.setAgentMode(first.id, "paper", 1, false);
+      // After the reset the ledger answers once — the lane's own read — and is busy for every read after it.
+      let reads: number | null = null;
+      const restarted = await rig({
+        reuse: first,
+        store: {
+          getPerpAccount: async (...args: Parameters<typeof store.getPerpAccount>) => {
+            if (reads !== null && ++reads > 1) throw new Error("SQLITE_BUSY: database is locked");
+            return store.getPerpAccount(...args);
+          },
+        },
+      });
+      const out = await restarted.lane.resetPaper(
+        async ({ clearEntriesHalt }) => {
+          assert.equal(clearEntriesHalt, false, "set-up: asked for before this worker began, so it lifts nothing");
+          const epoch = await store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt });
+          reads = 0;
+          return epoch;
+        },
+        { askedAt: clock - 20_000 },
+      );
+      assert.equal(reads, 1, `closedAll ${closedAll}: the lane's own read, and no second`);
+      reads = null;
+      assert.equal(out.haltKept, closedAll, `closedAll ${closedAll}`);
+      assert.equal(
+        resetHaltSentence(out.haltKept),
+        closedAll ? " New practice positions stay paused by your earlier Close all; reset again to lift that." : "",
+      );
+      assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, closedAll, "set-up: the ledger says the same");
+    }
+  });
+
+  it("AN UNARMED LANE — EVERY SPOT WORKER'S — KEEPS NO PAUSE AND ASKS NO PERP LEDGER: its reset is told to lift nothing and answers none, so the Spot owner's line is unchanged", async () => {
+    let asked = 0;
+    const r = await rig({
+      unarmed: true,
+      store: {
+        getPerpAccount: async () => {
+          asked++;
+          throw new Error("SQLITE_BUSY: database is locked");
+        },
+      },
+    });
+    for (const askedAt of [clock, clock - 60_000, undefined]) {
+      let told: boolean | undefined;
+      const out = await r.lane.resetPaper(
+        async ({ clearEntriesHalt }) => {
+          told = clearEntriesHalt;
+          return 7;
+        },
+        askedAt === undefined ? {} : { askedAt },
+      );
+      assert.equal(out.out, 7);
+      assert.equal(told, false, `asked at ${askedAt}: no agent, so no halt to lift`);
+      assert.equal(out.haltKept, false, `asked at ${askedAt}: none kept, and none unread`);
+      assert.equal(resetHaltSentence(out.haltKept), "");
+    }
+    assert.equal(asked, 0, "a Spot worker's reset reads no perp account");
   });
 });
 

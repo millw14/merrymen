@@ -54,6 +54,8 @@
  * held Spot book's reset is the owner's way out; held-reset.ts is Spot's). So
  * queuePaperReset reads the hold the orchestrator recorded and answers 409,
  * with nothing queued, rather than "queued" for a worker that cannot start.
+ * Nor before the Perps worker has reported its book (perps-book-reported.ts):
+ * a reset queued ahead of its first start would stop that start (409 too).
  *
  * Start over (/api/grants/discard) stays the Spot wallet's: it discards the
  * Spot grant, and the kill (which it is) already stops the Perps wallet.

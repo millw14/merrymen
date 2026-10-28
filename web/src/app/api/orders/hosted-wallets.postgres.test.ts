@@ -109,6 +109,12 @@ describe("hosted, a login's Spot and Perps orders in the one shared table", { sk
     const scoped = new URL(url!);
     scoped.searchParams.set("options", `-c search_path=${schema}`);
     await applyLedgerSchema(await makePgDb(scoped.toString()));
+    // The Perps worker has reported its book: its agents row is in the shared
+    // database, or no Perps exit or reset is queued (perps-book-reported.ts).
+    await admin.query(
+      `INSERT INTO ${schema}.agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES ($1, $2, $2, 4663, '{}', 0, 0)`,
+      [PERPS, TENANT],
+    );
     process.env.DATABASE_URL = scoped.toString();
     route = await import("./route");
     cookie = `mm_session=${mintSession(TENANT)}`;

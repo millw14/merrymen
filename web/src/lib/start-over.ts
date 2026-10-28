@@ -46,6 +46,7 @@ import { isGrantPurpose, type GrantPurpose } from "../../../packages/core/src/gr
 import { withReadDb } from "@/lib/ledger";
 import { paperRecoveryState } from "./paper-return";
 import { queueRecoveryCheckedCommand, type CommandAdmission } from "./recovery-commands";
+import { PERPS_RESET_NOT_REPORTED, perpsBookReported } from "./perps-book-reported";
 
 /** What became of the reset half of a Start over. */
 export type StartOverReset = "queued" | "no-agent" | "failed";
@@ -135,6 +136,14 @@ export type QueuedReset = { ok: true; id: string; expiresAt?: number } | { ok: f
  * it leaves the row waiting with its deadline, answered by the next worker to
  * start — run inside its window, expired with the book untouched after it. A
  * stale "held" costs a practice reset, never a book. Spot is not read here.
+ *
+ * HOSTED, NO PERPS RESET FOR A BOOK THAT HAS NOT REPORTED (409, nothing
+ * queued): the Perps account's `agents` row must be in the shared database
+ * (perps-book-reported.ts). An agent_commands row is ledger history, and the
+ * orchestrator never starts a Perps worker for the first time on an account
+ * that has any (ledger-import.ts registerLedgerSource), so a reset queued
+ * before that first start stopped the worker starting at all, and the book
+ * it was meant to reset never existed.
  */
 export async function queuePaperReset(
   hosted: boolean,
@@ -160,13 +169,15 @@ export async function queuePaperReset(
       return { ok: false, error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` };
     }
   }
-  let admitted: CommandAdmission | { ok: false; why: "perps-book-held" | "perps-book-unread" } = { ok: false, why: "unreachable" };
+  let admitted: CommandAdmission | { ok: false; why: "perps-book-held" | "perps-book-unread" | "perps-not-reported" } = { ok: false, why: "unreachable" };
   try {
     admitted = await withReadDb(async (db) => {
       if (wallet === "perps" && db) {
         const book = await paperRecoveryState(db, agent);
         if (book === "blocked") return { ok: false as const, why: "perps-book-held" as const };
         if (book === "unknown") return { ok: false as const, why: "perps-book-unread" as const };
+        // A read that fails throws, and is the 503 below.
+        if (!(await perpsBookReported(db, agent))) return { ok: false as const, why: "perps-not-reported" as const };
       }
       return queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at, ...deadline });
     }, wallet);
@@ -176,6 +187,7 @@ export async function queuePaperReset(
       error: "practice reset is paused while the original financial book is checked. No reset was queued." };
     if (admitted.why === "perps-book-held") return { ok: false, status: 409,
       error: "Your Perps wallet's practice book could not be restored, so it is being held and no Perps worker is running to reset it. No practice reset was queued; ask again once it is back." };
+    if (admitted.why === "perps-not-reported") return { ok: false, status: 409, error: PERPS_RESET_NOT_REPORTED };
     if (admitted.why === "perps-book-unread") return { ok: false, status: 503,
       error: "couldn't queue it — whether your Perps wallet's practice book is being held could not be read. No practice reset was queued; try again in a moment." };
     return {

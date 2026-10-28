@@ -359,10 +359,15 @@ nothing reaches a venue, a key or real money.
   restarted worker after the Close all) and lifts nothing; its answer says
   new practice positions stay paused, and the owner resets again. Whether a
   halt stands is the lane's to say (`resetPaper`'s `haltKept`): the ledger's
-  halt, or one only the lane holds because the Close all's write failed. A
-  reset that lifted nothing and then could not read the ledger says that it
-  could not tell (`"unread"`), never that no pause stands
-  (`resetHaltSentence`).
+  halt, as the lane's own read after the reset found it, or one only the
+  lane holds because the Close all's write failed; the ledger is asked again
+  only when that read never reached the account row, and an account with no
+  row was never paused. A reset that lifted nothing and could not read the
+  ledger at all says that it could not tell (`"unread"`), never that no pause
+  stands, and in words that do not say a Close all was pressed, since it can
+  come to an owner who never pressed one (`resetHaltSentence`). A Spot
+  worker's lane is never armed, so its reset keeps no pause and reads no perp
+  account.
   A Perps reset expires with the Perps order window, so a reset can never lift
   a halt days later. Nothing else clears it: Resume needs the owner-controls
   history (a hash-chained halt log, so a stale resume or an older checkpoint
@@ -510,7 +515,17 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   reset, and the check refuses neither today (`dual-purpose.test.ts`). A Perps
   worker's own hold refuses its spawn instead, and the ferry delivers only to
   a running worker, so an exit queued while it is held waits inside its window
-  and is answered expired if the hold outlasts it. Where no Perps worker runs
+  and is answered expired if the hold outlasts it. Hosted, an exit is queued
+  only onto a book that has reported: the Perps account's `agents` row must be
+  in the shared database (`perps-book-reported.ts`), or it is refused 409 with
+  nothing queued, and a read that fails is 503. An `agent_commands` row is
+  ledger history (`ledger-import.ts sharedLedgerHistory`), and the
+  orchestrator starts a Perps worker for the first time only on an account
+  with none (`registerLedgerSource`'s new-book branch), so an exit queued
+  before that first start stopped the worker ever starting, and nothing told
+  the owner (`reportFleetSource` records no hold for a Perps worker). Once the
+  `agents` row is there it is history itself, so a command beside it changes
+  nothing (`perps-not-reported.postgres.test.ts`). Where no Perps worker runs
   (`perpsWorkersRun`: `MERRYMEN_PERPS` is not paper; it answers as the
   orchestrator's spawn rule `orchestrator.ts perpsSpawnable`, exported so
   `perps-enabled.test.ts` asks both, and a self-hosted worker's stand-down
@@ -546,7 +561,9 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   (`paper_recovery_health`, `paper-return.ts paperRecoveryState`); an
   unreadable record is 503, and Spot's reset is not looked at. The look is not
   atomic with the next restore: a reset queued just before a hold waits with
-  its deadline for the next Perps worker to start. It also
+  its deadline for the next Perps worker to start. Hosted, it is refused 409
+  as an exit is while the Perps book has not reported (above): a reset queued
+  before the Perps worker's first start would stop that start. It also
   lifts the Close-all halt (above). Start over (`/api/grants/discard`) stays
   Spot's; it already stops the Perps wallet as every kill does, and Spot's
   reset is queued as it always was.

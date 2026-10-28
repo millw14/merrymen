@@ -440,8 +440,9 @@ export interface PerpLane {
    * ledger's, or one only this process holds because its write failed (a
    * re-read of the ledger alone missed that one, and the owner read a fresh
    * book with nothing to say why no position ever opened). "unread" when the
-   * reset lifted nothing and the ledger could not say whether it holds one.
-   * An unarmed lane, which a Spot worker's always is, keeps none.
+   * reset lifted nothing and the ledger could not say whether it holds one,
+   * which says nothing of whether any Close all was ever pressed. An unarmed
+   * lane, which a Spot worker's always is, keeps none.
    */
   resetPaper<T>(
     reset: (o: { clearEntriesHalt: boolean }) => Promise<T>,
@@ -494,11 +495,13 @@ const PRACTICE_BOOK_FROZEN =
  * What a practice reset's answer adds about the owner's Close-all pause, from
  * resetPaper's `haltKept`. A pause the reset did not lift is said, or the
  * owner reads a fresh book and waits for a strategy that never opens; one the
- * ledger could not answer for is said as that, never as none.
+ * ledger could not answer for is said as that, never as none, and in words
+ * that do not say a Close all was pressed: "unread" comes as readily to an
+ * owner who never pressed one.
  */
 export function resetHaltSentence(haltKept: boolean | "unread"): string {
   if (haltKept === "unread") {
-    return " Whether an earlier Close all still pauses new practice positions could not be read just now; if it does, reset again to lift it.";
+    return " Whether new practice positions are paused by a Close all could not be read just now; if they show as paused, reset again to lift it.";
   }
   return haltKept ? " New practice positions stay paused by your earlier Close all; reset again to lift that." : "";
 }
@@ -533,6 +536,14 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   let tickUnreadKeys = new Set<string>();
   /** market_id → the first owed funding hour the feed does not carry: that position's funding is unread. */
   let fundingGaps = new Map<number, number>();
+  /**
+   * The ledger's own Close-all halt as the last paper read found it, for the
+   * account it read (`key` is haltKey's), or null when no read since the last
+   * forget() reached the account row. Only the ledger's: the halt only this
+   * process holds is ownerEntryHalts. A practice reset answers from it
+   * (resetPaper), so a read that already said asks the ledger nothing more.
+   */
+  let ledgerHaltRead: { key: string; halted: boolean } | null = null;
   /**
    * THE OWNER'S HALT AS THIS PROCESS HOLDS IT, by account and book, with when
    * the newest Close all behind it was asked for. A Close all writes
@@ -570,6 +581,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     lastActive = false;
     tickUnreadKeys = new Set();
     fundingGaps = new Map();
+    ledgerHaltRead = null;
   }
 
   /**
@@ -772,6 +784,8 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     const positions = await store.getPerpPositions(a.agentId, "paper", { includeFlat: true });
     const unresolved = await store.listSubmittedPerpOrders(a.agentId, "paper");
     const account = await store.getPerpAccount(a.agentId, "paper");
+    // No row is no halt: an account that never traded was never paused.
+    ledgerHaltRead = { key: haltKey(a.agentId, "paper"), halted: account?.entriesHalted === true };
     const collateral = account?.paperCollateralMicro ?? 0n;
     const heldRows = positions.filter((p) => p.base > 0n && p.side !== null);
     const held = heldRows.length > 0 || unresolved.length > 0 || collateral !== 0n;
@@ -1654,17 +1668,25 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           // WHAT STANDS NOW, once the reset and the forgetting are done, so no
           // read here can stop either. A lifted halt left neither copy: the
           // reset's own transaction cleared the ledger's. The halt this process
-          // holds needs no read. Otherwise only the ledger knows, and a ledger
-          // that cannot answer is "unread", never "none": a halt an earlier
-          // worker stored, unlifted, still refuses every practice entry.
+          // holds needs no read. Otherwise only the ledger knows: the read just
+          // made says, when it reached the account row (ledgerHaltRead, which
+          // forget() cleared, so it is this read's); only when it did not is
+          // the ledger asked again. A second read that failed after the first
+          // had answered once made an owner who never pressed Close all read
+          // about one. A ledger that cannot answer at all is "unread", never
+          // "none": a halt an earlier worker stored, unlifted, still refuses
+          // every practice entry.
+          const seen = ledgerHaltRead;
           const haltKept: boolean | "unread" =
             a === null || key === null || clearEntriesHalt
               ? false
               : ownerEntryHalts.has(key) ||
-                (await deps.store.getPerpAccount(a.agentId, "paper").then(
-                  (acct) => acct?.entriesHalted === true,
-                  () => "unread" as const,
-                ));
+                (seen !== null && seen.key === key
+                  ? seen.halted
+                  : await deps.store.getPerpAccount(a.agentId, "paper").then(
+                      (acct) => acct?.entriesHalted === true,
+                      () => "unread" as const,
+                    ));
           return { out, haltKept };
         },
         { label: "paper reset" },
