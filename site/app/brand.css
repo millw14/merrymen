@@ -188,6 +188,9 @@ html[data-theme="light"] body {
   color: var(--text);
 }
 
+html[data-theme="light"] .dev-account-summary .dev-warn { color: var(--gold); }
+html[data-theme="light"] .dev-key-controls .dev-danger { color: var(--red); }
+
 h1, h2, h3, h4 {
   font-family: var(--font-serif), "Iowan Old Style", Palatino, Georgia, serif;
   font-weight: 500;
