@@ -622,3 +622,6 @@ body footer.foot {
   .download-options { grid-template-columns: 1fr; gap: 8px; }
   .doc-side { position: static; }
 }
+@media (max-width: 380px) {
+  .nav .brand > span { display: none; }
+}
