@@ -15,6 +15,7 @@
  */
 import { NextResponse } from "next/server";
 import { withReadDb } from "@/lib/ledger";
+import { readAgentSearchWindow } from "@/lib/agent-search";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { fetchMarket } from "@/lib/market";
 import { walletNotSupported } from "@/lib/route-guard";
@@ -88,14 +89,8 @@ export async function GET(req: Request) {
 
     await withReadDb(async (db) => {
       if (!db) return;
-      const rows = (await db
-        .prepare(
-          `SELECT smart_account, name, x_handle, COALESCE(mode, 'idle') AS mode
-             FROM agents
-            WHERE mode IN ('live','paper') AND smart_account NOT LIKE 'rh:%'
-            ORDER BY created_at DESC LIMIT 200`,
-        )
-        .all()) as { smart_account: string; name: string; x_handle: string | null; mode: string }[];
+      // Perps wallets are left out before the window, never after it.
+      const rows = await readAgentSearchWindow(db);
 
       for (const r of rows) {
         if (hits.length >= LIMIT) break;

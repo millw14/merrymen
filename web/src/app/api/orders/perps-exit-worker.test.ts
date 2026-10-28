@@ -154,7 +154,7 @@ before(async () => {
       equityKnown,
       nowSec: Math.floor(clock / 1000),
     }),
-    budget: { reserve: () => {}, release: () => {}, refresh: async () => {} },
+    budget: { reserve: () => {}, release: () => {}, refresh: async () => {}, keep: () => {}, counters: async () => ({ spentTodayUsdg: 0n, opsToday: 0 }) },
     events: async () => {},
     decide: async () => ({ ok: true }),
     paperExecutor: (o) => createPaperPerpExecutor(o),

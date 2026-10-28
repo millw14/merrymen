@@ -196,6 +196,20 @@ export interface PerpLaneBudget {
   release(spendMicro: bigint): void;
   /** Re-read the settled halves (index.ts refreshBudget) — the booked row is now counted there. */
   refresh(): Promise<void>;
+  /**
+   * Book one op and `spendMicro` straight into the settled halves, for an
+   * order that may have been booked when the re-read above could not answer
+   * (index.ts heldReservation's branch): released uncounted, the op is in
+   * neither half and the cap is looser until the next refresh. That refresh
+   * rebuilds the settled halves from the ledger, so nothing stays counted twice.
+   */
+  keep(spendMicro: bigint): void;
+  /**
+   * The day's spend and ops as they stand now, settled and in flight
+   * (index.ts spentToday / opsTodayCount). Read under the lane's lock, so an
+   * order judged there meets every op booked while it waited for the lock.
+   */
+  counters(): Promise<Pick<AgentState, "spentTodayUsdg" | "opsToday">>;
 }
 
 export type DecideFn = (
@@ -388,9 +402,10 @@ export interface PerpLane {
   /**
    * processIntentLocked's perp branch: judge, review, judge again, reserve,
    * place, count, release. `base` is the caller's own AgentState (index.ts
-   * passes processIntentLocked's `state`, so a perp open meets the very spend,
-   * ops and peak figures a spot buy would); absent, deps.agentState composes
-   * one. Either way `perp` and the venue flags are this call's FRESH read.
+   * passes processIntentLocked's `state`, so a perp open meets the very peak
+   * figures a spot buy would); absent, deps.agentState composes one. Either
+   * way `perp` and the venue flags are this call's FRESH read, and the day's
+   * spend and ops are read under the lock (budget.counters), never `base`'s.
    */
   execute(
     intent: PerpOrderIntent | PerpMarginIntent,
@@ -424,10 +439,14 @@ export interface PerpLane {
    * `haltKept` says whether a Close-all halt still stands after it: the
    * ledger's, or one only this process holds because its write failed (a
    * re-read of the ledger alone missed that one, and the owner read a fresh
-   * book with nothing to say why no position ever opened). An unarmed lane,
-   * which a Spot worker's always is, keeps none.
+   * book with nothing to say why no position ever opened). "unread" when the
+   * reset lifted nothing and the ledger could not say whether it holds one.
+   * An unarmed lane, which a Spot worker's always is, keeps none.
    */
-  resetPaper<T>(reset: (o: { clearEntriesHalt: boolean }) => Promise<T>, opts?: { askedAt?: number }): Promise<{ out: T; haltKept: boolean }>;
+  resetPaper<T>(
+    reset: (o: { clearEntriesHalt: boolean }) => Promise<T>,
+    opts?: { askedAt?: number },
+  ): Promise<{ out: T; haltKept: boolean | "unread" }>;
   /** Write `agents.perps` from the last read. */
   report(): Promise<void>;
   /** Venue market ids the feed should carry: the allowed markets plus anything held. */
@@ -470,6 +489,19 @@ export interface OwnerExitResult {
  */
 const PRACTICE_BOOK_FROZEN =
   "This account is not on paper right now, so its practice perpetual positions stay exactly as they are until it is. Nothing was sent.";
+
+/**
+ * What a practice reset's answer adds about the owner's Close-all pause, from
+ * resetPaper's `haltKept`. A pause the reset did not lift is said, or the
+ * owner reads a fresh book and waits for a strategy that never opens; one the
+ * ledger could not answer for is said as that, never as none.
+ */
+export function resetHaltSentence(haltKept: boolean | "unread"): string {
+  if (haltKept === "unread") {
+    return " Whether an earlier Close all still pauses new practice positions could not be read just now; if it does, reset again to lift it.";
+  }
+  return haltKept ? " New practice positions stay paused by your earlier Close all; reset again to lift that." : "";
+}
 
 export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   const lock = deps.lock ?? createPerpLaneLock({ onOverrun: (i) => log(`lane lock held past ${i.holdMs} ms by ${i.label ?? "?"}`) });
@@ -1046,6 +1078,12 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     let r = await refreshLocked();
     const stateFor = async (read: PerpLaneRead): Promise<AgentState> => ({
       ...(base ?? (await deps.agentState(equity))),
+      // THE DAY'S COUNTERS AS THEY STAND UNDER THE LOCK, never `base`'s: the
+      // caller read those before it queued for this lock, and an owner's
+      // Close or a protective close may have booked an op while it waited.
+      // An open judged on the older count went one over the grant's ops cap.
+      // This intent's own reservation is taken below, after the judging.
+      ...(await deps.budget.counters()),
       // The venue's state is the account's, from THIS read: an open judged
       // against an older "unread" (or an older "read") is judged against a
       // book nobody is looking at any more.
@@ -1108,28 +1146,38 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     // refusal included — a reservation left behind is permanent for the arm
     // (budget-reservation.invariant.test.ts; lane.test.ts pins this one).
     //
-    // A BOOKING IS NOT UNDONE BY A COUNTER THAT FAILED TO RE-READ AFTER IT.
-    // place() returned, so the paper engine committed the fill. The count
-    // shared place()'s try, and a store too busy to answer it made a booked
-    // order "refused": the owner's feed said a close that had run was refused
-    // (in the driver's raw words) and never announced its fill, a strategy
-    // open's energy was refunded for an order that was placed, and the re-read
-    // below was skipped. The counters are re-read on the next pass either way,
-    // and the reservation is released as it always was.
+    // COUNTED, OR KEPT COUNTED. The count re-reads the settled halves, which
+    // then hold the booked order. A store too busy to answer gets the
+    // reservation's own figures booked into them instead (keep, as Spot's
+    // heldReservation branch does): released uncounted, the op was in neither
+    // half, and the next open of the same tick went one over the ops cap.
+    //
+    // A BOOKING IS NOT UNDONE BY A COUNT THAT FAILED AFTER IT. place()
+    // returned, so the paper engine committed the fill, and it is announced
+    // and answered as one. (The count used to share place()'s try, and a busy
+    // store made a booked close "refused" and refunded a placed open's energy.)
+    // A throw from place() that is not the executor's own refusal (PerpRefused,
+    // always before anything is booked) may have come after its commit, so it
+    // is counted the same way before its refusal is answered.
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
+    const count = async (): Promise<void> => {
+      try {
+        await deps.budget.refresh();
+      } catch (e) {
+        deps.budget.keep(spend);
+        log(`day's counters not re-read after ${labelOf(intent)}; its op stays counted: ${errText(e)}`);
+      }
+    };
     deps.budget.reserve(spend);
     let placed: PerpPlaceResult;
     try {
       try {
         placed = await ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId });
       } catch (e) {
+        if (!(e instanceof PerpRefused)) await count();
         return refuse(intent, refusalOf(e), "place");
       }
-      try {
-        await deps.budget.refresh();
-      } catch (e) {
-        log(`day's counters not re-read after ${labelOf(intent)}: ${errText(e)}`);
-      }
+      await count();
     } finally {
       deps.budget.release(spend);
     }
@@ -1597,21 +1645,26 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
             (haltAskedAt !== undefined ? haltAskedAt <= askedAt : laneStartedAt <= askedAt);
           const out = await reset({ clearEntriesHalt });
           if (clearEntriesHalt && key !== null) ownerEntryHalts.delete(key);
-          // What stands now, read after the reset: a lifted halt left neither
-          // copy. The reset is done whatever this read does, so a ledger that
-          // cannot answer only says less; the halt this process holds needs no
-          // read.
-          const haltKept =
-            a !== null &&
-            key !== null &&
-            (ownerEntryHalts.has(key) ||
-              (await deps.store.getPerpAccount(a.agentId, "paper").then((acct) => acct?.entriesHalted === true, () => false)));
           // The book those memories were about is gone: a breach clock, a
           // cooldown or an entry candle carried across would act on nothing.
           const keepRail = railKey;
           forget();
           railKey = keepRail;
           await refreshLocked();
+          // WHAT STANDS NOW, once the reset and the forgetting are done, so no
+          // read here can stop either. A lifted halt left neither copy: the
+          // reset's own transaction cleared the ledger's. The halt this process
+          // holds needs no read. Otherwise only the ledger knows, and a ledger
+          // that cannot answer is "unread", never "none": a halt an earlier
+          // worker stored, unlifted, still refuses every practice entry.
+          const haltKept: boolean | "unread" =
+            a === null || key === null || clearEntriesHalt
+              ? false
+              : ownerEntryHalts.has(key) ||
+                (await deps.store.getPerpAccount(a.agentId, "paper").then(
+                  (acct) => acct?.entriesHalted === true,
+                  () => "unread" as const,
+                ));
           return { out, haltKept };
         },
         { label: "paper reset" },
@@ -1689,12 +1742,13 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           // refusal as for a fill — never taken from the order's result.
           //   - An IOC can fill part of a close.
           //   - A REFUSAL CAN COME AFTER THE BOOKING. The paper engine books
-          //     the close in one transaction inside place(), and executeLocked
-          //     re-reads the day's counters after it in the same try, whose
-          //     catch makes any throw a refusal (perp-unpriced). A counter read
-          //     that failed there came back "refused" for a position that was
-          //     gone, and the owner was told it and its stop "stay as they
-          //     were" — and their next Close found nothing to close.
+          //     the close in one transaction inside place(), and anything that
+          //     throws after that commit and before place() returns comes back
+          //     a refusal (perp-unpriced) for a position that is gone; the
+          //     owner was told it and its stop "stay as they were", and their
+          //     next Close found nothing to close. (A count of the day's ops
+          //     that fails after a booking is no longer one: executeLocked
+          //     answers that as the fill it was.)
           // Only "dropped" is taken as said: place() returned with nothing
           // filled, so nothing was booked.
           const left = await practiceBaseLeft(a, perpMarketByKey(market)!.marketId);
@@ -1702,14 +1756,15 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
             const rule = done.out.rejectRule;
             log(`${market} owner close came back ${rule ?? "refused"}; the ledger holds ${left === "unread" ? "an unread amount" : left.toString()} of ${heldBefore?.toString() ?? "?"}`);
             const booked = left === 0n || (left !== "unread" && heldBefore !== undefined && left < heldBefore);
-            if (booked) {
-              // The refusal skipped executeLocked's re-read after a booking:
-              // read now, so the report written below shows what the ledger holds.
-              try {
-                await refreshLocked();
-              } catch (e) {
-                log(`re-read after an owner close not taken: ${errText(e)}`);
-              }
+            // A refusal skips executeLocked's re-read after a booking, and
+            // whether one was booked is not always known (a ledger that could
+            // not be read just now): read again, as Close all does, so the
+            // report written below shows what the ledger holds, or that it
+            // could not be read, and never the read from before the close.
+            try {
+              await refreshLocked();
+            } catch (e) {
+              log(`re-read after an owner close not taken: ${errText(e)}`);
             }
             if (left === 0n) return { ok: true, sentence: `${market}: the practice position was closed.` };
             if (booked) {

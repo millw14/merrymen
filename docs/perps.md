@@ -319,11 +319,14 @@ nothing reaches a venue, a key or real money.
   What a Close says became of the position is read back from the ledger, for
   a refusal as for a fill: a close the paper engine booked before something
   after the booking threw is said to be closed, or part-closed, never "stays
-  as it was", and Close and Close all both re-read the book then, so the
-  report the desk shows never holds a position they closed. A day's counters
-  that fail to re-read after a booking no longer make it a refusal at all
+  as it was", and Close and Close all both re-read the book after any
+  refusal, so the report the desk shows never holds a position they closed
+  (or shows that the ledger could not be read). A day's counters that fail
+  to re-read after a booking no longer make it a refusal at all
   (`executeLocked`): the fill is announced and answered as a fill, for an
-  owner's exit and a strategy's order alike.
+  owner's exit and a strategy's order alike, and its op and spend are kept
+  counted (`budget.keep`, Spot's `heldReservation` rule) until the next
+  re-read, so the next open in the same tick meets them.
   A book with no view sends nothing, and the owner is told which of two gaps
   it was (`PerpLaneRead.viewUnread`). Prices that could not be read (the feed
   file missing, or stale because its writer stopped) leave the ledger read:
@@ -356,7 +359,10 @@ nothing reaches a venue, a key or real money.
   restarted worker after the Close all) and lifts nothing; its answer says
   new practice positions stay paused, and the owner resets again. Whether a
   halt stands is the lane's to say (`resetPaper`'s `haltKept`): the ledger's
-  halt, or one only the lane holds because the Close all's write failed.
+  halt, or one only the lane holds because the Close all's write failed. A
+  reset that lifted nothing and then could not read the ledger says that it
+  could not tell (`"unread"`), never that no pause stands
+  (`resetHaltSentence`).
   A Perps reset expires with the Perps order window, so a reset can never lift
   a halt days later. Nothing else clears it: Resume needs the owner-controls
   history (a hash-chained halt log, so a stale resume or an older checkpoint
@@ -581,7 +587,9 @@ nothing, as the orchestrator adds nothing for a Perps worker, so no slug,
 profile, board, search or follow can resolve to it. The profile, summary and
 own-book reads (`read-agent.ts`) and the MCP public board and profile
 (`public-feed.ts`) also leave out every account in `perps_wallets`, as a
-backstop; the first-name count is Spot's alone.
+backstop; the first-name count is Spot's alone. Search leaves them out before
+it takes its window of the newest agents (`agent-search.ts`), so a fleet's
+Perps rows, which no search can show, never push a Spot agent out of it.
 
 **One owner, two separate authorities.** Decided where both are written, under
 one lock for the tenant across both wallets (the file store's shared writer
@@ -1123,8 +1131,11 @@ All perp money is TEXT integer micro-USDG (aggregated in application BigInt or
   `worst_notional_micro`, anything else counts `filled_quote_micro`) and
   counts perp orders and withdraw requests as ops (an allowlist of statuses).
   `perp-deposit` counts as spend like `vault-deposit`; `perp-claim` does not.
-  Reservations follow `recordTrade`'s order; after a hosted wipe the day's
-  opens are rebuilt from the venue before any open.
+  Reservations follow `recordTrade`'s order. A perp intent is judged on the
+  day's spend and ops read again under the lane's lock (`budget.counters`),
+  never on figures its caller read before it queued: an owner's Close books
+  outside the intent chain. After a hosted wipe the day's opens are rebuilt
+  from the venue before any open.
 - **Hosted.** A child's ledger is disposable. Every `perp_*` table is mirrored
   (append-only tables `ON CONFLICT DO NOTHING`; updated tables as rank-guarded
   upserts). Live positions and orders are re-read from the venue at arm, never

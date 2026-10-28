@@ -272,7 +272,8 @@ describe("an owner's exit that did not run, or was never answered, in an exit's 
       assert.ok(at > 0, `${name} must exist`);
       return src.slice(at, src.indexOf("\n  }\n", at));
     };
-    assert.match(body("runQueuedCommand"), /runTickCommand\([\s\S]*\.\.\.orderExpiryHooks,[\s\S]*\}\);/);
+    // Last, so no key after the spread overrides a hook.
+    assert.match(body("runQueuedCommand"), /runTickCommand\([\s\S]*\.\.\.orderExpiryHooks,\s*\}\);/);
     assert.match(body("runCommand"), /const exit = cmd\.kind === "trade" \? perpExitExpiredLine\(cmd\.args, howLate\(Date\.now\(\) - \(cmd\.expiresAt \?\? 0\)\)\) : null;[\s\S]*line: exit \?\? `expired — /);
   });
 });

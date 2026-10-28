@@ -312,7 +312,7 @@ import {
   perpLaneLedgerFacts,
   setAgentPerps,
 } from "./store";
-import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLaneStore } from "./perps/lane";
+import { createPerpFeedHost, createPerpLane, isHostedChildProcess, resetHaltSentence, type PerpLaneStore } from "./perps/lane";
 import { perpExitExpiredLine, perpExitNotAdmittedLine, readPerpExitOrder } from "./perps/owner-order";
 import { lighterFeedPath, readLighterFeed } from "./perps/feed-reader";
 import { startLighterFeed } from "./perps/feed";
@@ -3778,6 +3778,13 @@ async function main() {
         inFlightSpentUsdg -= spend;
       },
       refresh: () => (active ? refreshBudget(active.agentId) : Promise.resolve()),
+      // A booked op whose re-read failed: the reservation's own figures, into
+      // the settled halves (heldReservation's branch), until the next refresh.
+      keep: (spend) => {
+        settledOps += 1;
+        settledSpentUsdg += spend;
+      },
+      counters: async () => ({ spentTodayUsdg: spentToday(), opsToday: opsTodayCount() }),
     },
     events: (level, message) => (active ? addEvent(active.agentId, level, message) : Promise.resolve()),
     decide: (intent, source, reason, known) => ensureDecision(intent, source, reason, known),
@@ -7057,13 +7064,11 @@ async function main() {
     // A CLOSE ALL THIS RESET DID NOT LIFT IS SAID, or the owner reads a fresh
     // book and waits for a strategy that never opens. The lane says whether
     // one stands: the ledger's, or one only it holds because the Close all's
-    // write failed, which a re-read of the ledger here never saw. A Spot
-    // worker's lane is never armed, so it says none.
+    // write failed, which a re-read of the ledger here never saw, or that the
+    // ledger could not say. A Spot worker's lane is never armed, so it says none.
     return {
       ok: true,
-      line:
-        `paper book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.` +
-        (haltKept ? " New practice positions stay paused by your earlier Close all; reset again to lift that." : ""),
+      line: `paper book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.` + resetHaltSentence(haltKept),
     };
   }
 
@@ -9404,7 +9409,9 @@ async function main() {
     // the proposed terms, has the executor price it, judges the REVIEWED
     // terms again, reserves this intent's op and spend in the same in-flight
     // halves `state` was read from, books it, re-reads the settled halves and
-    // releases (recordTrade's order, with a finally on every exit). The rail
+    // releases (recordTrade's order, with a finally on every exit). The day's
+    // spend and ops it judges by are read again under its lock: an owner's
+    // Close may book while this intent waits for it. The rail
     // is decided INSIDE, from execMode() as it stands now — never a rail
     // computed before this intent reached the chain (the broker lane's
     // consent-fork lesson above): a live account resolves to
