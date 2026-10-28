@@ -556,49 +556,144 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
   });
 
   /**
-   * A REFUSAL THAT CAME AFTER THE BOOKING. executeLocked re-reads the day's
-   * counters (index.ts refreshBudget, store reads) after place() has booked the
-   * close, in the same try whose catch makes any throw a refusal. A counter
-   * read that failed there used to come back to the owner as "the practice
-   * close was refused …, so the position and its stop stay as they were" —
-   * with the position gone, and their next Close finding nothing to close.
+   * THE DAY'S COUNTERS FAILING TO RE-READ AFTER A BOOKING. executeLocked
+   * re-reads them (index.ts refreshBudget, store reads) after place() has
+   * booked the order. That read used to share place()'s try, whose catch makes
+   * any throw a refusal: a Close that had run came back "refused … so the
+   * position and its stop stay as they were", the owner's feed said "refused"
+   * with the driver's raw words and never announced the fill, and a strategy
+   * open's energy was refunded for an order that was placed. A booking is a
+   * booking: the answer, the feed and the lane's read all say what happened.
    */
-  it("A CLOSE BOOKED BEFORE ITS OUTCOME CAME BACK REFUSED IS SAID TO BE CLOSED: the ledger, not the outcome, says what became of it", async () => {
+  it("A CLOSE OR CLOSE ALL WHOSE DAY'S COUNTERS FAILED TO RE-READ AFTER IT BOOKED IS A CLOSE: the answer, the owner's feed and the lane's read all say so", async () => {
+    for (const action of ["close", "flatten"] as const) {
+      writeFeed();
+      let busy = false;
+      const r = await rig({
+        refresh: async () => {
+          if (busy) throw new Error("SQLITE_BUSY: database is locked");
+        },
+      });
+      await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+      const fills = fillsOf(r.id);
+      busy = true;
+      const out = action === "close" ? await r.lane.close("BTC-PERP", { book: "paper" }) : await r.lane.flatten({ book: "paper" });
+      busy = false;
+      assert.equal(fillsOf(r.id), fills + 1, `${action} set-up: the close was booked, and only the counters' re-read after it failed`);
+      assert.deepEqual(
+        out,
+        action === "close"
+          ? { ok: true, sentence: "BTC-PERP: the practice position was closed." }
+          : { ok: true, sentence: "Every practice perpetual position was closed. New practice positions are paused until you reset the practice book." },
+      );
+      assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+      assert.equal(r.lane.last()?.view?.positions.has("BTC-PERP"), false, `${action}: the lane's read — the report the desk shows — was taken after it`);
+      assert.deepEqual(r.events.filter((e) => /refused/.test(e)), [], `${action}: the owner's feed never calls the close refused`);
+      assert.equal(r.events.filter((e) => /^📜 perps \(paper\): closed the long on BTC-PERP — .* realized .* USDG — nothing signed\.$/.test(e)).length, 1, `${action}: and announces its fill`);
+      assert.deepEqual(r.budget.released, r.budget.reserved, `${action}: every reservation released`);
+    }
+  });
+
+  it("A STRATEGY OPEN WHOSE DAY'S COUNTERS FAILED TO RE-READ AFTER IT BOOKED IS PLACED, never refused (an energy claim is refunded only when nothing was placed)", async () => {
     writeFeed();
-    let busy = false;
-    const r = await rig({
-      refresh: async () => {
-        if (busy) throw new Error("SQLITE_BUSY: database is locked");
+    const r = await rig({ refresh: async () => { throw new Error("SQLITE_BUSY: database is locked"); } });
+    const out = await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal(out.status, "paper");
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    assert.deepEqual(r.events.filter((e) => /refused/.test(e)), []);
+    assert.equal(r.events.filter((e) => /^📜 perps \(paper\): opened a /.test(e)).length, 1);
+    assert.equal(r.lane.last()?.view?.positions.has("BTC-PERP"), true, "the read after the booking was taken");
+    assert.deepEqual(r.budget.released, r.budget.reserved, "the reservation is released as it always was");
+  });
+
+  /**
+   * A REFUSAL THAT CAN STILL COME AFTER THE BOOKING: the paper engine commits
+   * the fill inside place(), and anything that throws after that commit and
+   * before place() returns comes back as a refusal. What became of the
+   * position is read back from the ledger, never taken from the outcome.
+   */
+  const bookThenThrow =
+    (armed: () => boolean, after?: () => void) =>
+    (ex: PerpExecutor): PerpExecutor => ({
+      mode: ex.mode,
+      review: ex.review.bind(ex),
+      setLeverage: ex.setLeverage?.bind(ex),
+      tick: ex.tick?.bind(ex),
+      setStop: ex.setStop?.bind(ex),
+      place: async (intent, review, ctx) => {
+        const placed = await ex.place(intent, review, ctx);
+        if (intent.effect !== "close" || !armed()) return placed;
+        after?.();
+        throw new Error("the paper engine booked it, then failed to answer");
       },
     });
+
+  it("A CLOSE BOOKED BEFORE ITS OUTCOME CAME BACK REFUSED IS SAID TO BE CLOSED: the ledger, not the outcome, says what became of it", async () => {
+    writeFeed();
+    let armed = false;
+    const r = await rig({ wrap: bookThenThrow(() => armed) });
     await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
     const fills = fillsOf(r.id);
-    busy = true;
+    armed = true;
     const out = await r.lane.close("BTC-PERP", { book: "paper" });
-    busy = false;
-    assert.equal(fillsOf(r.id), fills + 1, "set-up: the close was booked, and only the counters' re-read after it failed");
+    assert.equal(fillsOf(r.id), fills + 1, "set-up: the close was booked before the throw");
     assert.deepEqual(out, { ok: true, sentence: "BTC-PERP: the practice position was closed." });
     assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
     assert.equal(r.lane.last()?.view?.positions.has("BTC-PERP"), false, "and the lane's read — the report the desk shows — was taken after it");
+    assert.equal(reportedOf(r.id), 0, "agents.perps says so at once");
   });
 
   it("…and part of one, booked before the refusal, is said to be part-closed — never \"stay as they were\"", async () => {
     writeFeed();
-    let busy = false;
-    const r = await rig({
-      refresh: async () => {
-        if (busy) throw new Error("SQLITE_BUSY: database is locked");
-      },
-    });
+    let armed = false;
+    const r = await rig({ wrap: bookThenThrow(() => armed) });
     await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
     const before = (await store.getPerpPositions(r.id, "paper"))[0]!.base;
     writeFeed(802_000n, "1");
-    busy = true;
+    armed = true;
     const out = await r.lane.close("BTC-PERP", { book: "paper" });
-    busy = false;
     const after = (await store.getPerpPositions(r.id, "paper"))[0]!.base;
     assert.ok(after > 0n && after < before, "set-up: the IOC filled only available liquidity");
     assert.deepEqual(out, { ok: false, sentence: "BTC-PERP: the practice close filled only part of the position; the rest remains open with its stop." });
+  });
+
+  it("…and one whose ledger then could not be read says so: never \"stay as they were\", a claim nobody read", async () => {
+    writeFeed();
+    let armed = false;
+    let unread = false;
+    const r = await rig({
+      wrap: bookThenThrow(() => armed, () => (unread = true)),
+      store: {
+        getPerpPositions: async (...args: Parameters<typeof store.getPerpPositions>) => {
+          if (unread) throw new Error("SQLITE_BUSY: database is locked");
+          return store.getPerpPositions(...args);
+        },
+      },
+    });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    armed = true;
+    const out = await r.lane.close("BTC-PERP", { book: "paper" });
+    unread = false;
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "set-up: the close was booked");
+    assert.deepEqual(out, {
+      ok: false,
+      sentence: "BTC-PERP: the practice close was refused (the practice engine could not price or book it), and what remains could not be read; check the position before asking again.",
+    });
+  });
+
+  it("A CLOSE ALL WHOSE CLOSE CAME BACK REFUSED AFTER IT BOOKED re-reads the book, so agents.perps never shows the position it just closed", async () => {
+    writeFeed();
+    let armed = false;
+    const r = await rig({ wrap: bookThenThrow(() => armed) });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    await r.lane.report();
+    assert.equal(reportedOf(r.id), 1, "set-up: one position reported");
+    armed = true;
+    const out = await r.lane.flatten({ book: "paper" });
+    assert.deepEqual(out, { ok: true, sentence: "Every practice perpetual position was closed. New practice positions are paused until you reset the practice book." });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+    assert.equal(r.lane.last()?.view?.positions.size, 0, "the lane's read was taken after the close");
+    assert.equal(reportedOf(r.id), 0, "and agents.perps says so at once, not at the next pass");
   });
 
   it("A CLOSE REFUSED BEFORE ANYTHING WAS BOOKED keeps its position and says so, in practice-book words", async () => {
@@ -667,11 +762,12 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true);
     await store.setAgentMode(r.id, "paper", 1, false);
     const told: boolean[] = [];
-    await r.lane.resetPaper(
+    const lifted = await r.lane.resetPaper(
       ({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })),
       { askedAt: clock - 1_000 },
     );
     assert.deepEqual(told, [true]);
+    assert.equal(lifted.haltKept, false, "the owner is not told to reset again");
     assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, false, "the ledger's halt went with the old book");
     assert.notEqual((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
     assert.equal((await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true })).status, "paper", "a practice entry opens on the new book");
@@ -685,8 +781,9 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     await store.setAgentMode(r.id, "paper", 1, false);
     for (const opts of [{ askedAt: clock - 5_000 }, {}]) {
       const told: boolean[] = [];
-      await r.lane.resetPaper(({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })), opts);
+      const kept = await r.lane.resetPaper(({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })), opts);
       assert.deepEqual(told, [false], JSON.stringify(opts));
+      assert.equal(kept.haltKept, true, `the owner is told the pause stands: ${JSON.stringify(opts)}`);
       assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true, JSON.stringify(opts));
       assert.equal((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted", JSON.stringify(opts));
     }
@@ -736,7 +833,7 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     const reset = (askedAt: number) =>
       restarted.lane.resetPaper(({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt })), { askedAt });
     // Asked for BEFORE the Close all, delivered only now.
-    await reset(clock - 20_000);
+    assert.equal((await reset(clock - 20_000)).haltKept, true, "only the ledger holds it here, and the owner is told it stands");
     assert.deepEqual(told, [false], "nothing orders it after the Close all, so the ledger is not told to lift it");
     assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, true, "the owner's Close all stands");
     assert.equal((await restarted.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
@@ -746,7 +843,7 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     assert.deepEqual(told, [false, false]);
     assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, true);
     // Asked for once this worker began: after the Close all, whenever that ran. It lifts it.
-    await reset(clock);
+    assert.equal((await reset(clock)).haltKept, false);
     assert.deepEqual(told, [false, false, true]);
     assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, false);
     assert.equal((await restarted.lane.execute(await openDraft(restarted), { equityUsdg: u(100), equityKnown: true })).status, "paper", "a practice entry opens on the new book");
@@ -771,16 +868,21 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     // Hosted, a reset rides the reconcile pass and a Close all the ferry's
     // short loop, so a reset asked for first can reach the worker second.
     const told: boolean[] = [];
-    await r.lane.resetPaper(
+    const kept = await r.lane.resetPaper(
       ({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })),
       { askedAt: clock - 5_000 },
     );
     assert.deepEqual(told, [false], "the ledger is not told to lift it");
     assert.equal((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted", "and the lane still holds it");
+    // The ledger never heard of this halt, so a re-read of it after the reset
+    // (what the worker's answer used to be built from) told the owner nothing.
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted ?? false, false);
+    assert.equal(kept.haltKept, true, "the owner is told the pause stands, though only this worker holds it");
     assert.deepEqual(await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true }), { status: "rejected", rejectRule: "perp-entries-halted" });
     assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "nothing opened after the owner's Close all");
     // The reset the owner asks for after it is the one that lifts it.
-    await r.lane.resetPaper(({ clearEntriesHalt }) => store.resetPaperLedger(r.id, 100, { clearEntriesHalt }), { askedAt: clock });
+    const lifted = await r.lane.resetPaper(({ clearEntriesHalt }) => store.resetPaperLedger(r.id, 100, { clearEntriesHalt }), { askedAt: clock });
+    assert.equal(lifted.haltKept, false);
     assert.notEqual((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
   });
 
@@ -1197,12 +1299,24 @@ describe("an owner's exit, at most once (command-files.ts: the claim is the unli
     writeCommand(home, closeCommand("exit-stale", clock - 1));
     let ran = 0;
     const paper = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "paper" });
-    await runTickCommand(home, { now: () => clock, mayRun: () => !perpsWorkerStoodDown(paper), run: async () => (ran++, { ok: true, line: "ran" }), told: async () => {} });
+    // The worker's own drain hooks (index.ts runQueuedCommand spreads them),
+    // so this pins the sentence an owner is told, not the drain's Spot one.
+    await runTickCommand(home, {
+      now: () => clock,
+      mayRun: () => !perpsWorkerStoodDown(paper),
+      run: async () => (ran++, { ok: true, line: "ran" }),
+      told: async () => {},
+      ...orderExpiryHooks,
+    });
     assert.equal(ran, 0);
     const state = readCommandState(home, "exit-stale");
     assert.equal(state?.state, "done");
     assert.equal(state?.result?.ok, false);
-    assert.match(state?.result?.line ?? "", /^expired — .*Nothing was sent/);
+    assert.match(
+      state?.result?.line ?? "",
+      /^expired — I picked up this close of BTC-PERP .* after its window closed, so it did not run: nothing was sent and no practice position was closed\. Ask again if you still want it\.$/,
+    );
+    assert.doesNotMatch(state?.result?.line ?? "", /fill|different market/, "never the drain's Spot order sentence");
     assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
   });
 });
@@ -1360,11 +1474,14 @@ describe("the wiring in index.ts", () => {
     assert.match(fn("runPaperReset"), /async \(\{ clearEntriesHalt \}\) => \{\s*const epoch = await resetPaperLedger\(id, cfg\.paperStartUsdg, \{ clearEntriesHalt \}\);/);
     assert.match(fn("runPaperReset"), /\{ askedAt \},\s*\);/);
     assert.match(fn("runCommand"), /if \(cmd\.kind === "paper-reset"\) return runPaperReset\(cmd\.at\);/);
-    // A halt the reset left (one it could not order) is told to the owner, read from the ledger after the reset.
+    // A halt the reset left (one it could not order) is told to the owner, as
+    // the lane reports it: never re-read from the ledger alone, which misses a
+    // halt only the lane holds (its write failed). The lane tests above pin
+    // haltKept itself, each way and for that case.
     const reset = fn("runPaperReset");
-    const kept = reset.indexOf("const haltKept = await getPerpAccount(id, \"paper\")");
-    assert.ok(kept > reset.indexOf("await perpLane.resetPaper("), "read after the reset");
-    assert.match(reset.slice(kept), /haltKept \? " New practice positions stay paused by your earlier Close all; reset again to lift that\."/);
+    assert.match(reset, /const \{ out: opened, haltKept \} = await perpLane\.resetPaper\(/);
+    assert.doesNotMatch(reset, /getPerpAccount/);
+    assert.match(reset, /`paper book restarted at \$\{fmt\(usdg\(cfg\.paperStartUsdg\)\)\} USDG with no positions\.` \+\s*\(haltKept \? " New practice positions stay paused by your earlier Close all; reset again to lift that\." : ""\)/);
   });
 
   it("the route runs after the class route, inside tick(), and nothing perp is in the strategy loop", () => {

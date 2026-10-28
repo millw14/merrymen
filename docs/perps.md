@@ -194,7 +194,11 @@ who names no wallet can do changes, and no Perps capability is added, with
   later contributor finds.
   Every wallet-aware route answers a `?wallet=` it cannot read with the one
   shared refusal, 400 `wallet-unknown` with `private, no-store`, and Perps not
-  offered with 403 `perps-wallet-not-offered`, also `private, no-store`.
+  offered with 403 `perps-wallet-not-offered`, also `private, no-store`. The
+  grants, orders and paper-reset routes answer it with that shared refusal's
+  `error`; the settings save answers it with its own `errors` list, since an
+  off in the same save may already have been written (`saved`), but with the
+  same code and headers.
 
 **What 5b carries: the Perps wallet's intake and status, and the browser
 signer that makes one.** No screen calls the signer for Perps yet: the desk
@@ -238,7 +242,11 @@ and `/create?for=perps` are PR 3.
   which a renewal may skip the on-chain revocation, true only for a Perps grant
   whose wall rebuilds empty (D6). The empty wall is the whole safety case: a
   key that can call nothing leaves no authority behind. The retired-key fence
-  is hosted only (the store refuses a stopped key for good). Self-hosted, the
+  is hosted only, and lasts only as long as the Perps record: the store
+  refuses a stopped key while the record that retired it stands, and every
+  kill deletes that record (`revokeForKill`), its retired keys with it, so a
+  stopped key can be posted and armed again after a kill, as on main for
+  Spot. Nothing may lean on the fence for that reason too. Self-hosted, the
   renewal stop archives the Perps home's `grant.json` and keeps no record of
   the key, so the same grant posted again is armed again, as self-hosted Spot
   always was; there the skip rests on the empty wall alone
@@ -309,9 +317,13 @@ nothing reaches a venue, a key or real money.
   owner-command) before anything is placed, and booked by the paper engine as
   its own exits are. A close whose decision cannot be written is not sent.
   What a Close says became of the position is read back from the ledger, for
-  a refusal as for a fill: a close the paper engine booked before the day's
-  counters failed to re-read (which `executeLocked` returns as a refusal) is
-  said to be closed, or part-closed, never "stays as it was".
+  a refusal as for a fill: a close the paper engine booked before something
+  after the booking threw is said to be closed, or part-closed, never "stays
+  as it was", and Close and Close all both re-read the book then, so the
+  report the desk shows never holds a position they closed. A day's counters
+  that fail to re-read after a booking no longer make it a refusal at all
+  (`executeLocked`): the fill is announced and answered as a fill, for an
+  owner's exit and a strategy's order alike.
   A book with no view sends nothing, and the owner is told which of two gaps
   it was (`PerpLaneRead.viewUnread`). Prices that could not be read (the feed
   file missing, or stale because its writer stopped) leave the ledger read:
@@ -342,7 +354,9 @@ nothing reaches a venue, a key or real money.
   asked for before it began. A reset asked for after that lifts it; one asked
   for before cannot be ordered against it (it may be the reset that reached a
   restarted worker after the Close all) and lifts nothing; its answer says
-  new practice positions stay paused, and the owner resets again.
+  new practice positions stay paused, and the owner resets again. Whether a
+  halt stands is the lane's to say (`resetPaper`'s `haltKept`): the ledger's
+  halt, or one only the lane holds because the Close all's write failed.
   A Perps reset expires with the Perps order window, so a reset can never lift
   a halt days later. Nothing else clears it: Resume needs the owner-controls
   history (a hash-chained halt log, so a stale resume or an older checkpoint

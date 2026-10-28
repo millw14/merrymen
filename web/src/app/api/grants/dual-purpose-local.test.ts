@@ -124,9 +124,10 @@ describe("self-hosted: the Perps wallet is written to its own home, and only the
 
   it("D6 SELF-HOSTED HAS NO RETIRED-KEY FENCE: the grant a renewal stopped, posted again, is armed again — harmless only because its wall is empty, the one case renewalSkipsRevocation lets through", async () => {
     // Hosted, the store retires the stopped key's hash and refuses that key
-    // for good (dual-purpose.test.ts, D6). Here the stop archives grant.json
-    // and keeps no record of the key, as main's self-hosted Spot renewal never
-    // did; this machine's archive holds the key and its owner key either way.
+    // until a kill deletes the record (dual-purpose.test.ts, D6). Here the
+    // stop archives grant.json and keeps no record of the key, as main's
+    // self-hosted Spot renewal never did; this machine's archive holds the key
+    // and its owner key either way.
     // So nothing here may be read as that fence: a renewal that skips the
     // on-chain revocation (perps-renewal.ts) is safe on the empty wall alone.
     const first = await perpsGrant();

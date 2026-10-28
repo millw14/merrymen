@@ -141,4 +141,38 @@ describe("hosted, a Close all asked again in the same minute after its answer", 
     assert.equal((await post()).status, 409);
     assert.equal((await rows()).length, 2);
   });
+
+  /**
+   * A DOUBLE-CLICK, OR CLOSE ALL PRESSED ON TWO DEVICES AT ONCE. Every exit now
+   * has a random id, so the primary key that once absorbed a second identical
+   * ask in the same minute no longer can: the one-at-a-time slot, judged under
+   * the account's recovery lock (recovery-orders.ts placeRecoveryCheckedOrder,
+   * withFleetRecoveryLock), is all that keeps concurrent asks to one exit. A
+   * second exit is not harmless — it closes whatever is held when it runs,
+   * a position the strategy opened in between included. Without the lock the
+   * look and the insert race, and most rounds here queued two to four.
+   */
+  it("ASKED CONCURRENTLY, ONE EXIT IS QUEUED: one 200, every other ask 409, round after round", async () => {
+    await admin.query(`DELETE FROM ${schema}.agent_commands`);
+    const CLOSE = { purpose: "close-perp", side: "sell", symbol: "BTC-PERP", usdgAmount: 0, book: "paper", expectedAccount: PERPS };
+    const send = (body: object) =>
+      route.POST(new Request("https://app.example.test/api/orders?wallet=perps", {
+        method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify(body),
+      }));
+    for (let round = 0; round < 8; round++) {
+      // Close all on every device, or a Close beside it: one slot either way.
+      const asks = round % 2 === 0 ? [CLOSE_ALL, CLOSE_ALL, CLOSE_ALL, CLOSE_ALL] : [CLOSE, CLOSE_ALL, CLOSE, CLOSE_ALL];
+      const answers = await Promise.all(asks.map(send));
+      const statuses = answers.map((r) => r.status).sort();
+      assert.deepEqual(statuses, [200, 409, 409, 409], `round ${round}: ${JSON.stringify(statuses)}`);
+      const open = (await admin.query(`SELECT id FROM ${schema}.agent_commands WHERE kind = 'trade' AND done_at IS NULL`)).rows;
+      assert.equal(open.length, 1, `round ${round}: one exit queued, not ${open.length}`);
+      const queued = (await answers.find((r) => r.status === 200)!.json()) as { id: string };
+      assert.equal(open[0]!.id, queued.id, `round ${round}: the one queued is the one answered 200`);
+      // Answered, so the slot is free for the next round's asks.
+      const at = Date.now();
+      await admin.query(`UPDATE ${schema}.agent_commands SET claimed_at = $1, done_at = $2, result = $3 WHERE id = $4`,
+        [at, at + 1, JSON.stringify({ ok: true, line: "closed" }), queued.id]);
+    }
+  });
 });

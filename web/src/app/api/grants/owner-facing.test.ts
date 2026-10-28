@@ -14,7 +14,7 @@
  * local one) and the grant store's read, which is made to fail.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -196,9 +196,18 @@ it("A STORE WRITE THAT FAILED WITH A PLAIN ERROR: a redacted owner-facing 503, a
   const body = (await res.clone().json()) as { error?: string; ownerFacing?: unknown };
   assert.equal(res.status, 503, JSON.stringify(body));
   assert.deepEqual(body, { error: NOT_SAVED, ownerFacing: true }, "the store's text is never sent: it can name the database");
+  const again = res.clone();
   const handoff = await signerShows(t, res, grant);
   assert.deepEqual(handoff, { ok: false, error: NOT_SAVED });
   assert.notEqual(handoff.ok ? "" : handoff.error, ON_CHAIN);
+  // THE WALLET SCREEN'S RE-ARM, the other grant POST, reads the same answer
+  // the same way (session.ts refusalOfResponse). Its own copy of the read once
+  // dropped the marker in a revert that every suite let through.
+  const { refusalOfResponse } = await import("@/lib/session");
+  assert.equal(await refusalOfResponse(again), NOT_SAVED);
+  const wallet = readFileSync(path.join(process.cwd(), "web", "src", "terminal", "screens", "Wallet.tsx"), "utf8");
+  assert.match(wallet, /setError\(await refusalOfResponse\(r\)\);/, "the re-arm shows refusalOfResponse's sentence");
+  assert.doesNotMatch(wallet, /refusalMessage\(/, "and reads no refusal by hand");
 });
 
 it("and the ownership read that could not run reaches the signer in its own words", async t => {

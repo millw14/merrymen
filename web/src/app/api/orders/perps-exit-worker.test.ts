@@ -27,6 +27,7 @@ import { openCommands, readCommandState, runTickCommand, type CommandOutcome, ty
 import type { ExecMode } from "../../../../../worker/src/exec-mode";
 import { purposeHome } from "../../../../../worker/src/home";
 import { isPerpExitRoute, orderReadsOf, orderRoute, placeOrder, walletOrderRefusal } from "../../../../../worker/src/order-gate";
+import { orderExpiryHooks } from "../../../../../worker/src/order-receipt";
 import type { AgentLimits, PerpOrderIntent } from "../../../../../worker/src/policy";
 import { buildOpenDraft } from "../../../../../worker/src/perps/drafts";
 import { createPaperPerpExecutor } from "../../../../../worker/src/perps/executor";
@@ -214,7 +215,9 @@ function perpsWorkerRun(
 }
 /**
  * The Perps worker's drain at MERRYMEN_PERPS=paper, over the Perps home, armed
- * on the Perps grant's account (index.ts runQueuedCommand's `account`).
+ * on the Perps grant's account (index.ts runQueuedCommand's `account`), with
+ * the drain's own expiry hooks as runQueuedCommand passes them, so a late exit
+ * is answered here in the words the worker answers it in.
  */
 const drainPerps = (armed: string = PERPS, level: AdmissionLevel = "trade", at: { lever?: string; now?: () => number } = {}) => {
   const cfg = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: at.lever ?? "paper" });
@@ -224,6 +227,7 @@ const drainPerps = (armed: string = PERPS, level: AdmissionLevel = "trade", at: 
     run: perpsWorkerRun(undefined, { level, draining: false }),
     told: async () => {},
     account: () => armed,
+    ...orderExpiryHooks,
   });
 };
 const post = (body: object) =>
@@ -342,8 +346,12 @@ describe("from POST /api/orders?wallet=perps to a practice position closed", () 
     const state = readCommandState(purposeHome("perps"), id);
     assert.equal(state?.state, "done", "answered, so it can never run later either");
     assert.equal(state?.result?.ok, false);
-    assert.match(state?.result?.line ?? "", /^expired\b/, "the drain's answer, never the lane's");
-    assert.doesNotMatch(state?.result?.line ?? "", /practice position/);
+    assert.match(
+      state?.result?.line ?? "",
+      /^expired — I picked up this close of BTC-PERP .* after its window closed, so it did not run: nothing was sent and no practice position was closed\. Ask again if you still want it\.$/,
+      "the exit's own expiry sentence",
+    );
+    assert.doesNotMatch(state?.result?.line ?? "", /there is no practice position to close|position was closed\.$|fill|different market/, "never the lane's answer, nor the drain's Spot order sentence");
 
     // Comment leaders and line breaks out, so a sentence reads as one line.
     const prose = (text: string) => text.replace(/\n[ \t]*\*[ \t]?/g, " ").replace(/\s+/g, " ");

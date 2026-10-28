@@ -42,7 +42,7 @@ import {
   previewOwnerAccount,
   preflightAgentGrant,
   readFunding,
-  refusalMessage,
+  refusalOfResponse,
   restoreAgentWallet,
   createPrivyOwnedWallet,
   type Funding,
@@ -678,9 +678,9 @@ export default function GrantPage() {
       } else {
         // The button that did nothing. `if (r.ok)` with no else meant a refusal
         // left the banner up, re-enabled the button, and said NOTHING — so the
-        // only feedback was "press it again", forever. Show what the server said.
-        const body = (await r.json().catch(() => ({}))) as { error?: string; ownerFacing?: unknown };
-        setError(refusalMessage(r.status, body.error, body.ownerFacing === true));
+        // only feedback was "press it again", forever. Show what the server
+        // said, read as the handoff reads it (owner-facing words kept).
+        setError(await refusalOfResponse(r));
       }
     } catch {
       setError("couldn't reach the server to re-arm this wallet.");

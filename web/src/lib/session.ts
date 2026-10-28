@@ -1825,6 +1825,18 @@ export function refusalMessage(status: number, serverError?: string, ownerFacing
 }
 
 /**
+ * A REFUSED GRANT POST'S SENTENCE, read from its body: refusalMessage with the
+ * route's own words where it marks them `ownerFacing`. Both grant POSTs read
+ * it here — the handoff (postGrant) and the Wallet screen's re-arm — so
+ * neither can drop the marker and tell an owner whose permission could not be
+ * saved that the chain had failed (owner-facing.test.ts pins it).
+ */
+export async function refusalOfResponse(res: Response): Promise<string> {
+  const body = (await res.json().catch(() => ({}))) as { error?: string; ownerFacing?: unknown };
+  return refusalMessage(res.status, body.error, body.ownerFacing === true);
+}
+
+/**
  * How the browser proves a Privy identity when handing over a grant.
  *
  * Set by the Privy sign-in once, read here. The access token is NOT stored —
@@ -1864,8 +1876,7 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
       body: JSON.stringify(grant),
     });
     if (res.ok) return { ok: true };
-    const body = (await res.json().catch(() => ({}))) as { error?: string; ownerFacing?: unknown };
-    return { ok: false, error: refusalMessage(res.status, body.error, body.ownerFacing === true) };
+    return { ok: false, error: await refusalOfResponse(res) };
   } catch {
     // A genuine network failure, as opposed to a refusal. Still not fatal — the
     // grant is in localStorage and `re-arm` can push it again later.

@@ -1609,7 +1609,7 @@ async function judgePerpsSave(
         ownerFacing: true,
         ...(wrote.saved.length > 0 ? { saved: wrote.saved } : {}),
       },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 

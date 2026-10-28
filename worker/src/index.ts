@@ -6898,9 +6898,11 @@ async function main() {
         await runTickCommand(merrymenHome(), {
           now: Date.now,
           // A STOOD-DOWN PERPS WORKER CLAIMS NOTHING (settings.ts
-          // perpsWorkerStoodDown, D19): its positions are frozen, not run by
-          // owner orders, and every command waits in the queue, unclaimed, for
-          // a worker under paper to run it or answer it expired.
+          // perpsWorkerStoodDown, D19): no owner command runs on it, and every
+          // command waits in the queue, unclaimed, for a worker under paper to
+          // run it or answer it expired. Commands only: what it holds keeps
+          // its stops (its protective loop still runs). Positions are frozen
+          // only hosted, where no Perps child runs at all.
           mayRun: cmd => !!active && !perpsWorkerStoodDown(cfg) && !recoveryCommandRefused(merrymenHome(),
             { smartAccount: active.grant.smartAccount, chainId: active.grant.chainId }, cmd),
           // A COMMAND BOUND TO AN ACCOUNT RUNS ONLY ON THAT ACCOUNT. Self-hosted,
@@ -7038,7 +7040,7 @@ async function main() {
     // set is compared with when it was asked, and one an earlier worker
     // process stored with when this lane began, so a reset asked for before
     // a restart lifts nothing (the lane decides).
-    const opened = await perpLane.resetPaper(
+    const { out: opened, haltKept } = await perpLane.resetPaper(
       async ({ clearEntriesHalt }) => {
         const epoch = await resetPaperLedger(id, cfg.paperStartUsdg, { clearEntriesHalt });
         if (trenchBrain.reset()) tgDeliver(tgBook.reset());
@@ -7053,9 +7055,10 @@ async function main() {
         `and earlier paper trades closed into epoch ${opened - 1} (kept, but no longer counted)`,
     );
     // A CLOSE ALL THIS RESET DID NOT LIFT IS SAID, or the owner reads a fresh
-    // book and waits for a strategy that never opens. The reset is done
-    // whatever this read does, so a failed read only says less.
-    const haltKept = await getPerpAccount(id, "paper").then((a) => a?.entriesHalted === true, () => false);
+    // book and waits for a strategy that never opens. The lane says whether
+    // one stands: the ledger's, or one only it holds because the Close all's
+    // write failed, which a re-read of the ledger here never saw. A Spot
+    // worker's lane is never armed, so it says none.
     return {
       ok: true,
       line:

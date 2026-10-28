@@ -272,6 +272,7 @@ describe("where Perps are not offered, a Perps save may only turn things off (D1
     for (const body of [{ perpsEnabled: true }, { perpsMaxLeverage: 3 }, { perpsMarkets: ["BTC-PERP"] }, { liveTradingEnabled: true }, { telegramEnabled: false }, { perpsMaxLeverage: 99 }]) {
       const res = await PUT(request("?wallet=perps", { owner: OWNER, ...body }));
       assert.equal(res.status, 403, JSON.stringify(body));
+      assert.equal(res.headers.get("cache-control"), "private, no-store", `${JSON.stringify(body)}: answered as every wallet-aware route's not-offered refusal is`);
       const out = await json(res);
       assert.equal(out.code, "perps-wallet-not-offered", JSON.stringify(body));
       assert.match(out.errors?.join(" ") ?? "", /not offered on this server yet, so only switching perpetuals off can be saved for one\. Nothing was saved\./);
@@ -291,6 +292,7 @@ describe("where Perps are not offered, a Perps save may only turn things off (D1
     await getSettingsStore("perps").put(OWNER, { strategy: "perps-only", perpsEnabled: true, perpsMaxLeverage: 2 });
     const mixed = await PUT(request("?wallet=perps", { owner: OWNER, perpsEnabled: false, perpsMaxLeverage: 5 }));
     assert.equal(mixed.status, 403);
+    assert.equal(mixed.headers.get("cache-control"), "private, no-store");
     const mixedOut = await json(mixed);
     assert.deepEqual(mixedOut.saved, ["perpsEnabled"]);
     assert.match(mixedOut.errors?.join(" ") ?? "", /Switched off \(perpsEnabled\) — that was saved\. Nothing else was\./);
