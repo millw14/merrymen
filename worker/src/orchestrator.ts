@@ -234,6 +234,7 @@ import { energyUnrestoredPending, seedEnergyDays } from "./energy-seed";
 import { budgetUnrestored, seedBudget } from "./budget-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
+import { perpExitNeverRanLine, perpExitUnansweredLine } from "./perps/owner-order";
 import { makeMcpBackground } from "./mcp/background";
 import { childProcessBrokerPort, createDirectBroker, serveBrokerRequests } from "./fomo/broker";
 import { answerReadingsPerDay, attachFlowBroker, flowFor, flowRuntimeNow as flowRuntimeFor, type FlowRuntime } from "./orchestrator-flow";
@@ -4990,8 +4991,16 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // A PERPS BOOK THAT WILL NOT RESTORE IS HELD, whatever its settings say:
     // every Perps book is a practice book in this build, and its collateral
     // and positions must not silently start again from nothing. No worker and
-    // no hold process (it has no reset to honour); the restore is tried again
-    // on the next pass.
+    // no hold process; the restore is tried again on the next pass. AND NO
+    // PRACTICE RESET IS HONOURED HERE, as a held Spot book's is below: in
+    // this build a reset is not a way out of a Perps book that will not
+    // restore (held-reset.ts judges consent by a seven-day window, never reads
+    // a Perps reset's deadline and clears no perp book). tryPaperRestore has
+    // just recorded the hold for the Perps account (paper_recovery_health),
+    // and POST /api/paper-reset?wallet=perps refuses a reset while it says so
+    // (web start-over.ts queuePaperReset). One queued just before the hold
+    // waits, unclaimed, for the next Perps worker to start, which runs it
+    // inside its window or answers it expired, the book untouched.
     if (perpsSlot && !restore.ok) {
       sayTenantAlert(tenant, `[alert] ${tenant}: its paper perps book could not be restored (${restore.reason}) — no Perps worker starts until it can be`);
       return;
@@ -6775,9 +6784,18 @@ function perpsChildHomeKeys(): `0x${string}`[] {
  * worker spawned; unset, off, `live` (not in this build) or anything else
  * starts none, and stands down any that runs (perpsStandDownForCeiling).
  * Kills, expiry scrubs and cleanup never ask it: a flag limits trading only.
+ *
+ * EXPORTED, AND TAKING AN ENV, ONLY SO THE WEB CAN BE HELD TO IT. The web
+ * refuses a Perps exit or practice reset when it believes no Perps worker
+ * runs (web/src/lib/perps-enabled.ts perpsWorkersRun, D1, D18): if this rule
+ * and that one ever parted, the owner would be refused a Close on a server
+ * whose orchestrator does run their worker, or told "queued" for one that
+ * never starts. perps-enabled.test.ts asks both the same lever values, odd
+ * spellings included, and fails the day they answer differently. Every
+ * caller here passes nothing and reads this process's own env, as before.
  */
-function perpsSpawnable(): boolean {
-  return perpsCeilingOf(process.env.MERRYMEN_PERPS) === "paper";
+export function perpsSpawnable(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return perpsCeilingOf(env.MERRYMEN_PERPS) === "paper";
 }
 
 /** Perps workers stood down to give a Spot worker their process slot: final-passed and released, then started again only in room no Spot worker needs. */
@@ -8451,6 +8469,13 @@ export async function ferryForChild(
       // whose file write failed after the row was claimed lands here too.
       const unanswered =
         "I never heard back from my worker about this order, so I cannot tell you whether it filled — it may have. Check your trades before asking again.";
+      // AN OWNER'S PERPETUAL EXIT IN ITS OWN WORDS, both sentences
+      // (perps/owner-order.ts perpExitNeverRanLine, perpExitUnansweredLine):
+      // a Close is no fill into a market, its fills are never `trades` rows so
+      // "check your trades" points at a page that cannot show one, and a Close
+      // all nobody heard back from may already have paused new practice
+      // positions (its halt is written before it closes anything). Every other
+      // order keeps the two sentences above, word for word.
       for (const r of candidates) {
         // ONE ROW AT A TIME: a write that failed leaves its own row open for
         // the next pass, and does not cost every row after it this one.
@@ -8473,13 +8498,14 @@ export async function ferryForChild(
           // An owner's perpetual exit has none, here as in the child: its
           // sentence alone (order-receipt.ts expiredOrderReceipt).
           const expired = expiredOrderReceipt(args);
+          const neverRanLine = perpExitNeverRanLine(args) ?? neverRan;
           if (r.claimed_at === null || r.claimed_at === undefined) {
             // Undelivered, so no file can exist yet; a replica that delivers it
             // in the meantime wins the `claimed_at IS NULL` race and we stand down.
             if (where !== "gone") return;
             await closeWithReceipt(
               locked,
-              { sql: "done_at = ?, claimed_at = ?, result = ?", args: [now, now, neverRan] },
+              { sql: "done_at = ?, claimed_at = ?, result = ?", args: [now, now, neverRanLine] },
               expired,
               { sql: "id = ? AND done_at IS NULL AND claimed_at IS NULL", args: [id] },
             );
@@ -8489,7 +8515,7 @@ export async function ferryForChild(
           if (where === "queued" && typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
             await closeWithReceipt(
               locked,
-              { sql: "done_at = ?, result = ?", args: [now, neverRan] },
+              { sql: "done_at = ?, result = ?", args: [now, neverRanLine] },
               expired,
               { sql: "id = ? AND done_at IS NULL", args: [id] },
             );
@@ -8500,7 +8526,7 @@ export async function ferryForChild(
           if (now <= closesAt + ORDER_IN_FLIGHT_MS) return;
           await locked
             .prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND done_at IS NULL")
-            .run(now, unanswered, id);
+            .run(now, perpExitUnansweredLine(args) ?? unanswered, id);
           });
         } catch {
           /* left open (done_at NULL): the next pass retries this row whole */
@@ -12765,7 +12791,9 @@ async function perpsFeedHeld(): Promise<number[]> {
 function perpsFeedNow(): FleetPerpFeed {
   perpsFeed ??= createFleetPerpFeed({
     home: merrymenHome(),
-    enabled: perpsSpawnable,
+    // Wrapped, never passed bare: perpsSpawnable's one parameter is an env, and
+    // a feed that ever called enabled(x) must not have x read as the lever.
+    enabled: () => perpsSpawnable(),
     halted: () => stopping || haltRequested(),
     readSettings: async () => perpsFeedConsumers().flatMap((k) => perpsFeedSettings.get(k) ?? []),
     readHeld: perpsFeedHeld,

@@ -46,6 +46,32 @@ test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing 
       assert.deepEqual(await tables(), [], "the kill wrote no perps schema");
     });
 
+    await t.test("a Perps settings READ before any Perps write makes no table either: get, getVersioned, listTenants and remove answer empty by a catalog look", async () => {
+      // GET /api/settings?wallet=perps is answered whatever MERRYMEN_PERPS says
+      // (D1), and every Perps save reads first. These went through client(),
+      // which makes every table it names, so a signed-in login's read made
+      // perps_tenant_settings (and the holder tables) on a fleet that had
+      // never had a Perps wallet.
+      const store = new PgSettingsStore(scopedUrl, "perps");
+      assert.equal(await store.get(T), null);
+      assert.deepEqual(await store.getVersioned(T), { settings: null, version: null });
+      assert.deepEqual(await store.listTenants(), []);
+      await store.remove(T);
+      assert.deepEqual(await tables(), [], "no read wrote any schema");
+      // NO ANSWER OF "ABSENT" IS FINAL: another service's first write (the
+      // web's save, read by the orchestrator) makes the table, and this same
+      // store's next read finds the row.
+      const otherService = new PgSettingsStore(scopedUrl, "perps");
+      await otherService.put(T, { perpsMaxLeverage: 2 });
+      assert.ok((await tables()).includes("perps_tenant_settings"), "made by the write");
+      assert.deepEqual(await store.get(T), { perpsMaxLeverage: 2 });
+      assert.deepEqual(await store.listTenants(), [T]);
+      const read = await store.getVersioned(T);
+      assert.equal(await store.putIfUnchanged(T, { perpsMaxLeverage: 3 }, read.version), true);
+      await store.remove(T);
+      assert.equal(await otherService.get(T), null);
+    });
+
     await t.test("perps on: switched off, every other setting kept, still sealed", async () => {
       const store = new PgSettingsStore(scopedUrl, "perps");
       await store.put(T, OWNER);

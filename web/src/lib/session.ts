@@ -1783,7 +1783,7 @@ function archivePreviousGrant(wallet: GrantPurpose): void {
  * this replaced. The raw message is kept on the end where it adds detail, so a
  * bug report can still quote the exact check that refused.
  */
-export function refusalMessage(status: number, serverError?: string): string {
+export function refusalMessage(status: number, serverError?: string, ownerFacing = false): string {
   switch (status) {
     case 401:
       return "Sign in with your wallet first — a hosted agent is bound to the wallet you sign in with.";
@@ -1807,6 +1807,17 @@ export function refusalMessage(status: number, serverError?: string): string {
         ? `${serverError} (the server refused to arm this wallet)`
         : "The server won't arm this wallet: it isn't linked to the wallet you signed in with.";
     case 503:
+      // A 503 THE ROUTE WROTE FOR THE OWNER SAYS WHAT FAILED. The derivation's
+      // 503 carries the chain's own words, unmarked, and keeps this sentence;
+      // but the grants POST answers 503 for other failures too, each marked
+      // `ownerFacing` (the shell's rule, terminal/request-json.ts, and the
+      // Android client's): the ownership read that could not run, and a store
+      // write that refused — the other wallet's grant could not be read, the
+      // lock was busy, the database answered an error. This arm used to say
+      // "on-chain" for every one of them, so an owner whose permission could
+      // not be SAVED was told the chain had failed, and kept signing again to
+      // fix a chain that was never the problem.
+      if (ownerFacing && serverError) return serverError;
       return "Couldn't verify the account on-chain just now — try again in a moment.";
     default:
       return serverError ?? `the server refused the grant (${status})`;
@@ -1853,8 +1864,8 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
       body: JSON.stringify(grant),
     });
     if (res.ok) return { ok: true };
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    return { ok: false, error: refusalMessage(res.status, body.error) };
+    const body = (await res.json().catch(() => ({}))) as { error?: string; ownerFacing?: unknown };
+    return { ok: false, error: refusalMessage(res.status, body.error, body.ownerFacing === true) };
   } catch {
     // A genuine network failure, as opposed to a refusal. Still not fatal — the
     // grant is in localStorage and `re-arm` can push it again later.

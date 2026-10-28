@@ -32,7 +32,8 @@
  * a `-PERP` or `ALL-PERPS` symbol, so a receipt would read as a Spot sell of
  * an unnamed token, and a Close of a short is not a sell at all.
  */
-import { isPerpExitPurpose } from "./perps/owner-order";
+import type { FileCommand } from "./command-files";
+import { isPerpExitPurpose, perpExitExpiredLine } from "./perps/owner-order";
 
 /** C3's statuses. Closed: a renderer switches on these and nothing else. */
 export type ReceiptStatus = "filled" | "refused" | "failed" | "expired";
@@ -219,3 +220,20 @@ export function expiredOrderReceipt(args: Record<string, unknown> | undefined): 
   if (isPerpExitPurpose(args?.purpose)) return undefined;
   return orderReceipt(orderSubject(args), { kind: "late" }) as OrderReceipt;
 }
+
+/**
+ * WHAT THE DRAIN ANSWERS AN ORDER IT CLAIMED TOO LATE WITH, beside the
+ * lateness it words itself: the receipt where an order has one
+ * (expiredOrderReceipt), and an owner's perpetual exit's own sentence, which
+ * names the exit and says nothing was paused (perps/owner-order.ts
+ * perpExitExpiredLine). Anything else keeps the drain's sentence.
+ *
+ * The hooks command-files.ts runTickCommand takes, as index.ts
+ * runQueuedCommand passes them: ONE OBJECT, so a test drives the drain with
+ * the worker's own wiring rather than a copy that could drift from it.
+ */
+export const orderExpiryHooks = {
+  expiredReceipt: (cmd: FileCommand): OrderReceipt | undefined => (cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined),
+  expiredLine: (cmd: FileCommand, late: string): string | undefined =>
+    cmd.kind === "trade" ? perpExitExpiredLine(cmd.args, late) ?? undefined : undefined,
+} as const;

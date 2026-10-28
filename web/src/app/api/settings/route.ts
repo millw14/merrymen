@@ -46,6 +46,7 @@ import {
 // Relative, as the orders route reaches the worker: `tsx --test` resolves
 // against the root tsconfig, which has no @merrymen/settings.
 import { readSettingsFileWithText, writeSettingsFileIfUnchanged } from "../../../../../worker/src/settings";
+import { errorText } from "../../../../../worker/src/redact-urls";
 import { tenantOf } from "@/lib/auth";
 import { fomoEnabledFor } from "@/lib/fomo-switch";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
@@ -1097,8 +1098,20 @@ async function saveSettings(
  * hosted, writeSettingsFileIfUnchanged self-hosted); when anything landed in
  * between, nothing is written and the body is judged again from a fresh read,
  * so the kill's off stands under every save that never named the switch. A
- * body that switches practice perps ON over an off that landed while it was
- * on its way is refused: an owner who means it after the kill says so again.
+ * body that switches practice perps ON over an off that landed between this
+ * save's own first read and its write is refused: an owner who means it after
+ * the kill says so again.
+ *
+ * ONLY THAT WINDOW, THE SERVER'S OWN. An off already stored when this save
+ * first reads — a kill that finished while the request was still on the wire,
+ * or a form left open since before it — is not one this route can tell from
+ * an owner switching practice perps on after the kill: the body carries no
+ * record of what its sender saw. So such a body saves, as the owner's
+ * decision (a body that never names the switch still keeps the off). Refusing
+ * it needs the client to say what it last read (an expected version, or the
+ * `perpsEnabled` it saw) and the route to refuse a switch-on over anything
+ * else; no client sends Perps settings in this build, and the desk that will
+ * (PR 3) should send `perpsEnabled` only when the owner flips the switch.
  */
 
 /** The one strategy a Perps wallet runs (strategies/registry.ts: nobody picks it; the wallet does). */
@@ -1245,7 +1258,9 @@ const PERPS_SAVE_RACED = Symbol("perps-save-raced");
  */
 async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${string}` | null): Promise<NextResponse> {
   // Whether practice perps were on in this save's FIRST read: an off that
-  // lands after it is one this body never saw (see judgePerpsSave).
+  // lands after it is one this body was never judged against (see
+  // judgePerpsSave). One already stored at that read is not caught here; the
+  // header above says why.
   let firstSawOn: boolean | null = null;
   for (let attempt = 0; attempt < PERPS_SAVE_ATTEMPTS; attempt++) {
     const read = await readPerpsStoredStrict(tenant);
@@ -1261,8 +1276,9 @@ async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${str
 
 /**
  * One judgement of a Perps save against one read. `firstSawOn`: practice perps
- * were on when this save first read, so an off stored now landed while the
- * save was on its way.
+ * were on when this save first read, so an off stored now landed between that
+ * read and this one — while the save was being written. The refusal's "on its
+ * way" means that, and is said only then.
  */
 async function judgePerpsSave(
   body: Record<string, unknown>,
@@ -1318,8 +1334,9 @@ async function judgePerpsSave(
         offs.push({ key: "perpsEnabled", apply: (s) => (v === false ? void (s.perpsEnabled = false) : void delete s.perpsEnabled) });
       }
     } else if (v === true) {
-      // AN OFF THAT LANDED WHILE THIS SAVE WAS ON ITS WAY — a kill, or another
-      // device — is never undone by it: this body was written before it.
+      // AN OFF THAT LANDED AFTER THIS SAVE FIRST READ — a kill, or another
+      // device — is never undone by it: this body was judged against perps
+      // on. (One stored before that read is not seen here; see the header.)
       if (firstSawOn && stored.perpsEnabled !== true) {
         errors.push(
           "perpsEnabled: practice perpetuals were switched off while this save was on its way (a kill, or another device), so it did not switch them back on. Reload, and switch them on again if you mean to",
@@ -1535,7 +1552,19 @@ async function judgePerpsSave(
    * synchronous step (writeSettingsFileIfUnchanged).
    */
   const version = read.version;
-  const persist = async (settings: MerrymenSettings): Promise<"saved" | "raced" | { failed: string }> => {
+  /**
+   * A WRITE THAT THREW IS "failed", AND ITS TEXT STAYS ON THE SERVER. It is the
+   * store's or the file system's own message — a Postgres driver's (a table
+   * name, a connection's state, a host and port), or a path under the home —
+   * and the owner can do nothing with it but retry. So it is logged here,
+   * through errorText as every route logs a caught error (redact-urls.ts: an
+   * http or ws URL's secrets and any key material out), and the owner is told
+   * a fixed sentence (notSaved),
+   * as the grants route's storeRefused and this route's own Perps read
+   * (readPerpsStoredStrict) already answer. It used to be put inside that
+   * sentence, word for word.
+   */
+  const persist = async (settings: MerrymenSettings): Promise<"saved" | "raced" | "failed"> => {
     try {
       const blob: MerrymenSettings = { ...settings, strategy: PERPS_ONLY };
       const wrote = tenant
@@ -1543,19 +1572,20 @@ async function judgePerpsSave(
         : writeSettingsFileIfUnchanged(perpsSettingsFile(), version, JSON.stringify(blob, null, 2));
       return wrote ? "saved" : "raced";
     } catch (e) {
-      return { failed: e instanceof Error ? e.message : String(e) };
+      console.error(`[settings] the Perps wallet's settings could not be written: ${errorText(e)}`);
+      return "failed";
     }
   };
-  const notSaved = (why: string) =>
-    NextResponse.json({ errors: [`Your Perps wallet's settings could not be saved (${why}). Nothing was changed; try again.`] }, { status: 503 });
-  /** The offs alone, over what was stored: the keys switched off, a reason they could not be written, or "raced". */
-  const saveOffs = async (): Promise<{ saved: string[] } | { failed: string } | "raced"> => {
+  const notSaved = () =>
+    NextResponse.json({ errors: ["Your Perps wallet's settings could not be saved. Nothing was changed; try again."] }, { status: 503 });
+  /** The offs alone, over what was stored: the keys switched off, that they could not be written, or "raced". */
+  const saveOffs = async (): Promise<{ saved: string[] } | "failed" | "raced"> => {
     if (offs.length === 0) return { saved: [] };
     const offOnlyBlob: MerrymenSettings = { ...stored };
     for (const off of offs) off.apply(offOnlyBlob);
     const wrote = await persist(offOnlyBlob);
-    if (wrote === "raced") return "raced";
-    return wrote === "saved" ? { saved: [...new Set(offs.map((o) => o.key))] } : wrote;
+    if (wrote !== "saved") return wrote;
+    return { saved: [...new Set(offs.map((o) => o.key))] };
   };
 
   // ── WHERE PERPS ARE NOT OFFERED, ONLY AN OFF (D1) ──────────────────────
@@ -1565,7 +1595,7 @@ async function judgePerpsSave(
   if (!perpsOffered()) {
     const wrote = await saveOffs();
     if (wrote === "raced") return PERPS_SAVE_RACED;
-    if ("failed" in wrote) return notSaved(wrote.failed);
+    if (wrote === "failed") return notSaved();
     if (Object.keys(body).every((k) => offOnly.has(k))) {
       return NextResponse.json({ ok: true, appliesWithin: "one worker tick", ...(wrote.saved.length > 0 ? { saved: wrote.saved } : {}) });
     }
@@ -1587,7 +1617,7 @@ async function judgePerpsSave(
     if (offs.length === 0) return NextResponse.json({ errors }, { status: 400 });
     const wrote = await saveOffs();
     if (wrote === "raced") return PERPS_SAVE_RACED;
-    if ("failed" in wrote) return notSaved(wrote.failed);
+    if (wrote === "failed") return notSaved();
     return NextResponse.json(
       { errors, saved: wrote.saved, note: `Switched off (${wrote.saved.join(", ")}) — that was saved. Nothing else in this save was, because of the errors above.` },
       { status: 400 },
@@ -1596,7 +1626,7 @@ async function judgePerpsSave(
 
   const wrote = await persist(next);
   if (wrote === "raced") return PERPS_SAVE_RACED;
-  if (wrote !== "saved") return notSaved(wrote.failed);
+  if (wrote === "failed") return notSaved();
   return NextResponse.json({
     ok: true,
     appliesWithin: "one worker tick",

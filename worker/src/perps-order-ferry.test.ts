@@ -24,9 +24,9 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 
-import { commandDir, readCommandState, runTickCommand, writeCommand, type CommandOutcome, type FileCommand } from "./command-files";
+import { ORDER_IN_FLIGHT_MS, commandDir, markRunning, readCommandState, runTickCommand, writeCommand, type CommandOutcome, type FileCommand } from "./command-files";
 import { wrapSqlite } from "./db";
-import { expiredOrderReceipt } from "./order-receipt";
+import { orderExpiryHooks } from "./order-receipt";
 import { purposeHome } from "./home";
 import { COMMAND_RECEIPT_DDL, childHome, ferryForChild, ferryOrders } from "./orchestrator";
 import { workerKey } from "./worker-key";
@@ -141,24 +141,28 @@ describe("a login's two workers each get their own wallet's orders", () => {
     assert.ok(answered.claimed_at);
     assert.ok(answered.done_at);
     assert.match(String(answered.result), /^never ran — .*nothing was sent/);
+    // IN A CLOSE'S WORDS, not a Spot fill's (perps/owner-order.ts perpExitNeverRanLine).
+    assert.equal(answered.result, "never ran — this close of BTC-PERP sat in my queue past its window without being picked up, so nothing was sent and no practice position was closed. Ask again if you still want it.");
     // ITS SENTENCE ALONE: a Close is no Spot sell, so it carries no receipt
     // here, as it carries none when it runs (index.ts orderOutcome).
     assert.equal(answered.receipt, null);
     assert.ok(files(childHome(PERPS_KEY)).includes("frozen-close.json"));
     assert.ok(!files(childHome(SPOT_KEY)).includes("frozen-close.json"));
     // And the child, reaching the file at its claim, answers it expired with
-    // no receipt either: the drain's hook is index.ts runQueuedCommand's.
+    // no receipt either, in a Close's words: the drain's hooks are index.ts
+    // runQueuedCommand's own (order-receipt.ts orderExpiryHooks).
     const ran: string[] = [];
     const told: CommandOutcome[] = [];
     await runTickCommand(childHome(PERPS_KEY), {
       now: Date.now,
       run: async (cmd) => (ran.push(cmd.id), { ok: true, line: "ran" }),
       told: async (_cmd, outcome) => void told.push(outcome),
-      expiredReceipt: (cmd) => (cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined),
+      ...orderExpiryHooks,
     });
     assert.deepEqual(ran, [], "never run");
     assert.equal(told.length, 1);
-    assert.match(told[0]!.line, /^expired — /);
+    assert.match(told[0]!.line, /^expired — I picked up this close of BTC-PERP 30 min after its window closed, so it did not run: nothing was sent and no practice position was closed\./);
+    assert.doesNotMatch(told[0]!.line, /fill/, "a Close is no fill into a market");
     assert.equal(told[0]!.receipt, undefined);
     assert.equal(readCommandState(childHome(PERPS_KEY), "frozen-close")?.result?.receipt, undefined);
   });
@@ -187,6 +191,89 @@ describe("a login's two workers each get their own wallet's orders", () => {
     });
     assert.deepEqual(ran, [], "the practice book is not wiped a day after it was asked for");
     assert.match(told[0]?.line ?? "", /^expired — I picked up this practice reset .* so the practice book was not reset/);
+  });
+});
+
+/**
+ * AN EXIT THAT DID NOT RUN, OR THAT NOBODY HEARD BACK FROM, IS SAID AS AN EXIT
+ * (perps/owner-order.ts). The sweep, the drain's claim and the worker's own
+ * check were written for a Spot fill: "I will not fill it into a different
+ * market", and for a row nobody answered, "whether it filled … Check your
+ * trades" — a page that never shows a perpetual's close — with nothing about
+ * the halt a Close all writes before it closes anything (lane.ts flatten).
+ */
+describe("an owner's exit that did not run, or was never answered, in an exit's words", () => {
+  const HOUR = 60 * 60_000;
+  /** A trade row placed `ageMs` ago with a five-minute window, delivered when `claimed`. */
+  const placed = (raw: DatabaseSync, id: string, account: string, args: object, ageMs: number, claimed: boolean) => {
+    const created = Date.now() - ageMs;
+    raw
+      .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at, claimed_at) VALUES (?, ?, 'trade', ?, ?, ?)")
+      .run(id, account, JSON.stringify({ ...args, expiresAt: created + 5 * 60_000 }), created, claimed ? created + 5_000 : null);
+  };
+  // Past the window, its grace and the in-flight bound: a row the sweep closes whatever it says.
+  const LATE = 5 * 60_000 + 2 * 60_000 + ORDER_IN_FLIGHT_MS + HOUR;
+
+  it("A CLOSE ALL THE WORKER TOOK AND NEVER ANSWERED says it may have closed some and paused new ones, and points at the Perps positions — a Spot order beside it keeps its sentence", async () => {
+    const { raw, db } = newDb();
+    rmSync(commandDir(childHome(PERPS_KEY)), { recursive: true, force: true });
+    rmSync(commandDir(childHome(SPOT_KEY)), { recursive: true, force: true });
+    // Delivered and taken (the claim's `.running` marker), then the child was killed mid-way.
+    placed(raw, "all-killed", PERPS, FLATTEN, LATE, true);
+    markRunning(childHome(PERPS_KEY), "all-killed");
+    placed(raw, "close-killed", PERPS, CLOSE, LATE, true);
+    markRunning(childHome(PERPS_KEY), "close-killed");
+    placed(raw, "buy-killed", SPOT, BUY, LATE, true);
+    markRunning(childHome(SPOT_KEY), "buy-killed");
+    for (const t of targetsOf(new Map([[SPOT_KEY, { smartAccount: SPOT }], [PERPS_KEY, { smartAccount: PERPS }]]))) await ferryForChild(db, t);
+    const all = String(row(raw, "all-killed").result);
+    assert.ok(row(raw, "all-killed").done_at, "closed at last, so the slot is freed");
+    assert.equal(all, "I never heard back from my worker about this Close all, so I cannot tell you how far it got: some practice positions may have closed, and new practice positions may be paused until you reset the practice book. Check your Perps positions before asking again.");
+    assert.equal(String(row(raw, "close-killed").result), "I never heard back from my worker about this close of BTC-PERP, so I cannot tell you whether the practice position was closed — it may have been. Check your Perps positions before asking again.");
+    for (const id of ["all-killed", "close-killed"]) {
+      assert.doesNotMatch(String(row(raw, id).result), /trades|fill/, `${id}: a perpetual's fills are never trades rows`);
+      assert.equal(row(raw, id).receipt, null, `${id}: no receipt for an exit`);
+    }
+    assert.equal(String(row(raw, "buy-killed").result), "I never heard back from my worker about this order, so I cannot tell you whether it filled — it may have. Check your trades before asking again.");
+  });
+
+  it("A CLOSE ALL NOBODY PICKED UP says nothing was paused, at the sweep and at the child's claim alike", async () => {
+    const { raw, db } = newDb();
+    rmSync(commandDir(childHome(PERPS_KEY)), { recursive: true, force: true });
+    placed(raw, "all-late", PERPS, FLATTEN, HOUR, false);
+    for (const t of targetsOf(new Map([[PERPS_KEY, { smartAccount: PERPS }]]))) await ferryForChild(db, t);
+    assert.equal(String(row(raw, "all-late").result),
+      "never ran — this Close all sat in my queue past its window without being picked up, so nothing was sent, no practice position was closed and nothing was paused. Ask again if you still want it.");
+    const told: CommandOutcome[] = [];
+    await runTickCommand(childHome(PERPS_KEY), {
+      now: Date.now,
+      run: async () => { throw new Error("never run"); },
+      told: async (_cmd, outcome) => void told.push(outcome),
+      ...orderExpiryHooks,
+    });
+    assert.match(told[0]?.line ?? "", /^expired — I picked up this Close all 55 min after its window closed, so it did not run: nothing was sent, no practice position was closed and nothing was paused\./);
+    assert.equal(readCommandState(childHome(PERPS_KEY), "all-late")?.result?.line, told[0]?.line);
+  });
+
+  it("a Spot order the child reaches too late keeps the drain's own sentence and its receipt", async () => {
+    const home = childHome(SPOT_KEY);
+    rmSync(commandDir(home), { recursive: true, force: true });
+    writeCommand(home, { id: "late-buy", kind: "trade", at: Date.now() - HOUR, args: BUY, expiresAt: Date.now() - 30_000 });
+    const told: CommandOutcome[] = [];
+    await runTickCommand(home, { now: Date.now, run: async () => { throw new Error("never run"); }, told: async (_c, o) => void told.push(o), ...orderExpiryHooks });
+    assert.match(told[0]?.line ?? "", /^expired — I picked this order up 30s after its window closed, and I will not fill it into a different market than the one it was placed for\. Nothing was sent\./);
+    assert.equal(told[0]?.receipt?.status, "expired");
+  });
+
+  it("THE WORKER'S WIRING: runQueuedCommand passes orderExpiryHooks, and runCommand's own expiry check words an exit the same way", () => {
+    const src = readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "index.ts"), "utf8");
+    const body = (name: string) => {
+      const at = src.indexOf(`  async function ${name}(`);
+      assert.ok(at > 0, `${name} must exist`);
+      return src.slice(at, src.indexOf("\n  }\n", at));
+    };
+    assert.match(body("runQueuedCommand"), /runTickCommand\([\s\S]*\.\.\.orderExpiryHooks,[\s\S]*\}\);/);
+    assert.match(body("runCommand"), /const exit = cmd\.kind === "trade" \? perpExitExpiredLine\(cmd\.args, howLate\(Date\.now\(\) - \(cmd\.expiresAt \?\? 0\)\)\) : null;[\s\S]*line: exit \?\? `expired — /);
   });
 });
 

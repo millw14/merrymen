@@ -125,11 +125,11 @@ import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from 
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 import { breakerTripped, drawdownOf, opsHeadroomOf, opsSpent, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { expiredResetLine, isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
+import { expiredResetLine, howLate, isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { recoveryCommandRefused } from "./recovery-command-barrier";
-import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
+import { expiredOrderReceipt, ledgerFactsOf, orderExpiryHooks, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, drainOnUnreadTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
-import { ADMISSION_LEVEL_ENV, DRAIN_INTENT_CHAIN_MS, DrainingRefused, admissionFrom, admissionRefusal, drainIntentChain } from "./worker-admission";
+import { ADMISSION_LEVEL_ENV, DRAIN_INTENT_CHAIN_MS, DrainingRefused, admissionFrom, admissionRefusal, drainIntentChain, ownerPerpExitRefusal } from "./worker-admission";
 import { closeStore } from "./store";
 import { CoalescedRefresh } from "./coalesced-refresh";
 import {
@@ -313,7 +313,7 @@ import {
   setAgentPerps,
 } from "./store";
 import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLaneStore } from "./perps/lane";
-import { readPerpExitOrder } from "./perps/owner-order";
+import { perpExitExpiredLine, perpExitNotAdmittedLine, readPerpExitOrder } from "./perps/owner-order";
 import { lighterFeedPath, readLighterFeed } from "./perps/feed-reader";
 import { startLighterFeed } from "./perps/feed";
 import { createLighterApi } from "./perps/api";
@@ -6921,7 +6921,9 @@ async function main() {
           },
           // AN ORDER THAT EXPIRED IN THE QUEUE STILL GETS ITS RECEIPT. Only an
           // order has one; a probe past its window is answered in words alone.
-          expiredReceipt: (cmd) => (cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined),
+          // And an owner's perpetual exit gets its own words, not a Spot fill's
+          // (order-receipt.ts orderExpiryHooks).
+          ...orderExpiryHooks,
         });
       } catch (e) {
         console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -6956,9 +6958,13 @@ async function main() {
       // The receipt where an order has one: an owner's perpetual exit has none
       // (expiredOrderReceipt), as when it runs (orderOutcome).
       const receipt = cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined;
+      // AND AN EXIT'S OWN SENTENCE, as at the claim (orderExpiryHooks): a
+      // Close is no fill into a market, and a Close all that did not run
+      // paused nothing (perps/owner-order.ts perpExitExpiredLine).
+      const exit = cmd.kind === "trade" ? perpExitExpiredLine(cmd.args, howLate(Date.now() - (cmd.expiresAt ?? 0))) : null;
       return {
         ok: false,
-        line: `expired — this was placed for a market ${late}s ago and I will not fill it into a different one. Ask again if you still want it.`,
+        line: exit ?? `expired — this was placed for a market ${late}s ago and I will not fill it into a different one. Ask again if you still want it.`,
         ...(receipt ? { receipt } : {}),
       };
     }
@@ -7027,9 +7033,11 @@ async function main() {
     // stop's proceeds in the new book, and a breach clock, a cooldown or an
     // entry candle remembered from the old book would act on one that no
     // longer exists (perps/lane.ts resetPaper). The owner's Close-all halt
-    // goes with the old book, in the reset's own transaction, unless that
-    // Close all was asked for after this reset (the lane decides, from when
-    // each was asked).
+    // goes with the old book, in the reset's own transaction, only when the
+    // lane can order this reset after that Close all: a halt this process
+    // set is compared with when it was asked, and one an earlier worker
+    // process stored with when this lane began, so a reset asked for before
+    // a restart lifts nothing (the lane decides).
     const opened = await perpLane.resetPaper(
       async ({ clearEntriesHalt }) => {
         const epoch = await resetPaperLedger(id, cfg.paperStartUsdg, { clearEntriesHalt });
@@ -7044,14 +7052,22 @@ async function main() {
       `paper book restarted — cash back to ${fmt(usdg(cfg.paperStartUsdg))} USDG, positions cleared, ` +
         `and earlier paper trades closed into epoch ${opened - 1} (kept, but no longer counted)`,
     );
+    // A CLOSE ALL THIS RESET DID NOT LIFT IS SAID, or the owner reads a fresh
+    // book and waits for a strategy that never opens. The reset is done
+    // whatever this read does, so a failed read only says less.
+    const haltKept = await getPerpAccount(id, "paper").then((a) => a?.entriesHalted === true, () => false);
     return {
       ok: true,
-      line: `paper book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.`,
+      line:
+        `paper book restarted at ${fmt(usdg(cfg.paperStartUsdg))} USDG with no positions.` +
+        (haltKept ? " New practice positions stay paused by your earlier Close all; reset again to lift that." : ""),
     };
   }
 
   /**
-   * AN OWNER'S OWN BUY OR SELL, arriving from the app rather than from Telegram.
+   * AN OWNER'S OWN ORDER, arriving from the app rather than from Telegram: a
+   * Spot wallet's buy or sell, or a Perps wallet's Close or Close all (the
+   * owner's two practice exits, `close-perp` and `flatten-perps`).
    *
    * WHY THE VALIDATION IS HERE AND NOT ONLY IN THE ROUTE. Between the route and
    * this line the order crossed a shared Postgres table, an orchestrator that
@@ -7060,12 +7076,28 @@ async function main() {
    * a string and a signed UserOperation, and it must hold even if every layer
    * above it is wrong.
    *
-   * PAUSE IS HONOURED HERE, not at the drain. The drain runs above the tick's
-   * `isPaused()` return, deliberately — you want to be able to probe a paused
-   * agent. An ORDER is the opposite: pause is the owner's stop button, and a
+   * PAUSE IS HONOURED HERE, not at the drain, FOR EVERY ORDER BUT AN OWNER'S
+   * PERPETUAL EXIT. The drain runs above the tick's `isPaused()` return,
+   * deliberately — you want to be able to probe a paused agent. A Spot order,
+   * a sell included, is the opposite: pause is the owner's stop button, and a
    * trade that executes through it is the worst surprise this app could
-   * produce. So the gate is per kind, which is why it sits in this function and
-   * not in the caller.
+   * produce. So the gate is per kind, and within an order per route, which is
+   * why it sits in this function (inside placeOrder) and not in the caller.
+   *
+   * AN OWNER'S PERPETUAL EXIT RUNS THROUGH THE PAUSE, ON PURPOSE (docs/perps.md
+   * rule 8a: an exit is always attemptable). Pause stops entries; Close and
+   * Close all are reduce-only, sized by what is held, and asked for by the
+   * owner — less exposure, never more. An owner who paused the agent and then
+   * could not close it would be held in the very positions they paused to
+   * protect. So placeOrder (order-gate.ts) sends a parsed exit to the submitter
+   * BEFORE its unread, pause and ceiling gates; order-gate.test.ts pins that,
+   * and lane.test.ts pins that this function reads the pause once, only into
+   * the reads placeOrder judges. DO NOT add a pause check here, ahead of
+   * placeOrder, "for every order": it would strand Close and Close all on a
+   * paused agent. Nor read an exit's history as "it could not have run while
+   * paused": it could. What an exit does still meet here is the wallet check,
+   * its own shape, the tenant's admission level (ownerPerpExitRefusal) and the
+   * lane's own refusals under its lock.
    */
   async function runOrderCommand(cmd: FileCommand, reads: StatedReads): Promise<OrderReply> {
     // THE WALLET FIRST. This worker serves one of the login's two wallets
@@ -7081,7 +7113,10 @@ async function main() {
     // starved), a book that cannot be totalled for a BUY (checkPolicy would
     // skip the drawdown breaker for it), the owner's pause, the arguments, and
     // the owner's own ceiling — `cfg.telegramMaxActionUsdg`, named for the
-    // other surface and meaning the same thing in both. `reads` is what the
+    // other surface and meaning the same thing in both. An owner's perpetual
+    // exit meets none of those but its own shape: placeOrder sends it on
+    // first (rule 8a, the header above), so `paused` below never refuses a
+    // Close or a Close all. `reads` is what the
     // draining tick read, stated to the tick book at its drain site (order-gate.ts
     // createTickBook) and carried here whole: never a default, never a global
     // beside it, and the same record a Telegram order is judged against.
@@ -7098,6 +7133,19 @@ async function main() {
         if (isPerpExitRoute(route)) {
           const exit = readPerpExitOrder(cmd.args ?? {});
           if (exit === null || "error" in exit) return no(exit?.error ?? "That perpetual exit could not be read. Nothing was sent.");
+          // ADMISSION, AS EVERY OTHER OWNER ORDER MEETS IT. An exit never
+          // reaches processIntentLocked, whose gate a Spot sell meets: the lane
+          // builds and books it itself. So the same levels are asked here
+          // (worker-admission.ts ownerPerpExitRefusal): a tenant held at
+          // `observe` closes nothing and pauses nothing on its owner's order,
+          // `exits-only` lets it go, and a draining worker starts nothing.
+          // Before the lane, so nothing is read, filed or booked; the command
+          // was claimed, so it is answered once and never run.
+          const notAdmitted = ownerPerpExitRefusal({ level: admission.level, draining });
+          if (notAdmitted) {
+            console.log(`[admission] REFUSED ${exit.order.purpose}: ${notAdmitted} (level ${admission.level}${draining ? ", draining" : ""})`);
+            return no(perpExitNotAdmittedLine(exit.order, ownerRejectRuleLabel(notAdmitted) ?? notAdmitted));
+          }
           const notAfterMs = typeof cmd.expiresAt === "number" ? cmd.expiresAt : undefined;
           const result =
             exit.order.purpose === "close-perp"
@@ -8962,6 +9010,8 @@ async function main() {
    * editing a live one. Judged at the top of processIntentLocked, which every
    * intent passes on its way to the chain, before a budget is reserved, a quote
    * fetched or anything built — admission-invariant.test.ts pins both halves.
+   * And in runOrderCommand for a Perps wallet's Close and Close all, the owner
+   * orders the perp lane books without that funnel (ownerPerpExitRefusal).
    *
    * `draining` is raised by the SIGTERM handler at the bottom of main(). From
    * then on every intent that reaches the queue is refused. The one already on
@@ -9280,6 +9330,9 @@ async function main() {
     // nothing new at all (worker-admission.ts). FIRST, because this is the one
     // place every intent passes — the strategy, the class route, the Brain, an
     // owner's typed or queued order, the energy buy and the selftest probe —
+    // (all but a Perps wallet's Close and Close all, which the perp lane
+    // builds and books itself: runOrderCommand asks them the same levels,
+    // worker-admission.ts ownerPerpExitRefusal, before the lane is reached)
     // and because nothing has happened yet: no budget reserved, no quote, no
     // read of the risk period. So a refusal holds nothing open and leaves
     // nothing a restart could replay. It is a `rejected` row like every other

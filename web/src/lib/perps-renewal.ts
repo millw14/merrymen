@@ -13,10 +13,23 @@
  *
  * THE EXEMPTION IS NARROW, AND IT IS SAFE BECAUSE OF WHAT IT COVERS. A key
  * whose wall is empty can do nothing on chain — no call is permitted — so
- * revoking it removes no authority, and leaving it in place leaves none. The
- * server's fence still applies: a replacement stop retires the old session
- * key's hash, and the store refuses that key for good (grant-store
- * retiredSessionKeyHashes), so the old key can never be armed again here.
+ * revoking it removes no authority, and leaving it in place leaves none. That
+ * is the whole of the safety case, on every deployment.
+ *
+ * THE RETIRED-KEY FENCE IS HOSTED ONLY, so nothing may lean on it. Hosted, a
+ * replacement stop retires the old session key's hash and the store refuses
+ * that key for good (grant-store retiredSessionKeyHashes), so the old key can
+ * never be armed again there. Self-hosted there is no such record: the stop
+ * archives the Perps home's grant.json into accounts/perps/grants/ and removes
+ * it (worker perps-kill.ts revokeLocalPerpsGrant), and the intake (the grants
+ * route's selfHostedPerpsIntake) accepts the same grant posted again and arms
+ * the stopped key, as main's self-hosted Spot intake always has — the archive
+ * on that machine holds the key, and its owner key, either way. So there a
+ * skipped revocation rests on the empty wall alone (dual-purpose-local.test.ts
+ * pins it). Which is why this answers true ONLY for a wall that rebuilds
+ * empty: a wall that can call anything keeps the on-chain revocation
+ * everywhere, and must never be let through on a fence a self-hosted install
+ * does not have.
  *
  * "EMPTY" IS DECIDED BY REBUILDING THE WALL, not by reading a flag: the wall
  * the grant's own signed purpose, markers, chain and perp block rebuild to

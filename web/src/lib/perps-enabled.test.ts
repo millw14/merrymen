@@ -36,11 +36,45 @@ describe("the web's perps gate", () => {
     }
   });
 
-  it("perpsWorkersRun is the orchestrator's spawn rule and the worker's stand-down, read the same way", async () => {
+  // The lever values both checks below ask: the ones an operator means, and the
+  // spellings a hand-rolled parse would read differently from the core one
+  // (case, padding, a near-miss, a list). A rule that agreed only on "paper"
+  // would still part from the web on " Paper ".
+  const LEVERS = [undefined, "", "paper", " Paper ", "PAPER", "\tpaper\n", "live", "LIVE", "off", "x", "papers", "paper,live", "1"];
+
+  it("perpsWorkersRun is the orchestrator's spawn rule, asked the orchestrator's own function", async () => {
+    // The web refuses a Perps exit or reset when this says no worker runs, so
+    // it must answer exactly as the orchestrator decides whether to start one
+    // (D1, D18): otherwise an owner is refused a Close on a server whose
+    // orchestrator runs their worker, or told "queued" for one that never
+    // starts. Asked of the real export, not a copy of its rule.
+    // Loaded by a computed specifier so the web typecheck does not take in the whole orchestrator.
+    const orchestrator = "../../../worker/src/orchestrator";
+    const { perpsSpawnable } = (await import(orchestrator)) as { perpsSpawnable(env: Record<string, string | undefined>): boolean };
+    assert.equal(typeof perpsSpawnable, "function", "the orchestrator exports its spawn rule");
+    for (const v of LEVERS) {
+      const env = v === undefined ? {} : { MERRYMEN_PERPS: v };
+      assert.equal(perpsWorkersRun(env), perpsSpawnable(env), `MERRYMEN_PERPS=${JSON.stringify(v)}`);
+    }
+    // And it reads the env it is handed, not this process's: with the process
+    // saying paper, an env saying off is still off (and the reverse).
+    const saved = process.env.MERRYMEN_PERPS;
+    try {
+      process.env.MERRYMEN_PERPS = "paper";
+      assert.equal(perpsSpawnable({ MERRYMEN_PERPS: "off" }), false);
+      delete process.env.MERRYMEN_PERPS;
+      assert.equal(perpsSpawnable({ MERRYMEN_PERPS: "paper" }), true);
+    } finally {
+      if (saved === undefined) delete process.env.MERRYMEN_PERPS;
+      else process.env.MERRYMEN_PERPS = saved;
+    }
+  });
+
+  it("perpsWorkersRun is a self-hosted Perps worker's stand-down, read the same way (D19)", async () => {
     const { mergeSettings, perpsWorkerStoodDown } = await import("../../../worker/src/settings");
-    for (const v of [undefined, "paper", "live", "off", "x"]) {
+    for (const v of LEVERS) {
       const perpsWorker = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", ...(v === undefined ? {} : { MERRYMEN_PERPS: v }) });
-      assert.equal(perpsWorkersRun({ MERRYMEN_PERPS: v }), !perpsWorkerStoodDown(perpsWorker), String(v));
+      assert.equal(perpsWorkersRun({ MERRYMEN_PERPS: v }), !perpsWorkerStoodDown(perpsWorker), `MERRYMEN_PERPS=${JSON.stringify(v)}`);
     }
   });
 

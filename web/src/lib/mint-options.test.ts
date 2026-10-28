@@ -143,6 +143,21 @@ describe("refusalMessage", () => {
     assert.equal(refusalMessage(500, "boom"), "boom");
     assert.match(refusalMessage(500), /refused the grant \(500\)/);
   });
+
+  it("A 503 THE ROUTE MARKED ownerFacing SAYS WHAT FAILED; an unmarked one keeps the on-chain sentence", () => {
+    // The grants POST answers 503 for a store write that refused and for an
+    // ownership read that could not run, both written for the owner and
+    // marked so. Read as "on-chain", an owner whose permission could not be
+    // saved was told the chain had failed.
+    const saved = "Your permission could not be saved, and neither wallet was changed. Please try again.";
+    assert.equal(refusalMessage(503, saved, true), saved);
+    assert.equal(refusalMessage(503, "couldn't check this account's ownership — please try again", true), "couldn't check this account's ownership — please try again");
+    // The derivation's 503 carries the chain's own words and no mark: never shown.
+    const onChain = "Couldn't verify the account on-chain just now — try again in a moment.";
+    assert.equal(refusalMessage(503, "the chain answered the zero address", false), onChain);
+    assert.equal(refusalMessage(503, "the chain answered the zero address"), onChain);
+    assert.equal(refusalMessage(503, undefined, true), onChain, "marked, but nothing said: the fixed sentence");
+  });
 });
 
 /**

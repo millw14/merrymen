@@ -33,8 +33,10 @@ import { createPaperPerpExecutor } from "../../../../../worker/src/perps/executo
 import { readLighterFeed, specToJson, type LighterFeedFileMarket } from "../../../../../worker/src/perps/feed-reader";
 import { createPerpLane, type PerpLane, type PerpLaneConfig } from "../../../../../worker/src/perps/lane";
 import { parseOrderBookDetails } from "../../../../../worker/src/perps/markets";
-import { readPerpExitOrder } from "../../../../../worker/src/perps/owner-order";
+import { perpExitNotAdmittedLine, readPerpExitOrder } from "../../../../../worker/src/perps/owner-order";
 import { mergeSettings, perpsWorkerStoodDown } from "../../../../../worker/src/settings";
+import { ownerRejectRuleLabel } from "../../../../../worker/src/thesis-policy";
+import { ownerPerpExitRefusal, type AdmissionLevel } from "../../../../../worker/src/worker-admission";
 
 const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SETTINGS_FILE", "DATABASE_URL", "MERRYMEN_PERPS", "MERRYMEN_TICK_SECONDS"] as const;
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
@@ -181,10 +183,15 @@ const held = async () => (await store.getPerpPositions(agentId, "paper")).length
 /**
  * A Perps worker's dispatch of one claimed order: index.ts runOrderCommand, in
  * its order — the wallet first (walletOrderRefusal), then placeOrder, whose
- * exit goes to the lane with the order re-read from its own args and the
- * command's deadline. A Spot submitter is never reached.
+ * exit is re-read from its own args, asked the tenant's admission level
+ * (ownerPerpExitRefusal; a self-hosted worker with nothing set trades), and
+ * goes to the lane with the command's deadline. A Spot submitter is never
+ * reached.
  */
-function perpsWorkerRun(reads = { marketUnreadable: false, bookUnreadable: false, equityKnown: true }) {
+function perpsWorkerRun(
+  reads = { marketUnreadable: false, bookUnreadable: false, equityKnown: true },
+  admission: { level: AdmissionLevel; draining: boolean } = { level: "trade", draining: false },
+) {
   const no = (line: string) => ({ ok: false as const, line });
   return async (cmd: FileCommand): Promise<CommandOutcome> => {
     const wrongWallet = walletOrderRefusal("perps", orderRoute(cmd.args));
@@ -193,6 +200,8 @@ function perpsWorkerRun(reads = { marketUnreadable: false, bookUnreadable: false
       if (!isPerpExitRoute(route)) throw new Error("a Spot submitter was reached");
       const exit = readPerpExitOrder(cmd.args ?? {});
       if (exit === null || "error" in exit) return no(exit?.error ?? "unreadable");
+      const notAdmitted = ownerPerpExitRefusal(admission);
+      if (notAdmitted) return no(perpExitNotAdmittedLine(exit.order, ownerRejectRuleLabel(notAdmitted) ?? notAdmitted));
       const notAfterMs = typeof cmd.expiresAt === "number" ? cmd.expiresAt : undefined;
       const result =
         exit.order.purpose === "close-perp"
@@ -207,12 +216,12 @@ function perpsWorkerRun(reads = { marketUnreadable: false, bookUnreadable: false
  * The Perps worker's drain at MERRYMEN_PERPS=paper, over the Perps home, armed
  * on the Perps grant's account (index.ts runQueuedCommand's `account`).
  */
-const drainPerps = (armed: string = PERPS) => {
-  const cfg = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "paper" });
+const drainPerps = (armed: string = PERPS, level: AdmissionLevel = "trade", at: { lever?: string; now?: () => number } = {}) => {
+  const cfg = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: at.lever ?? "paper" });
   return runTickCommand(purposeHome("perps"), {
-    now: Date.now,
+    now: at.now ?? Date.now,
     mayRun: () => !perpsWorkerStoodDown(cfg),
-    run: perpsWorkerRun(),
+    run: perpsWorkerRun(undefined, { level, draining: false }),
     told: async () => {},
     account: () => armed,
   });
@@ -261,6 +270,97 @@ describe("from POST /api/orders?wallet=perps to a practice position closed", () 
     assert.equal(await held(), 0);
   });
 
+  /**
+   * A TENANT HELD BY THE ROLLOUT CLOSES NOTHING ON ITS OWNER'S ORDER. Its
+   * owner's Spot sell is refused `rollout-hold` at processIntentLocked; an exit
+   * never passes there (the lane books it), so it is asked the same level
+   * before the lane. At `observe` the claimed command is answered and never
+   * run — the position stays, and a Close all pauses nothing — and at
+   * `exits-only` the same Close closes it.
+   */
+  it("AT OBSERVE (a tenant the rollout holds) the exit is answered, not run: the position stays and Close all pauses nothing; at exits-only it closes", async () => {
+    await openPractice();
+    const before = await held();
+    assert.equal(before, 1);
+    const close = await post({ purpose: "close-perp", side: "sell", symbol: "BTC-PERP", usdgAmount: 0, book: "paper", expectedAccount: PERPS });
+    assert.equal(close.status, 200);
+    const { id } = (await close.json()) as { id: string };
+    await drainPerps(PERPS, "observe");
+    const state = readCommandState(purposeHome("perps"), id);
+    assert.equal(state?.state, "done", "claimed and answered, so it is never run later");
+    assert.deepEqual({ ok: state?.result?.ok, line: state?.result?.line }, {
+      ok: false,
+      line: "BTC-PERP: not closed — trading is on hold for this agent while the service brings agents back — so nothing was sent and its stop stays in place. Ask again once it is back.",
+    });
+    assert.equal(await held(), before, "the practice position is untouched");
+    const all = await post({ purpose: "flatten-perps", side: "sell", symbol: "ALL-PERPS", usdgAmount: 0, expectedAccount: PERPS });
+    assert.equal(all.status, 200);
+    const { id: allId } = (await all.json()) as { id: string };
+    await drainPerps(PERPS, "observe");
+    assert.match(readCommandState(purposeHome("perps"), allId)?.result?.line ?? "", /^Close all did not run — trading is on hold .* nothing was paused\./);
+    assert.equal(await held(), before);
+    assert.equal((await store.getPerpAccount(agentId, "paper"))?.entriesHalted ?? false, false, "no halt was written for a Close all that did not run");
+    // Drained again at observe, nothing runs: the claim was the unlink.
+    await drainPerps(PERPS, "observe");
+    assert.equal(await held(), before);
+    // exits-only admits an exit: the owner's next Close closes it (and leaves the book empty for the next case).
+    const again = await post({ purpose: "close-perp", side: "sell", symbol: "BTC-PERP", usdgAmount: 0, book: "paper", expectedAccount: PERPS });
+    assert.equal(again.status, 200);
+    const { id: againId } = (await again.json()) as { id: string };
+    await drainPerps(PERPS, "exits-only");
+    assert.equal(readCommandState(purposeHome("perps"), againId)?.result?.line, "BTC-PERP: the practice position was closed.");
+    assert.equal(await held(), 0);
+  });
+
+  /**
+   * WHY AN EXIT IS REFUSED WHERE NO PERPS WORKER RUNS (D1) — and it is not
+   * that a queued exit "would run whenever perps came back". Every exit
+   * carries its order window (the route's expiresAt). One queued at paper and
+   * still waiting when the operator stands perps down is claimed by nothing
+   * (D19), and a worker back under paper after the window answers it expired
+   * and sends nothing. The route's header, perps-enabled.ts and docs/perps.md
+   * gave the late run as the reason — contradicting the docs' own account of
+   * the deadline — and say this now; pinned beside the behaviour.
+   */
+  it("AN EXIT THAT WAITED OUT A STAND-DOWN PAST ITS WINDOW IS ANSWERED EXPIRED, NEVER RUN LATE — and the reasons given for D1's refusal say so", async () => {
+    // No practice position is opened for it (the day's opens are the other
+    // cases'): an exit that ran would be answered in the lane's words, "there
+    // is no practice position to close", and one never run is answered
+    // "expired" by the drain. lane.test.ts holds the same with a position held.
+    assert.equal(await held(), 0);
+    const res = await post({ purpose: "close-perp", side: "sell", symbol: "BTC-PERP", usdgAmount: 0, book: "paper", expectedAccount: PERPS });
+    assert.equal(res.status, 200);
+    const { id } = (await res.json()) as { id: string };
+    const [cmd] = openCommands(purposeHome("perps"));
+    assert.equal(cmd?.id, id);
+    assert.equal(typeof cmd?.expiresAt, "number", "every exit carries its window");
+    // Perps stood down (MERRYMEN_PERPS off): the worker's drain claims nothing.
+    await drainPerps(PERPS, "trade", { lever: "off" });
+    assert.equal(readCommandState(purposeHome("perps"), id)?.state, "queued");
+    // Back under paper a day later: answered expired, and nothing is closed.
+    await drainPerps(PERPS, "trade", { now: () => cmd!.expiresAt! + 86_400_000 });
+    const state = readCommandState(purposeHome("perps"), id);
+    assert.equal(state?.state, "done", "answered, so it can never run later either");
+    assert.equal(state?.result?.ok, false);
+    assert.match(state?.result?.line ?? "", /^expired\b/, "the drain's answer, never the lane's");
+    assert.doesNotMatch(state?.result?.line ?? "", /practice position/);
+
+    // Comment leaders and line breaks out, so a sentence reads as one line.
+    const prose = (text: string) => text.replace(/\n[ \t]*\*[ \t]?/g, " ").replace(/\s+/g, " ");
+    const said = {
+      "orders/route.ts": prose(readFileSync(path.join(import.meta.dirname, "route.ts"), "utf8")),
+      "lib/perps-enabled.ts": prose(readFileSync(path.join(process.cwd(), "web", "src", "lib", "perps-enabled.ts"), "utf8")),
+      "docs/perps.md": prose(readFileSync(path.join(process.cwd(), "docs", "perps.md"), "utf8")),
+    };
+    for (const [where, text] of Object.entries(said)) {
+      // assert.ok, not doesNotMatch: a failure names the file, not the whole of it.
+      assert.ok(!/(?:would|to) run whenever perps came back/.test(text), `${where} must not give a late run as the reason`);
+    }
+    assert.ok(/an exit queued then could only wait, unclaimed, inside the order window every exit carries \(`expiresAt`/.test(said["orders/route.ts"]), "orders/route.ts names the window");
+    assert.ok(/a command queued for the book would only wait, unclaimed, inside the window every Perps exit and reset carries \(`expiresAt`\)/.test(said["lib/perps-enabled.ts"]), "lib/perps-enabled.ts names the window");
+    assert.ok(/an exit queued then could only wait, unclaimed, inside its window \(`expiresAt`/.test(said["docs/perps.md"]), "docs/perps.md names the window");
+  });
+
   it("CLOSE ALL WITH NO BOOK (D11): every practice position closed, entries halted, and the next open refused", async () => {
     await openPractice();
     const res = await post({ purpose: "flatten-perps", side: "sell", symbol: "ALL-PERPS", usdgAmount: 0, expectedAccount: PERPS });
@@ -272,6 +372,20 @@ describe("from POST /api/orders?wallet=perps to a practice position closed", () 
     assert.match(state?.result?.line ?? "", /Every practice perpetual position was closed/);
     assert.equal(await held(), 0);
     assert.equal((await store.getPerpAccount(agentId, "paper"))?.entriesHalted, true);
+    // AND THE NEXT OPEN IS REFUSED, as the name says: the flag in the ledger
+    // is only half of it. The lane that drained this command must read the
+    // halt back for the account the route queued it for, or the strategy
+    // reopens the moment the owner is told everything was closed.
+    writeFeed();
+    const read = await lane.refresh();
+    assert.equal(read.view?.opensBlocked, "perps-entries-halted");
+    const built = buildOpenDraft({ market: read.view!.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 300, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+    assert.ok(built.ok);
+    assert.deepEqual(await lane.execute({ ...built.draft } as PerpOrderIntent, { equityUsdg: u(100), equityKnown: true }), {
+      status: "rejected",
+      rejectRule: "perp-entries-halted",
+    });
+    assert.equal(await held(), 0, "nothing opened after the owner's Close all");
   });
 
   it("the same command on the Spot wallet's worker is refused before anything is built", () => {

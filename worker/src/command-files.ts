@@ -298,6 +298,17 @@ export async function runTickCommand(
      * with its sentence alone, exactly as before receipts existed.
      */
     expiredReceipt?: (cmd: FileCommand) => OrderReceipt | undefined;
+    /**
+     * The sentence for a command answered here as expired, when it has one of
+     * its own; absent, or undefined, it is this drain's (expiredLine).
+     *
+     * A HOOK, for the reason `expiredReceipt` is one: what a `trade` means is
+     * in its arguments, and this file must not learn it. An owner's perpetual
+     * exit is a `trade`, and "I will not fill it into a different market" is a
+     * Spot fill's sentence, not a Close's (perps/owner-order.ts
+     * perpExitExpiredLine). `late` is the lateness as this drain words it.
+     */
+    expiredLine?: (cmd: FileCommand, late: string) => string | undefined;
   },
 ): Promise<void> {
   const dir = commandDir(home);
@@ -309,7 +320,9 @@ export async function runTickCommand(
       const receipt = deps.expiredReceipt?.(cmd);
       const dead: CommandOutcome = {
         ok: false,
-        line: cmd.kind === "paper-reset" ? expiredResetLine(cmd.expiresAt as number, now) : expiredLine(cmd.expiresAt as number, now, "claim"),
+        line: cmd.kind === "paper-reset"
+          ? expiredResetLine(cmd.expiresAt as number, now)
+          : deps.expiredLine?.(cmd, howLate(now - (cmd.expiresAt as number))) ?? expiredLine(cmd.expiresAt as number, now, "claim"),
         ...(receipt ? { receipt } : {}),
       };
       writeCommandResult(home, resultOf(cmd.id, dead, now));
@@ -377,7 +390,7 @@ export async function unlessLate<T>(
 }
 
 /** A lateness as an owner reads it: seconds while it is short, then minutes, then hours. */
-function howLate(ms: number): string {
+export function howLate(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 120) return `${s}s`;
   const m = Math.round(s / 60);

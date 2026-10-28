@@ -44,6 +44,7 @@ import { writeCommand } from "../../../worker/src/command-files";
 import { purposeHome } from "../../../worker/src/home";
 import { isGrantPurpose, type GrantPurpose } from "../../../packages/core/src/grant";
 import { withReadDb } from "@/lib/ledger";
+import { paperRecoveryState } from "./paper-return";
 import { queueRecoveryCheckedCommand, type CommandAdmission } from "./recovery-commands";
 
 /** What became of the reset half of a Start over. */
@@ -117,6 +118,23 @@ export type QueuedReset = { ok: true; id: string; expiresAt?: number } | { ok: f
  * the account in it, so the reset names the one it was asked for, and a
  * worker armed on another answers it without running it. Hosted, the row is
  * bound to `agent` and the ferry hands it only to that account's worker.
+ *
+ * HOSTED, NO PERPS RESET WHILE THE PERPS BOOK IS HELD (409, nothing queued).
+ * A practice book that will not restore starts no worker
+ * (orchestrator.ts spawnChild), and for a Spot book the reset is the owner's
+ * way out: the orchestrator honours it while the book is held
+ * (held-reset.ts). Not for a Perps book in this build: the orchestrator holds
+ * it with no hold process and honours no reset (held-reset.ts judges consent
+ * by a seven-day window and never reads a Perps reset's deadline, nor clears
+ * a perp book), so a reset queued then was answered "queued" and waited,
+ * unclaimed, for a worker that could not start. So the book's record is read
+ * first (paper-return.ts paperRecoveryState, which the orchestrator writes for
+ * the Perps account at every spawn): held is refused, unreadable is a 503,
+ * and only a clear or absent record (an older deployment) is queued. The look
+ * is not atomic with the orchestrator's next restore; a book held just after
+ * it leaves the row waiting with its deadline, answered by the next worker to
+ * start — run inside its window, expired with the book untouched after it. A
+ * stale "held" costs a practice reset, never a book. Spot is not read here.
  */
 export async function queuePaperReset(
   hosted: boolean,
@@ -142,13 +160,24 @@ export async function queuePaperReset(
       return { ok: false, error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` };
     }
   }
-  let admitted: CommandAdmission = { ok: false, why: "unreachable" };
+  let admitted: CommandAdmission | { ok: false; why: "perps-book-held" | "perps-book-unread" } = { ok: false, why: "unreachable" };
   try {
-    admitted = await withReadDb(db => queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at, ...deadline }), wallet);
+    admitted = await withReadDb(async (db) => {
+      if (wallet === "perps" && db) {
+        const book = await paperRecoveryState(db, agent);
+        if (book === "blocked") return { ok: false as const, why: "perps-book-held" as const };
+        if (book === "unknown") return { ok: false as const, why: "perps-book-unread" as const };
+      }
+      return queueRecoveryCheckedCommand(db, { id, agent, kind: "paper-reset", at, ...deadline });
+    }, wallet);
   } catch { /* unreadable is a refusal */ }
   if (!admitted.ok) {
     if (admitted.why === "recovery") return { ok: false, status: 409,
       error: "practice reset is paused while the original financial book is checked. No reset was queued." };
+    if (admitted.why === "perps-book-held") return { ok: false, status: 409,
+      error: "Your Perps wallet's practice book could not be restored, so it is being held and no Perps worker is running to reset it. No practice reset was queued; ask again once it is back." };
+    if (admitted.why === "perps-book-unread") return { ok: false, status: 503,
+      error: "couldn't queue it — whether your Perps wallet's practice book is being held could not be read. No practice reset was queued; try again in a moment." };
     return {
       ok: false,
       status: 503,

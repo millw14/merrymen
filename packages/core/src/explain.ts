@@ -249,7 +249,7 @@ export const CONCEPTS: readonly Concept[] = [
     term: "Couldn't verify the account on-chain just now — try again in a moment.",
     aliases: ["503", "couldnt verify", "try again in a moment", "account derivation"],
     plain: "Before arming your agent, we re-check that the account address in your grant really belongs to your owner key. That check can fail to run — the chain lookup doesn't answer, or our own record lookup doesn't. When it can't run, we stop rather than guess.",
-    because: "refusalMessage maps 503 to this; the route returns 503 (not 403) whenever derivation fails — including derivationUnreachable and the zero-address case — deliberately, so an honest grant is retried rather than told its account is a forgery.",
+    because: "refusalMessage maps an unmarked 503 to this; the route returns 503 (not 403) whenever derivation fails — including derivationUnreachable and the zero-address case — deliberately, so an honest grant is retried rather than told its account is a forgery. A 503 the route marked ownerFacing (the ownership read that could not run, a permission that could not be saved) shows the route's own sentence instead.",
     confusable: "A 403 from the same area (\"this smart account does not derive from the signed-in wallet\") is a real mismatch; 503 explicitly means the check could not be run.",
     evidence: "web/src/lib/session.ts:699-700",
   },

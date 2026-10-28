@@ -105,7 +105,7 @@ import {
   buildPerpBookTerm,
   buildPerpPolicyState,
   buildPerpsReport,
-  buildPerpsView,
+  buildPerpsViewStrict,
   renderScaled,
   type PerpsViewBuilt,
   type PerpsViewInput,
@@ -249,6 +249,20 @@ export interface PerpLaneRead {
   rail: PerpsMode;
   /** Snapshot.perps: undefined when the lane is off, null when unread, else the view. */
   view: PerpsViewBuilt | null | undefined;
+  /**
+   * WHY `view` IS NULL on the practice book, when it is — two different gaps:
+   *   - "ledger": the paper ledger itself could not be read (readLocked's
+   *     catch), or a row it holds is one no view can be built from (an
+   *     unlisted market, no entry price, no margin fraction: view.ts
+   *     buildPerpsViewStrict throws), so what is held is NOT known;
+   *   - "prices": the ledger read, but no view could be built from Lighter's
+   *     prices (no feed file, a stale one, or none for a held market:
+   *     view.ts buildPerpsViewStrict's null), so what is held IS known and
+   *     only cannot be priced.
+   * An owner's exit says which (close, flatten). Undefined whenever `view` is
+   * not null.
+   */
+  viewUnread?: "ledger" | "prices";
   /** index.ts `perpBook`: undefined = known zero (no perps), "unread", or C + ΣM + ΣU + T. */
   book: PerpBookTerm;
   /** C + ΣM + ΣU + T at the last read that succeeded; null before any. */
@@ -400,10 +414,12 @@ export interface PerpLane {
   /**
    * A paper reset: `reset` runs under the lock, then every in-memory perp fact
    * is forgotten. `askedAt` is when the owner asked for it (the command's
-   * `at`); with it, the reset also lifts the owner's Close-all halt, unless
-   * that halt was asked for after the reset was — `reset` is told which, and
-   * clears the ledger's halt in its own transaction (store.ts
-   * resetPaperLedger). Without it, no halt is lifted.
+   * `at`); with it, the reset also lifts the owner's Close-all halt when it
+   * was asked for after that halt: a halt this process set is compared with
+   * when it was asked, and one an earlier process stored with when this lane
+   * began, so a reset asked for before a restart lifts nothing. `reset` is
+   * told which, and clears the ledger's halt in its own transaction (store.ts
+   * resetPaperLedger). Without `askedAt`, no halt is lifted.
    */
   resetPaper<T>(reset: (o: { clearEntriesHalt: boolean }) => Promise<T>, opts?: { askedAt?: number }): Promise<T>;
   /** Write `agents.perps` from the last read. */
@@ -489,9 +505,18 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
    * asked for after that Close all: hosted, an exit rides the ferry's short
    * loop and a reset its reconcile pass, so a reset asked for first can reach
    * the worker second, and must not lift the halt the later Close all set.
+   * This memory does not survive a restart; a halt it holds no time for is
+   * ordered by when this lane began (laneStartedAt, resetPaper).
    */
   const ownerEntryHalts = new Map<string, number>();
   const haltKey = (agentId: string, book: "paper") => `${agentId.toLowerCase()}:${book}`;
+  /**
+   * WHEN THIS LANE — THIS WORKER PROCESS — BEGAN. Every halt this process sets
+   * is in ownerEntryHalts with its time, so a halt in the ledger it holds no
+   * time for was stored by an earlier process, and its Close all was asked for
+   * before this one began (resetPaper).
+   */
+  const laneStartedAt = deps.now();
 
   function forget(): void {
     lastRead = null;
@@ -687,6 +712,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         bookMode,
         rail,
         view: null,
+        viewUnread: "ledger",
         book: "unread",
         lastKnownMicro,
         policy: railOnlyPolicy(a, cfg, rail, nowSec),
@@ -801,7 +827,20 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       grant: { perTradeSealedMicro: a.limits.perTradeUsdg, expiresAtSec: a.limits.expiresAt },
       ledger,
     };
-    const view = buildPerpsView(input);
+    // A ROW NO VIEW CAN BE BUILT FROM IS THE LEDGER'S GAP, NOT THE PRICES'.
+    // buildPerpsView answers null for both; an owner told Lighter's prices
+    // could not be read, and to ask again in a minute, would ask for ever
+    // about a row no price read mends.
+    let view: PerpsViewBuilt | null;
+    let viewUnread: "ledger" | "prices" | undefined;
+    try {
+      view = buildPerpsViewStrict(input);
+      if (view === null) viewUnread = "prices";
+    } catch (e) {
+      log(`paper book unreadable: ${errText(e)}`);
+      view = null;
+      viewUnread = "ledger";
+    }
     let book: PerpBookTerm = buildPerpBookTerm(view);
     // A FLAT PAPER BOOK IS A KNOWN ZERO, whatever the feed says. The paper
     // ledger is the whole book (rule 14): with no position, no order in
@@ -817,6 +856,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       bookMode,
       rail,
       view,
+      ...(viewUnread !== undefined ? { viewUnread } : {}),
       book,
       lastKnownMicro,
       policy,
@@ -1335,10 +1375,16 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
    * market and nothing else (owner-order.ts): the side is the position's, the
    * size is all of it, and the worst price is the protective close's
    * (protect.ts protectCloseSlipBps: twice the owner's slippage, inside the
-   * venue's band). So it can only ever reduce, and a request run a second time
-   * finds nothing to close and sends nothing — the drain's claim is what keeps
-   * it to once (command-files.ts), and this is what makes a second run harmless
-   * if anything ever ran one.
+   * venue's band). So it can only ever reduce.
+   *
+   * IT IS NOT SAFE TO RUN TWICE. Built from what is held when it runs, a
+   * request run a second time closes whatever is held in that market at that
+   * moment: nothing, if nothing was opened since, but a position the strategy
+   * opened since, if one was — a close the owner never asked for (lane.test.ts
+   * pins both). The drain's claim is the only thing that keeps an exit to one
+   * run (command-files.ts: the claim is the unlink; hosted, the ferry claims
+   * the row before it writes the file), so nothing here may be leaned on as a
+   * second line.
    *
    * FILED AS THE OWNER'S. The decision row is written under source `chat`
    * before anything is placed, so its provenance is owner-command and the fill
@@ -1382,10 +1428,20 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   }
 
   /** How many practice positions are still held, from the ledger after the closes — never from an order's result. */
-  async function practiceLeft(a: PerpLaneAgent, marketId?: number): Promise<number | "unread"> {
+  async function practiceLeft(a: PerpLaneAgent): Promise<number | "unread"> {
     try {
       const held = await deps.store.getPerpPositions(a.agentId, "paper");
-      return held.filter((p) => p.base > 0n && (marketId === undefined || p.marketId === marketId)).length;
+      return held.filter((p) => p.base > 0n).length;
+    } catch {
+      return "unread";
+    }
+  }
+
+  /** How much of one market's practice position is still held, from the ledger after the close — never from the order's result. */
+  async function practiceBaseLeft(a: PerpLaneAgent, marketId: number): Promise<bigint | "unread"> {
+    try {
+      const held = await deps.store.getPerpPositions(a.agentId, "paper");
+      return held.filter((p) => p.marketId === marketId && p.base > 0n).reduce((sum, p) => sum + p.base, 0n);
     } catch {
       return "unread";
     }
@@ -1495,12 +1551,29 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           // that account for good (re-creating the wallet is the same index-1
           // account). Not a halt asked for after this reset was, and not for a
           // reset that cannot say when it was asked.
+          //
+          // A HALT THIS PROCESS HOLDS NO TIME FOR was stored by an earlier
+          // worker process (ownerEntryHalts holds every halt this one set), so
+          // its Close all was asked for before this lane began: a reset asked
+          // for after that is after it, and lifts it. A reset asked for BEFORE
+          // this lane began cannot be ordered against it — hosted, a reset
+          // asked for first rides the reconcile pass and can reach a restarted
+          // worker second, after the Close all ran in the process before — so
+          // it lifts nothing, and the owner resets again. It used to lift it:
+          // the restart had erased the only record that the reset came first,
+          // and an older command undid the owner's newer Close all. The two
+          // times are different clocks (the command's `at` is the web's, or
+          // the queue row's; this is the worker's), and the restart between
+          // the halt and this lane is far wider than they ever disagree by.
           const a = agentNow();
           const key = a === null ? null : haltKey(a.agentId, "paper");
           const haltAskedAt = key === null ? undefined : ownerEntryHalts.get(key);
           const askedAt = opts.askedAt;
           const clearEntriesHalt =
-            key !== null && typeof askedAt === "number" && Number.isFinite(askedAt) && (haltAskedAt === undefined || haltAskedAt <= askedAt);
+            key !== null &&
+            typeof askedAt === "number" &&
+            Number.isFinite(askedAt) &&
+            (haltAskedAt !== undefined ? haltAskedAt <= askedAt : laneStartedAt <= askedAt);
           const out = await reset({ clearEntriesHalt });
           if (clearEntriesHalt && key !== null) ownerEntryHalts.delete(key);
           // The book those memories were about is gone: a breach clock, a
@@ -1545,8 +1618,31 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           const r = await refreshLocked();
           if (r.bookMode !== "paper") return { ok: false, sentence: PRACTICE_BOOK_FROZEN };
           if (r.view === null) {
+            // WHICH OF TWO GAPS, told apart (r.viewUnread). A ledger that could
+            // not be read leaves what is held unknown. Prices that could not be
+            // read — the feed file missing or no longer refreshed, the far
+            // likelier of the two — leave the ledger read and the position
+            // known: it is still open, and nothing could price its close. Both
+            // used to be "the practice book could not be read", which an owner
+            // took for a lost practice record rather than a minute's wait.
+            // Either way nothing is sent: no close is built on stale prices,
+            // and with none fresh no paper stop can trigger either (protect.ts
+            // never closes on an unread view), so the stop is not called a
+            // protection it cannot be just now.
+            const held = r.viewUnread === "prices" ? await practiceBaseLeft(a, perpMarketByKey(market)!.marketId) : "unread";
+            if (held === 0n) return { ok: false, sentence: `${market}: there is no practice position to close. Nothing was sent.` };
+            if (held !== "unread") {
+              return {
+                ok: false,
+                sentence:
+                  `${market}: Lighter's prices could not be read just now, so nothing was sent. The practice position is still open, ` +
+                  "and its stop can only trigger once prices read again. Ask again in a minute.",
+              };
+            }
             return { ok: false, sentence: `${market}: the practice book could not be read, so nothing was sent. Its stop stays in place.` };
           }
+          // What was held when the close was built (paper: the ledger row's own base), to tell a part-close from none.
+          const heldBefore = r.view?.positions.get(market)?.baseAmount;
           const done = await ownerCloseLocked(r, market, `the owner asked to close ${market} reduce-only`);
           if (done.kind === "none") return { ok: false, sentence: `${market}: there is no practice position to close. Nothing was sent.` };
           if (done.kind === "unpriced") {
@@ -1559,15 +1655,48 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           if (done.out.status === "dropped") {
             return { ok: false, sentence: `${market}: the practice close did not fill — nothing on the book inside its worst price — so the position and its stop stay as they were.` };
           }
+          // WHAT BECAME OF THE POSITION IS READ BACK FROM THE LEDGER, for a
+          // refusal as for a fill — never taken from the order's result.
+          //   - An IOC can fill part of a close.
+          //   - A REFUSAL CAN COME AFTER THE BOOKING. The paper engine books
+          //     the close in one transaction inside place(), and executeLocked
+          //     re-reads the day's counters after it in the same try, whose
+          //     catch makes any throw a refusal (perp-unpriced). A counter read
+          //     that failed there came back "refused" for a position that was
+          //     gone, and the owner was told it and its stop "stay as they
+          //     were" — and their next Close found nothing to close.
+          // Only "dropped" is taken as said: place() returned with nothing
+          // filled, so nothing was booked.
+          const left = await practiceBaseLeft(a, perpMarketByKey(market)!.marketId);
           if (done.out.status !== "paper") {
             const rule = done.out.rejectRule;
-            const words = rule ? (ownerRejectRuleLabel(rule) ?? rule) : null;
+            log(`${market} owner close came back ${rule ?? "refused"}; the ledger holds ${left === "unread" ? "an unread amount" : left.toString()} of ${heldBefore?.toString() ?? "?"}`);
+            const booked = left === 0n || (left !== "unread" && heldBefore !== undefined && left < heldBefore);
+            if (booked) {
+              // The refusal skipped executeLocked's re-read after a booking:
+              // read now, so the report written below shows what the ledger holds.
+              try {
+                await refreshLocked();
+              } catch (e) {
+                log(`re-read after an owner close not taken: ${errText(e)}`);
+              }
+            }
+            if (left === 0n) return { ok: true, sentence: `${market}: the practice position was closed.` };
+            if (booked) {
+              return { ok: false, sentence: `${market}: the practice close filled only part of the position; the rest remains open with its stop.` };
+            }
+            // The practice book has no venue behind it: perp-unpriced's owner
+            // words ("Lighter could not be read, and money was at the venue")
+            // describe a live account, and here mean the paper engine could
+            // not price or book the close.
+            const words = rule === "perp-unpriced" ? "the practice engine could not price or book it" : rule ? (ownerRejectRuleLabel(rule) ?? rule) : null;
+            if (left === "unread") {
+              return { ok: false, sentence: `${market}: the practice close was refused${words ? ` (${words})` : ""}, and what remains could not be read; check the position before asking again.` };
+            }
             return { ok: false, sentence: `${market}: the practice close was refused${words ? ` (${words})` : ""}, so the position and its stop stay as they were.` };
           }
-          // AN IOC CAN FILL PART OF A CLOSE: the ledger, not the order's result, says whether it is gone.
-          const left = await practiceLeft(a, perpMarketByKey(market)!.marketId);
           if (left === "unread") return { ok: false, sentence: `${market}: a practice close was booked, but what remains could not be read; part of the position may still be open.` };
-          if (left > 0) return { ok: false, sentence: `${market}: the practice close filled only part of the position; the rest remains open with its stop.` };
+          if (left > 0n) return { ok: false, sentence: `${market}: the practice close filled only part of the position; the rest remains open with its stop.` };
           return { ok: true, sentence: `${market}: the practice position was closed.` };
         },
         { label: `owner close ${market}` },
@@ -1602,6 +1731,21 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           const r = await refreshLocked();
           if (r.bookMode !== "paper") return { ok: false, sentence: `${PRACTICE_BOOK_FROZEN} ${paused}` };
           if (r.view === null) {
+            // Which gap, as for Close (above). With only the prices unread the
+            // ledger read, so the owner is told how many positions are still
+            // open — not "they may still be open" — and to ask again; only a
+            // ledger that could not be read leaves that unknown. The halt above
+            // stands either way (D11).
+            const left = r.viewUnread === "prices" ? await practiceLeft(a) : "unread";
+            if (left === 0) return { ok: haltSaved, sentence: `There were no practice perpetual positions open. ${paused}` };
+            if (left !== "unread") {
+              return {
+                ok: false,
+                sentence:
+                  `Lighter's prices could not be read just now, so no practice position was closed: ${left} remain${left === 1 ? "s" : ""} open, ` +
+                  `with ${left === 1 ? "its stop" : "their stops"}, which can only trigger once prices read again. Ask again in a minute. ${paused}`,
+              };
+            }
             return { ok: false, sentence: `The practice book could not be read, so no position was closed; they may still be open. ${paused}` };
           }
           // Every market held at this read, each closed on the same read (one

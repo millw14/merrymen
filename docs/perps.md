@@ -170,7 +170,31 @@ who names no wallet can do changes, and no Perps capability is added, with
   wallet-aware refuses a `?wallet=` other than Spot with 400
   `wallet-not-supported` before it reads or writes anything, and a test walks
   every route file to hold it. Only `/api/grants` reads the wallet itself
-  (from 5c also `/api/settings`, `/api/orders` and `/api/paper-reset`).
+  (from 5c also `/api/settings`, `/api/orders` and `/api/paper-reset`), and
+  the same walk holds each of their handlers to it: `const wallet =
+  readWalletParam(req); if (wallet === null) return walletUnknown(…);` as the
+  handler's own first two statements (the grants POST may first check its
+  own body, by an explicit list of pure calls), read from the syntax tree, so
+  a mention in a comment or a read after a write fails. Nothing may run
+  before the refusal's `if`: the guard's statement is one `const` with that
+  one declarator (a second declarator, `const walletRefused = …, queued =
+  await …`, runs before the `if` and fails), and no parameter has a default
+  or a computed key, which run before the body does. The walk accepts only
+  a handler whose binding cannot change after it was read: an exported `let`
+  or `var` fails, and so does an exported function, or the local function an
+  export list or a `const` names, that the file assigns to anywhere, before
+  the export or after it (`=`, a compound assignment, a destructuring, a
+  for-of head: legal in a `route.js`, which nothing typechecks).
+  A third parameter's default runs on every request too (Next passes two
+  arguments) and fails like any other. An export the walk cannot read as a
+  function in the file (a re-export, a destructured value, CommonJS, a
+  TypeScript `export import POST = H.POST` alias) fails by name, and behind
+  that list TypeScript's own checker names every value the module exports: a
+  handler name it lists that the walk did not check fails, whatever form a
+  later contributor finds.
+  Every wallet-aware route answers a `?wallet=` it cannot read with the one
+  shared refusal, 400 `wallet-unknown` with `private, no-store`, and Perps not
+  offered with 403 `perps-wallet-not-offered`, also `private, no-store`.
 
 **What 5b carries: the Perps wallet's intake and status, and the browser
 signer that makes one.** No screen calls the signer for Perps yet: the desk
@@ -190,7 +214,14 @@ and `/create?for=perps` are PR 3.
   must derive from the owner at Kernel index 1 (403 on a mismatch, 503 when the
   derivation cannot be made, never a pass); it is stored with
   `getGrantStore("perps")`, whose conflicts answer 409 with their code and any
-  other failure a fixed 503. Self-hosted, the same wall and index-1 derivation
+  other failure a fixed 503, marked `ownerFacing` ("Your permission could not
+  be saved, and neither wallet was changed"; Spot's store failures too, which
+  main answered 500 with the store's own text, able to name the database).
+  The browser signer shows a marked 503's own sentence (`session.ts
+  refusalMessage`, `postGrant`, the Wallet screen's re-arm; the iOS engine is
+  bundled from it): its old 503 arm said "Couldn't verify the account
+  on-chain" for every 503, which now stays for the derivation's unmarked one
+  only. Self-hosted, the same wall and index-1 derivation
   (a live eth_call that fails closed with 503), the Spot `grant.json` held to
   the store's same-owner, other-account rules, then the Perps home's
   `grant.json` archived and replaced whole. No public identity or name (D2).
@@ -205,7 +236,14 @@ and `/create?for=perps` are PR 3.
   `MERRYMEN_PERPS` says (D1).
 - `renewalSkipsRevocation` (`web/src/lib/perps-renewal.ts`): the one rule by
   which a renewal may skip the on-chain revocation, true only for a Perps grant
-  whose wall rebuilds empty (D6). The server's retired-key fence still applies.
+  whose wall rebuilds empty (D6). The empty wall is the whole safety case: a
+  key that can call nothing leaves no authority behind. The retired-key fence
+  is hosted only (the store refuses a stopped key for good). Self-hosted, the
+  renewal stop archives the Perps home's `grant.json` and keeps no record of
+  the key, so the same grant posted again is armed again, as self-hosted Spot
+  always was; there the skip rests on the empty wall alone
+  (`dual-purpose-local.test.ts`), and a wall that permits anything keeps the
+  revocation on every deployment.
   It has no caller yet. The dashboard renewal (`Wallet.tsx renewKey`) renews
   Spot only and refuses any other grant before anything is read, stopped or
   signed: its account read is Spot's `GET /api/grants` and its revocation
@@ -254,15 +292,43 @@ nothing reaches a venue, a key or real money.
 - The worker judges the wallet first (`order-gate.ts walletOrderRefusal`): a
   Perps worker takes these two and nothing else (no Spot order, no energy
   buy); a Spot worker never takes one. An exit is not stopped by a Spot read,
-  the pause or the typed-order ceiling (rule 8a). The lane closes what the
+  the pause or the typed-order ceiling (rule 8a): `order-gate.ts placeOrder`
+  sends it on before those gates, and `runOrderCommand` reads the pause only
+  into the reads placeOrder judges, so a paused agent's owner can still Close
+  and Close all (`order-gate.test.ts`, `perps/lane.test.ts` "PAUSE NEVER
+  STANDS BETWEEN AN OWNER AND A CLOSE"). It does meet the tenant's
+  admission level, as every other owner order does: an exit never passes
+  processIntentLocked, where that gate stands, so `runOrderCommand` asks the
+  same levels before the lane (`worker-admission.ts ownerPerpExitRefusal`,
+  the answer `admissionRefusal` gives a reduce-only exit). At `observe` (a
+  tenant the rollout holds) the claimed exit is answered and never run:
+  nothing is closed and a Close all pauses nothing; `exits-only` and `trade`
+  let it go; a draining worker starts nothing. The lane closes what the
   practice book holds now (`lane.ts close`, `flatten`), under its lock, with
   the protective close's slippage, filed under source `chat` (provenance
   owner-command) before anything is placed, and booked by the paper engine as
   its own exits are. A close whose decision cannot be written is not sent.
+  What a Close says became of the position is read back from the ledger, for
+  a refusal as for a fill: a close the paper engine booked before the day's
+  counters failed to re-read (which `executeLocked` returns as a refusal) is
+  said to be closed, or part-closed, never "stays as it was".
+  A book with no view sends nothing, and the owner is told which of two gaps
+  it was (`PerpLaneRead.viewUnread`). Prices that could not be read (the feed
+  file missing, or stale because its writer stopped) leave the ledger read:
+  Close says the position is still open and its stop can only trigger once
+  prices read again, Close all says how many positions remain open (from the
+  ledger), and both say to ask again in a minute. Only a ledger that could not
+  be read says "the practice book could not be read" (Close all: "they may
+  still be open"). The lane tests also hold two markets at once: Close names
+  one, counts only what is left in it, leaves the other untouched and writes
+  `agents.perps` at once; Close all closes both.
   While the account is not on paper, its practice book is frozen (rule 14) and
   neither touches it.
 - Close all writes `perp_accounts.entries_halted` before it closes anything,
-  and holds the halt in the worker if that write fails. **The owner's practice
+  and holds the halt in the worker if that write fails. Before it reads the
+  book, too, so a frozen or unreadable book returns with the halt stored; the
+  lane tests read the ledger at the first close (placed, or its decision
+  filed) and find the halt already there. **The owner's practice
   reset lifts it** (`POST /api/paper-reset?wallet=perps`): the reset closes
   every practice position into the old epoch, so the halt has nothing left to
   guard, and the ledger's halt is cleared in the reset's own transaction
@@ -270,9 +336,13 @@ nothing reaches a venue, a key or real money.
   after that Close all: the lane remembers when the Close all was asked for
   and decides (`lane.ts resetPaper`), because hosted an exit rides the ferry's
   short loop and a reset its reconcile pass, so a reset asked for first can
-  reach the worker second. A halt stored by an earlier worker process (no
-  memory of when) is lifted by the next reset; a reset asked for before a Close
-  all that ran in a process since restarted is the one order this cannot tell.
+  reach the worker second. That memory does not survive a restart, so a halt
+  stored by an earlier worker process is ordered by when this process began:
+  every halt this process sets it remembers, so one it holds no time for was
+  asked for before it began. A reset asked for after that lifts it; one asked
+  for before cannot be ordered against it (it may be the reset that reached a
+  restarted worker after the Close all) and lifts nothing; its answer says
+  new practice positions stay paused, and the owner resets again.
   A Perps reset expires with the Perps order window, so a reset can never lift
   a halt days later. Nothing else clears it: Resume needs the owner-controls
   history (a hash-chained halt log, so a stale resume or an older checkpoint
@@ -285,6 +355,17 @@ nothing reaches a venue, a key or real money.
   `order-receipt.ts expiredOrderReceipt`, which answers none for an exit, as
   the run path's `orderOutcome` does. A receipt templates a Spot fill, and a
   Close of a short is not a sell.
+- Nor is it answered in a Spot fill's words when it did not run
+  (`perps/owner-order.ts perpExitExpiredLine`, `perpExitNeverRanLine`,
+  `perpExitUnansweredLine`; the drain takes them through
+  `order-receipt.ts orderExpiryHooks`). Expired at the claim or at the
+  worker's own check, or never picked up, it names the exit and says nothing
+  was sent or closed, and for Close all that nothing was paused. Taken and
+  never answered (a worker killed mid-way), the sweep says it cannot tell:
+  a Close may have closed the position, and a Close all may have closed some
+  and paused new practice positions until a reset (its halt is written before
+  any close); it points at the Perps positions, never at trades, which never
+  show a perpetual's fill. A Spot order keeps its sentences word for word.
 - Self-hosted, an exit or a reset filed in `accounts/perps/commands` names the
   account it was asked for (`FileCommand.account`), and the drain answers it,
   claimed and never run, on any other (`command-files.ts notForThisAccount`):
@@ -294,12 +375,21 @@ nothing reaches a venue, a key or real money.
 - At most once: the drain's claim is the unlink (`command-files.ts`), and the
   ferry claims a row before it writes the file, so a crash between a close and
   its answer leaves the command claimed and unanswered, never run again (the
-  sweep later says it may have run). A close is built from what is held, so a
-  second run would find nothing and book nothing.
+  sweep later says it may have run). The claim alone keeps an exit to one
+  run: a close is built from what is held when it runs, so a second run would
+  close whatever is held in that market then: nothing if nothing was opened
+  since, but a position the strategy opened since if one was, which the owner
+  never asked to close (`lane.test.ts` pins both). It can only ever reduce;
+  it is not harmless to run twice.
 - A Perps worker under any `MERRYMEN_PERPS` but paper claims no command
   (`settings.ts perpsWorkerStoodDown`, D19); hosted, it is not running at all.
   Its rows wait unclaimed, and are answered when a worker next drains under
-  paper: run inside their window, expired with nothing sent after it.
+  paper: run inside their window, expired with nothing sent after it. Only
+  the owner's commands are stood down: a self-hosted Perps worker started by
+  hand under any other ceiling still runs its protective loop, so what it
+  holds keeps its stops, take-profits, liquidation and funding (the loop
+  starts with every arm, the review's S3-02; `lane.test.ts` pins it). Hosted,
+  with no Perps child, the practice positions are frozen.
 - A Perps worker's energy report never says a buy is `ready` (`energy.ts
   energyBuyOf`).
 
@@ -324,8 +414,11 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   any form, "not available on this server yet" (D10); the consent's withdrawal
   is never refused. Offs (practice perps off, the live rail off, the consent
   withdrawn) are written even beside an error, over what was stored. Hosted,
-  the save holds the login's save lock and never calls `botClaimForSave`, so
-  a Perps save can neither take nor release the Spot wallet's bot. Reads are
+  the save holds the login's save lock (the one Spot's saves take, so saves
+  for one login take turns across both wallets, and a Perps save writes
+  nothing while another holds it: `settings/dual-purpose.test.ts` pins it)
+  and never calls `botClaimForSave`, so a Perps save can neither take nor
+  release the Spot wallet's bot. Reads are
   strict (a broken file is 409, never rewritten); writes are whole (atomic,
   0600) and **only over the blob that save read**: the kill turns
   `perpsEnabled` off in the same blob without the save lock (nothing may hold
@@ -334,15 +427,33 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   on Postgres, a synchronous look-and-write on the file store and
   `settings.ts writeSettingsFileIfUnchanged` self-hosted), and on a miss the
   body is judged again from a fresh read, at most three times (then 503, with
-  nothing written). A save that never names the switch keeps the kill's off; a
-  save that switches practice perps on over an off that landed while it was on
-  its way is refused. Self-hosted, a `merrymen kill` or Telegram `/kill` in
-  another process can still land between the look and the rename (no lock
-  across processes, D7). Where Perps are not offered (D1), self-hosted as
-  hosted (D19), a save may only turn things off: anything else is 403
-  `perps-wallet-not-offered` with only its offs written, and an off with
-  nothing on to turn off writes nothing, so no Perps settings are made on a
-  server that offers none.
+  nothing written). A write that throws is 503 with a fixed sentence ("Your
+  Perps wallet's settings could not be saved. Nothing was changed; try
+  again."): the store's or file system's own text, which can name a host, a
+  table or a path, is logged on the server through `errorText` and never sent,
+  as the Perps read and the grants route already answer. A save that never
+  names the switch keeps the kill's off; a save that switches practice perps
+  on over an off that landed between its own first read and its write is
+  refused. That window is the server's, not the
+  request's: an off already stored when the save first reads (a kill that
+  finished while the request was on the wire, or a form open since before it)
+  cannot be told from an owner switching practice perps on after the kill, so
+  a body naming `perpsEnabled: true` then saves, as the owner's decision.
+  Refusing that needs the client to send what it last read; no client sends
+  Perps settings in this build, and the desk (PR 3) should send `perpsEnabled`
+  only when the owner flips the switch. Self-hosted, the look-and-write is
+  pinned with the kill written inside the save's read-to-write window
+  (`settings-if-unchanged.test.ts`, `perps-kill-race.test.ts`); a `merrymen
+  kill` or Telegram `/kill` in another process can still land between the look
+  and the rename (no lock across processes, D7). Where Perps are not offered
+  (D1), self-hosted as hosted (D19), a save may only turn things off: anything
+  else is 403 `perps-wallet-not-offered` with only its offs written, and an
+  off with nothing on to turn off writes nothing, so no Perps settings are made
+  on a server that offers none — nor any Perps table: hosted, the Perps
+  settings reads (`GET ?wallet=perps`, and the read every save makes first)
+  answer empty by a catalog look until the first Perps write
+  (`settings-store.ts PgSettingsStore.reading`), where they used to make
+  `perps_tenant_settings` on any signed-in login's request.
 - `POST /api/orders?wallet=perps` queues the worker's two exits and nothing
   else (`readPerpsWalletOrder`, the worker's own parser): an entry, a Spot
   order or an energy buy is refused 400, and the Spot wallet refuses an exit
@@ -354,12 +465,48 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   refuses on any other account. The account, ceiling, order window (the Perps
   worker's tick), one-at-a-time slot and queue are each the Perps wallet's
   (self-hosted, `accounts/perps/commands`).
-  Close all with no `book` is queued without one (D11). The fleet recovery hold
-  refuses an exit as it refuses any order (D11). Where no Perps worker runs
-  (`perpsWorkersRun`: `MERRYMEN_PERPS` is not paper), `POST` and `GET` are 403
-  `perps-wallet-not-offered` with nothing queued or read: the worker is stood
-  down and its practice positions frozen, and an exit queued then would run
-  whenever perps came back. `/api/orders/ceiling` stays Spot's: an exit has no
+  Hosted, both wallets' orders are rows in the one `agent_commands` table,
+  told apart only by the account the route resolved
+  (`hostedAgentFor(req, "perps")`): `dual-purpose.test.ts` holds each
+  wallet's reads and slot to its own rows in one shared ledger, and
+  `hosted-wallets.postgres.test.ts` the hosted write (the Perps account's
+  row, the exit's fields only, the Perps worker's window).
+  Close all with no `book` is queued without one (D11). Every exit gets a fresh
+  id (`route.ts exitId`), never a Spot order's minute-bucket hash: an exit's
+  fields never vary, so under the hash a second ask in the same minute after
+  a failed first one collided with the answered one and never ran (hosted,
+  200 `duplicate` with no row added; self-hosted, GET read the old answer).
+  The one-at-a-time slot still refuses a second ask while the first is open
+  (409), and the claim keeps each ask to one run. A second ask once the first
+  was answered is a second exit (see "At most once" above), so **no client
+  may resend an exit POST by itself**: after a lost response PR 3's desk
+  reads the book again and leaves asking again to the owner. The fleet
+  recovery hold is checked as for any order (`placeRecoveryCheckedOrder`,
+  main's check with no rule-8a bypass, D11), and it is per account: it reads
+  `fleet_recovery_health` for the Perps account, and this build records a
+  hold only for the login's Spot account (`reportFleetSource` returns before
+  writing for a Perps worker; the report-only pass walks the Spot grants). So
+  the login's Spot hold refuses neither a Perps exit nor a Perps practice
+  reset, and the check refuses neither today (`dual-purpose.test.ts`). A Perps
+  worker's own hold refuses its spawn instead, and the ferry delivers only to
+  a running worker, so an exit queued while it is held waits inside its window
+  and is answered expired if the hold outlasts it. Where no Perps worker runs
+  (`perpsWorkersRun`: `MERRYMEN_PERPS` is not paper; it answers as the
+  orchestrator's spawn rule `orchestrator.ts perpsSpawnable`, exported so
+  `perps-enabled.test.ts` asks both, and a self-hosted worker's stand-down
+  `settings.ts perpsWorkerStoodDown` do, over the same lever values, odd
+  spellings included), `POST` and `GET` are 403
+  `perps-wallet-not-offered` with nothing queued or read: the worker takes no
+  command, so an exit queued then could only wait, unclaimed, inside its
+  window (`expiresAt`, at least five minutes): run if perps came back inside
+  it, answered expired with nothing sent after it, never days later — and the
+  owner would have been told "queued" for something nothing was doing. The
+  refusal says what becomes of the positions (`perps-enabled.ts
+  perpsStoodDownBook`): hosted, where no Perps child runs, they stay exactly as
+  they are; self-hosted, where a worker started by hand may still be running,
+  that it takes no orders or resets and that such a worker goes on managing
+  what it holds by its own rules (stops, take-profits, liquidation, funding),
+  never that they are frozen. The practice reset's 403 says the same. `/api/orders/ceiling` stays Spot's: an exit has no
   amount to offer chips for.
 - `POST /api/paper-reset?wallet=perps` (D12) queues a reset of the Perps
   wallet's practice book through `queuePaperReset(hosted, account, "perps",
@@ -369,7 +516,17 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   window (`order-ceiling.ts orderTtlFor`, the window its exits wait), on the
   self-hosted file and in the hosted row's `args`, which the ferry lifts onto
   the child's file: one queued at paper and still waiting when perps are stood
-  down is answered expired, the book untouched, when they return. It also
+  down is answered expired, the book untouched, when they return. Hosted, it
+  is refused 409 with nothing queued while the Perps book is held: a practice
+  book that could not be restored starts no Perps worker and no hold process,
+  and nothing honours a Perps reset while it is held (the held Spot book's
+  reset is its owner's way out, `held-reset.ts`, which judges consent by a
+  seven-day window that never reads a Perps deadline). The route reads the
+  hold the orchestrator records for the Perps account at every spawn
+  (`paper_recovery_health`, `paper-return.ts paperRecoveryState`); an
+  unreadable record is 503, and Spot's reset is not looked at. The look is not
+  atomic with the next restore: a reset queued just before a hold waits with
+  its deadline for the next Perps worker to start. It also
   lifts the Close-all halt (above). Start over (`/api/grants/discard`) stays
   Spot's; it already stops the Perps wallet as every kill does, and Spot's
   reset is queued as it always was.

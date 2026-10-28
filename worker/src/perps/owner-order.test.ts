@@ -8,11 +8,16 @@
  *                    (D11: an unread book is every book); "live" is refused by
  *                    name, because nothing real can be closed in this build.
  *   the symbol       one `-PERP` market for a close, ALL-PERPS for Close all.
+ *   its words        an exit that did not run, or that nobody heard back from,
+ *                    is said as an exit — never as a Spot fill, never "check
+ *                    your trades", and for Close all with what it paused.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ALL_PERPS, isPerpExitPurpose, ownerPerpMarket, readPerpExitOrder } from "./owner-order";
+import {
+  ALL_PERPS, isPerpExitPurpose, ownerPerpMarket, perpExitExpiredLine, perpExitNeverRanLine, perpExitUnansweredLine, readPerpExitOrder,
+} from "./owner-order";
 
 const close = { side: "sell", symbol: "BTC-PERP", usdgAmount: 0, purpose: "close-perp", book: "paper" };
 const flatten = { side: "sell", symbol: ALL_PERPS, usdgAmount: 0, purpose: "flatten-perps" };
@@ -96,5 +101,61 @@ describe("small pieces", () => {
     assert.equal(isPerpExitPurpose("close-perp"), true);
     assert.equal(isPerpExitPurpose("flatten-perps"), true);
     for (const p of ["energy", "trade", "resume-perps", "", null, undefined]) assert.equal(isPerpExitPurpose(p), false, String(p));
+  });
+});
+
+/**
+ * AN EXIT THAT DID NOT RUN, IN AN EXIT'S WORDS. The paths that answer an order
+ * nobody ran (the drain's claim, the worker's own check, the orchestrator's
+ * sweep) said a Spot fill's sentence for a Close: "I will not fill it into a
+ * different market", and for one nobody heard back from, "whether it filled …
+ * Check your trades" — a page that never shows a perpetual's close — with
+ * nothing about the pause a Close all writes before it closes anything.
+ */
+describe("an exit's own sentences where it did not run", () => {
+  const SPOT_WORDS = /fill|trades/i;
+
+  it("are null for anything that is not an exit, so a Spot order keeps its own sentence word for word", () => {
+    for (const args of [undefined, {}, { side: "buy", symbol: "TSLA", usdgAmount: 5 }, { side: "sell", symbol: "BTC-PERP", usdgAmount: 0 }, { side: "buy", symbol: "MERRYMEN", usdgAmount: 30, purpose: "energy" }]) {
+      assert.equal(perpExitExpiredLine(args, "30s"), null, JSON.stringify(args));
+      assert.equal(perpExitNeverRanLine(args), null, JSON.stringify(args));
+      assert.equal(perpExitUnansweredLine(args), null, JSON.stringify(args));
+    }
+  });
+
+  it("EXPIRED: names the exit and its lateness, says nothing was sent or closed — and for Close all, that nothing was paused", () => {
+    assert.equal(perpExitExpiredLine(close, "30s"),
+      "expired — I picked up this close of BTC-PERP 30s after its window closed, so it did not run: nothing was sent and no practice position was closed. Ask again if you still want it.");
+    assert.equal(perpExitExpiredLine(flatten, "9 min"),
+      "expired — I picked up this Close all 9 min after its window closed, so it did not run: nothing was sent, no practice position was closed and nothing was paused. Ask again if you still want it.");
+    assert.doesNotMatch(perpExitExpiredLine(close, "30s")!, SPOT_WORDS);
+  });
+
+  it("NEVER RAN: the sweep's sentence for an exit nobody picked up", () => {
+    assert.equal(perpExitNeverRanLine(close),
+      "never ran — this close of BTC-PERP sat in my queue past its window without being picked up, so nothing was sent and no practice position was closed. Ask again if you still want it.");
+    assert.equal(perpExitNeverRanLine({ ...flatten, book: "paper" }),
+      "never ran — this Close all sat in my queue past its window without being picked up, so nothing was sent, no practice position was closed and nothing was paused. Ask again if you still want it.");
+  });
+
+  it("UNANSWERED: claims nothing either way, points at the Perps positions, and for Close all says new positions may be paused until a reset", () => {
+    const one = perpExitUnansweredLine(close)!;
+    const all = perpExitUnansweredLine(flatten)!;
+    assert.equal(one, "I never heard back from my worker about this close of BTC-PERP, so I cannot tell you whether the practice position was closed — it may have been. Check your Perps positions before asking again.");
+    assert.equal(all, "I never heard back from my worker about this Close all, so I cannot tell you how far it got: some practice positions may have closed, and new practice positions may be paused until you reset the practice book. Check your Perps positions before asking again.");
+    for (const line of [one, all]) {
+      assert.doesNotMatch(line, SPOT_WORDS, "no fill, no trades page: a perpetual's fills are never trades rows");
+      assert.doesNotMatch(line, /never ran|will not fill|nothing was sent|did not/i, "it does not claim to know nothing went out");
+    }
+  });
+
+  it("names a market only when it has an exit's shape: these args may have crossed a file anything can write", () => {
+    for (const symbol of ["BTC-PERP; rm -rf", "<b>x</b>", 7, undefined]) {
+      const args = { ...close, symbol };
+      assert.match(perpExitExpiredLine(args, "1s")!, /^expired — I picked up this close 1s after/, String(symbol));
+      assert.match(perpExitNeverRanLine(args)!, /^never ran — this close sat in my queue/, String(symbol));
+      assert.match(perpExitUnansweredLine(args)!, /about this close, so/, String(symbol));
+    }
+    assert.match(perpExitNeverRanLine({ ...close, symbol: " eth-perp " })!, /this close of ETH-PERP/);
   });
 });

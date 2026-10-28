@@ -946,6 +946,12 @@ async function createIfAbsent(c: PgClientLike, ddl: string): Promise<void> {
   }
 }
 
+/** Does this table exist, by a catalog read that takes no lock and writes nothing? (grant-store.ts tableExists) */
+async function settingsTableExists(c: PgClientLike, table: string): Promise<boolean> {
+  const { rows } = await c.query(`SELECT to_regclass($1) IS NOT NULL AS found`, [table]);
+  return rows[0]?.found === true;
+}
+
 /**
  * ALTER TABLE … ADD COLUMN, SAFE TO RUN AT EVERY START AND FROM TWO SERVICES.
  *
@@ -982,10 +988,35 @@ async function connectPg(url: string): Promise<PgClientLike> {
  * RUNTIME only (webpackIgnore) so the file backend builds with it absent; the DEK
  * is required, exactly as PgGrantStore. Gated on a live-Postgres integration test
  * before any funding deploy (docs/hosted-platform-plan.md).
+ *
+ * ONE TABLE PER WALLET, AND THE PERPS ONE MADE ONLY BY A PERPS WRITE. Spot's
+ * `tenant_settings` is made, as it always was, the first time the store is
+ * used. `perps_tenant_settings` is made by the first Perps write (put,
+ * putIfUnchanged) and by nothing else — a holder call goes through client()
+ * too, but holder claims are the login's and only the Spot store is asked
+ * for them (getSettingsStore("spot") in every caller): until then every
+ * Perps read — get, getVersioned, listTenants, remove — answers empty by a
+ * catalog look (to_regclass) on a connection that has run no DDL, exactly as
+ * PgGrantStore keeps `perps_grants` (its existing()). It used not to: every
+ * read went through client(), which makes every table it names, so a signed-in
+ * login's GET /api/settings?wallet=perps — answered whatever MERRYMEN_PERPS
+ * says (D1) — or an off-only PUT with nothing to turn off made the Perps table
+ * on a fleet that had never had a Perps wallet. Tables are never dropped, so
+ * that could not be taken back, and every kill after it went past its no-table
+ * look to a SELECT (disablePerpsForKill).
  */
 export class PgSettingsStore implements SettingsStore {
+  /** The one connection, opened: nothing is written by opening it (connection()). */
+  private opened: Promise<PgClientLike> | null = null;
+  /** That connection with every table made (client()). */
   private ready: Promise<PgClientLike> | null = null;
   private readonly table: (typeof WALLET_SETTINGS_TABLE)[GrantPurpose];
+  /**
+   * Is this wallet's table known to exist? Always for Spot, whose reads make
+   * it (client()); for Perps, once a catalog look found it or client() made
+   * it. Tables are never dropped, so yes is final.
+   */
+  private present: boolean;
   constructor(
     private url: string,
     readonly wallet: GrantPurpose,
@@ -993,7 +1024,22 @@ export class PgSettingsStore implements SettingsStore {
   ) {
     if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
     this.table = WALLET_SETTINGS_TABLE[wallet];
+    this.present = wallet === "spot";
     requireDek();
+  }
+  /**
+   * The one connection, opened and nothing more: no table is made on it here.
+   * A failed open is forgotten, so the next call opens afresh; concurrent
+   * first callers share one attempt.
+   */
+  private connection(): Promise<PgClientLike> {
+    if (!this.opened) {
+      const started = (this.opened = this.connect(this.url));
+      started.catch(() => {
+        if (this.opened === started) this.opened = null;
+      });
+    }
+    return this.opened;
   }
   /**
    * The one connection, with every table made — once, and only once it WORKED.
@@ -1003,19 +1049,26 @@ export class PgSettingsStore implements SettingsStore {
    * later call on the store for the life of the process — in the web, every
    * settings read, holder link and tier. Concurrent first callers still share
    * one attempt.
+   *
+   * For the Perps wallet this is a WRITE's way in: it makes the Perps table.
+   * Its reads go through reading(), which never comes here.
    */
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
       const started = (this.ready = (async () => {
-        const c = await this.connect(this.url);
+        const opening = this.connection();
+        const c = await opening;
         try {
           await this.makeTables(c);
         } catch (e) {
-          // CLOSED, so a start that keeps failing (a permission, a lost
-          // race every time) cannot pile up one open connection per call.
+          // CLOSED, and forgotten with it, so a start that keeps failing (a
+          // permission, a lost race every time) cannot pile up one open
+          // connection per call, and the next call opens a fresh one.
+          if (this.opened === opening) this.opened = null;
           void Promise.resolve((c as { end?: () => unknown }).end?.()).catch(() => {});
           throw e;
         }
+        this.present = true;
         return c;
       })());
       started.catch(() => {
@@ -1023,6 +1076,20 @@ export class PgSettingsStore implements SettingsStore {
       });
     }
     return this.ready;
+  }
+  /**
+   * WHERE A READ GOES: Spot's through client(), exactly as before. The Perps
+   * wallet's on the bare connection, after a catalog look that takes no lock
+   * and writes nothing, until its table is known to exist; null while it does
+   * not, which every reader answers as "nothing stored". Asked again on every
+   * read until it is there: the table is made by another service's write (the
+   * web's save, read by the orchestrator), so no answer of "absent" is final.
+   */
+  private async reading(): Promise<PgClientLike | null> {
+    if (this.wallet === "spot") return this.client();
+    const c = await this.connection();
+    if (!this.present) this.present = await settingsTableExists(c, this.table);
+    return this.present ? c : null;
   }
   private async makeTables(c: PgClientLike): Promise<void> {
     await createIfAbsent(
@@ -1086,22 +1153,31 @@ export class PgSettingsStore implements SettingsStore {
     );
   }
   async get(tenant: `0x${string}`): Promise<MerrymenSettings | null> {
-    const c = await this.client();
+    const c = await this.reading();
+    if (!c) return null;
     const { rows } = await c.query(`SELECT sealed FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
     return rows[0] ? unseal(String(rows[0].sealed)) : null;
   }
   async listTenants(): Promise<`0x${string}`[]> {
-    const c = await this.client();
+    const c = await this.reading();
+    if (!c) return [];
     const { rows } = await c.query(`SELECT tenant FROM ${this.table}`);
     return rows.map((r) => String(r.tenant) as `0x${string}`);
   }
+  /** Nothing to remove where the table was never made, and so nothing is made to remove it from. */
   async remove(tenant: `0x${string}`): Promise<void> {
-    const c = await this.client();
+    const c = await this.reading();
+    if (!c) return;
     await c.query(`DELETE FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
   }
-  /** The row as stored, its sealed text the version (readSettingsVersioned): seal() draws a fresh IV, so no two writes share one. */
+  /**
+   * The row as stored, its sealed text the version (readSettingsVersioned): seal() draws a fresh IV, so no two writes share one.
+   * No Perps table yet is nothing stored, version null: the write that follows makes the table, and its INSERT … ON CONFLICT
+   * DO NOTHING misses if another service made table and row in between, so the save reads again (putIfUnchanged).
+   */
   async getVersioned(tenant: `0x${string}`): Promise<VersionedSettings> {
-    const c = await this.client();
+    const c = await this.reading();
+    if (!c) return { settings: null, version: null };
     const { rows } = await c.query(`SELECT sealed FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
     if (!rows[0]) return { settings: null, version: null };
     const sealed = String(rows[0].sealed);

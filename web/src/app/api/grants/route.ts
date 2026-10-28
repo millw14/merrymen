@@ -45,8 +45,8 @@ import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { readAgentPerps } from "@/lib/agent-perps";
-import { perpsCreationAllowed } from "@/lib/perps-enabled";
-import { NO_STORE_HEADERS } from "@/lib/route-guard";
+import { perpsCreationAllowed, perpsWalletRefused } from "@/lib/perps-enabled";
+import { NO_STORE_HEADERS, walletUnknown } from "@/lib/route-guard";
 import { assertIndependentWallets, getGrantStore, GrantReplacementConflict, GrantWalletConflict } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
@@ -936,20 +936,21 @@ export async function DELETE(req: Request) {
   return killed(solana, perps);
 }
 
-/** A `?wallet=` that names no wallet, or more than one. */
-function walletUnknown(nothing: string, headers?: HeadersInit): NextResponse {
-  return NextResponse.json({ error: `That request names a wallet this server does not know (${WALLET_PARAM}=spot or ${WALLET_PARAM}=perps). ${nothing}` }, { status: 400, headers });
-}
 /**
  * No Perps wallet is made or renewed on this server: MERRYMEN_PERPS is not
  * paper (perpsCreationAllowed). One that exists is still shown (GET) and
  * stopped by every kill; only a renewal, its first step included, is refused.
+ *
+ * THE SHARED REFUSAL (perps-enabled.ts perpsWalletRefused), as `walletUnknown`
+ * is route-guard.ts's: this route kept copies of its own, which answered the
+ * same refusal in another shape — a 400 with no `code` where /api/settings,
+ * /api/orders and /api/paper-reset answer `wallet-unknown`, and a 403 without
+ * `private, no-store` — so a client that reads the code read three routes
+ * right and this one, the first the desk asks, wrong. One helper each, one
+ * shape on every wallet-aware route; only the sentence is this route's.
  */
 function perpsWalletNotOffered(nothing: string): NextResponse {
-  return NextResponse.json(
-    { error: `Perps wallets are not offered on this server yet. ${nothing}`, code: "perps-wallet-not-offered", ownerFacing: true },
-    { status: 403 },
-  );
+  return perpsWalletRefused(nothing);
 }
 /** The stop that begins a Perps renewal, refused with the renewal it begins (D1). */
 function perpsRenewalNotOffered(): NextResponse {
@@ -1061,7 +1062,7 @@ export async function GET(req: Request) {
   // (decision D1): an owner must always be able to see, and so stop, a Perps
   // wallet they hold, on a server that no longer makes them.
   const wallet = readWalletParam(req);
-  if (wallet === null) return walletUnknown("Nothing was read.", NO_STORE_HEADERS);
+  if (wallet === null) return walletUnknown("Nothing was read.");
   let grant: StoredGrant;
   const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
   if (hostedTenant !== undefined) {

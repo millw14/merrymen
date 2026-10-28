@@ -367,12 +367,22 @@ export function perpsCeilingFor(
  *
  * The orchestrator never starts a Perps worker unless MERRYMEN_PERPS is paper
  * (orchestrator.ts perpsSpawnable), and a self-hosted one is to match it. A
- * stood-down Perps wallet's positions are FROZEN, not managed by owner orders
- * (docs/perps.md, D1): so a Perps worker that runs anyway under any other
- * ceiling — started by hand, or by a CLI that has not learned the rule —
- * drains no owner command. Each one stays queued, unclaimed, and is answered
- * by the worker that next drains under paper: run if it is still inside its
- * window, expired (nothing sent) if not. A Spot worker is never stood down here.
+ * stood-down Perps wallet is not managed by owner orders (docs/perps.md, D1):
+ * so a Perps worker that runs anyway under any other ceiling — started by
+ * hand, or by a CLI that has not learned the rule — drains no owner command.
+ * Each one stays queued, unclaimed, and is answered by the worker that next
+ * drains under paper: run if it is still inside its window, expired (nothing
+ * sent) if not. A Spot worker is never stood down here.
+ *
+ * COMMANDS ONLY, NOT THE BOOK'S OWN STOPS. Hosted, no Perps child runs, so
+ * its practice positions are frozen. A worker that runs anyway is another
+ * matter: its protective loop starts with every arm and a held position keeps
+ * the lane active whatever the switch says (perps/lane.ts armed, the review's
+ * S3-02), so what it holds keeps its stops, take-profits, liquidation and
+ * funding. That is on purpose — a running book with its stops switched off is
+ * the thing S3-02 fixed — and the web's refusal says so to a self-hosted
+ * owner rather than calling the positions frozen (web perps-enabled.ts
+ * perpsStoodDownBook); perps/lane.test.ts pins both halves.
  */
 export function perpsWorkerStoodDown(cfg: Pick<ResolvedConfig, "workerWallet" | "perpsOperatorCeiling">): boolean {
   return cfg.workerWallet === "perps" && cfg.perpsOperatorCeiling !== "paper";

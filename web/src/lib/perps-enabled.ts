@@ -16,9 +16,15 @@
  * - WORKERS RUN (ceiling is paper): a Perps wallet's worker runs here, so its
  *   practice book takes the owner's orders and resets. Under any other ceiling
  *   the orchestrator starts none (orchestrator.ts perpsSpawnable) and a
- *   self-hosted one claims nothing (worker settings.ts perpsWorkerStoodDown):
- *   the wallet's practice positions are FROZEN, and a command queued for them
- *   would wait, unseen, to run whenever perps came back (D1, D19).
+ *   self-hosted one claims no command (worker settings.ts
+ *   perpsWorkerStoodDown), so a command queued for the book would only wait,
+ *   unclaimed, inside the window every Perps exit and reset carries
+ *   (`expiresAt`): run if perps came back inside it, answered expired with
+ *   nothing done once it has passed (D1, D19). The owner would be told
+ *   "queued" for something nothing is doing, so it is refused. Hosted, the
+ *   practice positions stay frozen meanwhile; self-hosted, a worker started by
+ *   hand still keeps their stops (perpsStoodDownBook below says which, to the
+ *   owner).
  *
  * IN THIS BUILD THE THREE ARE THE SAME ANSWER, because the ceiling is only ever
  * off or paper: `live` is read as off (perpsCeilingOf). They are separate
@@ -56,6 +62,36 @@ export function perpsCreationAllowed(env: Env = process.env): boolean {
 /** A Perps wallet's worker runs on this server, and takes its owner's orders and resets: MERRYMEN_PERPS is paper. */
 export function perpsWorkersRun(env: Env = process.env): boolean {
   return perpsCeilingOf(env.MERRYMEN_PERPS) === "paper";
+}
+
+/**
+ * WHAT BECOMES OF THE PERPS WALLET'S PRACTICE POSITIONS WHILE NO PERPS WORKER
+ * RUNS HERE, in the owner's words, for the refusal of an exit (api/orders) or
+ * a practice reset (api/paper-reset). Two different truths, so two sentences,
+ * and the route says which deployment it is (`hosted`: this module reads no
+ * mode, see the header).
+ *
+ * - HOSTED, NOTHING MOVES THEM. The orchestrator starts no Perps worker under
+ *   any ceiling but paper (orchestrator.ts perpsSpawnable), given the same
+ *   MERRYMEN_PERPS as this web, which the Phase 3 deploy checklist holds
+ *   (D18). With no child, no stop, take-profit, liquidation or funding is
+ *   booked against what is held: the positions stay exactly as they were.
+ * - SELF-HOSTED, A WORKER MAY STILL BE RUNNING, and this server cannot see
+ *   whether one is. Nothing here starts one under any ceiling but paper, but
+ *   one started by hand keeps running, and D19 stands it down from the
+ *   owner's COMMANDS only (settings.ts perpsWorkerStoodDown). Its protective
+ *   loop goes on, on purpose: it starts with every arm, and a held position
+ *   keeps the lane active whatever the switch says (lane.ts armed, the
+ *   review's S3-02), so what that worker holds keeps its stops and closes on
+ *   its own rules. Switching those off to make "frozen" true would leave a
+ *   running book with no stop; so the sentence says what is true instead.
+ *   It used to say "stay exactly as they are" here too, while that worker's
+ *   stop closed the position the owner had just been refused a Close for.
+ */
+export function perpsStoodDownBook(hosted: boolean): string {
+  return hosted
+    ? "Practice perpetuals are not running here, so your Perps wallet's practice positions stay exactly as they are until they do."
+    : "Practice perpetuals are not running here, so your Perps wallet takes no orders or resets until they do. A Perps worker still running on this machine goes on managing the practice positions it holds by their own rules: their stops, take-profits, liquidation and funding.";
 }
 
 /**

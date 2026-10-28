@@ -679,8 +679,8 @@ export default function GrantPage() {
         // The button that did nothing. `if (r.ok)` with no else meant a refusal
         // left the banner up, re-enabled the button, and said NOTHING — so the
         // only feedback was "press it again", forever. Show what the server said.
-        const body = (await r.json().catch(() => ({}))) as { error?: string };
-        setError(refusalMessage(r.status, body.error));
+        const body = (await r.json().catch(() => ({}))) as { error?: string; ownerFacing?: unknown };
+        setError(refusalMessage(r.status, body.error, body.ownerFacing === true));
       }
     } catch {
       setError("couldn't reach the server to re-arm this wallet.");

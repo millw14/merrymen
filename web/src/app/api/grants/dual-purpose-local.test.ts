@@ -10,6 +10,9 @@
  * - MERRYMEN_PERPS is paper (D1), or nothing is written at all — and a
  *   renewal's stop (DELETE ?wallet=perps, permission-replacement) is refused
  *   with the renewal, while the kill still stops the wallet;
+ * - a renewal's stop keeps no record of the stopped key (no retired-key fence
+ *   here, unlike hosted), so the grant it stopped is armed again if posted
+ *   again: the skipped revocation of D6 rests on the empty wall alone;
  * - the grant is the Perps wall, empty in this build (D5), as hosted;
  * - the Spot grant.json, if any, has the same owner key and another account;
  * - THE INDEX-1 DERIVATION (D8): nothing else ties a self-hosted Perps grant to
@@ -117,6 +120,33 @@ describe("self-hosted: the Perps wallet is written to its own home, and only the
     // A renewal straight over the old file archives it too.
     assert.equal((await post(await perpsGrant())).status, 200);
     assert.deepEqual(JSON.parse(read(path.join(perpsHome(), "grants", `${first.smartAccount.toLowerCase()}.json`))!), next);
+  });
+
+  it("D6 SELF-HOSTED HAS NO RETIRED-KEY FENCE: the grant a renewal stopped, posted again, is armed again — harmless only because its wall is empty, the one case renewalSkipsRevocation lets through", async () => {
+    // Hosted, the store retires the stopped key's hash and refuses that key
+    // for good (dual-purpose.test.ts, D6). Here the stop archives grant.json
+    // and keeps no record of the key, as main's self-hosted Spot renewal never
+    // did; this machine's archive holds the key and its owner key either way.
+    // So nothing here may be read as that fence: a renewal that skips the
+    // on-chain revocation (perps-renewal.ts) is safe on the empty wall alone.
+    const first = await perpsGrant();
+    assert.equal((await post(first)).status, 200);
+    const stop = await route.DELETE(new Request(`${ORIGIN}/api/grants?wallet=perps`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement" }),
+    }));
+    assert.deepEqual(await json(stop), { status: 200, body: { ok: true, replacement: true, state: "stopped" } });
+    assert.equal(existsSync(perpsFile()), false, "stopped");
+    assert.deepEqual(await json(await post(first)), { status: 200, body: { ok: true } });
+    assert.deepEqual(JSON.parse(read(perpsFile())!), first, "the stopped session key is armed again");
+    // What makes that harmless: the wall it was sealed over rebuilds to no
+    // permission at all, so the key can call nothing on chain…
+    const { buildCallPermissions, grantWallOptions, GRANT_ENERGY } = await import("@merrymen/core");
+    const { renewalSkipsRevocation } = await import("@/lib/perps-renewal");
+    assert.deepEqual(buildCallPermissions(first.caps, first.smartAccount as `0x${string}`, grantWallOptions(first)), []);
+    assert.equal(renewalSkipsRevocation(first), true);
+    // …and a wall that could call anything never skips the revocation, here
+    // or hosted: it is never let through on a fence this install lacks.
+    assert.equal(renewalSkipsRevocation({ ...first, grantFeatures: [GRANT_ENERGY] }), false);
   });
 
   it("an install with no Spot grant makes its Perps wallet all the same", async () => {

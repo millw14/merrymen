@@ -89,8 +89,9 @@ describe("self-hosted: no Perps wallet is made while perps is off, and the kill 
     ["?wallet=perps", "?wallet=perps", spotGrant, 400, "wallet-mismatch"],
     ["?wallet=perps with a Perps grant, perps off", "?wallet=perps", { ...spotGrant, purpose: "perps" }, 403, "perps-wallet-not-offered"],
     ["a Perps grant with no selector", "", { ...spotGrant, purpose: "perps" }, 400, "wallet-mismatch"],
-    ["a wallet nobody knows", "?wallet=solana", spotGrant, 400, undefined],
-    ["two wallets at once", "?wallet=spot&wallet=perps", spotGrant, 400, undefined],
+    // The code every wallet-aware route answers a wallet it cannot read with (route-guard.ts walletUnknown).
+    ["a wallet nobody knows", "?wallet=solana", spotGrant, 400, "wallet-unknown"],
+    ["two wallets at once", "?wallet=spot&wallet=perps", spotGrant, 400, "wallet-unknown"],
     ["a grant naming a wallet nobody knows", "", { ...spotGrant, purpose: "other" }, 400, undefined],
   ] as const) {
     it(`POST ${what}: ${status}, grant.json untouched`, async () => {

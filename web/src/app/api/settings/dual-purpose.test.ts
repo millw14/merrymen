@@ -11,6 +11,8 @@
  *     before anything is read or written;
  *   - a Perps save never takes, settles or releases the Spot wallet's
  *     Telegram bot claim (lib/telegram-claims.ts);
+ *   - hosted, a Perps save takes its turn under the login's save lock, the
+ *     one Spot's saves take, and writes nothing while another save holds it;
  *   - WHERE PERPS ARE NOT OFFERED (MERRYMEN_PERPS unset), a Perps save may
  *     only turn things off, hosted and self-hosted (D1, D19): everything else
  *     is refused 403 with nothing written, and the GET still answers.
@@ -21,12 +23,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setImmediate } from "node:timers/promises";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 
 import { mintSession } from "@/lib/auth";
-import { useBotClaimsDbForTest } from "@/lib/telegram-claims";
+import { SETTINGS_SAVE_LOCK, settingsSaveLockKey, useBotClaimsDbForTest, withSettingsSaveLock } from "@/lib/telegram-claims";
 import { getSettingsStore, resetSettingsStoreForTest } from "@merrymen/settings-store";
-import { wrapSqlite, type Db } from "../../../../../worker/src/db";
+import { advisoryLockWaitersForTest, wrapSqlite, type Db } from "../../../../../worker/src/db";
 import { readBotClaims } from "../../../../../worker/src/telegram-claims";
 
 const OWNER = `0x${"aa".repeat(20)}` as const;
@@ -191,6 +194,72 @@ describe("a Perps save never touches the Spot wallet's bot claim", () => {
     // And another account still cannot take the Spot bot.
     assert.equal((await PUT(request("", { owner: OTHER, telegramBotToken: "111:CCC-reissued" }, OTHER))).status, 409);
     assert.deepEqual(await held(), { "111": OWNER });
+  });
+});
+
+/**
+ * A HOSTED PERPS SAVE TAKES THE LOGIN'S SAVE LOCK (lib/telegram-claims.ts
+ * withSettingsSaveLock) — the one Spot's saves take, so one save at a time per
+ * login across both wallets (the route's putPerps, docs/perps.md 5c).
+ *
+ * The compare-and-swap is what keeps a save from writing over a blob it never
+ * read; the lock is what makes saves take turns, so that a save's three
+ * judgements (PERPS_SAVE_ATTEMPTS) are only ever spent on the one writer that
+ * takes no lock, the kill. Without it, saves for one login (two tabs, the
+ * phone and the desktop) miss each other's swap, and enough of them at once
+ * run out of attempts into a 503 nobody caused. Nothing read the lock before
+ * this: putPerps could call savePerpsSettings bare and every settings suite
+ * still passed.
+ */
+describe("a hosted Perps save takes the login's save lock", () => {
+  let claims: Db;
+  beforeEach(() => {
+    claims = wrapSqlite(new DatabaseSync(":memory:"));
+    useBotClaimsDbForTest(claims);
+  });
+  const waiters = (tenant: `0x${string}`) => advisoryLockWaitersForTest(claims, SETTINGS_SAVE_LOCK, settingsSaveLockKey(tenant));
+  /** Wait for a state, polled each turn; failing only after a real-time bound. */
+  const until = async (what: string, ok: () => boolean) => {
+    const deadline = Date.now() + 10_000;
+    while (!ok()) {
+      if (Date.now() > deadline) assert.fail(`never reached: ${what}`);
+      await setImmediate();
+    }
+  };
+
+  it("WHILE ANOTHER SAVE FOR THE LOGIN HOLDS IT, A PERPS SAVE WAITS ITS TURN AND WRITES NOTHING, then saves; another login's waits for nobody", async () => {
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => (entered = r));
+    // Another save for this login (a Spot save in another tab, say) has the turn.
+    const holder = withSettingsSaveLock(OWNER, async () => {
+      entered();
+      await released;
+      return "held";
+    });
+    await inside;
+    let answered = false;
+    const perpsSave = PUT(request("?wallet=perps", { owner: OWNER, perpsEnabled: true, perpsMaxLeverage: 3 })).finally(() => {
+      answered = true;
+    });
+    await until("the Perps save waiting for the login's lock", () => {
+      if (answered) assert.fail("the Perps save was answered while another save for the login held the lock");
+      return waiters(OWNER) === 1;
+    });
+    assert.equal(await getSettingsStore("perps").get(OWNER), null, "nothing written while another save has the turn");
+    // The lock is the login's: another login's Perps save goes straight through.
+    const other = await PUT(request("?wallet=perps", { owner: OTHER, perpsEnabled: true }, OTHER));
+    assert.equal(other.status, 200, JSON.stringify(await json(other.clone())));
+    assert.equal(answered, false, "and this login's is still waiting");
+    release();
+    assert.equal(await holder, "held");
+    const res = await perpsSave;
+    assert.equal(res.status, 200, JSON.stringify(await json(res.clone())));
+    assert.equal(waiters(OWNER), 0);
+    const stored = await getSettingsStore("perps").get(OWNER);
+    assert.equal(stored?.perpsEnabled, true);
+    assert.equal(stored?.perpsMaxLeverage, 3);
   });
 });
 

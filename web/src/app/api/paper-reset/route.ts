@@ -32,9 +32,14 @@
  * resetPaper), as a Spot worker clears its own book.
  *
  * A PERPS RESET ONLY WHERE A PERPS WORKER RUNS (perps-enabled.ts
- * perpsWorkersRun, D1 and D12). Under any other MERRYMEN_PERPS its worker is
- * stood down and its practice book frozen; a reset queued then would wait for
- * perps to come back. So it is refused, and nothing is read or queued.
+ * perpsWorkersRun, D1 and D12). Under any other MERRYMEN_PERPS its worker
+ * takes no command (hosted it is not running; self-hosted one started by hand
+ * claims none, D19); a reset queued then would only wait, unclaimed, inside
+ * its deadline (below), and be answered expired, the book untouched, unless
+ * perps came back before it passed. So it is refused, and nothing is read or
+ * queued. What the refusal says of
+ * the book is perpsStoodDownBook's: frozen hosted, and self-hosted still
+ * managed by its own stops if a worker runs anyway.
  *
  * AND EVERY PERPS RESET CARRIES A DEADLINE: the Perps worker's order window
  * (order-ceiling.ts orderTtlFor, the window its exits wait), because the
@@ -44,6 +49,12 @@
  * asked. Past its window the worker answers it expired and touches nothing
  * (start-over.ts queuePaperReset). Spot's reset is queued as it always was.
  *
+ * NOR, HOSTED, WHILE THE PERPS BOOK IS HELD: one that could not be restored
+ * starts no worker, and nothing honours a Perps reset while it is held (the
+ * held Spot book's reset is the owner's way out; held-reset.ts is Spot's). So
+ * queuePaperReset reads the hold the orchestrator recorded and answers 409,
+ * with nothing queued, rather than "queued" for a worker that cannot start.
+ *
  * Start over (/api/grants/discard) stays the Spot wallet's: it discards the
  * Spot grant, and the kill (which it is) already stops the Perps wallet.
  */
@@ -52,7 +63,7 @@ import { isHostedMode, type GrantPurpose } from "@merrymen/core";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { orderTtlFor } from "@/lib/order-ceiling";
 import { queuePaperReset } from "@/lib/start-over";
-import { perpsWalletRefused, perpsWorkersRun } from "@/lib/perps-enabled";
+import { perpsStoodDownBook, perpsWalletRefused, perpsWorkersRun } from "@/lib/perps-enabled";
 import { walletUnknown } from "@/lib/route-guard";
 import { readWalletParam } from "@/lib/wallet-param";
 
@@ -70,9 +81,7 @@ export async function POST(req: Request) {
   const wallet = readWalletParam(req);
   if (wallet === null) return walletUnknown("No practice reset was queued.");
   if (wallet === "perps" && !perpsWorkersRun()) {
-    return perpsWalletRefused(
-      "No practice reset was queued: practice perpetuals are not running here, so your Perps wallet's practice book stays exactly as it is until they do.",
-    );
+    return perpsWalletRefused(`No practice reset was queued. ${perpsStoodDownBook(isHostedMode())}`);
   }
   const agent = await agentFor(req, wallet);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });

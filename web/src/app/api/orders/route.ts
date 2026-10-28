@@ -26,6 +26,8 @@
  *    It is a HASH and never a concatenation, because the id becomes a FILENAME
  *    under a child's home in a process that can see every tenant's home —
  *    command-files.ts states that boundary and validates the shape again.
+ *    The one exception is an owner's perpetual exit, which gets a fresh id
+ *    every time (exitId, and the Perps wallet's section below).
  *
  * 2. ONE ORDER IN FLIGHT AT A TIME. A second is refused while the first is
  *    unanswered. A queue one client can fill faster than a worker drains it is
@@ -79,16 +81,42 @@
  *   (FileCommand.account), because the Perps home outlives the account in it,
  *   and the worker answers it without running it on any other.
  * - ONLY WHERE A PERPS WORKER RUNS (perps-enabled.ts perpsWorkersRun, D1).
- *   Under any other MERRYMEN_PERPS the wallet's worker is stood down and its
- *   practice positions are frozen; an exit queued then would run whenever
- *   perps came back, closing positions at a price nobody was shown. So it is
- *   refused, and nothing is queued or read.
- * - The fleet recovery hold refuses a Perps exit as it refuses any order
- *   (placeRecoveryCheckedOrder, D11). Rule 8a's "an exit is always
- *   attemptable" waits for the live build, where a hold could strand a real
- *   position; a practice position waiting out a hold costs nothing.
+ *   Under any other MERRYMEN_PERPS the wallet's worker takes no command (it
+ *   is not running hosted; self-hosted, one started by hand claims none,
+ *   D19), so an exit queued then could only wait, unclaimed, inside the order
+ *   window every exit carries (`expiresAt`, two Perps-worker ticks and a
+ *   ferry pass, five minutes at least): run if perps came back inside it,
+ *   answered expired with nothing sent once it has passed — never run days
+ *   later. "Queued" would tell the owner something is under way that nothing
+ *   is doing. So it is refused, and nothing is queued or read. What the
+ *   refusal says of the positions differs by
+ *   deployment (perps-enabled.ts perpsStoodDownBook): hosted they stay
+ *   exactly as they are; self-hosted a worker still running keeps their stops.
+ * - A FRESH ID FOR EVERY EXIT, never the minute-bucket hash of point 1 above
+ *   (exitId). An exit's fields never vary, so the hash made every ask in one
+ *   minute the same key, and a second ask after a failed first one ("ask
+ *   again", a partial fill, a book that could not be read) was answered with
+ *   the first one's answer and never ran. One click is still one exit: the
+ *   one-at-a-time slot refuses a second while the first is open, and the
+ *   claim keeps each ask to one run. A second ask once the first was answered
+ *   is a second exit, so a client must never resend an exit on its own (a
+ *   lost response is not a reason to ask again; see exitId).
+ * - THE FLEET RECOVERY HOLD IS CHECKED AS FOR ANY ORDER, AND IT IS PER
+ *   ACCOUNT (placeRecoveryCheckedOrder: main's check, kept with no rule-8a
+ *   bypass, D11). It reads fleet_recovery_health for the account the order
+ *   is bound to — here the Perps account — and in this build nothing records
+ *   a hold for one: the orchestrator records the login's hold for its Spot
+ *   account only (orchestrator.ts reportFleetSource returns before writing
+ *   for a Perps worker; the report-only pass walks the Spot grants). So the
+ *   login's Spot hold does NOT refuse a Perps exit, nor a Perps practice
+ *   reset (api/paper-reset), and this check refuses neither today
+ *   (dual-purpose.test.ts pins both). A Perps worker's own hold refuses its
+ *   spawn instead, and the ferry hands commands only to a running worker, so
+ *   an exit queued while it is held waits inside its window and is answered
+ *   expired if the hold outlasts it. Rule 8a's "an exit is always
+ *   attemptable" is a Phase 4 gate, for the live build.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { purposeHome } from "@merrymen/home";
 import { isHostedMode, type GrantPurpose } from "@merrymen/core";
@@ -118,7 +146,7 @@ import {
   type OrderBody,
   type PerpsWalletOrder,
 } from "@/lib/order-state";
-import { perpsWalletRefused, perpsWorkersRun } from "@/lib/perps-enabled";
+import { perpsStoodDownBook, perpsWalletRefused, perpsWorkersRun } from "@/lib/perps-enabled";
 import { walletUnknown } from "@/lib/route-guard";
 import { readWalletParam } from "@/lib/wallet-param";
 
@@ -127,11 +155,13 @@ export const dynamic = "force-dynamic";
 
 const agentFor = (req: Request, wallet: GrantPurpose) => (isHostedMode() ? hostedAgentFor(req, wallet) : diskAgent(wallet));
 
-/** The refusal while no Perps worker runs here (D1): `what` is what was not done. */
+/**
+ * The refusal while no Perps worker runs here (D1): `what` is what was not
+ * done, then what becomes of the positions, which is not the same sentence
+ * hosted and self-hosted (perpsStoodDownBook).
+ */
 const perpsStoodDown = (what: string) =>
-  perpsWalletRefused(
-    `${what} Practice perpetuals are not running here, so your Perps wallet's practice positions stay exactly as they are until they do. Kill all agents still stops it.`,
-  );
+  perpsWalletRefused(`${what} ${perpsStoodDownBook(isHostedMode())} Kill all agents still stops it.`);
 
 /**
  * The primary key for this order, in this minute.
@@ -140,7 +170,7 @@ const perpsStoodDown = (what: string) =>
  * a second, genuinely-intended order impossible: ask for the same thing again
  * next minute and it is a new id, as it should be.
  */
-function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string; book?: string }, nowMs: number): string {
+function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string }, nowMs: number): string {
   const bucket = Math.floor(nowMs / 60_000);
   // THE ENERGY MARKER IS PART OF WHAT THE ORDER IS, so it is part of its id: a
   // get-energy card and a plain buy card with the same numbers in the same
@@ -148,15 +178,55 @@ function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: n
   // "already queued" off the first. Appended only when present, so every other
   // order keeps the id it always had.
   const purpose = o.purpose ? `|${o.purpose}` : "";
-  // AN EXIT'S BOOK, the same way: a Close all of the practice book and a Close
-  // all of every book are two orders. Only an exit carries one, so every other
-  // order's id is unchanged (hashing "" adds nothing).
-  const book = isPerpExitPurpose(o.purpose) && o.book ? `|${o.book}` : "";
   return createHash("sha256")
     .update(`${agent.toLowerCase()}|${o.side}|${o.symbol}|${o.usdgAmount}|${bucket}${purpose}`)
-    .update(book)
     .digest("hex")
     .slice(0, 32);
+}
+
+/**
+ * The primary key for an owner's perpetual exit: a FRESH ONE FOR EVERY ASK,
+ * never orderId's minute bucket.
+ *
+ * THE BUCKET IS THERE TO MAKE A RETRY THE SAME ORDER: a Spot buy asked again
+ * after a lost response must not become a second buy at a second price. An
+ * exit is the opposite case on both counts. Its fields never vary (`sell`,
+ * `<MARKET>-PERP` or `ALL-PERPS`, `0`), so under the bucket every ask in one
+ * clock minute was the SAME key; and the lane answers a failed exit with
+ * "ask again" (a close it could not record, a partial fill, a book it could
+ * not read), usually within seconds. The ask that followed then collided with
+ * the answered one. Hosted, the insert hit the primary key and was answered
+ * 200 "already queued" with no row added, so nothing was delivered and GET
+ * returned the FIRST attempt's failure as the second's result. Self-hosted,
+ * the file was written again beside the first answer, and GET read that old
+ * answer while the new attempt waited. The position stayed open until the
+ * next minute, behind a reply saying the close was queued.
+ *
+ * ONE CLICK IS STILL AT MOST ONE EXIT, by the rules that never relied on the
+ * id: the one-at-a-time slot refuses a second ask while the first is open
+ * (409; hosted, judged under the account's recovery lock, self-hosted in one
+ * synchronous look-and-write), so a double click is refused, not queued. What
+ * a fresh id admits is a second exit once the first has been answered — which
+ * is what the owner asked for — and a retry after a lost response that lands
+ * after the first was answered. That is a second exit of its own, the owner's
+ * own second ask, and NOT a no-op: built from what is held when it runs
+ * (perps/lane.ts ownerCloseLocked), a second Close closes nothing if nothing
+ * was opened since, but closes a position the strategy opened in that market
+ * since, if one was; a second Close all halts what is already halted and
+ * closes whatever is held then. Either can only ever reduce. What keeps any
+ * ONE ask to one run is the claim (command-files.ts), never the exit's shape.
+ * So NO CLIENT RETRIES AN EXIT POST BY ITSELF: there is no client request id
+ * that would make a resend the same ask, and a desk that resent one after a
+ * lost response would close what the strategy opened since. After a lost
+ * response the desk reads the book again, and only the owner asks again.
+ *
+ * RANDOM, NEVER A CONCATENATION of anything the request carries (the id
+ * becomes a filename under a child's home: command-files.ts ID_OK), and the
+ * 32 hex characters every other order id has, so nothing that reads an id
+ * sees a new shape.
+ */
+function exitId(): string {
+  return randomBytes(16).toString("hex");
 }
 
 export async function POST(req: Request) {
@@ -247,7 +317,9 @@ export async function POST(req: Request) {
   // worker that enforces it, the slot that waits on it and the card that
   // follows it all read the same number.
   const expiresAt = now + ttlMs;
-  const id = orderId(agent, order, now);
+  // An exit's own id, fresh every time (exitId); every other order's is the
+  // minute-bucket hash it always had. Only the Perps wallet takes an exit.
+  const id = isPerpExitPurpose(order.purpose) ? exitId() : orderId(agent, order, now);
   const args = { ...order };
 
   // Both rails run the rules in lib/order-state.ts, where a test drives them

@@ -1,5 +1,6 @@
 /**
- * A KILL THAT LANDS WHILE A PERPS SAVE IS ON ITS WAY IS NEVER UNDONE BY IT.
+ * A KILL THAT LANDS BETWEEN A PERPS SAVE'S READ AND ITS WRITE IS NEVER UNDONE
+ * BY IT.
  *
  * The kill turns the Perps wallet's `perpsEnabled` off in the same blob the
  * settings PUT writes, and takes no save lock: hosted, disablePaperPerpsForKill
@@ -16,17 +17,36 @@
  *     sqlite, as holder/route.test.ts runs it), at MERRYMEN_PERPS=paper;
  *   - hosted, where Perps are not offered, for a save that only turns
  *     something off (the one save allowed there, D1);
- *   - self-hosted, the kill run at every event-loop turn the save could yield.
+ *   - self-hosted, the kill written to settings.json right after the save
+ *     read it and before its look-and-write, as another process's kill lands
+ *     there (`merrymen kill`, a Telegram /kill), and the kill run at the one
+ *     await between the two, as one in this process would.
  * A save that names `perpsEnabled: true` over an off that landed under it is
  * refused; one that never names it keeps the kill's off.
+ *
+ * WHAT THIS DOES NOT COVER. An off already stored when the save first reads
+ * (a kill that finished while the request was still in flight) is not one the
+ * server can tell from an owner switching practice perps on after the kill:
+ * the body says nothing of what its sender saw. A body that names
+ * `perpsEnabled: true` then saves it, as the owner's own decision; one that
+ * never names the switch keeps the off. Pinned below as it is, not as a race
+ * this catches.
+ *
+ * The self-hosted sweep that runs the kill at each of the save's event-loop
+ * turns is a different check: the read and the look-and-write have no turn
+ * between them (both synchronous, one await apart), so every placement it can
+ * make lands before the read or after the write. It pins that a kill at
+ * either end of the save is kept, and nothing about the compare and swap,
+ * which the injected cases and worker/src/settings-if-unchanged.test.ts pin.
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 
 import type { MerrymenSettings } from "@merrymen/core";
 import { mintSession } from "@/lib/auth";
@@ -204,6 +224,69 @@ for (const backend of ["file store", "Postgres store"] as const) {
 describe("self-hosted: the kill at any point of the save", () => {
   const file = () => path.join(purposeHome("perps"), "settings.json");
   const stored = () => JSON.parse(readFileSync(file(), "utf8")) as MerrymenSettings;
+  const unmock = () => {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  };
+  afterEach(unmock);
+
+  /**
+   * The real kill, run once, INSIDE the self-hosted save's read-to-write
+   * window — which has no event-loop turn in it, so nothing scheduled from
+   * outside can reach it. The save's read of settings.json is
+   * readSettingsFileWithText, and its write writeSettingsFileIfUnchanged looks
+   * at the file again first; this runs the kill right after that first read
+   * returns. "another process": synchronously, inside the read, as a
+   * `merrymen kill` or Telegram /kill from another process writes the file
+   * there — the bytes on disk change under the save. "this process": queued
+   * for the one await between the read and the write (readPerpsStoredStrict
+   * is async), the only place a kill in this process could land. Every read
+   * after it is real. Says what the kill answered.
+   */
+  function killInsideTheSavesWindow(place: "another process" | "this process"): () => string | null {
+    const real = fs.readFileSync;
+    let killed: string | null = null;
+    let armed = true;
+    mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+      const out = real(...args);
+      if (armed && String(args[0]) === file()) {
+        armed = false;
+        const kill = () => void (killed = turnOffLocalPaperPerps(purposeHome("perps")));
+        if (place === "another process") kill();
+        else queueMicrotask(kill);
+      }
+      return out;
+    });
+    syncBuiltinESMExports();
+    return () => killed;
+  }
+
+  for (const place of ["another process", "this process"] as const) {
+    it(`A KILL BETWEEN THE SAVE'S READ AND ITS WRITE (${place}): the write misses, the body is judged again, and the kill's off stands`, async () => {
+      delete process.env.MERRYMEN_HOSTED;
+      for (const body of [{ perpsMaxLeverage: 3 }, { perpsEnabled: true, perpsMaxLeverage: 3 }] as Record<string, unknown>[]) {
+        const label = `${place}, ${JSON.stringify(body)}`;
+        mkdirSync(purposeHome("perps"), { recursive: true });
+        writeFileSync(file(), JSON.stringify({ strategy: "perps-only", perpsEnabled: true, perpsMaxLeverage: 2 }));
+        const killed = killInsideTheSavesWindow(place);
+        const r = await save(body, false);
+        unmock();
+        assert.equal(killed(), "disabled", `${label}: the kill ran, and found practice perps on`);
+        const after = stored();
+        assert.equal(after.perpsEnabled, false, `${label}: the kill's off stands: ${JSON.stringify(after)}`);
+        assert.equal(worker(after).perpsEnabled, false, `${label}: so the Perps worker opens nothing`);
+        if (body.perpsEnabled === true) {
+          // Its read saw them on, so the off is one this body never saw.
+          assert.equal(r.status, 400, `${label}: ${JSON.stringify(r.body)}`);
+          assert.match(r.body.errors?.join(" ") ?? "", /^perpsEnabled: practice perpetuals were switched off while this save was on its way/);
+          assert.equal(after.perpsMaxLeverage, 2, `${label}: nothing else from a refused save is written`);
+        } else {
+          assert.equal(r.status, 200, `${label}: ${JSON.stringify(r.body)}`);
+          assert.equal(after.perpsMaxLeverage, 3, `${label}: the owner's change landed on the kill's file`);
+        }
+      }
+    });
+  }
 
   it("WHEREVER THE KILL LANDS, practice perps end off and the owner's change is saved", async () => {
     delete process.env.MERRYMEN_HOSTED;
@@ -220,4 +303,36 @@ describe("self-hosted: the kill at any point of the save", () => {
       assert.equal(after.perpsMaxLeverage, 3, `${turns} turns in`);
     }
   });
+});
+
+describe("a kill that finished before the save first read: not a race the server can see", () => {
+  // The route's compare and swap catches an off that lands between the save's
+  // own read and its write. An off already stored when the save first reads
+  // (the kill finished while the request was still in flight) leaves nothing
+  // the server could tell from an owner switching practice perps on after the
+  // kill: the body carries no record of what its sender saw. So a body that
+  // never names the switch keeps the off, and one that names it on saves it —
+  // what the route's header and docs/perps.md say, and no more.
+  for (const where of ["hosted", "self-hosted"] as const) {
+    it(`${where}: a save that never names the switch keeps the kill's off; one that names it on is the owner's decision, and saves`, async () => {
+      if (where === "self-hosted") delete process.env.MERRYMEN_HOSTED;
+      const file = path.join(purposeHome("perps"), "settings.json");
+      const before: MerrymenSettings = { strategy: "perps-only", perpsEnabled: true, perpsMaxLeverage: 2 };
+      const store = where === "hosted" ? (getSettingsStore("perps") as FileSettingsStore) : null;
+      const read = async () => (store ? ((await store.get(OWNER)) ?? {}) : (JSON.parse(readFileSync(file, "utf8")) as MerrymenSettings));
+      if (store) await store.put(OWNER, before);
+      else {
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, JSON.stringify(before));
+      }
+      const killed = store ? await disablePaperPerpsForKill(OWNER, store) : turnOffLocalPaperPerps(purposeHome("perps"));
+      assert.equal(killed, "disabled");
+      const quiet = await save({ perpsMaxLeverage: 3 }, where === "hosted");
+      assert.equal(quiet.status, 200, JSON.stringify(quiet.body));
+      assert.deepEqual(await read(), { ...before, perpsEnabled: false, perpsMaxLeverage: 3 });
+      const on = await save({ perpsEnabled: true, perpsMaxLeverage: 4 }, where === "hosted");
+      assert.equal(on.status, 200, JSON.stringify(on.body));
+      assert.deepEqual(await read(), { ...before, perpsEnabled: true, perpsMaxLeverage: 4 });
+    });
+  }
 });

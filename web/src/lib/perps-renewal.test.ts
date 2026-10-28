@@ -6,9 +6,11 @@
  * Perps wallet (no ETH, ever) cannot pay for. The exemption is safe only
  * because an empty wall can do nothing on chain, so it is decided by
  * rebuilding the old grant's wall, and every grant whose wall permits
- * anything, or that cannot be read, keeps the revocation. The server's
- * retired-key fence is the store's and is not asked here (wallet-selector
- * and kill-perps cover the stop; grant-store tests the fence).
+ * anything, or that cannot be read, keeps the revocation. The retired-key
+ * fence is the hosted store's and is not asked here (wallet-selector and
+ * kill-perps cover the stop; grant-store tests the fence); self-hosted has
+ * none, so there the empty wall is all that makes the skip safe
+ * (grants/dual-purpose-local.test.ts).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";

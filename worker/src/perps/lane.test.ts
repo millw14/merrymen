@@ -17,11 +17,15 @@
  *                      a practice book that is not the account's is frozen.
  *   at most once       a crash between closing and answering never closes
  *                      again, and a stood-down Perps worker claims nothing.
+ *                      The claim is all that keeps it so: a close run twice
+ *                      closes whatever is held then, a position opened since
+ *                      included.
  *   the wiring         index.ts calls the protective loop from the arm, never
  *                      from tick(); lane.ts and protect.ts read nothing from
  *                      the chain's market read; every paper_book
  *                      read-modify-write in index.ts runs under the lane lock;
- *                      an owner's exit reaches the lane after the wallet check.
+ *                      an owner's exit reaches the lane after the wallet check
+ *                      and the tenant's admission level.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -51,6 +55,7 @@ import {
   type PerpLaneConfig,
 } from "./lane";
 import { parseOrderBookDetails } from "./markets";
+import { orderExpiryHooks } from "../order-receipt";
 import { readPerpExitOrder } from "./owner-order";
 import type { PerpRouteIntent } from "./route";
 
@@ -76,27 +81,41 @@ after(() => {
 });
 
 const u = (n: number) => BigInt(Math.round(n * 1e6));
-const BTC = parseOrderBookDetails(JSON.parse(readFileSync(path.join(HERE, "fixtures", "orderBookDetails.perp.json"), "utf8")))!.markets.get(1)!;
+const DETAILS = parseOrderBookDetails(JSON.parse(readFileSync(path.join(HERE, "fixtures", "orderBookDetails.perp.json"), "utf8")))!;
+const BTC = DETAILS.markets.get(1)!;
+/** ETH-PERP (market 0), for the owner's exits over more than one held market. */
+const ETH = DETAILS.markets.get(0)!;
 const FEED = path.join(scratch, "lighter-feed.json");
 let clock = 1_790_712_000_000;
 
-function writeFeed(mark = 802_000n, bidDepth = "1000"): void {
-  const m: LighterFeedFileMarket = {
-    observedAt: clock - 1_000,
+function feedMarket(spec: typeof BTC.spec, mark: bigint, bidDepth: string, at: number): LighterFeedFileMarket {
+  return {
+    observedAt: at - 1_000,
     priceSource: "ws",
     mark: mark.toString(),
     index: mark.toString(),
     status: "active",
-    spec: specToJson(BTC.spec),
-    specObservedAt: clock - 60_000,
+    spec: specToJson(spec),
+    specObservedAt: at - 60_000,
     takerFeePpm: 0,
     makerFeePpm: 0,
     bids: [[(mark - 100n).toString(), bidDepth]],
     asks: [[mark.toString(), "1000"]],
-    bookObservedAt: clock - 1_000,
+    bookObservedAt: at - 1_000,
     bookSource: "ws",
   };
-  writeFileSync(FEED, JSON.stringify({ v: 1, observedAt: clock - 500, markets: { "1": m } }));
+}
+
+/**
+ * The fleet's feed file: BTC-PERP at `mark`, and ETH-PERP too at `eth` when
+ * given. `ageMs` writes it as a writer that stopped that long ago left it —
+ * the file is there, and every price in it is stale.
+ */
+function writeFeed(mark = 802_000n, bidDepth = "1000", opts: { eth?: bigint; ageMs?: number } = {}): void {
+  const at = clock - (opts.ageMs ?? 0);
+  const markets: Record<string, LighterFeedFileMarket> = { "1": feedMarket(BTC.spec, mark, bidDepth, at) };
+  if (opts.eth !== undefined) markets["0"] = feedMarket(ETH.spec, opts.eth, "1000", at);
+  writeFileSync(FEED, JSON.stringify({ v: 1, observedAt: at - 500, markets }));
 }
 
 const PAPER: ExecMode = { mode: "paper", rule: "live-not-enabled" };
@@ -125,6 +144,7 @@ const CFG: PerpLaneConfig = {
 let n = 1;
 interface Rig {
   id: string;
+  smartAccount: `0x${string}`;
   lane: PerpLane;
   events: string[];
   budget: { reserved: bigint[]; released: bigint[] };
@@ -137,10 +157,14 @@ async function rig(
     store?: Partial<typeof store>;
     execMode?: () => ExecMode;
     decide?: DecideFn;
+    /** The budget's re-read of the day's counters (index.ts refreshBudget); a no-op by default. */
+    refresh?: () => Promise<void>;
+    /** Another lane over THAT rig's agent and ledger, with none of its memory: the worker restarted. */
+    reuse?: Rig;
   } = {},
 ): Promise<Rig> {
-  const hex = (n++).toString(16).padStart(40, "0");
-  const id = await store.ensureAgent({
+  const hex = opts.reuse ? opts.reuse.smartAccount.slice(2) : (n++).toString(16).padStart(40, "0");
+  const id = opts.reuse ? opts.reuse.id : await store.ensureAgent({
     smartAccount: `0x${hex}`,
     owner: "0x00000000000000000000000000000000000000b1",
     sessionKeyAddress: "0x00000000000000000000000000000000000000c1",
@@ -150,7 +174,7 @@ async function rig(
     expiresAt: 2_000_000_000,
     chainId: 4663,
   } as never);
-  await store.getPaperBook(id, 100);
+  if (!opts.reuse) await store.getPaperBook(id, 100);
   const limits: AgentLimits = {
     perTradeUsdg: u(50),
     dailyUsdg: u(500),
@@ -160,7 +184,7 @@ async function rig(
     expiresAt: Math.floor(clock / 1000) + 30 * 86_400,
     maxOpsPerDay: 48,
   };
-  const r = { id, events: [] as string[], budget: { reserved: [] as bigint[], released: [] as bigint[] }, cfg: { ...CFG, ...(opts.cfg ?? {}) } } as Rig;
+  const r = { id, smartAccount: `0x${hex}`, events: [] as string[], budget: { reserved: [] as bigint[], released: [] as bigint[] }, cfg: { ...CFG, ...(opts.cfg ?? {}) } } as Rig;
   r.lane = createPerpLane({
     store: { ...store, ...(opts.store ?? {}) },
     armed: () => ({ agentId: id, smartAccount: `0x${hex}`, limits }),
@@ -179,7 +203,7 @@ async function rig(
     budget: {
       reserve: (s) => void r.budget.reserved.push(s),
       release: (s) => void r.budget.released.push(s),
-      refresh: async () => {},
+      refresh: opts.refresh ?? (async () => {}),
     },
     events: async (_level, message) => void r.events.push(message),
     decide: opts.decide ?? (async () => ({ ok: true })),
@@ -189,9 +213,10 @@ async function rig(
   return r;
 }
 
-async function openDraft(r: Rig): Promise<PerpOrderIntent> {
+async function openDraft(r: Rig, market: "BTC-PERP" | "ETH-PERP" = "BTC-PERP"): Promise<PerpOrderIntent> {
   const view = (await r.lane.refresh()).view!;
-  const built = buildOpenDraft({ market: view.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 300, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+  assert.ok(view.markets.get(market), `set-up: ${market} is read fresh`);
+  const built = buildOpenDraft({ market: view.markets.get(market)!, side: "long", notionalCapMicro: u(20), stopBps: 300, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
   assert.ok(built.ok);
   return { ...built.draft } as PerpOrderIntent;
 }
@@ -448,6 +473,12 @@ describe("a paper reset", () => {
 
 const fillsOf = (id: string): number =>
   Number((raw.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id = ? AND mode = 'paper'").get(id.toLowerCase()) as { n: number }).n);
+/** The market ids the practice ledger holds a position in, sorted. */
+const heldMarketsOf = async (id: string): Promise<number[]> =>
+  (await store.getPerpPositions(id, "paper")).filter((p) => p.base > 0n).map((p) => p.marketId).sort((x, y) => x - y);
+/** How many positions `agents.perps` — what the desk reads — shows. */
+const reportedOf = (id: string): number =>
+  (JSON.parse(String((raw.prepare("SELECT perps FROM agents WHERE smart_account = ?").get(id) as { perps: string }).perps)) as { positions: unknown[] }).positions.length;
 
 describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-perps)", () => {
   it("Close all closes every practice position and halts new entries first — the next open is refused perp-entries-halted", async () => {
@@ -522,6 +553,79 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     assert.equal(late.ok, false);
     assert.match(late.sentence, /expired before it could run\. Nothing was sent and nothing was paused/);
     assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted ?? false, false, "an expired Close all pauses nothing either");
+  });
+
+  /**
+   * A REFUSAL THAT CAME AFTER THE BOOKING. executeLocked re-reads the day's
+   * counters (index.ts refreshBudget, store reads) after place() has booked the
+   * close, in the same try whose catch makes any throw a refusal. A counter
+   * read that failed there used to come back to the owner as "the practice
+   * close was refused …, so the position and its stop stay as they were" —
+   * with the position gone, and their next Close finding nothing to close.
+   */
+  it("A CLOSE BOOKED BEFORE ITS OUTCOME CAME BACK REFUSED IS SAID TO BE CLOSED: the ledger, not the outcome, says what became of it", async () => {
+    writeFeed();
+    let busy = false;
+    const r = await rig({
+      refresh: async () => {
+        if (busy) throw new Error("SQLITE_BUSY: database is locked");
+      },
+    });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    busy = true;
+    const out = await r.lane.close("BTC-PERP", { book: "paper" });
+    busy = false;
+    assert.equal(fillsOf(r.id), fills + 1, "set-up: the close was booked, and only the counters' re-read after it failed");
+    assert.deepEqual(out, { ok: true, sentence: "BTC-PERP: the practice position was closed." });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+    assert.equal(r.lane.last()?.view?.positions.has("BTC-PERP"), false, "and the lane's read — the report the desk shows — was taken after it");
+  });
+
+  it("…and part of one, booked before the refusal, is said to be part-closed — never \"stay as they were\"", async () => {
+    writeFeed();
+    let busy = false;
+    const r = await rig({
+      refresh: async () => {
+        if (busy) throw new Error("SQLITE_BUSY: database is locked");
+      },
+    });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const before = (await store.getPerpPositions(r.id, "paper"))[0]!.base;
+    writeFeed(802_000n, "1");
+    busy = true;
+    const out = await r.lane.close("BTC-PERP", { book: "paper" });
+    busy = false;
+    const after = (await store.getPerpPositions(r.id, "paper"))[0]!.base;
+    assert.ok(after > 0n && after < before, "set-up: the IOC filled only available liquidity");
+    assert.deepEqual(out, { ok: false, sentence: "BTC-PERP: the practice close filled only part of the position; the rest remains open with its stop." });
+  });
+
+  it("A CLOSE REFUSED BEFORE ANYTHING WAS BOOKED keeps its position and says so, in practice-book words", async () => {
+    writeFeed();
+    const r = await rig({
+      wrap: (ex) => ({
+        mode: ex.mode,
+        review: ex.review.bind(ex),
+        setLeverage: ex.setLeverage?.bind(ex),
+        tick: ex.tick?.bind(ex),
+        setStop: ex.setStop?.bind(ex),
+        place: async (intent, review, ctx) => {
+          if (intent.effect !== "close") return ex.place(intent, review, ctx);
+          throw new Error("the paper engine could not book it");
+        },
+      }),
+    });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    const out = await r.lane.close("BTC-PERP", { book: "paper" });
+    assert.equal(fillsOf(r.id), fills);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+    assert.deepEqual(out, {
+      ok: false,
+      sentence: "BTC-PERP: the practice close was refused (the practice engine could not price or book it), so the position and its stop stay as they were.",
+    });
+    assert.doesNotMatch(out.sentence, /Lighter|money was at the venue/, "a practice book has no venue behind it");
   });
 
   it("partial practice closes and flatten attempts report the position still open", async () => {
@@ -610,6 +714,95 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     assert.equal((await store.getPerpAccount(earlier.id, "paper"))?.entriesHalted, true);
   });
 
+  /**
+   * THE LANE'S MEMORY OF WHEN A CLOSE ALL WAS ASKED FOR DOES NOT SURVIVE A
+   * RESTART, and the ledger keeps the halt alone. Hosted, a reset asked for
+   * before a Close all can reach the worker after it (the reconcile pass, behind
+   * the ferry's short loop) — and after a restart in between, the reset used to
+   * lift the halt: no memory, so no order, so lifted. Now what this worker holds
+   * no time for, it orders by when it began.
+   */
+  it("A RESTARTED WORKER NEVER LETS A RESET ASKED FOR BEFORE THE CLOSE ALL LIFT ITS HALT: a halt it holds no time for, it orders by when it began", async () => {
+    writeFeed();
+    const first = await rig();
+    await first.lane.execute(await openDraft(first), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await first.lane.flatten({ askedAt: clock - 10_000 })).ok, true, "the Close all, run by the worker before the restart");
+    await first.lane.stopProtect();
+    await store.setAgentMode(first.id, "paper", 1, false);
+    // The restart: the same agent and ledger, a lane that remembers nothing.
+    const restarted = await rig({ reuse: first });
+    assert.equal((await restarted.lane.refresh()).view?.opensBlocked, "perps-entries-halted", "the ledger kept the halt");
+    const told: boolean[] = [];
+    const reset = (askedAt: number) =>
+      restarted.lane.resetPaper(({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt })), { askedAt });
+    // Asked for BEFORE the Close all, delivered only now.
+    await reset(clock - 20_000);
+    assert.deepEqual(told, [false], "nothing orders it after the Close all, so the ledger is not told to lift it");
+    assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, true, "the owner's Close all stands");
+    assert.equal((await restarted.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+    assert.deepEqual(await restarted.lane.execute(await openDraft(restarted), { equityUsdg: u(100), equityKnown: true }), { status: "rejected", rejectRule: "perp-entries-halted" });
+    // Asked for after the Close all but before the restart: nothing orders that one either, so it lifts nothing — the owner resets again.
+    await reset(clock - 5_000);
+    assert.deepEqual(told, [false, false]);
+    assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, true);
+    // Asked for once this worker began: after the Close all, whenever that ran. It lifts it.
+    await reset(clock);
+    assert.deepEqual(told, [false, false, true]);
+    assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, false);
+    assert.equal((await restarted.lane.execute(await openDraft(restarted), { equityUsdg: u(100), equityKnown: true })).status, "paper", "a practice entry opens on the new book");
+  });
+
+  // THE TWO GUARDS ON THE LANE'S MEMORY OF A HALT, each pinned where nothing
+  // else can stand in for it. The reset-before case above runs on a ledger
+  // that stored the halt, so the ledger refuses the open whatever the lane
+  // remembers; and every other Close all here is one. Without these, a reset
+  // that forgot the memory every time (`ownerEntryHalts.delete` unguarded), or
+  // a Close all that overwrote the remembered time instead of keeping the
+  // newest (no Math.max), passed every test while losing a halt the owner
+  // had been told about.
+  it("A RESET ASKED FOR BEFORE A CLOSE ALL WHOSE HALT ONLY THIS WORKER HOLDS (its write failed) NEVER LIFTS IT: the memory is the only copy of the pause the owner was told about", async () => {
+    writeFeed();
+    const r = await rig({ store: { patchPerpAccount: async () => { throw new Error("ledger write unavailable"); } } });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const out = await r.lane.flatten({ askedAt: clock - 1_000 });
+    assert.match(out.sentence, /New practice positions are paused in this worker, but the pause could not be saved/);
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted ?? false, false, "the ledger never heard of it: only the lane holds it");
+    await store.setAgentMode(r.id, "paper", 1, false);
+    // Hosted, a reset rides the reconcile pass and a Close all the ferry's
+    // short loop, so a reset asked for first can reach the worker second.
+    const told: boolean[] = [];
+    await r.lane.resetPaper(
+      ({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })),
+      { askedAt: clock - 5_000 },
+    );
+    assert.deepEqual(told, [false], "the ledger is not told to lift it");
+    assert.equal((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted", "and the lane still holds it");
+    assert.deepEqual(await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true }), { status: "rejected", rejectRule: "perp-entries-halted" });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "nothing opened after the owner's Close all");
+    // The reset the owner asks for after it is the one that lifts it.
+    await r.lane.resetPaper(({ clearEntriesHalt }) => store.resetPaperLedger(r.id, 100, { clearEntriesHalt }), { askedAt: clock });
+    assert.notEqual((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+  });
+
+  it("TWO CLOSE-ALLS THAT REACH THE WORKER OUT OF ORDER: the halt keeps the newer one's time, so a reset asked for between them lifts nothing, in the ledger or the lane", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await r.lane.flatten({ askedAt: clock - 1_000 })).ok, true);
+    // The older one second: an overwrite would lower the remembered time below the reset's.
+    assert.equal((await r.lane.flatten({ askedAt: clock - 9_000 })).ok, true);
+    await store.setAgentMode(r.id, "paper", 1, false);
+    const told: boolean[] = [];
+    await r.lane.resetPaper(
+      ({ clearEntriesHalt }) => (told.push(clearEntriesHalt), store.resetPaperLedger(r.id, 100, { clearEntriesHalt })),
+      { askedAt: clock - 5_000 },
+    );
+    assert.deepEqual(told, [false], "the newest Close all was asked for after this reset");
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true, "the ledger's halt stands");
+    assert.equal((await r.lane.refresh()).view?.opensBlocked, "perps-entries-halted");
+    assert.deepEqual(await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true }), { status: "rejected", rejectRule: "perp-entries-halted" });
+  });
+
   it("a practice book that is not the account's book is frozen (rule 14): Close and Close all send nothing", async () => {
     writeFeed();
     let mode: ExecMode = PAPER;
@@ -622,9 +815,203 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     assert.match(close.sentence, /not on paper right now, so its practice perpetual positions stay exactly as they are/);
     const all = await r.lane.flatten({});
     assert.equal(all.ok, false);
-    assert.match(all.sentence, /New practice positions are paused/, "the halt is still the owner's to have");
+    // The halt is still the owner's to have, and it is STORED: Close all writes
+    // it before it reads the book, so a frozen book returns with it saved. Both
+    // the saved and the could-not-be-saved sentences say "paused", so the
+    // sentence is matched in full and the ledger read.
+    assert.match(all.sentence, / New practice positions are paused until you reset the practice book\.$/);
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true, "the halt is in the ledger though nothing was closed");
     assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
     assert.equal(fillsOf(r.id), fills);
+  });
+
+  it("A PRACTICE BOOK THAT COULD NOT BE READ: Close and Close all close nothing and say the book could not be read, and Close all's halt is stored all the same", async () => {
+    writeFeed();
+    let unreadable = false;
+    const r = await rig({
+      store: {
+        perpLaneLedgerFacts: async (...args: Parameters<typeof store.perpLaneLedgerFacts>) => {
+          if (unreadable) throw new Error("perp_orders x: an amount is unreadable");
+          return store.perpLaneLedgerFacts(...args);
+        },
+      },
+    });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    unreadable = true;
+    // Prices are fresh: it is the ledger that is not read.
+    const read = await r.lane.refresh();
+    assert.equal(read.view, null);
+    assert.equal(read.viewUnread, "ledger");
+    assert.deepEqual(await r.lane.close("BTC-PERP", { book: "paper" }), {
+      ok: false,
+      sentence: "BTC-PERP: the practice book could not be read, so nothing was sent. Its stop stays in place.",
+    });
+    const out = await r.lane.flatten({});
+    assert.equal(out.ok, false);
+    assert.match(out.sentence, /^The practice book could not be read, so no position was closed; they may still be open\. New practice positions are paused until you reset the practice book\.$/);
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true);
+    assert.equal(fillsOf(r.id), fills);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
+  });
+
+  /**
+   * PRICES THAT COULD NOT BE READ ARE NOT A PRACTICE BOOK THAT COULD NOT BE.
+   * The feed file stops being refreshed (the fleet's feed writer down or
+   * slow) while the ledger reads fine: the view is null all the same, and the
+   * owner used to be told "the practice book could not be read" — and by
+   * Close all that their positions "may still be open" — with the ledger
+   * showing exactly one open long. Now the sentence says what is true: prices
+   * are stale, nothing was sent, the position is still open (Close all: how
+   * many), its stop cannot trigger until prices read, ask again.
+   */
+  it("PRICES THAT COULD NOT BE READ, WITH THE LEDGER READ: Close and Close all send nothing and say the position is still open — and how many — never that the book could not be read", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    const stalePrices = "Lighter's prices could not be read just now";
+    for (const gap of ["a feed file ten minutes old", "no feed file at all"] as const) {
+      if (gap === "no feed file at all") rmSync(FEED);
+      else writeFeed(802_000n, "1000", { ageMs: 10 * 60_000 });
+      const read = await r.lane.refresh();
+      assert.equal(read.view, null, `${gap}: set-up — no view on these prices`);
+      assert.equal(read.viewUnread, "prices", gap);
+      assert.deepEqual(await r.lane.close("BTC-PERP", { book: "paper" }), {
+        ok: false,
+        sentence: `BTC-PERP: ${stalePrices}, so nothing was sent. The practice position is still open, and its stop can only trigger once prices read again. Ask again in a minute.`,
+      }, gap);
+      // A market with nothing held is still "nothing to close", read from the ledger.
+      assert.deepEqual(await r.lane.close("ETH-PERP", { book: "paper" }), { ok: false, sentence: "ETH-PERP: there is no practice position to close. Nothing was sent." }, gap);
+      assert.deepEqual(await r.lane.flatten({}), {
+        ok: false,
+        sentence:
+          `${stalePrices}, so no practice position was closed: 1 remains open, with its stop, which can only trigger once prices read again. ` +
+          "Ask again in a minute. New practice positions are paused until you reset the practice book.",
+      }, gap);
+      assert.equal(fillsOf(r.id), fills, `${gap}: nothing was sent on prices nobody read`);
+      assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1, gap);
+    }
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true, "Close all's halt is stored before it reads the book (D11)");
+    // Prices read again: the same Close closes it.
+    writeFeed();
+    assert.deepEqual(await r.lane.close("BTC-PERP", { book: "paper" }), { ok: true, sentence: "BTC-PERP: the practice position was closed." });
+  });
+
+  it("…and with prices unread and nothing held, Close all says there was nothing open — the ledger read", async () => {
+    writeFeed(802_000n, "1000", { ageMs: 10 * 60_000 });
+    const r = await rig();
+    const out = await r.lane.flatten({});
+    assert.deepEqual(out, { ok: true, sentence: "There were no practice perpetual positions open. New practice positions are paused until you reset the practice book." });
+  });
+
+  it("A LEDGER ROW NO VIEW CAN BE BUILT FROM is the book's gap, not the prices': with fresh prices, Close and Close all never tell the owner to wait a minute for them", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const fills = fillsOf(r.id);
+    // The ledger reads, but its one row has lost its margin fraction (view.ts buildPerpsViewStrict throws on it).
+    raw.prepare("UPDATE perp_positions SET imf_bp = NULL WHERE agent_id = ? AND mode = 'paper'").run(r.id.toLowerCase());
+    writeFeed();
+    const read = await r.lane.refresh();
+    assert.equal(read.view, null);
+    assert.equal(read.feedFresh, true, "set-up: prices are fresh");
+    assert.equal(read.viewUnread, "ledger");
+    assert.deepEqual(await r.lane.close("BTC-PERP", { book: "paper" }), {
+      ok: false,
+      sentence: "BTC-PERP: the practice book could not be read, so nothing was sent. Its stop stays in place.",
+    });
+    const out = await r.lane.flatten({});
+    assert.equal(out.ok, false);
+    assert.match(out.sentence, /^The practice book could not be read, so no position was closed; they may still be open\. /);
+    assert.equal(fillsOf(r.id), fills);
+  });
+
+  /**
+   * TWO PRACTICE POSITIONS. Every other owner-exit case holds one, on
+   * BTC-PERP, so these went unpinned: Close counts what is left IN THE MARKET
+   * IT CLOSED (practiceBaseLeft's market filter) — counted across markets, a
+   * BTC close that worked was told "filled only part of the position" and
+   * answered not ok, because ETH was still held; Close writes agents.perps at
+   * once (reportAfterOwnerExit), not at the next pass; and Close all closes
+   * every held market on the one read, one close never moving another's
+   * position.
+   */
+  it("TWO PRACTICE POSITIONS: Close takes the market named and says it closed, the other untouched, and agents.perps shows it at once; Close all closes both", async () => {
+    writeFeed(802_000n, "1000", { eth: 268_100n });
+    const r = await rig({ cfg: { perpsMarkets: ["BTC-PERP", "ETH-PERP"] } });
+    for (const market of ["BTC-PERP", "ETH-PERP"] as const) {
+      assert.equal((await r.lane.execute(await openDraft(r, market), { equityUsdg: u(100), equityKnown: true })).status, "paper", market);
+    }
+    assert.deepEqual(await heldMarketsOf(r.id), [0, 1], "set-up: ETH-PERP (0) and BTC-PERP (1) both held");
+    const ethBefore = (await store.getPerpPositions(r.id, "paper")).find((p) => p.marketId === 0)!.base;
+    await r.lane.report();
+    assert.equal(reportedOf(r.id), 2);
+
+    assert.deepEqual(await r.lane.close("BTC-PERP", { book: "paper" }), { ok: true, sentence: "BTC-PERP: the practice position was closed." });
+    assert.deepEqual(await heldMarketsOf(r.id), [0], "BTC-PERP closed, ETH-PERP still held");
+    assert.equal((await store.getPerpPositions(r.id, "paper")).find((p) => p.marketId === 0)!.base, ethBefore, "ETH-PERP's size is untouched");
+    assert.equal(reportedOf(r.id), 1, "agents.perps says so at once, not at the next pass");
+
+    assert.equal((await r.lane.execute(await openDraft(r, "BTC-PERP"), { equityUsdg: u(100), equityKnown: true })).status, "paper");
+    assert.deepEqual(await heldMarketsOf(r.id), [0, 1]);
+    const all = await r.lane.flatten({ book: "paper" });
+    assert.deepEqual(all, { ok: true, sentence: "Every practice perpetual position was closed. New practice positions are paused until you reset the practice book." });
+    assert.deepEqual(await heldMarketsOf(r.id), [], "both closed");
+    assert.equal(reportedOf(r.id), 0);
+  });
+
+  // CLOSE ALL STORES ITS HALT BEFORE IT CLOSES ANYTHING (lane.ts flatten; docs
+  // "Close all writes perp_accounts.entries_halted before it closes anything").
+  // The test above it only reads the ledger after a Close all that worked, which
+  // a halt written after the closes satisfies as well; here the ledger is read
+  // AT the first close, and that close fails.
+  it("THE HALT IS IN THE LEDGER WHEN THE FIRST CLOSE IS PLACED, and a close that throws leaves it there", async () => {
+    writeFeed();
+    const atClose: Array<boolean | undefined> = [];
+    let id = "";
+    const r = await rig({
+      wrap: (ex) => ({
+        mode: ex.mode,
+        review: ex.review.bind(ex),
+        setLeverage: ex.setLeverage?.bind(ex),
+        tick: ex.tick?.bind(ex),
+        setStop: ex.setStop?.bind(ex),
+        place: async (intent, review, ctx) => {
+          if (intent.effect !== "close") return ex.place(intent, review, ctx);
+          atClose.push((await store.getPerpAccount(id, "paper"))?.entriesHalted);
+          throw new Error("the venue went away mid-close");
+        },
+      }),
+    });
+    id = r.id;
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted ?? false, false, "set-up: no halt before the Close all");
+    const out = await r.lane.flatten({});
+    assert.deepEqual(atClose, [true], "the first close was placed with entries_halted already stored");
+    assert.equal(out.ok, false);
+    assert.match(out.sentence, /^1 practice position remains open after the close attempts, with its stop\. New practice positions are paused until you reset the practice book\.$/);
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1, "the close never landed");
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true);
+  });
+
+  it("…and a Close all that dies at its first close's decision (it throws) has already stored the halt", async () => {
+    writeFeed();
+    const atDecision: Array<boolean | undefined> = [];
+    let id = "";
+    const r = await rig({
+      decide: async (_intent, source) => {
+        if (source !== "chat") return { ok: true };
+        atDecision.push((await store.getPerpAccount(id, "paper"))?.entriesHalted);
+        throw new Error("the decisions table went away");
+      },
+    });
+    id = r.id;
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    await assert.rejects(r.lane.flatten({}), /the decisions table went away/);
+    assert.deepEqual(atDecision, [true], "stored before the owner's close was filed");
+    assert.equal((await store.getPerpAccount(r.id, "paper"))?.entriesHalted, true, "a crash here leaves the halt durable");
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1);
   });
 
   it("a market this version does not trade, or one with nothing held, sends nothing", async () => {
@@ -699,7 +1086,12 @@ describe("an owner's exit, at most once (command-files.ts: the claim is the unli
     assert.equal(fillsOf(r.id), fillsBefore);
   });
 
-  it("and were one ever run twice, the second finds nothing held and books nothing — a close is built from what is held", async () => {
+  // WHAT A SECOND RUN WOULD DO, both ways, so nothing reads the close's shape
+  // as a second line behind the claim. A close is built from what is held
+  // when it runs: run again with nothing opened since, it finds nothing; run
+  // again after the strategy opened that market since, it closes the new
+  // position and says so. Only the claim keeps an exit to one run.
+  it("were one ever run twice with nothing opened since, the second finds nothing held and books nothing", async () => {
     writeFeed();
     const r = await rig();
     await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
@@ -715,7 +1107,24 @@ describe("an owner's exit, at most once (command-files.ts: the claim is the unli
     assert.equal((await store.getPaperBook(r.id, 100)).cashUsdg, cash);
   });
 
-  it("A STOOD-DOWN PERPS WORKER (D19) claims nothing: the queued exit waits, unclaimed, and the position stays exactly as it was", async () => {
+  it("…but WERE ONE RUN TWICE AFTER THE STRATEGY OPENED THAT MARKET AGAIN, the second would close the new position, which nobody asked to close — a replay is not harmless, the claim is all that prevents one", async () => {
+    writeFeed();
+    const r = await rig();
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    const cmd = closeCommand("exit-replayed");
+    assert.deepEqual(await dispatch(r.lane)(cmd), { ok: true, line: "BTC-PERP: the practice position was closed." });
+    await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 1, "the strategy opened BTC again");
+    const fills = fillsOf(r.id);
+    // The same command, run a second time (what the claim exists to stop):
+    assert.deepEqual(await dispatch(r.lane)(cmd), { ok: true, line: "BTC-PERP: the practice position was closed." });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "the position opened since is gone");
+    assert.equal(fillsOf(r.id), fills + 1, "and its close was booked");
+    // Through the drain this never happens: the crash case above shows the
+    // claimed command is gone, and the position opened since stays.
+  });
+
+  it("A STOOD-DOWN PERPS WORKER (D19) claims nothing: the queued exit waits, unclaimed, and the drain leaves the position exactly as it was", async () => {
     const off = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps" });
     const paper = mergeSettings({}, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "paper" });
     assert.equal(perpsWorkerStoodDown(off), true, "unset MERRYMEN_PERPS is off");
@@ -741,6 +1150,43 @@ describe("an owner's exit, at most once (command-files.ts: the claim is the unli
     assert.equal(ran, 1);
     assert.equal(readCommandState(home, "exit-off")?.state, "done");
     assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0);
+  });
+
+  /**
+   * WHAT THE WEB TELLS A SELF-HOSTED OWNER (web perps-enabled.ts
+   * perpsStoodDownBook), held to what the worker does. D19 stands a Perps
+   * worker down from the owner's commands; it does not switch off a running
+   * book's stops (the review's S3-02: the loop starts with every arm, and a
+   * held position keeps the lane active whatever the switch says). So the
+   * refusal says the positions are still managed by their own rules, never
+   * that they stay exactly as they are: a worker started by hand under
+   * MERRYMEN_PERPS unset closed this one on its stop while the owner's Close
+   * waited, refused. Hosted no Perps child runs, which is the frozen case.
+   */
+  it("A STOOD-DOWN WORKER THAT RUNS ANYWAY STILL KEEPS WHAT IT HOLDS ON ITS STOPS: commands are stood down, the book's own protection is not", async () => {
+    writeFeed();
+    const r = await rig({ cfg: { perpsOperatorCeiling: "paper" } });
+    const home = newHome();
+    assert.equal((await r.lane.execute(await openDraft(r), { equityUsdg: u(100), equityKnown: true })).status, "paper");
+    const [held] = await store.getPerpPositions(r.id, "paper");
+    assert.ok(held?.stopTrigger, "the practice position carries its stop");
+    // Started by hand with MERRYMEN_WALLET_PURPOSE=perps, MERRYMEN_PERPS unset.
+    const handStarted = mergeSettings({ perpsEnabled: true }, { MERRYMEN_WALLET_PURPOSE: "perps" });
+    assert.equal(perpsWorkerStoodDown(handStarted), true);
+    r.cfg = { ...r.cfg, perpsOperatorCeiling: handStarted.perpsOperatorCeiling };
+    writeCommand(home, closeCommand("exit-refused"));
+    let ran = 0;
+    await runTickCommand(home, { now: () => clock, mayRun: () => !perpsWorkerStoodDown(handStarted), run: async () => (ran++, { ok: true, line: "ran" }), told: async () => {} });
+    assert.equal(ran, 0, "the owner's Close is not taken");
+    await r.lane.armed();
+    assert.equal(r.lane.protecting, true, "the protective loop starts with the arm, under any ceiling");
+    await r.lane.stopProtect(); // the pass below is driven by hand
+    // The mark falls through the trigger; the book still bids above the stop's bound.
+    writeFeed(held.stopTrigger - 100n);
+    await r.lane.protectPass({ lock: r.lane.lock, signal: new AbortController().signal, pass: 1 });
+    assert.equal((await store.getPerpPositions(r.id, "paper")).length, 0, "its own stop closed it");
+    assert.ok(r.events.some((e) => /BTC-PERP stop fired/.test(e)), JSON.stringify(r.events));
+    assert.deepEqual(queuedCommandIds(home), ["exit-refused"], "and the owner's Close still waits, unclaimed");
   });
 
   it("…and one that waited past its window is answered expired when perps come back, with nothing sent", async () => {
@@ -914,6 +1360,11 @@ describe("the wiring in index.ts", () => {
     assert.match(fn("runPaperReset"), /async \(\{ clearEntriesHalt \}\) => \{\s*const epoch = await resetPaperLedger\(id, cfg\.paperStartUsdg, \{ clearEntriesHalt \}\);/);
     assert.match(fn("runPaperReset"), /\{ askedAt \},\s*\);/);
     assert.match(fn("runCommand"), /if \(cmd\.kind === "paper-reset"\) return runPaperReset\(cmd\.at\);/);
+    // A halt the reset left (one it could not order) is told to the owner, read from the ledger after the reset.
+    const reset = fn("runPaperReset");
+    const kept = reset.indexOf("const haltKept = await getPerpAccount(id, \"paper\")");
+    assert.ok(kept > reset.indexOf("await perpLane.resetPaper("), "read after the reset");
+    assert.match(reset.slice(kept), /haltKept \? " New practice positions stay paused by your earlier Close all; reset again to lift that\."/);
   });
 
   it("the route runs after the class route, inside tick(), and nothing perp is in the strategy loop", () => {
@@ -934,12 +1385,42 @@ describe("the wiring in index.ts", () => {
     assert.ok(exit > gate && submitters.every((at) => at > exit), "an exit returns before any Spot submitter");
     const branch = run.slice(exit, submitters[0]);
     assert.match(branch, /const exit = readPerpExitOrder\(cmd\.args \?\? \{\}\);/);
+    // The admission level before the lane (worker-admission.ts ownerPerpExitRefusal;
+    // admission-invariant.test.ts pins the refusal's branch).
+    const admitted = branch.indexOf("const notAdmitted = ownerPerpExitRefusal({ level: admission.level, draining });");
+    assert.ok(admitted > 0 && admitted < branch.indexOf("perpLane.close("), "the tenant's admission level is asked before the lane");
     assert.match(branch, /await perpLane\.close\(exit\.order\.symbol, \{ book: exit\.order\.book, notAfterMs \}\)/);
     assert.match(branch, /await perpLane\.flatten\(\{ \.\.\.\(exit\.order\.book \? \{ book: exit\.order\.book \} : \{\}\), notAfterMs, askedAt: cmd\.at \}\)/);
     assert.match(branch, /return \{ ok: result\.ok, line: result\.sentence \};/);
     const at = CODE.indexOf("  function orderOutcome(");
     const outcome = CODE.slice(at, CODE.indexOf("\n  }\n", at));
     assert.match(outcome, /if \(isPerpExitRoute\(orderRoute\(cmd\.args\)\)\) return \{ ok: reply\.ok, line: reply\.line \};\s*const receipt =/);
+  });
+
+  /**
+   * PAUSE NEVER STANDS BETWEEN AN OWNER AND A CLOSE (docs/perps.md rule 8a).
+   * placeOrder sends a parsed exit on before its pause gate, and
+   * order-gate.test.ts ("IS NEVER STRANDED") pins that, but it drives
+   * placeOrder alone: a pause check added in runOrderCommand ahead of it, "for
+   * every order", would strand Close and Close all on a paused agent and still
+   * pass there. So here the pause is read once in runOrderCommand, only into
+   * the reads placeOrder judges. And its header must say an exit is exempt,
+   * because it used to say the opposite ("An ORDER is the opposite ... So the
+   * gate is per kind") after PR 1 routed the exits through it: the very
+   * instruction that change, or an incident reader, would have followed.
+   */
+  it("PAUSE NEVER STANDS BETWEEN AN OWNER AND A CLOSE: runOrderCommand reads the pause only into placeOrder's reads, and its header says an exit is exempt", () => {
+    const run = fn("runOrderCommand");
+    assert.deepEqual(run.match(/\bisPaused\(\)|\bpaused\b/g), ["paused", "isPaused()"], "the pause is read once, and named only as placeOrder's read");
+    assert.match(run, /return placeOrder\(\s*cmd\.args,\s*orderReadsOf\(reads, \{ paused: isPaused\(\), ceilingUsdg: cfg\.telegramMaxActionUsdg \}\),/);
+    const at = SRC.indexOf("  async function runOrderCommand(");
+    const header = SRC.slice(SRC.lastIndexOf("/**", at), at);
+    assert.ok(header.length > 200, "found runOrderCommand's header");
+    assert.doesNotMatch(header, /An ORDER is the opposite/, "the header no longer says the pause gates every order");
+    assert.match(header, /PERPETUAL EXIT RUNS THROUGH THE PAUSE/);
+    assert.match(header, /rule 8a/);
+    assert.match(header, /placeOrder \(order-gate\.ts\) sends a parsed exit to the submitter\s+\*\s+BEFORE its unread, pause and ceiling gates/);
+    assert.match(header, /DO NOT add a pause check here/);
   });
 
   it("A STOOD-DOWN PERPS WORKER'S DRAIN CLAIMS NOTHING (D19)", () => {
@@ -951,7 +1432,14 @@ describe("the wiring in index.ts", () => {
   });
 
   it("AN OWNER'S PERPETUAL EXIT THAT EXPIRED IS ANSWERED WITHOUT A RECEIPT, on the drain's hook and in runCommand alike (order-receipt.ts expiredOrderReceipt)", () => {
-    assert.match(fn("runQueuedCommand"), /expiredReceipt: \(cmd\) => \(cmd\.kind === "trade" \? expiredOrderReceipt\(cmd\.args\) : undefined\)/);
+    // The drain's hooks are order-receipt.ts orderExpiryHooks, passed whole,
+    // and its receipt hook gives a Spot order its receipt and an exit none.
+    assert.match(fn("runQueuedCommand"), /runTickCommand\([\s\S]*\.\.\.orderExpiryHooks,[\s\S]*\}\);/);
+    const at = { id: "x", at: 1, expiresAt: 2 };
+    assert.equal(orderExpiryHooks.expiredReceipt({ ...at, kind: "trade", args: { side: "sell", symbol: "BTC-PERP", usdgAmount: 0, purpose: "close-perp", book: "paper" } }), undefined);
+    assert.equal(orderExpiryHooks.expiredReceipt({ ...at, kind: "trade", args: { side: "sell", symbol: "ALL-PERPS", usdgAmount: 0, purpose: "flatten-perps" } }), undefined);
+    assert.equal(orderExpiryHooks.expiredReceipt({ ...at, kind: "trade", args: { side: "buy", symbol: "TSLA", usdgAmount: 5 } })?.status, "expired");
+    assert.equal(orderExpiryHooks.expiredReceipt({ ...at, kind: "selftest" }), undefined);
     const run = fn("runCommand");
     assert.match(run, /const receipt = cmd\.kind === "trade" \? expiredOrderReceipt\(cmd\.args\) : undefined;/);
     assert.match(run, /\.\.\.\(receipt \? \{ receipt \} : \{\}\),/);

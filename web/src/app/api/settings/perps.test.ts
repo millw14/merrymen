@@ -510,3 +510,58 @@ describe("GET ?wallet=perps shows the Perps wallet's values and defaults, never 
     }
   });
 });
+
+describe("a Perps save whose write fails says so in a fixed sentence, never the store's own words", () => {
+  /**
+   * What a driver's message can carry: an internal host and port, a table, a
+   * connection's state, or a credential a misconfigured URL put there. The
+   * owner can only retry, so the text is logged on the server and the answer
+   * is a fixed sentence, as the grants route's storeRefused and this route's
+   * own Perps read already give (grants/dual-purpose.test.ts holds theirs).
+   */
+  const LEAK = 'connect ECONNREFUSED 10.1.2.3:5432 (postgres://admin:hunter2@db.internal:5432/merrymen); relation "perps_tenant_settings" does not exist';
+  const NOT_SAVED = "Your Perps wallet's settings could not be saved. Nothing was changed; try again.";
+
+  /** The real Perps store's reads, and a write that throws LEAK. */
+  const failingWrites = () => {
+    const real = getSettingsStore("perps");
+    const puts: unknown[] = [];
+    useSettingsStoreForTest({
+      get: (tenant: `0x${string}`) => real.get(tenant),
+      put: async (_tenant: `0x${string}`, s: unknown) => {
+        puts.push(s);
+        throw new Error(LEAK);
+      },
+    } as never, "perps");
+    return puts;
+  };
+
+  for (const [what, body, lever] of [
+    ["a whole save", { perpsMaxLeverage: 3 }, "paper"],
+    ["the offs beside an error", { perpsEnabled: false, perpsDriver: "strategist" }, "paper"],
+    ["an off where Perps are not offered (D1)", { perpsEnabled: false }, undefined],
+  ] as const) {
+    it(`${what}: 503, the fixed sentence, and none of the error's text`, async (t) => {
+      await getSettingsStore("perps").put(TENANT, { strategy: "perps-only", perpsEnabled: true });
+      const logged: string[] = [];
+      t.mock.method(console, "error", (...a: unknown[]) => void logged.push(a.map(String).join(" ")));
+      const puts = failingWrites();
+      if (lever === undefined) delete process.env.MERRYMEN_PERPS;
+      try {
+        const r = await put(body);
+        assert.equal(r.status, 503, JSON.stringify(r.body));
+        assert.ok(puts.length > 0, "the write was attempted");
+        assert.deepEqual(r.body.errors, [NOT_SAVED]);
+        const said = JSON.stringify(r.body);
+        for (const leaked of ["ECONNREFUSED", "10.1.2.3", "5432", "hunter2", "db.internal", "postgres://", "perps_tenant_settings", "relation"]) {
+          assert.equal(said.includes(leaked), false, `${leaked} reached the owner: ${said}`);
+        }
+        assert.ok(logged.some((l) => l.includes("ECONNREFUSED 10.1.2.3:5432")), "the operator still has it, in the server's log");
+        assert.equal(logged.some((l) => l.includes("hunter2")), false, "…less the database password (redact-urls.ts)");
+      } finally {
+        process.env.MERRYMEN_PERPS = "paper";
+        resetSettingsStoreForTest();
+      }
+    });
+  }
+});
