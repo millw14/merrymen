@@ -137,6 +137,9 @@ body,
   --text-faint: #89968b;
   --lime: #a6ca58;
   --lime-2: #b8d875;
+  --green: #3dd68c;
+  --gold: #eab308;
+  --red: #ff5c71;
   color: var(--text);
 }
 body { background: var(--bg); }
@@ -147,7 +150,7 @@ body .nav.scrolled {
 }
 body .btn { border-radius: 4px; font-weight: 600; }
 body .btn-primary { background: var(--text); color: var(--bg); }
-body .btn-primary:hover { background: var(--lime); color: #fff; }
+body .btn-primary:hover { background: var(--lime); color: var(--bg); }
 body .btn-primary .box { background: var(--bg); }
 body .btn-primary .box svg { color: var(--text); }
 body .btn-ghost { background: transparent; border-color: var(--line); }
@@ -178,6 +181,9 @@ html[data-theme="light"] body {
   --text-faint: #747c73;
   --lime: #557719;
   --lime-2: #456414;
+  --green: #1e633d;
+  --gold: #785000;
+  --red: #a51f37;
   background: var(--bg);
   color: var(--text);
 }
@@ -558,6 +564,9 @@ body footer.foot {
   --text-dim: #adb7ac;
   --text-faint: #89968b;
   --lime: #a6ca58;
+  --green: #3dd68c;
+  --gold: #eab308;
+  --red: #ff5c71;
   margin-top: 0;
   background: var(--bg);
   color: var(--text);
