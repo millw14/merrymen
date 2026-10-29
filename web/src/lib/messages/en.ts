@@ -565,6 +565,20 @@ export const EN = {
   "settings.text.agentStop": "/agent stop",
   "settings.text.outboundPublic": "Outbound & public",
   "settings.text.offByDefaultNothing": "— off by default; nothing streams until you turn this on and add a key.",
+
+  // ── Add funds: paying the agent from a private Gloam balance ─────────
+  //
+  // English only, on purpose. The rest of the funding panel is not extracted
+  // yet, and a Spanish block inside an English panel is the half-translated
+  // screen i18n.tsx exists to prevent. Translate `fund.*` with the panel.
+  // See docs/gloam-private-funding.md for what each sentence is claiming.
+  "fund.gloam.title": "Or fund it privately with Gloam",
+  "fund.gloam.body": "If you hold a private balance on Gloam, you can pay this address from it. The USDG arrives from Gloam's shared pool rather than your wallet, so the chain does not show which wallet funded this agent or what you hold on Gloam.",
+  "fund.gloam.public": "Gloam hides where the money came from, not what the agent is. Its address, the wallet that owns it, its balance and its trades stay public, as they are now. Paying in the exact amount you just added to Gloam, straight after adding it, can still give away where it came from. Gloam can send it in a few pieces over time to make that harder.",
+  "fund.gloam.steps": "In Gloam, choose Robinhood Chain, open Pay, paste this address and send USDG with Hide my wallet on. Robinhood Chain only: USDG sent to this address on another network does not reach your agent.",
+  "fund.gloam.unchanged": "Your agent's permission, limits and recovery do not change. It arrives as an ordinary deposit, and your balance updates once it is recorded.",
+  "fund.gloam.open": "Copy address and open Gloam",
+  "fund.gloam.opened": "Address copied. Paste it into Pay in Gloam.",
 } as const;
 
 /** Every message the product can show. A key outside this set will not compile. */
