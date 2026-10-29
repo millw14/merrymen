@@ -604,6 +604,8 @@ export interface OpenFile {
   state: "queued" | "running";
   expiresAt: number | null;
   at: number;
+  /** A queued file's kind; absent for a running marker or a file that cannot be read. */
+  kind?: string;
 }
 
 /**
@@ -622,6 +624,14 @@ export interface OpenFile {
  * account, because a home outlives the account in it. The Perps wallet's
  * exits carry it; Spot's orders are written as they always were.
  *
+ * ORDERS HOLD THE SLOT, AS HOSTED (placeHostedOrder reads kind = 'trade'
+ * only). A queued practice reset or selftest shares the directory and is not
+ * an order: counted, a Perps practice reset (D12, written with a deadline)
+ * refused the owner's Close and Close all "you already have an order
+ * waiting" with no order waiting, where hosted queued them. A running marker
+ * carries no kind and still holds it (an order may be running), and so does a
+ * queued file whose kind cannot be read.
+ *
  * A listing that throws is "unreachable", never "nothing waiting".
  */
 export function placeSelfHostedOrder(
@@ -634,6 +644,7 @@ export function placeSelfHostedOrder(
   try {
     const held = files
       .open()
+      .filter((f) => f.state === "running" || f.kind === undefined || f.kind === "trade")
       .some((f) => holdsSlot({ claimed: f.state === "running", expiresAt: f.expiresAt, at: f.at }, o.now));
     if (held) return { ok: false, why: "in-flight" };
     // The id collision is handled by the file simply being rewritten, which

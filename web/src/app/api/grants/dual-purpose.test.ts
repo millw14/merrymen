@@ -36,7 +36,7 @@
  */
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -45,7 +45,7 @@ import { after, before, describe, it, mock } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
 import { bindingMessage, type GrantPurpose, type StoredGrant } from "@merrymen/core";
-import { RESTORE_PERPS_OWNER_DIFFERS, restorePerpsRefusal } from "@/lib/restore-perps-owner";
+import { RENEWAL_PERPS_OWNER_DIFFERS, RESTORE_PERPS_HOSTED, renewalPerpsRefusal, restorePerpsRefusal } from "@/lib/restore-perps-owner";
 
 const ORIGIN = "https://app.merrymen.dev";
 const APP = "merrymen-test-app";
@@ -488,15 +488,23 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
   it("never another tenant's: a login with no Perps wallet, or none at all, reads none", async () => {
     const leo = await login("leo");
     assert.deepEqual(await (await get(leo, "?wallet=perps")).json(), { exists: false, tenant: leo.account.address.toLowerCase() });
+    // A Spot wallet is not a Perps one, stored or shown: no `stored`, and the Wallet screen's restore goes ahead.
+    assert.equal((await privyPost(await spotGrant(leo), "", leo, "spot")).status, 200);
+    assert.deepEqual(await (await get(leo, "?wallet=perps")).json(), { exists: false, tenant: leo.account.address.toLowerCase() });
+    const viaGet = (async (url: string | URL | Request) => get(leo, String(url).replace(/^\/api\/grants/, ""))) as typeof fetch;
+    assert.equal(await restorePerpsRefusal(privateKeyToAccount(generatePrivateKey()).address, viaGet), null);
     const out = await get(null, "?wallet=perps");
     assert.deepEqual(await out.json(), { exists: false, tenant: null });
     assert.equal(out.headers.get("cache-control"), "private, no-store");
   });
 
-  it("A PERPS RECORD STOPPED FOR A RENEWAL is `stored`, never none: the Spot put still holds a Spot grant to it, so the Wallet screen's restore compares it through the login", async () => {
+  it("A PERPS RECORD STOPPED FOR A RENEWAL is `stored`, never none: the Spot put still holds a Spot grant to it, so the Wallet screen's restore and renewal ask it through the login", async () => {
     const mia = await login("mia");
     const current = await perpsGrant(mia);
     assert.equal((await privyPost(current, "?wallet=perps", mia, "perps")).status, 200);
+    const viaGet = (async (url: string | URL | Request) => get(mia, String(url).replace(/^\/api\/grants/, ""))) as typeof fetch;
+    // Shown, the hosted Perps wallet refuses every restore, the login's own key included (the legacy binding refuses that key).
+    assert.equal(await restorePerpsRefusal(mia.account.address, viaGet), RESTORE_PERPS_HOSTED);
     const stop = await route.DELETE(new Request(`${ORIGIN}/api/grants?wallet=perps`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json", cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(mia.account.address)}` },
@@ -506,14 +514,26 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
     assert.equal(await perpsGrantOf(mia), null, "set-up: the store will not show it");
     const body = await (await get(mia, "?wallet=perps")).json();
     assert.deepEqual(body, { exists: false, tenant: mia.account.address.toLowerCase(), stored: true });
-    // The Wallet screen's restore reads exactly this answer.
-    const viaGet = (async (url: string | URL | Request) => get(mia, String(url).replace(/^\/api\/grants/, ""))) as typeof fetch;
+    // The Wallet screen's restore and renewal read exactly this answer.
     const legacyKey = privateKeyToAccount(generatePrivateKey()).address;
-    assert.equal(await restorePerpsRefusal(legacyKey, viaGet), RESTORE_PERPS_OWNER_DIFFERS, "another owner key is refused before its stop and revocation");
-    assert.equal(await restorePerpsRefusal(mia.account.address, viaGet), null, "the login's own key goes ahead");
+    assert.equal(await restorePerpsRefusal(legacyKey, viaGet), RESTORE_PERPS_HOSTED, "another owner key is refused before its stop and revocation");
+    assert.equal(await restorePerpsRefusal(mia.account.address, viaGet), RESTORE_PERPS_HOSTED, "and so is the login's own");
+    assert.equal(await renewalPerpsRefusal(mia.account.address, viaGet), null, "a Spot renewal re-signed by the login goes ahead");
+    assert.equal(await renewalPerpsRefusal(legacyKey, viaGet), RENEWAL_PERPS_OWNER_DIFFERS);
     // And the store's put does hold a Spot grant to that record: another owner key is refused there too.
     const spotUnderLegacy = (await fixture.signerGrant({ owner: privateKeyToAccount(generatePrivateKey()), account: mia.spot })).grant;
     await assert.rejects(stores.getGrantStore("spot").put(mia.account.address, spotUnderLegacy), /same owner key/);
+  });
+
+  it("ON THE FILE STORE, A PERPS RECORD IT CANNOT PARSE is `stored` too: the restore is refused before its stop, as the Spot put refuses after it", async () => {
+    const nia = await login("nia");
+    assert.equal((await privyPost(await spotGrant(nia), "", nia, "spot")).status, 200);
+    assert.equal((await privyPost(await perpsGrant(nia), "?wallet=perps", nia, "perps")).status, 200);
+    writeFileSync(path.join(home, "tenants-perps", `${nia.account.address.toLowerCase()}.json`), "{ truncated");
+    assert.deepEqual(await (await get(nia, "?wallet=perps")).json(), { exists: false, tenant: nia.account.address.toLowerCase(), stored: true });
+    const viaGet = (async (url: string | URL | Request) => get(nia, String(url).replace(/^\/api\/grants/, ""))) as typeof fetch;
+    assert.equal(await restorePerpsRefusal(nia.account.address, viaGet), RESTORE_PERPS_HOSTED, "the login's own key too: nothing is stopped for a POST that cannot land");
+    await assert.rejects(stores.getGrantStore("spot").put(nia.account.address, (await fixture.signerGrant({ owner: nia.account, account: nia.spot })).grant));
   });
 
   it("D1: answered whatever MERRYMEN_PERPS says, so an owner can always see a Perps wallet they hold", async () => {

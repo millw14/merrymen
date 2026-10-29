@@ -119,9 +119,10 @@ export interface AgentStatus {
   /**
    * Hosted `?wallet=perps` only, with `exists` false: the Perps store holds a
    * record it will not show (one stopped for a renewal whose POST has not
-   * landed, or one it cannot read). Its owner is the login (perps-owner), and
-   * a Spot grant is still held to it (assertIndependentWallets reads the
-   * record raw), so the Wallet screen's restore asks this too
+   * landed, or, on the file store, one it cannot parse). Its owner was the
+   * login (perps-owner), and a Spot put is still held to it: compared with it
+   * (assertIndependentWallets reads the record raw), or refused when it
+   * cannot be read. So the Wallet screen's restore and renewal ask this too
    * (restore-perps-owner.ts).
    */
   stored?: true;

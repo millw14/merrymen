@@ -371,9 +371,10 @@ test("THE ONE-AT-A-TIME RULE GETS DEADLINES, not a yes/no", () => {
     markRunning(home, "r");
     const before = Date.now();
     const open = Object.fromEntries(openCommands(home).map((c) => [c.id, c]));
-    assert.deepEqual(open.q, { id: "q", state: "queued", expiresAt: 5_000, at: 1_000 });
-    assert.deepEqual(open.probe, { id: "probe", state: "queued", expiresAt: null, at: 2_000 }, "no deadline is null, never 0");
+    assert.deepEqual(open.q, { id: "q", state: "queued", expiresAt: 5_000, at: 1_000, kind: "trade" });
+    assert.deepEqual(open.probe, { id: "probe", state: "queued", expiresAt: null, at: 2_000, kind: "selftest" }, "no deadline is null, never 0; the kind is the file's");
     assert.equal(open.r?.state, "running");
+    assert.equal(open.r?.kind, undefined, "a marker carries no kind");
     assert.equal(open.r?.expiresAt, null, "a marker carries no deadline");
     assert.ok(Math.abs(open.r!.at - before) < 60_000, "its age is when it was claimed");
     // Receipts and temp files are not orders.

@@ -231,4 +231,31 @@ test("Postgres: two wallets per login, beside an untouched Spot fleet", { skip: 
     await spot.remove(U);
     assert.equal((await row("tenant_ledger_import", U))!.state, "deleted");
   });
+
+  await t.test("A WALLET STOPPED FOR A RENEWAL STILL HOLDS THE OTHER TO ITS OWNER KEY, both ways (the hosted GET calls it `stored`; the Wallet screen's restore and renewal ask it first)", async () => {
+    const ownerDiffers = (e: unknown) => e instanceof GrantWalletConflict && e.code === "owner-differs";
+    // A Perps record stopped for its renewal: the store will not show it, but holds it, and a Spot grant under
+    // another owner key is refused against it.
+    const V = addr(0x161), VSPOT = addr(0x162), VPERPS = addr(0x163);
+    await spot.put(V, grant(V, VSPOT, key("31")));
+    await perps.put(V, grant(V, VPERPS, key("32"), { purpose: "perps" }));
+    assert.equal(await perps.stopForReplacement(V, VPERPS, privateKeyToAccount(key("32")).address), "stopped");
+    assert.equal(await perps.get(V), null);
+    assert.equal(await perps.hasStoredGrant(V), true);
+    const spotRow = await row("grants", V);
+    await assert.rejects(spot.put(V, grant(V, VSPOT, key("33"), { owner: addr(0x164) })), ownerDiffers);
+    assert.deepEqual(await row("grants", V), spotRow, "nothing of Spot's was written");
+    await perps.put(V, grant(V, VPERPS, key("34"), { purpose: "perps" }));
+    assert.equal((await perps.get(V))?.demoSessionPrivateKey, key("34"), "the renewal itself lands, under its own key");
+
+    // The other way: a Spot wallet under a legacy owner key, stopped for its renewal, still holds a Perps grant
+    // (whose owner is always the login) out.
+    const W = addr(0x171), WSPOT = addr(0x172);
+    await spot.put(W, grant(W, WSPOT, key("35"), { owner: addr(0x174) }));
+    assert.equal(await spot.stopForReplacement(W, WSPOT, privateKeyToAccount(key("35")).address), "stopped");
+    assert.equal(await spot.get(W), null);
+    assert.equal(await spot.hasStoredGrant(W), true);
+    await assert.rejects(perps.put(W, grant(W, addr(0x173), key("36"), { purpose: "perps" })), ownerDiffers);
+    assert.equal(await perps.hasStoredGrant(W), false, "nothing of Perps' was written");
+  });
 });

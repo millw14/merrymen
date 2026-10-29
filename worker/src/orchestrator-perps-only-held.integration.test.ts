@@ -142,7 +142,8 @@ it("A LOGIN WITH NO UNEXPIRED SPOT GRANT THE ROLLOUT HOLDS IS NAMED ONCE AND COU
     const line = named[0]!;
     assert.match(line, /MERRYMEN_FLEET_ROLLOUT does not name its owner, and a login with no unexpired Spot grant is never admitted by MERRYMEN_ROLLOUT_NEW_TENANTS/);
     // True whether or not its book has reported (perps-book-reported.ts).
-    assert.match(line, /nothing its owner asks is carried out: a Close, a Close all or a practice reset is refused while its book has not reported, and queued and left to expire once it has/);
+    assert.match(line, /so no Close, Close all or practice reset is carried out: each is refused while its book has not reported, and queued and left to expire once it has\. Its owner's kill still stops the wallet, and settings and renewals are still saved\./);
+    assert.doesNotMatch(line, /nothing its owner asks/, "a held login's kill is carried out (fleet-rollout.ts): the line never says otherwise");
     assert.ok(line.includes(`name ${owner} in MERRYMEN_FLEET_ROLLOUT`), line);
   }
   for (const owner of [BOTH, OLD, ACCT]) {

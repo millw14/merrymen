@@ -5,7 +5,7 @@ import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { assertRevocationFunded, revokeFromBrowser } from "@/lib/revoke-client";
 import { stopAgentForReplacement } from "@/lib/stop-agent";
-import { restorePerpsRefusal } from "@/lib/restore-perps-owner";
+import { renewalPerpsRefusal, restorePerpsRefusal } from "@/lib/restore-perps-owner";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
@@ -1186,6 +1186,16 @@ export default function GrantPage() {
         previousGrant,
         localGrants,
       };
+      // A login's two wallets share one owner key, and the grant POST that
+      // ends this renewal is held to the Perps wallet (refused for another
+      // owner, or for a Perps wallet it cannot read). Asked before anything is
+      // marked, stopped, revoked or signed, with the key this renewal re-signs
+      // with, so a renewal the POST would refuse changes nothing. (After the
+      // shared options, as every owner-type branch here is.)
+      const perpsRefusal = await renewalPerpsRefusal(
+        resignBy === "privy" ? privyOwner!.account.address : privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`).address,
+      );
+      if (perpsRefusal) throw new Error(perpsRefusal);
       // Check the canonical replacement before any persistent mutation, stop,
       // or revocation. This produces no key/signature to reuse after revoking.
       await preflightAgentGrant(

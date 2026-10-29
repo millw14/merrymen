@@ -95,13 +95,18 @@ const ACCOUNT_CLAIMED = "this agent account is already linked to a different log
  * /api/grants, which writes each wallet's grant.json in its own home and
  * holds the other wallet's file to these same three rules.
  *
- * No refusal here says "neither wallet was changed": a renewal or restore
- * POSTs its grant after its own stop, which a refusal does not undo. They say
- * what this request did. Owner-differs reaches the owner as written; the
- * plain Errors reach a hosted owner as the route's fixed 503 ("Your
- * permission could not be saved", grants/route.ts storeRefused), and a
- * self-hosted one as otherLocalWalletRefusal's own sentence. The Wallet
- * screen's restore asks the Perps owner first (restore-perps-owner.ts).
+ * Owner-differs and the plain Errors, the refusals a renewal or restore
+ * meets when it POSTs after its own stop, never say "neither wallet was
+ * changed": a refusal does not undo that stop. They say what this request
+ * did. Owner-differs reaches the owner as written; the plain Errors reach a
+ * hosted owner as the route's fixed 503 ("Your permission could not be
+ * saved", grants/route.ts storeRefused), and a self-hosted one as
+ * otherLocalWalletRefusal's own sentence. Account-shared and legacy-perps
+ * still end "Neither wallet was changed.", true for a wallet's first intake,
+ * where nothing was stopped; a renewal or restore that passed owner-differs
+ * cannot meet account-shared (one owner's two wallets are different Kernel
+ * indexes). The Wallet screen's restore and renewal ask the Perps owner
+ * first (restore-perps-owner.ts).
  */
 export function assertIndependentWallets(
   incoming: StoredGrant,

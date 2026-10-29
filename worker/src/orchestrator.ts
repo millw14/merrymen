@@ -804,10 +804,13 @@ function operatorHeld(tenant: string): boolean {
  * Spot-only login runs at MERRYMEN_ROLLOUT_NEW_TENANTS's level, and a
  * Perps-only one, or one whose Spot grant expired before the route admitted
  * it, waits until the operator names it. Nothing else says so. Its worker does
- * not start, so nothing its owner asks is carried out: a Close, a Close all or
- * a practice reset is refused while its book has not reported (web
- * perps-book-reported.ts), and queued and left to expire once it has. The
- * roster line counts it held. Whether the route should prove such a login new
+ * not start, so no Close, Close all or practice reset is carried out: each is
+ * refused while its book has not reported (web perps-book-reported.ts), and
+ * queued and left to expire once it has. The owner's kill still stops the
+ * wallet (the web's and Telegram's, which no rollout gates), and settings and
+ * renewals are still saved: the line says so, so no operator names an
+ * unreviewed login only to let a kill through. Said once, and again each hour
+ * it stays held (sayTenantAlert). The roster line counts it held. Whether the route should prove such a login new
  * through its Perps grant is the operator's decision, not made here.
  *
  * A login with an unexpired Spot grant is proved new through it, or told
@@ -822,9 +825,9 @@ function sayPerpsOnlyHeld(key: string, spotEligible: ReadonlySet<string>): void 
   if (accountingTenantHeld(owner) || !rolloutHeld(owner, process.env, newTenantAdmissions)) return;
   sayTenantAlert(key, `perps: ${key} is held — ${FLEET_ROLLOUT_ENV} does not name its owner, and a login with no unexpired Spot grant is ` +
     `never admitted by ${ROLLOUT_NEW_TENANTS_ENV} (the route proves a login new only through one). Its Perps worker does not start, ` +
-    "so nothing its owner asks is carried out: a Close, a Close all or a practice reset is refused while its book has not reported, " +
-    `and queued and left to expire once it has. To run it, name ${owner} in ${FLEET_ROLLOUT_ENV} once its accounting is reviewed ` +
-    "(docs/fleet-resume.md)");
+    "so no Close, Close all or practice reset is carried out: each is refused while its book has not reported, and queued and left to " +
+    "expire once it has. Its owner's kill still stops the wallet, and settings and renewals are still saved. " +
+    `To run it, name ${owner} in ${FLEET_ROLLOUT_ENV} once its accounting is reviewed (docs/fleet-resume.md)`);
 }
 
 /**

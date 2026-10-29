@@ -15,6 +15,7 @@ import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { getAddress } from "viem";
 import type { Db } from "../../../../worker/src/db";
 import { MIRROR_STATE_DDL } from "../../../../worker/src/ledger-mirror";
+import { resetSettingsStoreForTest, useSettingsStoreForTest, type SettingsStore } from "../../../../worker/src/settings-store";
 import {
   PATTERN_INPUT_MAX, describeDeployment, nameScrubber, normalizePattern, normalizeRule, readExecutionFailures, readPackageVersion, readProviderErrors,
 } from "@/lib/services/staff-diagnostics";
@@ -299,6 +300,43 @@ test("fleet health: tick-aware freshness, frozen vs stale, retired accounts, blo
   assert.equal(events.never_copied, 1);
   assert.deepEqual(sc.warnings, []);
   assertRedacted("fleet health", res);
+});
+
+test("fleet health: a Perps wallet's worker is current, on its own wallet's tick, and its mirror cursors count", async () => {
+  // B's Perps wallet (perps_grants, never grants: grant-store.ts WALLET_TABLE), mirrored as `<owner>:perps`.
+  const ACCOUNT_P = "0x000000000000000000000000000000000000fe01";
+  const d = await seedFleet();
+  await d.db.exec("CREATE TABLE perps_grants (tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json TEXT NOT NULL, sealed_session_key TEXT NOT NULL, updated_at INTEGER NOT NULL)");
+  d.raw.prepare("INSERT INTO perps_grants (tenant, chain_id, grant_json, sealed_session_key, updated_at) VALUES (?, 4663, ?, 'SEALED-KEY-never-read', ?)")
+    .run(OWNER_B, JSON.stringify({ smartAccount: ACCOUNT_P, purpose: "perps", serialized: "SERIALIZED-GRANT" }), NOW);
+  // Beat 300 s ago: fresh on B's Spot tick (the default, 570 s), stale on its Perps worker's own 30 s tick (180 s).
+  insAgent(d, ACCOUNT_P, OWNER_B, "SirSendIt", "active", "paper", NOW - 300, null);
+  d.raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, ?, ?, ?)").run(`${OWNER_B}:perps`, "trades", 2, NOW - 100);
+  useSettingsStoreForTest({ get: async (t: string) => (t === OWNER_B ? { tickSeconds: 30 } : null) } as unknown as SettingsStore, "perps");
+  try {
+    const { res, sc } = await call("staff_fleet_health");
+    assert.equal(sc.agents.current, 7);
+    assert.equal(sc.agents.without_current_grant, 1, "a running Perps worker is not a retired account");
+    assert.equal(sc.heartbeat.stale, 3);
+    assert.deepEqual(sc.heartbeat.stale_agents.find((a: { agent: string }) => a.agent === pseudonym(ACCOUNT_P)),
+      { agent: pseudonym(ACCOUNT_P), heartbeat_age_s: 300, fresh_within_s: 180, status: "active", mode: "paper" });
+    assert.deepEqual(sc.heartbeat.tick_seconds, { from_settings: 2, defaulted: 3, default_fresh_within_s: 570 });
+    const trades = sc.mirror.tables.find((t: { table: string }) => t.table === "trades");
+    assert.deepEqual(trades, { table: "trades", tenants: 3, never_copied: 0, lag_s: { min: 20, median: 100, p90: 600, max: 600 } });
+    assert.equal(sc.mirror.rows_without_current_grant, 1, "only the departed owner's cursor");
+    assert.deepEqual(sc.warnings, []);
+    assertRedacted("fleet health", res);
+    assert.ok(!JSON.stringify(res).toLowerCase().includes(ACCOUNT_P), "fleet health leaks the Perps account");
+
+    // A perps_grants that cannot be read is said, and its workers are counted as before: without a current grant.
+    await d.db.exec("DROP TABLE perps_grants");
+    await d.db.exec("CREATE TABLE perps_grants (tenant TEXT PRIMARY KEY)");
+    const unread = (await call("staff_fleet_health")).sc;
+    assert.equal(unread.agents.without_current_grant, 2);
+    assert.match(unread.warnings.join(" "), /Perps grants could not be read/);
+  } finally {
+    resetSettingsStoreForTest();
+  }
 });
 
 test("fleet health: no mirror_state yet is reported as unknown with a warning, and an empty fleet is zeros", async () => {

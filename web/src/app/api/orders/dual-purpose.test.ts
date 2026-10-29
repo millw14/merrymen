@@ -42,6 +42,7 @@ import { queueRecoveryCheckedCommand } from "@/lib/recovery-commands";
 import { placeRecoveryCheckedOrder } from "@/lib/recovery-orders";
 import { PERPS_EXIT_NOT_REPORTED } from "@/lib/perps-book-reported";
 import { GET, POST } from "./route";
+import { POST as paperReset } from "../paper-reset/route";
 import { GET as ceiling } from "./ceiling/route";
 
 const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SETTINGS_FILE", "DATABASE_URL", "MERRYMEN_SESSION_SECRET", "MERRYMEN_PERPS", "MERRYMEN_TICK_SECONDS"] as const;
@@ -314,6 +315,19 @@ describe("each wallet's slot and ceiling are its own", () => {
     assert.equal(second.status, 409, "the Perps wallet's own slot is held");
     assert.equal(queued(purposeHome("perps")), 1);
     assert.equal(queued(home), 1);
+  });
+
+  it("A PRACTICE RESET QUEUED IS NOT AN ORDER WAITING: a Close and a Close all asked after it are queued, as hosted queues them (order-state.ts placeSelfHostedOrder)", async () => {
+    const reset = await paperReset(new Request("https://app.example.test/api/paper-reset?wallet=perps", { method: "POST" }));
+    assert.equal(reset.status, 200, JSON.stringify(await reset.clone().json()));
+    assert.deepEqual(openCommands(purposeHome("perps")).map((c) => c.kind), ["paper-reset"]);
+    const close = await POST(req("orders?wallet=perps", reviewed(CLOSE)));
+    assert.equal(close.status, 200, JSON.stringify(await close.clone().json()));
+    assert.equal((await POST(req("orders?wallet=perps", reviewed(FLATTEN)))).status, 409, "the Close now waiting holds the slot");
+    assert.deepEqual(openCommands(purposeHome("perps")).map((c) => c.kind).sort(), ["paper-reset", "trade"]);
+    // Spot's own reset, queued with no deadline, leaves Spot's order slot as free.
+    assert.equal((await paperReset(new Request("https://app.example.test/api/paper-reset", { method: "POST" }))).status, 200);
+    assert.equal((await POST(req("orders", { side: "buy", symbol: "TSLA", usdgAmount: 5 }))).status, 200);
   });
 
   it("the Perps wallet's ceiling and tick are read from its own home; the ceiling route stays Spot's", async () => {

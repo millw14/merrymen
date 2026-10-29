@@ -728,7 +728,7 @@ describe("the funded wallet's re-sign control", () => {
    */
   for (const [what, answer, refusal] of [
     ["under another owner key than the Perps wallet's", () => json({ exists: true, grant: { owner: `0x${"9".repeat(40)}`, purpose: "perps" } }), /Your Perps wallet uses another owner key, and both of a login's wallets must use the same one\..*Nothing was stopped or signed\./],
-    ["while the Perps wallet cannot be read", () => json({ error: "Couldn't read your Perps wallet. Please try again." }, 503), /Your Perps wallet could not be read, so this restore cannot be checked against it\. Nothing was stopped or signed; try again\./],
+    ["while the Perps wallet cannot be read", () => json({ error: "Couldn't read your Perps wallet. Please try again." }, 503), /Your Perps wallet could not be read, so this restore cannot be checked against it\. Nothing was stopped or signed\. Try again in a moment; if it keeps failing, Kill all agents stops both wallets/],
   ] as const) it(`restoring ${what} stops nothing, revokes nothing and signs nothing`, async () => {
     perpsAnswer = answer;
     await ui.render(React.createElement(Wallet));
@@ -759,6 +759,67 @@ describe("the funded wallet's re-sign control", () => {
     await ui.click("Restore & arm 0x1111…1111");
     assert.deepEqual(fundingChecks, [{ smartAccount: address, chainId: 4663 }], "past the Perps owner, to the fee check");
     assert.doesNotMatch(ui.container.textContent!, /Your Perps wallet/);
+  });
+
+  it("SWITCHING TO ANOTHER ACCOUNT under that account's own key, while the Perps wallet keeps the active wallet's key, stops nothing and signs nothing", async () => {
+    // The refusal as it really arises: the active Spot wallet and the Perps wallet share one owner key (the
+    // same-owner rule allows no other state), and the key pasted is another account's own. A preview derives
+    // both the account and its owner from the key it is given.
+    const active = useRenewalOwner("legacy");
+    perpsAnswer = () => json({ exists: true, grant: { owner: active.address, purpose: "perps" } });
+    const other = `0x${"5".repeat(40)}`;
+    previewOwner = async key => ({ smartAccount: other, owner: privateKeyToAccount(key as `0x${string}`).address });
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey(`0x${"7".repeat(64)}`);
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x5555…5555");
+    assert.deepEqual(fundingChecks, [], "refused before even the fee check");
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(replacementStops, [], "the active wallet is not stopped for an account the POST would refuse");
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.match(ui.container.textContent!, /Your Perps wallet uses another owner key, and both of a login's wallets must use the same one\..*Nothing was stopped or signed\./);
+  });
+
+  /**
+   * HOSTED, NO KEY CAN BE RESTORED WHILE A PERPS WALLET EXISTS OR IS STORED:
+   * its owner is the login, and a restore signs as a legacy owner key, which
+   * the server refuses for the login's own key. Each was refused only after
+   * the stop and the paid revocation; the screen refuses first.
+   */
+  for (const [what, answer] of [
+    ["shown", (login: string) => json({ exists: true, tenant: login, grant: { owner: login, purpose: "perps" } })],
+    ["stopped for a renewal (stored)", (login: string) => json({ exists: false, tenant: login, stored: true })],
+  ] as const) for (const whose of ["the login's own key", "another key"] as const) it(`HOSTED, a Perps wallet ${what}: restoring ${whose} stops nothing, revokes nothing and signs nothing`, async () => {
+    const login = privateKeyToAccount(`0x${"7".repeat(64)}`);
+    const did = "did:privy:hosted-restore";
+    activeGrant = { ...grant, owner: login.address, demoOwnerPrivateKey: undefined, binding: { version: "privy-did-owner-v1", did, nonce: "n", ownerSignature: `0x${"0".repeat(130)}` } };
+    privyOwner = { account: login, did };
+    perpsAnswer = () => answer(login.address);
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists: true, tenant: login.address, grant: activeGrant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
+      if (path === "/api/auth/session") return json({ hosted: true, address: login.address });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey(whose === "the login's own key" ? `0x${"7".repeat(64)}` : `0x${"3".repeat(64)}`);
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(fundingChecks, [], "refused before even the fee check");
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(replacementStops, []);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.match(ui.container.textContent!, /Your Perps wallet is owned by the wallet you sign in with, and a restored owner key cannot sit beside it.*Nothing was stopped or signed\./);
   });
 
   it("on-chain revocation remains available when the service stop fails", async () => {
@@ -1124,6 +1185,42 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(checked.purpose, "spot");
     assert.equal(minted.purpose, "spot");
     assert.equal(minted.minimumValidationNonce, 9);
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
+
+  /**
+   * THE RENEWAL ENDS IN THE SAME POST AS THE RESTORE, held to the Perps
+   * wallet: refused for another owner key, or for a Perps wallet it cannot
+   * read. It asks first too, with the key it re-signs with, so a renewal the
+   * POST would refuse leaves the running permission exactly as it was.
+   */
+  for (const [what, answer, said] of [
+    ["while the Perps wallet cannot be read", () => json({ error: "Couldn't read your Perps wallet. Please try again." }, 503),
+      /kept your existing permission unchanged\. Your Perps wallet could not be read, so this renewal cannot be checked against it\. Try again in a moment\./],
+    ["under another owner key than the Perps wallet's", () => json({ exists: true, grant: { owner: `0x${"9".repeat(40)}`, purpose: "perps" } }),
+      /kept your existing permission unchanged\. Your Perps wallet uses another owner key, and both of a login's wallets must use the same one, so the renewed permission would be refused\./],
+  ] as const) for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal ${what}: refused before its preflight, stop, revocation or signature`, async () => {
+    useRenewalOwner(kind);
+    perpsAnswer = answer;
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
+    await ui.click("revoke earlier permissions & re-sign");
+    assertExistingPermissionKept(before);
+    assert.equal(preflightCalls, 0);
+    assert.deepEqual(replacementStops, [], "no stop names any wallet");
+    assert.match(ui.container.textContent!, said);
+  });
+
+  for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal under the Perps wallet's own owner key goes ahead`, async () => {
+    const owner = useRenewalOwner(kind);
+    perpsAnswer = () => json({ exists: true, grant: { owner: owner.address.toLowerCase(), purpose: "perps" } });
+    renew = async () => ({ local: { ...activeGrant, sessionKeyAddress: fixtureAddress(903) }, handoff: { ok: true } });
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(stopCalls, 1);
+    assert.equal(mintCalls, 1);
     assert.match(ui.container.textContent!, /Permission renewed/);
   });
 

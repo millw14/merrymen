@@ -17,6 +17,7 @@
 import * as z from "zod";
 import { describeDeployment, readExecutionFailures, readFleetHealth, readMcpUsage, readPackageVersion, readProviderErrors } from "@/lib/services/staff-diagnostics";
 import { settingsReader } from "@/lib/services/settings-view";
+import { getSettingsStore } from "@merrymen/settings-store";
 import { mcpConfig } from "../config";
 import { SERVER_VERSION } from "../instructions";
 import { metricsSnapshot, pseudonym } from "../observe";
@@ -95,13 +96,20 @@ const fleetHealth = defineTool({
   timeoutMs: 25_000,
   async handler(_args, ctx) {
     const now = ctx.now();
-    // Each owner's tick comes from the allowlisted settings projection; only
-    // the number is used, and the tenant never leaves the service.
+    // Each owner's tick comes from that wallet's settings: Spot's through the
+    // allowlisted settings projection, a Perps worker's from the Perps store
+    // (its own tick, getSettingsStore("perps")). Only the number is used, and
+    // the tenant never leaves the service.
     const data = await ctx.ledger((db) => readFleetHealth(db, {
       now,
       hash: pseudonym,
       signal: ctx.signal,
-      tickFor: async (tenant) => (ADDRESS.test(tenant) ? (await settingsReader().settingsFor(tenant))?.tickSeconds ?? null : null),
+      tickFor: async (tenant, wallet) => {
+        if (!ADDRESS.test(tenant)) return null;
+        if (wallet === "spot") return (await settingsReader().settingsFor(tenant))?.tickSeconds ?? null;
+        const tick = (await getSettingsStore("perps").get(tenant.toLowerCase() as `0x${string}`))?.tickSeconds;
+        return typeof tick === "number" ? tick : null;
+      },
     }));
     const h = data.heartbeat;
     return {

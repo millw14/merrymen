@@ -19,7 +19,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAddress, isAddress } from "viem";
-import type { Db } from "../../../../worker/src/db";
+import { tablePresent, type Db } from "../../../../worker/src/db";
 import { REJECT_RULES, rejectRuleLabel } from "@/lib/thesis";
 import { blockerView, freshWithin } from "./agent-status";
 
@@ -179,8 +179,8 @@ const modeOf = (m: unknown): ModeKey => (MODES as readonly string[]).includes(St
 export interface FleetHealthOptions {
   now: number;
   hash: Hasher;
-  /** The owner's configured tick in seconds, when known. Null (or a throw) means the default tick. */
-  tickFor?: (tenant: `0x${string}`) => Promise<number | null>;
+  /** The owner's configured tick in seconds for that wallet's worker, when known. Null (or a throw) means the default tick. */
+  tickFor?: (tenant: `0x${string}`, wallet: "spot" | "perps") => Promise<number | null>;
   /** Most agent rows read. */
   limit?: number;
   /** Most distinct owners whose tick is looked up; the rest use the default. */
@@ -241,28 +241,49 @@ interface AgentRow {
   expires_at: number | string | null;
 }
 
+/** A current account's owner, and which of the owner's wallets it is. */
+interface CurrentAccount { tenant: `0x${string}`; wallet: "spot" | "perps" }
+
 /**
- * Current accounts from the grants table: tenant → smart account, read through
+ * Current accounts from the grants tables: tenant → smart account, read through
  * a JSON projection so the sealed session key and the serialized grant never
- * leave the database. Null when the table cannot be read.
+ * leave the database. Null when the Spot table cannot be read.
+ *
+ * A PERPS WALLET'S WORKER IS CURRENT TOO. Its grant is in perps_grants, never
+ * in grants (grant-store.ts WALLET_TABLE), and the orchestrator mirrors it as
+ * its own tenant, `<owner>:perps` (ledger-mirror.ts), so read from grants
+ * alone every running Perps worker was a "retired account" and its mirror
+ * cursors "no longer mirrored": a wedged one was never stale. No perps_grants
+ * table is no Perps wallet yet; one that cannot be read is said in a warning,
+ * and its workers are counted as without a current grant.
  */
-async function readCurrentAccounts(db: Db, limit: number): Promise<{ byAccount: Map<string, `0x${string}`>; tenants: Set<string>; truncated: boolean } | null> {
-  try {
-    const rows = await db.prepare(`SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM grants ORDER BY tenant LIMIT ?`).all(limit + 1) as Array<{ tenant: string; smart_account: string | null }>;
-    const byAccount = new Map<string, `0x${string}`>();
-    const tenants = new Set<string>();
+async function readCurrentAccounts(db: Db, limit: number, warnings: string[]): Promise<{ byAccount: Map<string, CurrentAccount>; tenants: Set<string>; truncated: boolean } | null> {
+  const byAccount = new Map<string, CurrentAccount>();
+  const tenants = new Set<string>();
+  let truncated = false;
+  const read = async (table: "grants" | "perps_grants", wallet: CurrentAccount["wallet"]) => {
+    const rows = await db.prepare(`SELECT tenant, grant_json->>'smartAccount' AS smart_account FROM ${table} ORDER BY tenant LIMIT ?`).all(limit + 1) as Array<{ tenant: string; smart_account: string | null }>;
     for (const r of rows.slice(0, limit)) {
       const account = typeof r.smart_account === "string" ? r.smart_account.toLowerCase() : "";
       const tenant = typeof r.tenant === "string" ? r.tenant.toLowerCase() : "";
       if (!/^0x[0-9a-f]{40}$/.test(tenant)) continue;
-      tenants.add(tenant);
-      if (account) byAccount.set(account, tenant as `0x${string}`);
+      tenants.add(wallet === "perps" ? `${tenant}:perps` : tenant);
+      if (account) byAccount.set(account, { tenant: tenant as `0x${string}`, wallet });
     }
-    return { byAccount, tenants, truncated: rows.length > limit };
+    if (rows.length > limit) truncated = true;
+  };
+  try {
+    await read("grants", "spot");
   } catch {
     // No grants table (a fresh database) cannot tell current from retired.
     return null;
   }
+  try {
+    if (await tablePresent(db, "perps_grants")) await read("perps_grants", "perps");
+  } catch {
+    warnings.push("The Perps grants could not be read, so Perps workers are counted as without a current grant.");
+  }
+  return { byAccount, tenants, truncated };
 }
 
 export async function readFleetHealth(db: Db, o: FleetHealthOptions): Promise<FleetHealth> {
@@ -281,7 +302,7 @@ export async function readFleetHealth(db: Db, o: FleetHealthOptions): Promise<Fl
     if (!prev || (num(r.beat_at) ?? 0) > (num(prev.beat_at) ?? 0)) byAccount.set(key, r);
   }
 
-  const grants = await readCurrentAccounts(db, limit * 2);
+  const grants = await readCurrentAccounts(db, limit * 2, warnings);
   const current = grants?.byAccount ?? null;
   if (!grants) warnings.push("The grants table could not be read, so every agent row is treated as current (retired accounts may inflate the stale count).");
   else if (grants.truncated) warnings.push(`More than ${limit * 2} grants exist; agents beyond them are counted as without a current grant.`);
@@ -300,8 +321,8 @@ export async function readFleetHealth(db: Db, o: FleetHealthOptions): Promise<Fl
 
   for (const [account, r] of byAccount) {
     checkAborted(o.signal);
-    const tenant = current?.get(account) ?? null;
-    if (current && !tenant) {
+    const owner = current?.get(account) ?? null;
+    if (current && !owner) {
       // A retired account (the owner re-signed onto a new one) or a grant the
       // kill switch removed: its row stops updating by design.
       nonCurrent += 1;
@@ -325,11 +346,13 @@ export async function readFleetHealth(db: Db, o: FleetHealthOptions): Promise<Fl
     }
 
     let tick: number | null = null;
-    if (tenant && o.tickFor) {
-      if (!ticks.has(tenant) && ticks.size < tickLookups) {
-        ticks.set(tenant, await o.tickFor(tenant).then((t) => (typeof t === "number" && t > 0 ? t : null), () => null));
+    if (owner && o.tickFor) {
+      // Each wallet's worker runs on its own settings' tick.
+      const key = `${owner.wallet}:${owner.tenant}`;
+      if (!ticks.has(key) && ticks.size < tickLookups) {
+        ticks.set(key, await o.tickFor(owner.tenant, owner.wallet).then((t) => (typeof t === "number" && t > 0 ? t : null), () => null));
       }
-      tick = ticks.get(tenant) ?? null;
+      tick = ticks.get(key) ?? null;
     }
     if (tick === null) tickDefaulted += 1;
     else tickKnown += 1;

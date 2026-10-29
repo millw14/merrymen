@@ -540,6 +540,8 @@ export interface OpenCommand {
   expiresAt: number | null;
   /** When it was placed (queued) or claimed (running), in milliseconds. */
   at: number;
+  /** The queued file's kind ("trade" for an order); absent for a marker, which carries none, and for a file that cannot be read. */
+  kind?: string;
 }
 
 /**
@@ -579,17 +581,19 @@ export function openCommands(home: string): OpenCommand[] {
       } catch {
         continue; // claimed between the listing and the read — the marker says so next
       }
-      let at: unknown;
+      let parsed: { at?: unknown; kind?: unknown } | null = null;
       try {
-        at = (JSON.parse(raw) as { at?: unknown })?.at;
+        parsed = JSON.parse(raw) as { at?: unknown; kind?: unknown } | null;
       } catch {
         /* unreadable: the worker drops it at the claim; until then its age is the file's */
       }
+      const at = parsed?.at;
       out.push({
         id: n.slice(0, -".json".length),
         state: "queued",
         expiresAt: deadlineIn(raw),
         at: typeof at === "number" && Number.isFinite(at) ? at : mtimeOf(f),
+        ...(typeof parsed?.kind === "string" ? { kind: parsed.kind } : {}),
       });
     } else if (n.endsWith(RUNNING)) {
       out.push({ id: n.slice(0, -RUNNING.length), state: "running", expiresAt: null, at: mtimeOf(f) });
