@@ -55,6 +55,8 @@ let privyOwner: PrivyOwner | null = null;
 let Wallet: typeof import("./screens/Wallet").default;
 let ui: ReturnType<typeof testDom>;
 let savedWallets: SavedWallet[] = [];
+/** The server's answer to GET /api/grants?wallet=perps, which a restore asks before anything else (restore-perps-owner.ts): no Perps wallet unless a test says otherwise. */
+let perpsAnswer: () => Response;
 const originalFetch = globalThis.fetch;
 
 before(async () => {
@@ -111,6 +113,7 @@ before(async () => {
 beforeEach(() => {
   ui = testDom();
   savedWallets = [];
+  perpsAnswer = () => json({ exists: false });
   activeGrant = grant;
   storedGrantAvailable = true;
   privyOwner = null;
@@ -137,6 +140,7 @@ beforeEach(() => {
   globalThis.fetch = async (input) => {
     const path = String(input);
     if (path === "/api/grants") return json({ exists: true, grant: activeGrant, gasSponsored: true });
+    if (path === "/api/grants?wallet=perps") return perpsAnswer();
     if (path === "/api/auth/session") return json({ hosted: false, address: null });
     if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
     throw new Error(`Unexpected request: ${path}`);
@@ -266,6 +270,7 @@ describe("the funded wallet's re-sign control", () => {
         const path = String(input);
         if (path === "/api/grants" && init?.method === "POST") { posted++; return json({ ok: true }); }
         if (path === "/api/grants") return json({ exists: false });
+        if (path === "/api/grants?wallet=perps") return perpsAnswer();
         if (path === "/api/auth/session") return json({ hosted: false, address: null });
         if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
         throw new Error(`Unexpected request: ${path}`);
@@ -415,6 +420,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
       if (path === "/api/grants") return unavailable ? json({ error: "grant store unavailable" }, 500) : json({ exists: true, grant, gasSponsored: true });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -436,6 +442,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: true, tenant: b, grant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: true, address: a });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -451,6 +458,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
       if (path === "/api/grants") return ++reads === 1 ? oldGrant.promise : json({ exists: false });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -711,6 +719,48 @@ describe("the funded wallet's re-sign control", () => {
     assert.match(ui.container.textContent!, /needs ETH for the network fee\. Nothing was stopped or signed/);
   });
 
+  /**
+   * A LOGIN'S TWO WALLETS SHARE ONE OWNER KEY, and the grant POST that ends a
+   * restore refuses another one. Self-hosted, the restore's stop had already
+   * removed the running Spot grant.json (and stopped Solana) and its revocation
+   * had been paid for when that POST was refused. So the restore asks the
+   * Perps wallet first (restore-perps-owner.ts), before even the fee check.
+   */
+  for (const [what, answer, refusal] of [
+    ["under another owner key than the Perps wallet's", () => json({ exists: true, grant: { owner: `0x${"9".repeat(40)}`, purpose: "perps" } }), /Your Perps wallet uses another owner key, and both of a login's wallets must use the same one\..*Nothing was stopped or signed\./],
+    ["while the Perps wallet cannot be read", () => json({ error: "Couldn't read your Perps wallet. Please try again." }, 503), /Your Perps wallet could not be read, so this restore cannot be checked against it\. Nothing was stopped or signed; try again\./],
+  ] as const) it(`restoring ${what} stops nothing, revokes nothing and signs nothing`, async () => {
+    perpsAnswer = answer;
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(fundingChecks, [], "refused before even the fee check");
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(replacementStops, [], "no stop names any wallet");
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.equal(needsPermissionReplacement(activeGrant), false);
+    assert.match(ui.container.textContent!, refusal);
+  });
+
+  it("restoring with the Perps wallet's own owner key goes on as before, to the fee check", async () => {
+    perpsAnswer = () => json({ exists: true, grant: { owner: privateKeyToAccount(grant.demoOwnerPrivateKey!).address.toLowerCase(), purpose: "perps" } });
+    fundingCheck = async () => { throw new Error("Revoking earlier permissions needs ETH for the network fee. Nothing was stopped or signed."); };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(fundingChecks, [{ smartAccount: address, chainId: 4663 }], "past the Perps owner, to the fee check");
+    assert.doesNotMatch(ui.container.textContent!, /Your Perps wallet/);
+  });
+
   it("on-chain revocation remains available when the service stop fails", async () => {
     stop = async () => { throw new Error("service unavailable"); };
     await ui.render(React.createElement(Wallet));
@@ -820,6 +870,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists, ...(exists ? { grant: activeGrant } : {}) });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -889,6 +940,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: true, grant: serverGrant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -929,6 +981,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: true, grant: serverGrant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -972,6 +1025,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists, tenant: owner.address, ...(exists ? { grant: activeGrant } : {}) });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: true, address: owner.address });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -1022,6 +1076,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: false, tenant: b.address });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: true, address: b.address });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);

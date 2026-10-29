@@ -58,7 +58,8 @@ const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SETTINGS_FILE", "DAT
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 const TENANT = `0x${"aa".repeat(20)}` as const;
 const SPOT = `0x${"11".repeat(20)}`;
-const PERPS = `0x${"22".repeat(20)}`;
+/** With letters in it, so the agents row below can be spelled in another case from the one the routes are given. */
+const PERPS = `0x${"2b".repeat(20)}`;
 /** The Perps worker's key, as the orchestrator names its tenant (workerKey). */
 const PERPS_TENANT = `${TENANT}:perps`;
 const CLOSE = { purpose: "close-perp", side: "sell", symbol: "BTC-PERP", usdgAmount: 0, book: "paper" } as const;
@@ -175,7 +176,8 @@ describe("hosted, a Perps owner command and a Perps book that has not reported",
   });
 
   it("ONCE ITS agents ROW IS THERE — itself the history a first start refuses on — the exit and the reset are queued as before, on the Perps account", async () => {
-    await reported(PERPS);
+    // As the worker spells it (checksummed, not the routes' lowercase): the look is by the account, never its case.
+    await reported(`0x${PERPS.slice(2).toUpperCase()}`);
     assert.equal(await sharedLedgerHistory(shared, PERPS_TENANT, PERPS), "agents", "set-up: the row a command would add to is already there");
     const close = await exit(CLOSE);
     assert.equal(close.status, 200, JSON.stringify(close.body));

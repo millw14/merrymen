@@ -19,6 +19,13 @@ import type { Db } from "../../../worker/src/db";
  * there when the command is inserted.
  *
  * A read that fails throws; every caller refuses on that.
+ *
+ * NO ROW IS "NOT SAID", NEVER "NOTHING" (agent-perps.ts rule 11), and the
+ * refusals below say only that. A worker that has armed writes its row
+ * locally and can trade on its first tick, before the next mirror pass
+ * carries the row up; and a Perps wallet the rollout holds never reports
+ * while held (orchestrator.ts sayPerpsOnlyHeld). So neither sentence says
+ * there is nothing to close or reset, or when the book will show.
  */
 export async function perpsBookReported(db: Pick<Db, "prepare">, account: string): Promise<boolean> {
   const row = await db.prepare("SELECT 1 AS one FROM agents WHERE LOWER(smart_account) = ? LIMIT 1").get(account.toLowerCase());
@@ -27,8 +34,8 @@ export async function perpsBookReported(db: Pick<Db, "prepare">, account: string
 
 /** A Perps exit refused because the book has not reported (409, nothing queued). */
 export const PERPS_EXIT_NOT_REPORTED =
-  "Your Perps wallet has not reported its practice book yet, so there is no position here to close. Nothing was queued; try again once your Perps wallet shows its book.";
+  "Your Perps wallet has not reported its practice book yet, so this could not reach it: nothing was closed or paused, and nothing was queued. Try again once your Perps wallet shows its book.";
 
 /** A Perps practice reset refused because the book has not reported (409, nothing queued). */
 export const PERPS_RESET_NOT_REPORTED =
-  "Your Perps wallet has not reported its practice book yet, so there is no book to reset. No practice reset was queued; try again once your Perps wallet shows its book.";
+  "Your Perps wallet has not reported its practice book yet, so it cannot be reset yet. No practice reset was queued; try again once your Perps wallet shows its book.";

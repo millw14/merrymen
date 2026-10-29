@@ -94,6 +94,11 @@ const ACCOUNT_CLAIMED = "this agent account is already linked to a different log
  * Exported for the one writer that is not a store: a self-hosted POST
  * /api/grants, which writes each wallet's grant.json in its own home and
  * holds the other wallet's file to these same three rules.
+ *
+ * The two refusals a replacement can meet say what this request did, never
+ * "neither wallet was changed": a renewal or restore POSTs its grant after
+ * its own stop, which this refusal does not undo (the Wallet screen's
+ * restore asks the Perps owner first, restore-perps-owner.ts).
  */
 export function assertIndependentWallets(
   incoming: StoredGrant,
@@ -101,10 +106,10 @@ export function assertIndependentWallets(
 ): void {
   if (!other) return;
   if (typeof other.owner !== "string" || typeof other.smartAccount !== "string") {
-    throw new Error("Your other wallet's grant could not be read, so this one cannot be checked against it. Neither wallet was changed.");
+    throw new Error("Your other wallet's grant could not be read, so this one could not be checked against it and was not saved. Your other wallet was not changed.");
   }
   if (other.owner.toLowerCase() !== String(incoming.owner).toLowerCase()) {
-    throw new GrantWalletConflict("owner-differs", "Both of a login's wallets must use the same owner key. Neither wallet was changed.");
+    throw new GrantWalletConflict("owner-differs", "Both of a login's wallets must use the same owner key, so this permission was not saved. Your other wallet was not changed.");
   }
   if (other.smartAccount.toLowerCase() === incoming.smartAccount.toLowerCase()) {
     throw new GrantWalletConflict("account-shared", "Your Spot and Perps wallets must be different accounts. Neither wallet was changed.");

@@ -5,6 +5,7 @@ import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { assertRevocationFunded, revokeFromBrowser } from "@/lib/revoke-client";
 import { stopAgentForReplacement } from "@/lib/stop-agent";
+import { restorePerpsRefusal } from "@/lib/restore-perps-owner";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
@@ -902,6 +903,11 @@ export default function GrantPage() {
     setStatus("starting…");
     try {
       await verifyCurrentAccount();
+      // A login's two wallets share one owner key, and the grant POST that
+      // ends this restore refuses another one. Asked first, so a restore the
+      // POST would refuse stops nothing and signs nothing.
+      const perpsRefusal = await restorePerpsRefusal(privateKeyToAccount(ownerKey).address);
+      if (perpsRefusal) throw new Error(perpsRefusal);
       // Every network revoked below must be able to pay its own fee before the
       // service is stopped; an empty account would be stopped for nothing.
       for (const network of new Set([previousGrant?.chainId ?? selectedChain, selectedChain])) {

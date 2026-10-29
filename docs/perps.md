@@ -70,7 +70,16 @@ Perps workers, and nothing live:
   Telegram, groups, DM memory, Fomo or flow broker, IPC channel, public id or
   public roster (rule 17). Its holder status is the owner's, read-only. It is
   held as its owner is (accounting hold, rollout, chain check), never through
-  the new-tenant route, and spawned after every Spot worker. While the owner
+  the new-tenant route, and spawned after every Spot worker. That route proves
+  a login new only through its Spot grant, so under an explicit
+  `MERRYMEN_FLEET_ROLLOUT` a login with no Spot wallet runs its Perps worker
+  only once named, whatever `MERRYMEN_ROLLOUT_NEW_TENANTS` says; its owner's
+  exits and resets are refused until its book reports, which it never does
+  while held. The orchestrator names each such login once (`sayPerpsOnlyHeld`,
+  with what to do), and the perps roster line counts held Perps wallets apart
+  from those that may run (`orchestrator-perps-only-held.integration.test.ts`).
+  Whether the route should prove a Perps-only login new through its Perps
+  grant is an operator decision this build leaves open. While the owner
   has an unexpired Spot grant, it runs only on the replica holding that Spot
   lease, so a login is never split across replicas. That is checked at every
   start and restart, on every pass and the moment the Spot lease drops. One
@@ -229,6 +238,16 @@ and `/create?for=perps` are PR 3.
   (a live eth_call that fails closed with 503), the Spot `grant.json` held to
   the store's same-owner, other-account rules, then the Perps home's
   `grant.json` archived and replaced whole. No public identity or name (D2).
+  The same-owner rule holds the Spot intake to the Perps wallet too, and its
+  two refusals a replacement can meet (another owner key; the other wallet
+  unreadable) say this permission was not saved and the other wallet was not
+  changed, never "neither wallet was changed": a restore or renewal posts
+  after its own stop, which a refusal does not undo. The Wallet screen's
+  restore asks the Perps wallet's owner first (`restore-perps-owner.ts`, from
+  `GET /api/grants?wallet=perps`) and refuses another owner key, or a Perps
+  wallet it cannot read, before its stop, its revocation or its signature;
+  self-hosted that stop used to remove the running Spot `grant.json` and stop
+  the Solana strategy before the POST was refused.
 - The canonical wall rebuilds a Perps grant as the Perps wall
   (`grantWallOptions` from its signed purpose). In this build that wall is
   empty (D5): a Perps grant declaring any marker, token, sealed address, perp
@@ -361,11 +380,16 @@ nothing reaches a venue, a key or real money.
   halt stands is the lane's to say (`resetPaper`'s `haltKept`): the ledger's
   halt, as the lane's own read after the reset found it, or one only the
   lane holds because the Close all's write failed; the ledger is asked again
-  only when that read never reached the account row, and an account with no
-  row was never paused. A reset that lifted nothing and could not read the
+  only when that read never reached the account row (an inactive lane's read
+  reaches it too, before it finds itself inactive), and an account with no
+  row was never paused: a Close all creates the row it halts, even on a book
+  that never traded. A reset that lifted nothing and could not read the
   ledger at all says that it could not tell (`"unread"`), never that no pause
   stands, and in words that do not say a Close all was pressed, since it can
-  come to an owner who never pressed one (`resetHaltSentence`). A Spot
+  come to an owner who never pressed one (`resetHaltSentence`). Its
+  condition is the owner's own Close all ("if you pressed Close all before
+  asking for this reset"), never what the report shows: the operator's
+  `MERRYMEN_HALT_PERP_ENTRIES` shows the same pause, and no reset lifts it. A Spot
   worker's lane is never armed, so its reset keeps no pause and reads no perp
   account.
   A Perps reset expires with the Perps order window, so a reset can never lift
@@ -518,7 +542,11 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   and is answered expired if the hold outlasts it. Hosted, an exit is queued
   only onto a book that has reported: the Perps account's `agents` row must be
   in the shared database (`perps-book-reported.ts`), or it is refused 409 with
-  nothing queued, and a read that fails is 503. An `agent_commands` row is
+  nothing queued, and a read that fails is 503. The refusal says only that the
+  book has not reported, never that nothing is there to close (a worker that
+  has armed can trade before the mirror carries its row up) nor when it will
+  show (a Perps wallet the rollout holds never reports; see slice 4's
+  rollout bullet). An `agent_commands` row is
   ledger history (`ledger-import.ts sharedLedgerHistory`), and the
   orchestrator starts a Perps worker for the first time only on an account
   with none (`registerLedgerSource`'s new-book branch), so an exit queued

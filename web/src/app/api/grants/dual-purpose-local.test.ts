@@ -249,7 +249,7 @@ describe("self-hosted: every refusal lands before anything is written", () => {
       writeFileSync(spotFile(), unreadable);
       const res = await json(await post(await perpsGrant()));
       assert.equal(res.status, 503, unreadable.slice(0, 20));
-      assert.match(String(res.body.error), /could not be read.*Neither wallet was changed/);
+      assert.match(String(res.body.error), /could not be read.*was not saved\. Your spot wallet was not changed\./);
       untouched(unreadable);
     }
   });
@@ -273,6 +273,9 @@ describe("self-hosted: every refusal lands before anything is written", () => {
     const res = await json(await post(JSON.parse(spotOnDisk({ serialized: "renewed" })), ""));
     assert.equal(res.status, 409);
     assert.equal(res.body.code, "owner-differs");
+    // It may answer the second step of a restore, after that restore's own stop:
+    // it says what this request did, never that neither wallet changed.
+    assert.equal(res.body.error, "Both of a login's wallets must use the same owner key, so this permission was not saved. Your other wallet was not changed.");
     assert.equal(read(spotFile()), before);
     // With the Perps wallet's own owner it is the renewal it always was.
     writeFileSync(perpsFile(), JSON.stringify({ purpose: "perps", owner: owner.address, smartAccount: PERPS }));

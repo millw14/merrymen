@@ -779,7 +779,7 @@ function localGrantFile(wallet: GrantPurpose): string {
 async function otherLocalWalletRefusal(grant: StoredGrant, wallet: GrantPurpose): Promise<NextResponse | null> {
   const otherWallet: GrantPurpose = wallet === "spot" ? "perps" : "spot";
   const unreadable = NextResponse.json(
-    { error: `Your ${otherWallet} wallet's permission could not be read, so this one cannot be checked against it. Neither wallet was changed.`, ownerFacing: true },
+    { error: `Your ${otherWallet} wallet's permission could not be read, so this one could not be checked against it and was not saved. Your ${otherWallet} wallet was not changed.`, ownerFacing: true },
     { status: 503 },
   );
   let other: StoredGrant;

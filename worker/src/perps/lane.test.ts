@@ -276,10 +276,13 @@ describe("small pieces", () => {
     assert.equal(resetHaltSentence(true), " New practice positions stay paused by your earlier Close all; reset again to lift that.");
     assert.equal(
       resetHaltSentence("unread"),
-      " Whether new practice positions are paused by a Close all could not be read just now; if they show as paused, reset again to lift it.",
+      " Whether new practice positions are paused by a Close all could not be read just now; if you pressed Close all before asking for this reset, reset again to lift that pause.",
     );
     // "unread" comes as readily to an owner who never pressed Close all.
     assert.doesNotMatch(resetHaltSentence("unread"), /earlier|your Close all|still/);
+    // Its condition is the owner's own Close all, never what the report shows:
+    // the operator's entry halt shows the same pause, and no reset lifts it.
+    assert.doesNotMatch(resetHaltSentence("unread"), /show as paused|shows? paused/);
   });
   it("usdgText rounds toward zero and signs only when asked", () => {
     assert.equal(usdgText(12_345_678n), "12.34");
@@ -606,21 +609,36 @@ describe("a paper reset", () => {
     assert.equal(early.haltKept, false, "nor does one asked for before this lane began");
   });
 
-  it("A BOOK THAT NEVER TRADED HAS NO perp_accounts ROW, AND NO ROW IS NO PAUSE: from the lane's own read, and from the ledger asked again when that read stopped short of the account", async () => {
+  it("A BOOK WITH NO perp_accounts ROW (no trade, no Close all) IS NO PAUSE: from the lane's own read, which finds no row and is not asked again, and from the ledger asked again when that read stopped short of the account", async () => {
     writeFeed();
     let positionsDown = false;
+    // After a reset the ledger answers once — the lane's own read — and is busy for every read after it.
+    let reads: number | null = null;
     const r = await rig({
       store: {
         getPerpPositions: async (...args: Parameters<typeof store.getPerpPositions>) => {
           if (positionsDown) throw new Error("SQLITE_BUSY: database is locked");
           return store.getPerpPositions(...args);
         },
+        getPerpAccount: async (...args: Parameters<typeof store.getPerpAccount>) => {
+          if (reads !== null && ++reads > 1) throw new Error("SQLITE_BUSY: database is locked");
+          return store.getPerpAccount(...args);
+        },
       },
     });
     await store.setAgentMode(r.id, "paper", 1, false);
     assert.equal(await store.getPerpAccount(r.id, "paper"), null, "set-up: nothing was ever placed, so there is no account row");
     for (const askedAt of [clock - 60_000, undefined]) {
-      const reset = await r.lane.resetPaper(() => store.resetPaperLedger(r.id, 100), askedAt === undefined ? {} : { askedAt });
+      const reset = await r.lane.resetPaper(
+        async () => {
+          const epoch = await store.resetPaperLedger(r.id, 100);
+          reads = 0;
+          return epoch;
+        },
+        askedAt === undefined ? {} : { askedAt },
+      );
+      assert.equal(reads, 1, `asked at ${askedAt}: the lane's own read found no row, and that is the answer; the ledger is not asked again`);
+      reads = null;
       assert.equal(reset.haltKept, false, `the lane's own read, asked at ${askedAt}`);
     }
     // The lane's read fails before it reaches the account row, so the reset asks the ledger itself.
@@ -673,6 +691,113 @@ describe("a paper reset", () => {
         closedAll ? " New practice positions stay paused by your earlier Close all; reset again to lift that." : "",
       );
       assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, closedAll, "set-up: the ledger says the same");
+    }
+  });
+
+  it("A CLOSE ALL ON A BOOK THAT NEVER TRADED CREATES THE ROW IT HALTS, so a restarted lane's early reset says the pause stands, from its own read", async () => {
+    writeFeed();
+    const first = await rig();
+    assert.equal(await store.getPerpAccount(first.id, "paper"), null, "set-up: nothing was ever placed, so there is no account row");
+    assert.equal((await first.lane.flatten({ askedAt: clock - 10_000 })).ok, true);
+    assert.equal((await store.getPerpAccount(first.id, "paper"))?.entriesHalted, true, "the Close all wrote the row it halts");
+    assert.equal(fillsOf(first.id), 0, "set-up: and still nothing traded");
+    assert.equal(ordersOf(first.id), 0);
+    await first.lane.stopProtect();
+    await store.setAgentMode(first.id, "paper", 1, false);
+    let reads: number | null = null;
+    const restarted = await rig({
+      reuse: first,
+      store: {
+        getPerpAccount: async (...args: Parameters<typeof store.getPerpAccount>) => {
+          if (reads !== null && ++reads > 1) throw new Error("SQLITE_BUSY: database is locked");
+          return store.getPerpAccount(...args);
+        },
+      },
+    });
+    const out = await restarted.lane.resetPaper(
+      async ({ clearEntriesHalt }) => {
+        assert.equal(clearEntriesHalt, false, "set-up: asked for before this worker began, so it lifts nothing");
+        const epoch = await store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt });
+        reads = 0;
+        return epoch;
+      },
+      { askedAt: clock - 20_000 },
+    );
+    assert.equal(reads, 1, "the lane's own read, and no second");
+    assert.equal(out.haltKept, true);
+    assert.equal(resetHaltSentence(out.haltKept), " New practice positions stay paused by your earlier Close all; reset again to lift that.");
+  });
+
+  it("WHEN THE LANE'S OWN READ STOPS SHORT OF THE ACCOUNT ROW, THE LEDGER ASKED AGAIN SAYS A STORED CLOSE ALL STANDS: never a fresh book while every practice entry is refused", async () => {
+    writeFeed();
+    const first = await rig();
+    await first.lane.execute(await openDraft(first), { equityUsdg: u(100), equityKnown: true });
+    assert.equal((await first.lane.flatten({ askedAt: clock - 10_000 })).ok, true);
+    await first.lane.stopProtect();
+    await store.setAgentMode(first.id, "paper", 1, false);
+    // After the reset the lane's read fails at the positions, before the account row.
+    let positionsDown = false;
+    let reads: number | null = null;
+    const restarted = await rig({
+      reuse: first,
+      store: {
+        getPerpPositions: async (...args: Parameters<typeof store.getPerpPositions>) => {
+          if (positionsDown) throw new Error("SQLITE_BUSY: database is locked");
+          return store.getPerpPositions(...args);
+        },
+        getPerpAccount: async (...args: Parameters<typeof store.getPerpAccount>) => {
+          if (reads !== null) reads++;
+          return store.getPerpAccount(...args);
+        },
+      },
+    });
+    const out = await restarted.lane.resetPaper(
+      async ({ clearEntriesHalt }) => {
+        assert.equal(clearEntriesHalt, false, "set-up: asked for before this worker began, so it lifts nothing");
+        const epoch = await store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt });
+        positionsDown = true;
+        reads = 0;
+        return epoch;
+      },
+      { askedAt: clock - 20_000 },
+    );
+    positionsDown = false;
+    assert.equal(reads, 1, "the lane's read never reached the account row, so the ledger was asked once more");
+    assert.equal(out.haltKept, true, "the ledger asked again found the stored halt");
+    assert.equal(resetHaltSentence(out.haltKept), " New practice positions stay paused by your earlier Close all; reset again to lift that.");
+    assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, true, "set-up: the ledger says the same");
+  });
+
+  it("A LANE SWITCHED OFF ANSWERS FROM ITS OWN READ TOO: the account row is read before the lane finds itself inactive, so a reset asked for before it began asks the ledger once", async () => {
+    writeFeed();
+    for (const closedAll of [false, true]) {
+      const first = await rig();
+      if (closedAll) assert.equal((await first.lane.flatten({ askedAt: clock - 10_000 })).ok, true);
+      await first.lane.stopProtect();
+      await store.setAgentMode(first.id, "paper", 1, false);
+      let reads: number | null = null;
+      const restarted = await rig({
+        reuse: first,
+        cfg: { perpsEnabled: false },
+        store: {
+          getPerpAccount: async (...args: Parameters<typeof store.getPerpAccount>) => {
+            if (reads !== null && ++reads > 1) throw new Error("SQLITE_BUSY: database is locked");
+            return store.getPerpAccount(...args);
+          },
+        },
+      });
+      assert.equal((await restarted.lane.refresh()).active, false, `closedAll ${closedAll} set-up: switched off and holding nothing, the lane is inactive`);
+      const out = await restarted.lane.resetPaper(
+        async ({ clearEntriesHalt }) => {
+          assert.equal(clearEntriesHalt, false, "set-up: asked for before this worker began, so it lifts nothing");
+          const epoch = await store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt });
+          reads = 0;
+          return epoch;
+        },
+        { askedAt: clock - 20_000 },
+      );
+      assert.equal(reads, 1, `closedAll ${closedAll}: the lane's own read, and no second`);
+      assert.equal(out.haltKept, closedAll, `closedAll ${closedAll}`);
     }
   });
 

@@ -497,11 +497,13 @@ const PRACTICE_BOOK_FROZEN =
  * owner reads a fresh book and waits for a strategy that never opens; one the
  * ledger could not answer for is said as that, never as none, and in words
  * that do not say a Close all was pressed: "unread" comes as readily to an
- * owner who never pressed one.
+ * owner who never pressed one. Its condition is the owner's own Close all,
+ * never what the report shows: the operator's entry halt
+ * (MERRYMEN_HALT_PERP_ENTRIES) shows the same pause, and no reset lifts it.
  */
 export function resetHaltSentence(haltKept: boolean | "unread"): string {
   if (haltKept === "unread") {
-    return " Whether new practice positions are paused by a Close all could not be read just now; if they show as paused, reset again to lift it.";
+    return " Whether new practice positions are paused by a Close all could not be read just now; if you pressed Close all before asking for this reset, reset again to lift that pause.";
   }
   return haltKept ? " New practice positions stay paused by your earlier Close all; reset again to lift that." : "";
 }
@@ -784,7 +786,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     const positions = await store.getPerpPositions(a.agentId, "paper", { includeFlat: true });
     const unresolved = await store.listSubmittedPerpOrders(a.agentId, "paper");
     const account = await store.getPerpAccount(a.agentId, "paper");
-    // No row is no halt: an account that never traded was never paused.
+    // No row is no halt: a Close all creates the row it halts
+    // (patchPerpAccount inserts it), and one whose write failed is
+    // ownerEntryHalts', so an account with no row was never paused.
     ledgerHaltRead = { key: haltKey(a.agentId, "paper"), halted: account?.entriesHalted === true };
     const collateral = account?.paperCollateralMicro ?? 0n;
     const heldRows = positions.filter((p) => p.base > 0n && p.side !== null);

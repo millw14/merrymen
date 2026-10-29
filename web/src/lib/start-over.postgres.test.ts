@@ -489,10 +489,12 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       const early = await queuePaperReset(true, perps, "perps", { expiresAt });
       assert.ok(!early.ok && early.status === 409 && /not reported its practice book yet/.test(early.error), JSON.stringify(early));
       assert.equal(((await one.prepare("SELECT COUNT(*) AS n FROM agent_commands WHERE LOWER(agent_id) = ?").get(perps.toLowerCase())) as { n: number | string }).n, 0);
-      // Its agents row, in the worker's own spelling of the account: the look is by the account, not its case.
+      // Its agents row, spelled in another case from the account the reset is
+      // given (the worker writes viem's checksummed spelling, and a caller may
+      // pass any): the look is by the account on both sides, never its case.
       await one
         .prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, '0x9', '0x8', 4663, '{}', 1, 2)")
-        .run(perps.toLowerCase());
+        .run(`0x${perps.slice(2).toUpperCase()}`);
       const q = await queuePaperReset(true, perps, "perps", { expiresAt });
       assert.ok(q.ok, q.ok ? "" : q.error);
       assert.equal(q.expiresAt, expiresAt);

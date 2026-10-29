@@ -35,6 +35,7 @@ import { getGrantStore, resetGrantStoreForTest } from "@merrymen/grant-store";
 import { claimCommandFile, commandDir, runTickCommand, type CommandOutcome, type FileCommand } from "../../../../../worker/src/command-files";
 import { mergeSettings, perpsWorkerStoodDown } from "../../../../../worker/src/settings";
 import { orderTtlMs } from "@/lib/order-state";
+import { PERPS_RESET_NOT_REPORTED } from "@/lib/perps-book-reported";
 import { POST } from "./route";
 
 const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "DATABASE_URL", "MERRYMEN_SESSION_SECRET", "MERRYMEN_PERPS"] as const;
@@ -227,21 +228,27 @@ describe("hosted: the account is resolved in the Perps wallet, never the Spot on
    * used to answer 200 "queued" and leave the row waiting for a worker that
    * could not start. The orchestrator records the hold for the account
    * (paper_recovery_health); here it is a ledger file of its own, which the
-   * route opens read-only, so a reset the look lets through stops at the
+   * route opens read-only, so a reset the look lets through, onto a book
+   * that has reported (its agents row, perps-book-reported.ts), stops at the
    * insert (503) — hosted.postgres.test.ts drives the write.
    */
   it("A PERPS BOOK HELD BECAUSE IT COULD NOT BE RESTORED IS NOT RESET: 409, nothing queued; an unreadable record is a 503; Spot's held book is not looked at", async () => {
     process.env.MERRYMEN_HOSTED = "1";
     await getGrantStore("spot").put(A, grantOf(SPOT, { owner: A }));
     await getGrantStore("perps").put(A, grantOf(PERPS, { purpose: "perps", owner: A }));
-    /** The wallet's ledger, as the orchestrator leaves it: `health` is `blocked` per account, or a table that cannot be read. */
-    const ledger = (dir: string, health: Record<string, 0 | 1> | "unreadable") => {
+    /**
+     * The wallet's ledger, as the orchestrator leaves it: `health` is `blocked` per account, or a table that cannot be read;
+     * `reported` the accounts whose worker has written its agents row (the Perps one unless a step says otherwise).
+     */
+    const ledger = (dir: string, health: Record<string, 0 | 1> | "unreadable", reported: readonly string[] = [PERPS]) => {
       mkdirSync(dir, { recursive: true });
       const file = path.join(dir, "merrymen.db");
       rmSync(file, { force: true });
       const raw = new DatabaseSync(file);
       try {
         raw.exec("CREATE TABLE agent_commands (id TEXT PRIMARY KEY, agent_id TEXT, kind TEXT, args TEXT, created_at INTEGER, claimed_at INTEGER, done_at INTEGER, result TEXT)");
+        raw.exec("CREATE TABLE agents (smart_account TEXT PRIMARY KEY)");
+        for (const account of reported) raw.prepare("INSERT INTO agents VALUES (?)").run(account);
         if (health === "unreadable") raw.exec("CREATE TABLE paper_recovery_health (agent_id TEXT PRIMARY KEY)");
         else {
           raw.exec("CREATE TABLE paper_recovery_health (agent_id TEXT PRIMARY KEY, blocked INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
@@ -266,6 +273,13 @@ describe("hosted: the account is resolved in the Perps wallet, never the Spot on
     const clear = await reset("?wallet=perps", A);
     assert.equal(clear.status, 503, "a clear record lets it through, to an insert this read-only file refuses");
     assert.match(((await clear.json()) as { error: string }).error, /the ledger is unreachable/);
+
+    // A clear record, but a Perps worker that has not reported its book: refused before the queue, in its own words.
+    const unreported = ledger(purposeHome("perps"), { [PERPS]: 0 }, []);
+    const early = await reset("?wallet=perps", A);
+    assert.equal(early.status, 409);
+    assert.equal(((await early.json()) as { error: string }).error, PERPS_RESET_NOT_REPORTED);
+    assert.equal(unreported(), 0);
 
     const unread = ledger(purposeHome("perps"), "unreadable");
     const unknown = await reset("?wallet=perps", A);
