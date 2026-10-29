@@ -39,6 +39,13 @@ describe("restorePerpsRefusal", () => {
     assert.match(said!, /Nothing was stopped or signed/);
   });
 
+  it("hosted, a Perps record the store holds but will not show (stopped for a renewal) is the login's: compared through the tenant", async () => {
+    assert.equal(await restorePerpsRefusal(K2, answering(200, { exists: false, tenant: K1, stored: true })), RESTORE_PERPS_OWNER_DIFFERS);
+    assert.equal(await restorePerpsRefusal(K1.toUpperCase().replace("0X", "0x"), answering(200, { exists: false, tenant: K1, stored: true })), null);
+    assert.equal(await restorePerpsRefusal(K2, answering(200, { exists: false, stored: true })), RESTORE_PERPS_UNREAD, "no tenant to compare: unread");
+    assert.equal(await restorePerpsRefusal(K2, answering(200, { exists: false, tenant: K1 })), null, "no record at all: none");
+  });
+
   it("a Perps wallet that cannot be read is refused too, never taken for none", async () => {
     const throwing = (async () => {
       throw new TypeError("Failed to fetch");

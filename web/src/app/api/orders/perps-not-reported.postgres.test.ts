@@ -176,7 +176,9 @@ describe("hosted, a Perps owner command and a Perps book that has not reported",
   });
 
   it("ONCE ITS agents ROW IS THERE — itself the history a first start refuses on — the exit and the reset are queued as before, on the Perps account", async () => {
-    // As the worker spells it (checksummed, not the routes' lowercase): the look is by the account, never its case.
+    // Spelled in another case from the account the routes are given (the
+    // worker's own spelling is viem's checksummed one, another case again):
+    // the look is by the account, never its case.
     await reported(`0x${PERPS.slice(2).toUpperCase()}`);
     assert.equal(await sharedLedgerHistory(shared, PERPS_TENANT, PERPS), "agents", "set-up: the row a command would add to is already there");
     const close = await exit(CLOSE);

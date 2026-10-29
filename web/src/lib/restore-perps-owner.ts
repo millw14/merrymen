@@ -14,7 +14,13 @@
  * before the first step when the key being restored is not that wallet's.
  *
  * A Perps wallet that cannot be read refuses too: it is exactly the wallet the
- * rule is about, and the POST would refuse it after the stop.
+ * rule is about, and the POST would refuse it after the stop. Self-hosted the
+ * GET reads the Perps grant.json as the POST does (only a missing file is
+ * none); hosted it answers 503 when the store cannot, and `stored` for a
+ * record the store holds but will not show (one stopped for a renewal whose
+ * POST has not landed), which the store's put still compares. A hosted Perps
+ * wallet's owner is always the login (perps-owner), so that record is
+ * compared through the tenant the GET echoes.
  *
  * Browser-safe: a fetch and a comparison, nothing else.
  */
@@ -35,8 +41,11 @@ export async function restorePerpsRefusal(ownerAddress: string, read: typeof fet
     return RESTORE_PERPS_UNREAD;
   }
   if (!res.ok) return RESTORE_PERPS_UNREAD;
-  const body = (await res.json().catch(() => null)) as { exists?: unknown; grant?: { owner?: unknown } } | null;
-  if (body?.exists === false) return null;
-  if (body?.exists !== true || typeof body.grant?.owner !== "string") return RESTORE_PERPS_UNREAD;
-  return body.grant.owner.toLowerCase() === ownerAddress.toLowerCase() ? null : RESTORE_PERPS_OWNER_DIFFERS;
+  const body = (await res.json().catch(() => null)) as { exists?: unknown; tenant?: unknown; stored?: unknown; grant?: { owner?: unknown } } | null;
+  const owner = body?.exists === false
+    ? body.stored === true ? body.tenant : null
+    : body?.exists === true ? body.grant?.owner : undefined;
+  if (owner === null) return null;
+  if (typeof owner !== "string") return RESTORE_PERPS_UNREAD;
+  return owner.toLowerCase() === ownerAddress.toLowerCase() ? null : RESTORE_PERPS_OWNER_DIFFERS;
 }

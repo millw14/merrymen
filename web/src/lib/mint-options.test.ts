@@ -149,7 +149,7 @@ describe("refusalMessage", () => {
     // ownership read that could not run, both written for the owner and
     // marked so. Read as "on-chain", an owner whose permission could not be
     // saved was told the chain had failed.
-    const saved = "Your permission could not be saved, and neither wallet was changed. Please try again.";
+    const saved = "Your permission could not be saved. Please try again.";
     assert.equal(refusalMessage(503, saved, true), saved);
     assert.equal(refusalMessage(503, "couldn't check this account's ownership — please try again", true), "couldn't check this account's ownership — please try again");
     // The derivation's 503 carries the chain's own words and no mark: never shown.

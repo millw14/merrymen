@@ -11,12 +11,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { getAddress } from "viem";
 import { wrapSqlite } from "../../../worker/src/db";
 import { applyLedgerSchema } from "../../../worker/src/store";
 import { PERPS_EXIT_NOT_REPORTED, PERPS_RESET_NOT_REPORTED, perpsBookReported } from "./perps-book-reported";
 
-/** As the worker writes it: viem's checksummed, mixed-case spelling (store.ts ensureAgent). */
-const CHECKSUMMED = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+/** As the worker writes it: viem's EIP-55 checksummed spelling (store.ts ensureAgent writes grant.smartAccount as signed). */
+const CHECKSUMMED = getAddress("0xabcdef0123456789abcdef0123456789abcdef01");
 
 describe("perpsBookReported", () => {
   it("finds the worker's row whatever case either side is spelled in, and no row is false", async () => {
@@ -27,6 +28,7 @@ describe("perpsBookReported", () => {
       assert.equal(await perpsBookReported(db, CHECKSUMMED), false, "no row yet");
       raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, ?, ?, 4663, '{}', 0, 0)")
         .run(CHECKSUMMED, CHECKSUMMED, CHECKSUMMED);
+      assert.notEqual(CHECKSUMMED, CHECKSUMMED.toLowerCase(), "set-up: the checksummed spelling is mixed case");
       for (const asked of [CHECKSUMMED, CHECKSUMMED.toLowerCase(), `0x${CHECKSUMMED.slice(2).toUpperCase()}`]) {
         assert.equal(await perpsBookReported(db, asked), true, asked);
       }

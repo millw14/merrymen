@@ -116,6 +116,15 @@ export interface AgentStatus {
   recovery?: FleetRecoveryView | null;
   /** Hosted GET only: the authenticated tenant this status was read for. */
   tenant?: `0x${string}` | null;
+  /**
+   * Hosted `?wallet=perps` only, with `exists` false: the Perps store holds a
+   * record it will not show (one stopped for a renewal whose POST has not
+   * landed, or one it cannot read). Its owner is the login (perps-owner), and
+   * a Spot grant is still held to it (assertIndependentWallets reads the
+   * record raw), so the Wallet screen's restore asks this too
+   * (restore-perps-owner.ts).
+   */
+  stored?: true;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
   /** Decimal strings as read from the chain; null for any read that failed. */
   balances?: GrantBalances;
@@ -738,7 +747,7 @@ function storeRefused(e: unknown): NextResponse {
   if (e instanceof GrantWalletConflict) return NextResponse.json({ error: e.message, code: e.code, ownerFacing: true }, { status: 409 });
   console.error(`[grants] a grant could not be stored: ${errorText(e)}`);
   return NextResponse.json(
-    { error: "Your permission could not be saved, and neither wallet was changed. Please try again.", ownerFacing: true },
+    { error: "Your permission could not be saved. Please try again.", ownerFacing: true },
     { status: 503 },
   );
 }
@@ -1065,6 +1074,10 @@ export async function GET(req: Request) {
   if (wallet === null) return walletUnknown("Nothing was read.");
   let grant: StoredGrant;
   const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
+  const perpsUnread = () => NextResponse.json(
+    { error: "Couldn't read your Perps wallet. Please try again.", ownerFacing: true },
+    { status: 503, headers: NO_STORE_HEADERS },
+  );
   if (hostedTenant !== undefined) {
     if (!hostedTenant) return statusResponse({ exists: false, tenant: null });
     let g: StoredGrant | null;
@@ -1075,19 +1088,29 @@ export async function GET(req: Request) {
       // a wallet the owner may need to stop.
       try {
         g = await getGrantStore("perps").get(hostedTenant);
+        // A RECORD THE STORE HOLDS BUT WILL NOT SHOW is not "no Perps
+        // wallet" to the same-owner rule, which still holds a Spot grant to
+        // it: said as `stored` (AgentStatus).
+        if (!g && await getGrantStore("perps").hasStoredGrant(hostedTenant)) {
+          return statusResponse({ exists: false, tenant: hostedTenant, stored: true });
+        }
       } catch {
-        return NextResponse.json(
-          { error: "Couldn't read your Perps wallet. Please try again.", ownerFacing: true },
-          { status: 503, headers: NO_STORE_HEADERS },
-        );
+        return perpsUnread();
       }
     }
     if (!g) return statusResponse({ exists: false, tenant: hostedTenant });
     grant = g;
   } else {
     try {
-      grant = JSON.parse(await readFile(localGrantFile(wallet), "utf8")) as StoredGrant;
-    } catch {
+      // A Perps file is read as the POST reads it (otherLocalWalletRefusal):
+      // a leading BOM stripped, and only a file that is not there is "no
+      // Perps wallet". One there that cannot be read or parsed is "could not
+      // read", as hosted: the Wallet screen's restore asks this before it
+      // stops anything, and the POST refuses that file after the stop.
+      const text = await readFile(localGrantFile(wallet), "utf8");
+      grant = JSON.parse(wallet === "perps" ? text.replace(/^\ufeff/, "") : text) as StoredGrant;
+    } catch (e) {
+      if (wallet === "perps" && (e as NodeJS.ErrnoException).code !== "ENOENT") return perpsUnread();
       return statusResponse({ exists: false });
     }
   }

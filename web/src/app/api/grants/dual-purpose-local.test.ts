@@ -38,6 +38,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
 import type { StoredGrant } from "@merrymen/core";
+import { RESTORE_PERPS_OWNER_DIFFERS, RESTORE_PERPS_UNREAD, restorePerpsRefusal } from "@/lib/restore-perps-owner";
 
 const ORIGIN = "http://localhost:3100";
 const ENV = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "DATABASE_URL", "MERRYMEN_GRANT_FILE", "MERRYMEN_PERPS"] as const;
@@ -313,6 +314,42 @@ describe("self-hosted: GET ?wallet=perps reads the Perps home, never the Spot on
     const res = await json(await get("?wallet=perps"));
     assert.equal(res.status, 503);
     assert.doesNotMatch(JSON.stringify(res.body), /kept-on-this-install|spot-permission/);
+  });
+
+  it("A PERPS grant.json THAT IS THERE BUT CANNOT BE READ IS A 503, never none; a BOM is stripped as the POST strips it; and the Wallet screen's restore check sees each", async () => {
+    // The restore asks this before its stop, which self-hosted removes Spot's
+    // grant.json and stops Solana; the POST that ends it reads the Perps file
+    // this same way (otherLocalWalletRefusal) and would refuse it after.
+    const viaGet = (async (url: string | URL | Request) => get(String(url).replace(/^\/api\/grants/, ""))) as typeof fetch;
+    const stranger = privateKeyToAccount(generatePrivateKey()).address;
+    const grant = await perpsGrant();
+    assert.equal((await post(grant)).status, 200);
+    const onDisk = read(perpsFile())!;
+
+    writeFileSync(perpsFile(), `\ufeff${onDisk}`);
+    const bom = await json(await get("?wallet=perps"));
+    assert.equal(bom.status, 200);
+    assert.equal(bom.body.exists, true, "a BOM is no reason to call a wallet absent");
+    assert.equal(String((bom.body.grant as { owner: string }).owner).toLowerCase(), owner.address.toLowerCase());
+    assert.equal(await restorePerpsRefusal(stranger, viaGet), RESTORE_PERPS_OWNER_DIFFERS);
+    assert.equal(await restorePerpsRefusal(owner.address, viaGet), null);
+
+    for (const [what, damage] of [
+      ["truncated", () => writeFileSync(perpsFile(), onDisk.slice(0, 20))],
+      ["a directory", () => { rmSync(perpsFile()); mkdirSync(perpsFile()); }],
+    ] as const) {
+      damage();
+      const res = await json(await get("?wallet=perps"));
+      assert.equal(res.status, 503, what);
+      assert.equal(res.body.error, "Couldn't read your Perps wallet. Please try again.", what);
+      assert.equal(await restorePerpsRefusal(owner.address, viaGet), RESTORE_PERPS_UNREAD, `${what}: refused before the restore's stop, even under its own owner key`);
+    }
+    rmSync(perpsFile(), { recursive: true, force: true });
+    assert.deepEqual(await json(await get("?wallet=perps")), { status: 200, body: { exists: false } }, "gone is none");
+    assert.equal(await restorePerpsRefusal(stranger, viaGet), null);
+    // Spot's answer is as it was: an unreadable Spot grant.json is none there.
+    writeFileSync(spotFile(), "{not json");
+    assert.deepEqual(await json(await get("")), { status: 200, body: { exists: false } });
   });
 
   it("perps off: still answered", async () => {

@@ -801,6 +801,46 @@ describe("a paper reset", () => {
     }
   });
 
+  it("AN ACTIVE LANE WHOSE READ FAILS AFTER THE ACCOUNT ROW ANSWERS FROM THAT ROW: the day's facts busy after the reset never make it \"could not be read\"", async () => {
+    writeFeed();
+    for (const closedAll of [false, true]) {
+      const first = await rig();
+      await first.lane.execute(await openDraft(first), { equityUsdg: u(100), equityKnown: true });
+      if (closedAll) assert.equal((await first.lane.flatten({ askedAt: clock - 10_000 })).ok, true);
+      await first.lane.stopProtect();
+      await store.setAgentMode(first.id, "paper", 1, false);
+      // After the reset the lane's read gets past the account row and fails at the day's facts; the ledger answers once.
+      let factsDown = false;
+      let reads: number | null = null;
+      const restarted = await rig({
+        reuse: first,
+        store: {
+          perpLaneLedgerFacts: async (...args: Parameters<typeof store.perpLaneLedgerFacts>) => {
+            if (factsDown) throw new Error("SQLITE_BUSY: database is locked");
+            return store.perpLaneLedgerFacts(...args);
+          },
+          getPerpAccount: async (...args: Parameters<typeof store.getPerpAccount>) => {
+            if (reads !== null && ++reads > 1) throw new Error("SQLITE_BUSY: database is locked");
+            return store.getPerpAccount(...args);
+          },
+        },
+      });
+      const out = await restarted.lane.resetPaper(
+        async ({ clearEntriesHalt }) => {
+          assert.equal(clearEntriesHalt, false, "set-up: asked for before this worker began, so it lifts nothing");
+          const epoch = await store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt });
+          factsDown = true;
+          reads = 0;
+          return epoch;
+        },
+        { askedAt: clock - 20_000 },
+      );
+      factsDown = false;
+      assert.equal(reads, 1, `closedAll ${closedAll}: the lane's own read reached the row, and no second was asked`);
+      assert.equal(out.haltKept, closedAll, `closedAll ${closedAll}`);
+    }
+  });
+
   it("AN UNARMED LANE — EVERY SPOT WORKER'S — KEEPS NO PAUSE AND ASKS NO PERP LEDGER: its reset is told to lift nothing and answers none, so the Spot owner's line is unchanged", async () => {
     let asked = 0;
     const r = await rig({

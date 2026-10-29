@@ -45,6 +45,7 @@ import { after, before, describe, it, mock } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
 import { bindingMessage, type GrantPurpose, type StoredGrant } from "@merrymen/core";
+import { RESTORE_PERPS_OWNER_DIFFERS, restorePerpsRefusal } from "@/lib/restore-perps-owner";
 
 const ORIGIN = "https://app.merrymen.dev";
 const APP = "merrymen-test-app";
@@ -272,7 +273,9 @@ describe("hosted: a Perps wallet is made beside the Spot one, and only as itself
       const failed = await privyPost(await perpsGrant(erin), "?wallet=perps", erin, "perps");
       assert.equal(failed.status, 503);
       assert.equal(failed.body.ownerFacing, true);
-      assert.match(failed.body.error ?? "", /could not be saved, and neither wallet was changed/);
+      assert.equal(failed.body.error, "Your permission could not be saved. Please try again.");
+      // It may answer a renewal or restore after that flow's own stop: never that neither wallet changed.
+      assert.doesNotMatch(failed.body.error ?? "", /neither wallet/i);
       assert.doesNotMatch(JSON.stringify(failed.body), /ECONNREFUSED|hunter2|10\.1\.2\.3/);
     } finally {
       put.mock.restore();
@@ -488,6 +491,29 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
     const out = await get(null, "?wallet=perps");
     assert.deepEqual(await out.json(), { exists: false, tenant: null });
     assert.equal(out.headers.get("cache-control"), "private, no-store");
+  });
+
+  it("A PERPS RECORD STOPPED FOR A RENEWAL is `stored`, never none: the Spot put still holds a Spot grant to it, so the Wallet screen's restore compares it through the login", async () => {
+    const mia = await login("mia");
+    const current = await perpsGrant(mia);
+    assert.equal((await privyPost(current, "?wallet=perps", mia, "perps")).status, 200);
+    const stop = await route.DELETE(new Request(`${ORIGIN}/api/grants?wallet=perps`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(mia.account.address)}` },
+      body: JSON.stringify({ purpose: "permission-replacement", expectedTenant: mia.account.address, expectedAccount: current.smartAccount }),
+    }));
+    assert.equal(stop.status, 200, await stop.clone().text());
+    assert.equal(await perpsGrantOf(mia), null, "set-up: the store will not show it");
+    const body = await (await get(mia, "?wallet=perps")).json();
+    assert.deepEqual(body, { exists: false, tenant: mia.account.address.toLowerCase(), stored: true });
+    // The Wallet screen's restore reads exactly this answer.
+    const viaGet = (async (url: string | URL | Request) => get(mia, String(url).replace(/^\/api\/grants/, ""))) as typeof fetch;
+    const legacyKey = privateKeyToAccount(generatePrivateKey()).address;
+    assert.equal(await restorePerpsRefusal(legacyKey, viaGet), RESTORE_PERPS_OWNER_DIFFERS, "another owner key is refused before its stop and revocation");
+    assert.equal(await restorePerpsRefusal(mia.account.address, viaGet), null, "the login's own key goes ahead");
+    // And the store's put does hold a Spot grant to that record: another owner key is refused there too.
+    const spotUnderLegacy = (await fixture.signerGrant({ owner: privateKeyToAccount(generatePrivateKey()), account: mia.spot })).grant;
+    await assert.rejects(stores.getGrantStore("spot").put(mia.account.address, spotUnderLegacy), /same owner key/);
   });
 
   it("D1: answered whatever MERRYMEN_PERPS says, so an owner can always see a Perps wallet they hold", async () => {

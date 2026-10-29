@@ -795,30 +795,36 @@ function operatorHeld(tenant: string): boolean {
 }
 
 /**
- * A PERPS-ONLY LOGIN THE ROLLOUT HOLDS, SAID (sayTenantAlert: once per line,
- * again hourly). A Perps worker is held as its owner is (operatorHold), and a
- * login is proved new, recorded and admitted by the new-tenant route only
- * through its Spot grant (newTenantScope), so a login with no Spot wallet is
- * never admitted that way: under an explicit list with the route open, a new
- * Spot-only login runs at MERRYMEN_ROLLOUT_NEW_TENANTS's level and a new
- * Perps-only one waits until the operator names it. Nothing else says so. The
- * owner sees a Perps wallet that never reports, and every Close, Close all
- * and practice reset refused until it does (web perps-book-reported.ts); the
+ * A PERPS WORKER HELD BECAUSE ITS LOGIN HAS NO UNEXPIRED SPOT GRANT, SAID
+ * (sayTenantAlert: once per line, again hourly). A Perps worker is held as its
+ * owner is (operatorHold), and the new-tenant route proves a login new,
+ * records and admits it only through an unexpired Spot grant (newTenantScope,
+ * asked of the spawn order's Spot keys), so a login with none is never
+ * admitted that way: under an explicit list with the route open, a new
+ * Spot-only login runs at MERRYMEN_ROLLOUT_NEW_TENANTS's level, and a
+ * Perps-only one, or one whose Spot grant expired before the route admitted
+ * it, waits until the operator names it. Nothing else says so. Its worker does
+ * not start, so nothing its owner asks is carried out: a Close, a Close all or
+ * a practice reset is refused while its book has not reported (web
+ * perps-book-reported.ts), and queued and left to expire once it has. The
  * roster line counts it held. Whether the route should prove such a login new
  * through its Perps grant is the operator's decision, not made here.
  *
- * A login with a Spot wallet has that wallet's own lines, and one the
- * accounting hold or an explicit list without the route holds is held like
- * any Spot-only login, so neither is said here.
+ * A login with an unexpired Spot grant is proved new through it, or told
+ * "not new" on that grant's own line (sayNotNew), and one the accounting hold
+ * or an explicit list without the route holds is held like any Spot-only
+ * login, so none of those is said here. `spotEligible` is the pass's owners
+ * with an unexpired Spot grant (spotEligibleOwners).
  */
-function sayPerpsOnlyHeld(key: string, spotOwners: ReadonlySet<string>): void {
+function sayPerpsOnlyHeld(key: string, spotEligible: ReadonlySet<string>): void {
   const owner = slotOf(key).owner.toLowerCase();
-  if (spotOwners.has(owner) || !newTenantRouteOpen(owner, process.env)) return;
+  if (spotEligible.has(owner) || !newTenantRouteOpen(owner, process.env)) return;
   if (accountingTenantHeld(owner) || !rolloutHeld(owner, process.env, newTenantAdmissions)) return;
-  sayTenantAlert(key, `perps: ${key} is held — ${FLEET_ROLLOUT_ENV} does not name its owner, and a login with no Spot wallet is never ` +
-    `admitted by ${ROLLOUT_NEW_TENANTS_ENV} (the route proves a login new only through its Spot grant). Its Perps worker does not start, ` +
-    `and its owner's Close, Close all and practice reset are refused until its book reports. To run it, name ${owner} in ` +
-    `${FLEET_ROLLOUT_ENV} once its accounting is reviewed (docs/fleet-resume.md)`);
+  sayTenantAlert(key, `perps: ${key} is held — ${FLEET_ROLLOUT_ENV} does not name its owner, and a login with no unexpired Spot grant is ` +
+    `never admitted by ${ROLLOUT_NEW_TENANTS_ENV} (the route proves a login new only through one). Its Perps worker does not start, ` +
+    "so nothing its owner asks is carried out: a Close, a Close all or a practice reset is refused while its book has not reported, " +
+    `and queued and left to expire once it has. To run it, name ${owner} in ${FLEET_ROLLOUT_ENV} once its accounting is reviewed ` +
+    "(docs/fleet-resume.md)");
 }
 
 /**
@@ -7477,7 +7483,6 @@ export async function reconcile(): Promise<void> {
   // above, whose re-read of a re-signed key this roster's expiries include.
   // Counted by login: a Perps worker is its owner's, never a tenant of its own.
   const spotTenants = tenants.filter((t) => !isPerpsWorkerKey(t));
-  const spotOwners = new Set(spotTenants.map((t) => t.toLowerCase()));
   lastRolloutCounts = rolloutCounts(spotTenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible, newTenants: newTenantAdmissions });
   const activeCount = eligibleToSpawn.filter((t) => !isPerpsWorkerKey(t)).length;
   const expiredCount = spotTenants.length - activeCount;
@@ -7488,17 +7493,22 @@ export async function reconcile(): Promise<void> {
   // THE PERPS WORKERS' OWN LINE, said when it changes or every five minutes.
   // One the operator holds (as its owner is, operatorHold) is counted apart
   // from those that may run: a held Perps-only login used to be counted as
-  // one that "may run" (sayPerpsOnlyHeld).
-  const perpsHeld = perpsMaySpawn ? eligibleToSpawn.filter((t) => isPerpsWorkerKey(t) && operatorHeld(t.toLowerCase())).length : 0;
-  const perpsLine = perps.keys.length === 0 && perps.readable ? null
-    : `perps roster: ${perps.keys.length} Perps wallet${perps.keys.length === 1 ? "" : "s"}${perps.readable ? "" : " (store unreadable: kept as they are)"}, ` +
-      (perpsMaySpawn ? `${eligibleToSpawn.length - activeCount - perpsHeld} unexpired may run` +
-        `${perpsHeld ? `, ${perpsHeld} held as ${perpsHeld === 1 ? "its owner is" : "their owners are"}` : ""} (MERRYMEN_PERPS=paper)`
-        : !perps.readable ? "none may start this pass" : "none may run (MERRYMEN_PERPS is not paper)");
-  if (perpsLine !== lastPerpsRosterLog.line || (perpsLine && Date.now() - lastPerpsRosterLog.at > 5 * 60_000)) {
-    if (perpsLine) log(perpsLine);
-    lastPerpsRosterLog = { line: perpsLine, at: Date.now() };
-  }
+  // one that "may run" (sayPerpsOnlyHeld). Asked again after the spawn loop
+  // when it recorded new tenants, as the rollout counts are, so a Perps worker
+  // started beside a login admitted this pass is not left counted held.
+  const sayPerpsRoster = (): void => {
+    const perpsHeld = perpsMaySpawn ? eligibleToSpawn.filter((t) => isPerpsWorkerKey(t) && operatorHeld(t.toLowerCase())).length : 0;
+    const perpsLine = perps.keys.length === 0 && perps.readable ? null
+      : `perps roster: ${perps.keys.length} Perps wallet${perps.keys.length === 1 ? "" : "s"}${perps.readable ? "" : " (store unreadable: kept as they are)"}, ` +
+        (perpsMaySpawn ? `${eligibleToSpawn.length - activeCount - perpsHeld} unexpired may run` +
+          `${perpsHeld ? `, ${perpsHeld} held as ${perpsHeld === 1 ? "its owner is" : "their owners are"}` : ""} (MERRYMEN_PERPS=paper)`
+          : !perps.readable ? "none may start this pass" : "none may run (MERRYMEN_PERPS is not paper)");
+    if (perpsLine !== lastPerpsRosterLog.line || (perpsLine && Date.now() - lastPerpsRosterLog.at > 5 * 60_000)) {
+      if (perpsLine) log(perpsLine);
+      lastPerpsRosterLog = { line: perpsLine, at: Date.now() };
+    }
+  };
+  sayPerpsRoster();
 
   // A lease whose connection dropped no longer protects its tenant — Postgres
   // has released the lock and another replica may hold it. Stand the child down
@@ -7556,7 +7566,7 @@ export async function reconcile(): Promise<void> {
     // is for a tenant the operator holds, the lease attempt included — but
     // for that proof and its record.
     if (operatorHeld(lc) && !unproven) {
-      if (isPerpsWorkerKey(lc)) sayPerpsOnlyHeld(lc, spotOwners);
+      if (isPerpsWorkerKey(lc)) sayPerpsOnlyHeld(lc, spotEligibleOwners);
       continue;
     }
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
@@ -7699,8 +7709,12 @@ export async function reconcile(): Promise<void> {
   }
   if (newRouteOpen) {
     // The counts above were taken before this loop recorded anyone: counted
-    // again, so the heartbeat never reports a tenant it has just started as held.
-    if (newPass.admitted > 0) lastRolloutCounts = rolloutCounts(spotTenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible, newTenants: newTenantAdmissions });
+    // again, so the heartbeat never reports a tenant it has just started as
+    // held, nor the perps roster line a Perps worker started beside it.
+    if (newPass.admitted > 0) {
+      lastRolloutCounts = rolloutCounts(spotTenants, process.env, { accountingHeld: accountingHolds, unexpired: eligible, newTenants: newTenantAdmissions });
+      sayPerpsRoster();
+    }
     sayNewTenantPass(newPass);
   }
   // HELD TENANTS WHOSE RESTORE IS DUE AGAIN, and the handover to trading when

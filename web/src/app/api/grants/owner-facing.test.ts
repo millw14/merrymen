@@ -177,7 +177,7 @@ async function signerShows(t: import("node:test").TestContext, res: Response, gr
 }
 
 const ON_CHAIN = "Couldn't verify the account on-chain just now — try again in a moment.";
-const NOT_SAVED = "Your permission could not be saved, and neither wallet was changed. Please try again.";
+const NOT_SAVED = "Your permission could not be saved. Please try again.";
 
 it("A STORE WRITE THAT FAILED WITH A PLAIN ERROR: a redacted owner-facing 503, and the signer shows THAT sentence, never the on-chain one", async t => {
   const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
@@ -186,7 +186,7 @@ it("A STORE WRITE THAT FAILED WITH A PLAIN ERROR: a redacted owner-facing 503, a
   // One of the store's own plain Errors (grant-store.ts assertIndependentWallets'
   // reader): the login's Perps record would not verify.
   t.mock.method(store, "put", async () => {
-    throw new Error("Your other wallet's grant could not be verified. Neither wallet was changed.");
+    throw new Error("Your other wallet's grant could not be verified, so this permission was not saved.");
   });
   const rpc = answerDerivationOffline(t);
   const req = await claim();

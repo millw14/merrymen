@@ -95,10 +95,13 @@ const ACCOUNT_CLAIMED = "this agent account is already linked to a different log
  * /api/grants, which writes each wallet's grant.json in its own home and
  * holds the other wallet's file to these same three rules.
  *
- * The two refusals a replacement can meet say what this request did, never
- * "neither wallet was changed": a renewal or restore POSTs its grant after
- * its own stop, which this refusal does not undo (the Wallet screen's
- * restore asks the Perps owner first, restore-perps-owner.ts).
+ * No refusal here says "neither wallet was changed": a renewal or restore
+ * POSTs its grant after its own stop, which a refusal does not undo. They say
+ * what this request did. Owner-differs reaches the owner as written; the
+ * plain Errors reach a hosted owner as the route's fixed 503 ("Your
+ * permission could not be saved", grants/route.ts storeRefused), and a
+ * self-hosted one as otherLocalWalletRefusal's own sentence. The Wallet
+ * screen's restore asks the Perps owner first (restore-perps-owner.ts).
  */
 export function assertIndependentWallets(
   incoming: StoredGrant,
@@ -439,7 +442,7 @@ export class FileGrantStore implements GrantStore {
       // lock as the write below. An unreadable record anywhere refuses.
       const other = await readRecord(this.file(tenant, otherWallet(this.wallet)));
       if (other && grantPurpose(other.grant) !== otherWallet(this.wallet)) {
-        throw new Error("Your other wallet's grant could not be verified. Neither wallet was changed.");
+        throw new Error("Your other wallet's grant could not be verified, so this permission was not saved.");
       }
       assertIndependentWallets(grant, other?.grant ?? null);
       for (const holder of await this.holdersOf(grant.smartAccount)) {
@@ -803,7 +806,7 @@ export class PgGrantStore implements GrantStore {
         const { rows } = await c.query(`SELECT grant_json FROM ${other} WHERE tenant = $1`, [tenant.toLowerCase()]);
         const theirs = rows[0] ? parseGrantJson(rows[0].grant_json) : null;
         if (theirs && grantPurpose(theirs) !== otherWallet(this.wallet)) {
-          throw new Error("Your other wallet's grant could not be verified. Neither wallet was changed.");
+          throw new Error("Your other wallet's grant could not be verified, so this permission was not saved.");
         }
         assertIndependentWallets(grant, theirs);
       }

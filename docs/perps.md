@@ -71,13 +71,17 @@ Perps workers, and nothing live:
   public roster (rule 17). Its holder status is the owner's, read-only. It is
   held as its owner is (accounting hold, rollout, chain check), never through
   the new-tenant route, and spawned after every Spot worker. That route proves
-  a login new only through its Spot grant, so under an explicit
-  `MERRYMEN_FLEET_ROLLOUT` a login with no Spot wallet runs its Perps worker
-  only once named, whatever `MERRYMEN_ROLLOUT_NEW_TENANTS` says; its owner's
-  exits and resets are refused until its book reports, which it never does
-  while held. The orchestrator names each such login once (`sayPerpsOnlyHeld`,
-  with what to do), and the perps roster line counts held Perps wallets apart
-  from those that may run (`orchestrator-perps-only-held.integration.test.ts`).
+  a login new only through an unexpired Spot grant, so under an explicit
+  `MERRYMEN_FLEET_ROLLOUT` a login with none (Perps-only, or a Spot grant
+  that expired before the route admitted it) runs its Perps worker only once
+  named, whatever `MERRYMEN_ROLLOUT_NEW_TENANTS` says. Held, nothing its owner
+  asks is carried out: an exit or reset is refused while its book has not
+  reported, and queued and left to expire once it has. The orchestrator names
+  each such login once (`sayPerpsOnlyHeld`, with what to do; not one the
+  accounting hold or a shut route holds, which are held as any login is), and
+  the perps roster line counts held Perps wallets apart from those that may
+  run, counted again after a pass that admits a login
+  (`orchestrator-perps-only-held.integration.test.ts`).
   Whether the route should prove a Perps-only login new through its Perps
   grant is an operator decision this build leaves open. While the owner
   has an unexpired Spot grant, it runs only on the replica holding that Spot
@@ -228,8 +232,10 @@ and `/create?for=perps` are PR 3.
   derivation cannot be made, never a pass); it is stored with
   `getGrantStore("perps")`, whose conflicts answer 409 with their code and any
   other failure a fixed 503, marked `ownerFacing` ("Your permission could not
-  be saved, and neither wallet was changed"; Spot's store failures too, which
-  main answered 500 with the store's own text, able to name the database).
+  be saved"; Spot's store failures too, which main answered 500 with the
+  store's own text, able to name the database). It claims nothing about the
+  other wallet or an earlier step: a renewal or restore posts after its own
+  stop.
   The browser signer shows a marked 503's own sentence (`session.ts
   refusalMessage`, `postGrant`, the Wallet screen's re-arm; the iOS engine is
   bundled from it): its old 503 arm said "Couldn't verify the account
@@ -238,16 +244,22 @@ and `/create?for=perps` are PR 3.
   (a live eth_call that fails closed with 503), the Spot `grant.json` held to
   the store's same-owner, other-account rules, then the Perps home's
   `grant.json` archived and replaced whole. No public identity or name (D2).
-  The same-owner rule holds the Spot intake to the Perps wallet too, and its
-  two refusals a replacement can meet (another owner key; the other wallet
-  unreadable) say this permission was not saved and the other wallet was not
-  changed, never "neither wallet was changed": a restore or renewal posts
-  after its own stop, which a refusal does not undo. The Wallet screen's
-  restore asks the Perps wallet's owner first (`restore-perps-owner.ts`, from
+  The same-owner rule holds the Spot intake to the Perps wallet too. No
+  refusal a replacement can meet says "neither wallet was changed", since a
+  restore or renewal posts after its own stop, which a refusal does not undo:
+  owner-differs and the self-hosted unreadable-wallet 503 say this permission
+  was not saved and the other wallet was not changed; hosted, an unreadable
+  other wallet is the fixed 503 above. The Wallet screen's restore asks the
+  Perps wallet's owner first (`restore-perps-owner.ts`, from
   `GET /api/grants?wallet=perps`) and refuses another owner key, or a Perps
   wallet it cannot read, before its stop, its revocation or its signature;
   self-hosted that stop used to remove the running Spot `grant.json` and stop
-  the Solana strategy before the POST was refused.
+  the Solana strategy before the POST was refused. So the GET reads a
+  self-hosted Perps `grant.json` as the POST does (a BOM stripped; only a
+  missing file is none, anything else unreadable is 503), and hosted it
+  answers `stored: true` for a Perps record the store holds but will not
+  show (stopped for a renewal whose POST has not landed), whose owner is the
+  login and which the Spot put still compares.
 - The canonical wall rebuilds a Perps grant as the Perps wall
   (`grantWallOptions` from its signed purpose). In this build that wall is
   empty (D5): a Perps grant declaring any marker, token, sealed address, perp
