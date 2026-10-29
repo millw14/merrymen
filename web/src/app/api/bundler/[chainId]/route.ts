@@ -6,6 +6,8 @@
  * the byte-identical string, so handing it to a browser would hand out
  * house-sponsored gas along with it. This route closes that gap by adding the
  * key server-side and forwarding only withdrawals and exact self-revocations.
+ * An explicitly enabled beta also carries the exact owner-root Gloam deposit
+ * batch with its encrypted recovery memo and approval reset.
  *
  * The engine needs no changes: `recoverFunds` takes `bundlerUrl` as an opaque
  * string, so the browser passes `${origin}/api/bundler/4663` and everything else
@@ -50,6 +52,7 @@ import { NextResponse } from "next/server";
 import { pimlicoBundlerUrl, robinhoodChain, robinhoodTestnet, ENTRYPOINT } from "@merrymen/core";
 import { readTicket } from "@/lib/recovery-ticket";
 import { isRecoveryShape, isPermissionRevocationShape } from "@/lib/recovery-shape";
+import { isGloamWithdrawalShape } from "@/lib/gloam-withdrawal-shape";
 
 export const runtime = "nodejs";
 
@@ -207,7 +210,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ chainId: strin
     const callData = typeof op.callData === "string" ? (op.callData as `0x${string}`) : "0x";
     const shape = isRecoveryShape(callData, { classVaults: ticket.classVaults });
     if (!shape.ok && !isPermissionRevocationShape(callData, ticket.smartAccount)) {
-      return refuse(rpc.id, `this relay only carries withdrawals or permission revocation for your own account — ${shape.why}`);
+      const gloam = isGloamWithdrawalShape(callData, {
+        chainId,
+        enabled: process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED === "1",
+        nonce: op.nonce,
+      });
+      if (!gloam.ok) {
+        return refuse(rpc.id, `this relay only carries owner withdrawals or permission revocation — ${shape.why}; ${gloam.why}`);
+      }
     }
   }
 

@@ -6,6 +6,7 @@ import { ENTRYPOINT } from "@merrymen/core";
 import { mintTicket } from "@/lib/recovery-ticket";
 import { KERNEL_REVOCATION_ABI } from "@/lib/permission-revocation";
 import { sdkRevocationCall } from "@/lib/permission-revocation-fixture";
+import { fixtureGloamBatch, fixtureGloamCalls } from "@/lib/gloam-withdrawal-fixture";
 import { POST } from "./route";
 
 const ACCOUNT = "0xa96Bf429888e1aAb4255762d17d29C53f6a0370d" as const;
@@ -15,13 +16,16 @@ const methods = ["eth_estimateUserOperationGas", "eth_sendUserOperation"];
 const originalFetch = globalThis.fetch;
 let previousSecret: string | undefined;
 let previousBundler: string | undefined;
+let previousGloam: string | undefined;
 let forwarded: Array<{ method: string; params: unknown[] }>;
 
 beforeEach(() => {
   previousSecret = process.env.MERRYMEN_SESSION_SECRET;
   previousBundler = process.env.MERRYMEN_BUNDLER_API_KEY;
+  previousGloam = process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED;
   process.env.MERRYMEN_SESSION_SECRET = "relay-test-only-secret-never-production";
   process.env.MERRYMEN_BUNDLER_API_KEY = "relay-test-only-bundler";
+  delete process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED;
   forwarded = [];
   globalThis.fetch = async (_url, init) => {
     const rpc = JSON.parse(String(init?.body));
@@ -35,14 +39,17 @@ afterEach(() => {
   else process.env.MERRYMEN_SESSION_SECRET = previousSecret;
   if (previousBundler === undefined) delete process.env.MERRYMEN_BUNDLER_API_KEY;
   else process.env.MERRYMEN_BUNDLER_API_KEY = previousBundler;
+  if (previousGloam === undefined) delete process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED;
+  else process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED = previousGloam;
 });
 
 const ticket = (account: Address = ACCOUNT, chainId = 4663) => mintTicket({ smartAccount: account, chainId, classVaults: [] });
 async function request(method: string, callData: Hex, opts: {
-  sender?: string; cookie?: string | null; entryPoint?: string; op?: Record<string, unknown>;
+  sender?: string; cookie?: string | null; entryPoint?: string; op?: Record<string, unknown>; chainId?: number;
 } = {}) {
-  const cookie = opts.cookie === undefined ? ticket() : opts.cookie;
-  return POST(new Request("https://merrymen.test/api/bundler/4663", {
+  const chainId = opts.chainId ?? 4663;
+  const cookie = opts.cookie === undefined ? ticket(ACCOUNT, chainId) : opts.cookie;
+  return POST(new Request(`https://merrymen.test/api/bundler/${chainId}`, {
     method: "POST", headers: { "content-type": "application/json", ...(cookie ? { cookie: `merrymen_recovery=${cookie}` } : {}) },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [{
       sender: opts.sender ?? ACCOUNT, nonce: "0x0", callData,
@@ -50,7 +57,7 @@ async function request(method: string, callData: Hex, opts: {
       maxFeePerGas: "0x18ebe44", maxPriorityFeePerGas: "0x1fe3e", signature: "0x",
       ...opts.op,
     }, opts.entryPoint ?? ENTRYPOINT.v07] }),
-  }), { params: Promise.resolve({ chainId: "4663" }) });
+  }), { params: Promise.resolve({ chainId: String(chainId) }) });
 }
 
 describe("owner revocation through the real relay handler", () => {
@@ -113,6 +120,52 @@ describe("owner revocation through the real relay handler", () => {
       { op: { paymasterData: "0x01" } },
       { op: { paymasterVerificationGasLimit: "0x1" } },
     ]) assert.ok((await (await request(methods[0]!, DATA, opts)).json()).error);
+    assert.equal(forwarded.length, 0);
+  });
+});
+
+describe("owner Gloam withdrawal through the real relay handler", () => {
+  it("is disabled by default and accepts only the exact enabled value", async () => {
+    const cd = await fixtureGloamBatch();
+    for (const flag of [undefined, "0", "true", "yes"]) {
+      if (flag === undefined) delete process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED;
+      else process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED = flag;
+      for (const method of methods) assert.ok((await (await request(method, cd)).json()).error);
+    }
+    assert.equal(forwarded.length, 0);
+  });
+
+  it("forwards the atomic owner batch for estimation and submission when explicitly enabled", async () => {
+    process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED = "1";
+    const cd = await fixtureGloamBatch();
+    for (const method of methods) {
+      assert.equal((await (await request(method, cd)).json()).result.acceptedByFixture, true);
+      assert.equal((forwarded.at(-1)!.params[0] as { callData: string }).callData, cd);
+    }
+    assert.equal(forwarded.length, 2);
+  });
+
+  it("retains account, chain, EntryPoint, unsponsored and root-validator restrictions", async () => {
+    process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED = "1";
+    const cd = await fixtureGloamBatch();
+    for (const opts of [
+      { cookie: null }, { cookie: `${ticket()}tampered` }, { cookie: ticket(OTHER) }, { sender: OTHER },
+      { cookie: ticket(ACCOUNT, 46630) }, { chainId: 46630 }, { entryPoint: OTHER },
+      { op: { nonce: undefined } }, { op: { nonce: `0x${(2n << 240n).toString(16)}` } },
+      { op: { nonce: `0x${(1n << 240n).toString(16)}` } }, { op: { nonce: `0x${(1n << 248n).toString(16)}` } },
+      { op: { paymaster: OTHER } }, { op: { paymasterData: "0x01" } },
+      { op: { paymasterVerificationGasLimit: "0x1" } }, { op: { paymasterAndData: "0x01" } },
+    ]) for (const method of methods) assert.ok((await (await request(method, cd, opts)).json()).error);
+    assert.equal(forwarded.length, 0);
+  });
+
+  it("does not turn the feature flag into an approval or arbitrary-call relay", async () => {
+    process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED = "1";
+    const calls = fixtureGloamCalls();
+    for (const batch of [calls.slice(0, 1), calls.slice(0, 2), calls.slice(0, 3), [...calls, calls[0]!], [...calls.slice(0, 3), { ...calls[3]!, to: OTHER }]]) {
+      const cd = await fixtureGloamBatch(batch);
+      for (const method of methods) assert.ok((await (await request(method, cd)).json()).error);
+    }
     assert.equal(forwarded.length, 0);
   });
 });

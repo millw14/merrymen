@@ -3,8 +3,8 @@
  *
  * Gloam (gloam.trade) keeps stablecoin balances in a shielded pool on Robinhood
  * Chain. An owner with a private balance there can pay any 0x address from it,
- * and Gloam's relay submits the payment, so the USDG reaches the agent account
- * from the pool and not from the owner's wallet.
+ * and its available relay can submit the payment when the owner selects Hide
+ * my wallet. The USDG reaches the agent account from the pool.
  *
  * NOTHING HERE MOVES MONEY OR TOUCHES THE AGENT'S AUTHORITY. This module only
  * says where to send the owner. The agent account, its signed permission, its
@@ -27,6 +27,11 @@
 export const GLOAM_FUNDING_CHAIN_ID = 4663;
 
 export const GLOAM_PAY_URL = "https://gloam.trade/app/vault?tab=move&mode=pay";
+
+/** Explicit deployment opt-in. Next replaces this public value at build time. */
+export function gloamFundingEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_GLOAM_FUNDING_ENABLED === "1";
+}
 
 /** Where to send an owner funding an agent on `chainId` from Gloam, or null where it would not reach the agent. */
 export function gloamFundingLink(chainId: number): string | null {

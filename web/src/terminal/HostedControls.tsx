@@ -21,6 +21,7 @@ import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import { RecoveryNotice } from "./RecoveryNotice";
 import { pausedRecovery, recoveryFunds } from "./recovery-view";
 import { GloamFunding } from "./GloamFunding";
+import { GloamWithdrawal } from "./GloamWithdrawal";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -127,7 +128,7 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
   const [error,setError]=useState("");
   const [ownerKey]=useState(()=>{const grant=loadGrant();return grant?.smartAccount.toLowerCase()===account.status.grant?.smartAccount.toLowerCase() ? grant?.demoOwnerPrivateKey ?? "" : "";});
   const grant=account.status.grant;
-  return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add funds" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <RecoverPanel initialOwnerKey={ownerKey}/> : grant ? <><h2>Fund your agent</h2><p>Send USDG to your agent’s account on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`} — and only there. This address on any other network is not your agent: funds sent there are stuck, and no re-sign moves them back. Your balance updates after the transfer is recorded.</p>
+  return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add funds" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <>{grant && <GloamWithdrawal account={grant.smartAccount as `0x${string}`} chainId={grant.chainId} ownerKey={ownerKey ? ownerKey as `0x${string}` : undefined}/>}<RecoverPanel initialOwnerKey={ownerKey}/></> : grant ? <><h2>Fund your agent</h2><p>Send USDG to your agent’s account on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`} — and only there. This address on any other network is not your agent: funds sent there are stuck, and no re-sign moves them back. Your balance updates after the transfer is recorded.</p>
     {/* WHAT THIS AGENT IS ACTUALLY SHORT OF, on the screen where it can be fixed.
         The verdict is the child's — `AgentStatus.liveBlocker`, resolved every
         tick — and this panel only says what to do about it. Measured after the
