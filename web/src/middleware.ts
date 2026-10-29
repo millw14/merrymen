@@ -142,7 +142,11 @@ function documentResponse(req: NextRequest): NextResponse {
   // matcher excludes them too; retain that boundary when invoked directly.
   if (/^\/(?:_next|mcp|oauth|\.well-known)(?:\/|$)/.test(req.nextUrl.pathname) || STATIC_ASSETS.has(req.nextUrl.pathname)) return NextResponse.next();
   const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
-  const policy = documentPolicy(nonce, { development: process.env.NODE_ENV === "development", hosted: HOSTED });
+  const policy = documentPolicy(nonce, {
+    development: process.env.NODE_ENV === "development", hosted: HOSTED,
+    // Local, hash-verified Groth16 proving needs WebAssembly compilation, never JS eval.
+    gloamWithdrawals: process.env.NEXT_PUBLIC_GLOAM_WITHDRAWALS_ENABLED === "1",
+  });
   const headers = new Headers(req.headers);
   headers.set("x-nonce", nonce);
   // Next reads the request policy and nonces its framework and hydration

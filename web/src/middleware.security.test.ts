@@ -135,6 +135,15 @@ test("document script policy does not bleed into protocol handlers or MCP App re
   }
 });
 
+test("Gloam's opt-in permits WebAssembly proving without enabling JavaScript eval", () => {
+  const normal = documentPolicy("n", { development: false, hosted: true });
+  assert.doesNotMatch(normal, /wasm-unsafe-eval/);
+  const enabled = documentPolicy("n", { development: false, hosted: true, gloamWithdrawals: true });
+  assert.match(enabled, /'wasm-unsafe-eval'/);
+  assert.doesNotMatch(enabled, /(?:^|\s)'unsafe-eval'/);
+  assert.match(enabled, /script-src-attr 'none'/);
+});
+
 test("all routes receive anti-frame, MIME and referrer protections while browser SDK CORS remains", async () => {
   const rules = await nextConfig.headers!();
   const global = rules.find(r => r.source === "/:path*")!;
