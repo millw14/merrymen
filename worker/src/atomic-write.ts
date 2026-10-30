@@ -51,6 +51,9 @@ function writeTarget(file: string): string {
   }
 }
 
+/** The canonical destination used by cooperating read-modify-write locks. */
+export { writeTarget as atomicWriteTarget };
+
 /** Resolve the destination even when a symlink names a file not created yet. */
 async function writeTargetAsync(file: string): Promise<string> {
   let target = file;

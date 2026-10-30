@@ -5,6 +5,7 @@ import ts from "typescript";
 import { NextResponse } from "next/server";
 import { thesesMemo, THESES_CACHE_CONTROL } from "@/lib/theses-memo";
 import type { ReadThesesOptions } from "@/lib/read-theses";
+import { walletNotSupported } from "@/lib/route-guard";
 
 function handler(readTheses: (options?: ReadThesesOptions) => Promise<unknown>) {
   const source = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
@@ -14,6 +15,7 @@ function handler(readTheses: (options?: ReadThesesOptions) => Promise<unknown>) 
   const exports: Partial<typeof import("./route")> = {};
   const require = (name: string) => {
     if (name === "next/server") return { NextResponse };
+    if (name === "@/lib/route-guard") return { walletNotSupported };
     if (name === "@/lib/read-theses") return { readTheses };
     if (name === "@/lib/theses-memo") return { thesesMemo, THESES_CACHE_CONTROL };
     throw new Error(`Unexpected route dependency: ${name}`);

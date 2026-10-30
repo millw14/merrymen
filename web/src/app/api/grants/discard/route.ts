@@ -27,10 +27,13 @@ import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
 import { GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { queuePaperReset, startOver, type StartOverReset } from "@/lib/start-over";
 import { perpsHalf, stopLocalPerpsForKill, stopPerpsForKill, type PerpsHalf } from "../../../../../../worker/src/perps-kill";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (isHostedMode()) {
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
@@ -41,9 +44,9 @@ export async function POST(req: Request) {
     let removal: unknown = null;
     try {
       started = await startOver({
-        account: () => hostedAgentFor(req),
+        account: () => hostedAgentFor(req, "spot"),
         remove: () => getGrantStore("spot").remove(tenant),
-        queueReset: async (account) => (await queuePaperReset(true, account)).ok,
+        queueReset: async (account) => (await queuePaperReset(true, account, "spot")).ok,
       });
     } catch (e) {
       removal = e ?? new Error("grant removal failed");
@@ -58,9 +61,9 @@ export async function POST(req: Request) {
   const perps = await perpsHalf(() => stopLocalPerpsForKill());
   try {
     const paperReset = await startOver({
-      account: () => diskAgent(),
-      remove: removeSelfHostedGrant,
-      queueReset: async (account) => (await queuePaperReset(false, account)).ok,
+      account: () => diskAgent("spot"),
+      remove: () => removeSelfHostedGrant("spot"),
+      queueReset: async (account) => (await queuePaperReset(false, account, "spot")).ok,
     });
     return startedOver(paperReset, perps);
   } catch (e) {

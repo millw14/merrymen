@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchMarket } from "@/lib/market";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * NOT PRERENDERED AT BUILD, and that is a correctness rule rather than a
@@ -21,7 +22,9 @@ import { fetchMarket } from "@/lib/market";
  */
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const data = await fetchMarket();
   return NextResponse.json(data, {
     headers: { "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=60" },

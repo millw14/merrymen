@@ -31,10 +31,16 @@ import {
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { writeFileAtomicSync } from "./atomic-write";
+import { withSettingsFileLock } from "./settings-file-lock";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
 import { normalizeAgentBrief } from "./agent-brief";
 import type { DiscoveryFocus } from "./discovery-focus";
 import { energyExemptAccountsOf, energyModeOf, type EnergyMode } from "./energy";
+import { perpsCeilingOf, type PerpsCeiling } from "../../packages/core/src/perps-ceiling";
+// MERRYMEN_PERPS's one parser lives in core now, so the web reads the lever
+// exactly as this worker and the orchestrator do. Re-exported so every import
+// from here keeps working unchanged.
+export { PERPS_CEILINGS, perpsCeilingNote, perpsCeilingOf, type PerpsCeiling } from "../../packages/core/src/perps-ceiling";
 
 /**
  * A tenant settings file with every house-key field removed (hosted mode). The
@@ -314,49 +320,6 @@ export function workerWalletOf(env: Record<string, string | undefined>): GrantPu
 }
 
 /**
- * How far the operator lets perps go, weakest first. An operator lever, so it
- * restricts and never grants: "live" here still needs the owner's own consent
- * and a perps grant; it only stops the deployment being what says no.
- */
-export const PERPS_CEILINGS = ["off", "paper", "live"] as const;
-export type PerpsCeiling = (typeof PERPS_CEILINGS)[number];
-
-/**
- * MERRYMEN_PERPS, read restrict-only (docs/perps.md rule 1).
- *
- * UNSET IS OFF, hosted and self-hosted, as MERRYMEN_SOLANA is: perps land on
- * main in slices, and the next deploy of anything else ships every slice
- * already merged, so nothing may depend on an operator remembering to set
- * `off`. An operator turns paper on by writing `paper`. (The perps branch
- * defaulted hosted to paper and self-hosted to live, with an untested write
- * path; the plan's Phase 1 fix 5 replaced that.)
- *
- * `live` IS OFF IN THIS BUILD. Real-money perps are not built yet (Phase 4 of
- * the plan, after the mainnet checklist): there is no live executor, no
- * reconciler and no on-chain leg to reach. An operator who writes `live` gets
- * nothing rather than paper, so a deployment is never trading practice perps
- * its operator believes are real; perpsCeilingNote says so at startup.
- *
- * Anything else it does not recognise is OFF: a typo in a variable that exists
- * to take capability away must not hand it back.
- */
-export function perpsCeilingOf(raw: string | undefined): PerpsCeiling {
-  const v = (raw ?? "").trim().toLowerCase();
-  return v === "paper" ? "paper" : "off";
-}
-
-/**
- * The startup line for an operator whose MERRYMEN_PERPS asked for more than
- * this build gives (perpsCeilingOf), or null when it asked for nothing more.
- */
-export function perpsCeilingNote(raw: string | undefined): string | null {
-  const v = (raw ?? "").trim().toLowerCase();
-  if (v === "" || v === "off" || v === "paper") return null;
-  if (v === "live") return "MERRYMEN_PERPS=live: real-money perps are not in this build, so perps are OFF (set paper for practice perps).";
-  return `MERRYMEN_PERPS=${JSON.stringify(raw).slice(0, 40)} is not off, paper or live, so perps are OFF.`;
-}
-
-/**
  * MERRYMEN_PERPS_LIVE_TENANTS, hosted only. An entry that is not an address
  * can never match an account, so dropping it removes nothing but itself.
  */
@@ -397,6 +360,32 @@ export function perpsCeilingFor(
   if (cfg.perpsLiveTenants === null) return "live";
   const a = (smartAccount ?? "").trim().toLowerCase();
   return a !== "" && (cfg.perpsLiveTenants as readonly string[]).includes(a) ? "live" : "paper";
+}
+
+/**
+ * IS THIS A PERPS WALLET'S WORKER THAT THE OPERATOR HAS STOOD DOWN? (D19.)
+ *
+ * The orchestrator never starts a Perps worker unless MERRYMEN_PERPS is paper
+ * (orchestrator.ts perpsSpawnable), and a self-hosted one is to match it. A
+ * stood-down Perps wallet is not managed by owner orders (docs/perps.md, D1):
+ * so a Perps worker that runs anyway under any other ceiling — started by
+ * hand, or by a CLI that has not learned the rule — drains no owner command.
+ * Each one stays queued, unclaimed, and is answered by the worker that next
+ * drains under paper: run if it is still inside its window, expired (nothing
+ * sent) if not. A Spot worker is never stood down here.
+ *
+ * COMMANDS ONLY, NOT THE BOOK'S OWN STOPS. Hosted, no Perps child runs, so
+ * its practice positions are frozen. A worker that runs anyway is another
+ * matter: its protective loop starts with every arm and a held position keeps
+ * the lane active whatever the switch says (perps/lane.ts armed, the review's
+ * S3-02), so what it holds keeps its stops, take-profits, liquidation and
+ * funding. That is on purpose — a running book with its stops switched off is
+ * the thing S3-02 fixed — and the web's refusal says so to a self-hosted
+ * owner rather than calling the positions frozen (web perps-enabled.ts
+ * perpsStoodDownBook); perps/lane.test.ts pins both halves.
+ */
+export function perpsWorkerStoodDown(cfg: Pick<ResolvedConfig, "workerWallet" | "perpsOperatorCeiling">): boolean {
+  return cfg.workerWallet === "perps" && cfg.perpsOperatorCeiling !== "paper";
 }
 
 /**
@@ -877,13 +866,22 @@ function whereParseFailed(e: unknown, text: string): string {
 
 /** Read settings.json and say what is there. Remembers nothing — see settingsSource. */
 export function readSettingsFileAt(file: string): SettingsFileRead {
+  return readSettingsFileWithText(file).read;
+}
+
+/**
+ * readSettingsFileAt, and the text it read: null when the file was absent or
+ * would not be read. For a writer that must not land over a change it never
+ * saw (writeSettingsFileIfUnchanged): the text is what it hands back.
+ */
+export function readSettingsFileWithText(file: string): { read: SettingsFileRead; text: string | null } {
   let raw: string;
   try {
     raw = readFileSync(file, "utf8");
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { kind: "absent" };
-    return { kind: "unusable", why: `settings.json could not be read (${code ?? "unknown error"})` };
+    if (code === "ENOENT") return { read: { kind: "absent" }, text: null };
+    return { read: { kind: "unusable", why: `settings.json could not be read (${code ?? "unknown error"})` }, text: null };
   }
   let parsed: unknown;
   // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.
@@ -891,12 +889,36 @@ export function readSettingsFileAt(file: string): SettingsFileRead {
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    return { kind: "unusable", why: `settings.json is not valid JSON${whereParseFailed(e, text)}` };
+    return { read: { kind: "unusable", why: `settings.json is not valid JSON${whereParseFailed(e, text)}` }, text: raw };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { kind: "unusable", why: "settings.json is not a JSON object" };
+    return { read: { kind: "unusable", why: "settings.json is not a JSON object" }, text: raw };
   }
-  return { kind: "parsed", settings: parsed as MerrymenSettings };
+  return { read: { kind: "parsed", settings: parsed as MerrymenSettings }, text: raw };
+}
+
+/**
+ * WRITE ONLY OVER WHAT WAS READ: replace `file` with `data` (whole, 0600) if
+ * it still holds `seen` — the text readSettingsFileWithText returned, null for
+ * no file — and say whether it did. Nothing is written when it changed.
+ *
+ * The comparison and rename hold the same cross-process lock as the kill's
+ * turnOffLocalPaperPerps. A kill in another CLI or worker process therefore
+ * lands wholly before or after this write, never between its look and rename.
+ */
+export function writeSettingsFileIfUnchanged(file: string, seen: string | null, data: string): boolean {
+  return withSettingsFileLock(file, () => {
+    let now: string | null;
+    try {
+      now = readFileSync(file, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      now = null;
+    }
+    if (now !== seen) return false;
+    writeFileAtomicSync(file, data, 0o600);
+    return true;
+  });
 }
 
 /** A settings.json this process could not use, and what it runs on instead. */

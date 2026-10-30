@@ -28,15 +28,18 @@ the finished product; this table says how much of it main carries.
 | 1. Core and permission wall | the Lighter route, market and ABI constants, the `perp-lighter-v1` wall option, the canonical-wall marker, the signers' carry-forward. `POST /api/grants` refuses every perps grant (`perp-not-offered`) | merged (#359) |
 | 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | merged (#361) |
 | 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | merged (#362) |
-| 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | in review |
-| 5. Web API, desk and CLI | making and funding a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet | not yet |
+| 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | merged (#365) |
+| 5. Web API, desk and CLI | PR 1 (5a–5c): the foundation, Perps wallet intake and status, settings, owner paper exits and practice reset. PR 2: read routes, recover and CLI. PR 3: desk, entry points and onboarding. Funding follows slice 5 in its own PR | PR 1 implemented in this branch; PR 2 and PR 3 pending |
 | 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | not yet |
 
-Until slice 5, nothing on main can make a Perps wallet, so none exists in
-production; every kill path already reaches one (rule 13), so that from the day
-one can exist it is stopped by every kill. Perps stays off in production while
-the slices land: an unset `MERRYMEN_PERPS` means off (rule 1), and each slice
-is safe to deploy alone with perps off.
+Slice 5 PR 1 adds Perps wallet creation and renewal, gated by
+`MERRYMEN_PERPS=paper`. Every kill path already reaches the Perps wallet
+(rule 13). An unset `MERRYMEN_PERPS` means off (rule 1), and merging this PR
+does not turn it on. The hosted-paper rollout remains web first: it follows
+slice 5 and slice 6a (Telegram, MCP and partner API); the phone clients in
+slice 6b follow that launch. Phone builds carrying #358's kill request are
+still required before hosted paper. Funding and live execution are separate
+work and are not enabled by the paper flag.
 
 **What slice 3 carries, and what it does not.** The engine is the perps
 branch's paper engine (codex/perps-mode-samples at c7071662, before its live
@@ -47,7 +50,8 @@ other wallet's. Only a Perps worker arms the perp lane, and it runs no spot
 producer (`perps-only`). A Spot worker never starts the lane or its feed and
 shows its strategist no perps; its budget readers and paper reset touch the
 perp tables, which hold nothing for it, so they add nothing. Nothing on main
-starts a Perps worker yet. There is no live executor, reconciler or on-chain leg in this build:
+starts a Perps worker without the paper flag and a Perps grant; slice 4 supplies
+the hosted supervisor, and 5b supplies grant creation. There is no live executor, reconciler or on-chain leg in this build:
 `MERRYMEN_PERPS=live` is off, and a live account with perps on is refused
 `perp-live-not-yet`. The signer is vendored and hash-checked but loaded only by
 its own tests. The hosted checkpoint of paper perp state and the mirror of the
@@ -69,7 +73,22 @@ Perps workers, and nothing live:
   Telegram, groups, DM memory, Fomo or flow broker, IPC channel, public id or
   public roster (rule 17). Its holder status is the owner's, read-only. It is
   held as its owner is (accounting hold, rollout, chain check), never through
-  the new-tenant route, and spawned after every Spot worker. While the owner
+  the new-tenant route, and spawned after every Spot worker. That route proves
+  a login new only through an unexpired Spot grant, so under an explicit
+  `MERRYMEN_FLEET_ROLLOUT` a login with none (Perps-only, or a Spot grant
+  that expired before the route admitted it) runs its Perps worker only once
+  named, whatever `MERRYMEN_ROLLOUT_NEW_TENANTS` says. Held, no Close, Close
+  all or practice reset is carried out: each is refused while its book has not
+  reported, and queued and left to expire once it has. The owner's kill still
+  stops the wallet, and settings and renewals are still saved. The
+  orchestrator names each such login once, and again each hour it stays held
+  (`sayPerpsOnlyHeld`, with what to do; not one the accounting hold or a shut
+  route holds, which are held as any login is), and
+  the perps roster line counts held Perps wallets apart from those that may
+  run, counted again after a pass that admits a login
+  (`orchestrator-perps-only-held.integration.test.ts`).
+  Whether the route should prove a Perps-only login new through its Perps
+  grant is an operator decision this build leaves open. While the owner
   has an unexpired Spot grant, it runs only on the replica holding that Spot
   lease, so a login is never split across replicas. That is checked at every
   start and restart, on every pass and the moment the Spot lease drops. One
@@ -109,7 +128,14 @@ Perps workers, and nothing live:
   wallet in `perps_wallets` before its worker first starts (no record, no
   worker), and the directory, leaderboard, theses and decision pages leave
   those accounts out; one that cannot read the record says so rather than
-  listing both wallets. A Perps worker publishes no market review.
+  listing both wallets. A Perps worker publishes no market review. The staff
+  fleet-health read counts a Perps worker as current (its grant is in
+  `perps_grants`, its mirror tenant `<owner>:perps`), on its own wallet's
+  tick, so a wedged one shows as stale rather than as a retired account
+  (`staff-diagnostics.ts`). Where Perps workers do not run (this service's
+  `MERRYMEN_PERPS` is not paper) the fleet stands them all down and keeps
+  their grants, so they are counted without a current grant, with a warning,
+  never as stale workers crowding a wedged Spot worker out of the list.
 - *One feed.* `perps/fleet-feed.ts` publishes the public Lighter feed every
   hosted Perps worker reads, over what this replica's own Perps workers want
   and the markets their books hold. It runs only at `paper`, is paused under
@@ -123,7 +149,20 @@ Perps workers, and nothing live:
   owner's recovery journal, not yet carried out, holds the Perps worker: it does
   not start. A recorded pause not yet applied, or a durable pause, starts it
   paused instead (its protective loop still closes at stops), and it stays
-  paused until the owner's Spot home is armed and says otherwise.
+  paused until the owner's Spot home is armed and says otherwise. Those
+  closes are never read as the agent acting past a pause: the legacy pause a
+  rebuilt Spot home gets back is read across the owner's accounts but not its
+  Perps wallets (`recovery-reply-arm.ts ownerAccounts`, from `perps_wallets`;
+  unreadable, the arm holds), so a stop-close made while a `/pause` stood no
+  longer drops that pause from the Spot home, and then from the Perps worker.
+  A pause outlives a kill, as on main (a re-signed wallet comes back paused),
+  and a Perps-only login whose earlier Spot wallet was killed keeps it: the
+  `paused` file the Spot home kept, or the pause recorded under that wallet's
+  account. No bot hears its `/resume` (no Spot worker runs for it, and a Perps
+  worker runs none until slice 6a), so the orchestrator says so, once and then
+  hourly, with how it lifts (`sayPerpsPauseUnheard`: the owner makes a Spot
+  wallet and sends `/resume` to its bot); nothing lifts it for them. PR 3's
+  desk should show the owner that pause.
 
 **Not in slice 4.** The live hosted stand-down (closing at Lighter, bringing
 money home, Lighter's 1 USDG withdrawal minimum), the venue key's hand-over,
@@ -144,6 +183,562 @@ perp rows and `paper_checkpoints.perp_json` stay in Postgres. An operator
 recovery path (admitting a fresh Perps book and restoring `perp_json` into
 it) is not built yet. Until it is, never replace a volume while Perps books
 are on it; the handover already refuses.
+
+**What 5a carries: the foundation, inert.** Nothing a Spot owner or a caller
+who names no wallet can do changes, and no Perps capability is added, with
+`MERRYMEN_PERPS` set or not. It lands the pieces the rest of slice 5 stands on:
+
+- the core wall's `perpsOnly` option (`WallOptions.perpsOnly`), set only from
+  a grant's signed `purpose` (`grantWallOptions`): a Perps wall carries no Spot
+  spender, token, adapter, vault, class, Pons or Trencher permission, only the
+  perp route when a perp block is sealed and the energy buy when asked for. A
+  paper Perps grant seals neither, so its wall is empty. Spot walls rebuild
+  byte for byte as before. No signer makes a Perps grant yet;
+- one perps gate: `MERRYMEN_PERPS`'s parser moved to
+  `packages/core/src/perps-ceiling.ts` (the worker re-exports it), read by the
+  web as `perpsOffered` (not off) and `perpsCreationAllowed` (paper)
+  (`web/src/lib/perps-enabled.ts`), which no route asks yet;
+- `walletUrl`, the one client builder for `?wallet=`;
+- the wallet named, with no default, on the web's shared server helpers
+  (`hostedAgentFor`, `diskAgent`, `withReadDb`, `archiveCurrentGrant`,
+  `removeSelfHostedGrant`, `queuePaperReset`). Every caller passes `spot`;
+  `perps` resolves only the Perps wallet (its store hosted, `accounts/perps`
+  self-hosted) and never the Spot one;
+- the route guard (`web/src/lib/route-guard.ts`): every API route that is not
+  wallet-aware refuses a `?wallet=` other than Spot with 400
+  `wallet-not-supported` before it reads or writes anything, and a test walks
+  every route file to hold it. Only `/api/grants` reads the wallet itself
+  (from 5c also `/api/settings`, `/api/orders` and `/api/paper-reset`), and
+  the same walk holds each of their handlers to it: `const wallet =
+  readWalletParam(req); if (wallet === null) return walletUnknown(…);` as the
+  handler's own first two statements (the grants POST may first check its
+  own body, by an explicit list of pure calls), read from the syntax tree, so
+  a mention in a comment or a read after a write fails. Nothing may run
+  before the refusal's `if`: the guard's statement is one `const` with that
+  one declarator (a second declarator, `const walletRefused = …, queued =
+  await …`, runs before the `if` and fails), and no parameter has a default
+  or a computed key, which run before the body does. The walk accepts only
+  a handler whose binding cannot change after it was read: an exported `let`
+  or `var` fails, and so does an exported function, or the local function an
+  export list or a `const` names, that the file assigns to anywhere, before
+  the export or after it (`=`, a compound assignment, a destructuring, a
+  for-of head: legal in a `route.js`, which nothing typechecks).
+  A third parameter's default runs on every request too (Next passes two
+  arguments) and fails like any other. An export the walk cannot read as a
+  function in the file (a re-export, a destructured value, CommonJS, a
+  TypeScript `export import POST = H.POST` alias) fails by name, and behind
+  that list TypeScript's own checker names every value the module exports: a
+  handler name it lists that the walk did not check fails, whatever form a
+  later contributor finds.
+  Every wallet-aware route answers a `?wallet=` it cannot read with the one
+  shared refusal, 400 `wallet-unknown` with `private, no-store`, and Perps not
+  offered with 403 `perps-wallet-not-offered`, also `private, no-store`. The
+  grants, orders and paper-reset routes answer it with that shared refusal's
+  `error`; the settings save answers it with its own `errors` list, since an
+  off in the same save may already have been written (`saved`), but with the
+  same code and headers.
+
+**What 5b carries: the Perps wallet's intake and status, and the browser
+signer that makes one.** No screen calls the signer for Perps yet: the desk
+and `/create?for=perps` are PR 3.
+
+- `POST /api/grants?wallet=perps` makes or renews a Perps wallet only at
+  `MERRYMEN_PERPS=paper` (`perpsCreationAllowed`); otherwise 403
+  `perps-wallet-not-offered` with nothing read or written. A renewal's first
+  step, `DELETE /api/grants?wallet=perps` with `purpose:
+  "permission-replacement"`, is refused the same way before the store or the
+  Perps home's `grant.json` is touched, so a renewal that cannot finish never
+  stops the wallet; the kill names no wallet and is never gated. Robinhood Chain
+  mainnet only (400 `perps-chain`). Hosted, its owner must be the login (403
+  `perps-owner`, before the nonce: only `privy-did-owner-v1` logins have one in
+  v1); its binding is verified against the text that names the wallet, so a
+  Spot binding replayed as Perps, or the reverse, is refused 403; its account
+  must derive from the owner at Kernel index 1 (403 on a mismatch, 503 when the
+  derivation cannot be made, never a pass); it is stored with
+  `getGrantStore("perps")`, whose conflicts answer 409 with their code and any
+  other failure a fixed 503, marked `ownerFacing` ("Your permission could not
+  be saved"; Spot's store failures too, which main answered 500 with the
+  store's own text, able to name the database). It claims nothing about the
+  other wallet or an earlier step: a renewal or restore posts after its own
+  stop.
+  The browser signer shows a marked 503's own sentence (`session.ts
+  refusalMessage`, `postGrant`, the Wallet screen's re-arm; the iOS engine is
+  bundled from it): its old 503 arm said "Couldn't verify the account
+  on-chain" for every 503, which now stays for the derivation's unmarked one
+  only. Self-hosted, the same wall and index-1 derivation
+  (a live eth_call that fails closed with 503), the Spot `grant.json` held to
+  the store's same-owner, other-account rules, then the Perps home's
+  `grant.json` archived and replaced whole. No public identity or name (D2).
+  The same-owner rule holds the Spot intake to the Perps wallet too. Local
+  grant POSTs serialize their cross-wallet check, archive and write under a
+  shared SQLite OS lock, after network derivation finishes. Concurrent first
+  POSTs therefore cannot each accept a different owner against an empty
+  other-wallet file. Local DELETE, discard and CLI grant writers do not yet
+  participate in that lock; it is not a complete install-wide mutation lock.
+  No
+  refusal of the rule says "neither wallet was changed", since a restore or
+  renewal posts after its own stop, which a refusal does not undo, and a
+  hand-sent one can meet any of them there: owner-differs, account-shared,
+  legacy-perps and the self-hosted unreadable-wallet 503 say this permission
+  was not saved and the other wallet was not changed; hosted, an unreadable
+  other wallet is the fixed 503 above. The Wallet screen's restore and its
+  Spot renewal ask the Perps wallet's owner first (`restore-perps-owner.ts`,
+  from `GET /api/grants?wallet=perps`) and refuse another owner key, or a
+  Perps wallet they cannot read, before their stop, revocation or signature;
+  self-hosted that stop used to remove the running Spot `grant.json` and stop
+  the Solana strategy before the POST was refused. The restore asks with the
+  key it restores, whichever account that is. The renewal asks right after its
+  account read, before its Trencher read and fee check (each tells the owner
+  to do something first), with the key it re-signs with, and only when that
+  key is the grant's own owner: another signer (another Privy login's
+  embedded wallet in this browser) is the preflight's to refuse, in its own
+  words. Hosted, no restore is made while a Perps wallet exists or is stored,
+  whatever the key: its owner is the login, and a restore signs as a legacy
+  owner key, which the binding refuses for the login's own key (`auth.ts`), so
+  every key used to be refused after the stop. The hosted refusals say so and
+  name no way out: the self-hosted advice (restore with the Perps wallet's
+  key, or Kill all to change keys) leads nowhere there, where a login that can
+  hold a Perps wallet has no browser wallet to sign a restore's claim with at
+  all. Self-hosted, and for the renewal everywhere, a Perps wallet that stays
+  unreadable is answered with the way out: Kill all stops both wallets and
+  says whether it removed it. So the GET reads a self-hosted Perps
+  `grant.json` as the POST does (a BOM stripped; only a missing file is none,
+  anything else unreadable is 503), and hosted it answers `stored: true` for a
+  Perps record the store holds but will not show (stopped for a renewal whose
+  POST has not landed), owned by the login, which the Spot put still
+  compares. A hidden record that put would refuse on (one that cannot be
+  read, names the other wallet, or is owned by another key) is a 503 instead
+  (`storedGrantOwner`), so neither check passes a renewal or restore the POST
+  refuses after its stop. Self-hosted, a
+  stop removes the stopped wallet's `grant.json` and keeps no record, so a
+  pending renewal is not held against the other wallet there; only
+  hand-sent requests reach that in PR 1 (no PR 1 client sends a Perps
+  renewal), and PR 3's desk must bind it.
+- The canonical wall rebuilds a Perps grant as the Perps wall
+  (`grantWallOptions` from its signed purpose). In this build that wall is
+  empty (D5): a Perps grant declaring any marker, token, sealed address, perp
+  block or the energy buy is refused `invalid_wall`.
+- `GET /api/grants?wallet=perps` answers from the Perps store, home, ledger,
+  heartbeat and settings tick, through core's `publicGrantView` (Spot keeps
+  its denylist view, D3), with the worker's `agents.perps` report and no
+  energy; every GET answer is `private, no-store`. It is answered whatever
+  `MERRYMEN_PERPS` says (D1).
+- `renewalSkipsRevocation` (`web/src/lib/perps-renewal.ts`): the one rule by
+  which a renewal may skip the on-chain revocation, true only for a Perps grant
+  whose wall rebuilds empty (D6). The empty wall is the whole safety case: a
+  key that can call nothing leaves no authority behind. The retired-key fence
+  is hosted only, and lasts only as long as the Perps record: the store
+  refuses a stopped key while the record that retired it stands, and every
+  kill deletes that record (`revokeForKill`), its retired keys with it, so a
+  stopped key can be posted and armed again after a kill, as on main for
+  Spot. Nothing may lean on the fence for that reason too. Self-hosted, the
+  renewal stop archives the Perps home's `grant.json` and keeps no record of
+  the key, so the same grant posted again is armed again, as self-hosted Spot
+  always was; there the skip rests on the empty wall alone
+  (`dual-purpose-local.test.ts`), and a wall that permits anything keeps the
+  revocation on every deployment.
+  It has no caller yet. The dashboard renewal (`Wallet.tsx renewKey`) renews
+  Spot only and refuses any other grant before anything is read, stopped or
+  signed: its account read is Spot's `GET /api/grants` and its revocation
+  derives the Kernel account at index 0. The Perps renewal (PR 3) needs more
+  than loading the Perps grant: its account read through
+  `walletUrl("/api/grants", "perps")`; a revocation, when one is made, at
+  `accountIndexForPurpose("perps")`, or refused before the stop; D6 decided
+  from the page's own copy when the server holds none (an interrupted renewal),
+  as well as from the server's view when it holds one; and a decline before
+  the stop when `MERRYMEN_PERPS` is not paper (the stop is refused 403 then).
+- The browser signer (`web/src/lib/session.ts`): `MintOptions.purpose` (absent
+  is Spot) picks the Kernel index (`accountIndexForPurpose`, at both
+  derivations), the wall (`perpsOnly`, no Spot spender, no energy buy, no
+  scoped-spenders marker, no `tradeable-v2`: the empty wall the server
+  expects), the grant's own `purpose`, the claim it signs (`bindingMessage`
+  with the purpose), the storage slot (`merrymen.grant.perps.v1`; Spot's stays
+  `merrymen.grant.v1`) and the handoff URL (`walletUrl`, so
+  `/api/grants?wallet=perps`). A Perps signature refuses, before the owner
+  signs anything, every Spot opt-in, any Lighter key (new, carried, dropped or
+  recovered), and any network but mainnet. The storage helpers
+  (`loadGrant`, `clearGrant`, `listSavedWallets`, `localGrantsSnapshot`,
+  `previewOwnerAccount`) take the wallet with no default, as do
+  `loadRecoveryGrants` (whose snapshots now keep the purpose) and
+  `stopAgentForReplacement`; a kill still names no wallet.
+- `priorPerpFor` fails closed when the server's view is absent: this
+  browser's copy may say an account claims perps (`unknown`, refused) but never
+  supplies the key. A renewal takes one snapshot (the server's view at the
+  click and `localGrantsSnapshot(wallet)`) and hands the same objects to its
+  preflight and its mint.
+
+**What 5c carries in the worker: the owner's paper exits (D11).** An owner's
+Close and Close all on the Perps wallet are executed; nothing new opens, and
+nothing reaches a venue, a key or real money.
+
+- Two order shapes, both kind `trade`, both reduce-only, checked by the one
+  browser-safe parser the web route and the worker share
+  (`worker/src/perps/owner-order.ts readPerpExitOrder`): `close-perp`
+  `{side: "sell", symbol: "<MARKET>-PERP", usdgAmount: 0, purpose:
+  "close-perp", book: "paper"}` and `flatten-perps` `{side: "sell", symbol:
+  "ALL-PERPS", usdgAmount: 0, purpose: "flatten-perps"}`, whose `book:
+  "paper"` is optional: Close all from a desk that could not read its book
+  omits it, which means every book (D11), here the practice one. `book:
+  "live"` is refused by name. The row is bound to the Perps smart account, so
+  the ferry hands it to the Perps worker (`0x<owner>:perps`) and never the
+  Spot one; self-hosted, the file goes in `accounts/perps/commands`.
+- The worker judges the wallet first (`order-gate.ts walletOrderRefusal`): a
+  Perps worker takes these two and nothing else (no Spot order, no energy
+  buy); a Spot worker never takes one. An exit is not stopped by a Spot read,
+  the pause or the typed-order ceiling (rule 8a): `order-gate.ts placeOrder`
+  sends it on before those gates, and `runOrderCommand` reads the pause only
+  into the reads placeOrder judges, so a paused agent's owner can still Close
+  and Close all (`order-gate.test.ts`, `perps/lane.test.ts` "PAUSE NEVER
+  STANDS BETWEEN AN OWNER AND A CLOSE"). It does meet the tenant's
+  admission level, as every other owner order does: an exit never passes
+  processIntentLocked, where that gate stands, so `runOrderCommand` asks the
+  same levels before the lane (`worker-admission.ts ownerPerpExitRefusal`,
+  the answer `admissionRefusal` gives a reduce-only exit). At `observe` (a
+  tenant the rollout holds) the claimed exit is answered and never run:
+  nothing is closed and a Close all pauses nothing; `exits-only` and `trade`
+  let it go; a draining worker starts nothing. The lane closes what the
+  practice book holds now (`lane.ts close`, `flatten`), under its lock, with
+  the protective close's slippage, filed under source `chat` (provenance
+  owner-command) before anything is placed, and booked by the paper engine as
+  its own exits are. A close whose decision cannot be written is not sent.
+  What a Close says became of the position is read back from the ledger, for
+  a refusal as for a fill: a close the paper engine booked before something
+  after the booking threw is said to be closed, or part-closed, never "stays
+  as it was", and Close and Close all both re-read the book after any
+  refusal, so the report the desk shows never holds a position they closed
+  (or shows that the ledger could not be read). A day's counters that fail
+  to re-read after a booking no longer make it a refusal at all
+  (`executeLocked`): the fill is announced and answered as a fill, for an
+  owner's exit and a strategy's order alike, and its op and spend are kept
+  counted (`budget.keep`, Spot's `heldReservation` rule) until the next
+  re-read, so the next open in the same tick meets them.
+  A book with no view sends nothing, and the owner is told which of two gaps
+  it was (`PerpLaneRead.viewUnread`). Prices that could not be read (the feed
+  file missing, or stale because its writer stopped) leave the ledger read:
+  Close says the position is still open and its stop can only trigger once
+  prices read again, Close all says how many positions remain open (from the
+  ledger), and both say to ask again in a minute. Only a ledger that could not
+  be read says "the practice book could not be read" (Close all: "they may
+  still be open"). The lane tests also hold two markets at once: Close names
+  one, counts only what is left in it, leaves the other untouched and writes
+  `agents.perps` at once; Close all closes both.
+  While the account is not on paper, its practice book is frozen (rule 14) and
+  neither touches it.
+- Close all writes `perp_accounts.entries_halted` before it closes anything,
+  and holds the halt in the worker if that write fails. Before it reads the
+  book, too, so a frozen or unreadable book returns with the halt stored; the
+  lane tests read the ledger at the first close (placed, or its decision
+  filed) and find the halt already there. **The owner's practice
+  reset lifts it** (`POST /api/paper-reset?wallet=perps`): the reset closes
+  every practice position into the old epoch, so the halt has nothing left to
+  guard, and the ledger's halt is cleared in the reset's own transaction
+  (`store.ts resetPaperLedger`, `clearEntriesHalt`). Only a reset asked for
+  after that Close all: the lane remembers when the Close all was asked for
+  and decides (`lane.ts resetPaper`), because hosted an exit rides the ferry's
+  short loop and a reset its reconcile pass, so a reset asked for first can
+  reach the worker second. That memory does not survive a restart, so a halt
+  stored by an earlier worker process is ordered by when this process began:
+  every halt this process sets it remembers, so one it holds no time for was
+  asked for before it began. A reset asked for after that lifts it; one asked
+  for before cannot be ordered against it (it may be the reset that reached a
+  restarted worker after the Close all) and lifts nothing; its answer says
+  new practice positions stay paused, and the owner resets again. Whether a
+  halt stands is the lane's to say (`resetPaper`'s `haltKept`): the ledger's
+  halt, as the lane's own read after the reset found it, or one only the
+  lane holds because the Close all's write failed; the ledger is asked again
+  only when that read never reached the account row (an inactive lane's read
+  reaches it too, before it finds itself inactive), and an account with no
+  row was never paused: a Close all creates the row it halts, even on a book
+  that never traded. A reset that lifted nothing and could not read the
+  ledger at all says that it could not tell (`"unread"`), never that no pause
+  stands, and in words that do not say a Close all was pressed, since it can
+  come to an owner who never pressed one (`resetHaltSentence`). Its
+  condition is the owner's own Close all ("if you pressed Close all before
+  asking for this reset"), never what the report shows: the operator's
+  `MERRYMEN_HALT_PERP_ENTRIES` shows the same pause, and no reset lifts it. A Spot
+  worker's lane is never armed, so its reset keeps no pause and reads no perp
+  account.
+  A Perps reset expires with the Perps order window, so a reset can never lift
+  a halt days later. Nothing else clears it: Resume needs the owner-controls
+  history (a hash-chained halt log, so a stale resume or an older checkpoint
+  cannot clear a newer halt), which is built on the live recovery records and
+  hosted checkpoint formats that are not on main, so the desk must not offer
+  Resume. The owner's pause stops entries as before: the login's pause is
+  mirrored onto the Perps worker, and its tick returns before the perps route.
+- An owner's exit carries no receipt, run or expired: the drain's expiry at the
+  claim, the worker's own check and the orchestrator's never-ran sweep all ask
+  `order-receipt.ts expiredOrderReceipt`, which answers none for an exit, as
+  the run path's `orderOutcome` does. A receipt templates a Spot fill, and a
+  Close of a short is not a sell.
+- Nor is it answered in a Spot fill's words when it did not run
+  (`perps/owner-order.ts perpExitExpiredLine`, `perpExitNeverRanLine`,
+  `perpExitUnansweredLine`; the drain takes them through
+  `order-receipt.ts orderExpiryHooks`). Expired at the claim or at the
+  worker's own check, or never picked up, it names the exit and says nothing
+  was sent or closed, and for Close all that nothing was paused. Taken and
+  never answered (a worker killed mid-way), the sweep says it cannot tell:
+  a Close may have closed the position, and a Close all may have closed some
+  and paused new practice positions until a reset (its halt is written before
+  any close); it points at the Perps positions, never at trades, which never
+  show a perpetual's fill. A Spot order keeps its sentences word for word.
+- Self-hosted, an exit or a reset filed in `accounts/perps/commands` names the
+  account it was asked for (`FileCommand.account`), and the drain answers it,
+  claimed and never run, on any other (`command-files.ts notForThisAccount`):
+  the Perps home outlives the account in it, and a Perps wallet made again
+  under another owner key is another account there. Hosted, the row's
+  `agent_id` and the ferry's join already bind it.
+- At most once: the drain's claim is the unlink (`command-files.ts`), and the
+  ferry claims a row before it writes the file, so a crash between a close and
+  its answer leaves the command claimed and unanswered, never run again (the
+  sweep later says it may have run). The claim alone keeps an exit to one
+  run: a close is built from what is held when it runs, so a second run would
+  close whatever is held in that market then: nothing if nothing was opened
+  since, but a position the strategy opened since if one was, which the owner
+  never asked to close (`lane.test.ts` pins both). It can only ever reduce;
+  it is not harmless to run twice.
+- A Perps worker under any `MERRYMEN_PERPS` but paper claims no command
+  (`settings.ts perpsWorkerStoodDown`, D19); hosted, it is not running at all.
+  Its rows wait unclaimed, and are answered when a worker next drains under
+  paper: run inside their window, expired with nothing sent after it. Only
+  the owner's commands are stood down: a self-hosted Perps worker started by
+  hand under any other ceiling still runs its protective loop, so what it
+  holds keeps its stops, take-profits, liquidation and funding (the loop
+  starts with every arm, the review's S3-02; `lane.test.ts` pins it). Hosted,
+  with no Perps child, the practice positions are frozen.
+- A Perps worker's energy report never says a buy is `ready` (`energy.ts
+  energyBuyOf`).
+
+**What 5c carries on the web: the Perps wallet's settings, exits and practice
+reset.** `/api/settings`, `/api/orders` and `/api/paper-reset` read
+`?wallet=` themselves (`readWalletParam`; absent is Spot). A value that names
+no wallet, or two, is 400 `wallet-unknown` with nothing read or written. The
+Spot wallet's answers are what they were; no screen calls the Perps ones yet
+(the desk and `/create?for=perps` are PR 3).
+
+- `GET /api/settings?wallet=perps` answers from the Perps store (hosted) or
+  `accounts/perps/settings.json` (self-hosted), whatever `MERRYMEN_PERPS` says
+  (D1), with `strategy` `perps-only`, `private, no-store` and `Vary: Cookie`.
+  A store or file that cannot be read is 503 `settings-unreadable`, never the
+  defaults.
+- `PUT /api/settings?wallet=perps` is an allowlist, not Spot's handler: the
+  perps keys (bounds and grid from core, as the worker checks them), `strategy`
+  (always stored `perps-only`) and `liveTradingEnabled` false only (D5). Every
+  other key is reported in `ignored` and never stored: no secret, URL, Telegram
+  or holder field reaches the Perps blob. Refused by name: the strategist and
+  Brain drivers and any `perpsStyle` (D9), and switching real-money perps on in
+  any form, "not available on this server yet" (D10); the consent's withdrawal
+  is never refused. Offs (practice perps off, the live rail off, the consent
+  withdrawn) are written even beside an error, over what was stored. Hosted,
+  the save holds the login's save lock (the one Spot's saves take, so saves
+  for one login take turns across both wallets, and a Perps save writes
+  nothing while another holds it: `settings/dual-purpose.test.ts` pins it)
+  and never calls `botClaimForSave`, so a Perps save can neither take nor
+  release the Spot wallet's bot. Reads are
+  strict (a broken file is 409, never rewritten); writes are whole (atomic,
+  0600) and **only over the blob that save read**: the kill turns
+  `perpsEnabled` off in the same blob without the save lock (nothing may hold
+  a kill up), so every Perps write is a compare and swap
+  (`settings-store.ts putSettingsIfUnchanged`: `UPDATE … WHERE sealed = <read>`
+  on Postgres, a synchronous look-and-write on the file store and
+  `settings.ts writeSettingsFileIfUnchanged` self-hosted), and on a miss the
+  body is judged again from a fresh read, at most three times (then 503, with
+  nothing written). A write that throws is 503 with a fixed sentence ("Your
+  Perps wallet's settings could not be saved. Nothing was changed; try
+  again."): the store's or file system's own text, which can name a host, a
+  table or a path, is logged on the server through `errorText` and never sent,
+  as the Perps read and the grants route already answer. A save that never
+  names the switch keeps the kill's off; a save that switches practice perps
+  on over an off that landed between its own first read and its write is
+  refused. That window is the server's, not the
+  request's: an off already stored when the save first reads (a kill that
+  finished while the request was on the wire, or a form open since before it)
+  cannot be told from an owner switching practice perps on after the kill, so
+  a body naming `perpsEnabled: true` then saves, as the owner's decision.
+  Refusing that needs the client to send what it last read; no client sends
+  Perps settings in this build, and the desk (PR 3) should send `perpsEnabled`
+  only when the owner flips the switch. Self-hosted, the look-and-write is
+  pinned with the kill written inside the save's read-to-write window
+  (`settings-if-unchanged.test.ts`, `perps-kill-race.test.ts`); a `merrymen
+  kill` or Telegram `/kill` in another process now takes the same short SQLite
+  OS lock as the comparison and rename (`settings-file-lock.test.ts`). The
+  file-backed hosted store's conditional save and kill use it too. A contended
+  write fails after one second rather than reporting success; a kill still
+  attempts grant revocation and reports an incomplete paper stop. This does
+  not add a version to the client's request or serialize arbitrary file edits.
+  Where Perps are not offered
+  (D1), self-hosted as hosted (D19), a save may only turn things off: anything
+  else is 403 `perps-wallet-not-offered` with only its offs written, and an
+  off with nothing on to turn off writes nothing, so no Perps settings are made
+  on a server that offers none — nor any Perps table: hosted, the Perps
+  settings reads (`GET ?wallet=perps`, and the read every save makes first)
+  answer empty by a catalog look until the first Perps write
+  (`settings-store.ts PgSettingsStore.reading`), where they used to make
+  `perps_tenant_settings` on any signed-in login's request.
+- `POST /api/orders?wallet=perps` queues the worker's two exits and nothing
+  else (`readPerpsWalletOrder`, the worker's own parser): an entry, a Spot
+  order or an energy buy is refused 400, and the Spot wallet refuses an exit
+  with 400. The order must name the Perps account the owner reviewed
+  (`expectedAccount`; 409 `account-changed` on a mismatch, 400 when missing),
+  which is checked and never queued in the args; only the exit's own fields
+  are. The order is bound to the account the route resolved: hosted, the row's
+  `agent_id`; self-hosted, `FileCommand.account` on the file, which the worker
+  refuses on any other account. The account, ceiling, order window (the Perps
+  worker's tick), one-at-a-time slot and queue are each the Perps wallet's
+  (self-hosted, `accounts/perps/commands`).
+  Hosted, both wallets' orders are rows in the one `agent_commands` table,
+  told apart only by the account the route resolved
+  (`hostedAgentFor(req, "perps")`): `dual-purpose.test.ts` holds each
+  wallet's reads and slot to its own rows in one shared ledger, and
+  `hosted-wallets.postgres.test.ts` the hosted write (the Perps account's
+  row, the exit's fields only, the Perps worker's window).
+  Close all with no `book` is queued without one (D11). Every exit gets a fresh
+  id (`route.ts exitId`), never a Spot order's minute-bucket hash: an exit's
+  fields never vary, so under the hash a second ask in the same minute after
+  a failed first one collided with the answered one and never ran (hosted,
+  200 `duplicate` with no row added; self-hosted, GET read the old answer).
+  The one-at-a-time slot still refuses a second ask while the first is open
+  (409), and the claim keeps each ask to one run. Only an order holds it, as
+  hosted reads `kind = 'trade'`. Self-hosted, a queued practice reset or
+  selftest does not hold it; counted, a Perps reset refused the owner's Close
+  "you already have an order waiting" with no order waiting
+  (`order-state.ts placeSelfHostedOrder`). A running marker says what was
+  claimed (`command-files.ts markRunning`), so a reset whose run threw, or
+  whose worker died mid-run, does not hold it either; a claimed order does,
+  and so does a marker or file that does not say what it is (a legacy
+  marker, a file that cannot be read). A second ask once the first
+  was answered is a second exit (see "At most once" above), so **no client
+  may resend an exit POST by itself**: after a lost response PR 3's desk
+  reads the book again and leaves asking again to the owner. The fleet
+  recovery hold is checked as for any order (`placeRecoveryCheckedOrder`,
+  main's check with no rule-8a bypass, D11), and it is per account: it reads
+  `fleet_recovery_health` for the Perps account, and this build records a
+  hold only for the login's Spot account (`reportFleetSource` returns before
+  writing for a Perps worker; the report-only pass walks the Spot grants). So
+  the login's Spot hold refuses neither a Perps exit nor a Perps practice
+  reset, and the check refuses neither today (`dual-purpose.test.ts`). A Perps
+  worker's own hold refuses its spawn instead, and the ferry delivers only to
+  a running worker, so an exit queued while it is held waits inside its window
+  and is answered expired if the hold outlasts it. Hosted, an exit is queued
+  only onto a book that has reported: the Perps account's `agents` row must be
+  in the shared database (`perps-book-reported.ts`), or it is refused 409 with
+  nothing queued, and a read that fails is 503. The refusal says only that the
+  book has not reported, never that nothing is there to close (a worker that
+  has armed can trade before the mirror carries its row up) nor when it will
+  show (a Perps wallet the rollout holds never reports; see slice 4's
+  rollout bullet). An `agent_commands` row is
+  ledger history (`ledger-import.ts sharedLedgerHistory`), and the
+  orchestrator starts a Perps worker for the first time only on an account
+  with none (`registerLedgerSource`'s new-book branch), so an exit queued
+  before that first start stopped the worker ever starting, and nothing told
+  the owner (`reportFleetSource` records no hold for a Perps worker). Once the
+  `agents` row is there it is history itself, so a command beside it changes
+  nothing (`perps-not-reported.postgres.test.ts`). Where no Perps worker runs
+  (`perpsWorkersRun`: `MERRYMEN_PERPS` is not paper; it answers as the
+  orchestrator's spawn rule `orchestrator.ts perpsSpawnable`, exported so
+  `perps-enabled.test.ts` asks both, and a self-hosted worker's stand-down
+  `settings.ts perpsWorkerStoodDown` do, over the same lever values, odd
+  spellings included), `POST` and `GET` are 403
+  `perps-wallet-not-offered` with nothing queued or read: the worker takes no
+  command, so an exit queued then could only wait, unclaimed, inside its
+  window (`expiresAt`, at least five minutes): run if perps came back inside
+  it, answered expired with nothing sent after it, never days later — and the
+  owner would have been told "queued" for something nothing was doing. The
+  refusal says what becomes of the positions (`perps-enabled.ts
+  perpsStoodDownBook`): hosted, where no Perps child runs, they stay exactly as
+  they are; self-hosted, where a worker started by hand may still be running,
+  that it takes no orders or resets and that such a worker goes on managing
+  what it holds by its own rules (stops, take-profits, liquidation, funding),
+  never that they are frozen. The practice reset's 403 says the same. `/api/orders/ceiling` stays Spot's: an exit has no
+  amount to offer chips for.
+- `POST /api/paper-reset?wallet=perps` (D12) queues a reset of the Perps
+  wallet's practice book through `queuePaperReset(hosted, account, "perps",
+  { expiresAt })`, with the account resolved in the same wallet
+  (`hostedAgentFor(req, "perps")`, `diskAgent("perps")`), and is 403 where no
+  Perps worker runs. A Perps reset carries a deadline, the Perps worker's order
+  window (`order-ceiling.ts orderTtlFor`, the window its exits wait), on the
+  self-hosted file and in the hosted row's `args`, which the ferry lifts onto
+  the child's file: one queued at paper and still waiting when perps are stood
+  down is answered expired, the book untouched, when they return. Hosted, it
+  is refused 409 with nothing queued while the Perps book is held: a practice
+  book that could not be restored starts no Perps worker and no hold process,
+  and nothing honours a Perps reset while it is held (the held Spot book's
+  reset is its owner's way out, `held-reset.ts`, which judges consent by a
+  seven-day window that never reads a Perps deadline). The route reads the
+  hold the orchestrator records for the Perps account at every spawn
+  (`paper_recovery_health`, `paper-return.ts paperRecoveryState`); an
+  unreadable record is 503, and Spot's reset is not looked at. The look is not
+  atomic with the next restore: a reset queued just before a hold waits with
+  its deadline for the next Perps worker to start. Hosted, it is refused 409
+  as an exit is while the Perps book has not reported (above): a reset queued
+  before the Perps worker's first start would stop that start. It also
+  lifts the Close-all halt (above). Start over (`/api/grants/discard`) stays
+  Spot's; it already stops the Perps wallet as every kill does, and Spot's
+  reset is queued as it always was.
+- Not in 5c: Resume after Close all (see the worker paragraph above), the
+  Perps read routes and recover (PR 2), the desk, chat cards and onboarding
+  (PR 3).
+
+## Slice 5 PR 1 security follow-up (30 October)
+
+The continuation from the seventh review keeps this slice paper-only and
+adds the following protections:
+
+- Concurrent local grant POSTs cannot establish the two wallets under
+  different owners. Their shared-owner check and replacement are serialized;
+  local kill/delete/CLI grant mutations remain outside that lock.
+- A differently cased wallet selector, such as `?Wallet=perps`, is refused
+  rather than silently targeting Spot. Explicit Perps URLs use one canonical
+  selector. The client-import guard follows helpers and re-exports to detect
+  indirect browser imports of the server's environment gate.
+- A hosted permission whose active session key cannot be decrypted is a 503,
+  not a normal stored renewal stop. A valid replacement stop keeps its owner
+  binding after its session key has deliberately been erased.
+- An incomplete CLI kill gets its reason from a validated, redacted failure
+  response. Node runtime warnings cannot replace that reason, and a helper
+  crash cannot expose raw diagnostic output as advice to the owner.
+- A conditional settings save and a kill in another process cannot overlap
+  their final read and write. The Perps file store uses the same protection.
+- A child command result can update only commands belonging to that child's
+  smart account, including the legacy schema without a receipt column.
+- An old or malformed Spot arm marker cannot discard a newer recorded pause.
+  A later owner resume is checked without blocking the order ferry on a
+  database read, and a stale check cannot release a new worker's pause.
+- Command claims, running markers and receipts are synced before execution
+  or acknowledgement. An invalid receipt cannot release the running slot;
+  unsafe command IDs and malformed queue files cannot escape their directory
+  or crash the queue reader.
+- An older delayed Close all cannot downgrade a halt inherited after restart.
+  A failed paper-open response is checked against the ledger before refunding
+  its entry energy; unread outcomes keep the claim, and no fill amount is
+  invented.
+
+These are regression-tested boundaries, not proof of a live deployment.
+The read routes and CLI (PR 2), desk and onboarding (PR 3), funding and live
+execution remain subsequent work. The dependency audit exception still expires
+after 8 November; this continuation does not extend it or force SDKs onto an
+incompatible dependency major version.
+
+### Product decisions awaiting review
+
+The local copy of the 30 October plan still lists the following choices as
+unresolved. The implementation preserves these paper behaviors; the table
+does not record owner approval. The confirmed slice-5 choices are a
+Spot/Perps toggle on Robinhood Chain screens, plain navigation before a later
+nanite-switch PR, funding in its own PR after slice 5, and three stacked PRs.
+
+| Choice | Implemented behavior | Needed by |
+|---|---|---|
+| D11: should a Spot recovery hold also refuse Perps exits and practice resets? | The hold check uses the Perps account; a Spot hold does not refuse them | PR 1 review |
+| Refuse Close and Close all while the hosted Perps book is held? | Once the book has reported, exits may queue and expire while held; resets are refused | PR 1 review |
+| Refuse owner exits at observe and while draining? | Refused, as on Spot | PR 1 review |
+| Freeze a self-hosted running worker's protective loop when Perps turns off? | It takes no new orders or resets, but continues managing existing paper positions | PR 1 review |
+| Keep the not-reported-book 409, or change what counts as shared ledger history? | Keep the 409 so a queued command cannot prevent the worker's first start | PR 1 review |
+| May a practice reset lift the Close-all entries halt? | A later owner reset lifts it; there is no Resume command in this slice | PR 1 review |
+| D20: move kill copy naming every wallet into PR 1 or leave it in PR 3? | The remaining UI copy is assigned to PR 3 | PR 3 at the latest |
+
+The plan's eighth item is technical cleanup: query-parameter casing, the
+client-import guard and the D17 test-port list. This continuation addresses
+those separately from the unresolved trading and wallet policy choices.
 
 ## One login, two wallets
 
@@ -172,9 +767,15 @@ directory until the first Perps write: until then every Perps read answers
 empty and every kill finds nothing, by a catalog look (`to_regclass`) or a
 `stat`, with no lock. Nothing ever rewrites a Spot row for Perps. Holder claims
 are the login's, not a wallet's: both settings stores share them. The public
-profile is one: the Perps account joins the identity's account history at the
-end and never becomes its first, which stays the Spot account every existing
-link stands for.
+profile is the Spot agent's alone: the Perps account never joins the login's
+public identity (decision D2). `POST /api/grants?wallet=perps` mints and names
+nothing, as the orchestrator adds nothing for a Perps worker, so no slug,
+profile, board, search or follow can resolve to it. The profile, summary and
+own-book reads (`read-agent.ts`) and the MCP public board and profile
+(`public-feed.ts`) also leave out every account in `perps_wallets`, as a
+backstop; the first-name count is Spot's alone. Search leaves them out before
+it takes its window of the newest agents (`agent-search.ts`), so a fleet's
+Perps rows, which no search can show, never push a Spot agent out of it.
 
 **One owner, two separate authorities.** Decided where both are written, under
 one lock for the tenant across both wallets (the file store's shared writer
@@ -554,9 +1155,11 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
     `thesis-policy.ts`; every `perp-*` reject rule is withheld; no perp
     decision, order, fill, position, leverage or liquidation reaches the feed,
     theses, the group chat, X, the leaderboard's trade lists or `publicBook`.
-    Leaderboard equity includes perps per rule 12 and the profile shows a
-    "uses leverage" marker. The venue publishes the account anyway, and the
-    consent says so.
+    With two wallets per login, the Perps wallet is absent from every public
+    read: it never joins the public identity (D2), the leaderboard and profile
+    are the Spot agent's and their equity is the Spot wallet's, and no "uses
+    leverage" marker is shown (one would publish that a login runs perps). The
+    venue publishes the account anyway, and the consent says so.
 
 ## How it is built
 
@@ -714,8 +1317,11 @@ All perp money is TEXT integer micro-USDG (aggregated in application BigInt or
   `worst_notional_micro`, anything else counts `filled_quote_micro`) and
   counts perp orders and withdraw requests as ops (an allowlist of statuses).
   `perp-deposit` counts as spend like `vault-deposit`; `perp-claim` does not.
-  Reservations follow `recordTrade`'s order; after a hosted wipe the day's
-  opens are rebuilt from the venue before any open.
+  Reservations follow `recordTrade`'s order. A perp intent is judged on the
+  day's spend and ops read again under the lane's lock (`budget.counters`),
+  never on figures its caller read before it queued: an owner's Close books
+  outside the intent chain. After a hosted wipe the day's opens are rebuilt
+  from the venue before any open.
 - **Hosted.** A child's ledger is disposable. Every `perp_*` table is mirrored
   (append-only tables `ON CONFLICT DO NOTHING`; updated tables as rank-guarded
   upserts). Live positions and orders are re-read from the venue at arm, never
@@ -761,6 +1367,10 @@ home after 24 h flat and on perps-off, kill and expiry.
 
 
 #### Deterministic style profiles
+
+*Not in this build (decision D9): `perp-trend` trades the 4 h `swing-trend`
+signal only, and the Perps wallet's settings `PUT` refuses a `perpsStyle`. What follows is
+the branch's design, kept for when profiles land.*
 
 `perpsStyle` selects a real native candle stream and a channel length; it does
 not rename four-hour signals. Every profile requires at least 100 contiguous,
@@ -915,7 +1525,9 @@ required before claiming the live venue lifecycle has been verified.
   `perps=close&market=BTC-PERP&book=live`) handoff only opens that review;
   an omitted book requires a choice before confirmation. Dashboard Settings
   clears the flatten halt through a separate owner-bound `resume-perps`
-  request, never through chat; an incident still requires key rotation.
+  request, never through chat; an incident still requires key rotation. (Not
+  in this build: there is no `resume-perps`, and an owner's practice reset is
+  what lifts the paper halt; see slice 5c above.)
 - **MCP** — read-only `get_perp_positions` (portfolio.read); no perp tool moves
   funds or opens.
 - **CLI** — `status` and `doctor` show perps (signer hash, venue reachability,
@@ -955,8 +1567,7 @@ Spot wallet's: one wallet's strategy and risk budget never become the other's.
 |---|---|---|---|
 | `perpsEnabled` | false | — | paper perps; dashboard-only; no env term |
 | `perpsLiveEnabled` | false | — | real perps; stored with `perpsLiveConsentVersion`, `perpsLiveConsentAt`, `perpsRegionAttested` |
-| `perpsDriver` | `perp-trend` | `perp-trend` \| `brain` \| `strategist` \| `manual` | the one autonomous producer |
-| `perpsStyle` | `swing-trend` | IDs in `PERPS_STYLE_CATALOG` | deterministic cadence, channel and holding deadline; never execution consent |
+| `perpsDriver` | `perp-trend` | `perp-trend` \| `strategist` \| `manual` in core; the Perps wallet's `PUT` takes `perp-trend` \| `manual` (D9) | the one autonomous producer; Brain is in no list in this build |
 | `perpsMarkets` | `["BTC-PERP","ETH-PERP"]` | 1–8 keys of `LIGHTER_MARKETS_V1` | unknown key refused, never ignored |
 | `perpsMaxLeverage` | 2 | integer 1–10 | also ≤ venue max |
 | `perpsPerTradeUsdg` | 25 | 10–100000 | effective `min(sealed per-trade, this)` |
@@ -969,30 +1580,41 @@ Spot wallet's: one wallet's strategy and risk budget never become the other's.
 | `perpsLiqBufferPct` | 2 | 1–50 | stop must beat liquidation by this |
 | `perpsMaxSlippageBps` | 50 | 5–300 | IOC worst price vs mark; stand-down uses max(this, 150) |
 
-Every key is in the worker's clamps, the web `PUT` allowlist with identical
-bounds (`perpsMarkets`, `perpsDriver` and `perpsStyle` with their own branches), a rebuild
-fingerprint, and `spec-coverage.test.ts`.
+Every key is in the worker's clamps, the Perps wallet's `PUT` allowlist
+(`/api/settings?wallet=perps`) with identical bounds (`perpsMarkets`,
+`perpsDriver` and the consent record with their own branches), a rebuild
+fingerprint, and `spec-coverage.test.ts`. `perpsStyle` (the profiles below) is
+not in this build: core has no such key, and the Perps wallet's `PUT` refuses one (D9).
 
 ## Rollout
 
-The six slices of "What is on main" come first; none of the phases below starts
-before all six are merged and deployed with perps off.
+The 30 October remaining-work plan puts the web launch before the phone
+clients. Merging the paper foundation is not approval to activate a rollout.
 
-- **Phase 0 — mainnet checklist** (`docs/perps-mainnet-checklist.md`), on an
-  operator account with dust: WASM memory and latency in a hosted child;
-  deposit → account index → on-chain key registration → time to usable; a
-  minimum BTC open as OTO and OTOCO; stop placement, sizing, expiry bounds and
-  the fat-finger band; a standalone position-tied stop; secure withdrawal and
-  claim latencies; the 21126 ordering; whether IP or L1 limits apply to
-  `sendTx` from the hosted egress; a kill drill and a recover drill; on-chain
-  `createOrder` semantics.
-- **Phase 1** — the canonical-wall allowlist and the fleet feed ship; paper perps
-  behind `MERRYMEN_PERPS=paper`; signers do not offer the opt-in.
-- **Phase 2** — signers offer the opt-in; live only for tenants named in
-  `MERRYMEN_PERPS_LIVE_TENANTS` (self-hosted: the owner), after the mobile
-  banners ship.
-- **Phase 3** — general availability, after a written decision on operating
-  Lighter orders from the hosted egress for tenants.
+- **Hosted paper (the plan's Phase 3)** follows slices 1–4, all three slice-5
+  PRs, and slice 6a (Telegram, MCP and partner API). Phone builds carrying
+  #358's kill request are a prerequisite; the full Perps phone UI is not.
+  Before activation, settle paper admission and recovery policy, check child
+  process headroom, add feed capture, and either provide recovery for a lost
+  Perps home or prohibit replacing/handover of its volume while books exist.
+- **Funding** is a separate PR after slice 5. Whether it precedes or follows
+  hosted paper remains open. It moves real USDG and needs its own journal,
+  owner-outflow accounting and a fund/withdraw recovery drill.
+- **Phones (slice 6b)** follow the web paper launch. Their Perps wallet,
+  banner and Close-all support, plus the deferred native validation, must be
+  complete before any owner goes live.
+- **The live implementation** adds the executor, reconciliation, on-chain
+  leg, key handover, live stand-down, consent and owner recovery. The empty
+  paper permission wall and paper flag do not supply these capabilities.
+- **Mainnet checks and controlled live rollout (the plan's Phase 4)** follow
+  that implementation. Complete `docs/perps-mainnet-checklist.md`, including
+  funding, protected orders, withdrawal, kill and recovery drills, before
+  enabling real-money owners. Hosted live also requires Solana's live
+  guardrails and the unresolved custody/operating decisions below. Admission
+  remains explicit through `MERRYMEN_PERPS_LIVE_TENANTS`.
+- **General availability** additionally requires isolation of hosted workers
+  by OS user, a fleet request budget if the venue limits by IP, and replay
+  evidence before any performance claim.
 
 ## Decisions that need Milla
 
@@ -1053,3 +1675,93 @@ before all six are merged and deployed with perps off.
 - Start over (`/api/grants/discard`) revokes both wallets' grants and resets
   the Spot paper book, but does not stop the Solana strategy. "Kill all agents"
   is the control that stops everything.
+
+## Slice 5 PR 1 test inventory (D17)
+
+This inventory compares the original Perps branch at `112dbeb6` with the
+paper-only wallet-authority PR (5a–5c). It lists the source tests retained,
+replaced or deferred, rather than treating a matching filename as proof that
+all of its old live behavior was ported. Core, store and paper-engine tests
+that already landed in slices 1–4 are identified as existing foundations;
+unchanged Spot and general framework suites are not repeated here.
+
+The historical baseline was **inspected, not re-run** for this PR. Its pinned
+record is `112dbeb6:docs/perps-implementation-status.md`: the later
+separate-wallet run records 16,093 tests, 16,088 passing, four skipped and one
+stale Settings source assertion, followed by a passing focused rerun after
+that assertion was corrected. That is not evidence of a fresh all-green
+baseline run. Current-tree verification belongs in the PR's test results;
+counts from overlapping historical and current runs must not be added.
+
+| Source test at `112dbeb6` | Current disposition |
+|---|---|
+| `packages/core/src/grant-purpose.test.ts` | Same path; signed wallet-purpose foundation from earlier slices. |
+| `web/src/app/api/grants/dual-purpose.test.ts` | Adapted at the same path: independent hosted wallets, purpose-bound intake, index-1 proof, renewal and login-wide kill. |
+| `web/src/app/api/grants/dual-purpose-local.test.ts` | Adapted at the same path: separate homes, derivation proof, same-owner checks and refused writes preserve both wallets. |
+| `web/src/app/api/grants/public-view.test.ts` | Partly ported at the same path; the case-level live deferrals below apply. |
+| `web/src/app/api/grants/perps-status.test.ts` | Paper report cases ported at the same path; the live shutdown cases below are deferred. |
+| `web/src/app/api/settings/dual-purpose.test.ts` | Adapted at the same path: the dedicated Perps settings allowlist, independent stores and switch-off preservation. |
+| `web/src/app/api/settings/perps.test.ts` | Parser, boolean, market, risk-cap and off-wins cases retained; profile, Brain and live acceptance are replaced by refusals in this paper build. |
+| `web/src/app/api/orders/dual-purpose.test.ts` | Adapted at the same path for wallet-bound paper exits; the reset cases moved to `web/src/app/api/paper-reset/dual-purpose.test.ts`. The ceiling endpoint remains Spot-only; Perps closes need no entry-size ceiling. |
+| `web/src/lib/dedicated-perps-wall.test.ts` | Adapted at the same path for the purpose-based empty paper wall; live venue permission cases are not enabled. |
+| `web/src/lib/session-perps.test.ts` | Retained Spot authority-carry compatibility; these cases do not establish dedicated live Perps activation. |
+| `web/src/lib/perps-orders.test.ts` | Adapted paper order shapes and routing at the same path; native handoff is deferred to the desk/phone work. |
+| `web/src/lib/agent-perps.test.ts` | Restored and adapted to the explicit wallet read seam: scoped account/mode query, missing table/column, unreadable report, driver failure and no-account behavior; JSON whitelist and PostgreSQL error distinctions also covered. |
+| `worker/src/strategies/perps-only.test.ts` | Restored the inert tick/no Spot or vault intent cases. The old public-selectability assertion is replaced with the current internal-only registry contract. |
+| `worker/src/signer-lockstep.test.ts` | Existing signer/wall foundation, retained at the same path. |
+| `worker/src/order-gate.test.ts` | Existing order gate, extended at the same path for paper exits. |
+| `worker/src/command-files.test.ts` | Adapted at the same path for wallet-bound command execution, durable claims/results and receipt validation. |
+| `worker/src/order-receipt.test.ts` | Existing command receipt foundation retained at the same path. |
+| `worker/src/order-window.test.ts` | Existing deadline foundation retained at the same path. |
+| `worker/src/ferry-commands.test.ts` | Existing ferry foundation retained at the same path; separate Perps delivery is also covered by `worker/src/perps-order-ferry.test.ts`. |
+| `worker/src/perps/lane.test.ts` | Paper foundation from slice 3, extended for owner exits, Close-all halts, ordered reset, energy and durable-accounting failures. |
+| `worker/src/perps/paper-e2e.integration.test.ts` | Paper foundation retained at the same path. |
+| `worker/src/perps/executor.test.ts` | Paper executor foundation retained at the same path. |
+| `worker/src/perps/paper.test.ts` | Paper book foundation retained at the same path. |
+| `worker/src/perps/protect.test.ts` | Protective-loop foundation retained at the same path. |
+| `worker/src/perps/route.test.ts` | Paper route foundation retained at the same path. |
+| `worker/src/perps/view.test.ts` | Paper view foundation retained at the same path. |
+| `worker/src/perps/view-producers.test.ts` | Paper view producers retained at the same path. |
+
+The following source files were replaced by tests of the separate-wallet
+contract; their absence is intentional:
+
+| Source test at `112dbeb6` | Replacement and reason |
+|---|---|
+| `worker/src/dual-purpose-store.test.ts` | `worker/src/dual-wallet-store.test.ts`: independent grants/settings/homes and owner isolation, with no live custody implementation. |
+| `worker/src/dual-purpose.postgres.test.ts` | `worker/src/dual-wallet.postgres.test.ts`: real PostgreSQL wallet isolation and atomic owner checks, including lazy reads before Perps tables exist. |
+| `web/src/app/api/settings/perps-only.test.ts` | `web/src/app/api/settings/dual-purpose.test.ts` and `perps.test.ts`: a dedicated Perps wallet replaces switching a Spot wallet into a Perps strategy. |
+| `web/src/lib/session-minimal-perps.test.ts` | `web/src/lib/dedicated-perps-wall.test.ts`, `session-wallets.test.ts` and `packages/core/src/wall-perps-only.test.ts`: signed purpose and index 1 replace the old creation flag; D5 keeps the paper wall empty. |
+| `web/src/lib/account-purpose.test.ts` | `web/src/lib/wallet-param.test.ts` and `session-wallets.test.ts`: `?wallet=` is the transport selector; signed purpose remains authority. The helper, route guard and real reset route now refuse differently cased selector keys instead of falling back to Spot. |
+| `web/src/lib/kill-answer-purpose.test.ts` | `web/src/lib/stop-agent.test.ts`, `web/src/components/kill-switch.test.ts`, and grants `dual-purpose.test.ts` / `kill-perps.test.ts`: a kill reaches both wallets; the old per-wallet-kill expectation is dropped. Renewal stops remain separate. |
+
+Partial-file and whole-file deferrals are explicit:
+
+- `web/src/app/api/grants/public-view.test.ts` retains secret stripping,
+  whitelisted fields and private/no-store responses, scoped to the Perps
+  wallet, and adds Spot denylist compatibility. The source's plaintext
+  80-hex venue-key refusal/recovery notice and `perpsOptIn` live allowlist /
+  durable-journal readiness cases move with live custody and setup.
+- `web/src/app/api/grants/perps-status.test.ts` retains report/heartbeat,
+  absent and malformed report cases and adds Spot report omission. Its old
+  self-hosted stand-down-before-archive, custody wording, hosted durable
+  shutdown and wallet-discard wait cases move with live shutdown/recovery.
+  Paper login-wide kills have their own tests listed above.
+- `web/src/app/api/grants/perp-intake.test.ts`,
+  `web/src/app/api/grants/perp-drop-hosted.test.ts` and
+  `web/src/app/api/grants/perps-recovery.test.ts` exercise live venue-key
+  pairing, flatness and recovery notices; they remain with the live slice.
+- `worker/src/perps/owner-controls.test.ts`,
+  `worker/src/perps/hosted-dual-purpose.test.ts` and
+  `worker/src/perps/dual-wallet-standdown.test.ts` depend on live incidents,
+  retired venue keys or shutdown custody. Paper Close-all ordering is covered
+  by the current lane tests. The old explicit Resume case is replaced by the
+  ordered paper reset, whose product decision remains listed above.
+- The source's `/api/perps` read routes, recovery surface and CLI tests belong
+  to PR 2; desk, entry-point and onboarding tests belong to PR 3. Their absence
+  from PR 1 does not mean those slices have been verified or completed.
+
+New boundary checks in this PR include `web/src/lib/perps-enabled.test.ts`'s
+transitive client import guard (aliases, re-exports and literal dynamic
+imports), the route-guard sweep, and the wallet-selector refusal tests. These
+are additions to the source inventory, not replacements for its live tests.

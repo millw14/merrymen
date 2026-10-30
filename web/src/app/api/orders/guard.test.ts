@@ -53,6 +53,7 @@ import {
 } from "../../../../../worker/src/command-files";
 
 const ROUTE = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
+const CEILING = readFileSync(new URL("../../../lib/order-ceiling.ts", import.meta.url), "utf8");
 
 /** The file with its comments removed — this repo documents what it does NOT do. */
 const codeOf = (src: string) =>
@@ -111,7 +112,9 @@ describe("who may place an order", () => {
     // through the grant store — so a caller can never name somebody else's
     // agent. Self-hosted there is no auth and the localhost middleware is the
     // perimeter, which is the same split /api/selftest already draws.
-    assert.match(CODE, /const agent = await agentFor\(req\);\s*\n\s*if \(!agent\) return NextResponse\.json\(\{ error: "not signed in" \}, \{ status: 401 \}\);/);
+    // In the wallet the request names (?wallet=; absent is Spot), and never the
+    // other: agent-for.ts answers null for a grant of the other wallet.
+    assert.match(CODE, /const agent = await agentFor\(req, wallet\);\s*\n\s*if \(!agent\) return NextResponse\.json\(\{ error: "not signed in" \}, \{ status: 401 \}\);/);
     assert.equal((CODE.match(/if \(!agent\) return/g) ?? []).length, 2, "both POST and GET");
   });
 
@@ -200,7 +203,10 @@ describe("one click is at most one trade", () => {
     assert.deepEqual(readCommandState(h, "stamped"), { state: "queued", expiresAt: T + WINDOW_MS }, "self-hosted stamps it");
     // And it is the CALLER's tick, not this container's — the same lesson the
     // ceiling below had to learn.
-    assert.match(CODE, /\(await getSettingsStore\("spot"\)\.get\(tenant\)\)\?\.tickSeconds/);
+    // And the caller's WALLET's tick: each wallet's worker runs on its own settings
+    // (lib/order-ceiling.ts orderTtlFor, which a Perps practice reset waits on too).
+    assert.match(CODE, /await orderTtlFor\(req, isHostedMode\(\), wallet\)/);
+    assert.match(codeOf(CEILING), /\(await getSettingsStore\(wallet\)\.get\(tenant\)\)\?\.tickSeconds/);
   });
 });
 

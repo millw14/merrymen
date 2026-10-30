@@ -190,6 +190,13 @@ describe("redactUrls", () => {
   it("always removes userinfo", () => {
     assert.equal(redactUrls("https://me:hunter2@rpc.example.org/"), `https://${REDACTED}@rpc.example.org/`);
     assert.equal(redactUrls(`https://me:p@ss@${HOST}/v2/${KEY}`), `https://${REDACTED}@${HOST}/${REDACTED}`);
+    // A database driver's error carries its connection URL, password and all.
+    assert.equal(
+      redactUrls("connect ECONNREFUSED 10.1.2.3:5432 (postgres://admin:hunter2@db.internal:5432/merrymen)"),
+      `connect ECONNREFUSED 10.1.2.3:5432 (postgres://${REDACTED}@db.internal:5432/merrymen)`,
+    );
+    assert.equal(redactUrls("postgresql://u:p@h/d"), `postgresql://${REDACTED}@h/d`);
+    assert.equal(redactUrls("rediss://default:s3cret@cache.internal:6380"), `rediss://${REDACTED}@cache.internal:6380`);
   });
 
   it("leaves public URLs exactly as they were", () => {

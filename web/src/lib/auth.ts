@@ -29,8 +29,10 @@ import {
   DEFAULT_BINDING_VERSION,
   bindingMessage,
   isBindingVersion,
+  isGrantPurpose,
   sessionSecret,
   type BindingVersion,
+  type GrantPurpose,
 } from "@merrymen/core";
 
 /**
@@ -252,6 +254,22 @@ export async function verifyGrantBinding(args: {
   owner: `0x${string}`;
   smartAccount: `0x${string}`;
   chainId: number;
+  /**
+   * WHICH WALLET THE CLAIM IS FOR, AND IT IS IN THE SIGNED TEXT. A Perps claim
+   * signs "Account purpose: perps" (core bindingMessage); a Spot claim signs
+   * the text it always signed. The text is rebuilt with THIS, so a signature
+   * made over one wallet's claim recovers to nobody when it is offered for the
+   * other: a Spot binding replayed onto a Perps grant, or the other way round,
+   * is refused here before its nonce is spent.
+   *
+   * REQUIRED, with no default, as the stores take the wallet. A caller that
+   * forgot it would rebuild the Spot text for every claim, and a Spot
+   * signature would then verify as a Perps claim: the replay this exists to
+   * stop. The route passes the wallet the request names, which the grant has
+   * already been checked to agree with. Anything that names no wallet is
+   * refused, never read as Spot.
+   */
+  purpose: GrantPurpose;
   /** Required by `legacy-wallet-owner-v1`; absent under `privy-did-owner-v1`. */
   walletSignature?: `0x${string}`;
   ownerSignature: `0x${string}`;
@@ -292,6 +310,11 @@ export async function verifyGrantBinding(args: {
         : ("unrecognised" as BindingVersion);
   if (!isBindingVersion(version)) {
     return { ok: false, why: "this grant's binding version is not one this deployment verifies" };
+  }
+  // Refused before any signature is recovered or any nonce is read, as an
+  // unknown version is: guessing a wallet here is guessing which text was signed.
+  if (!isGrantPurpose(args.purpose)) {
+    return { ok: false, why: "this claim names a wallet this deployment does not know" };
   }
   const now = args.now ?? Date.now();
 
@@ -338,6 +361,7 @@ export async function verifyGrantBinding(args: {
       owner: args.owner,
       smartAccount: args.smartAccount,
       chainId: args.chainId,
+      purpose: args.purpose,
       did: args.verifiedDid,
     });
     let privyOwner: `0x${string}`;
@@ -381,6 +405,7 @@ export async function verifyGrantBinding(args: {
     owner: args.owner,
     smartAccount: args.smartAccount,
     chainId: args.chainId,
+    purpose: args.purpose,
   });
 
   let walletSigner: `0x${string}`;

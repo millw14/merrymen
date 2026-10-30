@@ -21,15 +21,57 @@
  * worker closes the old rows into a new accounting epoch and clears only the
  * simulated book and the caches derived from it. There is no request shape that
  * reaches a live agent's history.
+ *
+ * EITHER WALLET'S PRACTICE BOOK, NAMED BY THE REQUEST (`?wallet=`; absent is
+ * Spot, exactly as the phones send it), and never the other's: the account is
+ * resolved in the SAME wallet the reset is queued for (agent-for.ts and
+ * start-over.ts queuePaperReset take the one name), so a Perps reset is a row
+ * bound to the Perps account, which only the Perps worker is handed, or a file
+ * in the Perps home, which only it drains. That worker clears its practice
+ * perp book under its lane's lock (worker index.ts runPaperReset, perps/lane.ts
+ * resetPaper), as a Spot worker clears its own book.
+ *
+ * A PERPS RESET ONLY WHERE A PERPS WORKER RUNS (perps-enabled.ts
+ * perpsWorkersRun, D1 and D12). Under any other MERRYMEN_PERPS its worker
+ * takes no command (hosted it is not running; self-hosted one started by hand
+ * claims none, D19); a reset queued then would only wait, unclaimed, inside
+ * its deadline (below), and be answered expired, the book untouched, unless
+ * perps came back before it passed. So it is refused, and nothing is read or
+ * queued. What the refusal says of
+ * the book is perpsStoodDownBook's: frozen hosted, and self-hosted still
+ * managed by its own stops if a worker runs anyway.
+ *
+ * AND EVERY PERPS RESET CARRIES A DEADLINE: the Perps worker's order window
+ * (order-ceiling.ts orderTtlFor, the window its exits wait), because the
+ * refusal above only stops a reset asked for while perps are off. One asked
+ * for at paper and still waiting when the operator stands perps down would
+ * otherwise run whenever they came back, wiping a book days after the owner
+ * asked. Past its window the worker answers it expired and touches nothing
+ * (start-over.ts queuePaperReset). Spot's reset is queued as it always was.
+ *
+ * NOR, HOSTED, WHILE THE PERPS BOOK IS HELD: one that could not be restored
+ * starts no worker, and nothing honours a Perps reset while it is held (the
+ * held Spot book's reset is the owner's way out; held-reset.ts is Spot's). So
+ * queuePaperReset reads the hold the orchestrator recorded and answers 409,
+ * with nothing queued, rather than "queued" for a worker that cannot start.
+ * Nor before the Perps worker has reported its book (perps-book-reported.ts):
+ * a reset queued ahead of its first start would stop that start (409 too).
+ *
+ * Start over (/api/grants/discard) stays the Spot wallet's: it discards the
+ * Spot grant, and the kill (which it is) already stops the Perps wallet.
  */
 import { NextResponse } from "next/server";
-import { isHostedMode } from "@merrymen/core";
+import { isHostedMode, type GrantPurpose } from "@merrymen/core";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { orderTtlFor } from "@/lib/order-ceiling";
 import { queuePaperReset } from "@/lib/start-over";
+import { perpsStoodDownBook, perpsWalletRefused, perpsWorkersRun } from "@/lib/perps-enabled";
+import { walletUnknown } from "@/lib/route-guard";
+import { readWalletParam } from "@/lib/wallet-param";
 
 export const dynamic = "force-dynamic";
 
-const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
+const agentFor = (req: Request, wallet: GrantPurpose) => (isHostedMode() ? hostedAgentFor(req, wallet) : diskAgent(wallet));
 
 /**
  * The practice reset on its own, as the iOS and Android apps ask for it. The
@@ -38,9 +80,16 @@ const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskA
  * /api/grants/discard to do both (lib/start-over.ts).
  */
 export async function POST(req: Request) {
-  const agent = await agentFor(req);
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("No practice reset was queued.");
+  if (wallet === "perps" && !perpsWorkersRun()) {
+    return perpsWalletRefused(`No practice reset was queued. ${perpsStoodDownBook(isHostedMode())}`);
+  }
+  const agent = await agentFor(req, wallet);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-  const queued = await queuePaperReset(isHostedMode(), agent);
+  const hosted = isHostedMode();
+  const deadline = wallet === "perps" ? { expiresAt: Date.now() + (await orderTtlFor(req, hosted, wallet)) } : {};
+  const queued = await queuePaperReset(hosted, agent, wallet, deadline);
   if (!queued.ok) return NextResponse.json({ error: queued.error }, { status: queued.status ?? 503 });
-  return NextResponse.json({ id: queued.id, queued: true });
+  return NextResponse.json({ id: queued.id, queued: true, ...(queued.expiresAt !== undefined ? { expiresAt: queued.expiresAt } : {}) });
 }

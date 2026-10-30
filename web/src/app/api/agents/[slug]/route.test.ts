@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import ts from "typescript";
 import { NextResponse } from "next/server";
+import { walletNotSupported } from "@/lib/route-guard";
 
 function handler(reads: { readAgent: (slug: string) => Promise<unknown>; readAgentSummary: (slug: string) => Promise<unknown>; readTheses: (opts: unknown) => Promise<unknown> }) {
   const source = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
@@ -10,6 +11,7 @@ function handler(reads: { readAgent: (slug: string) => Promise<unknown>; readAge
   const exports: Partial<typeof import("./route")> = {};
   const require = (name: string) => {
     if (name === "next/server") return { NextResponse };
+    if (name === "@/lib/route-guard") return { walletNotSupported };
     if (name === "@/lib/read-agent") return reads;
     if (name === "@/lib/read-theses") return reads;
     throw new Error(`Unexpected route dependency: ${name}`);

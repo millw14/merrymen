@@ -50,6 +50,7 @@ import { NextResponse } from "next/server";
 import { pimlicoBundlerUrl, robinhoodChain, robinhoodTestnet, ENTRYPOINT } from "@merrymen/core";
 import { readTicket } from "@/lib/recovery-ticket";
 import { isRecoveryShape, isPermissionRevocationShape } from "@/lib/recovery-shape";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 
@@ -154,6 +155,8 @@ function refuse(id: unknown, message: string, code = -32_099) {
 const bad = (status: number, message: string) => NextResponse.json({ error: message }, { status });
 
 export async function POST(req: Request, ctx: { params: Promise<{ chainId: string }> }) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const chainId = Number((await ctx.params).chainId);
   if (!KNOWN_CHAINS.has(chainId)) return bad(400, "unknown chain");
 

@@ -20,6 +20,7 @@ import {
   CONTROLS_ARMED_FILE, LEGACY_EVENTS_BOT, PAUSED_FILE, RECORDED_DURING_UPGRADE,
   armOwnerControls, foldRecoveryControls, readControlsEvidence, readLegacyPause, readRecoveryControls, type KillForward,
 } from "./recovery-reply-arm";
+import { recordPerpsWallet } from "./perps-wallets";
 import { readDurablePause } from "./telegram-store";
 
 /** #259's journal, as that PR creates it (recovery-reply-controls.ts RECOVERY_REPLY_CONTROLS_SCHEMA). */
@@ -287,6 +288,58 @@ describe("armOwnerControls", () => {
     h.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: paused by chat 42', ?)").run(h.account, NOW_SEC - 7200);
     h.raw.prepare("INSERT INTO decisions (id, agent_id, source, action, at) VALUES ('d1', ?, 'brain', 'buy', ?)").run(h.account, NOW_SEC - 3600);
     assert.ok(await readLegacyPause(h.shared, h.scope), "a Brain decision is made before the pause gate, so it proves no resume");
+  });
+
+  it("a Perps wallet's stop-close made while the pause stood is not the agent acting past it (docs/perps.md: its protective loop runs through a pause)", async () => {
+    const agentRow = (raw: DatabaseSync, account: string, owner: string) =>
+      raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status) VALUES (?, ?, ?, 4663, '{}', 1, 2, 'armed')")
+        .run(account, owner, addr(2));
+    const pauseThenPerpsClose = async (f: Awaited<ReturnType<typeof fixture>>, perps: `0x${string}`) => {
+      // The login's Perps wallet: its agents row carries the login as owner (D4), as every Perps grant's does,
+      // and the orchestrator recorded it before its worker first started (perps-wallets.ts).
+      agentRow(f.raw, perps, f.tenant);
+      await recordPerpsWallet(f.shared, { smartAccount: perps, owner: f.tenant, chainId: 4663, nowSec: NOW_SEC - 9000 });
+      f.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: paused by chat 42', ?)").run(f.account, NOW_SEC - 7200);
+      // Its protective loop closed at a stop while the pause stood: lane.ts stamps that close perp-route.
+      f.raw.prepare("INSERT INTO decisions (id, agent_id, source, action, provenance, at) VALUES ('p1', ?, 'perp-route', 'sell', 'hard-risk-exit', ?)")
+        .run(perps, NOW_SEC - 3600);
+    };
+    const f = await fixture(false);
+    await pauseThenPerpsClose(f, addr(0xc0de));
+    const legacy = await readLegacyPause(f.shared, f.scope);
+    assert.ok(legacy, "the Spot home's pause still stands");
+    assert.deepEqual(await armOwnerControls({ scope: f.scope, home: f.home, shared: f.shared, mayWrite: () => true, forwardKill: noKill, nowMs: NOW }),
+      { ok: true, paused: true, applied: [`legacy-restore ${legacy.eventId}`] }, "and is put back into the rebuilt Spot home");
+
+    // The same close on an account that is not a Perps wallet is the agent acting: the rule itself is unchanged.
+    const g = await fixture(false);
+    agentRow(g.raw, addr(0xc0df), g.tenant);
+    g.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: paused by chat 42', ?)").run(g.account, NOW_SEC - 7200);
+    g.raw.prepare("INSERT INTO decisions (id, agent_id, source, action, provenance, at) VALUES ('p1', ?, 'perp-route', 'sell', 'hard-risk-exit', ?)").run(addr(0xc0df), NOW_SEC - 3600);
+    assert.equal(await readLegacyPause(g.shared, g.scope), null);
+
+    // An owner with no Spot grant: the Perps account stands in as the scope's own (orchestrator.ts
+    // perpsOwnerControls). The pause recorded under an earlier Spot account still stands.
+    const h = await fixture(false);
+    agentRow(h.raw, h.account, h.tenant);
+    await pauseThenPerpsClose(h, addr(0xc0e0));
+    assert.ok(await readLegacyPause(h.shared, { ...h.scope, smartAccount: addr(0xc0e0) }), "the stand-in Perps account's close proves no resume either");
+    // With no Spot account at all, nothing is read, and there is no pause.
+    const k = await fixture(false);
+    agentRow(k.raw, addr(0xc0e1), k.tenant);
+    await recordPerpsWallet(k.shared, { smartAccount: addr(0xc0e1), owner: k.tenant, chainId: 4663, nowSec: NOW_SEC - 9000 });
+    // Postgres refuses an empty IN list, which sqlite accepts: asked as Postgres would answer, so no empty list is ever sent.
+    const asPostgres: Db = { ...k.shared, prepare: (sql: string) => {
+      if (/IN \(\s*\)/.test(sql)) throw new Error('syntax error at or near ")"');
+      return k.shared.prepare(sql);
+    } };
+    assert.equal(await readLegacyPause(asPostgres, { ...k.scope, smartAccount: addr(0xc0e1) }), null);
+
+    // A perps_wallets table that cannot be read is not "no Perps wallets": the read throws, and the arm holds.
+    const m = await fixture(false);
+    m.raw.exec("CREATE TABLE perps_wallets (account TEXT)");
+    m.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: paused by chat 42', ?)").run(m.account, NOW_SEC - 7200);
+    await assert.rejects(readLegacyPause(m.shared, m.scope), /smart_account/);
   });
 
   it("a confirmed /kill is forwarded, and its receipt is written only after honourKill returns", async () => {

@@ -46,6 +46,32 @@ test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing 
       assert.deepEqual(await tables(), [], "the kill wrote no perps schema");
     });
 
+    await t.test("a Perps settings READ before any Perps write makes no table either: get, getVersioned, listTenants and remove answer empty by a catalog look", async () => {
+      // GET /api/settings?wallet=perps is answered whatever MERRYMEN_PERPS says
+      // (D1), and every Perps save reads first. These went through client(),
+      // which makes every table it names, so a signed-in login's read made
+      // perps_tenant_settings (and the holder tables) on a fleet that had
+      // never had a Perps wallet.
+      const store = new PgSettingsStore(scopedUrl, "perps");
+      assert.equal(await store.get(T), null);
+      assert.deepEqual(await store.getVersioned(T), { settings: null, version: null });
+      assert.deepEqual(await store.listTenants(), []);
+      await store.remove(T);
+      assert.deepEqual(await tables(), [], "no read wrote any schema");
+      // NO ANSWER OF "ABSENT" IS FINAL: another service's first write (the
+      // web's save, read by the orchestrator) makes the table, and this same
+      // store's next read finds the row.
+      const otherService = new PgSettingsStore(scopedUrl, "perps");
+      await otherService.put(T, { perpsMaxLeverage: 2 });
+      assert.ok((await tables()).includes("perps_tenant_settings"), "made by the write");
+      assert.deepEqual(await store.get(T), { perpsMaxLeverage: 2 });
+      assert.deepEqual(await store.listTenants(), [T]);
+      const read = await store.getVersioned(T);
+      assert.equal(await store.putIfUnchanged(T, { perpsMaxLeverage: 3 }, read.version), true);
+      await store.remove(T);
+      assert.equal(await otherService.get(T), null);
+    });
+
     await t.test("perps on: switched off, every other setting kept, still sealed", async () => {
       const store = new PgSettingsStore(scopedUrl, "perps");
       await store.put(T, OWNER);
@@ -82,6 +108,35 @@ test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing 
       });
       assert.equal(await disablePaperPerpsForKill(T, racing), "disabled");
       assert.deepEqual(await store.get(T), { ...OWNER, perpsMarkets: ["ETH-PERP"], perpsEnabled: false });
+    });
+
+    await t.test("the other order, a save that read before the kill: its compare and swap misses, and the kill's off stands", async () => {
+      const { readSettingsVersioned, putSettingsIfUnchanged } = await import("./settings-store");
+      const store = new PgSettingsStore(scopedUrl, "perps");
+      await store.put(T, OWNER);
+      // The owner's save reads, the kill lands, then the save writes the blob it read.
+      const read = await readSettingsVersioned(store, T);
+      assert.deepEqual(read.settings, OWNER);
+      assert.equal(await disablePaperPerpsForKill(T, store), "disabled");
+      assert.equal(await putSettingsIfUnchanged(store, T, { ...OWNER, perpsMaxLeverage: 3 }, read.version), false, "missed: the kill wrote in between");
+      assert.deepEqual(await store.get(T), { ...OWNER, perpsEnabled: false }, "nothing from the stale save was written");
+      // Read again, it lands, and only over that read.
+      const again = await readSettingsVersioned(store, T);
+      assert.equal(await putSettingsIfUnchanged(store, T, { ...again.settings, perpsMaxLeverage: 3 }, again.version), true);
+      assert.deepEqual(await store.get(T), { ...OWNER, perpsEnabled: false, perpsMaxLeverage: 3 });
+      assert.equal(await putSettingsIfUnchanged(store, T, { ...OWNER }, again.version), false, "a version is good for one write");
+    });
+
+    await t.test("nothing stored: the first save makes the row, and a second save that also read nothing misses", async () => {
+      const { readSettingsVersioned, putSettingsIfUnchanged } = await import("./settings-store");
+      const store = new PgSettingsStore(scopedUrl, "perps");
+      const U = "0x00000000000000000000000000000000000000b2" as const;
+      const first = await readSettingsVersioned(store, U);
+      const second = await readSettingsVersioned(store, U);
+      assert.deepEqual([first.settings, first.version, second.version], [null, null, null]);
+      assert.equal(await putSettingsIfUnchanged(store, U, { perpsMaxLeverage: 2 }, first.version), true);
+      assert.equal(await putSettingsIfUnchanged(store, U, { perpsMaxLeverage: 5 }, second.version), false);
+      assert.deepEqual(await store.get(U), { perpsMaxLeverage: 2 });
     });
 
     await t.test("the Spot wallet's store refuses: perps live only in the Perps wallet's settings", async () => {

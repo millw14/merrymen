@@ -207,7 +207,7 @@ export function RecoverPanelView({
       // actually put it.
       const saved = (() => {
         try {
-          return loadGrant();
+          return loadGrant("spot");
         } catch {
           return null;
         }
@@ -227,7 +227,7 @@ export function RecoverPanelView({
     // comes from what the wall actually covers rather than the builtin floor.
     const saved = (() => {
       try {
-        return listSavedWallets().find(
+        return listSavedWallets("spot").find(
           (w) => (w.ownerKey ?? "").toLowerCase() === key.toLowerCase(),
         );
       } catch {

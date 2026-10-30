@@ -16,7 +16,9 @@
  *   - settings already hold a name → the owner chose it; keep it.
  *   - the tenant has held an account before → not new. An empty setting does
  *     not mean nobody named it: a chat rename lives only in the soul, and the
- *     reconcile would stamp this name over it.
+ *     reconcile would stamp this name over it. A SPOT account: a Perps wallet
+ *     is not the agent (docs/perps.md rule 17), so one on record never makes
+ *     the Spot agent look re-granted.
  *   - the ledger already has a row for this account → not new either; that is
  *     an account from before the identity store, with no record to say so.
  *   - any of those three could not be read → unread, so no write.
@@ -43,6 +45,17 @@ export interface FirstNameInputs {
   };
   /** True when the ledger already has a row for the account; null when unread. */
   ledgerHasAgent(account: string): Promise<boolean | null>;
+  /**
+   * The accounts on record as Perps wallets (worker/src/perps-wallets.ts),
+   * lowercased, or null when that record could not be read. Left out of the
+   * "held an account before" count, so the count is Spot's alone.
+   *
+   * ABSENT OR UNREAD COUNTS EVERY PRIOR ACCOUNT, which is today's answer and
+   * the safe direction: it can only make an agent "not new", never name one.
+   * The grants route never adds a Perps account to an identity (decision D2),
+   * so this is a backstop for one that got there some other way.
+   */
+  perpsWallets?(): Promise<ReadonlySet<string> | null>;
 }
 
 export type FirstNameOutcome =
@@ -53,7 +66,15 @@ export async function nameNewAgent(i: FirstNameInputs): Promise<FirstNameOutcome
   const name = agentNameForSlug(i.slug);
   if (!name) return { skipped: "no-slug" };
   if (i.prior === undefined) return { skipped: "unread" };
-  if (i.prior && i.prior.accounts.length > 0) return { skipped: "not-new" };
+  if (i.prior && i.prior.accounts.length > 0) {
+    let perps: ReadonlySet<string> | null = null;
+    try {
+      perps = (await i.perpsWallets?.()) ?? null;
+    } catch {
+      perps = null;
+    }
+    if (i.prior.accounts.some((a) => !perps?.has(a.toLowerCase()))) return { skipped: "not-new" };
+  }
 
   let stored: MerrymenSettings | null;
   try {
@@ -128,6 +149,7 @@ export async function mintAndNameAgent(i: {
   identities: () => IdentityStoreLike;
   settings: FirstNameInputs["settings"];
   ledgerHasAgent: FirstNameInputs["ledgerHasAgent"];
+  perpsWallets?: FirstNameInputs["perpsWallets"];
 }): Promise<{ slug: string | null; naming: FirstNameOutcome | null }> {
   let prior: { accounts: readonly string[] } | null | undefined;
   try {
@@ -152,6 +174,7 @@ export async function mintAndNameAgent(i: {
       prior,
       settings: i.settings,
       ledgerHasAgent: i.ledgerHasAgent,
+      perpsWallets: i.perpsWallets,
     });
     if ("named" in naming) console.log(`[grants] a new agent with no name is called ${naming.named}`);
     return { slug, naming };

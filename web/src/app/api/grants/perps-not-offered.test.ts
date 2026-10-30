@@ -6,6 +6,11 @@
  * exactly as a perps-off server refuses a new opt-in (403 perp-not-offered),
  * and nothing is written.
  *
+ * A Perps WALLET is a different thing (perps slice 5b): it may be made where
+ * MERRYMEN_PERPS is paper, but a paper one carries no Lighter key either, so
+ * the same refusal holds for it; where perps is off, it is refused as a wallet
+ * not offered before its block is even read.
+ *
  * Self-hosted first, against grant.json. Then hosted, through the real route
  * with a real signed-in tenant and a real owner co-signature, like
  * canonical-wall.test.ts: the refusal must land before the single-use nonce is
@@ -21,7 +26,7 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
 import { bindingMessage, carriesOwnerKey, type StoredGrant } from "@merrymen/core";
 
-const saved = { home: process.env.MERRYMEN_HOME, hosted: process.env.MERRYMEN_HOSTED, grant: process.env.MERRYMEN_GRANT_FILE };
+const saved = { home: process.env.MERRYMEN_HOME, hosted: process.env.MERRYMEN_HOSTED, grant: process.env.MERRYMEN_GRANT_FILE, perps: process.env.MERRYMEN_PERPS };
 let home = "";
 let POST: (req: Request) => Promise<Response>;
 const A = "0x00000000000000000000000000000000000000a1";
@@ -32,10 +37,11 @@ before(async () => {
   process.env.MERRYMEN_HOME = home;
   delete process.env.MERRYMEN_HOSTED;
   delete process.env.MERRYMEN_GRANT_FILE;
+  delete process.env.MERRYMEN_PERPS;
   ({ POST } = await import("./route"));
 });
 after(() => {
-  for (const [k, v] of [["MERRYMEN_HOME", saved.home], ["MERRYMEN_HOSTED", saved.hosted], ["MERRYMEN_GRANT_FILE", saved.grant]] as const) {
+  for (const [k, v] of [["MERRYMEN_HOME", saved.home], ["MERRYMEN_HOSTED", saved.hosted], ["MERRYMEN_GRANT_FILE", saved.grant], ["MERRYMEN_PERPS", saved.perps]] as const) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
@@ -112,6 +118,29 @@ describe("POST /api/grants refuses perps until the intake slice lands", () => {
     assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
     assert.ok(existsSync(grantFile()));
   });
+
+  const KEPT = JSON.stringify({ smartAccount: "0x00000000000000000000000000000000000000b2" }) + "\n";
+  // A PERPS WALLET'S GRANT, both ways the ceiling can stand. Nothing is written
+  // in either: not grant.json, and no Perps home.
+  const perpsWallet = (g: Record<string, unknown>) =>
+    POST(new Request("http://localhost/api/grants?wallet=perps", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...g, purpose: "perps", grantFeatures: [] }) }));
+  for (const [ceiling, code] of [["paper", "perp-not-offered"], [undefined, "perps-wallet-not-offered"]] as const) {
+    it(`a Perps wallet carrying a Lighter key, MERRYMEN_PERPS ${ceiling ?? "unset"}: 403 ${code}, nothing written`, async () => {
+      if (ceiling) process.env.MERRYMEN_PERPS = ceiling;
+      try {
+        writeFileSync(grantFile(), KEPT);
+        for (const g of [{ ...base, perp }, { ...base, perpRecovery }]) {
+          const res = await perpsWallet(g);
+          assert.equal(res.status, 403);
+          assert.equal(((await res.json()) as { code?: string }).code, code);
+        }
+        assert.equal(readFileSync(grantFile(), "utf8"), KEPT);
+        assert.equal(existsSync(path.join(home, "accounts")), false);
+      } finally {
+        delete process.env.MERRYMEN_PERPS;
+      }
+    });
+  }
 });
 
 describe("hosted: the refusal lands before the nonce, the ownership read and the store", () => {

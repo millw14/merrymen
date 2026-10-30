@@ -26,9 +26,12 @@
  * NODE-ONLY (node:crypto, node:fs, pg). Imported by the web API and the worker,
  * never the browser bundle.
  */
+import { readFileSync } from "node:fs";
 import { link, mkdir, open, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
+import { writeFileAtomicSync } from "./atomic-write";
+import { withSettingsFileLock } from "./settings-file-lock";
 import { merrymenHome } from "./home";
 import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
 import { isGrantPurpose, type GrantPurpose, type MerrymenSettings } from "../../packages/core/src/index";
@@ -329,6 +332,31 @@ interface StoredSettingsRecord {
   updatedAt: number;
 }
 
+/**
+ * A tenant's settings AS READ FOR A WRITE THAT MUST NOT LAND OVER A CHANGE IT
+ * NEVER SAW (putSettingsIfUnchanged): the settings, or null when none are
+ * stored, and `version`, the stored text exactly as it was read (null: nothing
+ * stored). Opaque to the caller, which only hands it back.
+ */
+export interface VersionedSettings {
+  settings: MerrymenSettings | null;
+  version: string | null;
+}
+
+/** The file one record is written as. */
+const recordText = (tenant: `0x${string}`, settings: MerrymenSettings): string =>
+  JSON.stringify({ tenant, sealed: seal(settings), updatedAt: Math.floor(Date.now() / 1000) } satisfies StoredSettingsRecord, null, 2);
+
+/** A file's text, or null when there is none. Anything but ENOENT throws: an unreadable file is not an absent one. */
+function readTextOrNull(file: string): string | null {
+  try {
+    return readFileSync(file, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
 // ── file backend ─────────────────────────────────────────────────────────────
 
 export class FileSettingsStore implements SettingsStore {
@@ -374,13 +402,48 @@ export class FileSettingsStore implements SettingsStore {
   async remove(tenant: `0x${string}`): Promise<void> {
     await rm(this.file(tenant), { force: true });
   }
-  /** The kill's paper stand-down (disablePaperPerpsForKill). A missing file is "none", and nothing is made. */
+  /** The record as stored, its text the version (readSettingsVersioned). Throws as get does. */
+  async getVersioned(tenant: `0x${string}`): Promise<VersionedSettings> {
+    let raw: string;
+    try {
+      raw = await readFile(this.file(tenant), "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return { settings: null, version: null };
+      throw e;
+    }
+    return { settings: unseal((JSON.parse(raw) as StoredSettingsRecord).sealed), version: raw };
+  }
+  /**
+   * putSettingsIfUnchanged on disk: the record replaced only if its text is
+   * still `version` (null: still absent). The comparison and atomic rename
+   * hold the kill's cross-process file lock, so another process cannot switch
+   * perps off between the comparison and the stale save's rename.
+   */
+  async putIfUnchanged(tenant: `0x${string}`, settings: MerrymenSettings, version: string | null): Promise<boolean> {
+    const file = this.file(tenant);
+    return withSettingsFileLock(file, () => {
+      if (readTextOrNull(file) !== version) return false;
+      writeFileAtomicSync(file, recordText(tenant, settings), 0o600);
+      return true;
+    });
+  }
+  /**
+   * The kill's paper stand-down (disablePaperPerpsForKill). A missing file is
+   * "none", and nothing is made. The same cross-process lock as
+   * putIfUnchanged keeps a stale save from overwriting this off.
+   */
   async disablePerpsForKill(tenant: `0x${string}`): Promise<"disabled" | "none"> {
     if (this.wallet !== "perps") throw new Error("Only the Perps wallet's settings hold perps.");
-    const current = await this.get(tenant);
-    if (current?.perpsEnabled !== true) return "none";
-    await this.put(tenant, { ...current, perpsEnabled: false });
-    return "disabled";
+    const file = this.file(tenant);
+    if (readTextOrNull(file) === null) return "none";
+    return withSettingsFileLock(file, () => {
+      const raw = readTextOrNull(file);
+      if (raw === null) return "none";
+      const current = unseal((JSON.parse(raw) as StoredSettingsRecord).sealed);
+      if (current.perpsEnabled !== true) return "none";
+      writeFileAtomicSync(file, recordText(tenant, { ...current, perpsEnabled: false }), 0o600);
+      return "disabled";
+    });
   }
 
   /**
@@ -884,6 +947,12 @@ async function createIfAbsent(c: PgClientLike, ddl: string): Promise<void> {
   }
 }
 
+/** Does this table exist, by a catalog read that takes no lock and writes nothing? (grant-store.ts tableExists) */
+async function settingsTableExists(c: PgClientLike, table: string): Promise<boolean> {
+  const { rows } = await c.query(`SELECT to_regclass($1) IS NOT NULL AS found`, [table]);
+  return rows[0]?.found === true;
+}
+
 /**
  * ALTER TABLE … ADD COLUMN, SAFE TO RUN AT EVERY START AND FROM TWO SERVICES.
  *
@@ -920,10 +989,35 @@ async function connectPg(url: string): Promise<PgClientLike> {
  * RUNTIME only (webpackIgnore) so the file backend builds with it absent; the DEK
  * is required, exactly as PgGrantStore. Gated on a live-Postgres integration test
  * before any funding deploy (docs/hosted-platform-plan.md).
+ *
+ * ONE TABLE PER WALLET, AND THE PERPS ONE MADE ONLY BY A PERPS WRITE. Spot's
+ * `tenant_settings` is made, as it always was, the first time the store is
+ * used. `perps_tenant_settings` is made by the first Perps write (put,
+ * putIfUnchanged) and by nothing else — a holder call goes through client()
+ * too, but holder claims are the login's and only the Spot store is asked
+ * for them (getSettingsStore("spot") in every caller): until then every
+ * Perps read — get, getVersioned, listTenants, remove — answers empty by a
+ * catalog look (to_regclass) on a connection that has run no DDL, exactly as
+ * PgGrantStore keeps `perps_grants` (its existing()). It used not to: every
+ * read went through client(), which makes every table it names, so a signed-in
+ * login's GET /api/settings?wallet=perps — answered whatever MERRYMEN_PERPS
+ * says (D1) — or an off-only PUT with nothing to turn off made the Perps table
+ * on a fleet that had never had a Perps wallet. Tables are never dropped, so
+ * that could not be taken back, and every kill after it went past its no-table
+ * look to a SELECT (disablePerpsForKill).
  */
 export class PgSettingsStore implements SettingsStore {
+  /** The one connection, opened: nothing is written by opening it (connection()). */
+  private opened: Promise<PgClientLike> | null = null;
+  /** That connection with every table made (client()). */
   private ready: Promise<PgClientLike> | null = null;
   private readonly table: (typeof WALLET_SETTINGS_TABLE)[GrantPurpose];
+  /**
+   * Is this wallet's table known to exist? Always for Spot, whose reads make
+   * it (client()); for Perps, once a catalog look found it or client() made
+   * it. Tables are never dropped, so yes is final.
+   */
+  private present: boolean;
   constructor(
     private url: string,
     readonly wallet: GrantPurpose,
@@ -931,7 +1025,22 @@ export class PgSettingsStore implements SettingsStore {
   ) {
     if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
     this.table = WALLET_SETTINGS_TABLE[wallet];
+    this.present = wallet === "spot";
     requireDek();
+  }
+  /**
+   * The one connection, opened and nothing more: no table is made on it here.
+   * A failed open is forgotten, so the next call opens afresh; concurrent
+   * first callers share one attempt.
+   */
+  private connection(): Promise<PgClientLike> {
+    if (!this.opened) {
+      const started = (this.opened = this.connect(this.url));
+      started.catch(() => {
+        if (this.opened === started) this.opened = null;
+      });
+    }
+    return this.opened;
   }
   /**
    * The one connection, with every table made — once, and only once it WORKED.
@@ -941,19 +1050,26 @@ export class PgSettingsStore implements SettingsStore {
    * later call on the store for the life of the process — in the web, every
    * settings read, holder link and tier. Concurrent first callers still share
    * one attempt.
+   *
+   * For the Perps wallet this is a WRITE's way in: it makes the Perps table.
+   * Its reads go through reading(), which never comes here.
    */
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
       const started = (this.ready = (async () => {
-        const c = await this.connect(this.url);
+        const opening = this.connection();
+        const c = await opening;
         try {
           await this.makeTables(c);
         } catch (e) {
-          // CLOSED, so a start that keeps failing (a permission, a lost
-          // race every time) cannot pile up one open connection per call.
+          // CLOSED, and forgotten with it, so a start that keeps failing (a
+          // permission, a lost race every time) cannot pile up one open
+          // connection per call, and the next call opens a fresh one.
+          if (this.opened === opening) this.opened = null;
           void Promise.resolve((c as { end?: () => unknown }).end?.()).catch(() => {});
           throw e;
         }
+        this.present = true;
         return c;
       })());
       started.catch(() => {
@@ -961,6 +1077,20 @@ export class PgSettingsStore implements SettingsStore {
       });
     }
     return this.ready;
+  }
+  /**
+   * WHERE A READ GOES: Spot's through client(), exactly as before. The Perps
+   * wallet's on the bare connection, after a catalog look that takes no lock
+   * and writes nothing, until its table is known to exist; null while it does
+   * not, which every reader answers as "nothing stored". Asked again on every
+   * read until it is there: the table is made by another service's write (the
+   * web's save, read by the orchestrator), so no answer of "absent" is final.
+   */
+  private async reading(): Promise<PgClientLike | null> {
+    if (this.wallet === "spot") return this.client();
+    const c = await this.connection();
+    if (!this.present) this.present = await settingsTableExists(c, this.table);
+    return this.present ? c : null;
   }
   private async makeTables(c: PgClientLike): Promise<void> {
     await createIfAbsent(
@@ -1024,18 +1154,60 @@ export class PgSettingsStore implements SettingsStore {
     );
   }
   async get(tenant: `0x${string}`): Promise<MerrymenSettings | null> {
-    const c = await this.client();
+    const c = await this.reading();
+    if (!c) return null;
     const { rows } = await c.query(`SELECT sealed FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
     return rows[0] ? unseal(String(rows[0].sealed)) : null;
   }
   async listTenants(): Promise<`0x${string}`[]> {
-    const c = await this.client();
+    const c = await this.reading();
+    if (!c) return [];
     const { rows } = await c.query(`SELECT tenant FROM ${this.table}`);
     return rows.map((r) => String(r.tenant) as `0x${string}`);
   }
+  /** Nothing to remove where the table was never made, and so nothing is made to remove it from. */
   async remove(tenant: `0x${string}`): Promise<void> {
-    const c = await this.client();
+    const c = await this.reading();
+    if (!c) return;
     await c.query(`DELETE FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
+  }
+  /**
+   * The row as stored, its sealed text the version (readSettingsVersioned): seal() draws a fresh IV, so no two writes share one.
+   * No Perps table yet is nothing stored, version null: the write that follows makes the table, and its INSERT … ON CONFLICT
+   * DO NOTHING misses if another service made table and row in between, so the save reads again (putIfUnchanged).
+   */
+  async getVersioned(tenant: `0x${string}`): Promise<VersionedSettings> {
+    const c = await this.reading();
+    if (!c) return { settings: null, version: null };
+    const { rows } = await c.query(`SELECT sealed FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
+    if (!rows[0]) return { settings: null, version: null };
+    const sealed = String(rows[0].sealed);
+    return { settings: unseal(sealed), version: sealed };
+  }
+  /**
+   * putSettingsIfUnchanged in one statement: the row replaced only while it
+   * still holds `version` (the kill's own compare and swap, below), or made
+   * only while there is none. A write that landed after the read — the
+   * kill's, from another connection or another service, which takes no save
+   * lock — makes this miss, and nothing is written.
+   */
+  async putIfUnchanged(tenant: `0x${string}`, settings: MerrymenSettings, version: string | null): Promise<boolean> {
+    const c = await this.client();
+    const t = tenant.toLowerCase();
+    const at = Math.floor(Date.now() / 1000);
+    const { rows } =
+      version === null
+        ? await c.query(
+            `INSERT INTO ${this.table} (tenant, sealed, updated_at) VALUES ($1, $2, $3) ON CONFLICT (tenant) DO NOTHING RETURNING tenant`,
+            [t, seal(settings), at],
+          )
+        : await c.query(`UPDATE ${this.table} SET sealed = $1, updated_at = $2 WHERE tenant = $3 AND sealed = $4 RETURNING tenant`, [
+            seal(settings),
+            at,
+            t,
+            version,
+          ]);
+    return rows.length === 1;
   }
   /**
    * The kill's paper stand-down (disablePaperPerpsForKill), ON A CONNECTION OF
@@ -1045,7 +1217,9 @@ export class PgSettingsStore implements SettingsStore {
    * blob is sealed, so the field cannot be set in SQL: read, unseal, reseal and
    * write it back only if it is still the blob that was read (compare and
    * swap). An owner's save landing in between makes the write miss, and it is
-   * read again, so neither that save nor the kill is lost.
+   * read again, so neither that save nor the kill is lost. A save that READ
+   * before the kill and writes after it is the other order, and the save's own
+   * compare and swap (putIfUnchanged) is what keeps the kill there.
    */
   async disablePerpsForKill(tenant: `0x${string}`): Promise<"disabled" | "none"> {
     if (this.wallet !== "perps") throw new Error("Only the Perps wallet's settings hold perps.");
@@ -1287,6 +1461,48 @@ export async function disablePaperPerpsForKill(
   if (current?.perpsEnabled !== true) return "none";
   await store.put(tenant, { ...current, perpsEnabled: false });
   return "disabled";
+}
+
+/**
+ * A tenant's settings with the version a later putSettingsIfUnchanged
+ * compares against. Throws as get does: unreadable is never empty.
+ */
+export async function readSettingsVersioned(store: SettingsStore, tenant: `0x${string}`): Promise<VersionedSettings> {
+  if (store instanceof PgSettingsStore || store instanceof FileSettingsStore) return store.getVersioned(tenant);
+  // A stand-in a test installed (useSettingsStoreForTest): its own get, versioned by what it returned.
+  const settings = await store.get(tenant);
+  return { settings, version: settings === null ? null : JSON.stringify(settings) };
+}
+
+/**
+ * WRITE ONLY OVER WHAT WAS READ. Replace a tenant's settings with `settings`
+ * if what is stored is still the `version` readSettingsVersioned returned;
+ * false, with nothing written, when anything wrote in between.
+ *
+ * FOR A WRITER THAT IS NOT THE ONLY ONE. The settings PUT takes turns with
+ * other saves under the save lock (lib/telegram-claims.ts), but the kill skips
+ * that lock and turns a Perps wallet's
+ * `perpsEnabled` off in the same blob (disablePaperPerpsForKill). A save that
+ * read before the kill and put its whole blob back after it switched practice
+ * perps on again under a kill that had said they were off. So the Perps save
+ * writes through this, and on a miss reads again and judges its body afresh.
+ *
+ * A stand-in store (a test's) is compared and written in two steps, which is
+ * not atomic; the real stores are. The file backend's kill and conditional
+ * save share a short OS lock with a one-second contention limit. PostgreSQL
+ * uses the stored version in its conditional update.
+ */
+export async function putSettingsIfUnchanged(
+  store: SettingsStore,
+  tenant: `0x${string}`,
+  settings: MerrymenSettings,
+  version: string | null,
+): Promise<boolean> {
+  if (store instanceof PgSettingsStore || store instanceof FileSettingsStore) return store.putIfUnchanged(tenant, settings, version);
+  const now = await store.get(tenant);
+  if ((now === null ? null : JSON.stringify(now)) !== version) return false;
+  await store.put(tenant, settings);
+  return true;
 }
 
 /** Test seam: drop the cached stores so a test can change the environment. */

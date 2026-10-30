@@ -74,7 +74,7 @@ export async function readPublicDecisionLifecycle(
         trades: life.trades.map((t) => publicTrade(t, bookPublic)),
         post: life.post && thesis.post ? { body: thesis.post, created_at: life.post.created_at } : null,
       };
-    });
+    }, "spot");
   } catch {
     // Missing, unpublished and unreadable decisions have the same public shape.
     return null;

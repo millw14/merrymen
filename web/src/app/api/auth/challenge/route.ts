@@ -12,11 +12,14 @@
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { challengeMessage, issueChallengeNonce, requestOrigin } from "@/lib/auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return new NextResponse("not found", { status: 404 });
   try {
     // Shared with the grant route, which verifies nonces this one issues — two

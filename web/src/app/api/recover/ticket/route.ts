@@ -38,18 +38,23 @@ import {
   robinhoodChain,
   robinhoodTestnet,
 } from "@merrymen/core";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 
 const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const origin = requestOrigin(req);
   const nonce = issueChallengeNonce(origin);
   return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce) });
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const origin = requestOrigin(req);
 
   let body: { nonce?: unknown; signature?: unknown; chainId?: unknown };

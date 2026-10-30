@@ -32,6 +32,7 @@ import { getSettingsStore } from "@merrymen/settings-store";
 import { sharedRead } from "@/lib/read-discoveries";
 import { usd } from "@/lib/format";
 import { snipeEnergyAnswer } from "@/lib/energy-reserve";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -105,6 +106,8 @@ async function candidatesFor(tenant: `0x${string}` | null): Promise<SnipeCandida
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = isHostedMode() ? tenantOf(req) : null;
   if (isHostedMode() && !tenant) {
     return NextResponse.json({ error: "sign in first" }, { status: 401 });

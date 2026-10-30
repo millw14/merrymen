@@ -28,6 +28,7 @@
 import { NextResponse } from "next/server";
 import { getIdentityStore, SLUG_RE } from "@merrymen/identity-store";
 import { getImageStore, isImageKind } from "@merrymen/image-store";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 
@@ -44,6 +45,8 @@ export const runtime = "nodejs";
 const CACHE = "public, max-age=60, stale-while-revalidate=300";
 
 export async function GET(req: Request, { params }: { params: Promise<{ slug: string; kind: string }> }) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const { slug, kind } = await params;
   if (!SLUG_RE.test(slug)) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (!isImageKind(kind)) return NextResponse.json({ error: "not found" }, { status: 404 });

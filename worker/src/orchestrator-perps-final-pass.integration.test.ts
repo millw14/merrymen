@@ -108,8 +108,10 @@ const ownerAt = (n: number) => { const o = address(n); used.push(o); return o; }
 
 /**
  * The shared database, as the hosted fleet has it: ledger, mirror state, owner
- * controls. `onRecordRead` runs once, the first time anything reads the
- * perps_wallets record (not when the orchestrator writes it).
+ * controls. `onRecordRead` runs once, the first time the final pass reads an
+ * owner's Perps wallet from the perps_wallets record (perpsWalletOf), not when
+ * the orchestrator writes it, nor when the owner's controls read every Perps
+ * wallet to leave them out of a legacy pause (recovery-reply-arm.ts).
  */
 async function sharedDb(opts: { controls?: boolean; onRecordRead?: () => void } = {}) {
   const raw = new DatabaseSync(":memory:");
@@ -120,7 +122,7 @@ async function sharedDb(opts: { controls?: boolean; onRecordRead?: () => void } 
   let onRecordRead = opts.onRecordRead ?? null;
   const shared: typeof inner = {
     prepare(sql) {
-      if (onRecordRead && /perps_wallets/.test(sql) && !/INSERT|CREATE/.test(sql)) {
+      if (onRecordRead && /FROM perps_wallets WHERE owner/.test(sql)) {
         const f = onRecordRead;
         onRecordRead = null;
         f();

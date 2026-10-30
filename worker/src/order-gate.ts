@@ -22,6 +22,9 @@
  * worth more than a late yes, and the owner can ask again in a minute.
  */
 
+import type { GrantPurpose } from "../../packages/core/src/grant";
+import { readPerpExitOrder } from "./perps/owner-order";
+
 /**
  * What the tick that drains an order could read — handed to the drain whole.
  *
@@ -246,11 +249,51 @@ export function createTickBook(): TickBook {
  * another — a key-unsellable one, booked as capital leaving the book. A symbol
  * is a name anybody can launch a token under; a marker only one card writes is
  * a statement of intent.
+ *
+ * 'close-perp' and 'flatten-perps' are the owner's perpetual exits (perps/
+ * owner-order.ts), on the same rule: the marker routes them, never a `-PERP`
+ * symbol, and they go to the perp lane rather than to any submitter here.
  */
-export type OrderRoute = "energy" | "trade";
+export type OrderRoute = "energy" | "trade" | "close-perp" | "flatten-perps";
 
 export function orderRoute(args: Record<string, unknown> | undefined): OrderRoute {
-  return args?.purpose === "energy" ? "energy" : "trade";
+  const purpose = args?.purpose;
+  return purpose === "energy" || purpose === "close-perp" || purpose === "flatten-perps" ? purpose : "trade";
+}
+
+/** Is this route one of the owner's perpetual exits — the lane's, and never a Spot submitter's? */
+export function isPerpExitRoute(route: OrderRoute): route is "close-perp" | "flatten-perps" {
+  return route === "close-perp" || route === "flatten-perps";
+}
+
+/**
+ * WHICH ORDERS A WALLET'S WORKER TAKES FROM THE APP, or null when this one
+ * may go on to placeOrder. The sentence the owner reads otherwise; nothing is
+ * built or sent.
+ *
+ * One login has two wallets and each has its own worker (settings.ts
+ * workerWalletOf), and an order row is bound to ONE smart account, so the
+ * ferry only ever hands a worker its own wallet's orders. This is the worker's
+ * half of that, for the day an order lands in the wrong home anyway — a
+ * self-hosted file written by hand, a route that forgot its wallet:
+ *
+ *   PERPS takes the owner's perpetual exits and nothing else. A buy, a sell or
+ *   an energy buy would spend the perp book's collateral on tokens (policy.ts
+ *   perpsWalletRefusal refuses the intent again, and an energy report on this
+ *   wallet never says a buy is ready — energy.ts energyBuyOf).
+ *   SPOT holds no perpetual position, so an exit there has nothing to close
+ *   and must never be read as a sell of something else.
+ */
+export function walletOrderRefusal(wallet: GrantPurpose, route: OrderRoute): string | null {
+  if (wallet === "perps") {
+    if (isPerpExitRoute(route)) return null;
+    return route === "energy"
+      ? "This is your Perps wallet: it never buys energy — its USDG is perpetual collateral. Nothing was bought."
+      : "This is your Perps wallet: from the app it only closes perpetual positions. Place Spot orders from your Spot wallet. Nothing was sent.";
+  }
+  return isPerpExitRoute(route)
+    ? "Your Spot wallet holds no perpetual positions; close them from your Perps wallet. Nothing was sent."
+    : null;
 }
 
 /**
@@ -300,6 +343,19 @@ export async function placeOrder<R>(
   submit: (side: Side, symbol: string, size: number, route: OrderRoute) => Promise<R>,
 ): Promise<R | { ok: false; line: string }> {
   const no = (line: string) => ({ ok: false as const, line });
+  // AN OWNER'S PERPETUAL EXIT GOES FIRST, AND ONLY ITS OWN SHAPE IS JUDGED.
+  // It is reduce-only and sized by what is held, so nothing below has anything
+  // to say about it: the Spot market and book this tick read are not the perp
+  // book the lane re-reads under its own lock; pause stops ENTRIES, and the
+  // owner pressing Close is the opposite of an entry; and a ceiling on a typed
+  // order's size cannot size a close (docs/perps.md rule 8a: an exit is always
+  // attemptable). The wallet it may run on was judged before this
+  // (walletOrderRefusal), and the lane refuses again what it cannot close.
+  const exit = readPerpExitOrder(args ?? {});
+  if (exit) {
+    if ("error" in exit) return no(exit.error);
+    return submit(exit.order.side, exit.order.symbol, 0, exit.order.purpose);
+  }
   // ANSWERED, NOT STARVED. The tick's unreadable-market return sits a thousand
   // lines above the regular drain, so an order on such a tick used to be
   // skipped until it expired. It drains there now, with this flag set, and is

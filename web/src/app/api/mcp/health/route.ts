@@ -5,10 +5,13 @@
  * balancer or client backs off instead of hammering.
  */
 import { mcpHealth } from "@/mcp/health";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(): Promise<Response> {
+export async function GET(req: Request): Promise<Response> {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   return mcpHealth();
 }

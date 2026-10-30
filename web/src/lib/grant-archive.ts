@@ -10,9 +10,24 @@
  */
 import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { homePaths, liftKillPause, pauseForKeptGrant } from "@merrymen/home";
+import { liftKillPause, pauseForKeptGrant, purposeHome } from "@merrymen/home";
 import { fsyncDir, writeFileAtomic } from "@merrymen/atomic-write";
-import type { StoredGrant } from "@merrymen/core";
+import type { GrantPurpose, StoredGrant } from "@merrymen/core";
+
+/**
+ * A WALLET'S GRANT FILE, ITS ARCHIVE, AND THE HOME THEY SIT IN, self-hosted.
+ *
+ * `purposeHome` names the home: Spot's is MERRYMEN_HOME itself, so these are
+ * exactly the grant.json and grants/ every install has always had; Perps's is
+ * accounts/perps inside it, a complete home of its own (the same files
+ * worker/src/perps-kill.ts archives and removes). No default, as the stores
+ * take none: a caller names the wallet it means, and an unnamed one throws
+ * before any file is touched.
+ */
+function grantFiles(wallet: GrantPurpose): { home: string; grant: string; archive: string } {
+  const home = purposeHome(wallet);
+  return { home, grant: path.join(home, "grant.json"), archive: path.join(home, "grants") };
+}
 
 /** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
  * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
@@ -35,14 +50,15 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
  * replace and lose the copy. A same-account copy is replaced whole, never
  * truncated in place.
  *
- * Never throws. `failed` means a grant was there and no durable copy exists —
- * what that costs is the caller's decision (POST arms anyway; DELETE does not).
+ * Never throws for the files. `failed` means a grant was there and no durable
+ * copy exists — what that costs is the caller's decision (POST arms anyway;
+ * DELETE does not). `wallet` says whose grant.json (grantFiles); a wallet that
+ * names none throws, before anything is read.
  */
-export async function archiveCurrentGrant(): Promise<
+export async function archiveCurrentGrant(wallet: GrantPurpose): Promise<
   { kind: "archived"; account: string } | { kind: "nothing" } | { kind: "failed"; why: string }
 > {
-  const GRANT_FILE = homePaths.grant();
-  const ARCHIVE_DIR = homePaths.grantsArchive();
+  const { grant: GRANT_FILE, archive: ARCHIVE_DIR } = grantFiles(wallet);
   let raw: string;
   try {
     raw = await readFile(GRANT_FILE, "utf8");
@@ -75,20 +91,30 @@ export async function archiveCurrentGrant(): Promise<
 
 /** An owner key that cannot be kept must not be deleted by either web route. */
 export class GrantArchiveError extends Error {
-  constructor(why: string, public readonly paused: boolean) {
+  /** `archive` is the directory the owner must fix, as they would type it: Spot's, unless told otherwise. */
+  constructor(why: string, public readonly paused: boolean, archive = "~/.merrymen/grants/") {
     super(
       `The grant was NOT deleted: ${why}, and deleting it without a copy would lose your owner key for good. ` +
         (paused ? "Trading is paused instead. " : "Trading could not be paused either — stop the worker. ") +
-        "Fix ~/.merrymen/grants/ (disk space, permissions), then try again.",
+        `Fix ${archive} (disk space, permissions), then try again.`,
     );
     this.name = "GrantArchiveError";
   }
 }
 
-/** The self-hosted kill switch, shared by DELETE and Start over. */
-export async function removeSelfHostedGrant(): Promise<void> {
-  const kept = await archiveCurrentGrant();
-  if (kept.kind === "failed") throw new GrantArchiveError(kept.why, pauseForKeptGrant());
-  await rm(homePaths.grant(), { force: true });
-  liftKillPause();
+/**
+ * The self-hosted kill switch's grant half, shared by DELETE and Start over:
+ * `wallet`'s grant.json archived, then removed, then only a kill's pause lifted,
+ * all in that wallet's own home. Nothing of the other wallet's is touched. (A
+ * Perps KILL also turns that home's paper strategy off; that is
+ * worker/src/perps-kill.ts's stopLocalPerpsWallet, not this.)
+ */
+export async function removeSelfHostedGrant(wallet: GrantPurpose): Promise<void> {
+  const { home, grant } = grantFiles(wallet);
+  const kept = await archiveCurrentGrant(wallet);
+  if (kept.kind === "failed") {
+    throw new GrantArchiveError(kept.why, pauseForKeptGrant(home), wallet === "perps" ? "~/.merrymen/accounts/perps/grants/" : undefined);
+  }
+  await rm(grant, { force: true });
+  liftKillPause(home);
 }

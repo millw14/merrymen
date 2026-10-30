@@ -32,6 +32,7 @@ import {
 } from "@merrymen/core";
 import { ownerFromPrivateKey, planRecovery, recoverFunds } from "@merrymen/recover";
 import { errorText } from "../../../../../worker/src/redact-urls";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -87,7 +88,9 @@ const HOSTED_RECOVERY = {
 };
 
 /** Context for the active grant so the panel can render without asking for a key. */
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (isHostedMode()) return NextResponse.json({ hasStoredKey: false, ...HOSTED_RECOVERY });
   const [grant, settings] = await Promise.all([readGrant(), readSettings()]);
 
@@ -148,6 +151,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // HOSTED: never accept an owner key over the wire and never sweep server-side.
   // This is the fund-drain endpoint the audit flagged — a public URL where the
   // only guard was localhost. Closed by construction: the server has no key and

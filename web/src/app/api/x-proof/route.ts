@@ -36,6 +36,7 @@ import { isHostedMode } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { consumeChallengeNonce, issueChallengeNonce, requestOrigin, tenantOf } from "@/lib/auth";
 import { normaliseXHandle } from "@/lib/x-handle";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -87,6 +88,8 @@ function tweetIdFrom(raw: string): string | null {
 
 /** GET — the nonce to post, and the exact words to post it in. */
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) {
     return NextResponse.json(
@@ -112,6 +115,8 @@ interface Syndicated {
 
 /** POST — check the tweet, and store the proof if it holds. */
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) {
     return NextResponse.json({ error: "not signed in" }, { status: isHostedMode() ? 401 : 400 });
@@ -194,6 +199,8 @@ export async function POST(req: Request) {
 
 /** DELETE — unlink. Drops the proof AND the handle it vouched for. */
 export async function DELETE(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
   const store = getSettingsStore("spot");
@@ -205,6 +212,8 @@ export async function DELETE(req: Request) {
 
 /** PATCH — what is proven for this account right now. */
 export async function PATCH(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ handle: null, at: null });
   const stored = (await getSettingsStore("spot").get(tenant)) ?? {};

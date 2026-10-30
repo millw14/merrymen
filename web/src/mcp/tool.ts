@@ -174,7 +174,7 @@ export function setLedgerForTest(db: Db | null): void {
 /** The shared ledger for MCP code outside a tool call (the approval route), honouring the test seam. */
 export function readLedger<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
   const override = ledgerOverride;
-  return override ? fn(override) : withReadDb(fn);
+  return override ? fn(override) : withReadDb(fn, "spot");
 }
 
 /** Why an aborted call stops: the abort reason when it is ours (the timeout), else a timeout. */
@@ -217,7 +217,8 @@ export function makeContext(principal: Principal, traceId: string, signal: Abort
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const directory = deps.directory ?? agentDirectory();
   const override = ledgerOverride;
-  const readLedger = deps.ledger ?? (override ? <T>(fn: (db: Db | null) => Promise<T>) => fn(override) : withReadDb);
+  // The Spot wallet's ledger: the MCP tools read no other yet (Perps tools are slice 6's).
+  const readLedger = deps.ledger ?? (override ? <T>(fn: (db: Db | null) => Promise<T>) => fn(override) : <T>(fn: (db: Db | null) => Promise<T>) => withReadDb(fn, "spot"));
   const openMcp = deps.mcp ?? mcpDb;
   return {
     principal,

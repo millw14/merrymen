@@ -29,6 +29,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { withReadDb } from "@/lib/ledger";
 import { readFleetHeartbeats, type PublicHeartbeat } from "../../../../../../worker/src/fleet-heartbeat";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +56,8 @@ function authorized(req: Request, token: string): boolean {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const token = opsToken();
   if (!token) return new NextResponse(null, { status: 404, headers: NO_STORE });
   if (!authorized(req, token)) {
@@ -70,7 +73,7 @@ export async function GET(req: Request) {
       // check reads as "nothing is beating", never as healthy.
       const heartbeats = db ? await readFleetHeartbeats(db, now) : [];
       return NextResponse.json({ now, heartbeats } satisfies OpsHeartbeatResponse, { headers: NO_STORE });
-    });
+    }, "spot");
   } catch {
     // A read that failed is not an empty fleet: said apart, so the check can
     // tell "cannot see" from "nothing there".

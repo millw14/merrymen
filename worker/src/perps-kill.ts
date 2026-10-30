@@ -50,6 +50,7 @@ import { archiveGrantFile } from "./grant";
 import { liftKillPause, pauseForKeptGrant, purposeHome } from "./home";
 import { errorText } from "./redact-urls";
 import { readSettingsFileAt } from "./settings";
+import { withSettingsFileLock } from "./settings-file-lock";
 import { disablePaperPerpsForKill } from "./settings-store";
 
 /** What a kill needs of the Perps grant store. */
@@ -141,12 +142,16 @@ export class PerpsPaperNotStopped extends PerpsKillIncomplete {
  */
 export function turnOffLocalPaperPerps(home: string): "disabled" | "none" {
   const file = path.join(home, "settings.json");
-  const read = readSettingsFileAt(file);
-  if (read.kind === "absent") return "none";
-  if (read.kind === "unusable") throw new Error(read.why);
-  if (read.settings.perpsEnabled !== true) return "none";
-  writeFileAtomicSync(file, JSON.stringify({ ...read.settings, perpsEnabled: false }, null, 2), 0o600);
-  return "disabled";
+  // A wallet never set up still costs no directory or lock-file creation.
+  if (readSettingsFileAt(file).kind === "absent") return "none";
+  return withSettingsFileLock(file, () => {
+    const read = readSettingsFileAt(file);
+    if (read.kind === "absent") return "none";
+    if (read.kind === "unusable") throw new Error(read.why);
+    if (read.settings.perpsEnabled !== true) return "none";
+    writeFileAtomicSync(file, JSON.stringify({ ...read.settings, perpsEnabled: false }, null, 2), 0o600);
+    return "disabled";
+  });
 }
 
 /**

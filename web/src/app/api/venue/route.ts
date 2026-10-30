@@ -10,6 +10,7 @@ import {
   venueHeaders,
   type QuoteDoc,
 } from "@/lib/venue";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * THE ONE DOOR TO A THIRD-PARTY FEED.
@@ -38,6 +39,8 @@ import {
 const TTL: Record<string, number> = { quotes: 30, chart: 300, holders: 300 };
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const params = new URL(req.url).searchParams;
   const desk = params.get("desk") ?? "";
 

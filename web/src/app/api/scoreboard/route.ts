@@ -13,6 +13,7 @@ import { hostedAgentFor } from "@/lib/agent-for";
 import { readMeasuredMark } from "@/lib/held-marks";
 import { CapitalFlowsWithheld, netFlows, readDistinctFlows } from "@/lib/distinct-flows";
 import { distinctTrades } from "@/lib/distinct-trades";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +59,8 @@ export interface ScoreboardResponse {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // Self-hosted, this board is a transparency product: EVERY agent, publicly.
   // Hosted, that same query is a customer-list dump — every tenant's smart
   // account, caps, equity curve, P&L and fees. So hosted scopes to the caller's
@@ -74,7 +77,7 @@ export async function GET(req: Request) {
     if (!tenant) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
     // Signed in with no grant yet is an EMPTY board. Leaving the scope null here
     // would fall through to the unscoped query — the customer-list dump.
-    scopeAccount = await hostedAgentFor(req);
+    scopeAccount = await hostedAgentFor(req, "spot");
     if (!scopeAccount) return NextResponse.json({ source: "none", agents: [] } satisfies ScoreboardResponse);
   }
 
@@ -325,5 +328,5 @@ export async function GET(req: Request) {
     }));
 
     return NextResponse.json({ source: "sqlite", agents } satisfies ScoreboardResponse);
-  });
+  }, "spot");
 }

@@ -39,6 +39,7 @@ import { serializePermissionAccount, toPermissionValidator } from "@zerodev/perm
 import { toECDSASigner } from "@zerodev/permissions/signers";
 import {
   CASH,
+  accountIndexForPurpose,
   PONS_CLASS_VAULT_FACTORY,
   PONS_CLASS_VAULT_FACTORY_ABI,
   TRENCHER_FACTORY_ABI,
@@ -46,8 +47,10 @@ import {
   WALL_POLICY_FLAG,
   assertDerivedAccount,
   buildWallPolicies,
+  grantPurpose,
   grantWallOptions,
   robinhoodChain,
+  type GrantPurpose,
   type StoredGrant,
 } from "@merrymen/core";
 
@@ -178,6 +181,59 @@ export async function withStubChain<T>(account: Address, fn: () => Promise<T>, k
   }
 }
 
+/**
+ * A CHAIN THAT DERIVES, for the server's side of the account proof (POST
+ * /api/grants deriveKernelAccountAddress): global fetch answering the
+ * EntryPoint's getSenderAddress with an address computed from the initCode it
+ * is handed, so one owner's Spot (Kernel index 0) and Perps (index 1) accounts
+ * are two different, stable addresses, as they are on the real chain. A test
+ * learns them by deriving through it. Every other read is refused, as an
+ * unreachable node would (balances then read as unread, never zero).
+ *
+ * `state.down` turns the chain off: every request fails at the transport, the
+ * derivation the server must answer 503 to, never pass.
+ */
+export function derivingChain(): { install(): void; restore(): void; state: { down: boolean; derivations: number } } {
+  const GET_SENDER_ADDRESS = [
+    { type: "function", name: "getSenderAddress", stateMutability: "nonpayable", inputs: [{ name: "initCode", type: "bytes" }], outputs: [] },
+  ] as const;
+  const state = { down: false, derivations: 0 };
+  let real: typeof fetch | null = null;
+  const one = (r: { id: number; method: string; params?: unknown[] }): Record<string, unknown> => {
+    const head = { jsonrpc: "2.0", id: r.id };
+    if (r.method === "eth_chainId") return { ...head, result: toHex(robinhoodChain.id) };
+    if (r.method === "eth_call") {
+      const { to, data } = (r.params?.[0] ?? {}) as { to?: string; data?: Hex };
+      if (to?.toLowerCase() === ENTRY_POINT.address.toLowerCase() && data) {
+        try {
+          const call = decodeFunctionData({ abi: GET_SENDER_ADDRESS, data });
+          state.derivations += 1;
+          const sender = `0x${keccak256(call.args[0]).slice(-40)}` as Address;
+          // How the real EntryPoint answers: a revert carrying the address.
+          return { ...head, ...reverted(encodeErrorResult({ abi: SENDER_ADDRESS_RESULT, errorName: "SenderAddressResult", args: [sender] })) };
+        } catch { /* not a derivation */ }
+      }
+    }
+    return { ...head, error: { code: -32601, message: `${r.method} is not answered by this stub chain` } };
+  };
+  return {
+    state,
+    install() {
+      real = globalThis.fetch;
+      globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
+        if (state.down) throw new TypeError("fetch failed: the stub chain is down");
+        const request = JSON.parse(String(init?.body)) as { id: number; method: string; params?: unknown[] } | { id: number; method: string; params?: unknown[] }[];
+        const body = Array.isArray(request) ? request.map(one) : one(request);
+        return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+    },
+    restore() {
+      if (real) globalThis.fetch = real;
+      real = null;
+    },
+  };
+}
+
 export const TEST_CAPS = { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 20, maxOpsPerDay: 20 };
 
 /** What prepareAgentGrant accepts beyond the owner, all optional. */
@@ -197,14 +253,32 @@ export interface SignerOptions {
   perpDrop?: boolean;
   venueFlat?: boolean | null;
   chainId?: number;
+  /**
+   * The wallet the grant is for. Absent is Spot. "perps" is the paper Perps
+   * grant, signed by the same real signer at the Perps index.
+   */
+  purpose?: GrantPurpose;
 }
 
-/** A grant exactly as the real signer mints it. */
+/**
+ * A grant exactly as the real signer mints it.
+ *
+ * `purpose: "perps"` is the PAPER PERPS GRANT, made by the same signer
+ * (session.ts prepareAgentGrant with the purpose, perps slice 5b): the Perps
+ * account at Kernel index 1, its EMPTY Perps wall (core wall.ts perpsOnly, no
+ * perp block, no energy buy), `purpose: "perps"`, chain 4663, and no marker,
+ * token or sealed address. That is what POST /api/grants accepts
+ * (canonical-wall.ts, decision D5), so every server test built on it is a test
+ * that the browser and the server agree on the Perps wall. (The stub chain
+ * answers the given account at any index; derivingChain is the one that
+ * tells the two indexes apart.)
+ */
 export async function signerGrant(o: SignerOptions): Promise<{ grant: StoredGrant; owner: LocalAccount }> {
   const owner = o.owner ?? privateKeyToAccount(generatePrivateKey());
   const { prepareAgentGrant } = await import("./session");
   const grant = await withStubChain(o.account, () =>
     prepareAgentGrant(owner, {
+      purpose: o.purpose,
       caps: o.caps ?? TEST_CAPS,
       onStatus: () => {},
       chainId: o.chainId ?? robinhoodChain.id,
@@ -225,24 +299,32 @@ export async function signerGrant(o: SignerOptions): Promise<{ grant: StoredGran
 /**
  * Seal an ARBITRARY policy set the way a signer seals the wall: the owner
  * enables it, the session key is wrapped, and the account is serialized. The
- * result is a permission the account contract would install.
+ * result is a permission the account contract would install. `wallet` names
+ * the Kernel index the account is made at (Spot's 0 when absent); the stub
+ * chain answers the given `account` either way.
  */
 export async function sealWall(args: {
   owner: LocalAccount;
   account: Address;
   policies: unknown[];
   sessionKey?: Hex;
+  wallet?: GrantPurpose;
 }): Promise<{ serialized: string; sessionKey: Hex }> {
   const sessionKey = args.sessionKey ?? generatePrivateKey();
   const client = createPublicClient({
     chain: robinhoodChain,
-    transport: custom({
-      async request({ method, params }: { method: string; params?: unknown[] }) {
-        const a = answer(args.account, method, params ?? []);
-        if ("result" in a) return a.result;
-        throw Object.assign(new Error(a.error.message), a.error);
+    transport: custom(
+      {
+        async request({ method, params }: { method: string; params?: unknown[] }) {
+          const a = answer(args.account, method, params ?? []);
+          if ("result" in a) return a.result;
+          throw Object.assign(new Error(a.error.message), a.error);
+        },
       },
-    }),
+      // The stub answers at once and the same way every time: a retry only
+      // waits out viem's backoff (seconds per sealed wall) for the same revert.
+      { retryCount: 0 },
+    ),
   });
   const sudo = await signerToEcdsaValidator(client, { signer: args.owner, entryPoint: ENTRY_POINT, kernelVersion: KERNEL_V3_3 });
   const regular = await toPermissionValidator(client, {
@@ -252,7 +334,12 @@ export async function sealWall(args: {
     kernelVersion: KERNEL_V3_3,
     flag: WALL_POLICY_FLAG,
   } as never);
-  const account = await createKernelAccount(client, { entryPoint: ENTRY_POINT, kernelVersion: KERNEL_V3_3, plugins: { sudo, regular } });
+  const account = await createKernelAccount(client, {
+    index: accountIndexForPurpose(args.wallet ?? "spot"),
+    entryPoint: ENTRY_POINT,
+    kernelVersion: KERNEL_V3_3,
+    plugins: { sudo, regular },
+  });
   assertDerivedAccount(account.address, "the stub chain could not derive the account");
   if (account.address.toLowerCase() !== args.account.toLowerCase()) throw new Error("the stub chain derived a different account");
   return { serialized: await serializePermissionAccount(account, sessionKey), sessionKey };
@@ -282,7 +369,13 @@ export async function resealed(
   withSessionKey?: Hex,
 ) {
   const built = buildWallPolicies({ ...wallArgs(g), ...change });
-  const { serialized, sessionKey } = await sealWall({ owner, account: g.smartAccount, policies: built.policies, sessionKey: withSessionKey });
+  const { serialized, sessionKey } = await sealWall({
+    owner,
+    account: g.smartAccount,
+    policies: built.policies,
+    sessionKey: withSessionKey,
+    wallet: grantPurpose(g),
+  });
   return {
     ...g,
     serialized,

@@ -200,6 +200,13 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode } 
         acct.inFlight.spend -= spend;
       },
       refresh: async () => {},
+      // The counters below read the ledger itself, which always answers here,
+      // so no booked op is ever left for keep to hold.
+      keep: () => {},
+      counters: async () => ({
+        spentTodayUsdg: u(await store.getSpentTodayUsdg(id, "paper")) + acct.inFlight.spend,
+        opsToday: (await store.getOpsToday(id, "paper")) + acct.inFlight.ops,
+      }),
     },
     events: async (level, message) => {
       acct.events.push({ level, message });

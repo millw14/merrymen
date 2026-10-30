@@ -1163,9 +1163,24 @@ function stopLocalPerps() {
     }
     return null;
   }
-  const why = child.stderr.trim().split("\n").pop();
+  // stderr is a diagnostic stream: Node warnings can follow the helper's
+  // answer, and an uncaught runtime failure may contain private data. Only
+  // the helper's complete, redacted response can supply an owner-facing reason.
+  let why = "";
+  let failureStatus = null;
+  try {
+    const result = JSON.parse(child.stdout);
+    if (result?.v === 1 && result.kind === "perps-kill-error" &&
+        (result.status === 1 || result.status === 2) && result.status === child.status &&
+        typeof result.why === "string" && result.why.length <= 8192) {
+      why = result.why;
+      failureStatus = result.status;
+    }
+  } catch { /* No valid answer: report the incomplete kill without guessing why. */ }
   process.exitCode = 1;
-  if (child.status === 2) {
+  // An exit code alone does not prove that the grant was dealt with: the
+  // runtime can fail before the helper has produced an answer at all.
+  if (failureStatus === 2) {
     bad(`Kill incomplete: your Perps wallet's practice perpetuals could not be switched off.${why ? ` ${why}` : ""} Rerun: merrymen kill`);
     return "the Perps wallet's practice perpetuals were not switched off";
   }

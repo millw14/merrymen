@@ -43,7 +43,9 @@ describe("an order that waited too long is not the order that was placed", () =>
     const expiry = RUN.indexOf("isExpired(cmd, Date.now())");
     const kind = RUN.indexOf('cmd.kind === "selftest"');
     assert.ok(expiry > 0 && expiry < kind, "the clock is checked before anything else");
-    assert.match(RUN, /line: `expired/);
+    // An owner's perpetual exit in its own words (perps/owner-order.ts
+    // perpExitExpiredLine); every other order in this sentence, as before.
+    assert.match(RUN, /line: exit \?\? `expired/);
   });
 
   it("and an unknown kind is RECORDED, never run", () => {

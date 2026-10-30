@@ -292,7 +292,7 @@ export async function readLeaderboard(
     });
 
     return { source: "sqlite", agents, retired, retiredAgents };
-  });
+  }, "spot");
 }
 
 /**
