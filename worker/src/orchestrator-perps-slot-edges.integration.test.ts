@@ -108,7 +108,7 @@ const perpsKey = (owner: string) => `${owner}:perps`;
 const live = (tenant: string) => spawned.filter((p) => p.env.MERRYMEN_HOME === orch.childHome(tenant) && !p.gone);
 const all = (tenant: string) => spawned.filter((p) => p.env.MERRYMEN_HOME === orch.childHome(tenant));
 const used: `0x${string}`[] = [];
-const ownerAt = (n: number) => { const o = address(n); used.push(o); return o; };
+const ownerAt = (n: number) => { const o = address(n); used.push(o); process.env.MERRYMEN_PERPS_PAPER_TENANTS = [...new Set(used)].join(","); return o; };
 
 after(() => {
   console.log = realLog;
@@ -213,6 +213,14 @@ describe("a kill whose Perps half does not finish", () => {
   });
 });
 
+// Exercise the interval before the owner control process finishes preparing.
+// The Perps-only seat normally receipts the pause first now; the mirror must
+// still fence an old marker while that separate owner arm is outstanding.
+async function unarmedOwner(owner: `0x${string}`): Promise<void> {
+  await spot.remove(owner);
+  orch.setTenantLeaseForTest(owner, await acquireTenantLease(owner));
+  orch.setSpawningForTest(owner, 1);
+}
 describe("a standing pause on a rebuilt Spot home", () => {
   for (const duringRead of ["unchanged", "new arm", "lost lease", "new pause"] as const) {
     it(`checks a normal Spot resume without blocking the mirror, with ${duringRead} while evidence is read`, async () => {
@@ -232,6 +240,7 @@ describe("a standing pause on a rebuilt Spot home", () => {
           });
         }
         await spot.put(o, grant(o, s, { expiresAt: nowSec() - 60 }));
+        raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, ?, ?, 4663, '{}', 1, 2)").run(s, o, address(0xeee));
         await perps.put(o, grant(o, p, { purpose: "perps" }));
         const spotHome = orch.childHome(o), marker = path.join(spotHome, "controls-armed.json");
         mkdirSync(spotHome, { recursive: true });
@@ -239,7 +248,9 @@ describe("a standing pause on a rebuilt Spot home", () => {
         writeFileSync(marker, oldArm);
         writeFileSync(path.join(spotHome, "paused"), "paused");
         await recordDurablePause(shared, o, nowSec() - 30);
+        await unarmedOwner(o);
         await orch.reconcile();
+        orch.setSpawningForTest(o, null);
         await settle();
         assert.equal(live(perpsKey(o))[0]?.pausedAtStart, true);
         const perpsPaused = path.join(orch.childHome(perpsKey(o)), "paused");
@@ -313,7 +324,9 @@ describe("a standing pause on a rebuilt Spot home", () => {
               request_update_id INTEGER, message_at_sec INTEGER, expires_at_ms INTEGER, chat_id INTEGER)`);
             raw.prepare("INSERT INTO recovery_reply_controls VALUES ('111', 9, ?, 'pause', NULL, ?, NULL, 7)").run(o, nowSec() - 30);
           } else await recordDurablePause(shared, o, nowSec() - 30);
+          await unarmedOwner(o);
           await orch.reconcile();
+          orch.setSpawningForTest(o, null);
           await settle();
           const [worker] = live(perpsKey(o));
           assert.ok(worker, "the Perps worker may manage protective closes");
@@ -473,7 +486,8 @@ describe("one replica per login", () => {
     await orch.reconcile();
     await settle();
     const running = live(perpsKey(o));
-    assert.equal(running.length, 1, "a Perps-only login has nothing to sit beside");
+    assert.equal(running.length, 1, "a Perps-only login holds its owner control lease");
+    orch.loseLeaseForTest(o);
     leaseRefused = new Set([o]);
     await spot.put(o, grant(o, address(0xa9)));
     await orch.reconcile();

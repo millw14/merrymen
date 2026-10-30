@@ -1,3 +1,5 @@
+import { fileTelegramPerpsPort } from "./perps/telegram-bridge";
+import { createLocalPerpsPort } from "./perps/telegram-local";
 import { EVIDENCE_BUDGET_MS, brainEvidence, readPoolEvidence } from "./venues/pool-evidence";
 import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 import { errorText } from "./redact-urls";
@@ -15938,6 +15940,10 @@ async function main() {
 
   // Kept for the SIGTERM handler below, which stops the poll on the way out.
   const telegramPoll = startTelegram({
+    ...(isHostedMode()
+      ? { perps: fileTelegramPerpsPort(merrymenHome()) }
+      : cfg.workerWallet === "spot" ? { perps: createLocalPerpsPort(merrymenHome()) } : {}),
+    walletPurpose: cfg.workerWallet,
     // Resolve FRESH on every read: /link writes the allowlist to settings.json
     // and the very next message must see it — the tick-refreshed `cfg` snapshot
     // lags up to tickSeconds, which reads as "linked, then not authorized".

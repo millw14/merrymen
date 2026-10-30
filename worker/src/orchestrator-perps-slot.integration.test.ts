@@ -129,6 +129,7 @@ const running = (tenant: string) => spawnedFor(tenant).filter((p) => !p.gone);
 const readJson = (file: string) => JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
 
 async function fleetOfThree(): Promise<void> {
+  process.env.MERRYMEN_PERPS_PAPER_TENANTS = [BOTH, PERPS_ONLY].join(",");
   await spotStore.put(BOTH, grant(BOTH, accountOf(BOTH, "spot")));
   await perpsStore.put(BOTH, grant(BOTH, accountOf(BOTH, "perps"), { purpose: "perps" }));
   await perpsStore.put(PERPS_ONLY, grant(PERPS_ONLY, accountOf(PERPS_ONLY, "perps"), { purpose: "perps" }));

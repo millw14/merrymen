@@ -146,6 +146,8 @@ import type { TgCoinsPort, TgDeskPort, TgFomoPort, TgGroupFactsPort, TgOwnerOutc
 import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 import type { HeldGroupEntry } from "./held-groups";
 import { errorText } from "../redact-urls";
+import { startPerpsNotifier } from "./perps-notifier";
+import { telegramPerpsRequestId, type TelegramPerpsPort } from "./perps";
 
 /**
  * Commands that are really questions when they arrive as WORDS: answered by
@@ -167,6 +169,9 @@ interface ReplyExtras {
 }
 
 export interface TelegramServiceDeps {
+  /** Owner-bound paper Perps reader and durable exit queue; never a signer. */
+  perps?: TelegramPerpsPort;
+  walletPurpose?: "spot" | "perps";
   /** Live config (reassigned each tick by refreshConfig — pass a getter). */
   getCfg: () => ResolvedConfig;
   /** Shared persisted state (offset, link code, owner, alerts …). */
@@ -312,6 +317,7 @@ const POLL_QUIET_NOTE_MS = 30 * 60 * 1000;
  * rule 3 keeps all of those out of a group too.
  */
 const PRIVATE_READS: ReadonlySet<string> = new Set([
+  "perps",
   "status",
   "positions",
   "pnl",
@@ -477,6 +483,7 @@ function soulHeaderRe(): RegExp {
 /** Start the poll loop. Returns a stop() handle. */
 export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   let stopped = false;
+  const perpsNotifier = deps.perps ? startPerpsNotifier({perps: deps.perps, getCfg: deps.getCfg, stateRef: deps.stateRef, now: deps.now}) : null;
   /** Fingerprint (token + allowlist) whose "/" command menus are live — avoids
    * re-setting every poll and re-pushes when /link grows the allowlist. */
   let commandsRegisteredKey = "";
@@ -1293,7 +1300,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * second copy of this object would drift from the first on the next change.
    */
   const makeCmdDeps = (
-    msg: Pick<TgMessage, "chatId" | "fromId" | "fromUsername">,
+    msg: Pick<TgMessage, "chatId" | "fromId" | "fromUsername"> & Partial<Pick<TgMessage, "updateId" | "date">>,
     cfg: ResolvedConfig,
     token: string,
     extras: ReplyExtras,
@@ -1338,7 +1345,32 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
       return r;
     };
+    const botId = botIdOf(token);
+    const requestId = telegramPerpsRequestId(botId, msg.updateId);
+    const perpsOwnerNow = () => {
+      const current = deps.getCfg();
+      return msg.chatId > 0 && msg.chatId === msg.fromId && msg.fromId === stateRef.get().ownerId
+        && current.telegramEnabled && current.telegramBotToken === token && current.telegramAllowlist.includes(msg.fromId);
+    };
     const cmdDeps: CommandDeps = {
+      walletPurpose: deps.walletPurpose,
+      ...(deps.perps ? { perps: {
+        port: {
+          read: async () => {
+            if (!perpsOwnerNow()) throw new Error("Perps owner changed");
+            const snapshot = await deps.perps!.read();
+            if (!perpsOwnerNow()) throw new Error("Perps owner changed");
+            return snapshot;
+          },
+          exit: async (input) => {
+            if (!perpsOwnerNow() || !deps.getCfg().telegramControlEnabled) return "The owner link or Telegram controls changed. Nothing was queued.";
+            return deps.perps!.exit(input);
+          },
+        },
+        owner: perpsOwnerNow(),
+        requestId: requestId && requestId.length <= 128 ? requestId : null,
+        askedAtSec: msg.date ?? 0,
+      } } : {}),
       controlEnabled: cfg.telegramControlEnabled,
       hosted: isHostedMode(),
       maxActionUsdg: cfg.telegramMaxActionUsdg,
@@ -2300,6 +2332,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return;
     }
     if (!ours) return;
+    // A public command must never become an owner paper order by rewriting its
+    // sender into a DM below. The owner must ask privately, including confirm.
+    if (name === "close" || name === "flatten" || ((name === "confirm" || name === "yes") && pending.get(`${msg.fromId}:${msg.fromId}`)?.kind === "flatten-perps")) {
+      notice("dm-first");
+      return;
+    }
+    if (name === "perps" && !isOwner) { notice("owner-only"); return; }
     // Whoever hands a late one over, nothing else a late one says runs.
     if (late && lateGroupCommand(name, text) === "hold") return;
 
@@ -3203,6 +3242,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   return {
     stop: () => {
       stopped = true;
+      perpsNotifier?.stop();
       tgGroups?.stop();
       for (const w of fomoJobs.values()) if (w.timer) clearTimeout(w.timer);
       fomoJobs.clear();

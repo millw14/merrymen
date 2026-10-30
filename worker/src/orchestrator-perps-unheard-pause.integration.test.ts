@@ -152,8 +152,8 @@ it("a Perps-only login's standing pause from a killed Spot wallet stays, and is 
   for (const l of [RESUMED, FRESH]) assert.equal(pausedHere(perpsKey(l)), false, `${l}'s is not paused`);
   // Said once (the hourly resay has not come round), with how it lifts; not for a login with no pause, nor one whose Spot bot hears it.
   assert.equal(unheard(LEGACY).length, 1);
-  assert.match(unheard(LEGACY)[0]!, /is paused by its owner's recorded \/pause, and no Spot worker runs for 0x0+1e1 to hear \/resume/);
-  assert.match(unheard(LEGACY)[0]!, /The pause stands; it lifts once its owner makes a Spot wallet and sends \/resume to that wallet's bot/);
+  assert.match(unheard(LEGACY)[0]!, /is paused by its owner's \/pause, kept in its Spot home; no owner bot is currently answering/);
+  assert.match(unheard(LEGACY)[0]!, /The pause stands; link or restore the owner's bot and send \/resume in the private owner DM/);
   assert.equal(unheard(DURABLE).length, 1);
   assert.equal(unheard(KILLED).length, 1);
   assert.match(unheard(KILLED)[0]!, /is paused by its owner's \/pause, kept in its Spot home/);

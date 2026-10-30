@@ -29,8 +29,8 @@ the finished product; this table says how much of it main carries.
 | 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | merged (#361) |
 | 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | merged (#362) |
 | 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | merged (#365) |
-| 5. Web API, desk and CLI | PR 1 (5a–5c): the foundation, Perps wallet intake and status, settings, owner paper exits and practice reset. PR 2: read routes, recover and CLI. PR 3: desk, entry points and onboarding. Funding follows slice 5 in its own PR | PR 1 implemented in this branch; PR 2 and PR 3 pending |
-| 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | not yet |
+| 5. Web API, desk and CLI | PR 1 (5a–5c): the foundation, Perps wallet intake and status, settings, owner paper exits and practice reset. PR 2: read routes, recover and CLI. PR 3: desk, entry points and onboarding. Funding follows slice 5 in its own PR | PR 1–3 implemented in this branch; final combined review/verification and deployment remain pending |
+| 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | Paper web companion surfaces are being completed in this branch; full Perps phone UI remains later |
 
 Slice 5 PR 1 adds Perps wallet creation and renewal, gated by
 `MERRYMEN_PERPS=paper`. Every kill path already reaches the Perps wallet
@@ -1590,13 +1590,20 @@ not in this build: core has no such key, and the Perps wallet's `PUT` refuses on
 
 The 30 October remaining-work plan puts the web launch before the phone
 clients. Merging the paper foundation is not approval to activate a rollout.
+The concrete internal-pilot policy and unresolved deployment evidence live in
+[the paper launch checklist](perps-paper-launch.md).
 
 - **Hosted paper (the plan's Phase 3)** follows slices 1–4, all three slice-5
   PRs, and slice 6a (Telegram, MCP and partner API). Phone builds carrying
   #358's kill request are a prerequisite; the full Perps phone UI is not.
-  Before activation, settle paper admission and recovery policy, check child
-  process headroom, add feed capture, and either provide recovery for a lost
-  Perps home or prohibit replacing/handover of its volume while books exist.
+  Before activation, use explicit internal-owner admission, check the shared
+  48-child headroom with Spot priority, capture the existing public feed, and
+  preserve the original persistent Perps home. This pilot prohibits volume
+  replacement/handover or lost-home restart while books exist; lifting that
+  restriction requires an authoritative recovery drill. Removing pilot
+  admission switches new entries off while existing exits and stops remain
+  available. Real deployment, phone-release, Privy-capacity and backup evidence
+  remain required in the linked checklist.
 - **Funding** is a separate PR after slice 5. Whether it precedes or follows
   hosted paper remains open. It moves real USDG and needs its own journal,
   owner-outflow accounting and a fund/withdraw recovery drill.

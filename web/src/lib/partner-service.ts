@@ -1,3 +1,4 @@
+import { perpsCreationAllowed } from "./perps-enabled";
 import { randomBytes } from "node:crypto";
 import { PartnerError, objectBody, onlyFields, partnerAppOrigin, readPartnerBody, requirePartnerScope, verifyPartnerRequest, type PartnerPrincipal } from "./partner-bridge";
 import {
@@ -81,11 +82,21 @@ export function createPartnerService(deps: {
       requirePartnerScope(partner, "read:agents");
       return { status: 200, body: { data: (await store.list(partner.app_id)).map(c => view(c)) } };
     }
-    const match = /^\/agents\/([a-zA-Z0-9_-]{12,80})(?:\/(messages|connection|challenge|activate))?$/.exec(path);
+    const match = /^\/agents\/([a-zA-Z0-9_-]{12,80})(?:\/(messages|connection|challenge|activate|perps-review-link))?$/.exec(path);
     if (!match) throw new PartnerError(404, "not_found", "No such endpoint");
     const [, id, resource] = match;
     const connection = await store.byId(partner.app_id, id);
     if (!connection) throw new PartnerError(404, "not_found", "Agent not found");
+    if (resource === "perps-review-link" && method === "POST") {
+      requirePartnerScope(partner, "read:agents");
+      allowed(connection, "read:agents");
+      onlyFields(objectBody(raw), []);
+      if (!perpsCreationAllowed()) throw new PartnerError(409, "perps_unavailable", "Paper Perps review is not offered by this server");
+      // A navigation link, never a bearer capability or partner enrollment.
+      // The browser authenticates its own Privy-bound owner before granting.
+      return {status: 200, body: {id, wallet: "perps", mode: "paper", review_url: `${partnerAppOrigin()}/perps`,
+        authorization: "owner_review_required", message: "Open the Perps desk as the connected owner. Review and sign there; this link grants no permission and cannot enroll a wallet."}};
+    }
     if ((resource === "challenge" || resource === "activate") && method === "POST") {
       requirePartnerScope(partner, "write:agents");
       if (!deps.enrollment) throw new PartnerError(503, "upstream_unavailable", "Embedded setup is not configured");

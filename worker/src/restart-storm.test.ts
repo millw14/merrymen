@@ -306,7 +306,8 @@ describe("a stood-down tenant's access is cleared while its original source stay
     const walk = text.indexOf("for (const tenant of [...childHomeTenants(), ...perpsChildHomeKeys()])");
     assert.ok(walk > 0, "the homes on disk, not the running set");
     const loop = text.slice(walk);
-    assert.match(loop, /if \(wanted\.has\(tenant\) \|\| children\.has\(tenant\) \|\| spawning\.has\(tenant\) \|\| retiringExpired\.has\(tenant\) \|\| exitingChildren\.has\(tenant\) \|\| holders\.has\(tenant\)\) continue;/);
+    assert.match(loop, /if \(wanted\.has\(tenant\) \|\| perpsBotOwners\.has\(tenant\) \|\| children\.has\(tenant\) \|\| spawning\.has\(tenant\) \|\| retiringExpired\.has\(tenant\) \|\| exitingChildren\.has\(tenant\) \|\| holders\.has\(tenant\)\) continue;/,
+      "a retained Perps bot seat keeps its owner home, alongside every active financial writer");
     // Its restart is cancelled before anything awaits, so no timer starts a
     // spawn in the home while it is being read and cleared.
     const cancel = loop.indexOf("cancelRestart(tenant);");
