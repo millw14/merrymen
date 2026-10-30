@@ -378,6 +378,7 @@ describe("the one-shot census", () => {
     "MERRYMEN_TG_RECOVERY_ID", "MERRYMEN_TG_RECOVERY_CHAT_ID", "MERRYMEN_TG_RECOVERY_CONFIRM", "MERRYMEN_TG_RECOVERY_BODY_SHA256",
     "MERRYMEN_RECONCILE_SHADOW", "MERRYMEN_BACKFILL_LIVE_INTENT",
     "MERRYMEN_RECEIPT_ATTEST_ACCOUNT", "MERRYMEN_RECEIPT_ATTEST_TENANT", "MERRYMEN_RECEIPT_ATTEST_MODE", "MERRYMEN_RECEIPT_ATTEST_APPROVAL",
+    "MERRYMEN_RECEIPT_ATTEST_FLOW",
   ];
   /** Standing configuration and the rollout's own controls: never counted. */
   const STANDING = [
@@ -423,9 +424,11 @@ describe("one precisely scoped receipt attestation during staged rollout", () =>
   const scoped = { ...FLEET, MERRYMEN_FLEET_ROLLOUT: "none", MERRYMEN_ACCOUNTING_HOLD_TENANTS: tenant,
     MERRYMEN_RECEIPT_ATTEST_ACCOUNT: account, MERRYMEN_RECEIPT_ATTEST_TENANT: tenant, MERRYMEN_RECEIPT_ATTEST_MODE: "dry-run" };
   it("accepts only the named held protocol, keeping all other fleet protection", async () => {
-    for (const mode of ["dry-run", "commit"]) {
+    for (const [mode, flow] of [["dry-run", undefined], ["commit", undefined], ["dry-run", "428"], ["commit", "428"]] as const) {
       const env = { ...scoped, MERRYMEN_RECEIPT_ATTEST_MODE: mode,
-        ...(mode === "commit" ? { MERRYMEN_RECEIPT_ATTEST_APPROVAL: "a".repeat(64) } : {}) };
+        ...(mode === "commit" ? { MERRYMEN_RECEIPT_ATTEST_APPROVAL: "a".repeat(64) } : {}),
+        // One inferred flow of a traded book (receipt-attestation-traded.ts), by its shared id.
+        ...(flow ? { MERRYMEN_RECEIPT_ATTEST_FLOW: flow } : {}) };
       assert.equal((await start("start:orchestrator", env)).code, 0);
       assert.equal((await start("start:orchestrator", { ...env, MERRYMEN_IMAGE: "wrong" })).code, EX_CONFIG);
       assert.equal((await start("start:orchestrator", { ...env, MERRYMEN_PERSISTENT_HOME_REQUIRED: "0" })).code, EX_CONFIG);
@@ -443,6 +446,8 @@ describe("one precisely scoped receipt attestation during staged rollout", () =>
       { MERRYMEN_RECEIPT_ATTEST_MODE: "commit", MERRYMEN_RECEIPT_ATTEST_APPROVAL: "not-a-digest" },
       { MERRYMEN_RECEIPT_ATTEST_APPROVAL: "a".repeat(64) }, { MERRYMEN_REPAIR_HWM: "apply" },
       { MERRYMEN_ACCOUNTING_DIAGNOSE: "1" }, { MERRYMEN_RECEIPT_ATTEST_BYPASS: "1" },
+      { MERRYMEN_RECEIPT_ATTEST_FLOW: "" }, { MERRYMEN_RECEIPT_ATTEST_FLOW: "0" }, { MERRYMEN_RECEIPT_ATTEST_FLOW: "428,429" },
+      { MERRYMEN_RECEIPT_ATTEST_FLOW: "flows.id" },
     ];
     for (const changed of changes) {
       const r = await start("start:orchestrator", { ...scoped, ...changed });

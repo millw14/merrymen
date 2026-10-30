@@ -24,6 +24,8 @@ worker and bot are temporarily unavailable while held.
   its home through a fresh container, and step 4's commit refuses it ("local
   tenant state exists"). This procedure can commit only for a tenant with no
   home on the volume. Never move or erase a home to get past that refusal.
+  One inferred deposit of a book that has traded is attested on its home by
+  [receipt attestation's traded-book protocol](receipt-attestation.md#one-inferred-deposit-in-a-book-that-has-traded).
 - **Reads.** The reconstruction scan reads through the fleet's read path
   (`chainReadRpc`): a configured `MERRYMEN_RPC_MAINNET` that refuses — a spent
   quota, a refused key, a 5xx, a timeout — fails over to the chain's public

@@ -134,8 +134,10 @@ export function onRailway(env: NodeJS.ProcessEnv): boolean {
  * standing pass — so a new one-shot is counted from the commit that adds it.
  * The receipt-attestation exception still counts all its controls. It requires
  * exactly that protocol, a named account and tenant, explicit mode, the exact
- * tenant's maintenance hold and a digest for commit. It never admits trading
- * or allows another one-shot through a staged rollout.
+ * tenant's maintenance hold and a digest for commit. Its one optional control,
+ * a decimal shared flow id, selects one inferred deposit of a book that has
+ * traded (receipt-attestation-traded.ts) under the same scope. It never admits
+ * trading or allows another one-shot through a staged rollout.
  */
 const ONE_SHOT_EXACT: ReadonlySet<string> = new Set([
   "MERRYMEN_ACCOUNTING_RECONSTRUCT", "MERRYMEN_ACCOUNTING_DIAGNOSE", "MERRYMEN_GAS_AUDIT",

@@ -21,22 +21,22 @@ const OTHER_MARKERS = ["ledger-import.pending.json", "restore-blocked.json", "en
 const MAX_ROWS = 100_000;
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
-function refuse(reason: string): never { throw new Error(`Original receipt attestation refused: ${reason}. Preserve the original home and maintenance hold.`); }
+export function refuse(reason: string): never { throw new Error(`Original receipt attestation refused: ${reason}. Preserve the original home and maintenance hold.`); }
 type Row = Record<string, unknown>;
 const sorted = (rows: readonly unknown[]) => rows.map(canonicalJson).sort();
 const same = (a: unknown, b: unknown) => canonicalJson(a) === canonicalJson(b);
-function safeInteger(value: unknown): number {
+export function safeInteger(value: unknown): number {
   const n = Number(value);
   if ((typeof value !== "number" && typeof value !== "string") || !Number.isSafeInteger(n) || n < 0) return refuse("invalid integer evidence");
   return n;
 }
-function present(file: string): boolean {
+export function present(file: string): boolean {
   try { lstatSync(file); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
 /** Every financial table is retained and bound. Events/posts can grow independently of finance. */
-const PROTECTED = ["agents", "trades", "equity", "fee_accruals", "positions", "cost_basis", "position_floors",
+export const PROTECTED = ["agents", "trades", "equity", "fee_accruals", "positions", "cost_basis", "position_floors",
   "class_positions", "trench_positions", "risk_periods", "energy_days", "paper_book", "owner_operations", "agent_commands", "flows_quarantine"] as const;
 const MUST_BE_EMPTY = ["fee_accruals", "positions", "cost_basis", "position_floors", "class_positions", "trench_positions",
   "risk_periods", "flows_quarantine"] as const;
@@ -49,7 +49,7 @@ interface Snapshot {
   /** Omitted for original v1 empty-owner plans, preserving their retry digest. */
   ownerOperations?: Row[];
 }
-interface Receipt {
+export interface Receipt {
   txHash: string; blockNumber: number; blockHash: string; logIndex: number; at: number;
   amountUsdg6: string; from: string; to: string; token: string;
 }
@@ -83,14 +83,14 @@ export interface ReceiptAttestationReport {
   ownerProofSummary?: { operationCount: number; custody: string[]; proofDigest: string };
 }
 
-function authority(o: ReceiptAttestationOptions): void {
+export function authority(o: ReceiptAttestationOptions): void {
   const tenant = o.tenant.toLowerCase();
   if (!ADDRESS.test(tenant) || !ADDRESS.test(o.smartAccount.toLowerCase()) || o.chainId !== 4663) refuse("unsupported scope");
   if (o.lease.tenant.toLowerCase() !== tenant || o.lease.backend !== "postgres" || !o.lease.healthy()) refuse("tenant lease is not held");
   if (!accountingTenantHeld(tenant)) refuse("tenant is not explicitly held by the operator");
   o.assertQuiescent();
 }
-function fileIdentity(o: ReceiptAttestationOptions): { file: string; inode: string; device: string } {
+export function fileIdentity(o: ReceiptAttestationOptions): { file: string; inode: string; device: string } {
   const tenant = o.tenant.toLowerCase(), volume = o.volume;
   if (path.resolve(o.home) !== path.join(path.resolve(volume.homeRoot), "children", tenant)
       || !path.isAbsolute(volume.mountPath) || !path.isAbsolute(volume.homeRoot)
@@ -107,7 +107,7 @@ function fileIdentity(o: ReceiptAttestationOptions): { file: string; inode: stri
   for (const marker of OTHER_MARKERS) if (present(path.join(o.home, marker))) refuse("another recovery barrier exists");
   return { file, inode: String(st.ino), device: String(st.dev) };
 }
-async function rows(db: Db, table: string, account: string): Promise<Row[]> {
+export async function rows(db: Db, table: string, account: string): Promise<Row[]> {
   const key = table === "agents" ? "smart_account" : "agent_id";
   const result = await db.prepare(`SELECT * FROM ${table} WHERE LOWER(${key}) = ? LIMIT ${MAX_ROWS + 1}`).all(account) as Row[];
   if (result.length > MAX_ROWS) refuse("accounting evidence exceeds the bounded repair");
@@ -177,7 +177,7 @@ async function snapshot(db: Db, account: string, chainId: number, local: boolean
   return { flow, agent: agents[0]!, protectedDigest: hash(Object.fromEntries(Object.entries(values).map(([name, rs]) => [name, sorted(rs)]))), journal: journalState(journal, local),
     ...(values.owner_operations!.length ? { ownerOperations: [...values.owner_operations!].sort((a, b) => safeInteger(a.id) - safeInteger(b.id)) } : {}) };
 }
-async function sharedIdentity(db: Db, o: ReceiptAttestationOptions, lock = false): Promise<{ source: Row; grant: Row; marks: Row[] }> {
+export async function sharedIdentity(db: Db, o: ReceiptAttestationOptions, lock = false): Promise<{ source: Row; grant: Row; marks: Row[] }> {
   const tenant = o.tenant.toLowerCase(), account = o.smartAccount.toLowerCase();
   const pg = (o.dialect ?? "postgres") === "postgres";
   // Same grant -> generation lock order as the source handover and grant deletion.
@@ -238,7 +238,7 @@ async function chainEvidence(o: ReceiptAttestationOptions, local: Snapshot, shar
     from: `0x${log.topics[1]!.slice(-40)}`.toLowerCase(), to: `0x${log.topics[2]!.slice(-40)}`.toLowerCase(), token: log.address.toLowerCase() }, evidence,
     ...(ownerProof ? { ownerProof } : {}) };
 }
-function corrected(flow: Row, receipt: Receipt, chainId: number): Row {
+export function corrected(flow: Row, receipt: Receipt, chainId: number): Row {
   return { ...flow, source: "chain-log", tx_hash: receipt.txHash, block_number: receipt.blockNumber, log_index: receipt.logIndex, chain_id: chainId };
 }
 function approvalDigest(plan: Plan): string { const { evidence: _evidence, ...stable } = plan; return hash(stable); }

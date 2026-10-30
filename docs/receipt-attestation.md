@@ -6,6 +6,11 @@ with any successful or unsettled trade, position, withdrawal, fee, later epoch,
 multiple flows, missing original journal evidence, or inconsistent cash/high-water
 marks. It is deliberately narrower than general accounting reconstruction.
 
+A book that **has traded** uses its sibling under the same controls, hold,
+lease, audit table and source barrier: [one inferred deposit in a book that has
+traded](#one-inferred-deposit-in-a-book-that-has-traded), selected by
+`MERRYMEN_RECEIPT_ATTEST_FLOW`.
+
 Deposit receipts and the matching balance must be at least 64 blocks behind
 the observed chain head, matching the existing capital-booking policy. Any
 USDG transfer in the unconfirmed tail makes the preview or commit wait, including
@@ -126,3 +131,143 @@ preimages, authority changes and unrelated-tenant isolation. The opt-in
 `receipt-attestation.postgres.test.ts` suite uses disposable localhost PostgreSQL
 with actual advisory and row locks. It never connects to the ambient
 `DATABASE_URL`; only an explicitly supplied localhost test URL is used.
+
+## One inferred deposit in a book that has traded
+
+The untouched-book protocol proves a book's whole chain history is one deposit,
+which a book that has traded can never satisfy. When a top-up to a trading book
+was booked by inference (`source = 'inferred'`, no transaction), the hosted
+anchor counts that row as unevidenced on every later spawn: contributions read
+unknown, the fee stops and the Brain opens nothing. This sibling
+(`worker/src/receipt-attestation-traded.ts`) attests that one row's receipt and
+nothing else. It is chosen by naming the row: `MERRYMEN_RECEIPT_ATTEST_FLOW` is
+the flow's id **in the shared database** (`flows.id`). Without that variable the
+untouched-book protocol runs, as before.
+
+### Where the receipt must be, and what must be in it
+
+The original book's hash-chained journal records the inferred fact between two
+live cash readings, and each reading (`mark`) records the block its tick read.
+The deposit landed after the **baseline**, the last live reading before the
+fact that was not taken while flow inference was held, and by the **booking**
+reading, the first live reading after it. A tick reads its block before its cash
+and endpoints' heads differ, so the window reaches 3,000 blocks (about five
+minutes) past both readings. Readings more than 1,200,000 blocks apart refuse.
+
+In that window the deposit scanner's own reader (`deposit-log.ts`
+`findTransferFlows`) classifies every USDG movement of the account from its
+receipt, with the book's trades and their operations, the grant's custody
+contracts and every flow identity either book already holds. Every capital
+transfer whose transaction any flow row of either book names (by identity or
+by transaction, any source) is left out. Then all of these must hold:
+
+- exactly **one** capital transfer remains, inbound and equal to the inferred
+  amount to the micro-USDG: the live booker's own rule for a change it would
+  infer (`flow-inference.ts` RULE 4, `matchInferredDelta`). A second deposit or
+  an unbooked withdrawal in the window refuses: two movements that sum to the
+  change cannot be told from one that is it beside one that is not;
+- its block time lies between the baseline reading and the booking, with ten
+  minutes' skew;
+- it is at least 200,000 blocks behind the observed head, so the amended
+  chain-log row can never become the deposit scan's resume point (index.ts
+  `DEPOSIT_LOOKBACK_BLOCKS`), and the whole window is past the 64-block
+  confirmation tail;
+- no earlier repair quarantined it and no owner-operation record names its
+  transaction;
+- its receipt succeeded, and the receipt block and window end hash the same
+  before and after the read.
+
+The book must be one live account on this chain in both copies, the selected
+row an unattested inferred deposit of the current epoch, equal in every column
+but its id (and the account's letter case) to exactly one row of the original
+book, booked once in each book, and
+already copied by the mirror (its original id at or below the flows cursor).
+The original journal must verify as each (account, epoch) chain the store
+appends to, contiguous from entry 1, in one spelling of the account,
+with exactly one entry for this inferred deposit within seconds of the row.
+No historical `eth_call` is needed, so a non-archive endpoint can serve it.
+
+### What changes and what is preserved
+
+Exactly as the untouched-book protocol: only the flow's `source` (to
+`chain-log`), `tx_hash`, `block_number`, `log_index` and `chain_id`, in the
+original SQLite row and its shared copy. Amounts, booking time, epoch, row ids,
+high-water marks, risk periods, fees, trades, valuations, positions, owner
+records, grants and every mirror cursor are untouched. Every protected table of
+both books is bound by digest (large tables read in key windows), so any change
+between approval and amendment refuses. A correcting journal mark (version 2,
+retaining the original flow, the receipt, the window and the original entry)
+extends the flow's own epoch chain in the spelling the worker appends with, so
+the worker's next entry chains from it. The permanent
+`ledger_receipt_attestations` row holds the plan and every RPC response used.
+
+### Operator workflow
+
+Everything in [Operator workflow](#operator-workflow) above applies, with one
+more control. Find the row's shared id with a read-only query, for example:
+
+```sql
+SELECT id, direction, amount_usdg, source, tx_hash, epoch, at
+  FROM flows WHERE LOWER(agent_id) = '<smart account>' AND source = 'inferred';
+```
+
+| Variable | Preview value |
+| --- | --- |
+| `MERRYMEN_RECEIPT_ATTEST_ACCOUNT` | The smart-account address |
+| `MERRYMEN_RECEIPT_ATTEST_TENANT` | Its current tenant address |
+| `MERRYMEN_RECEIPT_ATTEST_FLOW` | The inferred row's shared `flows.id`, in decimal |
+| `MERRYMEN_RECEIPT_ATTEST_MODE` | `dry-run` |
+| `MERRYMEN_RECEIPT_ATTEST_APPROVAL` | Absent |
+
+The deploy guard admits it during a staged rollout exactly as it admits the
+untouched-book protocol: all its controls counted, the tenant held, a digest
+for commit, no other one-shot beside it. The preview's `receipt-attestation|`
+line carries `"protocol":"traded-book"`, the receipt (transaction, block, log
+index, sender), the `window` (its blocks and the two readings' blocks) and
+`anchor`: the `contributions`, `evidenced` and `unevidencedRows` the next
+spawn's anchor will read once the row is amended, in the same micro-USDG as the
+`[anchor]` line. Approve only a preview whose receipt is the expected transfer
+and whose `evidenced` equals `contributions` with `unevidencedRows` 0, unless
+the book has other unevidenced rows you know of. Commit and cleanup are as
+above; keep `MERRYMEN_RECEIPT_ATTEST_FLOW` set through the commit and any retry.
+
+**An expired grant is fine, and re-signing in the middle is not.** The stored
+permission is bound into the plan. Expiry retirement leaves the repair's lease
+alone while it runs (`retireExpiredGrants`), so a tenant whose grant lapsed can
+be attested before its owner re-signs. A re-sign between the preview and
+`applied` changes the bound grant: before the commit it only makes the approval
+stale, but after a commit is interrupted it refuses every retry and leaves the
+pending barriers in place. Re-sign after `applied`.
+
+**One deployed commit from the preview to `applied`.** Both books are bound by
+digests of whole rows, as in the untouched-book protocol, so a deploy that adds
+a column to a protected table (the shared ledger migrates on the next mirror
+pass) changes the evidence: before the commit it makes the approval stale, and
+after an interrupted commit it refuses every retry. Between the preview and
+`applied`, change only variables; the redeploys they cause keep the image.
+
+**Reads.** Chain evidence goes through the fleet's read path (`chainReadRpc`,
+as for the untouched-book protocol): a house endpoint that refuses, a spent
+quota included, fails over to the chain's public RPC. A window still unread
+after that refuses the preview.
+
+### Interruption, retry and limits
+
+The durable boundaries, barriers and retry rules are those of [Interruption and
+retry](#interruption-and-retry): audit, local marker, the original amendment
+with its correcting mark in one `synchronous=FULL` SQLite transaction, the
+shared amendment with the audit's completion in one PostgreSQL transaction, then
+the marker's removal. A resumed repair reads the window again and must find the
+same receipt.
+
+The audit table holds one attestation per tenant, of either protocol. A second
+inferred row in the same book, or a tenant that already has an attestation,
+refuses by name and needs a reviewed extension. As above, the generic audit
+reconstruction still lists the original inferred journal entry as unanchored;
+verify with the original journal, the appended correcting mark and the
+permanent plan together.
+
+Local tests cover every durable boundary, replay, the window rules, selection
+and journal refusals, protocol mixing and a reconcile pass during a commit on
+an expired grant. The opt-in `receipt-attestation-traded.postgres.test.ts`
+suite runs against disposable localhost PostgreSQL only.
