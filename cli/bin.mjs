@@ -265,17 +265,12 @@ function archiveCurrentGrant() {
   }
 }
 
-/** Archived wallets that still carry their owner key (i.e. recoverable). */
-async function archivedWallets() {
-  try {
-    const files = await readdir(GRANTS_ARCHIVE);
-    return files
-      .filter((f) => f.endsWith(".json"))
-      .map((f) => readJson(path.join(GRANTS_ARCHIVE, f)))
-      .filter((g) => g && g.smartAccount);
-  } catch {
-    return [];
-  }
+/** Recovery discovery includes both independent homes, even with paper disabled. */
+async function localRecoveryWallets() {
+  const { recoveryWallets } = await import("./recovery-wallets.mjs");
+  const result = await recoveryWallets(HOME);
+  for (const issue of result.unread) warn(`${issue.purpose} wallet file could not be read: ${issue.file}. It was not treated as empty.`);
+  return result;
 }
 
 const rpcFor = (s, chainId) =>
@@ -309,32 +304,21 @@ async function wallets() {
   ensureHome();
   const s = readJson(SETTINGS) ?? {};
 
-  const seen = new Set();
-  const list = [];
-  const current = readJson(GRANT);
-  if (current?.smartAccount) {
-    list.push({ g: current, active: true });
-    seen.add(current.smartAccount.toLowerCase());
-  }
-  for (const g of await archivedWallets()) {
-    if (!seen.has(g.smartAccount.toLowerCase())) {
-      list.push({ g, active: false });
-      seen.add(g.smartAccount.toLowerCase());
-    }
-  }
+  const found = await localRecoveryWallets();
+  const list = found.wallets;
 
   if (list.length === 0) {
-    warn("no wallets on this machine yet.");
+    warn(found.unread.length ? "no readable wallet records; unread files may still contain a recoverable wallet." : "no wallets on this machine yet.");
     console.log(`  create one at ${bold("http://localhost:3100/grant")}\n`);
     return;
   }
 
   console.log();
-  for (const { g, active } of list) {
+  for (const { g, active, purpose } of list) {
     const rpc = rpcFor(s, g.chainId);
     const [usdg, eth] = await Promise.all([usdgBalance(rpc, g.smartAccount), ethBalance(rpc, g.smartAccount)]);
     const key = g.demoOwnerPrivateKey ? green("🔑 owner key on disk") : red("⚠ no owner key — not recoverable here");
-    console.log(`  ${active ? green("● active ") : dim("○ archived")}  ${bold(g.smartAccount)} ${dim(`· chain ${g.chainId}`)}`);
+    console.log(`  ${active ? green("● active ") : dim("○ archived")}  ${bold(g.smartAccount)} ${dim(`· ${purpose} · chain ${g.chainId}`)}`);
     console.log(
       `     ${bold(usdg === null ? "?" : `${usdg.toFixed(2)} USDG`)} · ${eth === null ? "?" : `${eth.toFixed(5)} ETH`}  ${key}`,
     );
@@ -962,6 +946,21 @@ async function status() {
   } catch {
     console.log(dim("  no ledger yet"));
   }
+  const perps = (await localRecoveryWallets()).wallets.find(w => w.purpose === "perps" && w.active);
+  if (perps) {
+    console.log(`  Perps wallet: ${perps.g.smartAccount} ${dim(`chain ${perps.g.chainId} · paper book`)}`);
+    const perpsHeartbeat = readJson(path.join(perps.home, "heartbeat.json"));
+    console.log(`  Perps worker: ${perpsHeartbeat && now - perpsHeartbeat.at >= 0 && now - perpsHeartbeat.at < 90 ? "running" : "not reporting"}`);
+    let db;
+    try {
+      const { DatabaseSync } = await import("node:sqlite");
+      db = new DatabaseSync(path.join(perps.home, "merrymen.db"), { readOnly: true });
+      const row = db.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id = ? AND mode = ?").get(perps.g.smartAccount.toLowerCase(), "paper");
+      console.log(`  Perps recorded paper fills (all epochs): ${row.n}`);
+    } catch { console.log(dim("  Perps book could not be read; balances and positions are unknown")); }
+    finally { db?.close(); }
+    console.log(dim("  Recovery remains available: merrymen recover"));
+  }
   console.log();
 }
 
@@ -1146,12 +1145,11 @@ function stopLocalSolana() {
  * The kill's Perps half: the local Perps wallet's grant archived and revoked and
  * its paper strategy turned off (worker/src/perps-kill-cli.ts, stopLocalPerpsWallet),
  * before the Spot grant is touched, as the dashboard's and Telegram's self-hosted
- * kills do. Nothing to run without a Perps grant or Perps settings. Null when it
- * is done; otherwise what is left, with the exit code set: the kill is
+ * kills do. Even an unconfigured wallet needs a fresh off revision so an old
+ * enable request cannot undo this kill. Null when it is done; otherwise what is left, with the exit code set: the kill is
  * incomplete, never said done.
  */
 function stopLocalPerps() {
-  if (killTarget(PERPS_GRANT) === "absent" && killTarget(PERPS_SETTINGS) === "absent") return null;
   const child = spawnSync(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", "perps-kill-cli.ts")], {
     cwd: ROOT, encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1279,12 +1277,13 @@ async function kill() {
  * logged — so it can't leak into `ps` or shell history. Human progress streams
  * from the child's stderr; the one machine result line comes back on stdout.
  */
-function runRecoverChild(mode, { ownerKey, to, chainId, expect }) {
+function runRecoverChild(mode, { ownerKey, to, chainId, expect, purpose }) {
   return new Promise((resolve) => {
     const env = {
       ...process.env,
       MERRYMEN_RECOVER_OWNER_KEY: ownerKey,
       MERRYMEN_RECOVER_EXPECT: expect || "",
+      MERRYMEN_RECOVER_PURPOSE: purpose ?? "spot",
     };
     const child = toolSpawn(localBin("tsx"), [RECOVER_CLI, mode, to, String(chainId)], { cwd: ROOT, env });
     let out = "";
@@ -1323,48 +1322,38 @@ async function recover() {
       `  ${dim("shows a different, empty address if you import it. This sweeps the real balance out.")}\n`,
   );
 
-  const grant = readJson(GRANT);
   const p = makePrompter();
 
   let ownerKey;
   let chainId;
   let expect;
+  let purpose = "spot";
 
   // Every wallet on this machine whose owner key we hold: the active grant PLUS
   // every archived one (replaced/killed wallets are kept with their key). A picker
   // across ALL of them lets you recover a wallet that isn't the currently-armed
   // one — e.g. an old funded wallet you switched away from.
-  const candidates = [];
-  if (grant && /^0x[0-9a-fA-F]{64}$/.test(grant.demoOwnerPrivateKey ?? "")) {
-    candidates.push({ key: grant.demoOwnerPrivateKey, account: grant.smartAccount, chainId: grant.chainId || 4663, active: true });
-  }
-  for (const g of await archivedWallets()) {
-    if (
-      /^0x[0-9a-fA-F]{64}$/.test(g.demoOwnerPrivateKey ?? "") &&
-      !candidates.some((c) => c.account?.toLowerCase() === g.smartAccount.toLowerCase())
-    ) {
-      candidates.push({ key: g.demoOwnerPrivateKey, account: g.smartAccount, chainId: g.chainId || 4663, active: false });
-    }
-  }
+  const candidates = (await localRecoveryWallets()).wallets.filter(({ g }) => /^0x[0-9a-fA-F]{64}$/.test(g.demoOwnerPrivateKey ?? "")).map(({ g, active, purpose }) =>
+    ({ key: g.demoOwnerPrivateKey, account: g.smartAccount, chainId: g.chainId, active, purpose }));
 
   if (candidates.length === 1) {
-    ({ key: ownerKey, account: expect, chainId } = candidates[0]);
+    ({ key: ownerKey, account: expect, chainId, purpose } = candidates[0]);
     ok(`recovering ${expect.slice(0, 10)}… on chain ${chainId} ${dim("(owner key read from disk)")}`);
   } else if (candidates.length > 1) {
     console.log(`  ${green("✓")} ${candidates.length} wallets on this machine ${dim("(owner key on disk)")}:`);
     candidates.forEach((c, i) =>
-      console.log(`    ${i + 1}. ${bold(c.account)} ${dim(`· chain ${c.chainId} · ${c.active ? "active" : "archived"}`)}`),
+      console.log(`    ${i + 1}. ${bold(c.account)} ${dim(`· ${c.purpose} · chain ${c.chainId} · ${c.active ? "active" : "archived"}`)}`),
     );
     const pick = (await p.ask(`  which to recover? 1-${candidates.length}, or Enter to paste a different key: `)).trim();
     const idx = Number(pick) - 1;
     if (pick && Number.isInteger(idx) && candidates[idx]) {
-      ({ key: ownerKey, account: expect, chainId } = candidates[idx]);
+      ({ key: ownerKey, account: expect, chainId, purpose } = candidates[idx]);
       ok(`using ${expect.slice(0, 10)}… ${dim("(owner key read from disk — never typed)")}`);
     }
   }
 
   if (!ownerKey) {
-    warn(candidates.length ? "paste a different owner key to recover another wallet." : "no stored wallet — paste the owner key you backed up.");
+    warn(candidates.length ? "paste a different owner key to recover another wallet." : "no recoverable owner key could be read — paste the owner key you backed up.");
     console.log(dim("  (input hidden)"));
     ownerKey = (await p.askSecret("  owner private key (0x…): ")).trim();
     if (!/^0x[0-9a-fA-F]{64}$/.test(ownerKey)) {
@@ -1375,6 +1364,9 @@ async function recover() {
     const chainAns = (await p.ask("  chain — [1] mainnet 4663 (real funds)  ·  [2] testnet 46630  [1]: ")).trim();
     chainId = chainAns === "2" ? 46630 : 4663;
     expect = "";
+    const purposeAnswer = (await p.ask("  wallet — [1] Spot  ·  [2] Perps  [1]: ")).trim();
+    if (purposeAnswer && purposeAnswer !== "1" && purposeAnswer !== "2") { p.close(); bad("unknown wallet; nothing was signed."); return; }
+    purpose = purposeAnswer === "2" ? "perps" : "spot";
   }
 
   const s = readJson(SETTINGS) ?? {};
@@ -1402,7 +1394,7 @@ async function recover() {
   }
 
   console.log(dim("\n  reading what the account holds…\n"));
-  const plan = await runRecoverChild("plan", { ownerKey, to, chainId, expect });
+  const plan = await runRecoverChild("plan", { ownerKey, to, chainId, expect, purpose });
   if (!plan.result || plan.result.ok !== true) {
     p.close();
     bad(`couldn't read the account${plan.result?.error ? ` — ${plan.result.error}` : ""}.`);
@@ -1526,7 +1518,7 @@ async function recover() {
   }
 
   console.log(dim("\n  signing the recovery op with your owner key…\n"));
-  const done = await runRecoverChild("sweep", { ownerKey, to, chainId, expect });
+  const done = await runRecoverChild("sweep", { ownerKey, to, chainId, expect, purpose });
   if (done.result?.ok && done.result.txHash) {
     const base = EXPLORER[chainId] ?? EXPLORER[4663];
     console.log(`\n  ${green("✓")} ${bold("recovered.")} ${list} → ${to}`);
