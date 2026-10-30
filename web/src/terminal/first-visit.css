@@ -345,3 +345,24 @@
   bottom: auto;
   top: calc(100% + 6px);
 }
+
+/*
+ * THE MENU THAT ESCAPED ITS CARD. LanguagePicker renders its list through a
+ * portal into `document.body`, pinned to the viewport beside its trigger —
+ * because both of its homes (the tour card, the relaunch strip) sit in scroll
+ * boxes, and `overflow` clips an in-tree list whatever its z-index. On wide
+ * screens that clipping read as "the language button does nothing".
+ *
+ * The wrapper re-enters `.terminal-host`, so the list keeps the card styling
+ * above; this rule only breaks it out of document flow and above the tour
+ * overlay (z 1000). `top`/`bottom`/`max-height` arrive inline per open — the
+ * `auto` resets below exist so the in-card downward override further up this
+ * file cannot fight the inline side the component chose.
+ */
+.terminal-host .lang-menu.lang-menu-floating,
+.terminal-host .tour-card header .lang-menu.lang-menu-floating {
+  position: fixed;
+  top: auto;
+  bottom: auto;
+  z-index: 1200; /* above the tour overlay's own layer */
+}
