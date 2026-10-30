@@ -99,8 +99,9 @@ export const READ_TOOL_NAMES: readonly FomoReadToolName[] = [
   "fomo_find_opportunities",
   "fomo_research_coin",
   "fomo_get_research_status",
+  "fomo_ghost_pnl",
 ];
-export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin", "fomo_tail_trader", "fomo_untail_trader", "fomo_extend_tail"];
+export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin", "fomo_tail_trader", "fomo_untail_trader", "fomo_extend_tail", "fomo_record_tail_mark", "fomo_ghost_config", "fomo_ghost_enter"];
 export const TOOL_NAMES: readonly FomoToolName[] = [...READ_TOOL_NAMES, ...MUTATION_TOOL_NAMES];
 
 export function isFomoToolName(v: unknown): v is FomoToolName {
@@ -216,6 +217,90 @@ export interface UntailArgs {
   trader: TraderRef | null;
   all: boolean;
 }
+/** One told tail buy's entry mark (fomo_record_tail_mark). Owner only. */
+export interface MarkArgs {
+  /** Provider user id of the tailed trader (never a handle). */
+  traderUserId: string;
+  /** The tail buy notice's event id: one mark per told buy. */
+  eventId: string;
+  /** Display handle at mark time (display only). */
+  handle: string | null;
+  /** Token key (`namespace:network:address`), the storage/join key. */
+  tokenId: string;
+  /** USD entry price, 8dp decimal string, from a top pool quote. */
+  entryPrice8: string;
+  /** When the price was read. */
+  entryAtMs: number;
+  /** The pool that quoted it, e.g. "PONS / SOL 0%". */
+  entryPool: string | null;
+}
+
+/** A tail call mark recorded (fomo_record_tail_mark). Owner only. */
+export interface MarkData {
+  action: "mark";
+  eventId: string;
+  /** False when the mark already existed: a retried tell never double-books. */
+  recorded: boolean;
+}
+
+/** A ghost paper config change (fomo_ghost_config). Owner only. */
+export interface GhostConfigArgs {
+  /** Which trader. Null for tenant-wide ops (stop, reset). */
+  trader: TraderRef | null;
+  /** on | off | size | mode | cap | stop | reset. */
+  op: string;
+  /** Micro-USD for size (custom) and cap. Null otherwise. */
+  amountMicro: number | null;
+  /** scout-cut | flat | custom, for op mode. Null otherwise. */
+  mode: string | null;
+}
+
+/** A ghost paper config change applied (fomo_ghost_config). Owner only. */
+export interface GhostConfigData {
+  action: "ghost-config";
+  op: string;
+  handle: string | null;
+  words: string;
+}
+
+/** One told tail buy papered (fomo_ghost_enter). Owner only, background. */
+export interface GhostEnterArgs {
+  /** Provider user id of the tailed trader (never a handle). */
+  traderUserId: string;
+  /** The tail buy notice's event id: one ghost per told buy. */
+  eventId: string;
+  /** Display handle at entry time (display only). */
+  handle: string | null;
+  /** Token key (`namespace:network:address`), the storage/join key. */
+  tokenId: string;
+  /** USD entry price, 8dp decimal string, copied from the mark. */
+  entryPrice8: string;
+  /** The scout budget in micro-USD at entry time, for scout-cut sizing. Null when unknown. */
+  scoutBudgetMicro: number | null;
+}
+
+/** A ghost paper entry decided (fomo_ghost_enter). Owner only. */
+export interface GhostEnterData {
+  action: "ghost-enter";
+  eventId: string;
+  entered: boolean;
+  sizeUsdMicro: number | null;
+  /** ghost-off | no-budget | capped | already — null when entered. */
+  reason: string | null;
+}
+
+/** Her ghost paper PnL (fomo_ghost_pnl). Owner only. */
+export interface GhostPnlArgs {
+  /** Window in whole days back from now (1-90). */
+  days: number;
+}
+
+/** Her ghost paper PnL read (fomo_ghost_pnl). Owner only. */
+export interface GhostPnlData {
+  action: "ghost-pnl";
+  lines: string[];
+}
+
 /** One running tail made longer: whole hours (TOOL_LIMITS.tailExtendHours), never past 12 from now. */
 export interface ExtendTailArgs {
   trader: TraderRef;
@@ -237,6 +322,10 @@ export interface ToolArgs {
   fomo_tail_trader: TailArgs;
   fomo_untail_trader: UntailArgs;
   fomo_extend_tail: ExtendTailArgs;
+  fomo_record_tail_mark: MarkArgs;
+  fomo_ghost_config: GhostConfigArgs;
+  fomo_ghost_enter: GhostEnterArgs;
+  fomo_ghost_pnl: GhostPnlArgs;
 }
 
 export type ValidateResult<A> = { ok: true; args: A } | { ok: false; reason: string };
@@ -1263,6 +1352,145 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
             ? okv(o.hours as number)
             : bad("hours-out-of-range");
       return collect<ExtendTailArgs>({ trader: traderArg(o.trader, true) as Field<TraderRef>, hours });
+    },
+  },
+
+  fomo_ghost_config: {
+    description:
+      "Owner only: ghost paper controls — turn papering on or off per trader, pick a size mode, cap exposure, stop everything, or wipe the ghost ledger. " +
+      "Fake money only: never a trade, never a permission.",
+    schema: schema(
+      {
+        trader: { ...S.trader, description: "Fomo user id or handle. Omit for stop/reset." },
+        op: { type: "string", enum: ["on", "off", "size", "mode", "cap", "stop", "reset"], description: "What to change." },
+        amountMicro: { type: "integer", minimum: 0, maximum: 10000000000000, description: "Micro-USD for size (custom) and cap. Omit otherwise." },
+        mode: { type: "string", enum: ["scout-cut", "flat", "custom"], description: "Size mode, for op mode. Omit otherwise." },
+      },
+      ["op"],
+    ),
+    freshness: null,
+    mutation: true,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["trader", "op", "amountMicro", "mode"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      const opRaw = oneOf(o.op, ["on", "off", "size", "mode", "cap", "stop", "reset"] as const);
+      if (!opRaw) return { ok: false, reason: "op-invalid" };
+      const op: Field<string> = okv(opRaw);
+      const needsTrader = opRaw !== "stop" && opRaw !== "reset";
+      const trader = traderArg(o.trader ?? undefined, needsTrader);
+      if (!trader.ok) return { ok: false, reason: trader.reason };
+      const amount: Field<number | null> =
+        o.amountMicro === undefined || o.amountMicro === null ? okv(null)
+        : typeof o.amountMicro === "number" && Number.isSafeInteger(o.amountMicro) && o.amountMicro >= 0 ? okv(o.amountMicro)
+        : bad("amount-invalid");
+      const mode: Field<string | null> =
+        o.mode === undefined || o.mode === null ? okv(null)
+        : o.mode === "scout-cut" || o.mode === "flat" || o.mode === "custom" ? okv(o.mode)
+        : bad("mode-invalid");
+      if ((opRaw === "size" || opRaw === "cap") && !(typeof o.amountMicro === "number")) return { ok: false, reason: "amount-required" };
+      if (opRaw === "mode" && typeof o.mode !== "string") return { ok: false, reason: "mode-required" };
+      return collect<GhostConfigArgs>({ trader, op, amountMicro: amount, mode });
+    },
+  },
+
+  fomo_ghost_enter: {
+    description:
+      "Owner only: paper one told tail buy with ghost money after its mark lands. " +
+      "Opens nothing when ghosting is off for the trader, when the size cannot be resolved, or when the cap bites. Never a trade, never a permission.",
+    schema: schema(
+      {
+        traderUserId: { type: "string", maxLength: 128, description: "Provider user id of the tailed trader." },
+        eventId: { type: "string", maxLength: 128, description: "The tail buy notice's event id." },
+        handle: { type: "string", maxLength: 64, description: "Display handle at entry time." },
+        tokenId: { type: "string", maxLength: 128, description: "Token key (namespace:network:address)." },
+        entryPrice8: { type: "string", maxLength: 32, description: "USD entry price, 8dp decimal string, copied from the mark." },
+        scoutBudgetMicro: { type: "integer", minimum: 0, maximum: 9007199254740991, description: "Scout budget in micro-USD, for scout-cut sizing. Omit when unknown." },
+      },
+      ["traderUserId", "eventId", "tokenId", "entryPrice8"],
+    ),
+    freshness: null,
+    mutation: true,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["traderUserId", "eventId", "handle", "tokenId", "entryPrice8", "scoutBudgetMicro"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      const uid = str(o.traderUserId, "traderUserId", 128);
+      if (!uid.ok) return { ok: false, reason: uid.reason };
+      const ev = str(o.eventId, "eventId", 128);
+      if (!ev.ok) return { ok: false, reason: ev.reason };
+      const tk = str(o.tokenId, "tokenId", 128);
+      if (!tk.ok) return { ok: false, reason: tk.reason };
+      const px: Field<string> = typeof o.entryPrice8 === "string" && /^\d{1,24}(\.\d{1,8})?$/.test(o.entryPrice8) ? okv(o.entryPrice8) : bad("entry-price8-invalid");
+      const handle: Field<string | null> = o.handle === undefined || o.handle === null ? okv(null) : str(o.handle, "handle", 64);
+      const budget: Field<number | null> =
+        o.scoutBudgetMicro === undefined || o.scoutBudgetMicro === null ? okv(null)
+        : typeof o.scoutBudgetMicro === "number" && Number.isSafeInteger(o.scoutBudgetMicro) && o.scoutBudgetMicro >= 0 ? okv(o.scoutBudgetMicro)
+        : bad("budget-invalid");
+      return collect<GhostEnterArgs>({ traderUserId: uid, eventId: ev, handle, tokenId: tk, entryPrice8: px, scoutBudgetMicro: budget });
+    },
+  },
+
+  fomo_ghost_pnl: {
+    description:
+      "Owner only: her ghost paper PnL over recent told buys — positions, open exposure, settled +1h/+24h PnL with sample sizes. Fake money, read-only.",
+    schema: schema(
+      {
+        days: { type: "integer", minimum: 1, maximum: 90, description: "Window in whole days back from now." },
+      },
+      [],
+    ),
+    freshness: null,
+    mutation: false,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["days"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      const days: Field<number> =
+        o.days === undefined ? okv(30)
+        : typeof o.days === "number" && Number.isSafeInteger(o.days) && o.days >= 1 && o.days <= 90 ? okv(o.days)
+        : bad("days-out-of-range");
+      return collect<GhostPnlArgs>({ days });
+    },
+  },
+
+  fomo_record_tail_mark: {
+    description:
+      "Owner only: record one told tail buy's entry mark for the tail leaderboard (entry price from a top pool quote). " +
+      "One mark per event key; a repeat records nothing. Never a trade, never a permission.",
+    schema: schema(
+      {
+        traderUserId: { type: "string", maxLength: 128, description: "Provider user id of the tailed trader." },
+        eventId: { type: "string", maxLength: 128, description: "The tail buy notice's event id." },
+        handle: { type: "string", maxLength: 64, description: "Display handle at mark time." },
+        tokenId: { type: "string", maxLength: 128, description: "Token key (namespace:network:address)." },
+        entryPrice8: { type: "string", maxLength: 32, description: "USD entry price, 8dp decimal string." },
+        entryAtMs: { type: "integer", minimum: 1, maximum: 9007199254740991, description: "When the price was read." },
+        entryPool: { type: "string", maxLength: 160, description: "The pool that quoted it." },
+      },
+      ["traderUserId", "eventId", "tokenId", "entryPrice8", "entryAtMs"],
+    ),
+    freshness: null,
+    mutation: true,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["traderUserId", "eventId", "handle", "tokenId", "entryPrice8", "entryAtMs", "entryPool"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      const uid = str(o.traderUserId, "traderUserId", 128);
+      if (!uid.ok) return { ok: false, reason: uid.reason };
+      const ev = str(o.eventId, "eventId", 128);
+      if (!ev.ok) return { ok: false, reason: ev.reason };
+      const tk = str(o.tokenId, "tokenId", 128);
+      if (!tk.ok) return { ok: false, reason: tk.reason };
+      const px: Field<string> = typeof o.entryPrice8 === "string" && /^\d{1,24}(\.\d{1,8})?$/.test(o.entryPrice8) ? okv(o.entryPrice8) : bad("entry-price8-invalid");
+      const at: Field<number> = typeof o.entryAtMs === "number" && Number.isSafeInteger(o.entryAtMs) && o.entryAtMs > 0 ? okv(o.entryAtMs) : bad("entry-at-invalid");
+      const handle: Field<string | null> = o.handle === undefined || o.handle === null ? okv(null) : str(o.handle, "handle", 64);
+      const pool: Field<string | null> = o.entryPool === undefined || o.entryPool === null ? okv(null) : str(o.entryPool, "entryPool", 160);
+      return collect<MarkArgs>({ traderUserId: uid, eventId: ev, handle, tokenId: tk, entryPrice8: px, entryAtMs: at, entryPool: pool });
     },
   },
 };

@@ -205,6 +205,7 @@ export type Command =
   | { kind: "tail"; handle: string; hours: number; clamped: boolean; take?: boolean }
   | { kind: "untail"; handle: string | null }
   | { kind: "tails"; which?: boolean }
+  | { kind: "ghost"; op: "on" | "off" | "size" | "mode" | "cap" | "stop" | "reset" | "pnl"; handle: string | null; amountMicro: number | null; mode: "scout-cut" | "flat" | "custom" | null }
   | { kind: "chat"; reply: string }
   | { kind: "unknown"; text: string };
 
@@ -255,6 +256,19 @@ const MUTATION_KINDS = new Set([
   ...CONTROL_KINDS, "open", "volume", "media", "notify", "lock", "power", "getfile", "clipset", "shell", "type", "hotkey", "watch", "unwatch",
   "alert", "unalert", "name", "remember", "forget", "remind", "unremind", "agent", "tail", "untail",
 ]);
+
+export const GHOST_USAGE =
+  "usage: /ghost on <trader> papers their tail calls with fake money. /ghost off <trader> stops it. " +
+  "/ghost size <trader> <amount> sets a custom size ($1 to $10,000). /ghost mode <trader> <scout-cut|flat|custom> picks ten percent of the scout budget, $100 flat, or custom. " +
+  "/ghost cap <trader> <amount> caps open ghost exposure. /ghost pnl reads the paper record. /ghost stop halts everything; /ghost reset wipes the ledger.";
+
+/** Parse a ghost size amount ("100", "$100", "100usd"): micro-USD or null. Words live with the command, math in fomo/ghost.ts. */
+function ghostSizeMicro(raw: string): number | null {
+  const s = raw.trim().replace(/^\$/, "").replace(/usd$/i, "").trim();
+  if (!/^\d{1,7}(\.\d{1,2})?$/.test(s)) return null;
+  const micro = Math.round(Number(s) * 1_000_000);
+  return Number.isSafeInteger(micro) && micro >= 1_000_000 && micro <= 10_000_000_000 ? micro : null;
+}
 
 /** What /tail and /untail say when their argument cannot be read. Plain text: the executor escapes an "unknown". */
 export const TAIL_USAGE = `usage: /tail <trader> [hours] (1 to ${TAIL_MAX_HOURS}, 3 if you don't say). /untail <trader> or /untail all stops one; /tails lists them.`;
@@ -494,6 +508,28 @@ export function parseSlash(text: string): Command | null {
     }
     case "tails":
       return { kind: "tails" };
+    case "ghost": {
+      // Bare or pnl: her paper record. stop/reset: tenant-wide, no trader.
+      const parts = (arg ?? "").trim().split(/\s+/).filter((x) => x.length > 0);
+      if (parts.length === 0 || /^pnl$/i.test(parts[0]!)) return { kind: "ghost", op: "pnl", handle: null, amountMicro: null, mode: null };
+      if (/^stop$/i.test(parts[0]!)) return { kind: "ghost", op: "stop", handle: null, amountMicro: null, mode: null };
+      if (/^reset$/i.test(parts[0]!)) return { kind: "ghost", op: "reset", handle: null, amountMicro: null, mode: null };
+      const sub = parts[0]!.toLowerCase();
+      if (sub !== "on" && sub !== "off" && sub !== "size" && sub !== "mode" && sub !== "cap") return { kind: "unknown", text: GHOST_USAGE };
+      const handle = parseTailArgs(parts[1] ?? "")?.handle ?? null;
+      if (!handle) return { kind: "unknown", text: GHOST_USAGE };
+      if (sub === "on" || sub === "off") {
+        return parts.length === 2 ? { kind: "ghost", op: sub, handle, amountMicro: null, mode: null } : { kind: "unknown", text: GHOST_USAGE };
+      }
+      if (sub === "mode") {
+        const m = (parts[2] ?? "").toLowerCase();
+        if (parts.length !== 3 || (m !== "scout-cut" && m !== "flat" && m !== "custom")) return { kind: "unknown", text: GHOST_USAGE };
+        return { kind: "ghost", op: "mode", handle, amountMicro: null, mode: m };
+      }
+      const amount = ghostSizeMicro(parts[2] ?? "");
+      if (parts.length !== 3 || amount === null) return { kind: "unknown", text: GHOST_USAGE };
+      return { kind: "ghost", op: sub, handle, amountMicro: amount, mode: null };
+    }
     case "unwatch": {
       const id = Number(arg);
       return Number.isInteger(id) && id > 0 ? { kind: "unwatch", id } : { kind: "unknown", text: "usage: /unwatch <n>" };
