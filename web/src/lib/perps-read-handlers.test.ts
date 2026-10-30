@@ -49,6 +49,25 @@ it("selection never falls back to Spot and distinguishes missing, malformed, wro
   assert.deepEqual(await selectPerpsAccount(request()), { ...identity, owner: null });
   assert.doesNotMatch(JSON.stringify(await selectPerpsAccount(request())), /never-return/);
 });
+it("local selection keeps a stopped renewal distinct from missing, under the writer lock", async () => {
+  const dir = path.join(home, "accounts/perps"), file = path.join(dir, "grant.json"), binding = path.join(dir, "permission-replacement.json");
+  const { withLocalStateLock } = await import("../../../worker/src/local-state-lock");
+  const { retainLocalPerpsBinding } = await import("../../../worker/src/local-perps-binding");
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const writing = withLocalStateLock(home, async () => {
+    rmSync(file); entered(); await gate;
+    retainLocalPerpsBinding({ purpose: "perps", owner: OWNER, smartAccount: A, sessionKeyAddress: B, chainId: 4663 }, dir);
+  });
+  await ready; let finished = false;
+  const reading = selectPerpsAccount(request()).then(value => { finished = true; return value; });
+  try { await new Promise(resolve => setTimeout(resolve, 35)); assert.equal(finished, false); }
+  finally { release(); await writing; }
+  assert.equal((await reading).state, "unread");
+  writeFileSync(binding, "{broken"); assert.equal((await selectPerpsAccount(request())).state, "unread");
+  rmSync(binding); assert.equal((await selectPerpsAccount(request())).state, "not-configured");
+});
 it("hosted selection follows the signed tenant's Perps store only; corrupt records are unread", async () => {
   process.env.MERRYMEN_HOSTED = "1";
   for (const dir of ["tenants", "tenants-perps"]) mkdirSync(path.join(home, dir), { recursive: true });

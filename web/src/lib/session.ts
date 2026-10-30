@@ -1457,6 +1457,7 @@ async function mintGrant(
     { ...perpIn, localGrants: perpIn.localGrants ?? localGrantsSnapshot(wallet) },
   );
   if (!grant) throw new Error("Grant preparation returned no signed permission.");
+  perpIn.assertCurrent?.();
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
   // it. The owner key was generated right here, so `owner` can never equal the
@@ -1489,6 +1490,8 @@ async function mintGrant(
   // gives the self-hosted file (web/src/app/api/grants/route.ts).
   // Owner approval can take minutes. A wallet saved by another tab during
   // that wait must not be replaced by this older signing attempt.
+  await perpIn.beforeCommit?.();
+  perpIn.assertCurrent?.();
   if (localStorage.getItem(slot) !== previousLocal) {
     throw new Error("The saved wallet changed while signing. That wallet was kept. Reload before trying again.");
   }
@@ -1508,7 +1511,7 @@ async function mintGrant(
   // own store. In hosted mode the browser sends its session cookie so the
   // server can bind the grant to the authenticated wallet.
   onStatus("handing the grant to the worker…");
-  return { grant, local: localGrant, handoff: await postGrant(grant) };
+  return { grant, local: localGrant, handoff: await postGrant(grant, perpIn.assertCurrent) };
 }
 
 /**
@@ -1849,7 +1852,7 @@ export function setPrivyTokenSource(fn: (() => Promise<string | null>) | null): 
   privyTokenSource = fn;
 }
 
-async function postGrant(grant: Grant): Promise<GrantHandoff> {
+async function postGrant(grant: Grant, assertCurrent?: () => void): Promise<GrantHandoff> {
   // TO THE WALLET THE GRANT SIGNED FOR, and only through walletUrl: Spot posts
   // to exactly the URL it always did, Perps adds `wallet=perps`, which the
   // route checks against the grant's own purpose. A grant that names no
@@ -1869,6 +1872,7 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
       const token = await privyTokenSource();
       if (token) headers.Authorization = `Bearer ${token}`;
     }
+    assertCurrent?.();
     const res = await fetch(walletUrl("/api/grants", wallet), {
       method: "POST",
       headers,
@@ -1946,8 +1950,9 @@ export function sameGrantPermission(a: GrantPermissionView | undefined, b: Grant
  * handoff may have spent it. The trading permission, key and limits stay exact;
  * the owner confirms a fresh link instead of making a nonce replayable.
  */
-export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): Promise<GrantHandoff> {
-  if (!grant.binding && !proof) return postGrant(grant);
+export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof, assertCurrent?: () => void): Promise<GrantHandoff> {
+  assertCurrent?.();
+  if (!grant.binding && !proof) return postGrant(grant, assertCurrent);
   if (!proof) return { ok: false, error: "Confirm this wallet's account link again before retrying activation." };
   const { ownerSigner, tenant } = proof;
   const version = grant.binding?.version ?? "legacy-wallet-owner-v1";
@@ -1968,7 +1973,7 @@ export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): 
   // Historical local binding evidence stays intact. Only the fresh intake
   // claim changes, and an owner key must never accompany that hosted request.
   const { demoOwnerPrivateKey: _ownerKey, ...publicGrant } = grant;
-  return postGrant({ ...publicGrant, binding });
+  return postGrant({ ...publicGrant, binding }, assertCurrent);
 }
 
 /**
@@ -1996,6 +2001,10 @@ export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): 
  * With names, adding a field can only ever be additive.
  */
 export interface MintOptions {
+  /** Optional UI authority fence; checked after slow preparation and before delivery. */
+  assertCurrent?: () => void;
+  /** Recheck session/offer after approval, before archiving or saving a permission. */
+  beforeCommit?: () => Promise<void>;
   /**
    * WHICH OF THE OWNER'S WALLETS THIS SIGNATURE IS FOR. Absent is Spot, as it
    * is on the grant itself (core grantPurpose), so every caller written before
@@ -2076,6 +2085,8 @@ export interface MintOptions {
 
 /** What the preparation core takes about perpetuals; built from MintOptions by `perpInput`. */
 export interface PerpSigningInput {
+  assertCurrent?: () => void;
+  beforeCommit?: () => Promise<void>;
   /** The wallet signed for (MintOptions.purpose); absent is Spot. */
   purpose?: GrantPurpose;
   recovery?: PerpRecoveryReference;
@@ -2094,7 +2105,7 @@ export interface PerpSigningInput {
  */
 function perpInput(o: Omit<MintOptions, "hostedAs">): PerpSigningInput {
   return {
-    purpose: o.purpose,
+    purpose: o.purpose, assertCurrent: o.assertCurrent, beforeCommit: o.beforeCommit,
     perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant,
     perpDrop: o.perpDrop, venueFlat: o.venueFlat, localGrants: o.localGrants,
   };

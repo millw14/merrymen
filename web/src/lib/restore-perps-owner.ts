@@ -78,10 +78,10 @@ async function readPerpsOwner(read: typeof fetch): Promise<PerpsOwner> {
     return { kind: "unread" };
   }
   if (!res.ok) return { kind: "unread" };
-  const body = (await res.json().catch(() => null)) as { exists?: unknown; tenant?: unknown; stored?: unknown; grant?: { owner?: unknown } } | null;
+  const body = (await res.json().catch(() => null)) as { exists?: unknown; tenant?: unknown; stored?: unknown; storedOwner?: unknown; grant?: { owner?: unknown } } | null;
   const hosted = typeof body?.tenant === "string";
   const owner = body?.exists === false
-    ? body.stored === true ? body.tenant : null
+    ? body.stored === true ? body.tenant ?? body.storedOwner : null
     : body?.exists === true ? body.grant?.owner : undefined;
   if (owner === null) return { kind: "none" };
   if (typeof owner !== "string") return { kind: "unread" };

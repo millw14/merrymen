@@ -28,7 +28,7 @@
  */
 import { readFileSync } from "node:fs";
 import { link, mkdir, open, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { writeFileAtomicSync } from "./atomic-write";
 import { withSettingsFileLock } from "./settings-file-lock";
@@ -432,17 +432,16 @@ export class FileSettingsStore implements SettingsStore {
    * "none", and nothing is made. The same cross-process lock as
    * putIfUnchanged keeps a stale save from overwriting this off.
    */
-  async disablePerpsForKill(tenant: `0x${string}`): Promise<"disabled" | "none"> {
+  async disablePerpsForKill(tenant: `0x${string}`, ensureRevision = false): Promise<"disabled" | "none"> {
     if (this.wallet !== "perps") throw new Error("Only the Perps wallet's settings hold perps.");
     const file = this.file(tenant);
-    if (readTextOrNull(file) === null) return "none";
+    if (!ensureRevision && readTextOrNull(file) === null) return "none";
     return withSettingsFileLock(file, () => {
       const raw = readTextOrNull(file);
-      if (raw === null) return "none";
-      const current = unseal((JSON.parse(raw) as StoredSettingsRecord).sealed);
-      if (current.perpsEnabled !== true) return "none";
-      writeFileAtomicSync(file, recordText(tenant, { ...current, perpsEnabled: false }), 0o600);
-      return "disabled";
+      if (raw === null && !ensureRevision) return "none";
+      const current = raw === null ? {} : unseal((JSON.parse(raw) as StoredSettingsRecord).sealed);
+      writeFileAtomicSync(file, recordText(tenant, { ...current, perpsEnabled: false, perpsControlNonce: randomUUID() }), 0o600, { durable: true });
+      return current.perpsEnabled === true ? "disabled" : "none";
     });
   }
 
@@ -1221,8 +1220,9 @@ export class PgSettingsStore implements SettingsStore {
    * before the kill and writes after it is the other order, and the save's own
    * compare and swap (putIfUnchanged) is what keeps the kill there.
    */
-  async disablePerpsForKill(tenant: `0x${string}`): Promise<"disabled" | "none"> {
+  async disablePerpsForKill(tenant: `0x${string}`, ensureRevision = false): Promise<"disabled" | "none"> {
     if (this.wallet !== "perps") throw new Error("Only the Perps wallet's settings hold perps.");
+    if (ensureRevision) await this.client();
     const c = await this.connect(this.url);
     // The statements below fail on a dropped connection; its event must not end the process.
     (c as { on?: (event: string, fn: () => void) => void }).on?.("error", () => {});
@@ -1232,15 +1232,22 @@ export class PgSettingsStore implements SettingsStore {
       const t = tenant.toLowerCase();
       for (let attempt = 0; attempt < 5; attempt++) {
         const { rows } = await c.query(`SELECT sealed FROM ${this.table} WHERE tenant = $1`, [t]);
-        if (!rows[0]) return "none";
+        if (!rows[0]) {
+          if (!ensureRevision) return "none";
+          const inserted = await c.query(
+            `INSERT INTO ${this.table} (tenant, sealed, updated_at) VALUES ($1, $2, $3) ON CONFLICT (tenant) DO NOTHING RETURNING tenant`,
+            [t, seal({ perpsEnabled: false, perpsControlNonce: randomUUID() }), Math.floor(Date.now() / 1000)],
+          );
+          if (inserted.rows.length === 1) return "none";
+          continue;
+        }
         const before = String(rows[0].sealed);
         const current = unseal(before);
-        if (current.perpsEnabled !== true) return "none";
         const swapped = await c.query(
           `UPDATE ${this.table} SET sealed = $1, updated_at = $2 WHERE tenant = $3 AND sealed = $4 RETURNING tenant`,
-          [seal({ ...current, perpsEnabled: false }), Math.floor(Date.now() / 1000), t, before],
+          [seal({ ...current, perpsEnabled: false, perpsControlNonce: randomUUID() }), Math.floor(Date.now() / 1000), t, before],
         );
-        if (swapped.rows.length === 1) return "disabled";
+        if (swapped.rows.length === 1) return current.perpsEnabled === true ? "disabled" : "none";
       }
       throw new Error("the Perps wallet's settings kept changing under the kill");
     } finally {
@@ -1454,13 +1461,14 @@ export function getSettingsStore(wallet: GrantPurpose): SettingsStore {
 export async function disablePaperPerpsForKill(
   tenant: `0x${string}`,
   store: SettingsStore = getSettingsStore("perps"),
+  ensureRevision = false,
 ): Promise<"disabled" | "none"> {
-  if (store instanceof PgSettingsStore || store instanceof FileSettingsStore) return store.disablePerpsForKill(tenant);
+  if (store instanceof PgSettingsStore || store instanceof FileSettingsStore) return store.disablePerpsForKill(tenant, ensureRevision);
   // A stand-in a test installed (useSettingsStoreForTest): its own get and put.
   const current = await store.get(tenant);
-  if (current?.perpsEnabled !== true) return "none";
-  await store.put(tenant, { ...current, perpsEnabled: false });
-  return "disabled";
+  if (current === null && !ensureRevision) return "none";
+  await store.put(tenant, { ...current, perpsEnabled: false, perpsControlNonce: randomUUID() });
+  return current?.perpsEnabled === true ? "disabled" : "none";
 }
 
 /**

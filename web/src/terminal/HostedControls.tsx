@@ -49,7 +49,7 @@ export interface AccountState {
    * today (AgentStatus.energy). Null or absent is "not said yet", never an
    * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: GrantPermissionView & {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}}};
+  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; workerStale?: boolean | null; heartbeatUnread?: true; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: GrantPermissionView & {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";

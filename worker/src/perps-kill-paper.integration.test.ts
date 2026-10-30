@@ -78,7 +78,7 @@ const GRANT = path.join(PERPS_HOME, "grant.json");
 const SETTINGS = path.join(PERPS_HOME, "settings.json");
 const ACCOUNT = "0xab000000000000000000000000000000000000c4";
 const grantJson = (grantedAt: number) =>
-  JSON.stringify({ smartAccount: ACCOUNT, purpose: "perps", serialized: "0xserialized", chainId: 4663, grantedAt, demoOwnerPrivateKey: `0x${"77".repeat(32)}` });
+  JSON.stringify({ owner: "0x00000000000000000000000000000000000000b1", sessionKeyAddress: "0x00000000000000000000000000000000000000c1", smartAccount: ACCOUNT, purpose: "perps", serialized: "0xserialized", chainId: 4663, grantedAt, demoOwnerPrivateKey: `0x${"77".repeat(32)}` });
 /** The owner's Perps settings: practice perps on, BTC only, and keys the kill must leave alone. */
 const OWNER_SETTINGS = { perpsEnabled: true, perpsMarkets: ["BTC-PERP"], paperStartUsdg: 100, agentName: "Little John", perpsMaxLeverage: 2 };
 
@@ -233,7 +233,9 @@ describe("a Perps-only owner with an open paper position", () => {
     assert.equal(existsSync(GRANT), false, "the grant is gone");
     assert.ok(existsSync(path.join(PERPS_HOME, "grants", `${ACCOUNT}.json`)), "and archived, owner key and all");
     const after = JSON.parse(readFileSync(SETTINGS, "utf8")) as Record<string, unknown>;
-    assert.deepEqual(after, { ...OWNER_SETTINGS, perpsEnabled: false }, "perps off, and nothing else the owner set touched");
+    const { perpsControlNonce, ...ownerFields } = after;
+    assert.equal(typeof perpsControlNonce, "string", "kill advances the owner control generation");
+    assert.deepEqual(ownerFields, { ...OWNER_SETTINGS, perpsEnabled: false }, "perps off, and nothing else the owner set touched");
     assert.deepEqual(await held(), frozen, "not closed at a price the kill does not have: the book is as it was");
     assert.equal((await rows("SELECT 1 FROM perp_fills WHERE agent_id = ?")).length, fillsBefore, "nothing booked");
   });
@@ -286,13 +288,13 @@ describe("the other self-hosted kill paths, and a half that fails", () => {
   it("a Perps PERMISSION REPLACEMENT stops the grant alone: a renewal is the owner keeping it trading, and its perps stay on", async () => {
     writeFileSync(GRANT, grantJson(3_500_000));
     writeFileSync(SETTINGS, JSON.stringify(OWNER_SETTINGS, null, 2));
-    assert.equal(await fromSpotHome(() => stopLocalPerpsGrantForRenewal()), "stopped");
+    assert.equal(await fromSpotHome(() => stopLocalPerpsGrantForRenewal(ACCOUNT, "0x00000000000000000000000000000000000000c1")), "stopped");
     assert.equal(existsSync(GRANT), false, "the grant goes, so the renewal can be posted");
     assert.deepEqual(JSON.parse(readFileSync(SETTINGS, "utf8")), OWNER_SETTINGS, "and the settings are the owner's, untouched");
     // Even settings it could not read do not stop a renewal: it never reads them.
     writeFileSync(GRANT, grantJson(3_600_000));
     writeFileSync(SETTINGS, "{ not json");
-    assert.equal(await fromSpotHome(() => stopLocalPerpsGrantForRenewal()), "stopped");
+    assert.equal(await fromSpotHome(() => stopLocalPerpsGrantForRenewal(ACCOUNT, "0x00000000000000000000000000000000000000c1")), "stopped");
     writeFileSync(SETTINGS, JSON.stringify(OWNER_SETTINGS, null, 2));
   });
 

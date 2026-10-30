@@ -29,7 +29,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { StoredGrant } from "@merrymen/core";
 
 const ORIGIN = "https://app.merrymen.dev";
-const ENV = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_GRANT_FILE", "MERRYMEN_SESSION_SECRET", "MERRYMEN_STORE_DEK", "DATABASE_URL", "MERRYMEN_PERPS"] as const;
+const ENV = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_GRANT_FILE", "MERRYMEN_SESSION_SECRET", "MERRYMEN_STORE_DEK", "DATABASE_URL", "MERRYMEN_PERPS", "MERRYMEN_PERPS_PAPER_TENANTS"] as const;
 const saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
 let home = "";
 let route: typeof import("./route");
@@ -127,9 +127,9 @@ describe("self-hosted: no Perps wallet is made while perps is off, and the kill 
 
   // A renewal may name its wallet, as it may hosted, and stops only that one.
   const perpsGrantFile = () => path.join(home, "accounts", "perps", "grant.json");
-  const perpsKept = `{"smartAccount":"${addr(0xc3)}","purpose":"perps"}\n`;
+  const perpsKept = `{"smartAccount":"${addr(0xc3)}","purpose":"perps","owner":"${addr(0xa1)}","sessionKeyAddress":"${addr(0xb2)}","chainId":4663}\n`;
   const renew = (query: string) => route.DELETE(new Request(`${ORIGIN}/api/grants${query}`, {
-    method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement" }),
+    method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement", expectedAccount: addr(0xc3), expectedSession: addr(0xb2) }),
   }));
   const withPerpsGrant = () => {
     rmSync(path.join(home, "accounts"), { recursive: true, force: true });
@@ -164,6 +164,7 @@ describe("hosted: a permission replacement stops the wallet it names, and only t
 
   beforeEach(async () => {
     process.env.MERRYMEN_HOSTED = "1";
+    process.env.MERRYMEN_PERPS_PAPER_TENANTS = T;
     await stores.getGrantStore("spot").remove(T);
     await stores.getGrantStore("perps").remove(T);
     await stores.getGrantStore("spot").put(T, grant(T, SPOT, key("ab")));

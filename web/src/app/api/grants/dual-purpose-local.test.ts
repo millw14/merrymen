@@ -109,7 +109,7 @@ describe("self-hosted: the Perps wallet is written to its own home, and only the
     const first = await perpsGrant();
     assert.equal((await post(first)).status, 200);
     const stop = await route.DELETE(new Request(`${ORIGIN}/api/grants?wallet=perps`, {
-      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement" }),
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement", expectedAccount: first.smartAccount, expectedSession: first.sessionKeyAddress }),
     }));
     assert.deepEqual(await json(stop), { status: 200, body: { ok: true, replacement: true, state: "stopped" } });
     const next = await perpsGrant();
@@ -125,7 +125,7 @@ describe("self-hosted: the Perps wallet is written to its own home, and only the
   it("D6 SELF-HOSTED HAS NO RETIRED-KEY FENCE: the grant a renewal stopped, posted again, is armed again — harmless only because its wall is empty, the one case renewalSkipsRevocation lets through", async () => {
     // Hosted, the store retires the stopped key's hash and refuses that key
     // until a kill deletes the record (dual-purpose.test.ts, D6). Here the
-    // stop archives grant.json and keeps no record of the key, as main's
+    // stop archives grant.json and retains only public identity, as main's
     // self-hosted Spot renewal never did; this machine's archive holds the key
     // and its owner key either way.
     // So nothing here may be read as that fence: a renewal that skips the
@@ -133,7 +133,7 @@ describe("self-hosted: the Perps wallet is written to its own home, and only the
     const first = await perpsGrant();
     assert.equal((await post(first)).status, 200);
     const stop = await route.DELETE(new Request(`${ORIGIN}/api/grants?wallet=perps`, {
-      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement" }),
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement", expectedAccount: first.smartAccount, expectedSession: first.sessionKeyAddress }),
     }));
     assert.deepEqual(await json(stop), { status: 200, body: { ok: true, replacement: true, state: "stopped" } });
     assert.equal(existsSync(perpsFile()), false, "stopped");
@@ -417,5 +417,86 @@ describe("self-hosted: GET ?wallet=perps reads the Perps home, never the Spot on
     }
     const body = (await (await get("?wallet=perps")).json()) as { perps?: unknown };
     assert.deepEqual(body.perps, report, "the Perps home's ledger, never the Spot one's");
+  });
+});
+
+/** A delayed renewal is bound to the exact permission its screen displayed. */
+describe("local renewal identity survives its grant removal", () => {
+  const stop = (body: Record<string, unknown>) => route.DELETE(new Request(`${ORIGIN}/api/grants?wallet=perps`, {
+    method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement", ...body }),
+  }));
+  it("missing and stale account/session bindings change no files", async () => {
+    const current = await perpsGrant(); assert.equal((await post(current)).status, 200);
+    const original = read(perpsFile());
+    for (const [body, expectedStatus] of [
+      [{}, 400], [{ expectedAccount: current.smartAccount }, 400],
+      [{ expectedAccount: SPOT, expectedSession: current.sessionKeyAddress }, 409],
+      [{ expectedAccount: current.smartAccount, expectedSession: owner.address }, 409],
+    ] as const) {
+      assert.equal((await stop(body)).status, expectedStatus); assert.equal(read(perpsFile()), original);
+      assert.equal(existsSync(path.join(perpsHome(), "grants")), false);
+    }
+  });
+  it("the retained record contains no keys and still prevents a conflicting Spot restore after the Perps grant is gone", async () => {
+    const current = await perpsGrant(); assert.equal((await post(current)).status, 200);
+    assert.equal((await stop({ expectedAccount: current.smartAccount, expectedSession: current.sessionKeyAddress })).status, 200);
+    assert.equal(existsSync(perpsFile()), false);
+    const binding = path.join(perpsHome(), "permission-replacement.json");
+    const text = read(binding); assert.ok(text); assert.doesNotMatch(text, /PrivateKey|serialized|signature/i); assert.equal(statSync(binding).mode & 0o777, 0o600);
+    const status = await json(await route.GET(new Request(`${ORIGIN}/api/grants?wallet=perps`)));
+    assert.equal(status.body.exists, false); assert.equal(status.body.stored, true); assert.equal(status.body.storedOwner, owner.address.toLowerCase());
+    const pendingRead = (async () => Response.json(status.body)) as typeof fetch;
+    assert.equal(await restorePerpsRefusal(owner.address, pendingRead), null);
+    assert.equal(await restorePerpsRefusal(SPOT, pendingRead), RESTORE_PERPS_OWNER_DIFFERS);
+    assert.equal((await stop({ expectedAccount: current.smartAccount, expectedSession: owner.address })).status, 409);
+    assert.equal(read(binding), text, "a stale retry cannot replace the retained identity");
+    const stranger = privateKeyToAccount(generatePrivateKey());
+    const conflict = await json(await post(JSON.parse(spotOnDisk({ owner: stranger.address })), ""));
+    assert.equal(conflict.status, 409); assert.equal(conflict.body.code, "owner-differs");
+    const allowed = await post(JSON.parse(spotOnDisk()), ""); assert.equal(allowed.status, 200);
+    assert.equal((await post(await perpsGrant())).status, 200); assert.equal(existsSync(binding), false);
+  });
+  it("an unreadable retained identity fails closed, and a kill clears the pending relationship", async () => {
+    const current = await perpsGrant(); assert.equal((await post(current)).status, 200);
+    assert.equal((await stop({ expectedAccount: current.smartAccount, expectedSession: current.sessionKeyAddress })).status, 200);
+    const binding = path.join(perpsHome(), "permission-replacement.json");
+    writeFileSync(binding, "{broken");
+    assert.equal((await post(JSON.parse(spotOnDisk()), "")).status, 503);
+    assert.equal((await route.GET(new Request(`${ORIGIN}/api/grants?wallet=perps`))).status, 503);
+    const { stopLocalPerpsWallet } = await import("../../../../../worker/src/perps-kill");
+    await stopLocalPerpsWallet(); assert.equal(existsSync(binding), false, "kill discards the relationship even when the stopped record is unreadable");
+    assert.equal((await post(JSON.parse(spotOnDisk()), "")).status, 200);
+  });
+  it("a status read waits for the grant and retained identity writer transition", async () => {
+    const current = await perpsGrant(); assert.equal((await post(current)).status, 200);
+    const { withLocalStateLock } = await import("../../../../../worker/src/local-state-lock");
+    const { retainLocalPerpsBinding } = await import("../../../../../worker/src/local-perps-binding");
+    let entered!: () => void, release!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const writing = withLocalStateLock(home, async () => {
+      rmSync(perpsFile()); entered(); await gate; retainLocalPerpsBinding(current, perpsHome());
+    });
+    await ready;
+    let finished = false;
+    const reading = route.GET(new Request(`${ORIGIN}/api/grants?wallet=perps`)).then(res => { finished = true; return res; });
+    try { await new Promise(resolve => setTimeout(resolve, 35)); assert.equal(finished, false, "status cannot observe the gap between two identity files"); }
+    finally { release(); await writing; }
+    const status = await json(await reading);
+    assert.equal(status.body.stored, true); assert.equal(status.body.storedOwner, owner.address.toLowerCase());
+  });
+  it("a delayed stop waits for the shared writer lock and compares the permission again after it is released", async () => {
+    const first = await perpsGrant(), next = await perpsGrant(); assert.equal((await post(first)).status, 200);
+    const { withLocalStateLock } = await import("../../../../../worker/src/local-state-lock");
+    let entered!: () => void, release!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const writing = withLocalStateLock(home, async () => { entered(); await gate; writeFileSync(perpsFile(), JSON.stringify(next)); });
+    await ready;
+    let finished = false;
+    const stopping = stop({ expectedAccount: first.smartAccount, expectedSession: first.sessionKeyAddress }).then(res => { finished = true; return res; });
+    try { await new Promise(resolve => setTimeout(resolve, 35)); assert.equal(finished, false, "the stop participates in the grant writer lock"); }
+    finally { release(); await writing; }
+    assert.equal((await stopping).status, 409); assert.deepEqual(JSON.parse(read(perpsFile())!), next);
   });
 });

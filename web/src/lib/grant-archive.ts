@@ -10,8 +10,10 @@
  */
 import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { liftKillPause, pauseForKeptGrant, purposeHome } from "@merrymen/home";
+import { liftKillPause, pauseForKeptGrant, purposeHome, merrymenHome } from "@merrymen/home";
 import { fsyncDir, writeFileAtomic } from "@merrymen/atomic-write";
+import { withLocalStateLock } from "../../../worker/src/local-state-lock";
+import { clearLocalPerpsBinding } from "../../../worker/src/local-perps-binding";
 import type { GrantPurpose, StoredGrant } from "@merrymen/core";
 
 /**
@@ -110,11 +112,21 @@ export class GrantArchiveError extends Error {
  * worker/src/perps-kill.ts's stopLocalPerpsWallet, not this.)
  */
 export async function removeSelfHostedGrant(wallet: GrantPurpose): Promise<void> {
-  const { home, grant } = grantFiles(wallet);
-  const kept = await archiveCurrentGrant(wallet);
-  if (kept.kind === "failed") {
-    throw new GrantArchiveError(kept.why, pauseForKeptGrant(home), wallet === "perps" ? "~/.merrymen/accounts/perps/grants/" : undefined);
-  }
-  await rm(grant, { force: true });
-  liftKillPause(home);
+  return withLocalStateLock(merrymenHome(), async () => {
+    const { home, grant } = grantFiles(wallet);
+    const kept = await archiveCurrentGrant(wallet);
+    if (kept.kind === "failed") {
+      throw new GrantArchiveError(kept.why, pauseForKeptGrant(home), wallet === "perps" ? "~/.merrymen/accounts/perps/grants/" : undefined);
+    }
+    await rm(grant, { force: true });
+    try { await fsyncDir(home); }
+    catch (e) {
+      // A wallet that has never existed has no directory entry to sync. Keep
+      // syncing an existing home even on retries after a prior unlink, and
+      // propagate every real durability/read failure.
+      if (kept.kind !== "nothing" || (e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+    if (wallet === "perps") clearLocalPerpsBinding(home);
+    liftKillPause(home);
+  });
 }

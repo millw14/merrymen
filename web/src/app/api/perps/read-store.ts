@@ -2,7 +2,9 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { grantPurpose, isHostedMode } from "@merrymen/core";
-import { purposeHome } from "@merrymen/home";
+import { merrymenHome, purposeHome } from "@merrymen/home";
+import { withLocalStateLock } from "../../../../../worker/src/local-state-lock";
+import { readLocalPerpsBinding } from "../../../../../worker/src/local-perps-binding";
 import { getGrantStore } from "@merrymen/grant-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
@@ -20,8 +22,15 @@ export async function selectPerpsAccount(req: Request): Promise<PerpsSelection> 
       grant = await store.get(owner);
       if (!grant) return { ...absent, state: await store.hasStoredGrant(owner) ? "unread" : "not-configured" };
     } else {
-      try { grant = JSON.parse(await readFile(path.join(purposeHome("perps"), "grant.json"), "utf8")); }
-      catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return absent; throw e; }
+      grant = await withLocalStateLock(merrymenHome(), async () => {
+        try { return JSON.parse((await readFile(path.join(purposeHome("perps"), "grant.json"), "utf8")).replace(/^\ufeff/, "")); }
+        catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+          if (readLocalPerpsBinding()) throw new Error("Perps renewal is pending");
+          return undefined;
+        }
+      });
+      if (grant === undefined) return absent;
     }
     if (!grant || typeof grant !== "object" || Array.isArray(grant)) throw new Error("unreadable grant");
     const g = grant as { purpose?: unknown; smartAccount?: unknown; chainId?: unknown };

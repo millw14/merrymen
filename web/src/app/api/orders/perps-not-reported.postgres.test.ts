@@ -141,7 +141,12 @@ describe("hosted, a Perps owner command and a Perps book that has not reported",
   };
   const exit = (body: object) => order("?wallet=perps", { ...body, expectedAccount: PERPS });
   const reset = async (query: string): Promise<Answer> => {
-    const res = await resets.POST(new Request(`https://app.example.test/api/paper-reset${query}`, { method: "POST", headers: { cookie } }));
+    const res = await resets.POST(new Request(`https://app.example.test/api/paper-reset${query}`, {
+      method: "POST", headers: { cookie, "content-type": "application/json" },
+      ...(new URLSearchParams(query).get("wallet") === "perps"
+        ? { body: JSON.stringify({ expectedAccount: PERPS, expectedTenant: TENANT }) }
+        : {}),
+    }));
     return { status: res.status, body: (await res.json()) as Answer["body"] };
   };
   const rows = async () =>

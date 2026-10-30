@@ -41,13 +41,14 @@ export const TABS: { id: Tab; label: string }[] = [
  * from the server). Without it /solana is an unknown path and opens Home, so a
  * Back into an old /solana entry cannot mount the screen.
  */
-export function screenForPath(path: string, solana = false): Screen {
+export function screenForPath(path: string, solana = false, perps = false): Screen {
   if (path.startsWith("/t/")) return { kind: "token", id: decodeURIComponent(path.slice(3)) };
   if (path.startsWith("/a/")) return { kind: "profile", slug: decodeURIComponent(path.slice(3)) };
   if (path === "/search") return { kind: "search" };
   if (path === "/create") return { kind: "create" };
   if (path === "/settings") return { kind: "settings" };
   if (path === "/grant") return { kind: "grant" };
+  if (path === "/perps" && perps) return { kind: "perps" };
   if (path === "/solana" && solana) return { kind: "solana" };
   if (path === "/limits") return { kind: "limits" };
   // The room every agent is in. A screen, NOT a sixth tab: `/chat` is the

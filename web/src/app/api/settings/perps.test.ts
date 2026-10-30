@@ -32,7 +32,7 @@ import { PERPS_LIVE_CONSENT_VERSION, SETTINGS_DEFAULTS, type MerrymenSettings } 
 import { mergeSettings } from "../../../../../worker/src/settings";
 
 const TENANT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_PERPS"] as const;
+const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_PERPS", "MERRYMEN_PERPS_PAPER_TENANTS"] as const;
 const original = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 let dir: string;
 let PUT: (req: Request) => Promise<Response>;
@@ -44,6 +44,7 @@ before(async () => {
   process.env.MERRYMEN_HOSTED = "1";
   process.env.MERRYMEN_SESSION_SECRET = randomBytes(32).toString("hex");
   process.env.MERRYMEN_PERPS = "paper";
+  process.env.MERRYMEN_PERPS_PAPER_TENANTS = TENANT;
   delete process.env.DATABASE_URL;
   resetSettingsStoreForTest();
   // After the env: the route resolves its paths when it loads.
@@ -65,10 +66,19 @@ const cookie = () => `mm_session=${mintSession(TENANT)}`;
 const URL_PERPS = "https://app.example.test/api/settings?wallet=perps";
 
 async function put(body: Record<string, unknown>) {
+  // These contract cases intentionally request paper entries. Supply the same
+  // current revision the owner's settings screen must read before enabling.
+  let expectedVersion: unknown;
+  if (body.perpsEnabled === true && !Object.hasOwn(body, "expectedVersion")) {
+    const current = await GET(new Request(URL_PERPS, { headers: { cookie: cookie() } }));
+    assert.equal(current.status, 200);
+    expectedVersion = (await current.json() as { version: string }).version;
+    assert.equal(typeof expectedVersion, "string");
+  }
   const res = await PUT(new Request(URL_PERPS, {
     method: "PUT",
     headers: { "content-type": "application/json", cookie: cookie() },
-    body: JSON.stringify({ ...body, owner: TENANT }),
+    body: JSON.stringify({ ...(expectedVersion === undefined ? {} : { expectedVersion }), ...body, owner: TENANT }),
   }));
   return { status: res.status, body: (await res.json()) as { ok?: boolean; errors?: string[]; ignored?: string[]; saved?: string[]; note?: string } };
 }

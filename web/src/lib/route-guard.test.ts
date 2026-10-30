@@ -827,7 +827,7 @@ describe("a refused request reads and changes nothing", () => {
       code: ((await res.json()) as { code?: string }).code,
       cache: res.headers.get("cache-control"),
     });
-    const handlers = [["grants", "GET"], ["grants", "POST"], ["grants", "DELETE"], ["settings", "GET"], ["settings", "PUT"], ["orders", "GET"], ["orders", "POST"], ["paper-reset", "POST"]] as const;
+    const handlers = [["grants", "GET"], ["grants", "POST"], ["grants", "DELETE"], ["settings", "GET"], ["settings", "PUT"], ["orders", "GET"], ["orders", "POST"], ["paper-reset", "POST"], ["paper-reset", "GET"]] as const;
     for (const query of ["?wallet=Perps", "?wallet=", "?wallet=spot&wallet=perps"]) {
       for (const [route, method] of handlers) {
         const body = method === "GET" ? undefined : route === "grants" && method === "POST" ? grant : {};

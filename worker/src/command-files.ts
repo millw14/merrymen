@@ -32,7 +32,7 @@
  * semantics.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
@@ -114,6 +114,9 @@ const ID_OK = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** What the worker decided, on its way back. */
 export interface FileCommandResult {
+  /** Scope of a bound practice-reset answer; legacy answers remain unbound. */
+  kind?: string;
+  account?: string;
   id: string;
   ok: boolean;
   line: string;
@@ -143,12 +146,18 @@ export function writeCommand(home: string, cmd: FileCommand): void {
   // An account the drain could never match is a command that could never run.
   if (cmd.account !== undefined && !ACCOUNT_OK.test(cmd.account)) throw new Error("refusing to write a command bound to something that is not an account");
   const dir = commandDir(home);
-  mkdirSync(dir, { recursive: true });
-  // Written to a temp name and renamed, so a reader can never observe a
-  // half-written command — rename is atomic within a filesystem, write is not.
-  const tmp = path.join(dir, `.${cmd.id}.tmp`);
-  writeFileSync(tmp, JSON.stringify(cmd), "utf8");
-  renameSync(tmp, path.join(dir, `${cmd.id}.json`));
+  const created = mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (created) {
+    let current = path.resolve(dir);
+    for (;;) {
+      fsyncDirSync(path.dirname(current));
+      if (current === path.resolve(created)) break;
+      current = path.dirname(current);
+    }
+  }
+  // A queue acknowledgement must survive a host crash, just as the later
+  // claim and result do. Unique atomic temps also avoid writer collisions.
+  writeFileAtomicSync(path.join(dir, `${cmd.id}.json`), JSON.stringify(cmd), 0o600, { durable: true, followSymlinks: false });
 }
 
 /**
@@ -331,7 +340,7 @@ export async function runTickCommand(
           : deps.expiredLine?.(cmd, howLate(now - (cmd.expiresAt as number))) ?? expiredLine(cmd.expiresAt as number, now, "claim"),
         ...(receipt ? { receipt } : {}),
       };
-      writeCommandResult(home, resultOf(cmd.id, dead, now));
+      writeCommandResult(home, resultOf(cmd, dead, now));
       await deps.told(cmd, dead);
       continue;
     }
@@ -341,24 +350,24 @@ export async function runTickCommand(
     const elsewhere = notForThisAccount(cmd, deps.account?.() ?? null);
     if (elsewhere !== null) {
       const refused: CommandOutcome = { ok: false, line: elsewhere };
-      writeCommandResult(home, resultOf(cmd.id, refused, now));
+      writeCommandResult(home, resultOf(cmd, refused, now));
       await deps.told(cmd, refused);
       continue;
     }
     // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
     // gone from here until the receipt lands. Without this marker an owner
     // who asked again mid-trade got a second fill.
-    if (!markRunning(home, cmd.id, cmd.kind)) throw new Error("command claimed but its running marker could not be written; nothing was run");
+    if (!markRunning(home, cmd.id, cmd.kind, cmd.kind === "paper-reset" ? cmd.account : undefined)) throw new Error("command claimed but its running marker could not be written; nothing was run");
     const outcome = await deps.run(cmd);
-    writeCommandResult(home, resultOf(cmd.id, outcome, deps.now()));
+    writeCommandResult(home, resultOf(cmd, outcome, deps.now()));
     await deps.told(cmd, outcome);
     return;
   }
 }
 
 /** An outcome as it is written down — the receipt only when there is one, so an old reader sees the old shape. */
-function resultOf(id: string, o: CommandOutcome, at: number): FileCommandResult {
-  return { id, ok: o.ok, line: o.line, at, ...(o.receipt ? { receipt: o.receipt } : {}) };
+function resultOf(cmd: FileCommand, o: CommandOutcome, at: number): FileCommandResult {
+  return { id: cmd.id, ...(cmd.kind === "paper-reset" && cmd.account ? { kind: cmd.kind, account: cmd.account } : {}), ok: o.ok, line: o.line, at, ...(o.receipt ? { receipt: o.receipt } : {}) };
 }
 
 /** An order the intent queue reached after its own deadline, and did not run. Not a ledger status: no row exists. */
@@ -481,10 +490,18 @@ export function isExpired(cmd: FileCommand, nowMs: number): boolean {
 export function readCommandState(
   home: string,
   id: string,
+  scope?: { kind: "paper-reset"; account: string },
 ): { state: "queued" | "running" | "done"; result?: FileCommandResult; expiresAt?: number | null } | null {
   if (!ID_OK.test(id)) return null;
   const dir = commandDir(home);
+  const matches = (value: unknown): boolean => {
+    if (!scope) return true;
+    if (!value || typeof value !== "object") return false;
+    const v = value as { kind?: unknown; account?: unknown };
+    return v.kind === scope.kind && typeof v.account === "string" && v.account.toLowerCase() === scope.account.toLowerCase();
+  };
   const done = readMatchingResult(dir, id);
+  if (done !== null && !matches(done)) return null;
   if (done !== null) return { state: "done", result: done };
   // A file still in the queue carries its own deadline, read in the SAME read
   // that says it is queued. Two reads — "does it exist", then "what does it
@@ -493,7 +510,15 @@ export function readCommandState(
   try {
     raw = readFileSync(path.join(dir, `${id}.json`), "utf8");
   } catch {
+    if (scope) {
+      try { if (!matches(JSON.parse(readFileSync(path.join(dir, `${id}.running`), "utf8")))) return null; }
+      catch { return null; }
+    }
     return { state: "running" };
+  }
+  if (scope) {
+    try { const cmd = JSON.parse(raw); if (cmd.id !== id || !matches(cmd)) return null; }
+    catch { return null; }
   }
   return { state: "queued", expiresAt: deadlineIn(raw) };
 }
@@ -709,12 +734,12 @@ const RUNNING = ".running";
  * answers, and a bare timestamp read as "an order may be running". A marker
  * written before this, a bare timestamp, has no kind and still holds.
  */
-export function markRunning(home: string, id: string, kind?: string): boolean {
+export function markRunning(home: string, id: string, kind?: string, account?: string): boolean {
   if (!ID_OK.test(id)) return false;
   try {
     mkdirSync(commandDir(home), { recursive: true });
-    const body = typeof kind === "string" ? JSON.stringify({ at: Date.now(), kind }) : String(Date.now());
-    writeFileAtomicSync(path.join(commandDir(home), `${id}${RUNNING}`), body, 0o600, { durable: true });
+    const body = typeof kind === "string" ? JSON.stringify({ at: Date.now(), kind, ...(account ? { account } : {}) }) : String(Date.now());
+    writeFileAtomicSync(path.join(commandDir(home), `${id}${RUNNING}`), body, 0o600, { durable: true, followSymlinks: false });
     return true;
   } catch {
     // An unmarked command must not trade: the self-hosted order slot would
@@ -747,7 +772,7 @@ export function writeCommandResult(home: string, r: FileCommandResult): void {
   } catch {
     /* tidying is never worth losing a receipt over */
   }
-  writeFileAtomicSync(path.join(dir, `${r.id}.done.json`), JSON.stringify(r), 0o600, { durable: true });
+  writeFileAtomicSync(path.join(dir, `${r.id}.done.json`), JSON.stringify(r), 0o600, { durable: true, followSymlinks: false });
   // Keep the duplicate-order guard until an answer exists. Removing it
   // first leaves openCommands empty if the receipt write fails or crashes.
   try {
