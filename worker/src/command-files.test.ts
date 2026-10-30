@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test, { describe, it } from "node:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -277,6 +279,145 @@ test("a file that parses but is the wrong shape is removed, not re-read forever"
     assert.deepEqual(readdirSync(commandDir(home)), [], "the unreadable branch already knew to unlink; this one did not");
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("null and unsafe ids in external command files are discarded without running or blocking a valid command", async () => {
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "good", kind: "trade", at: 2 });
+    writeFileSync(path.join(commandDir(home), "null.json"), "null", "utf8");
+    writeFileSync(path.join(commandDir(home), "unsafe.json"), JSON.stringify({ id: "../outside", kind: "trade", at: 1 }), "utf8");
+    const ran: string[] = [];
+    await runTickCommand(home, {
+      now: () => 10,
+      run: async (cmd) => (ran.push(cmd.id), { ok: true, line: "done" }),
+      told: async () => {},
+    });
+    assert.deepEqual(ran, ["good"]);
+    assert.deepEqual(readdirSync(commandDir(home)), ["good.done.json"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("result ids cannot escape the command directory", () => {
+  const home = tmpHome();
+  try {
+    for (const id of ["../outside", "a/b", "..", "", "x".repeat(65)]) {
+      assert.throws(() => writeCommandResult(home, { id, ok: true, line: "done", at: 1 }), /not a plain id/);
+    }
+    assert.deepEqual(readdirSync(home), [], "refused before any path or receipt is created");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a failed receipt write retains the running marker and keeps the duplicate-order slot occupied", (t) => {
+  const home = tmpHome();
+  try {
+    markRunning(home, "order", "trade");
+    const rename = fs.renameSync;
+    t.mock.method(fs, "renameSync", (...args: Parameters<typeof fs.renameSync>) => {
+      if (String(args[1]).endsWith(`${path.sep}order.done.json`)) throw new Error("receipt rename failed");
+      return rename(...args);
+    });
+    syncBuiltinESMExports();
+    assert.throws(() => writeCommandResult(home, { id: "order", ok: true, line: "booked", at: 1 }));
+    assert.deepEqual(ids(home), ["order:running"]);
+    assert.equal(commandWhereabouts(home, "order"), "running");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an unpersisted claim cannot execute a financial command", async (t) => {
+  if (process.platform === "win32") return;
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "order", kind: "trade", at: 1 });
+    t.mock.method(fs, "fsyncSync", () => { throw Object.assign(new Error("claim cannot be synced"), { code: "EIO" }); });
+    syncBuiltinESMExports();
+    let ran = false;
+    await assert.rejects(runTickCommand(home, {
+      now: () => 10,
+      run: async () => (ran = true, { ok: true, line: "booked" }),
+      told: async () => {},
+    }), /claim cannot be synced/);
+    assert.equal(ran, false, "a booking cannot precede persistence of the claim");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a running marker and a receipt must be durable before they release their predecessor", (t) => {
+  const home = tmpHome();
+  try {
+    markRunning(home, "order", "trade");
+    t.mock.method(fs, "fsyncSync", () => { throw Object.assign(new Error("bytes cannot be synced"), { code: "EIO" }); });
+    syncBuiltinESMExports();
+    assert.equal(markRunning(home, "another", "trade"), false, "a marker that could not reach disk does not authorize execution");
+    assert.throws(() => writeCommandResult(home, { id: "order", ok: true, line: "booked", at: 1 }), /bytes cannot be synced/);
+    assert.deepEqual(ids(home), ["order:running"], "the receipt failed before superseding the durable marker");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a claimed command never runs when its running marker cannot be written", async () => {
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "order", kind: "trade", at: 1 });
+    mkdirSync(path.join(commandDir(home), "order.running"));
+    let ran = false;
+    await assert.rejects(runTickCommand(home, {
+      now: () => 10,
+      run: async () => (ran = true, { ok: true, line: "booked" }),
+      told: async () => {},
+    }), /running marker could not be written/);
+    assert.equal(ran, false);
+    assert.equal(claimCommandFile(home), null, "the failed claim is never replayed");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a receipt supersedes a marker left by a crash after the receipt was committed", () => {
+  const home = tmpHome();
+  try {
+    writeCommandResult(home, { id: "order", ok: true, line: "booked", at: Date.now() });
+    markRunning(home, "order", "trade");
+    assert.deepEqual(ids(home), [], "an answered command no longer holds the order slot");
+    assert.equal(commandWhereabouts(home, "order"), "answered");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable, malformed or mismatched receipt never hides a running command", () => {
+  for (const contents of [null, "{broken", "null", JSON.stringify({ id: "another", ok: true, line: "done", at: 1 })]) {
+    const home = tmpHome();
+    try {
+      markRunning(home, "order", "trade");
+      const resultPath = path.join(commandDir(home), "order.done.json");
+      if (contents === null) {
+        mkdirSync(resultPath);
+        assert.throws(() => writeCommandResult(home, { id: "order", ok: true, line: "booked", at: 1 }));
+      } else {
+        writeFileSync(resultPath, contents, "utf8");
+      }
+      assert.deepEqual(ids(home), ["order:running"]);
+      assert.equal(commandWhereabouts(home, "order"), "running");
+      assert.equal(readCommandState(home, "order")?.state, "running");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   }
 });
 

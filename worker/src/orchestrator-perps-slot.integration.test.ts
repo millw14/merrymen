@@ -267,11 +267,11 @@ describe("at MERRYMEN_PERPS=paper, a login's Perps worker", () => {
     await settle();
     const mine = path.join(childHome(perpsKey(BOTH)), "paused");
     writeFileSync(path.join(childHome(BOTH), "paused"), "paused");
-    mirrorLoginPausesForTest();
+    await mirrorLoginPausesForTest();
     assert.equal(existsSync(mine), true, "paused with the owner's Spot worker");
     assert.equal(existsSync(path.join(childHome(perpsKey(PERPS_ONLY)), "paused")), false, "another login is not");
     rmSync(path.join(childHome(BOTH), "paused"));
-    mirrorLoginPausesForTest();
+    await mirrorLoginPausesForTest();
     assert.equal(existsSync(mine), false, "resumed with it");
     // And the operator's rollout narrows it as its owner: the level a Perps
     // worker is started at is its owner's, and one the rollout does not name

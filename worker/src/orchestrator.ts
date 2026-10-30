@@ -4976,10 +4976,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
         return;
       }
       if (controls.paused) {
-        perpsPausedByRecord.add(tenant);
+        perpsPausedByRecord.set(tenant, {
+          account: storedGrant.smartAccount as `0x${string}`, chainId: storedGrant.chainId,
+        });
         log(`${tenant}: its owner's recorded pause stands — the Perps worker starts paused`);
       } else perpsPausedByRecord.delete(tenant);
-      mirrorLoginPause(tenant);
+      mirrorLoginPause(tenant, false);
     } else if (storedGrant && !(await armControlsForChild(tenant, storedGrant, lease))) return;
     const grantForChild = await writeGrantForChild(tenant);
     if (!grantForChild) {
@@ -6650,10 +6652,24 @@ async function honourPerpsHomeKill(owner: `0x${string}`, nowSec: number): Promis
  */
 /**
  * Perps workers started paused by their owner's recorded controls
- * (perpsOwnerControls): kept paused until the Spot home is armed and its own
- * `paused` file speaks for the login.
+ * (perpsOwnerControls): kept paused until those controls are applied in the
+ * Spot home or explicitly lifted by newer owner evidence.
  */
-const perpsPausedByRecord = new Set<string>();
+interface RecordedPerpsPause {
+  account: `0x${string}`;
+  chainId: number;
+  check?: Promise<void>;
+  released?: { lease: TenantLease; armedAt: number | null };
+}
+const perpsPausedByRecord = new Map<string, RecordedPerpsPause>();
+
+/** The same proof the Spot arm uses: an unreadable marker proves no arm. */
+function spotControlsArmedAt(home: string): number | null {
+  try {
+    const value = JSON.parse(readFileSync(path.join(home, CONTROLS_ARMED_FILE), "utf8")) as { armedAtMs?: unknown };
+    return typeof value.armedAtMs === "number" && Number.isSafeInteger(value.armedAtMs) && value.armedAtMs > 0 ? value.armedAtMs : null;
+  } catch { return null; }
+}
 
 /**
  * A PAUSE NO BOT CAN LIFT IS SAID. A Perps worker held paused, by its owner's
@@ -6674,23 +6690,47 @@ function sayPerpsPauseUnheard(key: string, from: string): void {
     "The pause stands; it lifts once its owner makes a Spot wallet and sends /resume to that wallet's bot");
 }
 
-function mirrorLoginPause(key: string): void {
+function mirrorLoginPause(key: string, startChecks = true): void {
   if (!isPerpsWorkerKey(key)) return;
   const spotHome = childHome(workerOwner(key));
   const spot = path.join(spotHome, PAUSED_FILE);
   const home = childHome(key);
   const mine = path.join(home, PAUSED_FILE);
   try {
-    if (perpsPausedByRecord.has(key)) {
-      if (!existsSync(path.join(spotHome, CONTROLS_ARMED_FILE))) {
+    const recorded = perpsPausedByRecord.get(key);
+    if (recorded) {
+      // A local file still saying pause needs no database read. Once it is
+      // absent, check receipts and the durable pause in the background: a slow
+      // database must never delay this loop's next kill or another owner's
+      // local pause. One outstanding read per fenced worker, never a backlog.
+      const armedAt = spotControlsArmedAt(spotHome);
+      const lease = leases.get(key);
+      const locallyPaused = existsSync(spot);
+      const released = !locallyPaused && lease?.healthy() === true
+        && recorded.released?.lease === lease && recorded.released.armedAt === armedAt;
+      if (!released) {
         if (!existsSync(mine)) {
           mkdirSync(home, { recursive: true, mode: 0o700 });
           writeFileAtomicSync(mine, "paused", 0o600);
         }
+        if (locallyPaused) recorded.released = undefined;
+        if (startChecks && !locallyPaused && lease?.healthy() === true && !recorded.check) {
+          const check = perpsOwnerControls(workerOwner(key), recorded.account, recorded.chainId).then((controls) => {
+            // A read cannot outlive this fence, the exact lease, or the Spot
+            // arm generation it inspected. It only permits a later sync pass;
+            // the callback itself never changes the pause file.
+            if (perpsPausedByRecord.get(key) !== recorded || leases.get(key) !== lease || !lease.healthy()
+                || spotControlsArmedAt(spotHome) !== armedAt || existsSync(spot)) return;
+            if (!controls.hold && !controls.paused) recorded.released = { lease, armedAt };
+          }).catch(() => { /* unreadable stays paused */ }).finally(() => {
+            if (recorded.check === check) recorded.check = undefined;
+          });
+          recorded.check = check;
+        }
         sayPerpsPauseUnheard(key, "recorded /pause");
         return;
       }
-      // Armed since: the Spot arm has applied (or lifted) the recorded pause.
+      // The recorded controls were applied or explicitly lifted since.
       perpsPausedByRecord.delete(key);
     }
     if (existsSync(spot)) {
@@ -6708,13 +6748,18 @@ function mirrorLoginPause(key: string): void {
     sayTenantAlert(`pause:${key}`, `[alert] ${key}: its owner's pause could not be mirrored into its Perps home (${errorKind(e)}) — tried again in seconds`);
   }
 }
-function mirrorLoginPauses(): void {
+function mirrorLoginPauses(startChecks = true): void {
   for (const key of [...children.keys(), ...spawning.keys()]) {
-    if (isPerpsWorkerKey(key) && leases.get(key)?.healthy()) mirrorLoginPause(key);
+    if (isPerpsWorkerKey(key) && leases.get(key)?.healthy()) mirrorLoginPause(key, startChecks);
   }
 }
-/** Test seam: one tick of the order ferry's pause mirror. */
-export { mirrorLoginPauses as mirrorLoginPausesForTest };
+/** Test seam: mirror, await the checks it launched, then apply their answers. */
+export async function mirrorLoginPausesForTest(waitForChecks = true): Promise<void> {
+  mirrorLoginPauses();
+  if (!waitForChecks) return;
+  await Promise.all([...perpsPausedByRecord.values()].flatMap((r) => r.check ? [r.check] : []));
+  mirrorLoginPauses(false);
+}
 
 /**
  * WHAT THE OWNER'S RECORDED CONTROLS SAY OF THEIR PERPS WORKER BEFORE IT
@@ -6732,12 +6777,12 @@ export { mirrorLoginPauses as mirrorLoginPausesForTest };
  *
  *  - HELD while a kill waits for its /confirm or a confirmed kill has no
  *    receipt, and while the controls cannot be read: fail closed;
- *  - STARTED PAUSED while a journalled pause has no receipt, or the Spot home
- *    has never been armed here and a durable or legacy pause stands — the
+ *  - STARTED PAUSED while a journalled pause has no receipt, or a durable or
+ *    legacy pause still needs applying in the Spot home — the
  *    same evidence the Spot arm would restore from (previewStartsPaused).
  *    Paused, not held, because a paused worker still closes at its stops and
- *    a held one closes nothing. The mirror keeps that pause until the Spot
- *    home is armed and speaks for itself (mirrorLoginPause).
+ *    a held one closes nothing. The mirror keeps that pause until the control
+ *    is applied or explicitly lifted by newer owner evidence (mirrorLoginPause).
  */
 async function perpsOwnerControls(owner: `0x${string}`, account: `0x${string}`, chainId: number): Promise<{ hold: string | null; paused: boolean }> {
   const url = process.env.DATABASE_URL;
@@ -6765,10 +6810,15 @@ async function perpsOwnerControls(owner: `0x${string}`, account: `0x${string}`, 
       return { hold: "a /kill its owner confirmed is carried out at its Spot worker's arm first", paused: false };
     }
     if (controls.fold.pauses.some((p) => !receipts.has(`${p.botId}:${p.updateId}`))) return { hold: null, paused: true };
-    if (existsSync(path.join(childHome(owner), CONTROLS_ARMED_FILE))) return { hold: null, paused: false };
-    if (controls.legacy && !receipts.has(`${LEGACY_EVENTS_BOT}:${controls.legacy.eventId}`)) return { hold: null, paused: true };
+    const armedAt = spotControlsArmedAt(childHome(owner));
+    if (armedAt === null && controls.legacy && !receipts.has(`${LEGACY_EVENTS_BOT}:${controls.legacy.eventId}`)) return { hold: null, paused: true };
     const durable = await readDurablePause(shared, owner);
-    return { hold: null, paused: durable !== null && !(await durablePauseLifted(shared, scope, durable)) };
+    // Match armOwnerControls: a marker older than the durable pause is not
+    // evidence of a later /resume. A valid arm at/after that pause makes this
+    // existing home's own pause file authoritative; otherwise require the
+    // owner's newer resume in the shared history.
+    return { hold: null, paused: durable !== null && !(armedAt !== null && armedAt >= durable * 1000)
+      && !(await durablePauseLifted(shared, scope, durable)) };
   } catch (e) {
     return { hold: `its owner's recorded controls could not be read (${errorKind(e)})`, paused: false };
   }
@@ -8400,23 +8450,35 @@ async function closeWithReceipt(
  * first; a table that has not grown the column yet refuses it, and the answer
  * is written the way it always was. The owner then reads the line — which every
  * surface already renders — rather than an order that never stops spinning.
+ *
+ * A RESULT ID IS CHILD INPUT, not authority over a shared row. Both writes
+ * bind it to the account the supervisor assigned this home, so one wallet
+ * cannot settle another's command or replace its execution receipt. Account
+ * casing can change on renewal; the address identity cannot.
  */
-async function landResults(shared: Db, home: string, tenant: string): Promise<void> {
+async function landResults(shared: Db, home: string, tenant: string, smartAccount: string): Promise<void> {
   for (const r of drainCommandResults(home)) {
     try {
       const now = Date.now();
       const line = r.line.slice(0, 500);
+      let changes: number;
       try {
-        await shared
-          .prepare("UPDATE agent_commands SET done_at = ?, result = ?, receipt = ? WHERE id = ?")
-          .run(now, line, receiptJson(r), r.id);
+        const result = await shared
+          .prepare("UPDATE agent_commands SET done_at = ?, result = ?, receipt = ? WHERE id = ? AND lower(agent_id) = lower(?)")
+          .run(now, line, receiptJson(r), r.id, smartAccount);
+        changes = result.changes;
       } catch (e) {
         // Only the missing column: a blip here used to land the answer without
         // its receipt and drop the file, losing the receipt for good.
         if (!missingReceiptColumn(e)) throw e;
-        await shared.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?").run(now, line, r.id);
+        const result = await shared.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ? AND lower(agent_id) = lower(?)").run(now, line, r.id, smartAccount);
+        changes = result.changes;
       }
       dropCommandResult(home, r.id);
+      if (changes === 0) {
+        log(`[alert] command ${r.id.slice(0, 8)} result from ${tenant.slice(0, 8)} refused: no command belongs to this account`);
+        continue;
+      }
       log(`command ${r.id.slice(0, 8)} ← ${tenant.slice(0, 8)}: ${r.ok ? "ok" : "failed"}`);
     } catch {
       // Left on disk on purpose: the next pass retries it. A receipt that
@@ -8475,7 +8537,7 @@ export async function ferryOrders(
   } catch {
     /* the table did not answer — every order waits for the next pass */
   }
-  for (const t of targets) await landResults(shared, t.home, t.tag);
+  for (const t of targets) await landResults(shared, t.home, t.tag, t.smartAccount);
 }
 
 /**
@@ -8518,7 +8580,7 @@ export async function ferryForChild(
       /* a child that misses a command this pass gets it next pass */
     }
     // ── up: results become rows ──
-    await landResults(shared, home, tag);
+    await landResults(shared, home, tag, smartAccount);
 
     // ── and a row nothing will ever answer is closed, not left running ──
     //

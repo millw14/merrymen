@@ -245,8 +245,14 @@ describe("the other writers of those files", () => {
 
   it("self-hosted, POST /api/grants replaces grant.json whole", () => {
     const post = body(GRANTS_ROUTE, "export async function POST(");
-    assert.match(post, /await writeFileAtomic\(GRANT_FILE, JSON\.stringify\(grant, null, 2\), 0o600\);/);
-    assert.doesNotMatch(GRANTS_ROUTE, /\b(?:writeFile|chmod)\(GRANT_FILE\b/);
+    assert.match(post, /return await withLocalStateLock\(DATA_DIR, \(\) => saveSelfHostedGrant\(grant, wallet\)\);/,
+      "both wallets enter the shared writer lock before reaching the file writer");
+    const save = body(GRANTS_ROUTE, "async function saveSelfHostedGrant(");
+    assert.match(save, /await writeFileAtomic\(localGrantFile\(wallet\), JSON\.stringify\(grant, null, 2\), 0o600\);/);
+    assert.match(body(GRANTS_ROUTE, "function localGrantFile("), /return wallet === "spot" \? GRANT_FILE : path\.join\(purposeHome\(wallet\), "grant\.json"\);/,
+      "the atomic write targets the selected wallet's grant file");
+    assert.doesNotMatch(GRANTS_ROUTE, IN_PLACE_WRITE, "no grant route may bypass the atomic writer");
+    assert.doesNotMatch(GRANTS_ROUTE, /\bchmod\(/, "file permissions are fixed before the rename");
   });
 });
 

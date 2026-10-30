@@ -6,8 +6,7 @@
  * the new bundler/RPC; trading fields rebuild the strategy in place.
  */
 
-import { mkdirSync, readFileSync } from "node:fs";
-import path from "node:path";
+import { readFileSync } from "node:fs";
 import {
   HOUSE_KEY_FIELDS,
   PERPS_DRIVERS,
@@ -32,6 +31,7 @@ import {
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { writeFileAtomicSync } from "./atomic-write";
+import { withSettingsFileLock } from "./settings-file-lock";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
 import { normalizeAgentBrief } from "./agent-brief";
 import type { DiscoveryFocus } from "./discovery-focus";
@@ -902,25 +902,23 @@ export function readSettingsFileWithText(file: string): { read: SettingsFileRead
  * it still holds `seen` — the text readSettingsFileWithText returned, null for
  * no file — and say whether it did. Nothing is written when it changed.
  *
- * SYNCHRONOUS ON PURPOSE. The look and the write run with nothing else in
- * this process between them, so a writer here that is itself synchronous —
- * the kill's turnOffLocalPaperPerps — lands wholly before or wholly after.
- * Another process (`merrymen kill`, a self-hosted Telegram /kill) can still
- * land between the look and the rename; closing that needs a lock across
- * processes, which self-hosted does not have (D7).
+ * The comparison and rename hold the same cross-process lock as the kill's
+ * turnOffLocalPaperPerps. A kill in another CLI or worker process therefore
+ * lands wholly before or after this write, never between its look and rename.
  */
 export function writeSettingsFileIfUnchanged(file: string, seen: string | null, data: string): boolean {
-  mkdirSync(path.dirname(file), { recursive: true });
-  let now: string | null;
-  try {
-    now = readFileSync(file, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    now = null;
-  }
-  if (now !== seen) return false;
-  writeFileAtomicSync(file, data, 0o600);
-  return true;
+  return withSettingsFileLock(file, () => {
+    let now: string | null;
+    try {
+      now = readFileSync(file, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      now = null;
+    }
+    if (now !== seen) return false;
+    writeFileAtomicSync(file, data, 0o600);
+    return true;
+  });
 }
 
 /** A settings.json this process could not use, and what it runs on instead. */

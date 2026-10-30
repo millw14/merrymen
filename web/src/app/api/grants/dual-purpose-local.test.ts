@@ -25,9 +25,8 @@
  * derives each Kernel account from its initCode. Adapted from the perps
  * branch's dual-purpose-local.test.ts (112dbeb6): `?wallet=`, main's renewal
  * stop (a permission replacement on ?wallet=perps) in place of the branch's
- * per-wallet DELETE, and the derivation the branch never made. Its "two first
- * setups at once" case needs the self-hosted writer lock, which decision D7
- * defers.
+ * per-wallet DELETE, and the derivation the branch never made. Competing
+ * POSTs now hold a shared writer lock while checking and saving both wallets.
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -163,6 +162,38 @@ describe("self-hosted: every refusal lands before anything is written", () => {
     assert.equal(read(spotFile()), before, "the Spot grant.json is untouched");
     assert.equal(existsSync(perpsHome()), false, "and no Perps home was made");
   };
+
+  it("rechecks the other wallet after a slow derivation, before saving a conflicting first grant", async () => {
+    const grant = await perpsGrant();
+    const stranger = privateKeyToAccount(generatePrivateKey());
+    const spot = JSON.parse(spotOnDisk({ owner: stranger.address }));
+    rmSync(spotFile());
+    const fetchChain = globalThis.fetch;
+    let reached!: () => void;
+    let release!: () => void;
+    const deriving = new Promise<void>(resolve => { reached = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+      reached();
+      await released;
+      return fetchChain(...args);
+    }) as typeof fetch;
+    const incoming = post(grant);
+    try {
+      await deriving;
+      assert.equal((await post(spot, "")).status, 200);
+      release();
+      const refused = await json(await incoming);
+      assert.equal(refused.status, 409, "a first grant saved during the derivation must still bind the other wallet's owner");
+      assert.equal(refused.body.code, "owner-differs");
+      assert.deepEqual(JSON.parse(read(spotFile())!), spot);
+      assert.equal(read(perpsFile()), null);
+    } finally {
+      release();
+      await incoming;
+      globalThis.fetch = fetchChain;
+    }
+  });
 
   it("D8: THE OWNER'S INDEX-0 ACCOUNT UNDER wallet=perps is refused 403, and so is anyone else's", async () => {
     // No Spot grant.json, so the index is the only thing that tells the two apart.

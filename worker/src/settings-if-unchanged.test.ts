@@ -3,7 +3,7 @@
  * (settings.ts writeSettingsFileIfUnchanged).
  *
  * The kill turns the Perps home's `perpsEnabled` off in the same file the
- * settings PUT replaces whole, and takes no save lock: in this process
+ * settings PUT replaces whole, under a short cross-process file lock: here
  * (turnOffLocalPaperPerps) and from another one (`merrymen kill`, a
  * self-hosted Telegram /kill). The save reads the file, judges its body, and
  * hands this the text it read; a write that landed in between must make it

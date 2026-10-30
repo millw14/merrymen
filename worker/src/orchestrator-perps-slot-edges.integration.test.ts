@@ -214,6 +214,137 @@ describe("a kill whose Perps half does not finish", () => {
 });
 
 describe("a standing pause on a rebuilt Spot home", () => {
+  for (const duringRead of ["unchanged", "new arm", "lost lease", "new pause"] as const) {
+    it(`checks a normal Spot resume without blocking the mirror, with ${duringRead} while evidence is read`, async () => {
+      const raw = new DatabaseSync(":memory:"), shared = wrapSqlite(raw);
+      await applyLedgerSchema(shared);
+      await shared.exec(MIRROR_STATE_DDL);
+      await ensureTelegramSchema(shared);
+      orch.setRetirementMemoryStoreForTest({ shared, dek, dialect: "sqlite" });
+      let releaseRead: () => void = () => {};
+      let leaseHealthy = true;
+      try {
+        const o = ownerAt(0x2a7), s = address(0x2a8), p = address(0x2a9);
+        if (duringRead === "lost lease") {
+          orch.setLeaseAcquireForTest(async (tenant) => {
+            const lease = await acquireTenantLease(tenant);
+            return lease && tenant === perpsKey(o) ? { ...lease, healthy: () => leaseHealthy } : lease;
+          });
+        }
+        await spot.put(o, grant(o, s, { expiresAt: nowSec() - 60 }));
+        await perps.put(o, grant(o, p, { purpose: "perps" }));
+        const spotHome = orch.childHome(o), marker = path.join(spotHome, "controls-armed.json");
+        mkdirSync(spotHome, { recursive: true });
+        const oldArm = JSON.stringify({ version: 1, armedAtMs: (nowSec() - 3600) * 1000 });
+        writeFileSync(marker, oldArm);
+        writeFileSync(path.join(spotHome, "paused"), "paused");
+        await recordDurablePause(shared, o, nowSec() - 30);
+        await orch.reconcile();
+        await settle();
+        assert.equal(live(perpsKey(o))[0]?.pausedAtStart, true);
+        const perpsPaused = path.join(orch.childHome(perpsKey(o)), "paused");
+        // Normal /resume changes the pause file and events, not the arm marker.
+        rmSync(path.join(spotHome, "paused"));
+        raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'info', 'Telegram: resumed by chat 7', ?)").run(s, nowSec());
+        let announceRead: () => void = () => {};
+        const started = new Promise<void>((resolve) => { announceRead = resolve; });
+        const blocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+        let reads = 0;
+        const delayed = {
+          exec: shared.exec.bind(shared), tx: shared.tx.bind(shared),
+          prepare(sql: string) {
+            const stmt = shared.prepare(sql);
+            if (!sql.includes("FROM recovery_reply_controls")) return stmt;
+            return { ...stmt, all: async (...args: unknown[]) => { reads++; announceRead(); await blocked; return stmt.all(...args); } };
+          },
+        };
+        orch.setRetirementMemoryStoreForTest({ shared: delayed, dek, dialect: "sqlite" });
+        await orch.mirrorLoginPausesForTest(false);
+        await started;
+        await orch.mirrorLoginPausesForTest(false);
+        assert.equal(reads, 1, "the next mirror returns while a single evidence read is still blocked");
+        assert.equal(existsSync(perpsPaused), true, "no resume without the read's evidence");
+        if (duringRead === "new arm") writeFileSync(marker, JSON.stringify({ version: 1, armedAtMs: Date.now() }));
+        if (duringRead === "lost lease") leaseHealthy = false;
+        if (duringRead === "new pause") writeFileSync(path.join(spotHome, "paused"), "paused");
+        releaseRead();
+        await orch.mirrorLoginPausesForTest();
+        if (duringRead === "unchanged") {
+          assert.equal(readFileSync(marker, "utf8"), oldArm);
+          assert.equal(existsSync(perpsPaused), false, "the newer owner resume is honoured with the same arm marker");
+        } else {
+          assert.equal(existsSync(perpsPaused), true, "an answer that outlived its authority cannot lift the pause");
+          leaseHealthy = true;
+          if (duringRead === "new pause") rmSync(path.join(spotHome, "paused"));
+          await orch.mirrorLoginPausesForTest(false);
+          assert.equal(existsSync(perpsPaused), true, "a recovered lease or removed local pause still requires fresh evidence");
+          await orch.mirrorLoginPausesForTest();
+          assert.equal(existsSync(perpsPaused), false, "a fresh read under the current arm and healthy lease permits the resume");
+        }
+      } finally {
+        releaseRead();
+        leaseHealthy = true;
+        orch.setLeaseAcquireForTest(async (tenant) => leaseRefused.has(tenant.toLowerCase()) ? null : acquireTenantLease(tenant));
+        orch.setRetirementMemoryStoreForTest(null);
+        raw.close();
+      }
+    });
+  }
+
+  for (const pause of ["journal", "durable"] as const) {
+    for (const marker of ["old", "invalid"] as const) {
+      it(`keeps a ${pause} pause beside an ${marker} Spot arm marker until the Spot arm applies it`, async () => {
+        const raw = new DatabaseSync(":memory:"), shared = wrapSqlite(raw);
+        await applyLedgerSchema(shared);
+        await shared.exec(MIRROR_STATE_DDL);
+        await ensureTelegramSchema(shared);
+        orch.setRetirementMemoryStoreForTest({ shared, dek, dialect: "sqlite" });
+        try {
+          const o = ownerAt(0x1a7), s = address(0x1a8), p = address(0x1a9);
+          await spot.put(o, grant(o, s, { expiresAt: nowSec() - 60 }));
+          await perps.put(o, grant(o, p, { purpose: "perps" }));
+          const spotHome = orch.childHome(o);
+          mkdirSync(spotHome, { recursive: true });
+          writeFileSync(path.join(spotHome, "controls-armed.json"), marker === "old"
+            ? JSON.stringify({ version: 1, armedAtMs: (nowSec() - 3600) * 1000 }) : "{unreadable");
+          if (pause === "journal") {
+            raw.exec(`CREATE TABLE recovery_reply_controls (
+              bot_id TEXT, update_id INTEGER, tenant TEXT, kind TEXT,
+              request_update_id INTEGER, message_at_sec INTEGER, expires_at_ms INTEGER, chat_id INTEGER)`);
+            raw.prepare("INSERT INTO recovery_reply_controls VALUES ('111', 9, ?, 'pause', NULL, ?, NULL, 7)").run(o, nowSec() - 30);
+          } else await recordDurablePause(shared, o, nowSec() - 30);
+          await orch.reconcile();
+          await settle();
+          const [worker] = live(perpsKey(o));
+          assert.ok(worker, "the Perps worker may manage protective closes");
+          assert.equal(worker.pausedAtStart, true, "an old or unreadable marker cannot prove that the newer pause was applied");
+          await orch.mirrorLoginPausesForTest();
+          const perpsPaused = path.join(orch.childHome(perpsKey(o)), "paused");
+          assert.equal(existsSync(perpsPaused), true, "the short loop must preserve the pause too");
+          if (pause === "journal") {
+            // Even a newer marker alone does not receipt this journal entry.
+            writeFileSync(path.join(spotHome, "controls-armed.json"), JSON.stringify({ version: 1, armedAtMs: Date.now() }));
+            await orch.mirrorLoginPausesForTest();
+            assert.equal(existsSync(perpsPaused), true, "the journal's receipt is required before the Spot file can speak for this pause");
+          }
+          // The real Spot arm writes the pause, its receipt/durable stamp, and
+          // the arm marker. The owner can then resume by removing its pause.
+          const { armOwnerControls } = await import("./recovery-reply-arm");
+          const armed = await armOwnerControls({ shared, home: spotHome, scope: { tenant: o, smartAccount: s, chainId: 4663 }, mayWrite: () => true, forwardKill: async () => "revoked" });
+          assert.equal(armed.ok, true);
+          await orch.mirrorLoginPausesForTest();
+          assert.equal(existsSync(perpsPaused), true);
+          rmSync(path.join(spotHome, "paused"));
+          await orch.mirrorLoginPausesForTest();
+          assert.equal(existsSync(perpsPaused), false, "the applied pause follows the owner's later resume");
+        } finally {
+          orch.setRetirementMemoryStoreForTest(null);
+          raw.close();
+        }
+      });
+    }
+  }
+
   it("reaches the Perps worker even when the Spot worker does not arm: it starts paused and stays paused", async () => {
     const raw = new DatabaseSync(":memory:"), shared = wrapSqlite(raw);
     await applyLedgerSchema(shared);
@@ -232,7 +363,7 @@ describe("a standing pause on a rebuilt Spot home", () => {
       const [worker] = live(perpsKey(o));
       assert.ok(worker, "the Perps worker runs — paused, not held, so its stops still close");
       assert.equal(worker.pausedAtStart, true, "and it started paused");
-      orch.mirrorLoginPausesForTest();
+      await orch.mirrorLoginPausesForTest();
       assert.equal(existsSync(path.join(orch.childHome(perpsKey(o)), "paused")), true, "the mirror keeps the recorded pause while the Spot home is unarmed");
     } finally {
       orch.setRetirementMemoryStoreForTest(null);

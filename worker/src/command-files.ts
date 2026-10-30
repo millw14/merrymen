@@ -35,6 +35,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import type { OrderReceipt } from "./order-receipt";
 
 /** One instruction, as it sits on disk. */
@@ -179,10 +180,14 @@ export function claimCommandFile(home: string): FileCommand | null {
 function claimFile(dir: string, n: string): boolean {
   try {
     unlinkSync(path.join(dir, n));
-    return true;
   } catch {
     return false;
   }
+  // A process crash cannot undo unlink, but a host crash can until the
+  // directory is synced. Persist the claim before any financial action;
+  // a sync failure must stop this drain, never authorize execution.
+  fsyncDirSync(dir);
+  return true;
 }
 
 /** Every pending command in a queue directory, oldest first, with the filename it was read from. */
@@ -225,7 +230,8 @@ function pendingCommands(dir: string): { n: string; cmd: FileCommand }[] {
     })
     .filter((e): e is { n: string; cmd: FileCommand } => {
       if (!e) return false;
-      if (typeof e.cmd.id === "string" && typeof e.cmd.kind === "string") return true;
+      if (e.cmd !== null && typeof e.cmd === "object" && !Array.isArray(e.cmd)
+          && typeof e.cmd.id === "string" && ID_OK.test(e.cmd.id) && typeof e.cmd.kind === "string") return true;
       // UNLINKED TOO. This branch used to filter and walk away, so a file that
       // parsed but was the wrong shape stayed in the directory and was
       // re-parsed forever — the unreadable branch above already knew better.
@@ -342,7 +348,7 @@ export async function runTickCommand(
     // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
     // gone from here until the receipt lands. Without this marker an owner
     // who asked again mid-trade got a second fill.
-    markRunning(home, cmd.id, cmd.kind);
+    if (!markRunning(home, cmd.id, cmd.kind)) throw new Error("command claimed but its running marker could not be written; nothing was run");
     const outcome = await deps.run(cmd);
     writeCommandResult(home, resultOf(cmd.id, outcome, deps.now()));
     await deps.told(cmd, outcome);
@@ -478,12 +484,8 @@ export function readCommandState(
 ): { state: "queued" | "running" | "done"; result?: FileCommandResult; expiresAt?: number | null } | null {
   if (!ID_OK.test(id)) return null;
   const dir = commandDir(home);
-  try {
-    const done = readFileSync(path.join(dir, `${id}.done.json`), "utf8");
-    return { state: "done", result: JSON.parse(done) as FileCommandResult };
-  } catch {
-    /* not finished — or not ours */
-  }
+  const done = readMatchingResult(dir, id);
+  if (done !== null) return { state: "done", result: done };
   // A file still in the queue carries its own deadline, read in the SAME read
   // that says it is queued. Two reads — "does it exist", then "what does it
   // say" — let a claim land between them, and the route then had to guess.
@@ -494,6 +496,19 @@ export function readCommandState(
     return { state: "running" };
   }
   return { state: "queued", expiresAt: deadlineIn(raw) };
+}
+
+/** A receipt supersedes a running marker only when it is readable and belongs to that command. */
+function readMatchingResult(dir: string, id: string): FileCommandResult | null {
+  try {
+    const r: unknown = JSON.parse(readFileSync(path.join(dir, `${id}.done.json`), "utf8"));
+    if (r === null || typeof r !== "object" || Array.isArray(r)) return null;
+    const result = r as Partial<FileCommandResult>;
+    return result.id === id && typeof result.ok === "boolean" && typeof result.line === "string"
+      && typeof result.at === "number" && Number.isFinite(result.at) ? result as FileCommandResult : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -596,6 +611,9 @@ export function openCommands(home: string): OpenCommand[] {
         ...(typeof parsed?.kind === "string" ? { kind: parsed.kind } : {}),
       });
     } else if (n.endsWith(RUNNING)) {
+      // The receipt is committed before the marker is removed. A crash in
+      // between can leave both; the answer supersedes that stale marker.
+      if (readMatchingResult(dir, n.slice(0, -RUNNING.length)) !== null) continue;
       // What was claimed, when the marker says (markRunning); a bare timestamp, or one that cannot be read, has no kind.
       let kind: unknown;
       try {
@@ -644,7 +662,7 @@ export function commandWhereabouts(home: string, id: string): CommandWhereabouts
   // An answer outranks anything else on disk about the same id. A result that
   // lands between these reads is seen as "gone" — the direction that waits
   // rather than the one that speaks.
-  if (existsSync(path.join(dir, `${id}.done.json`))) return "answered";
+  if (readMatchingResult(dir, id) !== null) return "answered";
   if (existsSync(path.join(dir, `${id}.json`))) return "queued";
   if (existsSync(path.join(dir, `${id}${RUNNING}`))) return "running";
   return "gone";
@@ -691,29 +709,25 @@ const RUNNING = ".running";
  * answers, and a bare timestamp read as "an order may be running". A marker
  * written before this, a bare timestamp, has no kind and still holds.
  */
-export function markRunning(home: string, id: string, kind?: string): void {
-  if (!ID_OK.test(id)) return;
+export function markRunning(home: string, id: string, kind?: string): boolean {
+  if (!ID_OK.test(id)) return false;
   try {
     mkdirSync(commandDir(home), { recursive: true });
     const body = typeof kind === "string" ? JSON.stringify({ at: Date.now(), kind }) : String(Date.now());
-    writeFileSync(path.join(commandDir(home), `${id}${RUNNING}`), body, "utf8");
+    writeFileAtomicSync(path.join(commandDir(home), `${id}${RUNNING}`), body, 0o600, { durable: true });
+    return true;
   } catch {
-    /* a missing marker costs a duplicate-order guard, never a trade */
+    // An unmarked command must not trade: the self-hosted order slot would
+    // admit a second request while the first was still running.
+    return false;
   }
 }
 
 /** Leave the outcome where the orchestrator will find it. */
 export function writeCommandResult(home: string, r: FileCommandResult): void {
+  if (typeof r.id !== "string" || !ID_OK.test(r.id)) throw new Error("refusing to write a result whose id is not a plain id");
   const dir = commandDir(home);
   mkdirSync(dir, { recursive: true });
-  // The answer supersedes the marker. Removed FIRST so a crash between the two
-  // leaves the order looking unanswered rather than answered — the direction
-  // that refuses a duplicate instead of admitting one.
-  try {
-    unlinkSync(path.join(dir, `${r.id}${RUNNING}`));
-  } catch {
-    /* never marked, or already swept */
-  }
   // SWEEP THE OLD ONES. Self-hosted nothing drains these — the orchestrator is
   // the only caller of drainCommandResults and self-hosted never runs it — so
   // without this they accumulate in a home directory forever. A day is far
@@ -733,9 +747,14 @@ export function writeCommandResult(home: string, r: FileCommandResult): void {
   } catch {
     /* tidying is never worth losing a receipt over */
   }
-  const tmp = path.join(dir, `.${r.id}.done.tmp`);
-  writeFileSync(tmp, JSON.stringify(r), "utf8");
-  renameSync(tmp, path.join(dir, `${r.id}.done.json`));
+  writeFileAtomicSync(path.join(dir, `${r.id}.done.json`), JSON.stringify(r), 0o600, { durable: true });
+  // Keep the duplicate-order guard until an answer exists. Removing it
+  // first leaves openCommands empty if the receipt write fails or crashes.
+  try {
+    unlinkSync(path.join(dir, `${r.id}${RUNNING}`));
+  } catch {
+    /* an answer supersedes even a marker left behind by a failed unlink */
+  }
 }
 
 /**

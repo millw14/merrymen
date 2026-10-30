@@ -196,8 +196,14 @@ describe("every archiver writes through the durable helper", () => {
 describe("grant.json changes only after the archive — and a kill without one does not delete", () => {
   it("web POST: archive, then replace; a failed archive is logged and arming goes on (best-effort, by design)", () => {
     const post = body(ROUTE, "export async function POST(");
-    before_(post, 'const kept = await archiveCurrentGrant("spot");', "await writeFileAtomic(GRANT_FILE,", "the copy is made before grant.json is replaced");
-    assert.match(post, /if \(kept\.kind === "failed"\) \{\s*console\.error\(/);
+    assert.match(post, /return await withLocalStateLock\(DATA_DIR, \(\) => saveSelfHostedGrant\(grant, wallet\)\);/,
+      "the cross-wallet check, archive and replacement share one writer lock");
+    const save = body(ROUTE, "async function saveSelfHostedGrant(");
+    before_(save, "const other = await otherLocalWalletRefusal(grant, wallet);", "const kept = await archiveCurrentGrant(wallet);", "the other wallet is checked under the lock before the archive");
+    before_(save, "if (other) return other;", "const kept = await archiveCurrentGrant(wallet);", "a conflicting wallet refuses before any archive or replacement");
+    before_(save, "const kept = await archiveCurrentGrant(wallet);", "await writeFileAtomic(localGrantFile(wallet),", "the selected wallet's copy is made before its grant.json is replaced");
+    assert.match(save, /if \(kept\.kind === "failed"\) \{\s*console\.error\(/);
+    assert.doesNotMatch(save, IN_PLACE_WRITE, "the locked helper must still replace the file atomically");
   });
 
   it("both web kill routes use the shared archive refusal before deleting or queuing a reset", () => {

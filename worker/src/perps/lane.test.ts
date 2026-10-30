@@ -520,6 +520,65 @@ describe("one intent's reservation", () => {
 // ── one writer per book ─────────────────────────────────────────────────────
 
 describe("the route's producer", () => {
+  for (const failure of ["before-booking", "after-booking", "after-booking-unread"] as const) {
+    it(`an uncertain strategy open keeps its energy until the ledger proves no entry: ${failure}`, async () => {
+      writeFeed();
+      let unread = false;
+      const r = await rig({
+        cfg: { perpsDriver: "strategist" },
+        store: {
+          getPerpPositions: async (...args: Parameters<typeof store.getPerpPositions>) => {
+            if (unread) throw new Error("entry outcome ledger unavailable");
+            return store.getPerpPositions(...args);
+          },
+        },
+        wrap: (ex) => ({
+          ...ex,
+          place: async (intent, review, ctx) => {
+            if (failure !== "before-booking") await ex.place(intent, review, ctx);
+            unread = failure === "after-booking-unread";
+            throw new Error("entry outcome unavailable");
+          },
+        }),
+      });
+      const intent = await openDraft(r);
+      await r.lane.readWithBook(() => store.getPaperBook(r.id, 100));
+      r.lane.deliverStrategist([intent as PerpRouteIntent]);
+      let refunds = 0;
+      let status: string | undefined;
+      const running = r.lane.runRoute({
+        equityUsdg: u(100), equityKnown: true, breakerIdle: true, energyEntriesLeft: true,
+        opsHeadroom: true, spendHeadroomMicro: u(500), strategistLive: true,
+      }, {
+        claimEntry: async () => ({ ok: true }),
+        refundEntry: async () => { refunds++; },
+        withholdEntry: async () => {},
+        ensureDecision: async () => ({ ok: true }),
+        processIntentReporting: async (i) => {
+          const outcome = await r.lane.execute(i as PerpOrderIntent, { equityUsdg: u(100), equityKnown: true });
+          status = outcome.status;
+          if (failure === "after-booking") assert.equal(outcome.amountUsdg, undefined, "an unavailable fill receipt supplies no invented amount");
+          return outcome;
+        },
+        processIntent: async () => { assert.fail("this is an entry"); },
+      });
+      if (failure === "after-booking-unread") {
+        await assert.rejects(running, /entry outcome unavailable/);
+        assert.equal(status, undefined, "the lane cannot assert a ledger verdict");
+      } else {
+        await running;
+        assert.equal(status, failure === "after-booking" ? "paper" : "rejected");
+      }
+      assert.equal(refunds, failure === "before-booking" ? 1 : 0);
+      assert.equal(fillsOf(r.id), failure === "before-booking" ? 0 : 1);
+      assert.deepEqual(r.budget.released, r.budget.reserved);
+      if (failure === "after-booking") {
+        assert.equal(r.lane.last()?.view?.positions.has("BTC-PERP"), true);
+        assert.deepEqual(r.events.filter((e) => /refused/.test(e)), [], "a committed entry is never described as refused");
+      }
+    });
+  }
+
   it("a strategist driver with no real model behind it is nobody, and the handoff is gone after one tick", async () => {
     writeFeed();
     const r = await rig({ cfg: { perpsDriver: "strategist" } });
@@ -1291,6 +1350,38 @@ describe("the owner's exits on a paper book (owner-order.ts close-perp, flatten-
     assert.deepEqual(told, [false, false, true]);
     assert.equal((await store.getPerpAccount(restarted.id, "paper"))?.entriesHalted, false);
     assert.equal((await restarted.lane.execute(await openDraft(restarted), { equityUsdg: u(100), equityKnown: true })).status, "paper", "a practice entry opens on the new book");
+  });
+
+  it("an older Close all delivered after restart cannot replace the ordering of a newer durable halt", async () => {
+    for (const unreadPrior of [false, true]) {
+      writeFeed();
+      const first = await rig();
+      assert.equal((await first.lane.flatten({ askedAt: clock - 10_000 })).ok, true);
+      await store.setAgentMode(first.id, "paper", 1, false);
+      let reads = 0;
+      const restarted = await rig({
+        reuse: first,
+        store: {
+          getPerpAccount: async (...args: Parameters<typeof store.getPerpAccount>) => {
+            if (unreadPrior && reads++ === 0) throw new Error("prior halt cannot be read");
+            return store.getPerpAccount(...args);
+          },
+        },
+      });
+      // This older command was delayed by delivery, and arrives after the
+      // newer halt survived a restart. It must not give that halt an older age.
+      assert.equal((await restarted.lane.flatten({ askedAt: clock - 30_000 })).ok, true);
+      const reset = (askedAt: number) => restarted.lane.resetPaper(
+        ({ clearEntriesHalt }) => store.resetPaperLedger(restarted.id, 100, { clearEntriesHalt }),
+        { askedAt },
+      );
+      assert.equal((await reset(clock - 20_000)).haltKept, true, `prior halt unread: ${unreadPrior}`);
+      assert.equal((await store.getPerpAccount(first.id, "paper"))?.entriesHalted, true);
+      assert.deepEqual(await restarted.lane.execute(await openDraft(restarted), { equityUsdg: u(100), equityKnown: true }), {
+        status: "rejected", rejectRule: "perp-entries-halted",
+      });
+      assert.equal((await reset(clock)).haltKept, false, "a reset requested after this worker began may lift the inherited halt");
+    }
   });
 
   it("A RESET THAT LIFTED NOTHING AND THEN COULD NOT READ THE LEDGER SAYS SO: never that no pause stands, while a halt an earlier worker stored refuses every entry", async () => {
@@ -2087,7 +2178,8 @@ describe("the wiring in index.ts", () => {
 
   it("the lane's reservation is released in a finally", () => {
     const lane = codeOnly(readFileSync(path.join(HERE, "lane.ts"), "utf8"));
-    assert.match(lane, /deps\.budget\.reserve\(spend\);\s*let placed[^;]*;\s*try \{[\s\S]{0,400}\} finally \{\s*deps\.budget\.release\(spend\);/);
+    const execute = lane.slice(lane.indexOf("async function executeLocked("), lane.indexOf("async function announceTick("));
+    assert.match(execute, /deps\.budget\.reserve\(spend\);\s*let placed[^;]*;\s*try \{[\s\S]*?\} finally \{\s*deps\.budget\.release\(spend\);/);
   });
 
   it("THE LANE'S BUDGET IS THE WORKER'S OWN TWO HALVES: counters read both as they stand, and keep books a booked op into the settled half (heldReservation's branch)", () => {

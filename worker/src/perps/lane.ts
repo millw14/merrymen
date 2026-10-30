@@ -548,7 +548,8 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   let ledgerHaltRead: { key: string; halted: boolean } | null = null;
   /**
    * THE OWNER'S HALT AS THIS PROCESS HOLDS IT, by account and book, with when
-   * the newest Close all behind it was asked for. A Close all writes
+   * the newest Close all behind it was asked for, or the startup boundary
+   * when an inherited halt has no known timestamp. A Close all writes
    * perp_accounts.entries_halted before it closes anything; this is for the
    * write that failed, so the halt the owner was told about still holds here.
    * NOT per-agent memory: forget() — an arm, another account — never clears
@@ -1176,7 +1177,8 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     // store made a booked close "refused" and refunded a placed open's energy.)
     // A throw from place() that is not the executor's own refusal (PerpRefused,
     // always before anything is booked) may have come after its commit, so it
-    // is counted the same way before its refusal is answered.
+    // is counted the same way. An open is then reconciled against the held
+    // position, or stays uncertain without refunding its entry energy.
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
     const count = async (): Promise<void> => {
       try {
@@ -1192,7 +1194,38 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       try {
         placed = await ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId });
       } catch (e) {
-        if (!(e instanceof PerpRefused)) await count();
+        if (!(e instanceof PerpRefused)) {
+          await count();
+          if (intent.effect === "open") {
+            // An unknown failure can follow the booking's commit. Returning
+            // rejected then refunds the route's durable energy claim for a
+            // position it actually opened. While this lock excludes another
+            // booking or reset, compare the previously empty market with the
+            // ledger. Only a readable empty market proves no entry filled.
+            if (!r.view || r.view.positions.has(intent.market)) throw e;
+            let held;
+            try {
+              held = (await deps.store.getPerpPositions(a.agentId, "paper"))
+                .find((p) => p.marketId === intent.marketId && p.base > 0n);
+            } catch (readError) {
+              log(`${intent.market} entry outcome unread; its energy stays claimed: ${errText(readError)}`);
+              // No ledger verdict exists: propagating preserves the claim,
+              // without inventing a fill or calling paper a live submission.
+              throw e;
+            }
+            if (held !== undefined) {
+              if (held.side !== intent.side) throw e;
+              lastRefusalKey = null;
+              await refreshLocked();
+              try {
+                await deps.events("warn", `perps (paper): the ${intent.market} ${intent.side} entry was booked, but its fill receipt could not be read — check your Perps position. Nothing signed.`);
+              } catch {
+                // The ledger's position is the fact, whether its line lands.
+              }
+              return { status: "paper", basisSource: "paper" };
+            }
+          }
+        }
         return refuse(intent, refusalOf(e), "place");
       }
       await count();
@@ -1827,8 +1860,21 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           // Remembered with when it was asked for (the newest Close all wins),
           // so a reset asked for before it never lifts it (resetPaper).
           const key = haltKey(a.agentId, "paper");
-          const askedAt = typeof opts.askedAt === "number" && Number.isFinite(opts.askedAt) ? opts.askedAt : Date.now();
-          ownerEntryHalts.set(key, Math.max(ownerEntryHalts.get(key) ?? Number.NEGATIVE_INFINITY, askedAt));
+          const askedAt = typeof opts.askedAt === "number" && Number.isFinite(opts.askedAt) ? opts.askedAt : deps.now();
+          let priorHaltAt = ownerEntryHalts.get(key);
+          if (priorHaltAt === undefined) {
+            // A delayed older Close all must not give an inherited halt an
+            // older timestamp. Before replacing the durable flag, preserve
+            // the same startup boundary resetPaper uses for an unknown age.
+            // An unread ledger cannot prove that no inherited halt exists.
+            priorHaltAt = laneStartedAt;
+            try {
+              if (!(await deps.store.getPerpAccount(a.agentId, "paper"))?.entriesHalted) priorHaltAt = Number.NEGATIVE_INFINITY;
+            } catch (e) {
+              log(`prior practice entries halt not read; keeping the restart boundary: ${errText(e)}`);
+            }
+          }
+          ownerEntryHalts.set(key, Math.max(priorHaltAt, askedAt));
           let haltSaved = false;
           try {
             await deps.store.patchPerpAccount(a.agentId, "paper", { entriesHalted: true });

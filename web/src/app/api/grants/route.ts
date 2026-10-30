@@ -60,6 +60,7 @@ import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../wo
 import { readPerpsWallets } from "../../../../../worker/src/perps-wallets";
 import { resolveConfig } from "../../../../../worker/src/settings";
 import { errorText } from "../../../../../worker/src/redact-urls";
+import { withLocalStateLock } from "../../../../../worker/src/local-state-lock";
 import { workerStale as workerStaleOf } from "@/terminal/worker-stale";
 
 const DATA_DIR = merrymenHome();
@@ -654,24 +655,38 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true });
   }
 
-  // A SELF-HOSTED PERPS WALLET lives in its own home (accounts/perps).
-  if (wallet === "perps") return selfHostedPerpsIntake(grant);
+  // Derivation may await the chain: finish it before taking the writer lock.
+  if (wallet === "perps") {
+    const refused = await selfHostedPerpsPreflight(grant);
+    if (refused) return refused;
+  }
+  // Both wallets share this lock. Re-read the other grant inside it, after
+  // every network wait, so concurrent first setups cannot each pass against
+  // nothing and leave this install with two different owner keys.
+  try {
+    return await withLocalStateLock(DATA_DIR, () => saveSelfHostedGrant(grant, wallet));
+  } catch (error) {
+    return storeRefused(error);
+  }
+}
 
+async function saveSelfHostedGrant(grant: StoredGrant, wallet: GrantPurpose): Promise<NextResponse> {
   // THE OTHER WALLET'S grant.json, held to the store's rules: the same owner
   // key, a different account, no perpetuals left on Spot. An install with no
   // Perps wallet reads nothing here and is exactly what it was.
-  const other = await otherLocalWalletRefusal(grant, "spot");
+  const other = await otherLocalWalletRefusal(grant, wallet);
   if (other) return other;
 
-  await mkdir(DATA_DIR, { recursive: true });
+  const home = purposeHome(wallet);
+  await mkdir(home, { recursive: true, mode: 0o700 });
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
   //
   // BEST-EFFORT, deliberately: archiving must never block arming a grant. A
   // failure is said loudly, because the grant it failed to keep is about to be
   // replaced.
-  const kept = await archiveCurrentGrant("spot");
+  const kept = await archiveCurrentGrant(wallet);
   if (kept.kind === "failed") {
-    console.error(`[grants] the outgoing grant was NOT archived (${kept.why}) — replacing grant.json anyway; its owner key is not in ~/.merrymen/grants/`);
+    console.error(`[grants] the outgoing ${wallet === "perps" ? "Perps " : ""}grant was NOT archived (${kept.why}) — replacing grant.json anyway; its owner key is not in ${wallet === "perps" ? "~/.merrymen/accounts/perps/grants/" : "~/.merrymen/grants/"}`);
   }
   // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600),
   // set on the temp file before it is renamed in.
@@ -681,7 +696,7 @@ export async function POST(req: Request) {
   // kill switch (syncGrant). And it is fsynced before the rename: self-hosted
   // this file is the only copy of the new owner key, and a crash after a
   // truncate-then-write could leave it empty.
-  await writeFileAtomic(GRANT_FILE, JSON.stringify(grant, null, 2), 0o600);
+  await writeFileAtomic(localGrantFile(wallet), JSON.stringify(grant, null, 2), 0o600);
   return NextResponse.json({ ok: true });
 }
 
@@ -782,9 +797,8 @@ function localGrantFile(wallet: GrantPurpose): string {
  * A file that is there but cannot be read, parsed or verified as the other
  * wallet's refuses with 503: it is exactly the grant the rules are about.
  *
- * NOT ATOMIC WITH THE WRITE. Two tabs posting both wallets' first grants at
- * once can each pass against nothing (decision D7 defers the self-hosted
- * writer lock, cli/grant-lock.mjs); an install has one owner at a keyboard.
+ * Called under the shared local writer lock, through the archive and write:
+ * two POSTs cannot each pass against the absence of the other's first grant.
  */
 async function otherLocalWalletRefusal(grant: StoredGrant, wallet: GrantPurpose): Promise<NextResponse | null> {
   const otherWallet: GrantPurpose = wallet === "spot" ? "perps" : "spot";
@@ -827,26 +841,11 @@ async function otherLocalWalletRefusal(grant: StoredGrant, wallet: GrantPurpose)
  *   it with. A live eth_call, so it FAILS CLOSED: an RPC that cannot answer is
  *   a 503 with nothing written, never a pass.
  */
-async function selfHostedPerpsIntake(grant: StoredGrant): Promise<NextResponse> {
+async function selfHostedPerpsPreflight(grant: StoredGrant): Promise<NextResponse | null> {
   const wall = checkCanonicalWall(grant as unknown as Record<string, unknown>);
   if (!wall.ok) return wallRefused(wall);
   if (!isAddr(grant.owner)) return NextResponse.json({ error: "grant owner is not an address" }, { status: 400 });
-  const other = await otherLocalWalletRefusal(grant, "perps");
-  if (other) return other;
-  const derivation = await derivationRefusal(grant, "perps");
-  if (derivation) return derivation;
-
-  const home = purposeHome("perps");
-  await mkdir(home, { recursive: true, mode: 0o700 });
-  // The outgoing Perps grant (and its owner key) kept in the Perps home's own
-  // archive, accounts/perps/grants/, best effort as Spot's is.
-  const kept = await archiveCurrentGrant("perps");
-  if (kept.kind === "failed") {
-    console.error(`[grants] the outgoing Perps grant was NOT archived (${kept.why}) — replacing its grant.json anyway; its owner key is not in ~/.merrymen/accounts/perps/grants/`);
-  }
-  // Owner-only, synced and renamed in whole: the worker re-reads it every tick.
-  await writeFileAtomic(localGrantFile("perps"), JSON.stringify(grant, null, 2), 0o600);
-  return NextResponse.json({ ok: true });
+  return derivationRefusal(grant, "perps");
 }
 
 export async function DELETE(req: Request) {

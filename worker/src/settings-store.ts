@@ -26,11 +26,12 @@
  * NODE-ONLY (node:crypto, node:fs, pg). Imported by the web API and the worker,
  * never the browser bundle.
  */
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { link, mkdir, open, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { writeFileAtomicSync } from "./atomic-write";
+import { withSettingsFileLock } from "./settings-file-lock";
 import { merrymenHome } from "./home";
 import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
 import { isGrantPurpose, type GrantPurpose, type MerrymenSettings } from "../../packages/core/src/index";
@@ -414,35 +415,35 @@ export class FileSettingsStore implements SettingsStore {
   }
   /**
    * putSettingsIfUnchanged on disk: the record replaced only if its text is
-   * still `version` (null: still absent). ONE SYNCHRONOUS LOOK-AND-WRITE, so no
-   * other code in this process — the kill's own look-and-write below
-   * included — runs between them; written whole (temp file and rename), so a
-   * reader never meets half a record. Another process can still land between
-   * the look and the rename; closing that needs a lock across processes.
+   * still `version` (null: still absent). The comparison and atomic rename
+   * hold the kill's cross-process file lock, so another process cannot switch
+   * perps off between the comparison and the stale save's rename.
    */
   async putIfUnchanged(tenant: `0x${string}`, settings: MerrymenSettings, version: string | null): Promise<boolean> {
-    mkdirSync(this.dir, { recursive: true });
     const file = this.file(tenant);
-    if (readTextOrNull(file) !== version) return false;
-    writeFileAtomicSync(file, recordText(tenant, settings), 0o600);
-    return true;
+    return withSettingsFileLock(file, () => {
+      if (readTextOrNull(file) !== version) return false;
+      writeFileAtomicSync(file, recordText(tenant, settings), 0o600);
+      return true;
+    });
   }
   /**
    * The kill's paper stand-down (disablePaperPerpsForKill). A missing file is
-   * "none", and nothing is made. ONE SYNCHRONOUS LOOK-AND-WRITE, written whole,
-   * like putIfUnchanged: an owner's save in this process lands wholly before
-   * it or wholly after it, never across it, and neither half-reads the other's
-   * file.
+   * "none", and nothing is made. The same cross-process lock as
+   * putIfUnchanged keeps a stale save from overwriting this off.
    */
   async disablePerpsForKill(tenant: `0x${string}`): Promise<"disabled" | "none"> {
     if (this.wallet !== "perps") throw new Error("Only the Perps wallet's settings hold perps.");
     const file = this.file(tenant);
-    const raw = readTextOrNull(file);
-    if (raw === null) return "none";
-    const current = unseal((JSON.parse(raw) as StoredSettingsRecord).sealed);
-    if (current.perpsEnabled !== true) return "none";
-    writeFileAtomicSync(file, recordText(tenant, { ...current, perpsEnabled: false }), 0o600);
-    return "disabled";
+    if (readTextOrNull(file) === null) return "none";
+    return withSettingsFileLock(file, () => {
+      const raw = readTextOrNull(file);
+      if (raw === null) return "none";
+      const current = unseal((JSON.parse(raw) as StoredSettingsRecord).sealed);
+      if (current.perpsEnabled !== true) return "none";
+      writeFileAtomicSync(file, recordText(tenant, { ...current, perpsEnabled: false }), 0o600);
+      return "disabled";
+    });
   }
 
   /**
@@ -1479,15 +1480,17 @@ export async function readSettingsVersioned(store: SettingsStore, tenant: `0x${s
  * false, with nothing written, when anything wrote in between.
  *
  * FOR A WRITER THAT IS NOT THE ONLY ONE. The settings PUT takes turns with
- * other saves under the save lock (lib/telegram-claims.ts), but the kill takes
- * no lock — nothing may hold a kill up — and turns a Perps wallet's
+ * other saves under the save lock (lib/telegram-claims.ts), but the kill skips
+ * that lock and turns a Perps wallet's
  * `perpsEnabled` off in the same blob (disablePaperPerpsForKill). A save that
  * read before the kill and put its whole blob back after it switched practice
  * perps on again under a kill that had said they were off. So the Perps save
  * writes through this, and on a miss reads again and judges its body afresh.
  *
  * A stand-in store (a test's) is compared and written in two steps, which is
- * not atomic; the real stores are.
+ * not atomic; the real stores are. The file backend's kill and conditional
+ * save share a short OS lock with a one-second contention limit. PostgreSQL
+ * uses the stored version in its conditional update.
  */
 export async function putSettingsIfUnchanged(
   store: SettingsStore,

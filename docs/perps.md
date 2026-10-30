@@ -48,7 +48,8 @@ other wallet's. Only a Perps worker arms the perp lane, and it runs no spot
 producer (`perps-only`). A Spot worker never starts the lane or its feed and
 shows its strategist no perps; its budget readers and paper reset touch the
 perp tables, which hold nothing for it, so they add nothing. Nothing on main
-starts a Perps worker yet. There is no live executor, reconciler or on-chain leg in this build:
+starts a Perps worker without the paper flag and a Perps grant; slice 4 supplies
+the hosted supervisor, and 5b supplies grant creation. There is no live executor, reconciler or on-chain leg in this build:
 `MERRYMEN_PERPS=live` is off, and a live account with perps on is refused
 `perp-live-not-yet`. The signer is vendored and hash-checked but loaded only by
 its own tests. The hosted checkpoint of paper perp state and the mirror of the
@@ -266,7 +267,13 @@ and `/create?for=perps` are PR 3.
   (a live eth_call that fails closed with 503), the Spot `grant.json` held to
   the store's same-owner, other-account rules, then the Perps home's
   `grant.json` archived and replaced whole. No public identity or name (D2).
-  The same-owner rule holds the Spot intake to the Perps wallet too. No
+  The same-owner rule holds the Spot intake to the Perps wallet too. Local
+  grant POSTs serialize their cross-wallet check, archive and write under a
+  shared SQLite OS lock, after network derivation finishes. Concurrent first
+  POSTs therefore cannot each accept a different owner against an empty
+  other-wallet file. Local DELETE, discard and CLI grant writers do not yet
+  participate in that lock; it is not a complete install-wide mutation lock.
+  No
   refusal of the rule says "neither wallet was changed", since a restore or
   renewal posts after its own stop, which a refusal does not undo, and a
   hand-sent one can meet any of them there: owner-differs, account-shared,
@@ -550,8 +557,13 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   only when the owner flips the switch. Self-hosted, the look-and-write is
   pinned with the kill written inside the save's read-to-write window
   (`settings-if-unchanged.test.ts`, `perps-kill-race.test.ts`); a `merrymen
-  kill` or Telegram `/kill` in another process can still land between the look
-  and the rename (no lock across processes, D7). Where Perps are not offered
+  kill` or Telegram `/kill` in another process now takes the same short SQLite
+  OS lock as the comparison and rename (`settings-file-lock.test.ts`). The
+  file-backed hosted store's conditional save and kill use it too. A contended
+  write fails after one second rather than reporting success; a kill still
+  attempts grant revocation and reports an incomplete paper stop. This does
+  not add a version to the client's request or serialize arbitrary file edits.
+  Where Perps are not offered
   (D1), self-hosted as hosted (D19), a save may only turn things off: anything
   else is 403 `perps-wallet-not-offered` with only its offs written, and an
   off with nothing on to turn off writes nothing, so no Perps settings are made
@@ -663,6 +675,36 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
 - Not in 5c: Resume after Close all (see the worker paragraph above), the
   Perps read routes and recover (PR 2), the desk, chat cards and onboarding
   (PR 3).
+
+## Slice 5 PR 1 security follow-up (30 October)
+
+The continuation from the seventh review keeps this slice paper-only and
+adds the following protections:
+
+- Concurrent local grant POSTs cannot establish the two wallets under
+  different owners. Their shared-owner check and replacement are serialized;
+  local kill/delete/CLI grant mutations remain outside that lock.
+- A conditional settings save and a kill in another process cannot overlap
+  their final read and write. The Perps file store uses the same protection.
+- A child command result can update only commands belonging to that child's
+  smart account, including the legacy schema without a receipt column.
+- An old or malformed Spot arm marker cannot discard a newer recorded pause.
+  A later owner resume is checked without blocking the order ferry on a
+  database read, and a stale check cannot release a new worker's pause.
+- Command claims, running markers and receipts are synced before execution
+  or acknowledgement. An invalid receipt cannot release the running slot;
+  unsafe command IDs and malformed queue files cannot escape their directory
+  or crash the queue reader.
+- An older delayed Close all cannot downgrade a halt inherited after restart.
+  A failed paper-open response is checked against the ledger before refunding
+  its entry energy; unread outcomes keep the claim, and no fill amount is
+  invented.
+
+These are regression-tested boundaries, not proof of a live deployment.
+The read routes and CLI (PR 2), desk and onboarding (PR 3), funding and live
+execution remain subsequent work. The dependency audit exception still expires
+after 8 November; this continuation does not extend it or force SDKs onto an
+incompatible dependency major version.
 
 ## One login, two wallets
 

@@ -100,7 +100,7 @@ after(() => {
   rmSync(fleet, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-const passes = async (n: number) => { for (let i = 0; i < n; i++) { await orch.reconcile(); await settle(); orch.mirrorLoginPausesForTest(); } };
+const passes = async (n: number) => { for (let i = 0; i < n; i++) { await orch.reconcile(); await settle(); await orch.mirrorLoginPausesForTest(); } };
 
 it("a Perps-only login's standing pause from a killed Spot wallet stays, and is said; a login whose Spot worker runs is not", async () => {
   // Recorded pauses of killed Spot wallets, in the shared database: their agents rows (owner = the login, D4) stay.
@@ -133,7 +133,7 @@ it("a Perps-only login's standing pause from a killed Spot wallet stays, and is 
     try { await applyLedgerSchema(wrapSqlite(book)); } finally { book.close(); }
     writeFileSync(path.join(orch.childHome(l), "paused"), "paused", "utf8");
   }
-  orch.mirrorLoginPausesForTest();
+  await orch.mirrorLoginPausesForTest();
   await spot.remove(KILLED);
   await passes(3);
   assert.equal(live(KILLED).length, 0, "set-up: Kill all stopped it");
