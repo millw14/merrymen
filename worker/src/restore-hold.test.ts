@@ -113,15 +113,46 @@ describe("the restore gate holds instead of returning", () => {
   });
 
   it("THE HOLD PROCESS RUNS WITH THE CHILD'S ENV, AND ITS OWN ENTRY", () => {
-    const start = fn("startHolderProcess").body!.getText();
+    const startFn = fn("startHolderProcess");
+    const start = startFn.body!.getText();
     assert.match(start, /spawn\(\s*process\.execPath,\s*\[`--max-old-space-size=\$\{HOLDER_MAX_OLD_SPACE_MB\}`, "--import", "tsx", HOLD_ENTRY\]/);
-    assert.match(start, /env: childEnv\(tenant\)/, "the same strip: no DATABASE_URL, no store key");
+    const fork = calls(startFn, "spawn")[0]!;
+    const options = fork.arguments[2];
+    assert.ok(options && ts.isObjectLiteralExpression(options));
+    const prop = (name: string) => options.properties.find((p): p is ts.PropertyAssignment =>
+      ts.isPropertyAssignment(p) && p.name.getText() === name)?.initializer;
+    const env = prop("env");
+    assert.ok(env && ts.isObjectLiteralExpression(env));
+    assert.equal(env.properties.length, 2, "no inherited env or secret override after the child strip");
+    const base = env.properties[0]!, flags = env.properties[1]!;
+    assert.ok(ts.isSpreadAssignment(base) && base.expression.getText() === "childEnv(tenant)", "the same strip: no DATABASE_URL, no store key");
+    assert.ok(ts.isSpreadAssignment(flags) && ts.isParenthesizedExpression(flags.expression));
+    const choice = flags.expression.expression;
+    assert.ok(ts.isConditionalExpression(choice));
+    assert.equal(choice.condition.getText(), "held.perpsSeat");
+    assert.ok(ts.isObjectLiteralExpression(choice.whenTrue) && ts.isObjectLiteralExpression(choice.whenFalse));
+    assert.deepEqual(choice.whenTrue.properties.map(p => p.getText()), ['MERRYMEN_PERPS_BOT_SEAT: "1"', 'MERRYMEN_TG_GROUPS: "0"'],
+      "the only additions select the control-only entry and turn groups off");
+    assert.equal(choice.whenFalse.properties.length, 0, "ordinary restore holders retain the stripped env unchanged");
+    assert.equal(prop("stdio")?.getText(), '["ignore", "pipe", "pipe"]', "neither holder kind receives an IPC broker channel");
     assert.match(ORCH, /const HOLD_ENTRY = path\.join\(fileURLToPath\(new URL\("\.", import\.meta\.url\)\), "telegram-hold\.ts"\);/);
     assert.ok(existsSync(path.join(SRC, "telegram-hold.ts")));
   });
 
+  it("THE PERPS CONTROL SEAT DOES NOT MAKE AN EXPIRED SPOT RESTORE HOLDER ELIGIBLE", () => {
+    const start = fn("startHolderProcess");
+    const read = calls(start, "getGrantStore")[0]!;
+    assert.equal(read.arguments[0]?.getText(), 'held.perpsSeat ? "perps" : "spot"');
+    const guard = all(start, (n) => ts.isIfStatement(n) && n.expression.getText().startsWith("!latest ||"))[0] as ts.IfStatement | undefined;
+    assert.ok(guard);
+    assert.match(guard.expression.getText(), /!held\.perpsSeat && \(!Number\.isFinite\(latest\.expiresAt\) \|\| latest\.expiresAt <= Math\.floor\(Date\.now\(\) \/ 1000\)\)/);
+    assert.match(guard.expression.getText(), /latest\.smartAccount\.toLowerCase\(\) !== held\.smartAccount\.toLowerCase\(\)/);
+    assert.equal(all(guard.thenStatement, ts.isReturnStatement).length, 1);
+    assert.ok(read.getEnd() < guard.getStart() && guard.getEnd() < calls(start, "spawn")[0]!.getStart(), "fresh grant identity and Spot expiry checked before either fork");
+  });
+
   it("A HELD TENANT IS NEVER A CHILD: spawnHolder and the retry never touch `children`", () => {
-    for (const name of ["spawnHolder", "startHolderProcess", "watchHolder", "retryHold", "handHoldBack", "standDownHolder"]) {
+    for (const name of ["spawnHolder", "startHolderProcess", "watchHolder", "retryHold", "handHoldBack", "standDownHolder", "reconcilePerpsBotSeats"]) {
       assert.doesNotMatch(fn(name).body!.getText(), /children\.set\(/, `${name} must not put a held tenant in children`);
     }
   });
@@ -168,6 +199,9 @@ describe("held tenants reach only the loops they belong in", () => {
       "localMemoryWriterPresent",
       "mirrorLedgers",
       "reconcile",
+      // A control-only bot seat uses the holder lifecycle and owner lease,
+      // never children or a financial ledger; the lifecycle suite drives it.
+      "reconcilePerpsBotSeats",
       "refreshGrantForChild",
       "reportFleetSource",
       // The explicit failure-only reporter refuses any local holder; it never
@@ -175,6 +209,8 @@ describe("held tenants reach only the loops they belong in", () => {
       "reportIdle",
       "retireExpiredGrants",
       "retryHold",
+      // Only suppresses an owner-bot-unheard alert while that seat is polling.
+      "sayPerpsPauseUnheard",
       "scheduleRestart",
       "signalFleetForDrain",
       "spawnChild",
@@ -186,11 +222,19 @@ describe("held tenants reach only the loops they belong in", () => {
       "standDownLostLeasesNow",
       "startHolderProcess",
       "sweepTgGroups",
+      // Reads bound control requests and queues exits; it never mirrors or
+      // restores the held home's financial book.
+      "syncPerpsBotBridges",
       "watchHolder",
       // The heartbeat COUNTS them (holders.size) and does nothing else: no
       // held tenant is visited, started or serviced by it.
       "writeOrchestratorHeartbeat",
     ]);
+    for (const name of ["reconcilePerpsBotSeats", "sayPerpsPauseUnheard", "syncPerpsBotBridges"]) {
+      for (const never of ["openChildLedger", "mirrorTenant", "mirrorSerially", "tryPaperRestore", "spawnChild", "writePeersFor"]) {
+        assert.equal(calls(fn(name), never).length, 0, `${name} must not reach a held financial book or start trading via ${never}`);
+      }
+    }
   });
 
   it("THE MIRROR'S HOLDERS LOOP PUBLISHES TELEGRAM, AND NEVER OPENS OR COPIES A LEDGER", () => {
@@ -200,7 +244,7 @@ describe("held tenants reach only the loops they belong in", () => {
     const body = loops[0]!.statement.getText();
     // Published as held, with the class its owner is told, so the dashboard
     // says trading is held rather than "connected" (plan §3.1).
-    assert.match(body, /await publishChildTelegram\(tenant as `0x\$\{string\}`, shared, `held:\$\{held\.cls\}`\);/);
+    assert.match(body, /await publishChildTelegram\(tenant as `0x\$\{string\}`, shared, held\.perpsSeat \? "perps-seat" : `held:\$\{held\.cls\}`\);/);
     assert.match(body, /if \(!lease \|\| !lease\.healthy\(\)\) continue;/, "only under the lease");
     for (const never of ["mirrorTenant", "openChildLedger", "mirrorSerially", "writePeersFor", "heldEquitySymbols"]) {
       assert.ok(!body.includes(never), `the holders loop must not call ${never}`);
@@ -255,8 +299,12 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.match(leaseLoss, /standDownHolder\(tenant\);/);
     // The kill switch stops the holder before requesting privacy cleanup;
     // its still-running writer cannot lose its home or financial source.
-    const kill = loopsOver(fn("reconcile"), "holders").find((l) => /standDownHolder/.test(l.statement.getText()));
-    assert.ok(kill && /wanted\.has\(tenant\)/.test(kill.statement.getText()));
+    // Capacity yielding now has another standDownHolder loop. Select removal
+    // by its privacy cleanup, whose ordering is the guarantee under test.
+    const kill = loopsOver(fn("reconcile"), "holders").find((l) => calls(l.statement, "forgetTgGroups").length === 1);
+    assert.ok(kill && ts.isBlock(kill.statement));
+    assert.equal(kill.statement.statements[0]!.getText(), "if (wanted.has(tenant) || (held.perpsSeat && perpsBotOwners.has(tenant))) continue;",
+      "only a Perps control seat may remain for the Perps roster after its Spot grant is gone");
     const stop = calls(kill.statement, "standDownHolder")[0], forget = calls(kill.statement, "forgetTgGroups")[0];
     assert.ok(stop && forget && stop.getEnd() < forget.getStart(), "stand down before privacy cleanup");
     assert.equal(calls(kill.statement, "rmSync").length, 0, "the holder's home is retained until its writer exits");
@@ -328,9 +376,13 @@ describe("held tenants reach only the loops they belong in", () => {
     const first = refresh.statement.statements[0]!;
     assert.equal(
       first.getText(),
-      "if (!eligible.has(tenant) || retiringExpired.has(tenant)) continue;",
-      "a revoked or expired grant, including one still retiring, claims no bot before its settings are written",
+      "if (!(held.perpsSeat ? perpsBotOwners.has(tenant) : eligible.has(tenant)) || retiringExpired.has(tenant)) continue;",
+      "a Spot holder still requires its unexpired eligible grant, and neither holder kind may refresh while retiring",
     );
+    const seat = refresh.statement.statements.find((st): st is ts.IfStatement => ts.isIfStatement(st) && st.expression.getText() === "held.perpsSeat");
+    assert.ok(seat && ts.isBlock(seat.thenStatement));
+    assert.ok(ts.isContinueStatement(seat.thenStatement.statements.at(-1)!));
+    assert.ok(seat.getEnd() < calls(refresh.statement, "refreshGrantForChild")[0]!.getStart(), "a control seat cannot refresh a Spot grant or enter its restore-to-trading path");
     assert.match(refresh.statement.getText(), /if \(stored && stored\.paperTradingEnabled !== true\) \{\s*released\.push\(held\);/);
     // The same test spawnChild's gate makes, or the two would disagree about who is held.
     assert.ok(all(fn("spawnChild"), (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true").length === 1);

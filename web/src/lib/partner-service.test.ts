@@ -315,3 +315,27 @@ test("body limits apply before parsing or signature verification", async () => {
   const r = await service.handle(new Request("https://app.merrymen.dev/api/partner/agents", { method: "POST", body: "x".repeat(32_769) }), "/agents");
   assert.equal(r.status, 413);
 });
+
+test("Perps review is a scoped owner handoff, never enrollment or partner-selected URL", async () => {
+  const previous = process.env.MERRYMEN_PERPS;
+  process.env.MERRYMEN_PERPS="paper";
+  try {
+    const f=fixture();
+    const made=await f.call("POST","/agents",{external_user_id:"perps-owner"});
+    const path=`/agents/${made.body.id}/perps-review-link`;
+    assert.equal((await f.call("POST",path,{})).status,409);
+    await f.store.bindAuthorized(made.body.id,key.appId,tenant,["read:agents"]);
+    const result=await f.call("POST",path,{});
+    assert.equal(result.status,200); assert.equal(result.body.mode,"paper"); assert.equal(result.body.wallet,"perps");
+    assert.equal(result.body.authorization,"owner_review_required");
+    const url=new URL(result.body.review_url); assert.equal(url.pathname,"/perps"); assert.equal(url.search,""); assert.equal(url.hash,"");
+    for (const field of ["token","grant","privateKey"]) assert.ok(!Object.hasOwn(result.body,field));
+    assert.ok(!JSON.stringify(result.body).includes(tenant));
+    assert.equal((await f.call("POST",path,{redirect_uri:"https://evil.test"})).status,400);
+    assert.equal((await f.call("POST",path,{}, {...key,scopes:["chat:agents"]})).status,403);
+    assert.equal((await f.call("POST",path,{}, {...key,appId:"integration_app_b"})).status,404);
+    process.env.MERRYMEN_PERPS="off"; assert.equal((await f.call("POST",path,{})).status,409);
+    await f.store.revoke(key.appId,made.body.id); process.env.MERRYMEN_PERPS="paper";
+    assert.equal((await f.call("POST",path,{})).status,409);
+  } finally { if(previous===undefined) delete process.env.MERRYMEN_PERPS; else process.env.MERRYMEN_PERPS=previous; }
+});

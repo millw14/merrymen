@@ -122,6 +122,7 @@ async function sharedDb(opts: { controls?: boolean; onRecordRead?: () => void } 
   let onRecordRead = opts.onRecordRead ?? null;
   const shared: typeof inner = {
     prepare(sql) {
+      if (opts.controls === false && sql.includes("FROM recovery_reply_controls")) throw new Error("control journal connection unavailable");
       if (onRecordRead && /FROM perps_wallets WHERE owner/.test(sql)) {
         const f = onRecordRead;
         onRecordRead = null;
@@ -240,8 +241,8 @@ describe("a stopped Perps worker's final pass", () => {
   });
 
   it("held before its grant was handed over, then removed: copied under the account its spawn read", async () => {
-    // No owner-controls schema: perpsOwnerControls cannot read, and holds the
-    // spawn before writeGrantForChild — where a journalled /kill awaiting its
+    // An unreadable owner-control journal holds both the bot seat and the
+    // Perps spawn before writeGrantForChild — where a journalled /kill awaiting its
     // /confirm holds it too.
     const { fills } = await sharedDb({ controls: false });
     const o = ownerAt(0xa1), perpsAcct = address(0xa3);

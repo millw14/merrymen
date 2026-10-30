@@ -126,7 +126,8 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
-import { purposeHome } from "@merrymen/home";
+import { merrymenHome, purposeHome } from "@merrymen/home";
+import { withLocalStateLock } from "../../../../../worker/src/local-state-lock";
 import { isHostedMode, type GrantPurpose } from "@merrymen/core";
 // RELATIVE, NOT THE ALIASES, so a test can run this route. `tsx --test`
 // resolves against the root tsconfig, which has no @merrymen/command-files or
@@ -345,18 +346,25 @@ export async function POST(req: Request) {
         }
         return placeRecoveryCheckedOrder(db, { agent, id, args, expiresAt, now });
       }, wallet).catch(() => ({ ok: false as const, why: "unreachable" as const }))
-    : // The web process and the worker share one MERRYMEN_HOME — no table, no
-      // ferry. Each wallet's worker drains its own home (purposeHome: Spot's is
-      // MERRYMEN_HOME itself, as it always was; Perps's is accounts/perps).
-      // A PERPS EXIT NAMES ITS ACCOUNT ON THE FILE: the Perps home outlives
-      // the account in it (a wallet made again under another owner key is
-      // another account in the same `accounts/perps`), so the account the
-      // owner reviewed rides with the exit and the worker runs it on no other
-      // (command-files.ts FileCommand.account).
-      placeSelfHostedOrder(
-        { open: () => openCommands(purposeHome(wallet)), write: (cmd) => writeCommand(purposeHome(wallet), cmd) },
-        { id, args, expiresAt, now, ...(wallet === "perps" ? { account: agent } : {}) },
-      );
+    : wallet === "perps"
+      ? await withLocalStateLock(merrymenHome(), async () => {
+          // Telegram, HTTP and grant replacement share this lock. Re-resolve
+          // after waiting: the grant read above may belong to a stopped wallet.
+          const current = await diskAgent("perps");
+          if (current?.toLowerCase() !== agent.toLowerCase()) return { ok: false as const, why: "account-changed" as const };
+          return placeSelfHostedOrder(
+            { open: () => openCommands(purposeHome("perps")), write: cmd => writeCommand(purposeHome("perps"), cmd) },
+            { id, args, expiresAt, now, account: agent },
+          );
+        }).catch(() => ({ ok: false as const, why: "unreachable" as const }))
+      : placeSelfHostedOrder(
+          { open: () => openCommands(purposeHome(wallet)), write: cmd => writeCommand(purposeHome(wallet), cmd) },
+          { id, args, expiresAt, now },
+        );
+
+  if (!result.ok && result.why === "account-changed") {
+    return NextResponse.json({ error: "Your Perps wallet changed while this request waited. Nothing was queued; review it again.", code: "account-changed" }, { status: 409 });
+  }
 
   if (!result.ok && result.why === "perps-not-reported") {
     return NextResponse.json({ error: PERPS_EXIT_NOT_REPORTED }, { status: 409 });

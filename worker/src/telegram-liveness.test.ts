@@ -154,7 +154,8 @@ describe("alert only: in the orchestrator's source", () => {
   it("publishes the liveness columns for workers and held tenants alike", () => {
     const mirror = body("mirrorLedgers");
     assert.match(mirror, /publishChildTelegram\(tenant as `0x\$\{string\}`, shared, "trading"\)/);
-    assert.match(mirror, /publishChildTelegram\(tenant as `0x\$\{string\}`, shared, `held:\$\{held\.cls\}`\)/);
+    assert.match(mirror, /publishChildTelegram\(tenant as `0x\$\{string\}`, shared, held\.perpsSeat \? "perps-seat" : `held:\$\{held\.cls\}`\)/,
+      "control-only seats are distinct, while ordinary held tenants retain their restore cause");
     // The columns, from the one sequence the Postgres suite races (telegram-store.ts ensureTelegramSchema).
     assert.match(mirror, /await ensureTelegramSchema\(shared\);/);
     const publish = body("publishChildTelegram");

@@ -1157,5 +1157,9 @@ export const HELP_TEXT = [
   "/ls [path] · /get &lt;path&gt; · /clip [text] · /run &lt;cmd&gt; · /type &lt;text&gt; · /key &lt;combo&gt;",
   "/remind &lt;20m&gt; &lt;msg&gt; · /watch · /pc · /agent &lt;task&gt; — or describe the task in plain words",
   "",
+  "<b>Perps · paper practice</b> (linked owner, private DM):",
+  "/perps — read the separate simulated perpetual book",
+  "/close BTC-PERP — request a practice exit; /flatten — close all and pause new entries (asks to confirm)",
+  "",
   "Voice notes work too, once an AI provider is set in Settings.",
 ].join("\n");
