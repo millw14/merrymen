@@ -8,6 +8,7 @@ import { renewalSkipsRevocation } from "../lib/perps-renewal";
 import { stopAgentForReplacement } from "../lib/stop-agent";
 import { assertRevocationFunded, revokeFromBrowser } from "../lib/revoke-client";
 import { walletUrl } from "../lib/wallet-param";
+import { fullDateTime } from "../lib/format";
 import { fetchAccountForSession } from "./account-session";
 import { guardPerpsSigner } from "./perps-client";
 import { requestJson } from "./request-json";
@@ -152,7 +153,7 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
     {(reading && !account) && <p>Checking your wallet…</p>}{readError && <p role="alert">{readError}</p>}
     {signedOut && <SignIn onDone={refresh}/>}
     {account && !signedOut && !signer && <p>Your protected signing wallet is not ready. {PRIVY_BETA ? "Sign in with the account that owns this wallet and wait for it to become ready." : "Protected wallet sign-in is not configured on this installation."}</p>}
-    {saved && <><p className="perps-address">Perps account <code>{saved.smartAccount}</code></p><p>Owner <code>{saved.owner}</code></p><p>Permission expires {new Date(saved.expiresAt * 1000).toLocaleString()}.</p></>}
+    {saved && <><p className="perps-address">Perps account <code>{saved.smartAccount}</code></p><p>Owner <code>{saved.owner}</code></p><p>Permission expires {fullDateTime(saved.expiresAt * 1000)}.</p></>}
     {account && !signedOut && <><div className="perps-settings-grid">{CAP_FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={key === "perTradeUsdg" || key === "dailyUsdg" ? "decimal" : "numeric"} value={caps[key]} disabled={busy || !offered} onChange={event => setCaps(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div><label><input type="checkbox" checked={ack} disabled={busy || !offered} onChange={event => setAck(event.target.checked)}/>{saved ? "I want to replace this Perps permission with the limits above. Recovery access stays with the same owner." : "I understand this is simulated trading and my sign-in controls the separate Perps wallet."}</label><button disabled={!offered || !signer || !savedRead || !ack || busy} onClick={() => void sign()}>{busy ? "Working…" : saved ? "Renew paper Perps permission" : "Create paper Perps wallet"}</button>
       {saved?.serialized && saved.demoSessionPrivateKey && !account.status.exists && !needsPermissionReplacement(saved) && <button disabled={!offered || !signer || busy} onClick={() => void activate()}>Retry saved permission activation</button>}</>}
     {status && <p role="status">{status}</p>}{message && <p role="status">{message}</p>}<p><a href="/withdraw?wallet=perps">Withdraw or recover this wallet</a></p>

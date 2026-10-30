@@ -6,6 +6,7 @@ import { readPerpsActivity, type PerpsActivityResponse } from "../lib/perps-acti
 import { readChartResponse } from "../lib/perps-chart-response";
 import type { ChartResponse, ChartWindow } from "../lib/perps-chart-data";
 import { walletUrl } from "../lib/wallet-param";
+import { fullDateTime as when } from "../lib/format";
 import { usePerpsAccount } from "./usePerpsAccount";
 import { fetchAccountForSession } from "./account-session";
 import { paperReport, perpsMoney, samePerpsIdentity, submitPerpsAction, type PerpsCommand } from "./perps-client";
@@ -18,7 +19,6 @@ import "./perps-desk.css";
 
 type Action = Parameters<typeof submitPerpsAction>[1];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "The read could not be completed.";
-const when = (ms: number) => new Date(ms).toLocaleString();
 
 export function PerpsLinks() {
   return <nav className="perps-actions" aria-label="Perps wallet navigation"><a href="/perps">Paper desk</a><a href="/settings?wallet=perps">Perps settings</a><a href="/grant?wallet=perps">Wallet &amp; permission</a><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></nav>;
