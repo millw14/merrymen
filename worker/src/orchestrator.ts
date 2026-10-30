@@ -3002,6 +3002,40 @@ async function writeSettingsForChild(
   }
 }
 
+class PerpsAdmissionDeliveryError extends Error {
+  constructor() {
+    super("The mandatory Perps entries-off settings could not be delivered.");
+    this.name = "PerpsAdmissionDeliveryError";
+  }
+}
+
+/** No await: the current admission decision and its durable file must agree before a fork. */
+function requirePerpsAdmissionForChild(tenant: `0x${string}`): void {
+  if (perpsPaperTenantAllowed(slotOf(tenant).owner)) return;
+  try {
+    const home = childHome(tenant), file = path.join(home, "settings.json");
+    const read = readSettingsFileAt(file);
+    const cached = perpsFeedSettings.get(tenant.toLowerCase());
+    // An unreadable cold file is not a trustworthy risk configuration. A
+    // running worker may use only the last configuration this parent supplied.
+    if (read.kind === "unusable" && !cached) throw new Error("Perps risk settings unreadable.");
+    const previous = read.kind === "parsed" ? read.settings : cached ?? null;
+    const restricted = childSettingsFor({ ...perpsWorkerSettings(previous), perpsEnabled: false }, lastWrittenHolder(file));
+    mkdirSync(home, { recursive: true });
+    writeFileAtomicSync(file, JSON.stringify(restricted, null, 2), 0o600, { durable: true, followSymlinks: false });
+    // Retain only the parent's own market evidence in the feed cache.
+    if (cached) perpsFeedSettings.set(tenant.toLowerCase(), { ...cached, perpsEnabled: false });
+  } catch {
+    // Keep the original book and healthy lease until the existing final pass
+    // completes. A failed write cannot leave a last-good enabled worker alive.
+    if (leases.has(tenant)) perpsYielded.add(tenant);
+    cancelRestart(tenant);
+    killChild(tenant);
+    sayTenantAlert(tenant, `[alert] ${tenant}: mandatory Perps entries-off settings could not be delivered — worker stood down; its book and final-accounting lease are retained`);
+    throw new PerpsAdmissionDeliveryError();
+  }
+}
+
 /**
  * A PERPS WORKER'S settings.json: its own wallet's settings, as that wallet's
  * worker may hold them.
@@ -3030,21 +3064,9 @@ async function writePerpsSettingsForChild(
   _botClaimsRead?: BotClaimsRead,
 ): Promise<MerrymenSettings | null> {
   const { owner } = slotOf(tenant);
-  const restrictWithdrawnAdmission = (): void => {
-    if (perpsPaperTenantAllowed(owner)) return;
-    const file = path.join(childHome(tenant), "settings.json");
-    const read = readSettingsFileAt(file);
-    const cached = perpsFeedSettings.get(tenant.toLowerCase());
-    const previous = read.kind === "parsed" ? read.settings : cached ?? null;
-    const restricted = { ...perpsWorkerSettings(previous), perpsEnabled: false };
-    writeChildSettings(tenant, childSettingsFor(restricted, lastWrittenHolder(file)));
-    // The feed keeps the markets last supplied by this parent, even during an
-    // outage. Never promote a child's locally edited settings into feed input.
-    if (cached) perpsFeedSettings.set(tenant.toLowerCase(), { ...cached, perpsEnabled: false });
-  };
   try {
     // Do not leave an enabled file in place while a store read hangs or fails.
-    restrictWithdrawnAdmission();
+    requirePerpsAdmissionForChild(tenant);
     const stored = await getSettingsStore("perps").get(owner);
     const spot = await getSettingsStore("spot").get(owner);
     const claims = claimsRead === undefined ? await readHolderClaims() : claimsRead;
@@ -3058,9 +3080,10 @@ async function writePerpsSettingsForChild(
     writeChildSettings(tenant, childSettingsFor(forChild, holder));
     perpsFeedSettings.set(tenant.toLowerCase(), forChild);
     return stored;
-  } catch {
+  } catch (error) {
+    if (error instanceof PerpsAdmissionDeliveryError) throw error;
     // Admission can also change during the awaited reads above.
-    try { restrictWithdrawnAdmission(); } catch { /* A failed local write remains a failed refresh. */ }
+    requirePerpsAdmissionForChild(tenant);
     return null;
   }
 }
@@ -3980,6 +4003,7 @@ export async function writeBootstrapForChild(
  */
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
+  if (perpsYielded.has(tenant)) return "the stopped Perps worker's final accounting is incomplete";
   if (isPerpsWorkerKey(tenant) && !perpsSpawnable()) return "MERRYMEN_PERPS is not paper";
   if (isPerpsWorkerKey(tenant) && perpsAffinityLost(tenant)) return "its owner's Spot worker is not leased on this replica";
   const held = operatorHold(tenant);
@@ -4905,6 +4929,7 @@ async function armControlsForChild(tenant: `0x${string}`, grant: StoredGrant, le
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
+  if (perpsYielded.has(tenant)) return;
   if (operatorHeld(tenant)) return;
   // A restart timer can outlive the ceiling it was set under (perpsSpawnable).
   if (isPerpsWorkerKey(tenant) && !perpsSpawnable()) return;
@@ -5229,6 +5254,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       await releaseLease(tenant);
       return;
     }
+    // Admission may have been withdrawn during any preparation await. Keep
+    // exits available only after the mandatory off file is durably delivered.
+    if (perpsSlot) requirePerpsAdmissionForChild(tenant);
     // The chat's trade history is the Spot agent's: a Perps book's perp
     // fills are not trades rows, and nothing of them is told in a chat yet.
     if (!perpsSlot) void writeHistoryForChild(tenant, smartAccount);
@@ -6960,7 +6988,7 @@ export function perpsSpawnable(env: Readonly<Record<string, string | undefined>>
   return perpsCeilingOf(env.MERRYMEN_PERPS) === "paper";
 }
 
-/** Perps workers stood down to give a Spot worker their process slot: final-passed and released, then started again only in room no Spot worker needs. */
+/** Stood-down Perps workers awaiting a complete final copy before their lease is released or another worker starts. */
 const perpsYielded = new Set<string>();
 
 /** The owners whose Spot grant was unexpired on the last pass (reconcile). */
@@ -7148,6 +7176,11 @@ interface DrainHome {
 function drainHomes(): DrainHome[] {
   const homes: DrainHome[] = [];
   for (const tenant of children.keys()) homes.push({ tenant, lease: leases.get(tenant) ?? null, wasChild: true, wasHolder: false });
+  // A mandatory-settings stand-down may happen just before shutdown, after
+  // children lost the process but before reconcile copied its last rows.
+  for (const tenant of perpsYielded) {
+    if (!children.has(tenant) && !retiringExpired.has(tenant)) homes.push({ tenant, lease: leases.get(tenant) ?? null, wasChild: true, wasHolder: false });
+  }
   for (const [tenant, held] of holders) {
     if (held.stoodDown) continue;
     homes.push({ tenant, lease: leases.get(tenant) ?? null, wasChild: false, wasHolder: true });
@@ -7710,6 +7743,10 @@ export async function reconcile(): Promise<void> {
       continue;
     }
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
+    // Keep an owned final-copy lease out of capacity handoffs and spawning.
+    // Without a lease, permit acquisition below; spawnChild still refuses,
+    // and the next reconcile can finish the copy under that fresh lease.
+    if (perpsYielded.has(lc) && leases.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
     // restart already scheduled is the timer's to make, on its rung, not this
@@ -7995,7 +8032,14 @@ export async function reconcile(): Promise<void> {
     await startHolderProcess(held);
   }
   for (const tenant of children.keys()) {
-    await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
+    try {
+      await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
+    } catch (error) {
+      if (!(error instanceof PerpsAdmissionDeliveryError)) throw error;
+      // This worker was already signalled and retained for its final copy.
+      // Continue refreshing the other tenants; do not refresh its grant here.
+      continue;
+    }
     // AND THEIR GRANT, for the same reason and on the same clock. Settings
     // reached a live agent in fifteen seconds while a new SIGNATURE reached it
     // only on a restart — so an owner who re-signed to cover a token watched

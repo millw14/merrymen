@@ -18,6 +18,10 @@ Funding, live execution and the Brain driver remain outside the paper launch.
   refresh. An existing paper worker continues its exits and protective rules;
   removal does not silently freeze a held book while exits appear queued.
   Existing owner reads, kill, recovery and exit controls remain available.
+  If local storage cannot accept the mandatory entries-off configuration,
+  stop the worker through the accounting drain and keep it held until the
+  restriction can be delivered. In that storage-failure case, paper positions
+  freeze; exits and stops cannot continue on stale enabled settings.
 - The shared local process ceiling is **48 children**, with Spot priority.
   Perps and any login bot seat consume real slots; an owner with two wallets
   does not count as one child. Measure actual process/thread and memory
@@ -48,6 +52,13 @@ it is not permission to bypass an accounting hold.
 
 ## Evidence to attach before enabling internal owners
 
+Review the stack in order: [authority and security (#368)](https://github.com/millw14/merrymen/pull/368),
+[private reads and recovery (#369)](https://github.com/millw14/merrymen/pull/369),
+[paper desk (#370)](https://github.com/millw14/merrymen/pull/370), then
+[pilot controls and this release record (#371)](https://github.com/millw14/merrymen/pull/371).
+Their current CI checks and validation notes are the code evidence; a successful
+code check does not fill the deployment and owner-drill gates below.
+
 Record the exact commit, build/deployment identifier, configuration review,
 operator and UTC time with each result. Keep authentication tokens, private
 keys, serialized grants and customer ledger rows out of the release note.
@@ -64,7 +75,7 @@ keys, serialized grants and customer ledger rows out of the release note.
 | Fleet capacity | Under the 48-child cap, demonstrate Spot priority, Perps-only bot-seat behavior, shutdown/final mirror and headroom with the proposed cohort | Code/test evidence is separate from deployment resource measurements, which remain outstanding |
 | Database backup | Current backup policy, recent successful backup, isolated restore and reconciliation evidence; preserve the original volume during pilot | Railway metadata shows no scheduled snapshots and PITR disabled; newest listed snapshots are October 8. Current backup and isolated restore remain blockers. No database rows or credentials were read |
 | Persistent home | Verify mount identity, lease exclusivity and restart on the original home; document held-wallet response if the home is missing | Existing authority/hold tests and the restrictive pilot policy above; lost-home/handover proof outstanding |
-| Public feed | Bounded recording from the deployed single public feed, exact timestamps, gap accounting and deterministic offline replay | Capture/replay synthetic tests; real deployment recording outstanding |
+| Public feed | Bounded recording from the deployed single public feed, exact timestamps, gap accounting and deterministic offline replay | Capture/replay synthetic tests passed. A read-only stat of `/data/merrymen/lighter-feed.json` on the existing production orchestrator returned ENOENT on October 30; no recording was made and no feed was started |
 | Other surfaces | Owner-scoped Telegram, MCP and partner routes; no Perps public identity or Spot fallback; recovery remains reachable when paper is off | Tests must be included in final combined verification; deployed owner exercise outstanding |
 
 ### Read-only release audit: 2026-10-30, 21:22 UTC
