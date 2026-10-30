@@ -120,4 +120,3 @@ export function slotFreesAt(o: SlotHolder): number {
 export function holdsSlot(o: SlotHolder, nowMs: number): boolean {
   return nowMs <= slotFreesAt(o);
 }
-
