@@ -342,7 +342,7 @@ export async function runTickCommand(
     // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
     // gone from here until the receipt lands. Without this marker an owner
     // who asked again mid-trade got a second fill.
-    markRunning(home, cmd.id);
+    markRunning(home, cmd.id, cmd.kind);
     const outcome = await deps.run(cmd);
     writeCommandResult(home, resultOf(cmd.id, outcome, deps.now()));
     await deps.told(cmd, outcome);
@@ -540,7 +540,7 @@ export interface OpenCommand {
   expiresAt: number | null;
   /** When it was placed (queued) or claimed (running), in milliseconds. */
   at: number;
-  /** The queued file's kind ("trade" for an order); absent for a marker, which carries none, and for a file that cannot be read. */
+  /** What was queued or claimed ("trade" for an order); absent for a marker written before markers said it, and for a file that cannot be read. */
   kind?: string;
 }
 
@@ -596,7 +596,17 @@ export function openCommands(home: string): OpenCommand[] {
         ...(typeof parsed?.kind === "string" ? { kind: parsed.kind } : {}),
       });
     } else if (n.endsWith(RUNNING)) {
-      out.push({ id: n.slice(0, -RUNNING.length), state: "running", expiresAt: null, at: mtimeOf(f) });
+      // What was claimed, when the marker says (markRunning); a bare timestamp, or one that cannot be read, has no kind.
+      let kind: unknown;
+      try {
+        kind = (JSON.parse(readFileSync(f, "utf8")) as { kind?: unknown } | null)?.kind;
+      } catch {
+        /* a legacy timestamp, or answered and removed under us */
+      }
+      out.push({
+        id: n.slice(0, -RUNNING.length), state: "running", expiresAt: null, at: mtimeOf(f),
+        ...(typeof kind === "string" ? { kind } : {}),
+      });
     }
   }
   return out;
@@ -674,12 +684,19 @@ const RUNNING = ".running";
  * result is written. It exists so that "unanswered" is observable during the
  * seconds an order is actually being decided, which is exactly the window a
  * worried owner asks again in.
+ *
+ * It says what was claimed (`kind`), so the one-at-a-time slot holds only for
+ * an order, as hosted does (order-state.ts placeSelfHostedOrder): a practice
+ * reset whose run threw, or whose worker died mid-run, leaves a marker nothing
+ * answers, and a bare timestamp read as "an order may be running". A marker
+ * written before this, a bare timestamp, has no kind and still holds.
  */
-export function markRunning(home: string, id: string): void {
+export function markRunning(home: string, id: string, kind?: string): void {
   if (!ID_OK.test(id)) return;
   try {
     mkdirSync(commandDir(home), { recursive: true });
-    writeFileSync(path.join(commandDir(home), `${id}${RUNNING}`), String(Date.now()), "utf8");
+    const body = typeof kind === "string" ? JSON.stringify({ at: Date.now(), kind }) : String(Date.now());
+    writeFileSync(path.join(commandDir(home), `${id}${RUNNING}`), body, "utf8");
   } catch {
     /* a missing marker costs a duplicate-order guard, never a trade */
   }

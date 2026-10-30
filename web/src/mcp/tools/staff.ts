@@ -18,6 +18,7 @@ import * as z from "zod";
 import { describeDeployment, readExecutionFailures, readFleetHealth, readMcpUsage, readPackageVersion, readProviderErrors } from "@/lib/services/staff-diagnostics";
 import { settingsReader } from "@/lib/services/settings-view";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { perpsWorkersRun } from "@/lib/perps-enabled";
 import { mcpConfig } from "../config";
 import { SERVER_VERSION } from "../instructions";
 import { metricsSnapshot, pseudonym } from "../observe";
@@ -104,6 +105,7 @@ const fleetHealth = defineTool({
       now,
       hash: pseudonym,
       signal: ctx.signal,
+      perpsWorkersRun: perpsWorkersRun(),
       tickFor: async (tenant, wallet) => {
         if (!ADDRESS.test(tenant)) return null;
         if (wallet === "spot") return (await settingsReader().settingsFor(tenant))?.tickSeconds ?? null;

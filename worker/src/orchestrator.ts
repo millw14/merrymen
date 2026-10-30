@@ -807,9 +807,13 @@ function operatorHeld(tenant: string): boolean {
  * not start, so no Close, Close all or practice reset is carried out: each is
  * refused while its book has not reported (web perps-book-reported.ts), and
  * queued and left to expire once it has. The owner's kill still stops the
- * wallet (the web's and Telegram's, which no rollout gates), and settings and
- * renewals are still saved: the line says so, so no operator names an
- * unreviewed login only to let a kill through. Said once, and again each hour
+ * wallet: the web's (Kill all agents and Start over, DELETE /api/grants and
+ * /api/grants/discard), which no rollout gates, and a kill request already in
+ * a home, which every pass honours. No bot is heard for such a login (it has
+ * no running Spot worker or hold process, and a Perps worker runs no bot), so
+ * a Telegram /kill is not. Settings and renewals are still saved. The line
+ * says so, so no operator names an unreviewed login only to let a kill
+ * through. Said once, and again each hour
  * it stays held (sayTenantAlert). The roster line counts it held. Whether the route should prove such a login new
  * through its Perps grant is the operator's decision, not made here.
  *
@@ -6629,6 +6633,25 @@ async function honourPerpsHomeKill(owner: `0x${string}`, nowSec: number): Promis
  */
 const perpsPausedByRecord = new Set<string>();
 
+/**
+ * A PAUSE NO BOT CAN LIFT IS SAID. A Perps worker held paused, by its owner's
+ * recorded controls (a legacy pause event or the durable stamp, read across
+ * every account the owner has had, a killed Spot wallet's included) or by the
+ * `paused` file a Spot home kept after a Kill all, whose owner has no
+ * unexpired Spot grant, has no bot to hear /resume: no Spot worker runs for
+ * that owner, and a Perps worker runs no bot (slice 6a). The pause stands, as
+ * every pause does (nothing here unpauses: recovery-reply-arm.ts); the
+ * operator is told, and again each hour while it lasts (sayTenantAlert), with
+ * how it lifts.
+ */
+function sayPerpsPauseUnheard(key: string, from: string): void {
+  const owner = workerOwner(key).toLowerCase();
+  if (spotEligibleOwners.has(owner)) return;
+  sayTenantAlert(`pause-unheard:${key}`, `perps: ${key} is paused by its owner's ${from}, and no Spot worker runs for ${owner} ` +
+    "to hear /resume (a Perps worker runs no bot until slice 6a): it opens no practice position, though its stops still close. " +
+    "The pause stands; it lifts once its owner makes a Spot wallet and sends /resume to that wallet's bot");
+}
+
 function mirrorLoginPause(key: string): void {
   if (!isPerpsWorkerKey(key)) return;
   const spotHome = childHome(workerOwner(key));
@@ -6642,16 +6665,19 @@ function mirrorLoginPause(key: string): void {
           mkdirSync(home, { recursive: true, mode: 0o700 });
           writeFileAtomicSync(mine, "paused", 0o600);
         }
+        sayPerpsPauseUnheard(key, "recorded /pause");
         return;
       }
       // Armed since: the Spot arm has applied (or lifted) the recorded pause.
       perpsPausedByRecord.delete(key);
     }
     if (existsSync(spot)) {
-      if (existsSync(mine)) return;
-      mkdirSync(home, { recursive: true, mode: 0o700 });
-      writeFileAtomicSync(mine, "paused", 0o600);
-      log(`${key}: its owner paused trading — the Perps worker is paused too`);
+      if (!existsSync(mine)) {
+        mkdirSync(home, { recursive: true, mode: 0o700 });
+        writeFileAtomicSync(mine, "paused", 0o600);
+        log(`${key}: its owner paused trading — the Perps worker is paused too`);
+      }
+      sayPerpsPauseUnheard(key, "/pause, kept in its Spot home");
     } else if (existsSync(mine)) {
       rmSync(mine, { force: true });
       log(`${key}: its owner resumed trading — the Perps worker is resumed too`);

@@ -95,18 +95,17 @@ const ACCOUNT_CLAIMED = "this agent account is already linked to a different log
  * /api/grants, which writes each wallet's grant.json in its own home and
  * holds the other wallet's file to these same three rules.
  *
- * Owner-differs and the plain Errors, the refusals a renewal or restore
- * meets when it POSTs after its own stop, never say "neither wallet was
- * changed": a refusal does not undo that stop. They say what this request
- * did. Owner-differs reaches the owner as written; the plain Errors reach a
- * hosted owner as the route's fixed 503 ("Your permission could not be
- * saved", grants/route.ts storeRefused), and a self-hosted one as
- * otherLocalWalletRefusal's own sentence. Account-shared and legacy-perps
- * still end "Neither wallet was changed.", true for a wallet's first intake,
- * where nothing was stopped; a renewal or restore that passed owner-differs
- * cannot meet account-shared (one owner's two wallets are different Kernel
- * indexes). The Wallet screen's restore and renewal ask the Perps owner
- * first (restore-perps-owner.ts).
+ * No refusal here says "neither wallet was changed": a renewal or restore
+ * POSTs its grant after its own stop, which a refusal does not undo, and a
+ * hand-sent request can meet any of them there (self-hosted, nothing derives
+ * a Spot grant's account, so one naming the Perps account meets
+ * account-shared after its stop). Each says what this request did: this
+ * permission was not saved, the other wallet was not changed. Owner-differs,
+ * account-shared and legacy-perps reach the owner as written; the plain
+ * Errors reach a hosted owner as the route's fixed 503 ("Your permission
+ * could not be saved", grants/route.ts storeRefused), and a self-hosted one
+ * as otherLocalWalletRefusal's own sentence. The Wallet screen's restore and
+ * renewal ask the Perps owner first (restore-perps-owner.ts).
  */
 export function assertIndependentWallets(
   incoming: StoredGrant,
@@ -120,13 +119,13 @@ export function assertIndependentWallets(
     throw new GrantWalletConflict("owner-differs", "Both of a login's wallets must use the same owner key, so this permission was not saved. Your other wallet was not changed.");
   }
   if (other.smartAccount.toLowerCase() === incoming.smartAccount.toLowerCase()) {
-    throw new GrantWalletConflict("account-shared", "Your Spot and Perps wallets must be different accounts. Neither wallet was changed.");
+    throw new GrantWalletConflict("account-shared", "Your Spot and Perps wallets must be different accounts, so this permission was not saved. Your other wallet was not changed.");
   }
   const spot = grantPurpose(incoming) === "spot" ? incoming : other;
   if (spot.perp !== undefined || spot.grantFeatures?.includes(GRANT_PERP_LIGHTER)) {
     throw new GrantWalletConflict(
       "legacy-perps",
-      "Your Spot wallet still carries a perpetuals permission. Retire it before a separate Perps wallet can be made. Neither wallet was changed.",
+      "Your Spot wallet still carries a perpetuals permission. Retire it before a separate Perps wallet can be made. This permission was not saved, and your other wallet was not changed.",
     );
   }
 }
@@ -190,6 +189,16 @@ export interface GrantStore {
   tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null>;
   /** Is there a record for this tenant, readable or not? Never false for an unreadable one. */
   hasStoredGrant(tenant: `0x${string}`): Promise<boolean>;
+  /**
+   * THE OWNER OF THE RECORD THIS STORE HOLDS for the tenant, shown or not (one
+   * stopped for a renewal, which `get` hides), as the other wallet's put reads
+   * it (assertIndependentWallets): null when there is none. THROWS when the
+   * record cannot be read, names another wallet, or carries no owner or
+   * account, where that put refuses: a record the put would refuse on is
+   * never "stored" to a reader that asks before a stop
+   * (grants/route.ts GET, restore-perps-owner.ts).
+   */
+  storedGrantOwner(tenant: `0x${string}`): Promise<string | null>;
   /** Forget a tenant's grant (the kill switch). */
   remove(tenant: `0x${string}`): Promise<void>;
   /** Remove signing capability, retaining the roster/home during permission replacement. */
@@ -474,6 +483,11 @@ export class FileGrantStore implements GrantStore {
       throw error;
     }
   }
+  async storedGrantOwner(tenant: `0x${string}`): Promise<string | null> {
+    const rec = await readRecord(this.file(tenant));
+    if (!rec) return null;
+    return verifiedOwner(rec.grant, this.wallet);
+  }
   async listTenants(): Promise<`0x${string}`[]> {
     return this.tenantsIn(this.dir);
   }
@@ -651,6 +665,14 @@ const OWNER_LOCK_NS = 0x4d4d474f;
 const ACCOUNT_LOCK_NS = 0x4d4d4741;
 
 const parseGrantJson = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v) as StoredRecord["grant"];
+
+/** A stored record's owner, as the other wallet's put would compare it; throws where that put refuses. */
+function verifiedOwner(grant: StoredRecord["grant"] | null, wallet: GrantPurpose): string {
+  if (!grant || grantPurpose(grant as StoredGrant) !== wallet || typeof grant.owner !== "string" || typeof grant.smartAccount !== "string") {
+    throw new Error("This wallet's stored grant could not be verified.");
+  }
+  return grant.owner;
+}
 
 /**
  * Postgres backend for the multi-service hosted deploy, where web and the
@@ -875,6 +897,13 @@ export class PgGrantStore implements GrantStore {
     if (!c) return false;
     const { rows } = await c.query(`SELECT 1 FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
     return rows.length > 0;
+  }
+  async storedGrantOwner(tenant: `0x${string}`): Promise<string | null> {
+    const c = await this.existing();
+    if (!c) return null;
+    const { rows } = await c.query(`SELECT grant_json FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
+    if (!rows[0]) return null;
+    return verifiedOwner(parseGrantJson(rows[0].grant_json), this.wallet);
   }
   async listTenants(): Promise<`0x${string}`[]> {
     const c = await this.existing();

@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   RENEWAL_PERPS_OWNER_DIFFERS, RENEWAL_PERPS_UNREAD, RESTORE_PERPS_HOSTED, RESTORE_PERPS_OWNER_DIFFERS, RESTORE_PERPS_UNREAD,
-  renewalPerpsRefusal, restorePerpsRefusal,
+  RESTORE_PERPS_UNREAD_HOSTED, renewalPerpsRefusal, restorePerpsRefusal,
 } from "./restore-perps-owner";
 
 const K1 = "0x00000000000000000000000000000000000000a1";
@@ -46,14 +46,18 @@ describe("restorePerpsRefusal", () => {
     const login = K1.toUpperCase().replace("0X", "0x");
     for (const body of [
       { exists: true, tenant: K1, grant: { owner: K1 } },
-      // A record the store holds but will not show: stopped for a renewal, or one the file store cannot parse.
+      // A record the store holds but will not show: stopped for a renewal.
       { exists: false, tenant: K1, stored: true },
     ]) {
       assert.equal(await restorePerpsRefusal(K2, answering(200, body)), RESTORE_PERPS_HOSTED, `another key, ${JSON.stringify(body)}`);
       assert.equal(await restorePerpsRefusal(login, answering(200, body)), RESTORE_PERPS_HOSTED, `the login's own key, ${JSON.stringify(body)}`);
     }
     assert.match(RESTORE_PERPS_HOSTED, /Nothing was stopped or signed/);
-    assert.doesNotMatch(RESTORE_PERPS_HOSTED, /Kill all|Restore with that owner key/, "the self-hosted way out leads nowhere on hosted");
+    // No way out is named on hosted: the self-hosted one leads nowhere there, and removing the Perps wallet does not
+    // let an embedded login's restore through either (it has no browser wallet to sign the restore's legacy claim).
+    for (const said of [RESTORE_PERPS_HOSTED, RESTORE_PERPS_UNREAD_HOSTED]) {
+      assert.doesNotMatch(said, /Kill all|Restore with that owner key|no key can be restored while|try again/i, said);
+    }
     assert.equal(await restorePerpsRefusal(K2, answering(200, { exists: false, stored: true })), RESTORE_PERPS_UNREAD, "no tenant to compare: unread");
     assert.equal(await restorePerpsRefusal(K2, answering(200, { exists: false, tenant: K1 })), null, "no record at all: none");
     assert.equal(await restorePerpsRefusal(K2, answering(200, { exists: false, tenant: null })), null, "signed out: none here; the POST asks for a sign-in");
@@ -72,24 +76,34 @@ describe("restorePerpsRefusal", () => {
       ["network", throwing],
     ] as const) {
       assert.equal(await restorePerpsRefusal(K1, read), RESTORE_PERPS_UNREAD, what);
-      assert.equal(await renewalPerpsRefusal(K1, read), RENEWAL_PERPS_UNREAD, what);
+      assert.equal(await restorePerpsRefusal(K1, read, true), RESTORE_PERPS_UNREAD_HOSTED, `hosted, ${what}`);
+      assert.equal(await renewalPerpsRefusal(K1, K1, read), RENEWAL_PERPS_UNREAD, what);
     }
     // A Perps wallet that stays unreadable is not "try again" alone: the way out is named, and what it depends on.
     assert.match(RESTORE_PERPS_UNREAD, /Kill all agents stops both wallets and says whether it removed this one/);
+    assert.match(RENEWAL_PERPS_UNREAD, /Your current permission keeps running until it expires\..*Kill all agents stops both wallets and says whether it removed the Perps one/);
   });
 });
 
 describe("renewalPerpsRefusal", () => {
   it("compares the key the renewal re-signs with to the Perps wallet's owner, hosted (through the tenant) as self-hosted", async () => {
-    assert.equal(await renewalPerpsRefusal(K1, answering(200, { exists: false })), null);
-    assert.equal(await renewalPerpsRefusal(K1, answering(200, { exists: true, grant: { owner: K1.toUpperCase().replace("0X", "0x") } })), null);
-    assert.equal(await renewalPerpsRefusal(K2, answering(200, { exists: true, grant: { owner: K1 } })), RENEWAL_PERPS_OWNER_DIFFERS);
+    assert.equal(await renewalPerpsRefusal(K1, K1, answering(200, { exists: false })), null);
+    assert.equal(await renewalPerpsRefusal(K1, K1, answering(200, { exists: true, grant: { owner: K1.toUpperCase().replace("0X", "0x") } })), null);
+    assert.equal(await renewalPerpsRefusal(K2, K2, answering(200, { exists: true, grant: { owner: K1 } })), RENEWAL_PERPS_OWNER_DIFFERS);
     // Hosted, a renewal re-signs with the login (Privy), which is the Perps wallet's owner: it goes ahead.
-    assert.equal(await renewalPerpsRefusal(K1, answering(200, { exists: true, tenant: K1, grant: { owner: K1 } })), null);
-    assert.equal(await renewalPerpsRefusal(K1, answering(200, { exists: false, tenant: K1, stored: true })), null);
-    assert.equal(await renewalPerpsRefusal(K2, answering(200, { exists: false, tenant: K1, stored: true })), RENEWAL_PERPS_OWNER_DIFFERS);
+    assert.equal(await renewalPerpsRefusal(K1, K1, answering(200, { exists: true, tenant: K1, grant: { owner: K1 } })), null);
+    assert.equal(await renewalPerpsRefusal(K1, K1, answering(200, { exists: false, tenant: K1, stored: true })), null);
+    assert.equal(await renewalPerpsRefusal(K2, K2, answering(200, { exists: false, tenant: K1, stored: true })), RENEWAL_PERPS_OWNER_DIFFERS);
     // Said after the renewal's own "This attempt kept your existing permission unchanged.": neither claims a stop.
     for (const said of [RENEWAL_PERPS_OWNER_DIFFERS, RENEWAL_PERPS_UNREAD]) assert.doesNotMatch(said, /stopped|Nothing was/);
+  });
+
+  it("A SIGNER THAT IS NOT THE GRANT'S OWNER is the preflight's to refuse: nothing is read, and the Perps wallet is never blamed", async () => {
+    const asked: string[] = [];
+    // Another Privy login's embedded wallet connected in this browser: K2 re-signing K1's grant, while K1's Perps wallet is K1's.
+    assert.equal(await renewalPerpsRefusal(K2, K1, answering(200, { exists: true, tenant: K1, grant: { owner: K1 } }, asked)), null);
+    assert.equal(await renewalPerpsRefusal(null, K1, answering(503, {}, asked)), null);
+    assert.deepEqual(asked, [], "not even asked");
   });
 });
 
@@ -116,13 +130,18 @@ describe("the Wallet screen asks before its first step", () => {
   };
 
   it("the restore asks restorePerpsRefusal with the restored key's own owner, whichever account it restores, before its funding check, stop, revocation or signature", () => {
-    asksFirst(fn("onRestore"), /const perpsRefusal = await restorePerpsRefusal\(privateKeyToAccount\(ownerKey\)\.address\);/,
+    asksFirst(fn("onRestore"), /const perpsRefusal = await restorePerpsRefusal\(privateKeyToAccount\(ownerKey\)\.address, fetch, session\?\.hosted === true\);/,
       ["assertRevocationFunded(", "stopAgentForReplacement(", "revokeFromBrowser(", "restoreAgentWallet("]);
   });
 
-  it("the renewal asks renewalPerpsRefusal with the key it re-signs with, before anything is marked, preflighted, stopped, revoked or signed", () => {
-    asksFirst(fn("renewKey"),
-      /const perpsRefusal = await renewalPerpsRefusal\(\s*resignBy === "privy" \? privyOwner!\.account\.address : privateKeyToAccount\(grant\.demoOwnerPrivateKey as `0x\$\{string\}`\)\.address,\s*\);/,
-      ["preflightAgentGrant(", "saveRecoveryGrant(", "markPermissionForReplacement(", "stopAgentForReplacement(", "revokeFromBrowser(", "createPrivyOwnedWallet(", "restoreAgentWallet("]);
+  it("the renewal asks renewalPerpsRefusal with the key it re-signs with, before its Trencher read and fee check, and before anything is marked, preflighted, stopped, revoked or signed", () => {
+    const body = fn("renewKey");
+    asksFirst(body, /const perpsRefusal = await renewalPerpsRefusal\(resignerAddress\(\), String\(grant\.owner\)\);/,
+      ["getCode(", "assertRevocationFunded(", "preflightAgentGrant(", "saveRecoveryGrant(", "markPermissionForReplacement(", "stopAgentForReplacement(",
+        "revokeFromBrowser(", "createPrivyOwnedWallet(", "restoreAgentWallet("]);
+    // resignerAddress is renewKey's own signer: the Privy embedded wallet's address, or the browser's owner key's.
+    const helper = src.slice(src.indexOf("function resignerAddress("), src.indexOf("\n  }\n", src.indexOf("function resignerAddress(")));
+    assert.match(helper, /resignBy === "privy"\) return privyOwner\?\.account\.address/);
+    assert.match(helper, /privateKeyToAccount\(grant\.demoOwnerPrivateKey as `0x\$\{string\}`\)\.address/);
   });
 });

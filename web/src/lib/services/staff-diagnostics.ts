@@ -181,6 +181,13 @@ export interface FleetHealthOptions {
   hash: Hasher;
   /** The owner's configured tick in seconds for that wallet's worker, when known. Null (or a throw) means the default tick. */
   tickFor?: (tenant: `0x${string}`, wallet: "spot" | "perps") => Promise<number | null>;
+  /**
+   * Whether Perps workers run (this service's MERRYMEN_PERPS is paper). False:
+   * the fleet stands every Perps worker down and keeps its grant, so a Perps
+   * wallet is not counted as a current worker (its frozen beat would read as
+   * stale, and its cursors pin the mirror lag). Absent is true.
+   */
+  perpsWorkersRun?: boolean;
   /** Most agent rows read. */
   limit?: number;
   /** Most distinct owners whose tick is looked up; the rest use the default. */
@@ -255,9 +262,12 @@ interface CurrentAccount { tenant: `0x${string}`; wallet: "spot" | "perps" }
  * alone every running Perps worker was a "retired account" and its mirror
  * cursors "no longer mirrored": a wedged one was never stale. No perps_grants
  * table is no Perps wallet yet; one that cannot be read is said in a warning,
- * and its workers are counted as without a current grant.
+ * and its workers are counted as without a current grant. Where Perps workers
+ * do not run (`perpsWorkersRun` false) the fleet keeps their grants but stands
+ * every one down (orchestrator.ts perpsSpawnable): those are counted without a
+ * current grant too, and said, never as stale workers.
  */
-async function readCurrentAccounts(db: Db, limit: number, warnings: string[]): Promise<{ byAccount: Map<string, CurrentAccount>; tenants: Set<string>; truncated: boolean } | null> {
+async function readCurrentAccounts(db: Db, limit: number, warnings: string[], perpsWorkersRun: boolean): Promise<{ byAccount: Map<string, CurrentAccount>; tenants: Set<string>; truncated: boolean } | null> {
   const byAccount = new Map<string, CurrentAccount>();
   const tenants = new Set<string>();
   let truncated = false;
@@ -279,7 +289,10 @@ async function readCurrentAccounts(db: Db, limit: number, warnings: string[]): P
     return null;
   }
   try {
-    if (await tablePresent(db, "perps_grants")) await read("perps_grants", "perps");
+    if (await tablePresent(db, "perps_grants")) {
+      if (perpsWorkersRun) await read("perps_grants", "perps");
+      else warnings.push("Perps workers do not run on this service (MERRYMEN_PERPS is not paper), so Perps wallets are counted as without a current grant, not as stale workers.");
+    }
   } catch {
     warnings.push("The Perps grants could not be read, so Perps workers are counted as without a current grant.");
   }
@@ -302,7 +315,7 @@ export async function readFleetHealth(db: Db, o: FleetHealthOptions): Promise<Fl
     if (!prev || (num(r.beat_at) ?? 0) > (num(prev.beat_at) ?? 0)) byAccount.set(key, r);
   }
 
-  const grants = await readCurrentAccounts(db, limit * 2, warnings);
+  const grants = await readCurrentAccounts(db, limit * 2, warnings, o.perpsWorkersRun ?? true);
   const current = grants?.byAccount ?? null;
   if (!grants) warnings.push("The grants table could not be read, so every agent row is treated as current (retired accounts may inflate the stale count).");
   else if (grants.truncated) warnings.push(`More than ${limit * 2} grants exist; agents beyond them are counted as without a current grant.`);

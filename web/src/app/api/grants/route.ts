@@ -119,11 +119,11 @@ export interface AgentStatus {
   /**
    * Hosted `?wallet=perps` only, with `exists` false: the Perps store holds a
    * record it will not show (one stopped for a renewal whose POST has not
-   * landed, or, on the file store, one it cannot parse). Its owner was the
-   * login (perps-owner), and a Spot put is still held to it: compared with it
-   * (assertIndependentWallets reads the record raw), or refused when it
-   * cannot be read. So the Wallet screen's restore and renewal ask this too
-   * (restore-perps-owner.ts).
+   * landed), owned by the login (perps-owner), and a Spot put is still held to
+   * it (assertIndependentWallets reads the record raw). So the Wallet screen's
+   * restore and renewal ask this too (restore-perps-owner.ts). A record that
+   * put would refuse on (one that cannot be read, or names the other wallet)
+   * is a 503 instead, never `stored` (storedGrantOwner).
    */
   stored?: true;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
@@ -1091,9 +1091,18 @@ export async function GET(req: Request) {
         g = await getGrantStore("perps").get(hostedTenant);
         // A RECORD THE STORE HOLDS BUT WILL NOT SHOW is not "no Perps
         // wallet" to the same-owner rule, which still holds a Spot grant to
-        // it: said as `stored` (AgentStatus).
-        if (!g && await getGrantStore("perps").hasStoredGrant(hostedTenant)) {
-          return statusResponse({ exists: false, tenant: hostedTenant, stored: true });
+        // it: said as `stored` (AgentStatus). Read as the Spot put reads it
+        // (storedGrantOwner): one it cannot read, or one that names the other
+        // wallet, throws to "could not read" below, since that put refuses on
+        // it after a renewal's or restore's stop; so does one whose owner is
+        // not the login (perps-owner), which a reader comparing the tenant
+        // would otherwise take for the login's own.
+        if (!g) {
+          const owner = await getGrantStore("perps").storedGrantOwner(hostedTenant);
+          if (owner !== null) {
+            if (owner.toLowerCase() !== hostedTenant.toLowerCase()) return perpsUnread();
+            return statusResponse({ exists: false, tenant: hostedTenant, stored: true });
+          }
         }
       } catch {
         return perpsUnread();

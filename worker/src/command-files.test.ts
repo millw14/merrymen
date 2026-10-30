@@ -374,12 +374,20 @@ test("THE ONE-AT-A-TIME RULE GETS DEADLINES, not a yes/no", () => {
     assert.deepEqual(open.q, { id: "q", state: "queued", expiresAt: 5_000, at: 1_000, kind: "trade" });
     assert.deepEqual(open.probe, { id: "probe", state: "queued", expiresAt: null, at: 2_000, kind: "selftest" }, "no deadline is null, never 0; the kind is the file's");
     assert.equal(open.r?.state, "running");
-    assert.equal(open.r?.kind, undefined, "a marker carries no kind");
+    assert.equal(open.r?.kind, undefined, "a marker that names no kind has none");
+    // A marker now says what was claimed; one written before that (a bare timestamp) still says nothing.
+    markRunning(home, "r2", "paper-reset");
+    writeFileSync(path.join(commandDir(home), "legacy.running"), String(Date.now()), "utf8");
+    const again = Object.fromEntries(openCommands(home).map((c) => [c.id, c]));
+    assert.equal(again.r2?.state, "running");
+    assert.equal(again.r2?.kind, "paper-reset");
+    assert.equal(again.legacy?.state, "running");
+    assert.equal(again.legacy?.kind, undefined);
     assert.equal(open.r?.expiresAt, null, "a marker carries no deadline");
     assert.ok(Math.abs(open.r!.at - before) < 60_000, "its age is when it was claimed");
     // Receipts and temp files are not orders.
     writeCommandResult(home, { id: "done", ok: true, line: "bought", at: 9 });
-    assert.deepEqual(ids(home), ["probe:queued", "q:queued", "r:running"]);
+    assert.deepEqual(ids(home), ["legacy:running", "probe:queued", "q:queued", "r2:running", "r:running"]);
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }

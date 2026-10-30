@@ -185,7 +185,7 @@ describe("AN UNCLAIMED ORDER WITH NO DEADLINE HOLDS THE SLOT UNTIL IT IS CLAIMED
     assert.equal(written, 0, "nothing was queued beside it");
   });
 
-  it("only an order holds the self-hosted slot, as hosted: a queued reset does not; a running marker and a file whose kind is unread still do", () => {
+  it("only an order holds the self-hosted slot, as hosted: a queued or claimed reset does not; a claimed order, and a marker or file that does not say what it is, still do", () => {
     const place = (files: Parameters<typeof placeSelfHostedOrder>[0]["open"]) => {
       let written = 0;
       const r = placeSelfHostedOrder(
@@ -198,6 +198,9 @@ describe("AN UNCLAIMED ORDER WITH NO DEADLINE HOLDS THE SLOT UNTIL IT IS CLAIMED
     assert.deepEqual(place(() => [{ state: "queued", kind: "paper-reset", ...fresh }, { state: "queued", kind: "selftest", ...fresh }]), { r: { ok: true }, written: 1 });
     assert.deepEqual(place(() => [{ state: "queued", kind: "trade", ...fresh }]), { r: { ok: false, why: "in-flight" }, written: 0 });
     assert.deepEqual(place(() => [{ state: "queued", ...fresh }]), { r: { ok: false, why: "in-flight" }, written: 0 }, "a kind that could not be read holds it");
-    assert.deepEqual(place(() => [{ state: "running", expiresAt: null, at: T }]), { r: { ok: false, why: "in-flight" }, written: 0 }, "a marker carries no kind: an order may be running");
+    assert.deepEqual(place(() => [{ state: "running", expiresAt: null, at: T, kind: "paper-reset" }]), { r: { ok: true }, written: 1 },
+      "a reset claimed and never answered (its run threw, its worker died) is not an order waiting");
+    assert.deepEqual(place(() => [{ state: "running", expiresAt: null, at: T, kind: "trade" }]), { r: { ok: false, why: "in-flight" }, written: 0 }, "a claimed order may be running");
+    assert.deepEqual(place(() => [{ state: "running", expiresAt: null, at: T }]), { r: { ok: false, why: "in-flight" }, written: 0 }, "a legacy marker says nothing: it may be an order");
   });
 });

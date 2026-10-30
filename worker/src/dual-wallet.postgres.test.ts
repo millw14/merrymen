@@ -245,6 +245,15 @@ test("Postgres: two wallets per login, beside an untouched Spot fleet", { skip: 
     const spotRow = await row("grants", V);
     await assert.rejects(spot.put(V, grant(V, VSPOT, key("33"), { owner: addr(0x164) })), ownerDiffers);
     assert.deepEqual(await row("grants", V), spotRow, "nothing of Spot's was written");
+    // What the hosted GET answers `stored` from: the hidden record's owner, as the Spot put reads it.
+    assert.equal(await perps.storedGrantOwner(V), V);
+    assert.equal(await perps.storedGrantOwner(addr(0x199)), null, "no record is none");
+    // A record that put would refuse on (one that names the other wallet) throws, never answers an owner.
+    const stopped = (await row("perps_grants", V))!.grant_json as Record<string, unknown>;
+    await admin.query(`UPDATE ${schema}.perps_grants SET grant_json = $1 WHERE tenant = $2`, [JSON.stringify({ ...stopped, purpose: undefined }), V]);
+    await assert.rejects(perps.storedGrantOwner(V), /could not be verified/);
+    await assert.rejects(spot.put(V, grant(V, VSPOT, key("37"))), /could not be verified/, "as the Spot put refuses on it");
+    await admin.query(`UPDATE ${schema}.perps_grants SET grant_json = $1 WHERE tenant = $2`, [JSON.stringify(stopped), V]);
     await perps.put(V, grant(V, VPERPS, key("34"), { purpose: "perps" }));
     assert.equal((await perps.get(V))?.demoSessionPrivateKey, key("34"), "the renewal itself lands, under its own key");
 

@@ -129,7 +129,10 @@ Perps workers, and nothing live:
   fleet-health read counts a Perps worker as current (its grant is in
   `perps_grants`, its mirror tenant `<owner>:perps`), on its own wallet's
   tick, so a wedged one shows as stale rather than as a retired account
-  (`staff-diagnostics.ts`).
+  (`staff-diagnostics.ts`). Where Perps workers do not run (this service's
+  `MERRYMEN_PERPS` is not paper) the fleet stands them all down and keeps
+  their grants, so they are counted without a current grant, with a warning,
+  never as stale workers crowding a wedged Spot worker out of the list.
 - *One feed.* `perps/fleet-feed.ts` publishes the public Lighter feed every
   hosted Perps worker reads, over what this replica's own Perps workers want
   and the markets their books hold. It runs only at `paper`, is paused under
@@ -149,6 +152,14 @@ Perps workers, and nothing live:
   Perps wallets (`recovery-reply-arm.ts ownerAccounts`, from `perps_wallets`;
   unreadable, the arm holds), so a stop-close made while a `/pause` stood no
   longer drops that pause from the Spot home, and then from the Perps worker.
+  A pause outlives a kill, as on main (a re-signed wallet comes back paused),
+  and a Perps-only login whose earlier Spot wallet was killed keeps it: the
+  `paused` file the Spot home kept, or the pause recorded under that wallet's
+  account. No bot hears its `/resume` (no Spot worker runs for it, and a Perps
+  worker runs none until slice 6a), so the orchestrator says so, once and then
+  hourly, with how it lifts (`sayPerpsPauseUnheard`: the owner makes a Spot
+  wallet and sends `/resume` to its bot); nothing lifts it for them. PR 3's
+  desk should show the owner that pause.
 
 **Not in slice 4.** The live hosted stand-down (closing at Lighter, bringing
 money home, Lighter's 1 USDG withdrawal minimum), the venue key's hand-over,
@@ -256,9 +267,10 @@ and `/create?for=perps` are PR 3.
   the store's same-owner, other-account rules, then the Perps home's
   `grant.json` archived and replaced whole. No public identity or name (D2).
   The same-owner rule holds the Spot intake to the Perps wallet too. No
-  refusal a replacement can meet says "neither wallet was changed", since a
-  restore or renewal posts after its own stop, which a refusal does not undo:
-  owner-differs and the self-hosted unreadable-wallet 503 say this permission
+  refusal of the rule says "neither wallet was changed", since a restore or
+  renewal posts after its own stop, which a refusal does not undo, and a
+  hand-sent one can meet any of them there: owner-differs, account-shared,
+  legacy-perps and the self-hosted unreadable-wallet 503 say this permission
   was not saved and the other wallet was not changed; hosted, an unreadable
   other wallet is the fixed 503 above. The Wallet screen's restore and its
   Spot renewal ask the Perps wallet's owner first (`restore-perps-owner.ts`,
@@ -266,20 +278,29 @@ and `/create?for=perps` are PR 3.
   Perps wallet they cannot read, before their stop, revocation or signature;
   self-hosted that stop used to remove the running Spot `grant.json` and stop
   the Solana strategy before the POST was refused. The restore asks with the
-  key it restores, whichever account that is; the renewal with the key it
-  re-signs with. Hosted, no restore is made while a Perps wallet exists or is
-  stored, whatever the key: its owner is the login, and a restore signs as a
-  legacy owner key, which the binding refuses for the login's own key
-  (`auth.ts`), so every key used to be refused after the stop; the refusal
-  says so, without the self-hosted advice (restore with the Perps wallet's
-  key, or Kill all to change keys). A Perps wallet that stays unreadable is
-  answered with the way out: Kill all stops both wallets and says whether it
-  removed this one. So the GET reads a self-hosted Perps `grant.json` as the
-  POST does (a BOM stripped; only a missing file is none, anything else
-  unreadable is 503), and hosted it answers `stored: true` for a Perps record
-  the store holds but will not show (stopped for a renewal whose POST has not
-  landed, or, on the file store, one it cannot parse): its owner was the
-  login, and the Spot put still compares it, or refuses on it. Self-hosted, a
+  key it restores, whichever account that is. The renewal asks right after its
+  account read, before its Trencher read and fee check (each tells the owner
+  to do something first), with the key it re-signs with, and only when that
+  key is the grant's own owner: another signer (another Privy login's
+  embedded wallet in this browser) is the preflight's to refuse, in its own
+  words. Hosted, no restore is made while a Perps wallet exists or is stored,
+  whatever the key: its owner is the login, and a restore signs as a legacy
+  owner key, which the binding refuses for the login's own key (`auth.ts`), so
+  every key used to be refused after the stop. The hosted refusals say so and
+  name no way out: the self-hosted advice (restore with the Perps wallet's
+  key, or Kill all to change keys) leads nowhere there, where a login that can
+  hold a Perps wallet has no browser wallet to sign a restore's claim with at
+  all. Self-hosted, and for the renewal everywhere, a Perps wallet that stays
+  unreadable is answered with the way out: Kill all stops both wallets and
+  says whether it removed it. So the GET reads a self-hosted Perps
+  `grant.json` as the POST does (a BOM stripped; only a missing file is none,
+  anything else unreadable is 503), and hosted it answers `stored: true` for a
+  Perps record the store holds but will not show (stopped for a renewal whose
+  POST has not landed), owned by the login, which the Spot put still
+  compares. A hidden record that put would refuse on (one that cannot be
+  read, names the other wallet, or is owned by another key) is a 503 instead
+  (`storedGrantOwner`), so neither check passes a renewal or restore the POST
+  refuses after its stop. Self-hosted, a
   stop removes the stopped wallet's `grant.json` and keeps no record, so a
   pending renewal is not held against the other wallet there; only
   hand-sent requests reach that in PR 1 (no PR 1 client sends a Perps
@@ -566,8 +587,11 @@ Spot wallet's answers are what they were; no screen calls the Perps ones yet
   hosted reads `kind = 'trade'`. Self-hosted, a queued practice reset or
   selftest does not hold it; counted, a Perps reset refused the owner's Close
   "you already have an order waiting" with no order waiting
-  (`order-state.ts placeSelfHostedOrder`). A running marker, which carries no
-  kind, still holds it. A second ask once the first
+  (`order-state.ts placeSelfHostedOrder`). A running marker says what was
+  claimed (`command-files.ts markRunning`), so a reset whose run threw, or
+  whose worker died mid-run, does not hold it either; a claimed order does,
+  and so does a marker or file that does not say what it is (a legacy
+  marker, a file that cannot be read). A second ask once the first
   was answered is a second exit (see "At most once" above), so **no client
   may resend an exit POST by itself**: after a lost response PR 3's desk
   reads the book again and leaves asking again to the owner. The fleet

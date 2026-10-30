@@ -243,6 +243,12 @@ describe("self-hosted: every refusal lands before anything is written", () => {
     const legacy = await json(await post(await perpsGrant()));
     assert.equal(legacy.status, 409);
     assert.equal(legacy.body.code, "legacy-perps");
+    // A hand-sent renewal or restore can meet any of these after its own stop (self-hosted, nothing derives a Spot
+    // grant's account): each says what this request did, never that neither wallet changed.
+    for (const refused of [differs, shared, legacy]) {
+      assert.match(String(refused.body.error), /this permission was not saved.*your other wallet was not changed\./i);
+      assert.doesNotMatch(String(refused.body.error), /neither wallet/i);
+    }
   });
 
   it("a Spot grant.json that cannot be read or verified refuses 503: it is the grant the rule is about", async () => {

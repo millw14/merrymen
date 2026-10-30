@@ -906,7 +906,7 @@ export default function GrantPage() {
       // A login's two wallets share one owner key, and the grant POST that
       // ends this restore refuses another one. Asked first, so a restore the
       // POST would refuse stops nothing and signs nothing.
-      const perpsRefusal = await restorePerpsRefusal(privateKeyToAccount(ownerKey).address);
+      const perpsRefusal = await restorePerpsRefusal(privateKeyToAccount(ownerKey).address, fetch, session?.hosted === true);
       if (perpsRefusal) throw new Error(perpsRefusal);
       // Every network revoked below must be able to pay its own fee before the
       // service is stopped; an empty account would be stopped for nothing.
@@ -1015,6 +1015,12 @@ export default function GrantPage() {
       ...(resignBy === "privy" ? { ownerAccount: privyOwner!.account } : { ownerKey: grant!.demoOwnerPrivateKey as `0x${string}` }),
     };
   }
+  /** The address a re-sign signs with (renewKey's signer), or null when this browser has none. */
+  function resignerAddress(): string | null {
+    if (resignBy === "privy") return privyOwner?.account.address ?? null;
+    if (resignBy === "owner-key" && grant?.demoOwnerPrivateKey) return privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`).address;
+    return null;
+  }
 
   async function stopOrRevoke(revoke: boolean) {
     if (!grant || securityBusy || renewing || (revoke && (!resignBy || !revokeAck))) return;
@@ -1077,6 +1083,16 @@ export default function GrantPage() {
       const wallet = grantPurpose(grant);
       if (wallet !== "spot") throw new Error("A Perps wallet is not renewed from this screen. Nothing was stopped or signed.");
       const current = await verifyCurrentAccount();
+      // A login's two wallets share one owner key, and the grant POST that
+      // ends this renewal is held to the Perps wallet (refused for another
+      // owner, or for a Perps wallet it cannot read). Asked first, before the
+      // Trencher read and the fee check (each of which tells the owner to do
+      // something first), and before anything is marked, stopped, revoked or
+      // signed, with the key this renewal re-signs with, so a renewal the POST
+      // would refuse changes nothing. A signer that is not this grant's owner
+      // is the preflight's to refuse (renewalPerpsRefusal reads nothing then).
+      const perpsRefusal = await renewalPerpsRefusal(resignerAddress(), String(grant.owner));
+      if (perpsRefusal) throw new Error(perpsRefusal);
       // ── ONE SNAPSHOT FOR THE PREFLIGHT AND THE MINT ─────────────────────────
       //
       // What the signer decides about the previous grant (session.ts
@@ -1186,16 +1202,6 @@ export default function GrantPage() {
         previousGrant,
         localGrants,
       };
-      // A login's two wallets share one owner key, and the grant POST that
-      // ends this renewal is held to the Perps wallet (refused for another
-      // owner, or for a Perps wallet it cannot read). Asked before anything is
-      // marked, stopped, revoked or signed, with the key this renewal re-signs
-      // with, so a renewal the POST would refuse changes nothing. (After the
-      // shared options, as every owner-type branch here is.)
-      const perpsRefusal = await renewalPerpsRefusal(
-        resignBy === "privy" ? privyOwner!.account.address : privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`).address,
-      );
-      if (perpsRefusal) throw new Error(perpsRefusal);
       // Check the canonical replacement before any persistent mutation, stop,
       // or revocation. This produces no key/signature to reuse after revoking.
       await preflightAgentGrant(

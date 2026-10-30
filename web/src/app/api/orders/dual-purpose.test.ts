@@ -330,6 +330,33 @@ describe("each wallet's slot and ceiling are its own", () => {
     assert.equal((await POST(req("orders", { side: "buy", symbol: "TSLA", usdgAmount: 5 }))).status, 200);
   });
 
+  it("A PRACTICE RESET CLAIMED AND NEVER ANSWERED (its run threw) holds no slot either; a claimed order still does", async () => {
+    assert.equal((await paperReset(new Request("https://app.example.test/api/paper-reset?wallet=perps", { method: "POST" }))).status, 200);
+    // The worker claims it, marks it running, and its run throws: no answer is written, and the marker stays.
+    await assert.rejects(runTickCommand(purposeHome("perps"), {
+      now: Date.now,
+      run: async () => { throw new Error("practice reset requires an agent on the paper rail"); },
+      told: async () => {},
+      account: () => PERPS,
+    }), /paper rail/);
+    assert.deepEqual(openCommands(purposeHome("perps")).map((c) => [c.state, c.kind]), [["running", "paper-reset"]]);
+    const close = await POST(req("orders?wallet=perps", reviewed(FLATTEN)));
+    assert.equal(close.status, 200, JSON.stringify(await close.clone().json()));
+    // That Close all, claimed and still running, holds the slot as any order does.
+    let release: () => void = () => {};
+    const running = runTickCommand(purposeHome("perps"), {
+      now: Date.now,
+      run: () => new Promise<CommandOutcome>((resolve) => { release = () => resolve({ ok: true, line: "closed" }); }),
+      told: async () => {},
+      account: () => PERPS,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(openCommands(purposeHome("perps")).map((c) => [c.state, c.kind]).sort(), [["running", "paper-reset"], ["running", "trade"]]);
+    assert.equal((await POST(req("orders?wallet=perps", reviewed(CLOSE)))).status, 409, "a claimed order may be running");
+    release();
+    await running;
+  });
+
   it("the Perps wallet's ceiling and tick are read from its own home; the ceiling route stays Spot's", async () => {
     assert.equal(houseConfigFor("spot").telegramMaxActionUsdg, 71);
     assert.equal(houseConfigFor("perps").telegramMaxActionUsdg, 9);

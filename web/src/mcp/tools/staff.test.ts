@@ -303,38 +303,69 @@ test("fleet health: tick-aware freshness, frozen vs stale, retired accounts, blo
 });
 
 test("fleet health: a Perps wallet's worker is current, on its own wallet's tick, and its mirror cursors count", async () => {
-  // B's Perps wallet (perps_grants, never grants: grant-store.ts WALLET_TABLE), mirrored as `<owner>:perps`.
+  // Perps wallets (perps_grants, never grants: grant-store.ts WALLET_TABLE), mirrored as `<owner>:perps`:
+  //  P, B's: beat 300 s ago, fresh on B's Spot tick (the default, 570 s), stale on its Perps worker's own 30 s tick (180 s);
+  //  Q, A's: beat 300 s ago with no Perps tick of its own, so the default (570 s), never A's 60 s Spot tick (210 s);
+  //  R, a Perps-only owner's, whose killed Spot wallet left a bare-owner trades cursor 500000 s old behind.
   const ACCOUNT_P = "0x000000000000000000000000000000000000fe01";
+  const ACCOUNT_Q = "0x000000000000000000000000000000000000fe02";
+  const ACCOUNT_R = "0x000000000000000000000000000000000000fe03";
+  const OWNER_P = "0x00000000000000000000000000000000000000ab";
   const d = await seedFleet();
   await d.db.exec("CREATE TABLE perps_grants (tenant TEXT PRIMARY KEY, chain_id INTEGER NOT NULL, grant_json TEXT NOT NULL, sealed_session_key TEXT NOT NULL, updated_at INTEGER NOT NULL)");
-  d.raw.prepare("INSERT INTO perps_grants (tenant, chain_id, grant_json, sealed_session_key, updated_at) VALUES (?, 4663, ?, 'SEALED-KEY-never-read', ?)")
-    .run(OWNER_B, JSON.stringify({ smartAccount: ACCOUNT_P, purpose: "perps", serialized: "SERIALIZED-GRANT" }), NOW);
-  // Beat 300 s ago: fresh on B's Spot tick (the default, 570 s), stale on its Perps worker's own 30 s tick (180 s).
+  const perpsGrant = d.raw.prepare("INSERT INTO perps_grants (tenant, chain_id, grant_json, sealed_session_key, updated_at) VALUES (?, 4663, ?, 'SEALED-KEY-never-read', ?)");
+  for (const [owner, account] of [[OWNER_B, ACCOUNT_P], [OWNER_A, ACCOUNT_Q], [OWNER_P, ACCOUNT_R]] as const) {
+    perpsGrant.run(owner, JSON.stringify({ smartAccount: account, purpose: "perps", serialized: "SERIALIZED-GRANT" }), NOW);
+  }
   insAgent(d, ACCOUNT_P, OWNER_B, "SirSendIt", "active", "paper", NOW - 300, null);
-  d.raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, ?, ?, ?)").run(`${OWNER_B}:perps`, "trades", 2, NOW - 100);
+  insAgent(d, ACCOUNT_Q, OWNER_A, "Shogun", "active", "paper", NOW - 300, null);
+  insAgent(d, ACCOUNT_R, OWNER_P, "Newbie", "active", "paper", NOW - 30, null);
+  const cursor = d.raw.prepare("INSERT INTO mirror_state (tenant, table_name, last_id, updated_at) VALUES (?, ?, ?, ?)");
+  cursor.run(`${OWNER_B}:perps`, "trades", 2, NOW - 100);
+  cursor.run(`${OWNER_P}:perps`, "trades", 2, NOW - 50);
+  cursor.run(OWNER_P, "trades", 9, NOW - 500_000);
   useSettingsStoreForTest({ get: async (t: string) => (t === OWNER_B ? { tickSeconds: 30 } : null) } as unknown as SettingsStore, "perps");
+  const savedPerps = process.env.MERRYMEN_PERPS;
+  process.env.MERRYMEN_PERPS = "paper";
   try {
     const { res, sc } = await call("staff_fleet_health");
-    assert.equal(sc.agents.current, 7);
+    assert.equal(sc.agents.current, 9);
     assert.equal(sc.agents.without_current_grant, 1, "a running Perps worker is not a retired account");
     assert.equal(sc.heartbeat.stale, 3);
     assert.deepEqual(sc.heartbeat.stale_agents.find((a: { agent: string }) => a.agent === pseudonym(ACCOUNT_P)),
       { agent: pseudonym(ACCOUNT_P), heartbeat_age_s: 300, fresh_within_s: 180, status: "active", mode: "paper" });
-    assert.deepEqual(sc.heartbeat.tick_seconds, { from_settings: 2, defaulted: 3, default_fresh_within_s: 570 });
+    assert.equal(sc.heartbeat.stale_agents.some((a: { agent: string }) => a.agent === pseudonym(ACCOUNT_Q)), false,
+      "a Perps worker with no tick of its own is judged on the default, never on its owner's Spot tick");
+    assert.deepEqual(sc.heartbeat.tick_seconds, { from_settings: 2, defaulted: 5, default_fresh_within_s: 570 });
     const trades = sc.mirror.tables.find((t: { table: string }) => t.table === "trades");
-    assert.deepEqual(trades, { table: "trades", tenants: 3, never_copied: 0, lag_s: { min: 20, median: 100, p90: 600, max: 600 } });
-    assert.equal(sc.mirror.rows_without_current_grant, 1, "only the departed owner's cursor");
+    assert.equal(trades.tenants, 4);
+    assert.equal(trades.lag_s.max, 600, "a Perps-only owner's leftover Spot cursor is not current and pins nothing");
+    assert.equal(sc.mirror.rows_without_current_grant, 2, "the departed owner's cursor and the Perps-only owner's Spot one");
     assert.deepEqual(sc.warnings, []);
     assertRedacted("fleet health", res);
-    assert.ok(!JSON.stringify(res).toLowerCase().includes(ACCOUNT_P), "fleet health leaks the Perps account");
+    for (const account of [ACCOUNT_P, ACCOUNT_Q, ACCOUNT_R, OWNER_P]) assert.ok(!JSON.stringify(res).toLowerCase().includes(account), `fleet health leaks ${account}`);
+
+    // WHERE PERPS WORKERS DO NOT RUN the fleet stands them all down and keeps their grants: they are said, and
+    // counted without a current grant, never as stale workers crowding a wedged Spot worker out of the list.
+    for (const off of [undefined, "off", "live"]) {
+      if (off === undefined) delete process.env.MERRYMEN_PERPS; else process.env.MERRYMEN_PERPS = off;
+      const down = (await call("staff_fleet_health")).sc;
+      assert.equal(down.agents.current, 6, String(off));
+      assert.equal(down.agents.without_current_grant, 4);
+      assert.equal(down.heartbeat.stale, 2, "only A and G, the Spot workers");
+      assert.equal(down.mirror.rows_without_current_grant, 4);
+      assert.match(down.warnings.join(" "), /Perps workers do not run on this service \(MERRYMEN_PERPS is not paper\)/);
+    }
+    process.env.MERRYMEN_PERPS = "paper";
 
     // A perps_grants that cannot be read is said, and its workers are counted as before: without a current grant.
     await d.db.exec("DROP TABLE perps_grants");
     await d.db.exec("CREATE TABLE perps_grants (tenant TEXT PRIMARY KEY)");
     const unread = (await call("staff_fleet_health")).sc;
-    assert.equal(unread.agents.without_current_grant, 2);
+    assert.equal(unread.agents.without_current_grant, 4);
     assert.match(unread.warnings.join(" "), /Perps grants could not be read/);
   } finally {
+    if (savedPerps === undefined) delete process.env.MERRYMEN_PERPS; else process.env.MERRYMEN_PERPS = savedPerps;
     resetSettingsStoreForTest();
   }
 });

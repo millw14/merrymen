@@ -30,7 +30,17 @@
  * login, refused by the binding, each after the stop. So the restore is
  * refused here whatever the key, in words true there: the self-hosted advice
  * (restore with the Perps wallet's key, or Kill all to change keys) leads
- * nowhere on hosted. The GET says it is hosted by echoing the tenant.
+ * nowhere on hosted, where a login that can hold a Perps wallet (an embedded
+ * Privy one) has no browser wallet to sign a restore's legacy claim with at
+ * all. So the hosted sentences name no way out: they say the restore was
+ * refused and why, never that removing the Perps wallet would let it through.
+ * The GET says it is hosted by echoing the tenant; a 503 echoes nothing, so
+ * the screen says it (`hosted`).
+ *
+ * THE RENEWAL ASKS WITH THE KEY IT RE-SIGNS WITH, and only when that key is
+ * the Spot grant's own owner: a browser whose signer is another (another
+ * Privy login's embedded wallet) is the preflight's to refuse, in its own
+ * words, before anything is stopped, and the Perps wallet is no part of it.
  *
  * Browser-safe: a fetch and a comparison, nothing else.
  */
@@ -40,7 +50,11 @@ export const RESTORE_PERPS_OWNER_DIFFERS =
   "Your Perps wallet uses another owner key, and both of a login's wallets must use the same one. Restore with that owner key; to change keys, Kill all agents stops both wallets first. Nothing was stopped or signed.";
 
 export const RESTORE_PERPS_HOSTED =
-  "Your Perps wallet is owned by the wallet you sign in with, and a restored owner key cannot sit beside it, so no key can be restored while you hold a Perps wallet. Nothing was stopped or signed.";
+  "Your Perps wallet is owned by the wallet you sign in with, and a restored owner key cannot sit beside it, so this restore was refused. Nothing was stopped or signed.";
+
+/** Hosted: no Kill-all way out, which leads nowhere there (see the header). */
+export const RESTORE_PERPS_UNREAD_HOSTED =
+  "Your Perps wallet could not be read just now, so this restore cannot be checked against it. Nothing was stopped or signed. While you hold a Perps wallet, a restored owner key cannot sit beside it: it is owned by the wallet you sign in with.";
 
 export const RESTORE_PERPS_UNREAD =
   "Your Perps wallet could not be read, so this restore cannot be checked against it. Nothing was stopped or signed. Try again in a moment; if it keeps failing, Kill all agents stops both wallets and says whether it removed this one, and once it has, your Perps wallet no longer stands in the way of a restore.";
@@ -51,7 +65,7 @@ export const RENEWAL_PERPS_OWNER_DIFFERS =
 
 /** Said after the renewal's own "This attempt kept your existing permission unchanged." */
 export const RENEWAL_PERPS_UNREAD =
-  "Your Perps wallet could not be read, so this renewal cannot be checked against it. Try again in a moment.";
+  "Your Perps wallet could not be read, so this renewal cannot be checked against it. Your current permission keeps running until it expires. Try again in a moment; if it keeps failing, Kill all agents stops both wallets and says whether it removed the Perps one.";
 
 /** What the server says of the login's Perps wallet: none, unreadable, or held by `owner`. */
 type PerpsOwner = { kind: "none" } | { kind: "unread" } | { kind: "owned"; owner: string; hosted: boolean };
@@ -76,17 +90,28 @@ async function readPerpsOwner(read: typeof fetch): Promise<PerpsOwner> {
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** The refusal for restoring a Spot wallet owned by `ownerAddress`, or null when the Perps wallet allows it (none, or self-hosted under the same owner). */
-export async function restorePerpsRefusal(ownerAddress: string, read: typeof fetch = fetch): Promise<string | null> {
+/**
+ * The refusal for restoring a Spot wallet owned by `ownerAddress`, or null when
+ * the Perps wallet allows it (none, or self-hosted under the same owner).
+ * `hosted`: the session's, for an answer that echoes no tenant (a 503).
+ */
+export async function restorePerpsRefusal(ownerAddress: string, read: typeof fetch = fetch, hosted = false): Promise<string | null> {
   const perps = await readPerpsOwner(read);
   if (perps.kind === "none") return null;
-  if (perps.kind === "unread") return RESTORE_PERPS_UNREAD;
+  if (perps.kind === "unread") return hosted ? RESTORE_PERPS_UNREAD_HOSTED : RESTORE_PERPS_UNREAD;
   if (perps.hosted) return RESTORE_PERPS_HOSTED;
   return same(perps.owner, ownerAddress) ? null : RESTORE_PERPS_OWNER_DIFFERS;
 }
 
-/** The refusal for renewing the Spot wallet under `ownerAddress` (the key it re-signs with), or null when the Perps wallet allows it. */
-export async function renewalPerpsRefusal(ownerAddress: string, read: typeof fetch = fetch): Promise<string | null> {
+/**
+ * The refusal for renewing the Spot wallet owned by `grantOwner` with the key
+ * `resigner`, or null when the Perps wallet allows it. Null, with nothing
+ * read, when the re-signing key is not the grant's owner: the preflight
+ * refuses that signer in its own words, before anything is stopped.
+ */
+export async function renewalPerpsRefusal(resigner: string | null, grantOwner: string, read: typeof fetch = fetch): Promise<string | null> {
+  if (!resigner || !same(resigner, grantOwner)) return null;
+  const ownerAddress = resigner;
   const perps = await readPerpsOwner(read);
   if (perps.kind === "none") return null;
   if (perps.kind === "unread") return RENEWAL_PERPS_UNREAD;

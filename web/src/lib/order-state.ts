@@ -604,7 +604,7 @@ export interface OpenFile {
   state: "queued" | "running";
   expiresAt: number | null;
   at: number;
-  /** A queued file's kind; absent for a running marker or a file that cannot be read. */
+  /** What the file or marker says was queued or claimed; absent when it does not say (a legacy marker) or cannot be read. */
   kind?: string;
 }
 
@@ -629,8 +629,11 @@ export interface OpenFile {
  * an order: counted, a Perps practice reset (D12, written with a deadline)
  * refused the owner's Close and Close all "you already have an order
  * waiting" with no order waiting, where hosted queued them. A running marker
- * carries no kind and still holds it (an order may be running), and so does a
- * queued file whose kind cannot be read.
+ * says what was claimed (command-files.ts markRunning), so a reset whose run
+ * threw, or whose worker died mid-run, no longer holds it for ~17 minutes
+ * either; a claimed order still does. A marker or file that does not say what
+ * it is (a legacy marker, a file that cannot be read) holds it: it may be an
+ * order.
  *
  * A listing that throws is "unreachable", never "nothing waiting".
  */
@@ -644,7 +647,7 @@ export function placeSelfHostedOrder(
   try {
     const held = files
       .open()
-      .filter((f) => f.state === "running" || f.kind === undefined || f.kind === "trade")
+      .filter((f) => f.kind === undefined || f.kind === "trade")
       .some((f) => holdsSlot({ claimed: f.state === "running", expiresAt: f.expiresAt, at: f.at }, o.now));
     if (held) return { ok: false, why: "in-flight" };
     // The id collision is handled by the file simply being rewritten, which

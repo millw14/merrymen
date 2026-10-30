@@ -299,9 +299,12 @@ const FILL_KINDS = ["swap", "curve-trade"] as const;
  * made while a /pause stood dropped that pause from a rebuilt Spot home, and
  * then from the Perps worker. Left out when it stands in as the scope's own
  * account too (perpsOwnerControls, for an owner with no Spot grant), so an
- * owner with no Spot account at all has none here and no pause. A
- * perps_wallets table that cannot be read throws (the arm holds), never names
- * nobody.
+ * owner who never had a Spot account has none here and no pause. One whose
+ * Spot wallet was killed still has that wallet's agents row (nothing deletes
+ * one), so its standing pause is still read here and starts the Perps worker
+ * paused: only restrictive, and said to the operator, since no bot runs to
+ * hear /resume (orchestrator.ts sayPerpsPauseUnheard). A perps_wallets table
+ * that cannot be read throws (the arm holds), never names nobody.
  */
 async function ownerAccounts(db: Db, scope: ControlScope): Promise<string[]> {
   const rows = (await db
