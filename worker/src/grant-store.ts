@@ -194,8 +194,9 @@ export interface GrantStore {
    * stopped for a renewal, which `get` hides), as the other wallet's put reads
    * it (assertIndependentWallets): null when there is none. THROWS when the
    * record cannot be read, names another wallet, or carries no owner or
-   * account, where that put refuses: a record the put would refuse on is
-   * never "stored" to a reader that asks before a stop
+   * account, where that put refuses. An active record's session key must
+   * also decrypt: an unreadable secret is not a deliberate renewal stop.
+   * Neither failure is "stored" to a reader that asks before a stop
    * (grants/route.ts GET, restore-perps-owner.ts).
    */
   storedGrantOwner(tenant: `0x${string}`): Promise<string | null>;
@@ -486,7 +487,7 @@ export class FileGrantStore implements GrantStore {
   async storedGrantOwner(tenant: `0x${string}`): Promise<string | null> {
     const rec = await readRecord(this.file(tenant));
     if (!rec) return null;
-    return verifiedOwner(rec.grant, this.wallet);
+    return verifiedRecordOwner(rec, this.wallet);
   }
   async listTenants(): Promise<`0x${string}`[]> {
     return this.tenantsIn(this.dir);
@@ -672,6 +673,30 @@ function verifiedOwner(grant: StoredRecord["grant"] | null, wallet: GrantPurpose
     throw new Error("This wallet's stored grant could not be verified.");
   }
   return grant.owner;
+}
+
+/**
+ * Unlike get's legacy file-store fallback, this status read must distinguish
+ * an unreadable active secret from a replacement stop. A stopped record has a
+ * valid retained fence and both copies of the signing key erased; merely
+ * finding a marker does not prove that. Validate on the same record as its
+ * owner, so a concurrent replacement cannot mix two reads.
+ */
+function verifiedRecordOwner(rec: StoredRecord, wallet: GrantPurpose): string {
+  const owner = verifiedOwner(rec.grant, wallet);
+  const stop = rec.grant.replacementStop;
+  if (stop !== undefined) {
+    if (!stop || typeof stop !== "object" || Array.isArray(stop)
+        || typeof stop.sessionKeyAddress !== "string" || !/^0x[0-9a-f]{40}$/i.test(stop.sessionKeyAddress)
+        || !Number.isSafeInteger(stop.stoppedAt) || stop.stoppedAt < 0
+        || rec.grant.expiresAt !== 0 || rec.grant.serialized !== "" || rec.sealedSessionKey !== "") {
+      throw new Error("This wallet's stopped grant could not be verified.");
+    }
+    retiredSessionKeys(rec.grant);
+  } else {
+    fromRecord(rec, wallet);
+  }
+  return owner;
 }
 
 /**
@@ -901,9 +926,8 @@ export class PgGrantStore implements GrantStore {
   async storedGrantOwner(tenant: `0x${string}`): Promise<string | null> {
     const c = await this.existing();
     if (!c) return null;
-    const { rows } = await c.query(`SELECT grant_json FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
-    if (!rows[0]) return null;
-    return verifiedOwner(parseGrantJson(rows[0].grant_json), this.wallet);
+    const rec = await this.readRow(c, tenant);
+    return rec ? verifiedRecordOwner(rec, this.wallet) : null;
   }
   async listTenants(): Promise<`0x${string}`[]> {
     const c = await this.existing();

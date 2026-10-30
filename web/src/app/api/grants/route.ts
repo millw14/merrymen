@@ -123,8 +123,9 @@ export interface AgentStatus {
    * landed), owned by the login (perps-owner), and a Spot put is still held to
    * it (assertIndependentWallets reads the record raw). So the Wallet screen's
    * restore and renewal ask this too (restore-perps-owner.ts). A record that
-   * put would refuse on (one that cannot be read, or names the other wallet)
-   * is a 503 instead, never `stored` (storedGrantOwner).
+   * put would refuse on (one that cannot be read, or names the other wallet),
+   * or an active record whose session key cannot be opened, is a 503 instead,
+   * never `stored` (storedGrantOwner).
    */
   stored?: true;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
@@ -1093,8 +1094,9 @@ export async function GET(req: Request) {
         // it: said as `stored` (AgentStatus). Read as the Spot put reads it
         // (storedGrantOwner): one it cannot read, or one that names the other
         // wallet, throws to "could not read" below, since that put refuses on
-        // it after a renewal's or restore's stop; so does one whose owner is
-        // not the login (perps-owner), which a reader comparing the tenant
+        // it after a renewal's or restore's stop. An active record whose key
+        // cannot be opened throws too: it is not a deliberate renewal stop.
+        // So does one whose owner is not the login (perps-owner), which a reader comparing the tenant
         // would otherwise take for the login's own.
         if (!g) {
           const owner = await getGrantStore("perps").storedGrantOwner(hostedTenant);

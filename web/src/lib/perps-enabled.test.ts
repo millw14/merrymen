@@ -10,8 +10,125 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import ts from "typescript";
 import { perpsCreationAllowed, perpsOffered, perpsWalletRefused, perpsWorkersRun } from "./perps-enabled";
 import { perpsCeilingOf as workerCeilingOf } from "../../../worker/src/settings";
+
+const ROOT = process.cwd();
+const SRC = path.join(ROOT, "web", "src");
+const GATE = path.join(SRC, "lib", "perps-enabled.ts");
+
+function clientGatePaths(sources: ReadonlyMap<string, string>): string[][] {
+  // Use the same paths and resolution rules as the web build. An alias,
+  // re-export or shared helper must not hide a server-only gate from this
+  // check. Fixtures override files in memory; they never enter the app tree.
+  const config = ts.readConfigFile(path.join(ROOT, "web", "tsconfig.json"), ts.sys.readFile);
+  assert.equal(config.error, undefined);
+  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, path.join(ROOT, "web"));
+  const host: ts.ModuleResolutionHost = {
+    ...ts.sys,
+    fileExists: (file) => sources.has(file) || ts.sys.fileExists(file),
+    readFile: (file) => sources.get(file) ?? ts.sys.readFile(file),
+    directoryExists: (dir) => [...sources.keys()].some((file) => file.startsWith(`${dir}${path.sep}`)) || ts.sys.directoryExists(dir),
+  };
+  const cache = ts.createModuleResolutionCache(ROOT, (file) => file, parsed.options);
+  const syntax = new Map<string, ts.SourceFile>();
+  const source = (file: string): ts.SourceFile => {
+    let tree = syntax.get(file);
+    if (!tree) {
+      tree = ts.createSourceFile(file, host.readFile(file) ?? "", ts.ScriptTarget.Latest, true);
+      syntax.set(file, tree);
+    }
+    return tree;
+  };
+  const client = (file: string): boolean => {
+    for (const stmt of source(file).statements) {
+      if (!ts.isExpressionStatement(stmt) || !ts.isStringLiteral(stmt.expression)) break;
+      if (stmt.expression.text === "use client") return true;
+    }
+    return false;
+  };
+  const edges = new Map<string, string[]>();
+  const imports = (file: string): string[] => {
+    const known = edges.get(file);
+    if (known) return known;
+    const specifiers: string[] = [];
+    const add = (value: ts.Node | undefined) => {
+      if (value && ts.isStringLiteralLike(value)) specifiers.push(value.text);
+    };
+    const visit = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node)) {
+        const clause = node.importClause;
+        const named = clause?.namedBindings;
+        const typesOnly = named && ts.isNamedImports(named) && named.elements.length > 0 && named.elements.every((e) => e.isTypeOnly);
+        if (!clause?.isTypeOnly && !(typesOnly && !clause?.name)) add(node.moduleSpecifier);
+      } else if (ts.isExportDeclaration(node)) {
+        const named = node.exportClause;
+        const typesOnly = named && ts.isNamedExports(named) && named.elements.length > 0 && named.elements.every((e) => e.isTypeOnly);
+        if (!node.isTypeOnly && !typesOnly) add(node.moduleSpecifier);
+      } else if (ts.isImportEqualsDeclaration(node) && !node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference)) {
+        add(node.moduleReference.expression);
+      } else if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+          || (ts.isIdentifier(node.expression) && node.expression.text === "require"))) {
+        add(node.arguments[0]);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source(file));
+    const resolved = specifiers.flatMap((specifier) => {
+      const target = ts.resolveModuleName(specifier, file, parsed.options, host, cache).resolvedModule?.resolvedFileName;
+      return target && target.startsWith(`${ROOT}${path.sep}`) && !target.includes(`${path.sep}node_modules${path.sep}`) ? [target] : [];
+    });
+    edges.set(file, resolved);
+    return resolved;
+  };
+  const find = (file: string, visited: Set<string>): string[] | null => {
+    if (file === GATE) return [file];
+    if (visited.has(file)) return null;
+    visited.add(file);
+    for (const dependency of imports(file)) {
+      const chain = find(dependency, visited);
+      if (chain) return [file, ...chain];
+    }
+    return null;
+  };
+  return [...sources.keys()].filter(client).flatMap((file) => {
+    const chain = find(file, new Set());
+    return chain ? [chain] : [];
+  });
+}
+
+describe("the client gate guard", () => {
+  const client = path.join(SRC, "__perps_gate_probe__", "client.tsx");
+  const helper = path.join(SRC, "__perps_gate_probe__", "helper.ts");
+  const barrel = path.join(SRC, "__perps_gate_probe__", "barrel.ts");
+
+  it("follows an alias through a helper and barrel to the server gate", () => {
+    const sources = new Map([
+      [client, '"use client"; import { offered } from "@/__perps_gate_probe__/helper"; export const visible = offered();'],
+      [helper, 'import { perpsOffered } from "./barrel"; export const offered = perpsOffered;'],
+      [barrel, 'export { perpsOffered } from "../lib/perps-enabled";'],
+    ]);
+    assert.deepEqual(clientGatePaths(sources), [[client, helper, barrel, GATE]]);
+  });
+
+  it("follows a literal dynamic import, and does not loop on a circular helper", () => {
+    const sources = new Map([
+      [client, '"use client"; export const load = () => import("./helper");'],
+      [helper, 'import "./client"; export { perpsOffered } from "../lib/perps-enabled";'],
+    ]);
+    assert.deepEqual(clientGatePaths(sources), [[client, helper, GATE]]);
+  });
+
+  it("does not treat comments, server-only modules or type-only edges as client imports", () => {
+    const sources = new Map([
+      [client, '"use client"; import type { Example } from "./helper"; export type View = Example; // perps-enabled is server-only'],
+      [helper, 'import { perpsOffered } from "../lib/perps-enabled"; export type Example = typeof perpsOffered;'],
+      [barrel, '// "use client"\nexport { perpsOffered } from "../lib/perps-enabled";'],
+    ]);
+    assert.deepEqual(clientGatePaths(sources), []);
+  });
+});
 
 describe("the web's perps gate", () => {
   it("unset is off: nothing offered, nothing made, no worker runs", () => {
@@ -116,21 +233,16 @@ describe("the web's perps gate", () => {
   });
 
   it("no client module imports it: in a browser bundle process.env is empty, so it would always say off", () => {
-    const SRC = path.join(process.cwd(), "web", "src");
     const walk = (dir: string, out: string[] = []): string[] => {
       for (const entry of readdirSync(dir)) {
         const full = path.join(dir, entry);
         if (statSync(full).isDirectory()) walk(full, out);
-        else if (/\.(ts|tsx)$/.test(entry) && !/\.test\.tsx?$/.test(entry)) out.push(full);
+        else if (/\.[cm]?[jt]sx?$/.test(entry) && !/\.test\.[cm]?[jt]sx?$/.test(entry) && !/\.d\.[cm]?ts$/.test(entry)) out.push(full);
       }
       return out;
     };
-    const offenders = walk(SRC)
-      .filter((f) => {
-        const text = readFileSync(f, "utf8");
-        return /^\s*["']use client["']/m.test(text) && /perps-enabled/.test(text);
-      })
-      .map((f) => path.relative(process.cwd(), f));
+    const offenders = clientGatePaths(new Map(walk(SRC).map((f) => [f, readFileSync(f, "utf8")])))
+      .map((chain) => chain.map((f) => path.relative(ROOT, f)).join(" -> "));
     assert.deepEqual(offenders, []);
   });
 });

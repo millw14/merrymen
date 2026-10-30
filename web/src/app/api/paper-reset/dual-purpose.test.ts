@@ -73,6 +73,18 @@ after(() => {
 });
 
 describe("self-hosted: each wallet's reset lands in its own home", () => {
+  it("a misspelled wallet key cannot queue a reset for the other wallet", async () => {
+    mkdirSync(purposeHome("perps"), { recursive: true });
+    writeFileSync(path.join(purposeHome("perps"), "grant.json"), JSON.stringify({ smartAccount: PERPS, purpose: "perps" }));
+    for (const query of ["?Wallet=perps", "?WALLET=perps", "?wallet=spot&Wallet=perps"]) {
+      const res = await reset(query);
+      assert.equal(res.status, 400, query);
+      assert.equal(((await res.json()) as { code?: string }).code, "wallet-unknown", query);
+      assert.deepEqual(filesIn(home), [], "a Perps-looking request must not reset Spot");
+      assert.deepEqual(filesIn(purposeHome("perps")), [], "an invalid selector queues nothing");
+    }
+  });
+
   it("A PERPS RESET IS QUEUED ONLY IN THE PERPS HOME, and Spot's only in Spot's", async () => {
     mkdirSync(purposeHome("perps"), { recursive: true });
     writeFileSync(path.join(purposeHome("perps"), "grant.json"), JSON.stringify({ smartAccount: PERPS, purpose: "perps" }));

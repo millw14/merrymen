@@ -29,15 +29,17 @@ the finished product; this table says how much of it main carries.
 | 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | merged (#361) |
 | 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | merged (#362) |
 | 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | merged (#365) |
-| 5. Web API, desk and CLI | making a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet; funding is its own PR after it. First, 5a: the inert foundation; then 5b: the Perps wallet's intake and status; then 5c: its settings, exits and practice reset, and the worker's paper exits (below) | 5a, 5b and 5c in review |
+| 5. Web API, desk and CLI | PR 1 (5a–5c): the foundation, Perps wallet intake and status, settings, owner paper exits and practice reset. PR 2: read routes, recover and CLI. PR 3: desk, entry points and onboarding. Funding follows slice 5 in its own PR | PR 1 implemented in this branch; PR 2 and PR 3 pending |
 | 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | not yet |
 
-Until slice 5b, nothing on main can make a Perps wallet, and from 5b only a
-deployment at `MERRYMEN_PERPS=paper` can, so none exists in production; every
-kill path already reaches one (rule 13), so that from the day
-one can exist it is stopped by every kill. Perps stays off in production while
-the slices land: an unset `MERRYMEN_PERPS` means off (rule 1), and each slice
-is safe to deploy alone with perps off.
+Slice 5 PR 1 adds Perps wallet creation and renewal, gated by
+`MERRYMEN_PERPS=paper`. Every kill path already reaches the Perps wallet
+(rule 13). An unset `MERRYMEN_PERPS` means off (rule 1), and merging this PR
+does not turn it on. The hosted-paper rollout remains web first: it follows
+slice 5 and slice 6a (Telegram, MCP and partner API); the phone clients in
+slice 6b follow that launch. Phone builds carrying #358's kill request are
+still required before hosted paper. Funding and live execution are separate
+work and are not enabled by the paper flag.
 
 **What slice 3 carries, and what it does not.** The engine is the perps
 branch's paper engine (codex/perps-mode-samples at c7071662, before its live
@@ -684,6 +686,16 @@ adds the following protections:
 - Concurrent local grant POSTs cannot establish the two wallets under
   different owners. Their shared-owner check and replacement are serialized;
   local kill/delete/CLI grant mutations remain outside that lock.
+- A differently cased wallet selector, such as `?Wallet=perps`, is refused
+  rather than silently targeting Spot. Explicit Perps URLs use one canonical
+  selector. The client-import guard follows helpers and re-exports to detect
+  indirect browser imports of the server's environment gate.
+- A hosted permission whose active session key cannot be decrypted is a 503,
+  not a normal stored renewal stop. A valid replacement stop keeps its owner
+  binding after its session key has deliberately been erased.
+- An incomplete CLI kill gets its reason from a validated, redacted failure
+  response. Node runtime warnings cannot replace that reason, and a helper
+  crash cannot expose raw diagnostic output as advice to the owner.
 - A conditional settings save and a kill in another process cannot overlap
   their final read and write. The Perps file store uses the same protection.
 - A child command result can update only commands belonging to that child's
@@ -705,6 +717,28 @@ The read routes and CLI (PR 2), desk and onboarding (PR 3), funding and live
 execution remain subsequent work. The dependency audit exception still expires
 after 8 November; this continuation does not extend it or force SDKs onto an
 incompatible dependency major version.
+
+### Product decisions awaiting review
+
+The local copy of the 30 October plan still lists the following choices as
+unresolved. The implementation preserves these paper behaviors; the table
+does not record owner approval. The confirmed slice-5 choices are a
+Spot/Perps toggle on Robinhood Chain screens, plain navigation before a later
+nanite-switch PR, funding in its own PR after slice 5, and three stacked PRs.
+
+| Choice | Implemented behavior | Needed by |
+|---|---|---|
+| D11: should a Spot recovery hold also refuse Perps exits and practice resets? | The hold check uses the Perps account; a Spot hold does not refuse them | PR 1 review |
+| Refuse Close and Close all while the hosted Perps book is held? | Once the book has reported, exits may queue and expire while held; resets are refused | PR 1 review |
+| Refuse owner exits at observe and while draining? | Refused, as on Spot | PR 1 review |
+| Freeze a self-hosted running worker's protective loop when Perps turns off? | It takes no new orders or resets, but continues managing existing paper positions | PR 1 review |
+| Keep the not-reported-book 409, or change what counts as shared ledger history? | Keep the 409 so a queued command cannot prevent the worker's first start | PR 1 review |
+| May a practice reset lift the Close-all entries halt? | A later owner reset lifts it; there is no Resume command in this slice | PR 1 review |
+| D20: move kill copy naming every wallet into PR 1 or leave it in PR 3? | The remaining UI copy is assigned to PR 3 | PR 3 at the latest |
+
+The plan's eighth item is technical cleanup: query-parameter casing, the
+client-import guard and the D17 test-port list. This continuation addresses
+those separately from the unresolved trading and wallet policy choices.
 
 ## One login, two wallets
 
@@ -1554,24 +1588,33 @@ not in this build: core has no such key, and the Perps wallet's `PUT` refuses on
 
 ## Rollout
 
-The six slices of "What is on main" come first; none of the phases below starts
-before all six are merged and deployed with perps off.
+The 30 October remaining-work plan puts the web launch before the phone
+clients. Merging the paper foundation is not approval to activate a rollout.
 
-- **Phase 0 — mainnet checklist** (`docs/perps-mainnet-checklist.md`), on an
-  operator account with dust: WASM memory and latency in a hosted child;
-  deposit → account index → on-chain key registration → time to usable; a
-  minimum BTC open as OTO and OTOCO; stop placement, sizing, expiry bounds and
-  the fat-finger band; a standalone position-tied stop; secure withdrawal and
-  claim latencies; the 21126 ordering; whether IP or L1 limits apply to
-  `sendTx` from the hosted egress; a kill drill and a recover drill; on-chain
-  `createOrder` semantics.
-- **Phase 1** — the canonical-wall allowlist and the fleet feed ship; paper perps
-  behind `MERRYMEN_PERPS=paper`; signers do not offer the opt-in.
-- **Phase 2** — signers offer the opt-in; live only for tenants named in
-  `MERRYMEN_PERPS_LIVE_TENANTS` (self-hosted: the owner), after the mobile
-  banners ship.
-- **Phase 3** — general availability, after a written decision on operating
-  Lighter orders from the hosted egress for tenants.
+- **Hosted paper (the plan's Phase 3)** follows slices 1–4, all three slice-5
+  PRs, and slice 6a (Telegram, MCP and partner API). Phone builds carrying
+  #358's kill request are a prerequisite; the full Perps phone UI is not.
+  Before activation, settle paper admission and recovery policy, check child
+  process headroom, add feed capture, and either provide recovery for a lost
+  Perps home or prohibit replacing/handover of its volume while books exist.
+- **Funding** is a separate PR after slice 5. Whether it precedes or follows
+  hosted paper remains open. It moves real USDG and needs its own journal,
+  owner-outflow accounting and a fund/withdraw recovery drill.
+- **Phones (slice 6b)** follow the web paper launch. Their Perps wallet,
+  banner and Close-all support, plus the deferred native validation, must be
+  complete before any owner goes live.
+- **The live implementation** adds the executor, reconciliation, on-chain
+  leg, key handover, live stand-down, consent and owner recovery. The empty
+  paper permission wall and paper flag do not supply these capabilities.
+- **Mainnet checks and controlled live rollout (the plan's Phase 4)** follow
+  that implementation. Complete `docs/perps-mainnet-checklist.md`, including
+  funding, protected orders, withdrawal, kill and recovery drills, before
+  enabling real-money owners. Hosted live also requires Solana's live
+  guardrails and the unresolved custody/operating decisions below. Admission
+  remains explicit through `MERRYMEN_PERPS_LIVE_TENANTS`.
+- **General availability** additionally requires isolation of hosted workers
+  by OS user, a fleet request budget if the venue limits by IP, and replay
+  evidence before any performance claim.
 
 ## Decisions that need Milla
 
@@ -1632,3 +1675,93 @@ before all six are merged and deployed with perps off.
 - Start over (`/api/grants/discard`) revokes both wallets' grants and resets
   the Spot paper book, but does not stop the Solana strategy. "Kill all agents"
   is the control that stops everything.
+
+## Slice 5 PR 1 test inventory (D17)
+
+This inventory compares the original Perps branch at `112dbeb6` with the
+paper-only wallet-authority PR (5a–5c). It lists the source tests retained,
+replaced or deferred, rather than treating a matching filename as proof that
+all of its old live behavior was ported. Core, store and paper-engine tests
+that already landed in slices 1–4 are identified as existing foundations;
+unchanged Spot and general framework suites are not repeated here.
+
+The historical baseline was **inspected, not re-run** for this PR. Its pinned
+record is `112dbeb6:docs/perps-implementation-status.md`: the later
+separate-wallet run records 16,093 tests, 16,088 passing, four skipped and one
+stale Settings source assertion, followed by a passing focused rerun after
+that assertion was corrected. That is not evidence of a fresh all-green
+baseline run. Current-tree verification belongs in the PR's test results;
+counts from overlapping historical and current runs must not be added.
+
+| Source test at `112dbeb6` | Current disposition |
+|---|---|
+| `packages/core/src/grant-purpose.test.ts` | Same path; signed wallet-purpose foundation from earlier slices. |
+| `web/src/app/api/grants/dual-purpose.test.ts` | Adapted at the same path: independent hosted wallets, purpose-bound intake, index-1 proof, renewal and login-wide kill. |
+| `web/src/app/api/grants/dual-purpose-local.test.ts` | Adapted at the same path: separate homes, derivation proof, same-owner checks and refused writes preserve both wallets. |
+| `web/src/app/api/grants/public-view.test.ts` | Partly ported at the same path; the case-level live deferrals below apply. |
+| `web/src/app/api/grants/perps-status.test.ts` | Paper report cases ported at the same path; the live shutdown cases below are deferred. |
+| `web/src/app/api/settings/dual-purpose.test.ts` | Adapted at the same path: the dedicated Perps settings allowlist, independent stores and switch-off preservation. |
+| `web/src/app/api/settings/perps.test.ts` | Parser, boolean, market, risk-cap and off-wins cases retained; profile, Brain and live acceptance are replaced by refusals in this paper build. |
+| `web/src/app/api/orders/dual-purpose.test.ts` | Adapted at the same path for wallet-bound paper exits; the reset cases moved to `web/src/app/api/paper-reset/dual-purpose.test.ts`. The ceiling endpoint remains Spot-only; Perps closes need no entry-size ceiling. |
+| `web/src/lib/dedicated-perps-wall.test.ts` | Adapted at the same path for the purpose-based empty paper wall; live venue permission cases are not enabled. |
+| `web/src/lib/session-perps.test.ts` | Retained Spot authority-carry compatibility; these cases do not establish dedicated live Perps activation. |
+| `web/src/lib/perps-orders.test.ts` | Adapted paper order shapes and routing at the same path; native handoff is deferred to the desk/phone work. |
+| `web/src/lib/agent-perps.test.ts` | Restored and adapted to the explicit wallet read seam: scoped account/mode query, missing table/column, unreadable report, driver failure and no-account behavior; JSON whitelist and PostgreSQL error distinctions also covered. |
+| `worker/src/strategies/perps-only.test.ts` | Restored the inert tick/no Spot or vault intent cases. The old public-selectability assertion is replaced with the current internal-only registry contract. |
+| `worker/src/signer-lockstep.test.ts` | Existing signer/wall foundation, retained at the same path. |
+| `worker/src/order-gate.test.ts` | Existing order gate, extended at the same path for paper exits. |
+| `worker/src/command-files.test.ts` | Adapted at the same path for wallet-bound command execution, durable claims/results and receipt validation. |
+| `worker/src/order-receipt.test.ts` | Existing command receipt foundation retained at the same path. |
+| `worker/src/order-window.test.ts` | Existing deadline foundation retained at the same path. |
+| `worker/src/ferry-commands.test.ts` | Existing ferry foundation retained at the same path; separate Perps delivery is also covered by `worker/src/perps-order-ferry.test.ts`. |
+| `worker/src/perps/lane.test.ts` | Paper foundation from slice 3, extended for owner exits, Close-all halts, ordered reset, energy and durable-accounting failures. |
+| `worker/src/perps/paper-e2e.integration.test.ts` | Paper foundation retained at the same path. |
+| `worker/src/perps/executor.test.ts` | Paper executor foundation retained at the same path. |
+| `worker/src/perps/paper.test.ts` | Paper book foundation retained at the same path. |
+| `worker/src/perps/protect.test.ts` | Protective-loop foundation retained at the same path. |
+| `worker/src/perps/route.test.ts` | Paper route foundation retained at the same path. |
+| `worker/src/perps/view.test.ts` | Paper view foundation retained at the same path. |
+| `worker/src/perps/view-producers.test.ts` | Paper view producers retained at the same path. |
+
+The following source files were replaced by tests of the separate-wallet
+contract; their absence is intentional:
+
+| Source test at `112dbeb6` | Replacement and reason |
+|---|---|
+| `worker/src/dual-purpose-store.test.ts` | `worker/src/dual-wallet-store.test.ts`: independent grants/settings/homes and owner isolation, with no live custody implementation. |
+| `worker/src/dual-purpose.postgres.test.ts` | `worker/src/dual-wallet.postgres.test.ts`: real PostgreSQL wallet isolation and atomic owner checks, including lazy reads before Perps tables exist. |
+| `web/src/app/api/settings/perps-only.test.ts` | `web/src/app/api/settings/dual-purpose.test.ts` and `perps.test.ts`: a dedicated Perps wallet replaces switching a Spot wallet into a Perps strategy. |
+| `web/src/lib/session-minimal-perps.test.ts` | `web/src/lib/dedicated-perps-wall.test.ts`, `session-wallets.test.ts` and `packages/core/src/wall-perps-only.test.ts`: signed purpose and index 1 replace the old creation flag; D5 keeps the paper wall empty. |
+| `web/src/lib/account-purpose.test.ts` | `web/src/lib/wallet-param.test.ts` and `session-wallets.test.ts`: `?wallet=` is the transport selector; signed purpose remains authority. The helper, route guard and real reset route now refuse differently cased selector keys instead of falling back to Spot. |
+| `web/src/lib/kill-answer-purpose.test.ts` | `web/src/lib/stop-agent.test.ts`, `web/src/components/kill-switch.test.ts`, and grants `dual-purpose.test.ts` / `kill-perps.test.ts`: a kill reaches both wallets; the old per-wallet-kill expectation is dropped. Renewal stops remain separate. |
+
+Partial-file and whole-file deferrals are explicit:
+
+- `web/src/app/api/grants/public-view.test.ts` retains secret stripping,
+  whitelisted fields and private/no-store responses, scoped to the Perps
+  wallet, and adds Spot denylist compatibility. The source's plaintext
+  80-hex venue-key refusal/recovery notice and `perpsOptIn` live allowlist /
+  durable-journal readiness cases move with live custody and setup.
+- `web/src/app/api/grants/perps-status.test.ts` retains report/heartbeat,
+  absent and malformed report cases and adds Spot report omission. Its old
+  self-hosted stand-down-before-archive, custody wording, hosted durable
+  shutdown and wallet-discard wait cases move with live shutdown/recovery.
+  Paper login-wide kills have their own tests listed above.
+- `web/src/app/api/grants/perp-intake.test.ts`,
+  `web/src/app/api/grants/perp-drop-hosted.test.ts` and
+  `web/src/app/api/grants/perps-recovery.test.ts` exercise live venue-key
+  pairing, flatness and recovery notices; they remain with the live slice.
+- `worker/src/perps/owner-controls.test.ts`,
+  `worker/src/perps/hosted-dual-purpose.test.ts` and
+  `worker/src/perps/dual-wallet-standdown.test.ts` depend on live incidents,
+  retired venue keys or shutdown custody. Paper Close-all ordering is covered
+  by the current lane tests. The old explicit Resume case is replaced by the
+  ordered paper reset, whose product decision remains listed above.
+- The source's `/api/perps` read routes, recovery surface and CLI tests belong
+  to PR 2; desk, entry-point and onboarding tests belong to PR 3. Their absence
+  from PR 1 does not mean those slices have been verified or completed.
+
+New boundary checks in this PR include `web/src/lib/perps-enabled.test.ts`'s
+transitive client import guard (aliases, re-exports and literal dynamic
+imports), the route-guard sweep, and the wallet-selector refusal tests. These
+are additions to the source inventory, not replacements for its live tests.

@@ -44,6 +44,7 @@ import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it, mock } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
+import { sealSecret } from "../../../../../worker/src/store-crypto";
 import { bindingMessage, type GrantPurpose, type StoredGrant } from "@merrymen/core";
 import {
   RENEWAL_PERPS_OWNER_DIFFERS, RENEWAL_PERPS_UNREAD, RESTORE_PERPS_HOSTED, RESTORE_PERPS_UNREAD_HOSTED, renewalPerpsRefusal, restorePerpsRefusal,
@@ -558,6 +559,53 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
       writeFileSync(perpsFile, JSON.stringify(record));
     }
     assert.equal(((await (await get(nia, "?wallet=perps")).json()) as { exists?: boolean }).exists, true, "the record put back reads again");
+  });
+
+  it("an active Perps record whose session key cannot be opened is unreadable, not stopped for renewal", async () => {
+    const noa = await login("noa-unread-key");
+    const grant = await perpsGrant(noa);
+    assert.equal((await privyPost(grant, "?wallet=perps", noa, "perps")).status, 200);
+    const file = tenantFile("tenants-perps", noa);
+    const original = readFileSync(file, "utf8");
+    const record = JSON.parse(original) as Record<string, unknown>;
+    const viaGet = (async (url: string | URL | Request) => get(noa, String(url).replace(/^\/api\/grants/, ""))) as typeof fetch;
+    try {
+      for (const [what, sealedSessionKey] of [
+        ["malformed ciphertext", "not-a-sealed-session-key"],
+        ["a different encryption key", sealSecret(grant.demoSessionPrivateKey, Buffer.alloc(32, 8))],
+      ]) {
+        const damaged = JSON.stringify({ ...record, sealedSessionKey });
+        writeFileSync(file, damaged);
+        assert.equal(await perpsGrantOf(noa), null, "the file store cannot supply a signing key");
+        const res = await get(noa, "?wallet=perps");
+        assert.equal(res.status, 503, `${what}: ${await res.clone().text()}`);
+        assert.equal(res.headers.get("cache-control"), "private, no-store");
+        assert.deepEqual(await res.json(), { error: "Couldn't read your Perps wallet. Please try again.", ownerFacing: true });
+        assert.equal(await restorePerpsRefusal(noa.account.address, viaGet, true), RESTORE_PERPS_UNREAD_HOSTED);
+        assert.equal(await renewalPerpsRefusal(noa.account.address, noa.account.address, viaGet), RENEWAL_PERPS_UNREAD,
+          "same-owner renewal must not turn unreadable status into permission to start its stop");
+        assert.equal(readFileSync(file, "utf8"), damaged, "status reads leave the record intact");
+      }
+    } finally {
+      writeFileSync(file, original);
+    }
+    assert.equal(await stores.getGrantStore("perps").stopForReplacement(noa.account.address), "stopped");
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).sealedSessionKey, "", "a deliberate stop erases the secret");
+    assert.deepEqual(await (await get(noa, "?wallet=perps")).json(), {
+      exists: false, tenant: noa.account.address.toLowerCase(), stored: true,
+    }, "the explicit replacement stop still reports its retained owner without a key");
+    const stopped = JSON.parse(readFileSync(file, "utf8"));
+    try {
+      for (const replacementStop of [null, {}, { ...stopped.grant.replacementStop, sessionKeyHash: "bad-fence" }]) {
+        writeFileSync(file, JSON.stringify({ ...stopped, grant: { ...stopped.grant, replacementStop } }));
+        const res = await get(noa, "?wallet=perps");
+        assert.equal(res.status, 503, "an empty key plus a malformed stop marker is unreadable, never `stored`");
+        assert.deepEqual(await res.json(), { error: "Couldn't read your Perps wallet. Please try again.", ownerFacing: true });
+        assert.equal(await renewalPerpsRefusal(noa.account.address, noa.account.address, viaGet), RENEWAL_PERPS_UNREAD);
+      }
+    } finally {
+      writeFileSync(file, JSON.stringify(stopped));
+    }
   });
 
   it("D1: answered whatever MERRYMEN_PERPS says, so an owner can always see a Perps wallet they hold", async () => {

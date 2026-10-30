@@ -17,6 +17,12 @@ it("names exactly one wallet, or the request is refused", () => {
   }
 });
 
+it("refuses a differently cased wallet key instead of silently selecting Spot", () => {
+  for (const query of ["?Wallet=perps", "?WALLET=perps", "?wAlLeT=spot", "?%57allet=perps", "?wallet=spot&Wallet=perps", "?Wallet=spot&wallet=perps"]) {
+    assert.equal(at(query), null, query);
+  }
+});
+
 it("is not the body's purpose: the old ?purpose= selector names no wallet", () => {
   assert.equal(at("?purpose=perps"), "spot");
 });
@@ -36,9 +42,10 @@ describe("walletUrl, the one client builder", () => {
   });
 
   it("never names two wallets: a wallet= already there is replaced, not repeated", () => {
-    for (const url of ["/api/grants?wallet=spot", "/api/grants?wallet=spot&wallet=perps", "/api/grants?wallet=junk"]) {
+    for (const url of ["/api/grants?wallet=spot", "/api/grants?wallet=spot&wallet=perps", "/api/grants?wallet=junk", "/api/grants?Wallet=spot", "/api/grants?WALLET=spot&wallet=perps"]) {
       const built = walletUrl(url, "perps");
       assert.equal(readWalletParam({ url: new URL(built, "https://app.merrymen.dev").href }), "perps", url);
+      assert.deepEqual([...new URL(built, "https://app.merrymen.dev").searchParams].filter(([key]) => key.toLowerCase() === "wallet"), [["wallet", "perps"]], url);
     }
   });
 

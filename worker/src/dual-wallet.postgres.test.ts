@@ -232,6 +232,37 @@ test("Postgres: two wallets per login, beside an untouched Spot fleet", { skip: 
     assert.equal((await row("tenant_ledger_import", U))!.state, "deleted");
   });
 
+  await t.test("an unreadable Perps session key is not a renewal stop, and a genuine stop needs no key", async () => {
+    const V = addr(0x18a), ACCOUNT = addr(0x18b), KEY = key("39");
+    await perps.put(V, grant(V, ACCOUNT, KEY, { purpose: "perps" }));
+    const original = (await row("perps_grants", V))!;
+    assert.equal(await perps.storedGrantOwner(V), V);
+    try {
+      for (const sealed of ["malformed-secret", sealSecret(KEY, Buffer.alloc(32, 8))]) {
+        await admin.query(`UPDATE ${schema}.perps_grants SET sealed_session_key = $1 WHERE tenant = $2`, [sealed, V]);
+        const damaged = await row("perps_grants", V);
+        await assert.rejects(perps.get(V));
+        await assert.rejects(perps.storedGrantOwner(V), Error, "status must not label an unsealing failure as `stored`");
+        assert.deepEqual(await row("perps_grants", V), damaged, "failed status reads preserve the row");
+      }
+    } finally {
+      await admin.query(`UPDATE ${schema}.perps_grants SET sealed_session_key = $1 WHERE tenant = $2`, [original.sealed_session_key, V]);
+    }
+    assert.equal(await perps.stopForReplacement(V), "stopped");
+    const stopped = (await row("perps_grants", V))!;
+    assert.equal(stopped.sealed_session_key, "");
+    assert.equal(await perps.get(V), null);
+    assert.equal(await perps.storedGrantOwner(V), V);
+    try {
+      await admin.query(`UPDATE ${schema}.perps_grants SET grant_json = $1 WHERE tenant = $2`, [
+        JSON.stringify({ ...(stopped.grant_json as Record<string, unknown>), replacementStop: null }), V,
+      ]);
+      await assert.rejects(perps.storedGrantOwner(V), /could not be verified/, "a malformed marker cannot stand in for a deliberate stop");
+    } finally {
+      await admin.query(`UPDATE ${schema}.perps_grants SET grant_json = $1 WHERE tenant = $2`, [JSON.stringify(stopped.grant_json), V]);
+    }
+  });
+
   await t.test("A WALLET STOPPED FOR A RENEWAL STILL HOLDS THE OTHER TO ITS OWNER KEY, both ways (the hosted GET calls it `stored`; the Wallet screen's restore and renewal ask it first)", async () => {
     const ownerDiffers = (e: unknown) => e instanceof GrantWalletConflict && e.code === "owner-differs";
     // A Perps record stopped for its renewal: the store will not show it, but holds it, and a Spot grant under
