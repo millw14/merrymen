@@ -254,3 +254,34 @@ describe("a Privy-owned hosted agent can reach its recovery disclosure", () => {
     assert.match(msg, /irreversible/i, "and it must still say what kind of act this is");
   });
 });
+
+it("Perps recovery selects its own saved wallet and URL, and the disabled-Privy wrapper renders without a provider", async () => {
+  const React = (await import("react")).default;
+  const { act } = await import("react");
+  (globalThis as Record<string, unknown>).React = React;
+  const { createRoot } = await import("react-dom/client");
+  const { RecoverPanel, RecoverPanelView } = await import("./RecoverPanel");
+  const account = `0x${"42".repeat(20)}`;
+  dom.window.localStorage.setItem("merrymen.grant.perps.v1", JSON.stringify({ purpose: "perps", smartAccount: account, chainId: 4663, owner: OWNER }));
+  const container = dom.window.document.createElement("div"); dom.window.document.body.append(container);
+  const root = createRoot(container);
+  const calls: string[] = [];
+  const fetchBefore = globalThis.fetch;
+  globalThis.fetch = async input => { calls.push(String(input)); return Response.json({ hasStoredKey: false, clientSide: true }); };
+  let planned: { smartAccount: string; purpose?: string } | null = null;
+  try {
+    await act(async () => root.render(React.createElement(RecoverPanel, { wallet: "perps" } as never)));
+    assert.match(container.textContent ?? "", /recover my funds/i, "the hook is not invoked outside PrivyProvider");
+    await act(async () => root.render(React.createElement(RecoverPanelView, {
+      wallet: "perps", privyOwner: { account: { address: OWNER }, did: "did:privy:test" },
+      planFn: async (w: { smartAccount: string; purpose?: string }) => {
+        planned = w;
+        return { smartAccount: w.smartAccount, ownerAddress: OWNER, chainId: 4663, explorer: "https://explorer.test", balances: [], classHoldings: [], classVaults: [], classVault: null, classNote: null, gasWei: 1n, nativeRecoverableWei: 0n, nativeReserveWei: 1n, unreadable: [], needsGas: false };
+      },
+    } as never)));
+    const click = async (pattern: RegExp) => { const button = [...container.querySelectorAll("button")].find(b => pattern.test(b.textContent ?? "")); assert.ok(button); await act(async () => button!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }))); };
+    await click(/recover my funds/i); await click(/check what's in it/i);
+    assert.deepEqual(calls, ["/api/recover?wallet=perps"]);
+    assert.ok(planned); assert.equal((planned as { smartAccount: string }).smartAccount, account); assert.equal((planned as { purpose: string }).purpose, "perps");
+  } finally { globalThis.fetch = fetchBefore; await act(async () => root.unmount()); container.remove(); }
+});

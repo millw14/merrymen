@@ -1,5 +1,8 @@
 "use client";
 
+import { privyEnabled } from "@/lib/privy-client";
+import { walletUrl } from "@/lib/wallet-param";
+import type { GrantPurpose } from "@merrymen/core";
 import { useState } from "react";
 import { listSavedWallets, loadGrant } from "@/lib/session";
 import { isAddr, normalizeAddr } from "@/lib/address";
@@ -124,16 +127,16 @@ const TESTNET = 46630;
  * did: that page is reachable while signed out and on a machine that never had
  * the wallet, which is the case the paste field exists for.
  */
-export function RecoverPanel({ initialOwnerKey = "" }: { initialOwnerKey?: string } = {}) {
-  // THE HOOK LIVES HERE AND NOWHERE ELSE. `usePrivy` throws outside a
-  // PrivyProvider, and `Providers` renders none when Privy is disabled — so a
-  // component that calls it cannot be rendered in a test without standing up
-  // Privy itself. Keeping the hook in a one-line wrapper leaves the whole flow
-  // below reachable, which is what lets `recover-privy-flow.test.ts` drive it.
-  return <RecoverPanelView initialOwnerKey={initialOwnerKey} privyOwner={usePrivyOwner()} />;
+export function RecoverPanel({ initialOwnerKey = "", wallet = "spot" }: { initialOwnerKey?: string; wallet?: GrantPurpose } = {}) {
+  return privyEnabled() ? <PrivyRecoverPanel key={wallet} initialOwnerKey={initialOwnerKey} wallet={wallet} /> :
+    <RecoverPanelView key={wallet} initialOwnerKey={initialOwnerKey} wallet={wallet} privyOwner={null} />;
+}
+function PrivyRecoverPanel({ initialOwnerKey, wallet }: { initialOwnerKey: string; wallet: GrantPurpose }) {
+  return <RecoverPanelView initialOwnerKey={initialOwnerKey} wallet={wallet} privyOwner={usePrivyOwner()} />;
 }
 
 export function RecoverPanelView({
+  wallet = "spot",
   initialOwnerKey = "",
   privyOwner,
   /**
@@ -143,6 +146,7 @@ export function RecoverPanelView({
   planFn = planFromBrowser,
 }: {
   initialOwnerKey?: string;
+  wallet?: GrantPurpose;
   /**
    * The signed-in embedded wallet, or null for a browser-key wallet.
    *
@@ -171,7 +175,7 @@ export function RecoverPanelView({
     if (ctx || loadingCtx) return;
     setLoadingCtx(true);
     try {
-      const r = await fetch("/api/recover");
+      const r = await fetch(walletUrl("/api/recover", wallet));
       setCtx((await r.json()) as Ctx);
     } catch {
       setCtx({ hasStoredKey: false, hasBundler: false, error: "couldn't reach the recovery service" });
@@ -207,7 +211,7 @@ export function RecoverPanelView({
       // actually put it.
       const saved = (() => {
         try {
-          return loadGrant("spot");
+          return loadGrant(wallet);
         } catch {
           return null;
         }
@@ -215,6 +219,7 @@ export function RecoverPanelView({
       const account = (smartAccount ?? saved?.smartAccount) as `0x${string}` | undefined;
       if (!account) return null;
       return {
+        purpose: wallet,
         smartAccount: account,
         ownerAccount: privyOwner.account,
         chainId: saved?.chainId ?? chainId,
@@ -227,7 +232,7 @@ export function RecoverPanelView({
     // comes from what the wall actually covers rather than the builtin floor.
     const saved = (() => {
       try {
-        return listSavedWallets("spot").find(
+        return listSavedWallets(wallet).find(
           (w) => (w.ownerKey ?? "").toLowerCase() === key.toLowerCase(),
         );
       } catch {
@@ -236,6 +241,7 @@ export function RecoverPanelView({
     })();
     if (!saved) return null;
     return {
+      purpose: wallet,
       smartAccount: saved.smartAccount,
       ownerKey: key as `0x${string}`,
       chainId: saved.chainId ?? chainId,
@@ -381,7 +387,7 @@ export function RecoverPanelView({
     }
     setBusy("checking");
     try {
-      const r = await fetch("/api/recover", {
+      const r = await fetch(walletUrl("/api/recover", wallet), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: "plan", ownerKey: ownerKey.trim(), chainId }),
@@ -514,7 +520,7 @@ export function RecoverPanelView({
         body.ownerKey = ownerKey.trim();
         body.chainId = chainId;
       }
-      const r = await fetch("/api/recover", {
+      const r = await fetch(walletUrl("/api/recover", wallet), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
