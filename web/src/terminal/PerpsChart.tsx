@@ -1,4 +1,5 @@
 import type { ChartResponse } from "../lib/perps-chart-data";
+import { fullDateTime } from "../lib/format";
 
 /** Mark candles and execution prices have independent coordinates; missing bars remain gaps. */
 export function PerpsChart({ data }: { data: ChartResponse }) {
@@ -20,8 +21,8 @@ export function PerpsChart({ data }: { data: ChartResponse }) {
     </svg>}
     {data.candles.stale && <p role="status">Market candles are stale; this is historical data.</p>}
     {data.candles.gaps.length > 0 && <p>{data.candles.gaps.length} gaps in candle history. No prices are drawn through the gaps.</p>}
-    <p>Market data as of {data.candles.asOfMs === null ? "not reported" : new Date(data.candles.asOfMs).toLocaleString()}.</p>
+    <p>Market data as of {data.candles.asOfMs === null ? "not reported" : fullDateTime(data.candles.asOfMs)}.</p>
     {data.unknownFills > 0 && <p>{data.unknownFills} fills lack enough evidence to mark an entry.</p>}{data.truncated && <p>Only the latest recorded fills are included.</p>}
-    {data.entries.length > 0 && <details><summary>Exact recorded entries ({data.entries.length})</summary><div className="perps-table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Size</th><th>Execution price</th><th>Epoch</th></tr></thead><tbody>{data.entries.map(entry => <tr key={entry.id}><td>{new Date(entry.timeMs).toLocaleString()}</td><td>{entry.side}</td><td>{entry.size}</td><td>{entry.priceExact}</td><td>{entry.epoch}</td></tr>)}</tbody></table></div></details>}
+    {data.entries.length > 0 && <details><summary>Exact recorded entries ({data.entries.length})</summary><div className="perps-table-wrap"><table><thead><tr><th>Time</th><th>Side</th><th>Size</th><th>Execution price</th><th>Epoch</th></tr></thead><tbody>{data.entries.map(entry => <tr key={entry.id}><td><time dateTime={new Date(entry.timeMs).toISOString()} title={new Date(entry.timeMs).toISOString()}>{fullDateTime(entry.timeMs)}</time></td><td>{entry.side}</td><td>{entry.size}</td><td>{entry.priceExact}</td><td>{entry.epoch}</td></tr>)}</tbody></table></div></details>}
   </div>;
 }
