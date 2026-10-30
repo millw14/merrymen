@@ -42,6 +42,7 @@ import {
   retryGrantHandoff,
   setPrivyTokenSource,
   type Grant,
+  type MintOptions,
 } from "./session";
 
 const ORIGIN = "https://app.merrymen.dev";
@@ -115,7 +116,7 @@ describe("the storage slots", () => {
 });
 
 /** Mint through the real signer with app requests answered here; returns what was posted where. */
-async function mint(wallet: GrantPurpose | undefined, account: `0x${string}`) {
+async function mint(wallet: GrantPurpose | undefined, account: `0x${string}`, fences: Pick<MintOptions, "beforeCommit" | "assertCurrent"> = {}) {
   const posts: { url: string; body: Grant }[] = [];
   setPrivyTokenSource(async () => "token");
   const minted = await withStubChain(account, async () => {
@@ -131,7 +132,7 @@ async function mint(wallet: GrantPurpose | undefined, account: `0x${string}`) {
     }) as typeof fetch;
     return createPrivyOwnedWallet(owner, DID, {
       ...(wallet ? { purpose: wallet } : {}),
-      caps: TEST_CAPS, onStatus: () => {}, chainId: 4663, hostedAs: owner.address,
+      caps: TEST_CAPS, onStatus: () => {}, chainId: 4663, hostedAs: owner.address, ...fences,
     });
   });
   return { minted, posts };
@@ -229,4 +230,15 @@ describe("how the signer names a wallet in a URL", () => {
     }
     assert.match(code("./stop-agent.ts"), /deleteAgent[\s\S]*?requestStop\("\/api\/grants",/, "the bare path is the kill's");
   });
+});
+
+
+it("a rejected post-approval authority check preserves both saved wallets and makes no grant POST", async () => {
+  await mint("perps", PERPS_ACCOUNT);
+  localStorage.setItem("merrymen.grant.v1", PRE_PERPS);
+  const snapshot = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!).sort().map(key => [key, localStorage.getItem(key)]);
+  let checked = false;
+  await assert.rejects(mint("perps", PERPS_ACCOUNT, { beforeCommit: async () => { checked = true; throw new Error("screen closed after approval"); } }), /screen closed after approval/);
+  assert.equal(checked, true, "the real mint reaches the post-signing fence");
+  assert.deepEqual(Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!).sort().map(key => [key, localStorage.getItem(key)]), snapshot, "no archive or storage mutation follows the rejected fence");
 });

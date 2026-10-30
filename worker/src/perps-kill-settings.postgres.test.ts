@@ -4,15 +4,19 @@
  *
  * Opt-in, disposable LOCAL PostgreSQL only (MERRYMEN_TEST_PG_URL). Never reads
  * DATABASE_URL. Pins the three things a hosted kill needs of the Perps
- * settings: an owner with no Perps wallet costs one catalog look and makes no
- * table; perps on are turned off with every other setting kept, sealed under
- * the DEK; and an owner's save racing the kill is never lost, nor is the kill.
+ * settings: read-only probes create no table; a completed public kill records
+ * a fresh off revision even for an absent wallet; other settings stay sealed
+ * under the DEK; and an owner's save racing the kill is never lost, nor is the kill.
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import type { MerrymenSettings } from "../../packages/core/src/index";
+
+function withoutNonce(value: MerrymenSettings | null): MerrymenSettings {
+  assert.ok(value);const {perpsControlNonce,...rest}=value;assert.match(perpsControlNonce!,/^[a-f0-9-]{36}$/);return rest;
+}
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 interface Client {
@@ -78,11 +82,13 @@ test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing 
       const sealedBefore = String((await admin.query(`SELECT sealed FROM ${schema}.perps_tenant_settings WHERE tenant = $1`, [T])).rows[0]?.sealed);
       assert.doesNotMatch(sealedBefore, /perpsEnabled/, "sealed under the DEK");
       assert.equal(await disablePaperPerpsForKill(T, store), "disabled");
-      assert.deepEqual(await store.get(T), { ...OWNER, perpsEnabled: false });
+      assert.deepEqual(withoutNonce(await store.get(T)), { ...OWNER, perpsEnabled: false });
       const sealedAfter = String((await admin.query(`SELECT sealed FROM ${schema}.perps_tenant_settings WHERE tenant = $1`, [T])).rows[0]?.sealed);
       assert.doesNotMatch(sealedAfter, /perpsEnabled|Little John/, "written back sealed");
-      // A retry finds them off.
+      // A retry finds them off, but must still invalidate pre-retry enables.
+      const nonce = (await store.get(T))!.perpsControlNonce;
       assert.equal(await disablePaperPerpsForKill(T, store), "none");
+      assert.notEqual((await store.get(T))!.perpsControlNonce, nonce);
     });
 
     await t.test("an owner's save racing the kill: neither is lost", async () => {
@@ -107,7 +113,7 @@ test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing 
         } as unknown as Client;
       });
       assert.equal(await disablePaperPerpsForKill(T, racing), "disabled");
-      assert.deepEqual(await store.get(T), { ...OWNER, perpsMarkets: ["ETH-PERP"], perpsEnabled: false });
+      assert.deepEqual(withoutNonce(await store.get(T)), { ...OWNER, perpsMarkets: ["ETH-PERP"], perpsEnabled: false });
     });
 
     await t.test("the other order, a save that read before the kill: its compare and swap misses, and the kill's off stands", async () => {
@@ -119,11 +125,11 @@ test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing 
       assert.deepEqual(read.settings, OWNER);
       assert.equal(await disablePaperPerpsForKill(T, store), "disabled");
       assert.equal(await putSettingsIfUnchanged(store, T, { ...OWNER, perpsMaxLeverage: 3 }, read.version), false, "missed: the kill wrote in between");
-      assert.deepEqual(await store.get(T), { ...OWNER, perpsEnabled: false }, "nothing from the stale save was written");
+      assert.deepEqual(withoutNonce(await store.get(T)), { ...OWNER, perpsEnabled: false }, "nothing from the stale save was written");
       // Read again, it lands, and only over that read.
       const again = await readSettingsVersioned(store, T);
       assert.equal(await putSettingsIfUnchanged(store, T, { ...again.settings, perpsMaxLeverage: 3 }, again.version), true);
-      assert.deepEqual(await store.get(T), { ...OWNER, perpsEnabled: false, perpsMaxLeverage: 3 });
+      assert.deepEqual(withoutNonce(await store.get(T)), { ...OWNER, perpsEnabled: false, perpsMaxLeverage: 3 });
       assert.equal(await putSettingsIfUnchanged(store, T, { ...OWNER }, again.version), false, "a version is good for one write");
     });
 
@@ -137,6 +143,15 @@ test("Postgres: a kill turns the Perps wallet's paper strategy off, and nothing 
       assert.equal(await putSettingsIfUnchanged(store, U, { perpsMaxLeverage: 2 }, first.version), true);
       assert.equal(await putSettingsIfUnchanged(store, U, { perpsMaxLeverage: 5 }, second.version), false);
       assert.deepEqual(await store.get(U), { perpsMaxLeverage: 2 });
+    });
+
+    await t.test("an explicit kill revision is created even without prior grant settings", async()=>{
+      const store=new PgSettingsStore(scopedUrl,"perps");
+      const U="0x00000000000000000000000000000000000000c2" as const;
+      assert.equal((await store.getVersioned(U)).version,null);
+      assert.equal(await disablePaperPerpsForKill(U,store,true),"none");
+      assert.deepEqual(withoutNonce(await store.get(U)),{perpsEnabled:false});
+      assert.equal(await store.putIfUnchanged(U,{perpsEnabled:true},null),false);
     });
 
     await t.test("the Spot wallet's store refuses: perps live only in the Perps wallet's settings", async () => {

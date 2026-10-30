@@ -183,3 +183,16 @@ it("a Privy Spot resume still matches its server view after perps slice 5b, and 
   assert.equal(sameGrantPermission(spotView, { ...grant, purpose: "perps" }), false);
   assert.equal(sameGrantPermission({ ...spotView, purpose: "solana" } as never, grant), false);
 });
+
+
+it("a changed UI authority while the fresh Privy token awaits prevents the handoff", async () => {
+  let tokenStarted!: () => void, finishToken!: (token: string) => void;
+  const started = new Promise<void>(resolve => { tokenStarted = resolve; });
+  setPrivyTokenSource(() => { tokenStarted(); return new Promise(resolve => { finishToken = resolve; }); });
+  let current = true;
+  const pending = retryGrantHandoff(grant, proof(), () => { if (!current) throw new Error("screen closed"); });
+  await started; current = false; finishToken("late-token");
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.deepEqual(requests.map(request => request.url), ["/api/auth/challenge"], "the delayed token cannot release a grant POST");
+});

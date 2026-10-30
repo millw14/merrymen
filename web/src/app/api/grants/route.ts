@@ -61,6 +61,8 @@ import { readPerpsWallets } from "../../../../../worker/src/perps-wallets";
 import { resolveConfig } from "../../../../../worker/src/settings";
 import { errorText } from "../../../../../worker/src/redact-urls";
 import { withLocalStateLock } from "../../../../../worker/src/local-state-lock";
+import { readLocalPerpsBinding, clearLocalPerpsBinding } from "../../../../../worker/src/local-perps-binding";
+import { perpsPaperAdmissionRefusal } from "@/lib/perps-paper-admission";
 import { workerStale as workerStaleOf } from "@/terminal/worker-stale";
 
 const DATA_DIR = merrymenHome();
@@ -128,6 +130,8 @@ export interface AgentStatus {
    * never `stored` (storedGrantOwner).
    */
   stored?: true;
+  /** Local pending renewal: verified public owner identity, without a signing grant. */
+  storedOwner?: `0x${string}`;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
   /** Decimal strings as read from the chain; null for any read that failed. */
   balances?: GrantBalances;
@@ -321,6 +325,10 @@ export async function POST(req: Request) {
   // already holds one still sees it (GET) and stops it (every kill); a gate
   // that switches a capability off never stands between an owner and that.
   if (wallet === "perps" && !perpsCreationAllowed()) return perpsWalletNotOffered("Nothing was saved.");
+  if (wallet === "perps") {
+    const refused = perpsPaperAdmissionRefusal(req, isHostedMode());
+    if (refused) return refused;
+  }
   // ROBINHOOD CHAIN MAINNET ONLY. The Perps wallet exists for Lighter, which
   // has no test network, and the testnet chain id would derive (and later be
   // killed and recovered) somewhere no Perps worker ever runs. Pure, before
@@ -672,6 +680,12 @@ export async function POST(req: Request) {
 }
 
 async function saveSelfHostedGrant(grant: StoredGrant, wallet: GrantPurpose): Promise<NextResponse> {
+  if (wallet === "perps") {
+    const pending = readLocalPerpsBinding();
+    if (pending && (pending.owner !== String(grant.owner).toLowerCase() || pending.smartAccount !== grant.smartAccount.toLowerCase() || pending.chainId !== grant.chainId)) {
+      return NextResponse.json({ error: "The Perps wallet awaiting replacement changed. Restore its permission or Kill all agents before choosing another wallet.", ownerFacing: true }, { status: 409 });
+    }
+  }
   // THE OTHER WALLET'S grant.json, held to the store's rules: the same owner
   // key, a different account, no perpetuals left on Spot. An install with no
   // Perps wallet reads nothing here and is exactly what it was.
@@ -697,7 +711,8 @@ async function saveSelfHostedGrant(grant: StoredGrant, wallet: GrantPurpose): Pr
   // kill switch (syncGrant). And it is fsynced before the rename: self-hosted
   // this file is the only copy of the new owner key, and a crash after a
   // truncate-then-write could leave it empty.
-  await writeFileAtomic(localGrantFile(wallet), JSON.stringify(grant, null, 2), 0o600);
+  await writeFileAtomic(localGrantFile(wallet), JSON.stringify(grant, null, 2), 0o600, { durable: true });
+  if (wallet === "perps") clearLocalPerpsBinding();
   return NextResponse.json({ ok: true });
 }
 
@@ -807,11 +822,14 @@ async function otherLocalWalletRefusal(grant: StoredGrant, wallet: GrantPurpose)
     { error: `Your ${otherWallet} wallet's permission could not be read, so this one could not be checked against it and was not saved. Your ${otherWallet} wallet was not changed.`, ownerFacing: true },
     { status: 503 },
   );
-  let other: StoredGrant;
+  let other: Pick<StoredGrant, "purpose" | "owner" | "smartAccount" | "perp" | "grantFeatures"> | null;
   try {
     other = JSON.parse((await readFile(localGrantFile(otherWallet), "utf8")).replace(/^\ufeff/, "")) as StoredGrant;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "ENOENT" ? null : unreadable;
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") return unreadable;
+    if (otherWallet !== "perps") return null;
+    try { other = readLocalPerpsBinding(); } catch { return unreadable; }
+    if (!other) return null;
   }
   try {
     if (grantPurpose(other) !== otherWallet) return unreadable;
@@ -887,6 +905,10 @@ export async function DELETE(req: Request) {
       // the store is asked anything. The kill (delete-agent, below) is not a
       // renewal and stays reachable whatever the lever says.
       if (wallet === "perps" && !perpsCreationAllowed()) return perpsRenewalNotOffered();
+      if (wallet === "perps") {
+        const refused = perpsPaperAdmissionRefusal(req, isHostedMode());
+        if (refused) return refused;
+      }
       if (!isAddr(body.expectedAccount) || (body.expectedSession !== undefined && !isAddr(body.expectedSession))) {
         return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
       }
@@ -918,14 +940,22 @@ export async function DELETE(req: Request) {
   // the wallet is judged: a renewal may name its wallet, as it may hosted, and
   // only a kill that names one is refused.
   let renewal = false;
+  let replacement: { expectedAccount?: unknown; expectedSession?: unknown } | null = null;
   try {
     const text = await readGrantBody(req, GRANT_DELETE_BODY_MAX_BYTES);
-    renewal = text !== null && (JSON.parse(text) as { purpose?: unknown } | null)?.purpose === "permission-replacement";
+    const parsed = text === null ? null : JSON.parse(text) as { purpose?: unknown; expectedAccount?: unknown; expectedSession?: unknown } | null;
+    renewal = parsed?.purpose === "permission-replacement";
+    replacement = parsed;
   } catch { /* a kill */ }
   if (walletNamed && !renewal) return killNamesWallet();
   // As hosted: the stop that begins a Perps renewal is refused with the renewal
   // while perps is not paper, before grant.json is archived or removed.
-  if (renewal && wallet === "perps") return perpsCreationAllowed() ? selfHostedPerpsRenewalStop() : perpsRenewalNotOffered();
+  if (renewal && wallet === "perps") {
+    if (!perpsCreationAllowed()) return perpsRenewalNotOffered();
+    const refused = perpsPaperAdmissionRefusal(req, false); if (refused) return refused;
+    if (!isAddr(replacement?.expectedAccount) || !isAddr(replacement?.expectedSession)) return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
+    return selfHostedPerpsRenewalStop(replacement.expectedAccount, replacement.expectedSession);
+  }
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
   // The local Solana strategy and the local Perps wallet are stopped first, whatever happens to
@@ -972,16 +1002,14 @@ function perpsRenewalNotOffered(): NextResponse {
  * Spot wallet's, or Solana's, is touched. The new Perps grant is posted straight
  * after (POST ?wallet=perps), which archives nothing more: this already kept it.
  */
-async function selfHostedPerpsRenewalStop(): Promise<NextResponse> {
-  // The grant alone: a renewal keeps the wallet trading, so its paper strategy stays as the owner set it.
-  const perps = await perpsHalf(() => stopLocalPerpsGrantForRenewal());
-  if (perps.state === "not-stopped") {
-    return NextResponse.json(
-      { error: `Your Perps wallet's permission could not be stopped for renewal.${perps.why ? ` ${perps.why}` : ""} Nothing else was changed; try again.`, ownerFacing: true },
-      { status: 503 },
-    );
+async function selfHostedPerpsRenewalStop(expectedAccount: string, expectedSession: string): Promise<NextResponse> {
+  try {
+    const state = await stopLocalPerpsGrantForRenewal(expectedAccount, expectedSession);
+    if (state === "changed") return NextResponse.json({ error: "Your permission changed in another tab. Reload your wallet before replacing it." }, { status: 409 });
+    return NextResponse.json({ ok: true, replacement: true, state: state === "stopped" ? "stopped" : "absent" });
+  } catch {
+    return NextResponse.json({ error: "Your Perps wallet's permission could not be stopped for renewal. Nothing else was changed; try again.", ownerFacing: true }, { status: 503 });
   }
-  return NextResponse.json({ ok: true, replacement: true, state: perps.state === "stopped" ? "stopped" : "absent" });
 }
 
 /** "Kill all agents" stops every wallet; a kill naming one is a client that means something else. */
@@ -1112,19 +1140,29 @@ export async function GET(req: Request) {
     if (!g) return statusResponse({ exists: false, tenant: hostedTenant });
     grant = g;
   } else {
+    const readLocal = async (): Promise<{ grant: StoredGrant } | { response: NextResponse }> => {
+      try {
+        const text = await readFile(localGrantFile(wallet), "utf8");
+        return { grant: JSON.parse(wallet === "perps" ? text.replace(/^\ufeff/, "") : text) as StoredGrant };
+      } catch (e) {
+        if (wallet === "perps") {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") return { response: perpsUnread() };
+          const pending = readLocalPerpsBinding();
+          if (pending) return { response: statusResponse({ exists: false, stored: true, storedOwner: pending.owner }) };
+        }
+        return { response: statusResponse({ exists: false }) };
+      }
+    };
+    // Grant installation and clearing its retained identity are one writer
+    // transition. Observe both under the same lock, or a reader can miss both.
+    // Chain and ledger reads below run after this short file-only lock releases.
     try {
-      // A Perps file is read as the POST reads it (otherLocalWalletRefusal):
-      // a leading BOM stripped, and only a file that is not there is "no
-      // Perps wallet". One there that cannot be read or parsed is "could not
-      // read", as hosted: the Wallet screen's restore asks this before it
-      // stops anything, and the POST refuses that file after the stop.
-      const text = await readFile(localGrantFile(wallet), "utf8");
-      grant = JSON.parse(wallet === "perps" ? text.replace(/^\ufeff/, "") : text) as StoredGrant;
-    } catch (e) {
-      if (wallet === "perps" && (e as NodeJS.ErrnoException).code !== "ENOENT") return perpsUnread();
-      return statusResponse({ exists: false });
-    }
+      const local = wallet === "perps" ? await withLocalStateLock(DATA_DIR, readLocal) : await readLocal();
+      if ("response" in local) return local.response;
+      grant = local.grant;
+    } catch { return perpsUnread(); }
   }
+
   // A PERPS ANSWER IS ABOUT A PERPS GRANT. The store refuses to hand out the
   // other wallet's record; a self-hosted file is checked here, so a grant.json
   // in the Perps home that names Spot (or nothing it knows) is never shown as

@@ -48,7 +48,10 @@ let home: string;
 const reset = (query: string, tenant?: `0x${string}`) =>
   POST(new Request(`https://app.example.test/api/paper-reset${query}`, {
     method: "POST",
-    ...(tenant ? { headers: { cookie: `mm_session=${mintSession(tenant)}` } } : {}),
+    headers: { "content-type": "application/json", ...(tenant ? { cookie: `mm_session=${mintSession(tenant)}` } : {}) },
+    ...(new URLSearchParams(query).get("wallet") === "perps"
+      ? { body: JSON.stringify({ expectedAccount: PERPS, ...(tenant ? { expectedTenant: tenant } : {}) }) }
+      : {}),
   }));
 const filesIn = (h: string) => (existsSync(commandDir(h)) ? readdirSync(commandDir(h)) : []);
 
@@ -73,6 +76,21 @@ after(() => {
 });
 
 describe("self-hosted: each wallet's reset lands in its own home", () => {
+  it("a Perps reset without the reviewed account, or for another account, queues nothing", async () => {
+    mkdirSync(purposeHome("perps"), { recursive: true });
+    writeFileSync(path.join(purposeHome("perps"), "grant.json"), JSON.stringify({ smartAccount: PERPS, purpose: "perps" }));
+    for (const body of [undefined, {}, { expectedAccount: SPOT }]) {
+      const res = await POST(new Request("https://app.example.test/api/paper-reset?wallet=perps", {
+        method: "POST", headers: { "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }));
+      assert.equal(res.status, 409);
+      assert.match(((await res.json()) as { error: string }).error, /account being reset changed or was not identified/);
+      assert.deepEqual(filesIn(home), []);
+      assert.deepEqual(filesIn(purposeHome("perps")), []);
+    }
+  });
+
   it("a misspelled wallet key cannot queue a reset for the other wallet", async () => {
     mkdirSync(purposeHome("perps"), { recursive: true });
     writeFileSync(path.join(purposeHome("perps"), "grant.json"), JSON.stringify({ smartAccount: PERPS, purpose: "perps" }));
@@ -212,6 +230,19 @@ describe("hosted: the account is resolved in the Perps wallet, never the Spot on
   const B = `0x${"bb".repeat(20)}` as const;
   const grantOf = (smartAccount: string, extra: object = {}) =>
     ({ smartAccount, chainId: 4663, serialized: "not-a-permission-account", demoSessionPrivateKey: "0x" + "11".repeat(32), ...extra }) as unknown as StoredGrant;
+
+  it("a hosted Perps reset refuses a missing or changed confirming owner and account before queue access", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    await getGrantStore("perps").put(A, grantOf(PERPS, { purpose: "perps", owner: A }));
+    for (const body of [{ expectedAccount: PERPS }, { expectedAccount: PERPS, expectedTenant: B }, { expectedAccount: SPOT, expectedTenant: A }]) {
+      const res = await POST(new Request("https://app.example.test/api/paper-reset?wallet=perps", {
+        method: "POST", headers: { "content-type": "application/json", cookie: `mm_session=${mintSession(A)}` },
+        body: JSON.stringify(body),
+      }));
+      assert.equal(res.status, 409);
+      assert.match(((await res.json()) as { error: string }).error, /account being reset changed or was not identified/);
+    }
+  });
 
   it("a login with only a Spot grant has no Perps reset to queue (401); one with a Perps grant reaches the queue", async () => {
     process.env.MERRYMEN_HOSTED = "1";

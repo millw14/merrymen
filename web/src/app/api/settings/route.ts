@@ -67,6 +67,8 @@ import {
 import { perpsOffered } from "@/lib/perps-enabled";
 import { NO_STORE_HEADERS, walletUnknown } from "@/lib/route-guard";
 import { readWalletParam } from "@/lib/wallet-param";
+import { perpsSettingsVersion } from "@/lib/perps-settings-version";
+import { perpsPaperTenantAllowed } from "../../../../../packages/core/src/perps-paper-admission";
 
 export const dynamic = "force-dynamic";
 
@@ -79,6 +81,8 @@ export interface SecretView {
 }
 
 export interface SettingsView {
+  /** Opaque Perps revision, required when turning paper entries on. */
+  version?: string;
   // secrets, masked
   bundlerApiKey: SecretView;
   groqApiKey: SecretView;
@@ -1174,6 +1178,7 @@ async function perpsSettingsView(req: Request): Promise<NextResponse> {
   const hosted = isHostedMode();
   const tenant = hosted ? tenantOf(req) : null;
   let stored: MerrymenSettings = {};
+  let version: string | null = null;
   if (!hosted || tenant) {
     const read = await readPerpsStoredStrict(tenant);
     if (!read.ok) {
@@ -1183,12 +1188,17 @@ async function perpsSettingsView(req: Request): Promise<NextResponse> {
       );
     }
     stored = read.settings;
+    version = read.version;
   }
   const { secrets, values } = splitSecrets(stored);
+  // The public revision is opaque. The worker-managed kill generation is
+  // retained in storage for CAS, but is never an owner-editable setting.
+  const { perpsControlNonce: _controlNonce, ...publicValues } = values;
   const view: SettingsView = {
     ...secrets,
+    version: perpsSettingsVersion(version, tenant),
     values: {
-      ...values,
+      ...publicValues,
       bundlerUrl: redactUrl(values.bundlerUrl),
       rpcMainnet: redactUrl(values.rpcMainnet),
       rpcTestnet: redactUrl(values.rpcTestnet),
@@ -1223,6 +1233,7 @@ async function putPerps(req: Request, raw: unknown): Promise<NextResponse> {
   delete body.owner;
   delete body.moveBot;
   delete body.perpsLiveConsentAt;
+  delete body.perpsControlNonce;
 
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
@@ -1257,6 +1268,8 @@ const PERPS_SAVE_RACED = Symbol("perps-save-raced");
  * nothing was written, and the body is judged again from a fresh read.
  */
 async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${string}` | null): Promise<NextResponse> {
+  const expectedVersion = body.expectedVersion;
+  delete body.expectedVersion;
   // Whether practice perps were on in this save's FIRST read: an off that
   // lands after it is one this body was never judged against (see
   // judgePerpsSave). One already stored at that read is not caught here; the
@@ -1265,7 +1278,7 @@ async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${str
   for (let attempt = 0; attempt < PERPS_SAVE_ATTEMPTS; attempt++) {
     const read = await readPerpsStoredStrict(tenant);
     if (read.ok && firstSawOn === null) firstSawOn = read.settings.perpsEnabled === true;
-    const answer = await judgePerpsSave(body, tenant, read, firstSawOn === true);
+    const answer = await judgePerpsSave(body, tenant, read, firstSawOn === true, expectedVersion);
     if (answer !== PERPS_SAVE_RACED) return answer;
   }
   return NextResponse.json(
@@ -1285,6 +1298,7 @@ async function judgePerpsSave(
   tenant: `0x${string}` | null,
   read: PerpsStoredRead,
   firstSawOn: boolean,
+  expectedVersion: unknown,
 ): Promise<NextResponse | typeof PERPS_SAVE_RACED> {
   if (!read.ok) {
     // Before any field is judged: nothing here can be saved without throwing
@@ -1299,6 +1313,8 @@ async function judgePerpsSave(
   const stored = read.settings;
   const next: MerrymenSettings = { ...stored, strategy: PERPS_ONLY };
   const errors: string[] = [];
+  const staleEnable = body.perpsEnabled === true && expectedVersion !== perpsSettingsVersion(read.version, tenant);
+  const pilotRefused = tenant !== null && body.perpsEnabled === true && !perpsPaperTenantAllowed(tenant);
   const touched = new Set<string>();
   const setOrClear = <K extends keyof MerrymenSettings>(key: K, value: MerrymenSettings[K] | undefined) => {
     touched.add(key as string);
@@ -1337,9 +1353,11 @@ async function judgePerpsSave(
       // AN OFF THAT LANDED AFTER THIS SAVE FIRST READ — a kill, or another
       // device — is never undone by it: this body was judged against perps
       // on. (One stored before that read is not seen here; see the header.)
-      if (firstSawOn && stored.perpsEnabled !== true) {
+      if (pilotRefused) {
+        errors.push("perpsEnabled: paper Perps is currently limited to invited internal accounts");
+      } else if (staleEnable || (firstSawOn && stored.perpsEnabled !== true)) {
         errors.push(
-          "perpsEnabled: practice perpetuals were switched off while this save was on its way (a kill, or another device), so it did not switch them back on. Reload, and switch them on again if you mean to",
+          "perpsEnabled: the settings changed or this page has no current revision. Reload and explicitly switch practice perpetuals on again if you mean to. A delayed save cannot undo a kill",
         );
       } else setOrClear("perpsEnabled", true);
     } else errors.push("perpsEnabled: must be true or false");
@@ -1614,13 +1632,13 @@ async function judgePerpsSave(
   }
 
   if (errors.length > 0) {
-    if (offs.length === 0) return NextResponse.json({ errors }, { status: 400 });
+    if (offs.length === 0) return NextResponse.json({ errors }, { status: pilotRefused ? 403 : staleEnable ? 409 : 400 });
     const wrote = await saveOffs();
     if (wrote === "raced") return PERPS_SAVE_RACED;
     if (wrote === "failed") return notSaved();
     return NextResponse.json(
       { errors, saved: wrote.saved, note: `Switched off (${wrote.saved.join(", ")}) — that was saved. Nothing else in this save was, because of the errors above.` },
-      { status: 400 },
+      { status: pilotRefused ? 403 : staleEnable ? 409 : 400 },
     );
   }
 

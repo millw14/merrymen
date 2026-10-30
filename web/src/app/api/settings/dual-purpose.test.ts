@@ -34,7 +34,7 @@ import { readBotClaims } from "../../../../../worker/src/telegram-claims";
 
 const OWNER = `0x${"aa".repeat(20)}` as const;
 const OTHER = `0x${"bb".repeat(20)}` as const;
-const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_PERPS"] as const;
+const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_PERPS", "MERRYMEN_PERPS_PAPER_TENANTS"] as const;
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 const realFetch = globalThis.fetch;
 const getMeAsked: string[] = [];
@@ -51,6 +51,12 @@ function request(query: string, body?: object, tenant: `0x${string}` | null = OW
   });
 }
 const json = async (r: Response) => (await r.json()) as Record<string, unknown> & { errors?: string[]; ignored?: string[]; saved?: string[]; code?: string };
+
+async function currentVersion(tenant: `0x${string}` | null = OWNER): Promise<string> {
+  const view = await json(await GET(request("?wallet=perps", undefined, tenant)));
+  assert.equal(typeof view.version, "string");
+  return view.version as string;
+}
 
 before(async () => {
   home = mkdtempSync(path.join(tmpdir(), "mm-dual-settings-"));
@@ -71,6 +77,7 @@ before(async () => {
 beforeEach(() => {
   process.env.MERRYMEN_HOSTED = "1";
   process.env.MERRYMEN_PERPS = "paper";
+  process.env.MERRYMEN_PERPS_PAPER_TENANTS = `${OWNER},${OTHER}`;
   resetSettingsStoreForTest();
   for (const d of ["tenant-settings", "tenant-settings-perps", "accounts"]) rmSync(path.join(home, d), { recursive: true, force: true });
   rmSync(path.join(home, "settings.json"), { force: true });
@@ -89,7 +96,7 @@ after(() => {
 describe("each wallet keeps its own settings", () => {
   it("one session saves independent limits, and a Perps save cannot set a Spot strategy", async () => {
     assert.equal((await PUT(request("", { owner: OWNER, strategy: "trencher", slippageBps: 150 }))).status, 200);
-    assert.equal((await PUT(request("?wallet=perps", { owner: OWNER, perpsMaxCollateralUsdg: 20, perpsEnabled: true }))).status, 200);
+    assert.equal((await PUT(request("?wallet=perps", { owner: OWNER, expectedVersion: await currentVersion(), perpsMaxCollateralUsdg: 20, perpsEnabled: true }))).status, 200);
     assert.equal((await getSettingsStore("spot").get(OWNER))?.strategy, "trencher");
     assert.equal((await getSettingsStore("spot").get(OWNER))?.perpsMaxCollateralUsdg, undefined, "the Perps wallet's number never lands on Spot");
     assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsMaxCollateralUsdg, 20);
@@ -144,7 +151,7 @@ describe("each wallet keeps its own settings", () => {
     assert.equal((await PUT(request("", { strategy: "steady-basket", slippageBps: 120 }, null))).status, 200);
     const spotFile = path.join(home, "settings.json");
     const before = readFileSync(spotFile, "utf8");
-    assert.equal((await PUT(request("?wallet=perps", { perpsMaxCollateralUsdg: 25, perpsEnabled: true }, null))).status, 200);
+    assert.equal((await PUT(request("?wallet=perps", { expectedVersion: await currentVersion(null), perpsMaxCollateralUsdg: 25, perpsEnabled: true }, null))).status, 200);
     assert.equal(readFileSync(spotFile, "utf8"), before);
     const perpsFile = path.join(home, "accounts", "perps", "settings.json");
     assert.deepEqual(JSON.parse(readFileSync(perpsFile, "utf8")), { strategy: "perps-only", perpsMaxCollateralUsdg: 25, perpsEnabled: true });
@@ -180,11 +187,11 @@ describe("a Perps save never touches the Spot wallet's bot claim", () => {
     // A Perps save with no token: run through Spot's claims it would settle
     // the login's claims to the token THIS store holds — none — and release
     // the bot for another account to take.
-    const plain = await PUT(request("?wallet=perps", { owner: OWNER, perpsEnabled: true, perpsMaxLeverage: 3 }));
+    const plain = await PUT(request("?wallet=perps", { owner: OWNER, expectedVersion: await currentVersion(), perpsEnabled: true, perpsMaxLeverage: 3 }));
     assert.equal(plain.status, 200, JSON.stringify(await json(plain.clone())));
     assert.deepEqual(await held(), { "111": OWNER }, "the Spot bot is still this login's");
     // A Perps save that carries a token: reported, never stored, never claimed, never asked about.
-    const token = await PUT(request("?wallet=perps", { owner: OWNER, telegramBotToken: "222:BBB-other-secret", moveBot: true, perpsEnabled: true }));
+    const token = await PUT(request("?wallet=perps", { owner: OWNER, expectedVersion: await currentVersion(), telegramBotToken: "222:BBB-other-secret", moveBot: true, perpsEnabled: true }));
     assert.equal(token.status, 200);
     assert.deepEqual((await json(token)).ignored, ["telegramBotToken"]);
     assert.deepEqual(await held(), { "111": OWNER }, "bot 222 was not claimed");
@@ -240,7 +247,7 @@ describe("a hosted Perps save takes the login's save lock", () => {
     });
     await inside;
     let answered = false;
-    const perpsSave = PUT(request("?wallet=perps", { owner: OWNER, perpsEnabled: true, perpsMaxLeverage: 3 })).finally(() => {
+    const perpsSave = PUT(request("?wallet=perps", { owner: OWNER, expectedVersion: await currentVersion(), perpsEnabled: true, perpsMaxLeverage: 3 })).finally(() => {
       answered = true;
     });
     await until("the Perps save waiting for the login's lock", () => {
@@ -249,7 +256,7 @@ describe("a hosted Perps save takes the login's save lock", () => {
     });
     assert.equal(await getSettingsStore("perps").get(OWNER), null, "nothing written while another save has the turn");
     // The lock is the login's: another login's Perps save goes straight through.
-    const other = await PUT(request("?wallet=perps", { owner: OTHER, perpsEnabled: true }, OTHER));
+    const other = await PUT(request("?wallet=perps", { owner: OTHER, expectedVersion: await currentVersion(OTHER), perpsEnabled: true }, OTHER));
     assert.equal(other.status, 200, JSON.stringify(await json(other.clone())));
     assert.equal(answered, false, "and this login's is still waiting");
     release();
@@ -319,5 +326,37 @@ describe("where Perps are not offered, a Perps save may only turn things off (D1
     assert.equal((await PUT(request("?wallet=perps", { perpsEnabled: true }, null))).status, 403);
     assert.equal(JSON.parse(readFileSync(perpsFile, "utf8")).perpsEnabled, false);
     assert.equal((await GET(request("?wallet=perps", undefined, null))).status, 200);
+  });
+});
+
+
+describe("paper entry activation requires current owner revision and pilot admission", () => {
+  it("refuses missing, foreign and stale revisions without writing risk fields", async () => {
+    const before = await currentVersion();
+    assert.match(before, /^[a-f0-9]{64}$/);
+    for (const expectedVersion of [undefined, null, "guessed", await currentVersion(OTHER)]) {
+      const res = await PUT(request("?wallet=perps", {owner: OWNER, perpsEnabled: true, expectedVersion, perpsMaxLeverage: 3}));
+      assert.equal(res.status,409);assert.equal(await getSettingsStore("perps").get(OWNER),null);
+    }
+    await getSettingsStore("perps").put(OWNER,{perpsEnabled:false,perpsMaxLeverage:2});
+    assert.equal((await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:true,expectedVersion:before}))).status,409);
+    const fresh=await currentVersion();
+    assert.equal((await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:true,expectedVersion:fresh}))).status,200);
+    assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsEnabled,true);
+  });
+  it("a current revision cannot bypass an absent or malformed pilot list, but off remains available", async () => {
+    await getSettingsStore("perps").put(OWNER,{perpsEnabled:false});
+    for(const list of [undefined,OTHER,`${OWNER},bad`]) {
+      if(list===undefined) delete process.env.MERRYMEN_PERPS_PAPER_TENANTS; else process.env.MERRYMEN_PERPS_PAPER_TENANTS=list;
+      const res=await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:true,expectedVersion:await currentVersion()}));
+      assert.equal(res.status,403);assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsEnabled,false);
+      assert.equal((await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:false}))).status,200);
+    }
+  });
+  it("the worker control nonce cannot be supplied or cleared by an owner save", async()=>{
+    await getSettingsStore("perps").put(OWNER,{perpsEnabled:false,perpsControlNonce:"server-generation"});
+    const res=await PUT(request("?wallet=perps",{owner:OWNER,perpsMaxLeverage:3,perpsControlNonce:"forged"}));
+    assert.equal(res.status,200);assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsControlNonce,"server-generation");
+    const out=await json(await GET(request("?wallet=perps")));assert.ok(!JSON.stringify(out).includes("server-generation"));
   });
 });

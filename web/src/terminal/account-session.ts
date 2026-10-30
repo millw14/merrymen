@@ -1,6 +1,8 @@
 import type { AccountState } from "./HostedControls";
 import type { ReadState } from "./live";
 import { requestJson } from "./request-json";
+import { walletUrl } from "../lib/wallet-param";
+import type { GrantPurpose } from "@merrymen/core";
 
 type Session = AccountState["session"];
 type Status = AccountState["status"];
@@ -91,10 +93,10 @@ export async function readAccountForSession(
 }
 
 /** The HTTP form of the tenant-bound account read, shared by account screens. */
-export function fetchAccountForSession(previous: Session | null) {
+export function fetchAccountForSession(previous: Session | null, wallet: GrantPurpose = "spot") {
   return readAccountForSession(
     previous,
     () => requestJson<Session>("/api/auth/session"),
-    () => requestJson<Status>("/api/grants"),
+    () => requestJson<Status>(walletUrl("/api/grants", wallet)),
   );
 }

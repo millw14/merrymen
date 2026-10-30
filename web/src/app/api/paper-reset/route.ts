@@ -68,6 +68,12 @@ import { queuePaperReset } from "@/lib/start-over";
 import { perpsStoodDownBook, perpsWalletRefused, perpsWorkersRun } from "@/lib/perps-enabled";
 import { walletUnknown } from "@/lib/route-guard";
 import { readWalletParam } from "@/lib/wallet-param";
+import { tenantOf } from "@/lib/auth";
+import { purposeHome } from "@merrymen/home";
+import { readCommandState } from "../../../../../worker/src/command-files";
+import { withReadDb } from "@/lib/ledger";
+import { LEDGER_UNREADABLE, readHostedOrder, selfHostedOrderReply } from "@/lib/order-state";
+import { readBounded } from "../../../../../worker/src/bounded-read";
 
 export const dynamic = "force-dynamic";
 
@@ -88,8 +94,44 @@ export async function POST(req: Request) {
   const agent = await agentFor(req, wallet);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
   const hosted = isHostedMode();
+  if (wallet === "perps") {
+    // The account shown when the owner confirmed must still be the one this
+    // session resolves. A delayed tab may never reset a different book.
+    const read = await readBounded(req, 2_048).catch(() => null);
+    if (read && !read.ok) return NextResponse.json({ error: "Reset request is too large." }, { status: 413 });
+    let body: { expectedAccount?: unknown; expectedTenant?: unknown } | null = null;
+    try { body = JSON.parse(read?.ok ? read.text : ""); } catch { /* refused below */ }
+    if (typeof body?.expectedAccount !== "string" || body.expectedAccount.toLowerCase() !== agent.toLowerCase()
+        || (hosted && (typeof body.expectedTenant !== "string" || body.expectedTenant.toLowerCase() !== tenantOf(req)?.toLowerCase()))) {
+      return NextResponse.json({ error: "The account being reset changed or was not identified. Reload the Perps desk and confirm again. Nothing was reset." }, { status: 409 });
+    }
+  }
   const deadline = wallet === "perps" ? { expiresAt: Date.now() + (await orderTtlFor(req, hosted, wallet)) } : {};
   const queued = await queuePaperReset(hosted, agent, wallet, deadline);
   if (!queued.ok) return NextResponse.json({ error: queued.error }, { status: queued.status ?? 503 });
   return NextResponse.json({ id: queued.id, queued: true, ...(queued.expiresAt !== undefined ? { expiresAt: queued.expiresAt } : {}) });
+}
+
+/** Read only the exact reset and account reviewed by this owner. Never infer a
+ * reset from an order, a missing file, or a legacy result without its scope. */
+export async function GET(req: Request) {
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was read.");
+  const headers = { "Cache-Control": "private, no-store" };
+  if (wallet !== "perps" || !perpsWorkersRun()) return NextResponse.json({ error: "Not found" }, { status: 404, headers });
+  const params = new URL(req.url).searchParams;
+  const id = params.get("id");
+  if (params.getAll("id").length !== 1 || !id || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return NextResponse.json({ error: "Identify the reset command to read." }, { status: 400, headers });
+  const agent = await agentFor(req, wallet);
+  if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401, headers });
+  const expected = params.get("expectedAccount");
+  const owner = params.get("owner");
+  const hosted = isHostedMode();
+  if (params.getAll("expectedAccount").length !== 1 || expected?.toLowerCase() !== agent.toLowerCase()
+      || hosted && (params.getAll("owner").length !== 1 || !owner || owner.toLowerCase() !== tenantOf(req)?.toLowerCase())) {
+    return NextResponse.json({ error: "The account being read changed or was not identified. Reload before checking this reset." }, { status: 409, headers });
+  }
+  if (!hosted) return NextResponse.json(selfHostedOrderReply(id, readCommandState(purposeHome(wallet), id, { kind: "paper-reset", account: agent }), Date.now()), { headers });
+  const reply = await withReadDb(db => readHostedOrder(db, agent, id, Date.now(), "paper-reset"), wallet).catch(() => LEDGER_UNREADABLE);
+  return NextResponse.json(reply.body, { status: reply.status, headers });
 }

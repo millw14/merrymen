@@ -318,7 +318,7 @@ describe("each wallet's slot and ceiling are its own", () => {
   });
 
   it("A PRACTICE RESET QUEUED IS NOT AN ORDER WAITING: a Close and a Close all asked after it are queued, as hosted queues them (order-state.ts placeSelfHostedOrder)", async () => {
-    const reset = await paperReset(new Request("https://app.example.test/api/paper-reset?wallet=perps", { method: "POST" }));
+    const reset = await paperReset(req("paper-reset?wallet=perps", { expectedAccount: PERPS }));
     assert.equal(reset.status, 200, JSON.stringify(await reset.clone().json()));
     assert.deepEqual(openCommands(purposeHome("perps")).map((c) => c.kind), ["paper-reset"]);
     const close = await POST(req("orders?wallet=perps", reviewed(CLOSE)));
@@ -331,7 +331,7 @@ describe("each wallet's slot and ceiling are its own", () => {
   });
 
   it("A PRACTICE RESET CLAIMED AND NEVER ANSWERED (its run threw) holds no slot either; a claimed order still does", async () => {
-    assert.equal((await paperReset(new Request("https://app.example.test/api/paper-reset?wallet=perps", { method: "POST" }))).status, 200);
+    assert.equal((await paperReset(req("paper-reset?wallet=perps", { expectedAccount: PERPS }))).status, 200);
     // The worker claims it, marks it running, and its run throws: no answer is written, and the marker stays.
     await assert.rejects(runTickCommand(purposeHome("perps"), {
       now: Date.now,

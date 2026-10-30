@@ -124,7 +124,12 @@ describe("hosted, a Perps practice reset and the book the orchestrator holds", {
   });
 
   const reset = async (query: string) => {
-    const res = await route.POST(new Request(`https://app.example.test/api/paper-reset${query}`, { method: "POST", headers: { cookie } }));
+    const res = await route.POST(new Request(`https://app.example.test/api/paper-reset${query}`, {
+      method: "POST", headers: { cookie, "content-type": "application/json" },
+      ...(new URLSearchParams(query).get("wallet") === "perps"
+        ? { body: JSON.stringify({ expectedAccount: PERPS, expectedTenant: TENANT }) }
+        : {}),
+    }));
     return { status: res.status, body: (await res.json()) as { id?: string; queued?: boolean; expiresAt?: number; error?: string } };
   };
   const rows = async () =>

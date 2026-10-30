@@ -90,16 +90,16 @@ function tempPathFor(target: string): string {
 }
 
 export interface AtomicWriteOptions {
+  /** Queue entries are replaced as entries, never followed to a symlink target. Settings default to following owner-configured links. */
+  followSymlinks?: boolean;
   /**
    * DURABLE, not just atomic: the file must survive a power loss once this
    * returns, or this must throw. A failed fsync is then an error (unless the
    * filesystem simply does not do fsync), and the directory is synced after the
    * rename — a renamed entry is not on disk until its directory is.
    *
-   * For a file whose loss cannot be undone: the grant archive, the only copy
-   * of an owner key once grant.json is replaced or removed. Everything else
-   * here is rewritten from its source on the next pass, and is not worth a
-   * second fsync per write.
+   * Use for state whose loss cannot be reconstructed safely: grant archives,
+   * command receipts and kill requests. Rebuildable snapshots may omit it.
    */
   durable?: boolean;
 }
@@ -195,7 +195,8 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600, op
   // THROUGH A SYMLINK, NOT OVER IT. writeFileSync followed a link to the file
   // it names; rename would replace the link itself with a regular file, and a
   // self-hosted owner who keeps settings.json elsewhere would lose the link.
-  const target = writeTarget(file);
+  const target = opts.followSymlinks === false
+    ? path.join(realpathSync(path.dirname(file)), path.basename(file)) : writeTarget(file);
   const tmp = tempPathFor(target);
   let fd: number | null = null;
   let created = false;
@@ -251,7 +252,8 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600, op
  */
 export async function writeFileAtomic(file: string, data: string, mode = 0o600, opts: AtomicWriteOptions = {}): Promise<void> {
   // Through a symlink, not over it — see writeFileAtomicSync.
-  const target = await writeTargetAsync(file);
+  const target = opts.followSymlinks === false
+    ? path.join(await realpath(path.dirname(file)), path.basename(file)) : await writeTargetAsync(file);
   const tmp = tempPathFor(target);
   let fh: FileHandle | null = null;
   let created = false;

@@ -24,13 +24,10 @@
  * A save that names `perpsEnabled: true` over an off that landed under it is
  * refused; one that never names it keeps the kill's off.
  *
- * WHAT THIS DOES NOT COVER. An off already stored when the save first reads
- * (a kill that finished while the request was still in flight) is not one the
- * server can tell from an owner switching practice perps on after the kill:
- * the body says nothing of what its sender saw. A body that names
- * `perpsEnabled: true` then saves it, as the owner's own decision; one that
- * never names the switch keeps the off. Pinned below as it is, not as a race
- * this catches.
+ * A delayed enable carries the opaque revision its owner reviewed. A kill
+ * advances that revision even when entries were already off, so a request
+ * arriving after the kill cannot silently turn the new permission back on.
+ * Only a fresh read and explicit enable can do that.
  *
  * The self-hosted sweep that runs the kill at each of the save's event-loop
  * turns is a different check: the read and the look-and-write have no turn
@@ -64,9 +61,10 @@ import { turnOffLocalPaperPerps } from "../../../../../worker/src/perps-kill";
 import { mergeSettings } from "../../../../../worker/src/settings";
 
 const OWNER = `0x${"ab".repeat(20)}` as const;
-const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_PERPS", "MERRYMEN_STORE_DEK"] as const;
+const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "DATABASE_URL", "MERRYMEN_PERPS", "MERRYMEN_STORE_DEK", "MERRYMEN_PERPS_PAPER_TENANTS"] as const;
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 let home: string;
+let GET: (r: Request) => Promise<Response>;
 let PUT: (r: Request) => Promise<Response>;
 
 before(async () => {
@@ -75,11 +73,12 @@ before(async () => {
   process.env.MERRYMEN_SESSION_SECRET = randomBytes(32).toString("hex");
   process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 5).toString("base64");
   delete process.env.DATABASE_URL;
-  ({ PUT } = await import("./route"));
+  ({ GET, PUT } = await import("./route"));
 });
 beforeEach(() => {
   process.env.MERRYMEN_HOSTED = "1";
   process.env.MERRYMEN_PERPS = "paper";
+  process.env.MERRYMEN_PERPS_PAPER_TENANTS = OWNER;
   resetSettingsStoreForTest();
   for (const d of ["tenant-settings-perps", "accounts"]) rmSync(path.join(home, d), { recursive: true, force: true });
 });
@@ -102,6 +101,16 @@ const save = async (body: Record<string, unknown>, hosted = true) => {
   );
   return { status: res.status, body: (await res.json()) as { ok?: boolean; errors?: string[]; saved?: string[] } };
 };
+async function currentVersion(hosted = true): Promise<string> {
+  const response = await GET(new Request("https://app.example.test/api/settings?wallet=perps", {headers: hosted ? {cookie:`mm_session=${mintSession(OWNER)}`} : {}}));
+  assert.equal(response.status,200);
+  const view=await response.json();assert.match(view.version,/^[a-f0-9]{64}$/);return view.version;
+}
+function withoutNonce(s: MerrymenSettings) {
+  const {perpsControlNonce,...rest}=s;
+  assert.equal(typeof perpsControlNonce,"string");assert.ok(perpsControlNonce!.length>0);
+  return rest;
+}
 /** What a Perps worker resolves from a stored blob (worker settings.ts). */
 const worker = (s: MerrymenSettings) => mergeSettings(s, { MERRYMEN_WALLET_PURPOSE: "perps", MERRYMEN_PERPS: "paper" });
 
@@ -169,16 +178,17 @@ for (const backend of ["file store", "Postgres store"] as const) {
 
     it("A SAVE THAT SWITCHES PRACTICE PERPS ON OVER AN OFF THAT LANDED UNDER IT IS REFUSED, and nothing it carried is written", async () => {
       await store.put(OWNER, { strategy: "perps-only", perpsEnabled: true, perpsMaxLeverage: 2 });
+      const expectedVersion=await currentVersion();
       const killed = killAfterTheSavesRead(store);
-      const r = await save({ perpsEnabled: true, perpsMaxLeverage: 3 });
+      const r = await save({ perpsEnabled: true, expectedVersion, perpsMaxLeverage: 3 });
       assert.equal(killed(), "disabled");
-      assert.equal(r.status, 400, JSON.stringify(r.body));
-      assert.match(r.body.errors?.join(" ") ?? "", /^perpsEnabled: practice perpetuals were switched off while this save was on its way/);
+      assert.equal(r.status, 409, JSON.stringify(r.body));
+      assert.match(r.body.errors?.join(" ") ?? "", /^perpsEnabled: the settings changed or this page has no current revision/);
       const after = (await store.get(OWNER)) ?? {};
       assert.equal(after.perpsEnabled, false);
       assert.equal(after.perpsMaxLeverage, 2, "the rest of a refused save is not written");
       // Asked again after the kill, it is the owner's own decision, and it saves.
-      const again = await save({ perpsEnabled: true, perpsMaxLeverage: 3 });
+      const again = await save({ perpsEnabled: true, expectedVersion:await currentVersion(), perpsMaxLeverage: 3 });
       assert.equal(again.status, 200, JSON.stringify(again.body));
       assert.equal((await store.get(OWNER))?.perpsEnabled, true);
     });
@@ -268,6 +278,7 @@ describe("self-hosted: the kill at any point of the save", () => {
         const label = `${place}, ${JSON.stringify(body)}`;
         mkdirSync(purposeHome("perps"), { recursive: true });
         writeFileSync(file(), JSON.stringify({ strategy: "perps-only", perpsEnabled: true, perpsMaxLeverage: 2 }));
+        if(body.perpsEnabled===true) body.expectedVersion=await currentVersion(false);
         const killed = killInsideTheSavesWindow(place);
         const r = await save(body, false);
         unmock();
@@ -277,8 +288,8 @@ describe("self-hosted: the kill at any point of the save", () => {
         assert.equal(worker(after).perpsEnabled, false, `${label}: so the Perps worker opens nothing`);
         if (body.perpsEnabled === true) {
           // Its read saw them on, so the off is one this body never saw.
-          assert.equal(r.status, 400, `${label}: ${JSON.stringify(r.body)}`);
-          assert.match(r.body.errors?.join(" ") ?? "", /^perpsEnabled: practice perpetuals were switched off while this save was on its way/);
+          assert.equal(r.status, 409, `${label}: ${JSON.stringify(r.body)}`);
+          assert.match(r.body.errors?.join(" ") ?? "", /^perpsEnabled: the settings changed or this page has no current revision/);
           assert.equal(after.perpsMaxLeverage, 2, `${label}: nothing else from a refused save is written`);
         } else {
           assert.equal(r.status, 200, `${label}: ${JSON.stringify(r.body)}`);
@@ -305,34 +316,24 @@ describe("self-hosted: the kill at any point of the save", () => {
   });
 });
 
-describe("a kill that finished before the save first read: not a race the server can see", () => {
-  // The route's compare and swap catches an off that lands between the save's
-  // own read and its write. An off already stored when the save first reads
-  // (the kill finished while the request was still in flight) leaves nothing
-  // the server could tell from an owner switching practice perps on after the
-  // kill: the body carries no record of what its sender saw. So a body that
-  // never names the switch keeps the off, and one that names it on saves it —
-  // what the route's header and docs/perps.md say, and no more.
-  for (const where of ["hosted", "self-hosted"] as const) {
-    it(`${where}: a save that never names the switch keeps the kill's off; one that names it on is the owner's decision, and saves`, async () => {
-      if (where === "self-hosted") delete process.env.MERRYMEN_HOSTED;
-      const file = path.join(purposeHome("perps"), "settings.json");
-      const before: MerrymenSettings = { strategy: "perps-only", perpsEnabled: true, perpsMaxLeverage: 2 };
-      const store = where === "hosted" ? (getSettingsStore("perps") as FileSettingsStore) : null;
-      const read = async () => (store ? ((await store.get(OWNER)) ?? {}) : (JSON.parse(readFileSync(file, "utf8")) as MerrymenSettings));
-      if (store) await store.put(OWNER, before);
-      else {
-        mkdirSync(path.dirname(file), { recursive: true });
-        writeFileSync(file, JSON.stringify(before));
-      }
-      const killed = store ? await disablePaperPerpsForKill(OWNER, store) : turnOffLocalPaperPerps(purposeHome("perps"));
-      assert.equal(killed, "disabled");
-      const quiet = await save({ perpsMaxLeverage: 3 }, where === "hosted");
-      assert.equal(quiet.status, 200, JSON.stringify(quiet.body));
-      assert.deepEqual(await read(), { ...before, perpsEnabled: false, perpsMaxLeverage: 3 });
-      const on = await save({ perpsEnabled: true, perpsMaxLeverage: 4 }, where === "hosted");
-      assert.equal(on.status, 200, JSON.stringify(on.body));
-      assert.deepEqual(await read(), { ...before, perpsEnabled: true, perpsMaxLeverage: 4 });
+describe("a kill completed before the delayed enable reaches the server", () => {
+  for(const where of ["hosted","self-hosted"] as const) for(const enabled of [true,false]) {
+    it(`${where}, entries initially ${enabled}: stale enable refused and explicit fresh enable accepted`,async()=>{
+      if(where==="self-hosted")delete process.env.MERRYMEN_HOSTED;
+      const file=path.join(purposeHome("perps"),"settings.json"),store=where==="hosted"?getSettingsStore("perps"):null;
+      const before:MerrymenSettings={strategy:"perps-only",perpsEnabled:enabled,perpsMaxLeverage:2};
+      const read=async()=>store?await store.get(OWNER):JSON.parse(readFileSync(file,"utf8")) as MerrymenSettings;
+      if(store)await store.put(OWNER,before);else{mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,JSON.stringify(before));}
+      const expectedVersion=await currentVersion(where==="hosted");
+      const killed=store?await disablePaperPerpsForKill(OWNER,store):turnOffLocalPaperPerps(purposeHome("perps"));
+      assert.equal(killed,enabled?"disabled":"none");
+      assert.notEqual(await currentVersion(where==="hosted"),expectedVersion,"even an already-off kill advances its generation");
+      const delayed=await save({perpsEnabled:true,expectedVersion,perpsMaxLeverage:4},where==="hosted");
+      assert.equal(delayed.status,409);assert.deepEqual(withoutNonce((await read())!),{...before,perpsEnabled:false});
+      const quiet=await save({perpsMaxLeverage:3},where==="hosted");assert.equal(quiet.status,200);
+      assert.deepEqual(withoutNonce((await read())!),{...before,perpsEnabled:false,perpsMaxLeverage:3});
+      const fresh=await save({perpsEnabled:true,expectedVersion:await currentVersion(where==="hosted"),perpsMaxLeverage:4},where==="hosted");
+      assert.equal(fresh.status,200);assert.deepEqual(withoutNonce((await read())!),{...before,perpsEnabled:true,perpsMaxLeverage:4});
     });
   }
 });

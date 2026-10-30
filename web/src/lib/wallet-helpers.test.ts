@@ -205,6 +205,19 @@ describe("archiveCurrentGrant and removeSelfHostedGrant", () => {
     await archive.removeSelfHostedGrant("perps");
     assert.equal(readFileSync(path.join(home, "grant.json"), "utf8"), SPOT_GRANT);
     assert.equal(existsSync(path.join(home, "grants")), false);
+    assert.equal(existsSync(perpsHome()), false, "a missing wallet remains absent");
+  });
+
+  it("Perps with only a stopped renewal identity removes that identity while leaving Spot alone", async () => {
+    mkdirSync(perpsHome(), { recursive: true });
+    const retained = path.join(perpsHome(), "permission-replacement.json");
+    writeFileSync(retained, JSON.stringify({ v: 1, purpose: "perps", owner: SPOT, smartAccount: PERPS,
+      sessionKeyAddress: SPOT, chainId: 4663 }));
+    assert.deepEqual(await archive.archiveCurrentGrant("perps"), { kind: "nothing" });
+    await archive.removeSelfHostedGrant("perps");
+    assert.equal(existsSync(retained), false, "nothing to archive does not skip retained identity cleanup");
+    assert.equal(readFileSync(path.join(home, "grant.json"), "utf8"), SPOT_GRANT);
+    assert.equal(existsSync(path.join(home, "grants")), false);
   });
 
   it("Perps's grant is archived into its own home and removed; Spot's file and archive are untouched", async () => {

@@ -54,7 +54,7 @@ const ORIGIN = "https://app.merrymen.dev";
 const APP = "merrymen-test-app";
 const ENV = [
   "MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "MERRYMEN_STORE_DEK", "DATABASE_URL", "MERRYMEN_PUBLIC_ORIGIN",
-  "MERRYMEN_PERPS", "NEXT_PUBLIC_PRIVY_APP_ID", "PRIVY_APP_SECRET", "PRIVY_VERIFICATION_KEY",
+  "MERRYMEN_PERPS", "MERRYMEN_PERPS_PAPER_TENANTS", "NEXT_PUBLIC_PRIVY_APP_ID", "PRIVY_APP_SECRET", "PRIVY_VERIFICATION_KEY",
 ] as const;
 const saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
 
@@ -81,6 +81,9 @@ function privyToken(did: string): string {
 interface Login { account: LocalAccount; did: string; spot: `0x${string}`; perps: `0x${string}` }
 async function login(name: string): Promise<Login> {
   const account = privateKeyToAccount(generatePrivateKey());
+  // These tests exercise wallet authority after pilot admission. Admit only
+  // their generated owners; read/kill tests below also withdraw that admission.
+  process.env.MERRYMEN_PERPS_PAPER_TENANTS = [process.env.MERRYMEN_PERPS_PAPER_TENANTS, account.address].filter(Boolean).join(",");
   const at = async (wallet: GrantPurpose) => {
     const d = await derive(account.address, 4663, wallet);
     assert.ok(d.ok, "the stub chain derives");
@@ -138,6 +141,7 @@ before(async () => {
   delete process.env.DATABASE_URL;
   delete process.env.MERRYMEN_PUBLIC_ORIGIN;
   process.env.MERRYMEN_PERPS = "paper";
+  delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
   process.env.NEXT_PUBLIC_PRIVY_APP_ID = APP;
   // WRITTEN, never read, and so not as `process.env.PRIVY_APP_SECRET`: that
   // spelling is how privy-boundary.test.ts finds a reader of the secret, and
@@ -608,7 +612,14 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
     }
   });
 
-  it("D1: answered whatever MERRYMEN_PERPS says, so an owner can always see a Perps wallet they hold", async () => {
+  it("D1: answered whatever MERRYMEN_PERPS says, including after pilot access ends, so an owner can always see a Perps wallet they hold", async (t) => {
+    const admitted = process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+    delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+    t.after(() => {
+      process.env.MERRYMEN_PERPS = "paper";
+      if (admitted === undefined) delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+      else process.env.MERRYMEN_PERPS_PAPER_TENANTS = admitted;
+    });
     for (const ceiling of [undefined, "off", "live"]) {
       if (ceiling === undefined) delete process.env.MERRYMEN_PERPS;
       else process.env.MERRYMEN_PERPS = ceiling;
@@ -619,7 +630,13 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
     process.env.MERRYMEN_PERPS = "paper";
   });
 
-  it("and the kill made for it stops it: the Perps wallet made here is revoked with the Spot one", async () => {
+  it("and the kill made for it stops it after pilot access ends: the Perps wallet made here is revoked with the Spot one", async (t) => {
+    const admitted = process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+    delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+    t.after(() => {
+      if (admitted === undefined) delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+      else process.env.MERRYMEN_PERPS_PAPER_TENANTS = admitted;
+    });
     const res = await route.DELETE(new Request(`${ORIGIN}/api/grants`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json", cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(kim.account.address)}` },
