@@ -14,8 +14,11 @@ import dev.merrymen.app.ui.SignInPage
 import dev.merrymen.app.ui.accountControlsOf
 import dev.merrymen.app.ui.signInPageOf
 import dev.merrymen.app.ui.stopArmedNote
+import dev.merrymen.app.ui.stopAllAgents
 import dev.merrymen.app.ui.welcomeOffersSignIn
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -27,6 +30,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * M17: EVERY SIGN-IN OFFER, SIGN-OUT AND STOP ON D'S SCREENS IS TRUE WHERE IT
@@ -94,9 +99,111 @@ class AccountControlsTest {
     // Hosted, removing the grant deletes the agent's memory, and re-signing
     // does not bring it back. The self-hosted worker only halts.
     val hosted = repoAfter("""{"hosted":true,"address":"0xabc0000000000000000000000000000000000001"}""")
-    assertTrue(stopArmedNote(hosted.signedIn.value).contains("deletes its memory, which re-signing does not bring back"))
+    assertTrue(stopArmedNote(hosted.signedIn.value).contains("deletes agent memory, which re-signing does not bring back"))
     val selfHosted = repoAfter("""{"hosted":false,"address":null}""")
     assertFalse(stopArmedNote(selfHosted.signedIn.value).contains("memory"))
+  }
+
+  @Test fun stopNamesEveryWalletAndDoesNotPromiseAnOnChainRevocation() {
+    for (owner in listOf("0x1111111111111111111111111111111111111111", null)) {
+      val note = stopArmedNote(owner)
+      assertTrue(note.contains("Spot, Perps and Solana"))
+      assertTrue(note.contains("does not close positions"))
+      assertTrue(note.contains("withdraw assets"))
+    }
+    assertTrue(stopArmedNote("0x1111111111111111111111111111111111111111").contains("revoke permissions on-chain"))
+  }
+
+  @Test fun aLostLoginWideStopReplyCannotBeConfirmedByAnAbsentSpotGrant() = runBlocking {
+    val store = MemoryStore(server.origin())
+    val api = MerrymenApi(Http.client(PersistentCookieJar(store), debug = false), store)
+    server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+    server.answer("""{"exists":false}""") // The old UI read only Spot and falsely said stopped.
+    val note = stopAllAgents(api, "0x1111111111111111111111111111111111111111") { true }
+    assertTrue(note.contains("Could not confirm whether all agents stopped"))
+    assertFalse(note.contains("Stop request accepted"))
+    assertEquals(1, server.requestCount) // No retry and no misleading Spot-only reconciliation.
+    val request = server.takeRequest()
+    assertEquals("DELETE", request.method)
+    assertEquals("/api/grants", request.path)
+    assertTrue(request.body.readUtf8().contains("\"expectedTenant\":\"0x1111111111111111111111111111111111111111\""))
+  }
+
+  @Test fun aReadableResponseMustActuallyConfirmTheStop() = runBlocking {
+    val store = MemoryStore(server.origin())
+    val api = MerrymenApi(Http.client(PersistentCookieJar(store), debug = false), store)
+    server.answer("""{"exists":false}""")
+    val note = stopAllAgents(api, "0x1111111111111111111111111111111111111111") { true }
+    assertTrue(note.contains("could not be confirmed")); assertFalse(note.contains("Stop request accepted"))
+    assertEquals(1, server.requestCount)
+  }
+
+  @Test fun aChangedLoginCannotSendOrDisplayThePreviousStop() = runBlocking {
+    val store = MemoryStore(server.origin())
+    val api = MerrymenApi(Http.client(PersistentCookieJar(store), debug = false), store)
+    assertTrue(stopAllAgents(api, "0x1111111111111111111111111111111111111111") { false }.contains("changed"))
+    assertEquals(0, server.requestCount)
+    server.answer("""{"ok":true}""")
+    var checks = 0
+    val note = stopAllAgents(api, "0x1111111111111111111111111111111111111111") { ++checks == 1 }
+    assertTrue(note.contains("changed")); assertFalse(note.contains("Stop request accepted"))
+    assertEquals(1, server.requestCount)
+  }
+
+  @Test fun aStopReviewCannotReviveWhenSessionReadsReturnToTheSameOwner() = runBlocking {
+    val owner = "0x1111111111111111111111111111111111111111"
+    val ownerSession = """{"hosted":true,"address":"$owner"}"""
+    for (intermediate in listOf("null", "\"0x2222222222222222222222222222222222222222\"")) {
+      val repo = repoAfter(ownerSession)
+      val reviewed = requireNotNull(repo.reviewStop(owner, repo.serverTurn.value, repo.confirmationVersion.value))
+      server.answer(ownerSession); repo.refreshIdentity()
+      assertTrue(repo.holdsStop(reviewed)) // An ordinary same-owner refresh keeps consent.
+      server.answer("""{"hosted":true,"address":$intermediate}"""); repo.refreshIdentity()
+      server.answer(ownerSession); repo.refreshIdentity()
+      assertEquals(owner, repo.signedIn.value)
+      assertFalse(repo.holdsStop(reviewed))
+      val before = server.requestCount
+      assertTrue(stopAllAgents(repo.api, reviewed.owner) { repo.holdsStop(reviewed) }.contains("changed"))
+      assertEquals(before, server.requestCount) // No DELETE from the old confirmation.
+    }
+  }
+
+  @Test fun aLateStopReplyCannotReviveAfterSignOutAndBackIntoTheSameOwner() = runBlocking {
+    val owner = "0x1111111111111111111111111111111111111111"
+    val repo = repoAfter("""{"hosted":true,"address":"$owner"}""")
+    val reviewed = requireNotNull(repo.reviewStop(owner, repo.serverTurn.value, repo.confirmationVersion.value))
+    val sent = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    server.dispatcher = object : Dispatcher() {
+      override fun dispatch(request: RecordedRequest): MockResponse {
+        if (request.method == "DELETE") {
+          sent.countDown()
+          check(release.await(10, TimeUnit.SECONDS))
+        }
+        return MockResponse().setBody(if (request.path == "/api/auth/session") """{"hosted":true,"address":"$owner"}""" else """{"ok":true}""")
+      }
+    }
+    val pending = async(Dispatchers.IO) { stopAllAgents(repo.api, reviewed.owner) { repo.holdsStop(reviewed) } }
+    try {
+      assertTrue(sent.await(5, TimeUnit.SECONDS))
+      repo.signOut(); repo.refreshIdentity()
+      assertEquals(owner, repo.signedIn.value)
+      assertFalse(repo.holdsStop(reviewed))
+    } finally { release.countDown() }
+    val note = pending.await()
+    assertTrue(note.contains("changed")); assertFalse(note.contains("Stop request accepted"))
+    assertEquals(4, server.requestCount) // Session, one DELETE, logout, new session.
+  }
+
+  @Test fun aStopReviewCannotMoveBetweenServersForTheSameOwner() = runBlocking {
+    val owner = "0x1111111111111111111111111111111111111111"
+    val repo = repoAfter("""{"hosted":true,"address":"$owner"}""")
+    val reviewed = requireNotNull(repo.reviewStop(owner, repo.serverTurn.value, repo.confirmationVersion.value))
+    repo.api.servers.leave(); repo.api.servers.arrive()
+    assertFalse(repo.holdsStop(reviewed))
+    val before = server.requestCount
+    assertTrue(stopAllAgents(repo.api, reviewed.owner) { repo.holdsStop(reviewed) }.contains("changed"))
+    assertEquals(before, server.requestCount)
   }
 
   @Test fun aServerThatHasNotSaidOpensNothing() {
