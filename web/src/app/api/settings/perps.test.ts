@@ -20,6 +20,8 @@
  * Bounds for each number are spec-coverage.test.ts's; this file is semantics.
  */
 import assert from "node:assert/strict";
+import { pilotFixture } from "@/lib/perps-pilot-fixture";
+let pilot: ReturnType<typeof pilotFixture>;
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,12 +47,14 @@ before(async () => {
   process.env.MERRYMEN_SESSION_SECRET = randomBytes(32).toString("hex");
   process.env.MERRYMEN_PERPS = "paper";
   process.env.MERRYMEN_PERPS_PAPER_TENANTS = TENANT;
+  pilot = pilotFixture([TENANT]);
   delete process.env.DATABASE_URL;
   resetSettingsStoreForTest();
   // After the env: the route resolves its paths when it loads.
   ({ PUT, GET } = await import("./route"));
 });
 after(() => {
+  pilot?.close();
   for (const k of KEYS) {
     if (original[k] === undefined) delete process.env[k];
     else process.env[k] = original[k];

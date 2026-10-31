@@ -18,6 +18,8 @@
  *     is refused 403 with nothing written, and the GET still answers.
  */
 import assert from "node:assert/strict";
+import { pilotFixture } from "@/lib/perps-pilot-fixture";
+let pilot: ReturnType<typeof pilotFixture>;
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,6 +77,8 @@ before(async () => {
   ({ GET, PUT } = await import("./route"));
 });
 beforeEach(() => {
+  pilot?.close();
+  pilot = pilotFixture([OWNER, OTHER]);
   process.env.MERRYMEN_HOSTED = "1";
   process.env.MERRYMEN_PERPS = "paper";
   process.env.MERRYMEN_PERPS_PAPER_TENANTS = `${OWNER},${OTHER}`;
@@ -84,6 +88,7 @@ beforeEach(() => {
 });
 afterEach(() => useBotClaimsDbForTest(null));
 after(() => {
+  pilot?.close();
   globalThis.fetch = realFetch;
   for (const k of KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -331,6 +336,52 @@ describe("where Perps are not offered, a Perps save may only turn things off (D1
 
 
 describe("paper entry activation requires current owner revision and pilot admission", () => {
+  it("revocation after a positive preflight prevents entry activation and its risk-field changes", async t => {
+    const store = getSettingsStore("perps");
+    const initial = { strategy: "perps-only", perpsEnabled: false, perpsMaxLeverage: 2 };
+    await store.put(OWNER, initial);
+    const version = await currentVersion(), get = pilot.store.get.bind(pilot.store);
+    let revoked = false;
+    t.mock.method(pilot.store, "get", async (owner: string) => {
+      const answer = await get(owner);
+      assert.equal(answer.status, "allowed");
+      revoked = true;
+      await pilot.set(owner, "revoked");
+      return answer;
+    });
+    const result = await PUT(request("?wallet=perps", { owner: OWNER, expectedVersion: version, perpsEnabled: true, perpsMaxLeverage: 3 }));
+    assert.equal(revoked, true, "the initial admission read completed before revocation");
+    assert.equal(result.status, 403, JSON.stringify(await json(result.clone())));
+    assert.deepEqual(await store.get(OWNER), initial, "neither entries nor the accompanying leverage increase was saved");
+  });
+
+  it("a late admission refusal still saves an explicit off, and standalone off remains available", async t => {
+    const store = getSettingsStore("perps");
+    await store.put(OWNER, { strategy: "perps-only", perpsEnabled: false, liveTradingEnabled: true, perpsMaxLeverage: 2 });
+    const version = await currentVersion(), get = pilot.store.get.bind(pilot.store);
+    let revoked = false;
+    const preflight = t.mock.method(pilot.store, "get", async (owner: string) => {
+      const answer = await get(owner);
+      assert.equal(answer.status, "allowed");
+      revoked = true;
+      await pilot.set(owner, "revoked");
+      return answer;
+    });
+    const result = await PUT(request("?wallet=perps", { owner: OWNER, expectedVersion: version, perpsEnabled: true, liveTradingEnabled: false, perpsMaxLeverage: 3 }));
+    assert.equal(revoked, true);
+    assert.equal(result.status, 403, JSON.stringify(await json(result.clone())));
+    assert.deepEqual((await json(result)).saved, ["liveTradingEnabled"]);
+    assert.deepEqual(await store.get(OWNER), { strategy: "perps-only", perpsEnabled: false, liveTradingEnabled: false, perpsMaxLeverage: 2 });
+    preflight.mock.restore();
+    assert.equal((await pilot.store.get(OWNER)).status, "revoked");
+    // Simulate an older persisted on switch: withdrawing access must never
+    // remove the owner's ability to write its explicit off without a revision.
+    await store.put(OWNER, { strategy: "perps-only", perpsEnabled: true, perpsMaxLeverage: 2 });
+    const off = await PUT(request("?wallet=perps", { owner: OWNER, perpsEnabled: false }));
+    assert.equal(off.status, 200, JSON.stringify(await json(off.clone())));
+    assert.equal((await store.get(OWNER))?.perpsEnabled, false);
+  });
+
   it("refuses missing, foreign and stale revisions without writing risk fields", async () => {
     const before = await currentVersion();
     assert.match(before, /^[a-f0-9]{64}$/);
@@ -344,12 +395,18 @@ describe("paper entry activation requires current owner revision and pilot admis
     assert.equal((await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:true,expectedVersion:fresh}))).status,200);
     assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsEnabled,true);
   });
-  it("a current revision cannot bypass an absent or malformed pilot list, but off remains available", async () => {
+  it("a current revision cannot bypass pending, missing, revoked or unreadable admission, but off remains available", async () => {
     await getSettingsStore("perps").put(OWNER,{perpsEnabled:false});
-    for(const list of [undefined,OTHER,`${OWNER},bad`]) {
-      if(list===undefined) delete process.env.MERRYMEN_PERPS_PAPER_TENANTS; else process.env.MERRYMEN_PERPS_PAPER_TENANTS=list;
-      const res=await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:true,expectedVersion:await currentVersion()}));
-      assert.equal(res.status,403);assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsEnabled,false);
+    for (const mode of ["missing", "pending", "revoked", "unreadable"]) {
+      pilot.close(); pilot = pilotFixture(mode === "unreadable" ? ["bad"] : []);
+      if (mode === "revoked") await pilot.set(OWNER, "revoked");
+      if (mode === "pending") {
+        const { code } = await pilot.store.createInvite({ actor: OTHER, maxUses: 1, expiresAt: Date.now() + 60_000 });
+        assert.equal((await pilot.store.redeem({ owner: OWNER, code })).outcome, "pending");
+      }
+      const res = await PUT(request("?wallet=perps", {owner:OWNER,perpsEnabled:true,expectedVersion:await currentVersion()}));
+      assert.equal(res.status, mode === "unreadable" ? 503 : 403);
+      assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsEnabled,false);
       assert.equal((await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:false}))).status,200);
     }
   });

@@ -35,13 +35,15 @@
  * gain the Perps account (the branch asserted it did).
  */
 import assert from "node:assert/strict";
+import { pilotFixture } from "@/lib/perps-pilot-fixture";
+let pilot: ReturnType<typeof pilotFixture>;
 import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { after, before, describe, it, mock } from "node:test";
+import { after, before, describe, it, mock, type TestContext } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
 import { sealSecret } from "../../../../../worker/src/store-crypto";
@@ -79,8 +81,9 @@ function privyToken(did: string): string {
 
 /** A Privy login: its embedded wallet is the session, the owner key and the tenant. */
 interface Login { account: LocalAccount; did: string; spot: `0x${string}`; perps: `0x${string}` }
-async function login(name: string): Promise<Login> {
+async function login(name: string, admitted = true): Promise<Login> {
   const account = privateKeyToAccount(generatePrivateKey());
+  if (admitted) await pilot.set(account.address, "allowed");
   // These tests exercise wallet authority after pilot admission. Admit only
   // their generated owners; read/kill tests below also withdraw that admission.
   process.env.MERRYMEN_PERPS_PAPER_TENANTS = [process.env.MERRYMEN_PERPS_PAPER_TENANTS, account.address].filter(Boolean).join(",");
@@ -132,6 +135,23 @@ const perpsGrant = async (who: Login, account = who.perps, owner = who.account) 
   (await fixture.signerGrant({ owner, account, purpose: "perps" })).grant;
 const spotGrant = async (who: Login) => (await fixture.signerGrant({ owner: who.account, account: who.spot })).grant;
 
+/** Return a real positive preflight whose admission was revoked while its
+ * reply was in flight. The final authority write must consult the locked store. */
+function revokeAfterPositivePreflight(t: TestContext, who: Login) {
+  const get = pilot.store.get.bind(pilot.store);
+  let revoked = false;
+  t.mock.method(pilot.store, "get", async (owner: string) => {
+    const answer = await get(owner);
+    if (!revoked && owner.toLowerCase() === who.account.address.toLowerCase()) {
+      assert.equal(answer.status, "allowed", "the request really passed its initial admission read");
+      revoked = true;
+      await pilot.set(owner, "revoked");
+    }
+    return answer;
+  });
+  return () => assert.equal(revoked, true, "the revocation must occur between admission preflight and mutation");
+}
+
 before(async () => {
   home = mkdtempSync(path.join(tmpdir(), "mm-grants-dual-purpose-"));
   process.env.MERRYMEN_HOME = home;
@@ -142,6 +162,7 @@ before(async () => {
   delete process.env.MERRYMEN_PUBLIC_ORIGIN;
   process.env.MERRYMEN_PERPS = "paper";
   delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+  pilot = pilotFixture();
   process.env.NEXT_PUBLIC_PRIVY_APP_ID = APP;
   // WRITTEN, never read, and so not as `process.env.PRIVY_APP_SECRET`: that
   // spelling is how privy-boundary.test.ts finds a reader of the secret, and
@@ -176,6 +197,7 @@ before(async () => {
   route = await import("./route");
 });
 after(() => {
+  pilot?.close();
   chain?.restore();
   mock.restoreAll();
   stores?.resetGrantStoreForTest();
@@ -185,6 +207,63 @@ after(() => {
     else process.env[k] = v;
   }
   rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+});
+
+describe("pilot revocation is ordered before the final hosted grant mutation", () => {
+  it("a valid invitation cannot install a grant until an admin approves its pending owner", async () => {
+    const who = await login("pending-approval", false), grant = await perpsGrant(who);
+    const { code } = await pilot.store.createInvite({ actor: who.account.address, maxUses: 1, expiresAt: Date.now() + 60_000 });
+    assert.equal((await pilot.store.redeem({ owner: who.account.address, code })).outcome, "pending");
+    const before = nonces;
+    const denied = await privyPost(grant, "?wallet=perps", who, "perps");
+    assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(nonces, before, "pending owners cannot consume a grant nonce");
+    assert.equal(await perpsGrantOf(who), null); assert.equal(read(tenantFile("tenants-perps", who)), null);
+    await pilot.set(who.account.address, "allowed");
+    assert.equal((await privyPost(grant, "?wallet=perps", who, "perps")).status, 200);
+    assert.equal((await perpsGrantOf(who))?.smartAccount.toLowerCase(), who.perps.toLowerCase());
+  });
+
+  it("a positive preflight cannot install a new grant after access is revoked", async t => {
+    const who = await login("late-revocation-create"), grant = await perpsGrant(who);
+    const assertRevoked = revokeAfterPositivePreflight(t, who);
+    const result = await privyPost(grant, "?wallet=perps", who, "perps");
+    assertRevoked();
+    assert.equal(result.status, 403, JSON.stringify(result.body));
+    assert.equal(result.body.code, "perps-pilot-invitation-required");
+    assert.equal(await perpsGrantOf(who), null);
+    assert.equal(read(tenantFile("tenants-perps", who)), null, "no signing authority was persisted");
+  });
+
+  it("a positive preflight cannot replace the existing grant after access is revoked", async t => {
+    const who = await login("late-revocation-replace"), original = await perpsGrant(who);
+    assert.equal((await privyPost(original, "?wallet=perps", who, "perps")).status, 200);
+    const before = read(tenantFile("tenants-perps", who));
+    const replacement = await perpsGrant(who);
+    assert.notEqual(replacement.demoSessionPrivateKey, original.demoSessionPrivateKey);
+    const assertRevoked = revokeAfterPositivePreflight(t, who);
+    const result = await privyPost(replacement, "?wallet=perps", who, "perps");
+    assertRevoked();
+    assert.equal(result.status, 403, JSON.stringify(result.body));
+    assert.equal(read(tenantFile("tenants-perps", who)), before, "the retained grant is byte-for-byte unchanged");
+    assert.equal((await perpsGrantOf(who))?.demoSessionPrivateKey, original.demoSessionPrivateKey);
+  });
+
+  it("a renewal stop with a stale positive preflight preserves the existing permission", async t => {
+    const who = await login("late-revocation-stop"), grant = await perpsGrant(who);
+    assert.equal((await privyPost(grant, "?wallet=perps", who, "perps")).status, 200);
+    const before = read(tenantFile("tenants-perps", who));
+    const assertRevoked = revokeAfterPositivePreflight(t, who);
+    const result = await route.DELETE(new Request(`${ORIGIN}/api/grants?wallet=perps`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(who.account.address)}` },
+      body: JSON.stringify({ purpose: "permission-replacement", expectedTenant: who.account.address, expectedAccount: grant.smartAccount }),
+    }));
+    assertRevoked();
+    assert.equal(result.status, 403, await result.clone().text());
+    assert.equal(read(tenantFile("tenants-perps", who)), before, "the rejected renewal cannot retire or erase its current key");
+    assert.equal((await perpsGrantOf(who))?.demoSessionPrivateKey, grant.demoSessionPrivateKey);
+  });
 });
 
 describe("hosted: a Perps wallet is made beside the Spot one, and only as itself", () => {
@@ -613,6 +692,7 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
   });
 
   it("D1: answered whatever MERRYMEN_PERPS says, including after pilot access ends, so an owner can always see a Perps wallet they hold", async (t) => {
+    await pilot.set(kim.account.address, "revoked");
     const admitted = process.env.MERRYMEN_PERPS_PAPER_TENANTS;
     delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
     t.after(() => {
@@ -631,6 +711,7 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
   });
 
   it("and the kill made for it stops it after pilot access ends: the Perps wallet made here is revoked with the Spot one", async (t) => {
+    await pilot.set(kim.account.address, "revoked");
     const admitted = process.env.MERRYMEN_PERPS_PAPER_TENANTS;
     delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
     t.after(() => {

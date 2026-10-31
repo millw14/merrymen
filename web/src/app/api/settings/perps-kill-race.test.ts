@@ -37,6 +37,8 @@
  * which the injected cases and worker/src/settings-if-unchanged.test.ts pin.
  */
 import assert from "node:assert/strict";
+import { pilotFixture } from "@/lib/perps-pilot-fixture";
+let pilot: ReturnType<typeof pilotFixture>;
 import { randomBytes } from "node:crypto";
 import fs, { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -76,6 +78,8 @@ before(async () => {
   ({ GET, PUT } = await import("./route"));
 });
 beforeEach(() => {
+  pilot?.close();
+  pilot = pilotFixture([OWNER]);
   process.env.MERRYMEN_HOSTED = "1";
   process.env.MERRYMEN_PERPS = "paper";
   process.env.MERRYMEN_PERPS_PAPER_TENANTS = OWNER;
@@ -84,6 +88,7 @@ beforeEach(() => {
 });
 afterEach(() => resetSettingsStoreForTest());
 after(() => {
+  pilot?.close();
   for (const k of KEYS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];

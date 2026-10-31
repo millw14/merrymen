@@ -85,7 +85,7 @@ const API = path.join(process.cwd(), "web", "src", "app", "api");
  * wallet they name: the grants (5b), and the Perps wallet's settings, exits
  * and practice reset (5c).
  */
-const WALLET_AWARE = new Set(["grants/route.ts", "settings/route.ts", "orders/route.ts", "paper-reset/route.ts", "perps/offered/route.ts", "perps/account/route.ts", "perps/activity/route.ts", "perps/chart/route.ts", "perps/market/route.ts", "recover/route.ts", "recover/ticket/route.ts", "bundler/[chainId]/route.ts"]);
+const WALLET_AWARE = new Set(["grants/route.ts", "settings/route.ts", "orders/route.ts", "paper-reset/route.ts", "perps/offered/route.ts", "perps/pilot/route.ts", "perps/pilot/redeem/route.ts", "perps/pilot/admin/route.ts", "perps/account/route.ts", "perps/activity/route.ts", "perps/chart/route.ts", "perps/market/route.ts", "recover/route.ts", "recover/ticket/route.ts", "bundler/[chainId]/route.ts"]);
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]);
 
 /**

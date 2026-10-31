@@ -108,10 +108,16 @@ const perpsKey = (owner: string) => `${owner}:perps`;
 const live = (tenant: string) => spawned.filter((p) => p.env.MERRYMEN_HOME === orch.childHome(tenant) && !p.gone);
 const all = (tenant: string) => spawned.filter((p) => p.env.MERRYMEN_HOME === orch.childHome(tenant));
 const used: `0x${string}`[] = [];
-const ownerAt = (n: number) => { const o = address(n); used.push(o); process.env.MERRYMEN_PERPS_PAPER_TENANTS = [...new Set(used)].join(","); return o; };
+const ownerAt = (n: number) => {
+  const o = address(n);
+  used.push(o);
+  orch.setPerpsPilotAdmissionReaderForTest(async () => ({ owners: [...new Set(used)], revision: used.length }));
+  return o;
+};
 
 after(() => {
   console.log = realLog;
+  orch.setPerpsPilotAdmissionReaderForTest(null);
   orch.setLeaseAcquireForTest(null);
   orch.setPaperRestoreForTest(null);
   orch.setPerpsFeedStartForTest(null);

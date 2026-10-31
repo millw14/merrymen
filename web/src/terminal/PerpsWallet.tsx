@@ -150,6 +150,7 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
   const signedOut = account?.session.hosted && !owner;
   return <section className="perps-desk"><h1>{creating && !saved ? "Create a paper Perps wallet" : "Perps wallet & permission"}</h1><PerpsLinks/><p>A separate account owned by your protected signing wallet. This paper permission cannot spend on-chain. No deposit or live trading is required.</p>
     {!offered && <p role="status">Paper Perps creation and renewal are disabled on this server. Withdrawal and recovery remain available.</p>}
+    <p>Have a pilot code? <a href="/perps/join">Submit your wallet for administrator approval</a> before creating a permission. Your invitation requests access; an administrator must approve it.</p>
     {(reading && !account) && <p>Checking your wallet…</p>}{readError && <p role="alert">{readError}</p>}
     {signedOut && <SignIn onDone={refresh}/>}
     {account && !signedOut && !signer && <p>Your protected signing wallet is not ready. {PRIVY_BETA ? "Sign in with the account that owns this wallet and wait for it to become ready." : "Protected wallet sign-in is not configured on this installation."}</p>}

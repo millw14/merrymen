@@ -91,7 +91,8 @@ import {
   type DrainHook, type DrainLimits, type FinalPassOutcome,
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
-import { perpsPaperTenantAllowed } from "../../packages/core/src/perps-paper-admission";
+import { PerpsPilotAdmission, type PerpsPilotSnapshotReader } from "./perps/pilot-admission";
+import { getPerpsPilotStore } from "./perps/pilot-store";
 import { drainPerpsBotRequests, readPerpsBotAuthority, writePerpsBotSnapshot } from "./perps/telegram-bridge";
 import { queuePerpsBotExit, readPerpsBotView } from "./perps/telegram-admission";
 import { applyPerpsBotControl } from "./perps/telegram-controls";
@@ -1203,6 +1204,7 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean; flowBrok
    */
   env.MERRYMEN_WALLET_PURPOSE = key?.purpose ?? "spot";
   delete env.MERRYMEN_PERPS_PAPER_TENANTS;
+  delete env.MERRYMEN_PERPS_PILOT_ADMINS;
   delete env.MERRYMEN_PERPS_BOT_SEAT;
   env.MERRYMEN_GRANT_FILE = path.join(env.MERRYMEN_HOME, "grant.json");
   env.MERRYMEN_SETTINGS_FILE = path.join(env.MERRYMEN_HOME, "settings.json");
@@ -3009,9 +3011,41 @@ class PerpsAdmissionDeliveryError extends Error {
   }
 }
 
+let perpsPilotReader: PerpsPilotSnapshotReader = () => getPerpsPilotStore().snapshot();
+/** The admission proof under which the parent's last entries-on settings were read. */
+const perpsSettingsAdmissionRevision = new Map<string, number>();
+type PerpsPilotTiming = { now?: () => number; refreshMs?: number; maxAgeMs?: number; timeoutMs?: number };
+const newPerpsPilotAdmission = (timing: PerpsPilotTiming = {}) => new PerpsPilotAdmission({
+  ...timing,
+  read: () => perpsPilotReader(),
+  onRestriction: () => {
+    if (stopping) return;
+    // No remote reads here: a roster/settings outage must not postpone this
+    // clock. Each delivery failure already stops its child and retains the
+    // final-accounting lease; continue restricting the rest of the fleet.
+    for (const key of perpsFeedConsumers()) {
+      try { requirePerpsAdmissionForChild(key as `0x${string}`); } catch { /* stood down */ }
+    }
+  },
+});
+let perpsPilotAdmission = newPerpsPilotAdmission();
+
+/** Test seam: a shared durable snapshot reader, never an environment fallback. */
+export function setPerpsPilotAdmissionReaderForTest(reader: PerpsPilotSnapshotReader | null, timing?: PerpsPilotTiming): void {
+  perpsPilotAdmission.stop();
+  perpsPilotReader = reader ?? (() => getPerpsPilotStore().snapshot());
+  perpsPilotAdmission = newPerpsPilotAdmission(timing);
+}
+export function refreshPerpsPilotAdmissionForTest(): Promise<boolean> {
+  return perpsPilotAdmission.refresh(true);
+}
+
 /** No await: the current admission decision and its durable file must agree before a fork. */
 function requirePerpsAdmissionForChild(tenant: `0x${string}`): void {
-  if (perpsPaperTenantAllowed(slotOf(tenant).owner)) return;
+  const revision = perpsPilotAdmission.revision();
+  if (revision !== null && perpsPilotAdmission.allowed(slotOf(tenant).owner) &&
+    perpsSettingsAdmissionRevision.get(tenant.toLowerCase()) === revision) return;
+  perpsSettingsAdmissionRevision.delete(tenant.toLowerCase());
   try {
     const home = childHome(tenant), file = path.join(home, "settings.json");
     const read = readSettingsFileAt(file);
@@ -3067,6 +3101,7 @@ async function writePerpsSettingsForChild(
   try {
     // Do not leave an enabled file in place while a store read hangs or fails.
     requirePerpsAdmissionForChild(tenant);
+    const admissionRevision = perpsPilotAdmission.allowed(owner) ? perpsPilotAdmission.revision() : null;
     const stored = await getSettingsStore("perps").get(owner);
     const spot = await getSettingsStore("spot").get(owner);
     const claims = claimsRead === undefined ? await readHolderClaims() : claimsRead;
@@ -3076,8 +3111,14 @@ async function writePerpsSettingsForChild(
     const forChild = perpsWorkerSettings(stored);
     // Admission controls new entries; existing exits and protective stops stay
     // available if an invitation is withdrawn. Stored risk limits are kept.
-    if (!perpsPaperTenantAllowed(owner)) forChild.perpsEnabled = false;
+    // Re-admission can happen during these awaits. Its beforeAdmit hook turns
+    // the shared switch off, so an older true read must never resurrect it.
+    if (admissionRevision === null || admissionRevision !== perpsPilotAdmission.revision() ||
+      !perpsPilotAdmission.allowed(owner)) forChild.perpsEnabled = false;
     writeChildSettings(tenant, childSettingsFor(forChild, holder));
+    if (forChild.perpsEnabled === true && admissionRevision !== null)
+      perpsSettingsAdmissionRevision.set(tenant.toLowerCase(), admissionRevision);
+    else perpsSettingsAdmissionRevision.delete(tenant.toLowerCase());
     perpsFeedSettings.set(tenant.toLowerCase(), forChild);
     return stored;
   } catch (error) {
@@ -5012,6 +5053,12 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // of a login's Spot book (ledger-resume.ts), and a Perps book has no
     // history before slice 4 for one to be about.
     const perpsSlot = slotOf(tenant).perps;
+    if (perpsSlot) {
+      perpsPilotAdmission.start();
+      // A bounded initial read may enable entries. An unavailable admission
+      // store instead starts an exits-only worker from trustworthy risk data.
+      await perpsPilotAdmission.refresh();
+    }
     const resume: ResumeVerdict = perpsSlot ? { go: true, registered: null } : await resumeAdmission(tenant, lease, storedGrant);
     if (!resume.go) return;
     // THE OWNER'S RECORDED STOPS, BEFORE THE KEY. A /pause or a confirmed
@@ -7153,6 +7200,7 @@ const drainBeforeChildren: DrainHook[] = [];
 export function onDrainBeforeChildren(name: string, run: DrainHook["run"]): void {
   drainBeforeChildren.push({ name, run });
 }
+onDrainBeforeChildren("perps admission", () => perpsPilotAdmission.stop());
 
 /** What the drain wrote down about one home before it signalled anything (fleet-drain.ts, step 1). */
 interface DrainHome {
@@ -7444,6 +7492,8 @@ export function setSpawningForTest(tenant: `0x${string}`, ageMs: number | null):
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
 export async function reconcile(): Promise<void> {
   if (stopping) return;
+  // Start before the Spot roster read, which may fail or never return.
+  if (perpsSpawnable()) perpsPilotAdmission.start();
   // The socket handler normally does this immediately. Its retry path must
   // also run before remote reads: a broken grant-store connection cannot keep
   // a child whose lease was lost alive indefinitely.
@@ -14065,6 +14115,7 @@ export async function runOrchestrator(): Promise<void> {
   });
   if (stopping) return;
 
+  if (perpsSpawnable()) perpsPilotAdmission.start();
   // ORDERS ON THEIR OWN CLOCK, beside the reconcile loop below rather than
   // inside it: that loop's pass is only as fast as its slowest step.
   void orderFerryLoop();

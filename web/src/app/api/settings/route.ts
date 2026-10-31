@@ -68,7 +68,7 @@ import { perpsOffered } from "@/lib/perps-enabled";
 import { NO_STORE_HEADERS, walletUnknown } from "@/lib/route-guard";
 import { readWalletParam } from "@/lib/wallet-param";
 import { perpsSettingsVersion } from "@/lib/perps-settings-version";
-import { perpsPaperTenantAllowed } from "../../../../../packages/core/src/perps-paper-admission";
+import { perpsPaperAdmission, withPerpsPaperAdmission } from "@/lib/perps-paper-admission";
 
 export const dynamic = "force-dynamic";
 
@@ -1314,7 +1314,8 @@ async function judgePerpsSave(
   const next: MerrymenSettings = { ...stored, strategy: PERPS_ONLY };
   const errors: string[] = [];
   const staleEnable = body.perpsEnabled === true && expectedVersion !== perpsSettingsVersion(read.version, tenant);
-  const pilotRefused = tenant !== null && body.perpsEnabled === true && !perpsPaperTenantAllowed(tenant);
+  const admission = tenant !== null && body.perpsEnabled === true ? await perpsPaperAdmission(tenant) : "allowed";
+  const pilotRefused = admission !== "allowed";
   const touched = new Set<string>();
   const setOrClear = <K extends keyof MerrymenSettings>(key: K, value: MerrymenSettings[K] | undefined) => {
     touched.add(key as string);
@@ -1354,7 +1355,7 @@ async function judgePerpsSave(
       // device — is never undone by it: this body was judged against perps
       // on. (One stored before that read is not seen here; see the header.)
       if (pilotRefused) {
-        errors.push("perpsEnabled: paper Perps is currently limited to invited internal accounts");
+        errors.push(admission === "unavailable" ? "perpsEnabled: paper access could not be verified; try again shortly" : "perpsEnabled: administrator approval is required; submit an invite code to request access and wait for approval");
       } else if (staleEnable || (firstSawOn && stored.perpsEnabled !== true)) {
         errors.push(
           "perpsEnabled: the settings changed or this page has no current revision. Reload and explicitly switch practice perpetuals on again if you mean to. A delayed save cannot undo a kill",
@@ -1632,17 +1633,34 @@ async function judgePerpsSave(
   }
 
   if (errors.length > 0) {
-    if (offs.length === 0) return NextResponse.json({ errors }, { status: pilotRefused ? 403 : staleEnable ? 409 : 400 });
+    if (offs.length === 0) return NextResponse.json({ errors }, { status: admission === "unavailable" ? 503 : pilotRefused ? 403 : staleEnable ? 409 : 400 });
     const wrote = await saveOffs();
     if (wrote === "raced") return PERPS_SAVE_RACED;
     if (wrote === "failed") return notSaved();
     return NextResponse.json(
       { errors, saved: wrote.saved, note: `Switched off (${wrote.saved.join(", ")}) — that was saved. Nothing else in this save was, because of the errors above.` },
-      { status: pilotRefused ? 403 : staleEnable ? 409 : 400 },
+      { status: admission === "unavailable" ? 503 : pilotRefused ? 403 : staleEnable ? 409 : 400 },
     );
   }
 
-  const wrote = await persist(next);
+  // Admission and this CAS write must be ordered against revocation. Do not
+  // hold the cohort lock during parsing, settings reads, or validation above.
+  let wrote: "saved" | "raced" | "failed";
+  if (tenant && body.perpsEnabled === true && next.perpsEnabled === true) {
+    const result = await withPerpsPaperAdmission(tenant, () => persist(next));
+    if (result.status !== "allowed") {
+      const offResult = await saveOffs();
+      if (offResult === "raced") return PERPS_SAVE_RACED;
+      if (offResult === "failed") return notSaved();
+      return NextResponse.json({
+        errors: [result.status === "unavailable"
+          ? "perpsEnabled: paper access could not be verified; try again shortly"
+          : "perpsEnabled: administrator approval is required; submit an invite code to request access and wait for approval"],
+        ...(offResult.saved.length > 0 ? { saved: offResult.saved } : {}),
+      }, { status: result.status === "unavailable" ? 503 : 403, headers: NO_STORE_HEADERS });
+    }
+    wrote = result.value;
+  } else wrote = await persist(next);
   if (wrote === "raced") return PERPS_SAVE_RACED;
   if (wrote === "failed") return notSaved();
   return NextResponse.json({

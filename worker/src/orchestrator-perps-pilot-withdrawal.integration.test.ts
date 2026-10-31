@@ -5,7 +5,7 @@ import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmS
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { after, afterEach, test } from "node:test";
+import { after, afterEach, beforeEach, test } from "node:test";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { privateKeyToAccount } from "viem/accounts";
 import type { MerrymenSettings, StoredGrant } from "../../packages/core/src/index";
@@ -59,8 +59,30 @@ orch.setLeaseAcquireForTest(acquireTenantLease);
 orch.setPaperRestoreForTest(async () => ({ ok: true, line: null }));
 orch.setPerpsFeedStartForTest(() => ({ stop() {} }));
 
+let pilotOwners: readonly `0x${string}`[] = [];
+let pilotRevision = 0;
+let pilotFailure = false;
+let pilotPending: Promise<{ owners: readonly `0x${string}`[]; revision: number }> | null = null;
+const readPilot = async () => {
+  if (pilotPending) return pilotPending;
+  if (pilotFailure) throw new Error("admission store unavailable");
+  return { owners: pilotOwners, revision: pilotRevision };
+};
+beforeEach(() => {
+  pilotFailure = false;
+  pilotPending = null;
+  pilotOwners = [];
+  pilotRevision = 0;
+  orch.setPerpsPilotAdmissionReaderForTest(readPilot);
+});
+async function setAdmission(allowed: boolean) {
+  pilotOwners = allowed ? [owner] : [];
+  pilotRevision++;
+  assert.equal(await orch.refreshPerpsPilotAdmissionForTest(), true);
+}
+
 async function prepareEnabled() {
-  process.env.MERRYMEN_PERPS_PAPER_TENANTS = owner;
+  await setAdmission(true);
   const secret = `0x${"42".repeat(32)}` as `0x${string}`;
   const now = Math.floor(Date.now() / 1000);
   await grants.put(owner, { owner, smartAccount: account, purpose: "perps", chainId: 4663,
@@ -103,13 +125,14 @@ function refuseSettingsRename(): () => void {
   return () => { fs.renameSync = original; syncBuiltinESMExports(); };
 }
 after(() => {
+  orch.setPerpsPilotAdmissionReaderForTest(null);
   orch.setLeaseAcquireForTest(null); orch.setPaperRestoreForTest(null); orch.setPerpsFeedStartForTest(null);
   rmSync(fleet, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test("cold withdrawal refuses an unreadable risk file without a trusted parent snapshot", async () => {
   await prepareEnabled();
-  delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+  await setAdmission(false);
   const home = orch.childHome(workerKey), file = path.join(home, "settings.json");
   mkdirSync(home, { recursive: true });
   writeFileSync(file, "{broken risk settings");
@@ -122,7 +145,7 @@ test("cold withdrawal refuses an unreadable risk file without a trusted parent s
 for (const unavailable of ["perps", "spot"] as const) {
   test(`withdrawing pilot admission turns entries off despite an unread ${unavailable} settings store`, async () => {
     const { trader, before } = await startEnabled();
-    delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+    await setAdmission(false);
     const entrySwitchAtReads: unknown[] = [];
     useSettingsStoreForTest({ get: async () => {
       entrySwitchAtReads.push(childSettings().perpsEnabled);
@@ -142,7 +165,7 @@ for (const unavailable of ["perps", "spot"] as const) {
 test("withdrawal during a failed settings read still disables the existing child", async () => {
   const { before } = await startEnabled();
   useSettingsStoreForTest({ get: async () => {
-    delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+    await setAdmission(false);
     throw new Error("settings unavailable after withdrawal");
   } } as never, "perps");
   await orch.reconcile(); await settle();
@@ -155,9 +178,8 @@ test("failed off delivery stops the running worker and retains its lease until f
   writeFileSync(book, "original book retained for final copy");
   let mirrors = 0;
   orch.setRetirementMirrorForTest(async () => { mirrors++; return false; });
-  delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
   const restore = refuseSettingsRename();
-  try { await orch.reconcile(); await settle(); } finally { restore(); }
+  try { await setAdmission(false); await orch.reconcile(); await settle(); } finally { restore(); }
   assert.ok(trader.signals.includes("SIGTERM"), "a worker retaining enabled settings must be stopped");
   assert.equal(trader.gone, true);
   assert.deepEqual(childSettings(), before, "the failed write did not pretend to turn the file off");
@@ -173,7 +195,7 @@ test("failed off delivery stops the running worker and retains its lease until f
 
 test("cold preparation cannot fork from an old enabled file when off publication fails, and retries after repair", async () => {
   await prepareEnabled();
-  delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
+  await setAdmission(false);
   const home = orch.childHome(workerKey);
   mkdirSync(home, { recursive: true });
   writeFileSync(path.join(home, "settings.json"), JSON.stringify(risk));
@@ -196,8 +218,8 @@ for (const publicationFails of [false, true]) {
     let restore = () => {};
     orch.setPaperRestoreForTest(async () => {
       assert.equal(childSettings().perpsEnabled, true, "the initial settings write happened while admitted");
-      delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
       if (publicationFails) restore = refuseSettingsRename();
+      await setAdmission(false);
       return { ok: true, line: null };
     });
     try {
@@ -208,12 +230,145 @@ for (const publicationFails of [false, true]) {
   });
 }
 
+
+test("an admission-store outage forces entries off while keeping the worker, risk limits, and grant", async () => {
+  const { trader, before } = await startEnabled();
+  // An old bootstrap variable must never rescue a failed shared-store read.
+  process.env.MERRYMEN_PERPS_PAPER_TENANTS = owner;
+  pilotFailure = true;
+  try {
+    assert.equal(await orch.refreshPerpsPilotAdmissionForTest(), false);
+    assert.deepEqual(childSettings(), { ...before, perpsEnabled: false });
+    assert.deepEqual(trader.signals, []);
+    assert.ok(await grants.get(owner));
+  } finally { delete process.env.MERRYMEN_PERPS_PAPER_TENANTS; }
+});
+
+test("an unavailable admission store permits a cold exits-only worker from trustworthy settings", async () => {
+  await prepareEnabled();
+  pilotFailure = true;
+  assert.equal(await orch.refreshPerpsPilotAdmissionForTest(), false);
+  await orch.reconcile(); await settle();
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0]!.entriesAtFork, false);
+  assert.equal(childSettings().perpsStopLossPct, risk.perpsStopLossPct);
+  assert.deepEqual(childSettings().perpsMarkets, risk.perpsMarkets);
+});
+
+test("a hung admission read turns entries off independently of a hung Spot roster", async () => {
+  orch.setPerpsPilotAdmissionReaderForTest(readPilot, { refreshMs: 5, maxAgeMs: 40, timeoutMs: 20 });
+  const { trader, before } = await startEnabled();
+  let releasePilot!: (snapshot: { owners: readonly `0x${string}`[]; revision: number }) => void;
+  pilotPending = new Promise(resolve => { releasePilot = resolve; });
+  const spotGrants = getGrantStore("spot"), original = spotGrants.listTenantExpiries!;
+  let releaseRoster!: () => void;
+  const rosterBlocked = new Promise<void>(resolve => { releaseRoster = resolve; });
+  let entered = false;
+  spotGrants.listTenantExpiries = async () => { entered = true; await rosterBlocked; return []; };
+  const blockedReconcile = orch.reconcile();
+  try {
+    const deadline = Date.now() + 1_000;
+    while (childSettings().perpsEnabled !== false && Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(entered, true, "the main loop is waiting inside the Spot roster");
+    assert.deepEqual(childSettings(), { ...before, perpsEnabled: false });
+    assert.deepEqual(trader.signals, [], "protective exits retain their running worker");
+    releasePilot({ owners: [owner], revision: pilotRevision });
+    await settle();
+    assert.equal(childSettings().perpsEnabled, false, "the timed-out response cannot restore entry permission");
+  } finally {
+    spotGrants.listTenantExpiries = original;
+    releaseRoster();
+    releasePilot({ owners: [owner], revision: pilotRevision });
+    await blockedReconcile;
+    pilotPending = null;
+  }
+});
+
+test("permission expiring during preparation is rechecked synchronously at fork", async () => {
+  let now = 0;
+  orch.setPerpsPilotAdmissionReaderForTest(readPilot, { now: () => now, maxAgeMs: 100 });
+  await prepareEnabled();
+  orch.setPaperRestoreForTest(async () => {
+    assert.equal(childSettings().perpsEnabled, true);
+    now = 100; // No timer needs to run between this await and the final fork.
+    return { ok: true, line: null };
+  });
+  await orch.reconcile(); await settle();
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0]!.entriesAtFork, false);
+  assert.equal(childSettings().perpsMaxLeverage, risk.perpsMaxLeverage);
+});
+
+test("a newly positive snapshot alone does not turn worker entries on", async () => {
+  await startEnabled();
+  await setAdmission(false);
+  assert.equal(childSettings().perpsEnabled, false);
+  await setAdmission(true);
+  assert.equal(childSettings().perpsEnabled, false, "only the normal settings path can enable entries");
+});
+
+test("a settings read started before revoke and re-admission cannot restore its stale enabled switch", async () => {
+  const { trader, before } = await startEnabled();
+  let release!: () => void, entered!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const reading = new Promise<void>(resolve => { entered = resolve; });
+  useSettingsStoreForTest({ get: async () => {
+    const stale = await settings.perps.get(owner);
+    entered();
+    await blocked;
+    return stale;
+  } } as never, "perps");
+  const reconciliation = orch.reconcile();
+  try {
+    await reading;
+    // The admin's beforeAdmit hook writes the new off settings. Both cohort
+    // changes land between polls, so the owner set itself is unchanged.
+    await settings.perps.put(owner, { ...risk, perpsEnabled: false, perpsControlNonce: "fresh-admission" });
+    pilotRevision += 2;
+    await orch.refreshPerpsPilotAdmissionForTest();
+    assert.deepEqual(childSettings(), { ...before, perpsEnabled: false }, "revision withdrawal reaches the running worker before any settings await completes");
+    release();
+    await reconciliation;
+    assert.equal(childSettings().perpsEnabled, false, "the older true result is not valid under the new admission revision");
+    assert.deepEqual(trader.signals, []);
+  } finally { release(); await reconciliation; }
+});
+
+test("revoke and re-admit between polls cannot fork from the earlier enabled file", async () => {
+  await prepareEnabled();
+  orch.setPaperRestoreForTest(async () => {
+    assert.equal(childSettings().perpsEnabled, true);
+    await settings.perps.put(owner, { ...risk, perpsEnabled: false, perpsControlNonce: "fresh-admission" });
+    pilotRevision += 2;
+    await orch.refreshPerpsPilotAdmissionForTest();
+    return { ok: true, line: null };
+  });
+  await orch.reconcile(); await settle();
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0]!.entriesAtFork, false, "unchanged membership never reuses a previous revision's enabled file");
+  assert.equal(childSettings().perpsMaxLeverage, risk.perpsMaxLeverage);
+});
+
+test("children receive neither pilot role configuration nor the admission database", () => {
+  const names = ["MERRYMEN_PERPS_PAPER_TENANTS", "MERRYMEN_PERPS_PILOT_ADMINS", "DATABASE_URL"] as const;
+  const saved = names.map(name => process.env[name]);
+  try {
+    for (const name of names) process.env[name] = "parent-only";
+    for (const key of [owner, workerKey]) {
+      const env = orch.childEnv(key);
+      for (const name of names) assert.equal(env[name], undefined, `${key}: ${name} is parent-only`);
+    }
+  } finally {
+    names.forEach((name, index) => { if (saved[index] === undefined) delete process.env[name]; else process.env[name] = saved[index]; });
+  }
+});
+
 test("shutdown final-copies a worker stopped for failed off delivery before the next reconcile", async () => {
   await startEnabled();
   writeFileSync(path.join(orch.childHome(workerKey), "merrymen.db"), "original book awaiting final copy");
-  delete process.env.MERRYMEN_PERPS_PAPER_TENANTS;
   const restore = refuseSettingsRename();
-  try { await orch.reconcile(); await settle(); } finally { restore(); }
+  try { await setAdmission(false); await orch.reconcile(); await settle(); } finally { restore(); }
   assert.equal(spawned.filter(p => !p.gone).length, 0);
   let mirrors = 0;
   orch.setRetirementMirrorForTest(async tenant => { assert.equal(tenant, workerKey); mirrors++; return true; });
