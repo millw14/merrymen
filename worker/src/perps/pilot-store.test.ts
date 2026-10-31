@@ -342,3 +342,29 @@ test("late legacy writers cannot grant authority after initialization; explicit 
   assert.equal((await f.store.get(owner(1))).status, "allowed");
   assert.deepEqual(await f.store.withAdmission(owner(1), async () => "saved"), { allowed: true, value: "saved" });
 });
+
+test("admin listing merges the newest bounded denials without scanning all admission history", async t => {
+  const f = fixture(t, owner(1));
+  const queries: string[] = [];
+  const recording = (db: Db): Db => ({ exec: sql => db.exec(sql), tx: fn => db.tx(tx => fn(recording(tx))), prepare: sql => {
+    if (sql.startsWith("SELECT * FROM perps_pilot_admissions")) queries.push(sql);
+    return db.prepare(sql);
+  } });
+  const store = new SqlPerpsPilotStore(recording(f.db), f.options);
+  await store.snapshot();
+  for (let i = 0; i < 102; i++) f.raw.prepare("INSERT INTO perps_pilot_admissions VALUES(?,'revoked','admin',1,?,?)").run(owner(i + 100), NOW + i, ADMIN);
+  f.raw.prepare("INSERT INTO perps_pilot_admissions VALUES(?,'allowed','invite',1,?,?)").run(owner(5000), NOW + 200, owner(5000));
+  const listing = await store.list();
+  assert.equal(listing.admissions.length, 101);
+  assert.equal(listing.admissions[0]!.owner, owner(1));
+  assert.deepEqual(listing.admissions.slice(1).map(row => row.owner), [owner(5000), ...Array.from({ length: 99 }, (_, i) => owner(201 - i))]);
+  assert.ok(listing.admissions.slice(1).every(row => row.status === "revoked"));
+  assert.equal(queries.length, 3);
+  for (const query of queries) {
+    const plan = f.raw.prepare(`EXPLAIN QUERY PLAN ${query}`).all();
+    assert.ok(plan.some(row => /^SEARCH perps_pilot_admissions USING INDEX/.test(String(row.detail))), query);
+    assert.ok(!plan.some(row => /^SCAN perps_pilot_admissions/.test(String(row.detail))), query);
+  }
+  for (let i = 0; i < 100; i++) f.raw.prepare("INSERT INTO perps_pilot_admissions VALUES(?,'allowed','invite',1,?,?)").run(owner(6000 + i), NOW, owner(6000 + i));
+  await assert.rejects(store.list(), /Legacy paper-pilot cohort exceeds its limit/);
+});

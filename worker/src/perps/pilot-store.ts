@@ -309,13 +309,19 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     return this.locked(async (tx, revision) => {
       const active = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap') ORDER BY owner LIMIT 101").all() as Row[];
       if (active.length > PERPS_PILOT_LIMIT) throw new Error("Paper-pilot cohort exceeds its limit.");
-      const revoked = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='revoked' OR source='invite' ORDER BY updated_at DESC,owner LIMIT 100").all() as Row[];
+      const revoked = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='revoked' ORDER BY updated_at DESC,owner LIMIT 100").all() as Row[];
+      // Keep the history lookup on the status index. An OR over legacy sources
+      // would scan and sort unbounded revoked history while holding the lock.
+      const legacy = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='allowed' AND source='invite' ORDER BY updated_at DESC,owner LIMIT 101").all() as Row[];
+      if (legacy.length > PERPS_PILOT_LIMIT) throw new Error("Legacy paper-pilot cohort exceeds its limit.");
+      const denied = [...revoked, ...legacy.map(row => ({ ...row, status: "revoked" }))].map(admissionFrom)
+        .sort((a, b) => b.updatedAt - a.updatedAt || a.owner.localeCompare(b.owner)).slice(0, 100);
       const requests = await tx.prepare("SELECT * FROM perps_pilot_requests ORDER BY submitted_at,owner LIMIT 1001").all() as Row[];
       if (requests.length > PERPS_PILOT_REQUEST_LIMIT) throw new Error("Paper-pilot request queue exceeds its limit.");
       const invites = await tx.prepare("SELECT * FROM perps_pilot_invites ORDER BY created_at DESC,id LIMIT 100").all() as Row[];
       const audit = await tx.prepare("SELECT * FROM perps_pilot_audit ORDER BY at DESC,id LIMIT 100").all() as Row[];
       return { revision, limit: PERPS_PILOT_LIMIT, requestLimit: PERPS_PILOT_REQUEST_LIMIT, requests: requests.map(requestFrom),
-        admissions: [...active, ...revoked.map(row => ({ ...row, status: "revoked" }))].map(admissionFrom), invites: invites.map(inviteFrom),
+        admissions: [...active.map(admissionFrom), ...denied], invites: invites.map(inviteFrom),
         audit: audit.map(row => ({ id: String(row.id), action: String(row.action), actor: row.actor === null ? null : storedOwner(row.actor),
           owner: row.owner === null ? null : storedOwner(row.owner), inviteId: row.invite_id === null ? null : String(row.invite_id),
           at: integer(row.at), revision: integer(row.revision) })) };
