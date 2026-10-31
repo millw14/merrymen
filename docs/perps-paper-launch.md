@@ -88,8 +88,9 @@ it is not permission to bypass an accounting hold.
 
 Review the stack in order: [authority and security (#368)](https://github.com/millw14/merrymen/pull/368),
 [private reads and recovery (#369)](https://github.com/millw14/merrymen/pull/369),
-[paper desk (#370)](https://github.com/millw14/merrymen/pull/370), then
-[pilot controls and this release record (#371)](https://github.com/millw14/merrymen/pull/371).
+[paper desk (#370)](https://github.com/millw14/merrymen/pull/370),
+[pilot controls and this release record (#371)](https://github.com/millw14/merrymen/pull/371), then
+[invite signup and wallet administration (#372)](https://github.com/millw14/merrymen/pull/372).
 Their current CI checks and validation notes are the code evidence; a successful
 code check does not fill the deployment and owner-drill gates below.
 
