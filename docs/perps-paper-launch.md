@@ -124,18 +124,189 @@ keys, serialized grants and customer ledger rows out of the release note.
 
 | Gate | Required evidence | Current evidence in this work |
 |---|---|---|
-| Reviewed release | Final tests, typechecks, build and review on the exact deployed commit; preserve any unresolved failures | Focused local tests exist; final combined verification and deployed commit must be recorded by the release owner |
-| Dependency security | Review outstanding dependency advisories and their reachability; require compatible remediation or a documented mitigation decision | The October 30 production dependency audit reports 16 high-severity package findings from one transitive Zod advisory. The application's direct Zod is patched; five nested Zod 3 installations remain flagged. See the assessment below |
-| Owner lifecycle | Real hosted Privy sign-in; separate account index 1; creation; renewal of an empty paper wall; stale login and closed-screen refusal; retained recovery after interrupted renewal | DOM, signer, binding and API regression tests; real hosted browser/Privy exercise outstanding |
+| Reviewed release | Final tests, typechecks, build and review on the exact deployed commit; preserve any unresolved failures | The complete CI run for `1d10b403666ec3bea3354ba91b552110235f2e7c` passed. Additional native stop fixes require their own review and checks. No paper release is deployed |
+| Dependency security | Review outstanding dependency advisories and their reachability; require compatible remediation or a documented mitigation decision | October 31 exact-lock audit still reports 16 high package findings from one transitive Zod advisory, zero critical. Direct Zod is patched; five nested Zod 3 installations remain flagged. The existing exception expires November 8; see the assessment below |
+| Owner lifecycle | Real hosted Privy sign-in; separate account index 1; creation; renewal of an empty paper wall; stale login and closed-screen refusal; retained recovery after interrupted renewal | Real Privy sign-in and pending-request/admin-approval flow passed on the isolated local preview with paper off. Owner signing, account creation/renewal and deployed worker round trip remain outstanding |
 | Paper desk | Current tenant/account report, unread/stale states, exact fills and candle gaps; Close, Close all and explicit reset show the correct worker result; a lost POST response is never automatically retried | Component and route tests; deployed end-to-end worker round trip outstanding |
 | Kill and exits | Kill names and stops all supported wallets; entries remain off after delayed settings writes; removing pilot admission disables new entries while exits/stops remain usable | Regression tests in this change; hosted operator drill outstanding |
-| Phone compatibility | Released iOS and Android builds carrying #358's compatible kill request; verify installed-client behavior against the intended backend | #358 is merged and Android CI passed its merge commit; the latest published Android release predates the fix, and iOS CI is disabled. Release/install evidence is outstanding; the full Perps phone UI follows web launch |
-| Privy capacity | Confirm configured production app, enabled login and embedded signing, expected internal-owner count and current plan/rate capacity | Account/plan/deployment evidence outstanding; no assumption from local mocks |
+| Phone compatibility | Released iOS and Android builds carrying the current login-wide kill request; verify installed-client behavior against the intended backend | Additional iOS Perps-only stop visibility and Android lost-reply/session-fence fixes are under review. Unsigned builds and local tests are code evidence; signed distribution and installed-device stop evidence remain outstanding |
+| Privy capacity | Confirm configured production app, enabled login and embedded signing, expected internal-owner count and current plan/rate capacity | Production app, email/X login and Free plan verified in the dashboard October 31. Organization usage was 155/500 MAUs and 758/50,000 signatures. The 100-owner admission ceiling fits that observed monthly headroom; request-rate capacity and real signing remain unmeasured |
 | Fleet capacity | Under the 48-child cap, demonstrate Spot priority, Perps-only bot-seat behavior, shutdown/final mirror and headroom with the proposed cohort | Code/test evidence is separate from deployment resource measurements, which remain outstanding |
-| Database backup | Current backup policy, recent successful backup, isolated restore and reconciliation evidence; preserve the original volume during pilot | Railway metadata shows no scheduled snapshots and PITR disabled; newest listed snapshots are October 8. Current backup and isolated restore remain blockers. No database rows or credentials were read |
+| Database backup | Current backup policy, recent successful backup, isolated restore and reconciliation evidence; preserve the original volume during pilot | New home and PostgreSQL snapshots are listed on October 31; DAILY schedules were added on the original volumes. PITR remains disabled. Provider snapshot inventory alone does not prove content or recovery; isolated logical restore evidence is recorded separately below |
 | Persistent home | Verify mount identity, lease exclusivity and restart on the original home; document held-wallet response if the home is missing | Existing authority/hold tests and the restrictive pilot policy above; lost-home/handover proof outstanding |
-| Public feed | Bounded recording from the deployed single public feed, exact timestamps, gap accounting and deterministic offline replay | Capture/replay synthetic tests passed. A read-only stat of `/data/merrymen/lighter-feed.json` on the existing production orchestrator returned ENOENT on October 30; no recording was made and no feed was started |
+| Public feed | Bounded recording from the deployed single public feed, exact timestamps, gap accounting and deterministic offline replay | Capture/replay synthetic tests passed. The existing production orchestrator still has no feed file or Perps homes on October 31, with paper off. No observed recording exists; no second publisher was started |
 | Other surfaces | Owner-scoped Telegram, MCP and partner routes; no Perps public identity or Spot fallback; recovery remains reachable when paper is off | Tests must be included in final combined verification; deployed owner exercise outstanding |
+
+### Launch preparation: 2026-10-31
+
+These actions advance the release gates without enabling production paper
+trading. The historical October 30 audit below is retained as a dated record.
+
+- **Exact dependency verification:** the complete [CI run for the invite and
+  approval head](https://github.com/millw14/merrymen/actions/runs/41198880031)
+  passed at `1d10b403666ec3bea3354ba91b552110235f2e7c`. An independent
+  clean `npm ci` installation matched all 836 installed locked package versions;
+  55 absent optional/platform packages were accounted for. Focused authority,
+  invitation, admin, UI, grant and settings checks passed 142/142 with no skips.
+  The earlier local preview's `npm install --package-lock=false` had changed
+  physical SDK versions despite leaving the lockfile unchanged. That preview
+  was rebuilt with `npm ci`, then `npm install --no-save --ignore-scripts
+  pg@8.23.1`, and all 836 locked versions were rechecked with zero mismatches.
+  CI and the Docker install did not use that incorrect preview command.
+- **Real sign-in and explicit approval:** at 16:47 UTC the isolated loopback
+  preview on port 3217 had one real Privy identity, one one-use invitation,
+  one explicitly admin-approved owner and zero grant rows. Before approval,
+  the browser showed the pending request and the admin page showed zero
+  admissions. After a separate review and confirmation, the browser showed
+  approval with paper unavailable. Database audit actions independently
+  confirmed request submission and admission approval, with zero
+  invite-sourced admissions. Paper remained `off` throughout. The verified
+  login owner was configured as an administrator only in the local preview;
+  no production admin or membership was changed. No grant was signed.
+- **Privy configuration and quota:** the existing production app matches the
+  configured public app ID. Its allowed origins include the two existing
+  production origins and the explicitly added `http://127.0.0.1:3217` preview
+  origin. Email and X login are enabled. The application requests Ethereum
+  embedded-wallet creation through its SDK configuration and handles restored
+  sessions without an embedded wallet; the dashboard-wide automatic creation
+  toggle remains off. At about 16:50 UTC the organization dashboard showed
+  155 monthly active users of 500 and 758 signatures of 50,000. These are
+  shared organization quotas, not reserved Perps capacity or request-per-second
+  measurements. No plan upgrade or billing change was made. Existing Privy
+  HttpOnly-cookie isolation is not enabled; changing that shared setting needs
+  a compatible web/native migration and verification, not an untested toggle.
+- **Isolated lifecycle checks:** 180/180 additional tests passed without skips
+  (121 local and 59 real PostgreSQL checks). They exercise paper accounting,
+  protective exits, grant recovery, kill/rearm, reset, final mirror,
+  replacement fencing, admission/revocation and Telegram control isolation.
+  Those orchestrator suites substitute child spawning, so they do not prove
+  an actual deployed browser-to-worker run. Fixtures used synthetic owners and
+  disposable local databases; no customer sessions or customer grants were used.
+- **Actual worker crash/recovery drill:** the opt-in
+  `worker/src/perps-child-process.test.ts` passed with no skips and its worker
+  typecheck passed. It launches the real `index.ts` with a canonical synthetic
+  index-1 permission, fresh private home, SQLite and a deterministic fixture
+  feed/RPC. Before launching, the OS sandbox must reject external TCP and
+  permit only that loopback RPC. The test checks the Perps lane's protection
+  report with entries off, durable Close all, wrong-account reset refusal,
+  acknowledged reset followed by SIGKILL, restart without duplicate reset,
+  normal shutdown drain, live kill, archived recovery discovery with its
+  ceiling off, and restart without rearming. Final fills, trades and positions
+  remain zero. An independent reviewer checked the final harness. This is a
+  self-hosted local worker test, not hosted orchestrator lease proof, cohort
+  load, observed-market replay or real owner signing. Run explicitly on macOS
+  with `MERRYMEN_TEST_PERPS_CHILD=1 node --import tsx --test
+  worker/src/perps-child-process.test.ts`; ordinary CI skips this OS-specific
+  drill. Synthetic grant homes were removed after execution.
+- **Phone stop fixes:** iOS now offers the login-wide stop even when the Spot
+  grant is absent or unreadable. Both clients describe the Spot, Perps and
+  Solana scope and bind confirmation to the current owner and session
+  generation. Android sends one DELETE, requires an explicit successful reply,
+  and no longer treats absence of a Spot grant as proof that Perps stopped
+  after a lost response. Android passed 728 unit tests, release lint, SDK
+  metadata checks and all nine release guards. Swift policy tests passed 23/23;
+  all eight packaging tests, the unsigned iOS simulator build and both new
+  stop UI cases passed. Packaging tests use CI's keyless ad-hoc simulator
+  identity; the initial fully unsigned run's missing-keychain-entitlement
+  failures were not counted as passes. Candidate Android 0.4.2/code 6 and iOS
+  0.2.1/build 2 artifacts were built and their metadata verified. The Android
+  debug APK and iOS device archive are unsigned, and store inventories still
+  need to confirm those version numbers are unused. The
+  generated iOS wallet engine was refreshed through the official generator
+  after the dependency lock changed; an independent exact-lock regeneration
+  reproduced all three native bundles and the 84-entry source manifest
+  byte-for-byte. These are local build/test results, not signed-release or
+  installed-device proof.
+- **Fresh snapshots and schedule:** Railway lists new home snapshot
+  `5094c313-df91-443b-bf0d-f039c3a7d77f` at 16:31:01 UTC and PostgreSQL snapshot
+  `9c6a98a0-45a1-46a3-a805-1575309a9d4f` at 16:31:03 UTC. All seven previous
+  snapshots remained listed. DAILY schedules were added and reread on the
+  original home and database volumes, respectively 02:19 and 06:35 UTC, with
+  provider-reported six-day retention. Existing schedule kinds were preserved.
+  Daily snapshots incur storage usage; no paid plan or new cloud service was
+  provisioned. Snapshot creation was accepted and inventory verified, but the
+  workflow-status API was unavailable to this credential; do not turn that
+  limitation into a claim of tested snapshot recovery. PITR is still disabled.
+- **Isolated database recovery:** PostgreSQL 18 dump and restore completed
+  successfully. Source and restored content fingerprints matched for all
+  129 tables and 5,575,387 rows, alongside 1,130 columns, 944 constraints,
+  272 indexes and 15 sequence values from the archive. The read-only source
+  snapshot was held for 304 seconds and all export sessions were verified
+  closed. The 154,373,800-byte dump was encrypted directly with AES-256-GCM;
+  authentication was checked before restoration into a fresh, encrypted local
+  image. The restore role had no superuser, role-creation, database-creation or
+  replication privileges, and the local cluster had no IP listener or outbound
+  IP access. The owned cluster is stopped and its encrypted image unmounted;
+  archive and recovery material are retained privately. This verifies logical
+  database content, not provider snapshot restore, original roles/ownership/ACLs
+  or production platform equivalence: the source uses Linux `en_US.utf8` and
+  the local verifier uses macOS `C`/UTF8, with explicit `C` fingerprint ordering.
+  No production restore, restart or deployment occurred. The separate home
+  volume and Perps books are not covered by this database-only proof.
+- **Unchanged production and observed headroom:** the web and orchestrator
+  remain on the older deployments recorded below. At 16:54 UTC the original
+  home was present, but `children-perps` and `lighter-feed.json` were absent and
+  the global paper setting was unset (off). The container reported about
+  2.99 GB used of 24 GB and 199 of 1,000 process/thread slots, with a 24-vCPU
+  quota. An exact command-argument inventory found 12 worker processes and
+  one orchestrator. This is current baseline load, not a Perps cohort capacity
+  test or permission to fill the remaining 48-child slots.
+
+The exact release still needs Milla's review under the repository merge policy,
+a controlled deployment on the original volumes, a real owner-signed paper
+canary, observed feed capture/replay, and installed-phone stop verification.
+The Zod exception remains an explicit release decision; passing tests does not
+remove the advisory. Never substitute a synthetic replay or unsigned simulator
+build for those remaining operator gates.
+
+### Controlled deployment and canary sequence
+
+1. Review the complete PR stack and the final commit's checks, including the
+   native follow-up. Record Milla's release decision and the dependency
+   exception decision. Resolve the stack in order without admin bypass. Verify
+   the resulting release contains the reviewed commits and rerun required
+   checks if its code differs.
+2. Keep paper off on every web and orchestrator replica while replacing old
+   readers/writers. Preserve the original volumes, `DATABASE_URL`, store DEK,
+   session secret, grant records and worker homes. Confirm one orchestrator
+   lease holder and its normal accounting drain before a restart; no second
+   worker may own an existing book. Do not fall back to a pre-approval version
+   after the new admission boundary has been initialized. Global paper-off
+   preserves existing owner entry settings; before turning it back on, disable
+   and review any retained enabled settings if an entries-off rollout is
+   required. It is not equivalent to an owner kill or admin revocation.
+3. On the new web release, configure the intended admin from a verified login
+   owner. Start with one explicitly approved internal canary, using the normal
+   code → pending → admin approval flow. Verify no other owners were admitted,
+   no permission was created by signup, and all entries remain off. Local
+   preview membership and admin configuration are not production setup.
+4. Enable paper only for that reviewed deployment and have the canary owner
+   complete the normal separate Perps permission review/signing flow. Check
+   account index 1, no funding or live execution path, entries off initially,
+   and correct private reads. Exercise explicit entry enablement, protective
+   exits, Close/Close all, reset, kill, fresh renewal, and admin revoke/re-admit.
+   Interrupt a response to confirm no automatic duplicate command; reopening
+   access must not restore old entry permission. Keep real owner signing in
+   the owner's wallet UI.
+5. Record the deployed commit, container limits, actual child/thread/memory
+   load, Spot priority and shutdown/final-mirror behavior during the canary.
+   Keep the 48-child ceiling and all trading limits unchanged. Any accounting
+   hold, ambiguous ownership, stale authorization or resource exhaustion stops
+   expansion; investigate rather than increasing a limit to pass the drill.
+6. Once the canary's single public feed exists, capture 120 samples at
+   five-second spacing using the existing read-only recorder. Replay the same
+   recording twice and preserve unread samples, gaps and both results. Verify
+   restart on the original home and an isolated restore of the canary's actual
+   Perps state before claiming persistent-book recovery. A PostgreSQL-only
+   restore cannot establish recovery of the separate home volume.
+7. Verify the current signed iOS and Android clients on installed devices
+   against the intended backend, including a Perps-only owner and an unread
+   Spot status. A stop must name all wallets, never silently retry, and leave
+   recovery reachable. Expand the cohort only after these results and the
+   measured capacity are recorded. Paper-off stands the fleet down and keeps
+   recovery separate. Restoring paper may respawn retained authorized workers
+   and resume their stored entry settings; kill and revoke/re-admit have their
+   own authority-reset behavior and must not be confused with that global flag.
 
 ### Read-only release audit: 2026-10-30, 21:22 UTC
 
@@ -212,9 +383,11 @@ retrieved.
 A red or missing gate remains visible in the release record. Turning the paper
 flag off is an operational stand-down: hosted paper books freeze with their
 recorded positions, and their stored grants remain for recovery. A login-wide
-kill and owner withdrawal/recovery remain separate actions. The pilot offers
-no automatic resume; reopening entry permission and resetting a practice book
-are explicit owner actions with their own checks.
+kill and owner withdrawal/recovery remain separate actions. Turning paper back
+on may respawn retained authorized workers and resume stored entry settings.
+After a kill or admin revoke/re-admit, renewed authority and entry enablement
+remain separate explicit owner actions. Resetting a practice book is also an
+explicit owner action with its own checks.
 
 ## Dependency audit assessment: October 30
 
