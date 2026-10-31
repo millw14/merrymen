@@ -7,6 +7,7 @@
  */
 import { NextResponse } from "next/server";
 import { readWallTape } from "@/lib/read-wall-tape";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * NOT PRERENDERED AT BUILD, and that is a correctness rule rather than a
@@ -28,7 +29,9 @@ import { readWallTape } from "@/lib/read-wall-tape";
  */
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const t = await readWallTape();
   // The cells are for a canvas and are large; a tape only needs the totals.
   return NextResponse.json(

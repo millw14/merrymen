@@ -45,6 +45,7 @@
 import { NextResponse } from "next/server";
 import { getLikeStore } from "@/lib/like-store";
 import { readTheses } from "@/lib/read-theses";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 /**
@@ -69,7 +70,9 @@ export interface LikeCountsResponse {
   read: boolean;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   try {
     // Same publication gate and post IDs; counts do not need return enrichment.
     const { theses } = await readTheses({ figures: false });

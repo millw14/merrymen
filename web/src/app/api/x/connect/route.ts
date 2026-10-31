@@ -65,6 +65,7 @@ import {
   type XTokens,
 } from "../../../../../../worker/src/xpost/client";
 import { getAccount, prunePending, putPending, takePending, upsertAccount } from "../../../../../../worker/src/xpost/store";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -204,6 +205,8 @@ async function finish(tenant: `0x${string}`, input: Record<string, unknown>): Pr
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, X_COPY.signedOut);

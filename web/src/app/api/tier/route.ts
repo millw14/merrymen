@@ -57,6 +57,7 @@ import {
   type BalanceCache,
   type Standing,
 } from "@/lib/merrymen-standing";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -105,6 +106,8 @@ export interface TierView {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const hosted = isHostedMode();
   const energyGate = energyGateOn(process.env.MERRYMEN_ENERGY_GATE, hosted);
   const view = (v: Partial<TierView>): TierView => ({

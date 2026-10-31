@@ -13,6 +13,7 @@ import { jsonResponse } from "@/mcp/oauth/metadata";
 import { OAuthError, decideRequest, describeRequest } from "@/mcp/oauth/server";
 import { ClientError } from "@/mcp/oauth/clients";
 import { logEvent } from "@/mcp/observe";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -20,6 +21,8 @@ export const runtime = "nodejs";
 const MAX = 8 * 1024;
 
 export async function POST(req: Request): Promise<Response> {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const cfg = mcpConfig();
   if (!cfg.enabled) return jsonResponse({ error: "not_found" }, 404);
   const origin = req.headers.get("origin");

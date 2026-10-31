@@ -8,6 +8,7 @@ import { AGENT_TOOLS } from "./agents";
 import { ATTENTION_TOOLS } from "./attention";
 import { AGENT_SETTINGS_TOOLS } from "./agent-settings";
 import { ONBOARDING_TOOLS } from "./onboarding";
+import { PERPS_TOOLS } from "./perps";
 import { PORTFOLIO_TOOLS } from "./portfolio";
 import { DECISIONS_TOOLS } from "./decisions";
 import { MARKET_TOOLS } from "./market";
@@ -29,6 +30,7 @@ export const ALL_TOOLS: readonly ToolDef[] = withAppMeta([
   ...ATTENTION_TOOLS,
   ...AGENT_SETTINGS_TOOLS,
   ...PORTFOLIO_TOOLS,
+  ...PERPS_TOOLS,
   ...DECISIONS_TOOLS,
   ...MARKET_TOOLS,
   ...CHAT_TOOLS,

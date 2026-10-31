@@ -376,6 +376,78 @@ describe("perpetuals", () => {
  * — the same construction without the reserve — passes, so the refusal is the
  * reserve and nothing about how the wall was sealed.
  */
+describe("a Perps wallet's grant (perps slice 5b): the Perps wall, and in this build an empty one", () => {
+  const PERPS_ACCOUNT = "0x00000000000000000000000000000000000e1e1e" as const;
+
+  it("the paper Perps grant passes: purpose perps, mainnet, no marker, the empty Perps wall", async () => {
+    const { grant } = await signerGrant({ account: PERPS_ACCOUNT, purpose: "perps" });
+    assert.deepEqual(verdict(grant), { ok: true });
+    assert.equal(grant.purpose, "perps");
+    assert.deepEqual(grant.grantFeatures, []);
+    // THE PREMISE: its call policy permits nothing, and the rebuild agrees.
+    assert.deepEqual(core.buildCallPermissions(grant.caps, PERPS_ACCOUNT, core.grantWallOptions(grant)), []);
+  });
+
+  it("A PERPS GRANT SEALED OVER THE SPOT WALL is refused: the rebuild is the Perps wall", async () => {
+    // What a tenant holding the owner key could build: the purpose and the
+    // empty marker list the server wants, over the full Spot wall (every stock
+    // approve, the swaps, the class vault) at the Perps address.
+    const { grant, owner } = await signerGrant({ account: PERPS_ACCOUNT, purpose: "perps" });
+    const overSpot = await resealed(grant, owner, { perpsOnly: false });
+    assert.notEqual(decode(overSpot).permissionParams.policies[1].policyParams.permissions.length, 0, "premise: a Spot wall was sealed");
+    const v = refusedWith(overSpot, "invalid_wall");
+    assert.match(v.ok ? "" : v.why, /does not implement the advertised Merrymen limits/);
+    // And the same wall declared as Spot would have been fine: only the purpose differs.
+    const { grant: spot, owner: spotOwner } = await signerGrant({ account: PERPS_ACCOUNT });
+    assert.deepEqual(verdict(await resealed(spot, spotOwner)), { ok: true });
+  });
+
+  it("a Spot grant relabelled Perps is refused, whatever it declares", async () => {
+    const { grant } = await signerGrant({ account: PERPS_ACCOUNT });
+    refusedWith({ ...grant, purpose: "perps" }, "invalid_wall");
+    // Even with its markers stripped, its wall is still the Spot one.
+    const v = refusedWith({ ...grant, purpose: "perps", grantFeatures: [], grantTokens: undefined, ponsClassVaultAddress: undefined, ponsClassVaultFactoryAddress: undefined }, "invalid_wall");
+    assert.match(v.ok ? "" : v.why, /does not implement the advertised Merrymen limits/);
+  });
+
+  it("D5: the paper Perps wall carries nothing — any marker, token, sealed address, perp block or energy buy is refused by name", async () => {
+    const { grant } = await signerGrant({ account: PERPS_ACCOUNT, purpose: "perps" });
+    for (const [what, change] of [
+      ["the energy buy", { grantFeatures: [GRANT_ENERGY] }],
+      ["the perpetuals marker", { grantFeatures: [GRANT_PERP_LIGHTER] }],
+      ["the perpetuals block", { grantFeatures: [GRANT_PERP_LIGHTER], perp: { route: GRANT_PERP_LIGHTER, apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: PERP_KEY } }],
+      ["a recovery reference", { perpRecovery: { v: 1 } }],
+      ["the wide-stock Spot marker", { grantFeatures: ["tradeable-v2"] }],
+      ["the scoped-spenders shape", { grantFeatures: [core.GRANT_SCOPED_SPENDERS] }],
+      ["a traded token", { grantTokens: [EXTRA.address] }],
+      ["a sealed class vault", { grantFeatures: ["pons-class"], ponsClassVaultAddress: CLASS_VAULT, ponsClassVaultFactoryAddress: CLASS_FACTORY }],
+      ["a sealed Trencher vault", { trencherVaultAddress: TRENCHER_VAULT }],
+      ["no marker list at all", { grantFeatures: undefined }],
+    ] as const) {
+      const v = refusedWith({ ...grant, ...change }, "invalid_wall");
+      assert.match(v.ok ? "" : v.why, /carries nothing in this build/, what);
+    }
+  });
+
+  it("a Perps wallet exists only on Robinhood Chain mainnet", async () => {
+    const { grant } = await signerGrant({ account: PERPS_ACCOUNT, purpose: "perps" });
+    for (const chainId of [46630, 1, undefined, "4663"]) {
+      const v = refusedWith({ ...grant, chainId }, "invalid_grant");
+      assert.match(v.ok ? "" : v.why, /only on Robinhood Chain mainnet/, String(chainId));
+    }
+  });
+
+  it("a purpose that names no wallet is refused by name, never rebuilt as Spot", async () => {
+    const { grant } = await signerGrant({ account: PERPS_ACCOUNT });
+    for (const purpose of ["Perps", "", "solana", 1, null]) {
+      const v = refusedWith({ ...grant, purpose }, "invalid_grant");
+      assert.match(v.ok ? "" : v.why, /names a wallet this service does not know/, String(purpose));
+    }
+    // Spot, named or not, is the wall it always was.
+    assert.deepEqual(verdict({ ...grant, purpose: "spot" }), { ok: true });
+  });
+});
+
 describe("a grant from a signer that predates energy", () => {
   const MERRY = core.MERRYMEN_TOKEN.address;
   const STANDIN = "0x000000000000000000000000000000000000beef";
@@ -499,6 +571,10 @@ describe("the accepted markers are exactly what the signers can mint", () => {
         // Rebuilt from the GRANT_PERP_LIGHTER marker AND the grant's `perp`
         // block (the sealed key) by grantWallOptions → grantPerp.
         "perpLighter",
+        // Rebuilt from the grant's signed `purpose` by grantWallOptions, which
+        // canonical-wall.ts passes (perps slice 5b): a Perps signer sets it
+        // from the purpose it signs, and the rebuild from the same field.
+        "perpsOnly",
       ]);
       for (const key of keys) assert.ok(modelled.has(key), `${who} passes ${key} to the wall, which canonical-wall.ts does not rebuild`);
       assert.doesNotMatch(block[1], /withdrawalAddresses|allowRialto/, `${who} must not widen the wall with a transfer or Rialto`);

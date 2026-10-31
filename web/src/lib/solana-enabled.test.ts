@@ -113,10 +113,10 @@ describe("the Solana switch", () => {
 
   it("the terminal shows the network switch only when the server says so", () => {
     const layout = readFileSync(join(WEB, "app/(app)/layout.tsx"), "utf8");
-    assert.match(layout, /<App solana=\{solanaEnabled\(\)\} \/>/);
+    assert.match(layout, /<App\s+solana=\{solanaEnabled\(\)\}\s+perps=\{perpsOffered\(\)\}\s*\/>/);
     const app = readFileSync(join(WEB, "terminal/App.tsx"), "utf8");
-    assert.match(app, /export function App\(\{ solana = false \}/);
-    assert.match(app, /screenForPath\(pathname, solana\)/);
+    assert.match(app, /export function App\(\{ solana = false, perps = false \}/);
+    assert.match(app, /screenForPath\(pathname, solana, perps\)/);
     assert.match(app, /\{solana && <nav aria-label="Trading networks"/);
     assert.equal(app.match(/aria-label="Trading networks"/g)?.length, 1, "no second, ungated switch");
   });

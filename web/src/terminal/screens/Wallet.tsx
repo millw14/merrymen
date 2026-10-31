@@ -5,6 +5,7 @@ import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { assertRevocationFunded, revokeFromBrowser } from "@/lib/revoke-client";
 import { stopAgentForReplacement } from "@/lib/stop-agent";
+import { renewalPerpsRefusal, restorePerpsRefusal } from "@/lib/restore-perps-owner";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
@@ -17,6 +18,7 @@ import { Info } from "@/components/Info";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
   explorerFor,
+  grantPurpose,
   grantTrencher,
   TRENCHER_VAULT_ABI,
   CASH,
@@ -37,10 +39,11 @@ import {
   listSavedWallets,
   isPrivyOwned,
   loadGrant,
+  localGrantsSnapshot,
   previewOwnerAccount,
   preflightAgentGrant,
   readFunding,
-  refusalMessage,
+  refusalOfResponse,
   restoreAgentWallet,
   createPrivyOwnedWallet,
   type Funding,
@@ -439,8 +442,8 @@ export default function GrantPage() {
   useEffect(() => {
     let active = true;
     const generation = ++accountReadGeneration.current;
-    const stored = loadGrant();
-    setSavedWallets(listSavedWallets());
+    const stored = loadGrant("spot");
+    setSavedWallets(listSavedWallets("spot"));
     // The chain selector FOLLOWS the loaded grant. renewKey now signs on the
     // SELECTED chain (so the page cannot lie), which makes this sync load-
     // bearing: without it the selector defaults to testnet, and a mainnet
@@ -472,7 +475,7 @@ export default function GrantPage() {
           // Stopping deliberately deletes the server grant. Historical signed
           // bindings preserve this tenant's renewal path across a refresh;
           // an address or DID merely claimed in localStorage is insufficient.
-          for (const candidate of [stored, ...loadRecoveryGrants()]) {
+          for (const candidate of [stored, ...loadRecoveryGrants("spot")]) {
             if (await trustedSavedGrant(candidate, verifiedSession, window.location.origin)) {
               trustedStored = candidate;
               break;
@@ -635,7 +638,7 @@ export default function GrantPage() {
   /** Re-push the stored grant so the worker obeys it again (undo a desync). */
   async function reArm() {
     try { await verifyCurrentAccount(); } catch (e) { setError(e instanceof Error ? e.message : "Could not confirm this account."); return; }
-    const stored = loadGrant();
+    const stored = loadGrant("spot");
     if (stored && needsPermissionReplacement(stored)) {
       setError("This saved permission was selected for revocation and cannot be re-armed. Review and renew below; your owner recovery access is kept.");
       return;
@@ -676,9 +679,9 @@ export default function GrantPage() {
       } else {
         // The button that did nothing. `if (r.ok)` with no else meant a refusal
         // left the banner up, re-enabled the button, and said NOTHING — so the
-        // only feedback was "press it again", forever. Show what the server said.
-        const body = (await r.json().catch(() => ({}))) as { error?: string };
-        setError(refusalMessage(r.status, body.error));
+        // only feedback was "press it again", forever. Show what the server
+        // said, read as the handoff reads it (owner-facing words kept).
+        setError(await refusalOfResponse(r));
       }
     } catch {
       setError("couldn't reach the server to re-arm this wallet.");
@@ -816,7 +819,7 @@ export default function GrantPage() {
     try {
       await verifyCurrentAccount();
       if (chainId === MAINNET && privyOwner) {
-        for (const candidate of [grant, loadGrant(), ...loadRecoveryGrants()]) {
+        for (const candidate of [grant, loadGrant("spot"), ...loadRecoveryGrants("spot")]) {
           if (candidate?.owner.toLowerCase() === privyOwner.account.address.toLowerCase() &&
               await trustedSavedGrant(candidate, session, window.location.origin)) {
             setSwitching(false);
@@ -875,7 +878,7 @@ export default function GrantPage() {
     }
     setPreviewing(true);
     try {
-      const p = await previewOwnerAccount(key as `0x${string}`, selectedChain);
+      const p = await previewOwnerAccount(key as `0x${string}`, selectedChain, "spot");
       if (generation !== restorePreviewGeneration.current) return;
       const balance = await readFunding(p.smartAccount, selectedChain).catch(() => null);
       if (generation !== restorePreviewGeneration.current) return;
@@ -900,6 +903,11 @@ export default function GrantPage() {
     setStatus("starting…");
     try {
       await verifyCurrentAccount();
+      // A login's two wallets share one owner key, and the grant POST that
+      // ends this restore refuses another one. Asked first, so a restore the
+      // POST would refuse stops nothing and signs nothing.
+      const perpsRefusal = await restorePerpsRefusal(privateKeyToAccount(ownerKey).address, fetch, session?.hosted === true);
+      if (perpsRefusal) throw new Error(perpsRefusal);
       // Every network revoked below must be able to pay its own fee before the
       // service is stopped; an empty account would be stopped for nothing.
       for (const network of new Set([previousGrant?.chainId ?? selectedChain, selectedChain])) {
@@ -924,6 +932,7 @@ export default function GrantPage() {
         setReplacementRequired(true);
       }
       await stopAgentForReplacement(
+        "spot",
         session?.hosted ? session.address : undefined,
         previousGrant?.smartAccount ?? expectedAccount,
         previousGrant?.sessionKeyAddress,
@@ -1006,6 +1015,12 @@ export default function GrantPage() {
       ...(resignBy === "privy" ? { ownerAccount: privyOwner!.account } : { ownerKey: grant!.demoOwnerPrivateKey as `0x${string}` }),
     };
   }
+  /** The address a re-sign signs with (renewKey's signer), or null when this browser has none. */
+  function resignerAddress(): string | null {
+    if (resignBy === "privy") return privyOwner?.account.address ?? null;
+    if (resignBy === "owner-key" && grant?.demoOwnerPrivateKey) return privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`).address;
+    return null;
+  }
 
   async function stopOrRevoke(revoke: boolean) {
     if (!grant || securityBusy || renewing || (revoke && (!resignBy || !revokeAck))) return;
@@ -1022,7 +1037,7 @@ export default function GrantPage() {
       // A service outage must not veto the owner’s separate on-chain authority.
       try {
         await verifyCurrentAccount();
-        await stopAgentForReplacement(session?.hosted ? session.address : undefined, grant.smartAccount, grant.sessionKeyAddress);
+        await stopAgentForReplacement("spot", session?.hosted ? session.address : undefined, grant.smartAccount, grant.sessionKeyAddress);
         setServerArmed(false);
         setSecurityMessage("Stop request accepted. The worker stops on its next check; earlier session keys are not yet revoked on-chain.");
       } catch (e) {
@@ -1052,7 +1067,48 @@ export default function GrantPage() {
     setStatus("checking your permission…");
     setRenewing(true);
     try {
-      await verifyCurrentAccount();
+      // THIS SCREEN RENEWS THE SPOT WALLET, AND ONLY IT. Its account read
+      // (verifyCurrentAccount → fetchAccountForSession) is Spot's GET
+      // /api/grants, and its revocation (ownerWallet → revokeFromBrowser)
+      // derives the owner's Kernel account at index 0. A Perps grant renewed
+      // here would be checked against the wrong wallet, asked for ETH a paper
+      // Perps wallet never holds, and, past that, have its stop accepted and
+      // then fail its revocation against an account its owner key does not
+      // control: a stopped Perps wallet and no renewal. loadGrant("spot")
+      // never hands this screen one; a grant naming any other wallet, or one
+      // this build does not know (grantPurpose throws), is refused here,
+      // before anything is read, stopped, revoked or signed. The Perps
+      // renewal, with D6's exemption (perps-renewal.ts), is the Perps desk's
+      // (perps slice 5, PR 3).
+      const wallet = grantPurpose(grant);
+      if (wallet !== "spot") throw new Error("A Perps wallet is not renewed from this screen. Nothing was stopped or signed.");
+      const current = await verifyCurrentAccount();
+      // A login's two wallets share one owner key, and the grant POST that
+      // ends this renewal is held to the Perps wallet (refused for another
+      // owner, or for a Perps wallet it cannot read). Asked first, before the
+      // Trencher read and the fee check (each of which tells the owner to do
+      // something first), and before anything is marked, stopped, revoked or
+      // signed, with the key this renewal re-signs with, so a renewal the POST
+      // would refuse changes nothing. A signer that is not this grant's owner
+      // is the preflight's to refuse (renewalPerpsRefusal reads nothing then).
+      const perpsRefusal = await renewalPerpsRefusal(resignerAddress(), String(grant.owner));
+      if (perpsRefusal) throw new Error(perpsRefusal);
+      // ── ONE SNAPSHOT FOR THE PREFLIGHT AND THE MINT ─────────────────────────
+      //
+      // What the signer decides about the previous grant (session.ts
+      // priorPerpFor: carry a Lighter key forward, refuse, or nothing) is
+      // decided TWICE, by the preflight before anything is stopped or revoked
+      // and by the mint after. Both must decide over the same inputs, taken
+      // once, here: the server's view at this click (the account read just
+      // made, which verifyCurrentAccount has already held to this account) and
+      // one snapshot of this browser's own grants for this wallet. Without
+      // them the preflight saw no previous grant at all while the mint read
+      // storage itself, after the replacement journal had been written, so a
+      // carried key that no longer fit was refused only after the old
+      // permission was gone. `undefined` is "not read", which the signer
+      // treats as unknown and never as "holds none".
+      const previousGrant: unknown = current.status.exists ? current.status.grant : null;
+      const localGrants = localGrantsSnapshot(wallet);
       const priorTrencher = grantTrencher(grant);
       if (priorTrencher && (!autonomousTrencher || chainId !== grant.chainId || (TRENCHER_FACTORY && TRENCHER_FACTORY.toLowerCase() !== priorTrencher.factory))) {
         const client = createPublicClient({chain: grant.chainId === MAINNET ? robinhoodChain : robinhoodTestnet, transport: http()});
@@ -1140,6 +1196,11 @@ export default function GrantPage() {
          * nothing failing anywhere. mintGrant refuses instead.
          */
         expectAccount: grant.smartAccount as `0x${string}`,
+        purpose: wallet,
+        // The ONE snapshot taken at the top of this click, the same object in
+        // the preflight below and in the mint (which spreads these options).
+        previousGrant,
+        localGrants,
       };
       // Check the canonical replacement before any persistent mutation, stop,
       // or revocation. This produces no key/signature to reuse after revoking.
@@ -1154,7 +1215,7 @@ export default function GrantPage() {
       saveRecoveryGrant(grant);
       markPermissionForReplacement(grant);
       setReplacementRequired(true);
-      await stopAgentForReplacement(session?.hosted ? session.address : undefined, grant.smartAccount, grant.sessionKeyAddress);
+      await stopAgentForReplacement(wallet, session?.hosted ? session.address : undefined, grant.smartAccount, grant.sessionKeyAddress);
       stopped = true;
       let revocation = await revokeFromBrowser(ownerWallet(), setStatus);
       if (chainId !== grant.chainId) revocation = await revokeFromBrowser(ownerWallet(chainId), setStatus);
@@ -1263,7 +1324,7 @@ export default function GrantPage() {
     // account is read, the grant removed as DELETE /api/grants removes it,
     // then the reset queued. keepalive, so closing the tab straight after
     // pressing this still delivers the kill.
-    const discardedGrant = loadGrant();
+    const discardedGrant = loadGrant("spot");
     setDiscarding(true);
     setError(null);
     try {
@@ -1283,13 +1344,13 @@ export default function GrantPage() {
     }
     // Another tab or a wallet switch can save a newer grant while the server
     // answers. This response is not permission to clear that wallet or backup.
-    const currentGrant = loadGrant();
+    const currentGrant = loadGrant("spot");
     if (currentGrant?.smartAccount !== discardedGrant?.smartAccount || currentGrant?.serialized !== discardedGrant?.serialized) {
       setError("The saved wallet changed while the kill was pending. The newer wallet and its backup were kept; check its status before trying again.");
       return;
     }
     try {
-      clearGrant();
+      clearGrant("spot");
       localStorage.removeItem(BACKUP_KEY);
     } catch (e) {
       setServerArmed(false);

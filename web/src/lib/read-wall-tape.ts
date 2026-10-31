@@ -255,5 +255,5 @@ export async function readWallTape(opts: { agentSlug?: string } = {}, readDb = w
       to,
       key: `${cells.length}:${to}`,
     };
-  });
+  }, "spot");
 }

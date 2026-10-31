@@ -60,6 +60,10 @@ final class AppStore: ObservableObject {
             path = [.xPosting]
             for key in ["uiTest.xPostingEnabled", "uiTest.xWrites", "uiTest.xSkipped", "uiTest.xDisconnected"] { UserDefaults.standard.removeObject(forKey: key) }
         }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-stand-down-test") {
+            path = [.permissions]
+            UserDefaults.standard.removeObject(forKey: "uiTest.stopRequests")
+        }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-snipe-test") {
             path = [.snipe("NEON", "5.00")]
             UserDefaults.standard.removeObject(forKey: "uiTest.orderPlaced")

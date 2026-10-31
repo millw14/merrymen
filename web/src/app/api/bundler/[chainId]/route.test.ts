@@ -39,10 +39,10 @@ afterEach(() => {
 
 const ticket = (account: Address = ACCOUNT, chainId = 4663) => mintTicket({ smartAccount: account, chainId, classVaults: [] });
 async function request(method: string, callData: Hex, opts: {
-  sender?: string; cookie?: string | null; entryPoint?: string; op?: Record<string, unknown>;
+  wallet?: "spot" | "perps"; sender?: string; cookie?: string | null; entryPoint?: string; op?: Record<string, unknown>;
 } = {}) {
   const cookie = opts.cookie === undefined ? ticket() : opts.cookie;
-  return POST(new Request("https://merrymen.test/api/bundler/4663", {
+  return POST(new Request(`https://merrymen.test/api/bundler/4663${opts.wallet ? `?wallet=${opts.wallet}` : ""}`, {
     method: "POST", headers: { "content-type": "application/json", ...(cookie ? { cookie: `merrymen_recovery=${cookie}` } : {}) },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [{
       sender: opts.sender ?? ACCOUNT, nonce: "0x0", callData,
@@ -115,4 +115,16 @@ describe("owner revocation through the real relay handler", () => {
     ]) assert.ok((await (await request(methods[0]!, DATA, opts)).json()).error);
     assert.equal(forwarded.length, 0);
   });
+});
+
+
+it("the relay binds purpose: legacy Spot and Perps tickets cannot cross wallets, even paper-off", async () => {
+  const perps = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVaults: [], purpose: "perps" });
+  for (const opts of [{ wallet: "perps" as const, cookie: ticket() }, { wallet: "spot" as const, cookie: perps }, { cookie: perps }]) {
+    const response = await request(methods[0]!, DATA, opts); assert.equal(response.status, 401); assert.match((await response.json()).error, /different wallet/);
+  }
+  assert.equal(forwarded.length, 0);
+  const allowed = await request(methods[0]!, DATA, { wallet: "perps", cookie: perps });
+  assert.equal(allowed.status, 200); assert.equal((await allowed.json()).result.acceptedByFixture, true); assert.equal(forwarded.length, 1);
+  const forbidden = await request(methods[0]!, "0xdeadbeef", { wallet: "perps", cookie: perps }); assert.ok((await forbidden.json()).error); assert.equal(forwarded.length, 1);
 });

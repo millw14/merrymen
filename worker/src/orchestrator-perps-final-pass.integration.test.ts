@@ -108,8 +108,10 @@ const ownerAt = (n: number) => { const o = address(n); used.push(o); return o; }
 
 /**
  * The shared database, as the hosted fleet has it: ledger, mirror state, owner
- * controls. `onRecordRead` runs once, the first time anything reads the
- * perps_wallets record (not when the orchestrator writes it).
+ * controls. `onRecordRead` runs once, the first time the final pass reads an
+ * owner's Perps wallet from the perps_wallets record (perpsWalletOf), not when
+ * the orchestrator writes it, nor when the owner's controls read every Perps
+ * wallet to leave them out of a legacy pause (recovery-reply-arm.ts).
  */
 async function sharedDb(opts: { controls?: boolean; onRecordRead?: () => void } = {}) {
   const raw = new DatabaseSync(":memory:");
@@ -120,7 +122,8 @@ async function sharedDb(opts: { controls?: boolean; onRecordRead?: () => void } 
   let onRecordRead = opts.onRecordRead ?? null;
   const shared: typeof inner = {
     prepare(sql) {
-      if (onRecordRead && /perps_wallets/.test(sql) && !/INSERT|CREATE/.test(sql)) {
+      if (opts.controls === false && sql.includes("FROM recovery_reply_controls")) throw new Error("control journal connection unavailable");
+      if (onRecordRead && /FROM perps_wallets WHERE owner/.test(sql)) {
         const f = onRecordRead;
         onRecordRead = null;
         f();
@@ -238,8 +241,8 @@ describe("a stopped Perps worker's final pass", () => {
   });
 
   it("held before its grant was handed over, then removed: copied under the account its spawn read", async () => {
-    // No owner-controls schema: perpsOwnerControls cannot read, and holds the
-    // spawn before writeGrantForChild — where a journalled /kill awaiting its
+    // An unreadable owner-control journal holds both the bot seat and the
+    // Perps spawn before writeGrantForChild — where a journalled /kill awaiting its
     // /confirm holds it too.
     const { fills } = await sharedDb({ controls: false });
     const o = ownerAt(0xa1), perpsAcct = address(0xa3);

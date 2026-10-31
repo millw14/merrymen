@@ -14,7 +14,7 @@
  * local one) and the grant store's read, which is made to fail.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -118,19 +118,18 @@ it("and the shell shows the owner that sentence, not a bare status", async () =>
   }
 });
 
-it("a full replacement history is an owner-facing 409 that explains the support path", async t => {
-  const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
-  const store = grants.getGrantStore("spot");
-  t.mock.method(store, "tenantForAccount", async () => null);
-  t.mock.method(store, "put", async () => { throw new grants.GrantReplacementConflict(); });
-  // The real derivation still runs, but its EntryPoint view call is answered
-  // offline. No network or signing authority is needed to reach the store.
+/**
+ * The real derivation still runs, but its EntryPoint view call is answered
+ * offline. No network or signing authority is needed to reach the store.
+ * Returns the stub, so a test can put fetch back before the signer reads.
+ */
+function answerDerivationOffline(t: import("node:test").TestContext) {
   const result = encodeErrorResult({
     abi: [{ type: "error", name: "SenderAddressResult", inputs: [{ name: "sender", type: "address" }] }],
     errorName: "SenderAddressResult",
     args: [SMART],
   });
-  t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+  return t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const payload = JSON.parse(String(init?.body));
     const answer = (rpc: { id: number; method: string; params: [{ data?: string }] }) => {
       if (rpc.method === "eth_chainId") return { jsonrpc: "2.0", id: rpc.id, result: `0x${CHAIN.toString(16)}` };
@@ -140,9 +139,81 @@ it("a full replacement history is an owner-facing 409 that explains the support 
     };
     return Response.json(Array.isArray(payload) ? payload.map(answer) : answer(payload));
   });
+}
+
+it("a full replacement history is an owner-facing 409 that explains the support path", async t => {
+  const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
+  const store = grants.getGrantStore("spot");
+  t.mock.method(store, "tenantForAccount", async () => null);
+  t.mock.method(store, "put", async () => { throw new grants.GrantReplacementConflict(); });
+  answerDerivationOffline(t);
   const res = await POST(await claim());
   const body = await res.json() as { error?: string; ownerFacing?: unknown };
   assert.equal(res.status, 409, JSON.stringify(body));
   assert.equal(body.ownerFacing, true);
   assert.match(body.error ?? "", /history is full.*contact support/);
+});
+
+// ── what the browser signer shows for those 503s (session.ts postGrant) ─────
+//
+// The signer that hands a grant over — every web mint, the iOS create engine
+// (createPrivyOwnedWallet, bundled from session.ts) and a retried handoff —
+// reads a refusal through refusalMessage. Its 503 arm said "Couldn't verify
+// the account on-chain" for EVERY 503, so the two owner-facing 503s above were
+// thrown away: a Spot owner whose permission the store could not save (the
+// other wallet's grant could not be read or verified, the lock was busy, the
+// database failed — a 500 carrying the store's own text before PR 1) was told
+// the chain had failed, and kept signing again for a fault that was never the
+// chain's. The route's real answer is handed to the real postGrant here.
+
+/** postGrant on `res`, reached as a retried handoff of a grant that carries no binding (session.ts retryGrantHandoff). */
+async function signerShows(t: import("node:test").TestContext, res: Response, grant: Record<string, unknown>) {
+  const { retryGrantHandoff } = await import("@/lib/session");
+  const asked: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0]) => (asked.push(String(input)), res));
+  const handoff = await retryGrantHandoff(grant as never);
+  assert.deepEqual(asked, ["/api/grants"], "the Spot grant went to the Spot wallet's intake, and only there");
+  return handoff;
+}
+
+const ON_CHAIN = "Couldn't verify the account on-chain just now — try again in a moment.";
+const NOT_SAVED = "Your permission could not be saved. Please try again.";
+
+it("A STORE WRITE THAT FAILED WITH A PLAIN ERROR: a redacted owner-facing 503, and the signer shows THAT sentence, never the on-chain one", async t => {
+  const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
+  const store = grants.getGrantStore("spot");
+  t.mock.method(store, "tenantForAccount", async () => null);
+  // One of the store's own plain Errors (grant-store.ts assertIndependentWallets'
+  // reader): the login's Perps record would not verify.
+  t.mock.method(store, "put", async () => {
+    throw new Error("Your other wallet's grant could not be verified, so this permission was not saved.");
+  });
+  const rpc = answerDerivationOffline(t);
+  const req = await claim();
+  const { binding: _binding, ...grant } = (await req.clone().json()) as Record<string, unknown>;
+  const res = await POST(req);
+  rpc.mock.restore();
+  const body = (await res.clone().json()) as { error?: string; ownerFacing?: unknown };
+  assert.equal(res.status, 503, JSON.stringify(body));
+  assert.deepEqual(body, { error: NOT_SAVED, ownerFacing: true }, "the store's text is never sent: it can name the database");
+  const again = res.clone();
+  const handoff = await signerShows(t, res, grant);
+  assert.deepEqual(handoff, { ok: false, error: NOT_SAVED });
+  assert.notEqual(handoff.ok ? "" : handoff.error, ON_CHAIN);
+  // THE WALLET SCREEN'S RE-ARM, the other grant POST, reads the same answer
+  // the same way (session.ts refusalOfResponse). Its own copy of the read once
+  // dropped the marker in a revert that every suite let through.
+  const { refusalOfResponse } = await import("@/lib/session");
+  assert.equal(await refusalOfResponse(again), NOT_SAVED);
+  const wallet = readFileSync(path.join(process.cwd(), "web", "src", "terminal", "screens", "Wallet.tsx"), "utf8");
+  assert.match(wallet, /setError\(await refusalOfResponse\(r\)\);/, "the re-arm shows refusalOfResponse's sentence");
+  assert.doesNotMatch(wallet, /refusalMessage\(/, "and reads no refusal by hand");
+});
+
+it("and the ownership read that could not run reaches the signer in its own words", async t => {
+  const req = await claim();
+  const { binding: _binding, ...grant } = (await req.clone().json()) as Record<string, unknown>;
+  const res = await POST(req);
+  assert.equal(res.status, 503);
+  assert.deepEqual(await signerShows(t, res, grant), { ok: false, error: OWNERSHIP_UNREADABLE });
 });

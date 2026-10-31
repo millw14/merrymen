@@ -50,6 +50,8 @@ import { NextResponse } from "next/server";
 import { pimlicoBundlerUrl, robinhoodChain, robinhoodTestnet, ENTRYPOINT } from "@merrymen/core";
 import { readTicket } from "@/lib/recovery-ticket";
 import { isRecoveryShape, isPermissionRevocationShape } from "@/lib/recovery-shape";
+import { walletUnknown } from "@/lib/route-guard";
+import { readWalletParam } from "@/lib/wallet-param";
 
 export const runtime = "nodejs";
 
@@ -154,6 +156,8 @@ function refuse(id: unknown, message: string, code = -32_099) {
 const bad = (status: number, message: string) => NextResponse.json({ error: message }, { status });
 
 export async function POST(req: Request, ctx: { params: Promise<{ chainId: string }> }) {
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was relayed.");
   const chainId = Number((await ctx.params).chainId);
   if (!KNOWN_CHAINS.has(chainId)) return bad(400, "unknown chain");
 
@@ -164,6 +168,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ chainId: strin
     req.headers.get("cookie")?.match(/(?:^|;\s*)merrymen_recovery=([^;]+)/)?.[1],
   );
   if (!ticket) return bad(401, "no valid recovery ticket — sign the challenge first");
+  if ((ticket.purpose ?? "spot") !== wallet) return bad(401, "this ticket is for a different wallet");
   if (ticket.chainId !== chainId) return bad(401, "this ticket is for a different chain");
 
   const raw = await req.text();

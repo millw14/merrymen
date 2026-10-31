@@ -423,10 +423,22 @@ describe("the report", () => {
     }
   });
   it("the buy field, decided in order", () => {
-    assert.equal(energyBuyOf({ chainId: 46630, live: true, hasRoute: true }), "not-mainnet");
-    assert.equal(energyBuyOf({ chainId: 4663, live: false, hasRoute: true }), "paper");
-    assert.equal(energyBuyOf({ chainId: 4663, live: true, hasRoute: false }), "resign");
-    assert.equal(energyBuyOf({ chainId: 4663, live: true, hasRoute: true }), "ready");
+    assert.equal(energyBuyOf({ chainId: 46630, live: true, hasRoute: true, wallet: "spot" }), "not-mainnet");
+    assert.equal(energyBuyOf({ chainId: 4663, live: false, hasRoute: true, wallet: "spot" }), "paper");
+    assert.equal(energyBuyOf({ chainId: 4663, live: true, hasRoute: false, wallet: "spot" }), "resign");
+    assert.equal(energyBuyOf({ chainId: 4663, live: true, hasRoute: true, wallet: "spot" }), "ready");
+  });
+  it("A PERPS WALLET'S WORKER NEVER REPORTS AN ENERGY BUY AS READY — not live, not with a sealed route, not on any chain", () => {
+    // Its USDG is perp collateral. A "ready" report is what puts the get-energy
+    // card in front of the owner, so it is never one, whatever the grant seals.
+    for (const chainId of [4663, 46630])
+      for (const live of [false, true])
+        for (const hasRoute of [false, true]) {
+          const buy = energyBuyOf({ chainId, live, hasRoute, wallet: "perps" });
+          assert.notEqual(buy, "ready", JSON.stringify({ chainId, live, hasRoute }));
+          assert.notEqual(buy, "resign", "and it never asks for a re-sign that would add the route");
+        }
+    assert.equal(energyBuyOf({ chainId: 4663, live: true, hasRoute: true, wallet: "perps" }), "paper");
   });
   it("the shortfall is known only when every present read answered", () => {
     assert.equal(energyShortfallRaw({ holder: tok(40_000), account: tok(10_000) }), ENERGY_FULL_RAW - tok(50_000));

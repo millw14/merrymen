@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test, { describe, it } from "node:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -10,6 +12,7 @@ import {
   drainCommandResults,
   dropCommandResult,
   expiredLine,
+  expiredResetLine,
   isExpired,
   markRunning,
   openCommands,
@@ -279,6 +282,145 @@ test("a file that parses but is the wrong shape is removed, not re-read forever"
   }
 });
 
+test("null and unsafe ids in external command files are discarded without running or blocking a valid command", async () => {
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "good", kind: "trade", at: 2 });
+    writeFileSync(path.join(commandDir(home), "null.json"), "null", "utf8");
+    writeFileSync(path.join(commandDir(home), "unsafe.json"), JSON.stringify({ id: "../outside", kind: "trade", at: 1 }), "utf8");
+    const ran: string[] = [];
+    await runTickCommand(home, {
+      now: () => 10,
+      run: async (cmd) => (ran.push(cmd.id), { ok: true, line: "done" }),
+      told: async () => {},
+    });
+    assert.deepEqual(ran, ["good"]);
+    assert.deepEqual(readdirSync(commandDir(home)), ["good.done.json"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("result ids cannot escape the command directory", () => {
+  const home = tmpHome();
+  try {
+    for (const id of ["../outside", "a/b", "..", "", "x".repeat(65)]) {
+      assert.throws(() => writeCommandResult(home, { id, ok: true, line: "done", at: 1 }), /not a plain id/);
+    }
+    assert.deepEqual(readdirSync(home), [], "refused before any path or receipt is created");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a failed receipt write retains the running marker and keeps the duplicate-order slot occupied", (t) => {
+  const home = tmpHome();
+  try {
+    markRunning(home, "order", "trade");
+    const rename = fs.renameSync;
+    t.mock.method(fs, "renameSync", (...args: Parameters<typeof fs.renameSync>) => {
+      if (String(args[1]).endsWith(`${path.sep}order.done.json`)) throw new Error("receipt rename failed");
+      return rename(...args);
+    });
+    syncBuiltinESMExports();
+    assert.throws(() => writeCommandResult(home, { id: "order", ok: true, line: "booked", at: 1 }));
+    assert.deepEqual(ids(home), ["order:running"]);
+    assert.equal(commandWhereabouts(home, "order"), "running");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an unpersisted claim cannot execute a financial command", async (t) => {
+  if (process.platform === "win32") return;
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "order", kind: "trade", at: 1 });
+    t.mock.method(fs, "fsyncSync", () => { throw Object.assign(new Error("claim cannot be synced"), { code: "EIO" }); });
+    syncBuiltinESMExports();
+    let ran = false;
+    await assert.rejects(runTickCommand(home, {
+      now: () => 10,
+      run: async () => (ran = true, { ok: true, line: "booked" }),
+      told: async () => {},
+    }), /claim cannot be synced/);
+    assert.equal(ran, false, "a booking cannot precede persistence of the claim");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a running marker and a receipt must be durable before they release their predecessor", (t) => {
+  const home = tmpHome();
+  try {
+    markRunning(home, "order", "trade");
+    t.mock.method(fs, "fsyncSync", () => { throw Object.assign(new Error("bytes cannot be synced"), { code: "EIO" }); });
+    syncBuiltinESMExports();
+    assert.equal(markRunning(home, "another", "trade"), false, "a marker that could not reach disk does not authorize execution");
+    assert.throws(() => writeCommandResult(home, { id: "order", ok: true, line: "booked", at: 1 }), /bytes cannot be synced/);
+    assert.deepEqual(ids(home), ["order:running"], "the receipt failed before superseding the durable marker");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a claimed command never runs when its running marker cannot be written", async () => {
+  const home = tmpHome();
+  try {
+    writeCommand(home, { id: "order", kind: "trade", at: 1 });
+    mkdirSync(path.join(commandDir(home), "order.running"));
+    let ran = false;
+    await assert.rejects(runTickCommand(home, {
+      now: () => 10,
+      run: async () => (ran = true, { ok: true, line: "booked" }),
+      told: async () => {},
+    }), /running marker could not be written/);
+    assert.equal(ran, false);
+    assert.equal(claimCommandFile(home), null, "the failed claim is never replayed");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a receipt supersedes a marker left by a crash after the receipt was committed", () => {
+  const home = tmpHome();
+  try {
+    writeCommandResult(home, { id: "order", ok: true, line: "booked", at: Date.now() });
+    markRunning(home, "order", "trade");
+    assert.deepEqual(ids(home), [], "an answered command no longer holds the order slot");
+    assert.equal(commandWhereabouts(home, "order"), "answered");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable, malformed or mismatched receipt never hides a running command", () => {
+  for (const contents of [null, "{broken", "null", JSON.stringify({ id: "another", ok: true, line: "done", at: 1 })]) {
+    const home = tmpHome();
+    try {
+      markRunning(home, "order", "trade");
+      const resultPath = path.join(commandDir(home), "order.done.json");
+      if (contents === null) {
+        mkdirSync(resultPath);
+        assert.throws(() => writeCommandResult(home, { id: "order", ok: true, line: "booked", at: 1 }));
+      } else {
+        writeFileSync(resultPath, contents, "utf8");
+      }
+      assert.deepEqual(ids(home), ["order:running"]);
+      assert.equal(commandWhereabouts(home, "order"), "running");
+      assert.equal(readCommandState(home, "order")?.state, "running");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
 test("SELF-HOSTED CAN TELL 'RAN' FROM 'NEVER RAN'", () => {
   const home = tmpHome();
   try {
@@ -370,14 +512,23 @@ test("THE ONE-AT-A-TIME RULE GETS DEADLINES, not a yes/no", () => {
     markRunning(home, "r");
     const before = Date.now();
     const open = Object.fromEntries(openCommands(home).map((c) => [c.id, c]));
-    assert.deepEqual(open.q, { id: "q", state: "queued", expiresAt: 5_000, at: 1_000 });
-    assert.deepEqual(open.probe, { id: "probe", state: "queued", expiresAt: null, at: 2_000 }, "no deadline is null, never 0");
+    assert.deepEqual(open.q, { id: "q", state: "queued", expiresAt: 5_000, at: 1_000, kind: "trade" });
+    assert.deepEqual(open.probe, { id: "probe", state: "queued", expiresAt: null, at: 2_000, kind: "selftest" }, "no deadline is null, never 0; the kind is the file's");
     assert.equal(open.r?.state, "running");
+    assert.equal(open.r?.kind, undefined, "a marker that names no kind has none");
+    // A marker now says what was claimed; one written before that (a bare timestamp) still says nothing.
+    markRunning(home, "r2", "paper-reset");
+    writeFileSync(path.join(commandDir(home), "legacy.running"), String(Date.now()), "utf8");
+    const again = Object.fromEntries(openCommands(home).map((c) => [c.id, c]));
+    assert.equal(again.r2?.state, "running");
+    assert.equal(again.r2?.kind, "paper-reset");
+    assert.equal(again.legacy?.state, "running");
+    assert.equal(again.legacy?.kind, undefined);
     assert.equal(open.r?.expiresAt, null, "a marker carries no deadline");
     assert.ok(Math.abs(open.r!.at - before) < 60_000, "its age is when it was claimed");
     // Receipts and temp files are not orders.
     writeCommandResult(home, { id: "done", ok: true, line: "bought", at: 9 });
-    assert.deepEqual(ids(home), ["probe:queued", "q:queued", "r:running"]);
+    assert.deepEqual(ids(home), ["legacy:running", "probe:queued", "q:queued", "r2:running", "r:running"]);
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
@@ -574,6 +725,93 @@ describe("the tick's drain", () => {
       const t = tick(home);
       await t.done;
       assert.deepEqual([t.ran, t.told], [[], []]);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("A PRACTICE RESET PAST ITS DEADLINE IS ANSWERED IN ITS OWN WORDS, and never run", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "late-reset", kind: "paper-reset", at: NOW - 25 * 60 * 60_000, expiresAt: NOW - 24 * 60 * 60_000 });
+      const t = tick(home);
+      await t.done;
+      assert.deepEqual(t.ran, []);
+      assert.equal(receipt(home, "late-reset")?.result?.line, expiredResetLine(NOW - 24 * 60 * 60_000, NOW));
+      assert.match(expiredResetLine(NOW - 24 * 60 * 60_000, NOW), /^expired — I picked up this practice reset 24 h after its window closed, so the practice book was not reset\./);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+/**
+ * A COMMAND BOUND TO AN ACCOUNT RUNS ONLY ON IT (FileCommand.account).
+ *
+ * Self-hosted the web writes into a wallet's home, and the home outlives the
+ * account in it: a Perps wallet made again under another owner key is another
+ * account in the same `accounts/perps`. A command names the account it was
+ * asked for, and the drain answers it — claimed, never run — anywhere else.
+ */
+describe("a command bound to an account", () => {
+  const NOW = 1_800_000_000_000;
+  const A = `0x${"aa".repeat(20)}`;
+  const B = `0x${"bb".repeat(20)}`;
+  const drain = async (home: string, armed: (() => string | null) | undefined) => {
+    const ran: string[] = [];
+    await runTickCommand(home, { now: () => NOW, run: async (cmd) => (ran.push(cmd.id), { ok: true, line: "ran" }), told: async () => {}, ...(armed ? { account: armed } : {}) });
+    return ran;
+  };
+
+  it("runs on its own account (case aside), and is answered — claimed, not run — on another, on none, or where the drain cannot say", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "mine", kind: "trade", at: NOW - 3, account: A, expiresAt: NOW + 60_000 });
+      assert.deepEqual(await drain(home, () => A.toUpperCase().replace(/^0X/, "0x")), ["mine"]);
+      for (const [id, armed] of [["other", () => B], ["unarmed", () => null], ["unasked", undefined]] as const) {
+        writeCommand(home, { id, kind: "paper-reset", at: NOW - 2, account: A });
+        assert.deepEqual(await drain(home, armed), [], id);
+        const st = readCommandState(home, id);
+        assert.equal(st?.state, "done", `${id}: answered, so it never sits in front of the account's own commands`);
+        assert.equal(st?.result?.ok, false);
+        assert.match(st?.result?.line ?? "", /^not run — this was asked for the account 0xaaaa…aaaa, and .*\. Nothing was sent\./, id);
+      }
+      assert.match(readCommandState(home, "other")?.result?.line ?? "", /this wallet's account is now 0xbbbb…bbbb/);
+      assert.deepEqual(openCommands(home), []);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a file whose binding is not a string is answered as bound elsewhere — claimed and answered, never thrown on and lost", async () => {
+    const home = tmpHome();
+    try {
+      mkdirSync(commandDir(home), { recursive: true });
+      writeFileSync(path.join(commandDir(home), "odd.json"), JSON.stringify({ id: "odd", kind: "trade", at: NOW, account: 42 }));
+      assert.deepEqual(await drain(home, () => A), []);
+      assert.match(readCommandState(home, "odd")?.result?.line ?? "", /^not run — this was asked for another account, and this wallet's account is now 0xaaaa…aaaa/);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a command that names no account runs wherever it is drained, as every command before it did", async () => {
+    const home = tmpHome();
+    try {
+      writeCommand(home, { id: "unbound", kind: "trade", at: NOW, expiresAt: NOW + 60_000 });
+      assert.deepEqual(await drain(home, () => B), ["unbound"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a binding that is not an account is never written", () => {
+    const home = tmpHome();
+    try {
+      for (const account of ["0x1234", "not-an-account", `${A} `, ""]) {
+        assert.throws(() => writeCommand(home, { id: "bad", kind: "trade", at: NOW, account }), /not an account/, account);
+      }
+      assert.deepEqual(openCommands(home), []);
     } finally {
       rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }

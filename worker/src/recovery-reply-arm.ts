@@ -68,6 +68,7 @@ import path from "node:path";
 import type { Db } from "./db";
 import { writeFileAtomicSync } from "./atomic-write";
 import { distinctTrades, OP_COPY_REACH_SEC } from "./distinct-trades";
+import { readPerpsWallets } from "./perps-wallets";
 import { clearDurablePause, ensureTelegramSchema, readDurablePause, recordDurablePause } from "./telegram-store";
 
 /**
@@ -286,14 +287,35 @@ export interface LegacyPause {
 }
 
 const FILL_KINDS = ["swap", "curve-trade"] as const;
-/** Every account this owner has had, newest grant's included: the pause belonged to the owner's home, not to one account. */
-async function ownerAccounts(db: Db, scope: ControlScope): Promise<string[]> {
+/**
+ * Every account this owner has had, newest grant's included: the pause belonged
+ * to the owner's home, not to one account.
+ *
+ * NOT THE OWNER'S PERPS WALLET (perps-wallets.ts). Its agents row carries the
+ * login as owner too (D4), but the pause is the Spot home's: the Perps worker
+ * only mirrors it (orchestrator.ts mirrorLoginPause), and its protective loop
+ * closes at stops through a pause by design (docs/perps.md), so one of its
+ * decisions is never the agent acting past the pause. Counted, a stop-close
+ * made while a /pause stood dropped that pause from a rebuilt Spot home, and
+ * then from the Perps worker. Left out when it stands in as the scope's own
+ * account too (perpsOwnerControls, for an owner with no Spot grant). Explicit
+ * pause/resume events from the Perps-only bot are included only when reading
+ * controls, never when deciding whether trading activity proves a resume. One whose
+ * Spot wallet was killed still has that wallet's agents row (nothing deletes
+ * one), so its standing pause is still read here and starts the Perps worker
+ * paused. A perps_wallets table
+ * that cannot be read throws (the arm holds), never names nobody.
+ */
+async function ownerAccounts(db: Db, scope: ControlScope, includePerpsControls = false): Promise<string[]> {
   const rows = (await db
     .prepare("SELECT DISTINCT lower(smart_account) AS a FROM agents WHERE lower(owner_address) = ? LIMIT 65")
     .all(scope.tenant.toLowerCase())) as Array<{ a: unknown }>;
   if (rows.length > 64) throw new Error("too many accounts under one owner to restore a pause");
-  const out = new Set<string>([scope.smartAccount.toLowerCase()]);
-  for (const r of rows) if (typeof r.a === "string" && /^0x[0-9a-f]{40}$/.test(r.a)) out.add(r.a);
+  const perps = await readPerpsWallets(db);
+  const out = new Set<string>();
+  for (const a of [scope.smartAccount.toLowerCase(), ...rows.map((r) => r.a)]) {
+    if (typeof a === "string" && /^0x[0-9a-f]{40}$/.test(a) && (includePerpsControls || !perps.has(a))) out.add(a);
+  }
   return [...out].sort();
 }
 
@@ -333,6 +355,7 @@ export async function readLegacyPause(db: Db, scope: ControlScope): Promise<Lega
  * file applied is the later row.
  */
 async function newestPauseOrResume(db: Db, accounts: readonly string[]): Promise<{ id: number; at: number; message: string } | null> {
+  if (accounts.length === 0) return null;
   const holes = accounts.map(() => "?").join(", ");
   const newest = (await db
     .prepare(
@@ -352,12 +375,16 @@ async function readLegacyPauseFrom(db: Db, scope: ControlScope): Promise<LegacyP
   const accounts = await ownerAccounts(db, scope);
   const holes = accounts.map(() => "?").join(", ");
   const inList = `lower(agent_id) IN (${holes})`;
-  const newest = await newestPauseOrResume(db, accounts);
+  // The Perps-only bot can explicitly pause/resume its login. Its trading
+  // activity still cannot prove that a login pause was lifted: protective
+  // Perps exits continue through pauses by design.
+  const newest = await newestPauseOrResume(db, await ownerAccounts(db, scope, true));
   if (!newest) return null;
   const { id, at, message } = newest;
   if (message.includes(RECORDED_DURING_UPGRADE)) return null;
   const paused = message.startsWith("Telegram: paused by chat") || (message.startsWith("Telegram: KILL by chat") && message.includes("paused instead"));
   if (!paused) return null;
+  if (accounts.length === 0) return { eventId: id, atSec: at };
   const decided = (await db
     .prepare(
       `SELECT MAX(at) AS at FROM decisions WHERE ${inList} AND at > ?
@@ -399,7 +426,7 @@ async function readLegacyPauseFrom(db: Db, scope: ControlScope): Promise<LegacyP
  */
 export async function durablePauseLifted(db: Db, scope: ControlScope, pausedAtSec: number): Promise<boolean> {
   try {
-    const newest = await newestPauseOrResume(db, await ownerAccounts(db, scope));
+    const newest = await newestPauseOrResume(db, await ownerAccounts(db, scope, true));
     return newest !== null && newest.message.startsWith("Telegram: resumed by chat") && newest.at >= pausedAtSec;
   } catch (e) {
     const err = e as { code?: unknown; message?: unknown };

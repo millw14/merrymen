@@ -9,6 +9,7 @@ import { Icon } from "./Icon";
 const links = [
   ["/#features", "Features"], ["/memescope", "Markets"], ["/dashboard", "Agents"],
   ["/watch", "Activity"], ["/claude", "Claude"], ["/grok", "Grok"], ["/api", "Developers"], ["/docs", "Docs"],
+  ["https://app.merrymen.dev/perps/join", "Pilot access"],
 ];
 function ThemeToggle() {
   const [theme, setTheme] = useState<"light" | "dark">("dark");

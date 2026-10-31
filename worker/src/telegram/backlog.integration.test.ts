@@ -118,6 +118,7 @@ interface Harness {
 async function withService(
   opts: {
     token?: string;
+    perps?: import("./perps").TelegramPerpsPort;
     allowlist?: number[];
     /** When the process starts, on the mocked clock; T0 unless a test runs a second process later. */
     startAt?: number;
@@ -182,6 +183,7 @@ async function withService(
     return { ok: status < 400, status, json: async () => r.body };
   }) as typeof fetch;
   const svc = startTelegram({
+    perps: opts.perps,
     getCfg: () => ({ ...cfg, telegramAllowlist: [...cfg.telegramAllowlist] }) as never,
     stateRef: {
       get: () => state,
@@ -862,5 +864,31 @@ describe("a code from before random codes", () => {
         assert.ok(!h.notes.some((n) => /re-minted/.test(n)));
       },
     );
+  });
+});
+
+
+describe("Perps paper exit private origin", () => {
+  it("a public close or confirmation never becomes a DM order; only the linked owner's fresh DM exits", async () => {
+    const exits: unknown[] = []; let round = 0;
+    const perps: import("./perps").TelegramPerpsPort = {
+      read: async()=>({state:"ready",account:ADDRESS as `0x${string}`,grantExpiresAt:NOW+3600,report:null}),
+      exit:async input=>{exits.push(input);return "paper queued";},
+    };
+    const group=(id:number,t:string)=>({update_id:id,message:{text:t,date:NOW,chat:{id:-99,type:"group"},from:{id:42}}});
+    await withService({allowlist:[42,43],state:{ownerId:42},perps,script:c=>{
+      if(c.method!=="getUpdates")return undefined;
+      round++;
+      if(round===1)return ok([text(1,42,"/flatten"),group(2,"/confirm"),group(3,"/close BTC-PERP"),text(4,43,"/close BTC-PERP")]);
+      if(round===2)return ok([text(5,42,"/confirm"),text(6,42,"/close ETH-PERP")]);
+      return ok([]);
+    }},async h=>{
+      await h.advance(12_000);
+      assert.equal(exits.length,2,JSON.stringify(exits));
+      assert.deepEqual(exits.map(e=>(e as {requestId:string}).requestId),["tg-perps-111-5","tg-perps-111-6"]);
+      assert.equal(h.trades.length,0);assert.equal(h.transfers.length,0);
+      assert.ok(h.sentTo(43).some(s=>/linked owner/.test(s)));
+      assert.equal(h.sentTo(-99).length,0);
+    });
   });
 });

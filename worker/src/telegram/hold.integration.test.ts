@@ -81,7 +81,7 @@ interface Harness {
   code: () => string;
 }
 
-async function withHold(body: (h: Harness) => Promise<void>): Promise<void> {
+async function withHold(body: (h: Harness) => Promise<void>, extra: Partial<import("./hold").HoldDeps> = {}): Promise<void> {
   const calls: Call[] = [];
   const queue: Update[] = [];
   const notes: string[] = [];
@@ -99,7 +99,7 @@ async function withHold(body: (h: Harness) => Promise<void>): Promise<void> {
     return { ok: true, status: 200, json: async () => ({ ok: true, result }) };
   }) as typeof fetch;
   const stateRef = createStateRef();
-  const svc = startHoldTelegram({ getCfg: () => resolveConfig(), stateRef, note: (_l, m) => notes.push(m) });
+  const svc = startHoldTelegram({ getCfg: () => resolveConfig(), stateRef, note: (_l, m) => notes.push(m), ...extra });
   const h: Harness = {
     calls,
     queue,
@@ -571,5 +571,28 @@ describe("Telegram groups are not answered while trading is held", () => {
       assert.deepEqual(h.sentTo(GROUP), []);
       assert.deepEqual(h.sentTo(OWNER), []);
     });
+  });
+});
+
+
+describe("Perps owner seat while trading is held", () => {
+  it("reads only Perps, confirms flatten, resumes only through its explicit port, and never orders from groups", async () => {
+    writeFileSync(path.join(HOME, "telegram.json"), JSON.stringify({ownerId: OWNER}));
+    const exits: unknown[] = []; let pauses=0, resumes=0;
+    const perps: import("./perps").TelegramPerpsPort = {
+      read:async()=>({state:"ready",account:"0x1111111111111111111111111111111111111111",report:null,grantExpiresAt:Math.floor(T0/1000)+86400}),
+      exit:async input=>{exits.push(input);return "durably queued paper exit";},
+    };
+    await withHold(async h=>{
+      h.queue.push(text(1,OWNER,"/positions"),text(2,OWNER,"/flatten")); await h.advance(1000);
+      assert.equal(exits.length,0); assert.ok(h.sentTo(OWNER).some(s=>s.includes("unknown, not zero")));
+      h.queue.push(text(3,OWNER,"/confirm"),text(4,OWNER,"/close BTC-PERP"),text(5,OWNER,"/pause"),text(6,OWNER,"/resume")); await h.advance(1000);
+      assert.equal(exits.length,2); assert.equal(pauses,1); assert.equal(resumes,1);
+      h.queue.push({update_id:7,message:{text:"/close BTC-PERP",date:nowSec(),chat:{id:-99,type:"group"},from:{id:OWNER}}});
+      h.queue.push(text(8,STRANGER,"/close BTC-PERP")); await h.advance(1000);
+      assert.equal(exits.length,2); assert.equal(h.sentTo(-99).length,0);
+      h.queue.push(text(9,OWNER,"/buy NVDA 10"));await h.advance(1000);
+      assert.match(h.sentTo(OWNER).at(-1)!,/paper practice/);
+    }, {perps,walletPurpose:"perps",pausePerps:async()=>{pauses++;return "paused";},resumePerps:async()=>{resumes++;return "login pause lifted; entry settings unchanged";}});
   });
 });

@@ -159,7 +159,7 @@ describe("money is a place, not a mode", () => {
     // for one panel, and the stale one wins whenever a link is followed.
     const app = codeOf(at("./App.tsx"));
     assert.ok(!/moneyMode|setMoneyMode/.test(app), "deposit and withdraw are routes now");
-    assert.match(app, /const money =\s*requestedScreen\.kind === "deposit"/, "derived from the URL, not stored");
+    assert.match(app, /const money =\s*!isolatedWallet && \(requestedScreen\.kind === "deposit"/, "derived from the Spot URL, not stored; Perps recovery has its own screen");
   });
 });
 

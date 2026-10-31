@@ -90,23 +90,42 @@ const ACCOUNT_CLAIMED = "this agent account is already linked to a different log
  *  - No perpetuals left on Spot: a Spot grant that still carries the Lighter
  *    permission is legacy Perps authority, and has to be retired before a
  *    separate Perps wallet exists beside it.
+ *
+ * Exported for the one writer that is not a store: a self-hosted POST
+ * /api/grants, which writes each wallet's grant.json in its own home and
+ * holds the other wallet's file to these same three rules.
+ *
+ * No refusal here says "neither wallet was changed": a renewal or restore
+ * POSTs its grant after its own stop, which a refusal does not undo, and a
+ * hand-sent request can meet any of them there (self-hosted, nothing derives
+ * a Spot grant's account, so one naming the Perps account meets
+ * account-shared after its stop). Each says what this request did: this
+ * permission was not saved, the other wallet was not changed. Owner-differs,
+ * account-shared and legacy-perps reach the owner as written; the plain
+ * Errors reach a hosted owner as the route's fixed 503 ("Your permission
+ * could not be saved", grants/route.ts storeRefused), and a self-hosted one
+ * as otherLocalWalletRefusal's own sentence. The Wallet screen's restore and
+ * renewal ask the Perps owner first (restore-perps-owner.ts).
  */
-function assertIndependentWallets(incoming: StoredGrant, other: StoredRecord["grant"] | null): void {
+export function assertIndependentWallets(
+  incoming: StoredGrant,
+  other: Pick<StoredGrant, "owner" | "smartAccount" | "purpose" | "perp" | "grantFeatures"> | null,
+): void {
   if (!other) return;
   if (typeof other.owner !== "string" || typeof other.smartAccount !== "string") {
-    throw new Error("Your other wallet's grant could not be read, so this one cannot be checked against it. Neither wallet was changed.");
+    throw new Error("Your other wallet's grant could not be read, so this one could not be checked against it and was not saved. Your other wallet was not changed.");
   }
   if (other.owner.toLowerCase() !== String(incoming.owner).toLowerCase()) {
-    throw new GrantWalletConflict("owner-differs", "Both of a login's wallets must use the same owner key. Neither wallet was changed.");
+    throw new GrantWalletConflict("owner-differs", "Both of a login's wallets must use the same owner key, so this permission was not saved. Your other wallet was not changed.");
   }
   if (other.smartAccount.toLowerCase() === incoming.smartAccount.toLowerCase()) {
-    throw new GrantWalletConflict("account-shared", "Your Spot and Perps wallets must be different accounts. Neither wallet was changed.");
+    throw new GrantWalletConflict("account-shared", "Your Spot and Perps wallets must be different accounts, so this permission was not saved. Your other wallet was not changed.");
   }
   const spot = grantPurpose(incoming) === "spot" ? incoming : other;
   if (spot.perp !== undefined || spot.grantFeatures?.includes(GRANT_PERP_LIGHTER)) {
     throw new GrantWalletConflict(
       "legacy-perps",
-      "Your Spot wallet still carries a perpetuals permission. Retire it before a separate Perps wallet can be made. Neither wallet was changed.",
+      "Your Spot wallet still carries a perpetuals permission. Retire it before a separate Perps wallet can be made. This permission was not saved, and your other wallet was not changed.",
     );
   }
 }
@@ -170,6 +189,17 @@ export interface GrantStore {
   tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null>;
   /** Is there a record for this tenant, readable or not? Never false for an unreadable one. */
   hasStoredGrant(tenant: `0x${string}`): Promise<boolean>;
+  /**
+   * THE OWNER OF THE RECORD THIS STORE HOLDS for the tenant, shown or not (one
+   * stopped for a renewal, which `get` hides), as the other wallet's put reads
+   * it (assertIndependentWallets): null when there is none. THROWS when the
+   * record cannot be read, names another wallet, or carries no owner or
+   * account, where that put refuses. An active record's session key must
+   * also decrypt: an unreadable secret is not a deliberate renewal stop.
+   * Neither failure is "stored" to a reader that asks before a stop
+   * (grants/route.ts GET, restore-perps-owner.ts).
+   */
+  storedGrantOwner(tenant: `0x${string}`): Promise<string | null>;
   /** Forget a tenant's grant (the kill switch). */
   remove(tenant: `0x${string}`): Promise<void>;
   /** Remove signing capability, retaining the roster/home during permission replacement. */
@@ -427,7 +457,7 @@ export class FileGrantStore implements GrantStore {
       // lock as the write below. An unreadable record anywhere refuses.
       const other = await readRecord(this.file(tenant, otherWallet(this.wallet)));
       if (other && grantPurpose(other.grant) !== otherWallet(this.wallet)) {
-        throw new Error("Your other wallet's grant could not be verified. Neither wallet was changed.");
+        throw new Error("Your other wallet's grant could not be verified, so this permission was not saved.");
       }
       assertIndependentWallets(grant, other?.grant ?? null);
       for (const holder of await this.holdersOf(grant.smartAccount)) {
@@ -453,6 +483,11 @@ export class FileGrantStore implements GrantStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw error;
     }
+  }
+  async storedGrantOwner(tenant: `0x${string}`): Promise<string | null> {
+    const rec = await readRecord(this.file(tenant));
+    if (!rec) return null;
+    return verifiedRecordOwner(rec, this.wallet);
   }
   async listTenants(): Promise<`0x${string}`[]> {
     return this.tenantsIn(this.dir);
@@ -632,6 +667,38 @@ const ACCOUNT_LOCK_NS = 0x4d4d4741;
 
 const parseGrantJson = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v) as StoredRecord["grant"];
 
+/** A stored record's owner, as the other wallet's put would compare it; throws where that put refuses. */
+function verifiedOwner(grant: StoredRecord["grant"] | null, wallet: GrantPurpose): string {
+  if (!grant || grantPurpose(grant as StoredGrant) !== wallet || typeof grant.owner !== "string" || typeof grant.smartAccount !== "string") {
+    throw new Error("This wallet's stored grant could not be verified.");
+  }
+  return grant.owner;
+}
+
+/**
+ * Unlike get's legacy file-store fallback, this status read must distinguish
+ * an unreadable active secret from a replacement stop. A stopped record has a
+ * valid retained fence and both copies of the signing key erased; merely
+ * finding a marker does not prove that. Validate on the same record as its
+ * owner, so a concurrent replacement cannot mix two reads.
+ */
+function verifiedRecordOwner(rec: StoredRecord, wallet: GrantPurpose): string {
+  const owner = verifiedOwner(rec.grant, wallet);
+  const stop = rec.grant.replacementStop;
+  if (stop !== undefined) {
+    if (!stop || typeof stop !== "object" || Array.isArray(stop)
+        || typeof stop.sessionKeyAddress !== "string" || !/^0x[0-9a-f]{40}$/i.test(stop.sessionKeyAddress)
+        || !Number.isSafeInteger(stop.stoppedAt) || stop.stoppedAt < 0
+        || rec.grant.expiresAt !== 0 || rec.grant.serialized !== "" || rec.sealedSessionKey !== "") {
+      throw new Error("This wallet's stopped grant could not be verified.");
+    }
+    retiredSessionKeys(rec.grant);
+  } else {
+    fromRecord(rec, wallet);
+  }
+  return owner;
+}
+
 /**
  * Postgres backend for the multi-service hosted deploy, where web and the
  * orchestrator are separate Railway services sharing a network database.
@@ -791,7 +858,7 @@ export class PgGrantStore implements GrantStore {
         const { rows } = await c.query(`SELECT grant_json FROM ${other} WHERE tenant = $1`, [tenant.toLowerCase()]);
         const theirs = rows[0] ? parseGrantJson(rows[0].grant_json) : null;
         if (theirs && grantPurpose(theirs) !== otherWallet(this.wallet)) {
-          throw new Error("Your other wallet's grant could not be verified. Neither wallet was changed.");
+          throw new Error("Your other wallet's grant could not be verified, so this permission was not saved.");
         }
         assertIndependentWallets(grant, theirs);
       }
@@ -855,6 +922,12 @@ export class PgGrantStore implements GrantStore {
     if (!c) return false;
     const { rows } = await c.query(`SELECT 1 FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
     return rows.length > 0;
+  }
+  async storedGrantOwner(tenant: `0x${string}`): Promise<string | null> {
+    const c = await this.existing();
+    if (!c) return null;
+    const rec = await this.readRow(c, tenant);
+    return rec ? verifiedRecordOwner(rec, this.wallet) : null;
   }
   async listTenants(): Promise<`0x${string}`[]> {
     const c = await this.existing();

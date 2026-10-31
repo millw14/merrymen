@@ -73,6 +73,7 @@ async function claim(opts: {
     owner,
     smartAccount,
     chainId: CHAIN,
+    purpose: "spot",
     walletSignature: await opts.wallet.signMessage({ message }),
     ownerSignature: opts.omitCoSignature
       ? ("0x" + "11".repeat(65) as `0x${string}`)
@@ -133,6 +134,7 @@ test("altering the claimed account after signing is refused", async () => {
     owner: owner.address,
     smartAccount: "0x00000000000000000000000000000000000000ff", // swapped
     chainId: CHAIN,
+    purpose: "spot",
     walletSignature: await wallet.signMessage({ message: signed }),
     ownerSignature: await owner.signMessage({ message: signed }),
   });
@@ -150,6 +152,7 @@ test("a nonce cannot be spent twice", async () => {
     owner: owner.address,
     smartAccount: SMART,
     chainId: CHAIN,
+    purpose: "spot" as const,
     walletSignature: await wallet.signMessage({ message }),
     ownerSignature: await owner.signMessage({ message }),
   };
@@ -169,6 +172,7 @@ test("a claim signed for another origin is refused", async () => {
     owner: owner.address,
     smartAccount: SMART,
     chainId: CHAIN,
+    purpose: "spot",
     walletSignature: await wallet.signMessage({ message }),
     ownerSignature: await owner.signMessage({ message }),
   });
@@ -202,8 +206,59 @@ test("a claim on one chain does not bind on the other", async () => {
     owner: owner.address,
     smartAccount: SMART,
     chainId: 4663, // mainnet — not what was signed
+    purpose: "spot",
     walletSignature: await wallet.signMessage({ message: onTestnet }),
     ownerSignature: await owner.signMessage({ message: onTestnet }),
   });
   assert.equal(r.ok, false);
+});
+
+test("A CLAIM ON ONE WALLET DOES NOT BIND ON THE OTHER: Spot replayed as Perps, and Perps as Spot", async () => {
+  // One owner key holds both wallets (Spot at Kernel index 0, Perps at 1), and
+  // both claims name the same login, owner, chain and origin. Only the purpose
+  // line in the signed text tells them apart, so the server must rebuild the
+  // text with the wallet the request is for: a signature made over one
+  // wallet's claim recovers to nobody when it is offered for the other.
+  for (const [signedFor, offeredAs] of [["spot", "perps"], ["perps", "spot"]] as const) {
+    const { wallet, owner } = actors();
+    const nonce = issueChallengeNonce(ORIGIN);
+    const signed = bindingMessage({ origin: ORIGIN, nonce, owner: owner.address, smartAccount: SMART, chainId: CHAIN, purpose: signedFor });
+    const offer = async (purpose: "spot" | "perps") => verifyGrantBinding({
+      origin: ORIGIN,
+      tenant: wallet.address.toLowerCase() as `0x${string}`,
+      nonce,
+      owner: owner.address,
+      smartAccount: SMART,
+      chainId: CHAIN,
+      purpose,
+      walletSignature: await wallet.signMessage({ message: signed }),
+      ownerSignature: await owner.signMessage({ message: signed }),
+    });
+    const replayed = await offer(offeredAs);
+    assert.equal(replayed.ok, false, `${signedFor} replayed as ${offeredAs}`);
+    // Refused BEFORE the nonce was spent: the honest claim still goes through.
+    const honest = await offer(signedFor);
+    assert.equal(honest.ok, true, honest.ok ? "" : honest.why);
+  }
+});
+
+test("a claim that names no wallet the deployment knows is refused, never read as Spot", async () => {
+  const { wallet, owner } = actors();
+  const nonce = issueChallengeNonce(ORIGIN);
+  const message = bindingMessage({ origin: ORIGIN, nonce, owner: owner.address, smartAccount: SMART, chainId: CHAIN });
+  for (const purpose of [undefined, "Spot", "solana", ""]) {
+    const r = await verifyGrantBinding({
+      origin: ORIGIN,
+      tenant: wallet.address.toLowerCase() as `0x${string}`,
+      nonce,
+      owner: owner.address,
+      smartAccount: SMART,
+      chainId: CHAIN,
+      purpose: purpose as unknown as "spot",
+      walletSignature: await wallet.signMessage({ message }),
+      ownerSignature: await owner.signMessage({ message }),
+    });
+    assert.equal(r.ok, false, String(purpose));
+    assert.match(r.ok ? "" : r.why, /names a wallet this deployment does not know/);
+  }
 });

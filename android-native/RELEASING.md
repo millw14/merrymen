@@ -8,7 +8,7 @@ project in `mobile/`, which uses the same package name but a different client.
 
 - JDK 17, Android SDK platform 36, and build-tools 35.0.0.
 - The committed Gradle 9.3.1 wrapper, AGP 8.13.1 and Kotlin 2.2.20.
-- Version 0.4.1, code 5. Before an upload, check Play Console for the highest
+- Release candidate version 0.4.2, code 6. Before an upload, check Play Console for the highest
   version code already used; every new upload must use a higher code.
 
 [AGP 8.13 supports API 36.1 and requires at least Gradle 8.13/JDK 17](https://developer.android.com/build/releases/agp-8-13-0-release-notes).

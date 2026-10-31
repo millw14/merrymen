@@ -2074,9 +2074,14 @@ describe("the orchestrator's wiring", () => {
 
   it("a held tenant's process never gets the channel, and never a broker", () => {
     const code = SRC.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
-    const holder = code.slice(code.indexOf("async function startHolderProcess("), code.indexOf("async function startHolderProcess(") + 6000);
-    assert.match(holder, /spawn\([\s\S]*?\{ cwd: ROOT, env: childEnv\(tenant\), stdio: \["ignore", "pipe", "pipe"\] \}/, "stdio is exactly the three pipes");
-    assert.doesNotMatch(holder.slice(0, holder.indexOf("\nasync function ") > 0 ? holder.indexOf("\nasync function ") : undefined), /attachFomoBroker|"ipc"/);
+    const holderStart = code.indexOf("async function startHolderProcess(");
+    assert.ok(holderStart >= 0, "the holder spawn boundary still exists");
+    const holder = code.slice(holderStart, code.indexOf("\n}\n", holderStart) + 2);
+    // Perps seats add environment flags. Those flags must not affect the
+    // process's channels or bypass the existing sanitized child environment.
+    assert.match(holder, /env: \{ \.\.\.childEnv\(tenant\),/, "the holder keeps the sanitized child environment");
+    assert.match(holder, /spawn\([\s\S]*?stdio:\s*\["ignore",\s*"pipe",\s*"pipe"\]\s*\}/, "stdio is exactly the three pipes");
+    assert.doesNotMatch(holder, /attachFomoBroker|"ipc"/);
     // And the pass asks, right before each file, whether the tenant is still a running child here and not held.
     const still = code.slice(code.indexOf("function fomoStillOurs("), code.indexOf("function fomoStillOurs(") + 800);
     assert.match(still, /children\.keys\(\)/, "a running child here");

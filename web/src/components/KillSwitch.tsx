@@ -39,7 +39,12 @@ export function KillSwitch({ expectedTenant, ready = true }: { expectedTenant?: 
       setState("kept");
       return;
     }
-    clearGrant();
+    // EVERY WALLET'S BROWSER COPY, because the kill above named no wallet and
+    // so stopped every one. Each slot is archived first (its owner key kept,
+    // session.ts clearGrant) and then cleared, so neither the Spot nor the
+    // Perps screen offers to re-arm a permission the kill just removed.
+    clearGrant("spot");
+    clearGrant("perps");
     setState("done");
     setTimeout(() => window.location.reload(), 900);
   }

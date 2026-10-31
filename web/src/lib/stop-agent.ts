@@ -1,15 +1,34 @@
-/** Explicitly discard the server permission and agent memory; preserve browser recovery keys. */
+import type { GrantPurpose } from "@merrymen/core";
+import { walletUrl } from "./wallet-param";
+
+/**
+ * Explicitly discard the server permission and agent memory; preserve browser recovery keys.
+ *
+ * A KILL NAMES NO WALLET, and that is the point of it: DELETE /api/grants with
+ * no `?wallet=` stops every wallet the login has (Spot, the Perps half, and
+ * Solana), and the route refuses a kill that names one (killNamesWallet). So
+ * there is no wallet argument here to get wrong.
+ */
 export async function deleteAgent(expectedTenant?: string | null): Promise<void> {
-  return requestStop({ purpose: "delete-agent", expectedTenant: expectedTenant ?? undefined });
+  return requestStop("/api/grants", { purpose: "delete-agent", expectedTenant: expectedTenant ?? undefined });
 }
 
-/** Retire the old permission while retaining the agent's home and Telegram memory. */
+/**
+ * Retire the old permission while retaining the agent's home and Telegram memory.
+ *
+ * ONE WALLET'S PERMISSION, the wallet named: a renewal replaces that wallet's
+ * grant and leaves the other's alone (the route stops `?wallet=` through that
+ * wallet's store). Spot's request is byte for byte the one it always was
+ * (walletUrl leaves a Spot URL untouched). REQUIRED, as the stores take it: a
+ * Perps renewal that forgot it would stop the Spot agent instead.
+ */
 export async function stopAgentForReplacement(
+  wallet: GrantPurpose,
   expectedTenant: string | null | undefined,
   expectedAccount: string,
   expectedSession?: string,
 ): Promise<void> {
-  return requestStop({
+  return requestStop(walletUrl("/api/grants", wallet), {
     purpose: "permission-replacement",
     expectedTenant: expectedTenant ?? undefined,
     expectedAccount,
@@ -17,10 +36,10 @@ export async function stopAgentForReplacement(
   });
 }
 
-async function requestStop(body: Record<string, string | undefined>): Promise<void> {
+async function requestStop(url: string, body: Record<string, string | undefined>): Promise<void> {
   let response: Response;
   try {
-    response = await fetch("/api/grants", {
+    response = await fetch(url, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

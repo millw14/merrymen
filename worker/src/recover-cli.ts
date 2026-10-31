@@ -13,7 +13,7 @@
  * so the CLI can decide what to do next without scraping prose.
  */
 
-import { chainForId, pimlicoBundlerUrl, robinhoodChain } from "../../packages/core/src/index";
+import { chainForId, pimlicoBundlerUrl, robinhoodChain, isGrantPurpose } from "../../packages/core/src/index";
 import { resolveConfig } from "./settings";
 import { ownerFromPrivateKey, planRecovery, recoverFunds } from "./recover";
 
@@ -44,6 +44,10 @@ async function main() {
     process.exit(2);
   }
 
+  const purpose = process.env.MERRYMEN_RECOVER_PURPOSE ?? "spot";
+  if (!isGrantPurpose(purpose)) { emit({ ok: false, error: "bad-wallet-purpose" }); process.exit(2); }
+  // The install owns RPC/bundler credentials. The selected wallet chooses only
+  // derivation and its sweep list, never another wallet's trading configuration.
   const cfg = resolveConfig();
   const chain = chainForId(chainId);
   const rpcUrl = chainId === robinhoodChain.id ? cfg.rpcMainnet : cfg.rpcTestnet;
@@ -51,11 +55,12 @@ async function main() {
   try {
     if (mode === "plan") {
       const plan = await planRecovery({
+        purpose,
         chain,
         owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
         expectedSmartAccount: expect,
-        extraTokens: cfg.customTokens,
+        extraTokens: purpose === "spot" ? cfg.customTokens : [],
       });
       say(`  smart account : ${plan.smartAccount}`);
       say(`  owner EOA     : ${plan.ownerAddress}   ${"<- what MetaMask shows when you import the key"}`);
@@ -140,13 +145,14 @@ async function main() {
     }
     say(`  sweeping to ${to} …`);
     const res = await recoverFunds({
+      purpose,
       chain,
       owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,
       rpcUrl,
       to,
       expectedSmartAccount: expect,
-      extraTokens: cfg.customTokens,
+      extraTokens: purpose === "spot" ? cfg.customTokens : [],
     });
     if (!res.txHash) {
       // Three different things reach here and they are NOT the same fact.

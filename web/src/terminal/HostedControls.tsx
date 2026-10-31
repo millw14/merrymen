@@ -49,7 +49,7 @@ export interface AccountState {
    * today (AgentStatus.energy). Null or absent is "not said yet", never an
    * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: GrantPermissionView & {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}}};
+  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; workerStale?: boolean | null; heartbeatUnread?: true; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: GrantPermissionView & {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";
@@ -124,7 +124,7 @@ export function AccountEntry({account,accountFailed=false,portfolio="ok",retryin
 export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";account:AccountState;onClose:()=>void}) {
   const [copied,setCopied]=useState(false);
   const [error,setError]=useState("");
-  const [ownerKey]=useState(()=>{const grant=loadGrant();return grant?.smartAccount.toLowerCase()===account.status.grant?.smartAccount.toLowerCase() ? grant?.demoOwnerPrivateKey ?? "" : "";});
+  const [ownerKey]=useState(()=>{const grant=loadGrant("spot");return grant?.smartAccount.toLowerCase()===account.status.grant?.smartAccount.toLowerCase() ? grant?.demoOwnerPrivateKey ?? "" : "";});
   const grant=account.status.grant;
   return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add funds" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <RecoverPanel initialOwnerKey={ownerKey}/> : grant ? <><h2>Fund your agent</h2><p>Send USDG to your agent’s account on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`} — and only there. This address on any other network is not your agent: funds sent there are stuck, and no re-sign moves them back. Your balance updates after the transfer is recorded.</p>
     {/* WHAT THIS AGENT IS ACTUALLY SHORT OF, on the screen where it can be fixed.

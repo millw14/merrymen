@@ -89,6 +89,8 @@ import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { homePaths, merrymenHome } from "../home";
 import { loadGrantFile } from "../grant";
 import { hostedKillFromChat } from "../kill-request";
+import { startPerpsNotifier } from "./perps-notifier";
+import { PERPS_ABSENT, PERPS_OWNER_ONLY, PERPS_UNREAD, readPerpsText, requestPerpsExit, telegramPerpsRequestId, usablePerpsAccount, validPerpsRequest, type TelegramPerpsPort } from "./perps";
 import { UNCLASSIFIED_BLOCK, holdText, readRestoreBlocked, type RestoreBlock } from "../restore-block";
 
 /**
@@ -112,9 +114,15 @@ const PRESS_NOT_KEPT_TEXT = "I can't do that while trading is held — press it 
 export type HoldConfig = Pick<
   ResolvedConfig,
   "telegramEnabled" | "telegramBotToken" | "telegramAllowlist" | "telegramControlEnabled"
->;
+> & {telegramNotifyEnabled?: boolean};
 
 export interface HoldDeps {
+  /** Optional owner-bound paper Perps port, independent of this home's held Spot book. */
+  perps?: TelegramPerpsPort;
+  walletPurpose?: "spot" | "perps";
+  /** Durable owner pause/resume requests; resume cannot lift entry-disable or Close all. */
+  pausePerps?: (request: {requestId: string; askedAtSec: number}) => Promise<string>;
+  resumePerps?: (request: {requestId: string; askedAtSec: number}) => Promise<string>;
   /** Fresh on every read, as in the child: a /link or a dashboard change applies to the next message. */
   getCfg: () => HoldConfig;
   /** telegram.json, shared with the child that will take over. */
@@ -132,6 +140,7 @@ export interface HoldDeps {
 export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   let stopped = false;
   const stateRef = deps.stateRef;
+  const perpsNotifier = deps.perps ? startPerpsNotifier({perps: deps.perps, getCfg: deps.getCfg, stateRef, now: deps.now}) : null;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const note = deps.note ?? telegramLog;
   const blocker = deps.blocker ?? (() => readRestoreBlocked(merrymenHome()));
@@ -149,6 +158,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   // The hold's own record unreadable: the class that names no cause, and no
   // practice reset offered, since nothing then says it would be honoured.
   const holdReply = (): string => {
+    if (deps.walletPurpose === "perps") return "Perps · paper practice. /perps, /positions and /pnl read your separate simulated book. /close BTC-PERP requests one exit; /flatten asks to close all and halt new entries. /pause holds entries; /kill revokes permission after confirmation. Practice reset is on the Perps desk. /resume lifts only your login pause; it never enables entries switched off on the desk or clears Close all.";
     const block = blocker();
     return esc(holdText(block?.class ?? UNCLASSIFIED_BLOCK, block?.resettable === true));
   };
@@ -171,6 +181,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   let keepWarned = false;
   /** A /kill waiting for /confirm, keyed `${chatId}:${fromId}` like the child's, and until when. */
   const parkedKills = new Map<string, number>();
+  const parkedFlattens = new Map<string, { account: `0x${string}`; expiresAt: number }>();
 
   const allowedIn = (cfg: HoldConfig, chatId: number, fromId: number): boolean =>
     cfg.telegramAllowlist.includes(chatId) || cfg.telegramAllowlist.includes(fromId);
@@ -228,6 +239,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
       return "🚫 in a group, only individually-allowlisted users can run that. The owner can add your Telegram user id in the dashboard.";
     }
     if (cmd === "kill") {
+      parkedFlattens.delete(key);
       if (!cfg.telegramControlEnabled) {
         return "🔒 control commands are turned off. Turn on “control” for Telegram in the dashboard to pause, switch strategy, trade, or kill.";
       }
@@ -247,6 +259,51 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
     return killDoneText(r);
   };
 
+
+  const perpsFlow = async (msg: TgMessage, head: {cmd: string; arg: string}, cfg: HoldConfig): Promise<string | null> => {
+    const key = `${msg.chatId}:${msg.fromId}`;
+    const parked = parkedFlattens.get(key);
+    const read = head.cmd === "perps" || ((head.cmd === "positions" || head.cmd === "pnl" || head.cmd === "status") && deps.walletPurpose === "perps");
+    const close = head.cmd === "close", flatten = head.cmd === "flatten", pause = head.cmd === "pause" && deps.walletPurpose === "perps", resume = head.cmd === "resume" && deps.walletPurpose === "perps";
+    const confirm = head.cmd === "confirm", cancel = head.cmd === "cancel";
+    if (!read && !close && !flatten && !pause && !resume && !((confirm || cancel) && parked)) return null;
+    if (!deps.perps || msg.chatId <= 0 || msg.chatId !== msg.fromId || msg.fromId !== stateRef.get().ownerId || msg.senderChatId !== undefined) return PERPS_OWNER_ONLY;
+    const stillOwner = () => {
+      const current = deps.getCfg();
+      return !stopped && stateRef.get().ownerId === msg.fromId && current.telegramEnabled
+        && current.telegramBotToken === cfg.telegramBotToken && current.telegramAllowlist.includes(msg.fromId);
+    };
+    if (read) {
+      if (head.arg) return "usage: /perps, /positions or /pnl";
+      const answer = await readPerpsText(deps.perps, now(), head.cmd === "pnl" ? "pnl" : "full");
+      return stillOwner() ? answer : PERPS_OWNER_ONLY;
+    }
+    if (head.arg && !close) return `usage: /${head.cmd}`;
+    if (cancel) { parkedFlattens.delete(key); return "🚫 cancelled — nothing done."; }
+    if (!cfg.telegramControlEnabled) return "🔒 control commands are turned off. Enable Telegram control on the Perps desk.";
+    const request = {requestId: telegramPerpsRequestId(botIdOf(cfg.telegramBotToken!), msg.updateId) ?? "", askedAtSec: msg.date};
+    if (!validPerpsRequest(request, now())) return "That practice control request is old or unverifiable. Ask again in your private DM; nothing was sent.";
+    if (resume) return deps.resumePerps ? deps.resumePerps(request) : "The resume could not be confirmed. No permission or entry setting was changed.";
+    if (pause) return deps.pausePerps ? deps.pausePerps(request) : "The pause could not be confirmed. Use the Perps desk.";
+    const market = close && /^[A-Z0-9]{1,24}-PERP$/.test(head.arg) ? head.arg as import("../../../packages/core/src/perps").PerpKey : undefined;
+    if (close && !market) return "usage: /close BTC-PERP — one practice market, in your private DM";
+    if (confirm) {
+      parkedFlattens.delete(key);
+      if (now() > parked!.expiresAt) return "⌛ that confirmation expired — ask again.";
+      return requestPerpsExit(deps.perps, {action: "flatten", expectedAccount: parked!.account, requestId: telegramPerpsRequestId(botIdOf(cfg.telegramBotToken!), msg.updateId) ?? "", askedAtSec: msg.date}, now());
+    }
+    let snapshot;
+    try { snapshot = await deps.perps.read(); } catch { return PERPS_UNREAD; }
+    if (!stillOwner() || !deps.getCfg().telegramControlEnabled) return "The owner link or Telegram controls changed. Nothing was queued.";
+    if (snapshot.state !== "ready") return snapshot.state === "absent" ? PERPS_ABSENT : PERPS_UNREAD;
+    if (!usablePerpsAccount(snapshot, now())) return "The Perps permission is expired or unreadable. Renew it on the Perps desk; no practice exit was sent.";
+    if (flatten) {
+      parkedKills.delete(key);
+      parkedFlattens.set(key, {account: snapshot.account, expiresAt: now() + CONFIRM_TTL_SEC});
+      return `⚠️ Close all practice perpetuals? This closes the paper book and halts new practice entries until a practice reset. No real-money order is signed. /confirm within ${CONFIRM_TTL_SEC}s, or /cancel.`;
+    }
+    return requestPerpsExit(deps.perps, {action: "close", market, expectedAccount: snapshot.account, requestId: telegramPerpsRequestId(botIdOf(cfg.telegramBotToken!), msg.updateId) ?? "", askedAtSec: msg.date}, now());
+  };
   /** A live message. */
   const handle = async (msg: TgMessage, cfg: HoldConfig): Promise<void> => {
     const token = cfg.telegramBotToken!;
@@ -264,7 +321,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
       await sendMessage({ token }, msg.chatId, onboarding ? onboardingText(msg.chatId) : refusalText(msg.chatId));
       return;
     }
-    const answer = head ? killFlow(msg, head.cmd, cfg) : null;
+    const answer = head ? await perpsFlow(msg, head, cfg) ?? killFlow(msg, head.cmd, cfg) : null;
     await sendMessage({ token }, msg.chatId, answer ?? holdReply());
   };
 
@@ -667,6 +724,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   return {
     stop: () => {
       stopped = true;
+      perpsNotifier?.stop();
     },
   };
 }

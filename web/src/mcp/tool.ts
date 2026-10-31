@@ -57,6 +57,8 @@ export interface ToolContext {
    * statement already in flight is not cancelled.
    */
   ledger<T>(fn: (db: Db) => Promise<T>): Promise<T>;
+  /** Perps uses its own ledger in self-hosted installs; never the Spot ledger. */
+  perpsLedger<T>(fn: (db: Db) => Promise<T>): Promise<T>;
   /** The agent this call is about, after the ownership check. */
   agent(ref?: string): Promise<OwnedAgent>;
   /** Every agent this connection may see. */
@@ -163,6 +165,7 @@ export interface RunDeps {
   mcp?: () => Promise<McpDb>;
   ledger?: <T>(fn: (db: Db | null) => Promise<T>) => Promise<T>;
   directory?: AgentDirectory;
+  perpsLedger?: <T>(fn: (db: Db | null) => Promise<T>) => Promise<T>;
 }
 
 let ledgerOverride: Db | null = null;
@@ -174,7 +177,7 @@ export function setLedgerForTest(db: Db | null): void {
 /** The shared ledger for MCP code outside a tool call (the approval route), honouring the test seam. */
 export function readLedger<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
   const override = ledgerOverride;
-  return override ? fn(override) : withReadDb(fn);
+  return override ? fn(override) : withReadDb(fn, "spot");
 }
 
 /** Why an aborted call stops: the abort reason when it is ours (the timeout), else a timeout. */
@@ -217,7 +220,9 @@ export function makeContext(principal: Principal, traceId: string, signal: Abort
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const directory = deps.directory ?? agentDirectory();
   const override = ledgerOverride;
-  const readLedger = deps.ledger ?? (override ? <T>(fn: (db: Db | null) => Promise<T>) => fn(override) : withReadDb);
+  // Each wallet keeps its own ledger when self-hosted.
+  const readLedger = deps.ledger ?? (override ? <T>(fn: (db: Db | null) => Promise<T>) => fn(override) : <T>(fn: (db: Db | null) => Promise<T>) => withReadDb(fn, "spot"));
+  const readPerpsLedger = deps.perpsLedger ?? (override ? <T>(fn: (db: Db | null) => Promise<T>) => fn(override) : <T>(fn: (db: Db | null) => Promise<T>) => withReadDb(fn, "perps"));
   const openMcp = deps.mcp ?? mcpDb;
   return {
     principal,
@@ -235,6 +240,14 @@ export function makeContext(principal: Principal, traceId: string, signal: Abort
       if (signal.aborted) return Promise.reject(abortError(signal));
       return readLedger(async (db) => {
         if (!db) throw new McpError("upstream_unavailable", "The shared ledger is not reachable right now.", { retryAfterSec: 30 });
+        if (signal.aborted) throw abortError(signal);
+        return fn(abortableDb(db, signal));
+      });
+    },
+    perpsLedger: (fn) => {
+      if (signal.aborted) return Promise.reject(abortError(signal));
+      return readPerpsLedger(async (db) => {
+        if (!db) throw new McpError("upstream_unavailable", "The Perps ledger is not reachable right now.", {retryAfterSec: 30});
         if (signal.aborted) throw abortError(signal);
         return fn(abortableDb(db, signal));
       });

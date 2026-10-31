@@ -77,6 +77,11 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
   /** The signed-in address, or null — signed out OR not yet known; see [identityKnown]. */
   val signedIn: StateFlow<String?> = _signedIn.asStateFlow()
 
+  private val _confirmationVersion = MutableStateFlow(0L)
+  /** Pending destructive confirmations cannot survive A → signed out/B → A.
+   * Unlike [turn], this also advances on an observed session expiry/switch. */
+  val confirmationVersion: StateFlow<Long> = _confirmationVersion.asStateFlow()
+
   private val _identityKnown = MutableStateFlow(false)
   /** True once the session route has genuinely answered. Until then null is not "signed out". */
   val identityKnown: StateFlow<Boolean> = _identityKnown.asStateFlow()
@@ -121,6 +126,7 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
   internal suspend fun credentialsAdopted(expectedTurn: Long): Read? = locked {
     if (expectedTurn != turns) return@locked null
     turns++
+    _confirmationVersion.value++
     _signedIn.value = null
     _identityKnown.value = false
     recompute()
@@ -149,6 +155,7 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
     when (r) {
       is ApiResult.Ok -> {
         val address = r.value.address
+        if (!address.equals(_signedIn.value, ignoreCase = true)) _confirmationVersion.value++
         if (address != null && owner != null && !address.equals(owner, ignoreCase = true)) {
           // A SWITCH. The old wallet's state goes before the new address is
           // published, so nothing renders A's thread under B's name.
@@ -160,6 +167,7 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
         _identityKnown.value = true
       }
       is ApiResult.Refused -> if (r.status == 401) {
+        if (_signedIn.value != null) _confirmationVersion.value++
         _signedIn.value = null
         _identityKnown.value = true
       }
@@ -172,6 +180,7 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
   /** The app signed out: every hook runs, and no wallet's state is held any more. */
   suspend fun signedOut() = locked {
     turns++
+    _confirmationVersion.value++
     forgetAll()
     owner = null
     _signedIn.value = null
@@ -187,6 +196,7 @@ class Identity(private val hookContext: CoroutineContext = Dispatchers.IO) {
    */
   suspend fun serverChanged() = locked {
     turns++
+    _confirmationVersion.value++
     forgetAll()
     owner = null
     _signedIn.value = null

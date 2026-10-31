@@ -138,6 +138,7 @@ func rawUnits(_ raw: String?, decimals: Int) -> String {
 struct PermissionsScreen: View {
     @EnvironmentObject var store: AppStore
     @State private var stop = false
+    @State private var stopReview: StandDown.Confirmation?
     @State private var resetPaper = false
     @State private var busy = false
     @State private var revision = 0
@@ -165,25 +166,32 @@ struct PermissionsScreen: View {
                             Button("Restart paper book") { resetPaper = true }.buttonStyle(SecondaryButtonStyle(fill: true)).disabled(busy)
                             Text("Paper cash goes back to the starting stake and simulated positions are cleared. Earlier paper trades stay on file but no longer count.").font(.caption).foregroundStyle(.secondary)
                         }
-                        Button("Stand down agent", role: .destructive) { stop = true }.disabled(busy)
-                        Text("Stand-down removes the service's active grant and deletes the agent's memory, which re-signing does not restore. It does not withdraw assets or invalidate the existing permission on-chain.").font(.caption).foregroundStyle(.secondary)
                     } else {
                         InactiveWalletPanel(status: status) { revision += 1 }
                         Text("No active trading permission."); NavigationLink("Create agent", value: Route.create)
                     }
                 }.id(revision)
+                // Login-wide stop must remain reachable without a Spot grant or
+                // a readable Spot status (including Perps-only owners).
+                Button("Stop all agents", role: .destructive) {
+                    stopReview = StandDown.Confirmation(owner: store.owner, generation: store.generation)
+                    stop = stopReview != nil
+                }.disabled(busy).accessibilityIdentifier("stop-all-agents")
+                Text("Stops Spot, Perps and Solana for this login. It removes active server permissions and agent memory. It does not withdraw assets or revoke permissions on-chain.").font(.caption).foregroundStyle(.secondary)
             }
         }.navigationTitle("Wallet & permissions")
-        .confirmationDialog("Stand down your agent?", isPresented: $stop, titleVisibility: .visible) {
-            Button("Stand down", role: .destructive) {
-                guard !busy else { return }; busy = true; let owner = store.owner
-                Task { defer { busy = false }; do {
-                    guard let owner, let body = StandDown.body(owner: owner) else { throw APIError(status: 401, message: "Sign in again before confirming this action.") }
-                    _ = try await store.perform("/api/grants", method: "DELETE", body: body, expectedOwner: owner)
-                    revision += 1; store.notice = "Stand-down request accepted. Existing assets remain in the smart account."
+        .confirmationDialog("Stop all agents for this login?", isPresented: $stop, titleVisibility: .visible) {
+            Button("Stop all agents", role: .destructive) {
+                guard !busy else { return }; busy = true; let reviewed = stopReview
+                Task { defer { busy = false; stopReview = nil }; do {
+                    guard let reviewed, let body = reviewed.body(currentOwner: store.owner, generation: store.generation) else { throw APIError(status: 409, message: "Your account changed. Review the stop again for the current login.") }
+                    let result = try await store.perform("/api/grants", method: "DELETE", body: body, expectedOwner: reviewed.owner)
+                    guard result["ok"].bool == true else { throw APIError(status: 502, message: "The stop response could not be confirmed. Check all agents before trying again.") }
+                    revision += 1; store.notice = "Stop request accepted for Spot, Perps and Solana. Existing assets remain in their accounts."
                 } catch { store.notice = error.localizedDescription } }
             }
-        } message: { Text("The agent will stop managing positions, and its memory will be deleted. Re-signing later does not bring that memory back. This does not sell positions or revoke permissions on-chain.") }
+            Button("Cancel", role: .cancel) { stopReview = nil }
+        } message: { Text("Spot, Perps and Solana for this login will stop managing positions. Active server permissions and agent memory are removed; re-signing does not restore that memory. This does not close or sell positions, withdraw assets, or revoke permissions on-chain.") }
         // The worker refuses this on the live rail, so it can only ever touch
         // the paper book; the button is also shown only for paper agents.
         .confirmationDialog("Restart the paper book?", isPresented: $resetPaper, titleVisibility: .visible) {

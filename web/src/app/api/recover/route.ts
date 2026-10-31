@@ -20,9 +20,12 @@
 
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { homePaths } from "@merrymen/home";
+import path from "node:path";
+import { purposeHome, homePaths } from "@merrymen/home";
 import {
   chainForId,
+  grantPurpose,
+  type GrantPurpose,
   explorerFor,
   isHostedMode,
   pimlicoBundlerUrl,
@@ -32,6 +35,10 @@ import {
 } from "@merrymen/core";
 import { ownerFromPrivateKey, planRecovery, recoverFunds } from "@merrymen/recover";
 import { errorText } from "../../../../../worker/src/redact-urls";
+import { walletUnknown, NO_STORE_HEADERS } from "@/lib/route-guard";
+import { readWalletParam } from "@/lib/wallet-param";
+
+const json = (body: unknown, init?: ResponseInit) => NextResponse.json(body, { ...init, headers: { ...NO_STORE_HEADERS, ...init?.headers } });
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,17 +49,23 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
 // RPC or bundler URL, key included. See worker/src/redact-urls.ts.
 const msg = (e: unknown) => errorText(e);
 
-async function readGrant(): Promise<StoredGrant | null> {
+async function readGrant(wallet: GrantPurpose): Promise<StoredGrant | null> {
   try {
-    return JSON.parse(await readFile(homePaths.grant(), "utf8")) as StoredGrant;
-  } catch {
-    return null;
+    const g = JSON.parse(await readFile(path.join(purposeHome(wallet), "grant.json"), "utf8")) as StoredGrant;
+    if (!g || grantPurpose(g) !== wallet || !isAddr(g.smartAccount)) throw new Error("The selected wallet grant could not be read. Use a backed-up owner key.");
+    return g;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
   }
 }
 
-async function readSettings(): Promise<MerrymenSettings> {
+async function readSettings(wallet: GrantPurpose): Promise<MerrymenSettings> {
   try {
-    return JSON.parse((await readFile(homePaths.settings(), "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
+    const settings = JSON.parse((await readFile(homePaths.settings(), "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
+    // Infrastructure credentials belong to the install. Trading tokens do not
+    // cross wallets; Perps recovery discovers its builtin cash and native gas.
+    return wallet === "spot" ? settings : { rpcMainnet: settings.rpcMainnet, rpcTestnet: settings.rpcTestnet, bundlerUrl: settings.bundlerUrl, bundlerApiKey: settings.bundlerApiKey };
   } catch {
     return {};
   }
@@ -87,20 +100,25 @@ const HOSTED_RECOVERY = {
 };
 
 /** Context for the active grant so the panel can render without asking for a key. */
-export async function GET() {
-  if (isHostedMode()) return NextResponse.json({ hasStoredKey: false, ...HOSTED_RECOVERY });
-  const [grant, settings] = await Promise.all([readGrant(), readSettings()]);
+export async function GET(req: Request) {
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was read or moved.");
+  if (isHostedMode()) return json({ hasStoredKey: false, ...HOSTED_RECOVERY });
+  let grant: StoredGrant | null;
+  const settings = await readSettings(wallet);
+  try { grant = await readGrant(wallet); } catch { return json({ hasStoredKey: false, hasBundler: !!bundlerFor(settings, robinhoodChain.id), error: "The selected wallet grant could not be read. Use a backed-up owner key." }); }
 
   if (!grant || !isKey(grant.demoOwnerPrivateKey)) {
     // Killed/expired (or externally-owned) — no stored key. The UI asks for the
     // backed-up owner key. hasBundler is a best-effort mainnet guess for the hint.
-    return NextResponse.json({ hasStoredKey: false, hasBundler: !!bundlerFor(settings, robinhoodChain.id) });
+    return json({ hasStoredKey: false, hasBundler: !!bundlerFor(settings, robinhoodChain.id) });
   }
 
   const chainId = grant.chainId;
   const hasBundler = !!bundlerFor(settings, chainId);
   try {
     const plan = await planRecovery({
+      purpose: wallet,
       chain: chainForId(chainId),
       owner: ownerFromPrivateKey(grant.demoOwnerPrivateKey),
       rpcUrl: rpcFor(settings, chainId),
@@ -109,7 +127,7 @@ export async function GET() {
       // these the escape hatch strands exactly what the owner chose to hold.
       extraTokens: settings.customTokens ?? [],
     });
-    return NextResponse.json({
+    return json({
       hasStoredKey: true,
       hasBundler,
       chainId,
@@ -143,32 +161,37 @@ export async function GET() {
       unreadable: plan.unreadable,
     });
   } catch (e) {
-    return NextResponse.json({ hasStoredKey: true, hasBundler, chainId, error: msg(e) });
+    return json({ hasStoredKey: true, hasBundler, chainId, error: msg(e) });
   }
 }
 
 export async function POST(req: Request) {
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was read or moved.");
   // HOSTED: never accept an owner key over the wire and never sweep server-side.
   // This is the fund-drain endpoint the audit flagged — a public URL where the
   // only guard was localhost. Closed by construction: the server has no key and
   // will not take one.
-  if (isHostedMode()) return NextResponse.json(HOSTED_RECOVERY, { status: 403 });
+  if (isHostedMode()) return json(HOSTED_RECOVERY, { status: 403 });
 
   let body: { mode?: string; to?: unknown; ownerKey?: unknown; chainId?: unknown };
   try {
     body = (await req.json()) as typeof body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("body is not an object");
   } catch {
-    return NextResponse.json({ error: "body is not JSON" }, { status: 400 });
+    return json({ error: "body is not JSON" }, { status: 400 });
   }
 
-  const [grant, settings] = await Promise.all([readGrant(), readSettings()]);
+  let grant: StoredGrant | null = null;
+  const settings = await readSettings(wallet);
+  if (!isKey(body.ownerKey)) try { grant = await readGrant(wallet); } catch { return json({ error: "The selected wallet grant could not be read. Use a backed-up owner key." }, { status: 503 }); }
   const mode = body.mode === "sweep" ? "sweep" : "plan";
 
   // Prefer a pasted key (killed case); fall back to the active grant's stored key.
   const pasted = isKey(body.ownerKey);
   const ownerKey = pasted ? (body.ownerKey as `0x${string}`) : isKey(grant?.demoOwnerPrivateKey) ? grant!.demoOwnerPrivateKey! : undefined;
   if (!ownerKey) {
-    return NextResponse.json({ error: "no owner key — paste the owner key you backed up" }, { status: 400 });
+    return json({ error: "no owner key — paste the owner key you backed up" }, { status: 400 });
   }
 
   const chainId = Number.isInteger(body.chainId) ? Number(body.chainId) : grant?.chainId ?? robinhoodChain.id;
@@ -180,13 +203,14 @@ export async function POST(req: Request) {
   try {
     if (mode === "plan") {
       const plan = await planRecovery({
-        chain: chainForId(chainId),
+        purpose: wallet,
+      chain: chainForId(chainId),
         owner: ownerFromPrivateKey(ownerKey),
         rpcUrl,
         expectedSmartAccount: expected,
         extraTokens: settings.customTokens ?? [],
       });
-      return NextResponse.json({
+      return json({
         smartAccount: plan.smartAccount,
         ownerAddress: plan.ownerAddress,
         gasWei: plan.gasWei.toString(),
@@ -219,16 +243,17 @@ export async function POST(req: Request) {
 
     // sweep
     if (!isAddr(body.to)) {
-      return NextResponse.json({ error: "destination is not a valid address" }, { status: 400 });
+      return json({ error: "destination is not a valid address" }, { status: 400 });
     }
     const bundlerUrl = bundlerFor(settings, chainId);
     if (!bundlerUrl) {
-      return NextResponse.json(
+      return json(
         { error: "recovery needs a bundler — add a free Pimlico key in Settings, then try again" },
         { status: 400 },
       );
     }
     const res = await recoverFunds({
+      purpose: wallet,
       chain: chainForId(chainId),
       owner: ownerFromPrivateKey(ownerKey),
       bundlerUrl,
@@ -237,7 +262,7 @@ export async function POST(req: Request) {
       expectedSmartAccount: expected,
       extraTokens: settings.customTokens ?? [],
     });
-    return NextResponse.json({
+    return json({
       txHash: res.txHash,
       to: res.to,
       smartAccount: res.smartAccount,
@@ -252,6 +277,6 @@ export async function POST(req: Request) {
       unreadable: res.unreadable,
     });
   } catch (e) {
-    return NextResponse.json({ error: msg(e) }, { status: 500 });
+    return json({ error: msg(e) }, { status: 500 });
   }
 }

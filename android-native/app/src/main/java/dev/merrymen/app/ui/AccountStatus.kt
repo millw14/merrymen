@@ -11,6 +11,7 @@ import dev.merrymen.app.net.MerrymenApi
 import dev.merrymen.app.net.Position
 import dev.merrymen.app.net.TelegramStatus
 import dev.merrymen.app.net.TradeRecord
+import dev.merrymen.app.net.said
 import java.math.RoundingMode
 import java.time.Instant
 import java.time.ZoneId
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 
 /**
@@ -145,11 +147,31 @@ fun accountControlsOf(signedIn: String?, hosted: Boolean?, canOfferSignIn: Boole
  */
 fun stopArmedNote(signedIn: String?): String =
   if (signedIn != null) {
-    "Tap again to stop it. This revokes its trading permission until you re-sign, " +
-      "and deletes its memory, which re-signing does not bring back."
+    "Tap again to stop Spot, Perps and Solana for this login. This removes their server trading permissions " +
+      "and deletes agent memory, which re-signing does not bring back. It does not close positions, withdraw assets or revoke permissions on-chain."
   } else {
-    "Tap again to stop it. This revokes its trading permission until you re-sign."
+    "Tap again to stop Spot, Perps and Solana on this server. This halts the workers; it does not close positions or withdraw assets."
   }
+
+/** A Spot-only grant read cannot confirm a login-wide stop. In particular,
+ * Perps-only owners have no Spot grant before or after an unsuccessful DELETE.
+ * Send once and keep an unread answer uncertain; never silently replay it. */
+suspend fun stopAllAgents(api: MerrymenApi, owner: String?, isCurrent: () -> Boolean): String {
+  val changed = "Your account or server changed. Check the previous login before repeating the stop."
+  if (!isCurrent()) return changed
+  val result = api.revokeGrant(expectedTenant = owner)
+  if (!isCurrent()) return changed
+  return when (result) {
+    is ApiResult.Ok -> if (((result.value as? JsonObject)?.get("ok") as? JsonPrimitive)?.booleanOrNull == true) {
+      "Stop request accepted for Spot, Perps and Solana. Existing assets remain in their accounts."
+    } else {
+      "The stop response could not be confirmed. Check Spot, Perps and Solana in the web app before trying again."
+    }
+    is ApiResult.Refused -> if (result.status == 401) "Sign in first. Nothing was stopped." else result.message
+    is ApiResult.Unreachable -> "Could not confirm whether all agents stopped — ${result.said.trimEnd('.')}. " +
+      "The request was not retried. Check Spot, Perps and Solana in the web app before trying again."
+  }
+}
 
 /** What the sign-in page may show, in the order it finds out. Only [Open] loads the web sign-in. */
 enum class SignInPage {

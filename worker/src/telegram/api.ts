@@ -919,6 +919,9 @@ function parseCallback(updateId: unknown, raw: unknown): TgCallback | null {
 export const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "help", description: "list every command" },
   { command: "status", description: "what the band is doing now" },
+  { command: "perps", description: "owner practice perpetual book (private DM)" },
+  { command: "close", description: "owner paper exit for MARKET-PERP (private DM)" },
+  { command: "flatten", description: "close all practice perpetuals (asks to confirm)" },
   { command: "positions", description: "current positions and P&L" },
   { command: "depth", description: "liquidity map for one SYMBOL" },
   { command: "pnl", description: "profit and loss" },
@@ -982,6 +985,7 @@ export const BOT_COMMANDS: { command: string; description: string }[] = [
  * the full menu pushed to their own allowlisted chats (service.ts).
  */
 const PUBLIC_COMMAND_NAMES = new Set([
+  "perps",
   "help",
   "status",
   "positions",

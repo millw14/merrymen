@@ -9,7 +9,7 @@
  * that home's archive, then removes it; an archive it cannot write keeps the
  * grant, pauses that home and says the kill is incomplete. It runs before the
  * Spot grant is touched, like Solana's half, and a Spot-only install's kill
- * makes no Perps home at all.
+ * records a disabled Perps revision, with no grant or worker.
  *
  * The Telegram row runs the Perps half and the answer it renders, and reads
  * index.ts for the order, as solana-kill.test.ts does for Solana: the kill
@@ -62,7 +62,7 @@ for (const owner of OWNERS) {
     assert.equal(await selfHostedPerpsKill(), hasPerps(owner) ? "stopped" : null);
     assert.equal(existsSync(path.join(perpsHome, "grant.json")), false);
     if (hasPerps(owner)) assert.equal(readFileSync(path.join(perpsHome, "grants", `${PERPS}.json`), "utf8"), local(PERPS, { purpose: "perps" }), "its owner key is kept");
-    else assert.equal(existsSync(path.join(dir, "accounts")), false, "a Spot-only kill makes no Perps home");
+    else assert.equal(JSON.parse(readFileSync(path.join(perpsHome, "settings.json"), "utf8")).perpsEnabled, false, "a Spot-only kill records an off revision against delayed enables");
     if (hasSpot(owner)) assert.equal(readFileSync(path.join(dir, "grant.json"), "utf8"), local(SPOT), "the Spot grant is the Spot half's to remove");
     assert.equal(await selfHostedPerpsKill(), null, "a retry finds nothing left");
   });
@@ -155,7 +155,7 @@ for (const owner of OWNERS) {
       assert.ok(existsSync(path.join(perpsHome, "grants", `${PERPS}.json`)));
     } else {
       assert.doesNotMatch(said, /Perps/);
-      assert.equal(existsSync(path.join(dir, "accounts")), false, "a Spot-only kill makes no Perps home");
+      assert.equal(JSON.parse(readFileSync(path.join(perpsHome, "settings.json"), "utf8")).perpsEnabled, false, "a Spot-only kill records an off revision against delayed enables");
     }
     if (hasSpot(owner)) assert.match(said, /grant destroyed — the band stands down on the next tick/);
     assert.equal(existsSync(path.join(dir, "grant.json")), false);
