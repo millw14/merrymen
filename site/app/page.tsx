@@ -134,6 +134,7 @@ export default async function Home() {
               <div className="path">
                 <span>For traders</span>
                 <a href={HOSTED_APP} className="btn btn-primary btn-lg">Open app <Icon name="arrow" size={18}/></a>
+                <a href={`${HOSTED_APP}/perps/join`}>Have a paper Perps invite?</a>
               </div>
               <div className="path">
                 <span>For developers</span>

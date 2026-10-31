@@ -41,6 +41,16 @@ slice 6b follow that launch. Phone builds carrying #358's kill request are
 still required before hosted paper. Funding and live execution are separate
 work and are not enabled by the paper flag.
 
+The hosted internal pilot additionally requires durable admission. Users enter
+an invite at `/perps/join` and sign in normally; their verified login owner is
+registered automatically without copying a wallet address. Operators use
+`/admin/perps` to issue bounded invitations or allow/revoke owners manually.
+Admission never signs a trading permission or enables entries. Revocation
+blocks new authority and switches workers to exits-only, preserving recovery;
+restored admission requires an explicit new enable. See
+[`perps-paper-launch.md`](./perps-paper-launch.md) for administrator setup,
+shared-store bootstrap, replica rollout, capacity and release evidence.
+
 **What slice 3 carries, and what it does not.** The engine is the perps
 branch's paper engine (codex/perps-mode-samples at c7071662, before its live
 executor), reconciled with main. A worker serves one wallet: whatever starts a

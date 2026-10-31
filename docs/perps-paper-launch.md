@@ -10,12 +10,45 @@ Funding, live execution and the Brain driver remain outside the paper launch.
 
 - Set `MERRYMEN_PERPS=paper` only for the reviewed release. An unset value,
   `off`, or `live` offers no paper creation or live capability.
-- `MERRYMEN_PERPS_PAPER_TENANTS` is a comma-separated list of explicit owner
-  addresses. Missing, malformed or oversized lists admit nobody. Begin with
-  internal owners; no wildcard or automatic new-tenant enrollment.
+- Admission lives in the shared PostgreSQL pilot store, capped at **100 active
+  owners**. `/perps/join` accepts an invitation, then uses the normal protected
+  sign-in to register the verified login owner automatically. The user does
+  not need to locate or paste their wallet address. Registration neither signs
+  a grant nor enables entries; those remain explicit owner operations.
+- `/admin/perps` lets configured administrators create/revoke invitations and
+  allow/revoke individual login owners. `MERRYMEN_PERPS_PILOT_ADMINS` is an
+  explicit comma-separated list of up to 20 nonzero owner addresses. Configure
+  it consistently on the web replicas. Empty or malformed configuration grants
+  nobody administrative access; membership and invitation codes never confer
+  the role. The signed-in page shows the public owner address for operator
+  setup; use that login address, not the separate Perps account address.
+- Invitations are random 256-bit codes, stored only as hashes and shown once
+  at creation. Defaults are one use and seven days; maxima are 100 uses and
+  30 days. Redemption is transactional and rate-limited per authenticated
+  owner across replicas. An explicit wallet revocation cannot be bypassed with
+  another code. Re-admission clears the old entries switch and rotates its
+  control nonce before access is restored. Revoking an invitation prevents new
+  redemptions; revoke an admitted wallet separately to remove existing access.
+- `MERRYMEN_PERPS_PAPER_TENANTS` is now only a one-time bootstrap: the first
+  store initialization imports its strict owner list under a shared lock.
+  Missing/empty means an empty cohort; malformed or oversized input fails
+  initialization. After initialization, changes to this variable are ignored,
+  including on a new replica. Use the admin page for subsequent membership
+  changes. A missing or unreadable database never falls back to this list.
+- **Upgrade or stand down every old web/orchestrator replica before relying on
+  admin revocation.** Old env-only versions cannot observe database changes.
+  Confirm common database configuration and the intended initial bootstrap
+  before first use; keep the global paper flag off during rollout. Admission
+  and admin pages can register the internal cohort before paper is enabled.
 - Admission is required for creation, renewal and explicit entry enablement.
-  Removing an owner from the pilot forces new entries off on worker settings
-  refresh. An existing paper worker continues its exits and protective rules;
+  Final authority writes serialize against revocation, after authentication and
+  RPC checks. Workers refresh shared admission every three seconds with a
+  two-second read timeout and a maximum 15-second positive-proof lifetime.
+  An independent timer invalidates expired/unavailable admission even while
+  roster/settings reads hang; each worker observes the delivered restriction
+  on its next settings tick. Admission revision changes invalidate enabled
+  child settings, including a revoke/re-admit between polls. An existing paper
+  worker continues its exits and protective rules;
   removal does not silently freeze a held book while exits appear queued.
   Existing owner reads, kill, recovery and exit controls remain available.
   If local storage cannot accept the mandatory entries-off configuration,
@@ -28,6 +61,7 @@ Funding, live execution and the Brain driver remain outside the paper launch.
   headroom under the deployment's limits before increasing the cohort.
   A Perps slot yield is a stand-down and final accounting pass, not a second
   worker running the same book on another replica.
+  The 100-owner admission ceiling does not raise this 48-child process cap.
 - Use the existing single public feed. Capture reads its atomic file; it
   creates no extra Lighter connection or request budget.
 

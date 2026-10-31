@@ -1,0 +1,263 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { test, type TestContext } from "node:test";
+import { wrapSqlite, type Db } from "../db";
+import { getPerpsPilotStore, PERPS_PILOT_INVITE_MAX_TTL_MS, setPerpsPilotStoreForTest, SqlPerpsPilotStore } from "./pilot-store";
+
+const NOW = 1_900_000_000_000;
+const owner = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as const;
+const ADMIN = owner(999);
+function fixture(t: TestContext, bootstrap = "") {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  let now = NOW, env = bootstrap;
+  const options = { bootstrapOwners: () => env, now: () => now };
+  const store = new SqlPerpsPilotStore(db, options);
+  t.after(() => raw.close());
+  const invite = (maxUses = 2, expiresAt = now + 60_000) => store.createInvite({ actor: ADMIN, maxUses, expiresAt });
+  const change = async (who: string, status: "allowed" | "revoked") => store.setAdmission({ actor: ADMIN, owner: who, status, expectedRevision: (await store.snapshot()).revision });
+  return { raw, db, store, options, invite, change, clock: (value: number) => { now = value; }, environment: (value: string) => { env = value; } };
+}
+
+test("strict environment bootstrap is durable once, including an explicitly empty initial cohort", async t => {
+  const f = fixture(t, ` ${owner(1).toUpperCase().replace("0X", "0x")} , ${owner(1)},${owner(2)}`);
+  assert.deepEqual(await f.store.snapshot(), { owners: [owner(1), owner(2)], revision: 1 });
+  f.environment(owner(3));
+  const otherReplica = new SqlPerpsPilotStore(f.db, f.options);
+  assert.deepEqual(await otherReplica.snapshot(), await f.store.snapshot());
+  assert.equal((await f.store.get(owner(3))).status, "not-admitted");
+  assert.equal(f.raw.prepare("SELECT count(*) AS n FROM perps_pilot_audit WHERE action='bootstrap'").get()!.n, 1);
+  const empty = fixture(t);
+  assert.deepEqual((await empty.store.snapshot()).owners, []);
+  empty.environment(owner(8));
+  assert.deepEqual((await new SqlPerpsPilotStore(empty.db, empty.options).snapshot()).owners, []);
+});
+
+test("invalid or over-cap bootstrap fails closed without committing initialization and can be repaired", async t => {
+  for (const raw of ["garbage", owner(0), `${owner(1)},`, Array.from({ length: 101 }, (_, i) => owner(i + 1)).join(",")]) {
+    const f = fixture(t, raw);
+    await assert.rejects(f.store.snapshot());
+    assert.equal(f.raw.prepare("SELECT initialized_at FROM perps_pilot_cohort").get()!.initialized_at, null);
+    assert.equal(f.raw.prepare("SELECT count(*) AS n FROM perps_pilot_admissions").get()!.n, 0);
+    f.environment(owner(1));
+    assert.deepEqual((await f.store.snapshot()).owners, [owner(1)]);
+  }
+});
+
+test("invite codes have high entropy, canonical encoding, hash-only storage, and private metadata", async t => {
+  const f = fixture(t);
+  const a = await f.invite(), b = await f.invite();
+  assert.match(a.code, /^mmp_[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(a.code, b.code);
+  const rows = f.raw.prepare("SELECT * FROM perps_pilot_invites").all();
+  assert.equal(rows[0]!.code_hash, createHash("sha256").update(a.code).digest("hex"));
+  assert.ok(!JSON.stringify(rows).includes(a.code));
+  const listed = JSON.stringify(await f.store.list());
+  assert.ok(!listed.includes(a.code));
+  assert.ok(!listed.includes(String(rows[0]!.code_hash)));
+  assert.ok(!listed.includes("code_hash"));
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const alternate = a.code.slice(0, -1) + alphabet[alphabet.indexOf(a.code.at(-1)!) + 1];
+  assert.deepEqual(Buffer.from(a.code.slice(4), "base64url"), Buffer.from(alternate.slice(4), "base64url"));
+  for (const code of [alternate, ` ${a.code}`, `${a.code}=`, a.code.toUpperCase(), "mmp_short"]) {
+    assert.equal((await f.store.redeem({ owner: owner(1), code })).outcome, "invalid-invite");
+  }
+  assert.equal((await f.store.list()).invites.find(i => i.id === a.invite.id)!.uses, 0);
+});
+
+test("redemption atomically consumes one use and replays safely across instances and invite expiry", async t => {
+  const f = fixture(t), { code, invite } = await f.invite(1);
+  const other = new SqlPerpsPilotStore(f.db, f.options);
+  const results = await Promise.all([f.store.redeem({ owner: owner(1), code }), other.redeem({ owner: owner(1), code })]);
+  assert.deepEqual(results.map(r => r.outcome).sort(), ["admitted", "already-admitted"]);
+  assert.equal((await f.store.list()).invites[0]!.uses, 1);
+  assert.equal(f.raw.prepare("SELECT count(*) AS n FROM perps_pilot_redemptions").get()!.n, 1);
+  assert.equal((await f.store.redeem({ owner: owner(2), code })).outcome, "invalid-invite");
+  f.clock(invite.expiresAt + 1);
+  assert.equal((await other.redeem({ owner: owner(1), code })).outcome, "already-admitted");
+  assert.deepEqual(await f.store.get(owner(1)), { owner: owner(1), status: "allowed", revision: 2, updatedAt: NOW });
+});
+
+test("expiry, bounded use counts and invite revocation never grant a new membership", async t => {
+  const f = fixture(t), limited = await f.invite(2), expired = await f.invite(1, NOW + 1), revoked = await f.invite();
+  assert.deepEqual(await f.store.revokeInvite({ actor: ADMIN, id: revoked.invite.id }), { revoked: true });
+  assert.deepEqual(await f.store.revokeInvite({ actor: ADMIN, id: revoked.invite.id }), { revoked: true });
+  f.clock(NOW + 1);
+  assert.equal((await f.store.redeem({ owner: owner(1), code: expired.code })).outcome, "invalid-invite");
+  assert.equal((await f.store.redeem({ owner: owner(1), code: revoked.code })).outcome, "invalid-invite");
+  const results = await Promise.all(Array.from({ length: 20 }, (_, i) => f.store.redeem({ owner: owner(i + 1), code: limited.code })));
+  assert.equal(results.filter(r => r.outcome === "admitted").length, 2);
+  assert.equal((await f.store.snapshot()).owners.length, 2);
+  for (const maxUses of [0, 101, 1.5, NaN]) await assert.rejects(f.store.createInvite({ actor: ADMIN, maxUses, expiresAt: NOW + 60_000 }));
+  for (const expiresAt of [NOW, NOW + PERPS_PILOT_INVITE_MAX_TTL_MS + 2, Infinity]) await assert.rejects(f.invite(1, expiresAt));
+});
+
+test("explicit wallet revocation beats every invite and changed environment; only a fresh admin decision reallows", async t => {
+  const f = fixture(t, owner(1)), first = await f.invite(), second = await f.invite();
+  const staleRevision = (await f.store.snapshot()).revision;
+  assert.equal((await f.change(owner(1), "revoked")).outcome, "updated");
+  f.environment(`${owner(1)},${owner(2)}`);
+  const another = new SqlPerpsPilotStore(f.db, f.options);
+  for (const code of [first.code, second.code]) assert.equal((await another.redeem({ owner: owner(1), code })).outcome, "revoked");
+  assert.deepEqual((await another.snapshot()).owners, []);
+  assert.equal((await f.store.setAdmission({ actor: ADMIN, owner: owner(1), status: "allowed", expectedRevision: staleRevision })).outcome, "stale");
+  assert.equal((await f.change(owner(1), "allowed")).outcome, "updated");
+  assert.deepEqual((await f.store.snapshot()).owners, [owner(1)]);
+  assert.equal((await f.store.list()).invites.reduce((sum, i) => sum + i.uses, 0), 0);
+  assert.equal((await f.change(owner(99), "revoked")).outcome, "updated", "revoking a never-admitted owner creates a persistent denial");
+  assert.equal((await f.store.redeem({ owner: owner(99), code: first.code })).outcome, "revoked");
+});
+
+test("the shared singleton makes concurrent last-seat admissions respect the hard cohort cap", async t => {
+  const f = fixture(t, Array.from({ length: 99 }, (_, i) => owner(i + 1)).join(","));
+  const a = await f.invite(), b = await f.invite();
+  const other = new SqlPerpsPilotStore(f.db, f.options);
+  const results = await Promise.all([f.store.redeem({ owner: owner(200), code: a.code }), other.redeem({ owner: owner(201), code: b.code })]);
+  assert.deepEqual(results.map(r => r.outcome).sort(), ["admitted", "full"]);
+  assert.equal((await f.store.snapshot()).owners.length, 100);
+  assert.equal((await f.change(owner(202), "allowed")).outcome, "full");
+  assert.equal((await f.store.list()).invites.reduce((sum, i) => sum + i.uses, 0), 1);
+  await f.change(owner(1), "revoked");
+  assert.equal((await f.change(owner(202), "allowed")).outcome, "updated");
+  assert.equal((await f.store.snapshot()).owners.length, 100);
+});
+
+test("failed guesses consume a shared owner budget that survives store recreation and leaves other owners independent", async t => {
+  const f = fixture(t), invite = await f.invite();
+  for (let i = 0; i < 10; i++) assert.equal((await new SqlPerpsPilotStore(f.db, f.options).redeem({ owner: owner(1), code: "bad" })).outcome, "invalid-invite");
+  assert.deepEqual(await f.store.redeem({ owner: owner(1), code: invite.code }), { outcome: "limited", revision: 1, retryAfterSec: 60 });
+  assert.equal((await f.store.redeem({ owner: owner(2), code: invite.code })).outcome, "admitted");
+  f.clock(NOW + 60_000);
+  const fresh = await f.invite();
+  assert.equal((await f.store.redeem({ owner: owner(1), code: fresh.code })).outcome, "admitted");
+});
+
+function auditFailure(db: Db): Db {
+  return { exec: sql => db.exec(sql), tx: fn => db.tx(tx => fn(auditFailure(tx))), prepare(sql) {
+    const stmt = db.prepare(sql);
+    return { ...stmt, run: async (...args) => {
+      if (sql.startsWith("INSERT INTO perps_pilot_audit") && args[1] === "invite-redeemed") throw new Error("audit unavailable");
+      return stmt.run(...args);
+    } };
+  } };
+}
+test("an audit failure rolls back membership, invite use, redemption receipt and revision together", async t => {
+  const f = fixture(t), { code } = await f.invite();
+  const broken = new SqlPerpsPilotStore(auditFailure(f.db), f.options);
+  await assert.rejects(broken.redeem({ owner: owner(1), code }), /audit unavailable/);
+  assert.deepEqual(await f.store.snapshot(), { owners: [], revision: 1 });
+  assert.equal((await f.store.list()).invites[0]!.uses, 0);
+  assert.equal(f.raw.prepare("SELECT count(*) AS n FROM perps_pilot_redemptions").get()!.n, 0);
+  assert.equal((await f.store.redeem({ owner: owner(1), code })).outcome, "admitted");
+});
+
+test("an unknown committed redemption replays as already admitted without consuming another use", async t => {
+  const f = fixture(t), { code } = await f.invite();
+  let loseReply = false;
+  const db: Db = { prepare: sql => f.db.prepare(sql), exec: sql => f.db.exec(sql), tx: async fn => {
+    const answer = await f.db.tx(fn);
+    if (loseReply) { loseReply = false; throw new Error("commit answer lost"); }
+    return answer;
+  } };
+  const uncertain = new SqlPerpsPilotStore(db, f.options);
+  await uncertain.snapshot(); loseReply = true;
+  await assert.rejects(uncertain.redeem({ owner: owner(1), code }), /commit answer lost/);
+  assert.equal((await f.store.redeem({ owner: owner(1), code })).outcome, "already-admitted");
+  assert.equal((await f.store.list()).invites[0]!.uses, 1);
+});
+
+test("entry-off preparation precedes actual admission and failures preserve denied membership and unused invites", async t => {
+  const f = fixture(t), { code } = await f.invite();
+  let calls = 0;
+  const fail = async () => { calls++; throw new Error("entry settings cannot be disabled"); };
+  await assert.rejects(f.store.redeem({ owner: owner(1), code, beforeAdmit: fail }), /cannot be disabled/);
+  assert.equal((await f.store.get(owner(1))).status, "not-admitted");
+  assert.equal((await f.store.list()).invites[0]!.uses, 0);
+  await f.change(owner(1), "revoked");
+  const revision = (await f.store.snapshot()).revision;
+  await assert.rejects(f.store.setAdmission({ actor: ADMIN, owner: owner(1), status: "allowed", expectedRevision: revision, beforeAdmit: fail }), /cannot be disabled/);
+  assert.equal((await f.store.get(owner(1))).status, "revoked");
+  assert.equal((await f.store.snapshot()).revision, revision);
+  assert.equal(calls, 2);
+  const beforeAdmit = async () => {
+    calls++;
+    assert.equal(f.raw.prepare("SELECT status FROM perps_pilot_admissions WHERE owner=?").get(owner(1))!.status, "revoked");
+  };
+  assert.equal((await f.store.setAdmission({ actor: ADMIN, owner: owner(1), status: "allowed", expectedRevision: revision, beforeAdmit })).outcome, "updated");
+  assert.equal(calls, 3);
+});
+
+test("stale, full, revoked and already-admitted decisions never invoke admission preparation", async t => {
+  const f = fixture(t, Array.from({ length: 100 }, (_, i) => owner(i + 1)).join(","));
+  const { code } = await f.invite();
+  const revision = (await f.store.snapshot()).revision;
+  const beforeAdmit = async () => { assert.fail("no entry settings write is authorized"); };
+  assert.equal((await f.store.setAdmission({ actor: ADMIN, owner: owner(1), status: "allowed", expectedRevision: revision, beforeAdmit })).outcome, "unchanged");
+  assert.equal((await f.store.setAdmission({ actor: ADMIN, owner: owner(200), status: "allowed", expectedRevision: 0, beforeAdmit })).outcome, "stale");
+  assert.equal((await f.store.setAdmission({ actor: ADMIN, owner: owner(200), status: "allowed", expectedRevision: revision, beforeAdmit })).outcome, "full");
+  assert.equal((await f.store.redeem({ owner: owner(200), code, beforeAdmit })).outcome, "full");
+  assert.equal((await f.store.redeem({ owner: owner(1), code, beforeAdmit })).outcome, "already-admitted");
+  await f.change(owner(1), "revoked");
+  assert.equal((await f.store.redeem({ owner: owner(1), code, beforeAdmit })).outcome, "revoked");
+});
+
+test("an invite expiring while entry settings are disabled cannot become a new admission afterward", async t => {
+  const f = fixture(t), { code } = await f.invite(1, NOW + 1000);
+  const result = await f.store.redeem({ owner: owner(1), code, beforeAdmit: async () => { f.clock(NOW + 1000); } });
+  assert.equal(result.outcome, "invalid-invite");
+  assert.equal((await f.store.get(owner(1))).status, "not-admitted");
+  assert.equal((await f.store.list()).invites[0]!.uses, 0);
+});
+
+test("missing storage and corrupt over-cap membership fail closed; factory has only an explicit test seam", async t => {
+  const f = fixture(t);
+  await f.store.snapshot();
+  for (let i = 0; i < 101; i++) f.raw.prepare("INSERT INTO perps_pilot_admissions VALUES(?,'allowed','admin',1,?,?)").run(owner(i + 1), NOW, ADMIN);
+  await assert.rejects(f.store.snapshot(), /exceeds/);
+  f.raw.exec("DROP TABLE perps_pilot_cohort");
+  await assert.rejects(f.store.snapshot());
+  const before = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
+  try {
+    assert.throws(() => getPerpsPilotStore(), /shared database/);
+    setPerpsPilotStoreForTest(f.store);
+    assert.equal(getPerpsPilotStore(), f.store);
+  } finally {
+    setPerpsPilotStoreForTest(null);
+    if (before === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = before;
+  }
+});
+
+test("a cached store revalidates durable initialization evidence on every authorization read", async t => {
+  const f = fixture(t, owner(1));
+  await f.store.snapshot();
+  f.raw.exec("UPDATE perps_pilot_cohort SET initialized_at=-1");
+  await assert.rejects(f.store.snapshot(), /Unreadable/);
+  await assert.rejects(f.store.get(owner(1)), /Unreadable/);
+  await assert.rejects(f.store.withAdmission(owner(1), async () => assert.fail("corrupt admission cannot authorize a write")), /Unreadable/);
+  await assert.rejects(f.store.createInvite({ actor: ADMIN, maxUses: 1, expiresAt: NOW + 60_000 }), /Unreadable/);
+  f.raw.prepare("UPDATE perps_pilot_cohort SET initialized_at=?").run(NOW);
+  assert.deepEqual((await f.store.snapshot()).owners, [owner(1)]);
+});
+
+test("final protected writes require current admission and propagate callback failure without changing membership", async t => {
+  const f = fixture(t, owner(1));
+  const before = await f.store.snapshot();
+  let calls = 0;
+  assert.deepEqual(await f.store.withAdmission(owner(1), async () => { calls++; return "saved"; }), { allowed: true, value: "saved" });
+  await assert.rejects(f.store.withAdmission(owner(1), async () => { calls++; throw new Error("protected write failed"); }), /protected write failed/);
+  assert.deepEqual(await f.store.snapshot(), before);
+  assert.deepEqual(await f.store.withAdmission(owner(2), async () => assert.fail("unknown owner cannot write")), { allowed: false });
+  await f.change(owner(1), "revoked");
+  assert.deepEqual(await f.store.withAdmission(owner(1), async () => assert.fail("revoked owner cannot write")), { allowed: false });
+  assert.equal(calls, 2);
+  await assert.rejects(f.store.withAdmission(owner(0), async () => assert.fail("zero owner cannot write")), /Invalid/);
+});
+
+test("a corrupt over-cap cohort refuses protected writes even for a stored admitted owner", async t => {
+  const f = fixture(t, owner(1));
+  await f.store.snapshot();
+  for (let i = 2; i <= 101; i++) f.raw.prepare("INSERT INTO perps_pilot_admissions VALUES(?,'allowed','admin',1,?,?)").run(owner(i), NOW, ADMIN);
+  await assert.rejects(f.store.withAdmission(owner(1), async () => assert.fail("over-cap membership cannot write")), /exceeds/);
+});

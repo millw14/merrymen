@@ -62,7 +62,7 @@ import { resolveConfig } from "../../../../../worker/src/settings";
 import { errorText } from "../../../../../worker/src/redact-urls";
 import { withLocalStateLock } from "../../../../../worker/src/local-state-lock";
 import { readLocalPerpsBinding, clearLocalPerpsBinding } from "../../../../../worker/src/local-perps-binding";
-import { perpsPaperAdmissionRefusal } from "@/lib/perps-paper-admission";
+import { perpsPaperAdmissionFailure, perpsPaperAdmissionRefusal, withPerpsPaperAdmission } from "@/lib/perps-paper-admission";
 import { workerStale as workerStaleOf } from "@/terminal/worker-stale";
 
 const DATA_DIR = merrymenHome();
@@ -326,7 +326,7 @@ export async function POST(req: Request) {
   // that switches a capability off never stands between an owner and that.
   if (wallet === "perps" && !perpsCreationAllowed()) return perpsWalletNotOffered("Nothing was saved.");
   if (wallet === "perps") {
-    const refused = perpsPaperAdmissionRefusal(req, isHostedMode());
+    const refused = await perpsPaperAdmissionRefusal(req, isHostedMode());
     if (refused) return refused;
   }
   // ROBINHOOD CHAIN MAINNET ONLY. The Perps wallet exists for Lighter, which
@@ -611,10 +611,19 @@ export async function POST(req: Request) {
     // store seals the session key at rest and refuses (again, defence in depth)
     // any grant carrying an owner key or whose owner isn't this tenant. It is
     // the WALLET'S store: a Perps grant never lands in the Spot one.
-    try {
-      await getGrantStore(wallet).put(tenant, grant);
-    } catch (e) {
-      return storeRefused(e);
+    const persistGrant = async () => {
+      try { await getGrantStore(wallet).put(tenant, grant); return null; }
+      catch (e) { return storeRefused(e); }
+    };
+    // Derivation can await RPC. Order the actual authority write against a
+    // revocation that may have committed since the earlier admission check.
+    if (wallet === "perps") {
+      const result = await withPerpsPaperAdmission(tenant, persistGrant);
+      if (result.status !== "allowed") return perpsPaperAdmissionFailure(result.status);
+      if (result.value) return result.value;
+    } else {
+      const refused = await persistGrant();
+      if (refused) return refused;
     }
 
     // NO PUBLIC IDENTITY FOR A PERPS WALLET (decision D2, docs/perps.md rule
@@ -906,19 +915,27 @@ export async function DELETE(req: Request) {
       // renewal and stays reachable whatever the lever says.
       if (wallet === "perps" && !perpsCreationAllowed()) return perpsRenewalNotOffered();
       if (wallet === "perps") {
-        const refused = perpsPaperAdmissionRefusal(req, isHostedMode());
+        const refused = await perpsPaperAdmissionRefusal(req, isHostedMode());
         if (refused) return refused;
       }
       if (!isAddr(body.expectedAccount) || (body.expectedSession !== undefined && !isAddr(body.expectedSession))) {
         return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
       }
-      try {
-        const state = await getGrantStore(wallet).stopForReplacement(tenant, body.expectedAccount, body.expectedSession);
-        if (state === "changed") return NextResponse.json({ error: "Your permission changed in another tab. Reload your wallet before replacing it." }, { status: 409 });
-        return NextResponse.json({ ok: true, replacement: true, state });
-      } catch {
-        return NextResponse.json({ error: "The service could not confirm the replacement stop. Your wallet was kept; try again.", ownerFacing: true }, { status: 503 });
+      const expectedAccount = body.expectedAccount, expectedSession = body.expectedSession;
+      const stop = async () => {
+        try {
+          const state = await getGrantStore(wallet).stopForReplacement(tenant, expectedAccount, expectedSession);
+          if (state === "changed") return NextResponse.json({ error: "Your permission changed in another tab. Reload your wallet before replacing it." }, { status: 409 });
+          return NextResponse.json({ ok: true, replacement: true, state });
+        } catch {
+          return NextResponse.json({ error: "The service could not confirm the replacement stop. Your wallet was kept; try again.", ownerFacing: true }, { status: 503 });
+        }
+      };
+      if (wallet === "perps") {
+        const result = await withPerpsPaperAdmission(tenant, stop);
+        return result.status === "allowed" ? result.value : perpsPaperAdmissionFailure(result.status);
       }
+      return stop();
     }
     if (walletNamed) return killNamesWallet();
     // The Solana strategy and the Perps wallet are stopped whatever happens to the Robinhood
@@ -952,7 +969,7 @@ export async function DELETE(req: Request) {
   // while perps is not paper, before grant.json is archived or removed.
   if (renewal && wallet === "perps") {
     if (!perpsCreationAllowed()) return perpsRenewalNotOffered();
-    const refused = perpsPaperAdmissionRefusal(req, false); if (refused) return refused;
+    const refused = await perpsPaperAdmissionRefusal(req, false); if (refused) return refused;
     if (!isAddr(replacement?.expectedAccount) || !isAddr(replacement?.expectedSession)) return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
     return selfHostedPerpsRenewalStop(replacement.expectedAccount, replacement.expectedSession);
   }

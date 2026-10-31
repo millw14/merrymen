@@ -15,5 +15,5 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Name the Perps wallet explicitly." }, { status: 400, headers: NO_STORE_HEADERS });
   }
   if (!perpsCreationAllowed()) return NextResponse.json({ error: "Paper Perps is not offered here." }, { status: 404, headers: NO_STORE_HEADERS });
-  return perpsPaperAdmissionRefusal(req, isHostedMode()) ?? NextResponse.json({ offered: true, mode: "paper" }, { headers: NO_STORE_HEADERS });
+  return await perpsPaperAdmissionRefusal(req, isHostedMode()) ?? NextResponse.json({ offered: true, mode: "paper" }, { headers: NO_STORE_HEADERS });
 }

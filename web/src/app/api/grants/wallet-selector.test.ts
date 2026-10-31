@@ -21,6 +21,8 @@
  * single-service hosted deploy), with a real signed-in session.
  */
 import assert from "node:assert/strict";
+import { pilotFixture } from "@/lib/perps-pilot-fixture";
+let pilot: ReturnType<typeof pilotFixture>;
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -48,6 +50,7 @@ before(async () => {
   stores = await import("@merrymen/grant-store");
 });
 after(() => {
+  pilot?.close();
   for (const [k, v] of Object.entries(saved)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -165,6 +168,7 @@ describe("hosted: a permission replacement stops the wallet it names, and only t
   beforeEach(async () => {
     process.env.MERRYMEN_HOSTED = "1";
     process.env.MERRYMEN_PERPS_PAPER_TENANTS = T;
+    pilot?.close(); pilot = pilotFixture([T]);
     await stores.getGrantStore("spot").remove(T);
     await stores.getGrantStore("perps").remove(T);
     await stores.getGrantStore("spot").put(T, grant(T, SPOT, key("ab")));
