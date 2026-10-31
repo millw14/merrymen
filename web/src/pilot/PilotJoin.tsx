@@ -35,10 +35,16 @@ export function PilotJoinView({ identity, signInEnabled }: { identity: PilotIden
     }
     if (next) previousTenant.current = next;
   }, [access?.tenant]);
+  useEffect(() => {
+    if (access && access.status !== "not-admitted") {
+      setCode(""); setRequested(false); setMessage("");
+    }
+  }, [access?.status]);
 
   async function redeem() {
     if (!access || !identity || !requested || flight.current) return;
     setRequested(false);
+    if (access.status !== "not-admitted") return;
     if (requestedTenant.current && requestedTenant.current !== access.tenant) { setCode(""); setMessage("Your account changed. Enter the invitation again for this account."); return; }
     requestedTenant.current = access.tenant;
     if (identity.owner.toLowerCase() !== access.tenant) { setMessage("This sign-in's protected wallet does not own the account on this session. Sign out and reconnect the account you want to register."); return; }
@@ -54,25 +60,28 @@ export function PilotJoinView({ identity, signInEnabled }: { identity: PilotIden
       if (!token) throw new Error("Your sign-in expired. Sign in again before using the invitation.");
       const result = parsePilotAccess(await requestJson("/api/perps/pilot/redeem?wallet=perps", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ code: selectedCode, expectedTenant }) }));
       assertCurrent();
-      if (result.tenant !== expectedTenant || result.status !== "allowed") throw new Error("Admission was not confirmed for this account. Refresh to check access.");
+      if (result.tenant !== expectedTenant || !["pending", "allowed", "revoked"].includes(result.status)) throw new Error("The request was not confirmed for this account. Refresh to check its status.");
       await guard.verify(); assertCurrent();
-      setCode(""); setMessage("Your account is registered for the paper pilot."); session.refresh();
+      setCode(""); setMessage(result.status === "pending" ? "Your request was submitted for administrator review." : result.status === "allowed" ? "This account is already approved for the paper pilot." : "Your request was reviewed and access was not approved."); session.refresh();
     } catch (error) {
       if (mounted.current && generation.current === started) setMessage(pilotError(error));
     } finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   // The only automatic write follows an explicit invitation submission. Login
-  // creates its owner wallet; this POST only registers admission, never a grant.
-  useEffect(() => { if (requested && access && identity && !busy) void redeem(); }, [requested, access?.tenant, identity?.did, identity?.owner, busy]);
+  // creates its owner wallet; this POST requests review, never grants access.
+  useEffect(() => { if (requested && access && identity && !busy) void redeem(); }, [requested, access?.tenant, access?.status, identity?.did, identity?.owner, busy]);
 
-  function submit(event: FormEvent) { event.preventDefault(); if (!code.trim() || busy) return; requestedTenant.current = access?.tenant ?? null; setMessage(""); setRequested(true); }
+  function submit(event: FormEvent) { event.preventDefault(); if (!code.trim() || busy || requested || flight.current || access && access.status !== "not-admitted") return; requestedTenant.current = access?.tenant ?? null; setMessage(""); setRequested(true); }
   const admitted = access?.status === "allowed";
-  return <PilotFrame><p className="pilot-eyebrow">Invite-only · simulated trading</p><h1>Join the paper Perps pilot</h1><p className="pilot-intro">Use your invitation, then sign in with email or X. We connect your account’s wallet automatically.</p>
+  return <PilotFrame><p className="pilot-eyebrow">Administrator approval · simulated trading</p><h1>Request paper Perps access</h1><p className="pilot-intro">Enter your invitation and sign in with email or X. We submit your account’s wallet automatically for an administrator to review. A code does not grant access.</p>
     {session.state === "loading" && <p role="status">Checking your account…</p>}
     {session.state === "error" && <div role="alert"><p>{session.error}</p><button onClick={session.refresh}>Try again</button></div>}
-    {admitted ? <section className="pilot-card"><h2>{access.paperAvailable ? "Your paper access is ready" : "You’re registered. Launch is next."}</h2><p>{access.paperAvailable ? "Choose your paper permission and limits when you’re ready. Entries stay off until you enable them." : "Your account is on the list. Paper trading is not available on this deployment yet."}</p>{access.paperAvailable && <div className="pilot-actions"><a className="flow-primary" href="/create?for=perps">Set up paper Perps</a><a href="/perps">Open paper desk</a></div>}</section> : <section className="pilot-card"><h2>Your invitation</h2>{access?.status === "revoked" && <p>Your pilot access was removed. Existing recovery access remains available; an administrator must restore your admission.</p>}<form onSubmit={submit}><label htmlFor="pilot-code">Invitation code</label><input id="pilot-code" name="invite" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={128} value={code} disabled={busy} onChange={event => { setCode(event.target.value); setRequested(false); }}/><button className="flow-primary" disabled={!code.trim() || busy || requested || session.state === "loading" || session.state === "error" || !signInEnabled}>{busy ? "Registering your account…" : requested && !access ? "Sign in below to continue" : "Use invitation"}</button></form>{requested && session.state === "signed-out" && <div className="pilot-signin"><h3>Sign in or create your account</h3><SignIn onDone={session.refresh}/></div>}{requested && access && !identity && <div role="status"><p>Waiting for your protected signing wallet.</p><SignIn onDone={session.refresh}/></div>}{!signInEnabled && <p role="status">Protected sign-in is not configured here. Registration will be available when it is enabled.</p>}</section>}
+    {admitted ? <section className="pilot-card"><h2>{access.paperAvailable ? "Your paper access is approved" : "You’re approved. Launch is next."}</h2><p>{access.paperAvailable ? "Choose your paper permission and limits when you’re ready. Entries stay off until you enable them." : "An administrator approved your account. Paper trading is not available on this deployment yet."}</p>{access.paperAvailable && <div className="pilot-actions"><a className="flow-primary" href="/create?for=perps">Set up paper Perps</a><a href="/perps">Open paper desk</a></div>}</section>
+      : access?.status === "pending" ? <section className="pilot-card" aria-label="Pending approval"><h2>Waiting for administrator approval</h2><p>Your account’s wallet is in the review queue. You do not need to submit another code. Access remains off until an administrator approves your request.</p><p>This page checks for updates automatically while it is open.</p><button onClick={session.refresh}>Check approval status</button></section>
+      : access?.status === "revoked" ? <section className="pilot-card"><h2>Access is not approved</h2><p>An administrator declined your request or removed your access. Another invitation cannot override that decision. Existing recovery access remains available.</p><button onClick={session.refresh}>Check approval status</button></section>
+      : <section className="pilot-card"><h2>Your invitation</h2><form onSubmit={submit}><label htmlFor="pilot-code">Invitation code</label><input id="pilot-code" name="invite" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={128} value={code} disabled={busy} onChange={event => { setCode(event.target.value); setRequested(false); }}/><button className="flow-primary" disabled={!code.trim() || busy || requested || session.state === "loading" || session.state === "error" || !signInEnabled}>{busy ? "Submitting your request…" : requested && !access ? "Sign in below to continue" : "Submit access request"}</button></form>{requested && session.state === "signed-out" && <div className="pilot-signin"><h3>Sign in or create your account</h3><SignIn onDone={session.refresh}/></div>}{requested && access && !identity && <div role="status"><p>Waiting for your protected signing wallet.</p><SignIn onDone={session.refresh}/></div>}{!signInEnabled && <p role="status">Protected sign-in is not configured here. Requests will be available when it is enabled.</p>}</section>}
     {message && <p role="status">{message}</p>}
     {access && <div className="pilot-account"><p>Signed in as <code>{access.tenant}</code></p><SignOut onStart={() => { setCode(""); setRequested(false); setMessage(""); session.invalidate(); }} after={session.refresh} onError={setMessage}/>{access.admin && <a href="/admin/perps">Manage pilot access</a>}</div>}
-    <p className="pilot-note">Registration does not sign a trading permission, enable entries, or move funds. You’ll review those choices separately.</p>
+    <p className="pilot-note">Submitting a request does not approve access, sign a trading permission, enable entries, or move funds. After approval, you’ll review your permission and entry settings separately.</p>
   </PilotFrame>;
 }

@@ -33,7 +33,7 @@ test("Postgres: pilot bootstrap, capacity, invite receipts and revocation serial
   const a = await makePgDb(scoped("pilot-store-a")), b = await makePgDb(scoped("pilot-store-b"));
   const stores = (bootstrap = "") => [a, b].map(db => new SqlPerpsPilotStore(db, { bootstrapOwners: () => bootstrap, now: () => NOW }));
   const reset = async () => {
-    await a.exec(`DELETE FROM perps_pilot_redemptions; DELETE FROM perps_pilot_invites;
+    await a.exec(`DELETE FROM perps_pilot_requests; DELETE FROM perps_pilot_redemptions; DELETE FROM perps_pilot_invites;
       DELETE FROM perps_pilot_admissions; DELETE FROM perps_pilot_attempts; DELETE FROM perps_pilot_audit;
       UPDATE perps_pilot_cohort SET initialized_at=NULL,bootstrap_digest=NULL,revision=0 WHERE id=1;`);
   };
@@ -53,25 +53,30 @@ test("Postgres: pilot bootstrap, capacity, invite receipts and revocation serial
     await t.test("independent pools cannot overspend an invite or duplicate a redeemed owner's receipt", async () => {
       await reset(); const [first, second] = stores(); const generated = await invite(first!, 3);
       const results = await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? first! : second!).redeem({ owner: owner(i + 1), code: generated.code })));
-      assert.equal(results.filter(r => r.outcome === "admitted").length, 3);
-      assert.equal((await first!.snapshot()).owners.length, 3);
+      assert.equal(results.filter(r => r.outcome === "pending").length, 3);
+      assert.equal((await first!.snapshot()).owners.length, 0);
       assert.equal((await first!.list()).invites[0]!.uses, 3);
       assert.equal((await a.prepare("SELECT count(*) AS n FROM perps_pilot_redemptions").get() as { n: number }).n, 3);
-      const admitted = (await first!.snapshot()).owners[0]!;
+      const admitted = (await first!.list()).requests[0]!.owner;
       const replay = await Promise.all([first!.redeem({ owner: admitted, code: generated.code }), second!.redeem({ owner: admitted, code: generated.code })]);
-      assert.ok(replay.every(r => r.outcome === "already-admitted"));
+      assert.ok(replay.every(r => r.outcome === "already-pending"));
       assert.equal((await first!.list()).invites[0]!.uses, 3);
     });
-    await t.test("two different invites racing for the final cohort place cannot create 101 active owners", async () => {
+    await t.test("pending requests do not fill the cohort; simultaneous admin approvals cannot create 101 active owners", async () => {
       await reset();
       const [first, second] = stores(Array.from({ length: 99 }, (_, i) => owner(i + 1)).join(","));
       const one = await invite(first!), two = await invite(second!);
       const results = await Promise.all([first!.redeem({ owner: owner(200), code: one.code }), second!.redeem({ owner: owner(201), code: two.code })]);
-      assert.deepEqual(results.map(r => r.outcome).sort(), ["admitted", "full"]);
+      assert.ok(results.every(r => r.outcome === "pending"));
+      const revision = (await first!.snapshot()).revision;
+      assert.equal((await first!.snapshot()).owners.length, 99);
+      const approvals = await Promise.all([first!.setAdmission({ actor: ADMIN, owner: owner(200), status: "allowed", expectedRevision: revision }), second!.setAdmission({ actor: ADMIN, owner: owner(201), status: "allowed", expectedRevision: revision })]);
+      assert.deepEqual(approvals.map(r => r.outcome).sort(), ["stale", "updated"]);
       const listing = await first!.list();
       assert.equal(listing.admissions.filter(row => row.status === "allowed").length, 100);
-      assert.equal(listing.invites.reduce((n, i) => n + i.uses, 0), 1);
-      assert.equal((await first!.setAdmission({ actor: ADMIN, owner: owner(202), status: "allowed", expectedRevision: listing.revision })).outcome, "full");
+      assert.equal(listing.requests.length, 1);
+      assert.equal(listing.invites.reduce((n, i) => n + i.uses, 0), 2);
+      assert.equal((await first!.setAdmission({ actor: ADMIN, owner: listing.requests[0]!.owner, status: "allowed", expectedRevision: listing.revision })).outcome, "full");
     });
     await t.test("durable revoke defeats another invite and a stale admin approval; fresh approval is explicit", async () => {
       await reset(); const [first, second] = stores(owner(1));
@@ -91,7 +96,7 @@ test("Postgres: pilot bootstrap, capacity, invite receipts and revocation serial
       assert.equal(results.filter(r => r.outcome === "invalid-invite").length, 10);
       assert.equal(results.filter(r => r.outcome === "limited").length, 2);
       assert.equal((await second!.redeem({ owner: owner(1), code: generated.code })).outcome, "limited");
-      assert.equal((await first!.redeem({ owner: owner(2), code: generated.code })).outcome, "admitted");
+      assert.equal((await first!.redeem({ owner: owner(2), code: generated.code })).outcome, "pending");
     });
     await t.test("a final protected write and revocation serialize across replicas; failed callbacks release the lock", async () => {
       await reset(); const [first, second] = stores(owner(1));
@@ -121,6 +126,59 @@ test("Postgres: pilot bootstrap, capacity, invite receipts and revocation serial
       await assert.rejects(first!.withAdmission(owner(1), async () => { throw new Error("protected write failed"); }), /protected write failed/);
       assert.deepEqual(await second!.snapshot(), restored, "failed callback leaves no pilot revision or membership change");
       assert.equal((await second!.setAdmission({ actor: ADMIN, owner: owner(1), status: "revoked", expectedRevision: restored.revision })).outcome, "updated");
+    });
+    await t.test("competing request submissions cannot exceed the 1000-owner queue or consume a refused use", async () => {
+      await reset(); const [first, second] = stores(); const generated = await invite(first!, 2);
+      await second!.snapshot();
+      await a.prepare("INSERT INTO perps_pilot_requests(owner,invite_id,submitted_at) SELECT '0x'||lpad(to_hex(n),40,'0'),?,? FROM generate_series(1,999) AS n").run(generated.invite.id, NOW);
+      const results = await Promise.all([first!.redeem({ owner: owner(2000), code: generated.code }), second!.redeem({ owner: owner(2001), code: generated.code })]);
+      assert.deepEqual(results.map(r => r.outcome).sort(), ["full", "pending"]);
+      const listing = await first!.list();
+      assert.equal(listing.requests.length, 1000);
+      assert.equal(listing.invites[0]!.uses, 1);
+      assert.deepEqual((await second!.snapshot()).owners, []);
+    });
+    await t.test("admin rejection racing a submission leaves a durable denial and no pending request", async () => {
+      await reset(); const [first, second] = stores(); const generated = await invite(first!);
+      const prior = await second!.snapshot();
+      const [submitted, rejected] = await Promise.all([first!.redeem({ owner: owner(1), code: generated.code }), second!.setAdmission({ actor: ADMIN, owner: owner(1), status: "revoked", expectedRevision: prior.revision })]);
+      assert.ok(["pending", "revoked"].includes(submitted.outcome));
+      assert.equal(rejected.outcome, "updated");
+      assert.equal((await first!.get(owner(1))).status, "revoked");
+      const listing = await second!.list();
+      assert.equal(listing.requests.length, 0);
+      assert.equal(listing.invites[0]!.uses, submitted.outcome === "pending" ? 1 : 0);
+      assert.deepEqual(await first!.withAdmission(owner(1), async () => assert.fail("rejected requests cannot write")), { allowed: false });
+    });
+    await t.test("pending approval failure rolls back; only a successful explicit admin decision creates authority", async () => {
+      await reset(); const [first, second] = stores(); const generated = await invite(first!);
+      await first!.redeem({ owner: owner(1), code: generated.code });
+      const prior = await second!.snapshot();
+      await assert.rejects(second!.setAdmission({ actor: ADMIN, owner: owner(1), status: "allowed", expectedRevision: prior.revision, beforeAdmit: async () => { throw new Error("entry-off failed"); } }), /entry-off failed/);
+      assert.equal((await first!.get(owner(1))).status, "pending");
+      assert.equal((await first!.list()).requests.length, 1);
+      assert.deepEqual(await first!.withAdmission(owner(1), async () => assert.fail("pending cannot write")), { allowed: false });
+      let calls = 0;
+      assert.equal((await second!.setAdmission({ actor: ADMIN, owner: owner(1), status: "allowed", expectedRevision: prior.revision, beforeAdmit: async () => { calls++; } })).outcome, "updated");
+      assert.equal(calls, 1);
+      assert.equal((await first!.list()).requests.length, 0);
+      assert.deepEqual(await first!.withAdmission(owner(1), async () => "saved"), { allowed: true, value: "saved" });
+    });
+    await t.test("legacy invite authority is durably quarantined and late legacy writes remain denied", async () => {
+      await reset(); const [first, second] = stores(owner(1)); await first!.snapshot(); await second!.snapshot();
+      await a.prepare("INSERT INTO perps_pilot_admissions VALUES(?,'allowed','invite',1,?,?)").run(owner(2), NOW, owner(2));
+      assert.equal((await first!.get(owner(2))).status, "revoked");
+      assert.deepEqual((await second!.snapshot()).owners, [owner(1)]);
+      assert.deepEqual(await first!.withAdmission(owner(2), async () => assert.fail("legacy source cannot write")), { allowed: false });
+      const upgraded = new SqlPerpsPilotStore(a, { bootstrapOwners: () => "", now: () => NOW });
+      assert.deepEqual(await upgraded.snapshot(), { owners: [owner(1)], revision: 2 });
+      assert.equal((await a.prepare("SELECT status FROM perps_pilot_admissions WHERE owner=?").get(owner(2)) as { status: string }).status, "revoked");
+      await a.prepare("INSERT INTO perps_pilot_admissions VALUES(?,'allowed','invite',2,?,?)").run(owner(3), NOW, owner(3));
+      assert.equal((await upgraded.get(owner(3))).status, "revoked");
+      let prepared = 0;
+      assert.deepEqual(await upgraded.setAdmission({ actor: ADMIN, owner: owner(3), status: "allowed", expectedRevision: 2, beforeAdmit: async () => { prepared++; } }), { outcome: "updated", revision: 3 });
+      assert.equal(prepared, 1);
+      assert.deepEqual((await first!.snapshot()).owners, [owner(1), owner(3)]);
     });
     await t.test("a contended mutation times out and rolls back while bounded snapshots remain readable", async () => {
       await reset(); const [first] = stores(); const snapshot = await first!.snapshot();

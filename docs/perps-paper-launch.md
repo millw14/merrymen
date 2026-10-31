@@ -12,11 +12,15 @@ Funding, live execution and the Brain driver remain outside the paper launch.
   `off`, or `live` offers no paper creation or live capability.
 - Admission lives in the shared PostgreSQL pilot store, capped at **100 active
   owners**. `/perps/join` accepts an invitation, then uses the normal protected
-  sign-in to register the verified login owner automatically. The user does
-  not need to locate or paste their wallet address. Registration neither signs
-  a grant nor enables entries; those remain explicit owner operations.
+  sign-in to capture the verified login owner in a **pending approval request**.
+  The user does not need to locate or paste their wallet address. A valid
+  invitation submits the request; it does not grant whitelist membership.
+  Until an administrator approves the captured owner, creation, renewal and
+  entry enablement remain unavailable. Approval neither signs a grant nor
+  enables entries; those remain explicit owner operations.
 - `/admin/perps` lets configured administrators create/revoke invitations and
-  allow/revoke individual login owners. `MERRYMEN_PERPS_PILOT_ADMINS` is an
+  review the pending queue, approve or reject requests, and allow/revoke
+  individual login owners. `MERRYMEN_PERPS_PILOT_ADMINS` is an
   explicit comma-separated list of up to 20 nonzero owner addresses. Configure
   it consistently on the web replicas. Empty or malformed configuration grants
   nobody administrative access; membership and invitation codes never confer
@@ -24,11 +28,20 @@ Funding, live execution and the Brain driver remain outside the paper launch.
   setup; use that login address, not the separate Perps account address.
 - Invitations are random 256-bit codes, stored only as hashes and shown once
   at creation. Defaults are one use and seven days; maxima are 100 uses and
-  30 days. Redemption is transactional and rate-limited per authenticated
-  owner across replicas. An explicit wallet revocation cannot be bypassed with
-  another code. Re-admission clears the old entries switch and rotates its
-  control nonce before access is restored. Revoking an invitation prevents new
-  redemptions; revoke an admitted wallet separately to remove existing access.
+  30 days. Submission is transactional and rate-limited per authenticated
+  owner across replicas. The separate review queue holds at most **1,000
+  pending owners**; pending requests do not consume active whitelist places.
+  An invitation use is consumed when a request is recorded, with a durable
+  receipt so a retry cannot consume it twice. Approval still checks the
+  100-owner active limit. Rejection leaves an explicit revocation, which
+  another code cannot bypass. A fresh administrator decision is required to
+  approve that owner later.
+- Approval clears the old entries switch and rotates its control nonce before
+  access is restored; submitting a request changes neither grants nor entry
+  settings. Admin decisions use the current list revision so a stale approval
+  cannot undo a newer rejection or revocation. Revoking an invitation prevents
+  new submissions; review existing requests and revoke approved wallets
+  separately.
 - `MERRYMEN_PERPS_PAPER_TENANTS` is now only a one-time bootstrap: the first
   store initialization imports its strict owner list under a shared lock.
   Missing/empty means an empty cohort; malformed or oversized input fails
@@ -36,10 +49,21 @@ Funding, live execution and the Brain driver remain outside the paper launch.
   including on a new replica. Use the admin page for subsequent membership
   changes. A missing or unreadable database never falls back to this list.
 - **Upgrade or stand down every old web/orchestrator replica before relying on
-  admin revocation.** Old env-only versions cannot observe database changes.
+  admin approval or revocation.** Old env-only versions cannot observe database
+  changes, and the earlier invite-redemption implementation could whitelist an
+  owner without review. Keep the global paper flag off while replacing those
+  writers; mixed-version operation does not provide the new approval boundary.
   Confirm common database configuration and the intended initial bootstrap
-  before first use; keep the global paper flag off during rollout. Admission
-  and admin pages can register the internal cohort before paper is enabled.
+  before first use. Admission and admin pages can collect requests and approve
+  the internal cohort before paper is enabled.
+- Existing active admissions whose source is the earlier automatic invite
+  flow are changed to **revoked** during store initialization, with a cohort
+  revision change and audit evidence. They require a fresh explicit admin
+  approval; their prior invite receipt is not approval. Admin-approved and
+  bootstrap admissions are preserved. Authorization also permanently excludes
+  invite-sourced admissions, including any written after initialization by an
+  old process. This protects upgraded readers, not old writers or readers:
+  do not roll back to a version that automatically admits invite holders.
 - Admission is required for creation, renewal and explicit entry enablement.
   Final authority writes serialize against revocation, after authentication and
   RPC checks. Workers refresh shared admission every three seconds with a

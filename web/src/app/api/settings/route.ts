@@ -1355,7 +1355,7 @@ async function judgePerpsSave(
       // device — is never undone by it: this body was judged against perps
       // on. (One stored before that read is not seen here; see the header.)
       if (pilotRefused) {
-        errors.push(admission === "unavailable" ? "perpsEnabled: paper access could not be verified; try again shortly" : "perpsEnabled: join the paper pilot with an invite code or ask an administrator for access");
+        errors.push(admission === "unavailable" ? "perpsEnabled: paper access could not be verified; try again shortly" : "perpsEnabled: administrator approval is required; submit an invite code to request access and wait for approval");
       } else if (staleEnable || (firstSawOn && stored.perpsEnabled !== true)) {
         errors.push(
           "perpsEnabled: the settings changed or this page has no current revision. Reload and explicitly switch practice perpetuals on again if you mean to. A delayed save cannot undo a kill",
@@ -1655,7 +1655,7 @@ async function judgePerpsSave(
       return NextResponse.json({
         errors: [result.status === "unavailable"
           ? "perpsEnabled: paper access could not be verified; try again shortly"
-          : "perpsEnabled: join the paper pilot with an invite code or ask an administrator for access"],
+          : "perpsEnabled: administrator approval is required; submit an invite code to request access and wait for approval"],
         ...(offResult.saved.length > 0 ? { saved: offResult.saved } : {}),
       }, { status: result.status === "unavailable" ? 503 : 403, headers: NO_STORE_HEADERS });
     }

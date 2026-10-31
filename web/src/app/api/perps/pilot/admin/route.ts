@@ -14,7 +14,10 @@ export async function GET(req: Request) {
   try {
     const result = await getPerpsPilotStore().list();
     if (!isPerpsPilotAdmin(tenant)) return pilotReply({ error: "Administrator access changed. Reload this page." }, 403);
-    return pilotReply({ tenant, revision: result.revision, capacity: result.limit, admissions: result.admissions.map(({ owner, status, revision, updatedAt }) => ({ owner, status, revision, updatedAt })), invites: result.invites.map(({ id, createdAt, expiresAt, maxUses, uses, revokedAt }) => ({ id, createdAt, expiresAt, maxUses, uses, revoked: revokedAt !== null })) });
+    return pilotReply({ tenant, revision: result.revision, capacity: result.limit, requestLimit: result.requestLimit,
+      requests: result.requests.map(({ owner, inviteId, submittedAt }) => ({ owner, inviteId, submittedAt })),
+      admissions: result.admissions.map(({ owner, status, revision, updatedAt }) => ({ owner, status, revision, updatedAt })),
+      invites: result.invites.map(({ id, createdAt, expiresAt, maxUses, uses, revokedAt }) => ({ id, createdAt, expiresAt, maxUses, uses, revoked: revokedAt !== null })) });
   } catch { return pilotUnavailable(); }
 }
 

@@ -21,7 +21,7 @@ type Action = Parameters<typeof submitPerpsAction>[1];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "The read could not be completed.";
 
 export function PerpsLinks() {
-  return <nav className="perps-actions" aria-label="Perps wallet navigation"><a href="/perps">Paper desk</a><a href="/settings?wallet=perps">Perps settings</a><a href="/grant?wallet=perps">Wallet &amp; permission</a><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a><a href="/perps/join">Use an invitation</a></nav>;
+  return <nav className="perps-actions" aria-label="Perps wallet navigation"><a href="/perps">Paper desk</a><a href="/settings?wallet=perps">Perps settings</a><a href="/grant?wallet=perps">Wallet &amp; permission</a><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a><a href="/perps/join">Request pilot access</a></nav>;
 }
 
 export function PerpsScreen() {

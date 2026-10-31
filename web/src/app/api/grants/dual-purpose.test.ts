@@ -81,9 +81,9 @@ function privyToken(did: string): string {
 
 /** A Privy login: its embedded wallet is the session, the owner key and the tenant. */
 interface Login { account: LocalAccount; did: string; spot: `0x${string}`; perps: `0x${string}` }
-async function login(name: string): Promise<Login> {
+async function login(name: string, admitted = true): Promise<Login> {
   const account = privateKeyToAccount(generatePrivateKey());
-  await pilot.set(account.address, "allowed");
+  if (admitted) await pilot.set(account.address, "allowed");
   // These tests exercise wallet authority after pilot admission. Admit only
   // their generated owners; read/kill tests below also withdraw that admission.
   process.env.MERRYMEN_PERPS_PAPER_TENANTS = [process.env.MERRYMEN_PERPS_PAPER_TENANTS, account.address].filter(Boolean).join(",");
@@ -210,6 +210,20 @@ after(() => {
 });
 
 describe("pilot revocation is ordered before the final hosted grant mutation", () => {
+  it("a valid invitation cannot install a grant until an admin approves its pending owner", async () => {
+    const who = await login("pending-approval", false), grant = await perpsGrant(who);
+    const { code } = await pilot.store.createInvite({ actor: who.account.address, maxUses: 1, expiresAt: Date.now() + 60_000 });
+    assert.equal((await pilot.store.redeem({ owner: who.account.address, code })).outcome, "pending");
+    const before = nonces;
+    const denied = await privyPost(grant, "?wallet=perps", who, "perps");
+    assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(nonces, before, "pending owners cannot consume a grant nonce");
+    assert.equal(await perpsGrantOf(who), null); assert.equal(read(tenantFile("tenants-perps", who)), null);
+    await pilot.set(who.account.address, "allowed");
+    assert.equal((await privyPost(grant, "?wallet=perps", who, "perps")).status, 200);
+    assert.equal((await perpsGrantOf(who))?.smartAccount.toLowerCase(), who.perps.toLowerCase());
+  });
+
   it("a positive preflight cannot install a new grant after access is revoked", async t => {
     const who = await login("late-revocation-create"), grant = await perpsGrant(who);
     const assertRevoked = revokeAfterPositivePreflight(t, who);

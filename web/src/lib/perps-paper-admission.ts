@@ -24,7 +24,7 @@ export async function withPerpsPaperAdmission<T>(owner: string, action: () => Pr
 
 export function perpsPaperAdmissionFailure(admission: "denied" | "unavailable"): NextResponse {
   if (admission === "unavailable") return NextResponse.json({ error: "Paper access could not be verified. Try again shortly; existing recovery and exit controls remain available.", code: "perps-pilot-unavailable", ownerFacing: true }, { status: 503, headers: NO_STORE_HEADERS });
-  return NextResponse.json({ error: "Join the paper pilot with an invite code, or ask an administrator for access.", code: "perps-pilot-invitation-required" }, { status: 403, headers: NO_STORE_HEADERS });
+  return NextResponse.json({ error: "Paper-pilot access requires administrator approval. Submit an invite code to request access, then wait for your wallet to be approved.", code: "perps-pilot-invitation-required" }, { status: 403, headers: NO_STORE_HEADERS });
 }
 
 /** This gates new authority and switch-on, never reads, off, exits, kills or recovery. */

@@ -1,13 +1,14 @@
 /**
  * Shared paper-pilot admission. The environment is imported exactly once;
- * thereafter only durable records decide membership. Invites never override a
- * revocation. All capacity-changing writes take the same singleton row lock,
+ * thereafter only durable records decide membership. Invites submit requests;
+ * only an admin can admit them. All capacity-changing writes take the same row lock,
  * and commit their audit/usage receipt in the same transaction.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { makePgDb, rootDb, type Db } from "../db";
 
 export const PERPS_PILOT_LIMIT = 100;
+export const PERPS_PILOT_REQUEST_LIMIT = 1000;
 export const PERPS_PILOT_INVITE_MAX_TTL_MS = 30 * 24 * 60 * 60_000;
 const WINDOW_MS = 60_000;
 const ATTEMPT_LIMIT = 10;
@@ -29,10 +30,12 @@ export interface PerpsPilotAudit {
 }
 export interface PerpsPilotListing {
   revision: number; limit: number; admissions: PerpsPilotAdmission[];
+  requestLimit: number; requests: PerpsPilotRequest[];
   invites: PerpsPilotInvite[]; audit: PerpsPilotAudit[];
 }
+export interface PerpsPilotRequest { owner: Owner; inviteId: string; submittedAt: number }
 export interface PerpsPilotRedeemResult {
-  outcome: "admitted" | "already-admitted" | "invalid-invite" | "revoked" | "full" | "limited";
+  outcome: "pending" | "already-pending" | "already-admitted" | "invalid-invite" | "revoked" | "full" | "limited";
   revision: number; retryAfterSec?: number;
 }
 /** Trusted server callback: atomically turn stored entry settings off before admission. */
@@ -45,14 +48,14 @@ export interface PerpsPilotStore {
    * writes cannot be rolled back if this transaction subsequently fails.
    */
   withAdmission<T>(owner: string, action: () => Promise<T>): Promise<{ allowed: false } | { allowed: true; value: T }>;
-  get(owner: string): Promise<{ owner: Owner; status: Status | "not-admitted"; revision: number; updatedAt: number | null }>;
+  get(owner: string): Promise<{ owner: Owner; status: Status | "pending" | "not-admitted"; revision: number; updatedAt: number | null }>;
   list(): Promise<PerpsPilotListing>;
   createInvite(args: { actor: string; maxUses: number; expiresAt: number }): Promise<{ code: string; invite: PerpsPilotInvite }>;
   revokeInvite(args: { actor: string; id: string }): Promise<{ revoked: boolean }>;
   setAdmission(args: { actor: string; owner: string; status: Status; expectedRevision: number; beforeAdmit?: PerpsPilotBeforeAdmit }): Promise<{
     outcome: "updated" | "unchanged" | "stale" | "full"; revision: number;
   }>;
-  redeem(args: { owner: string; code: string; beforeAdmit?: PerpsPilotBeforeAdmit }): Promise<PerpsPilotRedeemResult>;
+  redeem(args: { owner: string; code: string }): Promise<PerpsPilotRedeemResult>;
 }
 
 export const PERPS_PILOT_DDL = `
@@ -78,6 +81,10 @@ CREATE TABLE IF NOT EXISTS perps_pilot_redemptions (
   invite_id TEXT NOT NULL REFERENCES perps_pilot_invites(id), owner TEXT NOT NULL,
   redeemed_at INTEGER NOT NULL, PRIMARY KEY (invite_id, owner)
 );
+CREATE TABLE IF NOT EXISTS perps_pilot_requests (
+  owner TEXT PRIMARY KEY, invite_id TEXT NOT NULL REFERENCES perps_pilot_invites(id), submitted_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS perps_pilot_requests_submitted ON perps_pilot_requests(submitted_at, owner);
 CREATE TABLE IF NOT EXISTS perps_pilot_attempts (
   owner TEXT PRIMARY KEY, window_start INTEGER NOT NULL, attempts INTEGER NOT NULL CHECK (attempts >= 0)
 );
@@ -136,6 +143,10 @@ function admissionFrom(row: Row): PerpsPilotAdmission {
   return { owner: storedOwner(row.owner), status: row.status, source: row.source, revision: integer(row.revision),
     updatedAt: integer(row.updated_at), actor: row.actor === null ? null : storedOwner(row.actor) };
 }
+function requestFrom(row: Row): PerpsPilotRequest {
+  return { owner: storedOwner(row.owner), inviteId: inviteId(String(row.invite_id)), submittedAt: integer(row.submitted_at) };
+}
+function approvedSource(source: unknown): boolean { return source === "admin" || source === "bootstrap"; }
 
 const schemaReady = new WeakMap<Db, Promise<void>>();
 async function lockSchema(tx: Db): Promise<void> {
@@ -195,6 +206,18 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     await tx.prepare("INSERT INTO perps_pilot_audit(id,action,actor,owner,invite_id,at,revision) VALUES(?,?,?,?,?,?,?)")
       .run(randomUUID(), action, actor, owner, id, at, revision);
   }
+  private async quarantineLegacyInvites(tx: Db): Promise<void> {
+    const legacy = await tx.prepare("SELECT owner FROM perps_pilot_admissions WHERE status='allowed' AND source='invite' ORDER BY owner LIMIT 101").all() as Row[];
+    if (!legacy.length) return;
+    if (legacy.length > PERPS_PILOT_LIMIT) throw new Error("Legacy paper-pilot cohort exceeds its limit.");
+    const revision = await this.bump(tx), at = this.now();
+    for (const row of legacy) {
+      const owner = storedOwner(row.owner);
+      await tx.prepare("UPDATE perps_pilot_admissions SET status='revoked',revision=?,updated_at=?,actor=NULL WHERE owner=? AND source='invite' AND status='allowed'")
+        .run(revision, at, owner);
+      await this.audit(tx, "legacy-invite-quarantined", null, owner, null, revision, at);
+    }
+  }
   private async initialize(): Promise<void> {
     if (!this.ready) {
       this.ready = (async () => {
@@ -205,7 +228,15 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
           await lockSchema(tx);
           await this.lock(tx, true);
           const cohort = await tx.prepare("SELECT initialized_at FROM perps_pilot_cohort WHERE id=1").get() as Row;
-          if (cohort.initialized_at !== null) { integer(cohort.initialized_at); return; }
+          if (cohort.initialized_at !== null) {
+            integer(cohort.initialized_at);
+            // The previous, undeployed design admitted invite holders directly.
+            // Persist a denial so an old reader also fails closed. Old writers
+            // must be stopped before rollout; all new reads additionally check
+            // the admission source in case a stale writer reintroduces a row.
+            await this.quarantineLegacyInvites(tx);
+            return;
+          }
           if (await tx.prepare("SELECT owner FROM perps_pilot_admissions LIMIT 1").get()) throw new Error("Uninitialized paper-pilot cohort contains membership records.");
           const owners = bootstrapOwners((this.options.bootstrapOwners ?? (() => process.env.MERRYMEN_PERPS_PAPER_TENANTS))());
           const revision = await this.bump(tx), at = this.now();
@@ -226,7 +257,7 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     return boundedTransaction(this.db, async tx => fn(tx, await this.lock(tx)));
   }
   private async hasRoom(tx: Db): Promise<boolean> {
-    const row = await tx.prepare("SELECT COUNT(*) AS n FROM perps_pilot_admissions WHERE status='allowed'").get() as Row;
+    const row = await tx.prepare("SELECT COUNT(*) AS n FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap')").get() as Row;
     return integer(row.n) < PERPS_PILOT_LIMIT;
   }
   async snapshot(): Promise<PerpsPilotSnapshot> {
@@ -237,7 +268,8 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     // One SQL statement gives a matching revision and owner set, even at READ
     // COMMITTED while a different replica changes membership.
     const rows = await tx.prepare(`SELECT c.revision,c.initialized_at,a.owner FROM perps_pilot_cohort c
-      LEFT JOIN perps_pilot_admissions a ON a.status='allowed' WHERE c.id=1 AND c.initialized_at IS NOT NULL ORDER BY a.owner LIMIT 101`).all() as Row[];
+      LEFT JOIN perps_pilot_admissions a ON a.status='allowed' AND a.source IN ('admin','bootstrap')
+      WHERE c.id=1 AND c.initialized_at IS NOT NULL ORDER BY a.owner LIMIT 101`).all() as Row[];
     if (!rows.length || rows.length > PERPS_PILOT_LIMIT) throw new Error("Paper-pilot cohort is unavailable or exceeds its limit.");
     const revision = integer(rows[0]!.revision), owners: Owner[] = [];
     for (const row of rows) {
@@ -259,23 +291,31 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
   async get(value: string) {
     const owner = ownerKey(value);
     await this.initialize();
-    const row = await boundedTransaction(this.db, tx => tx.prepare(`SELECT c.revision,c.initialized_at,a.status,a.updated_at,
-      (SELECT COUNT(*) FROM perps_pilot_admissions WHERE status='allowed') AS active_count FROM perps_pilot_cohort c
-      LEFT JOIN perps_pilot_admissions a ON a.owner=? WHERE c.id=1 AND c.initialized_at IS NOT NULL`).get(owner)) as Row | undefined;
+    const row = await boundedTransaction(this.db, tx => tx.prepare(`SELECT c.revision,c.initialized_at,a.status,a.source,a.updated_at,p.submitted_at,
+      (SELECT COUNT(*) FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap')) AS active_count FROM perps_pilot_cohort c
+      LEFT JOIN perps_pilot_admissions a ON a.owner=? LEFT JOIN perps_pilot_requests p ON p.owner=?
+      WHERE c.id=1 AND c.initialized_at IS NOT NULL`).get(owner, owner)) as Row | undefined;
     if (!row || (row.status !== null && row.status !== "allowed" && row.status !== "revoked")) throw new Error("Unreadable paper-pilot admission.");
     integer(row.initialized_at);
     if (integer(row.active_count) > PERPS_PILOT_LIMIT) throw new Error("Paper-pilot cohort exceeds its limit.");
-    return { owner, status: (row.status ?? "not-admitted") as Status | "not-admitted", revision: integer(row.revision),
-      updatedAt: row.status === null ? null : integer(row.updated_at) };
+    if (row.status !== null && row.source !== "invite" && !approvedSource(row.source)) throw new Error("Unreadable paper-pilot source.");
+    const status: Status | "pending" | "not-admitted" = row.status !== null
+      ? (row.status === "allowed" && approvedSource(row.source) ? "allowed" : "revoked")
+      : row.submitted_at !== null ? "pending" : "not-admitted";
+    return { owner, status, revision: integer(row.revision),
+      updatedAt: row.status !== null ? integer(row.updated_at) : row.submitted_at !== null ? integer(row.submitted_at) : null };
   }
   async list(): Promise<PerpsPilotListing> {
     return this.locked(async (tx, revision) => {
-      const active = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='allowed' ORDER BY owner LIMIT 101").all() as Row[];
+      const active = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap') ORDER BY owner LIMIT 101").all() as Row[];
       if (active.length > PERPS_PILOT_LIMIT) throw new Error("Paper-pilot cohort exceeds its limit.");
-      const revoked = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='revoked' ORDER BY updated_at DESC,owner LIMIT 100").all() as Row[];
+      const revoked = await tx.prepare("SELECT * FROM perps_pilot_admissions WHERE status='revoked' OR source='invite' ORDER BY updated_at DESC,owner LIMIT 100").all() as Row[];
+      const requests = await tx.prepare("SELECT * FROM perps_pilot_requests ORDER BY submitted_at,owner LIMIT 1001").all() as Row[];
+      if (requests.length > PERPS_PILOT_REQUEST_LIMIT) throw new Error("Paper-pilot request queue exceeds its limit.");
       const invites = await tx.prepare("SELECT * FROM perps_pilot_invites ORDER BY created_at DESC,id LIMIT 100").all() as Row[];
       const audit = await tx.prepare("SELECT * FROM perps_pilot_audit ORDER BY at DESC,id LIMIT 100").all() as Row[];
-      return { revision, limit: PERPS_PILOT_LIMIT, admissions: [...active, ...revoked].map(admissionFrom), invites: invites.map(inviteFrom),
+      return { revision, limit: PERPS_PILOT_LIMIT, requestLimit: PERPS_PILOT_REQUEST_LIMIT, requests: requests.map(requestFrom),
+        admissions: [...active, ...revoked.map(row => ({ ...row, status: "revoked" }))].map(admissionFrom), invites: invites.map(inviteFrom),
         audit: audit.map(row => ({ id: String(row.id), action: String(row.action), actor: row.actor === null ? null : storedOwner(row.actor),
           owner: row.owner === null ? null : storedOwner(row.owner), inviteId: row.invite_id === null ? null : String(row.invite_id),
           at: integer(row.at), revision: integer(row.revision) })) };
@@ -309,15 +349,18 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     if (args.status !== "allowed" && args.status !== "revoked") throw new Error("Invalid paper-pilot status.");
     return this.locked(async (tx, revision) => {
       if (revision !== expected) return { outcome: "stale" as const, revision };
-      const previous = await tx.prepare("SELECT status FROM perps_pilot_admissions WHERE owner=?").get(owner) as Row | undefined;
-      if (previous?.status === args.status) return { outcome: "unchanged" as const, revision };
-      if (args.status === "allowed" && !(await this.hasRoom(tx))) return { outcome: "full" as const, revision };
-      if (args.status === "allowed") await args.beforeAdmit?.();
+      const previous = await tx.prepare("SELECT status,source FROM perps_pilot_admissions WHERE owner=?").get(owner) as Row | undefined;
+      const request = await tx.prepare("SELECT * FROM perps_pilot_requests WHERE owner=?").get(owner) as Row | undefined;
+      const alreadyAllowed = previous?.status === "allowed" && approvedSource(previous.source);
+      if (previous?.status === args.status && (args.status !== "allowed" || alreadyAllowed) && !request) return { outcome: "unchanged" as const, revision };
+      if (args.status === "allowed" && !alreadyAllowed && !(await this.hasRoom(tx))) return { outcome: "full" as const, revision };
+      if (args.status === "allowed" && !alreadyAllowed) await args.beforeAdmit?.();
       const nextRevision = await this.bump(tx), at = this.now();
       await tx.prepare(`INSERT INTO perps_pilot_admissions(owner,status,source,revision,updated_at,actor) VALUES(?,?,'admin',?,?,?)
         ON CONFLICT(owner) DO UPDATE SET status=excluded.status,source=excluded.source,revision=excluded.revision,updated_at=excluded.updated_at,actor=excluded.actor`)
         .run(owner, args.status, nextRevision, at, actor);
-      await this.audit(tx, `admission-${args.status}`, actor, owner, null, nextRevision, at);
+      await tx.prepare("DELETE FROM perps_pilot_requests WHERE owner=?").run(owner);
+      await this.audit(tx, `admission-${args.status}`, actor, owner, request ? requestFrom(request).inviteId : null, nextRevision, at);
       return { outcome: "updated" as const, revision: nextRevision };
     });
   }
@@ -334,32 +377,28 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
       (SELECT owner FROM perps_pilot_attempts WHERE window_start < ? ORDER BY window_start LIMIT 100)`).run(at - 24 * 60 * 60_000);
     return null;
   }
-  async redeem(args: { owner: string; code: string; beforeAdmit?: PerpsPilotBeforeAdmit }): Promise<PerpsPilotRedeemResult> {
+  async redeem(args: { owner: string; code: string }): Promise<PerpsPilotRedeemResult> {
     const owner = ownerKey(args.owner), hash = codeHash(args.code);
     return this.locked(async (tx, revision) => {
       const at = this.now(), retryAfterSec = await this.attempt(tx, owner, at);
       if (retryAfterSec !== null) return { outcome: "limited", revision, retryAfterSec };
-      const previous = await tx.prepare("SELECT status FROM perps_pilot_admissions WHERE owner=?").get(owner) as Row | undefined;
-      if (previous?.status === "revoked") return { outcome: "revoked", revision };
+      const previous = await tx.prepare("SELECT status,source FROM perps_pilot_admissions WHERE owner=?").get(owner) as Row | undefined;
+      if (previous && (previous.status === "revoked" || !approvedSource(previous.source))) return { outcome: "revoked", revision };
       if (previous?.status === "allowed") return { outcome: "already-admitted", revision };
+      if (await tx.prepare("SELECT owner FROM perps_pilot_requests WHERE owner=?").get(owner)) return { outcome: "already-pending", revision };
       if (!hash) return { outcome: "invalid-invite", revision };
       const row = await tx.prepare("SELECT * FROM perps_pilot_invites WHERE code_hash=?").get(hash) as Row | undefined;
       if (!row) return { outcome: "invalid-invite", revision };
       const invite = inviteFrom(row);
       if (invite.revokedAt !== null || invite.expiresAt <= at || invite.uses >= invite.maxUses) return { outcome: "invalid-invite", revision };
-      if (!(await this.hasRoom(tx))) return { outcome: "full", revision };
-      await args.beforeAdmit?.();
-      const admittedAt = this.now();
-      // The settings write may have waited on another connection. An invite
-      // that expired during that wait must not become new authority afterward.
-      if (invite.expiresAt <= admittedAt) return { outcome: "invalid-invite", revision };
-      const nextRevision = await this.bump(tx);
-      await tx.prepare("INSERT INTO perps_pilot_admissions(owner,status,source,revision,updated_at,actor) VALUES(?,'allowed','invite',?,?,?)")
-        .run(owner, nextRevision, admittedAt, owner);
-      await tx.prepare("INSERT INTO perps_pilot_redemptions(invite_id,owner,redeemed_at) VALUES(?,?,?)").run(invite.id, owner, admittedAt);
+      const queue = await tx.prepare("SELECT COUNT(*) AS n FROM perps_pilot_requests").get() as Row;
+      if (integer(queue.n) >= PERPS_PILOT_REQUEST_LIMIT) return { outcome: "full", revision };
+      await tx.prepare("INSERT INTO perps_pilot_requests(owner,invite_id,submitted_at) VALUES(?,?,?)").run(owner, invite.id, at);
+      await tx.prepare("INSERT INTO perps_pilot_redemptions(invite_id,owner,redeemed_at) VALUES(?,?,?)").run(invite.id, owner, at);
       await tx.prepare("UPDATE perps_pilot_invites SET uses=uses+1 WHERE id=?").run(invite.id);
-      await this.audit(tx, "invite-redeemed", owner, owner, invite.id, nextRevision, admittedAt);
-      return { outcome: "admitted", revision: nextRevision };
+      // Requests do not change authority or invalidate workers' admission proof.
+      await this.audit(tx, "request-submitted", owner, owner, invite.id, revision, at);
+      return { outcome: "pending", revision };
     });
   }
 }

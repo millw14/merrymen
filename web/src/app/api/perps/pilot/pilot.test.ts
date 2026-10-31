@@ -67,16 +67,23 @@ describe("pilot enrollment uses verified login authority", () => {
       assert.equal(response.status, 400); assert.equal(response.headers.get("cache-control"), "private, no-store");
     }
   });
-  it("registers the session owner automatically without a wallet field or grant", async () => {
+  it("submits the verified owner for admin approval without granting access or touching settings", async () => {
     await getSettingsStore("perps").put(ALICE, { perpsEnabled: true, perpsControlNonce: "old", perpsMaxLeverage: 2 });
     const made = await invite();
     const response = await useCode(made.code); assert.equal(response.status, 200, await response.clone().text());
-    assert.deepEqual(await response.json(), { tenant: ALICE, status: "allowed", revision: 2, paperAvailable: true, admin: false });
-    assert.equal((await offered(request("offered"))).status, 200);
+    assert.deepEqual(await response.json(), { tenant: ALICE, status: "pending", revision: 1, paperAvailable: true, admin: false });
+    assert.equal((await offered(request("offered"))).status, 403, "an invite never permits signing a grant");
     assert.equal((await useCode(made.code)).status, 200, "lost response can be checked/redeemed by same owner without another use");
     assert.equal((await pilot.store.list()).invites[0]?.uses, 1);
+    const listing = await pilot.store.list();
+    assert.equal(listing.requests.length, 1); assert.equal(listing.requests[0]?.owner, ALICE);
+    assert.equal(listing.requests[0]?.inviteId, made.invite.id); assert.deepEqual(listing.admissions, []);
+    assert.deepEqual((await pilot.store.snapshot()).owners, []);
+    let authorized = false;
+    assert.deepEqual(await pilot.store.withAdmission(ALICE, async () => { authorized = true; }), { allowed: false });
+    assert.equal(authorized, false);
     const settings = await getSettingsStore("perps").get(ALICE);
-    assert.equal(settings?.perpsEnabled, false); assert.notEqual(settings?.perpsControlNonce, "old"); assert.equal(settings?.perpsMaxLeverage, 2);
+    assert.equal(settings?.perpsEnabled, true); assert.equal(settings?.perpsControlNonce, "old"); assert.equal(settings?.perpsMaxLeverage, 2);
   });
   it("refuses a changed cookie, forged token, foreign DID and self-selected target wallet", async () => {
     const made = await invite();
@@ -84,7 +91,10 @@ describe("pilot enrollment uses verified login authority", () => {
     assert.equal((await useCode(made.code, ALICE, "forged-secret-token")).status, 401);
     assert.equal((await useCode(made.code, ALICE, token(BOB_DID))).status, 409);
     assert.equal((await useCode(made.code, ALICE, token(), { owner: BOB })).status, 400);
+    assert.equal((await useCode(made.code, ALICE, token(), { status: "allowed" })).status, 400);
+    assert.equal((await useCode(made.code, ALICE, token(), { admin: true })).status, 400);
     assert.equal((await pilot.store.list()).invites[0]?.uses, 0);
+    assert.deepEqual((await pilot.store.list()).requests, []);
     assert.equal((await pilot.store.get(BOB)).status, "not-admitted");
   });
   it("does not override explicit revocation or expose detailed invite validity", async () => {
@@ -110,6 +120,35 @@ describe("pilot enrollment uses verified login authority", () => {
 });
 
 describe("pilot administration is separate from membership", () => {
+  it("only an admin can see pending wallets and approve one without approving the rest", async () => {
+    const first = await invite(), second = await invite();
+    assert.equal((await useCode(first.code)).status, 200);
+    assert.equal((await useCode(second.code, BOB, token(BOB_DID))).status, 200);
+    const denied = await adminGet(request("pilot/admin"));
+    assert.equal(denied.status, 403); assert.ok(!(await denied.text()).includes(BOB));
+    const listing = await (await adminGet(request("pilot/admin", ADMIN))).json();
+    assert.deepEqual(listing.requests.map((row: { owner: string }) => row.owner).sort(), [ALICE, BOB].sort());
+    assert.equal(listing.requestLimit, 1000); assert.deepEqual(listing.admissions, []);
+    const action = { action: "set-admission", expectedTenant: ALICE, owner: ALICE, status: "allowed", expectedRevision: listing.revision };
+    assert.equal((await adminPost(request("pilot/admin", ALICE, action))).status, 403, "requesting access never confers admin authority");
+    await getSettingsStore("perps").put(ALICE, { perpsEnabled: true, perpsControlNonce: "old", perpsMaxLeverage: 2 });
+    assert.equal((await adminPost(request("pilot/admin", ADMIN, { ...action, expectedTenant: ADMIN }))).status, 200);
+    assert.equal((await pilot.store.get(ALICE)).status, "allowed"); assert.equal((await pilot.store.get(BOB)).status, "pending");
+    assert.equal((await offered(request("offered"))).status, 200);
+    assert.deepEqual((await pilot.store.list()).requests.map(row => row.owner), [BOB]);
+    const settings = await getSettingsStore("perps").get(ALICE);
+    assert.equal(settings?.perpsEnabled, false); assert.notEqual(settings?.perpsControlNonce, "old"); assert.equal(settings?.perpsMaxLeverage, 2);
+  });
+  it("rejecting a pending wallet blocks resubmission and stale approval", async () => {
+    const first = await invite(), second = await invite(); await useCode(first.code);
+    const revision = (await pilot.store.list()).revision;
+    const action = { action: "set-admission", expectedTenant: ADMIN, owner: ALICE, expectedRevision: revision };
+    assert.equal((await adminPost(request("pilot/admin", ADMIN, { ...action, status: "revoked" }))).status, 200);
+    assert.equal((await pilot.store.get(ALICE)).status, "revoked"); assert.deepEqual((await pilot.store.list()).requests, []);
+    assert.equal((await useCode(second.code)).status, 403);
+    assert.equal((await adminPost(request("pilot/admin", ADMIN, { ...action, status: "allowed" }))).status, 409);
+    assert.equal((await offered(request("offered"))).status, 403);
+  });
   it("denies members, malformed role lists and unset configuration", async () => {
     await pilot.set(ALICE, "allowed");
     assert.equal((await adminGet(request("pilot/admin"))).status, 403);
@@ -140,18 +179,22 @@ describe("pilot administration is separate from membership", () => {
     const settings = await getSettingsStore("perps").get(ALICE);
     assert.equal(settings?.perpsEnabled, false); assert.notEqual(settings?.perpsControlNonce, "old");
   });
-  it("a failed settings restriction does not spend a code or admit the account", async () => {
+  it("a failed approval restriction leaves the request pending and no authority granted", async () => {
     const made = await invite();
     const fail = mock.method(getSettingsStore("perps") as FileSettingsStore, "disablePerpsForKill", async () => { throw new Error("private database failure"); });
     try {
-      const response = await useCode(made.code); assert.equal(response.status, 503); assert.ok(!(await response.text()).includes("private database failure"));
-      assert.equal((await pilot.store.get(ALICE)).status, "not-admitted"); assert.equal((await pilot.store.list()).invites[0]?.uses, 0);
+      assert.equal((await useCode(made.code)).status, 200, "submitting a request does not change trading settings");
+      const response = await adminPost(request("pilot/admin", ADMIN, { action: "set-admission", expectedTenant: ADMIN, owner: ALICE, status: "allowed", expectedRevision: (await pilot.store.snapshot()).revision }));
+      assert.equal(response.status, 503); assert.ok(!(await response.text()).includes("private database failure"));
+      assert.equal((await pilot.store.get(ALICE)).status, "pending"); assert.equal((await pilot.store.list()).invites[0]?.uses, 1);
+      assert.equal((await pilot.store.list()).requests.length, 1); assert.deepEqual((await pilot.store.snapshot()).owners, []);
     } finally { fail.mock.restore(); }
   });
-  it("revokes an invitation without revoking owners already admitted by it", async () => {
+  it("revokes an invitation without granting access to its pending requests", async () => {
     const made = await invite(); await useCode(made.code);
     assert.equal((await adminPost(request("pilot/admin", ADMIN, { action: "revoke-invite", expectedTenant: ADMIN, id: made.invite.id }))).status, 200);
-    assert.equal((await pilot.store.get(ALICE)).status, "allowed");
+    assert.equal((await pilot.store.get(ALICE)).status, "pending");
+    assert.equal((await offered(request("offered"))).status, 403);
     assert.equal((await useCode(made.code, BOB, token(BOB_DID))).status, 400);
   });
   it("rejects cross-site mutations, malformed bodies and switched admin accounts", async () => {

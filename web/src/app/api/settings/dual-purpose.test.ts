@@ -395,11 +395,15 @@ describe("paper entry activation requires current owner revision and pilot admis
     assert.equal((await PUT(request("?wallet=perps",{owner:OWNER,perpsEnabled:true,expectedVersion:fresh}))).status,200);
     assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsEnabled,true);
   });
-  it("a current revision cannot bypass missing, revoked or unreadable admission, but off remains available", async () => {
+  it("a current revision cannot bypass pending, missing, revoked or unreadable admission, but off remains available", async () => {
     await getSettingsStore("perps").put(OWNER,{perpsEnabled:false});
-    for (const mode of ["missing", "revoked", "unreadable"]) {
+    for (const mode of ["missing", "pending", "revoked", "unreadable"]) {
       pilot.close(); pilot = pilotFixture(mode === "unreadable" ? ["bad"] : []);
       if (mode === "revoked") await pilot.set(OWNER, "revoked");
+      if (mode === "pending") {
+        const { code } = await pilot.store.createInvite({ actor: OTHER, maxUses: 1, expiresAt: Date.now() + 60_000 });
+        assert.equal((await pilot.store.redeem({ owner: OWNER, code })).outcome, "pending");
+      }
       const res = await PUT(request("?wallet=perps", {owner:OWNER,perpsEnabled:true,expectedVersion:await currentVersion()}));
       assert.equal(res.status, mode === "unreadable" ? 503 : 403);
       assert.equal((await getSettingsStore("perps").get(OWNER))?.perpsEnabled,false);
