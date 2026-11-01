@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { timeOnly } from "@/lib/format";
 import { AgentStrip } from "./AgentStrip";
 import Link from "./Link";
@@ -58,9 +58,10 @@ export function DesktopHeader({
   hasAgent = true,
   hideBalances = false,
   wallet = "spot",
+  tradingMode,
   onScreen,
   onTab,
-}: Actions & { hasAgent?: boolean; hideBalances?: boolean; wallet?: "spot" | "perps"; mine: LiveMine }) {
+}: Actions & { hasAgent?: boolean; hideBalances?: boolean; wallet?: "spot" | "perps"; mine: LiveMine; tradingMode?: ReactNode }) {
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, mine.recovery);
   const accountMenu = useRef<HTMLDetailsElement>(null);
   // "/" OPENS SEARCH, as the hint beside the word says (desktop.css). Only
@@ -81,6 +82,9 @@ export function DesktopHeader({
   const room = useGroupChatSupported();
   // The way into /connect/mcp; hidden on a self-hosted install, which has none.
   const assistants = useConnectAssistantOffered();
+  const searchButton = <button type="button" className="desktop-search" aria-label="Search tokens or agents" onClick={() => onScreen({ kind: "search" })}>
+    <Search size={17} /><span>Search tokens or agents</span>
+  </button>;
   return (
     <header className="desktop-header">
       <button
@@ -97,13 +101,7 @@ export function DesktopHeader({
         <LogoMark size={15} />
         <span>merrymen</span>
       </button>
-      <button
-        className="desktop-search"
-        onClick={() => onScreen({ kind: "search" })}
-      >
-        <Search size={17} />
-        <span>Search tokens or agents</span>
-      </button>
+      {tradingMode ? <div className="desktop-mode-controls">{searchButton}{tradingMode}</div> : searchButton}
       <div className="desktop-header-account">
         {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
         <Link className="desktop-settings-link" href={wallet === "perps" ? "/settings?wallet=perps" : "/settings"}>Settings</Link>

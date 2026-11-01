@@ -28,7 +28,7 @@ before(() => {
   const inert = new Proxy({ __esModule: true }, { get: (_target, name) => name === "__esModule" ? true : noop });
   // Run App's actual account reader and render wiring. Unrelated screens and
   // clocks are replaced at its module boundary, so no market/service I/O runs.
-  const keep = new Set(["react", "@merrymen/core", "./agent-status", "./account-read", "./account-session", "./recovery-view", "./worker-stale", "./chat-store", "./chat-payload", "./chat-thread", "./nav", "./perps-navigation"]);
+  const keep = new Set(["react", "@merrymen/core", "./agent-status", "./account-read", "./account-session", "./recovery-view", "./worker-stale", "./chat-store", "./chat-payload", "./chat-thread", "./nav", "./perps-navigation", "./use-trading-mode-transition"]);
   const intercepted = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
     if (parent?.filename !== appPath || keep.has(id)) return load.call(this, id, parent, isMain);
     if (id === "next/navigation") return { usePathname: () => "/settings", useSearchParams: () => new URLSearchParams(), useRouter: () => ({ push: noop }) };
