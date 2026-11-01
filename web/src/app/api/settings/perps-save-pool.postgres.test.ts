@@ -100,7 +100,7 @@ after(async () => {
   if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-const cookie = (t: string) => `mm_session=${mintSession(t)}`;
+const cookie = (t: `0x${string}`) => `mm_session=${mintSession(t)}`;
 
 async function versionOf(t: `0x${string}`): Promise<string> {
   const res = await GET(new Request(URL_PERPS, { headers: { cookie: cookie(t) } }));
