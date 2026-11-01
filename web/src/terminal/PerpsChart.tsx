@@ -1,8 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ChartNoAxesCombined } from "lucide-react";
 import type { ChartResponse } from "../lib/perps-chart-data";
-import { fullDateTime } from "../lib/format";
-import { marketPrice } from "./perps-market-summary";
+import { chartDayUtc, chartTimeUtc, fullDateTime, marketPrice } from "../lib/format";
 
 /** Mark candles and execution prices have independent coordinates; missing bars remain gaps. */
 export function PerpsChart({ data }: { data: ChartResponse }) {
@@ -36,9 +35,7 @@ export function PerpsChart({ data }: { data: ChartResponse }) {
   const last = bars[bars.length - 1];
   const candleCount = data.window === "24h" ? 288 : data.window === "7d" ? 168 : 180;
   const candleWidth = Math.max(.6, (plotRight - 18) / candleCount * .7);
-  const timeLabel = (time: number) => data.window === "24h"
-    ? new Date(time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" })
-    : new Date(time).toLocaleDateString("en-GB", { month: "short", day: "2-digit", timeZone: "UTC" });
+  const timeLabel = data.window === "24h" ? chartTimeUtc : chartDayUtc;
   return <div ref={frame}>
     {!hasPrices ? <div className="perps-empty-state"><ChartNoAxesCombined size={28} aria-hidden="true"/><h3>No market history in this window</h3><p>No candles or recorded entries were reported.</p></div> : <svg className="perps-chart" viewBox={`0 0 ${width} 354`} role="img" aria-label={`${data.market} mark candles and ${data.entries.length} recorded entries; ${data.window}`}>
       <defs><clipPath id={clipId}><rect x="16" y="25" width={plotRight - 14} height="300"/></clipPath></defs>

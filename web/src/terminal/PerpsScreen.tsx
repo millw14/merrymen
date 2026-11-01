@@ -7,7 +7,7 @@ import { readPerpsActivity, type PerpsActivityResponse } from "../lib/perps-acti
 import { readChartResponse } from "../lib/perps-chart-response";
 import type { ChartResponse, ChartWindow } from "../lib/perps-chart-data";
 import { walletUrl } from "../lib/wallet-param";
-import { fullDateTime as when } from "../lib/format";
+import { fullDateTime as when, marketPrice, pctPts } from "../lib/format";
 import { usePerpsAccount } from "./usePerpsAccount";
 import { fetchAccountForSession } from "./account-session";
 import { paperReport, perpsMoney, samePerpsIdentity, submitPerpsAction, type PerpsCommand } from "./perps-client";
@@ -16,7 +16,7 @@ import { startRefreshLoop } from "./refresh-loop";
 import { SignIn, type AccountState } from "./HostedControls";
 import { SkeletonRows } from "./Skeleton";
 import { PerpsChart } from "./PerpsChart";
-import { marketSummary, marketPrice } from "./perps-market-summary";
+import { marketSummary } from "./perps-market-summary";
 import "./perps-desk.css";
 
 type Action = Parameters<typeof submitPerpsAction>[1];
@@ -143,7 +143,7 @@ function PerpsDesk({ state }: { state: ReturnType<typeof usePerpsAccount> }) {
           <div className="perps-market-title"><span className="perps-symbol" aria-hidden="true">{symbol.slice(0, 1)}</span><div><h2>{symbol}<span> / USD</span></h2><span className="perps-eyebrow">Perpetual · Lighter</span></div></div>
           <dl className="perps-market-stats">
             <div><dt>Last candle</dt><dd>{marketPrice(summary?.last ?? null)}</dd></div>
-            <div><dt>{windowLabel} window change</dt><dd data-tone={summary && summary.changePct >= 0 ? "up" : summary ? "down" : undefined}>{summary ? `${summary.changePct > 0 ? "+" : ""}${summary.changePct.toFixed(2)}%` : "—"}</dd></div>
+            <div><dt>{windowLabel} window change</dt><dd data-tone={summary && summary.changePct >= 0 ? "up" : summary ? "down" : undefined}>{pctPts(summary?.changePct ?? null)}</dd></div>
             <div><dt>Window high</dt><dd>{marketPrice(summary?.high ?? null)}</dd></div>
             <div><dt>Window low</dt><dd>{marketPrice(summary?.low ?? null)}</dd></div>
           </dl>
