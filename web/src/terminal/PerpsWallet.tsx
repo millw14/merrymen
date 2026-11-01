@@ -21,11 +21,6 @@ import "./perps-desk.css";
 
 const DEFAULT_CAPS: GrantCaps = { perTradeUsdg: 25, dailyUsdg: 100, expiryDays: 7, maxDrawdownPct: 10, maxOpsPerDay: 48 };
 const CAP_FIELDS: [keyof GrantCaps, string, number, number][] = [["perTradeUsdg", "Per-trade limit (USDG)", 1, 100_000], ["dailyUsdg", "Daily limit (USDG)", 1, 100_000], ["expiryDays", "Permission lifetime (days)", 1, 90], ["maxDrawdownPct", "Maximum drawdown (%)", 1, 50], ["maxOpsPerDay", "Maximum operations per day", 1, 10_000]];
-/** An archived Perps grant of this chain owned by `owner`: its own history, not another login's record. */
-function ownArchivedPerps(record: unknown, owner: string | undefined): boolean {
-  const r = record as Partial<Grant> | null;
-  return !!owner && typeof r === "object" && r !== null && r.purpose === "perps" && r.chainId === 4663 && typeof r.owner === "string" && r.owner.toLowerCase() === owner;
-}
 async function requirePaperOffering() {
   const result = await requestJson<{ offered: boolean; mode: string }>(walletUrl("/api/perps/offered", "perps"));
   if (result?.offered !== true || result.mode !== "paper") throw new Error("Paper Perps wallets are not offered here. Nothing was stopped or signed.");
@@ -74,18 +69,35 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
     })().catch(() => { if (active) setMessage("Saved wallet details could not be verified. Keep recovery access and reload before signing."); });
     return () => { active = false; };
   }, [identity, !!account, signer?.account.address, localRevision]);
+  /** A flow in flight when the owner pressed the stop: voided by it, not by a login change. */
+  const voidedByStop = useRef(false);
+  /** Perps session keys the stop removed: never offered for activation again on this page. */
+  const stoppedKeys = useRef(new Set<string>());
   /**
-   * AFTER A CONFIRMED STOP OF EVERY WALLET. Whatever this page was doing is
-   * void: a create, renewal or activation in flight aborts at its next
-   * assertCurrent, before anything is saved or handed off, and the saved
-   * wallet (the kill cleared this browser's copy) is read again, so nothing
-   * the kill removed is offered for activation.
+   * THE OWNER PRESSED STOP ALL AGENTS. Whatever this page was doing is void,
+   * from the press, not from the answer: a create, renewal or activation in
+   * flight aborts at its next assertCurrent, before anything is saved or
+   * handed off, whatever the stop's reply (lost, refused or partial).
+   */
+  function stopPressed() {
+    voidedByStop.current = flight.current;
+    authorityGeneration.current++;
+  }
+  /**
+   * THE STOP WAS CONFIRMED. Every Perps key this page knew is dead (one the
+   * kill could not clear from this browser too), and the saved wallet is read
+   * again, so nothing the kill removed is offered for activation.
    */
   function afterStop() {
-    authorityGeneration.current++;
+    try {
+      for (const key of [saved?.sessionKeyAddress, loadGrant("perps")?.sessionKeyAddress]) if (key) stoppedKeys.current.add(key.toLowerCase());
+    } catch { if (saved?.sessionKeyAddress) stoppedKeys.current.add(saved.sessionKeyAddress.toLowerCase()); }
     setLocalRevision((value) => value + 1);
     refresh();
   }
+  const killedKey = (grant: Grant) => stoppedKeys.current.has(grant.sessionKeyAddress.toLowerCase());
+  /** A flow the stop voided after it may have handed a permission off: it may be live. */
+  const STOP_RACE = "The stop was sent while this page was handing a Perps permission to the server. If that reached the server after the stop, the permission is active: check the status here and stop again if it is.";
 
   async function checkedAccount() {
     if (!account) throw new Error("Reload your account before signing.");
@@ -99,7 +111,7 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
     flight.current = true; setBusy(true); setMessage("");
     const startingIdentity = authority;
     const startedGeneration = authorityGeneration.current;
-    let stopped = false;
+    let stopped = false, handing = false;
     const assertCurrent = () => { if (!mounted.current || currentIdentity.current !== startingIdentity || authorityGeneration.current !== startedGeneration) throw new Error("Your account changed while preparing this permission. Reload before continuing."); };
     const ownerSigner = guardPerpsSigner(signer.account, assertCurrent);
     try {
@@ -116,14 +128,11 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
       if (saved && (saved.purpose !== "perps" || saved.owner.toLowerCase() !== signer.account.address.toLowerCase() || (saved.binding?.ownerSignature && !await trustedSavedGrant(saved, current.session, window.location.origin)))) throw new Error("The signing wallet does not own this saved Perps permission.");
       if (previous && (!saved || !sameGrantPermission(previous, saved))) throw new Error("The active Perps permission changed. Reload to review it.");
       const snapshots = localGrantsSnapshot("perps");
-      // A FIRST WALLET OVER WHAT THIS BROWSER KEEPS. This owner's own archived
-      // Perps records (a kill, or an earlier wallet, leaves one) are history the
-      // mint keeps: the same owner derives the same account, and the mint checks
-      // it. A live record this page could not accept, or another login's, is not
-      // replaced from here.
-      const ownerKey = (current.session.hosted ? current.session.address : signer.account.address)?.toLowerCase();
-      const foreign = (snapshots.archived ?? []).filter((record) => !ownArchivedPerps(record, ownerKey));
-      if (!saved && (snapshots.current || foreign.length)) throw new Error("This browser holds a Perps wallet record that could not be matched to this login, so no new one was created. Nothing was stopped or signed. Reload; if this stays, sign in with the login that owns it, or recover it from Withdraw & recover.");
+      // A FIRST WALLET OVER WHAT THIS BROWSER KEEPS. Archived records (a kill,
+      // a renewal, another login's wallet) are history the mint leaves alone:
+      // it archives only the live slot, and reads only this account's archive.
+      // A live record this page could not accept is not replaced from here.
+      if (!saved && snapshots.current) throw new Error("This browser holds a Perps wallet record this login could not verify, so no new one was created. Nothing was stopped or signed. Reload and try again; if it stays, it belongs to another login: sign in with that login to stop or renew it.");
       const options = { purpose: "perps" as const, chainId: 4663, caps: chosen, onStatus: (value: string) => { assertCurrent(); setStatus(value); }, assertCurrent, beforeCommit: async () => { await requirePaperOffering(); await checkedAccount(); assertCurrent(); }, hostedAs: current.session.hosted ? current.session.address as `0x${string}` : undefined,
         ...(saved ? { expectAccount: saved.smartAccount as `0x${string}` } : {}), previousGrant: previous, localGrants: snapshots };
       // A renewal's wall is checked before anything is stopped or revoked; the
@@ -145,23 +154,28 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
         if (!skip && wallet) minimumValidationNonce = (await revokeFromBrowser(wallet, setStatus)).validNonceFrom;
       }
       await checkedAccount(); assertCurrent();
+      handing = true;
       const result = await createPrivyOwnedWallet(ownerSigner, signer.did, { ...options, minimumValidationNonce });
       assertCurrent();
       if (mounted.current) { setSaved(result.local); setMessage(result.handoff.ok ? "Permission activated. Open Perps settings to enable or adjust entries." : result.handoff.error ?? "Your signed permission is saved, but activation was not confirmed. Review and retry activation below."); setAck(false); refresh(); }
-    } catch (error) { if (mounted.current && currentIdentity.current === startingIdentity && authorityGeneration.current === startedGeneration) setMessage(`${stopped ? "The old Perps permission was stopped. Its saved recovery record was kept. " : ""}${error instanceof Error ? error.message : "The permission could not be activated."}`); }
-    finally { flight.current = false; if (mounted.current) { setBusy(false); setStatus(""); } }
+    } catch (error) {
+      if (mounted.current && currentIdentity.current === startingIdentity && authorityGeneration.current === startedGeneration) setMessage(`${stopped ? "The old Perps permission was stopped. Its saved recovery record was kept. " : ""}${error instanceof Error ? error.message : "The permission could not be activated."}`);
+      else if (mounted.current && currentIdentity.current === startingIdentity && voidedByStop.current && handing) { setMessage(STOP_RACE); refresh(); }
+    }
+    finally { flight.current = false; voidedByStop.current = false; if (mounted.current) { setBusy(false); setStatus(""); } }
   }
   async function activate() {
     if (!account || !saved || !signer || flight.current || !offered) return;
     flight.current = true; setBusy(true); setMessage("");
     const startingIdentity = authority;
     const startedGeneration = authorityGeneration.current;
+    let handing = false;
     const assertCurrent = () => { if (!mounted.current || currentIdentity.current !== startingIdentity || authorityGeneration.current !== startedGeneration) throw new Error("Your account changed while activating this permission. Reload before continuing."); };
     const ownerSigner = guardPerpsSigner(signer.account, assertCurrent);
     try {
       await requirePaperOffering();
       const current = await checkedAccount(); assertCurrent();
-      if (needsPermissionReplacement(saved)) throw new Error("This permission was selected for replacement. Renew it; it must not be activated again.");
+      if (needsPermissionReplacement(saved) || killedKey(saved)) throw new Error("This permission was selected for replacement or stopped. Renew it; it must not be activated again.");
       if (current.status.exists && !sameGrantPermission(current.status.grant, saved)) throw new Error("Another Perps permission is active. Reload before continuing.");
       const proof = { tenant: current.session.address as `0x${string}`, ownerSigner: { account: ownerSigner, binding: "privy-did-owner-v1" as const, did: signer.did }, beforeSubmit: async () => {
         assertCurrent();
@@ -171,11 +185,15 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
       } };
       if (!current.session.hosted) await proof.beforeSubmit();
       assertCurrent();
+      handing = true;
       const result = await retryGrantHandoff(saved, current.session.hosted ? proof : undefined, assertCurrent);
       assertCurrent();
       setMessage(result.ok ? "Permission activated. Its settings are unchanged." : result.error ?? "Activation was not confirmed."); refresh();
-    } catch (error) { if (mounted.current && currentIdentity.current === startingIdentity && authorityGeneration.current === startedGeneration) setMessage(error instanceof Error ? error.message : "Activation was not confirmed."); }
-    finally { flight.current = false; if (mounted.current) setBusy(false); }
+    } catch (error) {
+      if (mounted.current && currentIdentity.current === startingIdentity && authorityGeneration.current === startedGeneration) setMessage(error instanceof Error ? error.message : "Activation was not confirmed.");
+      else if (mounted.current && currentIdentity.current === startingIdentity && voidedByStop.current && handing) { setMessage(STOP_RACE); refresh(); }
+    }
+    finally { flight.current = false; voidedByStop.current = false; if (mounted.current) setBusy(false); }
   }
   const signedOut = account?.session.hosted && !owner;
   return <section className="perps-desk"><div className="perps-title-row"><h1>{creating && !saved ? "Set up your Perps wallet" : "Wallet & permission"}</h1><PerpsModeBadge/></div><PerpsLinks/><p>A separate account owned by your protected signing wallet. This paper permission cannot spend on-chain. No deposit or live trading is required.</p>
@@ -186,8 +204,8 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
     {account && !signedOut && !signer && <p>Your protected signing wallet is not ready. {PRIVY_BETA ? "Sign in with the account that owns this wallet and wait for it to become ready." : "Protected wallet sign-in is not configured on this installation."}</p>}
     {saved && <><p className="perps-address">Perps account <code>{saved.smartAccount}</code></p><p>Owner <code>{saved.owner}</code></p><p>Permission expires {fullDateTime(saved.expiresAt * 1000)}.</p></>}
     {account && !signedOut && <><div className="perps-settings-grid">{CAP_FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={key === "perTradeUsdg" || key === "dailyUsdg" ? "decimal" : "numeric"} value={caps[key]} disabled={busy || !offered} onChange={event => setCaps(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div><label><input type="checkbox" checked={ack} disabled={busy || !offered} onChange={event => setAck(event.target.checked)}/>{saved ? "I want to replace this Perps permission with the limits above. Recovery access stays with the same owner." : "I understand this is simulated trading and my sign-in controls the separate Perps wallet."}</label><button disabled={!offered || !signer || !savedRead || !ack || busy} onClick={() => void sign()}>{busy ? "Working…" : saved ? "Renew Perps permission" : "Create Perps wallet"}</button>
-      {saved?.serialized && saved.demoSessionPrivateKey && !account.status.exists && !needsPermissionReplacement(saved) && <button disabled={!offered || !signer || busy} onClick={() => void activate()}>Retry saved permission activation</button>}</>}
+      {saved?.serialized && saved.demoSessionPrivateKey && !account.status.exists && !needsPermissionReplacement(saved) && !killedKey(saved) && <button disabled={!offered || !signer || busy} onClick={() => void activate()}>Retry saved permission activation</button>}</>}
     {status && <p role="status">{status}</p>}{message && <p role="status">{message}</p>}<p><a href="/withdraw?wallet=perps">Withdraw or recover this wallet</a></p>
-    {(account || readError) && <StopAllAgents session={account?.session ?? null} onDone={afterStop}/>}
+    {(account || readError) && <StopAllAgents session={account?.session ?? null} onSend={stopPressed} onDone={afterStop}/>}
   </section>;
 }

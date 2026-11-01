@@ -24,7 +24,13 @@ const UNCONFIRMED = "Check your agents before asking again.";
  * (expectedTenant: the server refuses another). A lost or unconfirmed answer
  * is reported and never retried. Renders nothing for a signed-out visitor.
  */
-export function StopAllAgents({ session: confirmed, onDone }: { session: StopAllSession | null; onDone?: () => void }) {
+export function StopAllAgents({ session: confirmed, onSend, onDone }: {
+  session: StopAllSession | null;
+  /** Called as the stop is sent, before its answer: the screen voids what it has in flight. */
+  onSend?: () => void;
+  /** Called once the stop is confirmed. */
+  onDone?: () => void;
+}) {
   const [own, setOwn] = useState<StopAllSession | null>(null);
   const [ownFailed, setOwnFailed] = useState(false);
   const [ownRevision, setOwnRevision] = useState(0);
@@ -48,6 +54,10 @@ export function StopAllAgents({ session: confirmed, onDone }: { session: StopAll
   const mounted = useRef(true);
   const current = useRef(login);
   current.current = login;
+  const onFallback = useRef(false);
+  onFallback.current = confirmed === null;
+  /** On its own session read, a refused or lost stop reads it again: the login may have changed elsewhere. */
+  const recheck = () => { if (onFallback.current) setOwnRevision((value) => value + 1); };
   const panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   // A review belongs to the login it was opened under; any other closes it.
@@ -64,6 +74,7 @@ export function StopAllAgents({ session: confirmed, onDone }: { session: StopAll
     }
     inFlight.current = true; setSending(true); setMessage("");
     try {
+      onSend?.();
       let res: Response;
       try {
         res = await fetch("/api/grants", {
@@ -72,12 +83,14 @@ export function StopAllAgents({ session: confirmed, onDone }: { session: StopAll
         });
       } catch {
         if (mounted.current) setMessage(`The stop response was not received, so it is not known whether it reached the server. ${UNCONFIRMED}`);
+        recheck();
         return;
       }
       const body = await res.json().catch(() => null) as { ok?: unknown; error?: unknown } | null;
       if (!res.ok) {
         // The server's own sentence: a partial kill names what is still running.
         if (mounted.current) setMessage(typeof body?.error === "string" && body.error ? body.error : `The service did not confirm the stop (${res.status}). ${UNCONFIRMED}`);
+        recheck();
         return;
       }
       if (body?.ok !== true) {
