@@ -155,6 +155,8 @@ function requestFrom(row: Row): PerpsPilotRequest {
 function approvedSource(source: unknown): boolean { return source === "admin" || source === "bootstrap"; }
 
 const schemaReady = new WeakMap<Db, Promise<void>>();
+/** Databases whose schema is known made. A held connection checks this, never another caller's promise. */
+const schemaMade = new WeakSet<Db>();
 async function lockSchema(tx: Db): Promise<void> {
   try { await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(SCHEMA_LOCK); }
   catch (error) { if (!/no such function: pg_advisory_xact_lock/i.test(String((error as Error)?.message))) throw error; }
@@ -166,31 +168,41 @@ async function boundedTransaction<T>(db: Db, fn: (tx: Db) => Promise<T>): Promis
     return fn(tx);
   });
 }
+async function makeSchema(db: Db): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await boundedTransaction(db, async tx => {
+        await lockSchema(tx);
+        await tx.exec(PERPS_PILOT_DDL);
+        await tx.prepare("INSERT INTO perps_pilot_cohort(id,revision) VALUES(1,0) ON CONFLICT(id) DO NOTHING").run();
+      });
+      return;
+    } catch (error) {
+      if (attempt < 2 && ["23505", "42P07", "42710"].includes(String((error as { code?: unknown }).code))) continue;
+      throw error;
+    }
+  }
+}
 async function ensureSchema(db: Db): Promise<void> {
   const root = rootDb(db);
+  if (schemaMade.has(root)) return;
+  // A HELD CONNECTION (a session lock's, rootDb(db) !== db) MAKES IT ITSELF.
+  // The shared promise may be running on a pool connection still queued
+  // behind this one's holder, and a pool full of holders waiting on it would
+  // never drain. The DDL is idempotent and serialized by the schema lock.
+  if (root !== db) return makeSchema(db).then(() => { schemaMade.add(root); });
   const existing = schemaReady.get(root);
   if (existing) return existing;
-  const ready = (async () => {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await boundedTransaction(db, async tx => {
-          await lockSchema(tx);
-          await tx.exec(PERPS_PILOT_DDL);
-          await tx.prepare("INSERT INTO perps_pilot_cohort(id,revision) VALUES(1,0) ON CONFLICT(id) DO NOTHING").run();
-        });
-        return;
-      } catch (error) {
-        if (attempt < 2 && ["23505", "42P07", "42710"].includes(String((error as { code?: unknown }).code))) continue;
-        throw error;
-      }
-    }
-  })().catch(error => { if (schemaReady.get(root) === ready) schemaReady.delete(root); throw error; });
+  const ready = makeSchema(db).then(() => { schemaMade.add(root); })
+    .catch(error => { if (schemaReady.get(root) === ready) schemaReady.delete(root); throw error; });
   schemaReady.set(root, ready);
   return ready;
 }
 
 export class SqlPerpsPilotStore implements PerpsPilotStore {
   private ready: Promise<void> | null = null;
+  /** An initialization has finished: from here on nobody runs or waits on one. */
+  private initialized = false;
   constructor(private db: Db, private options: { bootstrapOwners?: () => string | undefined; now?: () => number } = {}) {}
   private now(): number { return integer((this.options.now ?? Date.now)()); }
   private async lock(tx: Db, initializing = false): Promise<number> {
@@ -229,38 +241,44 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     return on && rootDb(on) === rootDb(this.db) ? on : this.db;
   }
   private async initialize(on: Db = this.db): Promise<void> {
-    if (!this.ready) {
-      this.ready = (async () => {
-        await ensureSchema(on);
-        await boundedTransaction(on, async tx => {
-          // Another replica's first-use DDL can lock the admission tables.
-          // Take its schema lock BEFORE the cohort row, never the reverse.
-          await lockSchema(tx);
-          await this.lock(tx, true);
-          const cohort = await tx.prepare("SELECT initialized_at FROM perps_pilot_cohort WHERE id=1").get() as Row;
-          if (cohort.initialized_at !== null) {
-            integer(cohort.initialized_at);
-            // The previous, undeployed design admitted invite holders directly.
-            // Persist a denial so an old reader also fails closed. Old writers
-            // must be stopped before rollout; all new reads additionally check
-            // the admission source in case a stale writer reintroduces a row.
-            await this.quarantineLegacyInvites(tx);
-            return;
-          }
-          if (await tx.prepare("SELECT owner FROM perps_pilot_admissions LIMIT 1").get()) throw new Error("Uninitialized paper-pilot cohort contains membership records.");
-          const owners = bootstrapOwners((this.options.bootstrapOwners ?? (() => process.env.MERRYMEN_PERPS_PAPER_TENANTS))());
-          const revision = await this.bump(tx), at = this.now();
-          for (const owner of owners) {
-            await tx.prepare("INSERT INTO perps_pilot_admissions(owner,status,source,revision,updated_at,actor) VALUES(?,'allowed','bootstrap',?,?,NULL)")
-              .run(owner, revision, at);
-          }
-          await tx.prepare("UPDATE perps_pilot_cohort SET initialized_at=?,bootstrap_digest=? WHERE id=1")
-            .run(at, createHash("sha256").update(owners.join(",")).digest("hex"));
-          await this.audit(tx, "bootstrap", null, null, null, revision, at);
-        });
-      })().catch(error => { this.ready = null; throw error; });
-    }
+    if (this.initialized) return;
+    // A held connection (dbFor) never waits on an initialization running on
+    // another connection, which may be queued behind it in the same pool: it
+    // runs its own. Initialization is idempotent, serialized by the schema lock
+    // and the cohort row.
+    if (on !== this.db) return this.initializeOn(on);
+    this.ready ??= this.initializeOn(on).catch(error => { this.ready = null; throw error; });
     return this.ready;
+  }
+  private async initializeOn(on: Db): Promise<void> {
+    await ensureSchema(on);
+    await boundedTransaction(on, async tx => {
+      // Another replica's first-use DDL can lock the admission tables.
+      // Take its schema lock BEFORE the cohort row, never the reverse.
+      await lockSchema(tx);
+      await this.lock(tx, true);
+      const cohort = await tx.prepare("SELECT initialized_at FROM perps_pilot_cohort WHERE id=1").get() as Row;
+      if (cohort.initialized_at !== null) {
+        integer(cohort.initialized_at);
+        // The previous, undeployed design admitted invite holders directly.
+        // Persist a denial so an old reader also fails closed. Old writers
+        // must be stopped before rollout; all new reads additionally check
+        // the admission source in case a stale writer reintroduces a row.
+        await this.quarantineLegacyInvites(tx);
+        return;
+      }
+      if (await tx.prepare("SELECT owner FROM perps_pilot_admissions LIMIT 1").get()) throw new Error("Uninitialized paper-pilot cohort contains membership records.");
+      const owners = bootstrapOwners((this.options.bootstrapOwners ?? (() => process.env.MERRYMEN_PERPS_PAPER_TENANTS))());
+      const revision = await this.bump(tx), at = this.now();
+      for (const owner of owners) {
+        await tx.prepare("INSERT INTO perps_pilot_admissions(owner,status,source,revision,updated_at,actor) VALUES(?,'allowed','bootstrap',?,?,NULL)")
+          .run(owner, revision, at);
+      }
+      await tx.prepare("UPDATE perps_pilot_cohort SET initialized_at=?,bootstrap_digest=? WHERE id=1")
+        .run(at, createHash("sha256").update(owners.join(",")).digest("hex"));
+      await this.audit(tx, "bootstrap", null, null, null, revision, at);
+    });
+    this.initialized = true;
   }
   private async locked<T>(fn: (tx: Db, revision: number) => Promise<T>, on: Db = this.db): Promise<T> {
     await this.initialize(on);
