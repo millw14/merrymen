@@ -64,6 +64,32 @@ export default function Terms() {
         </div>
 
         <h2 id="hosted-service">1 · What the hosted service does</h2>
+        {/*
+          "NO POWER TO TRANSFER OR WITHDRAW" (here, below, and section 6) is
+          true for the HOSTED service, traced 2026-09-26 at 3ed3486e:
+          - packages/core/src/wall.ts buildCallPermissions emits a USDG
+            `transfer` permission only when `withdrawalAddresses` is non-empty.
+          - No signer can pass one. web/src/lib/session.ts builds `wallOpts`
+            without it and MintOptions has no such field; ios-native/Signing/
+            engine.ts and sdk/browser.ts sign through that file, and
+            mobile/src/crypto/signGrant.ts omits it too. Partner enrollment
+            rebuilds the canonical wall (web/src/lib/partner-enrollment.ts
+            validGrant, grantWallOptions) and refuses different bytes.
+            worker/src/transfer-mirror.test.ts pins the default wall.
+          - Only grants signed before WITHDRAWAL_ALLOWLIST_LANDED_AT
+            (packages/core/src/grant.ts, 2026-08-02) carry one, with any
+            recipient. The hosted route (web/src/app/api/grants/route.ts)
+            refuses a grant without a binding over a single-use server nonce
+            (web/src/lib/auth.ts verifyGrantBinding), and bindings exist only
+            since 2026-08-28, so no such grant reaches it through the app.
+          SCOPE: self-hosted, a pre-2026-08-02 grant can still be unexpired
+          (its grant page offered 90-day keys and did not clamp a typed
+          expiry), so section 14 must not repeat this. And
+          /api/grants does not re-check the policy bytes the way partner
+          enrollment does: this holds for every permission Merrymen mints, not
+          one an owner hand-builds and posts. If a signer ever registers a
+          withdrawal address, change these words and PrivacyPolicyDoc first.
+        */}
         <p>
           The hosted service runs a trading agent for you on Robinhood Chain. You create an agent
           with its own account on the chain, fund it, choose a strategy, and sign a trading
@@ -138,6 +164,8 @@ export default function Terms() {
             Holding $MERRYMEN can lower it (the Merry Circle).
           </li>
         </ul>
+        {/* "a transfer permission that the permission you signed does not
+            contain": the evidence is the comment under section 1's heading. */}
         <p>
           Both are recorded in your agent&apos;s ledger, where you can see them.{" "}
           <strong>Today neither is collected:</strong> no money moves to us, because collecting
