@@ -99,7 +99,10 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
       if (!saved && (snapshots.current || (snapshots.archived?.length ?? 0))) throw new Error("A saved Perps wallet needs review. Open Wallet & permission before creating a new permission.");
       const options = { purpose: "perps" as const, chainId: 4663, caps: chosen, onStatus: (value: string) => { assertCurrent(); setStatus(value); }, assertCurrent, beforeCommit: async () => { await requirePaperOffering(); await checkedAccount(); assertCurrent(); }, hostedAs: current.session.hosted ? current.session.address as `0x${string}` : undefined,
         ...(saved ? { expectAccount: saved.smartAccount as `0x${string}` } : {}), previousGrant: previous, localGrants: snapshots };
-      await preflightAgentGrant(ownerSigner, options); assertCurrent();
+      // A renewal's wall is checked before anything is stopped or revoked; the
+      // preflight needs the account it renews. A first wallet stops nothing, and
+      // its mint checks the wall before asking for any signature.
+      if (saved) { await preflightAgentGrant(ownerSigner, options); assertCurrent(); }
       const skip = !!saved && renewalSkipsRevocation(saved) && (previous === null || renewalSkipsRevocation(previous));
       const wallet = saved ? { smartAccount: saved.smartAccount as `0x${string}`, chainId: saved.chainId, ownerAccount: ownerSigner, purpose: "perps" as const } : null;
       if (wallet && !skip) await assertRevocationFunded(wallet);

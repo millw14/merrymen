@@ -41,7 +41,8 @@ before(async () => {
         loadGrant: () => localGrant,
         localGrantsSnapshot: () => ({ current: localGrant, archived: [] }),
         sameGrantPermission: (a: Grant, b: Grant) => a?.smartAccount === b?.smartAccount && a?.sessionKeyAddress === b?.sessionKeyAddress,
-        preflightAgentGrant: async (_owner: unknown, options: { purpose: string; expectAccount?: string }) => { events.push("preflight"); assert.equal(options.purpose, "perps"); if (preflightWait) await preflightWait.promise; },
+        // As session.ts's: a renewal preflight refuses without the account it renews.
+        preflightAgentGrant: async (_owner: unknown, options: { purpose: string; expectAccount?: string }) => { events.push("preflight"); assert.equal(options.purpose, "perps"); if (!options.expectAccount) throw new Error("A renewal preflight requires the existing account address."); if (preflightWait) await preflightWait.promise; },
         createPrivyOwnedWallet: async (_owner: unknown, _did: unknown, options: { purpose: string; expectAccount?: string; beforeCommit: () => Promise<void>; assertCurrent: () => void; minimumValidationNonce?: number }) => { events.push("mint"); if (mintWait) await mintWait.promise; await options.beforeCommit(); options.assertCurrent(); assert.equal(options.purpose, "perps"); if (events.includes("revoke")) assert.equal(options.minimumValidationNonce, 1); assert.equal(options.expectAccount, activeGrant?.smartAccount); const created = grant(); activeGrant = created; localGrant = created; return { local: created, handoff: { ok: true } }; },
         retryGrantHandoff: async () => { events.push("retry"); return { ok: true }; },
       };
@@ -282,7 +283,9 @@ test("a new paper wallet and an owner-verified public renewal both use the dedic
   activeGrant = null; localGrant = null;
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: true, signer }));
   await acknowledge(); await click("Create Perps wallet");
+  assert.equal(events.includes("preflight"), false); assert.ok(events.includes("mint"));
   assert.equal(events.includes("stop"), false); assert.equal((localGrant as Grant | null)?.purpose, "perps");
+  assert.match(ui.container.textContent!, /Permission activated/);
   await ui.render(null); events = []; localGrant = null;
   activeGrant = { ...grant(), binding: { version: "privy-did-owner-v1" }, serialized: undefined, demoSessionPrivateKey: undefined } as unknown as Grant;
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
