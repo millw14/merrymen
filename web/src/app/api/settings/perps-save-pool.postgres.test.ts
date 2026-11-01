@@ -193,11 +193,11 @@ test(
     // pool is full of them. Then the offered read (no lock, no connection held)
     // is the pilot store's first caller: its initialization queues for an
     // eleventh connection. Only then are the saves let go, to reach the pilot.
-    await admin!.query("BEGIN");
-    await admin!.query(`LOCK TABLE ${schema}.perps_tenant_settings IN ACCESS EXCLUSIVE MODE`);
     let offered: Promise<{ status: number; body: unknown }> | null = null;
     let released = false;
+    await admin!.query("BEGIN");
     try {
+      await admin!.query(`LOCK TABLE ${schema}.perps_tenant_settings IN ACCESS EXCLUSIVE MODE`);
       const saves = enableAll(versions);
       for (let i = 0; i < 200 && (await locksHeld()) < POOL_MAX; i++) await delay(25);
       assert.equal(await locksHeld() >= POOL_MAX, true, "the saves never filled the pool");

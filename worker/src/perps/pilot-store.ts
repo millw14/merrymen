@@ -203,6 +203,8 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
   private ready: Promise<void> | null = null;
   /** An initialization has finished: from here on nobody runs or waits on one. */
   private initialized = false;
+  /** The initialization running on a held connection: other held callers share it. */
+  private heldInit: Promise<void> | null = null;
   constructor(private db: Db, private options: { bootstrapOwners?: () => string | undefined; now?: () => number } = {}) {}
   private now(): number { return integer((this.options.now ?? Date.now)()); }
   private async lock(tx: Db, initializing = false): Promise<number> {
@@ -242,12 +244,26 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
   }
   private async initialize(on: Db = this.db): Promise<void> {
     if (this.initialized) return;
-    // A held connection (dbFor) never waits on an initialization running on
-    // another connection, which may be queued behind it in the same pool: it
-    // runs its own. Initialization is idempotent, serialized by the schema lock
-    // and the cohort row.
-    if (on !== this.db) return this.initializeOn(on);
-    this.ready ??= this.initializeOn(on).catch(error => { this.ready = null; throw error; });
+    // A held connection (dbFor) never waits on the pool's initialization,
+    // which may be queued for a connection behind its own holder. It shares
+    // one running on another held connection (already checked out, waiting
+    // only on database locks no waiting caller holds), else runs its own; and
+    // runs its own if the shared one failed. Initialization is idempotent,
+    // serialized by the schema lock and the cohort row.
+    if (on !== this.db) {
+      const running = this.heldInit;
+      if (running) {
+        try { return await running; } catch { if (this.initialized) return; return this.initializeOn(on); }
+      }
+      const mine: Promise<void> = this.initializeOn(on).finally(() => { if (this.heldInit === mine) this.heldInit = null; });
+      this.heldInit = mine;
+      return mine;
+    }
+    this.ready ??= this.initializeOn(on).catch(error => {
+      this.ready = null;
+      // A held caller finished it meanwhile: the pool's own attempt losing a lock race is no failure.
+      if (!this.initialized) throw error;
+    });
     return this.ready;
   }
   private async initializeOn(on: Db): Promise<void> {
