@@ -34,14 +34,13 @@ export function PerpsLinks() {
 export function PerpsScreen() {
   const state = usePerpsAccount();
   const identity = state.account?.status.grant?.smartAccount ?? state.account?.session.address ?? "signed-out";
-  const session = state.account?.session ?? null;
   // Outside the desk's identity key: the stop's answer must outlive the
-  // remount its own refresh causes. Shown while the login is unconfirmed by a
-  // failed read too (disabled, saying so), never to a signed-out visitor.
-  const stopShown = session ? !session.hosted || !!session.address : !!state.error;
+  // remount its own refresh causes. Once the first read has answered, even
+  // with a failure: the stop confirms the login itself when the wallet read
+  // cannot (and shows nothing to a signed-out visitor).
   return <>
     <PerpsDesk key={identity} state={state}/>
-    {stopShown && <div className="perps-desk"><StopAllAgents session={session} onDone={state.refresh}/></div>}
+    {(state.account || state.error) && <div className="perps-desk"><StopAllAgents session={state.account?.session ?? null} onDone={state.refresh}/></div>}
   </>;
 }
 

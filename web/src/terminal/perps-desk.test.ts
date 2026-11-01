@@ -22,6 +22,7 @@ let lostWrite: boolean, gate: boolean, settingsEnabled: boolean, settingsVersion
 let authWait: ReturnType<typeof deferred<Response>> | null, stopWait: ReturnType<typeof deferred<void>> | null, mintWait: ReturnType<typeof deferred<void>> | null;
 let postWait: ReturnType<typeof deferred<Response>> | null, preflightWait: ReturnType<typeof deferred<void>> | null;
 let hostedMode: boolean, killReply: () => Response | Promise<Response>;
+let archived: Grant[], clearThrows: string | null, grantsFail: boolean;
 const originalFetch = globalThis.fetch;
 const signer = { account: { address: OWNER }, did: "did:privy:perps-test" } as unknown as PrivyOwner;
 const require = createRequire(import.meta.url);
@@ -38,11 +39,16 @@ before(async () => {
     if (id.endsWith(".css")) return {};
     if (id === "./HostedControls") return { PRIVY_BETA: false, SignIn: () => React.createElement("p", null, "Sign in") };
     if (id === "./usePrivyOwner") return { usePrivyOwner: () => signer };
-    if (parent.filename === stopPath && id === "../lib/session") return { clearGrant: (wallet: string) => events.push(`clear-${wallet}`) };
+    // As session.ts's clearGrant: the slot is archived, then emptied.
+    if (parent.filename === stopPath && id === "../lib/session") return { clearGrant: (wallet: string) => {
+      if (clearThrows === wallet) throw new Error("storage refused");
+      events.push(`clear-${wallet}`);
+      if (wallet === "perps" && localGrant) { archived.push(localGrant); localGrant = null; }
+    } };
     if (parent.filename === walletPath) {
       if (id === "../lib/session") return {
         loadGrant: () => localGrant,
-        localGrantsSnapshot: () => ({ current: localGrant, archived: [] }),
+        localGrantsSnapshot: () => ({ current: localGrant, archived }),
         sameGrantPermission: (a: Grant, b: Grant) => a?.smartAccount === b?.smartAccount && a?.sessionKeyAddress === b?.sessionKeyAddress,
         // As session.ts's: a renewal preflight refuses without the account it renews.
         preflightAgentGrant: async (_owner: unknown, options: { purpose: string; expectAccount?: string }) => { events.push("preflight"); assert.equal(options.purpose, "perps"); if (!options.expectAccount) throw new Error("A renewal preflight requires the existing account address."); if (preflightWait) await preflightWait.promise; },
@@ -75,6 +81,7 @@ function accountReport() {
 beforeEach(() => {
   ui = testDom(); tenant = OWNER; activeGrant = grant(); localGrant = null; reportMode = "ok"; reportOwner = OWNER; activityOwner = OWNER; chartOwner = OWNER;
   hostedMode = true; killReply = () => { activeGrant = null; return json({ ok: true, perps: "stopped" }); };
+  archived = []; clearThrows = null; grantsFail = false;
   writes = []; events = []; lostWrite = false; gate = true; settingsEnabled = false; settingsVersion = "version-1"; postWait = null; preflightWait = null; authWait = null; stopWait = null; mintWait = null;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(String(input), "https://app.example.test"), method = init?.method ?? "GET";
@@ -87,6 +94,7 @@ beforeEach(() => {
     }
     if (url.pathname === "/api/auth/session" && authWait) return (await authWait.promise).clone();
     if (url.pathname === "/api/auth/session") return json(hostedMode ? { hosted: true, address: tenant } : { hosted: false, address: null });
+    if (url.pathname === "/api/grants" && grantsFail) return json({ error: "Couldn't read your Perps wallet. Try again shortly." }, 503);
     if (url.pathname === "/api/grants") { assert.equal(url.searchParams.get("wallet"), "perps"); return json({ exists: !!activeGrant, ...(hostedMode ? { tenant } : {}), ...(activeGrant ? { grant: activeGrant } : {}) }); }
     if (url.pathname === "/api/perps/account") return json(accountReport());
     if (url.pathname === "/api/perps/chart" || url.pathname === "/api/perps/market") return json(chart());
@@ -352,9 +360,11 @@ test("the stop needs no paper offering or pilot access, on the Wallet & permissi
   assert.match(ui.container.textContent!, /Stop request accepted for Spot, Perps and Solana/);
 });
 
-test("a self-hosted stop names no tenant", async () => {
+test("a self-hosted stop names no tenant, and promises no memory deletion", async () => {
   hostedMode = false; reportOwner = null as unknown as string;
   await mount(React.createElement(PerpsScreen));
+  assert.match(ui.container.textContent!, /local agent history is kept/);
+  assert.equal(ui.container.textContent!.includes("agent memory"), false);
   await click("Stop all agents"); await click("Stop all agents now");
   assert.deepEqual(deletes().map(write => write.body), [{ purpose: "delete-agent" }]);
 });
@@ -382,4 +392,54 @@ test("a login change after review closes it before anything is sent", async () =
   tenant = OTHER;
   await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Refresh account"]')!.click()); await settle();
   assert.equal(stopNow(), undefined); assert.equal(deletes().length, 0);
+});
+
+test("an unreadable Perps wallet never disables the stop: it confirms the login itself", async () => {
+  grantsFail = true;
+  await mount(React.createElement(PerpsScreen));
+  assert.match(ui.container.textContent!, /Perps wallet could not be verified/);
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.deepEqual(deletes().map(write => write.body), [{ purpose: "delete-agent", expectedTenant: OWNER }]);
+  assert.match(ui.container.textContent!, /Stop request accepted for Spot, Perps and Solana/);
+});
+
+test("after a stop the killed permission is not offered again, and a new wallet can be made in this browser", async () => {
+  activeGrant = null; localGrant = grant();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  assert.ok([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Retry saved permission activation"));
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.equal((localGrant as Grant | null), null); assert.equal(archived.length, 1);
+  assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "Retry saved permission activation"), false);
+  await acknowledge(); await click("Create Perps wallet");
+  assert.ok(events.includes("mint")); assert.equal(events.includes("preflight"), false); assert.equal(events.includes("retry"), false);
+  assert.match(ui.container.textContent!, /Permission activated/);
+});
+
+test("another login's archived Perps record is not replaced from here", async () => {
+  activeGrant = null; localGrant = null; archived = [{ ...grant(), owner: OTHER } as Grant];
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: true, signer }));
+  await acknowledge(); await click("Create Perps wallet");
+  assert.equal(events.includes("mint"), false);
+  assert.match(ui.container.textContent!, /could not be matched to this login.*Nothing was stopped or signed/);
+});
+
+test("a stop during a create in flight voids it: nothing is saved or handed off after the kill", async () => {
+  activeGrant = null; localGrant = null; mintWait = deferred<void>();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: true, signer }));
+  await acknowledge(); await ui.click("Create Perps wallet"); await settle();
+  assert.ok(events.includes("mint"));
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.equal(deletes().length, 1);
+  await act(async () => mintWait!.resolve()); await settle();
+  assert.equal(activeGrant, null); assert.equal(localGrant, null);
+  assert.equal(ui.container.textContent!.includes("Permission activated"), false);
+  assert.match(ui.container.textContent!, /Stop request accepted/);
+});
+
+test("one browser copy that cannot be cleared still clears the other, and says so", async () => {
+  clearThrows = "spot"; localGrant = grant();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.ok(events.includes("clear-perps")); assert.equal(localGrant, null);
+  assert.match(ui.container.textContent!, /saved spot permission could not be cleared/);
 });
