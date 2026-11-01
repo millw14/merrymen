@@ -121,13 +121,13 @@ export function DesktopHeader({
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
           <summary><Face name={mine.name} slug={mine.slug}/><span>{hasAgent && mine.name ? mine.name : "Account"}</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
-            <Link href={wallet === "perps" ? "/perps" : "/you"}>{wallet === "perps" ? "Perps practice book" : "Portfolio"}</Link>
+            <Link href={wallet === "perps" ? "/perps" : "/you"}>{wallet === "perps" ? "Perps portfolio" : "Portfolio"}</Link>
             <Link href={wallet === "perps" ? "/settings?wallet=perps" : "/settings"}>Settings</Link>
             <Link href={wallet === "perps" ? "/grant?wallet=perps" : "/grant"}>Wallet & permissions</Link>
             <Link href="/withdraw?wallet=perps">Perps withdrawal & recovery</Link>
             {wallet === "spot" && <Link href="/limits">Trading limits</Link>}
             {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
-            {!hasAgent && <Link href={wallet === "perps" ? "/create?for=perps" : "/create"}>{wallet === "perps" ? "Create paper Perps wallet" : "Create an agent"}</Link>}
+            {!hasAgent && <Link href={wallet === "perps" ? "/create?for=perps" : "/create"}>{wallet === "perps" ? "Create Perps wallet" : "Create an agent"}</Link>}
           </nav>
         </details>
       </div>
