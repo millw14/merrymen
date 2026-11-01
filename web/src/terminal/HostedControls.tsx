@@ -20,6 +20,7 @@ import type { ReadState } from "./live";
 import type { FleetRecoveryView } from "../../../worker/src/fleet-recovery";
 import { RecoveryNotice } from "./RecoveryNotice";
 import { pausedRecovery, recoveryFunds } from "./recovery-view";
+import { GloamFunding } from "./GloamFunding";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -144,7 +145,7 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
           {advice.say}
         </p>
       );
-    })()}{!pausedRecovery(account.status.recovery) && <EnergyFunding energy={account.status.energy} chainId={grant.chainId}/>}<label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
+    })()}{!pausedRecovery(account.status.recovery) && <EnergyFunding energy={account.status.energy} chainId={grant.chainId}/>}<label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}{!pausedRecovery(account.status.recovery) && <GloamFunding address={grant.smartAccount} chainId={grant.chainId}/>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
 }
 
 /**
