@@ -100,7 +100,7 @@ async function acknowledge() { const input = ui.container.querySelector<HTMLInpu
 
 test("desk shows exact paper positions and unknown figures, never a synthetic zero", async () => {
   await mount(React.createElement(PerpsScreen));
-  assert.match(ui.container.textContent!, /Perpetuals, on paper/);
+  assert.match(ui.container.textContent!, /Perpetuals/);
   assert.match(ui.container.textContent!, /long 0.001/);
   assert.match(ui.container.textContent!, /25.000000 USDG/);
   assert.match(ui.container.textContent!, /Not reported/);
@@ -132,6 +132,7 @@ test("private chart and activity responses must identify the displayed account",
   activityOwner = OTHER; chartOwner = OTHER;
   await mount(React.createElement(PerpsScreen));
   assert.match(ui.container.textContent!, /chart could not be verified/);
+  await click("Activity");
   assert.match(ui.container.textContent!, /Activity could not be verified/);
   assert.doesNotMatch(ui.container.textContent!, /No recorded fills/);
 });
@@ -153,6 +154,7 @@ test("reset requires explicit review and binds the dedicated account", async () 
   await click("Reset practice book");
   assert.equal(writes.length, 0);
   assert.match(ui.container.textContent!, /new simulated accounting epoch/);
+  assert.equal(document.activeElement, ui.container.querySelector(".perps-confirm"), "review receives focus before a command can be sent");
   await click("Confirm practice action");
   assert.equal(writes[0]!.url, "/api/paper-reset?wallet=perps");
   assert.equal(writes[0]!.body.expectedAccount, ACCOUNT);
@@ -171,9 +173,9 @@ test("login change after review prevents the close before its POST", async () =>
 
 test("settings attach the read version only for an explicit enable; risk save never re-enables", async () => {
   await mount(React.createElement(PerpsSettings, { offered: true }));
-  await click("Save paper risk settings");
+  await click("Save risk settings");
   assert.equal("perpsEnabled" in writes[0]!.body, false);
-  await click("Enable paper entries");
+  await click("Enable entries");
   assert.equal(writes[1]!.body.perpsEnabled, true);
   assert.equal(writes[1]!.body.expectedVersion, "version-1");
   await click("Switch entries off");
@@ -183,7 +185,7 @@ test("settings attach the read version only for an explicit enable; risk save ne
 
 test("offering disabled keeps off and recovery visible while disabling enabling", async () => {
   await mount(React.createElement(PerpsSettings, { offered: false }));
-  const enable = [...ui.container.querySelectorAll("button")].find(button => button.textContent === "Enable paper entries");
+  const enable = [...ui.container.querySelectorAll("button")].find(button => button.textContent === "Enable entries");
   assert.equal(enable?.disabled, true);
   await click("Switch entries off");
   assert.equal(writes[0]!.body.perpsEnabled, false);
@@ -193,14 +195,14 @@ test("offering disabled keeps off and recovery visible while disabling enabling"
 test("renewal checks gate before stop, preserves recovery, and skips only an empty Perps wall", async () => {
   localGrant = grant();
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
-  await acknowledge(); await click("Renew paper Perps permission");
+  await acknowledge(); await click("Renew Perps permission");
   assert.deepEqual(events, ["offered", "preflight", "offered", "save-recovery", "mark", "stop", "mint", "offered"]);
 });
 
 test("disabled paper gate refuses renewal before any stop, storage mutation or signature", async () => {
   localGrant = grant(); gate = false;
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
-  await acknowledge(); await click("Renew paper Perps permission");
+  await acknowledge(); await click("Renew Perps permission");
   assert.deepEqual(events, ["offered"]);
   assert.match(ui.container.textContent!, /Paper is off/);
 });
@@ -208,7 +210,7 @@ test("disabled paper gate refuses renewal before any stop, storage mutation or s
 test("fresh public metadata without binding can be renewed only by its owner", async () => {
   activeGrant = { ...grant(), binding: { version: "privy-did-owner-v1" }, serialized: undefined } as unknown as Grant;
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer: { ...signer, account: { address: OTHER } as PrivyOwner["account"] } }));
-  await acknowledge(); await click("Renew paper Perps permission");
+  await acknowledge(); await click("Renew Perps permission");
   assert.deepEqual(events, ["offered"]);
   assert.match(ui.container.textContent!, /protected signing wallet for this account/);
 });
@@ -216,7 +218,7 @@ test("fresh public metadata without binding can be renewed only by its owner", a
 test("account change during preflight never stops or signs the old wallet", async () => {
   localGrant = grant(); preflightWait = deferred<void>();
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
-  await acknowledge(); await ui.click("Renew paper Perps permission"); await settle();
+  await acknowledge(); await ui.click("Renew Perps permission"); await settle();
   assert.deepEqual(events, ["offered", "preflight"]);
   tenant = OTHER;
   await act(async () => preflightWait!.resolve()); await settle();
@@ -227,7 +229,7 @@ test("account change during preflight never stops or signs the old wallet", asyn
 test("closing settings during account preflight cancels the pending enable", async () => {
   await mount(React.createElement(PerpsSettings, { offered: true }));
   authWait = deferred<Response>();
-  await ui.click("Enable paper entries"); await settle();
+  await ui.click("Enable entries"); await settle();
   await ui.render(null);
   await act(async () => authWait!.resolve(json({ hosted: true, address: OWNER }))); await settle();
   assert.equal(writes.length, 0, "a closed screen cannot enable entries after a delayed preflight");
@@ -237,7 +239,7 @@ test("closing a renewal while stop is pending prevents revocation and mint", asy
   localGrant = { ...grant(), grantFeatures: ["energy-buy-v1"] } as Grant; activeGrant = localGrant;
   stopWait = deferred<void>();
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
-  await acknowledge(); await ui.click("Renew paper Perps permission"); await settle();
+  await acknowledge(); await ui.click("Renew Perps permission"); await settle();
   assert.ok(events.includes("stop"));
   await ui.render(null);
   await act(async () => stopWait!.resolve()); await settle();
@@ -250,7 +252,7 @@ test("a changed protected signer while stop awaits cannot revoke or mint", async
   localGrant = { ...grant(), grantFeatures: ["energy-buy-v1"] } as Grant; activeGrant = localGrant;
   stopWait = deferred<void>();
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
-  await acknowledge(); await ui.click("Renew paper Perps permission"); await settle();
+  await acknowledge(); await ui.click("Renew Perps permission"); await settle();
   assert.ok(events.includes("stop"));
   await ui.render(React.createElement(PerpsWalletView, { offered: true, creating: false, signer: { ...signer, did: "did:privy:changed" } }));
   await ui.render(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
@@ -261,7 +263,7 @@ test("a changed protected signer while stop awaits cannot revoke or mint", async
 test("creation rechecks the login after signing before saving or handing off", async () => {
   activeGrant = null; localGrant = null; mintWait = deferred<void>();
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: true, signer }));
-  await acknowledge(); await ui.click("Create paper Perps wallet"); await settle();
+  await acknowledge(); await ui.click("Create Perps wallet"); await settle();
   assert.ok(events.includes("mint")); tenant = OTHER;
   await act(async () => mintWait!.resolve()); await settle();
   assert.equal(localGrant, null); assert.equal(activeGrant, null);
@@ -272,18 +274,41 @@ test("creation rechecks the login after signing before saving or handing off", a
 test("a nonempty previous wall revokes only the Perps account and carries its confirmed nonce into renewal", async () => {
   localGrant = { ...grant(), grantFeatures: ["energy-buy-v1"] } as Grant; activeGrant = localGrant;
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
-  await acknowledge(); await click("Renew paper Perps permission");
+  await acknowledge(); await click("Renew Perps permission");
   assert.deepEqual(events, ["offered", "preflight", "funding-preflight", "offered", "save-recovery", "mark", "stop", "revoke", "mint", "offered"]);
 });
 
 test("a new paper wallet and an owner-verified public renewal both use the dedicated mint", async () => {
   activeGrant = null; localGrant = null;
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: true, signer }));
-  await acknowledge(); await click("Create paper Perps wallet");
+  await acknowledge(); await click("Create Perps wallet");
   assert.equal(events.includes("stop"), false); assert.equal((localGrant as Grant | null)?.purpose, "perps");
   await ui.render(null); events = []; localGrant = null;
   activeGrant = { ...grant(), binding: { version: "privy-did-owner-v1" }, serialized: undefined, demoSessionPrivateKey: undefined } as unknown as Grant;
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
-  await acknowledge(); await click("Renew paper Perps permission");
+  await acknowledge(); await click("Renew Perps permission");
   assert.ok(events.includes("stop")); assert.ok(events.includes("mint")); assert.equal(events.includes("revoke"), false);
+});
+
+
+test("market and ledger navigation never writes or enables trading", async () => {
+  await mount(React.createElement(PerpsScreen));
+  assert.equal(ui.container.querySelector('.perps-mode-badge')?.textContent, "Paper");
+  await click("Activity");
+  assert.match(ui.container.textContent!, /No recorded fills or funding/);
+  await click("Positions1");
+  assert.match(ui.container.textContent!, /long 0.001/);
+  assert.equal(writes.length, 0);
+});
+
+
+test("a signed-out visitor sees the market and access path without trading controls", async () => {
+  tenant = null; activeGrant = null;
+  await mount(React.createElement(PerpsScreen));
+  assert.match(ui.container.textContent!, /Not connected/);
+  assert.ok(ui.container.querySelector('[aria-label="Market chart"]'));
+  assert.ok(ui.container.querySelector('a[href="/perps/join"]'));
+  assert.equal(ui.container.querySelector('a[href="/create?for=perps"]'), null);
+  assert.equal([...ui.container.querySelectorAll('button')].some(button => /Close |Reset /.test(button.textContent || '')), false);
+  assert.equal(writes.length, 0);
 });

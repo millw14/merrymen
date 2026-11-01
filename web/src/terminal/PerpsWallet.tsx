@@ -15,7 +15,7 @@ import { requestJson } from "./request-json";
 import { usePerpsAccount } from "./usePerpsAccount";
 import { PRIVY_BETA, SignIn } from "./HostedControls";
 import { usePrivyOwner, type PrivyOwner } from "./usePrivyOwner";
-import { PerpsLinks } from "./PerpsScreen";
+import { PerpsLinks, PerpsModeBadge } from "./PerpsScreen";
 import "./perps-desk.css";
 
 const DEFAULT_CAPS: GrantCaps = { perTradeUsdg: 25, dailyUsdg: 100, expiryDays: 7, maxDrawdownPct: 10, maxOpsPerDay: 48 };
@@ -117,7 +117,7 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
       await checkedAccount(); assertCurrent();
       const result = await createPrivyOwnedWallet(ownerSigner, signer.did, { ...options, minimumValidationNonce });
       assertCurrent();
-      if (mounted.current) { setSaved(result.local); setMessage(result.handoff.ok ? "Paper permission activated. Open Perps settings to explicitly enable or adjust paper entries." : result.handoff.error ?? "Your signed permission is saved, but activation was not confirmed. Review and retry activation below."); setAck(false); refresh(); }
+      if (mounted.current) { setSaved(result.local); setMessage(result.handoff.ok ? "Permission activated. Open Perps settings to enable or adjust entries." : result.handoff.error ?? "Your signed permission is saved, but activation was not confirmed. Review and retry activation below."); setAck(false); refresh(); }
     } catch (error) { if (mounted.current && currentIdentity.current === startingIdentity && authorityGeneration.current === startedGeneration) setMessage(`${stopped ? "The old Perps permission was stopped. Its saved recovery record was kept. " : ""}${error instanceof Error ? error.message : "The permission could not be activated."}`); }
     finally { flight.current = false; if (mounted.current) { setBusy(false); setStatus(""); } }
   }
@@ -143,19 +143,19 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
       assertCurrent();
       const result = await retryGrantHandoff(saved, current.session.hosted ? proof : undefined, assertCurrent);
       assertCurrent();
-      setMessage(result.ok ? "The paper permission is activated. Its settings are unchanged." : result.error ?? "Activation was not confirmed."); refresh();
+      setMessage(result.ok ? "Permission activated. Its settings are unchanged." : result.error ?? "Activation was not confirmed."); refresh();
     } catch (error) { if (mounted.current && currentIdentity.current === startingIdentity && authorityGeneration.current === startedGeneration) setMessage(error instanceof Error ? error.message : "Activation was not confirmed."); }
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   const signedOut = account?.session.hosted && !owner;
-  return <section className="perps-desk"><h1>{creating && !saved ? "Create a paper Perps wallet" : "Perps wallet & permission"}</h1><PerpsLinks/><p>A separate account owned by your protected signing wallet. This paper permission cannot spend on-chain. No deposit or live trading is required.</p>
+  return <section className="perps-desk"><div className="perps-title-row"><h1>{creating && !saved ? "Set up your Perps wallet" : "Wallet & permission"}</h1><PerpsModeBadge/></div><PerpsLinks/><p>A separate account owned by your protected signing wallet. This paper permission cannot spend on-chain. No deposit or live trading is required.</p>
     {!offered && <p role="status">Paper Perps creation and renewal are disabled on this server. Withdrawal and recovery remain available.</p>}
     <p>Have a pilot code? <a href="/perps/join">Submit your wallet for administrator approval</a> before creating a permission. Your invitation requests access; an administrator must approve it.</p>
     {(reading && !account) && <p>Checking your wallet…</p>}{readError && <p role="alert">{readError}</p>}
     {signedOut && <SignIn onDone={refresh}/>}
     {account && !signedOut && !signer && <p>Your protected signing wallet is not ready. {PRIVY_BETA ? "Sign in with the account that owns this wallet and wait for it to become ready." : "Protected wallet sign-in is not configured on this installation."}</p>}
     {saved && <><p className="perps-address">Perps account <code>{saved.smartAccount}</code></p><p>Owner <code>{saved.owner}</code></p><p>Permission expires {fullDateTime(saved.expiresAt * 1000)}.</p></>}
-    {account && !signedOut && <><div className="perps-settings-grid">{CAP_FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={key === "perTradeUsdg" || key === "dailyUsdg" ? "decimal" : "numeric"} value={caps[key]} disabled={busy || !offered} onChange={event => setCaps(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div><label><input type="checkbox" checked={ack} disabled={busy || !offered} onChange={event => setAck(event.target.checked)}/>{saved ? "I want to replace this Perps permission with the limits above. Recovery access stays with the same owner." : "I understand this is simulated trading and my sign-in controls the separate Perps wallet."}</label><button disabled={!offered || !signer || !savedRead || !ack || busy} onClick={() => void sign()}>{busy ? "Working…" : saved ? "Renew paper Perps permission" : "Create paper Perps wallet"}</button>
+    {account && !signedOut && <><div className="perps-settings-grid">{CAP_FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={key === "perTradeUsdg" || key === "dailyUsdg" ? "decimal" : "numeric"} value={caps[key]} disabled={busy || !offered} onChange={event => setCaps(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div><label><input type="checkbox" checked={ack} disabled={busy || !offered} onChange={event => setAck(event.target.checked)}/>{saved ? "I want to replace this Perps permission with the limits above. Recovery access stays with the same owner." : "I understand this is simulated trading and my sign-in controls the separate Perps wallet."}</label><button disabled={!offered || !signer || !savedRead || !ack || busy} onClick={() => void sign()}>{busy ? "Working…" : saved ? "Renew Perps permission" : "Create Perps wallet"}</button>
       {saved?.serialized && saved.demoSessionPrivateKey && !account.status.exists && !needsPermissionReplacement(saved) && <button disabled={!offered || !signer || busy} onClick={() => void activate()}>Retry saved permission activation</button>}</>}
     {status && <p role="status">{status}</p>}{message && <p role="status">{message}</p>}<p><a href="/withdraw?wallet=perps">Withdraw or recover this wallet</a></p>
   </section>;

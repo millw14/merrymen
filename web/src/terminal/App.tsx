@@ -93,7 +93,7 @@ import { goTo } from "./navigate";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
 
-const PerpsWorkspace = dynamic(() => import("./PerpsWorkspace").then(module => module.PerpsWorkspace), { ssr: false, loading: () => <p role="status">Loading paper Perps desk…</p> });
+const PerpsWorkspace = dynamic(() => import("./PerpsWorkspace").then(module => module.PerpsWorkspace), { ssr: false, loading: () => <p role="status">Loading Perps…</p> });
 const SolanaScreen = dynamic(() => import("./SolanaScreen").then((module) => module.SolanaScreen));
 
 const desktopSnapshot = () => window.matchMedia("(min-width: 1100px)").matches;
@@ -178,6 +178,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   const screen: Screen = isolatedWallet && requestedScreen.kind === "tab" ? { kind: "perps" } : desktop && (
     money || (requestedScreen.kind === "tab" && (requestedScreen.tab === "feed" || requestedScreen.tab === "home"))
   ) ? desktopDetail : requestedScreen;
+  const perpsDesk = selectedWallet === "perps" && screen.kind === "perps";
   const modeOffered = perps && screen.kind !== "solana" && selectedWallet !== "invalid";
   const modeTransition = useTradingModeTransition({
     identity: `${epoch}:${account?.session.hosted ?? "unknown"}:${account?.session.address?.toLowerCase() ?? "signed-out"}`,
@@ -557,8 +558,9 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   return (
     <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
       ref={modeSceneRef}
-      className={ticks.length > 0 ? "app has-tape" : "app"}
+      className={!isolatedWallet && ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
+      data-wallet={selectedWallet}
     >
       {/* GATED IN JSX, NOT JUST IN CSS. These three were rendered on every
           device and hidden by a media query, so a phone MOUNTED the desktop
@@ -566,7 +568,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
       {desktop && <DesktopHeader tradingMode={tradingMode} hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
-      {desktop && isolatedWallet ? <aside className="desktop-sidebar"><nav className="perps-desk" aria-label="Perps workspace"><h2>Perps wallet</h2><p><a href="/perps">Paper desk</a></p><p><a href="/settings?wallet=perps">Settings</a></p><p><a href="/grant?wallet=perps">Permission</a></p><p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></p><p><a href="/home">Return to Spot</a></p></nav></aside> : desktop && (
+      {desktop && perpsDesk ? null : desktop && isolatedWallet ? <aside className="desktop-sidebar"><nav className="perps-desk" aria-label="Perps workspace"><h2>Perps wallet</h2><p><a href="/perps">Trading desk</a></p><p><a href="/settings?wallet=perps">Settings</a></p><p><a href="/grant?wallet=perps">Permission</a></p><p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></p><p><a href="/home">Return to Spot</a></p></nav></aside> : desktop && (
         <DesktopSidebar
           reads={live.reads}
           retired={live.retired}
@@ -844,7 +846,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
         )}
         {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
       </div>
-      {desktop && isolatedWallet ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Separate paper wallet</h2><p>Perps balances and positions appear only in this workspace. Your public identity remains your Spot profile.</p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></section></aside> : desktop && screen.kind === "solana" ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Solana account</h2><p>Solana balances, permissions and trading limits are shown in this workspace.</p><p>Use the network selector to return to Robinhood Chain.</p></section></aside> : desktop && money ? (
+      {desktop && perpsDesk ? null : desktop && isolatedWallet ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Your Perps wallet</h2><p>Balances and permissions belong to this separate account. Your public profile stays with Spot.</p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></section></aside> : desktop && screen.kind === "solana" ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Solana account</h2><p>Solana balances, permissions and trading limits are shown in this workspace.</p><p>Use the network selector to return to Robinhood Chain.</p></section></aside> : desktop && money ? (
         <aside
           className="desktop-money-panel"
           aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
@@ -929,7 +931,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           gated here rather than hidden in CSS, for the reason the header and
           rail are. Fed from the market read the shell already makes, so it
           costs no request and moves when the market read does. */}
-      {ticks.length > 0 && (
+      {!isolatedWallet && ticks.length > 0 && (
         <TickerStrip
           className="terminal-tape"
           loop

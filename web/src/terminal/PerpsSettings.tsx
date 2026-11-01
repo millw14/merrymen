@@ -5,7 +5,7 @@ import { LIGHTER_MARKETS_V1, SETTINGS_DEFAULTS, PERPS_NUM_BOUNDS } from "@merrym
 import { walletUrl } from "../lib/wallet-param";
 import { fetchAccountForSession } from "./account-session";
 import { requestJson } from "./request-json";
-import { PerpsLinks } from "./PerpsScreen";
+import { PerpsLinks, PerpsModeBadge } from "./PerpsScreen";
 import { usePerpsAccount } from "./usePerpsAccount";
 import { SignIn } from "./HostedControls";
 import "./perps-desk.css";
@@ -63,7 +63,7 @@ export function PerpsSettings({ offered }: { offered: boolean }) {
       if (enabled !== undefined) {
         body.perpsEnabled = enabled;
         if (enabled) {
-          if (driver !== "perp-trend" && driver !== "manual") throw new Error("Choose a supported paper driver before enabling entries.");
+          if (driver !== "perp-trend" && driver !== "manual") throw new Error("Choose a supported strategy before enabling entries.");
           body.expectedVersion = settings!.version; body.perpsDriver = driver;
         }
       } else {
@@ -80,20 +80,20 @@ export function PerpsSettings({ offered }: { offered: boolean }) {
       }
       await requestJson(walletUrl("/api/settings", "perps"), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       assertCurrent();
-      setMessage(enabled === false ? "New Perps entries switched off. Held positions keep their protective rules." : enabled === true ? "Paper entries enabled. The worker still applies its risk and signal checks." : "Paper risk settings saved.");
+      setMessage(enabled === false ? "New Perps entries switched off. Held positions keep their protective rules." : enabled === true ? "Entries enabled. The worker still applies its risk and signal checks." : "Risk settings saved.");
       setRevision(value => value + 1); refresh();
     } catch (error) { if (mounted.current && currentAuthority.current === started && authorityGeneration.current === startedGeneration) setMessage(error instanceof Error ? error.message : "The settings save was not confirmed. Reload before trying again."); }
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
-  return <section className="perps-desk"><h1>Paper Perps settings</h1><PerpsLinks/><p>Settings apply only to your Perps wallet. Leverage magnifies simulated gains and losses. The signed grant remains an additional limit.</p>
+  return <section className="perps-desk"><div className="perps-title-row"><h1>Perps settings</h1><PerpsModeBadge/></div><PerpsLinks/><p>Settings apply only to your Perps wallet. Leverage magnifies simulated gains and losses. The signed grant remains an additional limit.</p>
     {accountError && <p role="alert">{accountError}</p>}{account?.session.hosted && !owner && <SignIn onDone={refresh}/>}
     {!account && !accountError && <p>Loading your account…</p>}
     {!offered && account && !settings && <button disabled={busy} onClick={() => void save(false)}>Switch entries off</button>}
-    {account && settings && settings.owner?.toLowerCase() === owner?.toLowerCase() && <><p>New entries: {settings.values.perpsEnabled ? "enabled" : "off"}. Driver: {settings.values.perpsDriver ?? SETTINGS_DEFAULTS.perpsDriver}.</p><div className="perps-actions"><button disabled={busy || !offered || settings.values.perpsEnabled === true} onClick={() => void save(true)}>Enable paper entries</button><button disabled={busy} onClick={() => void save(false)}>Switch entries off</button></div>{!offered && <p>Paper perpetuals are disabled on this server. Switching entries off and recovery remain available.</p>}
-      <label>Paper driver<select value={driver} disabled={busy || !offered} onChange={event => setDriver(event.target.value)}><option value="perp-trend">Deterministic trend rules</option><option value="manual">Manual — no automatic entries</option>{!["perp-trend", "manual"].includes(driver) && <option value={driver} disabled>Unsupported stored driver</option>}</select></label>
+    {account && settings && settings.owner?.toLowerCase() === owner?.toLowerCase() && <><p>New entries: {settings.values.perpsEnabled ? "enabled" : "off"}. Driver: {settings.values.perpsDriver ?? SETTINGS_DEFAULTS.perpsDriver}.</p><div className="perps-actions"><button disabled={busy || !offered || settings.values.perpsEnabled === true} onClick={() => void save(true)}>Enable entries</button><button disabled={busy} onClick={() => void save(false)}>Switch entries off</button></div>{!offered && <p>Paper perpetuals are disabled on this server. Switching entries off and recovery remain available.</p>}
+      <label>Strategy<select value={driver} disabled={busy || !offered} onChange={event => setDriver(event.target.value)}><option value="perp-trend">Deterministic trend rules</option><option value="manual">Manual — no automatic entries</option>{!["perp-trend", "manual"].includes(driver) && <option value={driver} disabled>Unsupported stored driver</option>}</select></label>
       <fieldset disabled={busy || !offered}><legend>Markets the worker may open</legend>{LIGHTER_MARKETS_V1.map(market => <label key={market.key}><input type="checkbox" checked={markets.includes(market.key)} onChange={event => setMarkets(value => event.target.checked ? [...value, market.key] : value.filter(key => key !== market.key))}/>{market.key}</label>)}</fieldset>
       <div className="perps-settings-grid">{FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={PERPS_NUM_BOUNDS[key].decimals === 0 ? "numeric" : "decimal"} value={text[key] ?? String(settings.values[key] ?? SETTINGS_DEFAULTS[key])} disabled={busy || !offered} onChange={event => setText(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div>
-      <button disabled={busy || !offered} onClick={() => void save()}>Save paper risk settings</button><p>Saving risk settings never switches entries back on. Close all&apos;s halt is lifted only by an explicit practice reset.</p></>}
+      <button disabled={busy || !offered} onClick={() => void save()}>Save risk settings</button><p>Saving risk settings never switches entries back on. Close all&apos;s halt is lifted only by an explicit practice reset.</p></>}
     {message && <p role="status">{message}</p>}<button disabled={busy} onClick={() => { refresh(); setRevision(value => value + 1); }}>Reload settings</button>
   </section>;
 }

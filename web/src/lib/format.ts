@@ -151,6 +151,16 @@ export function coinPrice(n: number | null): string {
   return nf({ ...USD, minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(n);
 }
 
+/** A chart price with its unit supplied by the axis; tiny quotes never round to zero. */
+export function marketPrice(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return DASH;
+  const magnitude = Math.abs(n);
+  if (magnitude !== 0 && (magnitude < 0.000001 || magnitude >= 1_000_000_000)) {
+    return nf({ notation: "scientific", minimumFractionDigits: 3, maximumFractionDigits: 3 }).format(n);
+  }
+  return nf({ minimumFractionDigits: 2, maximumFractionDigits: magnitude < 1 ? 6 : 2 }).format(n);
+}
+
 /**
  * +40.8% / -2.2% / — . Signed, because an unsigned change is half a fact.
  *
@@ -263,6 +273,17 @@ export function shortDateTime(ms: number | null): string {
 export function dayLabel(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return DASH;
   return dtf("day", { month: "short", day: "numeric" }).format(new Date(ms));
+}
+
+/** UTC chart axes keep the same candle boundaries regardless of the browser's time zone. */
+export function chartTimeUtc(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return DASH;
+  return dtf("chart-time-utc", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "UTC" }).format(new Date(ms));
+}
+
+export function chartDayUtc(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return DASH;
+  return dtf("chart-day-utc", { month: "short", day: "2-digit", timeZone: "UTC" }).format(new Date(ms));
 }
 
 /** A clock time only, for a row in a trade tape. */
