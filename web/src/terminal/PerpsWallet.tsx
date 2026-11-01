@@ -16,6 +16,7 @@ import { usePerpsAccount } from "./usePerpsAccount";
 import { PRIVY_BETA, SignIn } from "./HostedControls";
 import { usePrivyOwner, type PrivyOwner } from "./usePrivyOwner";
 import { PerpsLinks, PerpsModeBadge } from "./PerpsScreen";
+import { StopAllAgents } from "./StopAllAgents";
 import "./perps-desk.css";
 
 const DEFAULT_CAPS: GrantCaps = { perTradeUsdg: 25, dailyUsdg: 100, expiryDays: 7, maxDrawdownPct: 10, maxOpsPerDay: 48 };
@@ -161,5 +162,6 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
     {account && !signedOut && <><div className="perps-settings-grid">{CAP_FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={key === "perTradeUsdg" || key === "dailyUsdg" ? "decimal" : "numeric"} value={caps[key]} disabled={busy || !offered} onChange={event => setCaps(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div><label><input type="checkbox" checked={ack} disabled={busy || !offered} onChange={event => setAck(event.target.checked)}/>{saved ? "I want to replace this Perps permission with the limits above. Recovery access stays with the same owner." : "I understand this is simulated trading and my sign-in controls the separate Perps wallet."}</label><button disabled={!offered || !signer || !savedRead || !ack || busy} onClick={() => void sign()}>{busy ? "Working…" : saved ? "Renew Perps permission" : "Create Perps wallet"}</button>
       {saved?.serialized && saved.demoSessionPrivateKey && !account.status.exists && !needsPermissionReplacement(saved) && <button disabled={!offered || !signer || busy} onClick={() => void activate()}>Retry saved permission activation</button>}</>}
     {status && <p role="status">{status}</p>}{message && <p role="status">{message}</p>}<p><a href="/withdraw?wallet=perps">Withdraw or recover this wallet</a></p>
+    {(account ? !signedOut : !!readError) && <StopAllAgents session={account?.session ?? null} onDone={refresh}/>}
   </section>;
 }

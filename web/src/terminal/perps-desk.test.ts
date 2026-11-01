@@ -21,6 +21,7 @@ let writes: { url: string; method: string; body: Record<string, unknown> }[], ev
 let lostWrite: boolean, gate: boolean, settingsEnabled: boolean, settingsVersion: string;
 let authWait: ReturnType<typeof deferred<Response>> | null, stopWait: ReturnType<typeof deferred<void>> | null, mintWait: ReturnType<typeof deferred<void>> | null;
 let postWait: ReturnType<typeof deferred<Response>> | null, preflightWait: ReturnType<typeof deferred<void>> | null;
+let hostedMode: boolean, killReply: () => Response | Promise<Response>;
 const originalFetch = globalThis.fetch;
 const signer = { account: { address: OWNER }, did: "did:privy:perps-test" } as unknown as PrivyOwner;
 const require = createRequire(import.meta.url);
@@ -30,12 +31,14 @@ before(async () => {
   Object.assign(globalThis, { window: boot.window, document: boot.window.document });
   ({ testDom, json, deferred } = await import("./test-dom"));
   const walletPath = fileURLToPath(new URL("./PerpsWallet.tsx", import.meta.url));
+  const stopPath = fileURLToPath(new URL("./StopAllAgents.tsx", import.meta.url));
   const loader = Module as unknown as { _load: (id: string, parent: { filename?: string }, isMain: boolean) => unknown };
   const load = loader._load;
   const hook = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, main: boolean) {
     if (id.endsWith(".css")) return {};
     if (id === "./HostedControls") return { PRIVY_BETA: false, SignIn: () => React.createElement("p", null, "Sign in") };
     if (id === "./usePrivyOwner") return { usePrivyOwner: () => signer };
+    if (parent.filename === stopPath && id === "../lib/session") return { clearGrant: (wallet: string) => events.push(`clear-${wallet}`) };
     if (parent.filename === walletPath) {
       if (id === "../lib/session") return {
         loadGrant: () => localGrant,
@@ -71,6 +74,7 @@ function accountReport() {
 }
 beforeEach(() => {
   ui = testDom(); tenant = OWNER; activeGrant = grant(); localGrant = null; reportMode = "ok"; reportOwner = OWNER; activityOwner = OWNER; chartOwner = OWNER;
+  hostedMode = true; killReply = () => { activeGrant = null; return json({ ok: true, perps: "stopped" }); };
   writes = []; events = []; lostWrite = false; gate = true; settingsEnabled = false; settingsVersion = "version-1"; postWait = null; preflightWait = null; authWait = null; stopWait = null; mintWait = null;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(String(input), "https://app.example.test"), method = init?.method ?? "GET";
@@ -78,11 +82,12 @@ beforeEach(() => {
       const body = JSON.parse(String(init?.body)); writes.push({ url: `${url.pathname}${url.search}`, method, body });
       if (url.pathname === "/api/orders" || url.pathname === "/api/paper-reset") { if (lostWrite) throw new Error("lost response"); if (postWait) return postWait.promise; return json({ id: "cmd_123", queued: true }); }
       if (url.pathname === "/api/settings") { if (body.perpsEnabled !== undefined) settingsEnabled = body.perpsEnabled; return json({ ok: true }); }
+      if (url.pathname === "/api/grants" && method === "DELETE") { if (lostWrite) throw new Error("lost response"); return killReply(); }
       throw new Error(`Unexpected write ${method} ${url}`);
     }
     if (url.pathname === "/api/auth/session" && authWait) return (await authWait.promise).clone();
-    if (url.pathname === "/api/auth/session") return json({ hosted: true, address: tenant });
-    if (url.pathname === "/api/grants") { assert.equal(url.searchParams.get("wallet"), "perps"); return json({ exists: !!activeGrant, tenant, ...(activeGrant ? { grant: activeGrant } : {}) }); }
+    if (url.pathname === "/api/auth/session") return json(hostedMode ? { hosted: true, address: tenant } : { hosted: false, address: null });
+    if (url.pathname === "/api/grants") { assert.equal(url.searchParams.get("wallet"), "perps"); return json({ exists: !!activeGrant, ...(hostedMode ? { tenant } : {}), ...(activeGrant ? { grant: activeGrant } : {}) }); }
     if (url.pathname === "/api/perps/account") return json(accountReport());
     if (url.pathname === "/api/perps/chart" || url.pathname === "/api/perps/market") return json(chart());
     if (url.pathname === "/api/perps/activity") return json({ state: "ok", owner: activityOwner, account: { smartAccount: ACCOUNT, chainId: 4663 }, market: "all", book: "paper", generatedAtMs: Date.now(), items: [], unknownRows: 0, truncated: false });
@@ -313,5 +318,68 @@ test("a signed-out visitor sees the market and access path without trading contr
   assert.ok(ui.container.querySelector('a[href="/perps/join"]'));
   assert.equal(ui.container.querySelector('a[href="/create?for=perps"]'), null);
   assert.equal([...ui.container.querySelectorAll('button')].some(button => /Close |Reset /.test(button.textContent || '')), false);
+  assert.equal(ui.container.textContent!.includes("Stop all agents"), false);
   assert.equal(writes.length, 0);
+});
+
+const stopNow = () => [...ui.container.querySelectorAll("button")].find(item => item.textContent === "Stop all agents now");
+const deletes = () => writes.filter(write => write.url === "/api/grants" && write.method === "DELETE");
+
+test("a Perps-only owner stops every wallet from the desk: one reviewed press, bound to the login, sent once", async () => {
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents");
+  assert.match(ui.container.textContent!, /Stop all agents for this login\?/);
+  assert.match(ui.container.textContent!, new RegExp(`Signed in as ${OWNER}`));
+  assert.match(ui.container.textContent!, /Spot, Perps and Solana for this login will stop managing positions/);
+  assert.equal(writes.length, 0);
+  await act(async () => { const button = stopNow()!; button.click(); button.click(); });
+  await settle(); assert.equal(writes.length, 1);
+  await act(async () => reply.resolve(json({}))); await settle();
+  assert.deepEqual(deletes(), [{ url: "/api/grants", method: "DELETE", body: { purpose: "delete-agent", expectedTenant: OWNER } }]);
+  assert.ok(events.includes("clear-spot")); assert.ok(events.includes("clear-perps"));
+  // The desk remounted on its account's removal; the answer outlives it.
+  assert.match(ui.container.textContent!, /Stop request accepted for Spot, Perps and Solana/);
+  assert.equal(writes.length, 1);
+});
+
+test("the stop needs no paper offering or pilot access, on the Wallet & permission page too", async () => {
+  gate = false;
+  await mount(React.createElement(PerpsWalletView, { offered: false, creating: false, signer }));
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.equal(deletes().length, 1); assert.equal(events.includes("offered"), false);
+  assert.match(ui.container.textContent!, /Stop request accepted for Spot, Perps and Solana/);
+});
+
+test("a self-hosted stop names no tenant", async () => {
+  hostedMode = false; reportOwner = null as unknown as string;
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.deepEqual(deletes().map(write => write.body), [{ purpose: "delete-agent" }]);
+});
+
+test("a lost stop reply is reported and never retried; the browser copies are kept", async () => {
+  lostWrite = true;
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents"); await click("Stop all agents now"); await settle();
+  assert.equal(deletes().length, 1);
+  assert.match(ui.container.textContent!, /not received.*Check your agents before asking again/);
+  assert.equal(events.some(event => event.startsWith("clear-")), false);
+});
+
+test("a partial kill shows the server's sentence and clears nothing", async () => {
+  killReply = () => json({ error: "Kill incomplete: your Robinhood Chain agent is stopped, but your Perps permission was not stopped. Try the kill again.", ownerFacing: true, solana: "stopped", perps: "not-stopped" }, 503);
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.match(ui.container.textContent!, /Kill incomplete: .*Try the kill again/);
+  assert.equal(events.some(event => event.startsWith("clear-")), false);
+});
+
+test("a login change after review closes it before anything is sent", async () => {
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents"); assert.ok(stopNow());
+  tenant = OTHER;
+  await act(async () => ui.container.querySelector<HTMLButtonElement>('[aria-label="Refresh account"]')!.click()); await settle();
+  assert.equal(stopNow(), undefined); assert.equal(deletes().length, 0);
 });

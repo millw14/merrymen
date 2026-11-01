@@ -47,6 +47,9 @@
 .perps-address, .perps-confirm code { overflow-wrap: anywhere; }
 .perps-confirm { padding: 20px !important; border: 1px solid #849d48 !important; border-radius: 8px; background: #192013; }
 .perps-confirm button { margin: 8px 10px 0 0; }
+.perps-desk .perps-stop-all-button { border-color: #6b3b47; color: var(--perps-down); }
+.perps-desk .perps-stop-all-button:hover:not(:disabled) { border-color: var(--perps-down); background: #2a1a1f; }
+.perps-stop-all .perps-confirm { border-color: #8a4a5a !important; background: #1d1316; }
 .perps-chart { display: block; width: 100%; height: auto; border-radius: 4px; background: var(--perps-bg); }
 .perps-chart text { fill: var(--perps-muted); font-family: var(--font-geist-mono), monospace; font-size: 11px; }
 .perps-chart-grid line { stroke: #243128; stroke-width: 1; stroke-dasharray: 3 5; }

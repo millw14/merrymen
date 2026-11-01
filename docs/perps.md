@@ -747,7 +747,7 @@ nanite-switch PR, funding in its own PR after slice 5, and three stacked PRs.
 | Freeze a self-hosted running worker's protective loop when Perps turns off? | It takes no new orders or resets, but continues managing existing paper positions | PR 1 review |
 | Keep the not-reported-book 409, or change what counts as shared ledger history? | Keep the 409 so a queued command cannot prevent the worker's first start | PR 1 review |
 | May a practice reset lift the Close-all entries halt? | A later owner reset lifts it; there is no Resume command in this slice | PR 1 review |
-| D20: move kill copy naming every wallet into PR 1 or leave it in PR 3? | The remaining UI copy is assigned to PR 3 | PR 3 at the latest |
+| D20: move kill copy naming every wallet into PR 1 or leave it in PR 3? | It did not land with PR 3. Added November 1: "Stop all agents" on the Perps desk and Wallet & permission page names Spot, Perps and Solana, as the phones do since #373 | PR 3 at the latest |
 
 The plan's eighth item is technical cleanup: query-parameter casing, the
 client-import guard and the D17 test-port list. This continuation addresses
