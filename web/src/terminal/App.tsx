@@ -45,6 +45,10 @@ import { useShellClocks } from "./live-clocks";
 import { Agent } from "./screens/Agent";
 import { Alpha } from "./screens/Alpha";
 import { terminalWallet } from "./perps-navigation";
+import { TradingModeToggle } from "./TradingModeToggle";
+import { useTradingModeTransition } from "./use-trading-mode-transition";
+import "./trading-mode-toggle.css";
+import "./perps-entrance.css";
 import "./perps-desk.css";
 import { pathForScreen, screenForPath, TABS } from "./nav";
 
@@ -101,6 +105,7 @@ function subscribeDesktop(onChange: () => void) {
 
 export function App({ solana = false, perps = false }: { solana?: boolean; perps?: boolean }) {
   const bodyRef = useRef<HTMLDivElement>(null);
+  const modeSceneRef = useRef<HTMLDivElement>(null);
   /**
    * THE LATEST ANSWER OF EVERY READ, and the screens drawn from them.
    *
@@ -173,6 +178,20 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   const screen: Screen = isolatedWallet && requestedScreen.kind === "tab" ? { kind: "perps" } : desktop && (
     money || (requestedScreen.kind === "tab" && (requestedScreen.tab === "feed" || requestedScreen.tab === "home"))
   ) ? desktopDetail : requestedScreen;
+  const modeOffered = perps && screen.kind !== "solana" && selectedWallet !== "invalid";
+  const modeTransition = useTradingModeTransition({
+    identity: `${epoch}:${account?.session.hosted ?? "unknown"}:${account?.session.address?.toLowerCase() ?? "signed-out"}`,
+    route: `${pathname}${searchParams?.size ? `?${searchParams}` : ""}`,
+    mode: selectedWallet === "perps" ? "perps" : "spot",
+    offered: modeOffered,
+    source: modeSceneRef,
+  });
+  const entrance = modeTransition.transition;
+  const Entrance = entrance?.Entrance;
+  const tradingMode = modeOffered ? <TradingModeToggle
+    mode={selectedWallet === "perps" ? "perps" : "spot"}
+    onChange={modeTransition.change} pending={modeTransition.pending} compact={desktop}
+  /> : null;
   const [tokenTab, setTokenTab] = useState<TokenTab>("buys");
   // Null until read — `String(caps ?? "")` rendered an unread key as "$0.00 per trade".
   const { perTrade, perDay } = capsOf(account);
@@ -311,6 +330,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
    * its grant have both been read. The same reset is used for sign-out.
    */
   const invalidateOwnerView = () => {
+    modeTransition.cancel();
     clockShell.invalidate();
     confirmedSession.current = null;
     setAccount(null);
@@ -536,6 +556,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
 
   return (
     <WiredProvider tenant={account?.session.hosted ? account.session.address : null}><div className="terminal-host"><div
+      ref={modeSceneRef}
       className={ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
     >
@@ -544,7 +565,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
+      {desktop && <DesktopHeader tradingMode={tradingMode} hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
       {desktop && isolatedWallet ? <aside className="desktop-sidebar"><nav className="perps-desk" aria-label="Perps workspace"><h2>Perps wallet</h2><p><a href="/perps">Paper desk</a></p><p><a href="/settings?wallet=perps">Settings</a></p><p><a href="/grant?wallet=perps">Permission</a></p><p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></p><p><a href="/home">Return to Spot</a></p></nav></aside> : desktop && (
         <DesktopSidebar
           reads={live.reads}
@@ -572,7 +593,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             nothing of the account, and nothing here reads it. */}
         <ServiceNotice />
         {solana && <nav aria-label="Trading networks" className="solana-network-nav"><a href="/home" aria-current={screen.kind !== "solana" ? "page" : undefined}>Robinhood Chain</a><a href="/solana" aria-current={screen.kind === "solana" ? "page" : undefined}>Solana</a></nav>}
-        {perps && screen.kind !== "solana" && <nav aria-label="Robinhood Chain trading mode" className="perps-mode-nav"><a href="/home" aria-current={selectedWallet === "spot" ? "page" : undefined}>Spot</a><a href="/perps" aria-current={selectedWallet === "perps" ? "page" : undefined}>Perps</a></nav>}
+        {!desktop && tradingMode && <div className="mobile-mode-bar"><span>Robinhood Chain</span>{tradingMode}</div>}
         {/* THE ONE PROMPT THAT FIRES BEFORE THE FIRST REFUSAL, rather than
             after it. Every other re-sign surface answers a question the
             WORKER asked — expired, uncovered, dead policy — and none of them
@@ -926,6 +947,10 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           <SoundToggle on={soundOn} onToggle={toggleSound} />
         </TickerStrip>
       )}
-    </div></div></WiredProvider>
+    </div>{entrance && Entrance && <Entrance
+      onDone={entrance.finish} scene={entrance.scene} direction={entrance.direction}
+      dramatic={entrance.direction === "perps"} ready={modeTransition.ready}
+      origin={entrance.origin} background={modeSceneRef.current}
+    />}</div></WiredProvider>
   );
 }
