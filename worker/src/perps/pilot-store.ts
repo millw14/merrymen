@@ -46,9 +46,15 @@ export interface PerpsPilotStore {
    * Serialize a final protected write with admission/revocation. The trusted
    * callback must not call this store recursively. Its independently committed
    * writes cannot be rolled back if this transaction subsequently fails.
+   *
+   * `on`: a connection the caller already holds (a session-lock callback's
+   * Db, withAdvisoryLock). Run there, never on a second connection from the
+   * same pool: a pool full of lock holders each waiting for one more would
+   * never drain. Ignored when it is another database's.
    */
-  withAdmission<T>(owner: string, action: () => Promise<T>): Promise<{ allowed: false } | { allowed: true; value: T }>;
-  get(owner: string): Promise<{ owner: Owner; status: Status | "pending" | "not-admitted"; revision: number; updatedAt: number | null }>;
+  withAdmission<T>(owner: string, action: () => Promise<T>, on?: Db | null): Promise<{ allowed: false } | { allowed: true; value: T }>;
+  /** `on`: as withAdmission's. */
+  get(owner: string, on?: Db | null): Promise<{ owner: Owner; status: Status | "pending" | "not-admitted"; revision: number; updatedAt: number | null }>;
   list(): Promise<PerpsPilotListing>;
   createInvite(args: { actor: string; maxUses: number; expiresAt: number }): Promise<{ code: string; invite: PerpsPilotInvite }>;
   revokeInvite(args: { actor: string; id: string }): Promise<{ revoked: boolean }>;
@@ -218,11 +224,15 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
       await this.audit(tx, "legacy-invite-quarantined", null, owner, null, revision, at);
     }
   }
-  private async initialize(): Promise<void> {
+  /** The connection to run on: `on` when it is this store's database, held by the caller; else the store's own. */
+  private dbFor(on: Db | null | undefined): Db {
+    return on && rootDb(on) === rootDb(this.db) ? on : this.db;
+  }
+  private async initialize(on: Db = this.db): Promise<void> {
     if (!this.ready) {
       this.ready = (async () => {
-        await ensureSchema(this.db);
-        await boundedTransaction(this.db, async tx => {
+        await ensureSchema(on);
+        await boundedTransaction(on, async tx => {
           // Another replica's first-use DDL can lock the admission tables.
           // Take its schema lock BEFORE the cohort row, never the reverse.
           await lockSchema(tx);
@@ -252,9 +262,9 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     }
     return this.ready;
   }
-  private async locked<T>(fn: (tx: Db, revision: number) => Promise<T>): Promise<T> {
-    await this.initialize();
-    return boundedTransaction(this.db, async tx => fn(tx, await this.lock(tx)));
+  private async locked<T>(fn: (tx: Db, revision: number) => Promise<T>, on: Db = this.db): Promise<T> {
+    await this.initialize(on);
+    return boundedTransaction(on, async tx => fn(tx, await this.lock(tx)));
   }
   private async hasRoom(tx: Db): Promise<boolean> {
     const row = await tx.prepare("SELECT COUNT(*) AS n FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap')").get() as Row;
@@ -279,19 +289,20 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     }
     return { owners, revision };
   }
-  async withAdmission<T>(value: string, action: () => Promise<T>): Promise<{ allowed: false } | { allowed: true; value: T }> {
+  async withAdmission<T>(value: string, action: () => Promise<T>, on?: Db | null): Promise<{ allowed: false } | { allowed: true; value: T }> {
     const owner = ownerKey(value);
     return this.locked(async tx => {
       // Validate the complete bounded cohort as well as this owner, so corrupt
       // over-cap membership cannot authorize a protected mutation.
       if (!(await this.snapshotAt(tx)).owners.includes(owner)) return { allowed: false };
       return { allowed: true, value: await action() };
-    });
+    }, this.dbFor(on));
   }
-  async get(value: string) {
+  async get(value: string, on?: Db | null) {
     const owner = ownerKey(value);
-    await this.initialize();
-    const row = await boundedTransaction(this.db, tx => tx.prepare(`SELECT c.revision,c.initialized_at,a.status,a.source,a.updated_at,p.submitted_at,
+    const db = this.dbFor(on);
+    await this.initialize(db);
+    const row = await boundedTransaction(db, tx => tx.prepare(`SELECT c.revision,c.initialized_at,a.status,a.source,a.updated_at,p.submitted_at,
       (SELECT COUNT(*) FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap')) AS active_count FROM perps_pilot_cohort c
       LEFT JOIN perps_pilot_admissions a ON a.owner=? LEFT JOIN perps_pilot_requests p ON p.owner=?
       WHERE c.id=1 AND c.initialized_at IS NOT NULL`).get(owner, owner)) as Row | undefined;
@@ -424,8 +435,8 @@ export function getPerpsPilotStore(): PerpsPilotStore {
     const load = () => pending ??= makePgDb(url).then(db => new SqlPerpsPilotStore(db)).catch(error => { pending = null; throw error; });
     store = {
       snapshot: () => load().then(value => value.snapshot()),
-      withAdmission: (owner, action) => load().then(value => value.withAdmission(owner, action)),
-      get: owner => load().then(value => value.get(owner)),
+      withAdmission: (owner, action, on) => load().then(value => value.withAdmission(owner, action, on)),
+      get: (owner, on) => load().then(value => value.get(owner, on)),
       list: () => load().then(value => value.list()),
       createInvite: args => load().then(value => value.createInvite(args)),
       revokeInvite: args => load().then(value => value.revokeInvite(args)),
