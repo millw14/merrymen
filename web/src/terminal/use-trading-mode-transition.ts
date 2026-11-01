@@ -9,6 +9,15 @@ const loadVisuals = () => import("./PerpsEntrance");
 export const MODE_LOAD_TIMEOUT = 1800;
 export const MODE_TRANSITION_TIMEOUT = 7000;
 
+/** Compare query values using App's URLSearchParams encoding, not URL spelling. */
+function comparableRoute(route: string): string {
+  const queryAt = route.indexOf("?");
+  if (queryAt < 0) return route;
+  const pathname = route.slice(0, queryAt);
+  const query = new URLSearchParams(route.slice(queryAt + 1)).toString();
+  return `${pathname}${query ? `?${query}` : ""}`;
+}
+
 type Transition = {
   Entrance: Visuals["PerpsEntrance"];
   scene: FrozenModeScene | null;
@@ -28,9 +37,10 @@ export function useTradingModeTransition({ identity, route, mode, offered, sourc
   load?: () => Promise<Visuals>;
   navigate?: (path: string) => void;
 }) {
+  const routeKey = comparableRoute(route);
   const mounted = useRef(false);
   const generation = useRef(0);
-  const current = useRef({ identity, route, mode, offered });
+  const current = useRef({ identity, route: routeKey, mode, offered });
   const active = useRef<Transition | null>(null);
   const request = useRef<object | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -62,10 +72,10 @@ export function useTradingModeTransition({ identity, route, mode, offered, sourc
   }, [cancel]);
   useLayoutEffect(() => {
     const previous = current.current;
-    current.current = { identity, route, mode, offered };
+    current.current = { identity, route: routeKey, mode, offered };
     if (previous.identity !== identity || !offered ||
-      (previous.route !== route && (!active.current || active.current.targetPath !== route))) cancel();
-  }, [identity, route, mode, offered, cancel]);
+      (previous.route !== routeKey && (!active.current || active.current.targetPath !== routeKey))) cancel();
+  }, [identity, routeKey, mode, offered, cancel]);
 
   const change = useCallback((direction: Mode, origin: Point | null = null) => {
     if (!mounted.current || !current.current.offered || direction === current.current.mode || request.current || active.current) return;
@@ -77,7 +87,7 @@ export function useTradingModeTransition({ identity, route, mode, offered, sourc
     request.current = token;
     setPending(true);
     const valid = () => mounted.current && generation.current === turn && request.current === token &&
-      current.current.offered && current.current.route === from && `${window.location.pathname}${window.location.search}` === from;
+      current.current.offered && current.current.route === from && comparableRoute(`${window.location.pathname}${window.location.search}`) === from;
     const fallback = () => {
       const mayNavigate = valid();
       if (request.current !== token) return;
@@ -110,5 +120,5 @@ export function useTradingModeTransition({ identity, route, mode, offered, sourc
     }, fallback);
   }, [cancel, clearTimer, load, navigate, source]);
 
-  return { change, cancel, pending, transition, ready: transition !== null && route === transition.targetPath };
+  return { change, cancel, pending, transition, ready: transition !== null && routeKey === transition.targetPath };
 }

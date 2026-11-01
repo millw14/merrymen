@@ -25,8 +25,8 @@ function Harness({ identity = "0:local", route = "/home", offered = true }: { id
       offered ? h(TradingModeToggle, { mode, pending: controller.pending, onChange: controller.change }) : null),
     scene && Entrance ? h(Entrance, { scene: scene.scene, direction: scene.direction, ready: controller.ready, onDone: scene.finish, background: source.current }) : null);
 }
-async function render(props: Parameters<typeof Harness>[0] = {}) {
-  ui.dom.window.history.replaceState(null, "", props.route ?? "/home");
+async function render(props: Parameters<typeof Harness>[0] = {}, browserRoute = props.route ?? "/home") {
+  ui.dom.window.history.replaceState(null, "", browserRoute);
   await ui.render(h(Harness, props));
 }
 beforeEach(() => {
@@ -97,6 +97,55 @@ test("loader timeout navigates once; late code cannot replay the animation", asy
   await act(async () => pending.resolve(visuals));
   assert.deepEqual(destinations, ["/perps"]); assert.equal(controller.transition, null);
 });
+
+const encodedRoute = "/home?utm_campaign=paper%20launch&ref=%2f&flag&tag=a&tag=b&question=why?now";
+// Match App's useSearchParams serialization, while retaining the address-bar
+// spelling separately. It preserves query values, duplicates and key order.
+const serializedRoute = "/home?" + new URLSearchParams(encodedRoute.slice(encodedRoute.indexOf("?") + 1)).toString();
+
+test("equivalent query encoding in the address bar and App still switches once", async () => {
+  await render({ route: serializedRoute }, encodedRoute);
+  await ui.click("Perps");
+  assert.deepEqual(destinations, ["/perps"]);
+  assert.ok(controller.transition); assert.equal(network, 0);
+});
+
+test("equivalent query serialization during chunk loading preserves the captured navigation", async () => {
+  const pending = deferred<typeof visuals>(); load = () => pending.promise;
+  await render({ route: encodedRoute }); await ui.click("Perps");
+  await render({ route: serializedRoute }, encodedRoute);
+  await act(async () => pending.resolve(visuals));
+  assert.deepEqual(destinations, ["/perps"]);
+  assert.ok(controller.transition); assert.equal(loads, 1);
+});
+
+test("query encoding does not block timeout fallback or replay a late chunk", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = deferred<typeof visuals>(); load = () => pending.promise;
+  await render({ route: serializedRoute }, encodedRoute); await ui.click("Perps");
+  await act(async () => context.mock.timers.tick(MODE_LOAD_TIMEOUT));
+  assert.deepEqual(destinations, ["/perps"]); assert.equal(controller.pending, false);
+  await act(async () => pending.resolve(visuals));
+  assert.deepEqual(destinations, ["/perps"]); assert.equal(controller.transition, null);
+});
+
+for (const changed of [
+  "/home?utm_campaign=paper%2Blaunch",
+  "/home?utm_campaign=paper+launch&wallet=perps",
+  "/feed?utm_campaign=paper+launch",
+]) {
+  test(`query normalization still fences actual intervening navigation to ${changed}`, async context => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const pending = deferred<typeof visuals>(); load = () => pending.promise;
+    await render({ route: "/home?utm_campaign=paper+launch" }, "/home?utm_campaign=paper%20launch");
+    await ui.click("Perps");
+    ui.dom.window.history.replaceState(null, "", changed);
+    await act(async () => pending.resolve(visuals));
+    await act(async () => context.mock.timers.tick(MODE_LOAD_TIMEOUT));
+    assert.deepEqual(destinations, []); assert.equal(controller.transition, null);
+    assert.equal(controller.pending, false); assert.equal(network, 0);
+  });
+}
 
 test("a URL change before React commits wins over a late loader or its timeout", async context => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
