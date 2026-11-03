@@ -1,23 +1,30 @@
 import { NextResponse } from "next/server";
+import type { Db } from "../../../worker/src/db";
 import { getPerpsPilotStore } from "../../../worker/src/perps/pilot-store";
 import { tenantOf } from "./auth";
 import { NO_STORE_HEADERS } from "./route-guard";
 
-/** Fresh preflight; the mutation boundary must also use withPerpsPaperAdmission. */
-export async function perpsPaperAdmission(owner: string): Promise<"allowed" | "denied" | "unavailable"> {
-  try { return (await getPerpsPilotStore().get(owner)).status === "allowed" ? "allowed" : "denied"; }
+/**
+ * Fresh preflight; the mutation boundary must also use withPerpsPaperAdmission.
+ * `held`: the connection a caller holding a session lock already has (the
+ * settings save lock's): the read runs on it, never on a second connection
+ * from the pool that lock came from.
+ */
+export async function perpsPaperAdmission(owner: string, held?: Db | null): Promise<"allowed" | "denied" | "unavailable"> {
+  try { return (await getPerpsPilotStore().get(owner, held)).status === "allowed" ? "allowed" : "denied"; }
   catch { return "unavailable"; }
 }
 
 /** Orders a short authority write against admin revocation in the shared store.
  * Authentication and network verification belong before this lock. The action
  * must not call the pilot store recursively. Existing exits/off never use it.
+ * `held`: as perpsPaperAdmission's.
  */
-export async function withPerpsPaperAdmission<T>(owner: string, action: () => Promise<T>): Promise<
+export async function withPerpsPaperAdmission<T>(owner: string, action: () => Promise<T>, held?: Db | null): Promise<
   { status: "allowed"; value: T } | { status: "denied" | "unavailable" }
 > {
   try {
-    const result = await getPerpsPilotStore().withAdmission(owner, action);
+    const result = await getPerpsPilotStore().withAdmission(owner, action, held);
     return result.allowed ? { status: "allowed", value: result.value } : { status: "denied" };
   } catch { return { status: "unavailable" }; }
 }

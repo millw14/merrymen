@@ -47,6 +47,7 @@ import {
 // against the root tsconfig, which has no @merrymen/settings.
 import { readSettingsFileWithText, writeSettingsFileIfUnchanged } from "../../../../../worker/src/settings";
 import { errorText } from "../../../../../worker/src/redact-urls";
+import type { Db } from "../../../../../worker/src/db";
 import { tenantOf } from "@/lib/auth";
 import { fomoEnabledFor } from "@/lib/fomo-switch";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
@@ -1244,8 +1245,10 @@ async function putPerps(req: Request, raw: unknown): Promise<NextResponse> {
   }
   if (!tenant) return savePerpsSettings(body, null);
   const account = tenant;
-  // The lock alone: its claims connection is never used for this wallet.
-  const saved = await withSettingsSaveLock(account, () => savePerpsSettings(body, account));
+  // No bot claim for this wallet. The lock's connection carries the pilot
+  // admission reads (savePerpsSettings): a save holding it must never wait for
+  // a second connection from the same pool, which ten saves at once would fill.
+  const saved = await withSettingsSaveLock(account, (claims) => savePerpsSettings(body, account, claims.db));
   if (saved === SAVE_BUSY) return NextResponse.json({ error: "settings_busy", errors: [SETTINGS_BUSY_TEXT] }, { status: 503 });
   return saved;
 }
@@ -1267,7 +1270,7 @@ const PERPS_SAVE_RACED = Symbol("perps-save-raced");
  * over the blob this read found. When something wrote in between (the kill),
  * nothing was written, and the body is judged again from a fresh read.
  */
-async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${string}` | null): Promise<NextResponse> {
+async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${string}` | null, held: Db | null = null): Promise<NextResponse> {
   const expectedVersion = body.expectedVersion;
   delete body.expectedVersion;
   // Whether practice perps were on in this save's FIRST read: an off that
@@ -1278,7 +1281,7 @@ async function savePerpsSettings(body: Record<string, unknown>, tenant: `0x${str
   for (let attempt = 0; attempt < PERPS_SAVE_ATTEMPTS; attempt++) {
     const read = await readPerpsStoredStrict(tenant);
     if (read.ok && firstSawOn === null) firstSawOn = read.settings.perpsEnabled === true;
-    const answer = await judgePerpsSave(body, tenant, read, firstSawOn === true, expectedVersion);
+    const answer = await judgePerpsSave(body, tenant, read, firstSawOn === true, expectedVersion, held);
     if (answer !== PERPS_SAVE_RACED) return answer;
   }
   return NextResponse.json(
@@ -1299,6 +1302,8 @@ async function judgePerpsSave(
   read: PerpsStoredRead,
   firstSawOn: boolean,
   expectedVersion: unknown,
+  /** The settings save lock's connection, when this save holds one: every pilot read runs on it. */
+  held: Db | null,
 ): Promise<NextResponse | typeof PERPS_SAVE_RACED> {
   if (!read.ok) {
     // Before any field is judged: nothing here can be saved without throwing
@@ -1314,7 +1319,9 @@ async function judgePerpsSave(
   const next: MerrymenSettings = { ...stored, strategy: PERPS_ONLY };
   const errors: string[] = [];
   const staleEnable = body.perpsEnabled === true && expectedVersion !== perpsSettingsVersion(read.version, tenant);
-  const admission = tenant !== null && body.perpsEnabled === true ? await perpsPaperAdmission(tenant) : "allowed";
+  // Not asked where Perps are not offered: only offs are saved there (below),
+  // and an off never needs admission.
+  const admission = tenant !== null && body.perpsEnabled === true && perpsOffered() ? await perpsPaperAdmission(tenant, held) : "allowed";
   const pilotRefused = admission !== "allowed";
   const touched = new Set<string>();
   const setOrClear = <K extends keyof MerrymenSettings>(key: K, value: MerrymenSettings[K] | undefined) => {
@@ -1647,7 +1654,7 @@ async function judgePerpsSave(
   // hold the cohort lock during parsing, settings reads, or validation above.
   let wrote: "saved" | "raced" | "failed";
   if (tenant && body.perpsEnabled === true && next.perpsEnabled === true) {
-    const result = await withPerpsPaperAdmission(tenant, () => persist(next));
+    const result = await withPerpsPaperAdmission(tenant, () => persist(next), held);
     if (result.status !== "allowed") {
       const offResult = await saveOffs();
       if (offResult === "raced") return PERPS_SAVE_RACED;

@@ -46,9 +46,15 @@ export interface PerpsPilotStore {
    * Serialize a final protected write with admission/revocation. The trusted
    * callback must not call this store recursively. Its independently committed
    * writes cannot be rolled back if this transaction subsequently fails.
+   *
+   * `on`: a connection the caller already holds (a session-lock callback's
+   * Db, withAdvisoryLock). Run there, never on a second connection from the
+   * same pool: a pool full of lock holders each waiting for one more would
+   * never drain. Ignored when it is another database's.
    */
-  withAdmission<T>(owner: string, action: () => Promise<T>): Promise<{ allowed: false } | { allowed: true; value: T }>;
-  get(owner: string): Promise<{ owner: Owner; status: Status | "pending" | "not-admitted"; revision: number; updatedAt: number | null }>;
+  withAdmission<T>(owner: string, action: () => Promise<T>, on?: Db | null): Promise<{ allowed: false } | { allowed: true; value: T }>;
+  /** `on`: as withAdmission's. */
+  get(owner: string, on?: Db | null): Promise<{ owner: Owner; status: Status | "pending" | "not-admitted"; revision: number; updatedAt: number | null }>;
   list(): Promise<PerpsPilotListing>;
   createInvite(args: { actor: string; maxUses: number; expiresAt: number }): Promise<{ code: string; invite: PerpsPilotInvite }>;
   revokeInvite(args: { actor: string; id: string }): Promise<{ revoked: boolean }>;
@@ -149,6 +155,8 @@ function requestFrom(row: Row): PerpsPilotRequest {
 function approvedSource(source: unknown): boolean { return source === "admin" || source === "bootstrap"; }
 
 const schemaReady = new WeakMap<Db, Promise<void>>();
+/** Databases whose schema is known made. A held connection checks this, never another caller's promise. */
+const schemaMade = new WeakSet<Db>();
 async function lockSchema(tx: Db): Promise<void> {
   try { await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(SCHEMA_LOCK); }
   catch (error) { if (!/no such function: pg_advisory_xact_lock/i.test(String((error as Error)?.message))) throw error; }
@@ -160,31 +168,43 @@ async function boundedTransaction<T>(db: Db, fn: (tx: Db) => Promise<T>): Promis
     return fn(tx);
   });
 }
+async function makeSchema(db: Db): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await boundedTransaction(db, async tx => {
+        await lockSchema(tx);
+        await tx.exec(PERPS_PILOT_DDL);
+        await tx.prepare("INSERT INTO perps_pilot_cohort(id,revision) VALUES(1,0) ON CONFLICT(id) DO NOTHING").run();
+      });
+      return;
+    } catch (error) {
+      if (attempt < 2 && ["23505", "42P07", "42710"].includes(String((error as { code?: unknown }).code))) continue;
+      throw error;
+    }
+  }
+}
 async function ensureSchema(db: Db): Promise<void> {
   const root = rootDb(db);
+  if (schemaMade.has(root)) return;
+  // A HELD CONNECTION (a session lock's, rootDb(db) !== db) MAKES IT ITSELF.
+  // The shared promise may be running on a pool connection still queued
+  // behind this one's holder, and a pool full of holders waiting on it would
+  // never drain. The DDL is idempotent and serialized by the schema lock.
+  if (root !== db) return makeSchema(db).then(() => { schemaMade.add(root); });
   const existing = schemaReady.get(root);
   if (existing) return existing;
-  const ready = (async () => {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await boundedTransaction(db, async tx => {
-          await lockSchema(tx);
-          await tx.exec(PERPS_PILOT_DDL);
-          await tx.prepare("INSERT INTO perps_pilot_cohort(id,revision) VALUES(1,0) ON CONFLICT(id) DO NOTHING").run();
-        });
-        return;
-      } catch (error) {
-        if (attempt < 2 && ["23505", "42P07", "42710"].includes(String((error as { code?: unknown }).code))) continue;
-        throw error;
-      }
-    }
-  })().catch(error => { if (schemaReady.get(root) === ready) schemaReady.delete(root); throw error; });
+  const ready = makeSchema(db).then(() => { schemaMade.add(root); })
+    .catch(error => { if (schemaReady.get(root) === ready) schemaReady.delete(root); throw error; });
   schemaReady.set(root, ready);
   return ready;
 }
 
 export class SqlPerpsPilotStore implements PerpsPilotStore {
   private ready: Promise<void> | null = null;
+  /** An initialization has finished: from here on nobody runs or waits on one. */
+  private initialized = false;
+  /** The initialization running on a held connection: other held callers share it. */
+  private heldInit: Promise<void> | null = null;
   constructor(private db: Db, private options: { bootstrapOwners?: () => string | undefined; now?: () => number } = {}) {}
   private now(): number { return integer((this.options.now ?? Date.now)()); }
   private async lock(tx: Db, initializing = false): Promise<number> {
@@ -218,43 +238,67 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
       await this.audit(tx, "legacy-invite-quarantined", null, owner, null, revision, at);
     }
   }
-  private async initialize(): Promise<void> {
-    if (!this.ready) {
-      this.ready = (async () => {
-        await ensureSchema(this.db);
-        await boundedTransaction(this.db, async tx => {
-          // Another replica's first-use DDL can lock the admission tables.
-          // Take its schema lock BEFORE the cohort row, never the reverse.
-          await lockSchema(tx);
-          await this.lock(tx, true);
-          const cohort = await tx.prepare("SELECT initialized_at FROM perps_pilot_cohort WHERE id=1").get() as Row;
-          if (cohort.initialized_at !== null) {
-            integer(cohort.initialized_at);
-            // The previous, undeployed design admitted invite holders directly.
-            // Persist a denial so an old reader also fails closed. Old writers
-            // must be stopped before rollout; all new reads additionally check
-            // the admission source in case a stale writer reintroduces a row.
-            await this.quarantineLegacyInvites(tx);
-            return;
-          }
-          if (await tx.prepare("SELECT owner FROM perps_pilot_admissions LIMIT 1").get()) throw new Error("Uninitialized paper-pilot cohort contains membership records.");
-          const owners = bootstrapOwners((this.options.bootstrapOwners ?? (() => process.env.MERRYMEN_PERPS_PAPER_TENANTS))());
-          const revision = await this.bump(tx), at = this.now();
-          for (const owner of owners) {
-            await tx.prepare("INSERT INTO perps_pilot_admissions(owner,status,source,revision,updated_at,actor) VALUES(?,'allowed','bootstrap',?,?,NULL)")
-              .run(owner, revision, at);
-          }
-          await tx.prepare("UPDATE perps_pilot_cohort SET initialized_at=?,bootstrap_digest=? WHERE id=1")
-            .run(at, createHash("sha256").update(owners.join(",")).digest("hex"));
-          await this.audit(tx, "bootstrap", null, null, null, revision, at);
-        });
-      })().catch(error => { this.ready = null; throw error; });
+  /** The connection to run on: `on` when it is this store's database, held by the caller; else the store's own. */
+  private dbFor(on: Db | null | undefined): Db {
+    return on && rootDb(on) === rootDb(this.db) ? on : this.db;
+  }
+  private async initialize(on: Db = this.db): Promise<void> {
+    if (this.initialized) return;
+    // A held connection (dbFor) never waits on the pool's initialization,
+    // which may be queued for a connection behind its own holder. It shares
+    // one running on another held connection (already checked out, waiting
+    // only on database locks no waiting caller holds), else runs its own; and
+    // runs its own if the shared one failed. Initialization is idempotent,
+    // serialized by the schema lock and the cohort row.
+    if (on !== this.db) {
+      const running = this.heldInit;
+      if (running) {
+        try { return await running; } catch { if (this.initialized) return; return this.initializeOn(on); }
+      }
+      const mine: Promise<void> = this.initializeOn(on).finally(() => { if (this.heldInit === mine) this.heldInit = null; });
+      this.heldInit = mine;
+      return mine;
     }
+    this.ready ??= this.initializeOn(on).catch(error => {
+      this.ready = null;
+      // A held caller finished it meanwhile: the pool's own attempt losing a lock race is no failure.
+      if (!this.initialized) throw error;
+    });
     return this.ready;
   }
-  private async locked<T>(fn: (tx: Db, revision: number) => Promise<T>): Promise<T> {
-    await this.initialize();
-    return boundedTransaction(this.db, async tx => fn(tx, await this.lock(tx)));
+  private async initializeOn(on: Db): Promise<void> {
+    await ensureSchema(on);
+    await boundedTransaction(on, async tx => {
+      // Another replica's first-use DDL can lock the admission tables.
+      // Take its schema lock BEFORE the cohort row, never the reverse.
+      await lockSchema(tx);
+      await this.lock(tx, true);
+      const cohort = await tx.prepare("SELECT initialized_at FROM perps_pilot_cohort WHERE id=1").get() as Row;
+      if (cohort.initialized_at !== null) {
+        integer(cohort.initialized_at);
+        // The previous, undeployed design admitted invite holders directly.
+        // Persist a denial so an old reader also fails closed. Old writers
+        // must be stopped before rollout; all new reads additionally check
+        // the admission source in case a stale writer reintroduces a row.
+        await this.quarantineLegacyInvites(tx);
+        return;
+      }
+      if (await tx.prepare("SELECT owner FROM perps_pilot_admissions LIMIT 1").get()) throw new Error("Uninitialized paper-pilot cohort contains membership records.");
+      const owners = bootstrapOwners((this.options.bootstrapOwners ?? (() => process.env.MERRYMEN_PERPS_PAPER_TENANTS))());
+      const revision = await this.bump(tx), at = this.now();
+      for (const owner of owners) {
+        await tx.prepare("INSERT INTO perps_pilot_admissions(owner,status,source,revision,updated_at,actor) VALUES(?,'allowed','bootstrap',?,?,NULL)")
+          .run(owner, revision, at);
+      }
+      await tx.prepare("UPDATE perps_pilot_cohort SET initialized_at=?,bootstrap_digest=? WHERE id=1")
+        .run(at, createHash("sha256").update(owners.join(",")).digest("hex"));
+      await this.audit(tx, "bootstrap", null, null, null, revision, at);
+    });
+    this.initialized = true;
+  }
+  private async locked<T>(fn: (tx: Db, revision: number) => Promise<T>, on: Db = this.db): Promise<T> {
+    await this.initialize(on);
+    return boundedTransaction(on, async tx => fn(tx, await this.lock(tx)));
   }
   private async hasRoom(tx: Db): Promise<boolean> {
     const row = await tx.prepare("SELECT COUNT(*) AS n FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap')").get() as Row;
@@ -279,19 +323,20 @@ export class SqlPerpsPilotStore implements PerpsPilotStore {
     }
     return { owners, revision };
   }
-  async withAdmission<T>(value: string, action: () => Promise<T>): Promise<{ allowed: false } | { allowed: true; value: T }> {
+  async withAdmission<T>(value: string, action: () => Promise<T>, on?: Db | null): Promise<{ allowed: false } | { allowed: true; value: T }> {
     const owner = ownerKey(value);
     return this.locked(async tx => {
       // Validate the complete bounded cohort as well as this owner, so corrupt
       // over-cap membership cannot authorize a protected mutation.
       if (!(await this.snapshotAt(tx)).owners.includes(owner)) return { allowed: false };
       return { allowed: true, value: await action() };
-    });
+    }, this.dbFor(on));
   }
-  async get(value: string) {
+  async get(value: string, on?: Db | null) {
     const owner = ownerKey(value);
-    await this.initialize();
-    const row = await boundedTransaction(this.db, tx => tx.prepare(`SELECT c.revision,c.initialized_at,a.status,a.source,a.updated_at,p.submitted_at,
+    const db = this.dbFor(on);
+    await this.initialize(db);
+    const row = await boundedTransaction(db, tx => tx.prepare(`SELECT c.revision,c.initialized_at,a.status,a.source,a.updated_at,p.submitted_at,
       (SELECT COUNT(*) FROM perps_pilot_admissions WHERE status='allowed' AND source IN ('admin','bootstrap')) AS active_count FROM perps_pilot_cohort c
       LEFT JOIN perps_pilot_admissions a ON a.owner=? LEFT JOIN perps_pilot_requests p ON p.owner=?
       WHERE c.id=1 AND c.initialized_at IS NOT NULL`).get(owner, owner)) as Row | undefined;
@@ -424,8 +469,8 @@ export function getPerpsPilotStore(): PerpsPilotStore {
     const load = () => pending ??= makePgDb(url).then(db => new SqlPerpsPilotStore(db)).catch(error => { pending = null; throw error; });
     store = {
       snapshot: () => load().then(value => value.snapshot()),
-      withAdmission: (owner, action) => load().then(value => value.withAdmission(owner, action)),
-      get: owner => load().then(value => value.get(owner)),
+      withAdmission: (owner, action, on) => load().then(value => value.withAdmission(owner, action, on)),
+      get: (owner, on) => load().then(value => value.get(owner, on)),
       list: () => load().then(value => value.list()),
       createInvite: args => load().then(value => value.createInvite(args)),
       revokeInvite: args => load().then(value => value.revokeInvite(args)),

@@ -17,6 +17,7 @@ import { SignIn, type AccountState } from "./HostedControls";
 import { SkeletonRows } from "./Skeleton";
 import { PerpsChart } from "./PerpsChart";
 import { marketSummary } from "./perps-market-summary";
+import { StopAllAgents } from "./StopAllAgents";
 import "./perps-desk.css";
 
 type Action = Parameters<typeof submitPerpsAction>[1];
@@ -33,7 +34,14 @@ export function PerpsLinks() {
 export function PerpsScreen() {
   const state = usePerpsAccount();
   const identity = state.account?.status.grant?.smartAccount ?? state.account?.session.address ?? "signed-out";
-  return <PerpsDesk key={identity} state={state}/>;
+  // Outside the desk's identity key: the stop's answer must outlive the
+  // remount its own refresh causes. Once the first read has answered, even
+  // with a failure: the stop confirms the login itself when the wallet read
+  // cannot (and shows nothing to a signed-out visitor).
+  return <>
+    <PerpsDesk key={identity} state={state}/>
+    {(state.account || state.error) && <div className="perps-desk"><StopAllAgents session={state.account?.session ?? null} onDone={state.refresh}/></div>}
+  </>;
 }
 
 function PerpsDesk({ state }: { state: ReturnType<typeof usePerpsAccount> }) {
