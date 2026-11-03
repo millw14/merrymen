@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { clearGrant } from "../lib/session";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { clearGrant, loadGrant } from "../lib/session";
+import { markPermissionForReplacement } from "../lib/permission-replacement";
 import { requestJson } from "./request-json";
 
 /** The signed-in login, as the Perps account read reports it (AccountState.session). */
@@ -9,6 +10,47 @@ export type StopAllSession = { hosted: boolean; address: string | null };
 
 const loginOf = (s: StopAllSession) => `${s.hosted}:${s.address?.toLowerCase() ?? ""}`;
 const UNCONFIRMED = "Check your agents before asking again.";
+
+/**
+ * THE STOP FENCE, ONE PER TAB. A sent stop outlives the screen that sent it:
+ * that screen can remount while the stop is pending (an in-place navigation,
+ * an account re-check), and a stop pressed on the desk covers the wallet page
+ * too. A screen that can arm a permission reads this, never its own state.
+ * - pending: stops sent and not yet answered. Nothing is armed meanwhile.
+ * - generation: moves when a stop is sent and when it is answered. A flow
+ *   begun under an older generation is void.
+ * - revision: moves when a confirmed stop cleared this browser's copies.
+ * - answer: the last stop's sentence, for the login it was sent for.
+ */
+export type StopFence = { pending: number; generation: number; revision: number; answer: { login: string; text: string } | null };
+const NO_STOPS: StopFence = { pending: 0, generation: 0, revision: 0, answer: null };
+let fence = NO_STOPS;
+const listeners = new Set<() => void>();
+const stoppedKeys = new Set<string>();
+function setFence(next: Partial<StopFence>) {
+  fence = { ...fence, ...next };
+  for (const listener of listeners) listener();
+}
+const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+export const currentStopFence = () => fence;
+export const useStopFence = () => useSyncExternalStore(subscribe, currentStopFence, currentStopFence);
+/**
+ * A Perps key the owner asked to stop is never offered for activation again:
+ * held for this tab, and in the replacement journal (permission-replacement.ts)
+ * so a reload or another tab refuses it too. A lost answer may have killed it.
+ * Renewal, which mints a new key, stays open.
+ */
+export function rememberStopped(grant: { smartAccount: string; chainId: number; sessionKeyAddress: string } | null | undefined) {
+  if (!grant?.sessionKeyAddress) return;
+  stoppedKeys.add(grant.sessionKeyAddress.toLowerCase());
+  try { markPermissionForReplacement(grant); } catch { /* this tab still holds it */ }
+}
+export const wasStopped = (sessionKey: string) => stoppedKeys.has(sessionKey.toLowerCase());
+/** This browser's Perps copy, whatever it holds: the one key a stop can see from any screen. */
+function rememberLocalPerps() {
+  try { rememberStopped(loadGrant("perps")); } catch { /* an unreadable slot offers nothing to activate */ }
+}
+export function resetStopFenceForTest() { fence = NO_STOPS; stoppedKeys.clear(); }
 
 /**
  * THE LOGIN-WIDE KILL, ON THE PERPS SCREENS. DELETE /api/grants with purpose
@@ -22,11 +64,12 @@ const UNCONFIRMED = "Check your agents before asking again.";
  * has one, and this asks the session route itself while it has none). One
  * reviewed press sends it once, bound to the login that was reviewed
  * (expectedTenant: the server refuses another). A lost or unconfirmed answer
- * is reported and never retried. Renders nothing for a signed-out visitor.
+ * is reported and never retried. A stop already pending never disables
+ * another. Renders nothing for a signed-out visitor.
  */
 export function StopAllAgents({ session: confirmed, onSend, onDone }: {
   session: StopAllSession | null;
-  /** Called as the stop is sent, before its answer: the screen voids what it has in flight. */
+  /** Called as the stop is sent, before its answer: the screen adds what it shows to the fence. */
   onSend?: () => void;
   /** Called once the stop is confirmed. */
   onDone?: () => void;
@@ -47,6 +90,7 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
   }, [confirmed === null, ownRevision]);
   const session = confirmed ?? own;
   const login = session ? loginOf(session) : null;
+  const stops = useStopFence();
   const [review, setReview] = useState<StopAllSession | null>(null);
   const [sending, setSending] = useState(false);
   const [message, setMessage] = useState("");
@@ -73,6 +117,13 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
       return;
     }
     inFlight.current = true; setSending(true); setMessage("");
+    // Shown here, and kept for the tab, so a screen that remounts meanwhile
+    // shows it too (for the login it was sent for).
+    const say = (text: string) => { if (mounted.current) setMessage(text); setFence({ answer: { login: loginOf(reviewed), text } }); };
+    let cleared = false;
+    // THE FENCE GOES UP BEFORE ANYTHING IS SENT, whatever the answer will be.
+    rememberLocalPerps();
+    setFence({ pending: fence.pending + 1, generation: fence.generation + 1, answer: null });
     try {
       onSend?.();
       let res: Response;
@@ -82,19 +133,19 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
           body: JSON.stringify({ purpose: "delete-agent", ...(reviewed.hosted ? { expectedTenant: reviewed.address } : {}) }),
         });
       } catch {
-        if (mounted.current) setMessage(`The stop response was not received, so it is not known whether it reached the server. ${UNCONFIRMED}`);
+        say(`The stop response was not received, so it is not known whether it reached the server. ${UNCONFIRMED}`);
         recheck();
         return;
       }
       const body = await res.json().catch(() => null) as { ok?: unknown; error?: unknown } | null;
       if (!res.ok) {
         // The server's own sentence: a partial kill names what is still running.
-        if (mounted.current) setMessage(typeof body?.error === "string" && body.error ? body.error : `The service did not confirm the stop (${res.status}). ${UNCONFIRMED}`);
+        say(typeof body?.error === "string" && body.error ? body.error : `The service did not confirm the stop (${res.status}). ${UNCONFIRMED}`);
         recheck();
         return;
       }
       if (body?.ok !== true) {
-        if (mounted.current) setMessage(`The stop response could not be confirmed. ${UNCONFIRMED}`);
+        say(`The stop response could not be confirmed. ${UNCONFIRMED}`);
         return;
       }
       // EVERY WALLET'S BROWSER COPY, as the kill stopped every wallet: each is
@@ -104,10 +155,15 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
       const kept = (["spot", "perps"] as const).filter((wallet) => {
         try { clearGrant(wallet); return false; } catch { return true; }
       });
-      if (mounted.current) setMessage("Stop request accepted for Spot, Perps and Solana. Existing assets remain in their accounts." +
+      cleared = true;
+      say("Stop request accepted for Spot, Perps and Solana. Existing assets remain in their accounts." +
         (kept.length ? ` This browser's saved ${kept.join(" and ")} permission could not be cleared; it was kept with its recovery data. Do not re-activate it; reload before renewing.` : ""));
       onDone?.();
     } finally {
+      // A copy another tab saved meanwhile is the stop's too: the kill was
+      // login-wide. (This tab's flows were voided at the press.)
+      rememberLocalPerps();
+      setFence({ pending: Math.max(0, fence.pending - 1), generation: fence.generation + 1, ...(cleared ? { revision: fence.revision + 1 } : {}) });
       inFlight.current = false;
       if (mounted.current) { setSending(false); setReview(null); }
     }
@@ -118,12 +174,13 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
   // Hosted, the orchestrator also removes the agents' memory; a self-hosted kill
   // removes the permissions and leaves local history where it is.
   const hosted = session?.hosted !== false;
+  const shown = message || (stops.answer && stops.answer.login === login ? stops.answer.text : "");
   return <section className="perps-stop-all" aria-label="Stop all agents">
     <h2>Stop all agents</h2>
     <p>{hosted
       ? "Stops Spot, Perps and Solana for this login. It removes active server permissions and agent memory. It does not withdraw assets or revoke permissions on-chain."
       : "Stops Spot, Perps and Solana on this install. It removes their active permissions; local agent history is kept. It does not withdraw assets or revoke permissions on-chain."}</p>
-    {!review && <button type="button" className="perps-stop-all-button" disabled={!ready || sending} onClick={() => { setMessage(""); setReview(session); }}>Stop all agents</button>}
+    {!review && <button type="button" className="perps-stop-all-button" disabled={!ready || sending} onClick={() => { setMessage(""); setFence({ answer: null }); setReview(session); }}>Stop all agents</button>}
     {!ready && (ownFailed
       ? <p role="status">Your login could not be confirmed, and the stop is bound to it. <button type="button" onClick={() => setOwnRevision((value) => value + 1)}>Check again</button></p>
       : <p role="status">Confirming your login…</p>)}
@@ -136,6 +193,6 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
       <button type="button" className="perps-stop-all-button" disabled={sending} onClick={() => void stop()}>{sending ? "Stopping…" : "Stop all agents now"}</button>
       <button type="button" disabled={sending} onClick={() => setReview(null)}>Cancel</button>
     </section>}
-    {message && <p className="perps-notice" role="status">{message}</p>}
+    {shown && <p className="perps-notice" role="status">{shown}</p>}
   </section>;
 }

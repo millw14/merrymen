@@ -22,7 +22,8 @@ let lostWrite: boolean, gate: boolean, settingsEnabled: boolean, settingsVersion
 let authWait: ReturnType<typeof deferred<Response>> | null, stopWait: ReturnType<typeof deferred<void>> | null, mintWait: ReturnType<typeof deferred<void>> | null;
 let postWait: ReturnType<typeof deferred<Response>> | null, preflightWait: ReturnType<typeof deferred<void>> | null;
 let hostedMode: boolean, killReply: () => Response | Promise<Response>;
-let archived: Grant[], clearThrows: string | null, grantsFail: boolean, mintPostWait: ReturnType<typeof deferred<void>> | null;
+let archived: Grant[], clearThrows: string | null, grantsFail: boolean, mintPostWait: ReturnType<typeof deferred<void>> | null, retryWait: ReturnType<typeof deferred<void>> | null, tokenWait: ReturnType<typeof deferred<void>> | null;
+let resetStopFence: () => void;
 const originalFetch = globalThis.fetch;
 const signer = { account: { address: OWNER }, did: "did:privy:perps-test" } as unknown as PrivyOwner;
 const require = createRequire(import.meta.url);
@@ -40,11 +41,12 @@ before(async () => {
     if (id === "./HostedControls") return { PRIVY_BETA: false, SignIn: () => React.createElement("p", null, "Sign in") };
     if (id === "./usePrivyOwner") return { usePrivyOwner: () => signer };
     // As session.ts's clearGrant: the slot is archived, then emptied.
-    if (parent.filename === stopPath && id === "../lib/session") return { clearGrant: (wallet: string) => {
+    if (parent.filename === stopPath && id === "../lib/session") return { loadGrant: (wallet: string) => wallet === "perps" ? localGrant : null, clearGrant: (wallet: string) => {
       if (clearThrows === wallet) throw new Error("storage refused");
       events.push(`clear-${wallet}`);
       if (wallet === "perps" && localGrant) { archived.push(localGrant); localGrant = null; }
     } };
+    if (parent.filename === stopPath && id === "../lib/permission-replacement") return { markPermissionForReplacement: (stopped: Grant) => events.push(`journal-${stopped.sessionKeyAddress}`) };
     if (parent.filename === walletPath) {
       if (id === "../lib/session") return {
         loadGrant: () => localGrant,
@@ -53,7 +55,14 @@ before(async () => {
         // As session.ts's: a renewal preflight refuses without the account it renews.
         preflightAgentGrant: async (_owner: unknown, options: { purpose: string; expectAccount?: string }) => { events.push("preflight"); assert.equal(options.purpose, "perps"); if (!options.expectAccount) throw new Error("A renewal preflight requires the existing account address."); if (preflightWait) await preflightWait.promise; },
         createPrivyOwnedWallet: async (_owner: unknown, _did: unknown, options: { purpose: string; expectAccount?: string; beforeCommit: () => Promise<void>; assertCurrent: () => void; minimumValidationNonce?: number }) => { events.push("mint"); if (mintWait) await mintWait.promise; await options.beforeCommit(); options.assertCurrent(); assert.equal(options.purpose, "perps"); if (events.includes("revoke")) assert.equal(options.minimumValidationNonce, 1); assert.equal(options.expectAccount, activeGrant?.smartAccount); const created = grant(); activeGrant = created; localGrant = created; if (mintPostWait) await mintPostWait.promise; return { local: created, handoff: { ok: true } }; },
-        retryGrantHandoff: async () => { events.push("retry"); return { ok: true }; },
+        // As session.ts's: checked, signed (retryWait), its proof's beforeSubmit, then postGrant, whose check
+        // after its token read (tokenWait) answers as a lost handoff rather than throwing.
+        retryGrantHandoff: async (_saved: Grant, proof?: { beforeSubmit: () => Promise<void> }, assertCurrent?: () => void) => {
+          events.push("retry"); assertCurrent?.(); if (retryWait) await retryWait.promise; await proof?.beforeSubmit();
+          if (tokenWait) await tokenWait.promise;
+          try { assertCurrent?.(); } catch { return { ok: false, error: "couldn't reach the server to hand over the grant — it's saved in this browser, try re-arming." }; }
+          events.push("handoff"); return { ok: true };
+        },
       };
       if (id === "../lib/saved-grant-binding") return { loadRecoveryGrants: () => [], trustedSavedGrant: async () => true, saveRecoveryGrant: () => events.push("save-recovery") };
       if (id === "../lib/permission-replacement") return { needsPermissionReplacement: () => false, markPermissionForReplacement: () => events.push("mark") };
@@ -66,6 +75,7 @@ before(async () => {
     PerpsScreen = require(fileURLToPath(new URL("./PerpsScreen.tsx", import.meta.url))).PerpsScreen;
     PerpsSettings = require(fileURLToPath(new URL("./PerpsSettings.tsx", import.meta.url))).PerpsSettings;
     PerpsWalletView = require(walletPath).PerpsWalletView;
+    resetStopFence = require(stopPath).resetStopFenceForTest;
   } finally { hook.mock.restore(); Reflect.deleteProperty(globalThis, "window"); Reflect.deleteProperty(globalThis, "document"); boot.window.close(); }
 });
 
@@ -81,7 +91,7 @@ function accountReport() {
 beforeEach(() => {
   ui = testDom(); tenant = OWNER; activeGrant = grant(); localGrant = null; reportMode = "ok"; reportOwner = OWNER; activityOwner = OWNER; chartOwner = OWNER;
   hostedMode = true; killReply = () => { activeGrant = null; return json({ ok: true, perps: "stopped" }); };
-  archived = []; clearThrows = null; grantsFail = false; mintPostWait = null;
+  archived = []; clearThrows = null; grantsFail = false; mintPostWait = null; retryWait = null; tokenWait = null; resetStopFence();
   writes = []; events = []; lostWrite = false; gate = true; settingsEnabled = false; settingsVersion = "version-1"; postWait = null; preflightWait = null; authWait = null; stopWait = null; mintWait = null;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(String(input), "https://app.example.test"), method = init?.method ?? "GET";
@@ -466,6 +476,8 @@ test("the stop voids a create from the press: a mint resuming before the answer,
     assert.equal(activeGrant, null, `lost=${lost}`); assert.equal(localGrant, null, `lost=${lost}`);
     assert.equal(ui.container.textContent!.includes("Permission activated"), false);
     if (!lost) { await act(async () => reply.resolve(json({}))); await settle(); killReply = answer; }
+    // Voided before its mint saved or handed anything off: nothing to warn about.
+    assert.equal(ui.container.textContent!.includes("If that reached the server after the stop"), false, `lost=${lost}`);
   }
 });
 
@@ -498,4 +510,138 @@ test("a permission handed off just before the stop is called out, not hidden", a
   await click("Stop all agents"); await click("Stop all agents now");
   await act(async () => mintPostWait!.resolve()); await settle();
   assert.match(ui.container.textContent!, /If that reached the server after the stop, the permission is active/);
+});
+
+const buttonNamed = (label: string) => [...ui.container.querySelectorAll("button")].find(item => item.textContent === label);
+
+test("while a stop awaits its answer no renewal or activation starts, and none survives it", async () => {
+  activeGrant = null; localGrant = grant();
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await acknowledge();
+  assert.equal(!!buttonNamed("Retry saved permission activation"), true); assert.equal(buttonNamed("Renew Perps permission")?.disabled, false);
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  assert.equal(deletes().length, 1);
+  // Whatever the page still offers, nothing starts while the stop is pending.
+  await act(async () => { buttonNamed("Retry saved permission activation")?.click(); }); await settle();
+  await act(async () => { buttonNamed("Renew Perps permission")?.click(); }); await settle();
+  assert.deepEqual(events.filter(event => ["preflight", "stop", "mint", "retry", "handoff"].includes(event)), []);
+  // The key it is stopping is not offered for activation, and renewal waits.
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false, "the stopped key is offered for activation");
+  assert.equal(buttonNamed("Renew Perps permission")?.disabled, true);
+  await act(async () => reply.resolve(json({}))); await settle();
+  assert.match(ui.container.textContent!, /Stop request accepted/);
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false, "the stopped key is offered for activation");
+  // Answered, a new wallet can be made again.
+  await acknowledge(); await click("Create Perps wallet");
+  assert.ok(events.includes("mint")); assert.match(ui.container.textContent!, /Permission activated/);
+});
+
+test("an activation begun before the stop is voided before it is submitted", async () => {
+  activeGrant = null; localGrant = grant(); retryWait = deferred<void>();
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await ui.click("Retry saved permission activation"); await settle();
+  assert.ok(events.includes("retry"));
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  await act(async () => retryWait!.resolve()); await settle();
+  assert.equal(events.includes("handoff"), false, "submitted while the stop was pending");
+  await act(async () => reply.resolve(json({}))); await settle();
+  assert.equal(events.includes("handoff"), false);
+  assert.equal(ui.container.textContent!.includes("Permission activated"), false);
+  // Voided while signing, before its last check: nothing was sent, so no race to warn about.
+  assert.equal(ui.container.textContent!.includes("If that reached the server after the stop"), false);
+});
+
+test("a key the owner asked to stop is not offered for activation, even when the answer was lost", async () => {
+  lostWrite = true; activeGrant = null; localGrant = grant();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  assert.equal(!!buttonNamed("Retry saved permission activation"), true);
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.match(ui.container.textContent!, /not received.*Check your agents before asking again/);
+  assert.ok(localGrant, "a lost answer clears nothing");
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false, "the stopped key is offered for activation");
+  // It can still be renewed: a new key replaces it.
+  lostWrite = false; await acknowledge();
+  assert.equal(buttonNamed("Renew Perps permission")?.disabled, false);
+});
+
+test("a stop during the activation's handoff is called out, and never answered as a lost handoff to re-arm", async () => {
+  activeGrant = null; localGrant = grant(); tokenWait = deferred<void>();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await ui.click("Retry saved permission activation"); await settle();
+  await click("Stop all agents"); await click("Stop all agents now");
+  await act(async () => tokenWait!.resolve()); await settle();
+  assert.equal(events.includes("handoff"), false);
+  assert.match(ui.container.textContent!, /If that reached the server after the stop, the permission is active/);
+  assert.equal(ui.container.textContent!.includes("try re-arming"), false);
+});
+
+test("the fence outlives the page: remounted while the stop is pending, it offers nothing, then shows the answer", async () => {
+  activeGrant = null; localGrant = grant();
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  // An in-place navigation or an account re-check remounts the page mid-stop.
+  await mount(React.createElement(PerpsWalletView, { key: "remounted", offered: true, creating: false, signer }));
+  await acknowledge();
+  await act(async () => { buttonNamed("Retry saved permission activation")?.click(); }); await settle();
+  await act(async () => { buttonNamed("Renew Perps permission")?.click(); }); await settle();
+  assert.deepEqual(events.filter(event => ["preflight", "stop", "mint", "retry", "handoff"].includes(event)), []);
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false, "the stopped key is offered for activation");
+  assert.equal(buttonNamed("Renew Perps permission")?.disabled, true);
+  await act(async () => reply.resolve(json({}))); await settle();
+  assert.match(ui.container.textContent!, /Stop request accepted/);
+  // The confirmed stop cleared this browser's copy, and the remounted page reads that.
+  assert.equal(!!buttonNamed("Create Perps wallet"), true); assert.equal(!!buttonNamed("Renew Perps permission"), false);
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false);
+});
+
+test("a stop sent from the desk fences the wallet page too", async () => {
+  activeGrant = null; localGrant = grant();
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await acknowledge();
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false, "the stopped key is offered for activation");
+  assert.equal(buttonNamed("Renew Perps permission")?.disabled, true);
+  await act(async () => { buttonNamed("Renew Perps permission")?.click(); }); await settle();
+  assert.deepEqual(events.filter(event => ["preflight", "stop", "mint", "retry", "handoff"].includes(event)), []);
+  await act(async () => reply.resolve(json({}))); await settle();
+  assert.match(ui.container.textContent!, /Stop request accepted/);
+});
+
+test("every key the stop could see is journaled at the press, so a lost answer never re-offers this browser's older one", async () => {
+  // The server holds a newer key (renewed elsewhere); this browser still holds the older one.
+  const newer = { ...grant(), sessionKeyAddress: `0x${"e".repeat(40)}` } as Grant;
+  delete (newer as Partial<Grant>).serialized; delete (newer as Partial<Grant>).demoSessionPrivateKey;
+  activeGrant = newer; localGrant = grant(); lostWrite = true;
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false);
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.match(ui.container.textContent!, /not received/);
+  assert.ok(events.includes(`journal-${newer.sessionKeyAddress}`), "the shown key is journaled");
+  assert.ok(events.includes(`journal-${grant().sessionKeyAddress}`), "this browser's own key is journaled");
+  // The kill did land: the next read shows nothing active, and the older local copy is the saved wallet again.
+  activeGrant = null;
+  await mount(React.createElement(PerpsWalletView, { key: "read-again", offered: true, creating: false, signer }));
+  assert.match(ui.container.textContent!, /Perps account/);
+  assert.equal(!!buttonNamed("Retry saved permission activation"), false, "the older key is offered for activation");
+});
+
+test("a stop confirmed from another screen reads the wallet page's account again", async () => {
+  localGrant = grant();
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  assert.equal(!!buttonNamed("Renew Perps permission"), true);
+  await act(async () => reply.resolve(json({}))); await settle();
+  assert.equal(!!buttonNamed("Create Perps wallet"), true, "the killed permission is still shown as the one to renew");
 });
