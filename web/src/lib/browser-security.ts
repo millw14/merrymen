@@ -8,10 +8,10 @@
  * policy is a script execution boundary, not a complete data-egress allowlist.
  * Local installs also support owner-configured HTTP RPCs and websocket URLs.
  */
-export function documentPolicy(nonce: string, options: { development: boolean; hosted: boolean }): string {
+export function documentPolicy(nonce: string, options: { development: boolean; hosted: boolean; gloamWithdrawals?: boolean }): string {
   return [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${options.development ? " 'unsafe-eval'" : ""}`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${options.development ? " 'unsafe-eval'" : ""}${options.gloamWithdrawals ? " 'wasm-unsafe-eval'" : ""}`,
     "script-src-attr 'none'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",

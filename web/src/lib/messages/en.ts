@@ -565,6 +565,24 @@ export const EN = {
   "settings.text.agentStop": "/agent stop",
   "settings.text.outboundPublic": "Outbound & public",
   "settings.text.offByDefaultNothing": "— off by default; nothing streams until you turn this on and add a key.",
+
+  // ── Add funds: paying the agent from a private Gloam balance ─────────
+  //
+  // English only, on purpose. The rest of the funding panel is not extracted
+  // yet, and a Spanish block inside an English panel is the half-translated
+  // screen i18n.tsx exists to prevent. Translate `fund.*` with the panel.
+  // See docs/gloam-private-funding.md for what each sentence is claiming.
+  "fund.gloam.title": "Fund from Gloam (beta)",
+  "fund.gloam.body": "Pay this agent from your private USDG balance in Gloam. With Hide my wallet enabled and its relay available, the payment comes from Gloam's pool and the relay submits it instead of your wallet.",
+  "fund.gloam.public": "Your agent's address, owning wallet, balance and trades remain visible on chain. Deposits into Gloam and payouts to the agent also show their amounts and times, which can still link them. This funding route does not make the agent private.",
+  "fund.gloam.beta": "Gloam is in beta. Review its fees and the USDG your agent will receive before confirming in Gloam. Merrymen credits only the USDG that arrives.",
+  "fund.gloam.steps": "Copy the address, open Gloam, choose Robinhood Chain mainnet and USDG, then paste it into Pay with Hide my wallet on. Check the full recipient address before confirming. Robinhood Chain only: USDG sent on another network does not fund this agent.",
+  "fund.gloam.unchanged": "Your agent's permission, limits and recovery do not change. It arrives as an ordinary deposit, and your balance updates once it is recorded.",
+  "fund.gloam.copy": "Copy agent address",
+  "fund.gloam.copying": "Copying address…",
+  "fund.gloam.copied": "Address copied. Open Gloam, paste it into Pay and check it matches the agent address.",
+  "fund.gloam.copyFailed": "The address was not copied. Select and copy the full address below before opening Gloam. Do not use an older address from your clipboard.",
+  "fund.gloam.open": "Open Gloam",
 } as const;
 
 /** Every message the product can show. A key outside this set will not compile. */

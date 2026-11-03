@@ -204,13 +204,19 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const snapshot = physicalLock(root);
     assertPatched(snapshot.lock.packages);
     await verifyNativeModules(root);
+    // Proving libraries retain worker threads. Run the offline compiled-bundle
+    // check in its bounded process so installation verification always terminates.
+    const proofCheck = spawnSync(process.execPath, [fileURLToPath(new URL("./gloam-bundle-smoke.mjs", import.meta.url)), root], {
+      encoding: "utf8", timeout: 75_000, maxBuffer: 1024 * 1024,
+    });
+    if (proofCheck.error || proofCheck.status !== 0) throw new Error("Prebuilt Gloam bundle verification failed.");
     const { metadata, excused } = auditPhysicalLock(snapshot);
     const exception = excused.length === 0 ? "" :
       `, all excused through ${ZOD3_EXCEPTION.lastDay} for ${ZOD3_EXCEPTION.advisory} (zod 3 at ${excused.join(", ")})`;
     if (exception && process.env.GITHUB_ACTIONS) {
       console.log(`::warning title=Audit exception::${ZOD3_EXCEPTION.advisory} is excused for ${excused.length} zod 3 copies until ${ZOD3_EXCEPTION.lastDay}; after that this check fails again.`);
     }
-    console.log(`[merrymen] Verified ${Object.keys(snapshot.lock.packages).length - 1} installed packages; native sharp, esbuild and Next SWC work; audit: ${metadata.vulnerabilities.total} vulnerabilities${exception}.`);
+    console.log(`[merrymen] Verified ${Object.keys(snapshot.lock.packages).length - 1} installed packages; native sharp, esbuild and Next SWC plus bundled Gloam proof/encryption modules work; audit: ${metadata.vulnerabilities.total} vulnerabilities${exception}.`);
   } catch (error) {
     console.error(`[merrymen] Installed package verification failed: ${error.message}`);
     process.exitCode = 1;
