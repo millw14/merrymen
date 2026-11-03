@@ -3,7 +3,7 @@
  * leave optional/native packages for npm to install on the consumer's platform.
  * All manifest normalization happens in a disposable staging directory. */
 import { createHash } from "node:crypto";
-import { constants, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,6 +12,9 @@ import Arborist from "@npmcli/arborist";
 import packlist from "npm-packlist";
 
 export const BUNDLE_ROOTS = ["next", "@privy-io/react-auth", "@zerodev/permissions"];
+// These browser libraries are compiled into .next. Source/Docker builds still
+// install them normally; only verified, prebuilt releases omit their Node trees.
+export const BUILD_ONLY_ROOTS = ["@gloamtrade/sdk", "snarkjs"];
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 const json = filename => JSON.parse(readFileSync(filename, "utf8"));
 const writeJson = (filename, value) => writeFileSync(filename, `${JSON.stringify(value, null, 2)}\n`);
@@ -34,7 +37,7 @@ function resolveLocked(packages, from, name, required = true) {
   }
 }
 
-export function runtimeBundlePlan(manifest, lock, bundleRoots = BUNDLE_ROOTS) {
+export function runtimeBundlePlan(manifest, lock, bundleRoots = BUNDLE_ROOTS, buildOnlyRoots = []) {
   if (lock.lockfileVersion !== 3 || lock.name !== manifest.name || lock.version !== manifest.version) throw new Error("A matching version 3 package-lock.json is required.");
   for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
     if (JSON.stringify(Object.entries(manifest[field] ?? {}).sort()) !== JSON.stringify(Object.entries(lock.packages?.[""]?.[field] ?? {}).sort())) throw new Error(`The package lock has stale ${field}; run npm install first.`);
@@ -43,6 +46,7 @@ export function runtimeBundlePlan(manifest, lock, bundleRoots = BUNDLE_ROOTS) {
   const staged = structuredClone(manifest);
   delete staged.devDependencies;
   delete staged.overrides;
+  for (const name of buildOnlyRoots) delete staged.dependencies?.[name];
   staged.bundleDependencies = [...bundleRoots];
   staged.optionalDependencies = {};
   for (const [name] of Object.entries(staged.dependencies ?? {})) staged.dependencies[name] = packages[resolveLocked(packages, "", name)].version;
@@ -95,6 +99,75 @@ export function runtimeBundlePlan(manifest, lock, bundleRoots = BUNDLE_ROOTS) {
   return { manifest: staged, packages: normalized };
 }
 
+/** Dependencies needed only while compiling the browser, excluding shared runtimes. */
+export function buildOnlyPackages(manifest, lock, buildOnlyRoots = BUILD_ONLY_ROOTS) {
+  function closure(names) {
+    const found = new Set();
+    const visit = rel => {
+      if (!rel || found.has(rel)) return;
+      found.add(rel);
+      const entry = lock.packages[rel];
+      for (const name of new Set([...Object.keys(entry.dependencies ?? {}), ...Object.keys(entry.optionalDependencies ?? {}), ...Object.keys(entry.peerDependencies ?? {})])) {
+        visit(resolveLocked(lock.packages, rel, name, false));
+      }
+    };
+    for (const name of names) visit(resolveLocked(lock.packages, "", name, false));
+    return found;
+  }
+  const runtime = closure(Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies }).filter(name => !buildOnlyRoots.includes(name)));
+  return [...closure(buildOnlyRoots.filter(name => manifest.dependencies?.[name]))].filter(rel => !runtime.has(rel));
+}
+
+/** Never omit a dependency that Next still expects to load from node_modules. */
+export function assertBuildOnlyBundled(root, omittedPackages) {
+  const omitted = omittedPackages.map(rel => path.resolve(root, rel));
+  const names = new Set(omittedPackages.map(rel => rel.slice(rel.lastIndexOf("node_modules/") + "node_modules/".length)));
+  const nextRoot = path.join(root, "web/.next");
+  let traces = 0;
+  let javascript = 0;
+  const checkSpecifier = (spec, from) => {
+    if (spec.startsWith(".") || path.isAbsolute(spec)) {
+      const target = path.resolve(path.dirname(from), spec);
+      if (omitted.some(pkg => target === pkg || target.startsWith(`${pkg}${path.sep}`))) throw new Error(`Runtime source imports omitted build dependency: ${spec}`);
+    }
+    const parts = spec.split("/");
+    const name = spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+    if (names.has(name)) throw new Error(`Prebuilt dashboard still imports omitted build dependency: ${spec}`);
+  };
+  const checkSource = file => {
+    const source = readFileSync(file, "utf8");
+    // Webpack's externals use require(); also reject native import forms.
+    for (const match of source.matchAll(/(?:require|__non_webpack_require__|import)\s*\(\s*["']([^"']+)["']\s*\)|\bfrom\s*["']([^"']+)["']|\bimport\s*["']([^"']+)["']/g)) checkSpecifier(match[1] ?? match[2] ?? match[3], file);
+  };
+  const walk = (directory, compiled = true) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === "cache") continue;
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(file, compiled);
+      else if (compiled && entry.name.endsWith(".nft.json")) {
+        traces++;
+        for (const dependency of json(file).files ?? []) {
+          const target = path.resolve(path.dirname(file), dependency);
+          if (omitted.some(pkg => target === pkg || target.startsWith(`${pkg}${path.sep}`))) {
+            throw new Error(`Prebuilt dashboard trace still needs omitted build dependency: ${dependency}`);
+          }
+        }
+      } else if (/\.[cm]?[jt]sx?$/.test(entry.name) && !/\.test\.[cm]?[jt]sx?$/.test(entry.name)) {
+        if (compiled) javascript++;
+        checkSource(file);
+      }
+    }
+  };
+  walk(nextRoot);
+  // These shipped entry points execute from source, independently of Next's
+  // traces. A future worker/CLI import must prevent pruning its dependencies.
+  for (const rel of ["cli", "worker/src", "packages/core/src", "sdk"]) {
+    const directory = path.join(root, rel);
+    if (existsSync(directory)) walk(directory, false);
+  }
+  if (!traces || !javascript) throw new Error("Prebuilt dashboard is missing runtime traces or JavaScript; cannot omit build dependencies.");
+}
+
 function npmJson(args, cwd) {
   const result = spawnSync("npm", args, { cwd, encoding: "utf8", shell: process.platform === "win32", maxBuffer: 128 * 1024 * 1024 });
   if (result.status !== 0) throw new Error(`npm ${args.join(" ")} failed: ${result.stderr || result.error || result.stdout}`);
@@ -114,7 +187,12 @@ export async function packRuntime({ root, outDir, bundleRoots = BUNDLE_ROOTS, re
     if (!existsSync(path.join(root, "sdk/dist/browser.js"))) throw new Error("The browser SDK is missing; run npm run pack:release.");
   }
   const lockBytes = readFileSync(path.join(root, "package-lock.json"));
-  const plan = runtimeBundlePlan(json(path.join(root, "package.json")), JSON.parse(lockBytes), bundleRoots);
+  const manifest = json(path.join(root, "package.json"));
+  const lock = JSON.parse(lockBytes);
+  const buildOnlyRoots = requireBuild ? BUILD_ONLY_ROOTS : [];
+  const omittedPackages = buildOnlyPackages(manifest, lock, buildOnlyRoots);
+  if (omittedPackages.length) assertBuildOnlyBundled(root, omittedPackages);
+  const plan = runtimeBundlePlan(manifest, lock, bundleRoots, buildOnlyRoots);
   const stage = mkdtempSync(path.join(tmpdir(), "merrymen-release-"));
   try {
     // npm 10 still runs prepare during `pack --dry-run --ignore-scripts`.
@@ -132,7 +210,7 @@ export async function packRuntime({ root, outDir, bundleRoots = BUNDLE_ROOTS, re
       mkdirSync(path.dirname(destination), { recursive: true });
       copyFileSync(source, destination);
     }
-    const report = { lockSha256: digest(lockBytes), bundleRoots, packages: [] };
+    const report = { lockSha256: digest(lockBytes), bundleRoots, buildOnlyRoots, browserBuildDependencies: [], packages: [] };
     for (const entry of plan.packages) {
       const source = path.join(root, entry.path);
       assertInside(path.join(root, "node_modules"), source);
@@ -156,6 +234,25 @@ export async function packRuntime({ root, outDir, bundleRoots = BUNDLE_ROOTS, re
       }
       if (entry.externalOptionals.length || entry.externalPeers.length) writeJson(path.join(destination, "package.json"), installed);
       report.packages.push({ ...entry, originalManifestSha256: digest(originalBytes) });
+    }
+    // Build inputs can contribute bundled browser code even though their Node
+    // package trees are absent. Keep provenance and license notices; never copy
+    // the unused implementation just to retain its attribution.
+    for (const rel of omittedPackages) {
+      const source = path.join(root, rel);
+      assertInside(path.join(root, "node_modules"), source);
+      const originalBytes = readFileSync(path.join(source, "package.json"));
+      const installed = JSON.parse(originalBytes);
+      if (installed.version !== lock.packages[rel].version) throw new Error(`Installed browser build dependency ${rel} does not match the lock. Run npm ci.`);
+      const licenses = [];
+      for (const entry of readdirSync(source, { withFileTypes: true })) {
+        if (!entry.isFile() || !/^(?:licen[cs]e|copying|notice)(?:$|[.\-_])/i.test(entry.name)) continue;
+        const target = path.join("cli/browser-build-dependencies", rel.replaceAll("node_modules/", ""), entry.name);
+        mkdirSync(path.dirname(path.join(stage, target)), { recursive: true });
+        copyFileSync(path.join(source, entry.name), path.join(stage, target));
+        licenses.push(target);
+      }
+      report.browserBuildDependencies.push({ path: rel, name: installed.name, version: installed.version, license: installed.license, resolved: lock.packages[rel].resolved, integrity: lock.packages[rel].integrity, originalManifestSha256: digest(originalBytes), licenses });
     }
     writeJson(path.join(stage, "package.json"), plan.manifest);
     mkdirSync(path.join(stage, "cli"), { recursive: true });

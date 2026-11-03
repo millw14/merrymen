@@ -186,11 +186,19 @@ and 852-byte encrypted memo, and independently decrypted the note using WebCrypt
 Mobile and desktop form/review/pending views were checked for overflow. Wallet signing,
 deployed relay submission and the final Gloam claim remain outside that local check.
 
-Dependencies are pinned for the SDK/prover. A scoped `jsonpath` override keeps the
-prover's CLI-only Underscore dependency on its patched release. The SDK's
-`circomlibjs`/Ethers dependency still reports the low-severity Elliptic signing advisory
-`GHSA-848j-6mx2-7j84`; this integration uses WebCrypto P-256 for receipt encryption and
-does not use the Ethers signing path. This does not replace an upstream crypto audit.
+Dependencies are pinned for the SDK/prover. Source builds retain those dependencies;
+the source dependency tree reports the Elliptic signing advisory
+`GHSA-848j-6mx2-7j84` through `circomlibjs`/Ethers, and the Minimatch advisory
+`GHSA-g3hv-75wg-m249` through the prover's unused CLI tools. The integration uses
+WebCrypto P-256 for receipt encryption and does not use either affected path.
+
+Prebuilt CLI releases ship the compiled Next.js proof modules and omit the unused
+SDK/prover Node dependency trees. Packaging verifies that runtime code and Next.js
+traces do not require those omitted packages, and preserves dependency provenance
+and license notices. Installed-package verification exercises the compiled encrypted
+note flow without loading the omitted packages, then applies the existing physical
+dependency audit unchanged. Source and Docker builds still install their complete
+dependencies. This does not replace an upstream crypto audit.
 
 Before enabling this beta, Milla and Duke should review the pinned contracts/proving
 artifacts and recipient claim flow, assess the pending external audit, and authorize a
