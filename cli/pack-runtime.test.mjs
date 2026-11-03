@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { packRuntime, runtimeBundlePlan } from "./pack-runtime.mjs";
+import { assertBuildOnlyBundled, buildOnlyPackages, packRuntime, runtimeBundlePlan } from "./pack-runtime.mjs";
 
 function fixture(t) {
   const root = mkdtempSync(path.join(tmpdir(), "merrymen-runtime-test-"));
@@ -150,4 +150,76 @@ test("a files allowlist cannot accidentally publish nested environment files", a
   const listing = spawnSync("tar", ["-tzf", packed.path], { encoding: "utf8" });
   assert.equal(listing.status, 0);
   assert(!listing.stdout.includes(".env"));
+});
+
+
+test("prebuilt releases omit browser build trees while source plans retain them", () => {
+  const root = new URL("../", import.meta.url);
+  const manifest = JSON.parse(readFileSync(new URL("package.json", root), "utf8"));
+  const lock = JSON.parse(readFileSync(new URL("package-lock.json", root), "utf8"));
+  const source = runtimeBundlePlan(manifest, lock);
+  const prebuilt = runtimeBundlePlan(manifest, lock, undefined, ["@gloamtrade/sdk", "snarkjs"]);
+  for (const name of ["@gloamtrade/sdk", "snarkjs"]) {
+    assert.ok(source.manifest.dependencies[name]);
+    assert.equal(prebuilt.manifest.dependencies[name], undefined);
+  }
+  const omitted = buildOnlyPackages(manifest, lock);
+  for (const name of ["@gloamtrade/sdk", "snarkjs", "circomlibjs", "elliptic", "filelist"]) {
+    assert.ok(omitted.includes(`node_modules/${name}`), name);
+  }
+  assert.ok(!omitted.includes("node_modules/viem"), "shared worker runtime stays installed");
+});
+
+test("prebuilt omission refuses traced or external runtime imports", t => {
+  const f = fixture(t);
+  const server = path.join(f.root, "web/.next/server");
+  mkdirSync(server, { recursive: true });
+  const trace = path.join(server, "page.js.nft.json");
+  const js = path.join(server, "page.js");
+  writeFileSync(js, "module.exports = 42");
+  writeFileSync(trace, JSON.stringify({ files: ["../../../node_modules/viem/index.js"] }));
+  assert.doesNotThrow(() => assertBuildOnlyBundled(f.root, ["node_modules/@gloamtrade/sdk", "node_modules/snarkjs"]));
+  writeFileSync(trace, JSON.stringify({ files: ["../../../node_modules/snarkjs/main.js"] }));
+  assert.throws(() => assertBuildOnlyBundled(f.root, ["node_modules/snarkjs"]), /trace still needs/);
+  writeFileSync(trace, JSON.stringify({ files: [] }));
+  for (const source of ['module.exports = require("snarkjs")', 'import("@gloamtrade/sdk")', 'import { groth16 } from "snarkjs"']) {
+    writeFileSync(js, source);
+    assert.throws(() => assertBuildOnlyBundled(f.root, ["node_modules/@gloamtrade/sdk", "node_modules/snarkjs"]), /still imports/);
+  }
+  writeFileSync(js, "module.exports = 42");
+  writeFileSync(path.join(f.root, "cli/bin.mjs"), 'import "snarkjs";');
+  assert.throws(() => assertBuildOnlyBundled(f.root, ["node_modules/snarkjs"]), /still imports/);
+});
+
+
+test("prebuilt packaging retains build-input provenance and licenses without Node implementation trees", async t => {
+  const f = fixture(t);
+  const prover = { name: "snarkjs", version: "1.0.0", license: "GPL-3.0" };
+  f.manifest.dependencies.snarkjs = "1.0.0";
+  f.lock.packages[""].dependencies = { ...f.manifest.dependencies };
+  f.lock.packages["node_modules/snarkjs"] = { ...prover, resolved: "https://registry.npmjs.org/snarkjs/-/snarkjs-1.0.0.tgz", integrity: "sha512-fixture" };
+  writeFileSync(path.join(f.root, "package.json"), JSON.stringify(f.manifest));
+  writeFileSync(path.join(f.root, "package-lock.json"), JSON.stringify(f.lock));
+  mkdirSync(path.join(f.root, "node_modules/snarkjs"), { recursive: true });
+  writeFileSync(path.join(f.root, "node_modules/snarkjs/package.json"), JSON.stringify(prover));
+  writeFileSync(path.join(f.root, "node_modules/snarkjs/COPYING"), "prover license");
+  writeFileSync(path.join(f.root, "node_modules/snarkjs/index.js"), "module.exports = 'unused Node implementation';");
+  mkdirSync(path.join(f.root, "web/.next/server"), { recursive: true });
+  for (const name of ["BUILD_ID", "required-server-files.json", "prerender-manifest.json", "routes-manifest.json"]) writeFileSync(path.join(f.root, "web/.next", name), "{}");
+  writeFileSync(path.join(f.root, "web/.next/server/page.js"), "module.exports = 42;");
+  writeFileSync(path.join(f.root, "web/.next/server/page.js.nft.json"), JSON.stringify({ files: [] }));
+  mkdirSync(path.join(f.root, "sdk/dist"), { recursive: true });
+  writeFileSync(path.join(f.root, "sdk/dist/browser.js"), "export {};");
+  const packed = await packRuntime({ ...f, requireBuild: true });
+  const manifest = JSON.parse(tarRead(packed.path, "package.json"));
+  assert.equal(manifest.dependencies.snarkjs, undefined);
+  const report = JSON.parse(tarRead(packed.path, "cli/runtime-dependencies.json"));
+  const metadata = report.browserBuildDependencies.find(pkg => pkg.name === "snarkjs");
+  assert.equal(metadata.version, "1.0.0");
+  assert.equal(metadata.integrity, "sha512-fixture");
+  assert.equal(metadata.license, "GPL-3.0");
+  assert.equal(tarRead(packed.path, metadata.licenses[0]), "prover license");
+  const listing = spawnSync("tar", ["-tzf", packed.path], { encoding: "utf8" });
+  assert.equal(listing.status, 0);
+  assert.ok(!listing.stdout.includes("node_modules/snarkjs"));
 });

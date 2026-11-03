@@ -6850,6 +6850,18 @@ html[lang|="ko"] .terminal-host {
 .terminal-host .recover-btn.go { background: var(--tx); color: var(--ink); }
 .terminal-host .recover-err, .terminal-host .recover-warn { color: var(--down); }
 .terminal-host .recover-panel { min-width: 0; overflow-wrap: anywhere; }
+.terminal-host .gloam-withdrawal { min-width: 0; margin: 16px 0; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.terminal-host .gloam-withdrawal h3 { margin: 16px 0; font-size: 18px; }
+.terminal-host .gloam-withdrawal form > label { display: block; font-size: 14px; }
+.terminal-host .gloam-withdrawal textarea { resize: vertical; }
+.terminal-host .gloam-withdrawal dl { display: grid; gap: 8px; margin: 16px 0; }
+.terminal-host .gloam-withdrawal dt { margin-top: 8px; color: var(--tx-2); font-size: 13px; }
+.terminal-host .gloam-withdrawal dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 14px; }
+.terminal-host .gloam-withdrawal > label { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0; font-size: 14px; line-height: 1.5; }
+.terminal-host .gloam-withdrawal input[type="checkbox"] { flex: 0 0 auto; margin-top: 4px; accent-color: var(--up); }
+.terminal-host .gloam-withdrawal > .flow-secondary { display: block; padding: 12px 0; }
+.terminal-host .gloam-withdrawal button:disabled { opacity: 0.5; cursor: not-allowed; }
+.terminal-host .gloam-withdrawal [role="alert"] { color: var(--down); }
 .terminal-host a.flow-primary { display: flex; text-decoration: none; }
 .terminal-host .hosted-account-links { display:flex; gap:16px; margin:16px 0; font-size:14px; }
 /* A page that rendered, saying which part of it did not. Not an error state —
