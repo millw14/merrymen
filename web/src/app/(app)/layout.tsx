@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { App } from "@/terminal/App";
 import { Providers } from "@/terminal/Providers";
 import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from "@/lib/locale";
+import { perpsOffered } from "@/lib/perps-enabled";
 import { solanaEnabled } from "@/lib/solana-enabled";
 
 // The whole terminal mounts here and nowhere else, so this is the one place a
@@ -39,7 +40,7 @@ export default async function AppLayout() {
   const locale = normalizeLocale(jar.get(LOCALE_COOKIE)?.value) ?? DEFAULT_LOCALE;
   return (
     <Providers locale={locale} solana={solanaEnabled()}>
-      <App solana={solanaEnabled()} />
+      <App solana={solanaEnabled()} perps={perpsOffered()} />
     </Providers>
   );
 }

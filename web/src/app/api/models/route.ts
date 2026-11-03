@@ -4,6 +4,7 @@ import { homePaths } from "@merrymen/home";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { isHostedMode, llmProviderById, type MerrymenSettings } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,8 @@ function filterModelId(id: string): string {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   let body: FetchModelsBody;
   try {
     body = (await req.json()) as FetchModelsBody;

@@ -5,6 +5,7 @@ import ts from "typescript";
 import { NextResponse } from "next/server";
 import type { LeaderboardRead, LeaderRow } from "@/lib/read-leaderboard";
 import type { AgentDirectory } from "@/lib/agent-directory";
+import { walletNotSupported } from "@/lib/route-guard";
 
 const PRIVATE_DIRECTORY_CACHE = "public, s-maxage=60, stale-while-revalidate=120";
 
@@ -19,6 +20,7 @@ function handler(readLeaderboard: () => Promise<LeaderboardRead>, readAgentDirec
   const exports: Partial<typeof import("./route")> = {};
   const require = (name: string) => {
     if (name === "next/server") return { NextResponse };
+    if (name === "@/lib/route-guard") return { walletNotSupported };
     if (name === "@/lib/read-leaderboard") return { readLeaderboard };
     if (name === "@/lib/agent-directory") return { readAgentDirectory };
     throw new Error(`Unexpected route dependency: ${name}`);

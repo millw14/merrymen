@@ -13,6 +13,16 @@ final class PreviewTransport: URLProtocol {
         var status = 200
         switch path {
         case "/api/auth/session": body = signedIn ? #"{"hosted":true,"address":"0x1111111111111111111111111111111111111111"}"# : #"{"hosted":true,"address":null}"#
+        case "/api/grants" where ProcessInfo.processInfo.arguments.contains("-stand-down-test"):
+            if request.httpMethod == "DELETE" {
+                let input = readBody(), count = UserDefaults.standard.integer(forKey: "uiTest.stopRequests") + 1
+                UserDefaults.standard.set(count, forKey: "uiTest.stopRequests")
+                if !signedIn || count != 1 || Set(input.keys) != Set(["purpose", "expectedTenant"]) || input["purpose"] as? String != "delete-agent" || input["expectedTenant"] as? String != "0x1111111111111111111111111111111111111111" {
+                    body = #"{"error":"Unexpected or repeated stop request"}"#; status = 409
+                } else { body = #"{"ok":true}"# }
+            } else if ProcessInfo.processInfo.arguments.contains("-unread-spot-grant") {
+                body = #"{"error":"Spot status is temporarily unreadable"}"#; status = 503
+            } else { body = #"{"exists":false,"owner":"0x1111111111111111111111111111111111111111"}"# }
         case "/api/likes": body = #"{"read":true,"liked":[]}"#
         case "/api/like-counts": body = #"{"read":true,"counts":{"test-post":2}}"#
         case "/api/follow": body = #"{"read":true,"wired":[]}"#

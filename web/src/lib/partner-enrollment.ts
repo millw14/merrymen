@@ -134,6 +134,7 @@ function connectionContext(principal: PartnerPrincipal, connection: PartnerConne
 function validGrant(input: unknown, now: number): StoredGrant {
   const body = object(input, "grant");
   if ("demoOwnerPrivateKey" in body || carriesOwnerKey(body)) return fail(422, "owner_key_forbidden", "Owner private keys must stay in the owner's wallet");
+  if (body.purpose === "perps" || body.perp !== undefined) return fail(422, "perps_owner_review_required", "Perps permissions require the connected owner's Privy-bound browser review on the Perps desk");
   onlyFields(body, ["smartAccount", "owner", "sessionKeyAddress", "serialized", "caps", "grantedAt", "expiresAt", "chainId", "grantFeatures", "grantTokens", "v4AdapterAddress", "ponsAdapterAddress", "ponsClassVaultAddress", "ponsClassVaultFactoryAddress", "binding", "demoSessionPrivateKey"]);
   const owner = asAddress(body.owner, "owner");
   const smartAccount = asAddress(body.smartAccount, "smartAccount");

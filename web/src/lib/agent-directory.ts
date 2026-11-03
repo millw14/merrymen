@@ -227,7 +227,7 @@ export async function readAgentDirectory(
           unrankedWhy: "not-read",
         })) : [],
       };
-    });
+    }, "spot");
   } catch (error) {
     opened("error");
     throw error;

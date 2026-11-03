@@ -37,20 +37,24 @@
  *    "not-stopped"), and the caller reports the kill incomplete, never done —
  *    the grant revoked but the paper strategy left on is a failed half too;
  *  - a retry is safe: each answer is a fact about what is stored now;
- *  - an owner with no Perps wallet costs a kill one read-only look and
- *    nothing more: no lock, no table, no directory (GrantStore.revokeForKill);
+ *  - every completed kill writes a disabled settings revision, even with no
+ *    current grant, so a delayed enable cannot undo a kill or its retry;
  *  - it runs whatever MERRYMEN_PERPS says. A flag limits trading, never a kill.
  */
-import { statSync, rmSync } from "node:fs";
+import { statSync, rmSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { isHostedMode } from "../../packages/core/src/hosted";
-import { writeFileAtomicSync } from "./atomic-write";
+import { writeFileAtomicSync, fsyncDirSync } from "./atomic-write";
 import { getGrantStore, type GrantStore } from "./grant-store";
 import { archiveGrantFile } from "./grant";
-import { liftKillPause, pauseForKeptGrant, purposeHome } from "./home";
+import { liftKillPause, pauseForKeptGrant, purposeHome, merrymenHome } from "./home";
 import { errorText } from "./redact-urls";
 import { readSettingsFileAt } from "./settings";
+import { withSettingsFileLock } from "./settings-file-lock";
 import { disablePaperPerpsForKill } from "./settings-store";
+import { withLocalStateLock } from "./local-state-lock";
+import { localPerpsBinding, readLocalPerpsBinding, retainLocalPerpsBinding, clearLocalPerpsBinding } from "./local-perps-binding";
 
 /** What a kill needs of the Perps grant store. */
 export type PerpsKillStore = Pick<GrantStore, "revokeForKill">;
@@ -84,7 +88,7 @@ export async function stopPerpsForKill(
   // Turned off whether or not a grant was there: a kill that revoked one and
   // failed here leaves the setting on, and its retry finds no grant.
   try {
-    await (opts.paper ?? ((t) => disablePaperPerpsForKill(t)))(tenant);
+    await (opts.paper ?? ((t) => disablePaperPerpsForKill(t, undefined, true)))(tenant);
   } catch (e) {
     // The store's own words (a driver's host and port, a DEK or unseal
     // failure) are the operator's, logged here; the owner is told what it means.
@@ -139,14 +143,18 @@ export class PerpsPaperNotStopped extends PerpsKillIncomplete {
  * that will not read is refused, never replaced, as patchSettingsFile refuses
  * it — rewriting it from nothing would lose every other setting.
  */
-export function turnOffLocalPaperPerps(home: string): "disabled" | "none" {
+export function turnOffLocalPaperPerps(home: string, ensureRevision = false): "disabled" | "none" {
   const file = path.join(home, "settings.json");
-  const read = readSettingsFileAt(file);
-  if (read.kind === "absent") return "none";
-  if (read.kind === "unusable") throw new Error(read.why);
-  if (read.settings.perpsEnabled !== true) return "none";
-  writeFileAtomicSync(file, JSON.stringify({ ...read.settings, perpsEnabled: false }, null, 2), 0o600);
-  return "disabled";
+  // A wallet never set up still costs no directory or lock-file creation.
+  if (!ensureRevision && readSettingsFileAt(file).kind === "absent") return "none";
+  return withSettingsFileLock(file, () => {
+    const read = readSettingsFileAt(file);
+    if (read.kind === "absent" && !ensureRevision) return "none";
+    if (read.kind === "unusable") throw new Error(read.why);
+    const settings = read.kind === "parsed" ? read.settings : {};
+    writeFileAtomicSync(file, JSON.stringify({ ...settings, perpsEnabled: false, perpsControlNonce: randomUUID() }, null, 2), 0o600, { durable: true });
+    return settings.perpsEnabled === true ? "disabled" : "none";
+  });
 }
 
 /**
@@ -154,24 +162,32 @@ export function turnOffLocalPaperPerps(home: string): "disabled" | "none" {
  * wallet: the one grant.json in the Perps home (purposeHome("perps")),
  * archived into that home's own archive first, exactly as the Spot kill keeps
  * its owner key, and that home's paper strategy turned off
- * (turnOffLocalPaperPerps). Says which was done; neither, without making
- * anything. A grant that cannot be archived throws PerpsKillIncomplete; a paper
+ * (turnOffLocalPaperPerps). Even when neither existed, a disabled revision
+ * is recorded so an older browser page cannot undo the kill. A grant that cannot be archived throws PerpsKillIncomplete; a paper
  * strategy that could not be turned off throws PerpsPaperNotStopped, after the
  * grant has been revoked.
  */
 export async function stopLocalPerpsWallet(): Promise<{ grant: "revoked" | "none"; paper: "disabled" | "none" }> {
   if (isHostedMode()) throw new Error("A hosted kill names its tenant.");
   const home = purposeHome("perps");
+  // Every completed kill advances a revision, including retries after the
+  // grant was removed but the first settings write failed. A stale page must
+  // never reuse the old absent-settings revision to re-enable entries.
+  return withLocalStateLock(merrymenHome(), async () => stopLocalPerpsWalletLocked(home));
+}
+
+async function stopLocalPerpsWalletLocked(home: string): Promise<{ grant: "revoked" | "none"; paper: "disabled" | "none" }> {
   // THE PAPER STRATEGY OFF FIRST, so it is off whatever the grant meets below;
   // a failure here is said after the grant has been dealt with.
   let paper: "disabled" | "none" = "none";
   let paperFailed: string | null = null;
   try {
-    paper = turnOffLocalPaperPerps(home);
+    paper = turnOffLocalPaperPerps(home, true);
   } catch (e) {
     paperFailed = e instanceof Error ? e.message : String(e);
   }
   const grant = revokeLocalPerpsGrant(home);
+  clearLocalPerpsBinding(home);
   if (paperFailed !== null) throw new PerpsPaperNotStopped(paperFailed, grant === "revoked");
   return { grant, paper };
 }
@@ -185,7 +201,7 @@ export async function stopLocalPerpsWallet(): Promise<{ grant: "revoked" | "none
  * when there is no such file. Throws PerpsKillIncomplete when the archive
  * cannot be written (the grant is kept and the home paused).
  */
-function revokeLocalPerpsGrant(home: string): "revoked" | "none" {
+function revokeLocalPerpsGrant(home: string, beforeRemove?: () => void): "revoked" | "none" {
   const file = path.join(home, "grant.json");
   try {
     statSync(file);
@@ -195,7 +211,9 @@ function revokeLocalPerpsGrant(home: string): "revoked" | "none" {
   }
   const kept = archiveGrantFile(file, path.join(home, "grants"));
   if (kept.kind === "failed") throw new PerpsKillIncomplete(kept.why, pauseForKeptGrant(home));
+  beforeRemove?.();
   rmSync(file, { force: true });
+  fsyncDirSync(home);
   // A pause an earlier, refused kill left in this home has done its job.
   liftKillPause(home);
   return "revoked";
@@ -207,9 +225,24 @@ function revokeLocalPerpsGrant(home: string): "revoked" | "none" {
  * archived and removed so the renewal can be posted, and NOTHING else — its
  * settings, paper strategy included, are the owner's and stay.
  */
-export async function stopLocalPerpsGrantForRenewal(): Promise<"stopped" | "none"> {
+export async function stopLocalPerpsGrantForRenewal(expectedAccount: string, expectedSession: string): Promise<"stopped" | "none" | "changed"> {
   if (isHostedMode()) throw new Error("A hosted renewal names its tenant.");
-  return revokeLocalPerpsGrant(purposeHome("perps")) === "revoked" ? "stopped" : "none";
+  if (![expectedAccount, expectedSession].every(value => typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value))) throw new Error("The permission being replaced is not identified");
+  return withLocalStateLock(merrymenHome(), async () => {
+    const home = purposeHome("perps");
+    let grant: unknown;
+    try { grant = JSON.parse(readFileSync(path.join(home, "grant.json"), "utf8").replace(/^\ufeff/, "")); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      const binding = readLocalPerpsBinding(home);
+      return binding && (binding.smartAccount !== expectedAccount.toLowerCase() || binding.sessionKeyAddress !== expectedSession.toLowerCase()) ? "changed" : "none";
+    }
+    const binding = localPerpsBinding(grant);
+    if (binding.smartAccount !== expectedAccount.toLowerCase() || binding.sessionKeyAddress !== expectedSession.toLowerCase()) return "changed";
+    // Archive first; persist only public identity before deleting the signing
+    // grant. A crash cannot lose the owner relationship between the wallets.
+    return revokeLocalPerpsGrant(home, () => retainLocalPerpsBinding(grant, home)) === "revoked" ? "stopped" : "none";
+  });
 }
 
 /**

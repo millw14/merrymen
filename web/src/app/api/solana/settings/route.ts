@@ -2,10 +2,13 @@ import { requireSolanaLiveSellLimits, requireSolanaLiveTradeMinimum, validateSol
 import { getSolanaAppRuntime } from "../../../../../../worker/src/solana-app-runtime";
 import { solanaContext, solanaRequestBody, solanaResponse } from "@/lib/solana-api";
 import { SolanaWebError } from "@/lib/solana-auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   return solanaResponse(async () => {
     const { principal, store, binding, scope } = await solanaContext(req);
     const body = await solanaRequestBody(req, ["mode", "limits", "revision", "liveConsent"]);

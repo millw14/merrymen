@@ -35,6 +35,7 @@ import { AGENT_NAME_RE, STOCK_TOKENS, normalizeAgentName, sellableAssets } from 
 import { specFor, validStoredSetting } from "../../../../../../../worker/src/telegram/setting-spec";
 import { PUT as settingsPut } from "../../../settings/route";
 import { POST as groupchatPost } from "../../../groupchat/route";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -247,6 +248,8 @@ async function view(row: ProposalRow, tenant: `0x${string}`, now: number) {
 }
 
 export async function GET(req: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!mcpConfig().enabled) return jsonResponse({ error: "not_found" }, 404);
   const tenant = tenantOf(req);
   if (!tenant) return jsonResponse({ error: "login_required" }, 401);
@@ -272,6 +275,8 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
 }
 
 export async function POST(req: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const cfg = mcpConfig();
   if (!cfg.enabled) return jsonResponse({ error: "not_found" }, 404);
   if (req.headers.get("origin") !== cfg.issuer) return jsonResponse({ error: "forbidden", error_description: "cross-site request" }, 403);

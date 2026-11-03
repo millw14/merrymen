@@ -3,8 +3,11 @@ import { NextResponse } from "next/server";
 import { readToken } from "@/lib/read-token";
 import { readTokenMarket } from "@/lib/read-token-market";
 import { readCandles } from "@/lib/read-candles";
+import { walletNotSupported } from "@/lib/route-guard";
 export const dynamic = "force-dynamic";
 export async function GET(req:Request,{params}:{params:Promise<{address:string}>}) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const {address}=await params;
   if(!/^0x[0-9a-fA-F]{40}$/.test(address)) return NextResponse.json({error:"Invalid token"},{status:400});
   const ledger=await readToken(address);

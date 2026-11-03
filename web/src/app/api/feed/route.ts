@@ -19,6 +19,7 @@ import { readMeasuredMark } from "@/lib/held-marks";
 import { CapitalFlowsWithheld, netFlows, readDistinctFlows, type FlowRecord } from "@/lib/distinct-flows";
 import { distinctTrades } from "@/lib/distinct-trades";
 import type { FeedMeasured } from "@/lib/feed-pnl";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * Where identity is read from on this deploy — see lib/feed-identity.ts for
@@ -214,6 +215,8 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // HOSTED: the tenant is the SIWE-authenticated wallet, resolved up front. No
   // session → nothing to show. The feed must scope to THIS tenant's agent, never
   // the global "armed or newest" heuristic below (which on a shared ledger is
@@ -230,7 +233,7 @@ export async function GET(req: Request) {
     tenant = tenantOf(req);
     // No session: nothing to scope to, so no per-tenant identity either.
     if (!tenant) return NextResponse.json(await emptyFeed(null));
-    hostedAgentId = await hostedAgentFor(req);
+    hostedAgentId = await hostedAgentFor(req, "spot");
   }
 
   // Reads go through the ledger driver: read-only sqlite (self-hosted) or the
@@ -487,5 +490,5 @@ export async function GET(req: Request) {
       landed,
       contributionsKnown,
     } satisfies FeedResponse);
-  });
+  }, "spot");
 }

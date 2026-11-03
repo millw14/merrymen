@@ -227,5 +227,5 @@ export const readToken = cache(async function readToken(
     }
 
     return { symbol, holders, privateHolders, fillsRead };
-  });
+  }, "spot");
 });

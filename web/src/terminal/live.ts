@@ -50,6 +50,7 @@ export type Screen =
   | { kind: "settings" }
   | { kind: "grant" }
   | { kind: "solana" }
+  | { kind: "perps" }
   | { kind: "limits" }
   | { kind: "groupchat" };
 

@@ -19,6 +19,15 @@ import { GRANT_TRENCHER } from "@merrymen/core";
  * generation is refused before any key is made or stored; this does not
  * retroactively encrypt or migrate previously saved keys. The session key
  * still lives in the browser grant and, for hosted agents, the worker store.
+ *
+ * ONE OWNER, TWO WALLETS. The same owner signs a Spot account at Kernel index
+ * 0 (every account made before Perps existed) and a Perps account at index 1
+ * (core accountIndexForPurpose). A signature names its wallet (`purpose`), and
+ * that one value picks the index, the wall (a Perps wall carries no Spot
+ * route: core WallOptions.perpsOnly), the text of the account-link claim
+ * (core bindingMessage), the browser's storage slot and the URL the grant is
+ * handed to. Absent is Spot, as it is on the grant itself, so every caller
+ * written before Perps signs exactly what it always signed.
  */
 
 import { createPublicClient, erc20Abi, http, parseAbi, type Address, type LocalAccount } from "viem";
@@ -81,13 +90,18 @@ import {
   TRADEABLE_V2,
   USDG_DECIMALS,
   assertDerivedAccount,
+  accountIndexForPurpose,
+  grantPurpose,
+  isGrantPurpose,
   type CustomToken,
   type GrantCaps,
+  type GrantPurpose,
   type StoredGrant,
   type PerpRecoveryReference,
   readPerpRecoveryReference,
 } from "@merrymen/core";
 import { findInjectedProvider, requestAccount } from "./wallet";
+import { walletUrl } from "./wallet-param";
 
 export type { GrantCaps, StoredGrant };
 
@@ -122,12 +136,51 @@ export function isPrivyOwned(grant: Pick<Grant, "binding"> | null | undefined): 
   return grant?.binding?.version === "privy-did-owner-v1";
 }
 
+/**
+ * WHERE THIS BROWSER KEEPS EACH WALLET'S GRANT: one slot per wallet.
+ *
+ * SPOT'S SLOT IS THE ONE IT ALWAYS WAS, BYTE FOR BYTE. Every owner who signed
+ * before Perps existed has their grant there, and for a legacy owner it holds
+ * the only copy of the owner key: a renamed slot is a wallet this page can no
+ * longer find, which to its owner is indistinguishable from lost funds. The
+ * iOS engine's storage host (WalletHost.swift) also admits that one name.
+ *
+ * Perps gets a slot of its own, so arming one wallet can never overwrite, or
+ * archive over, the other's grant. Archives stay keyed by account
+ * (ARCHIVE_PREFIX), and the two wallets are two different accounts, so they
+ * never share one either; a reader that wants one wallet's archives filters
+ * them by the purpose each grant signed (storedIn).
+ *
+ * The wallet is REQUIRED wherever a slot is read or written, as the server's
+ * stores take it: a caller that forgot it would read or clear Spot's grant
+ * from a Perps screen.
+ */
 const STORAGE_KEY = "merrymen.grant.v1";
+const PERPS_STORAGE_KEY = "merrymen.grant.perps.v1";
 
-export function loadGrant(): Grant | null {
+function storageKey(wallet: GrantPurpose): string {
+  if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
+  return wallet === "perps" ? PERPS_STORAGE_KEY : STORAGE_KEY;
+}
+
+/**
+ * WHOSE IS A STORED RECORD? A Perps grant says so (`purpose: "perps"`, which
+ * only a Perps signature writes); everything else is Spot's, as every record
+ * was before Perps existed. That includes a record this build cannot classify:
+ * it stays listed where it always was, rather than vanish from the recovery
+ * list that is the only way back to its key.
+ */
+function storedIn(g: unknown, wallet: GrantPurpose): boolean {
+  const perps = typeof g === "object" && g !== null && (g as { purpose?: unknown }).purpose === "perps";
+  return wallet === "perps" ? perps : !perps;
+}
+
+export function loadGrant(wallet: GrantPurpose): Grant | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Grant) : null;
+    const raw = localStorage.getItem(storageKey(wallet));
+    const grant: unknown = raw ? JSON.parse(raw) : null;
+    // A grant in one wallet's slot that names the other is not this wallet's.
+    return typeof grant === "object" && grant !== null && storedIn(grant, wallet) ? (grant as Grant) : null;
   } catch {
     return null;
   }
@@ -153,10 +206,13 @@ export function loadGrant(): Grant | null {
  * TRADING; it was never meant to be about forfeiting the balance, and
  * listSavedWallets already surfaces archived wallets so the key stays
  * reachable from /grant and from the dashboard's recovery panel.
+ *
+ * ONE WALLET'S SLOT, the one named. Clearing Spot leaves a Perps grant where it
+ * is, and the reverse.
  */
-export function clearGrant(): void {
-  archivePreviousGrant();
-  localStorage.removeItem(STORAGE_KEY);
+export function clearGrant(wallet: GrantPurpose): void {
+  archivePreviousGrant(wallet);
+  localStorage.removeItem(storageKey(wallet));
 }
 
 const usdgUnits = (v: number) => BigInt(Math.round(v * 10 ** USDG_DECIMALS));
@@ -252,6 +308,7 @@ export type PerpRefusalCode =
   | "perp-key-invalid"
   | "perp-key-changed"
   | "perp-prior-unreadable"
+  | "perp-prior-unknown"
   | "perp-other-account";
 
 /**
@@ -279,17 +336,24 @@ export class PerpSigningRefusal extends Error {
  *               which key is exactly the grant whose key we can least afford to
  *               lose track of, so it refuses until the owner drops it on
  *               purpose (flat venue) — fail closed, never through.
+ *   unknown     the server's view was NOT given (unread, or the caller does
+ *               not know it), and this browser's own copy of this account's
+ *               grant claims perps. Nothing here can say which key the worker
+ *               holds, so it is neither carried nor dropped: the signature is
+ *               refused until the server can be asked (priorPerpFor).
  */
 export type PriorPerp =
   | { state: "none" }
   | { state: "carried"; apiPublicKey: `0x${string}`; apiKeySealed?: string; from: "server" | "local" }
-  | { state: "unreadable"; from: "server" | "local" };
+  | { state: "unreadable"; from: "server" | "local" }
+  | { state: "unknown" };
 
 /**
- * The browser's own copies of grants: the armed one (`merrymen.grant.v1`) and
- * every archived account's last one. Read by `mintGrant` BEFORE signing and
- * handed to the preparation core as DATA, so the core itself stays free of
- * storage (prepare-agent-grant.test.ts pins that).
+ * The browser's own copies of ONE wallet's grants: the armed one (that
+ * wallet's slot, `merrymen.grant.v1` for Spot) and every archived account's
+ * last one. Read by `mintGrant` BEFORE signing and handed to the preparation
+ * core as DATA, so the core itself stays free of storage
+ * (prepare-agent-grant.test.ts pins that).
  */
 export interface LocalGrants {
   current?: unknown;
@@ -348,29 +412,48 @@ function perpOf(g: Record<string, unknown>, from: "server" | "local"): PriorPerp
  *   registered.
  *
  *   the BROWSER'S copies — the armed one first, then the archive for this
- *   account. Used when the server's answer is unknown (not passed, fetch
- *   failed) or names another account. A key sealed in THIS browser that the
- *   server never saw was never registered, so the server-wins rule cannot
- *   strand anything.
+ *   account. Used when the server says it holds nothing (`null`: after a kill,
+ *   when the carried blob below is the only way back to the key) or names
+ *   another account. A key sealed in THIS browser that the server never saw
+ *   was never registered, so the server-wins rule cannot strand anything.
+ *
+ * WHEN THE SERVER'S VIEW IS ABSENT (`undefined`: not passed, or the read
+ * failed), THIS FAILS CLOSED. The browser's copy may be stale (sealed before
+ * another device re-signed or dropped), so it is used only to notice that the
+ * account CLAIMS perps, never to supply a key: a claim comes back `unknown`,
+ * which decidePerpSeal refuses to carry or drop, and no claim is `none`. A
+ * re-sign that carried a key from stale local data could re-arm an old venue
+ * key; one that dropped it could strand the current one.
  *
  * And the ARMED grant — the server's if known (null = the server holds none),
  * else this browser's current one — may be for a DIFFERENT account: signing
  * a new agent while the armed one holds a Lighter key would replace the only
  * grant that key lives in (rule 5, "or re-signing for another account").
+ *
+ * ONE WALLET'S GRANTS. The caller passes the server's view and this browser's
+ * copies for the wallet being signed (localGrantsSnapshot(wallet)): a Perps
+ * signature replaces no Spot grant, so the Spot wallet's armed grant is not
+ * "another account" to it.
  */
 export function priorPerpFor(
   account: string,
   sources: { server?: unknown; local?: LocalGrants },
 ): { same: PriorPerp; otherArmed: { smartAccount: string; perp: PriorPerp } | null } {
   const { server, local } = sources;
+  // This browser's copy for THIS account: the armed one, else its archive.
+  const current = local?.current;
+  const localCopy: Record<string, unknown> | undefined = sameAccount(current, account)
+    ? current
+    : (local?.archived ?? []).find((g): g is Record<string, unknown> => sameAccount(g, account));
   const same: PriorPerp = sameAccount(server, account)
     ? perpOf(server, "server")
-    : sameAccount(local?.current, account)
-      ? perpOf(local.current, "local")
-      : (() => {
-          const archived = (local?.archived ?? []).find((g) => sameAccount(g, account));
-          return archived ? perpOf(archived as Record<string, unknown>, "local") : ({ state: "none" } as const);
-        })();
+    : server === undefined
+      ? localCopy && perpOf(localCopy, "local").state !== "none"
+        ? { state: "unknown" }
+        : { state: "none" }
+      : localCopy
+        ? perpOf(localCopy, "local")
+        : { state: "none" };
   // `undefined` = the caller does not know what the server holds; `null` (or
   // `{exists:false}` flattened to null by the caller) = it holds nothing.
   const armed = server !== undefined ? server : local?.current;
@@ -440,6 +523,19 @@ export function decidePerpSeal(a: {
   }
 
   const prior = a.prior.same;
+  // UNKNOWN BEFORE ANYTHING THE CALLER ASKED. The server's view was not read,
+  // and this browser's copy says the account holds a Lighter key: carrying it
+  // could re-arm a stale key, dropping it could strand the current one, and a
+  // flat-venue drop is no exception, because which key is armed is exactly
+  // what is not known. Reading the server again is the whole remedy.
+  if (prior.state === "unknown") {
+    throw new PerpSigningRefusal(
+      "perp-prior-unknown",
+      "refusing to sign: this browser's copy of your agent's permission includes perpetuals, and the service's copy " +
+        "could not be read, so its Lighter key can be neither carried forward nor removed safely. Nothing was " +
+        "signed; try again when the service answers. Your current key has not been replaced.",
+    );
+  }
   if (a.drop) {
     if (requested) {
       throw new PerpSigningRefusal(
@@ -499,6 +595,45 @@ export function decidePerpSeal(a: {
     );
   }
   return seal;
+}
+
+/**
+ * WHAT A PERPS WALLET'S SIGNATURE MAY NOT BE ASKED FOR, refused by name before
+ * any read, key or signature.
+ *
+ * A Perps wallet lives on Robinhood Chain mainnet only (Lighter has no test
+ * network, and its derivation and its kill are mainnet's), and its wall
+ * carries no Spot route (core WallOptions.perpsOnly). In this build it carries
+ * nothing at all (decision D5): no Lighter key yet, and so no drop or
+ * recovery of one either.
+ *
+ * REFUSED, NOT QUIETLY LEFT OUT. A caller handing a Perps signature a token
+ * list, an adapter, a class factory or Trencher is a caller that thinks it is
+ * signing for the Spot wallet, and the owner should hear about it before
+ * signing rather than receive a quieter wall than the one they reviewed. The
+ * platform defaults (official listings, the Pons adapter, the class factory)
+ * are not inputs, so they are skipped in prepareGrantCore instead.
+ */
+function refusePerpsWalletInputs(a: {
+  chainId: number;
+  extraTokens: readonly CustomToken[];
+  v4AdapterAddress?: `0x${string}`;
+  ponsAdapterAddress?: `0x${string}`;
+  ponsClassVaultFactory?: `0x${string}`;
+  trencherFactory?: `0x${string}`;
+  perpIn: PerpSigningInput;
+}): void {
+  if (a.chainId !== robinhoodChain.id) {
+    throw new Error("A Perps wallet exists only on Robinhood Chain mainnet. Nothing was signed.");
+  }
+  if (a.extraTokens.length > 0 || a.v4AdapterAddress || a.ponsAdapterAddress || a.ponsClassVaultFactory || a.trencherFactory) {
+    throw new Error(
+      "A Perps wallet's permission carries no Spot route: no token, adapter, class vault or Trencher. Nothing was signed.",
+    );
+  }
+  if (a.perpIn.perp != null || a.perpIn.perpDrop === true || a.perpIn.recovery !== undefined) {
+    throw new Error("A paper Perps wallet holds no Lighter key in this build, so none can be added, removed or recovered. Nothing was signed.");
+  }
 }
 
 async function prepareGrantCore(
@@ -575,6 +710,9 @@ async function prepareGrantCore(
    * the comment on MintOptions records: one more positional parameter here is
    * one more chance to shift a key into a slot meant for something else.
    * Decided by `decidePerpSeal`; see the block after the deployment read.
+   *
+   * It also carries `purpose`, the wallet this signature is for, for the same
+   * reason: one more named field in an object, not one more position.
    */
   perpIn: PerpSigningInput = {},
 ): Promise<Grant | null> {
@@ -582,6 +720,22 @@ async function prepareGrantCore(
       (!expectAccount || !Number.isInteger(minimumValidationNonce) ||
        minimumValidationNonce < 2 || minimumValidationNonce > 0xffff_ffff)) {
     throw new Error("A confirmed revocation boundary requires the existing account and a valid permission nonce. Nothing was signed.");
+  }
+
+  // ── WHICH WALLET: DECIDED ONCE, HERE, BEFORE ANY READ OR KEY ───────────────
+  //
+  // One value picks the Kernel index both derivations below are made at, the
+  // wall (perpsOnly), the markers and the grant's own `purpose`. Absent is
+  // Spot, so every caller written before Perps signs what it always signed;
+  // anything that names no wallet is refused, never signed as Spot.
+  const purpose = perpIn.purpose ?? "spot";
+  if (!isGrantPurpose(purpose)) {
+    throw new Error("This signature names a wallet this app does not know. Nothing was signed.");
+  }
+  if (purpose === "perps") {
+    refusePerpsWalletInputs({
+      chainId, extraTokens, v4AdapterAddress, ponsAdapterAddress, ponsClassVaultFactory, trencherFactory, perpIn,
+    });
   }
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
@@ -610,8 +764,13 @@ async function prepareGrantCore(
    * publishing a coin cannot widen a grant that is already signed. An owner
    * whose grant predates a listing must re-sign before their key can touch it.
    * That is the wall working, not a gap in it.
+   *
+   * A PERPS WALLET SEALS NONE: it trades no token, so not even the official
+   * listings reach its wall or its grant (refusePerpsWalletInputs has already
+   * refused an owner-added one).
    */
-  const sealedTokens: readonly CustomToken[] = [...officialCoinTokens(chainId), ...extraTokens];
+  const sealedTokens: readonly CustomToken[] =
+    purpose === "perps" ? [] : [...officialCoinTokens(chainId), ...extraTokens];
 
   /**
    * The Pons adapter this signature seals: the owner's own if they named one,
@@ -627,8 +786,10 @@ async function prepareGrantCore(
    * signature sealed (`grantPonsAdapter`) and never this constant, so a later
    * redeploy cannot redirect an existing grant's trades, and an owner who names
    * their own address still wins over the platform's.
+   *
+   * NO DEFAULT FOR A PERPS WALLET: the platform's adapter is a Spot venue.
    */
-  const sealedPonsAdapter = ponsAdapterForSigning(chainId, ponsAdapterAddress);
+  const sealedPonsAdapter = purpose === "perps" ? undefined : ponsAdapterForSigning(chainId, ponsAdapterAddress);
 
   const entryPoint = getEntryPoint("0.7");
   const kernelVersion = KERNEL_V3_3;
@@ -649,7 +810,13 @@ async function prepareGrantCore(
   // same fact that makes restore work). So derive the sudo-only account first,
   // pin the swap recipient / vault receiver to it, and assert below that the
   // full account came out identical.
+  //
+  // AT THE WALLET'S INDEX: Spot's 0 (Kernel's default, so every existing
+  // address is where it was) or Perps' 1. The server proves the same
+  // derivation at intake (derive-account.ts), so a signature made at the wrong
+  // index is refused there; made here, it is simply the right account.
   const sudoOnlyAccount = await createKernelAccount(publicClient, {
+    index: accountIndexForPurpose(purpose),
     entryPoint,
     kernelVersion,
     plugins: { sudo: ecdsaValidator },
@@ -748,10 +915,15 @@ async function prepareGrantCore(
    *
    * A tenant who has set their own factory keeps it — grant-first precedence,
    * exactly as the adapter path does.
+   *
+   * A PERPS WALLET GETS NO VAULT, default or otherwise, and so no factory read:
+   * a class vault is a Spot venue.
    */
   const sealedClassFactory =
-    ponsClassVaultFactory ??
-    ((PONS_CLASS_VAULT_FACTORY[chainId] ?? undefined) as `0x${string}` | undefined);
+    purpose === "perps"
+      ? undefined
+      : ponsClassVaultFactory ??
+        ((PONS_CLASS_VAULT_FACTORY[chainId] ?? undefined) as `0x${string}` | undefined);
 
   let ponsClassVaultAddress: `0x${string}` | undefined;
   if (sealedClassFactory) {
@@ -891,6 +1063,18 @@ async function prepareGrantCore(
     recovery: perpIn.recovery,
     smartAccount: sudoOnlyAccount.address,
   });
+  // A PAPER PERPS WALLET HOLDS NO LIGHTER KEY IN THIS BUILD (decision D5), so
+  // a key carried from a previous Perps grant is refused here, before anything
+  // is signed, rather than sealed into a grant POST /api/grants refuses after
+  // its nonce is spent. (A new key, a drop or a recovery was refused at the top
+  // by refusePerpsWalletInputs.) Live Perps lifts this in the same change that
+  // lets the server's canonical check admit a Perps perp block.
+  if (purpose === "perps" && sealedPerp) {
+    throw new Error(
+      "refusing to sign: this Perps wallet's previous permission names a Lighter key, and a paper Perps wallet " +
+        "holds none in this build. Nothing was signed.",
+    );
+  }
   // The ROUTE'S key index, never a caller's: `perp-lighter-v1` names index 16
   // forever and the wall pins it EQUAL, so it is not an input to this call.
   const perpLighter = sealedPerp
@@ -898,14 +1082,23 @@ async function prepareGrantCore(
     : undefined;
 
   const wallOpts = {
+    // A PERPS WALLET'S WALL CARRIES NO SPOT ROUTE (core WallOptions.perpsOnly),
+    // set from the purpose this signature signs and nothing else, as the
+    // server's rebuild sets it from the purpose the grant declares
+    // (grantWallOptions). With no perp block and no energy buy below, it is
+    // EMPTY: the paper Perps wallet, a key that can do nothing on chain.
+    perpsOnly: purpose === "perps",
     ...trenchScope,
     extraTokens: sealedTokens,
     allowUniswapV4,
     // EACH SPENDER ONLY ON THE TOKENS IT PULLS (WallOptions.scopedSpenders),
-    // always, and GRANT_SCOPED_SPENDERS below is minted from this same field.
-    // It is what lets class + Trencher + the v4 adapter + a few coins fit the
-    // first-enable maximum at all; unscoped, three coins came to ~15.75M.
-    scopedSpenders: true as boolean,
+    // always on Spot, and GRANT_SCOPED_SPENDERS below is minted from this same
+    // field. It is what lets class + Trencher + the v4 adapter + a few coins
+    // fit the first-enable maximum at all; unscoped, three coins came to
+    // ~15.75M. A Perps wall names no Spot spender to scope, so it carries
+    // neither the shape nor its marker, and the server refuses a Perps grant
+    // that declares it (canonical-wall.ts).
+    scopedSpenders: purpose === "spot",
     v4AdapterAddress,
     ponsAdapterAddress: sealedPonsAdapter,
     ponsClassVaultAddress,
@@ -949,8 +1142,13 @@ async function prepareGrantCore(
   // ONE BOOLEAN decides the permission (through wallOpts, below) AND the
   // GRANT_ENERGY marker (in grantFeatures) — marker and permission move
   // together, which signer-lockstep.test.ts pins in both signers.
-  wallOpts.energyBuy = energyBuyFits(caps, sudoOnlyAccount.address, chain.id, !alreadyDeployed, wallOpts);
-  if (!wallOpts.energyBuy && chain.id === ENERGY_ROUTE_V1.chainId) {
+  //
+  // NEVER ON A PERPS WALLET IN THIS BUILD (decision D5). Its account is a
+  // mainnet account, so the energy route exists and would fit an empty wall;
+  // sealing it would give a paper wallet's key the one thing it must not have,
+  // a USDG approve that can spend the real money its account holds.
+  wallOpts.energyBuy = purpose === "spot" && energyBuyFits(caps, sudoOnlyAccount.address, chain.id, !alreadyDeployed, wallOpts);
+  if (!wallOpts.energyBuy && purpose === "spot" && chain.id === ENERGY_ROUTE_V1.chainId) {
     onStatus("no room in this permission for the agent to buy its own energy — $MERRYMEN can still be sent to it directly");
   }
 
@@ -1019,6 +1217,9 @@ async function prepareGrantCore(
   });
 
   const account = await createKernelAccount(publicClient, {
+    // The SAME index as the sudo-only derivation: the assertion below holds
+    // the two to one address, so a mismatch here could only be refused.
+    index: accountIndexForPurpose(purpose),
     entryPoint,
     kernelVersion,
     plugins: {
@@ -1100,6 +1301,11 @@ async function prepareGrantCore(
   const serialized = await serializePermissionAccount(account, sessionPrivateKey, enableSignature);
 
   const grant: Grant = {
+    // THE WALLET, SIGNED: present only for Perps, so a Spot grant is the object
+    // it always was, key for key (absent is Spot, core grantPurpose). The
+    // server rebuilds the wall from it (perpsOnly) and verifies the account
+    // link against it (bindingMessage).
+    ...(purpose === "perps" ? { purpose } : {}),
     smartAccount: account.address,
     owner,
     sessionKeyAddress: sessionAccount.address,
@@ -1135,7 +1341,9 @@ async function prepareGrantCore(
     ...trenchScope,
     grantFeatures: [
       ...(trencherFactory ? [GRANT_TRENCHER] : []),
-      TRADEABLE_V2,
+      // A Spot marker, so Spot only: a Perps wall seals no stock at all, and
+      // the server refuses a Perps grant that claims it (canonical-wall.ts).
+      ...(purpose === "spot" ? [TRADEABLE_V2] : []),
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
       ...(sealedPonsAdapter ? [GRANT_PONS_ADAPTER] : []),
@@ -1226,27 +1434,36 @@ async function mintGrant(
   minimumValidationNonce?: number,
   perpIn: PerpSigningInput = {},
 ): Promise<MintedGrant> {
-  const previousLocal = localStorage.getItem(STORAGE_KEY);
+  // THE WALLET THIS MINT SIGNS FOR PICKS ITS SLOT, and nothing else does: the
+  // storage slot read and written below, the snapshot of this browser's own
+  // grants, the account-link claim and the handoff URL all follow the purpose
+  // prepareGrantCore signs. Spot's slot is the one it always was.
+  const wallet: GrantPurpose = perpIn.purpose ?? "spot";
+  const slot = storageKey(wallet);
+  const previousLocal = localStorage.getItem(slot);
   // THE BROWSER'S OWN PREVIOUS GRANTS, read BEFORE signing and handed over as
   // data. Every dashboard mint — create, restore, Privy re-sign — goes through
   // here, so no caller can forget to carry a Lighter key forward: the grant
   // this browser armed for this account is consulted whether or not the page
   // also passed the server's projection. (The preparation core stays free of
-  // storage; prepare-agent-grant.test.ts pins that.)
+  // storage; prepare-agent-grant.test.ts pins that.) THIS WALLET'S grants
+  // only: the other wallet's armed grant is not replaced by this signature.
   const grant = await prepareGrantCore(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
     ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
     false, minimumValidationNonce,
     // A snapshot the caller already took (a renewal hands the SAME one to its
     // preflight) wins; otherwise this mint reads storage itself.
-    { ...perpIn, localGrants: perpIn.localGrants ?? localGrantsSnapshot() },
+    { ...perpIn, localGrants: perpIn.localGrants ?? localGrantsSnapshot(wallet) },
   );
   if (!grant) throw new Error("Grant preparation returned no signed permission.");
+  perpIn.assertCurrent?.();
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
   // it. The owner key was generated right here, so `owner` can never equal the
   // tenant and the server cannot authorize on it — two signatures over one
   // server-issued nonce stand in for that. See bindingMessage in packages/core.
+  // The claim names the wallet, so it cannot be replayed onto the other one.
   if (hostedAs) {
     onStatus("linking this wallet to your account…");
     const binding = await signBinding({
@@ -1255,6 +1472,7 @@ async function mintGrant(
       chainId,
       ownerSigner,
       tenant: hostedAs,
+      purpose: wallet,
     });
     grant.binding = binding;
   }
@@ -1272,10 +1490,12 @@ async function mintGrant(
   // gives the self-hosted file (web/src/app/api/grants/route.ts).
   // Owner approval can take minutes. A wallet saved by another tab during
   // that wait must not be replaced by this older signing attempt.
-  if (localStorage.getItem(STORAGE_KEY) !== previousLocal) {
+  await perpIn.beforeCommit?.();
+  perpIn.assertCurrent?.();
+  if (localStorage.getItem(slot) !== previousLocal) {
     throw new Error("The saved wallet changed while signing. That wallet was kept. Reload before trying again.");
   }
-  archivePreviousGrant();
+  archivePreviousGrant(wallet);
   // The browser copy, which ALWAYS carries the owner key, hosted or not. Kept in
   // a named local so it can be returned as well as stored -- the UI needs the
   // copy with the key, and reading it back off localStorage to find that out
@@ -1284,14 +1504,14 @@ async function mintGrant(
     ownerSigner.binding === "legacy-wallet-owner-v1"
       ? { ...grant, demoOwnerPrivateKey: ownerSigner.privateKey }
       : { ...grant };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(localGrant));
+  localStorage.setItem(slot, JSON.stringify(localGrant));
 
   // Hand the grant to the worker. Self-hosted: a localhost file handoff.
   // Hosted: an authenticated POST of the session-key-only grant to the tenant's
   // own store. In hosted mode the browser sends its session cookie so the
   // server can bind the grant to the authenticated wallet.
   onStatus("handing the grant to the worker…");
-  return { grant, local: localGrant, handoff: await postGrant(grant) };
+  return { grant, local: localGrant, handoff: await postGrant(grant, perpIn.assertCurrent) };
 }
 
 /**
@@ -1320,7 +1540,17 @@ async function signBinding(args: {
   ownerSigner: OwnerSigner;
   /** The wallet the session belongs to — what the server will check against. */
   tenant: Address;
+  /**
+   * WHICH OF THE OWNER'S WALLETS THE CLAIM IS FOR, in the signed text (core
+   * bindingMessage adds "Account purpose: perps"; Spot's text is unchanged).
+   * The server rebuilds the text with the wallet the request names, so a
+   * claim signed for one wallet verifies for no other. REQUIRED, as it is on
+   * the server's side (auth.ts verifyGrantBinding): a caller that forgot it
+   * would sign every claim as Spot.
+   */
+  purpose: GrantPurpose;
 }): Promise<NonNullable<Grant["binding"]>> {
+  if (!isGrantPurpose(args.purpose)) throw new Error("This account link names a wallet this app does not know.");
   const ch = (await fetch("/api/auth/challenge", { cache: "no-store" }).then((r) => {
     if (!r.ok) throw new Error("couldn't start the account link — please sign in again.");
     return r.json();
@@ -1346,6 +1576,7 @@ async function signBinding(args: {
       owner: args.owner,
       smartAccount: args.smartAccount,
       chainId: args.chainId,
+      purpose: args.purpose,
       did,
     });
     return {
@@ -1362,6 +1593,7 @@ async function signBinding(args: {
     owner: args.owner,
     smartAccount: args.smartAccount,
     chainId: args.chainId,
+    purpose: args.purpose,
   });
 
   const provider = findInjectedProvider();
@@ -1419,14 +1651,19 @@ export interface SavedWallet {
  * So enumerate what is actually here — the live grant plus every archived one —
  * and let the page show balances and hand back the key. Reads only localStorage;
  * no server, no session, works while signed out.
+ *
+ * ONE WALLET'S: its armed grant and its archives (storedIn). Spot's list is
+ * every record it always listed, less any Perps grant, which a Spot page has no
+ * business offering as its own.
  */
-export function listSavedWallets(): SavedWallet[] {
+export function listSavedWallets(wallet: GrantPurpose): SavedWallet[] {
   const out: SavedWallet[] = [];
   const take = (raw: string | null, current: boolean) => {
     if (!raw) return;
     try {
       const g = JSON.parse(raw) as Partial<Grant>;
       if (typeof g?.smartAccount !== "string" || typeof g?.owner !== "string") return;
+      if (!storedIn(g, wallet)) return;
       // A wallet already listed as current must not appear twice as an archive.
       if (out.some((w) => w.smartAccount.toLowerCase() === g.smartAccount!.toLowerCase())) return;
       out.push({
@@ -1447,7 +1684,7 @@ export function listSavedWallets(): SavedWallet[] {
     }
   };
   try {
-    take(localStorage.getItem(STORAGE_KEY), true);
+    take(localStorage.getItem(storageKey(wallet)), true);
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (k?.startsWith(ARCHIVE_PREFIX)) take(localStorage.getItem(k), false);
@@ -1469,8 +1706,14 @@ export function listSavedWallets(): SavedWallet[] {
  * account that is not flat (a 409 once the custody intake lands; until then it
  * refuses every perps grant with 403). The objects returned carry keys;
  * nothing but the public fields is ever read from them.
+ *
+ * ONE WALLET'S GRANTS (storedIn): the wallet being signed. A Perps signature
+ * replaces no Spot grant and the reverse, so the other wallet's armed grant is
+ * not "another account" to it (priorPerpFor), and its archives speak for
+ * accounts this signature cannot reach. A renewal takes this ONCE and hands
+ * the same object to its preflight and its mint (MintOptions.localGrants).
  */
-export function localGrantsSnapshot(): LocalGrants {
+export function localGrantsSnapshot(wallet: GrantPurpose): LocalGrants {
   const parse = (raw: string | null): unknown => {
     if (!raw) return undefined;
     try {
@@ -1480,13 +1723,14 @@ export function localGrantsSnapshot(): LocalGrants {
     }
   };
   try {
-    const current = parse(localStorage.getItem(STORAGE_KEY));
+    const armed = parse(localStorage.getItem(storageKey(wallet)));
+    const current = armed !== undefined && storedIn(armed, wallet) ? armed : undefined;
     const archived: unknown[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k?.startsWith(ARCHIVE_PREFIX)) continue;
       const g = parse(localStorage.getItem(k));
-      if (g !== undefined) archived.push(g);
+      if (g !== undefined && storedIn(g, wallet)) archived.push(g);
     }
     return { current, archived };
   } catch {
@@ -1499,11 +1743,12 @@ export function localGrantsSnapshot(): LocalGrants {
  *
  * Fail closed: if archiving fails, the caller must not overwrite or remove the
  * only owner-key copy. Keyed by smart account, so a different wallet retains
- * its own recovery slot.
+ * its own recovery slot. The slot archived is the named wallet's: the one the
+ * caller is about to overwrite or clear, and no other.
  */
-function archivePreviousGrant(): void {
+function archivePreviousGrant(wallet: GrantPurpose): void {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey(wallet));
     if (!raw) return;
     const prev = JSON.parse(raw) as Partial<Grant>;
     if (typeof prev?.smartAccount !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(prev.smartAccount)) {
@@ -1541,7 +1786,7 @@ function archivePreviousGrant(): void {
  * this replaced. The raw message is kept on the end where it adds detail, so a
  * bug report can still quote the exact check that refused.
  */
-export function refusalMessage(status: number, serverError?: string): string {
+export function refusalMessage(status: number, serverError?: string, ownerFacing = false): string {
   switch (status) {
     case 401:
       return "Sign in with your wallet first — a hosted agent is bound to the wallet you sign in with.";
@@ -1565,10 +1810,33 @@ export function refusalMessage(status: number, serverError?: string): string {
         ? `${serverError} (the server refused to arm this wallet)`
         : "The server won't arm this wallet: it isn't linked to the wallet you signed in with.";
     case 503:
+      // A 503 THE ROUTE WROTE FOR THE OWNER SAYS WHAT FAILED. The derivation's
+      // 503 carries the chain's own words, unmarked, and keeps this sentence;
+      // but the grants POST answers 503 for other failures too, each marked
+      // `ownerFacing` (the shell's rule, terminal/request-json.ts, and the
+      // Android client's): the ownership read that could not run, and a store
+      // write that refused — the other wallet's grant could not be read, the
+      // lock was busy, the database answered an error. This arm used to say
+      // "on-chain" for every one of them, so an owner whose permission could
+      // not be SAVED was told the chain had failed, and kept signing again to
+      // fix a chain that was never the problem.
+      if (ownerFacing && serverError) return serverError;
       return "Couldn't verify the account on-chain just now — try again in a moment.";
     default:
       return serverError ?? `the server refused the grant (${status})`;
   }
+}
+
+/**
+ * A REFUSED GRANT POST'S SENTENCE, read from its body: refusalMessage with the
+ * route's own words where it marks them `ownerFacing`. Both grant POSTs read
+ * it here — the handoff (postGrant) and the Wallet screen's re-arm — so
+ * neither can drop the marker and tell an owner whose permission could not be
+ * saved that the chain had failed (owner-facing.test.ts pins it).
+ */
+export async function refusalOfResponse(res: Response): Promise<string> {
+  const body = (await res.json().catch(() => ({}))) as { error?: string; ownerFacing?: unknown };
+  return refusalMessage(res.status, body.error, body.ownerFacing === true);
 }
 
 /**
@@ -1584,7 +1852,17 @@ export function setPrivyTokenSource(fn: (() => Promise<string | null>) | null): 
   privyTokenSource = fn;
 }
 
-async function postGrant(grant: Grant): Promise<GrantHandoff> {
+async function postGrant(grant: Grant, assertCurrent?: () => void): Promise<GrantHandoff> {
+  // TO THE WALLET THE GRANT SIGNED FOR, and only through walletUrl: Spot posts
+  // to exactly the URL it always did, Perps adds `wallet=perps`, which the
+  // route checks against the grant's own purpose. A grant that names no
+  // wallet is not sent anywhere.
+  let wallet: GrantPurpose;
+  try {
+    wallet = grantPurpose(grant);
+  } catch {
+    return { ok: false, error: "This permission names a wallet this app does not know. Nothing was sent." };
+  }
   try {
     // A PRIVY BINDING CARRIES ITS TOKEN. The server cannot verify the identity
     // half of that binding without one, and it refuses rather than falling back
@@ -1594,15 +1872,15 @@ async function postGrant(grant: Grant): Promise<GrantHandoff> {
       const token = await privyTokenSource();
       if (token) headers.Authorization = `Bearer ${token}`;
     }
-    const res = await fetch("/api/grants", {
+    assertCurrent?.();
+    const res = await fetch(walletUrl("/api/grants", wallet), {
       method: "POST",
       headers,
       credentials: "same-origin",
       body: JSON.stringify(grant),
     });
     if (res.ok) return { ok: true };
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    return { ok: false, error: refusalMessage(res.status, body.error) };
+    return { ok: false, error: await refusalOfResponse(res) };
   } catch {
     // A genuine network failure, as opposed to a refusal. Still not fatal — the
     // grant is in localStorage and `re-arm` can push it again later.
@@ -1626,6 +1904,19 @@ export type GrantPermissionView = Partial<Omit<Grant, "owner" | "smartAccount" |
 /** A matching session key alone does not establish matching signed bounds. */
 export function sameGrantPermission(a: GrantPermissionView | undefined, b: GrantPermissionView): boolean {
   if (!a) return false;
+  // THE SAME WALLET. Absent is Spot on either side (core grantPurpose), so a
+  // Spot view and a Spot grant match exactly as they did before Perps; one that
+  // names no wallet matches nothing. (The two wallets are two accounts, so the
+  // address check below would refuse a cross-wallet pair too; this says why.)
+  const walletOf = (g: GrantPermissionView): GrantPurpose | null => {
+    try {
+      return grantPurpose(g);
+    } catch {
+      return null;
+    }
+  };
+  const wallet = walletOf(a);
+  if (wallet === null || wallet !== walletOf(b)) return false;
   const address = (value: unknown): value is string => typeof value === "string" && /^0x[0-9a-f]{40}$/i.test(value);
   for (const key of ["owner", "smartAccount", "sessionKeyAddress"] as const) {
     if (!address(a[key]) || !address(b[key]) || a[key].toLowerCase() !== b[key].toLowerCase()) return false;
@@ -1659,8 +1950,9 @@ export function sameGrantPermission(a: GrantPermissionView | undefined, b: Grant
  * handoff may have spent it. The trading permission, key and limits stay exact;
  * the owner confirms a fresh link instead of making a nonce replayable.
  */
-export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): Promise<GrantHandoff> {
-  if (!grant.binding && !proof) return postGrant(grant);
+export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof, assertCurrent?: () => void): Promise<GrantHandoff> {
+  assertCurrent?.();
+  if (!grant.binding && !proof) return postGrant(grant, assertCurrent);
   if (!proof) return { ok: false, error: "Confirm this wallet's account link again before retrying activation." };
   const { ownerSigner, tenant } = proof;
   const version = grant.binding?.version ?? "legacy-wallet-owner-v1";
@@ -1668,12 +1960,20 @@ export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): 
     || (ownerSigner.binding === "privy-did-owner-v1" && (grant.binding?.did !== ownerSigner.did || grant.owner.toLowerCase() !== tenant.toLowerCase()))) {
     return { ok: false, error: "Your signing wallet changed. Return to the account that owns this saved wallet before retrying activation." };
   }
-  const binding = await signBinding({ owner: grant.owner, smartAccount: grant.smartAccount, chainId: grant.chainId, ownerSigner, tenant });
+  // The fresh claim is for the wallet the saved permission signed, so it
+  // verifies for that wallet's intake and no other (and postGrant sends it there).
+  let purpose: GrantPurpose;
+  try {
+    purpose = grantPurpose(grant);
+  } catch {
+    return { ok: false, error: "This saved permission names a wallet this app does not know. Nothing was sent." };
+  }
+  const binding = await signBinding({ owner: grant.owner, smartAccount: grant.smartAccount, chainId: grant.chainId, ownerSigner, tenant, purpose });
   await proof.beforeSubmit();
   // Historical local binding evidence stays intact. Only the fresh intake
   // claim changes, and an owner key must never accompany that hosted request.
   const { demoOwnerPrivateKey: _ownerKey, ...publicGrant } = grant;
-  return postGrant({ ...publicGrant, binding });
+  return postGrant({ ...publicGrant, binding }, assertCurrent);
 }
 
 /**
@@ -1701,6 +2001,20 @@ export async function retryGrantHandoff(grant: Grant, proof?: GrantRetryProof): 
  * With names, adding a field can only ever be additive.
  */
 export interface MintOptions {
+  /** Optional UI authority fence; checked after slow preparation and before delivery. */
+  assertCurrent?: () => void;
+  /** Recheck session/offer after approval, before archiving or saving a permission. */
+  beforeCommit?: () => Promise<void>;
+  /**
+   * WHICH OF THE OWNER'S WALLETS THIS SIGNATURE IS FOR. Absent is Spot, as it
+   * is on the grant itself (core grantPurpose), so every caller written before
+   * Perps — the dashboard, the iOS engine, a partner — signs what it always
+   * did. "perps" signs the Perps account at Kernel index 1 with the Perps wall
+   * (empty in this build, decision D5), binds the claim to that wallet, saves
+   * it in that wallet's slot and hands it to POST /api/grants?wallet=perps.
+   * Mainnet only, and no Spot opt-in rides along (refusePerpsWalletInputs).
+   */
+  purpose?: GrantPurpose;
   caps: GrantCaps;
   onStatus: (status: string) => void;
   chainId?: number;
@@ -1759,7 +2073,7 @@ export interface MintOptions {
   /** `true` only when the venue read provably flat; false, null or absent is "not provably flat". */
   venueFlat?: boolean | null;
   /**
-   * This browser's own previous grants (`localGrantsSnapshot()`), as DATA. A
+   * This browser's own previous grants (`localGrantsSnapshot(wallet)`), as DATA. A
    * RENEWAL takes ONE snapshot and passes it, with `previousGrant`, in the
    * options its preflight and its mint both get. The preflight is storage-free,
    * so without it the preflight sees no local copy while the mint reads one,
@@ -1771,6 +2085,10 @@ export interface MintOptions {
 
 /** What the preparation core takes about perpetuals; built from MintOptions by `perpInput`. */
 export interface PerpSigningInput {
+  assertCurrent?: () => void;
+  beforeCommit?: () => Promise<void>;
+  /** The wallet signed for (MintOptions.purpose); absent is Spot. */
+  purpose?: GrantPurpose;
   recovery?: PerpRecoveryReference;
   perp?: PerpSealRequest | null;
   previousGrant?: unknown;
@@ -1782,10 +2100,12 @@ export interface PerpSigningInput {
 
 /**
  * The perps fields of a mint, NAMED, for every entry point. One helper so a
- * new entry point cannot thread three of the four and forget the drop guard.
+ * new entry point cannot thread three of the four and forget the drop guard —
+ * or forget the wallet, which would sign a Perps request as Spot.
  */
 function perpInput(o: Omit<MintOptions, "hostedAs">): PerpSigningInput {
   return {
+    purpose: o.purpose, assertCurrent: o.assertCurrent, beforeCommit: o.beforeCommit,
     perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant,
     perpDrop: o.perpDrop, venueFlat: o.venueFlat, localGrants: o.localGrants,
   };
@@ -1813,7 +2133,7 @@ export async function preflightAgentGrant(owner: LocalAccount, o: MintOptions): 
     // THE SAME PERPS DECISION THE MINT WILL MAKE, before anything is revoked:
     // a carried Lighter key that no longer fits must refuse here, not after.
     // Storage-free like the rest of the preflight, so the caller passes the
-    // server's projection (`previousGrant`) and one `localGrantsSnapshot()`
+    // server's projection (`previousGrant`) and one `localGrantsSnapshot(wallet)`
     // (`localGrants`) to BOTH this and the mint.
     perpInput(o),
   );
@@ -1852,6 +2172,11 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
   // but require an external or embedded owner signer for new real-fund wallets.
   if ((o.chainId ?? robinhoodChain.id) !== robinhoodTestnet.id) {
     throw new Error("New mainnet wallets require an embedded or external owner wallet. Sign in to create one; existing recovery keys can still be restored.");
+  }
+  // A Perps wallet is mainnet-only and owned by the signed-in wallet (decision
+  // D4), so a key generated here could never own one. Said before a key is made.
+  if ((o.purpose ?? "spot") === "perps") {
+    throw new Error("A Perps wallet is owned by the wallet you sign in with. Sign in to create one; no key was generated.");
   }
   o.onStatus("minting your agent's owner key…");
   const key = generatePrivateKey();
@@ -1997,10 +2322,15 @@ export interface OwnerPreview {
  * Read-only: which smart account does this owner key control? Lets the restore
  * flow show the derived address (and its balances) so the user can confirm it's
  * the funded wallet they meant BEFORE anything is signed or armed.
+ *
+ * FOR ONE WALLET: one owner key controls a Spot account (index 0) and a Perps
+ * account (index 1), so the wallet is named, and required. A preview made at
+ * the wrong index shows, and invites a deposit to, the other wallet.
  */
 export async function previewOwnerAccount(
   ownerPrivateKey: `0x${string}`,
-  chainId: number = robinhoodChain.id,
+  chainId: number,
+  wallet: GrantPurpose,
 ): Promise<OwnerPreview> {
   const chain = chainForId(chainId);
   const publicClient = createPublicClient({ chain, transport: http() });
@@ -2012,6 +2342,7 @@ export async function previewOwnerAccount(
   });
   // sudo-only derivation — the permission plugin doesn't change the address.
   const account = await createKernelAccount(publicClient, {
+    index: accountIndexForPurpose(wallet),
     entryPoint: getEntryPoint("0.7"),
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },

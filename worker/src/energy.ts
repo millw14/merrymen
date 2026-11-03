@@ -32,7 +32,7 @@
  */
 
 import { ENERGY, ENERGY_FULL_RAW, ENERGY_ROUTE_V1, SETTINGS_DEFAULTS, wholeTokens } from "../../packages/core/src/index";
-import type { EnergyBuy, EnergyLevel, EnergyMeter, EnergyMode, EnergyStatus } from "../../packages/core/src/index";
+import type { EnergyBuy, EnergyLevel, EnergyMeter, EnergyMode, EnergyStatus, GrantPurpose } from "../../packages/core/src/index";
 import type { TradeIntent } from "./policy";
 
 export type { EnergyLevel, EnergyMode } from "../../packages/core/src/index";
@@ -534,9 +534,21 @@ export function energyStatus(i: {
 /**
  * Can the agent buy its own energy right now, as the worker sees it?
  * Order matters: a non-mainnet account can never buy, whatever else is true.
+ *
+ * A PERPS WALLET'S WORKER NEVER SAYS "ready", whatever its grant or its rail.
+ * The wallet's USDG is the perp book's collateral, the energy buy is a Spot
+ * swap, and a ready report is what makes the app and the chat offer the
+ * get-energy card. Its paper wall carries no energy route (D5) and policy.ts
+ * refuses the intent on this wallet anyway (perpsWalletRefusal), but a report
+ * may not promise what the wall would refuse — and a later wall that does
+ * carry the route must not turn this on by itself. "paper" is the true answer
+ * in this build, where a Perps wallet only practises and never spends real
+ * USDG; a real-money Perps wallet needs its own state in core's EnergyBuy
+ * before it may say anything else. No default: the caller names its wallet.
  */
-export function energyBuyOf(i: { chainId: number; live: boolean; hasRoute: boolean }): EnergyBuy {
+export function energyBuyOf(i: { chainId: number; live: boolean; hasRoute: boolean; wallet: GrantPurpose }): EnergyBuy {
   if (i.chainId !== ENERGY_ROUTE_V1.chainId) return "not-mainnet";
+  if (i.wallet === "perps") return "paper";
   if (!i.live) return "paper";
   if (!i.hasRoute) return "resign";
   return "ready";

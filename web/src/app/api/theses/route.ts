@@ -20,6 +20,7 @@
 import { NextResponse } from "next/server";
 import { readTheses, type FeedThesis } from "@/lib/read-theses";
 import { THESES_CACHE_CONTROL, thesesMemo } from "@/lib/theses-memo";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /** Cacheable because the answer does not depend on who is asking. */
 /**
@@ -66,6 +67,8 @@ const theses = thesesMemo(() => readTheses());
 const activity = thesesMemo(() => readTheses({ figures: false }));
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const activityOnly = new URL(req.url).searchParams.get("view") === "activity";
   const r = await (activityOnly ? activity : theses).get();
   const response = activityOnly ? { ...r, figuresIncluded: false } : r;

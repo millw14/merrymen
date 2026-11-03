@@ -16,6 +16,7 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 import { runWallBattery } from "@merrymen/wall-battery";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export interface WallInfo {
   armed: boolean;
@@ -27,7 +28,9 @@ export interface WallInfo {
   addresses?: { smartAccount: string; sessionKey: string; owner: string };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const grant = await readStoredGrant();
   if (!grant) return NextResponse.json({ armed: false } satisfies WallInfo);
   const info: WallInfo = {
@@ -46,7 +49,9 @@ export async function GET() {
   return NextResponse.json(info);
 }
 
-export async function POST() {
+export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const grant = await readStoredGrant();
   if (!grant) return NextResponse.json({ error: "no grant — create a wallet first" }, { status: 404 });
   return NextResponse.json(runWallBattery(grant));

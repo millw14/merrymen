@@ -108,7 +108,7 @@ export function ResignPrompt({
    * coverage banner from the entire Privy cohort, which is the cohort the
    * create flow mints by default.
    */
-  const local = typeof window === "undefined" ? null : loadGrant();
+  const local = typeof window === "undefined" ? null : loadGrant("spot");
   const canSign = Boolean(local?.demoOwnerPrivateKey) || (isPrivyOwned(local) && Boolean(privyOwner));
 
   const applies = resignPromptApplies({ exists, grantedAt, canSign });

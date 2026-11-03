@@ -980,3 +980,50 @@ describe("Fomo tails as commands (docs/fomo.md \"Tailing a trader\")", () => {
   });
 
 });
+
+describe("owner Perps paper commands", () => {
+  const account = "0x1111111111111111111111111111111111111111" as const;
+  const fixture = (over: Partial<NonNullable<CommandDeps["perps"]>> = {}) => {
+    const exits: unknown[] = [];
+    const d = deps({perps: {owner: true, requestId:"tg-perps-111-42", askedAtSec:1_000_000, port: {read: async () => ({state:"ready", account, report:null, grantExpiresAt:2_000_000}), exit:async input => {exits.push(input); return "durably queued paper exit";}}, ...over}});
+    return {d, exits};
+  };
+  it("accepts explicit single-market exits only; models cannot invent them", () => {
+    assert.deepEqual(parseSlash("/perps"), {kind:"perps"});
+    assert.deepEqual(parseSlash("/close BTC-PERP"), {kind:"close-perp",market:"BTC-PERP"});
+    assert.deepEqual(parseSlash("/flatten"), {kind:"flatten-perps"});
+    for (const text of ["/close BTC", "/close BTC-PERP ETH-PERP", "/flatten now", "/perps secret"]) assert.equal(parseSlash(text)?.kind, "unknown", text);
+    for (const kind of ["close-perp", "flatten-perps"]) assert.equal(coerceLlmCommand({kind,market:"BTC-PERP"}).kind, "chat");
+  });
+  it("requires linked owner, current request identity and expiry for a close", async () => {
+    for (const over of [{owner:false},{requestId:null},{requestId:"../../x"},{askedAtSec:999_800},{askedAtSec:1_000_100}]) {
+      const {d,exits}=fixture(over); await executeCommand({kind:"close-perp",market:"BTC-PERP"},d); assert.equal(exits.length,0);
+    }
+    const {d,exits}=fixture();
+    assert.match(await executeCommand({kind:"close-perp",market:"BTC-PERP"},d), /queued/);
+    assert.deepEqual(exits,[{action:"close",market:"BTC-PERP",expectedAccount:account,requestId:"tg-perps-111-42",askedAtSec:1_000_000}]);
+    for (const expiry of [null,NaN,Infinity,1_000_000]) {
+      d.perps!.port.read=async()=>({state:"ready",account,report:null,grantExpiresAt:expiry});
+      assert.match(await executeCommand({kind:"close-perp",market:"BTC-PERP"},d),/expired or unreadable/);
+    }
+    assert.equal(exits.length,1);
+  });
+  it("flatten requires confirmation and retains the account the owner reviewed", async () => {
+    const {d,exits}=fixture();
+    assert.match(await executeCommand({kind:"flatten-perps"},d),/confirm/); assert.equal(exits.length,0);
+    d.perps!.port.read=async()=>({state:"ready",account:"0x2222222222222222222222222222222222222222",report:null,grantExpiresAt:2_000_000});
+    await executeCommand({kind:"confirm"},d);
+    assert.deepEqual(exits,[{action:"flatten",expectedAccount:account,requestId:"tg-perps-111-42",askedAtSec:1_000_000}]);
+    await executeCommand({kind:"confirm"},d); assert.equal(exits.length,1);
+  });
+  it("rechecks owner and controls at flatten confirmation", async () => {
+    for (const change of [(d:CommandDeps)=>{d.controlEnabled=false;},(d:CommandDeps)=>{d.perps!.owner=false;}]) {
+      const {d,exits}=fixture(); await executeCommand({kind:"flatten-perps"},d); change(d); await executeCommand({kind:"confirm"},d); assert.equal(exits.length,0);
+    }
+  });
+  it("Perps-only positions and P&L never read Spot or manufacture an empty book", async () => {
+    const {d}=fixture(); d.walletPurpose="perps";
+    d.reads.positions=()=>{throw new Error("Spot read");}; d.reads.pnl=()=>{throw new Error("Spot read");};
+    for (const kind of ["positions","pnl","perps"] as const) assert.match(await executeCommand({kind},d),/unknown, not zero/);
+  });
+});

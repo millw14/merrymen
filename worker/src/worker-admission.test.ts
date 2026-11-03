@@ -15,11 +15,17 @@
  * SIGTERM handler — is pinned over its source in admission-invariant.test.ts.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import type { HeldCurveLeg } from "./energy";
 import { DRAIN_LIMITS } from "./fleet-drain";
-import type { AgentLimits, TradeIntent } from "./policy";
+import { isExitIntent, type AgentLimits, type PerpOrderIntent, type TradeIntent } from "./policy";
+import { buildExitDraft } from "./perps/drafts";
+import { parseOrderBookDetails } from "./perps/markets";
+import { perpExitNotAdmittedLine, readPerpExitOrder } from "./perps/owner-order";
+import { ownerRejectRuleLabel } from "./thesis-policy";
 import {
   ADMISSION_LEVEL_ENV,
   DRAIN_INTENT_CHAIN_MS,
@@ -27,6 +33,7 @@ import {
   admissionFrom,
   admissionRefusal,
   drainIntentChain,
+  ownerPerpExitRefusal,
   type AdmissionLevel,
 } from "./worker-admission";
 
@@ -170,6 +177,58 @@ describe("which intents a level refuses", () => {
     for (const intent of [curve(EXTRA, MEME), otherCurve, curve(MEME, VAULT)]) {
       assert.equal(judge("exits-only", intent), "rollout-hold", JSON.stringify(intent, (_, v) => (typeof v === "bigint" ? `${v}` : v)));
     }
+  });
+});
+
+/**
+ * A PERPS WALLET'S CLOSE AND CLOSE ALL never reach processIntentLocked: the
+ * perp lane builds the exit from what is held and books it itself. Their gate
+ * (ownerPerpExitRefusal, asked in index.ts runOrderCommand before the lane —
+ * admission-invariant.test.ts pins where) must answer what admissionRefusal
+ * answers for the intent the lane would build. A Perps worker held at
+ * `observe` used to book its owner's Close: the one owner order a held tenant
+ * still carried out.
+ */
+describe("an owner's perpetual exit meets the same levels", () => {
+  const BTC = parseOrderBookDetails(JSON.parse(readFileSync(path.join(import.meta.dirname, "perps", "fixtures", "orderBookDetails.perp.json"), "utf8")))!.markets.get(1)!;
+  /** What the lane builds for a Close of each side (lane.ts ownerCloseLocked): reduce-only, the whole position. */
+  const exits = (["long", "short"] as const).map((side) => {
+    const draft = buildExitDraft({ market: { key: "BTC-PERP", marketId: 1, markPrice: 802_000n, spec: BTC.spec }, position: { side, baseAmount: 1_000n }, effect: "close", maxSlippageBps: 100 });
+    assert.ok(draft, side);
+    return { ...draft } as PerpOrderIntent;
+  });
+
+  it("THE ANSWER admissionRefusal GIVES THE EXIT THE LANE WOULD BUILD, at every level, draining or not", () => {
+    for (const intent of exits) {
+      assert.ok(isExitIntent(intent, LIMITS), "the lane's close is an exit by the breaker's own test");
+      for (const level of ["observe", "exits-only", "trade"] as const) {
+        for (const draining of [false, true]) {
+          assert.equal(ownerPerpExitRefusal({ level, draining }), admissionRefusal({ level, draining }, intent, LIMITS, new Map()), `${level}, draining=${draining}, ${intent.side}`);
+        }
+      }
+    }
+  });
+
+  it("OBSERVE REFUSES IT as it refuses every owner order; exits-only and trade let it go; draining wins", () => {
+    assert.equal(ownerPerpExitRefusal({ level: "observe", draining: false }), "rollout-hold");
+    assert.equal(ownerPerpExitRefusal({ level: "exits-only", draining: false }), null);
+    assert.equal(ownerPerpExitRefusal({ level: "trade", draining: false }), null);
+    for (const level of ["observe", "exits-only", "trade"] as const) assert.equal(ownerPerpExitRefusal({ level, draining: true }), "draining", level);
+  });
+
+  it("the owner is told in the words a held Spot order gets, and that nothing was sent, closed or paused", () => {
+    const close = readPerpExitOrder({ side: "sell", symbol: "BTC-PERP", usdgAmount: 0, purpose: "close-perp", book: "paper" });
+    const all = readPerpExitOrder({ side: "sell", symbol: "ALL-PERPS", usdgAmount: 0, purpose: "flatten-perps" });
+    assert.ok(close && "order" in close && all && "order" in all);
+    const hold = ownerRejectRuleLabel("rollout-hold")!;
+    assert.equal(
+      perpExitNotAdmittedLine(close.order, hold),
+      "BTC-PERP: not closed — trading is on hold for this agent while the service brings agents back — so nothing was sent and its stop stays in place. Ask again once it is back.",
+    );
+    assert.equal(
+      perpExitNotAdmittedLine(all.order, ownerRejectRuleLabel("draining")!),
+      "Close all did not run — the agent was restarting and took no new trades — so nothing was sent, no practice position was closed and nothing was paused. Ask again once it is back.",
+    );
   });
 });
 

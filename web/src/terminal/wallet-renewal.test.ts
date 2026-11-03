@@ -42,7 +42,10 @@ let restoredKeys: unknown[] = [];
 let previewOwner: (key: string, chainId: number) => Promise<{ smartAccount: string; owner: string }>;
 let stop: (expectedTenant?: string | null) => Promise<void>;
 let stopCalls = 0;
-let replacementStops: Array<{ tenant?: string | null; account: string; session?: string }> = [];
+let replacementStops: Array<{ wallet: string; tenant?: string | null; account: string; session?: string }> = [];
+let snapshotWallets: string[] = [];
+let localSnapshot: { current?: unknown; archived?: readonly unknown[] } = {};
+let snapshot: (wallet: string) => typeof localSnapshot;
 let destructiveStops = 0;
 let revokeCalls = 0;
 let mintCalls = 0;
@@ -52,6 +55,8 @@ let privyOwner: PrivyOwner | null = null;
 let Wallet: typeof import("./screens/Wallet").default;
 let ui: ReturnType<typeof testDom>;
 let savedWallets: SavedWallet[] = [];
+/** The server's answer to GET /api/grants?wallet=perps, which a restore asks before anything else (restore-perps-owner.ts): no Perps wallet unless a test says otherwise. */
+let perpsAnswer: () => Response;
 const originalFetch = globalThis.fetch;
 
 before(async () => {
@@ -79,13 +84,14 @@ before(async () => {
       };
       if (id === "@/lib/stop-agent") return {
         deleteAgent: (expectedTenant?: string | null) => { stopCalls++; destructiveStops++; return stop(expectedTenant); },
-        stopAgentForReplacement: (tenant: string | null | undefined, account: string, session?: string) => {
-          stopCalls++; replacementStops.push({ tenant, account, session }); return stop(tenant);
+        stopAgentForReplacement: (wallet: string, tenant: string | null | undefined, account: string, session?: string) => {
+          stopCalls++; replacementStops.push({ wallet, tenant, account, session }); return stop(tenant);
         },
       };
       if (id === "@/lib/session") return {
         FAUCET_URL: "https://faucet.testnet.chain.robinhood.com",
         loadGrant: () => storedGrantAvailable ? activeGrant : null,
+        localGrantsSnapshot: (wallet: string) => snapshot(wallet),
         listSavedWallets: () => savedWallets,
         isPrivyOwned: (g: StoredGrant | null) => g?.binding?.version === "privy-did-owner-v1",
         previewOwnerAccount: (key: string, chainId: number) => previewOwner(key, chainId),
@@ -107,6 +113,7 @@ before(async () => {
 beforeEach(() => {
   ui = testDom();
   savedWallets = [];
+  perpsAnswer = () => json({ exists: false });
   activeGrant = grant;
   storedGrantAvailable = true;
   privyOwner = null;
@@ -119,6 +126,9 @@ beforeEach(() => {
   preflightCalls = 0;
   stopCalls = 0;
   replacementStops = [];
+  snapshotWallets = [];
+  localSnapshot = { current: { smartAccount: address }, archived: [] };
+  snapshot = wallet => { snapshotWallets.push(wallet); return localSnapshot; };
   destructiveStops = 0;
   revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 });
   previewOwner = async () => ({ smartAccount: address, owner: address });
@@ -130,6 +140,7 @@ beforeEach(() => {
   globalThis.fetch = async (input) => {
     const path = String(input);
     if (path === "/api/grants") return json({ exists: true, grant: activeGrant, gasSponsored: true });
+    if (path === "/api/grants?wallet=perps") return perpsAnswer();
     if (path === "/api/auth/session") return json({ hosted: false, address: null });
     if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
     throw new Error(`Unexpected request: ${path}`);
@@ -259,6 +270,7 @@ describe("the funded wallet's re-sign control", () => {
         const path = String(input);
         if (path === "/api/grants" && init?.method === "POST") { posted++; return json({ ok: true }); }
         if (path === "/api/grants") return json({ exists: false });
+        if (path === "/api/grants?wallet=perps") return perpsAnswer();
         if (path === "/api/auth/session") return json({ hosted: false, address: null });
         if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
         throw new Error(`Unexpected request: ${path}`);
@@ -408,6 +420,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
       if (path === "/api/grants") return unavailable ? json({ error: "grant store unavailable" }, 500) : json({ exists: true, grant, gasSponsored: true });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -429,6 +442,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: true, tenant: b, grant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: true, address: a });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -444,6 +458,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async (input) => {
       const path = String(input);
       if (path === "/api/grants") return ++reads === 1 ? oldGrant.promise : json({ exists: false });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -530,7 +545,7 @@ describe("the funded wallet's re-sign control", () => {
     stop = async () => {
       events.push("stop");
       assert.equal(needsPermissionReplacement(activeGrant), true, "after preflight, the marker still precedes the stop");
-      assert.equal(loadRecoveryGrants().length, 1, "public recovery inputs are saved before the stop");
+      assert.equal(loadRecoveryGrants("spot").length, 1, "public recovery inputs are saved before the stop");
     };
     revoke = async () => {
       events.push("revoke requested");
@@ -642,7 +657,7 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     assert.equal(revokeCalls, 1);
-    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.deepEqual(replacementStops, [{ wallet: "spot", tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
     assert.equal(destructiveStops, 0, "renewal never deletes the agent's memory");
     assert.equal(mintCalls, 0);
     await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
@@ -702,6 +717,115 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(mintCalls, 0);
     assert.equal(needsPermissionReplacement(activeGrant), false);
     assert.match(ui.container.textContent!, /needs ETH for the network fee\. Nothing was stopped or signed/);
+  });
+
+  /**
+   * A LOGIN'S TWO WALLETS SHARE ONE OWNER KEY, and the grant POST that ends a
+   * restore refuses another one. Self-hosted, the restore's stop had already
+   * removed the running Spot grant.json (and stopped Solana) and its revocation
+   * had been paid for when that POST was refused. So the restore asks the
+   * Perps wallet first (restore-perps-owner.ts), before even the fee check.
+   */
+  for (const [what, answer, refusal] of [
+    ["under another owner key than the Perps wallet's", () => json({ exists: true, grant: { owner: `0x${"9".repeat(40)}`, purpose: "perps" } }), /Your Perps wallet uses another owner key, and both of a login's wallets must use the same one\..*Nothing was stopped or signed\./],
+    ["while the Perps wallet cannot be read", () => json({ error: "Couldn't read your Perps wallet. Please try again." }, 503), /Your Perps wallet could not be read, so this restore cannot be checked against it\. Nothing was stopped or signed\. Try again in a moment; if it keeps failing, Kill all agents stops both wallets/],
+  ] as const) it(`restoring ${what} stops nothing, revokes nothing and signs nothing`, async () => {
+    perpsAnswer = answer;
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(fundingChecks, [], "refused before even the fee check");
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(replacementStops, [], "no stop names any wallet");
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.equal(needsPermissionReplacement(activeGrant), false);
+    assert.match(ui.container.textContent!, refusal);
+  });
+
+  it("restoring with the Perps wallet's own owner key goes on as before, to the fee check", async () => {
+    perpsAnswer = () => json({ exists: true, grant: { owner: privateKeyToAccount(grant.demoOwnerPrivateKey!).address.toLowerCase(), purpose: "perps" } });
+    fundingCheck = async () => { throw new Error("Revoking earlier permissions needs ETH for the network fee. Nothing was stopped or signed."); };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(fundingChecks, [{ smartAccount: address, chainId: 4663 }], "past the Perps owner, to the fee check");
+    assert.doesNotMatch(ui.container.textContent!, /Your Perps wallet/);
+  });
+
+  it("SWITCHING TO ANOTHER ACCOUNT under that account's own key, while the Perps wallet keeps the active wallet's key, stops nothing and signs nothing", async () => {
+    // The refusal as it really arises: the active Spot wallet and the Perps wallet share one owner key (the
+    // same-owner rule allows no other state), and the key pasted is another account's own. A preview derives
+    // both the account and its owner from the key it is given.
+    const active = useRenewalOwner("legacy");
+    perpsAnswer = () => json({ exists: true, grant: { owner: active.address, purpose: "perps" } });
+    const other = `0x${"5".repeat(40)}`;
+    previewOwner = async key => ({ smartAccount: other, owner: privateKeyToAccount(key as `0x${string}`).address });
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey(`0x${"7".repeat(64)}`);
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x5555…5555");
+    assert.deepEqual(fundingChecks, [], "refused before even the fee check");
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(replacementStops, [], "the active wallet is not stopped for an account the POST would refuse");
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.match(ui.container.textContent!, /Your Perps wallet uses another owner key, and both of a login's wallets must use the same one\..*Nothing was stopped or signed\./);
+  });
+
+  /**
+   * HOSTED, NO KEY CAN BE RESTORED WHILE A PERPS WALLET EXISTS OR IS STORED:
+   * its owner is the login, and a restore signs as a legacy owner key, which
+   * the server refuses for the login's own key. Each was refused only after
+   * the stop and the paid revocation; the screen refuses first.
+   */
+  for (const [what, answer, said] of [
+    ["shown", (login: string) => json({ exists: true, tenant: login, grant: { owner: login, purpose: "perps" } }),
+      /Your Perps wallet is owned by the wallet you sign in with, and a restored owner key cannot sit beside it, so this restore was refused\. Nothing was stopped or signed\./],
+    ["stopped for a renewal (stored)", (login: string) => json({ exists: false, tenant: login, stored: true }),
+      /Your Perps wallet is owned by the wallet you sign in with, and a restored owner key cannot sit beside it, so this restore was refused\. Nothing was stopped or signed\./],
+    // A 503 echoes no tenant: the screen says it is hosted, and no Kill-all way out is offered there.
+    ["that cannot be read", () => json({ error: "Couldn't read your Perps wallet. Please try again." }, 503),
+      /Your Perps wallet could not be read just now, so this restore cannot be checked against it\. Nothing was stopped or signed\. While you hold a Perps wallet, a restored owner key cannot sit beside it/],
+  ] as const) for (const whose of ["the login's own key", "another key"] as const) it(`HOSTED, a Perps wallet ${what}: restoring ${whose} stops nothing, revokes nothing and signs nothing`, async () => {
+    const login = privateKeyToAccount(`0x${"7".repeat(64)}`);
+    const did = "did:privy:hosted-restore";
+    activeGrant = { ...grant, owner: login.address, demoOwnerPrivateKey: undefined, binding: { version: "privy-did-owner-v1", did, nonce: "n", ownerSignature: `0x${"0".repeat(130)}` } };
+    privyOwner = { account: login, did };
+    perpsAnswer = () => answer(login.address);
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists: true, tenant: login.address, grant: activeGrant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
+      if (path === "/api/auth/session") return json({ hosted: true, address: login.address });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey(whose === "the login's own key" ? `0x${"7".repeat(64)}` : `0x${"3".repeat(64)}`);
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(fundingChecks, [], "refused before even the fee check");
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(replacementStops, []);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.match(ui.container.textContent!, said);
+    assert.doesNotMatch(ui.container.textContent!, /Kill all agents stops both wallets/, "the self-hosted way out is not offered on hosted");
   });
 
   it("on-chain revocation remains available when the service stop fails", async () => {
@@ -770,7 +894,7 @@ describe("the funded wallet's re-sign control", () => {
     revoke = wallet => wallet.chainId === 46630 ? source.promise : destination.promise;
     stop = async () => {
       assert.equal(needsPermissionReplacement(activeGrant), true, "old-chain marker precedes DELETE");
-      assert.equal(loadRecoveryGrants()[0]?.chainId, 46630, "old-chain recovery snapshot precedes DELETE");
+      assert.equal(loadRecoveryGrants("spot")[0]?.chainId, 46630, "old-chain recovery snapshot precedes DELETE");
     };
     renew = async options => {
       assert.equal(options.chainId, 4663);
@@ -793,7 +917,7 @@ describe("the funded wallet's re-sign control", () => {
     await acknowledge("I understand restore first stops");
     await ui.click("Restore & arm 0x1111…1111");
     assert.deepEqual(revokeWallets.map(w => w.chainId), [46630]);
-    assert.deepEqual(replacementStops, [{ tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.deepEqual(replacementStops, [{ wallet: "spot", tenant: undefined, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
     assert.equal(destructiveStops, 0, "cross-network restore never uses destructive deletion");
     assert.equal(mintCalls, 0);
     assert.equal(input.matches(":disabled"), true);
@@ -813,6 +937,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists, ...(exists ? { grant: activeGrant } : {}) });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -833,7 +958,7 @@ describe("the funded wallet's re-sign control", () => {
     assert.deepEqual(revokeWallets.map(w => w.chainId), failedChain === 46630 ? [46630] : [46630, 4663]);
     assert.match(ui.container.textContent!, /Receipt unconfirmed/);
     assert.equal(needsPermissionReplacement(activeGrant), true);
-    assert.equal(loadRecoveryGrants()[0]?.chainId, 46630);
+    assert.equal(loadRecoveryGrants("spot")[0]?.chainId, 46630);
     storedGrantAvailable = false;
     await ui.remount(React.createElement(Wallet));
     assert.ok(ui.container.querySelector("#resign"), "the public snapshot survives losing the server grant");
@@ -882,6 +1007,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: true, grant: serverGrant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -897,7 +1023,7 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(stopCalls, 0);
     assert.equal(revokeCalls, 0);
     assert.equal(mintCalls, 0);
-    assert.equal(loadRecoveryGrants().length, 0);
+    assert.equal(loadRecoveryGrants("spot").length, 0);
     assert.equal(needsPermissionReplacement(grant), false);
     assert.match(ui.container.textContent!, /Couldn.t check your agent/);
     await ui.click("Try again");
@@ -922,6 +1048,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: true, grant: serverGrant });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: false, address: null });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -940,7 +1067,7 @@ describe("the funded wallet's re-sign control", () => {
       assert.deepEqual(revokeWallets.map(w => w.chainId), [serverGrant.chainId]);
       assert.equal(needsPermissionReplacement(serverGrant), true);
       assert.equal(needsPermissionReplacement(activeGrant), false, "the current server permission is replaced, not stale local metadata");
-      const recovery = loadRecoveryGrants()[0]!;
+      const recovery = loadRecoveryGrants("spot")[0]!;
       assert.equal(recovery.serialized, undefined);
       assert.equal(recovery.demoSessionPrivateKey, undefined);
       assert.equal(recovery.demoOwnerPrivateKey, undefined);
@@ -965,6 +1092,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists, tenant: owner.address, ...(exists ? { grant: activeGrant } : {}) });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: true, address: owner.address });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -978,7 +1106,7 @@ describe("the funded wallet's re-sign control", () => {
     // Stop alone must remain usable and leave a renewal route after refresh.
     stop = async () => { exists = false; };
     await ui.click("Stop agent now");
-    assert.deepEqual(replacementStops, [{ tenant: owner.address, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
+    assert.deepEqual(replacementStops, [{ wallet: "spot", tenant: owner.address, account: activeGrant.smartAccount, session: activeGrant.sessionKeyAddress }]);
     assert.equal(destructiveStops, 0, "stopping permission never deletes agent memory");
     await ui.remount(React.createElement(Wallet));
     assert.ok(ui.container.querySelector("#resign"));
@@ -1015,6 +1143,7 @@ describe("the funded wallet's re-sign control", () => {
     globalThis.fetch = async input => {
       const path = String(input);
       if (path === "/api/grants") return json({ exists: false, tenant: b.address });
+      if (path === "/api/grants?wallet=perps") return perpsAnswer();
       if (path === "/api/auth/session") return json({ hosted: true, address: b.address });
       if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
       throw new Error(`Unexpected request: ${path}`);
@@ -1028,5 +1157,142 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(mintCalls, 0);
   });
 
+  for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal: the preflight and the mint decide over ONE snapshot, taken at the click before anything is stopped`, async () => {
+    // THE RACE THIS CLOSES (perps slice 5b): the preflight was handed no
+    // previous grant and no local copies, while the mint read storage itself
+    // after the replacement journal was written, so the two could decide the
+    // carried-perps question over different inputs and a refusal could land
+    // only after the old permission was gone.
+    useRenewalOwner(kind);
+    const events: string[] = [];
+    snapshot = wallet => { events.push(`snapshot ${wallet}`); snapshotWallets.push(wallet); return localSnapshot; };
+    let checked: MintOptions | undefined;
+    let minted: MintOptions | undefined;
+    preflight = async (_signer, options) => { events.push("preflight"); checked = options; };
+    stop = async () => { events.push("stop"); };
+    revoke = async () => { events.push("revoke"); return { transactionHash: `0x${"4".repeat(64)}`, validNonceFrom: 9 }; };
+    renew = async options => {
+      events.push("mint");
+      minted = options;
+      return { local: { ...activeGrant, sessionKeyAddress: fixtureAddress(901) }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(events, ["snapshot spot", "preflight", "stop", "revoke", "mint"], "one snapshot, before the preflight and the stop");
+    assert.deepEqual(snapshotWallets, ["spot"], "this browser's grants for the wallet being renewed, read once");
+    assert.ok(checked && minted);
+    assert.equal(checked.localGrants, localSnapshot, "the preflight decides over the snapshot");
+    assert.equal(minted.localGrants, checked.localGrants, "and the mint over the very same object, not a later read");
+    // The server's view of the grant at this click, from the same account read
+    // that verified it, and the same object on both sides.
+    assert.equal((checked.previousGrant as { smartAccount?: string } | undefined)?.smartAccount, activeGrant.smartAccount);
+    assert.equal(minted.previousGrant, checked.previousGrant);
+    assert.equal(checked.purpose, "spot");
+    assert.equal(minted.purpose, "spot");
+    assert.equal(minted.minimumValidationNonce, 9);
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
 
+  /**
+   * THE RENEWAL ENDS IN THE SAME POST AS THE RESTORE, held to the Perps
+   * wallet: refused for another owner key, or for a Perps wallet it cannot
+   * read. It asks first too, with the key it re-signs with, so a renewal the
+   * POST would refuse leaves the running permission exactly as it was.
+   */
+  for (const [what, answer, said] of [
+    ["while the Perps wallet cannot be read", () => json({ error: "Couldn't read your Perps wallet. Please try again." }, 503),
+      /kept your existing permission unchanged\. Your Perps wallet could not be read, so this renewal cannot be checked against it\. Your current permission keeps running until it expires\. Try again in a moment; if it keeps failing, Kill all agents stops both wallets/],
+    ["under another owner key than the Perps wallet's", () => json({ exists: true, grant: { owner: `0x${"9".repeat(40)}`, purpose: "perps" } }),
+      /kept your existing permission unchanged\. Your Perps wallet uses another owner key, and both of a login's wallets must use the same one, so the renewed permission would be refused\./],
+  ] as const) for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal ${what}: refused before its fee check, preflight, stop, revocation or signature`, async () => {
+    useRenewalOwner(kind);
+    perpsAnswer = answer;
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
+    await ui.click("revoke earlier permissions & re-sign");
+    assertExistingPermissionKept(before);
+    assert.equal(preflightCalls, 0);
+    assert.deepEqual(fundingChecks, [], "never told to send ETH for a renewal that cannot land");
+    assert.deepEqual(replacementStops, [], "no stop names any wallet");
+    assert.match(ui.container.textContent!, said);
+  });
+
+  it("A PRIVY RENEWAL WHOSE CONNECTED EMBEDDED WALLET IS NOT THIS AGENT'S OWNER is refused by the preflight, in its own words; the Perps wallet is never blamed or asked", async () => {
+    const owner = useRenewalOwner("Privy");
+    perpsAnswer = () => json({ exists: true, tenant: owner.address, grant: { owner: owner.address, purpose: "perps" } });
+    // Another Privy login's embedded wallet, connected in this browser.
+    const other = privateKeyToAccount(`0x${"8".repeat(64)}`);
+    privyOwner = { account: other, did: "did:privy:someone-else" };
+    preflight = async (signer) => { throw new Error(`refusing to sign: this owner derives ${signer.address}, not ${owner.address}. Re-signing needs the same owner the agent was created with.`); };
+    const asked: string[] = [];
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => { asked.push(String(input)); return fetch(input, init); };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
+    await ui.click("revoke earlier permissions & re-sign");
+    assertExistingPermissionKept(before);
+    assert.equal(asked.includes("/api/grants?wallet=perps"), false, "the Perps wallet is not asked about another login's signer");
+    assert.match(ui.container.textContent!, /refusing to sign: this owner derives/);
+    assert.doesNotMatch(ui.container.textContent!, /Your Perps wallet/);
+  });
+
+  for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal under the Perps wallet's own owner key goes ahead`, async () => {
+    const owner = useRenewalOwner(kind);
+    perpsAnswer = () => json({ exists: true, grant: { owner: owner.address.toLowerCase(), purpose: "perps" } });
+    renew = async () => ({ local: { ...activeGrant, sessionKeyAddress: fixtureAddress(903) }, handoff: { ok: true } });
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(stopCalls, 1);
+    assert.equal(mintCalls, 1);
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
+
+  it("a renewal whose server grant was already stopped hands the signer null (holds none), never 'not read'", async () => {
+    // null and undefined are different answers to priorPerpFor: null is the
+    // server saying it holds nothing (the browser's copy may carry a key, as
+    // after a kill); undefined is unread, which fails closed.
+    let exists = true;
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => String(input) === "/api/grants" ? json(exists ? { exists, grant: activeGrant } : { exists }) : fetch(input, init);
+    let minted: MintOptions | undefined;
+    renew = async options => { minted = options; return { local: { ...activeGrant, sessionKeyAddress: fixtureAddress(902) }, handoff: { ok: true } }; };
+    await ui.render(React.createElement(Wallet));
+    exists = false;
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(mintCalls, 1);
+    assert.equal(minted?.previousGrant, null);
+  });
+
+  for (const purpose of ["perps", "options"] as const) it(`a grant naming the ${purpose} wallet is refused on this Spot screen before anything is read, stopped, revoked or signed`, async () => {
+    // THE PATH THIS CLOSES (perps slice 5b review): renewKey followed whatever
+    // wallet the grant named, but its account read is Spot's GET /api/grants
+    // and its revocation derives the owner's Kernel account at index 0. A
+    // paper Perps grant renewed here was asked for ETH it never holds, or, with
+    // some, had its stop accepted and then failed revocation against an
+    // account its owner key does not control. The Perps renewal, with D6's
+    // exemption (perps-renewal.test.ts), is the Perps desk's; this screen
+    // refuses. A wallet this build does not know is refused the same way.
+    activeGrant = { ...grant, purpose, grantFeatures: [], grantTokens: [] } as unknown as StoredGrant;
+    const reads: string[] = [];
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => { reads.push(String(input)); return fetch(input, init); };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
+    const mounted = reads.length;
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(reads.slice(mounted), [], "not even the account is read for it");
+    assertExistingPermissionKept(before);
+    assert.equal(preflightCalls, 0, "nothing is checked for signing");
+    assert.deepEqual(fundingChecks, [], "no ETH is asked of it");
+    assert.deepEqual(replacementStops, [], "no stop names any wallet");
+    assert.deepEqual(snapshotWallets, [], "and no wallet's local grants are read");
+    assert.match(ui.container.textContent!, /This attempt kept your existing permission unchanged/);
+    if (purpose === "perps") assert.match(ui.container.textContent!, /A Perps wallet is not renewed from this screen\. Nothing was stopped or signed\./);
+  });
 });

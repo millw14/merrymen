@@ -97,6 +97,9 @@ export function stripThinkingBlock(text: string): string {
 }
 
 export type Command =
+  | { kind: "perps" }
+  | { kind: "close-perp"; market: import("../../../packages/core/src/perps").PerpKey }
+  | { kind: "flatten-perps" }
   | { kind: "link"; code: string }
   /**
    * `/start <payload>`: what Telegram sends when a t.me/<bot>?start=<code> deep
@@ -220,6 +223,8 @@ export const CONTROL_KINDS = new Set([
   "sell",
   "transfer",
   "kill",
+  "close-perp",
+  "flatten-perps",
   // A settings change is state-changing: gated by the control switch AND the
   // group sender rule, like /strategy and /cap, which it generalises.
   "set",
@@ -288,6 +293,16 @@ export function parseSlash(text: string): Command | null {
       return { kind: "wallet" };
     case "status":
       return { kind: "status" };
+    case "perps":
+      return arg ? { kind: "unknown", text: "usage: /perps" } : { kind: "perps" };
+    case "close": {
+      const market = arg.toUpperCase();
+      return /^[A-Z0-9]{1,24}-PERP$/.test(market)
+        ? { kind: "close-perp", market: market as import("../../../packages/core/src/perps").PerpKey }
+        : { kind: "unknown", text: "usage: /close BTC-PERP — closes only that practice perpetual position" };
+    }
+    case "flatten":
+      return arg ? { kind: "unknown", text: "usage: /flatten — asks to close all practice perpetuals" } : { kind: "flatten-perps" };
     case "positions":
     case "book":
       return { kind: "positions" };

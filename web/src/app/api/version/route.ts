@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { NextResponse } from "next/server";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * WHICH COMMIT, FROM WHICH BRANCH. The package version only moves on a
@@ -22,7 +23,9 @@ function deployedSource(): { commit: string | null; branch: string | null } {
   };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   let version = "unknown";
   try {
     // web/ is nested under the package root at runtime (…/merrymen/web).

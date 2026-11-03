@@ -73,6 +73,20 @@ public enum TradeInput {
 /// `expectedTenant` is the wallet that confirmed: a session that has become
 /// another wallet since is refused (409) instead of stopping that one.
 public enum StandDown {
+    /// A confirmation belongs to the login that opened it, including its session
+    /// generation. Returning to the same address does not revive an old review.
+    public struct Confirmation {
+        public let owner: String
+        private let generation: Int
+        public init?(owner: String?, generation: Int) {
+            guard let owner, StandDown.body(owner: owner) != nil else { return nil }
+            self.owner = owner; self.generation = generation
+        }
+        public func body(currentOwner: String?, generation: Int) -> JSONValue? {
+            guard self.generation == generation, currentOwner?.lowercased() == owner.lowercased() else { return nil }
+            return StandDown.body(owner: owner)
+        }
+    }
     public static func body(owner: String) -> JSONValue? {
         guard owner.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil else { return nil }
         return .object(["purpose": .string("delete-agent"), "expectedTenant": .string(owner)])

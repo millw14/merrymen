@@ -32,6 +32,15 @@ const ROOT = join(import.meta.dirname, "..", "..");
 const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
 
 describe("the binding version reaches the validator", () => {
+  it("the grants route passes the WALLET to verifyGrantBinding, so a claim's signed text names it", () => {
+    // Without it every claim is rebuilt as Spot's text, and a Spot binding
+    // would verify as a Perps claim (perps slice 5b).
+    const src = read("web/src/app/api/grants/route.ts");
+    const call = src.slice(src.indexOf("verifyGrantBinding({"));
+    const args = call.slice(0, call.indexOf("});"));
+    assert.match(args, /\bpurpose:\s*wallet,/);
+  });
+
   it("the grants route passes `version` to verifyGrantBinding", () => {
     const src = read("web/src/app/api/grants/route.ts");
     const call = src.slice(src.indexOf("verifyGrantBinding({"));

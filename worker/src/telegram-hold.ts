@@ -18,6 +18,8 @@ import { resolveConfig } from "./settings";
 import { createStateRef, ensureLinkCode, retireLegacyCode } from "./telegram/state";
 import { startHoldTelegram } from "./telegram/hold";
 import { guardStdio } from "./redact-stdio";
+import { merrymenHome } from "./home";
+import { askPerpsBotControl, fileTelegramPerpsPort, queuePerpsBotKill } from "./perps/telegram-bridge";
 
 // Like a trading child's main(): an error that names a keyed URL loses the key
 // before it is printed. The orchestrator's relay redacts it again on the way out.
@@ -36,6 +38,13 @@ startHoldTelegram({
   // settings.json, and the orchestrator rewrites it every pass.
   getCfg: () => resolveConfig(),
   stateRef: tgState,
+  perps: fileTelegramPerpsPort(merrymenHome()),
+  ...(process.env.MERRYMEN_PERPS_BOT_SEAT === "1" ? {
+    walletPurpose: "perps" as const,
+    pausePerps: (request: { requestId: string; askedAtSec: number }) => askPerpsBotControl(merrymenHome(), "pause", request),
+    resumePerps: (request: { requestId: string; askedAtSec: number }) => askPerpsBotControl(merrymenHome(), "resume", request),
+    kill: () => queuePerpsBotKill(merrymenHome()),
+  } : {}),
 });
 
 console.log("merrymen hold process started — trading is held; answering Telegram only");

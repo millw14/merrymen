@@ -5200,14 +5200,20 @@ export async function getPaperBook(agentId: string, startUsdg: number): Promise<
  *                     different key and is never touched.
  *   perp_accounts   — the paper cross collateral goes to '0'. The nonce
  *                     high-water does NOT: it only ever rises, so no client
- *                     order index is reused after a reset either.
+ *                     order index is reused after a reset either. The owner's
+ *                     Close-all halt (entries_halted) goes too when the caller
+ *                     says so (`clearEntriesHalt`, the lane's resetPaper
+ *                     decides): the positions it guarded are closed here, and
+ *                     nothing else lifts it. In the same statement, so a
+ *                     reset never lands without the halt it was told to lift,
+ *                     nor lifts it without landing.
  *   open paper legs and orders — cancelled, so no simulated stop outlives the
  *                     position it protected. Fills and funding stay, behind the
  *                     epoch like the trade rows.
  * One transaction because a reset that cleared the cash but not the collateral
  * (or the reverse) is a book that no longer adds up.
  */
-export async function resetPaperLedger(agentId: string, startUsdg: number): Promise<number> {
+export async function resetPaperLedger(agentId: string, startUsdg: number, opts: { clearEntriesHalt?: boolean } = {}): Promise<number> {
   if (!Number.isFinite(startUsdg) || startUsdg < 0) throw new Error("paper opening cash must be finite and non-negative");
   return getDb().tx(async (db) => {
     // Select the caller's exact row before checking its rail; a paper alias
@@ -5228,7 +5234,7 @@ export async function resetPaperLedger(agentId: string, startUsdg: number): Prom
     await db.prepare("DELETE FROM perp_positions WHERE agent_id = ? AND mode = 'paper'").run(perpAccount);
     await db
       .prepare(
-        `UPDATE perp_accounts SET paper_collateral_micro = '0', updated_at = unixepoch()
+        `UPDATE perp_accounts SET paper_collateral_micro = '0', updated_at = unixepoch()${opts.clearEntriesHalt === true ? ", entries_halted = 0" : ""}
           WHERE agent_id = ? AND mode = 'paper'`,
       )
       .run(perpAccount);

@@ -34,23 +34,34 @@
  * returns the CURRENT account. A tenant who re-granted has older accounts with
  * rows still in the ledger; they are not reachable here and are not meant to be
  * — mixing two accounts' books is the bug the epoch filter exists to prevent.
+ *
+ * ONE WALLET, NAMED BY THE CALLER. A login has two (Spot and Perps, grant.ts
+ * GrantPurpose), each its own account, grant and book. Both resolvers take the
+ * wallet with no default, as the stores and `purposeHome` do, so a route says
+ * which it means; a default of Spot is how the perps branch's reads came to
+ * miss the Perps wallet. And a grant that names the other wallet answers null:
+ * one wallet's question is never answered with the other's account.
  */
 import { readFile } from "node:fs/promises";
-import { homePaths } from "@merrymen/home";
+import path from "node:path";
+import { grantPurpose, isGrantPurpose, type GrantPurpose } from "@merrymen/core";
+import { purposeHome } from "@merrymen/home";
 import { getGrantStore } from "@merrymen/grant-store";
 import { tenantOf } from "@/lib/auth";
 
 /**
- * The signed-in tenant's smart account, or null when there is no session or no
- * grant. HOSTED ONLY — the caller cannot name the agent, so one tenant can never
- * read (or spend the gas of) another's.
+ * The signed-in tenant's smart account in `wallet`, or null when there is no
+ * session or no grant. HOSTED ONLY — the caller cannot name the agent, so one
+ * tenant can never read (or spend the gas of) another's.
  */
-export async function hostedAgentFor(req: Request): Promise<`0x${string}` | null> {
+export async function hostedAgentFor(req: Request, wallet: GrantPurpose): Promise<`0x${string}` | null> {
+  if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
   const tenant = tenantOf(req);
   if (!tenant) return null;
   try {
-    const grant = await getGrantStore("spot").get(tenant);
-    return (grant?.smartAccount as `0x${string}`) ?? null;
+    const grant = await getGrantStore(wallet).get(tenant);
+    if (!grant || grantPurpose(grant) !== wallet) return null;
+    return (grant.smartAccount as `0x${string}`) ?? null;
   } catch {
     // An unreadable store is "we cannot tell", and the honest render of that is
     // an empty panel — never someone else's rows.
@@ -59,13 +70,17 @@ export async function hostedAgentFor(req: Request): Promise<`0x${string}` | null
 }
 
 /**
- * The account of whichever grant is on disk. SELF-HOSTED ONLY: there is no auth
- * there, the localhost middleware is the perimeter, and the machine owns exactly
- * one agent.
+ * The account of whichever grant is on disk in `wallet`'s home (`purposeHome`:
+ * Spot's grant.json where it has always been, Perps's under accounts/perps).
+ * SELF-HOSTED ONLY: there is no auth there, the localhost middleware is the
+ * perimeter, and the machine owns exactly one agent per wallet.
  */
-export async function diskAgent(): Promise<`0x${string}` | null> {
+export async function diskAgent(wallet: GrantPurpose): Promise<`0x${string}` | null> {
+  // Outside the try: an unnamed wallet is the caller's bug, not an empty disk.
+  const file = path.join(purposeHome(wallet), "grant.json");
   try {
-    const g = JSON.parse(await readFile(homePaths.grant(), "utf8")) as { smartAccount?: string };
+    const g = JSON.parse(await readFile(file, "utf8")) as { smartAccount?: string; purpose?: unknown };
+    if (grantPurpose(g) !== wallet) return null;
     return (g.smartAccount as `0x${string}`) ?? null;
   } catch {
     return null;

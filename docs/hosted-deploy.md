@@ -883,15 +883,17 @@ about half the USDG cap). Withdraw is never limited.
    `MERRYMEN_SOLANA` alone, which also removes owners' in-app revoke and
    withdraw.
 
-### Perpetual futures (off in production; nothing can make a Perps wallet yet)
+### Perpetual futures (paper intake available; rollout gated)
 
 An owner's perpetual futures on Lighter's Robinhood Chain instance trade from a
 second wallet of their login, the **Perps wallet** (Kernel index 1 of the same
 owner key; contract: [docs/perps.md](perps.md)). Perps lands on main in six
-slices, and until slice 5 no route can make, renew or fund a Perps wallet:
-`POST /api/grants` refuses one (`perps-wallet-not-offered`) and every perps
-grant (`perp-not-offered`). Merging a slice deploys nothing, but the next Deploy
-Latest Commit for any other change ships every slice already on main, so each
+slices. Slice 5 PR 1 adds `POST /api/grants?wallet=perps` for creation and
+renewal only at `MERRYMEN_PERPS=paper`; otherwise it refuses with
+`perps-wallet-not-offered`. The paper grant's permission wall is empty, and
+funding and live execution remain unavailable. Merging a slice deploys
+nothing, but the next Deploy Latest Commit for any other change ships every
+slice already on main, so each
 one is built to be safe alone with perps off.
 
 - **Every kill already reaches a Perps wallet** (slice 2). "Kill all agents",
@@ -903,8 +905,9 @@ one is built to be safe alone with perps off.
 - **The tables are additive.** `perps_grants` and `perps_tenant_settings` hold
   the Perps wallets' grants and settings beside `grants` and `tenant_settings`,
   which no Perps code rewrites. `perps_grants` is created by the first Perps
-  grant written and by nothing else, so on today's fleet it does not exist.
-  Never drop either once it does: it is accounting evidence. The identity
+  grant written. Check the deployed database before assuming it is absent;
+  take a backup and row counts before the deployment carrying slice 5 PR 1.
+  Never drop either once it exists: it is accounting evidence. The identity
   store's claim backfill reads both grants tables.
 
 These variables only ever **restrict** what an owner may turn on. Nothing here

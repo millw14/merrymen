@@ -126,7 +126,11 @@ describe("hosted: Kill all agents (and the phones' Stop) reaches every wallet", 
     const owner = { perpsEnabled: true, perpsMarkets: ["BTC-PERP"], perpsMaxLeverage: 2 };
     await settings.getSettingsStore("perps").put(T, owner);
     assert.deepEqual(await json(await kill()), { status: 200, body: { ok: true, perps: "stopped" } });
-    assert.deepEqual(await settings.getSettingsStore("perps").get(T), { ...owner, perpsEnabled: false });
+    const saved = await settings.getSettingsStore("perps").get(T);
+    assert.ok(saved);
+    const { perpsControlNonce, ...ownerFields } = saved;
+    assert.equal(typeof perpsControlNonce, "string");
+    assert.deepEqual(ownerFields, { ...owner, perpsEnabled: false });
     // Perps settings that cannot be read: the grant still goes, the kill says
     // what is left — never that a revoked grant may still sign.
     await set("perps-only");
@@ -217,7 +221,11 @@ describe("self-hosted: Kill all agents reaches the local Perps wallet", () => {
       assert.equal(existsSync(perpsFile()), false);
       if (hasSpot(owner)) assert.equal(readFileSync(path.join(home, "grants", `${SPOT}.json`), "utf8"), local(SPOT), "Spot's owner key is kept");
       if (hasPerps(owner)) assert.equal(readFileSync(path.join(perpsHome(), "grants", `${PERPS}.json`), "utf8"), local(PERPS, { purpose: "perps" }), "and the Perps wallet's, in its own home");
-      else assert.equal(existsSync(path.join(home, "accounts")), false, "a Spot-only kill makes no Perps home");
+      else {
+        const off = JSON.parse(readFileSync(path.join(perpsHome(), "settings.json"), "utf8"));
+        assert.equal(off.perpsEnabled, false, "a Spot-only kill invalidates delayed Perps enables too");
+        assert.equal(typeof off.perpsControlNonce, "string");
+      }
     });
   }
 
@@ -247,7 +255,11 @@ describe("self-hosted: Kill all agents reaches the local Perps wallet", () => {
       assert.equal(existsSync(spotFile()), false);
       assert.equal(existsSync(perpsFile()), false);
       if (hasPerps(owner)) assert.ok(existsSync(path.join(perpsHome(), "grants", `${PERPS}.json`)));
-      else assert.equal(existsSync(path.join(home, "accounts")), false);
+      else {
+        const off = JSON.parse(readFileSync(path.join(perpsHome(), "settings.json"), "utf8"));
+        assert.equal(off.perpsEnabled, false);
+        assert.equal(typeof off.perpsControlNonce, "string");
+      }
     });
   }
 

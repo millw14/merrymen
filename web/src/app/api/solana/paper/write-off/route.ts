@@ -3,6 +3,7 @@ import { getSolanaAppRuntime } from "../../../../../../../worker/src/solana-app-
 import { solanaContext, solanaRequestBody, solanaResponse } from "@/lib/solana-api";
 import { SolanaWebError } from "@/lib/solana-auth";
 import { takeSolanaIntentToken } from "../../intent/throttle";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,6 +17,8 @@ export const dynamic = "force-dynamic";
  * before anything runs when paced.
  */
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   return solanaResponse(async () => {
     const { principal, scope } = await solanaContext(req);
     const body = await solanaRequestBody(req, ["mint"]);

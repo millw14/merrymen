@@ -402,6 +402,43 @@ describe("THE GATE IS THE FIRST THING THE FUNNEL ASKS", () => {
   });
 });
 
+/**
+ * THE ONE OWNER ORDER THAT DOES NOT PASS THE FUNNEL. A Perps wallet's Close and
+ * Close all are built and booked by the perp lane itself (perps/lane.ts close,
+ * flatten), from runOrderCommand, so the gate above never sees them. A Perps
+ * worker held at `observe` used to book its owner's Close and store a Close
+ * all's halt while the same owner's Spot sell was refused `rollout-hold`. So
+ * the exit asks the same levels (worker-admission.ts ownerPerpExitRefusal),
+ * and these pins hold where.
+ */
+describe("AN OWNER'S PERPETUAL EXIT MEETS THE ADMISSION GATE TOO, before the lane", () => {
+  const RUN = span("  async function runOrderCommand(");
+  const run = CODE.slice(RUN[0], RUN[1]);
+
+  it("the lane's owner exits are reached from runOrderCommand alone", () => {
+    for (const re of [/\bperpLane\.close\(/, /\bperpLane\.flatten\(/]) {
+      const at = sites(re);
+      assert.equal(at.length, 1, `${re.source}: one call site`);
+      assert.ok(inside(RUN, at[0]!), `worker/src/index.ts:${lineOf(at[0]!)} reaches the lane's owner exit outside runOrderCommand`);
+    }
+  });
+
+  it("ASKED WITH THIS PROCESS'S LEVEL AND ITS DRAINING FLAG, and a refusal returns before the lane is reached", () => {
+    const gate = run.indexOf("const notAdmitted = ownerPerpExitRefusal({ level: admission.level, draining });");
+    assert.ok(gate > 0, "runOrderCommand must ask ownerPerpExitRefusal with the process's level and draining flag");
+    assert.equal((run.match(/ownerPerpExitRefusal\(/g) ?? []).length, 1, "asked once");
+    const refused = run.indexOf("if (notAdmitted) {", gate);
+    assert.ok(refused > gate);
+    const branch = run.slice(refused, run.indexOf("\n          }\n", refused));
+    assert.match(branch, /return no\(perpExitNotAdmittedLine\(exit\.order, ownerRejectRuleLabel\(notAdmitted\) \?\? notAdmitted\)\);$/);
+    assert.doesNotMatch(branch, /perpLane/);
+    for (const later of ["perpLane.close(", "perpLane.flatten("]) {
+      const at = run.indexOf(later);
+      assert.ok(at > refused, `${later} comes after the admission gate`);
+    }
+  });
+});
+
 describe("AND DRAINING IS ASKED AGAIN AT EACH BROADCAST — a signal can land mid-intent", () => {
   // The gate above judges an intent where it enters. Between there and the
   // send are the risk peak, the scout context, the transfer total, a quote, a

@@ -1572,9 +1572,11 @@ describe("the orchestrator ferries it where the contract says", () => {
     // The child's, above, and the hold process's (startHolderProcess), which
     // never opens the group store: while trading is held nothing of the
     // groups runs at all, so there is nothing there to hold off.
-    assert.equal(ORCH.split("env: childEnv(").length - 1, 2, "the child's spawn site and the hold process's");
+    assert.equal([...ORCH.matchAll(/(?:env: |\.\.\.)childEnv\(tenant(?:,|\))/g)].length, 2, "the child's spawn site and the hold process's");
     const holder = body("function startHolderProcess(");
-    assert.ok(holder.includes("HOLD_ENTRY") && holder.includes("env: childEnv(tenant)"), "the other one is the hold process");
+    assert.ok(holder.includes("HOLD_ENTRY") && holder.includes("env: { ...childEnv(tenant),"), "the other one is the hold process, retaining the sanitized environment");
+    assert.match(holder, /held\.perpsSeat \? \{ MERRYMEN_PERPS_BOT_SEAT: "1", MERRYMEN_TG_GROUPS: "0" \} : \{\}/,
+      "a Perps control seat explicitly disables group activity too");
 
     const mirror = body("async function mirrorLedgers(");
     assert.match(mirror, /if \(tgGroupsDekThisPass && mayPublishMemory\(\) && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
@@ -1641,16 +1643,21 @@ describe("the orchestrator ferries it where the contract says", () => {
 
   test("the grant store decides: a /kill that removes the grant, a spawn that finds none, and a sweep every pass", () => {
     const kill = body("async function honourKill(");
-    const removed = kill.indexOf("if (k.outcome === \"revoked\" && k.removed) {");
+    const removed = kill.indexOf('if (k.outcome === "revoked" && (k.removed || k.perps)) {');
     const forgetOnKill = kill.indexOf("await forgetTgGroups(tenant);");
-    assert.ok(removed > 0 && forgetOnKill > removed, "a /kill forgets at once");
-    assert.ok(forgetOnKill < kill.indexOf("\n  }\n", removed), "only in the branch whose DELETE removed the grant");
+    assert.ok(removed > 0 && forgetOnKill > removed, "a completed /kill that stopped a grant half forgets at once");
+    assert.ok(forgetOnKill < kill.indexOf("\n  }\n", removed), "only in the revoked branch; failed or superseded kills cannot forget");
+    const perpsKill = body("async function honourPerpsHomeKill(");
+    assert.match(perpsKill, /if \(spot !== "newer"\) await forgetTgGroups\(owner\);/,
+      "a kill arriving through the Perps home preserves a newer Spot agent's memory");
 
     const spawnFn = body("async function spawnChild(");
     const noGrant = spawnFn.indexOf("no usable signed grant in the store — not spawning");
     const ret = spawnFn.indexOf("return;", noGrant);
     const forgetOnSpawn = spawnFn.indexOf("await forgetTgGroups(tenant);", noGrant);
     assert.ok(noGrant > 0 && forgetOnSpawn > noGrant && forgetOnSpawn < ret, "a spawn that finds no grant forgets before it returns");
+    assert.match(spawnFn.slice(noGrant, ret), /const retained = \(await getGrantStore\(slot\.purpose\)\.listTenants\(\)\)\.some\([\s\S]*?if \(!retained\) await forgetTgGroups\(tenant\);/,
+      "only confirmed removal forgets; a stopped renewal identity retains its memory");
 
     const rec = body("export async function reconcile(");
     const stamp = rec.indexOf("const listedAtMs = Date.now();");

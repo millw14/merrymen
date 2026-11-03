@@ -438,3 +438,13 @@ test("a partner is told a name the soul would refuse, instead of the agent silen
   });
   assert.equal([...f.savedSettings.values()][0]?.agentName, "Little John");
 });
+
+test("even a real owner signature cannot enroll Perps through legacy partner activation", async () => {
+  const f=await fixture();
+  for (const extra of [{purpose:"perps"}, {perp:{enabled:true}}, {purpose:"perps",binding:{kind:"privy",userId:"did:privy:unverified"}}]) {
+    const grant={...f.grant,...extra} as StoredGrant;
+    const signed=await f.activationFor(grant);
+    await assert.rejects(f.service.activate(principal,f.connection,signed), errorCode("perps_owner_review_required"));
+    assert.equal(f.savedGrants.size,0);assert.equal(f.savedSettings.size,0);assert.deepEqual(f.events,[]);
+  }
+});

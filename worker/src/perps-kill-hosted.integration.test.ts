@@ -102,7 +102,7 @@ describe("a hosted Telegram /kill, carried out by the orchestrator", () => {
       assert.deepEqual(solanaStops, [T]);
       assert.deepEqual(confirmed, [{ tenant: T, perps: hasPerps(o) }]);
       if (!hasPerps(o)) assert.equal(existsSync(path.join(FLEET, "tenants-perps")), false, "a Spot-only kill makes no Perps directory");
-      if (!hasPerps(o)) assert.equal(existsSync(path.join(FLEET, "tenant-settings-perps")), false, "nor a Perps settings directory");
+      if (!hasPerps(o)) assert.equal((await getSettingsStore("perps").get(T))?.perpsEnabled, false, "an absent wallet still records a disabled revision");
       // A later pass finds both gone: safe, and no second ✅.
       await honourPendingKills();
       assert.equal(confirmed.length, 1);
@@ -141,7 +141,11 @@ describe("a hosted Telegram /kill, carried out by the orchestrator", () => {
     telegramKill();
     await honourPendingKills();
     assert.equal(await perpsStore.hasStoredGrant(T), false);
-    assert.deepEqual(await perpsSettings.get(T), { ...OWNER_PERPS, perpsEnabled: false });
+    const saved = await perpsSettings.get(T);
+    assert.ok(saved);
+    const { perpsControlNonce, ...ownerFields } = saved;
+    assert.equal(typeof perpsControlNonce, "string");
+    assert.deepEqual(ownerFields, { ...OWNER_PERPS, perpsEnabled: false });
     assert.deepEqual(confirmed, [{ tenant: T, perps: true }]);
   });
 

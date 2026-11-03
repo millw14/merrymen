@@ -21,12 +21,12 @@
  *
  * Server-only: it opens the ledger.
  */
-import { parseEnergyStatus, type EnergyStatus } from "@merrymen/core";
+import { parseEnergyStatus, type EnergyStatus, type GrantPurpose } from "@merrymen/core";
 import type { Db } from "../../../worker/src/db";
 import { withReadDb } from "./ledger";
 
-/** The ledger seam, so a test can hand it a stub database. */
-export type ReadDb = <T>(fn: (db: Db | null) => Promise<T>) => Promise<T>;
+/** The ledger seam, so a test can hand it a stub database. Whose ledger is named, as withReadDb takes it. */
+export type ReadDb = <T>(fn: (db: Db | null) => Promise<T>, wallet: GrantPurpose) => Promise<T>;
 
 export async function readAgentEnergy(
   account: string | null | undefined,
@@ -40,6 +40,7 @@ export async function readAgentEnergy(
             | { energy?: unknown }
             | undefined)
         : undefined,
+      "spot",
     );
     // Absent row and NULL column are the same answer: the worker has not said.
     return parseEnergyStatus(row?.energy ?? null);

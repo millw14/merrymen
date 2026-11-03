@@ -187,7 +187,7 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
         result: string | null;
       };
     const queue = async (acct: string): Promise<string> => {
-      const q = await queuePaperReset(true, acct);
+      const q = await queuePaperReset(true, acct, "spot");
       assert.ok(q.ok, q.ok ? "" : q.error);
       return q.id;
     };
@@ -455,7 +455,7 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       await heldBook(one, acct);
       const id = await queue(acct);
       await recordFleetRecoveryHold(two, scope, "source-continuity", nowSec, () => true);
-      const refused = await queuePaperReset(true, acct);
+      const refused = await queuePaperReset(true, acct, "spot");
       assert.ok(!refused.ok && refused.status === 409);
       assert.deepEqual(await queueRecoveryCheckedCommand(one, { id: "held-probe", agent: acct, kind: "selftest", at: Date.now() }),
         { ok: false, why: "recovery" });
@@ -480,6 +480,30 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       const old = await command(id);
       assert.deepEqual([old.claimed_at, old.done_at, old.result], [null, null, null], "legacy refusal is not marked as execution or supersession");
       assert.equal(await epochOf(acct), EPOCH + 2);
+    });
+
+    await t.test("A PERPS RESET CARRIES ITS DEADLINE IN THE ROW'S ARGS, which the ferry lifts onto the child's file; a Spot reset's row has none", async () => {
+      const perps = account(0x31), spot = account(0x32);
+      const expiresAt = Date.now() + 600_000;
+      // Not before the Perps worker has reported its book (perps-book-reported.ts): nothing queued.
+      const early = await queuePaperReset(true, perps, "perps", { expiresAt });
+      assert.ok(!early.ok && early.status === 409 && /not reported its practice book yet/.test(early.error), JSON.stringify(early));
+      assert.equal(((await one.prepare("SELECT COUNT(*) AS n FROM agent_commands WHERE LOWER(agent_id) = ?").get(perps.toLowerCase())) as { n: number | string }).n, 0);
+      // Its agents row, spelled in another case from the account the reset is
+      // given (the worker writes viem's checksummed spelling, and a caller may
+      // pass any): the look is by the account on both sides, never its case.
+      await one
+        .prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, '0x9', '0x8', 4663, '{}', 1, 2)")
+        .run(`0x${perps.slice(2).toUpperCase()}`);
+      const q = await queuePaperReset(true, perps, "perps", { expiresAt });
+      assert.ok(q.ok, q.ok ? "" : q.error);
+      assert.equal(q.expiresAt, expiresAt);
+      const row = (await one.prepare("SELECT agent_id, kind, args FROM agent_commands WHERE id = ?").get(q.id)) as { agent_id: string; kind: string; args: string | null };
+      assert.deepEqual({ agent: row.agent_id, kind: row.kind, args: JSON.parse(String(row.args)) }, { agent: perps, kind: "paper-reset", args: { expiresAt } });
+      const s = await queuePaperReset(true, spot, "spot");
+      assert.ok(s.ok && s.expiresAt === undefined);
+      assert.equal(((await one.prepare("SELECT args FROM agent_commands WHERE id = ?").get(s.id)) as { args: string | null }).args, null);
+      await assert.rejects(queuePaperReset(true, perps, "perps"), /carries a deadline/);
     });
   } finally {
     await admin.query(`DROP SCHEMA ${schema} CASCADE`).catch(() => {});

@@ -38,23 +38,30 @@ import {
   robinhoodChain,
   robinhoodTestnet,
 } from "@merrymen/core";
+import { walletUnknown, NO_STORE_HEADERS } from "@/lib/route-guard";
+import { readWalletParam } from "@/lib/wallet-param";
 
 export const runtime = "nodejs";
 
 const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
 
 export async function GET(req: Request) {
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was signed.");
   const origin = requestOrigin(req);
-  const nonce = issueChallengeNonce(origin);
-  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce) });
+  const nonce = issueChallengeNonce(wallet === "spot" ? origin : `${origin}#perps-recovery`);
+  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce, wallet) }, { headers: NO_STORE_HEADERS });
 }
 
 export async function POST(req: Request) {
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was signed.");
   const origin = requestOrigin(req);
 
   let body: { nonce?: unknown; signature?: unknown; chainId?: unknown };
   try {
     body = (await req.json()) as typeof body;
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some(k => !["nonce", "signature", "chainId"].includes(k))) throw new Error("malformed request");
   } catch {
     return NextResponse.json({ error: "malformed request" }, { status: 400 });
   }
@@ -74,13 +81,13 @@ export async function POST(req: Request) {
   // BURN THE NONCE FIRST. The signature alone binds origin (it is in the text)
   // but nothing else — without a single-use, expiring nonce, anyone who ever saw
   // that signature could mint tickets for the account forever.
-  const gate = await consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, wallet === "spot" ? origin : `${origin}#perps-recovery`);
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 401 });
 
   // Reconstruct the exact text that was signed. Nothing the caller sends is
   // trusted as an identity — the address falls out of the signature or the
   // request fails.
-  const message = recoveryChallengeMessage(origin, nonce);
+  const message = recoveryChallengeMessage(origin, nonce, wallet);
   let owner: `0x${string}`;
   try {
     owner = await recoverMessageAddress({ message, signature: signature as `0x${string}` });
@@ -98,7 +105,7 @@ export async function POST(req: Request) {
   // relay's `sender === ticket.smartAccount` check would even pass for it.
   let smartAccount: `0x${string}`;
   try {
-    const derived = await deriveKernelAccountAddress(owner, chainId, "spot");
+    const derived = await deriveKernelAccountAddress(owner, chainId, wallet);
     if (!derived.ok) return NextResponse.json({ error: derived.why }, { status: 502 });
     smartAccount = derived.address;
   } catch {
@@ -160,8 +167,8 @@ export async function POST(req: Request) {
   // httpOnly, so a script on the page cannot read it back out; sameSite strict,
   // so no other site can cause it to be sent; and short-lived by the ticket's
   // own expiry, which is what actually bounds it.
-  const res = NextResponse.json({ smartAccount, expiresInMs: TICKET_TTL_MS });
-  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVaults }), {
+  const res = NextResponse.json({ smartAccount, expiresInMs: TICKET_TTL_MS }, { headers: NO_STORE_HEADERS });
+  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVaults, purpose: wallet }), {
     httpOnly: true,
     secure: true,
     sameSite: "strict",

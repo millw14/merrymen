@@ -80,6 +80,18 @@ describe("what the endpoint may hand over", () => {
     assert.match(src, /Omit<StoredGrant, "serialized" \| "demoSessionPrivateKey" \| "demoOwnerPrivateKey">/);
   });
 
+  it("THE PERPS WALLET'S ANSWER IS AN ALLOWLIST (decision D3): publicGrantView, typed as it, and only for Perps", () => {
+    // Spot keeps the denylist above, because this adoption path and the
+    // saved-grant code read the binding it carries; the Perps answer, which no
+    // such code reads yet, goes out through core's allowlist (public-view.test.ts
+    // deep-scans it), and its type says so.
+    const src = route();
+    assert.match(src, /export interface PerpsWalletStatus extends Omit<AgentStatus, "grant" \| "energy"> \{\s*grant\?: PublicGrantView;/);
+    assert.match(src, /if \(wallet === "spot"\) return statusResponse\(status\);/);
+    assert.match(src, /grant: publicGrantView\(grant\)/);
+    assert.equal([...src.matchAll(/publicGrantView\(/g)].length, 1, "one allowlisted answer, the Perps one");
+  });
+
   it("AND ADOPTING ONE THIS BROWSER CANNOT SIGN IS STILL AN IMPROVEMENT, not a dead end", () => {
     // The concern this replaces was that adopting a legacy grant leaves
     // `resignBy` null and the signing control dead. It does — and that branch

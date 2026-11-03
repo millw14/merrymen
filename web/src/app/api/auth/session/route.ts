@@ -10,11 +10,14 @@ import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { fomoEnabledFor } from "@/lib/fomo-switch";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return NextResponse.json({ hosted: false, address: null, fomo: fomoEnabledFor(false) });
   return NextResponse.json({ hosted: true, address: tenantOf(req), fomo: fomoEnabledFor(true) });
 }

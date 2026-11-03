@@ -18,7 +18,7 @@ const PACKAGE_VERSION = (JSON.parse(readFileSync(path.join(WEB, "..", "package.j
 async function version(env: Partial<Record<(typeof KEYS)[number], string>>) {
   for (const k of KEYS) delete process.env[k];
   Object.assign(process.env, env);
-  const res = await GET();
+  const res = await GET(new Request("https://app.merrymen.dev/api/version"));
   return { status: res.status, cache: res.headers.get("cache-control"), body: (await res.json()) as Record<string, unknown> };
 }
 

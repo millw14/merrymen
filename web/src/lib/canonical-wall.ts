@@ -47,6 +47,17 @@
  * refused outright rather than rebuilt, because each one opens a route in the
  * worker's mirror that the rebuilt wall would not contain.
  *
+ * A PERPS WALLET'S GRANT IS REBUILT AS THE PERPS WALL. Its signed `purpose`
+ * reaches `grantWallOptions`, which sets `perpsOnly` from it and from nothing
+ * else, so a Perps grant is compared against the wall a Perps wallet may hold:
+ * no Spot spender, token, adapter, vault or route at all. A Perps grant sealed
+ * over the Spot wall at the Perps address fails the byte comparison. And in
+ * this build that wall is EMPTY (decision D5): paper Perps needs no on-chain
+ * authority, so a Perps grant that declares a marker, a token, a sealed
+ * address, a perp block or an energy buy is refused by name before the
+ * rebuild. The energy buy most of all: the Perps account is a mainnet account,
+ * and a paper product must not hold a key that can spend its real USDG.
+ *
  * Shared by partner enrollment (web/src/lib/partner-enrollment.ts, where it
  * started) and hosted POST /api/grants. One implementation, because two would
  * drift, and the difference would be a door that accepts what the other
@@ -71,6 +82,8 @@ import {
   validatePerpPubKey,
   TRADEABLE_V2,
   isEnergyReserveToken,
+  isGrantPurpose,
+  robinhoodChain,
   type StoredGrant,
 } from "@merrymen/core";
 
@@ -179,6 +192,12 @@ export function checkCanonicalWall(grant: Record<string, unknown>): WallVerdict 
 }
 
 function verify(grant: Record<string, unknown>): void {
+  // WHICH WALLET, FIRST. Absent is Spot (grantPurpose); anything else that is
+  // not a wallet is refused here by name, never rebuilt as Spot — the rebuild
+  // below would throw on it too, but as a wall nobody could verify.
+  if (grant.purpose !== undefined && !isGrantPurpose(grant.purpose)) {
+    refuse(400, "invalid_grant", "The grant names a wallet this service does not know");
+  }
   const owner = address(grant.owner, "owner");
   const smartAccount = address(grant.smartAccount, "smartAccount");
   const caps = object(grant.caps, "grant caps");
@@ -317,7 +336,46 @@ function verify(grant: Record<string, unknown>): void {
   // the mirror would open with any recipient. Naming the rejects makes a stale
   // or hand-built client say which marker it sent.
   const features = grant.grantFeatures;
-  if (!Array.isArray(features) || !features.includes(TRADEABLE_V2)) {
+
+  // ── A PERPS WALLET: ITS CHAIN, AND IN THIS BUILD AN EMPTY WALL (D5) ────────
+  //
+  // Robinhood Chain mainnet only: the Perps wallet exists for Lighter, which
+  // has no test network, and its derivation and its kill are mainnet's.
+  //
+  // And NOTHING declared beside it. The paper Perps wall carries no
+  // permission (core wall.ts perpsOnly with no perp block and no energy buy),
+  // so a Perps grant names no marker, no token, no sealed address and no perp
+  // block. Each of those is either a Spot permission a Perps key must never
+  // hold, or a venue or energy permission this build does not offer: the
+  // energy buy above all, which would let a paper wallet's key spend the real
+  // USDG its mainnet account holds. Refused BY NAME rather than left to the
+  // byte comparison below: the rebuild drops every Spot option for a Perps
+  // wall, so a Perps grant declaring Spot markers over an empty wall would
+  // pass it, storing metadata the worker's mirror reads (limitsFromGrant) for
+  // a wall that has none of it. TRADEABLE_V2 is a Spot marker too, so a Perps
+  // grant is exempt from declaring it. When live Perps lands, its perp block
+  // and marker are admitted here, in the same change that lets a signer seal them.
+  const perpsWallet = grant.purpose === "perps";
+  if (perpsWallet) {
+    if (grant.chainId !== robinhoodChain.id) {
+      refuse(400, "invalid_grant", "A Perps wallet exists only on Robinhood Chain mainnet");
+    }
+    if (
+      !Array.isArray(features) ||
+      features.length > 0 ||
+      (Array.isArray(tokens) && tokens.length > 0) ||
+      SEALED.some(([field]) => grant[field] !== undefined) ||
+      grant.perp !== undefined ||
+      grant.perpRecovery !== undefined
+    ) {
+      refuse(
+        400,
+        "invalid_wall",
+        "A Perps wallet's permission carries nothing in this build: no Spot permission, no energy buy and no perpetuals key",
+      );
+    }
+  }
+  if (!Array.isArray(features) || (!perpsWallet && !features.includes(TRADEABLE_V2))) {
     refuse(400, "invalid_grant", `The permission must declare ${TRADEABLE_V2}`);
   }
   const unknown = (features as unknown[]).filter((f) => typeof f !== "string" || !CANONICAL_GRANT_FEATURES.includes(f));
@@ -404,7 +462,11 @@ function verify(grant: Record<string, unknown>): void {
       // The chain and the perp block ride along so `grantWallOptions` rebuilds
       // the perps permissions around THE KEY THE GRANT NAMES: a wall sealed
       // over any other key differs in changePubKey's w4/w5 and fails below.
+      // And the signed PURPOSE, from which alone it sets `perpsOnly`: without
+      // it a Perps grant would be compared with the Spot wall, and one sealed
+      // over the Spot wall at the Perps address would pass.
       ...grantWallOptions({
+        purpose: grant.purpose,
         grantTokens: tokens as string[] | undefined,
         grantFeatures: features as string[],
         chainId: typeof grant.chainId === "number" ? grant.chainId : undefined,

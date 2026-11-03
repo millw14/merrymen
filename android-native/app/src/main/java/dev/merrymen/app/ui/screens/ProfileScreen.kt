@@ -51,6 +51,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavHostController
 import dev.merrymen.app.LocalContainer
 import dev.merrymen.app.data.Loaded
+import dev.merrymen.app.data.StopConfirmation
 import dev.merrymen.app.net.ApiResult
 import dev.merrymen.app.net.Feed
 import dev.merrymen.app.net.GrantView
@@ -67,6 +68,7 @@ import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.accountControlsOf
 import dev.merrymen.app.ui.stopArmedNote
+import dev.merrymen.app.ui.stopAllAgents
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.ownAgentName
@@ -339,9 +341,8 @@ fun ProfileScreen(nav: NavHostController) {
  * "stop everything" is too easy to hit by accident. DESTRUCTIVE in the true
  * sense (`--down`): re-arming needs a fresh signature, which is a web handoff.
  *
- * A LOST ANSWER IS NOT "it didn't stop". The grant may be gone. So the status
- * route is asked, and the owner is told what it says — stopped, or still
- * armed and theirs to stop again — rather than a failure that may be false.
+ * A lost reply remains uncertain: a Spot-only read cannot establish whether
+ * Perps and Solana also stopped. There is no automatic retry.
  *
  * [signedIn] is the wallet this page shows, sent as the stop's expected
  * tenant: hosted refuses (409) to stop a different one that signed in since.
@@ -350,43 +351,42 @@ fun ProfileScreen(nav: NavHostController) {
 private fun StopControl(signedIn: String?) {
   val c = LocalContainer.current
   val scope = rememberCoroutineScope()
-  var armed by remember { mutableStateOf(false) }
-  var stopNote by remember { mutableStateOf<String?>(null) }
+  // Plain values, not delegated State getters: callbacks retain this render's authority.
+  val serverTurn = c.repo.serverTurn.collectAsState().value
+  val version = c.repo.confirmationVersion.collectAsState().value
+  var review by remember(signedIn, serverTurn, version) { mutableStateOf<StopConfirmation?>(null) }
+  var busy by remember(signedIn, serverTurn, version) { mutableStateOf(false) }
+  var stopNote by remember(signedIn, serverTurn, version) { mutableStateOf<String?>(null) }
   Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
     Box(
       Modifier
         .heightIn(min = 44.dp)
-        .clickable(role = Role.Button) {
-          if (!armed) {
-            armed = true
-            stopNote = stopArmedNote(signedIn)
+        .clickable(enabled = !busy, role = Role.Button) {
+          if (busy) return@clickable
+          val reviewed = review
+          if (reviewed == null) {
+            review = c.repo.reviewStop(signedIn, serverTurn, version)
+            stopNote = if (review != null) stopArmedNote(signedIn) else "Your account or server changed. Review the stop again."
           } else {
-            armed = false
-            // The stop goes to the server this page shows, or nowhere (ServerBound).
+            review = null
+            val isCurrent = { c.repo.holdsStop(reviewed) }
+            if (!isCurrent()) {
+              stopNote = "Your account or server changed. Review the stop again."
+              return@clickable
+            }
+            busy = true
             scope.launch(c.api.boundHere()) {
-              stopNote = when (val r = c.api.revokeGrant(expectedTenant = signedIn)) {
-                is ApiResult.Ok ->
-                  "Stopped. Your agent will not trade again until you re-sign its permission."
-                is ApiResult.Refused ->
-                  if (r.status == 401) "Sign in first. Nothing was stopped." else r.message
-                is ApiResult.Unreachable -> when (val after = c.api.grants()) {
-                  is ApiResult.Ok -> if (!after.value.exists) {
-                    "Stopped. Your agent will not trade again until you re-sign its permission."
-                  } else {
-                    "Couldn't tell whether that went through (${r.said.trimEnd('.')}), and your agent's " +
-                      "permission is still in place. Tap again to stop it."
-                  }
-                  else -> "Couldn't tell whether your agent stopped — ${r.said.trimEnd('.')}, and its " +
-                    "status could not be read back. Look again before trying again."
-                }
-              }
+              try {
+                val answer = stopAllAgents(c.api, reviewed.owner, isCurrent)
+                if (isCurrent()) stopNote = answer
+              } finally { if (isCurrent()) busy = false }
             }
           }
         },
       contentAlignment = Alignment.CenterStart,
     ) {
       Text(
-        text = if (armed) "Tap again to stop your agent" else "Stop my agent",
+        text = if (busy) "Requesting stop…" else if (review != null) "Tap again to stop all agents" else "Stop all agents",
         style = TextStyle(fontFamily = sans(15.sp, FontWeight.SemiBold), fontSize = 15.sp),
         color = MerryColors.down,
       )

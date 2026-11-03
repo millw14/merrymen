@@ -38,6 +38,7 @@ import { NextResponse } from "next/server";
 import { tenantOf } from "@/lib/auth";
 import { getTourStore } from "@/lib/tour-store";
 import { TOUR_VERSION } from "@/lib/tour-version";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +58,8 @@ export interface TourResponse {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = tenantOf(req);
   if (!tenant) return NextResponse.json({ done: false, signedIn: false } satisfies TourResponse);
   const params = new URL(req.url).searchParams;
@@ -72,6 +75,8 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = tenantOf(req);
   if (!tenant) return NextResponse.json({ done: false, signedIn: false } satisfies TourResponse);
   const body = await req.json().catch(() => null) as { tenant?: string; version?: number } | null;

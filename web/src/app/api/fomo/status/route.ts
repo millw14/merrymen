@@ -24,6 +24,7 @@ import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { FOMO_NEEDS_AGENT, FOMO_NOT_ENABLED, fomoEnabledFor, fomoRuntime, fomoTenantFor, hostedFomoOwner } from "@/lib/fomo-runtime";
 import { FOMO_ATTRIBUTION, renderEnvelope } from "../../../../../../worker/src/fomo/render";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,8 @@ const MONITORING_SELF_HOSTED = {
 } as const;
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const hosted = isHostedMode();
   const session = hosted ? tenantOf(req) : null;
   if (hosted && !session) return NextResponse.json({ error: "not signed in" }, { status: 401, headers: NO_STORE });

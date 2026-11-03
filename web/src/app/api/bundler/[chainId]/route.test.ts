@@ -45,11 +45,11 @@ afterEach(() => {
 
 const ticket = (account: Address = ACCOUNT, chainId = 4663) => mintTicket({ smartAccount: account, chainId, classVaults: [] });
 async function request(method: string, callData: Hex, opts: {
-  sender?: string; cookie?: string | null; entryPoint?: string; op?: Record<string, unknown>; chainId?: number;
+  wallet?: "spot" | "perps"; sender?: string; cookie?: string | null; entryPoint?: string; op?: Record<string, unknown>; chainId?: number;
 } = {}) {
   const chainId = opts.chainId ?? 4663;
   const cookie = opts.cookie === undefined ? ticket(ACCOUNT, chainId) : opts.cookie;
-  return POST(new Request(`https://merrymen.test/api/bundler/${chainId}`, {
+  return POST(new Request(`https://merrymen.test/api/bundler/${chainId}${opts.wallet ? `?wallet=${opts.wallet}` : ""}`, {
     method: "POST", headers: { "content-type": "application/json", ...(cookie ? { cookie: `merrymen_recovery=${cookie}` } : {}) },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [{
       sender: opts.sender ?? ACCOUNT, nonce: "0x0", callData,
@@ -159,6 +159,25 @@ describe("owner Gloam withdrawal through the real relay handler", () => {
     assert.equal(forwarded.length, 0);
   });
 
+  it("keeps Gloam withdrawals scoped to Spot even with a valid Perps ticket", async () => {
+    process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED = "1";
+    const cd = await fixtureGloamBatch();
+    const perps = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVaults: [], purpose: "perps" });
+    for (const method of methods) {
+      for (const opts of [
+        { wallet: "perps" as const, cookie: perps },
+        { wallet: "perps" as const, cookie: ticket() },
+        { wallet: "spot" as const, cookie: perps },
+        { cookie: perps },
+      ]) assert.ok((await (await request(method, cd, opts)).json()).error);
+    }
+    assert.equal(forwarded.length, 0);
+    for (const method of methods) {
+      assert.equal((await (await request(method, cd, { wallet: "spot" })).json()).result.acceptedByFixture, true);
+    }
+    assert.equal(forwarded.length, 2);
+  });
+
   it("does not turn the feature flag into an approval or arbitrary-call relay", async () => {
     process.env.MERRYMEN_GLOAM_WITHDRAWALS_ENABLED = "1";
     const calls = fixtureGloamCalls();
@@ -168,4 +187,15 @@ describe("owner Gloam withdrawal through the real relay handler", () => {
     }
     assert.equal(forwarded.length, 0);
   });
+});
+
+it("the relay binds purpose: legacy Spot and Perps tickets cannot cross wallets, even paper-off", async () => {
+  const perps = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVaults: [], purpose: "perps" });
+  for (const opts of [{ wallet: "perps" as const, cookie: ticket() }, { wallet: "spot" as const, cookie: perps }, { cookie: perps }]) {
+    const response = await request(methods[0]!, DATA, opts); assert.equal(response.status, 401); assert.match((await response.json()).error, /different wallet/);
+  }
+  assert.equal(forwarded.length, 0);
+  const allowed = await request(methods[0]!, DATA, { wallet: "perps", cookie: perps });
+  assert.equal(allowed.status, 200); assert.equal((await allowed.json()).result.acceptedByFixture, true); assert.equal(forwarded.length, 1);
+  const forbidden = await request(methods[0]!, "0xdeadbeef", { wallet: "perps", cookie: perps }); assert.ok((await forbidden.json()).error); assert.equal(forwarded.length, 1);
 });

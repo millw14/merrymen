@@ -2,10 +2,13 @@ import { SOLANA_LIVE_MIN_TRADE_USDG_RAW, SOLANA_LIVE_STRATEGY_BELOW_MINIMUM } fr
 import { solanaContext, solanaRequestBody, solanaResponse } from "@/lib/solana-api";
 import { validateSolanaStrategy } from "@/lib/solana-binding-store";
 import { SolanaWebError } from "@/lib/solana-auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   return solanaResponse(async () => {
     const { principal, store, binding } = await solanaContext(req);
     const body = await solanaRequestBody(req, ["strategy", "revision"]);

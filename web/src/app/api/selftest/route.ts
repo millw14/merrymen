@@ -24,6 +24,7 @@ import { writeCommand } from "@merrymen/command-files";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { queueRecoveryCheckedCommand } from "@/lib/recovery-commands";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -32,8 +33,10 @@ export const dynamic = "force-dynamic";
 // why the `agents.owner_address` lookup cannot work here. Self-hosted has no
 // auth; the localhost middleware is the perimeter and the grant on disk is the
 // agent. The branch lives here because this file is server-side.
-const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
+const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req, "spot") : diskAgent("spot"));
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
 
@@ -59,7 +62,7 @@ export async function POST(req: Request) {
   // Hosted: the orchestrator is the only process that can reach both the
   // shared database and a child's home, so it ferries. See command-files.ts.
   const admitted = await withReadDb(db => queueRecoveryCheckedCommand(db,
-    { id, agent, kind: "selftest", at: Date.now() })).catch(() => ({ ok: false, why: "unreachable" } as const));
+    { id, agent, kind: "selftest", at: Date.now() }), "spot").catch(() => ({ ok: false, why: "unreachable" } as const));
 
   if (!admitted.ok) {
     if (admitted.why === "recovery") return NextResponse.json({
@@ -78,6 +81,8 @@ export async function POST(req: Request) {
 
 /** What happened to the most recent probe. Polled by the button that queued it. */
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
 
@@ -93,7 +98,7 @@ export async function GET(req: Request) {
     } catch {
       return null;
     }
-  });
+  }, "spot");
 
   if (!row) return NextResponse.json({ state: "none" });
   const done = row.done_at !== null && row.done_at !== undefined;

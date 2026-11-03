@@ -58,31 +58,54 @@ const decide = (o: Partial<Parameters<typeof decidePerpSeal>[0]> & { prior?: Ret
   });
 
 describe("which previous grant speaks for this account", () => {
-  it("the server's projection wins when it names this account; the browser's copy otherwise", () => {
+  it("the server's projection wins when it names this account; the browser's copy when it holds none or names another", () => {
     const server = withoutPerps(ACCOUNT);
     const local = { current: withPerps(ACCOUNT) };
     // The server refuses (409) any grant that would drop a key from a venue
     // that is not flat, so its "no perps" for this account is trustworthy.
     assert.equal(priorPerpFor(ACCOUNT, { server, local }).same.state, "none");
-    // Unknown server answer (undefined): the browser's copy carries it.
-    const carried = priorPerpFor(ACCOUNT, { local }).same;
+    // The server holds NOTHING (null, after a kill): the browser's copy carries it.
+    const carried = priorPerpFor(ACCOUNT, { server: null, local }).same;
     assert.equal(carried.state, "carried");
     assert.equal(carried.state === "carried" && carried.apiPublicKey, KEY);
     // The server's answer about ANOTHER account does not speak for this one.
     assert.equal(priorPerpFor(ACCOUNT, { server: withoutPerps(OTHER_ACCOUNT), local }).same.state, "carried");
   });
 
+  it("FAILS CLOSED when the server's view is absent: a local claim is UNKNOWN, carried and dropped by nobody", () => {
+    // perps slice 5b. Undefined is "not read" (no server view passed, or the
+    // read failed). The browser's copy may be stale, so it may say that the
+    // account claims perps but never which key: unknown, which the decision
+    // refuses whatever the caller asked. No claim at all is still none.
+    const local = { current: withPerps(ACCOUNT) };
+    assert.deepEqual(priorPerpFor(ACCOUNT, { local }).same, { state: "unknown" });
+    assert.deepEqual(priorPerpFor(ACCOUNT, { local: { archived: [withPerps(ACCOUNT)] } }).same, { state: "unknown" });
+    // An unreadable local block is still a claim, and still unknown.
+    assert.deepEqual(priorPerpFor(ACCOUNT, { local: { current: withPerps(ACCOUNT, `0x${"ff".repeat(40)}`) } }).same, { state: "unknown" });
+    assert.deepEqual(priorPerpFor(ACCOUNT, { local: { current: withoutPerps(ACCOUNT) } }).same, { state: "none" });
+    assert.deepEqual(priorPerpFor(ACCOUNT, {}).same, { state: "none" });
+    const prior = priorPerpFor(ACCOUNT, { local });
+    refusal(() => decide({ prior }), "perp-prior-unknown");
+    refusal(() => decide({ prior, requested: { apiPublicKey: KEY } }), "perp-prior-unknown");
+    refusal(() => decide({ prior, drop: true, venueFlat: true }), "perp-prior-unknown");
+    // And the refusal names the remedy, without echoing any key.
+    assert.throws(() => decide({ prior }), (e: unknown) => e instanceof Error && /could not be read/.test(e.message) && !e.message.includes("1a1a"));
+  });
+
   it("an archived copy counts for its own account, after the armed one", () => {
-    const prior = priorPerpFor(ACCOUNT, { local: { current: withoutPerps(OTHER_ACCOUNT), archived: [withPerps(ACCOUNT)] } });
+    const prior = priorPerpFor(ACCOUNT, { server: null, local: { current: withoutPerps(OTHER_ACCOUNT), archived: [withPerps(ACCOUNT)] } });
     assert.equal(prior.same.state, "carried");
-    // The armed copy for this account outranks its own archive (newest first).
+    // The armed copy for this account outranks its own archive (newest first),
+    // whether or not the server was read.
+    assert.equal(priorPerpFor(ACCOUNT, { server: null, local: { current: withoutPerps(ACCOUNT), archived: [withPerps(ACCOUNT)] } }).same.state, "none");
     assert.equal(priorPerpFor(ACCOUNT, { local: { current: withoutPerps(ACCOUNT), archived: [withPerps(ACCOUNT)] } }).same.state, "none");
   });
 
   it("the sealed blob rides along with the key it seals, so a re-sign after a kill can still reach it", () => {
     const g = withPerps(ACCOUNT, KEY);
     const sealed = { ...g, perp: { ...g.perp, apiKeySealed: "blob" } };
-    const fromLocal = priorPerpFor(ACCOUNT, { local: { current: sealed } }).same;
+    // After a kill the server holds no grant (null) to join the key from.
+    const fromLocal = priorPerpFor(ACCOUNT, { server: null, local: { current: sealed } }).same;
     assert.equal(fromLocal.state === "carried" && fromLocal.apiKeySealed, "blob");
     // A projection (publicGrantView) has none, and none is invented.
     const fromServer = priorPerpFor(ACCOUNT, { server: g }).same;

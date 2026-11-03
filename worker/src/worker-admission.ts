@@ -21,6 +21,12 @@
  * signs from anywhere else. A gate at each producer would be a gate some new
  * producer forgets. A gate in the funnel cannot be walked around.
  *
+ * ONE OWNER ORDER COMES IN BESIDE THE FUNNEL: a Perps wallet's Close and Close
+ * all, which the perp lane builds and books itself (perps/lane.ts). Its own
+ * gate, ownerPerpExitRefusal below, gives the answer admissionRefusal gives a
+ * reduce-only exit, and index.ts runOrderCommand asks it before the lane is
+ * reached; admission-invariant.test.ts pins that too.
+ *
  * ONLY EVER RESTRICTIVE. A refusal writes a `rejected` row, which is what
  * every other refusal in that function writes and what the ledger is for, and
  * it is taken before `reserveBudget`, so it reserves nothing and holds nothing
@@ -141,6 +147,36 @@ export function admissionRefusal(
   if (gate.level === "exits-only" && countsAsEntry(intent.kind, isExitIntent(intent, limits), sellsHeldLeg(intent, held))) {
     return "rollout-hold";
   }
+  return null;
+}
+
+/**
+ * AN OWNER'S PERPETUAL EXIT (Close, Close all) MEETS THE SAME LEVELS — the
+ * one owner order that does not pass processIntentLocked.
+ *
+ * It cannot: the exit's intent does not exist until the perp lane builds it,
+ * under its own lock, from what the practice book holds at that moment
+ * (perps/lane.ts close, flatten), and the lane then books it itself. So
+ * index.ts runOrderCommand asks this before it hands the exit to the lane,
+ * and a tenant held at `observe` closes nothing on its owner's order, exactly
+ * as its owner's Spot sell is refused there. Before this, a Perps worker held
+ * at `observe` booked the owner's Close and wrote a Close all's halt — the one
+ * owner order a held tenant still carried out.
+ *
+ * THE SAME ANSWER admissionRefusal GIVES THAT INTENT, without the intent:
+ * whatever the lane builds is reduce-only and sized to what is held
+ * (buildExitDraft), which isExitIntent calls an exit, so `exits-only` admits
+ * it and `observe` refuses it like everything else; draining wins.
+ * worker-admission.test.ts asks both functions about real exit drafts at
+ * every level, so the two cannot drift apart.
+ *
+ * NOT THE PROTECTIVE LOOP: a stop or a take-profit the paper engine fires is
+ * the lane's own, outside any owner order, and nothing here reaches it
+ * (admission-invariant.test.ts).
+ */
+export function ownerPerpExitRefusal(gate: { level: AdmissionLevel; draining: boolean }): AdmissionRule | null {
+  if (gate.draining) return "draining";
+  if (gate.level === "observe") return "rollout-hold";
   return null;
 }
 

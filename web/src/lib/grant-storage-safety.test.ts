@@ -28,7 +28,7 @@ function installStorage(value: string, refuseArchive = false) {
 
 it("discard refuses when the recovery archive cannot be written, preserving the only owner key", () => {
   const storage = installStorage(raw, true);
-  assert.throws(() => clearGrant(), /saved wallet was kept/);
+  assert.throws(() => clearGrant("spot"), /saved wallet was kept/);
   assert.equal(storage.get(key), raw);
   assert.equal(storage.has(archive), false);
 });
@@ -36,15 +36,34 @@ it("discard refuses when the recovery archive cannot be written, preserving the 
 it("discard preserves unreadable recovery data instead of silently deleting it", () => {
   const damaged = raw.slice(0, -1);
   const storage = installStorage(damaged);
-  assert.throws(() => clearGrant(), /saved wallet was kept/);
+  assert.throws(() => clearGrant("spot"), /saved wallet was kept/);
   assert.equal(storage.get(key), damaged);
 });
 
 it("a successful discard keeps the recovery copy and cannot clobber another wallet's archive", () => {
   const storage = installStorage(raw);
   storage.set("merrymen.grant.archive.other", "other-wallet");
-  clearGrant();
+  clearGrant("spot");
   assert.equal(storage.has(key), false);
   assert.equal(storage.get(archive), raw);
   assert.equal(storage.get("merrymen.grant.archive.other"), "other-wallet");
+});
+
+it("clearing one wallet's slot archives and clears that slot alone: Spot's key is the one it always was", () => {
+  const perpsAccount = `0x${"b".repeat(40)}`;
+  const perps = JSON.stringify({ purpose: "perps", smartAccount: perpsAccount });
+  const storage = installStorage(raw);
+  storage.set("merrymen.grant.perps.v1", perps);
+  clearGrant("perps");
+  assert.equal(storage.has("merrymen.grant.perps.v1"), false);
+  assert.equal(storage.get(`merrymen.grant.archive.${perpsAccount}`), perps, "the Perps grant is archived under its own account");
+  assert.equal(storage.get(key), raw, "the Spot grant, under merrymen.grant.v1, is untouched");
+  clearGrant("spot");
+  assert.equal(storage.has(key), false);
+  assert.equal(storage.get(archive), raw);
+  assert.equal(storage.get(`merrymen.grant.archive.${perpsAccount}`), perps, "and Spot's clear leaves the Perps archive alone");
+  // A wallet this build does not know clears nothing.
+  storage.set(key, raw);
+  assert.throws(() => clearGrant("solana" as never));
+  assert.equal(storage.get(key), raw);
 });

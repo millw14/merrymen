@@ -31,6 +31,7 @@ import { isHostedMode } from "@merrymen/core";
 import { getFollowStore, isSelfFollow, MAX_FOLLOWS, SLUG_SHAPE } from "@merrymen/follow-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { tenantOf } from "@/lib/auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /** A follow is per-caller state; it must never be cached or shared. */
 export const dynamic = "force-dynamic";
@@ -55,6 +56,8 @@ async function tenant(req: Request): Promise<`0x${string}` | null> {
 
 /** What this owner's agent currently reads. */
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return NextResponse.json({ error: "not found" }, { status: 404 });
   const t = await tenant(req);
   if (!t) return NextResponse.json({ error: "sign in" }, { status: 401 });
@@ -63,6 +66,8 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return NextResponse.json({ error: "not found" }, { status: 404 });
   const t = await tenant(req);
   if (!t) return NextResponse.json({ error: "sign in" }, { status: 401 });

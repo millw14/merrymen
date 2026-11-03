@@ -27,6 +27,7 @@
  */
 import { NextResponse } from "next/server";
 import { readPublicDecisionLifecycle } from "../../../../lib/read-decision-lifecycle";
+import { walletNotSupported } from "../../../../lib/route-guard";
 
 export const runtime = "nodejs";
 /** A ledger read: cacheable briefly, never per-caller. */
@@ -41,7 +42,9 @@ export const dynamic = "force-dynamic";
  */
 const ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const { id } = await params;
   if (!ID_RE.test(id)) return NextResponse.json({ error: "not found" }, { status: 404 });
 

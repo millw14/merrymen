@@ -3,11 +3,14 @@ import { getPartnerStore } from "@/lib/partner-store";
 import { createPartnerService, partnerFailure } from "@/lib/partner-service";
 import { readPartnerRuntime, replyToPartner } from "@/lib/partner-runtime";
 import { createPartnerEnrollmentService } from "@/lib/partner-enrollment";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 async function handle(req: Request, context: { params: Promise<{ path: string[] }> }) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return Response.json({ error: { code: "not_found", message: "Hosted API only" } }, { status: 404 });
   try {
     const { path } = await context.params;

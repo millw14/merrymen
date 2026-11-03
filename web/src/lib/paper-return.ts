@@ -15,19 +15,31 @@ export interface PaperPerformance {
   pnlAt: number;
 }
 
-/** Missing legacy health is compatible; an unread verdict cannot permit a book. */
-export async function paperRecoveryBlocked(db: Db, account: string): Promise<boolean> {
+/**
+ * What the orchestrator last recorded of this account's practice book: its
+ * restore failed and the book is held ("blocked"), it restored or no record
+ * table exists yet ("clear": an older deployment), or the record could not be
+ * read ("unknown"). orchestrator.ts tryPaperRestore writes it on every spawn,
+ * keyed by the account the book is the book of — the Perps one for a Perps
+ * worker — so one wallet's hold is never read as the other's.
+ */
+export async function paperRecoveryState(db: Db, account: string): Promise<"blocked" | "clear" | "unknown"> {
   try {
     const health = await db.prepare("SELECT blocked FROM paper_recovery_health WHERE LOWER(agent_id) = ?")
       .get(account.toLowerCase()) as { blocked: number } | undefined;
-    return Number(health?.blocked) === 1;
+    return Number(health?.blocked) === 1 ? "blocked" : "clear";
   } catch (error) {
     const e = error as { code?: unknown; message?: unknown };
     // Only an absent legacy table permits the older recorded-mark behavior.
     // Permission failures, timeouts and unread columns are unknown health.
-    return !(e.code === "42P01" || (typeof e.message === "string"
-      && /^no such table: (?:\w+\.)?paper_recovery_health$/i.test(e.message)));
+    return e.code === "42P01" || (typeof e.message === "string"
+      && /^no such table: (?:\w+\.)?paper_recovery_health$/i.test(e.message)) ? "clear" : "unknown";
   }
+}
+
+/** Missing legacy health is compatible; an unread verdict cannot permit a book. */
+export async function paperRecoveryBlocked(db: Db, account: string): Promise<boolean> {
+  return (await paperRecoveryState(db, account)) !== "clear";
 }
 
 /**

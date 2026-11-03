@@ -109,3 +109,25 @@ test("the existing Start over kill ordering survives a recovery refusal", async 
   assert.doesNotMatch(start + selftest, /INSERT INTO agent_commands/);
   assert.match(reset, /queued\.status \?\? 503/);
 });
+
+test("A PERPS RESET'S DEADLINE RIDES IN ITS ARGS, as an order's does; a probe and a Spot reset are written as they always were", async () => {
+  const { raw, db } = fixture();
+  raw.exec("ALTER TABLE agent_commands ADD COLUMN args TEXT");
+  try {
+    const now = at * 1000;
+    assert.deepEqual(await queueRecoveryCheckedCommand(db, { ...command("perps-reset"), expiresAt: now + 300_000 }), { ok: true });
+    assert.deepEqual(await queueRecoveryCheckedCommand(db, command("spot-reset")), { ok: true });
+    assert.deepEqual(await queueRecoveryCheckedCommand(db, command("probe", "selftest")), { ok: true });
+    const argsOf = (id: string) => (raw.prepare("SELECT args FROM agent_commands WHERE id=?").get(id) as { args: string | null }).args;
+    assert.deepEqual(JSON.parse(String(argsOf("perps-reset"))), { expiresAt: now + 300_000 });
+    assert.equal(argsOf("spot-reset"), null);
+    assert.equal(argsOf("probe"), null);
+    // A deadline that is not a time after the request is not one: nothing is written.
+    for (const expiresAt of [now, now - 1, Number.NaN, 1.5 + now]) {
+      assert.deepEqual(await queueRecoveryCheckedCommand(db, { ...command(`bad-${String(expiresAt).replace(/\W/g, "")}`), expiresAt }), { ok: false, why: "unreachable" });
+    }
+    assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM agent_commands").get() as { n: number }).n, 3);
+  } finally {
+    raw.close();
+  }
+});

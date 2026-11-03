@@ -674,6 +674,8 @@ export interface MerrymenSettings {
    * also on file. The first of rule 1's two dashboard acts. Off by default.
    */
   perpsEnabled?: boolean;
+  /** Server-owned kill revision. Changes even when paper trading was already off. */
+  perpsControlNonce?: string;
   /**
    * REAL-MONEY PERPETUALS: the second act, and a CONSENT, so it never stands on
    * its own. The worker honours it only together with

@@ -40,6 +40,7 @@ import { robinhoodChain } from "@merrymen/core";
 
 import { tenantOf } from "@/lib/auth";
 import { sharedRead } from "@/lib/read-discoveries";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -146,6 +147,8 @@ function answer(why: ProposalsResponse["why"], proposals: Proposal[] = [], cover
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   // Self-hosted has one operator whose settings file IS the answer; there is no
   // tenant to look a grant up by, and the /settings screen is one click away.
   if (!isHostedMode()) return answer("signed-out");

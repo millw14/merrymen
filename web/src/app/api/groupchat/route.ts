@@ -55,6 +55,7 @@ import {
   withRoom,
   type Room,
 } from "./room";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -138,6 +139,8 @@ function unreadable(since: number | undefined): NextResponse {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!roomOpen()) return notFound();
   const q = new URL(req.url).searchParams;
   const since = cursorParam(q.get("since"));
@@ -292,6 +295,8 @@ type Posted =
   | { ok: false; status: number; error: string; retryAfter?: number };
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!roomOpen()) return notFound();
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, "Sign in to post.");
@@ -424,6 +429,8 @@ export async function POST(req: Request) {
  * room, or another owner — the answer for those is simply `hidden: false`.
  */
 export async function DELETE(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!roomOpen()) return notFound();
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, "Sign in first.");

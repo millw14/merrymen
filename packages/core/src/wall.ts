@@ -18,7 +18,7 @@ import {
 } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
-import { GRANT_SCOPED_SPENDERS, builtinGrantTargets, type GrantCaps } from "./grant";
+import { GRANT_SCOPED_SPENDERS, builtinGrantTargets, grantPurpose, type GrantCaps } from "./grant";
 import { ENERGY_ROUTE_V1, GRANT_ENERGY, isEnergyReserveToken } from "./energy";
 // perps.ts imports only perps-styles.ts, which imports nothing, so this cannot
 // become a cycle through grant.ts.
@@ -218,6 +218,30 @@ export function allowedSpenders(
  * trades, and does nothing else.
  */
 export interface WallOptions extends TrencherPermission {
+  /**
+   * A PERPS WALLET'S WALL: no Spot authority at all, whatever else is passed.
+   *
+   * The one field here that only ever NARROWS. A Perps wallet (index 1,
+   * grant.purpose "perps") trades perpetuals and nothing else, so its wall
+   * carries no stock, coin or USDG approve to a Spot spender, no swap, no
+   * adapter, no vault (Morpho, class or Trencher), no Rialto or v4 route and
+   * no USDG transfer out. What it may carry is the perp route (when a perp
+   * block is sealed: the deposit, the key registration and the proxy in the
+   * one USDG approve) and the energy buy (only when `energyBuy` is asked for,
+   * on the same terms as Spot). With neither, it is EMPTY, and an empty wall
+   * can do nothing on chain: that is the paper Perps wallet.
+   *
+   * Applied as a filter over the permission list Spot would get, not as a
+   * second builder, so every permission a Perps wall keeps is byte for byte the
+   * one a Spot wall carries for the same route — one description per route,
+   * not two that can drift. Absent (every grant signed before Perps) is the
+   * Spot wall, unchanged.
+   *
+   * Set from the grant's PURPOSE and nothing else: by a signer from the
+   * purpose it signs, and on a rebuild by `grantWallOptions` from the stored
+   * grant's, so no other option can talk a rebuild into the other wallet's wall.
+   */
+  perpsOnly?: boolean;
   extraTokens?: readonly CustomToken[];
   /**
    * Addresses USDG may be transferred OUT to.
@@ -677,9 +701,13 @@ export function buildCallPermissions(
   // a venue that only ever takes cash. Because the proxy pulls only from
   // msg.sender, the allowance this approve creates is spendable by no one but
   // this account's own `deposit` call below.
+  //
+  // A PERPS WALL NAMES NO SPOT SPENDER HERE (WallOptions.perpsOnly). The one
+  // USDG approve is kept for the venue and the energy router alone, so the
+  // allowance it can create is never one a Spot spender could pull.
   const energy = opts.energyBuy === true;
   const usdgSpenders: Address[] = [
-    ...spenders,
+    ...(opts.perpsOnly ? [] : spenders),
     ...(energy ? [ENERGY_ROUTE_V1.router as Address] : []),
     ...(perp ? [LIGHTER_ROUTE_V1.proxy as Address] : []),
   ];
@@ -763,7 +791,7 @@ export function buildCallPermissions(
     ...new Set((opts.withdrawalAddresses ?? []).map((a) => a.toLowerCase() as Address)),
   ];
 
-  return [
+  const permissions = [
     ...trencherPermissions(opts, smartAccount, usdgUnits(caps.perTradeUsdg)),
     {
       // approve USDG, only to the allowed spenders, only up to one trade's size.
@@ -1413,6 +1441,25 @@ export function buildCallPermissions(
         ]
       : []),
   ];
+  if (!opts.perpsOnly) return permissions;
+  // A PERPS WALLET KEEPS THE PERP ROUTE AND THE ENERGY BUY, AND NOTHING ELSE
+  // (WallOptions.perpsOnly). A filter over the Spot list rather than a second
+  // list, so a kept permission is the very object Spot would seal for that
+  // route: its recipient pins, its key words and its per-call cap included.
+  //
+  // By TARGET, and USDG by selector too: the USDG `transfer` to a registered
+  // withdrawal address shares the approve's target and must not ride along.
+  // The approve itself survives only when it names someone (`usdgSpenders`,
+  // already stripped of every Spot spender above); with no perp block and no
+  // energy buy there is nobody to name, and the wall is empty.
+  return permissions.filter((permission) => {
+    const target = permission.target.toLowerCase();
+    if (target === CASH.USDG.toLowerCase()) return permission.functionName === "approve" && usdgSpenders.length > 0;
+    return (
+      (perp !== undefined && target === LIGHTER_ROUTE_V1.proxy.toLowerCase()) ||
+      (energy && target === ENERGY_ROUTE_V1.router.toLowerCase())
+    );
+  });
 }
 
 /**
@@ -1481,6 +1528,10 @@ export function buildWallPolicies(args: {
       // A mirror looser than the chain is the one shape this file exists to
       // prevent.
       permissions: buildCallPermissions(args.caps, args.smartAccount, {
+        // And the one that narrows, which is no less a trap to drop: a Perps
+        // grant would be signed over the Spot wall, the stock approvals and
+        // the swap routes included, at the Perps wallet's address.
+        perpsOnly: args.perpsOnly,
         extraTokens: args.extraTokens,
         withdrawalAddresses: args.withdrawalAddresses,
         allowRialto: args.allowRialto,
@@ -1564,8 +1615,15 @@ export function buildWallPolicies(args: {
  * deserves. Both fields are optional so a caller that passes neither rebuilds
  * exactly the wall it always did; the hosted canonical check passes both. The
  * sealed private key never enters this object.
+ *
+ * `perpsOnly` FROM THE SIGNED PURPOSE (`grantPurpose`), and only when it is
+ * "perps". Absent is Spot, so every grant signed before Perps rebuilds the wall
+ * it always did, key for key; a purpose that names no wallet THROWS rather
+ * than rebuilding as Spot, the refusal `grantPurpose` gives everywhere else.
+ * A Perps purpose is bound into the owner's signed claim (bindingMessage).
  */
 export function grantWallOptions(grant: {
+  purpose?: unknown;
   grantTokens?: readonly string[];
   grantFeatures?: readonly string[];
   chainId?: number;
@@ -1580,6 +1638,9 @@ export function grantWallOptions(grant: {
       ? grantPerp({ grantFeatures: grant.grantFeatures, chainId: grant.chainId, perp: grant.perp })
       : null;
   return {
+    // Present only for a Perps grant, so a Spot grant yields an options object
+    // with exactly the keys it always had.
+    ...(grantPurpose(grant) === "perps" ? { perpsOnly: true } : {}),
     extraTokens,
     allowRialto: features.has("rialto"),
     allowUniswapV4: features.has("v4"),

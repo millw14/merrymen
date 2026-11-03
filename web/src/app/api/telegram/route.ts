@@ -53,6 +53,7 @@ import { isBotToken } from "@/lib/telegram-claims";
 import { telegramListening, type Listening, type TelegramRuntime } from "@/lib/telegram-listening";
 import { readTelegramRuntime } from "@/lib/telegram-runtime";
 import { botIdOf, parsePollHealth } from "../../../../../worker/src/telegram/state";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -137,7 +138,7 @@ async function runtimeFor(tenant: `0x${string}` | null, confirmedBot: string | n
   // would hand this caller some other tenant's bearer credential. The read
   // itself is lib/telegram-runtime.ts, keyed on this tenant.
   if (!tenant) return { linkCode: null, ownerId: null };
-  return withReadDb(async (db) => (db ? readTelegramRuntime(db, tenant, confirmedBot) : { linkCode: null, ownerId: null }));
+  return withReadDb(async (db) => (db ? readTelegramRuntime(db, tenant, confirmedBot) : { linkCode: null, ownerId: null }), "spot");
 }
 
 /**
@@ -286,6 +287,8 @@ export interface TelegramStatus {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const tenant = isHostedMode() ? tenantOf(req) : null;
   const owner = new URL(req.url).searchParams.get("owner");
   if (isHostedMode() && owner !== null && ownerMismatch(owner, tenant)) {
@@ -328,6 +331,8 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   let body: { action?: string; token?: string };
   try {
     body = (await req.json()) as typeof body;

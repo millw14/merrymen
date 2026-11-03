@@ -102,7 +102,7 @@ export async function withRoom<T>(fn: (room: Room | null) => Promise<T>): Promis
     if (!db) return fn(null);
     await ensureGroupchatSchema(db, "postgres");
     return fn({ db, dialect: "postgres" });
-  });
+  }, "spot");
 }
 
 /**

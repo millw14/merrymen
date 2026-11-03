@@ -6,6 +6,7 @@ import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
 import { withReadDb } from "@/lib/ledger";
 import { readTradePnl } from "@/lib/trade-pnl";
 import { renderPnlCard } from "@merrymen/pnl-card";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /** Private PNG of an evidenced live sell, using the same house card as Telegram. */
 export const dynamic = "force-dynamic";
@@ -16,6 +17,8 @@ const PRIVATE_HEADERS = { "Cache-Control": "private, no-store", "Vary": "Cookie"
 const failure = (message: string, status: number) => new NextResponse(message, { status, headers: PRIVATE_HEADERS });
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const ids = new URL(req.url).searchParams.getAll("trade");
   const id = Number(ids[0]);
   if (ids.length !== 1 || !/^[1-9]\d*$/.test(ids[0] ?? "") || !Number.isSafeInteger(id)) {
@@ -23,11 +26,11 @@ export async function GET(req: Request) {
   }
   // The request may name a trade, never an account. Self-hosted keeps the same
   // single disk account and localhost perimeter as the rest of the dashboard.
-  const agent = isHostedMode() ? await hostedAgentFor(req) : await diskAgent();
+  const agent = isHostedMode() ? await hostedAgentFor(req, "spot") : await diskAgent("spot");
   if (!agent) return failure("Not found.", 404);
   let result;
   try {
-    result = await withReadDb(async (db) => db ? readTradePnl(db, agent, id) : { kind: "unreadable" as const });
+    result = await withReadDb(async (db) => db ? readTradePnl(db, agent, id) : { kind: "unreadable" as const }, "spot");
   } catch {
     return failure("Trade history is unavailable. Try again shortly.", 503);
   }

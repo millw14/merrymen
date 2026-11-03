@@ -13,6 +13,7 @@
 
 import { esc } from "./api";
 import { CONTROL_KINDS, PC_CAP_OF, PC_KINDS, type Command } from "./interpreter";
+import { PERPS_ABSENT, PERPS_OWNER_ONLY, PERPS_UNREAD, readPerpsText, requestPerpsExit, type TelegramPerpsPort } from "./perps";
 import { resolveInRoot, shellAllowed, type PcActions } from "./pc";
 import { WALLET_TEXT } from "./reads";
 import { CONFIRM_TTL_SEC, killDoneText, killPromptText, type KillResult } from "./kill-confirm";
@@ -21,6 +22,7 @@ import { CONFIRM_TTL_SEC, killDoneText, killPromptText, type KillResult } from "
  * original transfer-only store so a pending PC action and a pending transfer
  * share one per-chat slot (the latest ask wins). */
 export type PendingAction =
+  | { kind: "flatten-perps"; expectedAccount: `0x${string}`; expiresAt: number }
   | { kind: "transfer"; to: `0x${string}`; usdg: number; expiresAt: number }
   | { kind: "shell"; cmd: string; expiresAt: number }
   | { kind: "getfile"; path: string; expiresAt: number }
@@ -78,6 +80,9 @@ export const TAIL_CONFIRM_TTL_SEC = 600;
 export type { KillResult };
 
 export interface CommandDeps {
+  /** The owner's private DM only. Request identity comes from Telegram's update, never message text. */
+  perps?: { owner: boolean; port: TelegramPerpsPort; requestId: string | null; askedAtSec: number };
+  walletPurpose?: "spot" | "perps";
   controlEnabled: boolean;
   /**
    * Hosted fleet (MERRYMEN_HOSTED)? The kill prompt has to say what a kill
@@ -214,6 +219,14 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
   if (refusal) return refusal;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
 
+  const readPerps = (view: "full" | "pnl" = "full") => deps.perps?.owner
+    ? readPerpsText(deps.perps.port, now(), view) : Promise.resolve(PERPS_OWNER_ONLY);
+  const exitPerps = async (action: "close" | "flatten", expectedAccount: `0x${string}`, market?: import("../../../packages/core/src/perps").PerpKey): Promise<string> => {
+    const p = deps.perps;
+    if (!p?.owner) return PERPS_OWNER_ONLY;
+    return requestPerpsExit(p.port, { action, ...(market ? { market } : {}), expectedAccount, requestId: p.requestId ?? "", askedAtSec: p.askedAtSec }, now());
+  };
+
   switch (cmd.kind) {
     case "link": {
       const r = deps.link(cmd.code); // call once — link mutates state
@@ -239,12 +252,28 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.reads.wallet ? deps.reads.wallet() : WALLET_TEXT;
     case "status":
       return deps.reads.status();
+    case "perps":
+      return await readPerps();
     case "positions":
-      return deps.reads.positions();
+      if (deps.walletPurpose === "perps") return await readPerps();
+      return deps.reads.positions() + (deps.perps?.owner ? `\n\n${await readPerps()}` : "");
     case "depth":
       return deps.reads.depth(cmd.symbol);
     case "pnl":
-      return deps.reads.pnl();
+      if (deps.walletPurpose === "perps") return await readPerps("pnl");
+      return deps.reads.pnl() + (deps.perps?.owner ? `\n\n${await readPerps("pnl")}` : "");
+    case "close-perp":
+    case "flatten-perps": {
+      if (!deps.perps?.owner) return PERPS_OWNER_ONLY;
+      let snapshot;
+      try { snapshot = await deps.perps.port.read(); } catch { return PERPS_UNREAD; }
+      if (snapshot.state !== "ready") return snapshot.state === "absent" ? PERPS_ABSENT : PERPS_UNREAD;
+      if (!/^0x[0-9a-f]{40}$/i.test(snapshot.account)) return PERPS_UNREAD;
+      if (!Number.isSafeInteger(snapshot.grantExpiresAt) || snapshot.grantExpiresAt! <= now()) return "The Perps permission is expired or unreadable. Renew it on the Perps desk; no practice exit was sent.";
+      if (cmd.kind === "close-perp") return await exitPerps("close", snapshot.account, cmd.market);
+      deps.setPending({ kind: "flatten-perps", expectedAccount: snapshot.account, expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ <b>Close all practice perpetuals?</b>\nThis requests exits for every paper position and pauses new practice entries until you reset the practice book. No real-money order is signed.\n/confirm within ${CONFIRM_TTL_SEC}s, or /cancel.`;
+    }
     case "trades":
       return await deps.reads.trades();
     case "report":
@@ -338,6 +367,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return TAIL_OWNER_ONLY_TEXT;
         }
+      } else if (p.kind === "flatten-perps") {
+        if (!deps.controlEnabled || !deps.perps?.owner) {
+          deps.clearPending();
+          return !deps.perps?.owner ? PERPS_OWNER_ONLY : "Control was turned off before you confirmed. No practice exit was sent.";
+        }
       } else if (p.kind === "kill") {
         // Kill is a control command, not a PC capability — re-vet the control
         // switch rather than running it through pcRefusal, which knows nothing
@@ -355,6 +389,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       }
       deps.clearPending();
       switch (p.kind) {
+        case "flatten-perps":
+          return await exitPerps("flatten", p.expectedAccount);
         case "transfer":
           return await deps.transfer(p.to, p.usdg);
         case "shell":

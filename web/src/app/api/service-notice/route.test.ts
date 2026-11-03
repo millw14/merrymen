@@ -39,7 +39,7 @@ afterEach(() => {
 async function read(value: string | undefined) {
   if (value === undefined) delete process.env.MERRYMEN_SERVICE_NOTICE;
   else process.env.MERRYMEN_SERVICE_NOTICE = value;
-  const response = await GET();
+  const response = await GET(new Request("https://app.merrymen.dev/api/service-notice"));
   return { response, body: await response.json() as { notice: unknown } };
 }
 

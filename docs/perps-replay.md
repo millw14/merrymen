@@ -79,3 +79,60 @@ liquidation queue are outside this replay. Keep the raw input alongside the
 result. Synthetic regression fixtures demonstrate behavior and accounting;
 they are not evidence of investment returns. Mainnet execution remains subject
 to [the live checklist](perps-mainnet-checklist.md).
+
+## Capture the existing public feed
+
+`capture-public-feed-cli.ts` records the `lighter-feed.json` already published
+by the fleet feed. It opens no network connection, loads no `.env`, grant,
+private ledger or signing key, and does not start a second feed. The input must
+be that named regular file; a final symlink is refused. Unknown fields,
+including nested fields, are refused so a mistaken secret-bearing input cannot
+be copied into a recording. Feed observation times remain unchanged.
+
+Run on the host with the existing feed, writing to a **new** directory outside
+source control. The explicit opt-in applies only to capture; it enables no
+worker or trading permission:
+
+```sh
+MERRYMEN_PERPS_CAPTURE_PUBLIC_FEED=1 node --import tsx \
+  worker/src/perps/capture-public-feed-cli.ts \
+  /existing/fleet-home/lighter-feed.json /private/perps-capture-2026-10-30 \
+  120 5000
+```
+
+This example samples 120 times, five seconds apart (about ten minutes). The
+arguments are sample count and interval in milliseconds. Limits are 8,640
+samples, 1–60 second intervals, at most 24 hours of scheduled sampling, 1 MiB
+per input frame and 64 MiB of recorded frame lines. The directory is created
+with mode `0700` and files with `0600`. It refuses an existing directory.
+`frames.ndjson` preserves each complete sample as it is read and synced;
+`replay.json` and `capture.json` finalize the recording on completion or a
+handled SIGINT/SIGTERM. The NDJSON and replay file duplicate the frames, so
+allow at least 128 MiB per maximum-sized run. A hard process/host failure may
+leave only complete NDJSON lines; do not present that as a completed capture.
+
+A missing, malformed, oversized, future-dated or unrecognized feed is retained
+as `{ "atMs": ..., "feed": null }`. The next good sample does not erase that
+gap. Replay stops at the first unread frame with unknown final equity. The
+capture exits 2 for an interrupted/bounded/incomplete recording or any unread
+frame, 1 for invalid invocation or an execution error, and 0 only when all
+requested samples were readable. A backwards/nonadvancing system clock stops
+capture instead of fabricating a later timestamp.
+
+Replay the finalized recording with the existing offline engine:
+
+```sh
+node --import tsx worker/src/perps/backtest-cli.ts \
+  /private/perps-capture-2026-10-30/replay.json \
+  > /private/perps-capture-2026-10-30/result.json
+```
+
+The capture's replay assumptions are explicit: 100 simulated USDG, a 25 USDG
+per-trade cap, 100 USDG daily cap, 48 operations per day, two opening energy
+slots and a 5% drawdown breaker; strategy settings retain the shipped defaults.
+These are replay inputs, not a signed permission or proof of an owner's actual
+limits. Keep `capture.json`, `frames.ndjson`, `replay.json`, `result.json`, the
+commit SHA and the exact replay command together. A complete capture only
+means its requested frames were recorded; a complete replay only means those
+samples were interpretable under its assumptions. Neither establishes live
+performance, safety between samples, or readiness to trade real funds.

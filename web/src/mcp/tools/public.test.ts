@@ -349,6 +349,37 @@ test("the actual public tools enrich the canonical account's current epoch and v
   assertAbsent(after.json + changedProfile.json, [...PRIVATE_A, alias, "private-target", ...SECRETS], "changed canonical book");
 });
 
+test("FIX 4 (perps slice 5b): a Perps wallet on an identity is never the public run — the board and the profile stay on the Spot agent", async () => {
+  // The grants route never adds a Perps account to an identity (decision D2);
+  // this is the backstop for one that got there anyway. A Perps worker's row
+  // is the slug's NEWEST registration, with a newer paper valuation, and the
+  // board's run and the profile both pick the newest registration.
+  const { d, connect } = await setup();
+  const PERPS_C = "0x000000000000000000000000000000000000c0e1" as const;
+  d.raw.prepare(`INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, mode, beat_at, epoch, contributions_known, created_at)
+    VALUES (?, 'Perps paper agent', ?, '0x1', 4663, '{}', ?, 4102444800, 'active', 'paper', ?, 1, 1, ?)`).run(PERPS_C, OWNER_C, T - H, T - 1, T - 60);
+  d.raw.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at) VALUES (?, '0', 5000, 0, 0, 5000, 1, 'paper', ?)`).run(PERPS_C, T - 1);
+  const withPerps = IDS.map((i) => (i.slug === SLUG_C ? { ...i, accounts: [ACCOUNT_C, PERPS_C] } : i));
+  setPublicIdentitiesForTest({
+    async all() { return withPerps; },
+    async bySlug(slug) { return withPerps.find((i) => i.slug === slug) ?? null; },
+  });
+  const principal = await connect(OWNER_B);
+  // THE PREMISE: with no record of it, the Perps row is the one the profile picks.
+  assert.equal((await call(principal, "get_public_agent", { agent: SLUG_C })).sc.name, "Perps paper agent");
+
+  const { recordPerpsWallet } = await import("../../../../worker/src/perps-wallets");
+  await recordPerpsWallet(d.db, { smartAccount: PERPS_C, owner: OWNER_C, chainId: 4663, nowSec: T });
+  const list = await call(principal, "list_public_agents", {});
+  const row = list.sc.agents.find((r: { agent: string }) => r.agent === SLUG_C);
+  assert.equal(row.name, "Glassbox");
+  assert.deepEqual(row.last_valuation, { at: new Date((T - H) * 1000).toISOString(), book: "live" }, "the Spot agent's own run");
+  const profile = await call(principal, "get_public_agent", { agent: SLUG_C });
+  assert.equal(profile.sc.name, "Glassbox");
+  assert.deepEqual(profile.sc.valuation, row.last_valuation);
+  assertAbsent(list.json + profile.json, ["Perps paper agent", PERPS_C, "5000"], "the Perps wallet");
+});
+
 test("theses: dollars only for public books, third-party text labelled untrusted, fills labelled by book", async () => {
   const { connect } = await setup();
   const { res, sc, json } = await call(await connect(OWNER_B), "get_public_theses", {});

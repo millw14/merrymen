@@ -300,8 +300,11 @@ test("both signers seal the energy buy and mint its marker from ONE boolean", ()
     assert.ok(literal, `${name} must collect its wall options in one literal`);
     assert.match(literal[1]!, /energyBuy:\s*false as boolean/, `${name} must start the energy buy CLOSED inside wallOpts`);
 
-    // DECIDED ONCE, by the shared policy, over the real deployment state.
-    assert.match(src, /wallOpts\.energyBuy\s*=\s*energyBuyFits\(/, `${name} must decide the energy buy with energyBuyFits`);
+    // DECIDED ONCE, by the shared policy, over the real deployment state. The
+    // web signer asks it for the Spot wallet only: a Perps wallet never seals
+    // the energy buy in this build (decision D5), and the guard is the
+    // purpose it signs, in that same one assignment.
+    assert.match(src, /wallOpts\.energyBuy\s*=\s*(?:purpose === "spot" &&\s*)?energyBuyFits\(/, `${name} must decide the energy buy with energyBuyFits`);
     assert.equal(
       (src.match(/wallOpts\.energyBuy\s*=(?!=)/g) ?? []).length,
       1,
@@ -353,7 +356,10 @@ test("both signers seal the SCOPED wall and mint its marker from the same field"
     ["web/src/lib/session.ts", WEB],
     ["mobile/src/crypto/signGrant.ts", MOBILE],
   ] as const) {
-    assert.match(src, /scopedSpenders:\s*true as boolean/, `${name} must seal the scoped wall`);
+    // Always on Spot. The web signer's Perps wall names no Spot spender to
+    // scope, so it carries neither the shape nor the marker (the server
+    // refuses a Perps grant that declares it): the field is the purpose test.
+    assert.match(src, /scopedSpenders:\s*(?:true as boolean|purpose === "spot")/, `${name} must seal the scoped wall`);
     assert.match(
       src,
       /wallOpts\.scopedSpenders\s*\?\s*\[GRANT_SCOPED_SPENDERS\]\s*:\s*\[\]/,
@@ -642,7 +648,9 @@ test("the renewal preflight decides perps without touching browser storage", () 
     assert.doesNotMatch(body, /\bmintGrant\(/, `${fn} must not go through mintGrant, which reads them`);
     assert.doesNotMatch(body, /\blocalStorage\b/, `${fn} must not touch browser storage`);
   }
-  const reads = [...src.matchAll(/\blocalGrantsSnapshot\(\)/g)].filter((m) => isCall(src, m.index!));
+  // One wallet's grants since perps slice 5b (localGrantsSnapshot(wallet)),
+  // still read in exactly one place.
+  const reads = [...src.matchAll(/\blocalGrantsSnapshot\(/g)].filter((m) => isCall(src, m.index!));
   assert.equal(reads.length, 1, "the browser's stored grants are read in exactly one place");
   assert.equal(enclosingFunction(src, reads[0]!.index!), "mintGrant", "and that place is mintGrant");
 });

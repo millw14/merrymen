@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sharedRead } from "@/lib/read-discoveries";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * What is trading on this chain, over HTTP.
@@ -14,7 +15,9 @@ import { sharedRead } from "@/lib/read-discoveries";
 // revalidate cannot do.
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const payload = await sharedRead();
   return NextResponse.json(payload, {
     headers: {

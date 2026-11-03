@@ -155,7 +155,7 @@ export async function withXpostDb<T>(fn: (db: Db | null) => Promise<T>): Promise
     if (!db) return fn(null);
     await ensureXpostSchema(db, "postgres");
     return fn(db);
-  });
+  }, "spot");
 }
 
 // ── what the routes say ─────────────────────────────────────────────────────

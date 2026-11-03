@@ -212,7 +212,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
     // withReadDb), and its decision: what the owner's screen would say.
     const withReadDb = createReadDb(makePgDb);
     const webRead = (tenant: `0x${string}`, confirmedBot: string | null) =>
-      withDatabaseUrl("web-read", () => withReadDb((db) => readTelegramRuntime(db!, tenant, confirmedBot)));
+      withDatabaseUrl("web-read", () => withReadDb((db) => readTelegramRuntime(db!, tenant, confirmedBot), "spot"));
     const dashboard = async (tenant: `0x${string}`, token: string | null, now: number, o: { confirmed?: boolean } = {}) => {
       const confirmed = token && o.confirmed !== false ? botIdOf(token) : null;
       return telegramListening(await webRead(tenant, confirmed), token, now);

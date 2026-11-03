@@ -150,11 +150,12 @@ function restLooksKeyed(rest: string, publicPath: boolean): boolean {
 }
 
 /**
- * Every http(s)/ws(s) URL in running text. Stops at whitespace, quotes,
- * brackets and backslashes, which is where a URL ends in a log line, a JSON
- * string or `util.inspect` output.
+ * Every http(s)/ws(s) URL in running text, and the database URLs a driver's
+ * error can carry (postgres, redis): their userinfo is the database password.
+ * Stops at whitespace, quotes, brackets and backslashes, which is where a URL
+ * ends in a log line, a JSON string or `util.inspect` output.
  */
-const URL_IN_TEXT = /\b(?:https?|wss?):\/\/[^\s"'`<>\\()[\]{}|^]+/gi;
+const URL_IN_TEXT = /\b(?:https?|wss?|postgres(?:ql)?|rediss?):\/\/[^\s"'`<>\\()[\]{}|^]+/gi;
 
 /** Punctuation that ends a sentence rather than the URL inside it. A key never contains these. */
 const TRAILING = /[.,;:!?]+$/;

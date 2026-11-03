@@ -152,7 +152,7 @@ describe("the page reads the server's answer back, and nothing else", () => {
   it("the route judges it with its own clock, after both heartbeat sources", () => {
     const get = ROUTE.indexOf("export async function GET");
     assert.ok(get > 0, "the GET handler must exist");
-    const call = ROUTE.indexOf("workerStaleOf(workerAliveAt, Math.floor(Date.now() / 1000), await tickSecondsFor(hostedTenant))", get);
+    const call = ROUTE.indexOf("workerStaleOf(workerAliveAt, Math.floor(Date.now() / 1000), await tickSecondsFor(hostedTenant, wallet))", get);
     assert.ok(call > get, "GET must judge the heartbeat it read, by the server's clock and the owner's tick");
     // After the ledger branch, so the hosted heartbeat (the mirrored row) is
     // the one judged, not only the self-hosted file.
@@ -165,7 +165,8 @@ describe("the page reads the server's answer back, and nothing else", () => {
   it("the tick is read for the caller, and a failed read is the default, never the house's", () => {
     const fn = ROUTE.slice(ROUTE.indexOf("async function tickSecondsFor"));
     const body = fn.slice(0, fn.indexOf("\n}\n"));
-    assert.match(body, /getSettingsStore\("spot"\)\.get\(hostedTenant\)/, "hosted: this tenant's own settings");
+    // The wallet's own settings (perps slice 5b): a Perps wallet's tick is not the Spot one's.
+    assert.match(body, /getSettingsStore\(wallet\)\.get\(hostedTenant\)/, "hosted: this tenant's own settings, for the wallet asked about");
     assert.match(body, /catch \{\s*return null;/, "a failed read falls back to freshWithin's default");
   });
 

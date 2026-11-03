@@ -30,6 +30,7 @@
  * tickets for that account forever.
  */
 
+import { isGrantPurpose, type GrantPurpose } from "@merrymen/core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 /** Long enough to plan, read, confirm and submit; short enough to be worthless if leaked. */
@@ -53,7 +54,8 @@ const hmac = (payload: string, secret: string) =>
  * to sign something with the key that controls all their money and deserves to
  * read a sentence rather than a hex blob.
  */
-export function recoveryChallengeMessage(origin: string, nonce: string): string {
+export function recoveryChallengeMessage(origin: string, nonce: string, purpose: GrantPurpose = "spot"): string {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised wallet purpose");
   return [
     `${origin} — withdraw from your merrymen account.`,
     "",
@@ -61,12 +63,15 @@ export function recoveryChallengeMessage(origin: string, nonce: string): string 
     "It moves no funds by itself and grants no permissions: the withdrawal itself",
     "is a separate operation you sign next.",
     "",
+    ...(purpose === "perps" ? ["Wallet: perps (account index 1)"] : []),
     `URI: ${origin}`,
     `Nonce: ${nonce}`,
   ].join("\n");
 }
 
 export interface Ticket {
+  /** Absent only on legacy Spot tickets. Perps is signed into the body. */
+  purpose?: GrantPurpose;
   smartAccount: `0x${string}`;
   chainId: number;
   /**
@@ -105,13 +110,15 @@ const VAULT_SEP = "-";
 
 /** Stateless: the ticket IS its own proof, so no server-side store to keep or leak. */
 export function mintTicket(t: Omit<Ticket, "exp">, now = Date.now()): string {
+  const purpose = t.purpose ?? "spot";
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised wallet purpose");
   const exp = now + TICKET_TTL_MS;
   // The vault is INSIDE the signed body. Appending it outside the hmac would
   // let a caller edit which vault their ticket blesses, which is the whole
   // thing this field exists to prevent.
   const vault =
     t.classVaults.length > 0 ? t.classVaults.map((v) => v.toLowerCase()).join(VAULT_SEP) : NO_VAULT;
-  const body = `${t.smartAccount.toLowerCase()}.${t.chainId}.${vault}.${exp}`;
+  const body = `${t.smartAccount.toLowerCase()}.${t.chainId}.${vault}.${exp}${purpose === "perps" ? ".perps" : ""}`;
   return `${body}.${hmac(body, secretOrThrow())}`;
 }
 
@@ -123,9 +130,12 @@ export function readTicket(token: string | undefined | null, now = Date.now()): 
   // shape does not parse and the owner signs the challenge again — which costs
   // them one click, bounded by a 15-minute TTL, and is the correct treatment
   // for a credential whose meaning changed.
-  if (parts.length !== 5) return null;
-  const [account, chain, vault, exp, sig] = parts as [string, string, string, string, string];
-  const body = `${account}.${chain}.${vault}.${exp}`;
+  if (parts.length !== 5 && parts.length !== 6) return null;
+  const [account, chain, vault, exp] = parts as [string, string, string, string];
+  const purpose = parts.length === 5 ? "spot" : parts[4];
+  if (purpose !== "spot" && purpose !== "perps") return null;
+  const sig = parts.at(-1)!;
+  const body = parts.slice(0, -1).join(".");
   let want: Buffer;
   let got: Buffer;
   try {
@@ -154,6 +164,7 @@ export function readTicket(token: string | undefined | null, now = Date.now()): 
     classVaults = parsed as `0x${string}`[];
   }
   return {
+    ...(purpose === "perps" ? { purpose } : {}),
     smartAccount: account as `0x${string}`,
     chainId,
     classVaults,

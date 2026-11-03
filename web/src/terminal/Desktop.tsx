@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { timeOnly } from "@/lib/format";
 import { AgentStrip } from "./AgentStrip";
 import Link from "./Link";
@@ -57,9 +57,11 @@ export function DesktopHeader({
   mine,
   hasAgent = true,
   hideBalances = false,
+  wallet = "spot",
+  tradingMode,
   onScreen,
   onTab,
-}: Actions & { hasAgent?: boolean; hideBalances?: boolean; mine: LiveMine }) {
+}: Actions & { hasAgent?: boolean; hideBalances?: boolean; wallet?: "spot" | "perps"; mine: LiveMine; tradingMode?: ReactNode }) {
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, mine.recovery);
   const accountMenu = useRef<HTMLDetailsElement>(null);
   // "/" OPENS SEARCH, as the hint beside the word says (desktop.css). Only
@@ -80,6 +82,9 @@ export function DesktopHeader({
   const room = useGroupChatSupported();
   // The way into /connect/mcp; hidden on a self-hosted install, which has none.
   const assistants = useConnectAssistantOffered();
+  const searchButton = <button type="button" className="desktop-search" aria-label="Search tokens or agents" onClick={() => onScreen({ kind: "search" })}>
+    <Search size={17} /><span>Search tokens or agents</span>
+  </button>;
   return (
     <header className="desktop-header">
       <button
@@ -96,16 +101,10 @@ export function DesktopHeader({
         <LogoMark size={15} />
         <span>merrymen</span>
       </button>
-      <button
-        className="desktop-search"
-        onClick={() => onScreen({ kind: "search" })}
-      >
-        <Search size={17} />
-        <span>Search tokens or agents</span>
-      </button>
+      {tradingMode ? <div className="desktop-mode-controls">{searchButton}{tradingMode}</div> : searchButton}
       <div className="desktop-header-account">
         {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
-        <Link className="desktop-settings-link" href="/settings">Settings</Link>
+        <Link className="desktop-settings-link" href={wallet === "perps" ? "/settings?wallet=perps" : "/settings"}>Settings</Link>
         {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
             already read "$964" as their deposit does not go on to read a
             footnote. See packages/core/src/autonomy.ts. */}
@@ -122,12 +121,13 @@ export function DesktopHeader({
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
           <summary><Face name={mine.name} slug={mine.slug}/><span>{hasAgent && mine.name ? mine.name : "Account"}</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
-            <Link href="/you">Portfolio</Link>
-            <Link href="/settings">Settings</Link>
-            <Link href="/grant">Wallet & permissions</Link>
-            <Link href="/limits">Trading limits</Link>
+            <Link href={wallet === "perps" ? "/perps" : "/you"}>{wallet === "perps" ? "Perps portfolio" : "Portfolio"}</Link>
+            <Link href={wallet === "perps" ? "/settings?wallet=perps" : "/settings"}>Settings</Link>
+            <Link href={wallet === "perps" ? "/grant?wallet=perps" : "/grant"}>Wallet & permissions</Link>
+            <Link href="/withdraw?wallet=perps">Perps withdrawal & recovery</Link>
+            {wallet === "spot" && <Link href="/limits">Trading limits</Link>}
             {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
-            {!hasAgent && <Link href="/create">Create an agent</Link>}
+            {!hasAgent && <Link href={wallet === "perps" ? "/create?for=perps" : "/create"}>{wallet === "perps" ? "Create Perps wallet" : "Create an agent"}</Link>}
           </nav>
         </details>
       </div>

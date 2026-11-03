@@ -544,7 +544,7 @@ describe("publicBotCommands — what strangers see", () => {
   it("is exactly this safe subset (pinned — additions are a conscious choice)", () => {
     assert.deepEqual(
       publicBotCommands.map((c) => c.command).sort(),
-      ["alerts", "brag", "depth", "help", "link", "pnl", "positions", "reminders", "report", "soul", "status", "trades", "wallet", "why"],
+      ["alerts", "brag", "depth", "help", "link", "perps", "pnl", "positions", "reminders", "report", "soul", "status", "trades", "wallet", "why"],
     );
   });
 

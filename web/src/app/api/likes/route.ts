@@ -27,6 +27,7 @@ import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { getLikeStore, MAX_LIKES } from "@/lib/like-store";
 import { POST_ID_SHAPE } from "@/lib/post-id";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /** A like is per-caller state; it must never be cached or shared. */
 export const runtime = "nodejs";
@@ -80,6 +81,8 @@ function body(
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return NextResponse.json({ error: "not found" }, { status: 404 });
   const t = tenantOf(req);
   // Nothing to read is a complete answer, so it counts as read.
@@ -94,6 +97,8 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return NextResponse.json({ error: "not found" }, { status: 404 });
   const t = tenantOf(req);
   if (!t) return NextResponse.json({ error: "sign in" }, { status: 401 });

@@ -81,6 +81,9 @@ fun Loaded<*>.needsSignIn(): Boolean = this is Loaded.Refused && status == 401
  */
 data class FormOwner(val serverTurn: Long, val signedIn: String?)
 
+/** The exact login/server whose destructive stop the reader reviewed. */
+class StopConfirmation internal constructor(val owner: String?, internal val serverTurn: Long, internal val version: Long)
+
 /** The [FormOwner] for [turn] (Repository.serverTurn) and [signedIn]; see there. */
 fun formOwnerOf(turn: Long, signedIn: String?): FormOwner = FormOwner(turn - turn % 2, signedIn)
 
@@ -106,6 +109,14 @@ class Repository(
   private val identity: Identity = Identity(),
 ) {
   val signedIn: StateFlow<String?> = identity.signedIn
+  val confirmationVersion: StateFlow<Long> = identity.confirmationVersion
+
+  fun reviewStop(owner: String?, serverTurn: Long, version: Long): StopConfirmation? =
+    StopConfirmation(owner, serverTurn, version).takeIf(::holdsStop)
+
+  fun holdsStop(review: StopConfirmation): Boolean =
+    review.version == confirmationVersion.value && api.servers.holds(review.serverTurn) &&
+      review.owner == signedIn.value && (review.owner != null || hosted.value == false)
 
   /**
    * WHETHER WE HAVE ACTUALLY ASKED "who are you" AND GOT AN ANSWER.

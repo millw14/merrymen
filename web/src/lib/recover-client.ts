@@ -37,7 +37,7 @@
 
 import { privateKeyToAccount } from "viem/accounts";
 import type { LocalAccount } from "viem";
-import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import { robinhoodChain, robinhoodTestnet, type GrantPurpose } from "@merrymen/core";
 import {
   ownerFromPrivateKey,
   ownerFromSigner,
@@ -47,7 +47,10 @@ import {
   type RecoveryOwner,
 } from "@merrymen/recover";
 
+import { walletUrl } from "./wallet-param";
+
 export interface BrowserWallet {
+  purpose?: GrantPurpose;
   smartAccount: `0x${string}`;
   /**
    * A browser-held owner key, for wallets that have one.
@@ -82,8 +85,8 @@ function ownerOf(w: BrowserWallet): RecoveryOwner {
 const chainOf = (id: number) => (id === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain);
 
 /** This origin's relay, which holds the house bundler key so the browser cannot. */
-export const relayUrl = (chainId: number) =>
-  `${typeof window === "undefined" ? "" : window.location.origin}/api/bundler/${chainId}`;
+export const relayUrl = (chainId: number, purpose: GrantPurpose = "spot") =>
+  walletUrl(`${typeof window === "undefined" ? "" : window.location.origin}/api/bundler/${chainId}`, purpose);
 
 /**
  * Strip anything that could carry a key or an upstream URL out of an error.
@@ -114,7 +117,7 @@ export function redact(e: unknown, ownerKey?: string): string {
  * and no script on the page can read it back out.
  */
 export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
-  const chal = await fetch("/api/recover/ticket", { cache: "no-store" });
+  const chal = await fetch(walletUrl("/api/recover/ticket", w.purpose ?? "spot"), { cache: "no-store" });
   if (!chal.ok) throw new Error("could not start recovery — the site did not issue a challenge");
   const { nonce, message } = (await chal.json()) as { nonce: string; message: string };
 
@@ -125,7 +128,7 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
   if (!signer) throw new Error("no owner signer: nothing here can sign the recovery challenge.");
   const signature = await signer.signMessage({ message });
 
-  const res = await fetch("/api/recover/ticket", {
+  const res = await fetch(walletUrl("/api/recover/ticket", w.purpose ?? "spot"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ nonce, signature, chainId: w.chainId }),
@@ -136,7 +139,7 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
   // The server derived an account from the signature alone. If it disagrees with
   // the wallet this browser holds, something is wrong on one side and sweeping
   // would be guessing.
-  if (body.smartAccount && body.smartAccount.toLowerCase() !== w.smartAccount.toLowerCase()) {
+  if (!body.smartAccount || body.smartAccount.toLowerCase() !== w.smartAccount.toLowerCase()) {
     throw new Error("this key does not control the account shown — refusing to sweep");
   }
 }
@@ -173,6 +176,7 @@ export const grantExtraTokens = (grantTokens: readonly string[] = []) =>
 /** What is in the account, read straight from the chain. No relay, no session. */
 export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
   const plan = (await planRecovery({
+    purpose: w.purpose ?? "spot",
     chain: chainOf(w.chainId),
     owner: ownerOf(w),
     // ALWAYS passed: the server route cannot check this for a pasted key, but
@@ -212,9 +216,10 @@ export async function sweepFromBrowser(
   await getRecoveryTicket(w);
 
   return recoverFunds({
+    purpose: w.purpose ?? "spot",
     chain: chainOf(w.chainId),
     owner: ownerOf(w),
-    bundlerUrl: relayUrl(w.chainId),
+    bundlerUrl: relayUrl(w.chainId, w.purpose ?? "spot"),
     to,
     expectedSmartAccount: w.smartAccount,
     extraTokens: grantExtraTokens(w.grantTokens),

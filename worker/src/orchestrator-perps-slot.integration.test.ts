@@ -36,7 +36,7 @@ process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 41).toString("base64");
 const {
   childEnv, childHome, hasLeaseForTest, honourFleetHalt, honourPendingKills, mirrorLoginPausesForTest, perpsFeedMarketsForTest, reconcile,
   refreshPerpsFeedForTest, setKillConfirmForTest, setLeaseAcquireForTest, setPaperRestoreForTest, setPerpsFeedStartForTest,
-  setSolanaKillForTest, setSpawnForTest,
+  setSolanaKillForTest, setSpawnForTest, setPerpsPilotAdmissionReaderForTest, refreshPerpsPilotAdmissionForTest,
 } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore } = await import("./settings-store");
@@ -129,6 +129,8 @@ const running = (tenant: string) => spawnedFor(tenant).filter((p) => !p.gone);
 const readJson = (file: string) => JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
 
 async function fleetOfThree(): Promise<void> {
+  setPerpsPilotAdmissionReaderForTest(async () => ({ owners: [BOTH, PERPS_ONLY], revision: 1 }));
+  await refreshPerpsPilotAdmissionForTest();
   await spotStore.put(BOTH, grant(BOTH, accountOf(BOTH, "spot")));
   await perpsStore.put(BOTH, grant(BOTH, accountOf(BOTH, "perps"), { purpose: "perps" }));
   await perpsStore.put(PERPS_ONLY, grant(PERPS_ONLY, accountOf(PERPS_ONLY, "perps"), { purpose: "perps" }));
@@ -141,6 +143,7 @@ async function fleetOfThree(): Promise<void> {
 
 after(() => {
   console.log = realLog;
+  setPerpsPilotAdmissionReaderForTest(null);
   setLeaseAcquireForTest(null);
   setPaperRestoreForTest(null);
   setPerpsFeedStartForTest(null);
@@ -267,11 +270,11 @@ describe("at MERRYMEN_PERPS=paper, a login's Perps worker", () => {
     await settle();
     const mine = path.join(childHome(perpsKey(BOTH)), "paused");
     writeFileSync(path.join(childHome(BOTH), "paused"), "paused");
-    mirrorLoginPausesForTest();
+    await mirrorLoginPausesForTest();
     assert.equal(existsSync(mine), true, "paused with the owner's Spot worker");
     assert.equal(existsSync(path.join(childHome(perpsKey(PERPS_ONLY)), "paused")), false, "another login is not");
     rmSync(path.join(childHome(BOTH), "paused"));
-    mirrorLoginPausesForTest();
+    await mirrorLoginPausesForTest();
     assert.equal(existsSync(mine), false, "resumed with it");
     // And the operator's rollout narrows it as its owner: the level a Perps
     // worker is started at is its owner's, and one the rollout does not name

@@ -123,7 +123,8 @@ Gloam receive address, review it, and approve with the wallet that owns the agen
 After confirmation, open Gloam to find and claim the payment into your private balance.
 The agent-to-pool amount and time remain public.
 
-`GloamWithdrawal` appears alongside the existing recovery panel on Robinhood mainnet.
+`GloamWithdrawal` appears alongside the existing Spot recovery panel on Robinhood mainnet.
+The browser client and relay reject Perps wallets, including valid Perps recovery tickets.
 The browser requires `NEXT_PUBLIC_GLOAM_WITHDRAWALS_ENABLED=1`; the bundler relay
 independently requires `MERRYMEN_GLOAM_WITHDRAWALS_ENABLED=1`. Both default off.
 These are separate from the funding flag. Public flags must be set at build time.

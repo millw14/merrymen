@@ -5,12 +5,15 @@ import { PartnerError, objectBody, onlyFields, partnerAppOrigin, readPartnerBody
 import { partnerFailure } from "@/lib/partner-service";
 import { getGrantStore } from "../../../../../worker/src/grant-store";
 import { getIdentityStore } from "../../../../../worker/src/identity-store";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 const json = (body: unknown) => Response.json(body, { headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } });
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return Response.json({ error: { code: "not_found", message: "Hosted API only" } }, { status: 404 });
   try {
     const origin = req.headers.get("origin");

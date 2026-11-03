@@ -6,7 +6,7 @@ import { formatUserOperation, formatUserOperationRequest, getUserOperationHash, 
 import { createKernelAccount, createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
-import { assertDerivedAccount, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import { accountIndexForPurpose, assertDerivedAccount, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import { userOpGasConfig } from "../../../worker/src/gas";
 import { getRecoveryTicket, relayUrl, redact, type BrowserWallet } from "./recover-client";
 import { invalidatePermissions, isRevocationFeeShortfall, KERNEL_REVOCATION_ABI, readConfirmedRevocationCutoff, revocationFeeMessage, type PendingRevocation } from "./permission-revocation";
@@ -74,13 +74,13 @@ export async function revokeFromBrowser(w: BrowserWallet, onStatus: (message: st
   const confirmationClient = createPublicClient({ chain, cacheTime: 0, transport: http(undefined, { timeout: 2_500, retryCount: 0 }) });
   const entryPoint = getEntryPoint("0.7");
   const sudo = await signerToEcdsaValidator(publicClient, { signer, entryPoint, kernelVersion: KERNEL_V3_3 });
-  const account = await createKernelAccount(publicClient, { entryPoint, kernelVersion: KERNEL_V3_3, plugins: { sudo } });
+  const account = await createKernelAccount(publicClient, { entryPoint, kernelVersion: KERNEL_V3_3, plugins: { sudo }, index: accountIndexForPurpose(w.purpose ?? "spot") });
   assertDerivedAccount(account.address, "owner permission revocation");
   if (account.address.toLowerCase() !== w.smartAccount.toLowerCase()) {
     throw new Error("This owner controls a different account. No revocation was signed.");
   }
   await getRecoveryTicket(w);
-  const url = relayUrl(w.chainId);
+  const url = relayUrl(w.chainId, w.purpose ?? "spot");
   const client = createKernelAccountClient({ account, chain, bundlerTransport: http(url), userOperation: userOpGasConfig(publicClient, url) });
   try {
     return await invalidatePermissions({

@@ -65,6 +65,7 @@ import { agentAccountFor } from "@/lib/agent-account";
 import { countedAgent, readStanding, standingTokens } from "@/lib/merrymen-standing";
 import { createPublicClient } from "viem";
 import { errorText } from "../../../../../worker/src/redact-urls";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -102,6 +103,8 @@ function tierView(t: CircleTier) {
 }
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const baseFeeBps = SETTINGS_DEFAULTS.perfFeeBps;
   const token = {
     symbol: MERRYMEN_TOKEN.symbol,

@@ -23,128 +23,13 @@
  */
 // Browser-safe: chat-commands.ts, which the card bundles, imports it too.
 import { MERRYMEN_TOKEN } from "@merrymen/core";
+// Browser-safe too (it imports one type), and by path: the worker checks an
+// exit with this same parser before it builds one, so the two gates cannot
+// come to disagree about what an exit is.
+import { isPerpExitPurpose, readPerpExitOrder, type PerpExitOrder } from "../../../worker/src/perps/owner-order";
 
-/**
- * How long after its expiry an UNCLAIMED row may still hold the one-at-a-time
- * slot, and how long GET waits before calling it expired.
- *
- * The expiry is enforced in the CHILD, at the claim, so a row can legitimately
- * be a ferry pass and a tick behind its own deadline while it is genuinely
- * being decided. Past that it either answered or never will.
- *
- * The orchestrator's ORDER_GRACE_MS is the same figure, stated there because
- * the two processes share no module: the ferry must not close a row before the
- * route would free its slot, or a second order is admitted beside a live one.
- */
-export const ORDER_STALE_GRACE_MS = 2 * 60_000;
-
-/**
- * How long past deadline AND grace a CLAIMED row goes on holding the slot.
- *
- * A claimed order may be waiting on its receipt well after its deadline — the
- * deadline bounds when the order STARTS (the worker refuses a late claim, and
- * refuses an order its intent queue reaches late), not when it finishes. So
- * the slot is released only once the order's own run cannot still be filling
- * it; freeing it earlier is "ask again" with the first order on chain. The
- * orchestrator's sweep closes such a row at the same moment, with a sentence
- * that does not claim to know.
- * Stated again in worker/src/command-files.ts for that sweep; a test holds the
- * two equal.
- */
-export const ORDER_IN_FLIGHT_MS = 10 * 60_000;
-
-/** The shortest an order window may ever be, whatever the tick. */
-export const ORDER_TTL_FLOOR_MS = 5 * 60_000;
-
-/**
- * How long an order stays willing to fill, for a given tick.
- *
- * Two ticks plus a ferry pass is the smallest window that survives missing one
- * — the child drains at most ONE command per tick — with the original five
- * minutes as a floor so a fast tick does not make orders expire faster than a
- * person can watch them. The route supplies the CALLER's tick, not the
- * container's.
- */
-export function orderTtlMs(tickSeconds: number): number {
-  return Math.max(ORDER_TTL_FLOOR_MS, (2 * tickSeconds + 15) * 1000);
-}
-
-export type OrderState = "queued" | "running" | "done" | "expired";
-
-/**
- * The deadline an order was placed with, or null when it carries none.
- *
- * NULL IS NOT "ALREADY EXPIRED". The worker's `isExpired` treats a missing
- * `expiresAt` as no expiry at all, so an order without one can still be run —
- * and saying it expired would be telling the owner nothing was sent about an
- * order that may yet fill.
- */
-export function orderExpiresAt(args: unknown): number | null {
-  let bag: unknown = args;
-  if (typeof args === "string") {
-    try {
-      bag = JSON.parse(args);
-    } catch {
-      return null;
-    }
-  }
-  if (!bag || typeof bag !== "object") return null;
-  const v = (bag as { expiresAt?: unknown }).expiresAt;
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
-
-/** The one rule, for a table row and a command file alike. */
-export function orderStateOf(
-  o: { done: boolean; claimed: boolean; expiresAt: number | null },
-  nowMs: number,
-): OrderState {
-  if (o.done) return "done";
-  if (o.claimed) return "running";
-  if (o.expiresAt !== null && nowMs > o.expiresAt + ORDER_STALE_GRACE_MS) return "expired";
-  return "queued";
-}
-
-/** An unanswered order, as the one-at-a-time rule reads it. */
-export interface SlotHolder {
-  claimed: boolean;
-  expiresAt: number | null;
-  /** Placed (or, for a self-hosted marker, claimed) — used only when there is no deadline. */
-  at: number;
-}
-
-/**
- * The moment an unanswered order stops holding the owner's slot.
- *
- * UNCLAIMED: at the instant GET first says "expired" — never earlier, or a
- * second order is admitted while the first can still be claimed; never later,
- * or the owner is told to ask again and then refused for asking.
- *
- * CLAIMED: the in-flight bound after that, because a claimed order can still
- * be trading. Not for ever: a child SIGKILLed mid-trade — the watchdog does
- * that in bulk on this fleet — never answers, and a row nothing can finish
- * used to refuse every future order from that owner, for good.
- *
- * NO DEADLINE (legacy rows only; nothing the route writes today) AND NOT YET
- * CLAIMED: never, until it is claimed. The worker's `isExpired` runs such an
- * order whenever it gets to it, and GET calls it queued for as long as it
- * waits, so there is no moment at which it stops being able to fill. It used
- * to let go at the floor window and its grace — the orchestrator's old seven
- * minutes — and admit a second order beside one the worker would still run.
- * Hosted, the ferry ends the wait: it delivers the row, or closes it as never
- * delivered. Self-hosted, the worker's next armed tick does.
- *
- * NO DEADLINE, CLAIMED: the floor window from when it was placed (or, for a
- * marker, claimed), and the in-flight bound after it, as for any claimed order.
- */
-export function slotFreesAt(o: SlotHolder): number {
-  if (o.expiresAt === null && !o.claimed) return Number.POSITIVE_INFINITY;
-  const deadline = o.expiresAt ?? o.at + ORDER_TTL_FLOOR_MS;
-  return deadline + ORDER_STALE_GRACE_MS + (o.claimed ? ORDER_IN_FLIGHT_MS : 0);
-}
-
-export function holdsSlot(o: SlotHolder, nowMs: number): boolean {
-  return nowMs <= slotFreesAt(o);
-}
+import { holdsSlot, orderExpiresAt, orderStateOf, orderTtlMs, ORDER_STALE_GRACE_MS, ORDER_IN_FLIGHT_MS, ORDER_TTL_FLOOR_MS, type OrderState } from "../../../worker/src/order-window";
+export { holdsSlot, slotFreesAt, orderExpiresAt, orderStateOf, orderTtlMs, ORDER_STALE_GRACE_MS, ORDER_IN_FLIGHT_MS, ORDER_TTL_FLOOR_MS, type OrderState, type SlotHolder } from "../../../worker/src/order-window";
 
 /** What POST answers once the order exists. */
 export interface OrderPlaced {
@@ -302,6 +187,55 @@ export function readOrder(body: OrderBody): { order: OrderAsked } | { error: str
     order.purpose = "energy";
   }
   return { order };
+}
+
+// ── the Perps wallet's orders: the owner's exits, and nothing else ────────
+
+/** What a Perps wallet's order queue carries: an exit, exactly as the worker's parser reads it. */
+export type PerpsWalletOrder = PerpExitOrder;
+
+/**
+ * Said to an owner whose Perps wallet was asked for anything but an exit.
+ * Nothing is queued: a buy, a sell or an energy buy would spend the practice
+ * book's collateral on tokens, and the worker refuses each again
+ * (order-gate.ts walletOrderRefusal).
+ */
+export const PERPS_WALLET_EXITS_ONLY =
+  "This is your Perps wallet: from the app it only closes perpetual positions (close one, or close all). Place Spot orders from your Spot wallet. Nothing was queued.";
+
+/**
+ * Said to an owner whose Spot wallet was asked to close a perpetual position.
+ * The Spot wallet holds none, and an exit there must never be read as a sell
+ * of something else; the worker refuses it again (walletOrderRefusal).
+ */
+export const SPOT_WALLET_HOLDS_NO_PERPS =
+  "Your Spot wallet holds no perpetual positions; close them from your Perps wallet. Nothing was queued.";
+
+/** Does this Spot order body name one of the Perps wallet's exits? Checked before readOrder, which knows no exits. */
+export function namesPerpExit(body: unknown): boolean {
+  return !!body && typeof body === "object" && isPerpExitPurpose((body as { purpose?: unknown }).purpose);
+}
+
+/**
+ * The exit a Perps wallet's order is asking for, or the reason it is not one.
+ *
+ * EXITS ONLY: `close-perp` (one market, the practice book) and
+ * `flatten-perps` (Close all; with no book when the desk could not read which
+ * book it saw, which the worker reads as every book, D11). The shape is
+ * worker/src/perps/owner-order.ts's, checked here with the worker's own
+ * parser, and what is queued is the parser's object — never the body — so
+ * nothing the request carried beside the exit (an `expectedAccount`, an
+ * `owner`, a field nobody reads) is ever written into the command.
+ *
+ * A BODY THAT IS NOT AN OBJECT IS REFUSED here, before any field is read: JSON
+ * `null`, a list or a string is not an order, and reading a field off one
+ * would throw.
+ */
+export function readPerpsWalletOrder(body: unknown): { order: PerpsWalletOrder } | { error: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "That is not an order. Nothing was queued." };
+  const exit = readPerpExitOrder(body as Record<string, unknown>);
+  if (exit === null) return { error: PERPS_WALLET_EXITS_ONLY };
+  return exit;
 }
 
 /**
@@ -515,6 +449,7 @@ export async function readHostedOrder(
   agent: string,
   id: string,
   nowMs: number,
+  kind: "trade" | "paper-reset" = "trade",
 ): Promise<
   { status: 200; body: ReturnType<typeof hostedOrderReply> | { state: "none" } } | typeof LEDGER_UNREADABLE
 > {
@@ -529,15 +464,15 @@ export async function readHostedOrder(
       ? db
           .prepare(
             `SELECT * FROM agent_commands
-              WHERE agent_id = ? AND kind = 'trade' AND id = ? LIMIT 1`,
+              WHERE agent_id = ? AND kind = ? AND id = ? LIMIT 1`,
           )
-          .get(agent, id)
+          .get(agent, kind, id)
       : db
           .prepare(
             `SELECT * FROM agent_commands
-              WHERE agent_id = ? AND kind = 'trade' ORDER BY created_at DESC, id DESC LIMIT 1`,
+              WHERE agent_id = ? AND kind = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
           )
-          .get(agent))) as Record<string, unknown> | undefined;
+          .get(agent, kind))) as Record<string, unknown> | undefined;
     return { status: 200, body: row ? hostedOrderReply(row, nowMs) : { state: "none" } };
   } catch {
     return LEDGER_UNREADABLE;
@@ -551,6 +486,8 @@ export interface OpenFile {
   state: "queued" | "running";
   expiresAt: number | null;
   at: number;
+  /** What the file or marker says was queued or claimed; absent when it does not say (a legacy marker) or cannot be read. */
+  kind?: string;
 }
 
 /**
@@ -564,20 +501,40 @@ export interface OpenFile {
  * it only drains while armed. The file stays where it is; the worker drops it
  * as expired at the claim and writes the receipt that says so.
  *
+ * `account`, when given, is written on the file beside the deadline
+ * (command-files.ts FileCommand.account): the worker runs it only on that
+ * account, because a home outlives the account in it. The Perps wallet's
+ * exits carry it; Spot's orders are written as they always were.
+ *
+ * ORDERS HOLD THE SLOT, AS HOSTED (placeHostedOrder reads kind = 'trade'
+ * only). A queued practice reset or selftest shares the directory and is not
+ * an order: counted, a Perps practice reset (D12, written with a deadline)
+ * refused the owner's Close and Close all "you already have an order
+ * waiting" with no order waiting, where hosted queued them. A running marker
+ * says what was claimed (command-files.ts markRunning), so a reset whose run
+ * threw, or whose worker died mid-run, no longer holds it for ~17 minutes
+ * either; a claimed order still does. A marker or file that does not say what
+ * it is (a legacy marker, a file that cannot be read) holds it: it may be an
+ * order.
+ *
  * A listing that throws is "unreachable", never "nothing waiting".
  */
 export function placeSelfHostedOrder(
-  files: { open(): OpenFile[]; write(cmd: { id: string; kind: "trade"; at: number; args: OrderAsked; expiresAt: number }): void },
-  o: { id: string; args: OrderAsked; expiresAt: number; now: number },
+  files: {
+    open(): OpenFile[];
+    write(cmd: { id: string; kind: "trade"; at: number; args: OrderAsked | PerpsWalletOrder; expiresAt: number; account?: string }): void;
+  },
+  o: { id: string; args: OrderAsked | PerpsWalletOrder; expiresAt: number; now: number; account?: string },
 ): PlaceResult {
   try {
     const held = files
       .open()
+      .filter((f) => f.kind === undefined || f.kind === "trade")
       .some((f) => holdsSlot({ claimed: f.state === "running", expiresAt: f.expiresAt, at: f.at }, o.now));
     if (held) return { ok: false, why: "in-flight" };
     // The id collision is handled by the file simply being rewritten, which
     // for an identical order in the same minute is a no-op.
-    files.write({ id: o.id, kind: "trade", at: o.now, args: o.args, expiresAt: o.expiresAt });
+    files.write({ id: o.id, kind: "trade", at: o.now, args: o.args, expiresAt: o.expiresAt, ...(o.account ? { account: o.account } : {}) });
     return { ok: true };
   } catch (e) {
     return { ok: false, why: "unreachable", detail: e instanceof Error ? e.message : String(e) };

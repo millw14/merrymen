@@ -18,11 +18,13 @@ import { describe, it } from "node:test";
 import {
   chatOrderGate,
   createTickBook,
+  isPerpExitRoute,
   orderAsked,
   orderReadsOf,
   orderRoute,
   placeOrder,
   tickReads,
+  walletOrderRefusal,
   type OrderReads,
   type OrderRoute,
   type StatedReads,
@@ -180,6 +182,80 @@ describe("the energy route is reached only by get-energy's marker", () => {
     const { reply, sent } = await place({ side: "buy", symbol: "MERRYMEN", usdgAmount: 30, purpose: "energy" }, { paused: true });
     assert.equal(reply.ok, false);
     assert.deepEqual(sent, []);
+  });
+});
+
+/**
+ * AN OWNER'S PERPETUAL EXIT GOES TO THE LANE, AND ONLY ITS OWN SHAPE IS JUDGED
+ * HERE (perps/owner-order.ts). It is reduce-only and sized by what is held, so
+ * the Spot reads, the pause and the typed-order ceiling have nothing to say
+ * about it — rule 8a: an exit is always attemptable. Which wallet's worker may
+ * run it is walletOrderRefusal's, asked before this gate.
+ */
+describe("an owner's perpetual exit", () => {
+  const CLOSE = { side: "sell", symbol: "btc-perp", usdgAmount: 0, purpose: "close-perp", book: "paper" };
+  const FLATTEN = { side: "sell", symbol: "ALL-PERPS", usdgAmount: 0, purpose: "flatten-perps" };
+
+  /** Run placeOrder and record what the submitter was handed. */
+  async function handed(args: Record<string, unknown>, reads: Partial<OrderReads> = {}) {
+    const sent: { side: string; symbol: string; size: number; route: OrderRoute }[] = [];
+    const reply = await placeOrder(args, { ...READ, ...reads }, async (side, symbol, size, route) => {
+      sent.push({ side, symbol, size, route });
+      return { ok: true, line: "closed" };
+    });
+    return { reply, sent };
+  }
+
+  it("is routed by its marker to the lane's route, its market canonical and its size zero", async () => {
+    assert.deepEqual((await handed(CLOSE)).sent, [{ side: "sell", symbol: "BTC-PERP", size: 0, route: "close-perp" }]);
+    assert.deepEqual((await handed(FLATTEN)).sent, [{ side: "sell", symbol: "ALL-PERPS", size: 0, route: "flatten-perps" }]);
+    assert.equal(orderRoute(CLOSE), "close-perp");
+    assert.equal(orderRoute(FLATTEN), "flatten-perps");
+    assert.equal(orderRoute({ side: "sell", symbol: "BTC-PERP", usdgAmount: 0 }), "trade", "never inferred from a -PERP symbol");
+    assert.equal(isPerpExitRoute("close-perp") && isPerpExitRoute("flatten-perps"), true);
+    assert.equal(isPerpExitRoute("trade") || isPerpExitRoute("energy"), false);
+  });
+
+  it("IS NEVER STRANDED BY A SPOT READ, THE PAUSE OR THE TYPED-ORDER CEILING — exits are always attemptable", async () => {
+    for (const reads of [{ marketUnreadable: true }, { bookUnreadable: true }, { equityKnown: false }, { paused: true }, { ceilingUsdg: 1 }]) {
+      for (const args of [CLOSE, FLATTEN]) {
+        const { reply, sent } = await handed(args, reads);
+        assert.equal(reply.ok, true, JSON.stringify({ args, reads }));
+        assert.equal(sent.length, 1);
+      }
+    }
+  });
+
+  it("a malformed exit is refused by its own words and reaches nothing — and an ordinary order still meets every gate", async () => {
+    for (const args of [{ ...CLOSE, book: "live" }, { ...CLOSE, usdgAmount: 5 }, { ...CLOSE, side: "buy" }, { ...FLATTEN, symbol: "BTC-PERP" }]) {
+      const { reply, sent } = await handed(args, { paused: true });
+      assert.equal(reply.ok, false);
+      assert.doesNotMatch(reply.line, /paused/, "answered as the exit it failed to be, not by a Spot gate");
+      assert.match(reply.line, /Nothing was sent/);
+      assert.deepEqual(sent, []);
+    }
+    await refused(SELL, { paused: true }, /you have me paused/);
+  });
+});
+
+/**
+ * ONE LOGIN, TWO WALLETS, TWO WORKERS. A Perps wallet's worker takes the
+ * owner's perpetual exits and nothing else from the app; a Spot wallet's never
+ * takes one. Asked before placeOrder (index.ts runOrderCommand).
+ */
+describe("walletOrderRefusal", () => {
+  it("a Perps wallet's worker takes exits only — never a trade, never an energy buy", () => {
+    assert.equal(walletOrderRefusal("perps", "close-perp"), null);
+    assert.equal(walletOrderRefusal("perps", "flatten-perps"), null);
+    assert.match(walletOrderRefusal("perps", "trade") ?? "", /Perps wallet: from the app it only closes perpetual positions\. .*Nothing was sent/);
+    assert.match(walletOrderRefusal("perps", "energy") ?? "", /never buys energy — its USDG is perpetual collateral\. Nothing was bought/);
+  });
+
+  it("a Spot wallet's worker never takes an exit, and everything it always took it still takes", () => {
+    assert.match(walletOrderRefusal("spot", "close-perp") ?? "", /Spot wallet holds no perpetual positions/);
+    assert.match(walletOrderRefusal("spot", "flatten-perps") ?? "", /Nothing was sent/);
+    assert.equal(walletOrderRefusal("spot", "trade"), null);
+    assert.equal(walletOrderRefusal("spot", "energy"), null);
   });
 });
 

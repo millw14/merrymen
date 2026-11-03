@@ -88,6 +88,25 @@ describe("an agent that already has a name, or might, is never renamed", () => {
     }
   });
 
+  it("THE COUNT IS SPOT'S: a Perps wallet held first never makes the Spot agent look re-granted", async () => {
+    // The grants route never adds a Perps account to an identity (decision
+    // D2). Should one get there anyway, the owner's first Spot agent is still
+    // new, and gets its slug's name rather than "Robin".
+    const PERPS = "0x00000000000000000000000000000000000000E1";
+    const perpsFirst = inputs({ prior: { accounts: [PERPS] }, perpsWallets: async () => new Set([PERPS.toLowerCase()]) });
+    assert.deepEqual(await nameNewAgent(perpsFirst.args), { named: agentNameForSlug(SLUG) });
+    assert.equal(perpsFirst.writes.length, 1);
+    // A Spot account held before is still "not new", Perps wallet or not.
+    const both = inputs({ prior: { accounts: [PERPS, "0x00000000000000000000000000000000000000a0"] }, perpsWallets: async () => new Set([PERPS.toLowerCase()]) });
+    assert.deepEqual(await nameNewAgent(both.args), { skipped: "not-new" });
+    // A record that cannot be read, or none asked, counts every prior account: never a rename.
+    for (const perpsWallets of [async () => null, async () => { throw new Error("ledger down"); }, undefined]) {
+      const unread = inputs({ prior: { accounts: [PERPS] }, perpsWallets });
+      assert.deepEqual(await nameNewAgent(unread.args), { skipped: "not-new" });
+      assert.deepEqual(unread.writes, []);
+    }
+  });
+
   it("no slug, no name — a blank seed would name every such agent the same", async () => {
     const { args, writes } = inputs({ slug: "" });
     assert.deepEqual(await nameNewAgent(args), { skipped: "no-slug" });

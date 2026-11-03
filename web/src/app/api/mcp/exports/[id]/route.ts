@@ -21,11 +21,14 @@ import { mcpConfig } from "@/mcp/config";
 import { mcpDb } from "@/mcp/db";
 import { jsonResponse } from "@/mcp/oauth/metadata";
 import { writeAudit } from "@/mcp/observe";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const cfg = mcpConfig();
   if (!cfg.enabled) return jsonResponse({ error: "not_found" }, 404);
   const tenant = tenantOf(req);

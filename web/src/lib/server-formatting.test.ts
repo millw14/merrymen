@@ -38,7 +38,7 @@ import {
  *
  *     WHATEVER THE SERVER RENDERS IS LOCALE-INDEPENDENT.
  *
- * It holds because the server tree is handed NO DATA — figures arrive from
+ * It holds because the server tree is handed NO FINANCIAL DATA — figures arrive from
  * client fetches — so at SSR every value is null, every formatter returns the
  * em dash before it reaches `Intl`, and the em dash is one string in all
  * eleven languages. The first client render runs with that same empty state and
@@ -54,15 +54,20 @@ const SRC = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (p: string) => readFileSync(path.join(SRC, p), "utf8");
 
 describe("the server tree is handed nothing to format", () => {
-  it("THE APP RECEIVES NO DATA FROM THE SERVER", () => {
+  it("THE APP RECEIVES ONLY CAPABILITY FLAGS FROM THE SERVER", () => {
     // One prop carrying a balance or a price would be rendered server-side, in
     // whatever locale the server guessed, and then re-rendered on the client in
     // the reader's own. This is the edit that would break everything below it.
-    // The one prop allowed is the Solana switch (solanaEnabled): a boolean from
-    // the server's environment, not a figure, so no locale renders it twice.
-    const layout = read("app/(app)/layout.tsx").replace("<App solana={solanaEnabled()} />", "<App />");
-    assert.match(layout, /<App \/>/, "App must be rendered without props");
-    assert.ok(!/<App\s+\w/.test(layout), "a prop on <App/> would put server data in the tree");
+    // Only the explicit Solana and paper-Perps capability booleans are allowed.
+    // Neither carries account data or a figure. Match the complete element so
+    // an added data prop, JSX spread, or substituted value still fails.
+    const layout = read("app/(app)/layout.tsx").replace(
+      /<App\s+solana=\{solanaEnabled\(\)\}\s+perps=\{perpsOffered\(\)\}\s*\/>/,
+      "<App />",
+    );
+    assert.equal(layout.match(/<App\b/g)?.length, 1, "the terminal has exactly one App boundary");
+    assert.match(layout, /<App \/>/, "App may receive only the two server capability flags");
+    assert.ok(!/<App\s+(?!\/)/.test(layout), "an unapproved prop on <App/> would put server data in the tree");
   });
 
   it("and no route outside that tree formats a figure of its own", () => {

@@ -33,7 +33,7 @@ import type { LocalAccount } from "viem";
 import { createKernelAccount, createKernelAccountClient } from "@zerodev/sdk";
 import { KERNEL_V3_3, getEntryPoint } from "@zerodev/sdk/constants";
 import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
-import { assertDerivedAccount } from "../../packages/core/src/index";
+import { accountIndexForPurpose, type GrantPurpose, assertDerivedAccount } from "../../packages/core/src/index";
 import {
   CASH,
   MERRYMEN_TOKEN,
@@ -461,11 +461,11 @@ export const ownerAddressOf = (owner: RecoveryOwner): Address =>
  * owner address) — so a single differing argument silently produces a different,
  * empty account, and a recovery that "succeeds" having moved nothing.
  *
- * No `index`, no `address` override, no factory overrides: the SDK's defaults
- * (index 0n, useMetaFactory true) are what every other construction in this
- * repo uses, so this reproduces an account minted by web/src/lib/session.ts.
+ * The purpose selects the same account index as wallet creation: Spot 0n,
+ * Perps 1n. No address or factory override can redirect recovery.
  */
-async function deriveKernelAccount(chain: Chain, rpcUrl: string | undefined, ownerAccount: LocalAccount) {
+async function deriveKernelAccount(chain: Chain, rpcUrl: string | undefined, ownerAccount: LocalAccount, purpose: GrantPurpose) {
+  const index = accountIndexForPurpose(purpose);
   const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
   const entryPoint = getEntryPoint("0.7");
   const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
@@ -477,6 +477,7 @@ async function deriveKernelAccount(chain: Chain, rpcUrl: string | undefined, own
     entryPoint,
     kernelVersion: KERNEL_V3_3,
     plugins: { sudo: ecdsaValidator },
+    index,
   });
 }
 
@@ -490,6 +491,7 @@ async function deriveKernelAccount(chain: Chain, rpcUrl: string | undefined, own
  * so `ownerFromAddress` is a first-class way to call it.
  */
 export async function planRecovery(opts: {
+  purpose?: GrantPurpose;
   chain: Chain;
   owner: RecoveryOwner;
   rpcUrl?: string;
@@ -500,7 +502,7 @@ export async function planRecovery(opts: {
 }): Promise<RecoverPlan> {
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
   const ownerAccount = ownerAccountOf(opts.owner);
-  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccount);
+  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccount, opts.purpose ?? "spot");
 
   // A sweep aimed at the zero address would be a signed transaction to nothing.
   assertDerivedAccount(account.address, "that owner does not derive an account");
@@ -842,6 +844,7 @@ export function nativeSweep(heldWei: bigint, gasPriceWei: bigint): { sweep: bigi
 }
 
 export async function recoverFunds(opts: {
+  purpose?: GrantPurpose;
   chain: Chain;
   owner: RecoveryOwner;
   bundlerUrl: string;
@@ -894,6 +897,7 @@ export async function recoverFunds(opts: {
     );
   }
   const plan = await planRecovery({
+    purpose: opts.purpose,
     chain: opts.chain,
     owner: opts.owner,
     rpcUrl: opts.rpcUrl,
@@ -932,7 +936,7 @@ export async function recoverFunds(opts: {
     return { ...plan, txHash: null, to: opts.to, skipped: [], nativeSweptWei: 0n, nativeReservedWei };
   }
   const ownerAccount = ownerAccountOf(opts.owner);
-  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccount);
+  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccount, opts.purpose ?? "spot");
   assertDerivedAccount(account.address, "that owner does not derive an account");
   // DERIVED TWICE, CHECKED TWICE. `planRecovery` already compared this against
   // `expectedSmartAccount`, but that was a different derivation a moment

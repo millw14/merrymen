@@ -8,6 +8,7 @@
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { SESSION_COOKIE, mintSession, sessionCookieOptions, verifySignedChallenge } from "@/lib/auth";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +20,8 @@ function originOf(req: Request): string {
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return new NextResponse("not found", { status: 404 });
   let body: { nonce?: unknown; signature?: unknown };
   try {

@@ -37,6 +37,7 @@ async function exclusive<T>(account: Address, run: () => Promise<T>): Promise<T>
 }
 
 async function ownerClient(w: BrowserWallet) {
+  if ((w.purpose ?? "spot") !== "spot") throw new Error("Gloam withdrawals support the Spot wallet only.");
   if (w.chainId !== GLOAM_WITHDRAWAL_CHAIN_ID) throw new Error("Gloam withdrawals support USDG on Robinhood mainnet only.");
   const signer = w.ownerKey ? privateKeyToAccount(w.ownerKey) : w.ownerAccount;
   if (!signer) throw new Error("Sign in with this agent's owner wallet to approve a withdrawal.");

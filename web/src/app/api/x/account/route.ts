@@ -79,6 +79,7 @@ import {
   setPrefs,
   type XPostPrefs,
 } from "../../../../../../worker/src/xpost/store";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,6 +94,8 @@ const refuse = (status: number, error: string) =>
   json(status >= 500 ? { error, ownerFacing: true } : { error }, status);
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, X_COPY.signedOut);
@@ -126,6 +129,8 @@ function ownerRefusal(input: Record<string, unknown>, tenant: `0x${string}`): Re
 }
 
 export async function POST(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, X_COPY.signedOut);
@@ -210,6 +215,8 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (!isHostedMode()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, X_COPY.signedOut);

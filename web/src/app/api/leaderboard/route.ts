@@ -13,6 +13,7 @@
 import { NextResponse } from "next/server";
 import { readLeaderboard } from "@/lib/read-leaderboard";
 import { readAgentDirectory } from "@/lib/agent-directory";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * NOT PRERENDERED AT BUILD, and that is a correctness rule rather than a
@@ -35,6 +36,8 @@ import { readAgentDirectory } from "@/lib/agent-directory";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   if (new URL(req.url).searchParams.get("view") === "directory") {
     const directory = await readAgentDirectory();
     return NextResponse.json(directory, {

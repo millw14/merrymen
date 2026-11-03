@@ -41,14 +41,14 @@
  * it stays pending. A single shared file would need a read-modify-write, and
  * the second kill could be overwritten inside it.
  *
- * THE REQUEST IS NOT DURABLE, SO THE CHILD DOES NOT CLAIM THE KILL IS DONE.
- * It lives in the child's home, and a redeploy discards the container along
- * with it. A request lost before the store is changed is a grant that arms
- * again. So:
+ * THE REQUEST ALONE DOES NOT PROVE THE KILL IS DONE.
+ * Its file and directory entries are synced in the child's persistent home.
+ * Losing or replacing that volume can still lose a request before the store
+ * changes, so preserving the home is a launch requirement. Therefore:
  *
  *  - the orchestrator carries requests out on its three-second order-ferry
  *    clock and again on shutdown, not only in the fifteen-second reconcile.
- *    The window in which one can be lost is seconds, not a pass;
+ *    This shortens the interval before the durable store confirms revocation;
  *  - the child's reply says only what the child did. The ✅ that the grant is
  *    gone (KILL_DONE_TEXT) is sent by the orchestrator after the conditional
  *    DELETE succeeds. That is the one party that knows it happened.
@@ -63,6 +63,7 @@ import { readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "no
 import path from "node:path";
 import type { StoredGrant } from "../../packages/core/src/index";
 import type { GrantStore } from "./grant-store";
+import { writeFileAtomicSync } from "./atomic-write";
 
 /** `kill-request-<nonce>.json` is pending; `kill-request-<nonce>.superseded.json` is not. */
 export const KILL_REQUEST_PREFIX = "kill-request-";
@@ -262,10 +263,8 @@ export function writeKillRequest(
 ): void {
   const nonce = randomUUID();
   const file = path.join(home, `${KILL_REQUEST_PREFIX}${nonce}${PENDING_SUFFIX}`);
-  const tmp = path.join(home, `${KILL_REQUEST_PREFIX}${nonce}.tmp`);
   const body: KillRequestBody = { smartAccount: grant.smartAccount, grant: grantIdentity(grant), killedAt: nowSec };
-  writeFileSync(tmp, JSON.stringify(body, null, 2), { encoding: "utf8", mode: 0o600 });
-  renameSync(tmp, file);
+  writeFileAtomicSync(file, JSON.stringify(body, null, 2), 0o600, { durable: true, followSymlinks: false });
 }
 
 export interface HostedKillResult {

@@ -11,18 +11,30 @@
  * timestamps are formatted from the raw epoch by fmtEpoch() instead.
  */
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { homePaths } from "../../../worker/src/home";
+import { purposeHome } from "../../../worker/src/home";
 import { wrapSqlite, makePgDb, type Db } from "../../../worker/src/db";
+import { isGrantPurpose, type GrantPurpose } from "../../../packages/core/src/grant";
 
 /**
  * Run `fn` against the ledger's read driver, or against `null` when there is no
  * ledger to read (no sqlite file yet, or an unopenable one). Never throws for a
  * missing/locked database — that is an empty dashboard, not an error.
+ *
+ * WHOSE LEDGER: `wallet`, named by every caller, with no default (as the stores
+ * and `purposeHome` take it). Hosted, both wallets' rows live in the one shared
+ * Postgres, told apart by the account every query already names, so the driver
+ * is the same. Self-hosted, each wallet's worker writes its own home's
+ * merrymen.db (`purposeHome`: Spot's where it has always been, Perps's under
+ * accounts/perps), so a Perps read opens that file and never the Spot one —
+ * absent, it is an empty panel, not the other wallet's book.
  */
 export function createReadDb(openPostgres: (url: string) => Promise<Db> = makePgDb) {
   let pgDriver: Promise<Db> | null = null;
-  return async function withReadDb<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
+  return async function withReadDb<T>(fn: (db: Db | null) => Promise<T>, wallet: GrantPurpose): Promise<T> {
+    // Thrown, never read as Spot: an unnamed wallet is the caller's bug.
+    if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
     const url = process.env.DATABASE_URL;
     if (url) {
       // One pooled Postgres driver for the whole web process. The worker child is
@@ -33,10 +45,11 @@ export function createReadDb(openPostgres: (url: string) => Promise<Db> = makePg
       });
       return fn(await pgDriver);
     }
-    if (!existsSync(homePaths.db())) return fn(null);
+    const file = path.join(purposeHome(wallet), "merrymen.db");
+    if (!existsSync(file)) return fn(null);
     let raw: DatabaseSync;
     try {
-      raw = new DatabaseSync(homePaths.db(), { readOnly: true });
+      raw = new DatabaseSync(file, { readOnly: true });
     } catch {
       return fn(null);
     }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { resolveLogo, safeHost } from "@/lib/coin-image";
 import { fetchPublicHttps } from "../../../../../packages/core/src/server/public-network";
+import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * A launched token's logo, fetched server-side and streamed back.
@@ -34,6 +35,8 @@ const MAX_BYTES = 2_000_000;
 const TIMEOUT_MS = 6_000;
 
 export async function GET(req: Request) {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const raw = new URL(req.url).searchParams.get("uri");
   if (!raw) return new NextResponse("missing uri", { status: 400 });
 

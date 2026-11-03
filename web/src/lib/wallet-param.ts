@@ -5,7 +5,9 @@ import { isGrantPurpose, type GrantPurpose } from "@merrymen/core";
  *
  * ABSENT IS SPOT, so every client written before Perps keeps reaching the
  * account it always reached. A value that names no wallet, an empty one, or
- * more than one is null, and the route refuses it rather than guessing.
+ * more than one is null, and the route refuses it rather than guessing. A
+ * differently cased key is invalid too: `?Wallet=perps` is not an absent
+ * selector and must never fall through to a mutation of the Spot wallet.
  *
  * NOT `?purpose=`, the perps branch's name for it. DELETE /api/grants already
  * reads `purpose` from its body, for what a stop is for (`delete-agent`,
@@ -15,7 +17,38 @@ import { isGrantPurpose, type GrantPurpose } from "@merrymen/core";
 export const WALLET_PARAM = "wallet";
 
 export function readWalletParam(req: Pick<Request, "url">): GrantPurpose | null {
-  const values = new URL(req.url).searchParams.getAll(WALLET_PARAM);
+  const params = new URL(req.url).searchParams;
+  for (const key of params.keys()) {
+    if (key !== WALLET_PARAM && key.toLowerCase() === WALLET_PARAM) return null;
+  }
+  const values = params.getAll(WALLET_PARAM);
   if (values.length === 0) return "spot";
   return values.length === 1 && isGrantPurpose(values[0]) ? values[0] : null;
+}
+
+/**
+ * THE ONE WAY A CLIENT NAMES A WALLET IN A URL: `walletUrl("/api/x", wallet)`.
+ *
+ * SPOT LEAVES THE URL EXACTLY AS IT WAS, byte for byte, so every request a Spot
+ * screen makes is the request it made before Perps existed (absent is Spot,
+ * readWalletParam). Perps adds `wallet=perps`, beside any query the URL
+ * already carries and in place of any `wallet=` it already names (any casing),
+ * so a URL can never name two wallets (which readWalletParam refuses).
+ *
+ * Here and not built by hand at each call site, because a hand-built `?` on a
+ * URL that already has a query, or a `wallet=` set twice, is a request for no
+ * wallet at all. And NOT `?purpose=`: see WALLET_PARAM.
+ *
+ * A path stays a path (a client's `/api/...`); an absolute URL stays absolute.
+ */
+export function walletUrl(url: string, wallet: GrantPurpose): string {
+  if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
+  if (wallet === "spot") return url;
+  const base = "http://wallet-url.invalid";
+  const parsed = new URL(url, base);
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (key.toLowerCase() === WALLET_PARAM) parsed.searchParams.delete(key);
+  }
+  parsed.searchParams.set(WALLET_PARAM, wallet);
+  return parsed.origin === base ? `${parsed.pathname}${parsed.search}${parsed.hash}` : parsed.href;
 }

@@ -15,6 +15,7 @@ import { OAuthError, createPersonalToken, listConnections, revokeConnection } fr
 import { scopeInfo, SCOPES } from "@/mcp/scopes";
 import { writeAudit } from "@/mcp/observe";
 import { cancelAwaitingForConnection } from "@/lib/services/proposals";
+import { walletNotSupported } from "@/lib/route-guard";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -23,6 +24,8 @@ export const runtime = "nodejs";
 const BODY_MAX = 8 * 1024;
 
 export async function GET(req: Request): Promise<Response> {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const cfg = mcpConfig();
   if (!cfg.enabled) return jsonResponse({ enabled: false, why: cfg.disabledWhy }, 404);
   const tenant = tenantOf(req);
@@ -49,6 +52,8 @@ export async function GET(req: Request): Promise<Response> {
 }
 
 export async function POST(req: Request): Promise<Response> {
+  const walletRefused = walletNotSupported(req);
+  if (walletRefused) return walletRefused;
   const cfg = mcpConfig();
   if (!cfg.enabled) return jsonResponse({ error: "not_found" }, 404);
   if (req.headers.get("origin") !== cfg.issuer) return jsonResponse({ error: "forbidden", error_description: "cross-site request" }, 403);
