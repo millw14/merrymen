@@ -606,8 +606,11 @@ test("a stop sent from the desk fences the wallet page too", async () => {
   killReply = () => reply.promise.then(() => answer());
   await mount(React.createElement(PerpsScreen));
   await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  // The desk shows no key, so the stop itself journals this browser's, before any answer.
+  assert.ok(events.includes(`journal-${grant().sessionKeyAddress}`), "journaled at the press");
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
   await acknowledge();
+  assert.match(ui.container.textContent!, /A stop is waiting for its answer/);
   assert.equal(!!buttonNamed("Retry saved permission activation"), false, "the stopped key is offered for activation");
   assert.equal(buttonNamed("Renew Perps permission")?.disabled, true);
   await act(async () => { buttonNamed("Renew Perps permission")?.click(); }); await settle();
@@ -620,13 +623,16 @@ test("every key the stop could see is journaled at the press, so a lost answer n
   // The server holds a newer key (renewed elsewhere); this browser still holds the older one.
   const newer = { ...grant(), sessionKeyAddress: `0x${"e".repeat(40)}` } as Grant;
   delete (newer as Partial<Grant>).serialized; delete (newer as Partial<Grant>).demoSessionPrivateKey;
-  activeGrant = newer; localGrant = grant(); lostWrite = true;
+  activeGrant = newer; localGrant = grant();
+  const reply = deferred<void>(); killReply = () => reply.promise.then(() => { throw new Error("lost response"); });
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
   assert.equal(!!buttonNamed("Retry saved permission activation"), false);
-  await click("Stop all agents"); await click("Stop all agents now");
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  // Before any answer: a reload or a closed tab may come next.
+  assert.ok(events.includes(`journal-${newer.sessionKeyAddress}`), "the shown key is journaled at the press");
+  assert.ok(events.includes(`journal-${grant().sessionKeyAddress}`), "this browser's own key is journaled at the press");
+  await act(async () => reply.resolve()); await settle();
   assert.match(ui.container.textContent!, /not received/);
-  assert.ok(events.includes(`journal-${newer.sessionKeyAddress}`), "the shown key is journaled");
-  assert.ok(events.includes(`journal-${grant().sessionKeyAddress}`), "this browser's own key is journaled");
   // The kill did land: the next read shows nothing active, and the older local copy is the saved wallet again.
   activeGrant = null;
   await mount(React.createElement(PerpsWalletView, { key: "read-again", offered: true, creating: false, signer }));
@@ -644,4 +650,46 @@ test("a stop confirmed from another screen reads the wallet page's account again
   assert.equal(!!buttonNamed("Renew Perps permission"), true);
   await act(async () => reply.resolve(json({}))); await settle();
   assert.equal(!!buttonNamed("Create Perps wallet"), true, "the killed permission is still shown as the one to renew");
+});
+
+test("a copy another tab saved during a confirmed stop is journaled before the stop clears it", async () => {
+  activeGrant = null; localGrant = grant();
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  // Another tab renews while the stop is pending, into the shared slot.
+  const other = { ...grant(), sessionKeyAddress: `0x${"f".repeat(40)}` } as Grant;
+  localGrant = other;
+  await act(async () => reply.resolve(json({}))); await settle();
+  const journaled = events.indexOf(`journal-${other.sessionKeyAddress}`);
+  assert.ok(journaled >= 0, "the other tab's copy is journaled");
+  assert.ok(journaled < events.indexOf("clear-perps"), "journaled before it was cleared");
+  assert.equal(archived.some(item => item.sessionKeyAddress === other.sessionKeyAddress), true);
+});
+
+test("a stop's answer is not shown by a screen opened after it, or after the owner armed a new permission", async () => {
+  activeGrant = null; localGrant = grant();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await click("Stop all agents"); await click("Stop all agents now");
+  assert.match(ui.container.textContent!, /Stop request accepted/);
+  await acknowledge(); await click("Create Perps wallet");
+  assert.match(ui.container.textContent!, /Permission activated/);
+  await mount(React.createElement(PerpsScreen));
+  assert.equal(ui.container.textContent!.includes("Stop request accepted"), false);
+  await mount(React.createElement(PerpsWalletView, { key: "later", offered: true, creating: false, signer }));
+  assert.equal(ui.container.textContent!.includes("Stop request accepted"), false);
+});
+
+test("another login, signed in while the stop was pending, is never shown its answer", async () => {
+  const reply = deferred<Response>(); const answer = killReply;
+  killReply = () => reply.promise.then(() => answer());
+  await mount(React.createElement(PerpsScreen));
+  await click("Stop all agents"); await act(async () => stopNow()!.click()); await settle();
+  // Signed out and in as another login in this tab: the screens remount for it.
+  tenant = OTHER; reportOwner = OTHER; activityOwner = OTHER; chartOwner = OTHER; activeGrant = { ...grant(), owner: OTHER } as Grant;
+  await mount(React.createElement(PerpsScreen, { key: "other-login" }));
+  await act(async () => reply.resolve(json({}))); await settle();
+  assert.equal(ui.container.textContent!.includes("Stop request accepted"), false);
+  assert.equal(!!buttonNamed("Stop all agents"), true, "the other login can still stop its own agents");
 });

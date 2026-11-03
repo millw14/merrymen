@@ -20,9 +20,11 @@ const UNCONFIRMED = "Check your agents before asking again.";
  * - generation: moves when a stop is sent and when it is answered. A flow
  *   begun under an older generation is void.
  * - revision: moves when a confirmed stop cleared this browser's copies.
- * - answer: the last stop's sentence, for the login it was sent for.
+ * - answer: the last stop's sentence, for the login it was sent for, at the
+ *   generation that answered it: shown only by a screen that was mounted
+ *   while that stop was pending, never by one opened after it.
  */
-export type StopFence = { pending: number; generation: number; revision: number; answer: { login: string; text: string } | null };
+export type StopFence = { pending: number; generation: number; revision: number; answer: { login: string; text: string; generation: number } | null };
 const NO_STOPS: StopFence = { pending: 0, generation: 0, revision: 0, answer: null };
 let fence = NO_STOPS;
 const listeners = new Set<() => void>();
@@ -91,6 +93,8 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
   const session = confirmed ?? own;
   const login = session ? loginOf(session) : null;
   const stops = useStopFence();
+  /** The fence's generation when this mounted: a stop answered after it was pending while this was here. */
+  const mountedAt = useRef(currentStopFence().generation);
   const [review, setReview] = useState<StopAllSession | null>(null);
   const [sending, setSending] = useState(false);
   const [message, setMessage] = useState("");
@@ -117,9 +121,9 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
       return;
     }
     inFlight.current = true; setSending(true); setMessage("");
-    // Shown here, and kept for the tab, so a screen that remounts meanwhile
-    // shows it too (for the login it was sent for).
-    const say = (text: string) => { if (mounted.current) setMessage(text); setFence({ answer: { login: loginOf(reviewed), text } }); };
+    // Shown here, and kept with the answer for a screen remounted meanwhile.
+    let answer = "";
+    const say = (text: string) => { answer = text; if (mounted.current) setMessage(text); };
     let cleared = false;
     // THE FENCE GOES UP BEFORE ANYTHING IS SENT, whatever the answer will be.
     rememberLocalPerps();
@@ -152,6 +156,9 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
       // archived (its owner key kept, session.ts clearGrant) and then cleared,
       // so no screen offers to re-arm a permission the kill just removed. Each
       // on its own, so one that cannot be cleared still leaves the other done.
+      // The copy about to be cleared is remembered first: another tab may have
+      // saved it while the stop was pending, and the kill was login-wide.
+      rememberLocalPerps();
       const kept = (["spot", "perps"] as const).filter((wallet) => {
         try { clearGrant(wallet); return false; } catch { return true; }
       });
@@ -163,7 +170,9 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
       // A copy another tab saved meanwhile is the stop's too: the kill was
       // login-wide. (This tab's flows were voided at the press.)
       rememberLocalPerps();
-      setFence({ pending: Math.max(0, fence.pending - 1), generation: fence.generation + 1, ...(cleared ? { revision: fence.revision + 1 } : {}) });
+      const generation = fence.generation + 1;
+      setFence({ pending: Math.max(0, fence.pending - 1), generation, ...(cleared ? { revision: fence.revision + 1 } : {}),
+        ...(answer ? { answer: { login: loginOf(reviewed), text: answer, generation } } : {}) });
       inFlight.current = false;
       if (mounted.current) { setSending(false); setReview(null); }
     }
@@ -174,7 +183,7 @@ export function StopAllAgents({ session: confirmed, onSend, onDone }: {
   // Hosted, the orchestrator also removes the agents' memory; a self-hosted kill
   // removes the permissions and leaves local history where it is.
   const hosted = session?.hosted !== false;
-  const shown = message || (stops.answer && stops.answer.login === login ? stops.answer.text : "");
+  const shown = message || (stops.answer && stops.answer.login === login && stops.answer.generation > mountedAt.current ? stops.answer.text : "");
   return <section className="perps-stop-all" aria-label="Stop all agents">
     <h2>Stop all agents</h2>
     <p>{hosted
