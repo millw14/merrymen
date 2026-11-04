@@ -1,0 +1,130 @@
+/*
+ * THE MERRYMAN'S STAGE.
+ *
+ * The canvas is transparent; the glow behind him is CSS, so the character sits
+ * in whatever card or hero the page gives him rather than in a black box. The
+ * flat SVG sits in the same spot until the 3D one arrives, and fades out under
+ * it, so the swap is never a jump.
+ */
+.mm-merryman {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 160px;
+  isolation: isolate;
+  /* Vertical scrolling and pinch-zoom stay the browser's; a horizontal drag spins him. */
+  touch-action: pan-y pinch-zoom;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mm-merryman-glow {
+  position: absolute;
+  inset: 6% 4% 0;
+  z-index: -1;
+  border-radius: 50%;
+  background:
+    radial-gradient(48% 42% at 50% 58%, rgba(120, 220, 140, 0.20), transparent 70%),
+    radial-gradient(36% 30% at 60% 70%, rgba(255, 168, 80, 0.16), transparent 72%),
+    radial-gradient(60% 50% at 40% 40%, rgba(80, 190, 255, 0.10), transparent 75%);
+  filter: blur(6px);
+  animation: mm-glow 7s ease-in-out infinite alternate;
+}
+@keyframes mm-glow {
+  from { transform: scale(0.96); opacity: 0.85; }
+  to { transform: scale(1.04); opacity: 1; }
+}
+.mm-merryman-stage {
+  position: absolute;
+  inset: 0;
+}
+.mm-stage-canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  cursor: grab;
+}
+.mm-stage-canvas:active { cursor: grabbing; }
+.mm-merryman-flat {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.mm-merryman-flat svg { width: auto; height: 78%; max-width: 90%; }
+.mm-merryman-flat.is-loading svg { animation: mm-bob 1.4s ease-in-out infinite; opacity: 0.9; }
+@keyframes mm-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.mm-merryman[data-state="ready"] .mm-merryman-flat { display: none; }
+.mm-merryman[data-state="flat"] .mm-merryman-stage { display: none; }
+.mm-merryman-figure { position: absolute; inset: 0; }
+.mm-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── speech bubble ── */
+.mm-bubble {
+  position: absolute;
+  left: 50%;
+  top: 4%;
+  transform: translateX(-50%);
+  max-width: min(86%, 320px);
+  padding: 9px 14px;
+  border-radius: 16px;
+  background: #f6f2ea;
+  color: #17141a;
+  font: 600 14px/1.3 var(--mm-font-ui, "DM Sans", system-ui, sans-serif);
+  text-align: center;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 0 2px #17141a;
+  animation: mm-pop 360ms cubic-bezier(0.2, 1.6, 0.4, 1) both;
+  pointer-events: none;
+  z-index: 2;
+}
+.mm-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  width: 16px;
+  height: 16px;
+  background: inherit;
+  transform: translateX(-50%) rotate(45deg);
+  border-radius: 3px;
+  box-shadow: 2px 2px 0 0 #17141a;
+}
+.mm-bubble.tone-good { background: #dff7e3; }
+.mm-bubble.tone-warn { background: #fff0c9; }
+.mm-bubble.tone-bad { background: #ffe0dc; }
+@keyframes mm-pop {
+  from { transform: translateX(-50%) scale(0.6) translateY(10px); opacity: 0; }
+  to { transform: translateX(-50%) scale(1) translateY(0); opacity: 1; }
+}
+
+/* ── portrait in lists ── */
+.mm-portrait {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  overflow: hidden;
+  border-radius: 30%;
+  background: radial-gradient(70% 70% at 50% 35%, #26402c, #0f1a12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.mm-portrait img,
+.mm-portrait svg { width: 100%; height: 100%; display: block; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mm-merryman-glow,
+  .mm-merryman-flat.is-loading svg,
+  .mm-bubble { animation: none; }
+}

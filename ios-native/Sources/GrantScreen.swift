@@ -20,13 +20,16 @@ struct GrantScreen: View {
     @State private var paper = true
     @State private var liveAcknowledged = false
     @State private var trencher = false
-    @State private var caps = ["perTradeUsdg": "10", "dailyUsdg": "50", "expiryDays": "7", "maxDrawdownPct": "5", "maxOpsPerDay": "24"]
+    // Thirty days: the shared monthly default (packages/core autonomy.ts
+    // DEFAULT_PERMISSION_DAYS) every signing surface opens on. Seven made the
+    // owner re-sign weekly, and a lapsed permission stops the agent.
+    @State private var caps = ["perTradeUsdg": "10", "dailyUsdg": "50", "expiryDays": "30", "maxDrawdownPct": "5", "maxOpsPerDay": "24"]
     @State private var error: String?
     @State private var result: J?
     @State private var review: ReviewValue?
     @State private var loading = true
     @State private var submitting = false
-    private let fields = [("perTradeUsdg", "USDG per trade"), ("dailyUsdg", "USDG per day"), ("expiryDays", "Permission lifetime in days"), ("maxDrawdownPct", "Maximum drawdown %"), ("maxOpsPerDay", "Operations per day")]
+    private let fields = [("perTradeUsdg", "USDG per trade"), ("dailyUsdg", "USDG per day"), ("expiryDays", "Renew every (days)"), ("maxDrawdownPct", "Maximum drawdown %"), ("maxOpsPerDay", "Operations per day")]
     private func words(_ key: String) -> String { Language.text(key, locale: language) }
     var body: some View {
         Page {
@@ -65,10 +68,20 @@ struct GrantScreen: View {
                     Card {
                         Text("Bound the permission").font(.title2.bold())
                         DisclosureGroup("Choose a cap preset") {
-                            Button("Cautious · the scout") { applyPreset(["10", "50", "7", "5", "24"]) }
-                            Button("Balanced · the outlaw") { applyPreset(["50", "500", "14", "10", "48"]) }
+                            // Every preset renews monthly; they differ in money, not in how often you sign.
+                            Button("Cautious · the scout") { applyPreset(["10", "50", "30", "5", "24"]) }
+                            Button("Balanced · the outlaw") { applyPreset(["50", "500", "30", "10", "48"]) }
                             Button("Bold · the warlord") { applyPreset(["200", "2000", "30", "15", "96"]) }
                             Text("A preset fills the limits below. Nothing changes until you review and sign.").font(.caption).foregroundStyle(.secondary)
+                        }
+                        // RENEW MONTHLY, the web wallet's one-tap choice: a renewal pre-fills the
+                        // caps signed last time exactly, so an agent signed for a week stays weekly
+                        // until its owner says otherwise. This changes the lifetime field and nothing
+                        // else, and the review sheet still shows every limit before signing.
+                        if !creating, let signed = grant?["caps"]["expiryDays"].number, signed < 30 {
+                            let monthly = caps["expiryDays"] == "30"
+                            Button(monthly ? "Renews monthly (30 days)" : "Renew monthly (30 days)") { caps["expiryDays"] = "30" }.disabled(monthly)
+                            Text(monthly ? "This renewal runs 30 days instead of \(Int(signed)). Nothing else changes." : "Sign once a month instead of every \(Int(signed)) days. Only the lifetime changes, and you review it before signing.").font(.caption).foregroundStyle(.secondary)
                         }
                         ForEach(fields, id: \.0) { key, title in
                             VStack(alignment: .leading) { Text(title).font(.caption); TextField(title, text: Binding(get: { caps[key] ?? "" }, set: { caps[key] = $0 })).keyboardType(.decimalPad) }

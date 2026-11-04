@@ -1478,7 +1478,11 @@ Lighter key. Hosted rollout restrictions still apply.
 
 Settings shows the saved producer, current setup progress, observed order
 minimums and signed permission expiry. The trend rule requires more than seven
-days remaining before an entry because it can hold for seven days. A market
+days remaining before an entry because it can hold for seven days. A new Perps
+permission runs 30 days by default (`DEFAULT_PERMISSION_DAYS`), which leaves
+about 23 days of entries per signature; a 7-day permission is inside the rule
+from the moment it is signed and never opens a trend entry, so the renewal
+form offers a one-tap switch to 30 days for one signed shorter. A market
 whose minimum exceeds the owner's effective cap stays unavailable; selecting
 eligible markets never changes that cap. A valid setup may wait for a signal.
 

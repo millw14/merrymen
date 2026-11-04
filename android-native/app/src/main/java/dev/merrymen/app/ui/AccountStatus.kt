@@ -306,7 +306,7 @@ internal val BLOCKER_ADVICE: Map<String, BlockerAdvice> = mapOf(
     funding = true, resign = false, fault = true,
   ),
   "no-cash" to BlockerAdvice(
-    "Your agent has no USDG to trade with. Send USDG to the address below.",
+    "Your agent has no USDG to trade with. Send USDG to your agent's address.",
     funding = true, resign = false, fault = true,
   ),
   "dead-policy" to BlockerAdvice(

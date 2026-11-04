@@ -15,26 +15,43 @@ import type { Screen, Tab } from "./live";
 /**
  * THE BAR, IN ORDER, AND EVERY BUTTON HAS TO EARN ITS PLACE.
  *
- * The owner's brief was "make all buttons have a value not just another tab".
- * Board left because it answers the same question Home does and Home now
- * carries it; Alpha took the freed slot.
+ * FOUR, because a newcomer asks four questions: how is my merryman doing
+ * (Home), can I talk to him (Chat), what is everybody else doing (Explore),
+ * and where are my account and settings (Me). The bar used to be five — Feed
+ * and Alpha each had a slot, and Alpha was a lock screen for most people and
+ * unreachable on desktop. Both now live under Explore, beside the leaderboard
+ * and the market list that Home used to stack under the balance.
  *
- * FEED IS THE CENTRE, under the logo — which is where the logo already was.
- * `TabIcon` has rendered `<LogoMark/>` for the middle slot all along; it just
- * opened the agent chat. Putting the feed under the mark that is already there
- * is what "the LOGO tab is the main tab" means.
+ * THE LOGO IS EXPLORE'S ICON. `TabIcon` renders `<LogoMark/>` for `feed`, and
+ * Explore opens on the feed, so the mark still leads to the room.
  *
  * The ids are NOT the labels. They are wired into TabIcon's exhaustive switch,
  * the record below, the `data-screen` attribute CSS selects on, and FirstVisit
- * — so `agent` stays `agent` while it reads "Chat".
+ * — so `agent` stays `agent` while it reads "Chat", `feed` reads "Explore" and
+ * `you` reads "Me". `alpha` is still a tab id (its screen and URL are
+ * unchanged); it is simply reached through Explore rather than the bar.
  */
 export const TABS: { id: Tab; label: string }[] = [
   { id: "home", label: "Home" },
   { id: "agent", label: "Chat" },
-  { id: "feed", label: "Feed" },
-  { id: "alpha", label: "Alpha" },
-  { id: "you", label: "Profile" },
+  { id: "feed", label: "Explore" },
+  { id: "you", label: "Me" },
 ];
+
+/** The views inside Explore, in order. Each is its own URL so Back works. */
+export const EXPLORE: { id: "feed" | "leaders" | "markets" | "alpha"; label: string; path: string }[] = [
+  { id: "feed", label: "Feed", path: "/feed" },
+  { id: "leaders", label: "Leaders", path: "/leaders" },
+  { id: "markets", label: "Markets", path: "/markets" },
+  { id: "alpha", label: "Research", path: "/alpha" },
+];
+
+/** Which Explore view a screen is, or null when it is not part of Explore. */
+export function exploreViewOf(screen: Screen): (typeof EXPLORE)[number]["id"] | null {
+  if (screen.kind === "leaders" || screen.kind === "markets") return screen.kind;
+  if (screen.kind === "tab" && (screen.tab === "feed" || screen.tab === "alpha")) return screen.tab;
+  return null;
+}
 
 /**
  * `solana` is whether this deployment offers Solana (solanaEnabled, handed down
@@ -54,16 +71,22 @@ export function screenForPath(path: string, solana = false, perps = false): Scre
   // The room every agent is in. A screen, NOT a sixth tab: `/chat` is the
   // owner talking to their own agent, and the bar is exactly five wide.
   if (path === "/groupchat") return { kind: "groupchat" };
+  // Where an owner dresses their merryman. A screen, like the room above.
+  if (path === "/wardrobe") return { kind: "wardrobe" };
+  // Explore's own views. The leaderboard has a place again, under Explore,
+  // and the old addresses for both open the view they always named.
+  if (path === "/leaders" || path === "/leaderboard") return { kind: "leaders" };
+  if (path === "/markets" || path === "/tokens") return { kind: "markets" };
   // MONEY IS A PLACE, NOT A MODE. These were component state, so Back could not
   // dismiss the panel and the tab bar vanished while it was open — on the two
   // screens where a person is most likely to want out. Adding them here is what
   // makes the browser's own back button work.
   if (path === "/deposit") return { kind: "deposit" };
   if (path === "/withdraw") return { kind: "withdraw" };
-  // /leaderboard still resolves — it is a URL people have open and have shared.
-  // The board moved onto Home rather than disappearing, so that is where it
-  // goes. next.config.mjs also normalises the address bar with a redirect; this
-  // is the half that works whether or not the redirect is configured.
+  //
+  // "/" IS HOME. The front door is the merryman, on every device: the phone
+  // used to open on the feed and the desktop on whichever token chart was
+  // listed first, so nobody landed in the same place twice.
   return {
     kind: "tab",
     tab:
@@ -71,7 +94,7 @@ export function screenForPath(path: string, solana = false, perps = false): Scre
         ? "agent"
         : path === "/you" || path === "/profile"
           ? "you"
-          : path === "/feed" || path === "/"
+          : path === "/feed"
             ? "feed"
             : path === "/alpha"
               ? "alpha"
@@ -83,6 +106,35 @@ export function pathForScreen(screen: Screen): string {
   if (screen.kind === "token") return `/t/${encodeURIComponent(screen.id)}`;
   if (screen.kind === "profile") return `/a/${encodeURIComponent(screen.slug)}`;
   if (screen.kind === "tab")
-    return ({ home: "/home", agent: "/chat", you: "/profile", feed: "/", alpha: "/alpha" })[screen.tab];
+    return ({ home: "/home", agent: "/chat", you: "/profile", feed: "/feed", alpha: "/alpha" })[screen.tab];
   return `/${screen.kind}`;
+}
+
+/**
+ * WHERE BACK AND CLOSE GO, or null for "the current tab".
+ *
+ * Back from a detail screen (a token, a profile, search, limits) goes to the
+ * last place the reader was BROWSING, which skips those detail screens on
+ * purpose: Back from a profile opened off Home's board is Home, not the token
+ * chart seen before it.
+ *
+ * Closing Add money or Withdraw is different. It goes to the page the panel
+ * was opened OVER, detail screens included. On desktop that page never went
+ * anywhere — it stayed on screen under the panel — so closing over a token
+ * chart and landing on Markets moved the reader somewhere they had not asked
+ * to go. `under` is that page; a cold load of /deposit has none, and falls
+ * back to the browse history like any other Back.
+ *
+ * The desktop opens Chat as a dock over the page rather than as a screen (see
+ * goTab), so neither answer may be that tab there.
+ */
+export function closeTarget({ money, under, lastBrowse, desktop }: {
+  money: boolean;
+  under: Screen | null;
+  lastBrowse: Screen | null;
+  desktop: boolean;
+}): Screen | null {
+  const usable = (s: Screen | null): Screen | null =>
+    !s || s.kind === "deposit" || s.kind === "withdraw" || (desktop && s.kind === "tab" && s.tab === "agent") ? null : s;
+  return (money ? usable(under) : null) ?? usable(lastBrowse);
 }

@@ -119,8 +119,12 @@ describe("the desktop chat floats instead of replacing the app", () => {
     // The sidebar's "Open chat", the portfolio panel's "Chat with X" and the
     // tab bar all call goTab("agent"). Intercepting there means one entry
     // point and no second one to keep in step.
+    // Whenever there is an agent to talk to: the dock needs `mine`, and with
+    // none a click used to do nothing and pop the dock open later, so a
+    // visitor is sent to create one instead.
     const app = read("./App.tsx");
-    assert.match(app, /if \(desktop && next === "agent"\) \{\s*setChatDocked\(true\);/);
+    assert.match(app, /if \(desktop && next === "agent"\) \{[\s\S]{0,400}?if \(mine\) \{\s*setChatDocked\(true\);\s*return;/);
+    assert.match(app, /if \(account && !account\.status\.exists\) \{\s*goTo\("\/create"\);/);
   });
 
   it("and it renders THE SAME agent screen, not a second chat", () => {

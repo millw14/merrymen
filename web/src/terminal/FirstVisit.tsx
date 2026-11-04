@@ -82,7 +82,7 @@ export const STOPS: Stop[] = [
   {
     titleKey: "tour.stop07.title",
     copyKey: "tour.stop07.copy",
-    target: ['[data-tour="tab-feed"]', "#explore-tab-feed"],
+    target: ['[data-tour="tab-feed"]', ".explore-pills", "#explore-tab-feed"],
     screen: { kind: "tab", tab: "feed" },
   },
 {titleKey: "tour.stop08.title", copyKey: "tour.stop08.copy", "target": [".find"], "screen": {"kind": "search"}},
@@ -93,13 +93,13 @@ export const STOPS: Stop[] = [
 {titleKey: "tour.stop13.title", copyKey: "tour.stop13.copy", "target": null, "screen": {"kind": "deposit"}},
 {titleKey: "tour.stop14.title", copyKey: "tour.stop14.copy", "target": null, "screen": {"kind": "withdraw"}},
 {titleKey: "tour.stop15.title", copyKey: "tour.stop15.copy", "target": [".desktop-portfolio"], "screen": {"kind": "tab", "tab": "you"}},
-{titleKey: "tour.stop16.title", copyKey: "tour.stop16.copy", "target": ["#explore-tab-agents"], "screen": {"kind": "tab", "tab": "home"}, "explore": "agents"},
-{titleKey: "tour.stop17.title", copyKey: "tour.stop17.copy", "target": ["#explore-tab-board"], "screen": {"kind": "tab", "tab": "home"}, "explore": "board"},
-{titleKey: "tour.stop18.title", copyKey: "tour.stop18.copy", "target": ["#explore-panel-board"], "screen": {"kind": "tab", "tab": "home"}, "explore": "board"},
-{titleKey: "tour.stop19.title", copyKey: "tour.stop19.copy", "target": ["#explore-panel-board"], "screen": {"kind": "tab", "tab": "home"}, "explore": "board"},
-{titleKey: "tour.stop20.title", copyKey: "tour.stop20.copy", "target": ["#explore-tab-feed"], "screen": {"kind": "tab", "tab": "feed"}, "explore": "feed"},
-{titleKey: "tour.stop21.title", copyKey: "tour.stop21.copy", "target": ["#explore-tab-feed"], "screen": {"kind": "tab", "tab": "feed"}, "explore": "feed"},
-{titleKey: "tour.stop22.title", copyKey: "tour.stop22.copy", "target": ["#explore-tab-feed"], "screen": {"kind": "tab", "tab": "feed"}, "explore": "feed"},
+{titleKey: "tour.stop16.title", copyKey: "tour.stop16.copy", "target": [".board-page", ".explore-pills"], "screen": {"kind": "leaders"}},
+{titleKey: "tour.stop17.title", copyKey: "tour.stop17.copy", "target": [".board-page", ".explore-pills"], "screen": {"kind": "leaders"}},
+{titleKey: "tour.stop18.title", copyKey: "tour.stop18.copy", "target": [".board-page", ".explore-pills"], "screen": {"kind": "leaders"}},
+{titleKey: "tour.stop19.title", copyKey: "tour.stop19.copy", "target": [".board-page", ".explore-pills"], "screen": {"kind": "leaders"}},
+{titleKey: "tour.stop20.title", copyKey: "tour.stop20.copy", "target": [".feed-page", ".explore-pills", "[data-tour=\"tab-feed\"]"], "screen": {"kind": "tab", "tab": "feed"}},
+{titleKey: "tour.stop21.title", copyKey: "tour.stop21.copy", "target": [".feed-page", ".explore-pills", "[data-tour=\"tab-feed\"]"], "screen": {"kind": "tab", "tab": "feed"}},
+{titleKey: "tour.stop22.title", copyKey: "tour.stop22.copy", "target": [".feed-page", ".explore-pills", "[data-tour=\"tab-feed\"]"], "screen": {"kind": "tab", "tab": "feed"}},
 {titleKey: "tour.stop23.title", copyKey: "tour.stop23.copy", "target": [".alpha-page"], "screen": {"kind": "tab", "tab": "alpha"}},
 {titleKey: "tour.stop24.title", copyKey: "tour.stop24.copy", "target": [".mm-wrap"], "screen": {"kind": "settings"}},
 {titleKey: "tour.stop25.title", copyKey: "tour.stop25.copy", "target": [".mm-wrap"], "screen": {"kind": "settings"}},
@@ -148,6 +148,15 @@ export function FirstVisit({
 }: {
   tenant?: string | null;
   layoutKey?: string;
+  /**
+   * Does the tour open by itself for somebody who has never seen it? The app
+   * passes false: a newcomer now lands on their merryman, whose bubble and two
+   * buttons are the welcome, with the replay link one tap away above him. An
+   * eight-card modal over that, before anything else could be read, was the
+   * first piece of "work" every visitor was handed. Default true, so the tour
+   * itself behaves as it always has wherever it is mounted that way.
+   */
+  autoStart?: boolean;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
   onExplore?: (section: "markets" | "agents" | "feed" | "board") => void;
@@ -159,12 +168,14 @@ export function FirstVisit({
 function AccountTour({
   tenant,
   layoutKey,
+  autoStart = true,
   onScreen,
   onQuestion,
   onExplore,
 }: {
   tenant: string | null;
   layoutKey?: string;
+  autoStart?: boolean;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
   onExplore?: (section: "markets" | "agents" | "feed" | "board") => void;
@@ -236,7 +247,15 @@ function AccountTour({
         writeLocal(KEY, { ...anonymous, claimed: tenant });
       }
     }
-    save(local ?? { done: false, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" });
+    // Without auto-start a first visit RECORDS NOTHING: the tour is simply
+    // closed in this render, so no dismissal is written, claimed on sign-in or
+    // synced to the server for a tour nobody was shown.
+    if (local) save(local);
+    else if (autoStart) save({ done: false, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" });
+    else {
+      state.current = { done: true, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" };
+      setSaved(state.current);
+    }
     setReady(true);
     void sync();
     const retry = () => { void sync(); };
@@ -245,7 +264,7 @@ function AccountTour({
       alive.current = false;
       window.removeEventListener("online", retry);
     };
-  }, [key, tenant, save, sync]);
+  }, [key, tenant, save, sync, autoStart]);
 
   // ── AND WHAT DOES THE SERVER KNOW ─────────────────────────────────────────
   //

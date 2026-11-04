@@ -291,7 +291,7 @@ describe("the funded wallet's re-sign control", () => {
     ["maxDrawdownPct", "drawdown limit"],
     ["perTradeUsdg", "most it can spend on one trade"],
     ["dailyUsdg", "most it can spend in a day"],
-    ["expiryDays", "auto-expire the agent after"],
+    ["expiryDays", "Renew every"],
     ["maxOpsPerDay", "most trades per day"],
   ] as const) {
     it(`blocks an untouched zero ${key} from a legacy grant until its owner corrects it`, async () => {
@@ -370,6 +370,72 @@ describe("the funded wallet's re-sign control", () => {
     assert.match(ui.container.querySelector("#resign")!.textContent!, /breaker 5 % → 8 %/);
     await ui.click("revoke earlier permissions & re-sign");
     assert.deepEqual(signedCaps, { ...grant.caps, maxDrawdownPct: 8 });
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
+
+  /**
+   * MONTHLY IS OFFERED, NEVER APPLIED. A renewal pre-fills the caps its owner
+   * signed last time (the tests above pin that exactly), so an agent signed
+   * weekly would renew weekly forever without an explicit switch. The switch is
+   * one tap that edits ONE field, and everything after it — the change line,
+   * the acknowledgement, the sign button — is the path every edit takes.
+   */
+  const monthlyButton = () => [...ui.container.querySelectorAll<HTMLButtonElement>("#resign button")]
+    .find(button => button.textContent?.trim() === "Renew monthly (30 days)");
+  const weeklyGrant = () => {
+    const now = Math.floor(Date.now() / 1000);
+    return { ...grant, caps: { ...grant.caps, expiryDays: 7 }, grantedAt: now, expiresAt: now + 7 * 86_400 } as StoredGrant;
+  };
+
+  it("offers a weekly permission a one-tap monthly renewal, without changing the pre-filled lifetime", async () => {
+    activeGrant = weeklyGrant();
+    await ui.render(React.createElement(Wallet));
+    assert.ok(monthlyButton(), "a 7-day permission is offered the monthly switch");
+    assert.equal(monthlyButton()!.disabled, false);
+    assert.equal(renewalInput("Renew every").value, "7", "the form still opens on the signed lifetime, exactly");
+    assert.doesNotMatch(ui.container.querySelector("#resign")!.textContent!, /Signing now also changes/, "offering the switch changes nothing");
+    assert.equal(mintCalls, 0);
+  });
+
+  it("does not offer the monthly switch to a permission that already runs 30 days", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    activeGrant = { ...grant, caps: { ...grant.caps, expiryDays: 30 }, grantedAt: now, expiresAt: now + 30 * 86_400 } as StoredGrant;
+    await ui.render(React.createElement(Wallet));
+    assert.ok(ui.container.querySelector("#resign"), "the renewal panel is shown");
+    assert.equal(monthlyButton(), undefined);
+    assert.equal(ui.container.querySelector("[data-renew-monthly]"), null);
+    assert.equal(renewalInput("Renew every").value, "30");
+  });
+
+  it("monthly changes only the lifetime, shows it in the change line, and still needs the same acknowledgement", async () => {
+    activeGrant = weeklyGrant();
+    let signedCaps: GrantCaps | undefined;
+    renew = async ({ caps }) => {
+      signedCaps = structuredClone(caps);
+      return { local: { ...activeGrant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("Renew monthly (30 days)");
+    assert.equal(renewalInput("Renew every").value, "30");
+    assert.equal(monthlyButton()!.disabled, true, "pressed once; a second tap has nothing left to do");
+    assert.equal(monthlyButton()!.getAttribute("aria-pressed"), "true");
+    const changes = [...ui.container.querySelectorAll("#resign .field-lead")]
+      .map(line => line.textContent ?? "").find(line => line.startsWith("Signing now also changes"));
+    assert.equal(changes, "Signing now also changes: expiry 7 days → 30 days.", "the lifetime, and nothing else");
+    // Choosing monthly is not consent to sign: no stop, revocation or signature yet.
+    assert.equal(signedCaps, undefined);
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.equal(renewalButton().disabled, true, "the revocation acknowledgement is still required");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(signedCaps, undefined, "an unacknowledged renewal never reaches the signer");
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+    await acknowledge("I authorize revoking");
+    assert.equal(renewalButton().disabled, false);
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(signedCaps, { ...weeklyGrant().caps, expiryDays: 30 }, "every other cap is signed exactly as before");
     assert.match(ui.container.textContent!, /Permission renewed/);
   });
 

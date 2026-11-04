@@ -164,7 +164,7 @@
 
 @media (min-width: 1100px) {
   .terminal-host .app[data-wallet="perps"][data-screen="perps"] { grid-template-columns: minmax(0, 1fr); }
-  .terminal-host .app[data-wallet="perps"][data-screen="perps"] > .desktop-header { grid-template-columns: 180px minmax(0, 1fr) auto; }
+  .terminal-host .app[data-wallet="perps"][data-screen="perps"] > .desktop-header { grid-template-columns: 180px auto minmax(0, 1fr) auto; }
   .terminal-host .app[data-wallet="perps"][data-screen="perps"] > .body { grid-column: 1 / -1; padding: 24px 28px; gap: 16px; }
 }
 @media (min-width: 1600px) {

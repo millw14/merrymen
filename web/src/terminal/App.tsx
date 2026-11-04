@@ -50,10 +50,18 @@ import { useTradingModeTransition } from "./use-trading-mode-transition";
 import "./trading-mode-toggle.css";
 import "./perps-entrance.css";
 import "./perps-desk.css";
-import { pathForScreen, screenForPath, TABS } from "./nav";
+import { closeTarget, exploreViewOf, pathForScreen, screenForPath, TABS } from "./nav";
+import { ExploreNav } from "./ExploreNav";
+import { Markets } from "./screens/Markets";
+import { Board } from "./screens/Board";
 
 import { Feed } from "./screens/Feed";
 import { GroupChat } from "./screens/GroupChat";
+import { Wardrobe } from "@/merryman/Wardrobe";
+import { DRAFT, adoptDraft } from "@/merryman/wardrobe-store";
+import "@/merryman/merryman.css";
+import "@/merryman/wardrobe.css";
+import "./merryman-shell.css";
 import { Home } from "./screens/Home";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
@@ -174,10 +182,17 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // over whatever you were looking at, so the body keeps rendering that — the
   // one place the URL and the body legitimately differ, because the panel is an
   // overlay and the page under it did not go anywhere.
-  const [tab, setTab] = useState<Tab>("feed");
-  const screen: Screen = isolatedWallet && requestedScreen.kind === "tab" ? { kind: "perps" } : desktop && (
-    money || (requestedScreen.kind === "tab" && (requestedScreen.tab === "feed" || requestedScreen.tab === "home"))
-  ) ? desktopDetail : requestedScreen;
+  // The tab this visit started on, not an assumed Feed: "/" is Home now.
+  const [tab, setTab] = useState<Tab>(() => requestedScreen.kind === "tab" ? requestedScreen.tab : "home");
+  // HOME AND EXPLORE ARE THE CENTRE ON DESKTOP TOO. The desktop used to swap
+  // both for the last token chart opened (or the first one listed), so a
+  // first-time visitor at "/" met an arbitrary chart and Home never rendered
+  // there at all. The money panel is an overlay and keeps the page under it.
+  // The page under the panel is the one that was showing when it opened; the
+  // last token chart is only for a cold load of /deposit or /withdraw.
+  const underMoney = useRef<Screen | null>(null);
+  if (!money) underMoney.current = requestedScreen;
+  const screen: Screen = isolatedWallet && requestedScreen.kind === "tab" ? { kind: "perps" } : desktop && money ? (underMoney.current ?? desktopDetail) : requestedScreen;
   const perpsDesk = selectedWallet === "perps" && screen.kind === "perps";
   const modeOffered = perps && screen.kind !== "solana" && selectedWallet !== "invalid";
   const modeTransition = useTradingModeTransition({
@@ -363,8 +378,10 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
     // There is nothing to fund before an agent exists, and the deposit panel
     // reads `account.status.grant` — so the guard stays, and it sends people to
     // the screen that can actually create one.
+    // That used to be /you, which showed three competing "create" prompts and,
+    // from /you itself, did nothing at all: the same URL is not a navigation.
     if ((next.kind === "deposit" || next.kind === "withdraw") && !account?.status.exists) {
-      goTo("/you");
+      goTo("/create");
       return;
     }
     setScreen(next);
@@ -384,12 +401,16 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
      * one to keep in step, and the phone is untouched.
      */
     if (desktop && next === "agent") {
-      setChatDocked(true);
-      return;
-    }
-    if (desktop && next === "feed") {
-      setSidebarSection("feed");
-      return;
+      // Only when there is an agent to talk to: the dock needs `mine`, so a
+      // visitor's click used to do nothing and then pop the dock open later.
+      if (mine) {
+        setChatDocked(true);
+        return;
+      }
+      if (account && !account.status.exists) {
+        goTo("/create");
+        return;
+      }
     }
     setTab(next);
     setScreen({ kind: "tab", tab: next });
@@ -398,6 +419,33 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // goTab, so a cold load of /alpha left the bar highlighting Home until the
   // user clicked something.
   const activeTab = screen.kind === "tab" ? screen.tab : requestedScreen.kind === "tab" ? requestedScreen.tab : tab;
+  // Explore's views all light Explore in the bar; Research (alpha) included.
+  // The account's own screens (wardrobe, settings, wallet, limits, money) are
+  // part of Me, and creating an agent starts from Home — so no screen falls
+  // back to whatever tab happened to be clicked last.
+  const exploreView = exploreViewOf(screen);
+  const barTab: Tab | null = exploreView ? "feed"
+    : ["wardrobe", "settings", "grant", "limits", "deposit", "withdraw"].includes(screen.kind) ? "you"
+    : screen.kind === "create" ? "home"
+    : screen.kind === "perps" || screen.kind === "solana" ? null
+    : activeTab;
+  /**
+   * WHERE BACK AND CLOSE GO: the last place the reader was browsing, not the
+   * last tab they happened to click. A profile opened from Home's board goes
+   * back to Home, a token opened from Markets back to Markets. Closing Add
+   * money returns to the page it was opened over, detail pages included — see
+   * closeTarget.
+   */
+  const lastBrowse = useRef<Screen | null>(null);
+  const browseKey = pathForScreen(screen);
+  useEffect(() => {
+    if (!["token", "profile", "search", "limits", "deposit", "withdraw"].includes(screen.kind)) lastBrowse.current = screen;
+    // Keyed on the path: `screen` is a new object on every render.
+  }, [browseKey]);
+  const goBackTo = (back: Screen | null) => (back ? setScreen(back) : goTab(tab));
+  const goBack = () => goBackTo(closeTarget({ money: false, under: null, lastBrowse: lastBrowse.current, desktop }));
+  /** Closing Add money or Withdraw: back to the page it was opened over. */
+  const closeMoney = () => goBackTo(closeTarget({ money: true, under: underMoney.current, lastBrowse: lastBrowse.current, desktop }));
   const token =
     screen.kind === "token" ? tokenById(live.tokens, screen.id) : undefined;
   const listedAgent =
@@ -436,9 +484,10 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
     return()=>{alive=false;clearInterval(timer);profileRefresh.current=null;};
   },[profileSlug]);
   useEffect(()=>{if(pathname==="/agent" || pathname==="/chat")setSidebarSection("agents");},[pathname]);
+  // The rail shows on trading screens only (railShown), and opens on Markets.
   useEffect(() => {
-    if (desktop && (pathname === "/" || pathname === "/feed")) setSidebarSection("feed");
-  }, [desktop, pathname]);
+    if (desktop && (screen.kind === "token" || screen.kind === "markets")) setSidebarSection("markets");
+  }, [desktop, screen.kind]);
   // Never the leaderboard row while the profile read is in flight — see profileShown.
   const agent=profileShown(profile, profileError, listedAgent);
   /**
@@ -548,10 +597,22 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // than a placeholder every surface then has to special-case.
   const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
+  // The merryman dressed during creation becomes this agent's look the first
+  // time its slug is known — unless the owner already dressed this agent.
+  const mineSlug = mine?.slug ?? null;
+  useEffect(() => { if (mineSlug) adoptDraft(mineSlug); }, [mineSlug]);
   // The grants read can finish before the first feed read. In that window the
   // feed has no tenant yet because it has no answer; keep its loading state.
   // Once it answers, a wrong-tenant feed is never shown as this owner's book.
   const portfolioRead = accountFeedRead(account?.session ?? null, live.feedTenant, live.reads.mine);
+  /**
+   * THE MARKET RAIL IS FOR TRADING SCREENS. On a token, a public profile, a
+   * search or the market list it is the fastest way between coins; on Home,
+   * the wardrobe, create and settings it was 300px of tickers beside a screen
+   * about something else, and it squeezed the merryman into a sliver. Those
+   * screens get the width instead. Perps keeps its own rail as it was.
+   */
+  const railShown = isolatedWallet || ["token", "profile", "search", "markets"].includes(screen.kind);
   /** The tape's rows, from the market read above — desktop only; see ticker.ts. */
   const ticks = desktop ? ticksOf(live.tokens, Date.now() / 1000) : [];
 
@@ -561,13 +622,14 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
       className={!isolatedWallet && ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
       data-wallet={selectedWallet}
+      data-rail={railShown ? "on" : "off"}
     >
       {/* GATED IN JSX, NOT JUST IN CSS. These three were rendered on every
           device and hidden by a media query, so a phone MOUNTED the desktop
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader tradingMode={tradingMode} hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
+      {desktop && <DesktopHeader tradingMode={tradingMode} active={barTab ?? undefined} hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
       {desktop && perpsDesk ? null : desktop && isolatedWallet ? <aside className="desktop-sidebar"><nav className="perps-desk" aria-label="Perps workspace"><h2>Perps wallet</h2><p><a href="/perps">Trading desk</a></p><p><a href="/settings?wallet=perps">Settings</a></p><p><a href="/grant?wallet=perps">Permission</a></p><p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></p><p><a href="/home">Return to Spot</a></p></nav></aside> : desktop && (
         <DesktopSidebar
           reads={live.reads}
@@ -609,19 +671,13 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           tenant={account?.session.hosted ? account.session.address : null}
           href={resignHref}
         />}
-        {!isolatedWallet && <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
-          if (desktop && next.kind === "tab" && ["home", "agent", "feed"].includes(next.tab)) {
-            // Desktop tabs live in the rail/dock, not the phone's routes.
-            // Navigating home would select Feed again and spotlight Markets
-            // while showing the wrong panel behind it.
-            if (next.tab === "home") setSidebarSection("markets");
-            if (next.tab === "agent") setSidebarSection("agents");
-            if (next.tab === "feed") setSidebarSection("feed");
-            setChatDocked(next.tab === "agent");
-            openScreen(next);
-          } else openScreen(next);
+        {!isolatedWallet && <FirstVisit autoStart={false} layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
+          // Home and Explore are centre routes on desktop now; only the chat
+          // still lives in the dock there.
+          if (desktop && next.kind === "tab") setChatDocked(next.tab === "agent" && mine !== null);
+          openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>}
-        {!isolatedWallet && !mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "solana" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
+        {!isolatedWallet && !mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "solana" && screen.kind !== "wardrobe" && !(screen.kind === "tab" && screen.tab === "home" && account?.status.exists !== true) && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
         {selectedWallet === "invalid" && <section className="perps-desk"><h1>Unknown wallet selection</h1><p>No wallet controls were opened.</p><a href="/home">Return to Spot</a></section>}
         {selectedWallet === "perps" && <PerpsWorkspace key={`${epoch}:${screen.kind}`} screen={screen.kind} offered={perps}/>}
         {!isolatedWallet && screen.kind === "grant" && <p><a href="/withdraw?wallet=perps">Perps withdrawal &amp; recovery</a></p>}
@@ -646,7 +702,35 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             onSearch={() => openScreen({ kind: "search" })}
             onDesk={() => goTab("agent")}
             onGroupChat={() => openScreen({ kind: "groupchat" })}
+            onCreate={() => openScreen({ kind: "create" })}
+            onWardrobe={() => openScreen({ kind: "wardrobe" })}
+            onLeaders={() => openScreen({ kind: "leaders" })}
+            onResign={() => {window.location.href=resignHref;}}
+            phase={account === null ? (accountFailed ? "failed" : "loading") : account.session.hosted && !account.session.address ? "signed-out" : account.status.exists ? (portfolioRead === "unreadable" ? "failed" : "loading") : "no-agent"}
             hasAgent={account?.status.exists === true}
+          />
+        )}
+        {exploreView && <ExploreNav active={exploreView} />}
+        {screen.kind === "leaders" && (
+          <Board
+            read={live.reads.board}
+            retired={live.retired}
+            retiredAgents={live.retiredAgents}
+            agents={live.agents}
+            theses={live.theses}
+            mine={mine}
+            onProfile={(slug) => openScreen({ kind: "profile", slug })}
+            onDesk={() => openScreen({ kind: "create" })}
+          />
+        )}
+        {screen.kind === "markets" && (
+          <Markets
+            tokens={live.tokens}
+            tokenTab={tokenTab}
+            onTokenTab={setTokenTab}
+            onToken={(id) => openScreen({ kind: "token", id })}
+            onAgent={(slug) => openScreen({ kind: "profile", slug })}
+            onSearch={() => openScreen({ kind: "search" })}
           />
         )}
         {screen.kind === "tab" && screen.tab === "feed" && (
@@ -700,6 +784,8 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             perTrade={perTrade}
             perDay={perDay}
             mine={mine}
+            hasAgent={account?.status.exists === true}
+            onCreate={() => openScreen({ kind: "create" })}
           />
         )}
         {/* The trade chime's switch on every device; desktop also has it on
@@ -766,7 +852,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
                   what this button used to refresh while the page said the
                   token could not be loaded. */}
               {unreadable && <button onClick={missing.retry}>Try again</button>}
-              <button onClick={()=>goTab("home")}>Back to markets</button>
+              <button onClick={()=>setScreen({ kind: "markets" })}>Back to markets</button>
             </section>
           );
         })()}
@@ -776,7 +862,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             token={token}
             theses={live.theses}
             agents={live.agents}
-            onBack={() => goTab(tab)}
+            onBack={goBack}
             onProfile={(slug) => openScreen({ kind: "profile", slug })}
           />
         )}
@@ -806,7 +892,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             theses={profile ? profileTheses : live.theses}
             activityError={profileActivityError}
             tokens={live.tokens}
-            onBack={() => goTab(tab)}
+            onBack={goBack}
             onToken={(id) => openScreen({ kind: "token", id })}
             isMine={mine?.slug === agent.slug}
             onBookChanged={() => profileRefresh.current?.()}
@@ -821,13 +907,13 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             belongs, and the AccountEntry above says which kind of nothing this
             is: loading, signed out, or no agent yet. */}
         {!desktop && money && account && (
-          <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>
+          <FundingPanel key={money} mode={money} account={account} onClose={closeMoney}/>
         )}
         {screen.kind === "search" && (
           <Search
             tokens={live.tokens}
             agents={live.agents}
-            onBack={() => goTab(tab)}
+            onBack={goBack}
             onToken={(id) => openScreen({ kind: "token", id })}
             onProfile={(slug) => openScreen({ kind: "profile", slug })}
           />
@@ -842,8 +928,13 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           />
         )}
         {screen.kind === "limits" && (
-          <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
+          <LimitsPanel account={account} onClose={goBack}/>
         )}
+        {/* An owner whose agent has not loaded yet must not dress the pre-create
+            DRAFT and be told it saved: that look would never reach their agent. */}
+        {screen.kind === "wardrobe" && (account?.status.exists && !mine
+          ? <section className="create-agent"><SkeletonRows rows={3} label="Loading your merryman"/></section>
+          : <Wardrobe id={mine?.slug ?? DRAFT} seed={mine?.slug ?? DRAFT} name={mine?.name ?? "your merryman"} />)}
         {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
       </div>
       {desktop && perpsDesk ? null : desktop && isolatedWallet ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Your Perps wallet</h2><p>Balances and permissions belong to this separate account. Your public profile stays with Spot.</p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></section></aside> : desktop && screen.kind === "solana" ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Solana account</h2><p>Solana balances, permissions and trading limits are shown in this workspace.</p><p>Use the network selector to return to Robinhood Chain.</p></section></aside> : desktop && money ? (
@@ -851,7 +942,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           className="desktop-money-panel"
           aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
         >
-          {account && <FundingPanel key={money} mode={money} account={account} onClose={()=>goTab(tab)}/>}
+          {account && <FundingPanel key={money} mode={money} account={account} onClose={closeMoney}/>}
         </aside>
       ) : desktop && mine ? (
         <DesktopPortfolio
@@ -871,14 +962,14 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
               <button
                 key={t.id}
                 type="button"
-                className={activeTab === t.id ? "tab on" : "tab"}
+                className={barTab === t.id ? "tab on" : "tab"}
                 /* The guided first visit spotlights these by name. An
                    aria-label would have worked and would have tied a visual
                    affordance to an accessibility string, so that renaming a
                    label for screen readers silently unaimed the tour. */
                 data-tour={`tab-${t.id}`}
                 aria-label={t.label}
-                aria-current={activeTab === t.id ? "page" : undefined}
+                aria-current={barTab === t.id ? "page" : undefined}
                 onClick={() => goTab(t.id)}
               >
                 <TabIcon id={t.id} />

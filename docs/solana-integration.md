@@ -952,11 +952,13 @@ npm run solana:paper -- write-off --owner YOUR_PUBLIC_KEY --mint MINT
 ```
 
 The default local book has 1,000 simulated USDG, 25 USDG per trade, 100 USDG per
-rolling day, 20 operations per day, a 10% drawdown limit and seven-day expiry.
+rolling day, 20 operations per day, a 10% drawdown limit and a 30-day expiry
+(the same monthly default as an EVM permission; this local book carries no SOL
+sell caps, so the hosted 168-hour Solana limit does not apply to it).
 `renew` changes only the limits named, prints what changed and appends the old
 and new limits to the book's `limitsHistory`. Raising a limit needs `--loosen`;
-lowering never does. Without `--expires-days`, an expired book gets 7 days from
-now, a bare renew extends a running book to 7 days from now (or keeps a later
+lowering never does. Without `--expires-days`, an expired book gets 30 days from
+now, a bare renew extends a running book to 30 days from now (or keeps a later
 expiry), and a renew that changes a limit keeps a running book's expiry. It
 never changes cash, positions, P&L or receipts, and has no `--cash`. `write-off`
 keeps Jupiter's zero-output answer as evidence in the book's `writeOffs`.
@@ -1572,7 +1574,7 @@ says where to change it. Superseded choices are listed under the current one.
 | Decision | Default now | Alternatives | Change |
 |---|---|---|---|
 | Paper renew loosening | `--loosen` required to raise a limit | Value flags alone; interactive | `solana-paper-command.ts` |
-| Paper renew expiry | Changed limits keep a running expiry; bare renew extends to 7 days; expired gets 7 days | The old max(current, +7d) | same |
+| Paper renew expiry | Changed limits keep a running expiry; bare renew extends to 30 days; expired gets 30 days (was 7) | The old max(current, +7d) | same |
 | Paper history and write-offs | In the book row, never pruned | A new table | `solana-paper-store.ts` |
 | Dust prevention | Fail closed during a quote outage | Allow partial sells | same |
 | Paper write-off evidence | Zero-output answer for the whole lot, context slot, at most 1% | Accept no-route over time; check slot freshness | same |

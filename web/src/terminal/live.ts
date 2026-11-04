@@ -52,7 +52,10 @@ export type Screen =
   | { kind: "solana" }
   | { kind: "perps" }
   | { kind: "limits" }
-  | { kind: "groupchat" };
+  | { kind: "groupchat" }
+  | { kind: "wardrobe" }
+  | { kind: "leaders" }
+  | { kind: "markets" };
 
 export interface AgentRef {
   slug: string;

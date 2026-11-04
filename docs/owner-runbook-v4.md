@@ -179,8 +179,10 @@ stock leg still needs US market hours).
    routable).
 2. `/settings`: add it (symbol, address, decimals) and tick it into the
    basket.
-3. `/grant`: click **renew the key (free)**. One click; it now reads your
-   fresh settings and signs on the chain the page shows.
+3. `/grant`: open **Renew your permission**, tick the acknowledgement and sign.
+   Renewal revokes the old permission on-chain first, which costs a small
+   network fee in ETH; it then reads your fresh settings and signs on the chain
+   the page shows.
 
 That re-sign-per-token loop is structural, not an inconvenience to engineer
 away: the wall cannot widen itself, which is the product's core promise. Two

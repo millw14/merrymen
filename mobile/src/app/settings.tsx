@@ -3,7 +3,7 @@ import { Alert, AppState, Linking, Pressable, ScrollView, StyleSheet, Text, View
 import { router } from "expo-router";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as Clipboard from "expo-clipboard";
-import type { StoredGrant } from "@merrymen/core";
+import { RENEW_SOON_DAYS, type StoredGrant } from "@merrymen/core";
 import { EXPLORER } from "@/net/chainlinks";
 import { feedOrigin, isMock } from "@/net/api";
 import { chatUrl, fetchTelegramStatus, type TelegramStatus } from "@/net/telegram";
@@ -181,8 +181,9 @@ export default function Settings() {
 
   const left = grant ? secondsLeft(grant) : 0;
   /** Shared by the wall's expiry Row and the stop list's expiry bullet, so the
-   *  same countdown escalates the same way in both places. */
-  const expiryTone = !grant ? C.dim : left <= 0 ? C.red : left < 2 * 86_400 ? C.gold : C.text2;
+   *  same countdown escalates the same way in both places — and inside the
+   *  shared `RENEW_SOON_DAYS`, so the phone turns gold the day the web warns. */
+  const expiryTone = !grant ? C.dim : left <= 0 ? C.red : left < RENEW_SOON_DAYS * 86_400 ? C.gold : C.text2;
   const linked = tg?.owner != null;
 
   return (
@@ -409,7 +410,7 @@ export default function Settings() {
               −10% drawdown", then never surfaced again. A card headed "verify
               every cap" that showed four of five was the bigger problem. */}
           <Row label="stops out at" value={`−${grant.caps.maxDrawdownPct}%`} />
-          <Row label="key expires" value={countdown(left)} tone={expiryTone} last />
+          <Row label="permission ends" value={countdown(left)} tone={expiryTone} last />
           <Pressable
             style={styles.link}
             onPress={() => Linking.openURL(`${EXPLORER}/address/${grant.smartAccount}`)}

@@ -10,7 +10,7 @@ export const zh_CN: Partial<Record<MessageKey, string>> = {
   "tour.stop01.title": "欢迎使用 merrymen。",
   "tour.stop01.copy": "给智能体设定一个策略，设置它的限额，然后跟踪它做出的每个决策。你可以看完整个导览，也可以用「目录」直接跳到某个功能。随时可以退出，也随时可以重看。",
   "tour.stop02.title": "从你熟悉的市场开始。",
-  "tour.stop02.copy": "首页里有排行榜和各个市场。打开任意一个代币，就能看到它的历史价格，以及各个智能体在它上面记录下来的交易。",
+  "tour.stop02.copy": "首页是你的 merryman 和你的资金。探索（Explore）里有排行榜和各个市场：打开任意一个代币，就能看到它的历史价格，以及各个智能体在它上面记录下来的交易。",
   "tour.stop03.title": "你的智能体，你定边界。",
   "tour.stop03.copy": "一个策略加两个限额——单笔限额和每日限额——决定了它能做什么。在你另行设置之前，模拟模式只会用虚拟资金练习。",
   "tour.stop04.title": "问它为什么。",

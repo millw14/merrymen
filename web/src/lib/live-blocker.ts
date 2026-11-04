@@ -64,7 +64,7 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     fault: true,
   },
   "no-cash": {
-    say: "Your agent has no USDG to trade with. Send USDG to the address below.",
+    say: "Your agent has no USDG to trade with. Send USDG to your agent's address.",
     funding: true,
     resign: false,
     fault: true,

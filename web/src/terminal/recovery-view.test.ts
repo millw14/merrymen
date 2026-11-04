@@ -69,7 +69,8 @@ describe("owner recovery presentation", () => {
     const panel = doc(React.createElement(DesktopPortfolio, { mine: { ...mine, recovery: held,
       autonomy: autonomyOf({ mode: "live", liveBlocker: "dead-policy" }) }, tokens: [], stopped: false,
       perTrade: 10, perDay: 20, onScreen: noop, onTab: noop }));
-    assert.equal(panel.querySelector(".desktop-running")!.textContent, "RECOVERING");
+    assert.equal(panel.querySelector(".desktop-running")!.textContent, "Paused");
+    assert.equal(panel.querySelector(".desktop-running")!.getAttribute("title"), "RECOVERING");
     assert.ok(panel.querySelector(".desktop-running")!.classList.contains("paused"));
     assert.match(panel.body.textContent!, /Last recorded balance.*\$42.*Reconciliation pending/);
     assert.equal(panel.querySelector(".recovery-balance-label")!.textContent, "Last recorded balance");
@@ -92,7 +93,9 @@ describe("owner recovery presentation", () => {
     const page = doc(React.createElement(Agent, { mine: { ...mine, recovery: held }, tokens: [], stopped: false,
       chat, perTrade: 10, perDay: 20, liveBlocker: "dead-policy", onToken: noop, onDeposit: noop,
       onWithdraw: noop, onLimits: noop, onResign: noop, onSettings: noop }));
-    assert.equal(page.querySelector(".desk-status")!.textContent, "RECOVERING");
+    // The chip says the verdict in a plain word; the core label is its tooltip.
+    assert.equal(page.querySelector(".desk-status")!.textContent, "Paused");
+    assert.equal(page.querySelector(".desk-status")!.getAttribute("title"), "RECOVERING");
     assert.ok(page.querySelector(".desk-status")!.classList.contains("paused"));
     // The card scrolls with the thread (chat-room.test.ts); the pill and the qualified balance stay pinned.
     assert.match(page.querySelector(".desk-conversation > .agent-recovery")!.textContent!, /Trading paused for recovery/);
@@ -116,7 +119,8 @@ describe("owner recovery presentation", () => {
   it("the owner profile qualifies saved balances and withholds daily usage without hiding withdrawals", () => {
     const profile = doc(React.createElement(You, { mine: { ...mine, recovery: held }, history: [40, 42],
       stopped: false, perTrade: 10, perDay: 20, onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop }));
-    assert.equal(profile.querySelector(".profile-mode")!.textContent, "RECOVERING");
+    assert.equal(profile.querySelector(".profile-mode")!.textContent, "Paused");
+    assert.equal(profile.querySelector(".profile-mode")!.getAttribute("title"), "RECOVERING");
     assert.match(profile.body.textContent!, /Last recorded portfolio balance/);
     assert.equal(profile.querySelector(".account-balance > .recovery-balance-label")!.textContent, "Last recorded portfolio balance");
     assert.match(profile.querySelector(".profile-usage")!.textContent!, /Daily usageReconciliation pending/);
