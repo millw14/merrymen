@@ -183,7 +183,13 @@
   background: var(--tx);
   color: var(--ink);
 }
+/* Four views have to fit a 360px phone without a hidden fourth. */
+@media (max-width: 420px) {
+  .terminal-host .explore-pills a { padding: 9px 6px; font-size: 13px; }
+  .terminal-host .explore-pills a svg { display: none; }
+}
 /* Explore owns the page title, so the views drop their own. */
+.terminal-host .explore-nav ~ .feed-page > .feed-head { display: none; }
 .terminal-host .explore-nav ~ .feed-page .top-title,
 .terminal-host .explore-nav ~ .alpha-page > header .top-title,
 .terminal-host .explore-nav ~ .board-page > .board-head > .top-title { display: none; }

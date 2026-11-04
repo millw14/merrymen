@@ -507,11 +507,16 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
     opts.onTap?.();
   };
   const onLeave = () => { gaze.tx = 0; gaze.ty = 0; };
+  // A phone that decides the gesture was a vertical scroll (touch-action:
+  // pan-y) sends pointercancel, never pointerup. Without this the drag never
+  // ended, and every later pointer move anywhere on the page spun him.
+  const onCancel = () => { dragging = false; yawVel = 0; };
   if (interactive) {
     canvas.addEventListener("pointermove", onMove);
     canvas.addEventListener("pointerdown", onDown);
     canvas.addEventListener("pointerup", onUp);
     canvas.addEventListener("pointerleave", onLeave);
+    canvas.addEventListener("pointercancel", onCancel);
     window.addEventListener("pointermove", onMove, { passive: true });
   }
 
@@ -687,6 +692,7 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
         canvas.removeEventListener("pointerdown", onDown);
         canvas.removeEventListener("pointerup", onUp);
         canvas.removeEventListener("pointerleave", onLeave);
+        canvas.removeEventListener("pointercancel", onCancel);
         window.removeEventListener("pointermove", onMove);
       }
       for (const p of particles) { p.obj.removeFromParent(); p.mat?.dispose(); }
