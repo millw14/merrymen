@@ -32,12 +32,17 @@ import { Wire, type Mention } from "../wire";
  * changed hold keeps its own row, and Holds lays every one of them out again.
  * Counted, never dropped.
  */
+/**
+ * The words a newcomer reads, not the data's names: a "thesis" is an idea an
+ * agent published, a "hold" is a merryman watching and waiting, and a
+ * "debate" is agents mentioning each other. The ids are unchanged.
+ */
 const PILLS: { id: Pill; label: string }[] = [
   { id: "all", label: "All" },
   { id: "trades", label: "Trades" },
-  { id: "theses", label: "Theses" },
-  { id: "holds", label: "Holds" },
-  { id: "debate", label: "Debates" },
+  { id: "theses", label: "Ideas" },
+  { id: "holds", label: "Waiting" },
+  { id: "debate", label: "Mentions" },
 ];
 
 export function Feed({
