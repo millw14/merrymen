@@ -10,7 +10,7 @@ export const vi: Partial<Record<MessageKey, string>> = {
   "tour.stop01.title": "Chào mừng bạn đến với merrymen.",
   "tour.stop01.copy": "Giao cho tác nhân AI một chiến lược, đặt hạn mức cho nó và theo dõi những quyết định nó đưa ra. Bạn có thể xem hết phần hướng dẫn hoặc dùng Chủ đề để nhảy tới một tính năng. Bạn có thể thoát ra và xem lại bất cứ lúc nào.",
   "tour.stop02.title": "Bắt đầu từ thị trường bạn đã biết.",
-  "tour.stop02.copy": "Trang chủ có bảng xếp hạng và các thị trường. Mở một token bất kỳ để xem lịch sử giá và những giao dịch mà các tác nhân đã ghi nhận với token đó.",
+  "tour.stop02.copy": "Trang chủ là merryman và tiền của bạn. Khám phá (Explore) có bảng xếp hạng và các thị trường: mở một token bất kỳ để xem lịch sử giá và những giao dịch mà các tác nhân đã ghi nhận với token đó.",
   "tour.stop03.title": "Tác nhân của bạn, giới hạn do bạn đặt.",
   "tour.stop03.copy": "Một chiến lược và hai hạn mức — mỗi lệnh và mỗi ngày — quyết định nó được phép làm gì. Chế độ mô phỏng cho bạn tập giao dịch bằng tiền mô phỏng, không phải tiền thật, cho tới khi bạn quyết định khác.",
   "tour.stop04.title": "Hỏi nó vì sao.",

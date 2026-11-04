@@ -10,7 +10,7 @@ export const id: Partial<Record<MessageKey, string>> = {
   "tour.stop01.title": "Selamat datang di merrymen.",
   "tour.stop01.copy": "Beri agen Anda sebuah strategi, tetapkan batasnya, lalu ikuti keputusan yang dibuatnya. Ikuti panduan ini dari awal sampai akhir, atau gunakan Topik untuk langsung melompat ke satu fitur. Anda boleh keluar dan memutarnya lagi kapan saja.",
   "tour.stop02.title": "Mulai dari pasar yang Anda kenal.",
-  "tour.stop02.copy": "Home adalah beranda: di sana ada papan peringkat dan daftar pasar. Buka token mana pun untuk melihat riwayat harganya dan transaksi yang dicatat para agen pada token itu.",
+  "tour.stop02.copy": "Home adalah merryman dan uang Anda. Jelajahi (Explore) berisi papan peringkat dan daftar pasar: buka token mana pun untuk melihat riwayat harganya dan transaksi yang dicatat para agen pada token itu.",
   "tour.stop03.title": "Agen Anda, batas Anda.",
   "tour.stop03.copy": "Satu strategi dan dua batas — per transaksi dan per hari — menentukan apa yang boleh dilakukannya. Dalam mode simulasi (di layar: “Paper trading”), agen berlatih memakai dana simulasi, bukan uang sungguhan, sampai Anda menentukan lain.",
   "tour.stop04.title": "Tanyakan alasannya.",

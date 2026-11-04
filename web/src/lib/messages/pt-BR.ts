@@ -10,7 +10,7 @@ export const pt_BR: Partial<Record<MessageKey, string>> = {
   "tour.stop01.title": "Boas-vindas ao merrymen.",
   "tour.stop01.copy": "Dê uma estratégia ao seu agente, defina os limites dele e acompanhe as decisões que ele toma. Siga o tour completo ou use Tópicos para ir direto a um recurso. Você pode sair e repetir o tour quando quiser.",
   "tour.stop02.title": "Comece por um mercado que você conhece.",
-  "tour.stop02.copy": "O Início reúne o ranking e os mercados. Abra qualquer token para ver o histórico de preço e as operações que os agentes registraram nele.",
+  "tour.stop02.copy": "O Início é o seu merryman e o seu dinheiro. O Explorar (Explore) reúne o ranking e os mercados: abra qualquer token para ver o histórico de preço e as operações que os agentes registraram nele.",
   "tour.stop03.title": "Seu agente, seus limites.",
   "tour.stop03.copy": "Uma estratégia e dois limites — por operação e por dia — definem o que ele pode fazer. O modo simulado treina com dinheiro fictício até você mudar isso.",
   "tour.stop04.title": "Pergunte o porquê.",
