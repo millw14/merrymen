@@ -75,18 +75,33 @@ const zodFinding = (nodes, via = [ZOD]) => ({ name: "zod", severity: "high", via
 const dependent = (name, ...via) => ({ name, severity: "high", via, nodes: [`node_modules/merrymen/node_modules/${name}`] });
 const october = new Date("2026-10-25T12:00:00Z");
 
-test("the zod 3 exception excuses only the five SDKs' copies and what is flagged through them", () => {
+test("the zod 3 exception excuses only the four SDKs' copies and what is flagged through them", () => {
   const audit = report({
     zod: zodFinding(sdkCopies),
-    "@privy-io/api-base": dependent("@privy-io/api-base", "zod"),
-    "@privy-io/react-auth": dependent("@privy-io/react-auth", "@privy-io/api-base"),
+    x402: dependent("x402", "zod", "wagmi"),
+    wagmi: dependent("wagmi", "@wagmi/connectors"),
+    "@wagmi/connectors": dependent("@wagmi/connectors", "zod", "@reown/appkit-wallet", "@coinbase/cdp-sdk"),
+    "@coinbase/cdp-sdk": dependent("@coinbase/cdp-sdk", "zod"),
+    "@reown/appkit-wallet": dependent("@reown/appkit-wallet", "zod"),
+    "@privy-io/react-auth": dependent("@privy-io/react-auth", "x402", "@reown/appkit-wallet"),
     merrymen: dependent("merrymen", "@privy-io/react-auth", "zod"),
   });
   assert.deepEqual(evaluateAudit(audit, zod3(sdkCopies), october), sdkCopies);
   assert.deepEqual(evaluateAudit(report({}), {}, october), []);
 });
 
-test("a zod copy anywhere else, or a zod 4 copy under one of the five, still fails", () => {
+test("Privy's api-base left the exception on 2026-11-04: a zod 3 copy under it fails again", () => {
+  assert.ok(!ZOD3_EXCEPTION.parents.includes("@privy-io/api-base"));
+  const privy = zodUnder("@privy-io/api-base");
+  const audit = report({
+    zod: zodFinding([...sdkCopies, privy]),
+    "@privy-io/api-base": dependent("@privy-io/api-base", "zod"),
+    "@privy-io/react-auth": dependent("@privy-io/react-auth", "@privy-io/api-base"),
+  });
+  assert.throws(() => evaluateAudit(audit, { ...zod3(sdkCopies), ...zod3([privy]) }, october), /3 vulnerable packages: zod \(high/);
+});
+
+test("a zod copy anywhere else, or a zod 4 copy under one of the four, still fails", () => {
   const own = "node_modules/merrymen/node_modules/zod";
   assert.throws(() => evaluateAudit(report({ zod: zodFinding([...sdkCopies, own]) }), { ...zod3(sdkCopies), [own]: { name: "zod", version: "4.6.5" } }, october), /1 vulnerable packages: zod \(high/);
   const other = zodUnder("@some/other-sdk");
@@ -110,6 +125,6 @@ test("every other advisory still fails, alone or beside the excused one", () => 
 test("the exception ends after its last day, and npm's own failure is never a pass", () => {
   const audit = report({ zod: zodFinding(sdkCopies) });
   assert.deepEqual(evaluateAudit(audit, zod3(sdkCopies), new Date(`${ZOD3_EXCEPTION.lastDay}T23:59:59Z`)), sdkCopies);
-  assert.throws(() => evaluateAudit(audit, zod3(sdkCopies), new Date("2026-11-09T00:00:00Z")), /ended after 2026-11-08/);
+  assert.throws(() => evaluateAudit(audit, zod3(sdkCopies), new Date("2026-11-23T00:00:00Z")), /ended after 2026-11-22/);
   assert.throws(() => evaluateAudit({ error: { code: "ENOAUDIT", summary: "registry unreachable" } }, {}, october), /npm audit failed/);
 });
