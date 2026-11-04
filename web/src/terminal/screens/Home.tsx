@@ -157,7 +157,7 @@ export function Home({
             <>
               <div className="hero empty">
                 <h2>Meet your merryman.</h2>
-                <p>He trades for you inside limits you set, explains every move, and stops the moment you say so. Start with pretend money — no risk.</p>
+                <p>He trades for you inside your limits and explains every move. Start with pretend money — no risk.</p>
               </div>
               <div className="mm-actions">
                 <button type="button" className="mm-action primary" onClick={onCreate ?? onDeposit}><Sparkles size={18} aria-hidden="true"/> Create your merryman</button>

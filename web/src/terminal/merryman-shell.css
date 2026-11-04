@@ -38,7 +38,7 @@
    375x667 phone; tall phones and desktop still get the full stage. */
 .terminal-host .mm-hero-stage {
   position: relative;
-  height: clamp(210px, calc(100dvh - 420px), 420px);
+  height: clamp(190px, calc(100dvh - 470px), 420px);
 }
 .terminal-host .mm-hero-stage .mm-merryman { position: absolute; inset: 0; }
 .terminal-host .mm-hero-body {
