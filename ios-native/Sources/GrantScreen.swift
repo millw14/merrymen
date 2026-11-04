@@ -74,6 +74,15 @@ struct GrantScreen: View {
                             Button("Bold · the warlord") { applyPreset(["200", "2000", "30", "15", "96"]) }
                             Text("A preset fills the limits below. Nothing changes until you review and sign.").font(.caption).foregroundStyle(.secondary)
                         }
+                        // RENEW MONTHLY, the web wallet's one-tap choice: a renewal pre-fills the
+                        // caps signed last time exactly, so an agent signed for a week stays weekly
+                        // until its owner says otherwise. This changes the lifetime field and nothing
+                        // else, and the review sheet still shows every limit before signing.
+                        if !creating, let signed = grant?["caps"]["expiryDays"].number, signed < 30 {
+                            let monthly = caps["expiryDays"] == "30"
+                            Button(monthly ? "Renews monthly (30 days)" : "Renew monthly (30 days)") { caps["expiryDays"] = "30" }.disabled(monthly)
+                            Text(monthly ? "This renewal runs 30 days instead of \(Int(signed)). Nothing else changes." : "Sign once a month instead of every \(Int(signed)) days. Only the lifetime changes, and you review it before signing.").font(.caption).foregroundStyle(.secondary)
+                        }
                         ForEach(fields, id: \.0) { key, title in
                             VStack(alignment: .leading) { Text(title).font(.caption); TextField(title, text: Binding(get: { caps[key] ?? "" }, set: { caps[key] = $0 })).keyboardType(.decimalPad) }
                         }
