@@ -109,9 +109,7 @@
 
 /* ── the big friendly buttons ── */
 .terminal-host .mm-actions {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
+  display: flex;
   gap: 8px;
 }
 .terminal-host .mm-action {
@@ -128,19 +126,21 @@
   font: inherit;
   font-size: 15px;
   font-weight: 700;
+  white-space: nowrap;
+  flex: 1 1 0;
+  min-width: 0;
   cursor: pointer;
   transition: transform 140ms cubic-bezier(0.2, 1.6, 0.4, 1), background 140ms;
 }
 .terminal-host .mm-action:hover { background: rgb(255 255 255 / 0.08); }
 .terminal-host .mm-action:active { transform: scale(0.97); }
 .terminal-host .mm-action.primary {
-  grid-column: span 2;
+  flex: 1.9 1 0;
   background: var(--lime);
   border-color: transparent;
   color: #111;
 }
 .terminal-host .mm-action.primary:hover { background: #b6df2a; }
-.terminal-host .mm-actions:has(.mm-action:nth-child(2):last-child) .mm-action.primary { grid-column: span 1; }
 
 .terminal-host .home-leaders-teaser .home-show-more {
   display: inline-flex;
@@ -365,3 +365,7 @@
 .terminal-host .hosted-funding .fund-chain-warning strong { color: #f3c14b; }
 .terminal-host .hosted-funding .fund-more { margin-top: 12px; }
 .terminal-host .hosted-funding .fund-more > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+@media (max-width: 420px) {
+  .terminal-host .mm-action { padding: 0 8px; gap: 6px; font-size: 14px; }
+  .terminal-host .mm-action:not(.primary) svg { display: none; }
+}
