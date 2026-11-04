@@ -21,6 +21,9 @@ import type { Framing, Stage } from "./stage";
 export type Cue = { key: string | number; clip: string };
 
 function webglAvailable(): boolean {
+  // jsdom (the node tests) has a canvas with no context; asking it prints a
+  // "not implemented" error into the test output for nothing.
+  if (typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent)) return false;
   try {
     const c = document.createElement("canvas");
     const gl = (c.getContext("webgl2") ?? c.getContext("webgl")) as WebGLRenderingContext | null;

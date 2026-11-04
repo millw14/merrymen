@@ -1,4 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Merryman } from "@/merryman/Merryman";
+import { useReactions } from "@/merryman/MerrymanHero";
+import { moodOf, wordOf, type ChatPhase, type Move } from "@/merryman/mood";
+import { useOutfit } from "@/merryman/wardrobe-store";
+import type { Autonomy } from "@merrymen/core";
 import { Proposals } from "../Proposals";
 import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
@@ -712,7 +717,10 @@ export function Agent({
           `.desk-conversation` below. The blocker stays pinned: it is short, and
           it is the one thing on this screen that must not be scrolled past. */}
       <header className="desk-header">
-        <Face name={mine.name} slug={mine.slug} />
+        {/* HE IS IN THE ROOM. The same merryman as Home, head and shoulders,
+            thinking while your question is out and talking while the answer
+            streams — the chat controller's own state, nothing guessed. */}
+        <DeskMerryman name={mine.name} slug={mine.slug} autonomy={mine.autonomy} recovery={recovery !== null} chat={chat.sending ? (chat.streaming ? "replying" : "thinking") : "idle"} moves={mine.moves} />
         <div>
           <h1>{mine.name}</h1>
           <p>{strategyName(mine.glance.id)}</p>
@@ -721,9 +729,11 @@ export function Agent({
           <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
         {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
-        <span className={`desk-status ${notTrading ? "paused" : ""}`}>
+        <span className={`desk-status ${notTrading ? "paused" : ""}`} title={recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}>
           <i />
-          {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
+          {/* The verdict in a plain word (merryman/mood.ts wordOf); the core's
+              all-caps label stays as the tooltip and in every API answer. */}
+          {mine.autonomy ? wordOf(mine.autonomy.state, { recovery: recovery !== null, expired: mine.autonomy.rule === "expired", needsOwner: mine.autonomy.needsOwnerAction }) : "Offline"}
         </span>
       </header>
       <section className="desk-portfolio">
@@ -1312,6 +1322,18 @@ function CopyReply({ text }: { text: string }) {
             ? "Couldn’t copy. Select the text to copy it."
             : ""}
       </span>
+    </div>
+  );
+}
+
+/** The chat header's merryman: head and shoulders, no island, same moods. */
+function DeskMerryman({ name, slug, autonomy, recovery, chat, moves }: { name: string; slug: string | null; autonomy: Autonomy | undefined; recovery: boolean; chat: ChatPhase; moves?: readonly Move[] }) {
+  const { outfit } = useOutfit(slug, slug ?? name);
+  const mood = moodOf({ phase: "agent", autonomy: autonomy ?? null, recovery, chat });
+  const reaction = useReactions(moves);
+  return (
+    <div className="desk-merryman">
+      <Merryman outfit={outfit} base={mood.clip} cue={reaction.cue} framing="portrait" ground={false} label={`${name}: ${mood.word}`} />
     </div>
   );
 }

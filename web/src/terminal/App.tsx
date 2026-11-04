@@ -629,7 +629,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           tenant={account?.session.hosted ? account.session.address : null}
           href={resignHref}
         />}
-        {!isolatedWallet && <FirstVisit layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
+        {!isolatedWallet && <FirstVisit autoStart={false} layoutKey={desktop ? "desktop" : "mobile"} tenant={account?.session.hosted ? account.session.address : null} onScreen={next => {
           if (desktop && next.kind === "tab" && ["home", "agent", "feed"].includes(next.tab)) {
             // Desktop tabs live in the rail/dock, not the phone's routes.
             // Navigating home would select Feed again and spotlight Markets

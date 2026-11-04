@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { Coin, Face, LogoMark, TabIcon, NameBlock, MovingFigure } from "./ui";
 import { TABS } from "./nav";
+import { wordOf } from "@/merryman/mood";
 import {
   money,
   coinPrice,
@@ -108,7 +109,7 @@ export function DesktopHeader({
           research; there was no desktop way into research at all before. */}
       <nav className="desktop-primary" aria-label="Main navigation">
         {TABS.map((t) => (
-          <button key={t.id} type="button" className={active === t.id ? "on" : undefined} aria-current={active === t.id ? "page" : undefined} onClick={() => onTab(t.id)}>
+          <button key={t.id} type="button" data-tour={`tab-${t.id}`} className={active === t.id ? "on" : undefined} aria-current={active === t.id ? "page" : undefined} onClick={() => onTab(t.id)}>
             <TabIcon id={t.id} />
             <span>{t.label}</span>
           </button>
@@ -473,8 +474,9 @@ export function DesktopPortfolio({
         <div className="desktop-section-heading">
           <h2>Your agent</h2>
           {/* The dot is green for a running agent, so NOT RUNNING never wears it. */}
-          <span className={`desktop-running ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`}>
-            {recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}
+          <span className={`desktop-running ${stopped || recovery || displayedAutonomy.state === "not-running" ? "paused" : ""}`} title={recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}>
+            {/* A plain word, as on the chat header; the core label is the tooltip. */}
+            {mine.autonomy ? wordOf(mine.autonomy.state, { recovery: !!recovery, expired: mine.autonomy.rule === "expired", needsOwner: mine.autonomy.needsOwnerAction }) : "Offline"}
           </span>
         </div>
         <button className="desktop-agent-id" onClick={() => onTab("agent")}>

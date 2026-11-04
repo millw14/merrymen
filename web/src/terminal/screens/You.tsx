@@ -2,10 +2,13 @@ import { PerformanceChart } from "../DitherChart";
 import { dailyChange, spentToday } from "../account";
 import { money, pctPts, type LiveMine } from "../live";
 import { strategyName } from "../strategy";
-import { Empty, Face } from "../ui";
+import { Empty } from "../ui";
 import { BalanceFigure } from "../studio";
 import Link from "../Link";
-import { ChartNoAxesCombined, SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
+import { ChartNoAxesCombined, SlidersHorizontal, Wallet, Settings, ChevronRight, Plug, Shirt } from "lucide-react";
+import { MerrymanPortrait } from "@/merryman/Merryman";
+import { wordOf } from "@/merryman/mood";
+import { useOutfit } from "@/merryman/wardrobe-store";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
 import { RecoveryNotice } from "../RecoveryNotice";
 import { pausedRecovery } from "../recovery-view";
@@ -36,14 +39,18 @@ export function You({
 }) {
   // Before the early return: a hook may not be skipped on some renders.
   const assistants = useConnectAssistantOffered();
+  const { outfit } = useOutfit(mine?.slug ?? null, mine?.slug ?? mine?.name ?? "draft");
+  // With no agent, the shell sends a "deposit" to /create (App openScreen),
+  // so this button now leads somewhere instead of back to this same page.
   if (!mine)
     return (
       <Empty
         kind="profile"
-        title="Your agents belong here."
-        action={{ label: "Fund an agent", onClick: onDeposit }}
+        title="Your merryman lives here."
+        action={{ label: "Create your merryman", onClick: onDeposit }}
       />
     );
+  const word = wordOf(mine.autonomy?.state, { recovery: pausedRecovery(mine.recovery) !== null, expired: mine.autonomy?.rule === "expired", needsOwner: mine.autonomy?.needsOwnerAction });
   const owner = mine.owner ?? "You";
   const ownerLabel =
     owner.startsWith("0x") && owner.length > 16
@@ -55,7 +62,7 @@ export function You({
   return (
     <div className="account-page">
       <header className="account-header">
-        <h1>Profile</h1>
+        <h1>Me</h1>
       </header>
       <div className="account-person">
         <span className="account-avatar" aria-hidden>
@@ -65,7 +72,7 @@ export function You({
           <h2>{ownerLabel}</h2>
           <p>1 agent</p>
         </div>
-        <span className="profile-mode">{recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}</span>
+        <span className="profile-mode" title={recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}>{word}</span>
       </div>
       <RecoveryNotice recovery={recovery} funds={mine.recoveryFunds}/>
       <section className="account-balance" aria-label="Account balance">
@@ -81,7 +88,7 @@ export function You({
         <PerformanceChart balance values={history} height={68} restate={false} />
         <div className="profile-funding">
         <button type="button" className="account-fund" onClick={onDeposit}>
-          Add funds
+          Add money
         </button>
         <button type="button" className="account-fund" onClick={onWithdraw}>
           Withdraw
@@ -94,14 +101,14 @@ export function You({
           <span>1</span>
         </div>
         <button type="button" className="account-agent" onClick={onDesk}>
-          <Face name={mine.name} slug={mine.slug} />
+          <MerrymanPortrait outfit={outfit} size={44} title={mine.name} />
           <span>
             <strong>{mine.name}</strong>
             <small>{strategyName(mine.glance.id)}</small>
           </span>
           <span className="account-agent-value">
             <strong>{money(mine.equity)}</strong>
-            <small>{recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"} ↗</small>
+            <small>{word} ↗</small>
           </span>
         </button>
       </section>
@@ -109,6 +116,11 @@ export function You({
         <div className="account-section-title">
           <h2>Account</h2>
         </div>
+        <Link className="account-control" href="/wardrobe">
+          <Shirt size={24} aria-hidden="true"/>
+          <span><strong>Dress your merryman</strong><small>Hats, outfits, pets and 40+ moves</small></span>
+          <ChevronRight size={18} aria-hidden="true"/>
+        </Link>
         <Link className="account-control owner-trades-link" href="/agent#trades">
           <ChartNoAxesCombined size={24} aria-hidden="true"/>
           <span><strong>Trades &amp; P&amp;L</strong><small>View results and P&amp;L cards</small></span>

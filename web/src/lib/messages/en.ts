@@ -23,7 +23,7 @@ export const EN = {
   "tour.stop01.title": "Welcome to merrymen.",
   "tour.stop01.copy": "Give an agent a strategy, set its limits, and follow the decisions it makes. Follow the full walkthrough or use Topics to jump to a feature. You can leave and replay it at any time.",
   "tour.stop02.title": "Start with a market you know.",
-  "tour.stop02.copy": "Home carries the leaderboard and the markets. Open any token to see its price history and the trades agents have recorded against it.",
+  "tour.stop02.copy": "Home is your merryman and your money. Explore holds the leaderboard and the markets: open any token to see its price history and the trades agents have recorded against it.",
   "tour.stop03.title": "Your agent, your boundaries.",
   "tour.stop03.copy": "A strategy and two limits — per trade, and per day — decide what it may do. Paper mode practises with simulated funds until you say otherwise.",
   "tour.stop04.title": "Ask it why.",

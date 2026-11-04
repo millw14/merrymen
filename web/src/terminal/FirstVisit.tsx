@@ -148,6 +148,15 @@ export function FirstVisit({
 }: {
   tenant?: string | null;
   layoutKey?: string;
+  /**
+   * Does the tour open by itself for somebody who has never seen it? The app
+   * passes false: a newcomer now lands on their merryman, whose bubble and two
+   * buttons are the welcome, with the replay link one tap away above him. An
+   * eight-card modal over that, before anything else could be read, was the
+   * first piece of "work" every visitor was handed. Default true, so the tour
+   * itself behaves as it always has wherever it is mounted that way.
+   */
+  autoStart?: boolean;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
   onExplore?: (section: "markets" | "agents" | "feed" | "board") => void;
@@ -159,12 +168,14 @@ export function FirstVisit({
 function AccountTour({
   tenant,
   layoutKey,
+  autoStart = true,
   onScreen,
   onQuestion,
   onExplore,
 }: {
   tenant: string | null;
   layoutKey?: string;
+  autoStart?: boolean;
   onScreen: (screen: Screen) => void;
   onQuestion: () => void;
   onExplore?: (section: "markets" | "agents" | "feed" | "board") => void;
@@ -236,7 +247,15 @@ function AccountTour({
         writeLocal(KEY, { ...anonymous, claimed: tenant });
       }
     }
-    save(local ?? { done: false, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" });
+    // Without auto-start a first visit RECORDS NOTHING: the tour is simply
+    // closed in this render, so no dismissal is written, claimed on sign-in or
+    // synced to the server for a tour nobody was shown.
+    if (local) save(local);
+    else if (autoStart) save({ done: false, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" });
+    else {
+      state.current = { done: true, step: ESSENTIAL_STOP_INDICES[0]!, track: "essentials" };
+      setSaved(state.current);
+    }
     setReady(true);
     void sync();
     const retry = () => { void sync(); };
@@ -245,7 +264,7 @@ function AccountTour({
       alive.current = false;
       window.removeEventListener("online", retry);
     };
-  }, [key, tenant, save, sync]);
+  }, [key, tenant, save, sync, autoStart]);
 
   // ── AND WHAT DOES THE SERVER KNOW ─────────────────────────────────────────
   //
