@@ -718,13 +718,29 @@ impl Fork {
         f.set_token_amount(vault_usdg, usdg).await;
         f
     }
+    /// A legacy setup transaction from the cluster payer, which must succeed.
+    ///
+    /// It runs through process_transaction_with_metadata like `process`. Do not mix in
+    /// BanksClient::process_transaction: it queues the transaction for the bank-forks thread
+    /// and returns once the signature status is committed, which can be before that thread
+    /// unlocks the batch's accounts. A swap executed directly right after it then finds the
+    /// shared fee payer still locked and fails with AccountInUse without running.
     async fn legacy(&mut self, ixs: &[Instruction], signers: &[&Keypair]) {
         let hash = self.ctx.get_new_latest_blockhash().await.unwrap();
         let mut all = vec![&self.ctx.payer];
         all.extend_from_slice(signers);
         let tx =
             Transaction::new_signed_with_payer(ixs, Some(&self.ctx.payer.pubkey()), &all, hash);
-        self.ctx.banks_client.process_transaction(tx).await.unwrap();
+        let out = self
+            .ctx
+            .banks_client
+            .process_transaction_with_metadata(tx)
+            .await
+            .unwrap();
+        if let Err(e) = out.result {
+            let logs = out.metadata.map(|m| m.log_messages).unwrap_or_default();
+            panic!("setup transaction failed: {e:?}\n{}", logs.join("\n"));
+        }
     }
     /// A new owner-signed session with these caps (the session epoch moves on).
     async fn set_caps(&mut self, caps: Caps) {
