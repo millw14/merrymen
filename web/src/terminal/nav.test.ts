@@ -20,7 +20,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { pathForScreen, screenForPath, TABS } from "./nav";
+import { closeTarget, pathForScreen, screenForPath, TABS } from "./nav";
+import type { Screen } from "./live";
 
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -41,15 +42,17 @@ const codeOf = (src: string) =>
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
     .join("\n");
 
-describe("the five tabs", () => {
-  it("is exactly five, in the order the owner asked for", () => {
-    // The bar is `grid-template-columns: repeat(5, 1fr)` in CSS. Six tabs would
-    // silently overflow one cell rather than fail.
-    assert.equal(TABS.length, 5);
+describe("the four tabs", () => {
+  it("is exactly four, in the order the owner asked for", () => {
+    // The bar is `grid-template-columns: repeat(4, 1fr)` in CSS. A fifth tab
+    // would silently overflow one cell rather than fail. Feed, the board, the
+    // markets and research (alpha) all live under Explore now.
+    assert.equal(TABS.length, 4);
     assert.deepEqual(
       TABS.map((t) => t.label),
-      ["Home", "Chat", "Feed", "Alpha", "Profile"],
+      ["Home", "Chat", "Explore", "Me"],
     );
+    assert.match(at("./terminal.css"), /\.tabbar \{[^}]*grid-template-columns: repeat\(4, 1fr\)/, "the bar's grid matches its tabs");
   });
 
   it("THE LOGO IS THE CENTRE BUTTON", () => {
@@ -82,7 +85,7 @@ describe("routing", () => {
     assert.deepEqual(screenForPath("/solana", true), { kind: "solana" });
     assert.equal(pathForScreen({ kind: "solana" }), "/solana");
     assert.ok(existsSync(join(ROOT, "web/src/app/(app)/solana/page.tsx")));
-    assert.equal(TABS.length, 5);
+    assert.equal(TABS.length, 4);
   });
   it("without Solana on this deployment, /solana is Home like any unknown path", () => {
     assert.deepEqual(screenForPath("/solana"), { kind: "tab", tab: "home" });
@@ -109,11 +112,19 @@ describe("routing", () => {
     assert.deepEqual(missing, [], `these tabs 404 on refresh: ${missing.join(", ")}`);
   });
 
-  it("REGRESSION: /leaderboard still resolves after the board tab retired", () => {
-    // A URL testers have open and have shared. It renders Home, which now
-    // carries the board.
-    const s = screenForPath("/leaderboard");
-    assert.equal(s.kind === "tab" && s.tab, "home");
+  it("REGRESSION: /leaderboard and /tokens still open what they named", () => {
+    // URLs testers have open and have shared. The board and the market table
+    // live under Explore now, each at its own address.
+    assert.deepEqual(screenForPath("/leaderboard"), { kind: "leaders" });
+    assert.deepEqual(screenForPath("/tokens"), { kind: "markets" });
+  });
+
+  it("Explore's views round-trip and have route files", () => {
+    for (const kind of ["leaders", "markets", "wardrobe"] as const) {
+      assert.deepEqual(screenForPath(pathForScreen({ kind })), { kind });
+      assert.ok(existsSync(join(ROOT, `web/src/app/(app)/${kind}/page.tsx`)), `/${kind} has no page stub`);
+    }
+    assert.deepEqual(screenForPath("/"), { kind: "tab", tab: "home" }, "the front door is Home");
   });
 
   it("and the address bar is normalised by a redirect, not by a page", () => {
@@ -163,6 +174,52 @@ describe("money is a place, not a mode", () => {
   });
 });
 
+describe("closing Add money goes back to the page it was opened over", () => {
+  // Reported on PR #377: on desktop, Markets → a token → Add money → close
+  // landed on Markets, while the token chart had been on screen under the
+  // panel the whole time. Back skips detail screens on purpose; closing a
+  // money panel must not.
+  const markets: Screen = { kind: "markets" };
+  const token: Screen = { kind: "token", id: "0xabc" };
+  const profile: Screen = { kind: "profile", slug: "alan" };
+  const home: Screen = { kind: "tab", tab: "home" };
+  const chat: Screen = { kind: "tab", tab: "agent" };
+
+  it("OVER A TOKEN CHART OR A PROFILE, CLOSE IS THAT PAGE — desktop and phone", () => {
+    for (const desktop of [true, false]) {
+      assert.deepEqual(closeTarget({ money: true, under: token, lastBrowse: markets, desktop }), token);
+      assert.deepEqual(closeTarget({ money: true, under: profile, lastBrowse: home, desktop }), profile);
+      assert.deepEqual(closeTarget({ money: true, under: home, lastBrowse: home, desktop }), home);
+    }
+  });
+
+  it("Back from a detail screen still goes to the last place browsed", () => {
+    assert.deepEqual(closeTarget({ money: false, under: token, lastBrowse: markets, desktop: true }), markets);
+    assert.deepEqual(closeTarget({ money: false, under: null, lastBrowse: home, desktop: false }), home);
+  });
+
+  it("a cold load of /deposit has nothing under it: the browse history, then the tab", () => {
+    assert.deepEqual(closeTarget({ money: true, under: null, lastBrowse: markets, desktop: true }), markets);
+    assert.equal(closeTarget({ money: true, under: null, lastBrowse: null, desktop: true }), null);
+  });
+
+  it("never a money screen, and never Chat on desktop, where Chat is a dock", () => {
+    assert.equal(closeTarget({ money: true, under: { kind: "withdraw" }, lastBrowse: null, desktop: false }), null);
+    assert.equal(closeTarget({ money: true, under: chat, lastBrowse: null, desktop: true }), null);
+    assert.deepEqual(closeTarget({ money: true, under: chat, lastBrowse: markets, desktop: true }), markets);
+    assert.deepEqual(closeTarget({ money: true, under: chat, lastBrowse: null, desktop: false }), chat, "the phone has a Chat screen");
+    assert.equal(closeTarget({ money: false, under: null, lastBrowse: chat, desktop: true }), null);
+  });
+
+  it("App closes BOTH funding panels this way, and nothing else does", () => {
+    const app = codeOf(at("./App.tsx"));
+    const panels = app.match(/<FundingPanel\b[^>]*>/g) ?? [];
+    assert.equal(panels.length, 2, "the phone panel and the desktop side panel");
+    for (const panel of panels) assert.match(panel, /onClose=\{closeMoney\}/);
+    assert.match(app, /const closeMoney = \(\) => goBackTo\(closeTarget\(\{ money: true, under: underMoney\.current/);
+  });
+});
+
 describe("the group chat is a place, not a tab", () => {
   // The room every agent is in. `/chat` already means the owner talking to
   // their own agent, and the bar is five wide by CSS — so the room is a screen
@@ -177,8 +234,8 @@ describe("the group chat is a place, not a tab", () => {
     assert.ok(existsSync(join(ROOT, "web/src/app/(app)/groupchat/page.tsx")), "/groupchat has no page stub");
   });
 
-  it("and did not become a sixth tab", () => {
-    assert.equal(TABS.length, 5);
+  it("and did not become a fifth tab", () => {
+    assert.equal(TABS.length, 4);
     assert.ok(!TABS.some((t) => (t.id as string) === "groupchat"));
   });
 
@@ -206,7 +263,7 @@ describe("what the nav rewrite could have broken quietly", () => {
     for (const label of TABS.map((t) => t.label)) {
       assert.ok(named.includes(label), `the prompt never mentions the ${label} tab`);
     }
-    assert.ok(!named.includes("Portfolio"), "Portfolio was renamed to Profile");
+    assert.ok(!named.includes("Portfolio"), "Portfolio was renamed, and is now Me");
   });
 
   it("the desktop no longer rewrites /feed to Home", () => {
@@ -256,7 +313,8 @@ describe("what the nav rewrite could have broken quietly", () => {
 });
 
 describe("what the room came for is at the top", () => {
-  const home = codeOf(at("./screens/Home.tsx"));
+  // The market table moved from Home to Explore → Markets, ranking and all.
+  const home = codeOf(at("./screens/Markets.tsx"));
 
   it("COINS RANK ABOVE STOCKS, in every list this screen sorts", () => {
     // An admin's words: "can we show memecoins first instead of stocks? nobody
@@ -271,7 +329,7 @@ describe("what the room came for is at the top", () => {
     assert.equal(
       (home.match(/coinFirst\(a, b\) \|\|/g) ?? []).length,
       3,
-      "every ranked list on Home must put coins first",
+      "every ranked list on Markets must put coins first",
     );
   });
 

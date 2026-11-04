@@ -3,11 +3,23 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { CONCEPTS, conceptTooltip, conceptsFor, renderConcepts, type Concept } from "./explain";
+import { DEFAULT_PERMISSION_DAYS } from "./autonomy";
+import { CONCEPTS, conceptByTerm, conceptTooltip, conceptsFor, renderConcepts, type Concept } from "./explain";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
 
 describe("the concept base is grounded", () => {
+  it("the permission entry names the lifetime a new agent actually signs", () => {
+    // Written out in explain.ts (a literal table the SDK bundle can drop), so
+    // the default is held to it here instead.
+    const entry = conceptByTerm(`Trading permission ${DEFAULT_PERMISSION_DAYS} days`);
+    assert.ok(entry, "the glossary term follows DEFAULT_PERMISSION_DAYS");
+    assert.ok(entry.aliases.includes(`${DEFAULT_PERMISSION_DAYS} days`));
+    assert.match(entry.plain, new RegExp(`— ${DEFAULT_PERMISSION_DAYS} unless you picked`));
+    assert.ok(entry.aliases.includes("7 days"), "owners of older weekly permissions still find it");
+    assert.equal(conceptsFor("does my permission expire monthly")[0]?.term, entry.term);
+  });
+
   it("every entry cites a file that exists", () => {
     // An entry whose citation has rotted is a sentence the chat will repeat
     // confidently to somebody asking about their money. The citation is the

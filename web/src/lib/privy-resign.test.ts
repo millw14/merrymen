@@ -144,7 +144,8 @@ describe("what a Privy owner is told when they cannot re-sign", () => {
   it("the expiry and uncovered warnings reach Privy owners too", () => {
     // Both were gated on the owner key, so the cohort least able to act was
     // also the one never told it needed to.
-    assert.match(WALLET, /secsLeft > 3 \* 86_400 \|\| !resignBy/);
+    // The window is the shared RENEW_SOON_DAYS (three days), not a literal.
+    assert.match(WALLET, /secsLeft > RENEW_SOON_DAYS \* 86_400 \|\| !resignBy/);
     assert.match(WALLET, /uncoveredNames\.length > 0 && resignBy/);
   });
 });

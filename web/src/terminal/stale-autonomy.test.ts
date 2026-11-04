@@ -192,7 +192,7 @@ describe("the desk says NOT RUNNING without losing a remedy", () => {
       const panel = page.querySelector(".desk-blocked");
       assert.ok(panel, `no-gas must render its panel (staleBlocker=${staleBlocker}): a signature says nothing about ETH`);
       assert.match(panel.textContent!, /no ETH/);
-      assert.equal(page.querySelector(".desk-status")!.textContent, "NOT RUNNING");
+      assert.equal(page.querySelector(".desk-status")!.textContent, "Asleep");
     }
   });
 
@@ -200,17 +200,17 @@ describe("the desk says NOT RUNNING without losing a remedy", () => {
     const silent = desk(mineFor({ mode: "live", liveBlocker: null, workerSilentSince: SILENT }), null);
     assert.ok(silent.querySelector(".desk-status")!.classList.contains("paused"));
     const running = desk(mineFor({ mode: "live", liveBlocker: null }), null);
-    assert.equal(running.querySelector(".desk-status")!.textContent, "LIVE");
+    assert.equal(running.querySelector(".desk-status")!.textContent, "Trading");
     assert.ok(!running.querySelector(".desk-status")!.classList.contains("paused"), "a running agent keeps it");
     const wide = portfolio(mineFor({ mode: "live", liveBlocker: null, workerSilentSince: SILENT }));
-    assert.equal(wide.querySelector(".desktop-running")!.textContent, "NOT RUNNING");
+    assert.equal(wide.querySelector(".desktop-running")!.textContent, "Asleep");
     assert.ok(wide.querySelector(".desktop-running")!.classList.contains("paused"));
   });
 
   it("a re-signer whose worker is silent is told NOT RUNNING, and still not asked to sign again", () => {
     const mine = mineFor({ mode: "paper", liveBlocker: "wrong-chain", blockerPredatesGrant: true, workerSilentSince: SILENT });
     const page = desk(mine, "wrong-chain", true);
-    assert.equal(page.querySelector(".desk-status")!.textContent, "NOT RUNNING");
+    assert.equal(page.querySelector(".desk-status")!.textContent, "Asleep");
     assert.equal(page.querySelector(".desk-blocked"), null, "the verdict about the replaced key stays down");
     assert.doesNotMatch(page.body.textContent!, /re-sign my permission|few minutes/);
     assert.equal(portfolio(mine).querySelector(".desktop-blocked"), null, "and no banner on the desktop either");
@@ -337,7 +337,7 @@ describe("a key about to expire is a chip, not an alarm", () => {
     assert.equal(page.querySelector(".desk-blocked"), null, "never the red panel");
     const note = page.querySelector(".desk-note")!;
     assert.match(note.querySelector("button")!.textContent!, /Renew permission \(expires in 2 days\)/);
-    assert.equal(page.querySelector(".desk-status")!.textContent, "LIVE", "and the agent is still what it is");
+    assert.equal(page.querySelector(".desk-status")!.textContent, "Trading", "and the agent is still what it is");
     const wide = portfolio(soon());
     const link = wide.querySelector('a[href="/grant#resign"]')!;
     assert.equal(link.textContent, "Renew permission (expires in 2 days)");

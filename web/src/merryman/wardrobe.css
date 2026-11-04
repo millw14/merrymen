@@ -1,0 +1,252 @@
+/*
+ * THE WARDROBE. A dressing room, not a form: the stage takes the most room,
+ * the drawers are chips and swatches big enough for a thumb, and the three
+ * actions sit where a thumb already is.
+ */
+.mm-wardrobe {
+  --wd-bg: var(--card, #12130f);
+  --wd-line: var(--line, #24261e);
+  --wd-accent: var(--lime, #a5ce1f);
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 1fr);
+  gap: 20px;
+  align-items: stretch;
+  min-height: min(720px, calc(100dvh - 140px));
+}
+@media (min-width: 1100px) {
+  /* The whole figure in view while the drawers scroll beside him. */
+  .mm-wardrobe { min-height: 0; align-items: start; }
+  .mm-wardrobe-stage { position: sticky; top: 12px; height: min(640px, calc(100dvh - 200px)); min-height: 420px; }
+}
+.mm-wardrobe-stage {
+  position: relative;
+  min-height: 420px;
+  border-radius: 24px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 80% at 50% 100%, #183020 0%, transparent 60%),
+    radial-gradient(90% 70% at 50% 0%, #10222c 0%, transparent 70%),
+    #070a08;
+  border: 1px solid var(--wd-line);
+}
+.mm-wardrobe-stage .mm-merryman { position: absolute; inset: 0; }
+.mm-wardrobe-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12px;
+  margin: 0;
+  text-align: center;
+  pointer-events: none;
+}
+.mm-wardrobe-hint span {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgb(7 8 6 / 0.72);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  font-size: 12px;
+  color: var(--tx-2, #b3afa9);
+}
+.mm-save-status { margin: 0; min-height: 1.2em; font-size: 13px; color: var(--tx-2, #b3afa9); }
+.mm-wardrobe-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.mm-wardrobe-head h1 {
+  margin: 0 0 4px;
+  font-size: 26px;
+  letter-spacing: -0.02em;
+}
+.mm-wardrobe-head p {
+  margin: 0;
+  color: var(--tx-2, #b3afa9);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.mm-looks {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* Room for the focus ring, which overflow would otherwise clip. */
+  padding: 4px;
+  margin: -4px;
+}
+.mm-looks button {
+  flex: none;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 6px 6px 8px;
+  border-radius: 16px;
+  border: 1px solid var(--wd-line);
+  background: var(--wd-bg);
+  color: var(--tx-2, #b3afa9);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.2, 1.6, 0.4, 1), border-color 140ms;
+}
+.mm-looks button:hover { transform: translateY(-2px); }
+.mm-looks button.on { border-color: var(--wd-accent); color: var(--tx, #e9e6e1); }
+/* All five drawers fit a 320px phone: no hidden "Moves" behind a scroll. */
+.mm-drawers {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 14px;
+  background: var(--wd-bg);
+  border: 1px solid var(--wd-line);
+}
+.mm-drawers button {
+  min-width: 0;
+  padding: 9px 4px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--tx-2, #b3afa9);
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 160ms, color 160ms;
+}
+.mm-drawers button.on {
+  background: var(--tx, #e9e6e1);
+  color: #111;
+}
+.mm-drawer {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.mm-slot {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.mm-slot-label {
+  display: block;
+  margin: 0 0 8px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint, #898c80);
+}
+.mm-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mm-chips button,
+.mm-move-grid button {
+  padding: 9px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--wd-line);
+  background: var(--wd-bg);
+  color: var(--tx, #e9e6e1);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.2, 1.6, 0.4, 1), border-color 140ms, background 140ms;
+}
+.mm-chips button:hover,
+.mm-move-grid button:hover { border-color: #4a4d40; transform: translateY(-1px); }
+.mm-chips button:active,
+.mm-move-grid button:active { transform: scale(0.96); }
+.mm-chips button.on {
+  background: color-mix(in srgb, var(--wd-accent) 18%, var(--wd-bg));
+  border-color: var(--wd-accent);
+  color: #f4ffd6;
+}
+.mm-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.mm-swatches button {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  background: var(--sw);
+  box-shadow: inset 0 -6px 10px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.2, 1.6, 0.4, 1);
+}
+.mm-swatches button:hover { transform: scale(1.08); }
+.mm-swatches button.on {
+  border-color: var(--tx, #e9e6e1);
+  box-shadow: 0 0 0 3px #000, 0 0 0 5px var(--wd-accent);
+}
+.mm-move-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 8px;
+}
+.mm-move-grid button { border-radius: 12px; text-align: left; }
+.mm-move-grid button.is-loop::after {
+  content: " ↻";
+  color: var(--faint, #898c80);
+}
+.mm-wardrobe-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 4px;
+}
+.mm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--wd-line, #24261e);
+  font: inherit;
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.2, 1.6, 0.4, 1), opacity 140ms;
+}
+.mm-btn:active { transform: scale(0.97); }
+.mm-btn:disabled { opacity: 0.45; cursor: default; }
+.mm-btn.ghost { background: transparent; color: var(--tx, #e9e6e1); }
+.mm-btn.primary {
+  flex: 1;
+  background: var(--wd-accent, #a5ce1f);
+  border-color: transparent;
+  color: #111;
+}
+
+@media (max-width: 420px) {
+  .mm-drawers button { font-size: 13px; }
+}
+@media (max-width: 860px) {
+  .mm-wardrobe {
+    grid-template-columns: 1fr;
+    min-height: 0;
+    gap: 14px;
+  }
+  .mm-wardrobe-stage { min-height: 46dvh; }
+  .mm-wardrobe-actions {
+    position: sticky;
+    bottom: calc(var(--tabbar-clear, 84px));
+    background: linear-gradient(transparent, var(--bg, #070806) 30%);
+    padding: 16px 0 6px;
+  }
+  .mm-wardrobe-actions .mm-btn.ghost span { display: none; }
+}
+.mm-wardrobe.is-embedded { min-height: 0; }
+.mm-wardrobe.is-embedded .mm-wardrobe-stage { min-height: 380px; }

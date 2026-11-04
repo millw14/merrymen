@@ -10,7 +10,7 @@ export const tr: Partial<Record<MessageKey, string>> = {
   "tour.stop01.title": "merrymen'e hoş geldiniz.",
   "tour.stop01.copy": "Bir ajana strateji verin, limitlerini belirleyin ve verdiği kararları izleyin. Turun tamamını takip edebilir ya da Konular ile doğrudan bir özelliğe geçebilirsiniz. İstediğiniz zaman çıkabilir, turu daha sonra yeniden izleyebilirsiniz.",
   "tour.stop02.title": "Bildiğiniz bir piyasayla başlayın.",
-  "tour.stop02.copy": "Ana sayfada liderlik tablosu ve piyasalar yer alır. Fiyat geçmişini ve ajanların o token üzerinde kaydettiği işlemleri görmek için herhangi bir token'ı açın.",
+  "tour.stop02.copy": "Ana sayfa, merryman'iniz ve paranızdır. Keşfet (Explore) bölümünde liderlik tablosu ve piyasalar yer alır: fiyat geçmişini ve ajanların o token üzerinde kaydettiği işlemleri görmek için herhangi bir token'ı açın.",
   "tour.stop03.title": "Ajanınız, sizin sınırlarınız.",
   "tour.stop03.copy": "Ajanın ne yapabileceğini bir strateji ve iki limit belirler: işlem başına limit ve günlük limit. Demo modunda ajan, siz aksini söyleyene kadar gerçek para yerine simüle edilmiş parayla alıştırma yapar.",
   "tour.stop04.title": "Nedenini sorun.",

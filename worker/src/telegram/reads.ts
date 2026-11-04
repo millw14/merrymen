@@ -308,7 +308,7 @@ export function readStatus(ctx: StatusContext): string {
   }
   if (ctx.grant) {
     lines.push(
-      `• caps: ${ctx.grant.perTradeUsdg}/trade · ${ctx.grant.dailyUsdg}/day · breaker ${ctx.grant.maxDrawdownPct}% · key dies in ${ctx.grant.expiresInDays}d`,
+      `• caps: ${ctx.grant.perTradeUsdg}/trade · ${ctx.grant.dailyUsdg}/day · breaker ${ctx.grant.maxDrawdownPct}% · renew in ${ctx.grant.expiresInDays}d`,
     );
   } else {
     lines.push(`• no grant signed — raise the permission wall in the dashboard`);

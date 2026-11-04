@@ -10,7 +10,7 @@ import { markPermissionForReplacement } from "@/lib/permission-replacement";
 import { RISK_PROFILES } from "@merrymen/core";
 
 const tenant = `0x${"a".repeat(40)}`;
-const grant = { smartAccount: `0x${"b".repeat(40)}`, owner: tenant, sessionKeyAddress: `0x${"c".repeat(40)}`, chainId: 4663, grantedAt: 1, expiresAt: 604801, binding: { version: "privy-did-owner-v1" }, caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 } } as Grant;
+const grant = { smartAccount: `0x${"b".repeat(40)}`, owner: tenant, sessionKeyAddress: `0x${"c".repeat(40)}`, chainId: 4663, grantedAt: 1, expiresAt: 2592001, binding: { version: "privy-did-owner-v1" }, caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 30, maxDrawdownPct: 5, maxOpsPerDay: 24 } } as Grant;
 const account: AccountState = { session: { hosted: true, address: tenant }, status: { exists: false, tenant } };
 let stored: Grant | null;
 let snapshots: Grant[];

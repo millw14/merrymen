@@ -184,7 +184,7 @@ const grant = await prepareMerryman({
   caps: {
     perTradeUsdg: 10,
     dailyUsdg: 50,
-    expiryDays: 7,
+    expiryDays: 30,
     maxDrawdownPct: 5,
     maxOpsPerDay: 24,
   },

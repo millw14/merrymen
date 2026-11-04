@@ -176,7 +176,7 @@ function Rank({
         onClick={() => onProfile(a.slug)}
       >
         <span className="n">{row.ret == null ? "—" : row.rank}</span>
-        <Face name={a.name} slug={a.slug} />
+        <Face name={a.name} slug={a.slug} figure />
         <div className="rank-who">
           <div className="rank-name">
             <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />

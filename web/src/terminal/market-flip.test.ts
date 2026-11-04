@@ -3,7 +3,7 @@
  *
  * The tape, the Token page and the balances flipped when their figure moved,
  * and the three lists a reader actually watches prices on did not: the desktop
- * rail, Home's market table and Home's phone list printed `coinPrice` bare, so
+ * rail, the market table and its phone list printed `coinPrice` bare, so
  * a thirty-second market read that moved every price changed digits in place
  * with nothing to say they had moved. Rendered, re-rendered with newer prices,
  * and read back off the DOM — the same way the shell re-renders them.
@@ -84,24 +84,18 @@ describe("the market lists' prices", () => {
     }
   });
 
-  it("Home's table and its phone list flip too", async () => {
+  it("the market table and its phone list flip too", async () => {
+    // These lived on Home; they are Explore → Markets now, the same table.
     const t = testDom();
-    const { Home } = await import("./screens/Home");
+    const { Markets } = await import("./screens/Markets");
     const home = (tsla: number) =>
-      createElement(Home, {
+      createElement(Markets, {
         tokens: [token("TSLA", tsla)],
-        agents: [],
-        theses: [],
-        mine: null,
         tokenTab: "buys",
         onTokenTab: noop,
         onToken: noop,
         onAgent: noop,
-        onDeposit: noop,
         onSearch: noop,
-        onDesk: noop,
-        hasAgent: false,
-        read: "ok",
       } as never);
     try {
       await t.render(home(350));

@@ -714,6 +714,7 @@ function ConnectedSolana() {
           <label>Trades per 24 hours<input type="number" min="1" max="96" value={ops} onChange={(e) => setOps(e.target.value)} /></label>
           <label>Maximum drawdown (%)<input inputMode="decimal" value={drawdown} onChange={(e) => setDrawdown(e.target.value)} /></label>
           <label>Permission duration (hours)<input type="number" min="1" max="168" value={duration} onChange={(e) => setDuration(e.target.value)} /></label>
+          <p className="create-note">Solana permissions last at most 168 hours (7 days): the Solana vault program enforces that limit. Robinhood Chain permissions renew monthly.</p>
           {mode === "live" && <>
             <label>SOL sold per trade<input inputMode="decimal" value={perTradeSol} onChange={(e) => setPerTradeSol(e.target.value)} /></label>
             <label>SOL sold per 24 hours<input inputMode="decimal" value={dailySol} onChange={(e) => setDailySol(e.target.value)} /></label>

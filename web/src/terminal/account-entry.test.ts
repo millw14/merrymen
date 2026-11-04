@@ -123,7 +123,7 @@ describe("the create screen", () => {
     const stale: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
     const html = await create({ account: stale, accountFailed: true });
     assert.match(text(html), /couldn.t load your account/i);
-    assert.doesNotMatch(text(html), /Set trading limits|Meet your next agent/);
+    assert.doesNotMatch(text(html), /Set trading limits|Meet your next agent|Meet your merryman/);
   });
   it("does not say 'Loading your account' about a read that failed", async () => {
     const html = await create({ account: null, accountFailed: true });

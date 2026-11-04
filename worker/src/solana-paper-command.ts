@@ -4,7 +4,7 @@ import { CHAINS } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, solanaPaperAgentId, validateSolanaPaperLimits } from "../../packages/core/src/solana";
 import { merrymenHome } from "./home";
 import { createSolanaMarket } from "./solana-market";
-import { SolanaPaperStore, type SolanaPaperLimitsRenewal } from "./solana-paper-store";
+import { SOLANA_PAPER_RENEW_DEFAULT_DAYS, SolanaPaperStore, type SolanaPaperLimitsRenewal } from "./solana-paper-store";
 import { assertSolanaPaperLocalMode, createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 
 export class SolanaPaperCommandError extends Error {
@@ -14,7 +14,7 @@ export class SolanaPaperCommandError extends Error {
 export const SOLANA_PAPER_HELP = `Solana paper trading — local simulation; no wallet signing or real funds.
 
 init --owner PUBLIC_KEY [--cash 1000] [--per-trade 25] [--daily 100]
-     [--max-ops 20] [--drawdown-bps 1000] [--expires-days 7]
+     [--max-ops 20] [--drawdown-bps 1000] [--expires-days ${SOLANA_PAPER_RENEW_DEFAULT_DAYS}]
 renew --owner PUBLIC_KEY [--expires-days N] [--per-trade USDG] [--daily USDG]
       [--max-ops N] [--drawdown-bps N] [--loosen]
 status --owner PUBLIC_KEY
@@ -30,9 +30,9 @@ units (USDG has 6 decimals). Reuse a trade's request ID after interruption;
 it returns the saved receipt without applying another fill. Never reset a
 book by repeating init: an existing book is refused. Once limits expire, the
 owner can renew them. renew changes only the limits given (others are kept)
-and prints what changed. Without --expires-days: an expired book gets 7 days
+and prints what changed. Without --expires-days: an expired book gets ${SOLANA_PAPER_RENEW_DEFAULT_DAYS} days
 from now; a running book keeps its expiry when renew changes a limit, so
-tightening never lengthens it; a bare renew extends it to 7 days from now,
+tightening never lengthens it; a bare renew extends it to ${SOLANA_PAPER_RENEW_DEFAULT_DAYS} days from now,
 or keeps it if later. Only --expires-days can shorten the expiry, or lengthen
 it alongside a limit change. Lowering a limit needs nothing more; raising the
 per-trade, daily, max-ops or drawdown limit also needs --loosen. Every renewal
@@ -176,7 +176,7 @@ export async function runSolanaPaperCommand(args: readonly string[], deps: Solan
     amountRaw: required(flags, "amount-raw"), slippageBps: numberOption(flags["slippage-bps"] ?? "100", 100),
   }) : null;
   const createdAt = now();
-  const days = command === "init" ? numberOption(flags["expires-days"] ?? "7", 365) : 0;
+  const days = command === "init" ? numberOption(flags["expires-days"] ?? String(SOLANA_PAPER_RENEW_DEFAULT_DAYS), 365) : 0;
   const limits = command === "init" ? validateSolanaPaperLimits({
     perTradeUsdg: paperUsdgRaw(flags["per-trade"] ?? "25"), dailyUsdg: paperUsdgRaw(flags.daily ?? "100"),
     maxOpsPerDay: numberOption(flags["max-ops"] ?? "20", 100_000),
