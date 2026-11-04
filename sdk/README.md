@@ -70,7 +70,7 @@ const grant = await prepareMerryman({
   owner,
   chainId: 4663,
   caps: {
-    perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7,
+    perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 30,
     maxDrawdownPct: 5, maxOpsPerDay: 24,
   },
   onStatus: (text) => renderStatus(text),
@@ -107,7 +107,8 @@ grant or perform wallet backups. It takes exactly these options:
   and `maxOpsPerDay`, each a finite number of at least 1. `perTradeUsdg` must
   not exceed `dailyUsdg`, `maxDrawdownPct` must not exceed 100, `expiryDays` is
   a whole number up to 365 and `maxOpsPerDay` a whole number. Fractional USDG
-  amounts and drawdowns are fine.
+  amounts and drawdowns are fine. Merrymen's own apps sign `expiryDays: 30` by
+  default, so owners renew once a month; the example above does the same.
 - `chainId`: `4663` (Robinhood Chain, real funds) or `46630` (its testnet).
   Omitted or `undefined` means `4663`. Anything else, `null` and the string
   `"46630"` included, is refused rather than signed for mainnet.

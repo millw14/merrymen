@@ -158,3 +158,20 @@ it("contains keyboard focus, closes with Escape and restores previous focus", as
   assert.equal(ui.container.querySelector('[role="dialog"]'), null);
   assert.equal(document.activeElement, outside);
 });
+it("without auto-start a newcomer lands on the page, records nothing, and can still open the tour", async () => {
+  const quiet = (tenant: string | null = null) => React.createElement(FirstVisit, { tenant, autoStart: false, onScreen: () => {}, onQuestion: () => {} });
+  await ui.render(quiet());
+  assert.equal(ui.container.querySelector('[role="dialog"]'), null, "no modal over the merryman");
+  assert.equal(localStorage.getItem(KEY), null, "a tour nobody was shown is not a dismissal");
+  await ui.render(quiet(A));
+  assert.equal(requests.filter((r) => r.method === "POST").length, 0, "and nothing is claimed for the account on sign-in");
+  await ui.click("Show me around");
+  assert.ok(ui.container.querySelector('[role="dialog"]'), "the same tour, one tap away");
+  assert.equal(ui.container.querySelector(".tour-count")?.textContent, `1 / ${ESSENTIAL_STOP_INDICES.length}`);
+});
+it("every spotlight can land outside the desktop market rail, which most screens now hide", () => {
+  for (const [i, stop] of STOPS.entries()) {
+    if (!stop.target) continue;
+    assert.ok(stop.target.some((sel) => !sel.startsWith("#explore-")), `stop ${i + 1} only targets the rail: ${stop.target.join(", ")}`);
+  }
+});

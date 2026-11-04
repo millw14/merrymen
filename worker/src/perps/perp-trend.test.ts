@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { leverageFromImfBp, type PerpKey } from "../../../packages/core/src/perps";
+import { DEFAULT_PERMISSION_DAYS } from "../../../packages/core/src/autonomy";
 import type { Why } from "../strategies/reasons";
 import type { PerpsView } from "../strategies/types";
 import { parseMarkCandles } from "./markets";
@@ -227,6 +228,48 @@ describe("perp-trend: each entry condition ALONE blocks the entry", () => {
     const small = perpTrendTick(btcOnly(), settings(), ctx({ equityMicro: u(20) }));
     assert.equal(small.entry, null);
     assert.equal(small.idle?.code, "perp-below-min");
+  });
+});
+
+/**
+ * WHY THE PERMISSION DEFAULT IS MONTHLY, as the producer sees it.
+ *
+ * perp-trend refuses any entry the grant cannot outlive by its longest hold
+ * (`maxHoldHours`, 168 h — a week). A seven-day permission is inside that from
+ * the second it is signed, so the old weekly default produced a Perps desk
+ * that could never open a position however often its owner re-signed. The
+ * monthly `DEFAULT_PERMISSION_DAYS` leaves about 23 days of entries per
+ * signature. These cases pin both halves against the real rule.
+ */
+describe("perp-trend under the default permission lifetime", () => {
+  const DAY = 86_400;
+  const HOLD = PERP_TREND_DEFAULTS.maxHoldHours * 3600;
+  const signedNow = (days: number) => btcOnly({ grantExpiresAtSec: NOW_SEC + days * DAY });
+
+  it("a 7-day grant signed this second is already blocked: perp-grant-expiring", () => {
+    const r = perpTrendTick(signedNow(7), settings(), ctx());
+    assert.equal(r.entry, null);
+    assert.deepEqual(r.idle, { code: "perp-grant-expiring", withinHours: 168 });
+  });
+
+  it("the monthly default signed this second is not blocked, and the wall accepts the open", () => {
+    assert.equal(DEFAULT_PERMISSION_DAYS, 30);
+    const v = signedNow(DEFAULT_PERMISSION_DAYS);
+    const r = perpTrendTick(v, settings(), ctx());
+    assert.ok(r.entry, JSON.stringify(r.idle));
+    assert.deepEqual(policyVerdict(r.entry, v), { ok: true });
+  });
+
+  it("the monthly default keeps entering until a week is left — about 23 days of entries", () => {
+    const signedAt = NOW_SEC - 22 * DAY; // 8 days left: still more than a hold
+    const late = btcOnly({ grantExpiresAtSec: signedAt + DEFAULT_PERMISSION_DAYS * DAY });
+    assert.ok(perpTrendTick(late, settings(), ctx()).entry, "22 days in, the grant still outlives a full hold");
+    // The last entry second: one past it and the grant no longer outlives a hold.
+    const edge = btcOnly({ grantExpiresAtSec: NOW_SEC + HOLD + 1 });
+    assert.ok(perpTrendTick(edge, settings(), ctx()).entry);
+    const over = btcOnly({ grantExpiresAtSec: NOW_SEC + HOLD });
+    assert.deepEqual(perpTrendTick(over, settings(), ctx()).idle, { code: "perp-grant-expiring", withinHours: 168 });
+    assert.equal(Math.floor((DEFAULT_PERMISSION_DAYS * DAY - HOLD) / DAY), 23);
   });
 });
 

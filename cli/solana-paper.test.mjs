@@ -174,14 +174,14 @@ test("Solana CLI renew restarts a book's limits without refilling or resetting i
 test("Solana CLI renew that only tightens a limit keeps a running book's expiry", t => {
   const { run } = fixture(t);
   const created = successJson(run(["init", "--owner", OWNER, "--cash", "100", "--per-trade", "5", "--daily", "10", "--expires-days", "1"]));
-  // One day left: lowering the per-trade limit does not also give the book seven days.
+  // One day left: lowering the per-trade limit does not also give the book thirty days.
   const tightened = successJson(run(["renew", "--owner", OWNER, "--per-trade", "4"]));
   assert.equal(tightened.limits.expiresAtMs, created.limits.expiresAtMs);
   assert.deepEqual(tightened.renewal.changes, { perTradeUsdg: { from: "5000000", to: "4000000" } });
-  // A bare renew is a request for more time: seven days from now.
+  // A bare renew is a request for more time: thirty days from now, the monthly default.
   const startedAt = Date.now();
   const extended = successJson(run(["renew", "--owner", OWNER]));
-  assert.ok(extended.limits.expiresAtMs >= startedAt + 7 * 86_400_000 && extended.limits.expiresAtMs <= Date.now() + 7 * 86_400_000);
+  assert.ok(extended.limits.expiresAtMs >= startedAt + 30 * 86_400_000 && extended.limits.expiresAtMs <= Date.now() + 30 * 86_400_000);
   assert.deepEqual(Object.keys(extended.renewal.changes), ["expiresAtMs"]);
 });
 

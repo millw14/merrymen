@@ -8,7 +8,7 @@ import { isMock } from "@/net/api";
 // package so the wall lists what the key may actually touch — and because a
 // type-only import would be erased at compile time, leaving the Metro alias for
 // @merrymen/core configured but never exercised, which is the same as untested.
-import { TRADEABLE_SYMBOLS, type GrantCaps } from "@merrymen/core";
+import { DEFAULT_PERMISSION_DAYS, TRADEABLE_SYMBOLS, type GrantCaps } from "@merrymen/core";
 import { accountFromMnemonic } from "@/crypto/mnemonic";
 import { readOwner } from "@/crypto/keystore";
 import { fundWithPhantom } from "@/net/wallets";
@@ -26,7 +26,13 @@ import { C } from "@/ui/tokens";
  * five sliders and hoping.
  *
  * Presets and values are the same three the dashboard offers, so a person who set
- * up on desktop sees the same choices here.
+ * up on desktop sees the same choices here. (The web form opens on the scout and
+ * calls it the default; this screen opens on the outlaw.)
+ *
+ * Every preset runs the shared monthly `DEFAULT_PERMISSION_DAYS`: they differ in
+ * how much money the agent may move, not in how often its owner must sign. The
+ * scout and the outlaw were 7 and 14 days, so an agent set up here went offline
+ * every week or two until somebody signed again.
  */
 
 const PRESETS: { id: string; label: string; blurb: string; caps: GrantCaps }[] = [
@@ -34,19 +40,19 @@ const PRESETS: { id: string; label: string; blurb: string; caps: GrantCaps }[] =
     id: "scout",
     label: "cautious · the scout",
     blurb: "dip a toe — tiny trades, tight leash",
-    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 },
+    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 5, maxOpsPerDay: 24 },
   },
   {
     id: "outlaw",
     label: "balanced · the outlaw",
     blurb: "the sensible default",
-    caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
+    caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 10, maxOpsPerDay: 48 },
   },
   {
     id: "warlord",
     label: "bold · the warlord",
     blurb: "bigger arrows, wider walls",
-    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: 30, maxDrawdownPct: 15, maxOpsPerDay: 96 },
+    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 15, maxOpsPerDay: 96 },
   },
 ];
 
@@ -173,7 +179,7 @@ export default function Grant() {
         <Cap label="most per trade" value={`${caps.perTradeUsdg} USDG`} />
         <Cap label="most per day" value={`${caps.dailyUsdg} USDG`} />
         <Cap label="trades per day" value={`${caps.maxOpsPerDay}`} />
-        <Cap label="key expires in" value={`${caps.expiryDays} days`} />
+        <Cap label="renews every" value={`${caps.expiryDays} days`} />
         <Cap label="stops out at" value={`−${caps.maxDrawdownPct}% drawdown`} last />
       </View>
 
@@ -194,7 +200,7 @@ export default function Grant() {
       <View style={styles.nevers}>
         <Never text="Send your money anywhere. This wall registers no withdrawal address, so it carries no transfer permission at all — the chain refuses every send. Funds come home with your owner key." />
         <Never text="Trade an asset outside the allowed list. Adding one means signing a new wall, which is why it can't widen by itself." />
-        <Never text="Outlive its expiry. The key dies on schedule even if every other control fails." />
+        <Never text="Trade past its permission. When the permission ends, trading stops on schedule even if every other control fails." />
         <Never text="Touch your recovery phrase. It never leaves this phone — not to us, not to the agent, not over the network." />
       </View>
 

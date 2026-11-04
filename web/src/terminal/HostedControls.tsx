@@ -128,25 +128,47 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
   const [error,setError]=useState("");
   const [ownerKey]=useState(()=>{const grant=loadGrant("spot");return grant?.smartAccount.toLowerCase()===account.status.grant?.smartAccount.toLowerCase() ? grant?.demoOwnerPrivateKey ?? "" : "";});
   const grant=account.status.grant;
-  return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add funds" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <>{grant && <GloamWithdrawal account={grant.smartAccount as `0x${string}`} chainId={grant.chainId} ownerKey={ownerKey ? ownerKey as `0x${string}` : undefined}/>}<RecoverPanel initialOwnerKey={ownerKey}/></> : grant ? <><h2>Fund your agent</h2><p>Send USDG to your agent’s account on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`} — and only there. This address on any other network is not your agent: funds sent there are stuck, and no re-sign moves them back. Your balance updates after the transfer is recorded.</p>
-    {/* WHAT THIS AGENT IS ACTUALLY SHORT OF, on the screen where it can be fixed.
-        The verdict is the child's — `AgentStatus.liveBlocker`, resolved every
-        tick — and this panel only says what to do about it. Measured after the
-        fleet stopped being killed mid-tick: no-gas 12, wrong-chain 9,
-        dead-policy 6, no-cash 2. Twelve owners were reading the line above,
-        sending USDG exactly as told, and getting no trades, because the thing
-        missing was ETH for fees. And where money is NOT the fix, this says so
-        rather than letting a deposit address imply that it is. */}
+  return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add money" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <>{grant && <GloamWithdrawal account={grant.smartAccount as `0x${string}`} chainId={grant.chainId} ownerKey={ownerKey ? ownerKey as `0x${string}` : undefined}/>}<RecoverPanel initialOwnerKey={ownerKey}/></> : grant ? <>
+    {/* THE ADDRESS FIRST. This panel used to open with a paragraph about
+        stuck funds, then blocker advice, then a long $MERRYMEN energy note,
+        and only then the one thing a person came here to do. Now it is the
+        address and its copy button, the network warning in the same breath
+        right under it, anything this agent is actually short of, and the
+        other ways in folded away. Nothing was removed. */}
+    <h2>Add money</h2>
     {(() => {
-      if (pausedRecovery(account.status.recovery)) return <RecoveryNotice recovery={account.status.recovery} funds={recoveryFunds(account.status)}/>;
+      // WHEN MONEY IS NOT THE FIX, THAT COMES FIRST. A recovery hold, or a
+      // blocker that USDG cannot clear (a dead policy, the wrong network, real
+      // trading switched off), is said above the address and its copy button,
+      // because of what was measured after the fleet stopped being killed
+      // mid-tick: no-gas 12, wrong-chain 9, dead-policy 6, no-cash 2. Twelve
+      // owners sent USDG exactly as told and got no trades, because the thing
+      // missing was ETH for fees. The verdict is the child's
+      // (`AgentStatus.liveBlocker`, resolved every tick); this only says what
+      // to do about it. Where money IS the fix (no ETH, no USDG) the advice
+      // sits just under the address it refers to.
+      const held = pausedRecovery(account.status.recovery);
       const advice = blockerAdvice(account?.status.liveBlocker);
-      if (!advice) return null;
-      return (
-        <p className={advice.funding ? "fund-blocker" : "fund-blocker not-money"} role="status">
-          {advice.say}
-        </p>
-      );
-    })()}{!pausedRecovery(account.status.recovery) && <EnergyFunding energy={account.status.energy} chainId={grant.chainId}/>}<label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}{!pausedRecovery(account.status.recovery) && <GloamFunding address={grant.smartAccount} chainId={grant.chainId}/>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
+      const first = held
+        ? <RecoveryNotice recovery={account.status.recovery} funds={recoveryFunds(account.status)}/>
+        : advice && !advice.funding ? <p className="fund-blocker not-money" role="status">{advice.say}</p> : null;
+      const after = !held && advice?.funding ? <p className="fund-blocker" role="status">{advice.say}</p> : null;
+      return <>
+        {first}
+        <p className="fund-lead">Send dollars (USDG) to your merryman&apos;s account. You can withdraw any time.</p>
+        <div className="fund-address-card">
+          <label>Your merryman&apos;s account</label>
+          <p className="funding-address">{grant.smartAccount}</p>
+          <button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>
+          {error && <p role="alert">{error}</p>}
+        </div>
+        <p className="fund-chain-warning"><strong>Send USDG on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`} — and only there.</strong> This address on any other network is not your agent: funds sent there are stuck, and no re-sign moves them back. Your balance updates after the transfer is recorded.</p>
+        {after}
+        {!held && <EnergyFunding energy={account.status.energy} chainId={grant.chainId}/>}
+      </>;
+    })()}
+    <details className="fund-more"><summary>More ways to add money</summary>{!pausedRecovery(account.status.recovery) && <GloamFunding address={grant.smartAccount} chainId={grant.chainId}/>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></details>
+  </> : <a href="/grant">Set up an agent wallet</a>}</section>;
 }
 
 /**

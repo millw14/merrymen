@@ -8,7 +8,7 @@ import { stopAgentForReplacement } from "@/lib/stop-agent";
 import { renewalPerpsRefusal, restorePerpsRefusal } from "@/lib/restore-perps-owner";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
-import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
+import { DEFAULT_PERMISSION_DAYS, MAX_USDG_UI, RENEW_EVERY_TIP, RENEW_SOON_DAYS, isWallTooWide } from "@merrymen/core";
 import { parseAmount, type AmountField } from "@/lib/parse-amount";
 import { fullDateTime } from "@/lib/format";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -64,10 +64,17 @@ import { RESIGN_ANCHOR, SIGNED_IN_EVENT, SIGNED_IN_RELOAD_KEY, shouldJumpToResig
 // restyle during a redesign. It keeps the sheets it was written against, and
 // they no longer reach anything else.
 
+/**
+ * The outlaw's caps. Its lifetime is the shared monthly default
+ * (`DEFAULT_PERMISSION_DAYS`) like every preset's: a temperament here is about
+ * how much MONEY the agent may move, not about how often its owner must sign.
+ * Fourteen days used to sit here under the words "the sensible default" while
+ * the form actually opened on the scout's seven.
+ */
 const DEFAULTS: GrantCaps = {
   perTradeUsdg: 50,
   dailyUsdg: 500,
-  expiryDays: 14,
+  expiryDays: DEFAULT_PERMISSION_DAYS,
   maxDrawdownPct: 10,
   maxOpsPerDay: 48,
 };
@@ -108,8 +115,14 @@ const CAP_FLOOR: Record<keyof GrantCaps, number> = {
  *   as 10 — an edit to a number the owner was in the middle of reading.
  *
  * Money keeps its cents; days, trades and percent are whole by construction.
- * The expiry ceiling is the signer's own, so a value that parses here cannot be
- * refused later by the thing being signed.
+ *
+ * THE 90-DAY CEILING IS THIS FORM'S CHOICE, NOT THE SIGNER'S. Nothing that
+ * signs or stores a grant caps its lifetime that low: the web signer and
+ * /api/grants require only at least one day, and the SDK and partner path allow
+ * up to 365. Ninety is where an owner typing a lifetime stops on this screen —
+ * three monthly renewals' worth — and because it sits below every limit
+ * downstream, a value that parses here cannot be refused later by the thing
+ * being signed.
  */
 const CAP_FIELDS: Record<keyof GrantCaps, AmountField> = {
   perTradeUsdg: { maxDecimals: 2, min: CAP_FLOOR.perTradeUsdg, max: MAX_USDG_UI },
@@ -125,14 +138,17 @@ const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: G
     id: "scout",
     icon: "shield",
     label: "cautious · the scout",
-    blurb: "dip a toe — tiny trades, tight leash",
-    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 },
+    // "The default" lives HERE, on the preset the form actually opens on
+    // (GrantPage's first state, and what "start over" resets to) — it used to
+    // label the outlaw, which nothing ever opened on.
+    blurb: "the default — tiny trades, tight leash",
+    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 5, maxOpsPerDay: 24 },
   },
   {
     id: "outlaw",
     icon: "target",
     label: "balanced · the outlaw",
-    blurb: "the sensible default",
+    blurb: "more room, once you've watched it trade",
     caps: DEFAULTS,
   },
   {
@@ -140,7 +156,7 @@ const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: G
     icon: "bolt",
     label: "bold · the warlord",
     blurb: "bigger arrows, wider walls",
-    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: 30, maxDrawdownPct: 15, maxOpsPerDay: 96 },
+    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 15, maxOpsPerDay: 96 },
   },
 ];
 
@@ -355,6 +371,11 @@ export default function GrantPage() {
 
     Start conservatively. Raising a cap later requires an owner-authorized
     revocation transaction and a replacement signature.
+
+    Cautious about money, not about time: the scout's permission runs the same
+    monthly `DEFAULT_PERMISSION_DAYS` as every preset. A short lifetime protects
+    nothing the per-trade cap and the call allowlist do not already bound, and
+    it was the most common reason a working agent went offline.
   */
   const [caps, setCaps] = useState<GrantCaps>(PRESETS[0]!.caps);
   /*
@@ -744,6 +765,18 @@ export default function GrantPage() {
   const capsInputInvalid = (Object.keys(CAP_FIELDS) as (keyof GrantCaps)[]).some(key =>
     !parseAmount(capShown(key), CAP_FIELDS[key]).ok,
   );
+  /**
+   * The renewal panel's "Renew monthly" tap: the lifetime field set to the
+   * monthly default, as if the owner had typed it there. Only `expiryDays`
+   * moves, and only in the form — the diff, the acknowledgement and the sign
+   * button that follow are the same ones any edit goes through.
+   */
+  const monthlyChosen = capShown("expiryDays") === String(DEFAULT_PERMISSION_DAYS);
+  const chooseMonthly = () => {
+    setCapText((t) => ({ ...t, expiryDays: String(DEFAULT_PERMISSION_DAYS) }));
+    setCaps((c) => ({ ...c, expiryDays: DEFAULT_PERMISSION_DAYS }));
+    setCapError("");
+  };
   const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;
     setCapText((t) => ({ ...t, [k]: raw }));
@@ -1820,7 +1853,7 @@ export default function GrantPage() {
                   <span className="preset-blurb">{p.blurb}</span>
                   <span className="preset-caps mono">
                     {p.caps.perTradeUsdg}/trade · {p.caps.dailyUsdg}/day · {p.caps.maxDrawdownPct}% breaker ·{" "}
-                    {p.caps.expiryDays}d key
+                    renews every {p.caps.expiryDays} days
                   </span>
                 </button>
               ))}
@@ -1844,8 +1877,8 @@ export default function GrantPage() {
               </label>
               <label className="field">
                 <span className="field-label">
-                  auto-expire the agent after{" "}
-                  <Info>A safety timer. After this many days the agent&apos;s key stops working on its own — so a forgotten agent can&apos;t trade forever.</Info>
+                  Renew every{" "}
+                  <Info>{RENEW_EVERY_TIP}</Info>
                 </span>
                 <span className="field-input">
                   <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
@@ -1880,7 +1913,7 @@ export default function GrantPage() {
               On {isMainnet ? "Robinhood Chain" : "the testnet"}, this agent can trade
               at most <b>{caps.perTradeUsdg} USDG</b> per trade, <b>{caps.dailyUsdg} USDG</b> per day,
               and <b>{caps.maxOpsPerDay}</b> trades per day. It stops itself if it&apos;s down{" "}
-              <b>{caps.maxDrawdownPct}%</b>, and its key auto-expires in <b>{caps.expiryDays} days</b>.
+              <b>{caps.maxDrawdownPct}%</b>, and this permission runs <b>{caps.expiryDays} days</b>, then you renew it.
               <br />
               <br />
               {/*
@@ -1919,14 +1952,18 @@ export default function GrantPage() {
                   the form happens to hold.
 
                   The default is the scout preset, so the silent direction is now
-                  NARROWER than most people's previous wall, which is the safe way
-                  round. Saying so is still better than relying on that: someone
+                  NARROWER than most people's previous wall on MONEY, which is the
+                  safe way round. Its LIFETIME is the monthly default, which can be
+                  longer than a lost weekly key's — the per-trade cap and the call
+                  allowlist bound a key however long it lives, and the sentence
+                  below names the days so nobody restores a lifetime unread.
+                  Saying so is still better than relying on that: someone
                   restoring a warlord wallet should know their caps just shrank,
                   and someone who had tighter limits should know to set them again.
                 */}
                 <p className="field-lead" style={{ marginTop: 12 }}>
                   This signs the limits shown above — <b>{caps.perTradeUsdg} USDG</b> a trade,{" "}
-                  <b>{caps.dailyUsdg}</b> a day, key for <b>{caps.expiryDays} days</b>. Your old
+                  <b>{caps.dailyUsdg}</b> a day, for <b>{caps.expiryDays} days</b>. Your old
                   limits lived in the key you lost, so nothing can read them back; set them here
                   if they mattered. Revocation spends ETH for network fees; it does not move your trading balances.
                 </p>
@@ -2093,14 +2130,16 @@ export default function GrantPage() {
               // `resignBy`, not the owner key: a Privy agent's key expires on
               // exactly the same clock, and hiding the warning from the one
               // cohort that could not act on it was two problems, not one.
-              if (secsLeft > 3 * 86_400 || !resignBy) return null;
+              // The shared window (`RENEW_SOON_DAYS`), so this note, the desk's
+              // chip and the reminders all start on the same day.
+              if (secsLeft > RENEW_SOON_DAYS * 86_400 || !resignBy) return null;
               const expired = secsLeft <= 0;
               return (
                 <div className={expired ? "renew-note expired" : "renew-note"}>
                   {expired ? (
-                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key has expired.</b> Trading is paused.</>
+                    <><GI d="clock" size={13} /> <b>Your agent&apos;s permission has ended.</b> Trading is paused; your money has not moved.</>
                   ) : (
-                    <><GI d="clock" size={13} /> <b>Your agent&apos;s key expires in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
+                    <><GI d="clock" size={13} /> <b>Your agent&apos;s permission ends in {Math.max(1, Math.ceil(secsLeft / 86_400))} day{secsLeft > 86_400 ? "s" : ""}.</b></>
                   )}{" "}
                   Review and renew your trading permissions below.
                   {/*
@@ -2456,11 +2495,12 @@ export default function GrantPage() {
                       </span>
                     </label>
                     <label className="field">
-                      <span className="field-label">auto-expire the agent after</span>
+                      <span className="field-label">Renew every</span>
                       <span className="field-input">
                         <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
                         <span className="field-unit">days</span>
                       </span>
+                      <small>{RENEW_EVERY_TIP}</small>
                     </label>
                     <label className="field">
                       <span className="field-label">drawdown limit</span>
@@ -2476,6 +2516,40 @@ export default function GrantPage() {
                       </small>
                     </label>
                   </div>
+                  {/*
+                    MONTHLY IN ONE TAP, AND ONLY EVER BY A TAP.
+
+                    New permissions run `DEFAULT_PERMISSION_DAYS`, but a renewal
+                    pre-fills the caps its owner signed last time — exactly, on
+                    purpose, and pinned by tests — so an agent signed weekly
+                    would renew weekly forever unless somebody offered the switch.
+                    This is that offer, shown only while the SIGNED lifetime is
+                    shorter than the default.
+
+                    It is an edit to the form and nothing more: it moves the
+                    "Renew every" field to thirty exactly as typing would, so the
+                    change appears in the "Signing now also changes" line below,
+                    and signing still waits for the same acknowledgement and the
+                    same button. Never applied silently, and never on the retry
+                    path, which must re-send the caps already signed.
+                  */}
+                  {typeof grant.caps.expiryDays === "number" && grant.caps.expiryDays < DEFAULT_PERMISSION_DAYS && (
+                    <div className="renew-monthly" data-renew-monthly style={{ marginTop: 12 }}>
+                      <p className="field-lead">
+                        Sign once a month instead: this sets <b>Renew every</b> to {DEFAULT_PERMISSION_DAYS} days.
+                        Every other limit stays exactly as it is.
+                      </p>
+                      <button
+                        type="button"
+                        className="copy-btn"
+                        aria-pressed={monthlyChosen}
+                        disabled={monthlyChosen}
+                        onClick={chooseMonthly}
+                      >
+                        {`Renew monthly (${DEFAULT_PERMISSION_DAYS} days)`}
+                      </button>
+                    </div>
+                  )}
                   {capsInputInvalid && <p className="grant-cap-error" role="alert">{capError || "Enter valid limits before signing."}</p>}
                   {/*
                     MOVING A KEY BETWEEN CHAINS, as a first-class action.

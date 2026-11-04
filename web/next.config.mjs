@@ -52,7 +52,7 @@ const nextConfig = {
   // session cookie and Next forwards it upstream. A redirect sends the browser
   // somewhere with no such thing attached, and the destination here is our own.
   async redirects() {
-    return [{ source: "/leaderboard", destination: "/home", permanent: false }];
+    return [{ source: "/leaderboard", destination: "/leaders", permanent: false }];
   },
   async headers() {
     // Every dashboard screen can expose owner actions, not only /connect.

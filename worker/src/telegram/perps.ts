@@ -1,5 +1,5 @@
 /** Owner-DM Perps views and the paper-exit port. No signing or venue calls. */
-import { parsePerpsReport, perpsBlockerText, type PerpKey, type PerpsReport } from "../../../packages/core/src/index";
+import { RENEW_SOON_DAYS, parsePerpsReport, perpsBlockerText, type PerpKey, type PerpsReport } from "../../../packages/core/src/index";
 import { esc } from "./api";
 
 export type TelegramPerpsSnapshot =
@@ -97,7 +97,12 @@ export function perpsAttention(snapshot: TelegramPerpsSnapshot, nowSec: number):
   const lines: string[] = [];
   if (Number.isSafeInteger(snapshot.grantExpiresAt)) {
     if (snapshot.grantExpiresAt! <= nowSec) lines.push("The Perps permission has expired. Renew it on the Perps desk; do not assume the protective loop is running.");
-    else if (snapshot.grantExpiresAt! - nowSec <= 86_400) lines.push("The Perps permission expires within 24 hours. Review renewal on the Perps desk.");
+    else if (snapshot.grantExpiresAt! - nowSec <= RENEW_SOON_DAYS * 86_400) {
+      // The same three-day window as every Spot reminder (core RENEW_SOON_DAYS).
+      const left = snapshot.grantExpiresAt! - nowSec;
+      const when = left > 48 * 3_600 ? `in about ${Math.ceil(left / 86_400)} days` : left > 3_600 ? `in about ${Math.ceil(left / 3_600)} hours` : "within the hour";
+      lines.push(`The Perps permission runs out ${when}. Review renewal on the Perps desk.`);
+    }
   }
   const r = parsePerpsReport(snapshot.report);
   if (!r || r.mode === "live" || r.accountIndex !== null || r.venueReadAt === null || r.collateralMicro === null) {

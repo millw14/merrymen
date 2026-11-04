@@ -9,6 +9,7 @@ import { useTrend, type Trend } from "./motion";
 // terminal's faces and components/AgentAvatar's could drift with nothing to
 // notice — and changing the seed would have meant changing both.
 import { avatarGradient, faceSeed, initialsOf } from "@/lib/agent-avatar";
+import { FaceFigure } from "@/merryman/Merryman";
 
 export function Face({
   name,
@@ -16,12 +17,19 @@ export function Face({
   large,
   small,
   pin,
+  figure,
 }: {
   name: string;
   slug?: string | null;
   large?: boolean;
   small?: boolean;
   pin?: boolean;
+  /**
+   * Draw the agent's MERRYMAN under the picture instead of its initials. Opt
+   * in, per surface: the leaderboard, where every agent is meant to be met as a
+   * character. Everywhere else the gradient and initials stay, unchanged.
+   */
+  figure?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   const src = useAgentImageSrc(slug ?? null, "avatar");
@@ -54,8 +62,10 @@ export function Face({
     // name, every "Robin" was one colour with one "RO", and a feed of different
     // agents read as one agent talking to itself. The slug is minted once and
     // never changes, so a rename keeps the face too.
-    <span className={cls} style={{ background: avatarGradient(faceSeed(name, slug)) }} aria-hidden>
-      {initialsOf(name)}
+    <span className={figure ? `${cls} has-figure` : cls} style={figure ? undefined : { background: avatarGradient(faceSeed(name, slug)) }} aria-hidden>
+      {/* The figure only where no uploaded picture will cover it: a row with
+          a picture would otherwise render a portrait nobody sees. */}
+      {figure ? (!src || failed ? <FaceFigure seed={faceSeed(name, slug)} slug={slug ?? null} /> : null) : initialsOf(name)}
       {src && !failed && <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />}
     </span>
   );

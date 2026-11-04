@@ -1,0 +1,376 @@
+/*
+ * THE SHELL AROUND THE MERRYMAN: the Home hero, its actions, the status chip
+ * and Explore's switcher.
+ *
+ * Built on the terminal's own tokens (--bg, --card, --line, --tx, --lime) so it
+ * sits in the same dark room as everything else, with one addition: a warm
+ * Sherwood glow behind the character, the only place the page is allowed to
+ * feel like a forest rather than a terminal.
+ */
+
+/* ── hero ── */
+.terminal-host .mm-hero {
+  position: relative;
+  display: grid;
+  gap: 14px;
+  margin: 6px 0 4px;
+  padding: 0 0 16px;
+  border-radius: 28px;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(130% 70% at 50% 0%, rgb(48 96 60 / 0.55), transparent 62%),
+    radial-gradient(90% 60% at 80% 30%, rgb(255 168 80 / 0.10), transparent 70%),
+    linear-gradient(180deg, #0d1710 0%, var(--card) 70%);
+  overflow: hidden;
+}
+.terminal-host .mm-hero::before {
+  /* faint tree line behind him */
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 340px;
+  background: url("/atmos/sherwood-night.webp") center 30% / cover no-repeat;
+  opacity: 0.22;
+  mask-image: linear-gradient(180deg, #000 30%, transparent 92%);
+  pointer-events: none;
+}
+/* Short enough that the first button clears the floating tab bar on a
+   375x667 phone; tall phones and desktop still get the full stage. */
+.terminal-host .mm-hero-stage {
+  position: relative;
+  height: clamp(190px, calc(100dvh - 470px), 420px);
+}
+.terminal-host .mm-hero-stage .mm-merryman { position: absolute; inset: 0; }
+.terminal-host .mm-hero-body {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  padding: 0 16px;
+  min-width: 0;
+}
+.terminal-host .mm-chip {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgb(7 8 6 / 0.72);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  backdrop-filter: blur(10px);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--tx);
+}
+.terminal-host .mm-chip i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+  box-shadow: 0 0 0 4px rgb(255 255 255 / 0.06);
+}
+.terminal-host .mm-chip.tone-good i { background: var(--up); box-shadow: 0 0 0 4px rgb(61 214 140 / 0.18); animation: mm-chip-pulse 2.4s ease-in-out infinite; }
+.terminal-host .mm-chip.tone-warn i { background: #f3c14b; box-shadow: 0 0 0 4px rgb(243 193 75 / 0.2); }
+.terminal-host .mm-chip.tone-bad i { background: var(--down); }
+@keyframes mm-chip-pulse {
+  50% { box-shadow: 0 0 0 7px rgb(61 214 140 / 0.04); }
+}
+
+.terminal-host .mm-hero .hero {
+  display: grid;
+  gap: 2px;
+  padding: 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+.terminal-host .mm-hero .mm-hero-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--tx-2);
+}
+.terminal-host .mm-hero .home-balance-label { font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+.terminal-host .mm-hero .hero.empty { cursor: default; }
+.terminal-host .mm-hero .hero.empty h2 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+.terminal-host .mm-hero .hero.empty p {
+  margin: 6px 0 0;
+  color: var(--tx-2);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+/* ── the big friendly buttons ── */
+.terminal-host .mm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.terminal-host .mm-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 50px;
+  padding: 0 12px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgb(255 255 255 / 0.04);
+  color: var(--tx);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex: 1 1 0;
+  min-width: max-content;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.2, 1.6, 0.4, 1), background 140ms;
+}
+.terminal-host .mm-action:hover { background: rgb(255 255 255 / 0.08); }
+.terminal-host .mm-action:active { transform: scale(0.97); }
+.terminal-host .mm-action.primary {
+  flex: 1.9 1 0;
+  background: var(--lime);
+  border-color: transparent;
+  color: #111;
+}
+.terminal-host .mm-action.primary:hover { background: #b6df2a; }
+
+.terminal-host .home-leaders-teaser .home-show-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* ── Explore ── */
+.terminal-host .explore-nav {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+}
+.terminal-host .explore-pills {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 4px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.terminal-host .explore-pills a {
+  flex: 1 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 14px;
+  border-radius: 12px;
+  color: var(--tx-2);
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background 160ms, color 160ms;
+}
+.terminal-host .explore-pills a.on {
+  background: var(--tx);
+  color: var(--ink);
+}
+/* Four views have to fit a 360px phone without a hidden fourth. */
+@media (max-width: 420px) {
+  .terminal-host .explore-pills a { padding: 9px 6px; font-size: 13px; }
+  .terminal-host .explore-pills a svg { display: none; }
+}
+/* Explore owns the page title, so the views drop their own. */
+.terminal-host .explore-nav ~ .feed-page > .feed-head { display: none; }
+.terminal-host .explore-nav ~ .feed-page .top-title,
+.terminal-host .explore-nav ~ .alpha-page > header .top-title,
+.terminal-host .explore-nav ~ .board-page > .board-head > .top-title { display: none; }
+
+@media (min-width: 1100px) {
+  /* The rail only on trading screens (App.tsx railShown); elsewhere the
+     centre takes its width. */
+  .terminal-host .app[data-rail="off"] {
+    grid-template-columns: 0 minmax(0, 1fr) var(--portfolio-width);
+  }
+  .terminal-host .app[data-rail="off"] > .desktop-sidebar { display: none; }
+  /* Placed, not auto-flowed: with the rail hidden, auto-placement would drop
+     the body into the zero-width first column. */
+  .terminal-host .app[data-rail="off"] > .body { grid-column: 2; grid-row: 2; padding-left: 12px; }
+  .terminal-host .app[data-rail="off"] > .desktop-portfolio { grid-column: 3; grid-row: 2; }
+  .terminal-host .app .desktop-header {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    gap: 20px;
+  }
+  .terminal-host .app .desktop-primary {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 12px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    font-family: var(--sans);
+  }
+  .terminal-host .app .desktop-primary button {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 12px;
+    border-radius: 9px;
+    color: var(--tx-2);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .terminal-host .app .desktop-primary button svg { width: 16px; height: 16px; }
+  .terminal-host .app .desktop-primary button svg.logo-mark { width: 20px; height: 14px; }
+  .terminal-host .app .desktop-primary button:hover { color: var(--tx); }
+  .terminal-host .app .desktop-primary button.on { background: var(--tx); color: var(--ink); }
+  .terminal-host .app .desktop-header-account .desktop-fund {
+    padding: 7px 12px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--lime);
+    color: #111;
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .terminal-host .app .desktop-header-account .desktop-fund:hover { background: #b6df2a; color: #111; }
+  .terminal-host .app[data-screen="home"] .home-overview { display: block; }
+  .terminal-host .mm-hero-stage { height: 440px; }
+  .terminal-host .mm-hero { grid-template-columns: minmax(0, 1.25fr) minmax(280px, 1fr); align-items: end; padding: 0; }
+  .terminal-host .mm-hero::before { height: 100%; }
+  .terminal-host .mm-hero-body { padding: 24px 24px 24px 0; align-self: center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-host .mm-chip.tone-good i { animation: none; }
+}
+
+/* ── chat header ── */
+.terminal-host .desk-header > .desk-merryman {
+  position: relative;
+  flex: none;
+  width: 60px;
+  height: 60px;
+  border-radius: 18px;
+  overflow: hidden;
+  background: radial-gradient(80% 80% at 50% 30%, #2a4a30, #0d1710);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08);
+}
+.terminal-host .desk-merryman .mm-merryman { position: absolute; inset: 0; min-height: 0; }
+.terminal-host .desk-merryman .mm-merryman-glow { display: none; }
+.terminal-host .desk-merryman .mm-merryman-flat svg { height: 100%; }
+
+/* ── a face drawn as its merryman (ui.tsx Face figure) ── */
+.terminal-host .face.has-figure {
+  background: radial-gradient(70% 70% at 50% 35%, #2f5236, #0f1a12);
+  border-radius: 30%;
+}
+.terminal-host .face.has-figure .face-figure {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.terminal-host .face.lg.has-figure,
+.terminal-host .board-row .face.has-figure { width: 40px; height: 40px; }
+
+/* ── public profile ── */
+.terminal-host .public-agent-id > .profile-merryman {
+  position: relative;
+  flex: none;
+  width: 96px;
+  height: 96px;
+  border-radius: 26px;
+  overflow: hidden;
+  background: radial-gradient(80% 80% at 50% 30%, #2a4a30, #0d1710);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08), 0 10px 30px rgb(0 0 0 / 0.4);
+}
+.terminal-host .profile-merryman .mm-merryman { position: absolute; inset: 0; min-height: 0; }
+.terminal-host .profile-merryman .mm-merryman-glow { display: none; }
+.terminal-host .profile-merryman .mm-merryman-flat svg { height: 100%; }
+
+/* ── create ── */
+.terminal-host .create-agent .mm-wardrobe { margin: 4px 0 18px; }
+.terminal-host .create-plain {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 10px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.terminal-host .create-plain p { margin: 0; color: var(--tx-2); font-size: 14px; line-height: 1.5; }
+.terminal-host .create-plain strong { color: var(--tx); }
+.terminal-host .create-details {
+  margin: 0 0 14px;
+  color: var(--tx-2);
+  font-size: 14px;
+}
+.terminal-host .create-details > summary {
+  cursor: pointer;
+  color: var(--tx);
+  font-weight: 600;
+  padding: 6px 0;
+}
+.terminal-host .create-live { display: grid; gap: 6px; }
+.terminal-host .create-live .create-note { margin: 0; }
+.terminal-host .create-ready-merryman {
+  position: relative;
+  height: 300px;
+  margin: 0 0 12px;
+  border-radius: 24px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: radial-gradient(120% 80% at 50% 100%, #183020 0%, transparent 60%), #070a08;
+}
+.terminal-host .create-ready-merryman .mm-merryman { position: absolute; inset: 0; }
+
+/* ── add money ── */
+.terminal-host .hosted-funding .fund-lead { color: var(--tx-2); font-size: 15px; line-height: 1.5; margin: 4px 0 14px; }
+.terminal-host .hosted-funding .fund-address-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.terminal-host .hosted-funding .fund-address-card label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
+.terminal-host .hosted-funding .fund-address-card .funding-address { margin: 0; word-break: break-all; font-family: var(--mono); font-size: 14px; color: var(--tx); }
+.terminal-host .hosted-funding .fund-chain-warning {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgb(243 193 75 / 0.08);
+  border: 1px solid rgb(243 193 75 / 0.35);
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.terminal-host .hosted-funding .fund-chain-warning strong { color: #f3c14b; }
+.terminal-host .hosted-funding .fund-more { margin-top: 12px; }
+.terminal-host .hosted-funding .fund-more > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+@media (max-width: 420px) {
+  .terminal-host .mm-action { padding: 0 8px; gap: 6px; font-size: 14px; }
+  .terminal-host .mm-action:not(.primary) svg { display: none; }
+}

@@ -57,6 +57,7 @@
 "Add funds." = "充值。";
 "add token" = "add token";
 "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L." = "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L.";
+"Address copied. Open Gloam, paste it into Pay and check it matches the agent address." = "Address copied. Open Gloam, paste it into Pay and check it matches the agent address.";
 "Advanced settings" = "Advanced settings";
 "Agent connections" = "Agent connections";
 "Agent name" = "Agent name";
@@ -137,7 +138,10 @@
 "Continue" = "继续";
 "Continue with X" = "使用 X 继续";
 "contract address" = "contract address";
+"Copy agent address" = "Copy agent address";
 "Copy message" = "复制消息";
+"Copy the address, open Gloam, choose Robinhood Chain mainnet and USDG, then paste it into Pay with Hide my wallet on. Check the full recipient address before confirming. Robinhood Chain only: USDG sent on another network does not fund this agent." = "Copy the address, open Gloam, choose Robinhood Chain mainnet and USDG, then paste it into Pay with Hide my wallet on. Check the full recipient address before confirming. Robinhood Chain only: USDG sent on another network does not fund this agent.";
+"Copying address…" = "Copying address…";
 "Could not load your settings." = "Could not load your settings.";
 "could not reach the settings API" = "could not reach the settings API";
 "covers it — re-sign after saving, and it will. Adding a token on its own only means “watch this”." = "covers it — re-sign after saving, and it will. Adding a token on its own only means “watch this”.";
@@ -176,6 +180,7 @@
 "free-form shell for /agent" = "free-form shell for /agent";
 "Free-form shell is remote code execution by an AI." = "Free-form shell is remote code execution by an AI.";
 "from Telegram" = "from Telegram";
+"Fund from Gloam (beta)" = "Fund from Gloam (beta)";
 "gap budget" = "gap budget";
 "Get a free key" = "Get a free key";
 "get a key" = "get a key";
@@ -183,13 +188,14 @@
 "Get your bot token from @BotFather." = "Get your bot token from @BotFather.";
 "Give an agent a strategy, set its limits, and follow the decisions it makes. Follow the full walkthrough or use Topics to jump to a feature. You can leave and replay it at any time." = "给智能体设定一个策略，设置它的限额，然后跟踪它做出的每个决策。你可以看完整个导览，也可以用「目录」直接跳到某个功能。随时可以退出，也随时可以重看。";
 "Give your agent a name." = "请给你的智能体取个名字。";
+"Gloam is in beta. Review its fees and the USDG your agent will receive before confirming in Gloam. Merrymen credits only the USDG that arrives." = "Gloam is in beta. Review its fees and the USDG your agent will receive before confirming in Gloam. Merrymen credits only the USDG that arrives.";
 "h" = "h";
 "Hang out in Telegram groups" = "Hang out in Telegram groups";
 "Hard strategist ceiling per proposed trade — beneath the grant caps." = "Hard strategist ceiling per proposed trade — beneath the grant caps.";
 "held" = "held";
 "Holdings" = "持仓";
 "Home" = "首页";
-"Home carries the leaderboard and the markets. Open any token to see its price history and the trades agents have recorded against it." = "首页里有排行榜和各个市场。打开任意一个代币，就能看到它的历史价格，以及各个智能体在它上面记录下来的交易。";
+"Home is your merryman and your money. Explore holds the leaderboard and the markets: open any token to see its price history and the trades agents have recorded against it." = "首页是你的 merryman 和你的资金。探索（Explore）里有排行榜和各个市场：打开任意一个代币，就能看到它的历史价格，以及各个智能体在它上面记录下来的交易。";
 "How chatty in groups" = "How chatty in groups";
 "How many class positions may be held at once. 0 = no limit beyond the scout budget." = "How many class positions may be held at once. 0 = no limit beyond the scout budget.";
 "How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level." = "How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level.";
@@ -279,6 +285,7 @@
 "Only in trencher mode. Its Brain decides and every trencher limit still applies." = "Only in trencher mode. Its Brain decides and every trencher limit still applies.";
 "Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused." = "Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.";
 "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket." = "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket.";
+"Open Gloam" = "Open Gloam";
 "Open Telegram →" = "Open Telegram →";
 "Optional custom connection to Robinhood Chain mainnet." = "Optional custom connection to Robinhood Chain mainnet.";
 "Optional." = "Optional.";
@@ -292,6 +299,7 @@
 "Paper trading · recommended" = "模拟交易 · 推荐";
 "Paper trading: simulated fills at live market prices, and no real orders. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can turn on Live trading any time in Settings, without a new signature." = "模拟交易：按实时市场价格模拟成交，不会产生任何真实订单。这只是一项设置，不是切换到另一个网络——无论选哪种，你的智能体都在 Robinhood Chain 上；你随时可以在「设置」里打开实盘交易，无需重新签名。";
 "Paste a new one →" = "Paste a new one →";
+"Pay this agent from your private USDG balance in Gloam. With Hide my wallet enabled and its relay available, the payment comes from Gloam's pool and the relay submits it instead of your wallet." = "Pay this agent from your private USDG balance in Gloam. With Hide my wallet enabled and its relay available, the payment comes from Gloam's pool and the relay submits it instead of your wallet.";
 "Per day" = "每日限额";
 "per entry (USDG)" = "per entry (USDG)";
 "Per trade" = "单笔限额";
@@ -395,6 +403,7 @@
 "test connection" = "test connection";
 "testnet RPC override" = "testnet RPC override";
 "That one won’t run yet." = "That one won’t run yet.";
+"The address was not copied. Select and copy the full address below before opening Gloam. Do not use an older address from your clipboard." = "The address was not copied. Select and copy the full address below before opening Gloam. Do not use an older address from your clipboard.";
 "The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report." = "The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.";
 "The budget is the risk control here" = "The budget is the risk control here";
 "The class route is on but the size is" = "The class route is on but the size is";
@@ -479,6 +488,8 @@
 "Your agent mints a link code on its next pass. Check back shortly." = "Your agent mints a link code on its next pass. Check back shortly.";
 "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way." = "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way.";
 "Your agent, your boundaries." = "你的智能体，你定边界。";
+"Your agent's address, owning wallet, balance and trades remain visible on chain. Deposits into Gloam and payouts to the agent also show their amounts and times, which can still link them. This funding route does not make the agent private." = "Your agent's address, owning wallet, balance and trades remain visible on chain. Deposits into Gloam and payouts to the agent also show their amounts and times, which can still link them. This funding route does not make the agent private.";
+"Your agent's permission, limits and recovery do not change. It arrives as an ordinary deposit, and your balance updates once it is recorded." = "Your agent's permission, limits and recovery do not change. It arrives as an ordinary deposit, and your balance updates once it is recorded.";
 "Your balance, your positions and your performance. Adding funds and withdrawing live here too." = "你的余额、持仓和收益表现都在这里。充值和提现也在这个页面。";
 "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable." = "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.";
 "Your bot is saved. Its link code appears here once your agent is running, and it can't run until you renew its trading permission." = "Your bot is saved. Its link code appears here once your agent is running, and it can't run until you renew its trading permission.";
