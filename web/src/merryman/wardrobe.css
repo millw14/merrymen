@@ -13,6 +13,11 @@
   align-items: stretch;
   min-height: min(720px, calc(100dvh - 140px));
 }
+@media (min-width: 1100px) {
+  /* The whole figure in view while the drawers scroll beside him. */
+  .mm-wardrobe { min-height: 0; align-items: start; }
+  .mm-wardrobe-stage { position: sticky; top: 12px; height: min(640px, calc(100dvh - 200px)); min-height: 420px; }
+}
 .mm-wardrobe-stage {
   position: relative;
   min-height: 420px;
@@ -53,6 +58,31 @@
   font-size: 14px;
   line-height: 1.45;
 }
+.mm-looks {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+}
+.mm-looks button {
+  flex: none;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 6px 6px 8px;
+  border-radius: 16px;
+  border: 1px solid var(--wd-line);
+  background: var(--wd-bg);
+  color: var(--tx-2, #b3afa9);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 140ms cubic-bezier(0.2, 1.6, 0.4, 1), border-color 140ms;
+}
+.mm-looks button:hover { transform: translateY(-2px); }
+.mm-looks button.on { border-color: var(--wd-accent); color: var(--tx, #e9e6e1); }
 .mm-drawers {
   display: flex;
   gap: 6px;

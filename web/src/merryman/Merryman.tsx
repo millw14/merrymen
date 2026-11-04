@@ -14,6 +14,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MerrymanFlat } from "./MerrymanFlat";
 import { outfitKey, type Outfit } from "./outfit";
+import { useOutfit } from "./wardrobe-store";
 import type { Framing, Stage } from "./stage";
 // merryman.css is imported once by the shell (terminal/App.tsx): node tests
 // render screens that mount this component, and they cannot import CSS.
@@ -143,10 +144,11 @@ export function Merryman({
 }
 
 /**
- * A still portrait for lists: rendered once per outfit through the shared
- * offscreen renderer, flat SVG until (or unless) that works.
+ * A still of this exact outfit, rendered once through the shared offscreen
+ * renderer when the browser is idle — null until then, or for ever without
+ * WebGL, and the caller draws the flat SVG meanwhile.
  */
-export function MerrymanPortrait({ outfit, size = 40, className = "", title }: { outfit: Outfit; size?: number; className?: string; title?: string }) {
+function usePortrait(outfit: Outfit, size: number): string | null {
   const [src, setSrc] = useState<string | null>(null);
   const key = outfitKey(outfit);
   useEffect(() => {
@@ -160,9 +162,27 @@ export function MerrymanPortrait({ outfit, size = 40, className = "", title }: {
     if (idle) idle(run); else setTimeout(run, 30);
     return () => { cancelled = true; };
   }, [key, size]);
+  return src;
+}
+
+/** A still portrait for lists, in its own rounded well. */
+export function MerrymanPortrait({ outfit, size = 40, className = "", title }: { outfit: Outfit; size?: number; className?: string; title?: string }) {
+  const src = usePortrait(outfit, size);
   return (
     <span className={`mm-portrait ${className}`} style={{ width: size, height: size }} title={title}>
       {src ? <img src={src} alt="" width={size} height={size} draggable={false} /> : <MerrymanFlat outfit={outfit} size={size} bust />}
     </span>
   );
+}
+
+/**
+ * THE BOTTOM LAYER OF AN AGENT'S FACE, as a merryman instead of initials.
+ * terminal/ui.tsx Face paints an uploaded picture over it when there is one,
+ * exactly as it paints one over the gradient. The look is the owner's own
+ * choice for their agent in this browser, or the one seeded on the slug.
+ */
+export function FaceFigure({ seed, slug }: { seed: string; slug: string | null }) {
+  const { outfit } = useOutfit(slug, seed);
+  const src = usePortrait(outfit, 48);
+  return src ? <img className="face-figure" src={src} alt="" draggable={false} /> : <MerrymanFlat outfit={outfit} size={48} bust className="face-figure" />;
 }

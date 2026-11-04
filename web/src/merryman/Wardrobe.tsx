@@ -13,11 +13,25 @@
 import { Dices, RotateCcw, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { EMOTES } from "./clips";
-import { Merryman, type Cue } from "./Merryman";
+import { Merryman, MerrymanPortrait, type Cue } from "./Merryman";
 import {
   AURAS, BACKS, BEARDS, CAPES, CLOTH, EYES, EYEWEAR, HAIR, HATS, HELD, LEATHER, PETS, SKIN, STYLES,
-  SLOT_LABELS, outfitKey, randomOutfit, type Choice, type ColorSlot, type Outfit, type ShapeSlot, type Swatch,
+  SLOT_LABELS, outfitKey, parseOutfit, randomOutfit, type Choice, type ColorSlot, type Outfit, type ShapeSlot, type Swatch,
 } from "./outfit";
+
+/**
+ * LOOKS TO TRY: whole outfits, one tap each, for somebody who would rather
+ * pick than build. Fixed rather than random, so the row is the same every
+ * visit and a favourite can be found again.
+ */
+const LOOKS: { name: string; outfit: Outfit }[] = [
+  { name: "Robin", outfit: parseOutfit({ hat: "feather", style: "tunic", cape: "none", held: "bow", back: "quiver", cloth: "forest", trim: "gold", hatColor: "forest", skin: "peach", hair: "chestnut", aura: "fireflies" }) },
+  { name: "The King", outfit: parseOutfit({ hat: "crown", style: "robe", cape: "long", held: "staff", back: "none", cloth: "royal", trim: "gold", skin: "porcelain", hair: "silver", beard: "full", aura: "sparkles" }) },
+  { name: "Night Owl", outfit: parseOutfit({ hat: "hood", style: "hoodie", cape: "none", held: "lantern", back: "backpack", cloth: "midnight", trim: "teal", hatColor: "midnight", skin: "umber", hair: "black", eyewear: "visor", pet: "owl", aura: "embers" }) },
+  { name: "The Banker", outfit: parseOutfit({ hat: "tophat", style: "suit", cape: "none", held: "coinbag", back: "none", cloth: "charcoal", trim: "crimson", skin: "honey", hair: "black", beard: "mustache", eyewear: "monocle", aura: "coins" }) },
+  { name: "Sir Shield", outfit: parseOutfit({ hat: "viking", style: "armor", cape: "short", held: "shield", back: "none", cloth: "crimson", trim: "crimson", skin: "caramel", hair: "ginger", beard: "goatee", aura: "none" }) },
+  { name: "The Wizard", outfit: parseOutfit({ hat: "wizard", style: "robe", cape: "none", held: "staff", back: "none", cloth: "plum", trim: "gold", hatColor: "plum", skin: "sky", hair: "silver", beard: "full", pet: "frog", aura: "sparkles" }) },
+];
 import { useOutfit } from "./wardrobe-store";
 
 type Drawer = "look" | "face" | "colours" | "extras" | "moves";
@@ -116,6 +130,14 @@ export function Wardrobe({
             <p>Pick a look. Your merryman wears it everywhere: on Home, in chat and on the leaderboard in this browser.</p>
           </header>
         )}
+        <div className="mm-looks" aria-label="Looks to try">
+          {LOOKS.map((l) => (
+            <button key={l.name} type="button" className={outfitKey(l.outfit) === outfitKey(draft) ? "on" : ""} aria-pressed={outfitKey(l.outfit) === outfitKey(draft)} onClick={() => { setDraft(l.outfit); setSaved("idle"); play("spin"); }}>
+              <MerrymanPortrait outfit={l.outfit} size={56} />
+              <span>{l.name}</span>
+            </button>
+          ))}
+        </div>
         <div className="mm-drawers" role="tablist" aria-label="Wardrobe sections">
           {DRAWERS.map((d) => (
             <button key={d.id} type="button" role="tab" aria-selected={drawer === d.id} className={drawer === d.id ? "on" : ""} onClick={() => setDrawer(d.id)}>

@@ -407,8 +407,14 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // user clicked something.
   const activeTab = screen.kind === "tab" ? screen.tab : requestedScreen.kind === "tab" ? requestedScreen.tab : tab;
   // Explore's views all light Explore in the bar; Research (alpha) included.
+  // The account's own screens (wardrobe, settings, wallet, limits, money) are
+  // part of Me, and creating an agent starts from Home — so no screen falls
+  // back to whatever tab happened to be clicked last.
   const exploreView = exploreViewOf(screen);
-  const barTab: Tab = exploreView ? "feed" : activeTab;
+  const barTab: Tab = exploreView ? "feed"
+    : ["wardrobe", "settings", "grant", "limits", "deposit", "withdraw"].includes(screen.kind) ? "you"
+    : screen.kind === "create" ? "home"
+    : activeTab;
   const token =
     screen.kind === "token" ? tokenById(live.tokens, screen.id) : undefined;
   const listedAgent =
