@@ -107,7 +107,7 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
     assert.match(text(), /7 days · 5% drawdown · 24 operations\/day/);
     assert.equal(ui.container.querySelector<HTMLInputElement>("#agent-name")?.value, "My Merryman");
     assert.equal(writes.length, 0); assert.equal(mints.length, 0);
-    await ui.click("Start live Trencher");
+    await ui.click("Go live with real money");
     assert.deepEqual(writes, [{ owner: OWNER, agentName: "My Merryman", strategy: "trencher", paperTradingEnabled: true,
       liveTradingEnabled: true, assetMode: "crypto", basketSymbols: [], customTokens: [], discoveryEnabled: true,
       officialCoinsEnabled: true, trencherFastEnabled: true, trencherLiveEnabled: true, tickSeconds: 15 }]);
@@ -123,7 +123,7 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
   });
 
   it("offers explicit practice with both real-trading switches off and the same initial permission", async () => {
-    await mount(); await ui.click("Practise first");
+    await mount(); await ui.click("Start practising");
     assert.equal(writes[0]!.liveTradingEnabled, false);
     assert.equal(writes[0]!.trencherLiveEnabled, false);
     assert.equal(writes[0]!.paperTradingEnabled, true);
@@ -133,7 +133,7 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
   });
 
   it("keeps a saved Privy wallet ready after account refresh and reload while retaining legacy key backup", async () => {
-    await mount(); await ui.click("Start live Trencher");
+    await mount(); await ui.click("Go live with real money");
     const active = { ...ACCOUNT, status: { ...ACCOUNT.status, exists: true, grant: GRANT } };
     await ui.render(screen(active));
     assert.match(text(), /Your wallet is connected/);
@@ -151,7 +151,7 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
     let finish!: (response: Response) => void;
     saveResponse = () => new Promise(resolve => { finish = resolve; });
     await mount();
-    const live = [...ui.container.querySelectorAll("button")].find(button => button.textContent === "Start live Trencher")!;
+    const live = [...ui.container.querySelectorAll("button")].find(button => button.textContent === "Go live with real money")!;
     await act(async () => { live.click(); live.click(); });
     assert.equal(writes.length, 1); assert.equal(mints.length, 0);
     await act(async () => { finish(Response.json({ ok: true })); });
@@ -160,30 +160,30 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
 
   it("does not sign or show success when settings fail, and allows a safe retry", async () => {
     saveResponse = () => Response.json({ error: "settings unavailable", ownerFacing: true }, { status: 503 });
-    await mount(); await ui.click("Start live Trencher");
+    await mount(); await ui.click("Go live with real money");
     assert.equal(mints.length, 0);
     assert.match(text(), /settings unavailable/);
     assert.doesNotMatch(text(), /Your wallet is connected/);
     saveResponse = undefined;
-    await ui.click("Start live Trencher");
+    await ui.click("Go live with real money");
     assert.equal(mints.length, 1);
   });
 
   it("keeps incomplete signing explicit and does not advertise a connected wallet", async () => {
     signError = new Error("Wallet approval was declined.");
-    await mount(); await ui.click("Start live Trencher");
+    await mount(); await ui.click("Go live with real money");
     assert.match(text(), /Wallet approval was declined/);
     assert.doesNotMatch(text(), /Your wallet is connected/);
     assert.equal(retries.length, 0);
     signError = null;
-    await ui.click("Start live Trencher");
+    await ui.click("Go live with real money");
     assert.equal(mints.length, 2, "a declined signature has no permission to resubmit");
     assert.match(text(), /Your wallet is connected/);
   });
 
   it("retries a failed activation with the same permission and no second mint or settings write", async () => {
     handedOff = false;
-    await mount(); await ui.click("Start live Trencher");
+    await mount(); await ui.click("Go live with real money");
     assert.match(text(), /Retry activation/);
     assert.doesNotMatch(text(), /Your wallet is connected/);
     await ui.click("Retry activation");
@@ -201,7 +201,7 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
     assert.match(text(), /Your agent is already set up/);
     assert.equal(mints.length, 0); assert.equal(writes.length, 0);
     await ui.remount(screen()); current = { kind: "changed" };
-    await ui.click("Start live Trencher");
+    await ui.click("Go live with real money");
     assert.equal(mints.length, 0); assert.equal(writes.length, 0);
     assert.match(text(), /couldn.t confirm your account/);
   });
@@ -210,7 +210,7 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
     factory = undefined;
     await mount();
     assert.match(text(), /verified trading vault is not configured/);
-    await ui.click("Start live Trencher");
+    await ui.click("Go live with real money");
     assert.equal(writes.length, 0); assert.equal(mints.length, 0);
     await chooseStrategy("steady-basket");
     assert.match(text(), /What should it trade/);

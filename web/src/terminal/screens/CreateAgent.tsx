@@ -27,6 +27,9 @@ import { loadTier, newAgentQualifies } from "../tier";
 import { count, decimalSeparator, fullDateTime, usd } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { approveMcpCreateSetup, declineMcpCreateSetup, loadMcpCreateReview, mcpSetupRequest, type McpCreateReview } from "../mcp-create-setup";
+import { Wardrobe } from "@/merryman/Wardrobe";
+import { Merryman } from "@/merryman/Merryman";
+import { DRAFT, useOutfit } from "@/merryman/wardrobe-store";
 
 /**
  * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
@@ -202,7 +205,10 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
   if(!account || accountFailed)return accountFailed
     ? <section className="create-agent"><p role="status">{retrying ? "Trying to load your account again…" : assistantProposalId ? "We couldn't load your account. Try again before signing." : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
     : <section className="create-agent"><SkeletonRows rows={3} label="Loading your account"/></section>;
-  if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>{assistantProposalId?"One quick sign-in.":"Meet your next agent."}</h1><p>{assistantProposalId?"Sign in with the same account you connected to your assistant. Your chosen name and strategy will be waiting here.":"Sign in to create an agent and keep its portfolio with your account."}</p><SignIn onDone={onSignedIn}/></section>;
+  // A visitor can dress their merryman BEFORE signing in: the look is kept in
+  // this browser (DRAFT) and becomes the agent's once it exists. Signing in is
+  // then the one step between them and a practising merryman, not the first.
+  if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>{assistantProposalId?"One quick sign-in.":"Meet your merryman."}</h1><p>{assistantProposalId?"Sign in with the same account you connected to your assistant. Your chosen name and strategy will be waiting here.":"Dress him now. Then sign in with email or X — a few seconds — and he starts practising with pretend money."}</p>{!assistantProposalId&&<Wardrobe id={DRAFT} seed={DRAFT} name="your merryman" embedded saveLabel="Keep this look"/>}<SignIn onDone={onSignedIn}/></section>;
   if(declined)return <section className="create-agent"><h1>Setup declined.</h1><p>No wallet was created and no settings changed. Return to your chat if you want a different setup.</p><a href="/connect/apps">Connected apps</a></section>;
   if(account.status.exists && !grant)return <section className="create-agent"><h1>Your agent is already set up.</h1><p>{assistantProposalId?"You can return to your chat to check its current status and manage it. No new wallet is needed.":"Open your agent to view its portfolio, or manage its wallet on this device."}</p>{assistantProposalId?<a className="flow-primary" href="/agent">Open your agent</a>:<button className="flow-primary" onClick={onDone}>Open agent</button>}<a href="/grant">Manage existing wallet</a>{blockedReview}</section>;
   const recovery=savedRecovery?.context===savedContext?savedRecovery:null;
@@ -365,20 +371,38 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
   if(grant?.demoOwnerPrivateKey)steps.splice(steps.length-1,0,"backup");
   const index=steps.indexOf(step);
   return <section className="create-agent">
-    <header className="create-heading">{!assistantProposalId&&<button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep(strategy==="trencher"?"agent":"market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button>}<span>{assistantProposalId?"Review and create your Merryman":"Create an agent"}</span></header>
+    <header className="create-heading">{!assistantProposalId&&<button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep(strategy==="trencher"?"agent":"market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button>}<span>{assistantProposalId?"Review and create your Merryman":"Create your merryman"}</span></header>
     {reviewedSetup?.setup&&!grant&&<AssistantSetupSummary setup={reviewedSetup.setup} showSigningGuidance/>}
     {step!=="quick"&&<ol className="create-steps" aria-label="Setup progress">{steps.map((stage,i)=><li key={stage} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{stage==="fund"?"Connected":assistantProposalId&&stage==="limits"?"Review & sign":stage[0]!.toUpperCase()+stage.slice(1)}</li>)}</ol>}
     {step==="quick"&&<>
-      <div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Start your Trencher.</h1><p>Finds verified memecoin pools, asks Brain before buying, and monitors exits. No token addresses to enter.</p></div>
+      {/* THE DRESSING ROOM IS THE FRONT DOOR. A newcomer used to meet a
+          gradient circle, "Start your Trencher.", a five-row limits table and
+          two paragraphs of warnings before anything happened. Now they meet
+          their merryman, dress and name him, read one plain sentence about
+          what he will do, and start — practising first. Every number the old
+          table showed is still one tap away under "See the exact limits", and
+          going live is still its own explicit click with its warning beside it. */}
+      <div className="create-intro create-merryman"><h1>Meet your merryman.</h1><p>Dress him, name him, and he starts trading for you — with pretend money first, so there is nothing to lose while you watch how he works.</p></div>
+      <Wardrobe id={DRAFT} seed={DRAFT} name={name.trim()||"your merryman"} embedded saveLabel="Keep this look"/>
       <fieldset disabled={busy} style={{border:0,padding:0,margin:0}}>
-        <label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} onChange={e=>setName(e.target.value)}/>
-        <dl className="fund-breakdown"><div><dt>Planned entries</dt><dd>$2.50</dd></div><div><dt>Trencher vault limits</dt><dd>$5 per buy · $25 per 24 hours</dd></div><div><dt>Signed trading limits</dt><dd>$10 per trade · $50 per day</dd></div><div><dt>Permission</dt><dd>7 days · 5% drawdown · 24 operations/day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>
-        <p className="create-note">Starting live authorizes real-money trades once funded. Every entry needs Brain approval and must pass your limits. Memecoins can lose all their value.</p>
-        <p className="create-note">Approve the wallet prompts to finish. Your signing wallet keeps ownership; keep access to your sign-in account.</p>
+        <label className="create-label" htmlFor="agent-name">Name him</label><input className="create-input" id="agent-name" value={name} maxLength={24} onChange={e=>setName(e.target.value)}/>
+        <div className="create-plain">
+          <p><strong>How he trades.</strong> He hunts verified memecoin pools, has each one checked by an AI review before he buys, and sells on his own exit rules. No token addresses to enter.</p>
+          <p><strong>His limits.</strong> Up to {usd(INITIAL_CAPS.perTradeUsdg)} a trade and {usd(INITIAL_CAPS.dailyUsdg)} a day. He stops himself if he loses {INITIAL_CAPS.maxDrawdownPct}%, and his trading pass renews every {INITIAL_CAPS.expiryDays} days with one signature.</p>
+        </div>
+        <details className="create-details"><summary>See the exact limits</summary>
+          <dl className="fund-breakdown"><div><dt>Planned entries</dt><dd>$2.50</dd></div><div><dt>Trencher vault limits</dt><dd>$5 per buy · $25 per 24 hours</dd></div><div><dt>Signed trading limits</dt><dd>${INITIAL_CAPS.perTradeUsdg} per trade · ${INITIAL_CAPS.dailyUsdg} per day</dd></div><div><dt>Permission</dt><dd>{INITIAL_CAPS.expiryDays} days · {INITIAL_CAPS.maxDrawdownPct}% drawdown · {INITIAL_CAPS.maxOpsPerDay} operations/day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>
+          <p className="create-note">Approve the wallet prompts to finish. Your signing wallet keeps ownership; keep access to your sign-in account.</p>
+        </details>
         {!TRENCHER_FACTORY&&<p className="flow-error" role="status">Trencher's verified trading vault is not configured on this installation. You can choose another strategy below.</p>}
-        <div className="create-quick-actions"><button className="flow-primary" disabled={!TRENCHER_FACTORY} onClick={()=>void create(false,true)}>{busy?"Setting up your agent…":"Start live Trencher"}</button>
-        <button className="copy-btn" disabled={!TRENCHER_FACTORY} onClick={()=>void create(true)}>Practise first</button>
-        <button className="copy-btn" onClick={()=>{setError("");setStep("agent");}}>Customise strategy and limits</button></div>
+        <div className="create-quick-actions">
+          <button className="flow-primary" disabled={!TRENCHER_FACTORY} onClick={()=>void create(true)}>{busy?"Setting up your merryman…":"Start practising"}</button>
+          <div className="create-live">
+            <button className="copy-btn" disabled={!TRENCHER_FACTORY} onClick={()=>void create(false,true)}>Go live with real money</button>
+            <p className="create-note">Going live authorizes real-money trades once you add money. Every entry needs an AI review and must pass your limits. Memecoins can lose all their value.</p>
+          </div>
+          <button className="copy-btn" onClick={()=>{setError("");setStep("agent");}}>Customise strategy and limits</button>
+        </div>
       </fieldset>
     </>}
     {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError(t("create.errName"));return;}setError("");setStep(strategy==="trencher"?"limits":"market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it opens nothing new until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
@@ -515,7 +539,18 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
         that was working. So this step says what is actually true of each. */}
     {step==="backup"&&grant&&isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Your signing wallet holds the key that owns this account. There is nothing here to write down — merrymen never sees it, so it cannot show it to you or lose it.</p></div><div className="create-secret"><code>Held by your Privy login</code></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I understand: if I lose access to my sign-in account, merrymen cannot recover these funds for me.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setStep("fund");}}>Continue</button></>}
     {step==="backup"&&grant&&!isPrivyOwned(grant)&&<><div className="create-intro"><h1>Your agent has a home.</h1><p>Save the recovery key before you go. It lets you recover this wallet if you lose this device.</p></div><label className="create-label">Recovery key</label><div className="create-secret"><code>{reveal ? grant.demoOwnerPrivateKey : "•••• •••• •••• •••• •••• ••••"}</code><button aria-label={reveal?"Hide recovery key":"Reveal recovery key"} onClick={()=>setReveal(!reveal)}>{reveal?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><label className="create-check"><input type="checkbox" checked={backupAck} onChange={e=>setBackupAck(e.target.checked)}/>I saved my recovery key somewhere safe.</label><button className="flow-primary" disabled={!backupAck} onClick={()=>{localStorage.setItem(`merrymen.backup.${grant.smartAccount.toLowerCase()}`,"1");setReveal(false);setStep("fund");}}>Continue</button></>}
+    {step==="fund"&&grant&&armed&&<ReadyMerryman name={name}/>}
     {step==="fund"&&grant&&<><div className="create-intro"><h1>{armed?(assistantProposalId?"Wallet connected.":"Ready when you are."):"One last connection."}</h1><p>{armed?(assistantProposalId?"Your signed permission is saved. Return to your chat and refresh Merryman to check activation and manage your agent.":paper ? "Your wallet is connected. Open your agent to check its status and follow paper trades." : "Your wallet is connected. Add trading funds, then open your agent to check its status."):"Your wallet is saved. Retry activation and confirm a fresh account-link signature. Your wallet, trading permission and limits stay the same."}</p></div>{armed?<><dl className="fund-breakdown"><div><dt>Agent</dt><dd>{name || "Your agent"}</dd></div><div><dt>Strategy</dt><dd>{STRATEGIES.find(s=>s.id===strategy)?.name ?? strategy}</dd></div><div><dt>Trading mode</dt><dd>{paper ? "Paper trading" : "Live trading"}</dd></div></dl>{strategy==="trencher"&&<p className="create-note">Brain reviews and eligible pools are required before Trencher buys. Open your agent to check its current status. Keep access to the sign-in account that controls your wallet.</p>}{strategy==="llm-strategist"&&<p className="create-note">Check your AI provider in <a href="/settings">Settings</a> before your strategist starts.</p>}{!paper&&<button className="flow-primary" onClick={()=>onFund(grant)}>Add trading funds</button>}{assistantProposalId?<><p className="create-note">A saved permission does not confirm a running worker. Return to the same chat and ask for its latest status. You can close this tab; Merrymen runs the worker.</p><button className="flow-primary" onClick={()=>{void navigator.clipboard?.writeText(STATUS_PROMPT).then(()=>setCopied(true)).catch(()=>setCopied(false));}}>{copied?"Copied":"Copy a status-check message"}</button><p className="mcp-setup-prompt">{STATUS_PROMPT}</p><a href="/agent">Open your agent</a><p className="create-note">If your assistant cannot see this agent, reconnect it and choose the agent to share. <a href="/connect/apps">Connected apps</a></p></>:<button className="flow-primary" onClick={()=>{onRefresh();onDone();}}>Open your agent</button>}</>:<button className="flow-primary" disabled={busy} onClick={()=>void retryActivation()}>Retry activation</button>}</>}
     {status&&<p role="status" className="create-note">{status}</p>}{error&&<p role="alert" className="flow-error">{error}{isWallTooWide(error)&&<> <a href="/settings">Review custom tokens</a></>}</p>}
   </section>;
+}
+
+/** The moment it works: the merryman you dressed, celebrating. */
+function ReadyMerryman({ name }: { name: string }) {
+  const { outfit } = useOutfit(DRAFT, DRAFT);
+  return (
+    <div className="create-ready-merryman">
+      <Merryman outfit={outfit} base="happy" cue={{ key: "ready", clip: "celebrate" }} label={`${name || "Your merryman"} is ready`} bubble={`${name || "Your merryman"} is ready!`} bubbleTone="good" />
+    </div>
+  );
 }

@@ -58,7 +58,7 @@ import { Board } from "./screens/Board";
 import { Feed } from "./screens/Feed";
 import { GroupChat } from "./screens/GroupChat";
 import { Wardrobe } from "@/merryman/Wardrobe";
-import { DRAFT } from "@/merryman/wardrobe-store";
+import { DRAFT, adoptDraft } from "@/merryman/wardrobe-store";
 import "@/merryman/merryman.css";
 import "@/merryman/wardrobe.css";
 import "./merryman-shell.css";
@@ -565,6 +565,10 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // than a placeholder every surface then has to special-case.
   const emptyMine = {name:"Your agent",slug:null,handle:null,owner:null,equity:null,chg24:null,mode:null,thesis:null,moves:[],glance:{id:"custom" as const,label:"",cashUsd:undefined},autonomy:autonomyOf({mode:null,liveBlocker:null})};
   const displayMine = mine ?? emptyMine;
+  // The merryman dressed during creation becomes this agent's look the first
+  // time its slug is known — unless the owner already dressed this agent.
+  const mineSlug = mine?.slug ?? null;
+  useEffect(() => { if (mineSlug) adoptDraft(mineSlug); }, [mineSlug]);
   // The grants read can finish before the first feed read. In that window the
   // feed has no tenant yet because it has no answer; keep its loading state.
   // Once it answers, a wrong-tenant feed is never shown as this owner's book.

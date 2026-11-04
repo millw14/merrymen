@@ -296,3 +296,40 @@
 .terminal-host .profile-merryman .mm-merryman { position: absolute; inset: 0; min-height: 0; }
 .terminal-host .profile-merryman .mm-merryman-glow { display: none; }
 .terminal-host .profile-merryman .mm-merryman-flat svg { height: 100%; }
+
+/* ── create ── */
+.terminal-host .create-agent .mm-wardrobe { margin: 4px 0 18px; }
+.terminal-host .create-plain {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 10px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.terminal-host .create-plain p { margin: 0; color: var(--tx-2); font-size: 14px; line-height: 1.5; }
+.terminal-host .create-plain strong { color: var(--tx); }
+.terminal-host .create-details {
+  margin: 0 0 14px;
+  color: var(--tx-2);
+  font-size: 14px;
+}
+.terminal-host .create-details > summary {
+  cursor: pointer;
+  color: var(--tx);
+  font-weight: 600;
+  padding: 6px 0;
+}
+.terminal-host .create-live { display: grid; gap: 6px; }
+.terminal-host .create-live .create-note { margin: 0; }
+.terminal-host .create-ready-merryman {
+  position: relative;
+  height: 300px;
+  margin: 0 0 12px;
+  border-radius: 24px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: radial-gradient(120% 80% at 50% 100%, #183020 0%, transparent 60%), #070a08;
+}
+.terminal-host .create-ready-merryman .mm-merryman { position: absolute; inset: 0; }
