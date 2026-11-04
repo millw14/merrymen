@@ -111,11 +111,19 @@ describe("routing", () => {
     assert.deepEqual(missing, [], `these tabs 404 on refresh: ${missing.join(", ")}`);
   });
 
-  it("REGRESSION: /leaderboard still resolves after the board tab retired", () => {
-    // A URL testers have open and have shared. It renders Home, which now
-    // carries the board.
-    const s = screenForPath("/leaderboard");
-    assert.equal(s.kind === "tab" && s.tab, "home");
+  it("REGRESSION: /leaderboard and /tokens still open what they named", () => {
+    // URLs testers have open and have shared. The board and the market table
+    // live under Explore now, each at its own address.
+    assert.deepEqual(screenForPath("/leaderboard"), { kind: "leaders" });
+    assert.deepEqual(screenForPath("/tokens"), { kind: "markets" });
+  });
+
+  it("Explore's views round-trip and have route files", () => {
+    for (const kind of ["leaders", "markets", "wardrobe"] as const) {
+      assert.deepEqual(screenForPath(pathForScreen({ kind })), { kind });
+      assert.ok(existsSync(join(ROOT, `web/src/app/(app)/${kind}/page.tsx`)), `/${kind} has no page stub`);
+    }
+    assert.deepEqual(screenForPath("/"), { kind: "tab", tab: "home" }, "the front door is Home");
   });
 
   it("and the address bar is normalised by a redirect, not by a page", () => {

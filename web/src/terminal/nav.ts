@@ -73,18 +73,16 @@ export function screenForPath(path: string, solana = false, perps = false): Scre
   if (path === "/groupchat") return { kind: "groupchat" };
   // Where an owner dresses their merryman. A screen, like the room above.
   if (path === "/wardrobe") return { kind: "wardrobe" };
-  // Explore's own views. The leaderboard has a place again, under Explore.
-  if (path === "/leaders") return { kind: "leaders" };
-  if (path === "/markets") return { kind: "markets" };
+  // Explore's own views. The leaderboard has a place again, under Explore,
+  // and the old addresses for both open the view they always named.
+  if (path === "/leaders" || path === "/leaderboard") return { kind: "leaders" };
+  if (path === "/markets" || path === "/tokens") return { kind: "markets" };
   // MONEY IS A PLACE, NOT A MODE. These were component state, so Back could not
   // dismiss the panel and the tab bar vanished while it was open — on the two
   // screens where a person is most likely to want out. Adding them here is what
   // makes the browser's own back button work.
   if (path === "/deposit") return { kind: "deposit" };
   if (path === "/withdraw") return { kind: "withdraw" };
-  // /leaderboard still resolves — it is a URL people have open and have shared.
-  // next.config.mjs normalises the address bar with a redirect to /home; this
-  // is the half that works whether or not the redirect is configured.
   //
   // "/" IS HOME. The front door is the merryman, on every device: the phone
   // used to open on the feed and the desktop on whichever token chart was
