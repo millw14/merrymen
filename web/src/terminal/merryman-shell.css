@@ -333,3 +333,29 @@
   background: radial-gradient(120% 80% at 50% 100%, #183020 0%, transparent 60%), #070a08;
 }
 .terminal-host .create-ready-merryman .mm-merryman { position: absolute; inset: 0; }
+
+/* ── add money ── */
+.terminal-host .hosted-funding .fund-lead { color: var(--tx-2); font-size: 15px; line-height: 1.5; margin: 4px 0 14px; }
+.terminal-host .hosted-funding .fund-address-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.terminal-host .hosted-funding .fund-address-card label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); }
+.terminal-host .hosted-funding .fund-address-card .funding-address { margin: 0; word-break: break-all; font-family: var(--mono); font-size: 14px; color: var(--tx); }
+.terminal-host .hosted-funding .fund-chain-warning {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgb(243 193 75 / 0.08);
+  border: 1px solid rgb(243 193 75 / 0.35);
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.terminal-host .hosted-funding .fund-chain-warning strong { color: #f3c14b; }
+.terminal-host .hosted-funding .fund-more { margin-top: 12px; }
+.terminal-host .hosted-funding .fund-more > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
